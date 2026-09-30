@@ -79,6 +79,7 @@ var beadsExemptCommands = map[string]bool{
 	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator
 	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
+	"tail":          true, // Read-only stream; reports an unreachable bd per rig and continues
 }
 
 // Commands exempt from the town root branch warning.
@@ -180,7 +181,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	touchDeaconHeartbeat()
 
 	// Skip beads check for exempt commands
-	if beadsExempt || isRoleCommand(cmd) {
+	if beadsExempt {
 		return nil
 	}
 
@@ -202,21 +203,9 @@ func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) b
 	return false
 }
 
-// isRoleCommand returns true when the invoked command belongs to the `gt role` tree.
-// Role introspection commands are often used in scripts and tests that expect clean
-// output; beads version warnings are unrelated noise for these commands.
-func isRoleCommand(cmd *cobra.Command) bool {
-	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "role" {
-			return true
-		}
-	}
-	return false
-}
-
 // isDoneCommand reports whether cmd is the top-level `gt done` command.
 // It must not match subcommands that merely share the name — `gt dog done`,
-// `gt wl done`, `gt mol step done` — or they would trip the polecat-only
+// `gt mol step done` — or they would trip the polecat-only
 // worktree guard and skip telemetry init (gt-lt7).
 func isDoneCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == "done" &&

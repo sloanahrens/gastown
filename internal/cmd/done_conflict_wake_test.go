@@ -323,14 +323,14 @@ func TestWakeRefineryForReadyConflict_SkipsUnrelatedCompletion(t *testing.T) {
 // file would still pass, so the call site itself is asserted here.
 //
 // The call must land after updateAgentStateAfterSubmission, not merely
-// somewhere in notifyWitness: that call is what actually closes the hooked
+// somewhere in reportDone: that call is what actually closes the hooked
 // conflict task (via updateAgentStateOnDone), and checking readiness before
 // the close always found the task still open — gt done could never wake the
 // refinery for its own conflict-resolution completion (gt-ue2h).
 //
 // A source-level check is used because the alternative — driving runDone — needs
 // a git remote, a beads database, and a tmux session. This deliberately asserts
-// only that notifyWitness reaches the wake after the close, not how it is
+// only that reportDone reaches the wake after the close, not how it is
 // spelled around it.
 func TestDoneWiresConflictWakeIntoNotifyWitness(t *testing.T) {
 	t.Parallel()
@@ -341,33 +341,31 @@ func TestDoneWiresConflictWakeIntoNotifyWitness(t *testing.T) {
 	}
 	doneSrc := string(src)
 
-	// Scope the search to the notifyWitness block: gt done has several early
-	// gotos to it, and a call placed anywhere else would not run for the
-	// completions this fixes. The block runs to the next top-level func decl
-	// (the end of runDone) rather than cutting at "Notifying Witness..." —
-	// the wake call must land after the state-update close, which happens
-	// later in the same block.
-	label := strings.Index(doneSrc, "notifyWitness:")
+	// Scope the search to reportDone: every successful run ends there, and a
+	// call placed anywhere else would not run for the completions this fixes.
+	// The block runs to the next top-level func decl, since the wake call must
+	// land after the state-update close later in the same function.
+	label := strings.Index(doneSrc, "func reportDone(")
 	if label < 0 {
-		t.Fatal("done.go has no notifyWitness block — the refinery wake site moved")
+		t.Fatal("done.go has no reportDone — the refinery wake site moved")
 	}
 	block := doneSrc[label:]
 	if end := strings.Index(block, "\nfunc "); end >= 0 {
 		block = block[:end]
 	}
 
-	closeIdx := strings.Index(block, "updateAgentStateAfterSubmission(")
+	closeIdx := strings.Index(block, "updateAgentStateOnDoneFn(")
 	if closeIdx < 0 {
-		t.Fatal("done.go's notifyWitness block no longer calls updateAgentStateAfterSubmission — the hooked-conflict-task close site moved")
+		t.Fatal("done.go's reportDone no longer calls updateAgentStateOnDoneFn — the hooked-conflict-task close site moved")
 	}
 	wakeIdx := strings.Index(block, "wakeRefineryForReadyConflict(")
 	if wakeIdx < 0 {
-		t.Fatalf("gt done's notifyWitness block does not call wakeRefineryForReadyConflict:\n%s\n"+
+		t.Fatalf("gt done's reportDone does not call wakeRefineryForReadyConflict:\n%s\n"+
 			"A conflict-resolution completion creates no MR of its own, so it can only reach the "+
 			"refinery through this call (gt-rv8h).", block)
 	}
 	if wakeIdx < closeIdx {
-		t.Errorf("wakeRefineryForReadyConflict is called before updateAgentStateAfterSubmission — "+
+		t.Errorf("wakeRefineryForReadyConflict is called before updateAgentStateOnDoneFn — "+
 			"the readiness check would see the hooked conflict task as still open (gt-ue2h):\n%s", block)
 	}
 }
@@ -478,12 +476,12 @@ func TestDoneAcceptsConflictCompletionOnBaseBranch(t *testing.T) {
 	}
 	doneSrc := string(src)
 
-	rejection := strings.Index(doneSrc, "cannot submit %s/master branch to merge queue")
+	rejection := strings.Index(doneSrc, "cannot submit the %s/master branch for landing")
 	if rejection < 0 {
-		t.Fatal("done.go no longer rejects base-branch MR submissions — this guard moved")
+		t.Fatal("done.go no longer rejects base-branch submissions — this guard moved")
 	}
 
-	const guard = `if branch == defaultBranch || branch == "master" {`
+	const guard = `if r.branch == r.defaultBranch || r.branch == "master" {`
 	start := strings.LastIndex(doneSrc[:rejection], guard)
 	if start < 0 {
 		t.Fatal("done.go has no base-branch guard before the rejection")
@@ -495,8 +493,8 @@ func TestDoneAcceptsConflictCompletionOnBaseBranch(t *testing.T) {
 			"A conflict-resolution pass ends on the base branch and submits no branch of its own, "+
 			"so this guard rejects the completion the formula is built to produce (gt-tne1).", block)
 	}
-	if !strings.Contains(block, "goto notifyWitness") {
-		t.Errorf("the base-branch guard accepts a conflict completion but does not reach notifyWitness:\n%s\n"+
+	if !strings.Contains(block, "return sub, nil") {
+		t.Errorf("the base-branch guard accepts a conflict completion but does not return success to reportDone:\n%s\n"+
 			"Without that jump the completion handshake — including the gt-rv8h refinery wake — still "+
 			"never runs.", block)
 	}

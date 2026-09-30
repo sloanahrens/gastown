@@ -1,13 +1,11 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
 )
 
 // OverseerConfig represents the human operator's identity (mayor/overseer.json).
@@ -40,8 +38,8 @@ func LoadOverseerConfig(path string) (*OverseerConfig, error) {
 	}
 
 	var config OverseerConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing overseer config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateOverseerConfig(&config); err != nil {
@@ -57,20 +55,7 @@ func SaveOverseerConfig(path string, config *OverseerConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding overseer config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: overseer config doesn't contain secrets
-		return fmt.Errorf("writing overseer config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateOverseerConfig validates an OverseerConfig.
@@ -202,7 +187,7 @@ func detectFromEnvironment() *OverseerConfig {
 	if username == "" {
 		// Try whoami as last resort
 		cmd := exec.Command("whoami")
-	
+
 		if out, err := cmd.Output(); err == nil {
 			username = strings.TrimSpace(string(out))
 		}

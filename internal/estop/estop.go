@@ -146,3 +146,25 @@ func parse(content string) *Info {
 
 	return info
 }
+
+// ActiveFor reports whether an e-stop covers a seat in rig ("" for a
+// town-level seat): the town sentinel, or the rig's own. Unlike IsActive it
+// fails CLOSED: a sentinel whose presence cannot be determined (a stat error
+// other than absence) reads as active, with the error, because its only
+// caller is the supervisor's refusal check (gt-4k3fj.3, G1-07).
+func ActiveFor(townRoot, rig string) (bool, error) {
+	paths := []string{FilePath(townRoot)}
+	if rig != "" {
+		paths = append(paths, RigFilePath(townRoot, rig))
+	}
+	for _, p := range paths {
+		_, err := os.Stat(p)
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return true, fmt.Errorf("checking e-stop sentinel %s: %w", p, err)
+		}
+	}
+	return false, nil
+}

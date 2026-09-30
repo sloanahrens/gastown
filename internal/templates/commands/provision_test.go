@@ -159,17 +159,16 @@ func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 		t.Fatalf("reading the embedded done body: %v", err)
 	}
 	text := string(body)
-	const calmWait = "`gt done` waits for the container-gate slot before it runs the container suites, " +
-		"printing a `still waiting for the container-gate slot …` line every couple of minutes while " +
-		"it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives " +
-		"up with a slot-acquire timeout once the cap expires."
+	const calmWait = "`gt done` runs the local gate itself (lint, build and the unit tier of the tests; " +
+		"no container slot), which can take several minutes. That is normal. Do not interrupt it " +
+		"and do not close the bead."
 	if !strings.Contains(text, calmWait) {
-		t.Error("the /done body lacks the slot-wait sentence")
+		t.Error("the /done body lacks the gt done wait sentence")
 	}
 	for _, want := range []string{
-		"Never poll the slot, and never script a retry around `gt done`",
+		"Never script a retry around `gt done`",
 		"`gt escalate -s medium`",
-		"--skip-tests",
+		"No flag skips the gate.",
 		"read the container-gate rule in `docs/reference.md`",
 	} {
 		if !strings.Contains(text, want) {

@@ -29,7 +29,7 @@ func TestClosedWispDeleteAge(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 			t.Fatalf("mkdir mayor: %v", err)
 		}
-		daemonJSON := `{"type":"patrols","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"24h"}}}`
+		daemonJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"24h"}}}`
 		if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(daemonJSON), 0644); err != nil {
 			t.Fatalf("write daemon.json: %v", err)
 		}
@@ -43,7 +43,7 @@ func TestClosedWispDeleteAge(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 			t.Fatalf("mkdir mayor: %v", err)
 		}
-		daemonJSON := `{"type":"patrols","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"not-a-duration"}}}`
+		daemonJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"not-a-duration"}}}`
 		if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(daemonJSON), 0644); err != nil {
 			t.Fatalf("write daemon.json: %v", err)
 		}
@@ -70,7 +70,7 @@ func TestPurgeClosedEphemeralBeadsPassesOlderThan(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
-	daemonJSON := `{"type":"patrols","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"48h"}}}`
+	daemonJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"48h"}}}`
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(daemonJSON), 0644); err != nil {
 		t.Fatalf("write daemon.json: %v", err)
 	}

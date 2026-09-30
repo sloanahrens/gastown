@@ -685,3 +685,47 @@ func TestDoneStateEnvZeroValueIsTheRealProcess(t *testing.T) {
 		t.Error("zero doneStateEnv has a bd runner; it must be nil, the real bd")
 	}
 }
+
+// TestDoneLeavesReadyToLandBeadOpenWithSubmissionNote: a bead gt done marked
+// ready to land is the landing worker's to close, with the landed commit. gt
+// done records the submission and leaves it open (ADR 0004).
+func TestDoneLeavesReadyToLandBeadOpenWithSubmissionNote(t *testing.T) {
+	t.Parallel()
+	fb := &inprocBD{answer: readyToLandBD}
+	runDoneStateUpdate(t, fb)
+
+	calls := fb.log()
+	commentLine := ""
+	for _, line := range strings.Split(strings.TrimSpace(calls), "\n") {
+		if strings.HasPrefix(line, "close ") && strings.Contains(line, "gt-base-123") {
+			t.Fatalf("gt done closed a bead waiting to land:\n%s", calls)
+		}
+		if strings.HasPrefix(line, "comments ") && strings.Contains(line, "gt-base-123") {
+			commentLine = line
+		}
+	}
+	if !strings.Contains(commentLine, "Submitted for landing: polecat/nux/gt-base-123 @ 01234567 onto main (attempt 1)") {
+		t.Fatalf("submission comment = %q\nCalls:\n%s", commentLine, calls)
+	}
+}
+
+func readyToLandBD(f *inprocBD, cmd string, args []string) bdAnswer {
+	switch cmd {
+	case "show":
+		if argsMention(args, "--children") {
+			return bdOut("{}\n")
+		}
+		switch firstArg(args) {
+		case "gt-gastown-polecat-nux":
+			return bdOut(`[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working"}]` + "\n")
+		case "gt-base-123":
+			return bdOut(`[{"id":"gt-base-123","title":"Base bead","status":"hooked","labels":["gt:ready-to-land"],"notes":"READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux"}]` + "\n")
+		}
+		return bdAnswer{}
+	case "list":
+		return bdOut("[]\n")
+	case "close", "comments":
+		f.logLine(cmd + " " + strings.Join(args, " "))
+	}
+	return bdAnswer{}
+}

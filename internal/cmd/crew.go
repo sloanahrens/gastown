@@ -266,28 +266,6 @@ Examples:
 	RunE: runCrewPristine,
 }
 
-var crewNextCmd = &cobra.Command{
-	Use:   "next",
-	Short: "Switch to next crew session in same rig",
-	Long: `Switch to the next crew tmux session within the same rig.
-
-Used internally by tmux keybindings for quick session cycling.
-Pass --session to specify the current tmux session name.`,
-	Hidden: true, // Internal command for tmux keybindings
-	RunE:   runCrewNext,
-}
-
-var crewPrevCmd = &cobra.Command{
-	Use:   "prev",
-	Short: "Switch to previous crew session in same rig",
-	Long: `Switch to the previous crew tmux session within the same rig.
-
-Used internally by tmux keybindings for quick session cycling.
-Pass --session to specify the current tmux session name.`,
-	Hidden: true, // Internal command for tmux keybindings
-	RunE:   runCrewPrev,
-}
-
 var crewStartCmd = &cobra.Command{
 	Use:     "start [rig] [name...]",
 	Aliases: []string{"spawn"},
@@ -421,10 +399,6 @@ func init() {
 
 	// Add --session flag to next/prev commands for tmux key binding support
 	// When run via run-shell, tmux session context may be wrong, so we pass it explicitly
-	crewNextCmd.Flags().StringVarP(&crewCycleSession, "session", "s", "", "tmux session name (for key bindings)")
-	crewPrevCmd.Flags().StringVarP(&crewCycleSession, "session", "s", "", "tmux session name (for key bindings)")
-	crewCmd.AddCommand(crewNextCmd)
-	crewCmd.AddCommand(crewPrevCmd)
 	crewCmd.AddCommand(crewStartCmd)
 	crewCmd.AddCommand(crewStopCmd)
 

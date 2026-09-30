@@ -8,12 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -49,8 +49,8 @@ func LoadTownConfig(path string) (*TownConfig, error) {
 	}
 
 	var config TownConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateTownConfig(&config); err != nil {
@@ -66,54 +66,31 @@ func SaveTownConfig(path string, config *TownConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0600)
 }
 
-// LoadRigsConfig loads and validates a rigs registry file.
-// Retries once on read/parse errors to tolerate the brief window during which a
-// concurrent non-atomic writer could leave the file truncated. With
-// SaveRigsConfig now using atomic write-then-rename this is belt-and-suspenders
-// against older versions that may still be writing the file.
+// LoadRigsConfig loads and validates a rigs registry file. Every writer is
+// atomic (WriteConfigJSON), so a file that does not parse is damage and is
+// reported, not retried.
 func LoadRigsConfig(path string) (*RigsConfig, error) {
-	readAndParse := func() (*RigsConfig, error) {
-		data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
-			}
-			return nil, fmt.Errorf("reading config: %w", err)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
 		}
-
-		var config RigsConfig
-		if err := json.Unmarshal(data, &config); err != nil {
-			return nil, fmt.Errorf("parsing config: %w", err)
-		}
-
-		if err := validateRigsConfig(&config); err != nil {
-			return nil, err
-		}
-
-		return &config, nil
+		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
-	cfg, err := readAndParse()
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		cfg, err = readAndParse()
+	var config RigsConfig
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
-	return cfg, err
+
+	if err := validateRigsConfig(&config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 // SaveRigsConfig saves a rigs registry to a file atomically.
@@ -125,20 +102,7 @@ func SaveRigsConfig(path string, config *RigsConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding config: %w", err)
-	}
-
-	if err := atomicfile.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0600)
 }
 
 // validateTownConfig validates a TownConfig.
@@ -177,8 +141,8 @@ func LoadRigConfig(path string) (*RigConfig, error) {
 	}
 
 	var config RigConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateRigConfig(&config); err != nil {
@@ -194,20 +158,7 @@ func SaveRigConfig(path string, config *RigConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: config files don't contain secrets
-		return fmt.Errorf("writing config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateRigConfig validates a RigConfig (identity only).
@@ -489,41 +440,23 @@ func LoadRigSettings(path string) (*RigSettings, error) {
 	}
 
 	var settings RigSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, fmt.Errorf("parsing settings: %w", err)
+	if err := DecodeJSONFile(path, data, &settings); err != nil {
+		return nil, err
 	}
 
 	if err := validateRigSettings(&settings); err != nil {
 		return nil, err
 	}
 
-	// Check for deprecated merge_queue keys that were removed.
-	// These are silently ignored by json.Unmarshal but may indicate stale config.
-	warnDeprecatedMergeQueueKeys(data, path)
-
 	return &settings, nil
 }
 
-// DeprecatedMergeQueueKeys lists merge_queue config keys that have been removed.
+// DeprecatedMergeQueueKeys lists merge_queue config keys that have been
+// removed. Strict decoding rejects them in a rig settings file; gt doctor
+// names them.
 // target_branch and integration_branches were replaced by rig default_branch
 // and per-epic integration branch metadata.
 var DeprecatedMergeQueueKeys = []string{"target_branch", "integration_branches"}
-
-// warnDeprecatedMergeQueueKeys checks raw settings JSON for removed merge_queue keys
-// and prints a stderr warning. This is advisory only — not a validation error.
-func warnDeprecatedMergeQueueKeys(data []byte, path string) {
-	var raw struct {
-		MergeQueue map[string]json.RawMessage `json:"merge_queue"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil || raw.MergeQueue == nil {
-		return
-	}
-	for _, key := range DeprecatedMergeQueueKeys {
-		if _, ok := raw.MergeQueue[key]; ok {
-			fmt.Fprintf(os.Stderr, "warning: %s: merge_queue.%s is deprecated and ignored (use rig default_branch instead)\n", path, key)
-		}
-	}
-}
 
 // SaveRigSettings saves rig settings to a file.
 func SaveRigSettings(path string, settings *RigSettings) error {
@@ -531,20 +464,8 @@ func SaveRigSettings(path string, settings *RigSettings) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding settings: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: settings files don't contain secrets
-		return fmt.Errorf("writing settings: %w", err)
-	}
-
-	return nil
+	// 0600 for a new file: agent presets carry API tokens until gt-y3pgh.5.
+	return WriteConfigJSON(path, settings, 0o600)
 }
 
 // LoadMayorConfig loads and validates a mayor config file.
@@ -558,8 +479,8 @@ func LoadMayorConfig(path string) (*MayorConfig, error) {
 	}
 
 	var config MayorConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateMayorConfig(&config); err != nil {
@@ -575,20 +496,7 @@ func SaveMayorConfig(path string, config *MayorConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: config files don't contain secrets
-		return fmt.Errorf("writing config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateMayorConfig validates a MayorConfig.
@@ -626,8 +534,8 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 	}
 
 	var config DaemonPatrolConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing daemon patrol config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateDaemonPatrolConfig(&config); err != nil {
@@ -642,24 +550,8 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	if err := validateDaemonPatrolConfig(config); err != nil {
 		return err
 	}
-	if err := checkExistingDaemonPatrolConfig(path); err != nil {
-		return err
-	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding daemon patrol config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: config files don't contain secrets
-		return fmt.Errorf("writing daemon patrol config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
@@ -672,211 +564,81 @@ func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	return nil
 }
 
-// EnsureDaemonPatrolConfig creates the daemon patrol config if it doesn't exist.
+// EnsureDaemonPatrolConfig creates the daemon patrol config if it doesn't
+// exist. An existing file is left alone, and one that does not parse is a
+// *ParseError: it is neither replaced nor accepted.
 func EnsureDaemonPatrolConfig(townRoot string) error {
-	path := DaemonPatrolConfigPath(townRoot)
-	if _, err := os.Stat(path); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("checking daemon patrol config: %w", err)
+	return UpdateConfigJSON(DaemonPatrolConfigPath(townRoot), 0o644, func(cfg *DaemonPatrolConfig, exists bool) error {
+		if !exists {
+			*cfg = *NewDaemonPatrolConfig()
 		}
-		return SaveDaemonPatrolConfig(path, NewDaemonPatrolConfig())
-	}
-	return nil
+		return nil
+	})
 }
 
-// AddRigToDaemonPatrols adds a rig to the witness and refinery patrol rigs arrays
-// in daemon.json. Uses raw JSON manipulation to preserve fields not in PatrolConfig
-// (e.g., dolt_server config). If daemon.json doesn't exist, this is a no-op.
+// AddRigToDaemonPatrols adds a rig to the witness and refinery patrol rigs
+// arrays in daemon.json. A missing daemon.json, patrols section or patrol
+// entry is left missing. It goes through the locked writer, so a daemon.json
+// that does not parse is refused rather than rewritten.
 func AddRigToDaemonPatrols(townRoot string, rigName string) error {
-	path := DaemonPatrolConfigPath(townRoot)
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No daemon.json yet, nothing to update
-		}
-		return fmt.Errorf("reading daemon config: %w", err)
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parsing daemon config: %w", err)
-	}
-
-	patrolsRaw, ok := raw["patrols"]
-	if !ok {
-		return nil // No patrols section
-	}
-
-	var patrols map[string]json.RawMessage
-	if err := json.Unmarshal(patrolsRaw, &patrols); err != nil {
-		return fmt.Errorf("parsing patrols: %w", err)
-	}
-
-	modified := false
-	for _, patrolName := range []string{"witness", "refinery"} {
-		pRaw, ok := patrols[patrolName]
-		if !ok {
-			continue
-		}
-
-		var patrol map[string]json.RawMessage
-		if err := json.Unmarshal(pRaw, &patrol); err != nil {
-			continue
-		}
-
-		// Parse existing rigs array
-		var rigs []string
-		if rigsRaw, ok := patrol["rigs"]; ok {
-			if err := json.Unmarshal(rigsRaw, &rigs); err != nil {
-				rigs = nil
-			}
-		}
-
-		// Check if already present
-		found := false
+	return editDaemonPatrolRigs(townRoot, func(rigs []string) []string {
 		for _, r := range rigs {
 			if r == rigName {
-				found = true
-				break
+				return rigs
 			}
 		}
-		if found {
-			continue
-		}
-
-		// Append and update
-		rigs = append(rigs, rigName)
-		rigsJSON, err := json.Marshal(rigs)
-		if err != nil {
-			return fmt.Errorf("encoding rigs: %w", err)
-		}
-		patrol["rigs"] = rigsJSON
-
-		patrolJSON, err := json.Marshal(patrol)
-		if err != nil {
-			return fmt.Errorf("encoding patrol %s: %w", patrolName, err)
-		}
-		patrols[patrolName] = patrolJSON
-		modified = true
-	}
-
-	if !modified {
-		return nil
-	}
-
-	patrolsJSON, err := json.Marshal(patrols)
-	if err != nil {
-		return fmt.Errorf("encoding patrols: %w", err)
-	}
-	raw["patrols"] = patrolsJSON
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding daemon config: %w", err)
-	}
-
-	if err := os.WriteFile(path, append(out, '\n'), 0644); err != nil { //nolint:gosec // G306: config file
-		return fmt.Errorf("writing daemon config: %w", err)
-	}
-
-	return nil
+		return append(rigs, rigName)
+	})
 }
 
-// RemoveRigFromDaemonPatrols removes a rig from the witness and refinery patrol rigs arrays
-// in daemon.json. Uses raw JSON manipulation to preserve fields not in PatrolConfig
-// (e.g., dolt_server config). If daemon.json doesn't exist, this is a no-op.
+// RemoveRigFromDaemonPatrols removes a rig from the witness and refinery
+// patrol rigs arrays in daemon.json, under the same rules as
+// AddRigToDaemonPatrols.
 func RemoveRigFromDaemonPatrols(townRoot string, rigName string) error {
-	path := DaemonPatrolConfigPath(townRoot)
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No daemon.json yet, nothing to update
-		}
-		return fmt.Errorf("reading daemon config: %w", err)
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parsing daemon config: %w", err)
-	}
-
-	patrolsRaw, ok := raw["patrols"]
-	if !ok {
-		return nil // No patrols section
-	}
-
-	var patrols map[string]json.RawMessage
-	if err := json.Unmarshal(patrolsRaw, &patrols); err != nil {
-		return fmt.Errorf("parsing patrols: %w", err)
-	}
-
-	modified := false
-	for _, patrolName := range []string{"witness", "refinery"} {
-		pRaw, ok := patrols[patrolName]
-		if !ok {
-			continue
-		}
-
-		var patrol map[string]json.RawMessage
-		if err := json.Unmarshal(pRaw, &patrol); err != nil {
-			continue
-		}
-
-		// Parse existing rigs array
-		var rigs []string
-		if rigsRaw, ok := patrol["rigs"]; ok {
-			if err := json.Unmarshal(rigsRaw, &rigs); err != nil {
-				rigs = nil
-			}
-		}
-
-		// Filter out the rig
-		var filtered []string
+	return editDaemonPatrolRigs(townRoot, func(rigs []string) []string {
+		var kept []string
 		for _, r := range rigs {
 			if r != rigName {
-				filtered = append(filtered, r)
+				kept = append(kept, r)
 			}
 		}
+		return kept
+	})
+}
 
-		if len(filtered) == len(rigs) {
-			continue // Rig wasn't present
-		}
+// errNoDaemonPatrolEdit stops UpdateConfigJSON without writing.
+var errNoDaemonPatrolEdit = errors.New("daemon.json: nothing to change")
 
-		// Update with filtered list
-		rigsJSON, err := json.Marshal(filtered)
-		if err != nil {
-			return fmt.Errorf("encoding rigs: %w", err)
-		}
-		patrol["rigs"] = rigsJSON
-
-		patrolJSON, err := json.Marshal(patrol)
-		if err != nil {
-			return fmt.Errorf("encoding patrol %s: %w", patrolName, err)
-		}
-		patrols[patrolName] = patrolJSON
-		modified = true
+func editDaemonPatrolRigs(townRoot string, edit func([]string) []string) error {
+	path := DaemonPatrolConfigPath(townRoot)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil // no daemon.json yet, nothing to update
 	}
-
-	if !modified {
+	err := UpdateConfigJSON(path, 0o644, func(cfg *DaemonPatrolConfig, exists bool) error {
+		if !exists || cfg.Patrols == nil {
+			return errNoDaemonPatrolEdit
+		}
+		changed := false
+		for _, name := range []string{"witness", "refinery"} {
+			p := cfg.Patrols.RolePatrol(name)
+			if p == nil {
+				continue
+			}
+			next := edit(append([]string(nil), p.Rigs...))
+			if !slices.Equal(next, p.Rigs) {
+				p.Rigs = next
+				changed = true
+			}
+		}
+		if !changed {
+			return errNoDaemonPatrolEdit
+		}
+		return nil
+	})
+	if errors.Is(err, errNoDaemonPatrolEdit) {
 		return nil
 	}
-
-	patrolsJSON, err := json.Marshal(patrols)
-	if err != nil {
-		return fmt.Errorf("encoding patrols: %w", err)
-	}
-	raw["patrols"] = patrolsJSON
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding daemon config: %w", err)
-	}
-
-	if err := os.WriteFile(path, append(out, '\n'), 0644); err != nil { //nolint:gosec // G306: config file
-		return fmt.Errorf("writing daemon config: %w", err)
-	}
-
-	return nil
+	return err
 }
 
 // LoadAccountsConfig loads and validates an accounts configuration file.
@@ -890,8 +652,8 @@ func LoadAccountsConfig(path string) (*AccountsConfig, error) {
 	}
 
 	var config AccountsConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing accounts config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateAccountsConfig(&config); err != nil {
@@ -907,20 +669,7 @@ func SaveAccountsConfig(path string, config *AccountsConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding accounts config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: accounts config doesn't contain sensitive credentials
-		return fmt.Errorf("writing accounts config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateAccountsConfig validates an AccountsConfig.
@@ -1037,8 +786,8 @@ func LoadMessagingConfig(path string) (*MessagingConfig, error) {
 	}
 
 	var config MessagingConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing messaging config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateMessagingConfig(&config); err != nil {
@@ -1054,20 +803,7 @@ func SaveMessagingConfig(path string, config *MessagingConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding messaging config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: messaging config doesn't contain secrets
-		return fmt.Errorf("writing messaging config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateMessagingConfig validates a MessagingConfig.
@@ -1186,24 +922,8 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 		return fmt.Errorf("%w: got %d, max supported %d", ErrInvalidVersion, settings.Version, CurrentTownSettingsVersion)
 	}
 
-	if err := refuseToReplaceUnparseable(path, &TownSettings{}); err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding settings: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: settings files don't contain secrets
-		return fmt.Errorf("writing settings: %w", err)
-	}
-
-	return nil
+	// 0600 for a new file: agent presets carry API tokens until gt-y3pgh.5.
+	return WriteConfigJSON(path, settings, 0o600)
 }
 
 // ResolveAgentConfig resolves the agent configuration for a rig.
@@ -3040,8 +2760,8 @@ func LoadEscalationConfig(path string) (*EscalationConfig, error) {
 	}
 
 	var config EscalationConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing escalation config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateEscalationConfig(&config); err != nil {
@@ -3069,20 +2789,7 @@ func SaveEscalationConfig(path string, config *EscalationConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding escalation config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: escalation config doesn't contain secrets
-		return fmt.Errorf("writing escalation config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateEscalationConfig validates an EscalationConfig.

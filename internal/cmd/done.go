@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,76 +11,78 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var doneCmd = &cobra.Command{
-	Use:         "done",
-	GroupID:     GroupWork,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Signal work ready for merge queue",
-	Long: `Signal that your work is complete and ready for the merge queue.
+	Use:     "done",
+	GroupID: GroupWork,
+	Short:   "Submit your branch for landing and end the polecat session",
+	Long: `Submit your finished branch for landing, notify the Witness, and end the
+polecat session. gt done never lands anything on the target branch: the
+daemon's landing worker does that (ADR 0004).
 
-This is a convenience command for polecats that:
-1. Submits the current branch to the merge queue
-2. Auto-detects issue ID from branch name
-3. Notifies the Witness with the exit outcome
-4. Exits the polecat session after durable handoff
-   (Witness/refinery cleanup owns the retired sandbox)
+For COMPLETED, gt done:
+1. Fetches origin and rebases the branch onto the target (default: the rig's
+   default branch; --target or the bead's base_branch override it)
+2. Squashes auto-save and checkpoint commits into one descriptive commit
+3. Runs the local gate on the rebased tree: make lint, go build ./...,
+   and the unit tier of make test (a rig without go.mod runs its
+   lint_command, build_command and test_command)
+4. Pushes the branch under a lease and reads the tip back
+5. Marks the work bead ready to land (label gt:ready-to-land and a
+   READY TO LAND notes block naming branch, head and target)
+6. Notifies the Witness and retires the session
+
+There is no way to skip the gate or to land directly.
 
 Exit statuses:
-  COMPLETED      - Work done, MR submitted (default)
+  COMPLETED      - Work done, branch submitted for landing (default)
   ESCALATED      - Hit blocker, needs human intervention
   DEFERRED       - Work paused, issue still open
 
-Process exit codes (work that did not land; notifications already ran):
+Process exit codes (the work was not submitted; the Witness is not told
+"done" and the session stays up so you can fix it and re-run gt done):
   10  push failed: origin does not have the commit
   11  push unverified: origin is not at the commit gt done would declare
-  12  MR bead not created or not trusted
-  13  source bead could not be closed
+  12  the work bead could not be marked ready to land
+  13  the no-code completion could not close the bead
+  14  rebase onto the target conflicted
+  15  the local gate failed
+  16  the local gate could not run (not a verdict on the change)
 
 Examples:
   gt done                              # Submit branch, notify COMPLETED, exit session
-  gt done --pre-verified               # Submit with pre-verification fast-path
-  gt done --target feat/my-branch      # Explicit MR target branch
-  gt done --pre-verified --target feat/contract-review  # Pre-verified with explicit target
+  gt done --target feat/my-branch      # Explicit target branch
   gt done --issue gt-abc               # Explicit issue ID
-  gt done --skip-tests                 # Skip the test gate (one-shot mayor ruling only)
-  gt done --status ESCALATED           # Signal blocker, skip MR
-  gt done --status DEFERRED            # Pause work, skip MR`,
+  gt done --status ESCALATED           # Signal blocker, submit nothing
+  gt done --status DEFERRED            # Pause work, submit nothing`,
 	RunE:         runDone,
 	SilenceUsage: true, // Don't print usage on operational errors (confuses agents)
 }
 
 var (
 	doneIssue         string
-	donePriority      int
 	doneStatus        string
 	doneCleanupStatus string
-	doneResume        bool
-	donePreVerified   bool
 	doneTarget        string
-	doneSkipTests     bool
 	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
@@ -102,22 +102,6 @@ const (
 // lifecycle handling owns the polecat from here.
 const envDoneFromHandoff = "GT_DONE_FROM_HANDOFF"
 
-func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
-	targetBranch := defaultBranch
-	if explicitTarget != "" {
-		targetBranch = strings.TrimSpace(explicitTarget)
-		if strings.HasPrefix(targetBranch, "origin/") || strings.HasPrefix(targetBranch, "upstream/") {
-			return targetBranch
-		}
-	}
-
-	return "origin/" + targetBranch
-}
-
-func shouldUpdateAgentStateOnDone(pushFailed, mrFailed bool) bool {
-	return !pushFailed && !mrFailed
-}
-
 // isFinalDoneExitType reports whether a gt done exit status ends the polecat's
 // turn on its hooked bead: the outcome is signaled and the session has nothing
 // left to do. A deferred *issue* is still a finished *turn*, so DEFERRED ends
@@ -133,7 +117,10 @@ func isFinalDoneExitType(exitType string) bool {
 	}
 }
 
-func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFailed, mrFailed, fromHandoff bool) bool {
+// shouldRetirePolecatSessionAfterDone reports whether a reported exit retires
+// the session. A run that failed never reaches here: it returns its coded
+// error before reporting, and the session stays up to fix it.
+func shouldRetirePolecatSessionAfterDone(exitType string, fromHandoff bool) bool {
 	// A handoff-triggered DEFERRED defers the work mid-task; the polecat (or its
 	// successor) is expected to keep going, so it must never be torn down here,
 	// regardless of exit type (gt-5g3e).
@@ -142,24 +129,7 @@ func shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy string, pushFai
 	}
 	// A polecat that has signaled a final status and stays alive keeps spending
 	// tokens on work it already reported finished (gt-5g3e).
-	if !isFinalDoneExitType(exitType) {
-		return false
-	}
-	// A failed push or MR submission leaves work only recoverable from this
-	// session, and a local-review merge strategy still expects a human in it.
-	if pushFailed || mrFailed {
-		return false
-	}
-	return mergeStrategy != "local"
-}
-
-// shouldResolveConvoyForRetirement reports whether gt done still needs to look
-// up convoy info to correctly gate session retirement. Every final exit type
-// needs this now that DEFERRED and ESCALATED can also retire the session, not
-// only COMPLETED (gt-5g3e): a "local" merge strategy must exempt those exits
-// from retirement exactly as it does COMPLETED.
-func shouldResolveConvoyForRetirement(issueID string, convoyInfo *ConvoyInfo) bool {
-	return issueID != "" && convoyInfo == nil
+	return isFinalDoneExitType(exitType)
 }
 
 type doneSessionKiller interface {
@@ -180,292 +150,23 @@ var newDoneSessionKiller = func() doneSessionKiller {
 
 var updateAgentStateOnDoneFn = updateAgentStateOnDone
 
-func updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID string, pushFailed, mrFailed bool) error {
-	if !shouldUpdateAgentStateOnDone(pushFailed, mrFailed) {
-		style.PrintWarning("skipping agent cleanup because push or MR submission failed")
-		return nil
-	}
-	return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID)
-}
-
-// resolvePreVerifiedClaim decides whether to honor a --pre-verified request
-// when writing the MR bead's pre_verified stamp. It exists so the stamp can
-// never diverge from the same gate-command binding `gt sling` uses to
-// populate formula vars: a rig with zero configured gate commands has
-// nothing a polecat could have verified, so the claim is downgraded here
-// rather than trusted at face value (gt-k4sy).
-//
-// Returns whether to honor the claim, and a non-empty warning to surface to
-// the polecat when the claim is downgraded.
-func resolvePreVerifiedClaim(requested bool, townRoot, rigName string) (honor bool, warning string) {
-	if !requested {
-		return false, ""
-	}
-	// runPreVerificationGates runs the five *_command gates only, so the stamp
-	// cannot cover a named merge_queue.gates entry — the refinery's
-	// resolveFastPath refuses such a stamp for the same reason. Refusing at the
-	// producer keeps the two sides agreeing on what a stamp means instead of
-	// queueing a claim nothing will honor (gt-ypkc).
-	if gates := rig.LoadNamedGateCommands(townRoot, rigName); len(gates) > 0 {
-		return false, fmt.Sprintf("ignoring --pre-verified: rig defines %d named merge_queue.gates entry(ies), which the pre-verification run does not cover — the refinery will run them", len(gates))
-	}
-	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-	if !mq.HasAnyGateCommand() {
-		return false, "ignoring --pre-verified: rig has no configured gate commands (setup/typecheck/lint/test/build) — there is nothing to have verified"
-	}
-	return true, ""
-}
-
-// preVerificationStamp holds the pre_verified_* fields to append to the MR
-// bead description once a --pre-verified gate run is trusted.
-type preVerificationStamp struct {
-	verifiedBase string
-	gateSetSHA   string
-	logSHA256    string
-}
-
-// resolvePreVerification runs (and gates trust in) the --pre-verified check
-// that gt done stamps into the MR bead. It refuses to stamp — returning
-// ok=false with a warning instead — when the branch's HEAD does not
-// actually contain the resolved target base as an ancestor.
-//
-// --pre-verified disables autoRebaseOnTarget (done_rebase.go), so a branch
-// left behind the target runs gates at its own (stale) HEAD; without this
-// check the stamp would record pre_verified_base=<target HEAD the branch
-// never rebased onto>, and the refinery's fast-path would then skip gates
-// on a merged tree nothing ever verified (om-gate T8).
-func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, gateSetSHA string, gateSlot preVerifySlot) (preVerificationStamp, bool, string) {
-	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
-	verifiedBase, baseErr := g.Rev(verifiedBaseRef)
-	if baseErr != nil {
-		return preVerificationStamp{}, false, fmt.Sprintf("could not resolve %s for pre-verified base: %v (skipping pre-verification)", verifiedBaseRef, baseErr)
-	}
-
-	ancestor, ancErr := g.IsAncestor(verifiedBase, "HEAD")
-	if ancErr != nil {
-		return preVerificationStamp{}, false, fmt.Sprintf("could not verify %s is an ancestor of HEAD: %v (skipping pre-verification)", shortSHA(verifiedBase), ancErr)
-	}
-	if !ancestor {
-		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: HEAD does not contain %s (branch is behind %s and --pre-verified skips auto-rebase) — refusing to stamp a base the branch was never verified against; rebase onto %s and retry", shortSHA(verifiedBase), target, target)
-	}
-
-	result, runErr := runPreVerificationGates(worktree, mq, gateSlot)
-	if runErr != nil {
-		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: could not run gates: %v (MR will not carry the pre-verified stamp)", runErr)
-	}
-	if !result.success {
-		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: gate %q failed (exit %d) — see %s; MR will not carry the pre-verified stamp", result.failedGate, result.exitCode, result.logPath)
-	}
-
-	return preVerificationStamp{
-		verifiedBase: verifiedBase,
-		gateSetSHA:   gateSetSHA,
-		logSHA256:    result.logSHA256,
-	}, true, ""
-}
-
-// preVerificationResult is the outcome of runPreVerificationGates.
-type preVerificationResult struct {
-	success    bool
-	failedGate string // name of the gate that failed; empty on success or no-op
-	exitCode   int    // failing gate's exit code, or 0 on success/no-op
-	logPath    string // path to the captured combined stdout/stderr log
-	logSHA256  string // sha256 hex digest of the log; empty unless success
-}
-
-// preVerificationGateTimeout bounds each individual pre-verification gate
-// command. Without it a hung gate (e.g. a test waiting on a port) blocks gt
-// done indefinitely at a point where the branch may already be pushed but no
-// MR bead exists yet. The refinery's own GateConfig.Timeout is per-gate and
-// operator-configured; gt done's gate commands (the polecat-side *_command
-// set) carry no such per-gate config, so this is a single generous fixed
-// bound instead.
-//
-// A test drives the timeout branch through preVerifyBudget rather than
-// sleeping out ten minutes (gt-ypkc).
-const preVerificationGateTimeout = 10 * time.Minute
-
-// preVerifyBudget is how long each pre-verification gate may run and how a
-// contended lint waits between attempts. gt done runs defaultPreVerifyBudget;
-// a test passes a shorter one to runPreVerificationGatesWithBudget.
-type preVerifyBudget struct {
-	gateTimeout     time.Duration
-	lintRetryDelays []time.Duration // nil means lintlock.RetryDelay
-	// clock is the clock gateTimeout runs on; nil means the real clock. A
-	// test sets a fake one to prove what is and is not charged to a gate's
-	// budget without depending on how fast a real process starts (gt-22hdp.49).
-	clock clockwork.Clock
-}
-
-func (b preVerifyBudget) clk() clockwork.Clock {
-	if b.clock == nil {
-		return clockwork.NewRealClock()
-	}
-	return b.clock
-}
-
-// defaultPreVerifyBudget is the budget gt done's pre-verification runs under.
-func defaultPreVerifyBudget() preVerifyBudget {
-	return preVerifyBudget{gateTimeout: preVerificationGateTimeout}
-}
-
-// preVerificationGateOutcome is one pre-verification gate command's result:
-// the run error (nil on success) and whether it was the gate's timeout that
-// ended it, which the caller reports distinctly from a failing exit code.
-type preVerificationGateOutcome struct {
-	err      error
-	timedOut bool
-}
-
-// runPreVerificationGate runs one gate command in worktree, streaming combined
-// output to logFile. Split out of runPreVerificationGates' loop so the lint
-// gate can be run more than once when golangci-lint's lock is held (gt-xsty),
-// which is also why the caller owns ctx: every attempt of one gate draws on
-// that gate's single preVerificationGateTimeout budget, rather than a retry
-// getting a fresh one.
-func runPreVerificationGate(ctx context.Context, worktree, script string, logFile *os.File) preVerificationGateOutcome {
-	// Trust boundary: gate commands come from rig config.json (operator-
-	// controlled infrastructure config), not from PR branches or user
-	// input — same trust boundary as the refinery's own gate runner.
-	cmd := exec.CommandContext(ctx, "sh", "-c", script) //nolint:gosec // G204: command is from trusted rig config
-	cmd.Dir = worktree
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// SetProcessGroup, not SetDetachedProcessGroup: the group's Cancel hook is
-	// what makes the gate's deadline reach the script's own children — a hung
-	// `make test` otherwise leaves the test binary running after gt done has
-	// gone (gt-ypkc).
-	util.SetProcessGroup(cmd)
-	err := cmd.Run()
-	// Check Done before Err: a fake-clock context's Err blocks until it is done.
-	timedOut := false
-	select {
-	case <-ctx.Done():
-		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-	default:
-	}
-	return preVerificationGateOutcome{err: err, timedOut: timedOut}
-}
-
-// runPreVerificationGateHeld runs one pre-verification gate under its own
-// preVerificationGateTimeout budget, holding the container-gate slot for the
-// test gate when gateSlot.hold says it needs one (gt-l6by). The slot is taken
-// before the budget starts, so its wait is never charged to the gate, and it
-// is released by defer however the gate ends. A non-nil error means the slot
-// could not be taken and the gate did not run.
-func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile *os.File, mq *config.MergeQueueConfig, gateSlot preVerifySlot, budget preVerifyBudget) (preVerificationGateOutcome, error) {
-	if name == "test" {
-		release, err := gateSlot.hold(worktree, script, mq, logFile)
-		if err != nil {
-			return preVerificationGateOutcome{}, err
-		}
-		defer release()
-	}
-	ctx, cancel := clockwork.WithTimeout(context.Background(), budget.clk(), budget.gateTimeout)
-	defer cancel()
-	var got preVerificationGateOutcome
-	runGate := func() lintlock.Attempt {
-		from := fileSize(logFile)
-		got = runPreVerificationGate(ctx, worktree, script, logFile)
-		return lintlock.Attempt{Err: got.err, Output: readLogFrom(logPath, from)}
-	}
-	if name == "lint" {
-		// gt-xsty: lint is the only gate with a cross-process lock
-		// (golangci-lint's), so a concurrent lint is waited out rather
-		// than costing the submission its pre-verified stamp. This gate's
-		// own 10m bound is the retry budget.
-		_ = lintlock.RetryWithDelays(ctx, budget.lintRetryDelays, runGate, func(attempt, attempts int, wait time.Duration) {
-			fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
-		})
-	} else {
-		runGate()
-	}
-	return got, nil
-}
-
-// runPreVerificationGates performs the verification `gt done --pre-verified`
-// stamps: it runs each of the rig's configured gate commands, in
-// setup/typecheck/lint/build/test order, in worktree, streaming combined
-// output to <worktree>/.runtime/gt-preverify.log. It stops at the first
-// failing gate. There is no path that reports success without this function
-// having actually executed every configured command (om-gate T8).
-//
-// The test gate runs inside a container-gate slot whenever it may start a
-// container-backed suite (gt-l6by, see resolvePreVerifyTestSlot): a stamped MR
-// skips the refinery's gate, so this run is the one that exercises the Docker
-// suite and it must hold a slot like every other suite that does. The slot
-// wait is not counted against the gate's preVerificationGateTimeout budget.
-func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig, gateSlot preVerifySlot) (preVerificationResult, error) {
-	return runPreVerificationGatesWithBudget(worktree, mq, gateSlot, defaultPreVerifyBudget())
-}
-
-// runPreVerificationGatesWithBudget is runPreVerificationGates under budget.
-func runPreVerificationGatesWithBudget(worktree string, mq *config.MergeQueueConfig, gateSlot preVerifySlot, budget preVerifyBudget) (preVerificationResult, error) {
-	type namedGate struct {
-		name string
-		cmd  string
-	}
-	var gates []namedGate
-	if mq != nil {
-		for _, ng := range []namedGate{
-			{"setup", mq.SetupCommand},
-			{"typecheck", mq.TypecheckCommand},
-			{"lint", mq.LintCommand},
-			{"build", mq.BuildCommand},
-			{"test", mq.TestCommand},
-		} {
-			if ng.cmd != "" {
-				gates = append(gates, ng)
-			}
-		}
-	}
-
-	// Written under .runtime/ (constants.DirRuntime) so it is a recognized
-	// runtime artifact (git.go's runtimeArtifactRoot): untracked at the
-	// worktree root it made CleanExcludingRuntime() false, tripping gt done's
-	// uncommitted-work checks on re-runs (om-gate T8).
-	logDir := filepath.Join(worktree, constants.DirRuntime)
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return preVerificationResult{}, fmt.Errorf("creating pre-verification log dir %s: %w", logDir, err)
-	}
-	logPath := filepath.Join(logDir, "gt-preverify.log")
-	logFile, err := os.Create(logPath)
+// doneLocalGate is gt done's pre-submit gate: the same land.Gate seam Land()
+// runs on the merged tree, here in its unit tier (no container slot) on the
+// rebased branch. D9's `make gate` replaces the steps, not the seam. Tests
+// replace this variable.
+var doneLocalGate = func(townRoot, rigName, dir string) (land.Gate, error) {
+	g, err := land.RigGate(dir, rig.ResolveMergeQueueConfig(townRoot, rigName), true)
 	if err != nil {
-		return preVerificationResult{}, fmt.Errorf("creating pre-verification log %s: %w", logPath, err)
+		return nil, err
 	}
-	defer logFile.Close()
-
-	for _, ng := range gates {
-		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
-		got, slotErr := runPreVerificationGateHeld(ng.name, ng.cmd, worktree, logPath, logFile, mq, gateSlot, budget)
-		if slotErr != nil {
-			return preVerificationResult{}, slotErr
-		}
-		if got.timedOut {
-			// A hung gate (e.g. a test waiting on a port) must not wedge gt
-			// done indefinitely at a point where the branch is already
-			// pushed but no MR bead exists yet — degrade to "no stamp"
-			// instead (om-gate T8).
-			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, budget.gateTimeout)
-			return preVerificationResult{success: false, failedGate: ng.name, exitCode: -1, logPath: logPath}, nil
-		}
-		if got.err != nil {
-			exitCode := -1
-			var exitErr *exec.ExitError
-			if errors.As(got.err, &exitErr) {
-				exitCode = exitErr.ExitCode()
-			}
-			return preVerificationResult{success: false, failedGate: ng.name, exitCode: exitCode, logPath: logPath}, nil
-		}
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		return preVerificationResult{}, fmt.Errorf("reading pre-verification log %s: %w", logPath, err)
-	}
-	sum := sha256.Sum256(logBytes)
-	return preVerificationResult{success: true, logPath: logPath, logSHA256: hex.EncodeToString(sum[:])}, nil
+	g.Out = os.Stdout
+	g.LogDir = filepath.Join(dir, constants.DirRuntime, "done-gate")
+	return g, nil
 }
+
+// doneLocalGateBudget bounds the whole local gate. The lint step's lock
+// retries need a deadline to plan against (lintlock.RoomForRetry).
+const doneLocalGateBudget = 60 * time.Minute
 
 func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
 	cwd, err := os.Getwd()
@@ -742,9 +443,9 @@ func retirePolecatSessionAfterDone(rigName, polecatName string, pid int) error {
 //
 // Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
 // caller's own PID, so the durable handoff writes above it still finish.
-func retirePolecatSessionAfterFinalExit(exitType, mergeStrategy string, pushFailed, mrFailed, fromHandoff bool, rigName, polecatName string, pid int) bool {
-	if !shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed, fromHandoff) {
-		fmt.Printf("%s Session preserved for recovery, local review, or handoff continuation\n", style.Bold.Render("→"))
+func retirePolecatSessionAfterFinalExit(exitType string, fromHandoff bool, rigName, polecatName string, pid int) bool {
+	if !shouldRetirePolecatSessionAfterDone(exitType, fromHandoff) {
+		fmt.Printf("%s Session preserved for handoff continuation\n", style.Bold.Render("→"))
 		return false
 	}
 	fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
@@ -855,9 +556,9 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 //
 // Two shapes of skip are closed here:
 //
-//   - A push or MR failure returns early from updateAgentStateAfterSubmission,
-//     which used to take the self-report with it. A failed push is exactly the
-//     case where the witness needs to see "has_unpushed".
+//   - A failed submission returns before reportDone, so runDone records the
+//     status on that path too. A failed push is exactly the case where the
+//     witness needs to see "has_unpushed".
 //   - A status that could not be observed stays "" or parses to CleanupUnknown.
 //     Re-observing the live worktree at completion time is the last chance to
 //     record a real value; if even that fails, "unknown" is recorded rather
@@ -1145,21 +846,38 @@ func autoSaveSquashTitle(issue *beads.Issue, issueID string) string {
 
 func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
-	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
 	doneCmd.Flags().StringVar(&doneStatus, "status", ExitCompleted, "Exit status: COMPLETED, ESCALATED, or DEFERRED")
 	doneCmd.Flags().StringVar(&doneCleanupStatus, "cleanup-status", "", "Git cleanup status: clean, uncommitted, unpushed, stash, unknown (ZFC: agent-observed)")
-	doneCmd.Flags().BoolVar(&doneResume, "resume", false, "Resume from last checkpoint (auto-detected, for Witness recovery)")
-	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
-	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
-	doneCmd.Flags().BoolVar(&doneSkipTests, "skip-tests", false, "Skip the default test gate: a one-shot mayor ruling for untestable or slot-starved work (recorded on the MR). Push verification is never skipped")
-	// --skip-verify skipped both the test gate and push verification (G2-02).
-	// It now only skips tests; kept so existing rulings and scripts still parse.
-	doneCmd.Flags().BoolVar(&doneSkipTests, "skip-verify", false, "Deprecated alias for --skip-tests")
-	_ = doneCmd.Flags().MarkDeprecated("skip-verify", "use --skip-tests; push verification is no longer skippable")
+	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit target branch (overrides the bead's base_branch and the rig default)")
 	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
 	rootCmd.AddCommand(doneCmd)
+}
+
+// doneRun is what one gt done invocation knows about itself once its
+// identity, branch and issue are resolved.
+type doneRun struct {
+	g                *git.Git
+	cwd              string
+	townRoot         string
+	rigName          string
+	polecatName      string
+	sender           string
+	branch           string
+	issueID          string
+	agentBeadID      string
+	defaultBranch    string
+	heartbeatSession string
+}
+
+// doneSubmission is what a COMPLETED run handed over.
+type doneSubmission struct {
+	sourceIssue *beads.Issue
+	sourceBD    *beads.Beads
+	// head and target are set when a branch was submitted for landing.
+	head   string
+	target string
 }
 
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
@@ -1179,1512 +897,672 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("invalid exit status '%s': must be COMPLETED, ESCALATED, or DEFERRED", doneStatus)
 	}
 
-	// Every final exit status retires the live polecat session after durable
-	// handoff; failed submissions and local-review paths preserve it.
-
 	worktree, err := resolveDonePolecatWorktree()
 	if err != nil {
 		return err
 	}
-	townRoot := worktree.townRoot
-	cwd := worktree.cwd
-	rigName := worktree.rigName
-	polecatName := worktree.polecatName
-	sender := worktree.actor
+	r := &doneRun{
+		townRoot:    worktree.townRoot,
+		cwd:         worktree.cwd,
+		rigName:     worktree.rigName,
+		polecatName: worktree.polecatName,
+		sender:      worktree.actor,
+	}
+	r.g = git.NewGit(r.cwd)
 
-	g := git.NewGit(cwd)
-
-	branch, err := g.CurrentBranch()
+	r.branch, err = r.g.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
 	}
-	if err := requireRealCurrentBranch(branch, "gt done"); err != nil {
+	if err := requireRealCurrentBranch(r.branch, "gt done"); err != nil {
 		return err
 	}
 
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
 	if doneCleanupStatus == "" {
-		doneCleanupStatus = observeCleanupStatus(g, branch)
+		doneCleanupStatus = observeCleanupStatus(r.g, r.branch)
 	}
-
-	// SAFETY NET (gt-pvx, stash recovery): If we detected stashes belonging to
-	// this branch, auto-pop them so the existing uncommitted-work auto-commit
-	// path (below) catches the contents and saves them as a normal commit.
-	//
-	// Background: agents have been observed running `git stash` to clear the
-	// working tree before rebase/checkout, then dying before `git stash pop`.
-	// The stash entries become orphaned in .git/refs/stash, surviving for
-	// indefinite periods and silently leaking work. By popping them on the way
-	// out of `gt done`, the recovery flow turns "lost" stashes into a
-	// committed safety-net snapshot.
-	//
-	// Pop happens oldest-first so the most recent state ends up on top of the
-	// working tree (matches what a user would do manually). If any pop has
-	// conflicts, we stop and let the agent/user resolve — surfacing the
-	// conflict is better than silently dropping the stash.
 	if doneCleanupStatus == "stash" {
-		entries, err := g.StashListForBranch()
-		if err != nil {
-			style.PrintWarning("auto-pop: could not list stashes: %v — orphaned stashes may remain", err)
-		} else if len(entries) > 0 {
-			fmt.Printf("\n%s %d stash(es) detected on this branch — auto-popping (gt-pvx safety net)\n",
-				style.Bold.Render("⚠"), len(entries))
-			// Pop oldest first: iterate in reverse so newest lands on top.
-			popFailed := false
-			for i := len(entries) - 1; i >= 0; i-- {
-				e := entries[i]
-				fmt.Printf("  popping %s — %s\n", e.Ref, e.Message)
-				if popErr := g.StashPop(e.Ref); popErr != nil {
-					style.PrintWarning("auto-pop %s failed (likely conflict): %v", e.Ref, popErr)
-					style.PrintWarning("stopping pop chain — resolve conflict manually then re-run gt done")
-					popFailed = true
-					break
-				}
-				// After each pop, stash refs shift; re-fetch the list before next pop.
-				entries, err = g.StashListForBranch()
-				if err != nil || len(entries) == 0 {
-					break
-				}
-			}
-			if !popFailed {
-				// Re-evaluate cleanup status: pops likely produced uncommitted changes
-				// that the next block will auto-commit. Worst case, status was already
-				// uncommitted and the next block runs anyway.
-				if workStatus, wsErr := g.CheckUncommittedWork(); wsErr == nil && workStatus.HasUncommittedChanges {
-					doneCleanupStatus = "uncommitted"
-					fmt.Printf("%s Stash content moved to working tree — will auto-commit below.\n",
-						style.Bold.Render("✓"))
-				} else {
-					// Pops succeeded but produced nothing dirty (e.g. stashes were
-					// already merged). Recompute status normally.
-					doneCleanupStatus = ""
-				}
-			}
-		}
+		popBranchStashes(r.g)
 	}
-
-	// SAFETY NET: Auto-commit uncommitted work before ANY exit path (gt-pvx).
-	// Polecats have been observed running gt done without committing their
-	// implementation work (1000s of lines lost). This happened because:
-	// 1. The agent skips the "commit changes" formula step
-	// 2. The COMPLETED check blocks, but the agent retries with --status DEFERRED
-	//    which skips all checks
-	// 3. The agent's session dies after the error, before it can commit
-	//
-	// Auto-commit ensures work is NEVER lost regardless of exit type or agent behavior.
-	// The commit message is clearly marked as an auto-save so reviewers know.
 	if doneCleanupStatus == "uncommitted" {
-		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
-		workStatus, err := g.CheckUncommittedWork()
-		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
-			if len(workStatus.UnmergedFiles) > 0 {
-				return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", strings.Join(workStatus.UnmergedFiles, ", "))
-			}
-
-			fmt.Printf("\n%s Uncommitted changes detected — auto-saving to prevent work loss\n", style.Bold.Render("⚠"))
-			fmt.Printf("  Files: %s\n\n", workStatus.String())
-
-			// Stage all changes (git add -A), then unstage overlay/runtime files (gt-p35)
-			// and any deletions of tracked files (gt-pvx safety: never commit deletions).
-			if addErr := g.Add("-A"); addErr != nil {
-				style.PrintWarning("auto-commit: git add failed: %v — uncommitted work may be at risk", addErr)
-			} else {
-				// Unstage Gas Town overlay files that git add -A picked up.
-				// These are runtime artifacts that must not be committed to repos.
-				_ = g.ResetFiles("CLAUDE.local.md")
-				// Only unstage CLAUDE.md if it contains the overlay marker
-				if claudeData, readErr := os.ReadFile(filepath.Join(cwd, "CLAUDE.md")); readErr == nil {
-					if strings.Contains(string(claudeData), templates.PolecatLifecycleMarker) {
-						_ = g.ResetFiles("CLAUDE.md")
-					}
-				}
-				// Unstage runtime/ephemeral artifacts using the centralized git policy.
-				for _, path := range workStatus.RuntimeArtifactPaths() {
-					_ = g.ResetFiles(path)
-				}
-				// Unstage throwaway files (gt-ozo4). This runs `git add -A` for the
-				// same reason the checkpoint dog does, and would sweep up the same
-				// scratch, /tmp, editor-backup and patch-leftover files. They stay
-				// in the worktree, untracked, and are named so the polecat sees
-				// which of them it is not getting a safety-net commit for.
-				if throwaway := checkpoint.ThrowawayPaths(workStatus.UntrackedFiles); len(throwaway) > 0 {
-					_ = g.ResetFiles(throwaway...)
-					style.PrintWarning("auto-commit: left %d throwaway file(s) uncommitted: %s",
-						len(throwaway), strings.Join(throwaway, ", "))
-				}
-				// Unstage deletions of tracked files. A safety-net auto-commit should
-				// preserve work (additions + modifications), never destroy it (deletions).
-				// This prevents the bug where a polecat's working tree has a missing
-				// tracked file (e.g. .beads/metadata.json) and the auto-save commits
-				// the deletion, breaking infrastructure for subsequent sessions.
-				if stagedDeletions, delErr := g.StagedDeletions(); delErr == nil && len(stagedDeletions) > 0 {
-					_ = g.ResetFiles(stagedDeletions...)
-				}
-				// Build a descriptive commit message
-				autoMsg := "fix: auto-save uncommitted implementation work (gt-pvx safety net)"
-				if issueFromBranch := parseBranchName(branch).Issue; issueFromBranch != "" {
-					autoMsg = fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, gt-pvx safety net)", issueFromBranch)
-				}
-				if commitErr := g.Commit(autoMsg); commitErr != nil {
-					style.PrintWarning("auto-commit: git commit failed: %v — uncommitted work may be at risk", commitErr)
-				} else {
-					fmt.Printf("%s Auto-committed uncommitted work (safety net)\n", style.Bold.Render("✓"))
-					fmt.Printf("  The agent should have committed before running gt done.\n")
-					fmt.Printf("  This auto-save prevents work loss.\n\n")
-					doneCleanupStatus = "unpushed" // Update status — changes are now committed but not pushed
-				}
-			}
+		if err := autoSaveUncommittedWork(r.g, r.cwd, r.branch); err != nil {
+			return err
 		}
 	}
 
-	// Parse branch info
-	info := parseBranchName(branch)
-
-	// Override with explicit flags
-	issueID := doneIssue
-	if issueID == "" {
-		issueID = info.Issue
+	info := parseBranchName(r.branch)
+	r.issueID = doneIssue
+	if r.issueID == "" {
+		r.issueID = info.Issue
 	}
-
-	// The MR's worker must be whoever is actually running `gt done` right
-	// now (polecatName, validated above against BD_ACTOR/GT_POLECAT and the
-	// worktree path), never the name parsed out of the branch. A --branch
-	// rework reuses the ORIGINAL polecat's branch name under a different
-	// worker, so trusting info.Worker here misattributes the MR and later
-	// misroutes FIX_NEEDED to a polecat that no longer holds the issue
-	// (gt-fl0n).
-	worker := polecatName
 
 	// Get agent bead ID for cross-referencing.
-	ctx, actor := resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName)
-	if actor != "" {
-		sender = actor
+	ctx, actorID := resolveDoneAgentIdentity(r.cwd, r.townRoot, r.rigName, r.polecatName)
+	if actorID != "" {
+		r.sender = actorID
 	}
-	agentBeadID := getAgentBeadID(ctx)
+	r.agentBeadID = getAgentBeadID(ctx)
 
-	// Recreate the agent bead if it's missing (hq-xu4p). Done-intent
-	// labels, checkpoints, and active_mr all write to it; when it's gone
-	// every write fails 'issue not found' and witness zombie detection +
-	// done-resume silently degrade. Best-effort: a failed recreate just
-	// leaves the existing warnings.
-	//
-	// Completion now exits the live polecat session after durable handoff.
-	// The agent bead keeps lifecycle metadata for witness/refinery cleanup.
-	ensureAgentBeadExists(beads.New(cwd).ForAgentBead(), agentBeadID, ctx)
+	// Recreate the agent bead if it's missing (hq-xu4p). Done-intent labels
+	// and completion metadata write to it; when it's gone every write fails
+	// 'issue not found' and witness zombie detection silently degrades.
+	ensureAgentBeadExists(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, ctx)
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
-		if assignedIssueIDs == nil && sender != "" {
-			assignedIssueIDs = findAssignedBeadsForAgent(cwd, sender)
+		if assignedIssueIDs == nil && r.sender != "" {
+			assignedIssueIDs = findAssignedBeadsForAgent(r.cwd, r.sender)
 		}
 		return assignedIssueIDs
 	}
 
 	// If issue ID not set by flag or branch name, query for hooked beads
-	// assigned to this agent. This replaces reading agent_bead.hook_bead
-	// (hq-l6mm5: direct bead tracking instead of agent bead slot).
-	if issueID == "" && sender != "" {
+	// assigned to this agent (hq-l6mm5: direct bead tracking).
+	if r.issueID == "" && r.sender != "" {
 		if hookIssue, ambiguous := selectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
-			issueID = hookIssue
+			r.issueID = hookIssue
 		} else if ambiguous {
-			return fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", sender)
+			return fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", r.sender)
 		}
 	}
 
 	// Stale-branch guard (hq-l0fj): a redispatched polecat that reuses its
-	// previous work branch carries the OLD bead-id in the branch name, which
-	// would mis-attribute this MR (close credit goes to a closed bead; the
-	// real issue stays open and hooked). When the branch-derived id differs
-	// from the hooked bead, trust the hook. An explicit --issue flag still
-	// wins, and subtask branches of the hooked bead (e.g. gt-abc.1 under
-	// hooked gt-abc) are left alone.
-	if doneIssue == "" && info.Issue != "" && sender != "" {
+	// previous work branch carries the OLD bead-id in the branch name. When the
+	// branch-derived id differs from the hooked bead, trust the hook. An
+	// explicit --issue flag still wins, and subtask branches of the hooked bead
+	// (e.g. gt-abc.1 under hooked gt-abc) are left alone.
+	if doneIssue == "" && info.Issue != "" && r.sender != "" {
 		if hookIssue, ambiguous := selectAssignedIssue(info.Issue, loadAssignedIssueIDs()); isStaleBranchIssue(info.Issue, hookIssue) {
-			style.PrintWarning("branch %q embeds issue %s but your hooked bead is %s — submitting for %s (stale branch reuse?)", branch, info.Issue, hookIssue, hookIssue)
+			style.PrintWarning("branch %q embeds issue %s but your hooked bead is %s — submitting for %s (stale branch reuse?)", r.branch, info.Issue, hookIssue, hookIssue)
 			fmt.Printf("  Fresh branches must be named polecat/<name>/<bead-id>+<suffix> for the bead you are working.\n")
 			fmt.Printf("  Use --issue to override if the branch-derived id is actually correct.\n\n")
-			issueID = hookIssue
+			r.issueID = hookIssue
 		} else if ambiguous {
-			return fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", branch, info.Issue, sender)
+			return fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", r.branch, info.Issue, r.sender)
 		}
 	}
 
-	// Write done-intent label EARLY, before push/MR operations.
-	// If gt done crashes after this point, the Witness can detect the intent
-	// and auto-nuke the zombie polecat.
-	//
-	// Also read existing checkpoints for resume capability (gt-aufru).
-	// If gt done was interrupted (SIGTERM, context exhaustion, SIGKILL),
-	// checkpoints indicate which stages completed. On re-invocation, we
-	// skip those stages to avoid repeating work or hitting errors.
-	checkpoints := map[DoneCheckpoint]string{}
-	if agentBeadID != "" {
-		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-		// legacy town fallback — gt-8we).
-		bd := beads.New(cwd).ForAgentBead()
-		setDoneIntentLabel(bd, agentBeadID, exitType)
-		checkpoints = readDoneCheckpoints(bd, agentBeadID)
-		if len(checkpoints) > 0 {
-			fmt.Printf("%s Resuming gt done from checkpoint (previous run was interrupted)\n", style.Bold.Render("→"))
-		}
+	// Write the done-intent label before the long stages, so the Witness can
+	// tell a polecat that died inside gt done from one still working. A run
+	// that fails does not report done and keeps its session to fix the
+	// failure, so the label must not outlive it: a stale done-intent label
+	// gets a working polecat restarted (gt-wmpy). Every error return is such a
+	// run: reportDone's only error comes before the Witness nudge. A run that
+	// succeeds leaves the label to updateAgentStateOnDone, which clears it last.
+	if r.agentBeadID != "" {
+		agentBd := beads.New(r.cwd).ForAgentBead()
+		setDoneIntentLabel(agentBd, r.agentBeadID, exitType)
+		defer func() {
+			if retErr != nil {
+				clearDoneIntentLabel(agentBd, r.agentBeadID)
+			}
+		}()
 	}
 
-	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2).
-	// Tells the witness we're in the gt done flow — trust the agent until
-	// heartbeat goes stale. No timer-based inference needed.
-	// Parallel to done-intent label for backwards compat during migration.
-	heartbeatSession := os.Getenv("GT_SESSION")
-	if heartbeatSession != "" && townRoot != "" {
-		polecat.TouchSessionHeartbeatWithState(townRoot, heartbeatSession, polecat.HeartbeatExiting, "gt done", issueID)
+	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the witness
+	// trusts the agent until the heartbeat goes stale.
+	r.heartbeatSession = os.Getenv("GT_SESSION")
+	if r.heartbeatSession != "" && r.townRoot != "" {
+		polecat.TouchSessionHeartbeatWithState(r.townRoot, r.heartbeatSession, polecat.HeartbeatExiting, "gt done", r.issueID)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
+	r.defaultBranch = "main" // fallback
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(r.townRoot, r.rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		r.defaultBranch = rigCfg.DefaultBranch
 	}
-	baseRef := g.CleanBaseRef("origin", defaultBranch, doneTarget)
 
-	// For COMPLETED, we need an issue ID and branch must not be the default branch
-	var mrID string
-	var pushFailed bool
-	var mrFailed bool
-	// landing records every outcome that did not land. It becomes gt done's
-	// exit status after the notifications below have run, so a caller cannot
-	// mistake a dropped submission for a landed one (gt-2wqt, G5-01).
-	var landing doneLanding
-	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
-	var sourceIssueForNoMerge *beads.Issue
-	var sourceBD *beads.Beads
+	var sub doneSubmission
 	if exitType == ExitCompleted {
-		if branch == defaultBranch || branch == "master" {
-			// A conflict-resolution pass ends on the base branch by design: it
-			// submits no branch of its own, because its work is a rewritten head
-			// already pushed to the branch of an existing MR
-			// (mol-polecat-conflict-resolve, cleanup-and-exit). Rejecting it here
-			// returns before notifyWitness, so the wake for the MR the pass just
-			// released never fires (gt-rv8h, gt-tne1). DEFERRED is not this exit:
-			// it files a finished pass as "stuck".
-			if task := conflictResolutionCompletionTask(cwd, agentBeadID, issueID); task != nil {
-				if !beads.IssueStatus(task.Status).IsTerminal() {
-					// Completing now would walk away from a task the refinery is
-					// still blocked on. Say so, rather than reporting a merge-queue
-					// rejection the polecat cannot act on.
-					return fmt.Errorf("cannot complete %s: conflict-resolution task %s is still open, and its MR stays blocked until it closes\nClose it first: bd close %s --reason=\"resolved conflicts\"",
-						defaultBranch, task.ID, task.ID)
-				}
-				fmt.Printf("%s Conflict-resolution completion on %s — no branch of its own to submit\n", style.Bold.Render("→"), defaultBranch)
-				fmt.Printf("  %s is closed; the refinery wake below names the MR it released.\n", task.ID)
-				goto notifyWitness
-			}
-			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
-		}
-
-		// CRITICAL: Verify work exists before completing (hq-xthqf)
-		// Polecats calling gt done without commits results in lost work.
-		// We MUST check for:
-		// 1. Working directory availability (can't verify git state without it)
-		// 2. Uncommitted changes (work that would be lost)
-		// 3. Unique commits compared to origin (ensures branch was pushed with actual work)
-
-		// Block if there are uncommitted changes (would be lost on completion).
-		// Runtime artifacts (.claude/, .opencode/, .beads/, .runtime/, __pycache__/) are
-		// excluded — these are toolchain-managed and normally gitignored.
-		// Without this filter, gt done fails on virtually every polecat because
-		// Cursor creates .claude/ at runtime in every workspace.
-		workStatus, err := g.CheckUncommittedWork()
+		sub, err = submitForLanding(r)
 		if err != nil {
-			return fmt.Errorf("checking git status: %w", err)
-		}
-		if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
-			return fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
-		}
-
-		// Check if branch has commits ahead of the clean target base. In fork-backed
-		// rigs this is upstream/main, not the fork's origin/main.
-		aheadCount, err := g.CommitsAhead(baseRef, "HEAD")
-		if err != nil {
-			// Fallback to local branch comparison if origin not available
-			aheadCount, err = g.CommitsAhead(defaultBranch, branch)
-			if err != nil {
-				// Can't determine - assume work exists and continue
-				style.PrintWarning("could not check commits ahead of %s: %v", defaultBranch, err)
-				aheadCount = 1
-			}
-		}
-
-		// Check no_merge or review_only flags on the hooked bead. When set,
-		// this is a non-code task (email, research, analysis, PRD review)
-		// where zero commits is expected.
-		// Must be checked before the zero-commit guard below (GH#2496, gt-kvf).
-		isNoMergeTask := false
-		reviewOnlySource := false
-		if issueID != "" {
-			sourceInfo, sourceErr := resolveSubmitSourceIssue(cwd, issueID)
-			if sourceErr != nil {
-				return fmt.Errorf("source issue validation failed: %w", sourceErr)
-			}
-			sourceIssueForNoMerge = sourceInfo.Issue
-			sourceBD = sourceInfo.BD
-			if af := beads.ParseAttachmentFields(sourceIssueForNoMerge); af != nil {
-				if af.NoMerge || af.ReviewOnly {
-					isNoMergeTask = true
-				}
-				reviewOnlySource = af.ReviewOnly
-			}
-		}
-
-		// If no commits ahead, work was likely already merged or is a legitimate
-		// report-only completion. Fork-backed rigs must not infer success from fork main.
-		// For polecats, zero commits usually means the polecat sleepwalked through
-		// implementation without writing code (gastown#1484, beads#emma).
-		// The --cleanup-status=clean escape is preserved for legitimate report-only
-		// tasks (audits, reviews) that the formula explicitly directs to use it.
-		// no_merge/review_only tasks (GH#2496, gt-kvf) also bypass: non-code work has no commits by design.
-		// IMPORTANT: The error message must NOT mention --cleanup-status=clean.
-		// LLM agents read error messages and self-bypass (the original bug).
-		if aheadCount == 0 {
-			if os.Getenv("GT_POLECAT") != "" && doneCleanupStatus != "clean" && !isNoMergeTask {
-				// Before failing, check whether commits exist on the remote feature branch.
-				// After a polecat pushes to origin/<feature-branch> and submits an MR,
-				// if master advances (e.g., other MRs land), the feature branch is no
-				// longer ahead of origin/master — but the work WAS committed and pushed.
-				// In that case, treat as "MR already submitted" and fall through. (GH#wd7)
-				branchPushedWithWork := false
-				if branch != defaultBranch {
-					pushed, unpushed, pushErr := g.BranchPushedToRemote(branch, "origin")
-					branchPushedWithWork = pushErr == nil && pushed && unpushed == 0
-				}
-				if !branchPushedWithWork {
-					return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
-						"Polecats must have at least 1 commit to submit.\n"+
-						"If the bug was already fixed upstream: gt done --status DEFERRED\n"+
-						"If you're blocked: gt done --status ESCALATED",
-						baseRef)
-				}
-			}
-
-			// Non-polecat (crew/mayor), polecat with --cleanup-status=clean
-			// (report-only tasks like audits/reviews), or no_merge polecat
-			// (non-code tasks like email/research per GH#2496):
-			// zero commits is valid.
-			fmt.Printf("%s Branch has no commits ahead of %s\n", style.Bold.Render("→"), baseRef)
-			fmt.Printf("  Work was likely already merged or report-only.\n")
-			fmt.Printf("  Skipping MR creation - completing without merge request.\n\n")
-
-			// G15 fix: Close the base issue when completing with no MR.
-			// Without this, no-op polecats (bug already fixed) leave issues stuck
-			// in HOOKED state with assignee pointing to the nuked polecat.
-			// Normally the Refinery closes after merge, but with no MR, nothing
-			// would ever close the issue.
-			if issueID != "" {
-				bd := sourceBD
-				if bd == nil {
-					bd = beads.New(cwd)
-				}
-
-				skipClose := false
-				if skipReason, fatal := doneSourceCloseSkipReason(bd, issueID, sourceIssueForNoMerge); skipReason != "" {
-					style.PrintWarning("%s", skipReason)
-					fmt.Printf("  The bead will remain open for witness/mayor review.\n")
-					notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, skipReason)
-					if fatal {
-						return fmt.Errorf("cannot complete review-only/no-MR work: %s", skipReason)
-					}
-					skipClose = true
-				}
-
-				if !skipClose {
-					closeReason := "Completed with no code changes (already fixed or already merged)"
-					noMRCommitSHA, _ := g.Rev("HEAD")
-					if !isNoMergeTask {
-						if g.ForkBackedRemote("origin") {
-							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", branch, baseRef)
-						}
-						if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
-							noteVerifiedPushFailure(bd, cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
-							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
-						}
-						if noMRCommitSHA != "" {
-							closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
-						}
-					}
-					// G15 fix: Force-close bypasses molecule dependency checks.
-					// The polecat is about to be nuked — open wisps should not block closure.
-					// Retry with backoff handles transient dolt lock contention (A2).
-					var closeErr error
-					for attempt := 1; attempt <= 3; attempt++ {
-						closeErr = bd.ForceCloseWithReason(closeReason, issueID)
-						if closeErr == nil {
-							fmt.Printf("%s Issue %s closed (no MR needed)\n", style.Bold.Render("✓"), issueID)
-							break
-						}
-						if attempt < 3 {
-							style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
-							time.Sleep(time.Duration(attempt*2) * time.Second)
-						}
-					}
-					if closeErr != nil {
-						errMsg := fmt.Sprintf("could not close issue %s after 3 attempts: %v", issueID, closeErr)
-						landing.fail(doneExitCloseFailed, errMsg, closeErr)
-						style.PrintWarning("%s (issue may be left HOOKED)", errMsg)
-					}
-				}
-			}
-
-			// Skip straight to witness notification (no MR needed)
-			goto notifyWitness
-		}
-
-		if reviewOnlySource {
-			return fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", issueID, baseRef)
-		}
-
-		// Branch contamination preflight: check if branch is significantly behind
-		// the effective target branch, which indicates the branch may contain stale merge-base
-		// artifacts that will pollute the PR diff. (GH#2220)
-		//
-		// gh#3400: Refresh remote tracking refs first so contamination check (and
-		// the auto-rebase below) sees the current clean base. In fork-backed rigs,
-		// that base is upstream/main, not the fork's origin/main.
-		contaminationBase := baseRef
-		if doneTarget != "" && doneTarget != defaultBranch {
-			contaminationBase = doneContaminationBaseRef(defaultBranch, doneTarget)
-		}
-		fetchRemote := git.RemoteForRef(contaminationBase)
-		if fetchRemote == "" {
-			fetchRemote = "origin"
-		}
-		if fetchErr := g.Fetch(fetchRemote); fetchErr != nil {
-			style.PrintWarning("could not fetch %s before contamination check: %v (proceeding with local refs)", fetchRemote, fetchErr)
-		}
-
-		// Does this branch already exist where this run will push it? Every
-		// branch push on this path targets origin (the refspec built further
-		// down is branch:branch against it), so ask about origin/<branch> —
-		// not whichever remote the fetch above followed. In a fork-backed rig
-		// that fetch is upstream's, which leaves origin/<branch> stale enough
-		// to miss a push from an earlier dispatch and mistake a reused branch
-		// for a new one (gt-i0z3). Drives both the auto-rebase gate below and
-		// the commit-message squash gate further down, which must agree.
-		_, pushedReason := branchAlreadyOnRemote(g, "origin", branch, fetchRemote != "origin")
-		if pushedCheckpointBranch(checkpoints[CheckpointPushed]) == branch {
-			pushedReason = "prior push checkpoint exists"
-		}
-
-		contam, err := g.CheckBranchContamination(contaminationBase)
-		if err == nil && contam.Behind > 0 {
-			const warnThreshold = 50
-			const blockThreshold = 200
-			if contam.Behind >= blockThreshold {
-				return fmt.Errorf("branch contamination: %d commits behind %s (threshold: %d)\n"+
-					"The branch is severely stale and will include unrelated changes in the PR.\n"+
-					"Fix: git fetch %s && git rebase %s",
-					contam.Behind, contaminationBase, blockThreshold, fetchRemote, contaminationBase)
-			} else if contam.Behind >= warnThreshold {
-				style.PrintWarning("branch is %d commits behind %s — consider rebasing to avoid PR contamination", contam.Behind, contaminationBase)
-			}
-
-			// gh#3400: Auto-rebase the polecat branch onto the latest target before
-			// push, so the resulting MR/PR has a current base.
-			//
-			// gt-bf5x: checkpoints only remember THIS session's own push. A
-			// branch reused across a redispatch (formula's rejected-MR rework
-			// exception) can already be on origin from a *previous* session,
-			// which the checkpoint has no record of — rebasing it here would
-			// diverge local history from origin for no reason (the formula
-			// already rebases such branches itself in step 2). Treat an
-			// existing origin/<branch> the same way the commit-message squash
-			// step below already does: as proof this branch was pushed before.
-			// pushedReason names which of the two proved it (gt-i0z3).
-			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, pushedReason)
-			if rebaseErr != nil {
-				return rebaseErr
-			}
-			if rebased {
-				fmt.Printf("%s Branch rebased onto %s\n", style.Bold.Render("✓"), contaminationBase)
-				// Recompute commits ahead since rebase rewrote history.
-				aheadCount, _ = g.CommitsAhead(baseRef, "HEAD")
-			} else if skipReason != "" {
-				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
-			}
-		}
-
-		// Refuse to submit a branch that reverts work already merged to the
-		// target (gt-63sz). Anything else in this path — the contamination
-		// check above, the MR gate, the refinery — reads the commit graph, and
-		// a `git reset --soft origin/main` over a stale checkout produces a
-		// branch that is one commit ahead of a fresh base while its content
-		// undoes every commit merged in between. Only the branch's file content
-		// shows that, so this is the one place that looks at it.
-		//
-		// Runs after the auto-rebase above: a rebase replays the same diff, so
-		// it neither causes nor cures this and the check must see the branch in
-		// the state that would actually be pushed.
-		if doneAllowReverts {
-			style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", contaminationBase)
-		} else if err := reportRevertedMerges(g, contaminationBase); err != nil {
+			// Nothing is reported done, but the worktree's git state is still
+			// recorded: a session that dies before re-running gt done must not
+			// strand its slot (hq-vx224).
+			selfReportCleanupStatus(r.g, r.branch, beads.New(filepath.Join(r.townRoot, r.rigName)).ForAgentBead(), r.agentBeadID, doneCleanupStatus)
 			return err
 		}
-
-		// Refuse a branch that would add throwaway files to the target
-		// (gt-ozo4). Checked here, before the commit-message squash below
-		// rewrites history, so a refusal leaves the branch exactly as the
-		// polecat left it.
-		if doneAllowThrowawayPaths {
-			style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", contaminationBase)
-		} else if err := reportThrowawayPaths(g, contaminationBase); err != nil {
-			return err
-		}
-
-		// Refuse a rework whose content is byte-identical to an attempt the
-		// refinery already rejected (gt-0jzd5). Runs after the rebase above,
-		// for the same reason the revert check does: patch-id is
-		// base-invariant, so what matters is the content about to be pushed.
-		var sourceNotes string
-		if sourceIssueForNoMerge != nil {
-			sourceNotes = sourceIssueForNoMerge.Notes
-		}
-		rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sourceBD, mrID) }
-		if err := reportUnchangedSinceRejection(g, sourceNotes, issueID, contaminationBase, rejectedTip); err != nil {
-			return err
-		}
-
-		// Rewrite machine-generated commit messages before submission (gt-3wf).
-		// The gt-pvx safety net and checkpoint dog commit real work under
-		// generic subjects ("fix: auto-save uncommitted implementation work",
-		// "WIP: checkpoint (auto)"). Polecats are told to amend before gt done
-		// but observably never do, so main's merge history fills with
-		// meaningless messages. Squash the branch into one commit instead:
-		// non-generated subjects are preserved (first as title, rest in the
-		// body); when every commit is machine-generated, the source issue
-		// title becomes the subject. Skipped when the branch was already
-		// pushed (resume checkpoint, or the agent pushed manually — polecat
-		// branch names are session-unique, so an existing origin/<branch>
-		// means this session pushed it, and gt-i0z3 made the ref read behind
-		// pushedReason refresh first) — rewriting history then would break the
-		// later non-force push.
-		//
-		// The skip is safe only while the tip is real work: a machine-generated
-		// tip passes through it unseen and is landed as-is, which is how a
-		// checkpoint commit became main's tip (gt-iki6, f0a00f6). That shape
-		// cannot be squashed here — origin already has the commit — so refuse
-		// it and hand the polecat the rewrite instead.
-		tip, tipErr := checkpoint.InspectAutoSaveTip(cwd, baseRef, "HEAD")
-		if tipErr != nil {
-			// An unreadable tip must not fail the gate open on a branch origin
-			// already has: that is the shape being refused, unverified.
-			if pushedReason != "" {
-				return autoSaveTipUninspectableError(branch, pushedReason, tipErr)
-			}
-			style.PrintWarning("could not inspect the branch tip for auto-save commits: %v", tipErr)
-		} else if err := autoSaveTipGate(tip, branch, pushedReason); err != nil {
-			return err
-		}
-		if pushedReason == "" {
-			headBefore, headBeforeErr := g.Rev("HEAD")
-			if squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(sourceIssueForNoMerge, issueID)); squashErr != nil {
-				// A squash that failed after its soft reset leaves the branch
-				// holding no commits at all; refuse before anything pushes it.
-				if headAfter, revErr := g.Rev("HEAD"); headBeforeErr == nil && revErr == nil && headAfter != headBefore {
-					return autoSaveSquashResetError(branch, baseRef, squashErr)
-				}
-				if tip.AutoSave {
-					return autoSaveTipRefusalError(tip, branch,
-						fmt.Sprintf("the squash failed: %v.", squashErr))
-				}
-				style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
-			} else if squashed > 0 {
-				fmt.Printf("%s Squashed %d auto-save/WIP commit(s) into a single descriptive commit\n", style.Bold.Render("✓"), squashed)
-				aheadCount, _ = g.CommitsAhead(baseRef, "HEAD")
-			}
-		}
-
-		// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).
-		// Polecats commit the overlay (polecat lifecycle boilerplate) into repos,
-		// overwriting project-specific CLAUDE.md content. Detect and revert before push.
-		if stripped := stripOverlayCLAUDEmd(g, defaultBranch, baseRef); stripped {
-			// Recalculate commits ahead since we added a cleanup commit
-			aheadCount, _ = g.CommitsAhead(baseRef, "HEAD")
-		}
-
-		// Determine merge strategy from convoy (gt-myofa.3)
-		// Convoys can override the default MR-based workflow:
-		//   mr:     default — create merge-request bead, refinery merges
-		//   local:  keep on feature branch, no push, no MR (for human review/upstream PRs)
-		//
-		// Primary: read convoy info from the issue's attachment fields (gt-7b6wf fix).
-		// gt sling stores convoy_id and merge_strategy on the issue when dispatching,
-		// which avoids unreliable cross-rig dep resolution at gt done time.
-		// Fallback: dep-based lookup via getConvoyInfoForIssue (for issues dispatched
-		// before this fix, or where attachment fields weren't set).
-		convoyInfo = getConvoyInfoFromSourceIssue(sourceIssueForNoMerge)
-		if convoyInfo == nil {
-			convoyInfo = getConvoyInfoForIssue(issueID)
-		}
-
-		// Handle "local" strategy: skip push and MR entirely
-		if convoyInfo != nil && convoyInfo.MergeStrategy == "local" {
-			fmt.Printf("%s Local merge strategy: skipping push and merge queue\n", style.Bold.Render("→"))
-			fmt.Printf("  Branch: %s\n", branch)
-			if issueID != "" {
-				fmt.Printf("  Issue: %s\n", issueID)
-			}
-			fmt.Println()
-			fmt.Printf("%s\n", style.Dim.Render("Work stays on local feature branch."))
-			goto notifyWitness
-		}
-
-		// Default: "mr" strategy (or no convoy) — push branch, create MR bead
-
-		if issueID == "" {
-			return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", branch)
-		}
-
-		// Initialize beads and validate the source before any remote mutation.
-		// Without a redirect, MR beads are invisible to the Refinery.
-		resolvedBeads := beads.ResolveBeadsDir(cwd)
-		if beads.IsLocalBeadsDir(cwd, resolvedBeads) {
-			fmt.Fprintf(os.Stderr, "WARNING: beads resolved to local dir %s (no shared-beads redirect)\n", resolvedBeads)
-			fmt.Fprintf(os.Stderr, "  MR beads written here will be invisible to the Refinery — run 'gt polecat repair' to fix\n")
-		}
-		bd := beads.NewWithBeadsDir(cwd, resolvedBeads)
-		if attachmentFields := beads.ParseAttachmentFields(sourceIssueForNoMerge); attachmentFields != nil && strings.EqualFold(strings.TrimSpace(attachmentFields.MergeStrategy), "local") {
-			fmt.Printf("%s Local merge strategy: skipping push and merge queue\n", style.Bold.Render("→"))
-			fmt.Printf("  Branch: %s\n", branch)
-			fmt.Printf("  Issue: %s\n", issueID)
-			fmt.Println()
-			fmt.Printf("%s\n", style.Dim.Render("Work stays on local feature branch."))
-			goto notifyWitness
-		}
-
-		// Pre-declare push variables for checkpoint goto (gt-aufru)
-		var refspec string
-		var pushErr error
-		var pushedCommitSHA string
-		// Declared here rather than at its assignment below because the
-		// checkpoint resume jumps over that point into afterPush, and a goto may
-		// not carry a variable into scope (gt-0opm).
-		var pushFailureDetail string
-
-		// Use explicit refspec (branch:branch) to create the remote branch.
-		// Without refspec, git push follows the tracking config — polecat branches
-		// track origin/main, so a bare push sends commits to main directly,
-		// bypassing the MR/refinery flow (G20 root cause).
-		//
-		// Built before the checkpoint resume because the landing retry at
-		// afterPush re-sends this refspec, and the MR declares this commit, so
-		// the retry must not be a different push (gt-0opm).
-		refspec = branch + ":" + branch
-
-		// Resume: skip push if already completed in a previous run (gt-aufru).
-		// Validate checkpoint branch matches current branch (ge-sbo: stale checkpoint
-		// on polecat reassignment causes new work to skip push for old branch)
-		// AND that the branch has not moved since that push (gt-2wqt: a
-		// branch-only key let a retry after new commits skip the push, so the
-		// MR declared a commit origin never received — the
-		// "gate fails → fix commit → re-run gt done" cycle reproduced it every
-		// time). A matching checkpoint records a push of this exact commit that
-		// gt-2wqt's assertion already proved landed; classifyResumedPush reads
-		// what that means for this run.
-		checkpointHead, checkpointHeadErr := g.Rev("HEAD")
-		if checkpointHeadErr != nil {
-			return fmt.Errorf("resolving HEAD for push checkpoint: %w", checkpointHeadErr)
-		}
-		if checkpoints[CheckpointPushed] != "" {
-			// Only the --target override is resolved this early; a run whose MR
-			// targets another source of it (a formula_vars base_branch) misses
-			// the landed classification, which costs it only that outcome.
-			landedTarget := defaultBranch
-			if doneTarget != "" {
-				landedTarget = doneTarget
-			}
-			switch classifyResumedPush(g, "origin", landedTarget, checkpoints[CheckpointPushed], branch, checkpointHead) {
-			case resumedWorkLanded:
-				fmt.Printf("%s Branch %s already landed on origin/%s — nothing left to submit\n",
-					style.Bold.Render("✓"), branch, landedTarget)
-				goto notifyWitness
-			case resumedWorkPushed:
-				fmt.Printf("%s Branch already pushed (resumed from checkpoint)\n", style.Bold.Render("✓"))
-				goto afterPush
-			default:
-				// Stale checkpoint — either a previous assignment's branch (ge-sbo) or
-				// this branch at an earlier commit (gt-2wqt) — discard and push normally.
-				fmt.Printf("→ Discarding stale push checkpoint (%s, now on %s@%s)\n",
-					checkpoints[CheckpointPushed], branch, shortSHA(checkpointHead))
-			}
-		}
-
-		// CRITICAL: Push branch BEFORE creating MR bead (hq-6dk53, hq-a4ksk)
-		// The MR bead triggers Refinery to process this branch. If the branch
-		// isn't pushed yet, Refinery finds nothing to merge. The worktree gets
-		// nuked at the end of gt done, so the commits are lost forever.
-		//
-		// Auto-push submodule changes BEFORE parent push (gt-dzs).
-		// If the parent repo's submodule pointer references commits that don't
-		// exist on the submodule's remote, the Refinery MR will be broken.
-		// Detect modified submodules and push each one first.
-		pushSubmoduleChanges(g, baseRef)
-
-		fmt.Printf("Pushing branch to remote...\n")
-		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = pushBranchToOrigin(g, townRoot, rigName, refspec)
-		// pushFailureDetail carries the divergence diagnosis (and any recovery
-		// error) into the terminal message at afterPush, where the landing retry
-		// decides whether the failure is terminal at all.
-		if pushErr != nil {
-			// Both push attempts failed non-fast-forward. Before alarming as
-			// possible work loss, check whether origin already has this branch
-			// from an earlier dispatch/rebase carrying the same work (gt-bf5x)
-			// — if so, it's safe to leased-force-push rather than raise a false
-			// alarm.
-			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
-			if recovered {
-				fmt.Printf("%s Recovered non-fast-forward push: %s\n", style.Bold.Render("✓"), diagnosis)
-				pushErr = nil
-			} else {
-				// gt-0opm: a failed push command is not yet an unlanded push, so
-				// fall through to afterPush, which re-asserts origin and retries
-				// before this becomes terminal.
-				pushFailureDetail = diagnosis
-				// Report the recovery failure independently of the diagnosis:
-				// the two say different things (why recovery was refused vs.
-				// why the attempt itself broke), and the fetch/comparison
-				// errors that produce a diagnosis-less failure are exactly the
-				// ones a reader needs to see (gt-i0z3).
-				if recoverErr != nil {
-					pushFailureDetail = fmt.Sprintf("%s [recovery attempt: %v]", pushFailureDetail, recoverErr)
-				}
-				style.PrintWarning("push failed for branch '%s': %v — re-checking origin before treating the work as unlanded", branch, pushErr)
-			}
-		}
-
-	afterPush:
-
-		// Verify the remote branch tip is the exact commit this run will declare
-		// in the MR before anything downstream trusts the push (gt-2wqt).
-		//
-		// This runs on EVERY path into afterPush — including the checkpoint
-		// resume above — because a recorded push is a fact about the past and
-		// origin can move off it afterwards. The failure it closes: origin
-		// holding an older tip than the commit the MR declares, so the refinery
-		// gates and merges the old tree while the MR looks ready
-		// (gt-wisp-i2vk amber/gt-uoqg, gt-wisp-qjy slate, gt-wisp-yle marble).
-		// A branch-exists check is not enough, and neither is the push's exit
-		// code: "Branch pushed" below is printed from this assertion alone.
-		{
-			if pushedCommitSHA == "" {
-				pushedCommitSHA, _ = g.Rev("HEAD")
-			}
-			// lastPushErr is the most recent push attempt's outcome: the exit
-			// status says whether the final send failed (10) or succeeded while
-			// origin still lacks the commit (11), not what the first try did.
-			lastPushErr := pushErr
-			if recovered, verifyErr := landBranchPushBeforeMR(
-				func() error {
-					lastPushErr = pushBranchToOrigin(g, townRoot, rigName, refspec)
-					return lastPushErr
-				},
-				func() error { return verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA) },
-				time.Sleep,
-			); verifyErr != nil {
-				// gt-0opm: only reached once origin was re-asserted and the push
-				// re-sent, so a first failing attempt never strands the work.
-				pushFailed = true
-				errMsg := unlandedPushMessage(branch, pushErr, pushFailureDetail, verifyErr)
-				if lastPushErr != nil {
-					landing.fail(doneExitPushFailed, errMsg, verifyErr)
-				} else {
-					landing.fail(doneExitPushUnverified, errMsg, verifyErr)
-				}
-				noteVerifiedPushFailure(sourceBD, cwd, issueID, branch, pushedCommitSHA, verifyErr)
-				if pushErr != nil {
-					style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
-				} else {
-					style.PrintWarning("%s\nNo merge request created: it would declare a commit origin does not have. Witness will be notified.", errMsg)
-				}
-				goto notifyWitness
-			} else {
-				// The gt-0opm recovery: the push command failed and origin has
-				// the commit anyway. Nothing below marks this run failed, so the
-				// MR is created normally.
-				if recovered {
-					fmt.Printf("%s Branch pushed to origin (recovered: the first attempt reported an error, origin has commit %s)\n",
-						style.Bold.Render("✓"), shortSHA(pushedCommitSHA))
-				} else {
-					fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
-				}
-			}
-
-			// Fix cleanup_status after successful push (gt-wcr).
-			// Status was detected before push, so "unpushed" is now stale.
-			doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
-
-			// Write push checkpoint for resume (gt-aufru), keyed on branch AND
-			// commit (gt-2wqt) and written only once the remote tip is verified,
-			// so a failed verification can never let a retry skip the push.
-			if agentBeadID != "" && pushedCommitSHA != "" {
-				// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-				// legacy town fallback — gt-8we).
-				cpBd := beads.New(cwd).ForAgentBead()
-				writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, pushedCheckpointValue(branch, pushedCommitSHA))
-			}
-		}
-
-		// Check for no_merge flag - if set, skip merge queue and notify for review
-		{
-			attachmentFields := beads.ParseAttachmentFields(sourceIssueForNoMerge)
-			if attachmentFields != nil && attachmentFields.NoMerge {
-				fmt.Printf("%s No-merge mode: skipping merge queue\n", style.Bold.Render("→"))
-				fmt.Printf("  Branch: %s\n", branch)
-				fmt.Printf("  Issue: %s\n", issueID)
-				fmt.Println()
-
-				// When merge_strategy=pr, create a GitHub PR for human review
-				// instead of just leaving the branch on origin (gas-rfi).
-				var prURL string
-				if noMergeMQ := rig.ResolveMergeQueueConfig(townRoot, rigName); noMergeMQ != nil && noMergeMQ.MergeStrategy == "pr" {
-					issueTitle := sourceIssueForNoMerge.Title
-					prTitle := fmt.Sprintf("%s (%s)", issueTitle, issueID)
-					if issueTitle == "" {
-						prTitle = issueID
-					}
-					// Build PR body from bead description + diff stat
-					var prBodyBuilder strings.Builder
-					prBodyBuilder.WriteString("## Summary\n\n")
-					if sourceIssueForNoMerge.Description != "" {
-						// Strip attachment metadata lines from description
-						descLines := strings.Split(sourceIssueForNoMerge.Description, "\n")
-						var cleanDesc []string
-						for _, line := range descLines {
-							trimmed := strings.TrimSpace(line)
-							if strings.HasPrefix(trimmed, "attached_") || strings.HasPrefix(trimmed, "dispatched_by:") || strings.HasPrefix(trimmed, "formula_vars:") {
-								continue
-							}
-							cleanDesc = append(cleanDesc, line)
-						}
-						desc := strings.TrimSpace(strings.Join(cleanDesc, "\n"))
-						if desc != "" {
-							prBodyBuilder.WriteString(desc)
-							prBodyBuilder.WriteString("\n\n")
-						}
-					}
-					// Add diff stat for quick review context
-					if diffStat, diffErr := g.DiffStat(baseRef + "..." + branch); diffErr == nil && diffStat != "" {
-						prBodyBuilder.WriteString("## Changes\n\n```\n")
-						prBodyBuilder.WriteString(diffStat)
-						prBodyBuilder.WriteString("```\n\n")
-					}
-					prBodyBuilder.WriteString("---\n")
-					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
-					prBody := prBodyBuilder.String()
-					ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
-						"--base", defaultBranch,
-						"--head", branch,
-						"--title", prTitle,
-						"--body", prBody,
-					)
-					ghCmd.Dir = cwd
-					prOutput, prErr := ghCmd.Output()
-					if prErr != nil {
-						style.PrintWarning("could not create GitHub PR: %v", prErr)
-					} else {
-						prURL = strings.TrimSpace(string(prOutput))
-						fmt.Printf("%s GitHub PR created: %s\n", style.Bold.Render("✓"), prURL)
-					}
-				} else {
-					fmt.Printf("%s\n", style.Dim.Render("Work stays on feature branch for human review."))
-				}
-
-				// Mail dispatcher with READY_FOR_REVIEW
-				if dispatcher := attachmentFields.DispatchedBy; dispatcher != "" {
-					townRouter := mail.NewRouter(townRoot)
-					defer townRouter.WaitPendingNotifications()
-					reviewBody := fmt.Sprintf("Branch: %s\nIssue: %s\nReady for review.", branch, issueID)
-					if prURL != "" {
-						reviewBody = fmt.Sprintf("Branch: %s\nIssue: %s\nPR: %s\nReady for review.", branch, issueID, prURL)
-					}
-					reviewMsg := &mail.Message{
-						To:      dispatcher,
-						From:    detectSender(),
-						Subject: fmt.Sprintf("READY_FOR_REVIEW: %s", issueID),
-						Body:    reviewBody,
-					}
-					if err := townRouter.Send(reviewMsg); err != nil {
-						style.PrintWarning("could not notify dispatcher: %v", err)
-					} else {
-						fmt.Printf("%s Dispatcher notified: READY_FOR_REVIEW\n", style.Bold.Render("✓"))
-					}
-				}
-
-				// No-merge work never goes through the refinery, so close the source bead
-				// here after notifying the dispatcher. Otherwise hooked work remains open.
-				if issueID != "" {
-					noMergeBd := sourceBD
-					if noMergeBd == nil {
-						noMergeBd = bd
-					}
-					canCloseIssue := true
-					if skipReason, fatal := doneSourceCloseSkipReason(noMergeBd, issueID, sourceIssueForNoMerge); skipReason != "" {
-						style.PrintWarning("%s", skipReason)
-						notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, skipReason)
-						if fatal {
-							return fmt.Errorf("cannot complete review-only/no-merge work: %s", skipReason)
-						}
-						canCloseIssue = false
-					}
-					if canCloseIssue && attachmentFields.AttachedMolecule != "" {
-						molID := attachmentFields.AttachedMolecule
-						n, molErr := closeStepsThenRoot(noMergeBd, molID, func() error {
-							err := forceCloseIssueWithRetry(noMergeBd.ForceCloseWithReason, molID, "done", "Attached molecule %s closed")
-							if errors.Is(err, beads.ErrNotFound) {
-								return nil
-							}
-							return err
-						})
-						if n > 0 {
-							fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, molID)
-						}
-						if molErr != nil {
-							style.PrintWarning("could not close attached molecule %s: %v", molID, molErr)
-							canCloseIssue = false
-						}
-					}
-
-					closeReason := "No-merge work completed; merge queue skipped"
-					if prURL != "" {
-						closeReason = fmt.Sprintf("%s\npr_url: %s", closeReason, prURL)
-					}
-					if canCloseIssue {
-						if closeErr := forceCloseIssueWithRetry(
-							noMergeBd.ForceCloseWithReason,
-							issueID,
-							closeReason,
-							"Issue %s closed (no-merge)",
-						); closeErr != nil {
-							style.PrintWarning("could not close issue %s after 3 attempts: %v (issue may be left HOOKED)", issueID, closeErr)
-						}
-					}
-				}
-
-				// Skip MR creation, go to witness notification
-				goto notifyWitness
-			}
-		}
-
-		// Determine target branch for the MR.
-		// Priority: explicit --target flag > formula_vars base_branch > integration branch auto-detect > rig default.
-		target := defaultBranch
-		explicitTarget := false
-
-		// 1. Explicit --target flag (highest priority — polecat knows its base branch).
-		// This is the most reliable path: the formula passes {{base_branch}} directly,
-		// avoiding any dependency on bd.Show() or Dolt availability.
-		if doneTarget != "" {
-			target = doneTarget
-			explicitTarget = true
-			fmt.Printf("  Target branch: %s (from --target flag)\n", target)
-		}
-
-		// 2. Check for --base-branch override in formula vars (stored on bead at sling time).
-		// Fallback for polecats dispatched before --target flag existed, or when
-		// the formula doesn't pass --target explicitly.
-		if !explicitTarget && target == defaultBranch && sourceIssueForNoMerge != nil {
-			if af := beads.ParseAttachmentFields(sourceIssueForNoMerge); af != nil {
-				if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
-					target = bb
-					fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
-				}
-			}
-		}
-
-		// 3. Auto-detect integration branch from epic hierarchy (if enabled).
-		// Only overrides if no explicit target was set above.
-		if !explicitTarget && target == defaultBranch {
-			if refineryIntegrationEnabled(townRoot, rigName) {
-				autoTarget, err := beads.DetectIntegrationBranch(sourceBD, g, issueID)
-				if err == nil && autoTarget != "" {
-					target = autoTarget
-				}
-			}
-		}
-
-		// gt-a8i3: refuse a self-targeted MR no matter which of the sources
-		// above produced it (known cause: a resume dispatch's base_branch
-		// formula var leaking the resume branch) — guarded unconditionally
-		// since a self-target is never valid regardless of cause. Also
-		// refuses an unexplained polecat/* target (gt-w2jc): explicitTarget
-		// is true only for the --target flag path above, never for the
-		// formula_vars/auto-detect paths that leaked the self-target once
-		// already.
-		var targetErr error
-		target, targetErr = resolveMRTarget(target, branch, defaultBranch, explicitTarget)
-		if targetErr != nil {
-			return targetErr
-		}
-
-		// Get source issue for priority inheritance
-		var priority int
-		carriedFrom := ""
-		if donePriority >= 0 {
-			// An explicit --priority is the submitter's own intent; nothing
-			// carries over it.
-			priority = donePriority
-		} else {
-			// A superseded MR for this issue may hold a manual bump the source
-			// issue never saw (gt-m7fm; see carriedMRPriority).
-			priority, carriedFrom = carriedMRPriority(bd, issueID, sourceIssueForNoMerge.Priority)
-		}
-
-		// Pre-declare for checkpoint goto (gt-aufru)
-		var existingMR *beads.Issue
-		var commitSHA string
-
-		// GH#3032: Resolve HEAD commit SHA for MR dedup.
-		// Branch name alone is not a valid dedup key — a polecat may push new
-		// commits to the same branch after a gate failure. The commit SHA
-		// distinguishes genuinely new submissions from idempotent retries.
-		commitSHA, _ = g.Rev("HEAD")
-
-		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
-		// Mirrors the push checkpoint pattern above. Without this, every retry
-		// re-attempts bd.Create which hits unique constraints or creates duplicates.
-		// Validate that the checkpoint MR still describes this run before resuming
-		// onto it (ge-sbo); mrCheckpointStaleReason states what that requires.
-		if checkpoints[CheckpointMRCreated] != "" {
-			cpMRID := checkpoints[CheckpointMRCreated]
-			if cpMR, cpErr := bd.Show(cpMRID); cpErr == nil && cpMR != nil {
-				if reason := mrCheckpointStaleReason(cpMR, branch, commitSHA); reason != "" {
-					fmt.Printf("→ Discarding stale MR checkpoint %s (%s)\n", cpMRID, reason)
-				} else {
-					if err := validateMergeRequestSource(cpMR, issueID, sourceIssueForNoMerge); err != nil {
-						mrFailed = true
-						errMsg := fmt.Sprintf("checkpoint MR validation failed: %v", err)
-						landing.fail(doneExitMRFailed, errMsg, err)
-						style.PrintWarning("%s\nBranch is pushed but MR bead not trusted. Witness will be notified.", errMsg)
-						goto notifyWitness
-					}
-					mrID = cpMRID
-					fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
-					goto afterMR
-				}
-			}
-			// If MR lookup fails, fall through to create/find MR normally.
-		}
-
-		// Check if MR bead already exists for this branch+SHA (idempotency)
-		if commitSHA != "" {
-			existingMR, err = bd.FindMRForBranchAndSHA(branch, commitSHA)
-		} else {
-			existingMR, err = bd.FindMRForBranch(branch)
-		}
-		if err != nil {
-			style.PrintWarning("could not check for existing MR: %v", err)
-			// Continue with creation attempt - Create will fail if duplicate
-		}
-
-		if existingMR != nil {
-			// MR already exists with same branch AND commit — true idempotent retry
-			if err := validateMergeRequestSource(existingMR, issueID, sourceIssueForNoMerge); err != nil {
-				mrFailed = true
-				errMsg := fmt.Sprintf("existing MR validation failed: %v", err)
-				landing.fail(doneExitMRFailed, errMsg, err)
-				style.PrintWarning("%s\nBranch is pushed but existing MR bead not trusted. Witness will be notified.", errMsg)
-				goto notifyWitness
-			}
-			mrID = existingMR.ID
-			fmt.Printf("%s MR already exists (idempotent)\n", style.Bold.Render("✓"))
-			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
-		} else {
-			// Build MR bead title and description
-			title := fmt.Sprintf("Merge: %s", issueID)
-			description := fmt.Sprintf("branch: %s\ntarget: %s\nsource_issue: %s\nrig: %s",
-				branch, target, issueID, rigName)
-			if commitSHA != "" {
-				description += fmt.Sprintf("\ncommit_sha: %s", commitSHA)
-			}
-			if doneSkipTests {
-				description += "\nskip_tests: true"
-			}
-			if worker != "" {
-				description += fmt.Sprintf("\nworker: %s", worker)
-			}
-			if agentBeadID != "" {
-				description += fmt.Sprintf("\nagent_bead: %s", agentBeadID)
-			}
-
-			// Add conflict resolution tracking fields (initialized, updated by Refinery)
-			description += "\nretry_count: 0"
-			description += "\nlast_conflict_sha: null"
-			description += "\nconflict_task_id: null"
-
-			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
-			// The refinery uses these fields to fast-path merge without re-running gates.
-			// honorPreVerified is gated on the same gate-command binding gt sling reads,
-			// so the stamp can't say "verified" when there was nothing to verify (gt-k4sy).
-			honorPreVerified, preVerifiedWarning := resolvePreVerifiedClaim(donePreVerified, townRoot, rigName)
-			if preVerifiedWarning != "" {
-				style.PrintWarning("%s", preVerifiedWarning)
-			}
-			fullGatesVerified := false
-			if honorPreVerified {
-				mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-				// config.CombineGateSetSHA is the same function the refinery's
-				// currentGateSetSHAFn calls (internal/refinery/engineer.go); the
-				// two values must agree exactly or the fast-path never fires
-				// (om-gate T8).
-				gateSetSHA := config.CombineGateSetSHA(mq, rig.LoadNamedGateCommands(townRoot, rigName))
-				// gt-azmw: renew the exiting heartbeat across this bounded gate
-				// run (up to five 10m gates), exactly as the default test-verify
-				// below does — see StartExitingHeartbeatKeepAlive.
-				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
-				// gt-l6by: the pre-verified test gate may start the rig's
-				// container-backed suite, so it takes a container-gate slot
-				// under the same polecat role the default gate uses.
-				gateSlot := preVerifySlot{townRoot: townRoot, role: fmt.Sprintf("%s/%s", rigName, polecatName)}
-				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA, gateSlot)
-				stopHeartbeat()
-				if warning != "" {
-					style.PrintWarning("%s", warning)
-				}
-				if ok {
-					fullGatesVerified = true
-					description += "\npre_verified: true"
-					description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
-					description += fmt.Sprintf("\npre_verified_base: %s", stamp.verifiedBase)
-					description += fmt.Sprintf("\npre_verified_gates: %s", stamp.gateSetSHA)
-					description += "\npre_verified_exit: 0"
-					description += fmt.Sprintf("\npre_verified_log: %s", stamp.logSHA256)
-				}
-			}
-
-			// gt-h9kf: gt done must itself test at least the branch's changed
-			// packages before an MR can be created — polecats were submitting
-			// with their own new tests never run (2 of 4 gate rejections in a
-			// 90-minute window, each costing a full refinery gate cycle plus a
-			// redispatch). Runs unconditionally unless the polecat already ran
-			// the full gate set via --pre-verified (fullGatesVerified, which
-			// already covers this and more) or explicitly opted out with
-			// --skip-tests. A failure here returns an error and no MR bead is
-			// created — that refusal is the fix.
-			if !doneSkipTests && !fullGatesVerified {
-				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
-				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
-				// gt-azmw: this gate can hold the container slot for 60m
-				// (defaultTestVerifySlotTimeout) and then run for a scaled run
-				// budget (30m minimum, more with more changed packages), all of
-				// it silent, while the heartbeat written at gt done's start ages
-				// past every consumer's stale threshold. Renew it for exactly as
-				// long as this bounded stage can run. The gate itself now logs
-				// progress lines to the pane and the verify log (gt-pnkd).
-				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
-				verify, verifyErr := runDefaultTestVerification(g, cwd, defaultBranch, target, verifyMQ, townRoot, verifyRole)
-				stopHeartbeat()
-				if verifyErr != nil {
-					return verifyErr
-				}
-				if verify.lintRan {
-					fmt.Printf("%s Default lint-verify passed (%s, %s)\n", style.Bold.Render("✓"), verify.lintCommand, verify.lintElapsed.Round(time.Second))
-					description += "\nlint_verified: true"
-					description += fmt.Sprintf("\nlint_verified_command: %s", verify.lintCommand)
-				}
-				if verify.skipReason != "" {
-					style.PrintWarning("gt done: skipping default test-verify: %s", verify.skipReason)
-				} else if verify.ran {
-					fmt.Printf("%s Default test-verify passed (full test_command)\n", style.Bold.Render("✓"))
-					description += "\ntest_verified: true"
-					description += fmt.Sprintf("\ntest_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
-					description += fmt.Sprintf("\ntest_verified_sha: %s", commitSHA)
-					description += fmt.Sprintf("\ntest_verified_scope: %s", verify.scope)
-					if len(verify.packages) > 0 {
-						description += fmt.Sprintf("\ntest_verified_packages: %s", strings.Join(verify.packages, ","))
-					}
-					description += fmt.Sprintf("\ntest_verified_slot_used: %t", verify.slotUsed)
-					description += "\ntest_verified_exit: 0"
-					description += fmt.Sprintf("\ntest_verified_log: %s", verify.logSHA256)
-					// gt-pnkd: record the budgets the gate actually resolved and
-					// what it actually cost, so a refinery gate flap can be told
-					// apart from a budget that was too tight without re-reading
-					// the polecat's (now nuked) worktree .runtime log.
-					description += fmt.Sprintf("\ntest_verified_run_budget: %s", humanDuration(verify.runBudget))
-					description += fmt.Sprintf("\ntest_verified_slot_cap: %s", humanDuration(verify.slotTimeout))
-					description += fmt.Sprintf("\ntest_verified_slot_wait: %s", verify.slotWait.Round(time.Second))
-					description += fmt.Sprintf("\ntest_verified_elapsed: %s", verify.runElapsed.Round(time.Second))
-				}
-			}
-
-			mrIssue, err := bd.Create(beads.CreateOptions{
-				Title:       title,
-				Labels:      []string{"gt:merge-request"},
-				Priority:    priority,
-				Description: description,
-				Ephemeral:   true,
-				Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
-			})
-			if err != nil {
-				// Non-fatal: record the error and skip to notifyWitness.
-				// Push succeeded so branch is on remote, but MR bead failed.
-				// Set mrFailed so the witness knows not to send MERGE_READY.
-				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
-				landing.fail(doneExitMRFailed, errMsg, err)
-				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
-				goto notifyWitness
-			}
-			mrID = mrIssue.ID
-
-			// Guard against empty ID from bd create (observed in ephemeral/wisp mode).
-			// Fail fast with a clear message rather than passing "" to bd.Show.
-			if mrID == "" {
-				mrFailed = true
-				errMsg := "MR bead creation returned empty ID"
-				landing.fail(doneExitMRFailed, errMsg, nil)
-				style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
-				goto notifyWitness
-			}
-
-			// GH#1945: Verify MR bead is readable before considering it confirmed.
-			// bd.Create() succeeds when the bead is written locally, but if the write
-			// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
-			// with no MR in the queue — losing the polecat's work permanently.
-			if verifiedMR, verifyErr := bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
-				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
-				landing.fail(doneExitMRFailed, errMsg, verifyErr)
-				style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
-				goto notifyWitness
-			}
-
-			// gt-gpy: Validate that the MR bead landed in the rig's database.
-			// If the source bead has a cross-rig prefix (e.g., hq-), the routing
-			// could still resolve to the wrong database despite Rig: rigName.
-			// This is a warning-only guard — mrFailed is NOT set on mismatch.
-			if prefixErr := beads.ValidateRigPrefix(townRoot, rigName, mrID); prefixErr != nil {
-				style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, rigName)
-			}
-
-			// GH#3032: Supersede older open MRs for the same source issue.
-			// When a polecat re-submits after fixing a gate failure, the old MR
-			// (same branch, different SHA) is stale. Close it so the refinery
-			// doesn't process the old submission.
-			//
-			// gt-c5uv: the old MR was usually submitted by a *different* polecat
-			// (deacon redispatch with resume_branch after a rejection), and its
-			// agent bead's active_mr still names it. Clearing that pointer here is
-			// what keeps the superseded worker out of a permanent
-			// idle-pr-open/reusable=false state — nothing downstream does it. See
-			// supersedeOpenMRsForIssue.
-			for _, sup := range supersedeOpenMRsForIssue(bd, bd.ForAgentBead(), issueID, mrIssue, townRoot, rigName) {
-				fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), sup.ID)
-				if sup.AgentCleared {
-					fmt.Printf("  %s Cleared active_mr on %s\n", style.Dim.Render("○"), sup.AgentBead)
-				}
-			}
-			if carriedFrom != "" {
-				fmt.Printf("  %s Inherited priority P%d from %s\n", style.Dim.Render("○"), priority, carriedFrom)
-			}
-
-			// Update agent bead with active_mr reference (for traceability).
-			// ForAgentBead resolves the agent bead's database (rig-local first,
-			// legacy town fallback — gt-8we) to avoid the "issue not found"
-			// warning that leaves active_mr null after every gt done (hq-e73z).
-			if agentBeadID != "" {
-				if err := bd.ForAgentBead().UpdateAgentActiveMR(agentBeadID, mrID); err != nil {
-					style.PrintWarning("could not update agent bead with active_mr: %v", err)
-				}
-			}
-
-			// GH#2599: Back-link source issue to MR bead for discoverability.
-			if issueID != "" {
-				comment := fmt.Sprintf("MR created: %s", mrID)
-				if err := sourceBD.AddComment(issueID, comment); err != nil {
-					style.PrintWarning("could not back-link source issue %s to MR %s: %v", issueID, mrID, err)
-				}
-			}
-
-			// Success output
-			fmt.Printf("%s Work submitted to merge queue (verified)\n", style.Bold.Render("✓"))
-			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
-
-			// NOTE: Refinery nudge is deferred to AFTER the Dolt branch merge
-			// (see post-merge nudge below). Nudging here would race with the
-			// merge — refinery wakes up and queries main before the polecat's
-			// Dolt branch (containing the MR bead) is merged.
-		}
-
-		// Write MR checkpoint for resume (gt-aufru)
-		if mrID != "" && agentBeadID != "" {
-			// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-			// legacy town fallback — gt-8we).
-			cpBd := beads.New(cwd).ForAgentBead()
-			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
-		}
-
-	afterMR:
-		fmt.Printf("  Source: %s\n", branch)
-		fmt.Printf("  Target: %s\n", target)
-		fmt.Printf("  Issue: %s\n", issueID)
-		if worker != "" {
-			fmt.Printf("  Worker: %s\n", worker)
-		}
-		fmt.Printf("  Priority: P%d\n", priority)
-		fmt.Println()
-		fmt.Printf("%s\n", style.Dim.Render("The Refinery will process your merge request."))
 	} else {
-		// For ESCALATED or DEFERRED, just print status
 		fmt.Printf("%s Signaling %s\n", style.Bold.Render("→"), exitType)
-		if issueID != "" {
-			fmt.Printf("  Issue: %s\n", issueID)
+		if r.issueID != "" {
+			fmt.Printf("  Issue: %s\n", r.issueID)
 		}
-		fmt.Printf("  Branch: %s\n", branch)
+		fmt.Printf("  Branch: %s\n", r.branch)
+	}
+	return reportDone(r, exitType, sub)
+}
+
+// popBranchStashes pops this branch's stashes oldest first so the auto-save
+// below commits their contents (gt-pvx stash recovery). Agents have been
+// observed running `git stash` before a rebase and dying before
+// `git stash pop`; popping on the way out turns a lost stash into a commit. A
+// conflicting pop stops the chain: surfacing the conflict beats silently
+// dropping a stash.
+func popBranchStashes(g *git.Git) {
+	entries, err := g.StashListForBranch()
+	if err != nil {
+		style.PrintWarning("auto-pop: could not list stashes: %v — orphaned stashes may remain", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	fmt.Printf("\n%s %d stash(es) detected on this branch — auto-popping (gt-pvx safety net)\n",
+		style.Bold.Render("⚠"), len(entries))
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		fmt.Printf("  popping %s — %s\n", e.Ref, e.Message)
+		if popErr := g.StashPop(e.Ref); popErr != nil {
+			style.PrintWarning("auto-pop %s failed (likely conflict): %v", e.Ref, popErr)
+			style.PrintWarning("stopping pop chain — resolve conflict manually then re-run gt done")
+			return
+		}
+		// After each pop, stash refs shift; re-fetch the list before next pop.
+		entries, err = g.StashListForBranch()
+		if err != nil || len(entries) == 0 {
+			break
+		}
+	}
+	if workStatus, wsErr := g.CheckUncommittedWork(); wsErr == nil && workStatus.HasUncommittedChanges {
+		doneCleanupStatus = "uncommitted"
+		fmt.Printf("%s Stash content moved to working tree — will auto-commit below.\n", style.Bold.Render("✓"))
+	} else {
+		// Pops succeeded but produced nothing dirty; recompute normally.
+		doneCleanupStatus = ""
+	}
+}
+
+// autoSaveUncommittedWork commits uncommitted work before any exit path
+// (gt-pvx): polecats have run gt done without committing thousands of lines,
+// then died. The commit is marked as an auto-save, runtime and overlay files
+// and throwaway files are left out, and deletions of tracked files are never
+// committed. Only unmerged conflicts refuse.
+func autoSaveUncommittedWork(g *git.Git, cwd, branch string) error {
+	workStatus, err := g.CheckUncommittedWork()
+	if err != nil || !workStatus.HasUncommittedChanges || workStatus.CleanExcludingRuntime() {
+		return nil
+	}
+	if len(workStatus.UnmergedFiles) > 0 {
+		return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", strings.Join(workStatus.UnmergedFiles, ", "))
 	}
 
-notifyWitness:
-	// Nudge refinery — MR bead is already on main (transaction-based shared main).
+	fmt.Printf("\n%s Uncommitted changes detected — auto-saving to prevent work loss\n", style.Bold.Render("⚠"))
+	fmt.Printf("  Files: %s\n\n", workStatus.String())
+
+	if addErr := g.Add("-A"); addErr != nil {
+		style.PrintWarning("auto-commit: git add failed: %v — uncommitted work may be at risk", addErr)
+		return nil
+	}
+	// Unstage Gas Town overlay files that git add -A picked up (gt-p35).
+	_ = g.ResetFiles("CLAUDE.local.md")
+	if claudeData, readErr := os.ReadFile(filepath.Join(cwd, "CLAUDE.md")); readErr == nil {
+		if strings.Contains(string(claudeData), templates.PolecatLifecycleMarker) {
+			_ = g.ResetFiles("CLAUDE.md")
+		}
+	}
+	for _, path := range workStatus.RuntimeArtifactPaths() {
+		_ = g.ResetFiles(path)
+	}
+	// Throwaway files stay untracked and are named (gt-ozo4).
+	if throwaway := checkpoint.ThrowawayPaths(workStatus.UntrackedFiles); len(throwaway) > 0 {
+		_ = g.ResetFiles(throwaway...)
+		style.PrintWarning("auto-commit: left %d throwaway file(s) uncommitted: %s",
+			len(throwaway), strings.Join(throwaway, ", "))
+	}
+	// A safety-net commit preserves work and never destroys it.
+	if stagedDeletions, delErr := g.StagedDeletions(); delErr == nil && len(stagedDeletions) > 0 {
+		_ = g.ResetFiles(stagedDeletions...)
+	}
+	autoMsg := "fix: auto-save uncommitted implementation work (gt-pvx safety net)"
+	if issueFromBranch := parseBranchName(branch).Issue; issueFromBranch != "" {
+		autoMsg = fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, gt-pvx safety net)", issueFromBranch)
+	}
+	if commitErr := g.Commit(autoMsg); commitErr != nil {
+		style.PrintWarning("auto-commit: git commit failed: %v — uncommitted work may be at risk", commitErr)
+		return nil
+	}
+	fmt.Printf("%s Auto-committed uncommitted work (safety net)\n", style.Bold.Render("✓"))
+	fmt.Printf("  The agent should have committed before running gt done.\n")
+	fmt.Printf("  This auto-save prevents work loss.\n\n")
+	doneCleanupStatus = "unpushed"
+	return nil
+}
+
+// submitForLanding is the COMPLETED path: rebase, squash, gate, push and mark the
+// work bead ready to land. It never lands anything. Every failure returns
+// before the Witness is told anything.
+func submitForLanding(r *doneRun) (doneSubmission, error) {
+	var sub doneSubmission
+	if r.branch == r.defaultBranch || r.branch == "master" {
+		// A conflict-resolution pass ends on the base branch by design: its
+		// work is a rewritten head already pushed to the branch of an existing
+		// MR (mol-polecat-conflict-resolve). It submits nothing of its own
+		// (gt-rv8h, gt-tne1). Deleted with the merge queue (gt-v4ssj.6).
+		if task := conflictResolutionCompletionTask(r.cwd, r.agentBeadID, r.issueID); task != nil {
+			if !beads.IssueStatus(task.Status).IsTerminal() {
+				return sub, fmt.Errorf("cannot complete %s: conflict-resolution task %s is still open, and its MR stays blocked until it closes\nClose it first: bd close %s --reason=\"resolved conflicts\"",
+					r.defaultBranch, task.ID, task.ID)
+			}
+			fmt.Printf("%s Conflict-resolution completion on %s — no branch of its own to submit\n", style.Bold.Render("→"), r.defaultBranch)
+			fmt.Printf("  %s is closed; the refinery wake below names the MR it released.\n", task.ID)
+			return sub, nil
+		}
+		return sub, fmt.Errorf("cannot submit the %s/master branch for landing", r.defaultBranch)
+	}
+
+	// Refuse uncommitted changes (hq-xthqf): they would be lost. Runtime
+	// artifacts (.claude/, .beads/, .runtime/ ...) are toolchain-managed and
+	// excluded.
+	workStatus, err := r.g.CheckUncommittedWork()
+	if err != nil {
+		return sub, fmt.Errorf("checking git status: %w", err)
+	}
+	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
+		return sub, fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
+	}
+
+	// no_merge / review_only are non-code tasks where zero commits is
+	// expected (GH#2496, gt-kvf); read them before the zero-commit guard.
+	isNoMergeTask := false
+	reviewOnlySource := false
+	if r.issueID != "" {
+		sourceInfo, sourceErr := resolveSubmitSourceIssue(r.cwd, r.issueID)
+		if sourceErr != nil {
+			return sub, fmt.Errorf("source issue validation failed: %w", sourceErr)
+		}
+		sub.sourceIssue = sourceInfo.Issue
+		sub.sourceBD = sourceInfo.BD
+		if af := beads.ParseAttachmentFields(sub.sourceIssue); af != nil {
+			isNoMergeTask = af.NoMerge || af.ReviewOnly
+			reviewOnlySource = af.ReviewOnly
+		}
+	}
+
+	target, err := resolveDoneTarget(r, sub.sourceIssue)
+	if err != nil {
+		return sub, err
+	}
+	// In fork-backed rigs the clean base is upstream/<target>, never the
+	// fork's origin/<target>.
+	baseRef := r.g.CleanBaseRef("origin", r.defaultBranch, target)
+	fetchRemote := git.RemoteForRef(baseRef)
+	if fetchRemote == "" {
+		fetchRemote = "origin"
+	}
+	if err := r.g.Fetch(fetchRemote); err != nil {
+		return sub, fmt.Errorf("fetching %s before rebasing onto %s: %w", fetchRemote, baseRef, err)
+	}
+
+	aheadCount, err := r.g.CommitsAhead(baseRef, "HEAD")
+	if err != nil {
+		return sub, fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
+	}
+	if aheadCount == 0 {
+		return sub, completeWithoutCode(r, sub, baseRef, isNoMergeTask)
+	}
+	if reviewOnlySource {
+		return sub, fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", r.issueID, baseRef)
+	}
+	if r.issueID == "" {
+		return sub, fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", r.branch)
+	}
+
+	if err := rebaseOntoTarget(r.g, baseRef); err != nil {
+		return sub, err
+	}
+
+	// Refuse a branch that reverts work already merged to the target
+	// (gt-63sz). After the rebase: a rebase replays the same diff, so the
+	// check must see the branch as it will be pushed.
+	if doneAllowReverts {
+		style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", baseRef)
+	} else if err := reportRevertedMerges(r.g, baseRef); err != nil {
+		return sub, err
+	}
+	// Refuse a branch that would add throwaway files to the target (gt-ozo4).
+	if doneAllowThrowawayPaths {
+		style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", baseRef)
+	} else if err := reportThrowawayPaths(r.g, baseRef); err != nil {
+		return sub, err
+	}
+	// Refuse a rework byte-identical to a rejected attempt (gt-0jzd5).
+	var sourceNotes string
+	if sub.sourceIssue != nil {
+		sourceNotes = sub.sourceIssue.Notes
+	}
+	rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sub.sourceBD, mrID) }
+	if err := reportUnchangedSinceRejection(r.g, sourceNotes, r.issueID, baseRef, rejectedTip); err != nil {
+		return sub, err
+	}
+
+	if err := squashAutoSaveBeforeSubmit(r.g, r.cwd, r.branch, baseRef, sub.sourceIssue, r.issueID); err != nil {
+		return sub, err
+	}
+	// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).
+	stripOverlayCLAUDEmd(r.g, r.defaultBranch, baseRef)
+
+	head, err := r.g.Rev("HEAD")
+	if err != nil {
+		return sub, fmt.Errorf("resolving HEAD: %w", err)
+	}
+	if err := runDoneLocalGate(r, head); err != nil {
+		return sub, err
+	}
+
+	// Push submodule commits first, so the parent's pointer never names a
+	// commit the submodule's remote lacks (gt-dzs).
+	pushSubmoduleChanges(r.g, baseRef)
+	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
+		return sub, err
+	}
+	doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
+
+	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName}
+	if err := markReadyToLand(sub.sourceBD, work); err != nil {
+		return sub, doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, shortSHA(head)), err)
+	}
+	sub.head, sub.target = head, target
+
+	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
+	fmt.Printf("  Branch: %s @ %s\n", r.branch, shortSHA(head))
+	fmt.Printf("  Target: %s\n", target)
+	fmt.Printf("  Issue:  %s\n", r.issueID)
+	fmt.Printf("  Worker: %s\n\n", r.polecatName)
+	fmt.Printf("%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
+	return sub, nil
+}
+
+// resolveDoneTarget picks the branch to land on: --target, then the bead's
+// formula_vars base_branch, then the rig default. resolveMRTarget refuses a
+// self-target and an unexplained polecat/* target (gt-a8i3, gt-w2jc).
+func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
+	target := r.defaultBranch
+	explicit := false
+	if doneTarget != "" {
+		target = doneTarget
+		explicit = true
+		fmt.Printf("  Target branch: %s (from --target flag)\n", target)
+	} else if source != nil {
+		if af := beads.ParseAttachmentFields(source); af != nil {
+			if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != r.defaultBranch {
+				target = bb
+				fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
+			}
+		}
+	}
+	return resolveMRTarget(target, r.branch, r.defaultBranch, explicit)
+}
+
+// completeWithoutCode finishes a run whose branch has nothing ahead of the
+// target: report-only, no_merge and review_only work, or a fix that already
+// landed. It closes the bead because no landing will; it pushes nothing.
+// Polecats must have at least one commit unless the work is non-code
+// (gastown#1484). The error text must not mention --cleanup-status=clean:
+// agents read errors and self-bypass.
+func completeWithoutCode(r *doneRun, sub doneSubmission, baseRef string, isNoMergeTask bool) error {
+	if os.Getenv("GT_POLECAT") != "" && doneCleanupStatus != "clean" && !isNoMergeTask {
+		// A branch already pushed with its work whose target has since moved
+		// on is not empty-handed (GH#wd7).
+		pushed, unpushed, pushErr := r.g.BranchPushedToRemote(r.branch, "origin")
+		if pushErr != nil || !pushed || unpushed != 0 {
+			return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
+				"Polecats must have at least 1 commit to submit.\n"+
+				"If the bug was already fixed upstream: gt done --status DEFERRED\n"+
+				"If you're blocked: gt done --status ESCALATED",
+				baseRef)
+		}
+	}
+
+	fmt.Printf("%s Branch has no commits ahead of %s\n", style.Bold.Render("→"), baseRef)
+	fmt.Printf("  Work was likely already landed or report-only; nothing to submit.\n\n")
+	if r.issueID == "" {
+		return nil
+	}
+	bd := sub.sourceBD
+	if bd == nil {
+		bd = beads.New(r.cwd)
+	}
+	if skipReason, fatal := doneSourceCloseSkipReason(bd, r.issueID, sub.sourceIssue); skipReason != "" {
+		style.PrintWarning("%s", skipReason)
+		fmt.Printf("  The bead will remain open for witness/mayor review.\n")
+		notifyDoneCloseSkipped(r.townRoot, r.rigName, r.sender, r.issueID, skipReason)
+		if fatal {
+			return fmt.Errorf("cannot complete review-only/no-code work: %s", skipReason)
+		}
+		return nil
+	}
+
+	closeReason := "Completed with no code changes (already fixed or already landed)"
+	if !isNoMergeTask {
+		if r.g.ForkBackedRemote("origin") {
+			return fmt.Errorf("cannot close no-code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", r.branch, baseRef)
+		}
+		headSHA, _ := r.g.Rev("HEAD")
+		if verifyErr := r.g.VerifyPushedCommitReachableFromPushTarget("origin", r.defaultBranch, headSHA); verifyErr != nil {
+			noteVerifiedPushFailure(bd, r.cwd, r.issueID, r.defaultBranch, headSHA, verifyErr)
+			return fmt.Errorf("cannot close no-code bead: %w", verifyErr)
+		}
+		if headSHA != "" {
+			closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, r.defaultBranch, headSHA)
+		}
+	}
+	// Force-close bypasses molecule dependency checks; the retry absorbs
+	// transient Dolt lock contention (A2).
+	if closeErr := forceCloseIssueWithRetry(bd.ForceCloseWithReason, r.issueID, closeReason, "Issue %s closed (no code to land)"); closeErr != nil {
+		return doneExit(doneExitCloseFailed, fmt.Sprintf("could not close issue %s after 3 attempts", r.issueID), closeErr)
+	}
+	return nil
+}
+
+// rebaseOntoTarget rebases the branch onto baseRef when it is behind. A
+// conflict aborts the rebase, leaving the branch as it was, and exits 14
+// naming the conflicting files.
+func rebaseOntoTarget(g *git.Git, baseRef string) error {
+	behind, err := g.CommitsAhead("HEAD", baseRef)
+	if err != nil {
+		return fmt.Errorf("counting commits behind %s: %w", baseRef, err)
+	}
+	if behind == 0 {
+		return nil
+	}
+	fmt.Printf("→ Rebasing onto %s (%d commit(s) behind)\n", baseRef, behind)
+	if rebaseErr := g.Rebase(baseRef); rebaseErr != nil {
+		files, _ := g.GetConflictingFiles()
+		_ = g.AbortRebase()
+		return doneExit(doneExitRebaseConflict,
+			fmt.Sprintf("rebase onto %s conflicts in %s; resolve it (git fetch origin && git rebase %s), commit the resolution, then re-run gt done",
+				baseRef, strings.Join(files, ", "), baseRef), rebaseErr)
+	}
+	fmt.Printf("%s Branch rebased onto %s\n", style.Bold.Render("✓"), baseRef)
+	return nil
+}
+
+// squashAutoSaveBeforeSubmit folds machine-generated commits (the gt-pvx
+// safety net, the checkpoint dog) into one commit named after the work
+// (gt-3wf), so none reaches the target (gt-iki6). The branch is pushed under
+// a lease afterwards, so a branch origin already has is rewritten too.
+func squashAutoSaveBeforeSubmit(g *git.Git, cwd, branch, baseRef string, issue *beads.Issue, issueID string) error {
+	tip, tipErr := checkpoint.InspectAutoSaveTip(cwd, baseRef, "HEAD")
+	headBefore, headBeforeErr := g.Rev("HEAD")
+	squashed, squashErr := checkpoint.SquashAutoSaveCommits(cwd, baseRef, autoSaveSquashTitle(issue, issueID))
+	if squashErr != nil {
+		// A squash that failed after its soft reset leaves the branch
+		// holding no commits at all; refuse before anything pushes it.
+		if headAfter, revErr := g.Rev("HEAD"); headBeforeErr == nil && revErr == nil && headAfter != headBefore {
+			return autoSaveSquashResetError(branch, baseRef, squashErr)
+		}
+		if tipErr == nil && tip.AutoSave {
+			return autoSaveTipRefusalError(tip, branch, fmt.Sprintf("the squash failed: %v.", squashErr))
+		}
+		style.PrintWarning("could not rewrite auto-save commit messages: %v (submitting as-is)", squashErr)
+		return nil
+	}
+	if squashed > 0 {
+		fmt.Printf("%s Squashed %d auto-save/WIP commit(s) into a single descriptive commit\n", style.Bold.Render("✓"), squashed)
+	}
+	return nil
+}
+
+// runDoneLocalGate runs the local pre-submit gate on the rebased tree at
+// head. A red gate exits 15 before anything is pushed.
+func runDoneLocalGate(r *doneRun, head string) error {
+	gate, err := doneLocalGate(r.townRoot, r.rigName, r.cwd)
+	if err != nil {
+		return doneExit(doneExitGateUnavailable, "no local gate could be built; this is not a verdict on your change, so escalate (gt escalate -s medium) rather than edit code", err)
+	}
+	fmt.Printf("→ Running the local gate on %s\n", shortSHA(head))
+	// The gate can run for many minutes; keep the exiting heartbeat fresh so
+	// no consumer reads this polecat as hung (gt-azmw).
+	stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(r.townRoot, r.heartbeatSession, "gt done", r.issueID)
+	ctx, cancel := context.WithTimeout(context.Background(), doneLocalGateBudget)
+	res := gate.Run(ctx, r.cwd)
+	cancel()
+	stopHeartbeat()
+	if res.Err != nil {
+		return doneExit(doneExitGateUnavailable, "the local gate could not run ("+res.Summary()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", res.Err)
+	}
+	if !res.Passed {
+		return doneExit(doneExitGateFailed, fmt.Sprintf("the local gate failed on %s: %s\n%s", shortSHA(head), res.Summary(), res.FailureTail()), nil)
+	}
+	fmt.Printf("%s Local gate passed: %s\n", style.Bold.Render("✓"), res.Summary())
+	return nil
+}
+
+// pushBranchForLanding pushes head to origin/<branch> under a lease on the
+// tip origin had, then asserts origin holds exactly head (gt-2wqt). A rebased
+// or squashed branch replaces an earlier attempt's tip; a concurrent push to
+// the branch makes the lease fail instead of being clobbered. One retry
+// absorbs a push that errored while origin took the objects (gt-0opm).
+func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head, baseRef string) error {
+	fmt.Printf("Pushing branch to origin...\n")
+	var lastPushErr error
+	attempt := func() error {
+		lastPushErr = pushBranchToOrigin(r.g, r.townRoot, r.rigName, r.branch, head, baseRef)
+		return lastPushErr
+	}
+	firstErr := attempt()
+	if firstErr != nil {
+		style.PrintWarning("push failed for branch '%s': %v — re-checking origin before treating the work as unlanded", r.branch, firstErr)
+	}
+	recovered, verifyErr := landBranchPush(attempt,
+		func() error { return verifyPushLanded(r.g, r.townRoot, r.rigName, r.branch, head) },
+		time.Sleep)
+	if verifyErr != nil {
+		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr)
+		msg := unlandedPushMessage(r.branch, firstErr, verifyErr)
+		if lastPushErr != nil {
+			return doneExit(doneExitPushFailed, msg, verifyErr)
+		}
+		return doneExit(doneExitPushUnverified, msg, verifyErr)
+	}
+	if recovered && firstErr != nil {
+		fmt.Printf("%s Branch pushed to origin (recovered: the first attempt reported an error, origin has commit %s)\n",
+			style.Bold.Render("✓"), shortSHA(head))
+	} else {
+		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+	}
+	return nil
+}
+
+// markReadyToLand writes the READY TO LAND block, then the label the landing
+// worker picks by, then reads the bead back. The block goes first so a bead
+// that carries the label always says what to land.
+func markReadyToLand(bd *beads.Beads, w land.Work) error {
+	if bd == nil {
+		return errors.New("no beads client for the work bead")
+	}
+	if err := bd.AppendNotes(w.BeadID, land.FormatReadyNote(w)); err != nil {
+		return fmt.Errorf("writing the READY TO LAND note: %w", err)
+	}
+	if err := bd.Update(w.BeadID, beads.UpdateOptions{
+		AddLabels:    []string{land.LabelReadyToLand},
+		RemoveLabels: []string{land.LabelRework},
+	}); err != nil {
+		return fmt.Errorf("adding %s: %w", land.LabelReadyToLand, err)
+	}
+	// bd reporting success is not proof the write persisted (GH#1945).
+	issue, err := bd.Show(w.BeadID)
+	if err != nil {
+		return fmt.Errorf("reading %s back: %w", w.BeadID, err)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		return fmt.Errorf("%s does not carry %s after the write", w.BeadID, land.LabelReadyToLand)
+	}
+	return nil
+}
+
+// reportDone tells the Witness and the agent bead how the run ended, then
+// retires the session. Only runs that succeeded reach it.
+func reportDone(r *doneRun, exitType string, sub doneSubmission) error {
+	// A conflict-resolution completion releases an MR that already exists,
+	// and nothing else emits a wake for its blocked->ready transition
+	// (gt-rv8h). The candidates are read before updateAgentStateOnDoneFn
+	// clears hook_bead, and checked after it closes the hooked task (gt-ue2h).
 	var wakeConflictCandidates []string
 	var wakeConflictBD *beads.Beads
-	if shouldNudgeRefinery(exitType, mrID) {
-		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
-	} else if !pushFailed {
-		// A conflict-resolution completion releases an MR that already exists,
-		// so shouldNudgeRefinery's COMPLETED+new-MR gate above can never fire for
-		// it and nothing else emits a wake for the blocked->ready transition —
-		// see wakeRefineryForReadyConflict (gt-rv8h).
-		//
-		// Skipped when this run's own push failed: the resolution's new head
-		// would then not be on origin, and waking the refinery would only invite
-		// it to merge a stale head. The MR is left blocked and the existing
-		// push-failure recovery path owns it.
-		wakeConflictBD = sourceBD
+	if sub.head == "" {
+		wakeConflictBD = sub.sourceBD
 		if wakeConflictBD == nil {
-			wakeConflictBD = beads.New(cwd)
+			wakeConflictBD = beads.New(r.cwd)
 		}
-		// issueID is branch-derived unless --issue was passed, and a conflict
-		// polecat may still be on the resolved branch (whose name carries the
-		// source issue, not the task). The agent bead's hook_bead is the other
-		// candidate for "the conflict task this completion just finished".
-		// Captured here, before updateAgentStateAfterSubmission below clears
-		// the agent bead's hook_bead field, but the actual readiness check is
-		// deferred until after that call closes the hooked conflict task
-		// (gt-ue2h): checking readiness here always found the task still open,
-		// since gt done itself hadn't closed it yet.
-		wakeConflictCandidates = conflictResolutionCandidates(cwd, agentBeadID, issueID)
+		wakeConflictCandidates = conflictResolutionCandidates(r.cwd, r.agentBeadID, r.issueID)
 	}
 
-	// Write completion metadata to agent bead for audit trail.
-	// Self-managed completion (gt-1qlg): metadata is retained for anomaly
-	// detection and crash recovery by witness patrol, but the witness no
-	// longer processes routine completions from these fields.
+	// Completion metadata on the agent bead is the audit trail the witness
+	// patrol reads for anomalies and crash recovery (gt-1qlg).
 	fmt.Printf("\nNotifying Witness...\n")
-	if agentBeadID != "" {
-		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-		// legacy town fallback — gt-8we).
-		completionBd := beads.New(cwd).ForAgentBead()
+	if r.agentBeadID != "" {
+		completionBd := beads.New(r.cwd).ForAgentBead()
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
-			MRID:           mrID,
-			Branch:         branch,
-			HookBead:       issueID,
-			MRFailed:       mrFailed,
-			PushFailed:     pushFailed,
+			Branch:         r.branch,
+			HookBead:       r.issueID,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := completionBd.UpdateAgentCompletion(agentBeadID, meta); err != nil {
+		if err := completionBd.UpdateAgentCompletion(r.agentBeadID, meta); err != nil {
 			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
 		}
 	}
 
-	// Write witness notification checkpoint for resume (gt-aufru)
-	if agentBeadID != "" {
-		// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
-		// legacy town fallback — gt-8we).
-		cpBd := beads.New(cwd).ForAgentBead()
-		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
-	}
+	// Self-report cleanup_status (ZFC #10), addressed through the rig
+	// directory so it still resolves if the worktree is already gone.
+	selfReportCleanupStatus(r.g, r.branch, beads.New(filepath.Join(r.townRoot, r.rigName)).ForAgentBead(), r.agentBeadID, doneCleanupStatus)
 
-	// Self-report cleanup_status (ZFC #10). Deliberately NOT part of
-	// updateAgentStateAfterSubmission below: that call is skipped whenever
-	// push or MR submission failed, which is precisely the case where the
-	// witness needs to see "has_unpushed" on the slot. See
-	// selfReportCleanupStatus for why this write must never be skipped.
-	//
-	// Addressed through the rig directory rather than cwd, matching
-	// updateAgentStateOnDone below: both hit the same database, and the rig path
-	// still resolves if the worktree is already gone.
-	selfReportCleanupStatus(g, branch, beads.New(filepath.Join(townRoot, rigName)).ForAgentBead(), agentBeadID, doneCleanupStatus)
-
-	// Log done event (townlog and activity feed)
-	if err := LogDone(townRoot, sender, issueID); err != nil {
+	if err := LogDone(r.townRoot, r.sender, r.issueID); err != nil {
 		style.PrintWarning("could not log done event: %v", err)
 	}
-	if err := events.LogFeed(events.TypeDone, sender, events.DonePayload(issueID, branch)); err != nil {
+	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
 		style.PrintWarning("could not log feed event: %v", err)
 	}
 
-	// Update agent bead state (ZFC: self-report completion). If push/MR failed,
-	// keep the hook intact so Witness can recover the still-open work.
-	if err := updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID, pushFailed, mrFailed); err != nil {
+	// Update agent bead state (ZFC: self-report completion).
+	if err := updateAgentStateOnDoneFn(r.cwd, r.townRoot, exitType, r.issueID); err != nil {
 		return err
 	}
-
-	// Check the conflict-resolution wake now that the hooked conflict task
-	// bead above has actually been closed (updateAgentStateOnDone, reached via
-	// updateAgentStateAfterSubmission). wakeConflictCandidates is nil whenever
-	// shouldNudgeRefinery already fired or the push failed (gt-ue2h).
 	if wakeConflictCandidates != nil {
-		wakeRefineryForReadyConflict(wakeConflictBD.Show, rigName, wakeConflictCandidates...)
+		wakeRefineryForReadyConflict(wakeConflictBD.Show, r.rigName, wakeConflictCandidates...)
 	}
 
-	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
-	// evaluate slot availability against stale hook_bead or cleanup_status and emit
-	// false SLOT_BLOCKED/SLOT_OPEN signals.
-	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
+	// Nudge the witness only after hook/cleanup state is updated, or it
+	// evaluates slot availability against stale state.
+	nudgeWitness(r.rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", r.polecatName, exitType))
 	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
 
-	// Every final exit status (COMPLETED, ESCALATED, DEFERRED) retires the
-	// polecat session after durable handoff, unless it's a handoff-triggered
-	// DEFERRED (gt-5g3e). Preserve the feature branch and metadata;
-	// Witness/refinery cleanup owns the sandbox.
-	isPolecat := false
-	mergeStrategy := ""
 	fromHandoff := os.Getenv(envDoneFromHandoff) == "1"
-	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil && roleInfo.Role == RolePolecat {
+	isPolecat := false
+	if roleInfo, err := GetRoleWithContext(r.cwd, r.townRoot); err == nil && roleInfo.Role == RolePolecat {
 		isPolecat = true
-
-		if pushFailed || mrFailed {
-			fmt.Printf("%s Work needs recovery (push or MR failed) — session preserved\n", style.Bold.Render("⚠"))
-		}
-		// Resolve convoy info for every final exit, not only COMPLETED: DEFERRED
-		// and ESCALATED can also retire the session now, so a local-review convoy
-		// on either of those exits must still be exempted (gt-5g3e).
-		if shouldResolveConvoyForRetirement(issueID, convoyInfo) {
-			convoyInfo = getConvoyInfoFromSourceIssue(sourceIssueForNoMerge)
-			if convoyInfo == nil {
-				convoyInfo = getConvoyInfoForIssue(issueID)
-			}
-		}
-		if convoyInfo != nil {
-			mergeStrategy = convoyInfo.MergeStrategy
-		}
 	}
-
 	fmt.Println()
 	if !isPolecat {
 		fmt.Printf("%s Session exiting\n", style.Bold.Render("→"))
 		fmt.Printf("  Witness will handle cleanup.\n")
+		return nil
 	}
-
-	// Retire the live session as the final action. The PID exclusion prevents
-	// killing gt done before all metadata and notifications above are written.
-	if isPolecat {
-		retirePolecatSessionAfterFinalExit(exitType, mergeStrategy, pushFailed, mrFailed, fromHandoff, rigName, polecatName, os.Getpid())
-	}
-
-	// Fail closed on every outcome that did not land (gt-2wqt, G5-01):
-	// without a non-zero status the caller cannot tell a dropped submission
-	// from a landed one. Everything above — witness notification, completion
-	// metadata, session preservation — has already run.
-	return landing.err()
+	// Retire the live session as the final action. The PID exclusion keeps
+	// gt done alive until everything above is written.
+	retirePolecatSessionAfterFinalExit(exitType, fromHandoff, r.rigName, r.polecatName, os.Getpid())
+	return nil
 }
 
 // pushSubmoduleChanges detects submodules modified between baseRef
@@ -2774,16 +1652,16 @@ func noteVerifiedPushFailure(sourceBD *beads.Beads, cwd, issueID, branch, commit
 	_ = bd.AddComment(issueID, msg)
 }
 
-// verifyPushLandedBeforeMR asserts that the remote branch tip is exactly the
-// commit gt done is about to declare in an MR bead (gt-2wqt). It is the only
-// source of the "Branch pushed" claim: a push that exits 0 while origin keeps
-// an older tip is indistinguishable from success until ls-remote is compared
-// against HEAD.
+// verifyPushLanded asserts that the remote branch tip is exactly the commit
+// gt done is about to declare ready to land (gt-2wqt). It is the only source
+// of the "Branch pushed" claim: a push that exits 0 while origin keeps an older
+// tip is indistinguishable from success until ls-remote is compared against
+// HEAD.
 //
-// Every error return is fatal to the submission — the caller must create no MR
-// bead, because an MR whose commit_sha origin does not have makes the refinery
-// gate and merge a tree that silently lacks the fix.
-func verifyPushLandedBeforeMR(g *git.Git, townRoot, rigName, branch, commit string) error {
+// Every error return is fatal to the submission: a ready mark naming a commit
+// origin does not have would make the landing worker merge a tree that lacks
+// the fix.
+func verifyPushLanded(g *git.Git, townRoot, rigName, branch, commit string) error {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		head, headErr := g.Rev("HEAD")
@@ -2826,21 +1704,47 @@ func describePushVerificationFailure(g *git.Git, branch, commit string, cause er
 	if tipErr != nil || strings.TrimSpace(remoteTip) == "" {
 		remoteTip = "(missing on origin)"
 	}
-	return fmt.Errorf("verified_push_failed: branch %s is not at the commit this merge request would declare; no MR created\n"+
+	return fmt.Errorf("verified_push_failed: branch %s is not at the commit gt done would declare ready to land\n"+
 		"  local HEAD:  %s\n"+
 		"  origin/%s:  %s\n"+
 		"  %v", branch, commit, branch, remoteTip, cause)
 }
 
-// pushBranchToOrigin sends refspec to origin, falling back to the rig's bare
-// repo when the worktree's git context cannot reach the remote (GH #1348).
+// pushBranchToOrigin pushes head to origin/<branch> under a lease on the tip
+// origin has now ("" = the branch must not exist yet), falling back to the
+// rig's bare repo when the worktree's git context cannot reach the remote
+// (GH #1348). A tip already at head is not re-sent. The retry in
+// landBranchPush calls this again, and it re-reads the tip each time.
 //
-// The landing retry at afterPush re-sends this same push, so the two share one
-// function rather than two copies of the fallback: a retry that pushed
-// differently from the attempt it retries would verify a state that attempt
-// never aimed at (gt-0opm).
-func pushBranchToOrigin(g *git.Git, townRoot, rigName, refspec string) error {
-	err := g.Push("origin", refspec, false)
+// A lease alone would let gt done replace any tip it had just read, including
+// another session's rework of the same branch. So when origin's tip is not an
+// ancestor of head, the change-sets are compared first (recoverDivergedPush):
+// a rebase or a rework on top of origin's commits is pushed over under the
+// lease, and real divergence is refused (gt-bf5x, gt-i0z3).
+func pushBranchToOrigin(g *git.Git, townRoot, rigName, branch, head, baseRef string) error {
+	expected, err := g.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		return fmt.Errorf("reading origin/%s before the push: %w", branch, err)
+	}
+	if expected == head {
+		return nil
+	}
+	refspec := "refs/heads/" + branch + ":refs/heads/" + branch
+	if expected != "" {
+		if contained, ancErr := g.IsAncestor(expected, head); ancErr != nil || !contained {
+			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
+			switch {
+			case recovered:
+				fmt.Printf("%s Replaced origin/%s: %s\n", style.Bold.Render("✓"), branch, diagnosis)
+				return nil
+			case recoverErr != nil:
+				return fmt.Errorf("origin/%s has diverged from this branch (%s): %w", branch, diagnosis, recoverErr)
+			default:
+				return fmt.Errorf("refusing to push over origin/%s: %s", branch, diagnosis)
+			}
+		}
+	}
+	err = g.PushForceWithLease("origin", refspec, "refs/heads/"+branch, expected)
 	if err == nil {
 		return nil
 	}
@@ -2850,8 +1754,7 @@ func pushBranchToOrigin(g *git.Git, townRoot, rigName, refspec string) error {
 		return err
 	}
 	bareGit := git.NewGitWithDir(bareRepoPath, "")
-	bareErr := bareGit.Push("origin", refspec, false)
-	if bareErr != nil {
+	if bareErr := bareGit.PushForceWithLease("origin", refspec, "refs/heads/"+branch, expected); bareErr != nil {
 		style.PrintWarning("bare repo push also failed: %v", bareErr)
 		return bareErr
 	}
@@ -2868,24 +1771,23 @@ func pushBranchToOrigin(g *git.Git, townRoot, rigName, refspec string) error {
 // retry, and a failed submission must not hold the polecat's slot open.
 var pushLandingRetryDelays = []time.Duration{3 * time.Second}
 
-// landBranchPushBeforeMR delivers the branch to origin and proves the commit
-// arrived, retrying the push and the assertion as one unit. It is the gate
-// between a push whose first attempt failed and the terminal "no merge request
-// created" exit (gt-0opm).
+// landBranchPush delivers the branch to origin and proves the commit arrived,
+// retrying the push and the assertion as one unit. It is the gate between a
+// push whose first attempt failed and the terminal exit (gt-0opm).
 //
 // A failed first attempt is not a verdict: `git push` reports an error for
 // outcomes that leave the branch on origin anyway — a client-side timeout after
 // the receiving side took the objects, a worktree git context only the bare-repo
-// fallback could work around. Exiting there cost the merge request rather than a
-// retry: the branch was on origin, the issue stayed hooked, and the refinery,
-// blind to anything outside the queue by protocol, had nothing to look at.
+// fallback could work around. Exiting there used to cost the submission rather
+// than a retry, with the branch on origin and the issue still hooked.
 //
 // Origin is queried before anything is re-sent, so a landing already in place is
-// proven without a second push. attemptPush must therefore be idempotent —
-// callers pass the same branch:branch refspec the first attempt used, which is a
-// no-op fast-forward when origin has the commit and fails closed (never a force)
-// when it does not. recovered reports whether the retry was what proved it.
-func landBranchPushBeforeMR(attemptPush, verify func() error, sleep func(time.Duration)) (bool, error) {
+// proven without a second push. attemptPush must therefore be idempotent:
+// pushBranchToOrigin re-reads origin's tip each time, sends nothing when it is
+// already the commit, and pushes under a lease on the tip it read (after the
+// divergence check), so a retry never clobbers work origin has and HEAD lacks.
+// recovered reports whether the retry was what proved it.
+func landBranchPush(attemptPush, verify func() error, sleep func(time.Duration)) (bool, error) {
 	verifyErr := verify()
 	for i := 0; verifyErr != nil && i < len(pushLandingRetryDelays); i++ {
 		sleep(pushLandingRetryDelays[i])
@@ -2901,30 +1803,14 @@ func landBranchPushBeforeMR(attemptPush, verify func() error, sleep func(time.Du
 }
 
 // unlandedPushMessage renders the terminal gt done error for a submission whose
-// branch never proved out on origin.
-//
-// The push-command error says why the send broke and the assertion says where
-// origin stands; a reader of a strand needs both. When only the assertion
-// failed, it is the whole story (gt-0opm).
-func unlandedPushMessage(branch string, pushErr error, pushFailureDetail string, verifyErr error) string {
+// branch never proved out on origin. The push-command error says why the send
+// broke and the assertion says where origin stands; a reader needs both. When
+// only the assertion failed, it is the whole story (gt-0opm).
+func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 	if pushErr == nil {
 		return verifyErr.Error()
 	}
-	msg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-	if pushFailureDetail != "" {
-		msg = fmt.Sprintf("%s (%s)", msg, pushFailureDetail)
-	}
-	return fmt.Sprintf("%s [after retry: %v]", msg, verifyErr)
-}
-
-// shouldNudgeRefinery reports whether a gt done invocation may wake the
-// refinery. Only COMPLETED exits create an MR bead; DEFERRED and ESCALATED
-// exits (polecats finishing operational tasks with no code changes) must
-// never emit MQ_SUBMIT, or the refinery wakes from backoff to find an empty
-// merge queue (gh#3885). The exitType check is defensive: it holds the
-// invariant even if a future code path populates mrID outside COMPLETED.
-func shouldNudgeRefinery(exitType, mrID string) bool {
-	return exitType == ExitCompleted && mrID != ""
+	return fmt.Sprintf("push failed for branch '%s': %v [after retry: %v]", branch, pushErr, verifyErr)
 }
 
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
@@ -2976,166 +1862,9 @@ func clearDoneIntentLabel(bd *beads.Beads, agentBeadID string) {
 	}
 }
 
-// DoneCheckpoint represents a checkpoint stage in the gt done flow (gt-aufru).
-// Checkpoints are stored as labels on the agent bead, enabling resume after
-// process interruption (context exhaustion, SIGTERM, etc.).
-type DoneCheckpoint string
-
-const (
-	CheckpointPushed          DoneCheckpoint = "pushed"
-	CheckpointMRCreated       DoneCheckpoint = "mr-created"
-	CheckpointWitnessNotified DoneCheckpoint = "witness-notified"
-)
-
-// writeDoneCheckpoint writes a checkpoint label on the agent bead.
-// Format: done-cp:<stage>:<value>:<unix-ts>
-// The pushed stage stores "branch@sha" (see pushedCheckpointValue, gt-2wqt);
-// other stages store their own opaque value.
-// Non-fatal: if this fails, gt done continues without the checkpoint.
-func writeDoneCheckpoint(bd *beads.Beads, agentBeadID string, cp DoneCheckpoint, value string) {
-	if agentBeadID == "" {
-		return
-	}
-	label := fmt.Sprintf("done-cp:%s:%s:%d", cp, value, time.Now().Unix())
-	if err := bd.Update(agentBeadID, beads.UpdateOptions{
-		AddLabels: []string{label},
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't write checkpoint %s on %s: %v\n", cp, agentBeadID, err)
-	}
-}
-
-// pushedCheckpointValue encodes the branch AND the commit a push checkpoint was
-// written for (gt-2wqt). The checkpoint originally stored the branch alone,
-// which made "already pushed" a claim about the branch name rather than about
-// the commits on it: a gt done that pushed, failed its gate, and was re-run
-// after a fix commit saw the same branch name, skipped both the push and the
-// push verification, and created an MR declaring a commit origin never had.
-func pushedCheckpointValue(branch, sha string) string {
-	return branch + "@" + strings.TrimSpace(sha)
-}
-
-// pushedCheckpointBranch returns the branch recorded in a push checkpoint
-// value. Values written before gt-2wqt hold the branch alone and still resolve.
-func pushedCheckpointBranch(value string) string {
-	if i := strings.LastIndex(value, "@"); i >= 0 {
-		return value[:i]
-	}
-	return value
-}
-
-// pushedCheckpointMatches reports whether a push checkpoint was written for
-// this exact branch at this exact commit. Anything else — a different branch, a
-// different commit on the same branch, or a value that records no commit at all
-// — is stale, so the push and its verification must run again.
-func pushedCheckpointMatches(value, branch, sha string) bool {
-	if value == "" || strings.TrimSpace(sha) == "" {
-		return false
-	}
-	return value == pushedCheckpointValue(branch, sha)
-}
-
-// mrCheckpointStaleReason reports why a checkpointed merge-request bead no
-// longer describes the submission this run is about to make, or "" when it
-// still does.
-//
-// The checkpoint records an MR id and nothing else, so the bead is asked the
-// questions FindMRForBranchAndSHA asks a fresh search: same branch, same
-// commit, still in the queue. A checkpoint is a claim about a submission rather
-// than about a name (gt-2wqt), and a rerun after an interrupted gt done reads a
-// bead that may have been rejected and closed in between. Reading a closed MR
-// as live reports "MR already created" and queues nothing, stranding the pushed
-// work (gt-xgbv).
-func mrCheckpointStaleReason(mr *beads.Issue, branch, commitSHA string) string {
-	switch {
-	case mr == nil:
-		return "MR bead not found"
-	case mr.Status != string(beads.StatusOpen):
-		return "MR is " + mr.Status
-	case !strings.HasPrefix(mr.Description, "branch: "+branch+"\n"):
-		return "was for different branch"
-	}
-	// A legacy MR records no commit_sha, and an unreadable HEAD leaves nothing
-	// to compare against: the branch and the queue status are all there is to
-	// go on, the same fallback FindMRForBranchAndSHA makes.
-	fields := beads.ParseMRFields(mr)
-	if fields == nil || fields.CommitSHA == "" || commitSHA == "" {
-		return ""
-	}
-	if fields.CommitSHA != commitSHA {
-		return "was for commit " + shortSHA(fields.CommitSHA)
-	}
-	return ""
-}
-
-// resumedWork is what a push checkpoint means for a gt done that has been
-// re-invoked on the same branch and commit.
-type resumedWork string
-
-const (
-	// resumedWorkStale: the checkpoint names another branch or another commit,
-	// so it is no evidence about this run's push and the push must run.
-	resumedWorkStale resumedWork = "stale"
-	// resumedWorkPushed: the checkpoint names this commit, so the push belongs
-	// to an earlier run of this session.
-	resumedWorkPushed resumedWork = "pushed"
-	// resumedWorkLanded: the commit is on the run's merge target, so the work
-	// was submitted and the merge deleted origin/<branch> — there is nothing
-	// left to submit.
-	resumedWorkLanded resumedWork = "landed"
-)
-
-// landedOnTargetGit is the single query classifyResumedPush asks, so a test can
-// answer it without a remote.
-type landedOnTargetGit interface {
-	CommitLandedOnTarget(remote, target, commit string) bool
-}
-
-// classifyResumedPush decides what a push checkpoint on a re-invoked gt done
-// means for the branch the run is about to push.
-//
-// The landed case exists because the merge that lands a branch deletes it from
-// origin: a re-run of gt done the checkpoint then matches would push the branch
-// back and read the missing ref as an unlanded push, reporting pushFailed for a
-// submission that completed (gt-mik3). A commit on the target is proof of the
-// opposite, so it is asked only once the checkpoint has named this commit —
-// a stale checkpoint says nothing about where the work is.
-func classifyResumedPush(g landedOnTargetGit, remote, target, checkpoint, branch, sha string) resumedWork {
-	if !pushedCheckpointMatches(checkpoint, branch, sha) {
-		return resumedWorkStale
-	}
-	if g.CommitLandedOnTarget(remote, target, sha) {
-		return resumedWorkLanded
-	}
-	return resumedWorkPushed
-}
-
-// readDoneCheckpoints reads all done-cp:* labels from the agent bead.
-// Returns a map of checkpoint stage -> value. Empty map if none found.
-func readDoneCheckpoints(bd *beads.Beads, agentBeadID string) map[DoneCheckpoint]string {
-	checkpoints := make(map[DoneCheckpoint]string)
-	if agentBeadID == "" {
-		return checkpoints
-	}
-	issue, err := bd.Show(agentBeadID)
-	if err != nil {
-		return checkpoints
-	}
-	for _, label := range issue.Labels {
-		if strings.HasPrefix(label, "done-cp:") {
-			// Format: done-cp:<stage>:<value>:<ts>
-			parts := strings.SplitN(label, ":", 4)
-			if len(parts) >= 3 {
-				stage := DoneCheckpoint(parts[1])
-				value := parts[2]
-				checkpoints[stage] = value
-			}
-		}
-	}
-	return checkpoints
-}
-
-// clearDoneCheckpoints removes all done-cp:* labels from the agent bead.
-// Called on clean exit to prevent stale checkpoints from interfering with future runs.
+// clearDoneCheckpoints removes done-cp:* labels from the agent bead. gt done
+// no longer writes them (its push is idempotent under a lease), but agent
+// beads from earlier runs still carry them.
 func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 	if agentBeadID == "" {
 		return
@@ -3168,7 +1897,7 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // re-entering the idle reuse pool before witness/refinery cleanup finishes.
 // Escalated/deferred exits use "stuck" because they need recovery.
 //
-// cleanup_status is NOT written here — notifyWitness self-reports it through
+// cleanup_status is NOT written here — reportDone self-reports it through
 // selfReportCleanupStatus so that failed submissions record it too.
 //
 // BUG FIX (hq-3xaxy): This function must be resilient to working directory deletion.
@@ -3362,7 +2091,19 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			}
 
 			// Acceptance criteria gate: skip close if criteria are unchecked.
-			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
+			if beads.HasLabel(hookedBead, land.LabelReadyToLand) {
+				// Submitted for landing: the landing worker closes it when it
+				// lands, with the landed commit (ADR 0004). "Closed" means
+				// landed; closing here would claim that for a pushed branch.
+				attempt := 1 + land.CountRejections(hookedBead.Notes)
+				note := fmt.Sprintf("Submitted for landing (attempt %d)", attempt)
+				if w, ok := land.ParseReadyNote(hookedBead.Notes); ok {
+					note = fmt.Sprintf("Submitted for landing: %s @ %s onto %s (attempt %d)", w.Branch, shortSHA(w.Head), w.Target, attempt)
+				}
+				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: couldn't record the submission on %s: %v\n", hookedBeadID, err)
+				}
+			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
 			} else if skipReason := doneCloseTimeInvariantSkipReason(bd, cwd, townRoot, ctx.Rig, hookedBeadID, pendingMRID); skipReason != "" {
@@ -3430,9 +2171,9 @@ doneStateUpdate:
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
 	}
 
-	// ZFC #10 cleanup_status self-report moved to notifyWitness
-	// (selfReportCleanupStatus): this function only runs when push and MR
-	// submission both succeeded, so a failed submission recorded nothing at
+	// ZFC #10 cleanup_status self-report moved to reportDone and runDone's
+	// failure path (selfReportCleanupStatus): this function only ever ran when
+	// the submission succeeded, so a failed submission recorded nothing at
 	// all — the exact case where the witness needs "has_unpushed". The report
 	// also used to be skipped whenever the status was empty/unknown, leaving
 	// cleanup_status=<missing> on a slot that can never be reclaimed.

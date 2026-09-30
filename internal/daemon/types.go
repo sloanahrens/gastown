@@ -10,6 +10,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,103 +105,29 @@ func SaveState(townRoot string, state *State) error {
 	return atomicfile.WriteJSON(stateFile, state)
 }
 
-// PatrolConfig holds configuration for a single patrol.
-type PatrolConfig struct {
-	// Enabled controls whether this patrol runs during heartbeat.
-	Enabled bool `json:"enabled"`
-
-	// Interval is how often to run this patrol (not used yet).
-	Interval string `json:"interval,omitempty"`
-
-	// Agent is the agent type for this patrol (not used yet).
-	Agent string `json:"agent,omitempty"`
-
-	// Rigs limits this patrol to specific rigs. If empty, all rigs are patrolled.
-	Rigs []string `json:"rigs,omitempty"`
-}
-
-// PatrolsConfig holds configuration for all patrols.
-type PatrolsConfig struct {
-	Refinery       *PatrolConfig          `json:"refinery,omitempty"`
-	Witness        *PatrolConfig          `json:"witness,omitempty"`
-	Deacon         *PatrolConfig          `json:"deacon,omitempty"`
-	Handler        *PatrolConfig          `json:"handler,omitempty"`
-	DoltServer     *DoltServerConfig      `json:"dolt_server,omitempty"`
-	DoltBackup     *DoltBackupConfig      `json:"dolt_backup,omitempty"`
-	JsonlGitBackup *JsonlGitBackupConfig  `json:"jsonl_git_backup,omitempty"`
-	WispReaper     *WispReaperConfig      `json:"wisp_reaper,omitempty"`
-	DoctorDog      *DoctorDogConfig       `json:"doctor_dog,omitempty"`
-	CompactorDog           *CompactorDogConfig            `json:"compactor_dog,omitempty"`
-	CheckpointDog          *CheckpointDogConfig           `json:"checkpoint_dog,omitempty"`
-	ScheduledMaintenance   *ScheduledMaintenanceConfig    `json:"scheduled_maintenance,omitempty"`
-	MainBranchTest         *MainBranchTestConfig          `json:"main_branch_test,omitempty"`
-	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
-	QuotaResume            *QuotaDogConfig                `json:"quota_resume,omitempty"`
-	MayorDispatch          *MayorDispatchConfig           `json:"mayor_dispatch,omitempty"`
-	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
-
-	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
-	// per run; the open bead is the double-dispatch guard (gt-nj23).
-	ScheduledSlings *ScheduledSlingsConfig `json:"scheduled_slings,omitempty"`
-
-	// PatrolWatchdog flags a patrol role (witness, deacon, refinery) whose
-	// session is alive but whose last COMPLETED patrol cycle is older than
-	// N x its cadence — awake but not patrolling (gt-4z3b7).
-	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
-}
-
-// DoltBackupConfig holds configuration for the dolt_backup patrol.
-// This patrol periodically syncs Dolt databases to local filesystem backups.
-type DoltBackupConfig struct {
-	// Enabled controls whether backup sync runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to sync, as a string (e.g., "15m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// Databases lists specific database names to back up.
-	// If empty, auto-discovers databases with configured backup remotes.
-	Databases []string `json:"databases,omitempty"`
-}
-
-// JsonlGitBackupConfig holds configuration for the jsonl_git_backup patrol.
-// This patrol exports issues to JSONL files, scrubs ephemeral data, and pushes to a git repo.
-type JsonlGitBackupConfig struct {
-	// Enabled controls whether JSONL git backup runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "15m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// Databases lists specific database names to export.
-	// If empty, auto-discovers from dolt server.
-	Databases []string `json:"databases,omitempty"`
-
-	// GitRepo is the path to the git repository for backup.
-	// Default: ~/.dolt-archive/git
-	GitRepo string `json:"git_repo,omitempty"`
-
-	// Scrub controls whether ephemeral data is filtered out.
-	// Default: true
-	Scrub *bool `json:"scrub,omitempty"`
-
-	// SpikeThreshold is the maximum allowed percentage change in record counts
-	// between consecutive exports. If the delta exceeds this threshold (in either
-	// direction), the export is halted and escalated. Default: 0.20 (20%).
-	SpikeThreshold *float64 `json:"spike_threshold,omitempty"`
-}
-
-// DaemonPatrolConfig is the structure of mayor/daemon.json.
-type DaemonPatrolConfig struct {
-	Type      string            `json:"type"`
-	Version   int               `json:"version"`
-	Heartbeat *PatrolConfig     `json:"heartbeat,omitempty"`
-	Patrols   *PatrolsConfig    `json:"patrols,omitempty"`
-	// Env holds environment variables to set at startup.
-	// Propagated to all sessions spawned by the daemon and read by gt up/mayor attach.
-	// Example: {"GT_DOLT_PORT": "43211"}
-	Env       map[string]string `json:"env,omitempty"`
-}
+// The mayor/daemon.json schema lives in internal/config so the config
+// kernel decodes the file strictly with the types the daemon runs on
+// (gt-y3pgh.1). These aliases keep the daemon's names.
+type (
+	DaemonPatrolConfig         = agentconfig.DaemonPatrolConfig
+	PatrolConfig               = agentconfig.PatrolConfig
+	PatrolsConfig              = agentconfig.PatrolsConfig
+	DoltServerConfig           = agentconfig.DoltServerConfig
+	DoltBackupConfig           = agentconfig.DoltBackupConfig
+	JsonlGitBackupConfig       = agentconfig.JsonlGitBackupConfig
+	WispReaperConfig           = agentconfig.WispReaperConfig
+	DoctorDogConfig            = agentconfig.DoctorDogConfig
+	CompactorDogConfig         = agentconfig.CompactorDogConfig
+	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
+	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
+	MainBranchTestConfig       = agentconfig.MainBranchTestConfig
+	QuotaDogConfig             = agentconfig.QuotaDogConfig
+	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
+	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
+	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
+	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
+	PatrolWatchdogConfig       = agentconfig.PatrolWatchdogConfig
+)
 
 // PatrolConfigFile returns the path to the patrol config file.
 func PatrolConfigFile(townRoot string) string {
@@ -214,54 +141,29 @@ func PatrolConfigFile(townRoot string) string {
 // it is for read-only callers only. Anything that writes the file back, or
 // starts the town from it, uses ReadPatrolConfig (gt-fcxe9.10).
 func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
-	configFile := PatrolConfigFile(townRoot)
-	data, err := os.ReadFile(configFile)
+	cfg, err := ReadPatrolConfig(townRoot)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
 		return nil
 	}
-
-	var config DaemonPatrolConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		// Log parse errors to help debug config issues (was previously silent).
-		fmt.Fprintf(os.Stderr, "daemon: failed to parse %s: %v\n", configFile, err)
-		return nil
-	}
-	return &config
+	return cfg
 }
 
-// ReadPatrolConfig loads mayor/daemon.json, telling absent (nil, nil) from
-// unparseable (nil, *config.ParseError naming the file and offset).
+// ReadPatrolConfig loads mayor/daemon.json through the config package's one
+// parser, telling absent (nil, nil) from unparseable (nil, *config.ParseError
+// naming the file and offset).
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
-	configFile := PatrolConfigFile(townRoot)
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
+	if errors.Is(err, agentconfig.ErrNotFound) {
+		return nil, nil
 	}
-	var cfg DaemonPatrolConfig
-	if err := agentconfig.DecodeJSONFile(configFile, data, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return cfg, err
 }
 
-// SavePatrolConfig saves patrol configuration to mayor/daemon.json. It
-// refuses to replace a file that does not parse: the caller could not have
-// read it, so what it would write is built from defaults (G3-03).
+// SavePatrolConfig writes mayor/daemon.json through the config package's
+// locked writer, which refuses to replace a file that does not parse.
 func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
-	configFile := PatrolConfigFile(townRoot)
-	if _, err := ReadPatrolConfig(townRoot); err != nil {
-		return err
-	}
-
-	// Ensure mayor directory exists
-	if err := os.MkdirAll(filepath.Dir(configFile), 0755); err != nil {
-		return err
-	}
-
-	return atomicfile.WriteJSON(configFile, config)
+	return agentconfig.WriteConfigJSON(PatrolConfigFile(townRoot), config, 0o644)
 }
 
 // IsPatrolEnabled checks if a patrol is enabled in the config.

@@ -321,7 +321,7 @@ func TestIsDoneCommand(t *testing.T) {
 		t.Fatal("root command should not be detected as done")
 	}
 
-	// Subcommands that happen to be named "done" (gt dog done, gt wl done,
+	// Subcommands that happen to be named "done" (gt dog done,
 	// gt mol step done) must NOT trip the polecat-only guard (gt-lt7).
 	dog := &cobra.Command{Use: "dog"}
 	dogDone := &cobra.Command{Use: "done [name]"}

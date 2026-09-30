@@ -21,15 +21,6 @@ const (
 	defaultCheckpointDogInterval = 10 * time.Minute
 )
 
-// CheckpointDogConfig holds configuration for the checkpoint_dog patrol.
-type CheckpointDogConfig struct {
-	// Enabled controls whether the checkpoint dog runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "10m").
-	IntervalStr string `json:"interval,omitempty"`
-}
-
 // checkpointDogInterval returns the configured interval, or the default (10m).
 func checkpointDogInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.CheckpointDog != nil {

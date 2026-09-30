@@ -205,7 +205,7 @@ This is the same hook events as Claude Code, just in Copilot's JSON format.
 To activate:
 ```bash
 gt config default-agent copilot        # Set as town default
-gt start --agent copilot               # Or pass per-command
+gt mayor start --agent copilot         # Or pass per-command
 ```
 
 ### Activating a custom preset

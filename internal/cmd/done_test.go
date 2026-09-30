@@ -959,147 +959,29 @@ func TestDoneIntentLabelFormat(t *testing.T) {
 	}
 }
 
-// TestShouldNudgeRefinery locks in the gh#3885 invariant: only COMPLETED
-// exits with a created MR bead may wake the refinery. DEFERRED/ESCALATED
-// exits — used by polecats finishing operational tasks with no code changes —
-// must never emit MQ_SUBMIT, even if an mrID is somehow populated. The
-// "stray MR" cases guard against a regression to a bare `mrID != ""` check.
-func TestShouldNudgeRefinery(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		exitType string
-		mrID     string
-		want     bool
-	}{
-		{"completed with MR nudges", ExitCompleted, "gt-abc123", true},
-		{"completed without MR does not nudge", ExitCompleted, "", false},
-		{"deferred without MR does not nudge", ExitDeferred, "", false},
-		{"deferred with stray MR does not nudge", ExitDeferred, "gt-abc123", false},
-		{"escalated without MR does not nudge", ExitEscalated, "", false},
-		{"escalated with stray MR does not nudge", ExitEscalated, "gt-abc123", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldNudgeRefinery(tt.exitType, tt.mrID); got != tt.want {
-				t.Errorf("shouldNudgeRefinery(%q, %q) = %v, want %v",
-					tt.exitType, tt.mrID, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShouldUpdateAgentStateOnDone(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		pushFailed bool
-		mrFailed   bool
-		want       bool
-	}{
-		{"clean submission updates state", false, false, true},
-		{"push failure preserves hook", true, false, false},
-		{"mr failure preserves hook", false, true, false},
-		{"both failures preserve hook", true, true, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shouldUpdateAgentStateOnDone(tt.pushFailed, tt.mrFailed)
-			if got != tt.want {
-				t.Errorf("shouldUpdateAgentStateOnDone(%v, %v) = %v, want %v", tt.pushFailed, tt.mrFailed, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestUpdateAgentStateAfterSubmissionSkipsFailedSubmissions(t *testing.T) {
-	calls := 0
-	old := updateAgentStateOnDoneFn
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error {
-		calls++
-		return nil
-	}
-	t.Cleanup(func() { updateAgentStateOnDoneFn = old })
-
-	if err := updateAgentStateAfterSubmission("/work", "/town", ExitCompleted, "gt-abc", true, false); err != nil {
-		t.Fatalf("updateAgentStateAfterSubmission push failure: %v", err)
-	}
-	if err := updateAgentStateAfterSubmission("/work", "/town", ExitCompleted, "gt-abc", false, true); err != nil {
-		t.Fatalf("updateAgentStateAfterSubmission mr failure: %v", err)
-	}
-	if calls != 0 {
-		t.Fatalf("state update calls after failed submissions = %d, want 0", calls)
-	}
-
-	if err := updateAgentStateAfterSubmission("/work", "/town", ExitCompleted, "gt-abc", false, false); err != nil {
-		t.Fatalf("updateAgentStateAfterSubmission clean submission: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("state update calls after clean submission = %d, want 1", calls)
-	}
-}
-
 func TestShouldRetirePolecatSessionAfterDone(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		exitType      string
-		mergeStrategy string
-		pushFailed    bool
-		mrFailed      bool
-		fromHandoff   bool
-		want          bool
+		name        string
+		exitType    string
+		fromHandoff bool
+		want        bool
 	}{
-		{"completed default strategy retires", ExitCompleted, "", false, false, false, true},
-		{"completed direct strategy retires", ExitCompleted, "direct", false, false, false, true},
-		{"completed mr strategy retires", ExitCompleted, "mr", false, false, false, true},
-		{"local strategy preserves session", ExitCompleted, "local", false, false, false, false},
-		{"deferred retires session", ExitDeferred, "", false, false, false, true},
-		{"escalated retires session", ExitEscalated, "", false, false, false, true},
-		{"deferred local strategy preserves session", ExitDeferred, "local", false, false, false, false},
-		{"escalated local strategy preserves session", ExitEscalated, "local", false, false, false, false},
-		{"push failure preserves session", ExitCompleted, "", true, false, false, false},
-		{"mr failure preserves session", ExitCompleted, "", false, true, false, false},
-		{"deferred push failure preserves session", ExitDeferred, "", true, false, false, false},
-		{"escalated mr failure preserves session", ExitEscalated, "", false, true, false, false},
-		{"non-final exit preserves session", "PHASE_COMPLETE", "", false, false, false, false},
-		{"unknown exit preserves session", "PAUSED", "", false, false, false, false},
-		{"empty exit preserves session", "", "", false, false, false, false},
-		{"handoff-triggered deferred preserves session", ExitDeferred, "", false, false, true, false},
-		{"handoff flag overrides completed retirement", ExitCompleted, "", false, false, true, false},
+		{"completed retires", ExitCompleted, false, true},
+		{"deferred retires session", ExitDeferred, false, true},
+		{"escalated retires session", ExitEscalated, false, true},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, false},
+		{"unknown exit preserves session", "PAUSED", false, false},
+		{"empty exit preserves session", "", false, false},
+		{"handoff-triggered deferred preserves session", ExitDeferred, true, false},
+		{"handoff flag overrides completed retirement", ExitCompleted, true, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.fromHandoff)
+			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.fromHandoff)
 			if got != tt.want {
-				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %q, %v, %v, %v) = %v, want %v",
-					tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.fromHandoff, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShouldResolveConvoyForRetirement(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		issueID    string
-		convoyInfo *ConvoyInfo
-		want       bool
-	}{
-		{"issue with no convoy yet needs resolution", "gt-abc", nil, true},
-		{"issue that already resolved a convoy skips re-lookup", "gt-abc", &ConvoyInfo{}, false},
-		{"no issue id skips lookup", "", nil, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shouldResolveConvoyForRetirement(tt.issueID, tt.convoyInfo)
-			if got != tt.want {
-				t.Errorf("shouldResolveConvoyForRetirement(%q, %v) = %v, want %v", tt.issueID, tt.convoyInfo, got, tt.want)
+				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %v) = %v, want %v", tt.exitType, tt.fromHandoff, got, tt.want)
 			}
 		})
 	}
@@ -1174,22 +1056,16 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 	tests := []struct {
 		name        string
 		exitType    string
-		pushFailed  bool
-		mrFailed    bool
 		fromHandoff bool
 		wantKills   int
 	}{
-		{"completed retires session", ExitCompleted, false, false, false, 1},
-		{"deferred retires session", ExitDeferred, false, false, false, 1},
-		{"escalated retires session", ExitEscalated, false, false, false, 1},
-		{"non-final exit preserves session", "PHASE_COMPLETE", false, false, false, 0},
-		{"unknown exit preserves session", "PAUSED", false, false, false, 0},
-		{"failed push preserves session", ExitCompleted, true, false, false, 0},
-		{"failed push preserves deferred session", ExitDeferred, true, false, false, 0},
-		{"failed MR preserves escalated session", ExitEscalated, false, true, false, 0},
-		{"handoff-triggered deferred preserves session", ExitDeferred, false, false, true, 0},
+		{"completed retires session", ExitCompleted, false, 1},
+		{"deferred retires session", ExitDeferred, false, 1},
+		{"escalated retires session", ExitEscalated, false, 1},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, 0},
+		{"unknown exit preserves session", "PAUSED", false, 0},
+		{"handoff-triggered deferred preserves session", ExitDeferred, true, 0},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeDoneSessionKiller{}
@@ -1197,7 +1073,7 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 			newDoneSessionKiller = func() doneSessionKiller { return fake }
 			t.Cleanup(func() { newDoneSessionKiller = old })
 
-			retired := retirePolecatSessionAfterFinalExit(tt.exitType, "", tt.pushFailed, tt.mrFailed, tt.fromHandoff, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
@@ -1894,130 +1770,6 @@ func TestConvoyMergeFromFields(t *testing.T) {
 	}
 }
 
-// TestDoneCheckpointLabelFormat verifies the done-cp label format matches
-// the expected pattern: done-cp:<stage>:<value>:<unix-ts>
-func TestDoneCheckpointLabelFormat(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	tests := []struct {
-		checkpoint DoneCheckpoint
-		value      string
-		wantPrefix string
-	}{
-		{CheckpointPushed, "polecat/furiosa-abc", "done-cp:pushed:polecat/furiosa-abc:"},
-		{CheckpointMRCreated, "gt-xyz123", "done-cp:mr-created:gt-xyz123:"},
-		{CheckpointWitnessNotified, "ok", "done-cp:witness-notified:ok:"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.checkpoint), func(t *testing.T) {
-			label := fmt.Sprintf("done-cp:%s:%s:%d", tt.checkpoint, tt.value, now.Unix())
-			if !strings.HasPrefix(label, tt.wantPrefix) {
-				t.Errorf("label = %q, want prefix %q", label, tt.wantPrefix)
-			}
-
-			// Verify the label can be parsed back
-			parts := strings.SplitN(label, ":", 4)
-			if len(parts) != 4 {
-				t.Fatalf("expected 4 parts, got %d: %v", len(parts), parts)
-			}
-			if parts[0] != "done-cp" {
-				t.Errorf("prefix = %q, want %q", parts[0], "done-cp")
-			}
-			if DoneCheckpoint(parts[1]) != tt.checkpoint {
-				t.Errorf("stage = %q, want %q", parts[1], tt.checkpoint)
-			}
-			if parts[2] != tt.value {
-				t.Errorf("value = %q, want %q", parts[2], tt.value)
-			}
-		})
-	}
-}
-
-// TestReadDoneCheckpoints verifies that readDoneCheckpoints correctly
-// parses checkpoint labels from an issue's label list.
-func TestReadDoneCheckpoints(t *testing.T) {
-	t.Parallel()
-	// Test the parsing logic directly by simulating what readDoneCheckpoints does
-	tests := []struct {
-		name   string
-		labels []string
-		want   map[DoneCheckpoint]string
-	}{
-		{
-			name:   "no checkpoints",
-			labels: []string{"gt:agent", "idle:3"},
-			want:   map[DoneCheckpoint]string{},
-		},
-		{
-			name:   "push checkpoint only",
-			labels: []string{"gt:agent", "done-cp:pushed:polecat/furiosa-abc:1738972800"},
-			want:   map[DoneCheckpoint]string{CheckpointPushed: "polecat/furiosa-abc"},
-		},
-		{
-			name: "multiple checkpoints",
-			labels: []string{
-				"gt:agent",
-				"done-cp:pushed:polecat/furiosa-abc:1738972800",
-				"done-cp:mr-created:gt-xyz123:1738972801",
-			},
-			want: map[DoneCheckpoint]string{
-				CheckpointPushed:    "polecat/furiosa-abc",
-				CheckpointMRCreated: "gt-xyz123",
-			},
-		},
-		{
-			name: "all checkpoints",
-			labels: []string{
-				"done-cp:pushed:branch-name:1738972800",
-				"done-cp:mr-created:gt-mr1:1738972801",
-				"done-cp:witness-notified:ok:1738972803",
-			},
-			want: map[DoneCheckpoint]string{
-				CheckpointPushed:          "branch-name",
-				CheckpointMRCreated:       "gt-mr1",
-				CheckpointWitnessNotified: "ok",
-			},
-		},
-		{
-			name: "mixed with done-intent and other labels",
-			labels: []string{
-				"gt:agent",
-				"done-intent:COMPLETED:1738972800",
-				"done-cp:pushed:mybranch:1738972801",
-				"idle:2",
-			},
-			want: map[DoneCheckpoint]string{CheckpointPushed: "mybranch"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the parsing logic from readDoneCheckpoints
-			checkpoints := make(map[DoneCheckpoint]string)
-			for _, label := range tt.labels {
-				if strings.HasPrefix(label, "done-cp:") {
-					parts := strings.SplitN(label, ":", 4)
-					if len(parts) >= 3 {
-						stage := DoneCheckpoint(parts[1])
-						value := parts[2]
-						checkpoints[stage] = value
-					}
-				}
-			}
-
-			if len(checkpoints) != len(tt.want) {
-				t.Errorf("got %d checkpoints, want %d", len(checkpoints), len(tt.want))
-			}
-			for k, v := range tt.want {
-				if checkpoints[k] != v {
-					t.Errorf("checkpoint[%s] = %q, want %q", k, checkpoints[k], v)
-				}
-			}
-		})
-	}
-}
-
 // TestClearDoneCheckpoints verifies that clearDoneCheckpoints removes
 // only done-cp labels while preserving other labels.
 func TestClearDoneCheckpoints(t *testing.T) {
@@ -2064,174 +1816,6 @@ func TestClearDoneCheckpoints(t *testing.T) {
 	}
 	if !found {
 		t.Error("done-intent label should be preserved by clearDoneCheckpoints")
-	}
-}
-
-// TestCheckpointResumeSkipsPush verifies the guard that lets a resumed gt done
-// skip the push. It calls the helper runDone calls, so the two cannot drift
-// apart: a checkpoint skips the push only for the branch AND commit it was
-// written for (gt-2wqt), never for a branch name alone.
-func TestCheckpointResumeSkipsPush(t *testing.T) {
-	t.Parallel()
-	const (
-		branch = "mybranch"
-		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		shaB   = "c890451bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	tests := []struct {
-		name        string
-		checkpoints map[DoneCheckpoint]string
-		head        string
-		wantSkip    bool
-	}{
-		{
-			name:        "no checkpoints - push runs normally",
-			checkpoints: map[DoneCheckpoint]string{},
-			head:        shaA,
-			wantSkip:    false,
-		},
-		{
-			name:        "push checkpoint for this commit - skip push",
-			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: pushedCheckpointValue(branch, shaA)},
-			head:        shaA,
-			wantSkip:    true,
-		},
-		{
-			name: "push and MR checkpoints - skip push",
-			checkpoints: map[DoneCheckpoint]string{
-				CheckpointPushed:    pushedCheckpointValue(branch, shaA),
-				CheckpointMRCreated: "gt-xyz",
-			},
-			head:     shaA,
-			wantSkip: true,
-		},
-		{
-			name:        "checkpoint for an earlier commit on this branch - push again",
-			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: pushedCheckpointValue(branch, shaA)},
-			head:        shaB,
-			wantSkip:    false,
-		},
-		{
-			name:        "legacy branch-only checkpoint - push again",
-			checkpoints: map[DoneCheckpoint]string{CheckpointPushed: branch},
-			head:        shaA,
-			wantSkip:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// The guard from runDone, via the same helper it calls.
-			skipPush := pushedCheckpointMatches(tt.checkpoints[CheckpointPushed], branch, tt.head)
-			if skipPush != tt.wantSkip {
-				t.Errorf("skipPush = %v, want %v", skipPush, tt.wantSkip)
-			}
-		})
-	}
-}
-
-// TestMRCheckpointStaleReason guards gt-xgbv: a rerun of gt done may resume
-// from an MR-created checkpoint only while that MR is still this branch's, at
-// this commit, and in the queue. A checkpoint whose MR has since been closed —
-// the shape a refinery rejection leaves behind (gt-bsmp) — must read as stale,
-// so the rerun creates a fresh MR rather than reporting success and queueing
-// nothing.
-//
-// It calls the same helper runDone calls, so the two cannot drift apart.
-func TestMRCheckpointStaleReason(t *testing.T) {
-	t.Parallel()
-	const (
-		branch = "polecat/obsidian/gt-xgbv"
-		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		shaB   = "c890451bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	mr := func(status, mrBranch, sha string) *beads.Issue {
-		description := fmt.Sprintf("branch: %s\ntarget: main\nsource_issue: gt-xgbv\nrig: gastown", mrBranch)
-		if sha != "" {
-			description += "\ncommit_sha: " + sha
-		}
-		return &beads.Issue{ID: "gt-mr1", Status: status, Description: description}
-	}
-
-	tests := []struct {
-		name string
-		mr   *beads.Issue
-		head string
-		want string
-	}{
-		{
-			name: "open MR for this branch and commit - resume",
-			mr:   mr("open", branch, shaA),
-			head: shaA,
-			want: "",
-		},
-		{
-			name: "rejected MR for this branch and commit - create fresh",
-			mr:   mr("closed", branch, shaA),
-			head: shaA,
-			want: "MR is closed",
-		},
-		{
-			name: "tombstoned MR - create fresh",
-			mr:   mr("tombstone", branch, shaA),
-			head: shaA,
-			want: "MR is tombstone",
-		},
-		{
-			name: "open MR for another branch - create fresh",
-			mr:   mr("open", "polecat/obsidian/gt-other", shaA),
-			head: shaA,
-			want: "was for different branch",
-		},
-		{
-			name: "open MR for an earlier commit on this branch - create fresh",
-			mr:   mr("open", branch, shaA),
-			head: shaB,
-			want: "was for commit " + shaA[:8],
-		},
-		{
-			name: "legacy MR with no commit_sha - branch and status decide",
-			mr:   mr("open", branch, ""),
-			head: shaA,
-			want: "",
-		},
-		{
-			name: "unreadable HEAD - branch and status decide",
-			mr:   mr("open", branch, shaA),
-			head: "",
-			want: "",
-		},
-		{
-			name: "MR bead gone - create fresh",
-			mr:   nil,
-			head: shaA,
-			want: "MR bead not found",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := mrCheckpointStaleReason(tt.mr, branch, tt.head); got != tt.want {
-				t.Errorf("mrCheckpointStaleReason() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestCheckpointNilMapSafe verifies that reading from a nil/empty checkpoint
-// map returns zero values and doesn't panic.
-func TestCheckpointNilMapSafe(t *testing.T) {
-	t.Parallel()
-	// Nil map - should not panic
-	var nilMap map[DoneCheckpoint]string
-	if nilMap[CheckpointPushed] != "" {
-		t.Error("nil map should return zero value")
-	}
-
-	// Empty map
-	emptyMap := map[DoneCheckpoint]string{}
-	if emptyMap[CheckpointPushed] != "" {
-		t.Error("empty map should return zero value")
 	}
 }
 
@@ -2681,91 +2265,4 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
-}
-
-// TestResolvePreVerifiedClaim guards gt-k4sy: the pre_verified stamp gt done
-// writes must be gated on the same gate-command binding gt sling reads, so it
-// can never be true when the rig has nothing configured to verify.
-func TestResolvePreVerifiedClaim(t *testing.T) {
-	t.Parallel()
-	t.Run("not requested", func(t *testing.T) {
-		honor, warning := resolvePreVerifiedClaim(false, t.TempDir(), "gastown")
-		if honor {
-			t.Error("honor = true, want false when --pre-verified was not requested")
-		}
-		if warning != "" {
-			t.Errorf("warning = %q, want empty when --pre-verified was not requested", warning)
-		}
-	})
-
-	t.Run("requested with zero configured gate commands", func(t *testing.T) {
-		townRoot := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0o755); err != nil {
-			t.Fatalf("mkdir rig dir: %v", err)
-		}
-		// No config.json, no settings — nothing configured anywhere.
-		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
-		if honor {
-			t.Error("honor = true, want false when the rig has zero configured gate commands")
-		}
-		if warning == "" {
-			t.Error("warning = \"\", want a non-empty warning explaining the downgrade")
-		}
-	})
-
-	// gt-ypkc: the pre-verification run covers the five *_command gates only,
-	// so a rig with a named merge_queue.gates entry has gates a stamp cannot
-	// claim — and the refinery refuses such a stamp.
-	t.Run("requested with named gates configured", func(t *testing.T) {
-		townRoot := t.TempDir()
-		rigDir := filepath.Join(townRoot, "gastown")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatalf("mkdir rig dir: %v", err)
-		}
-		rigConfig := `{
-  "merge_queue": {
-    "test_command": "make test",
-    "gates": {"boot-check": {"cmd": "make boot-check", "phase": "post-squash"}}
-  }
-}`
-		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
-			t.Fatalf("write rig config.json: %v", err)
-		}
-
-		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
-		if honor {
-			t.Error("honor = true, want false: the stamp cannot cover a named gate")
-		}
-		if !strings.Contains(warning, "named merge_queue.gates") {
-			t.Errorf("warning = %q, want it to name the uncovered gates", warning)
-		}
-	})
-
-	t.Run("requested with a configured gate command", func(t *testing.T) {
-		townRoot := t.TempDir()
-		rigDir := filepath.Join(townRoot, "gastown")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatalf("mkdir rig dir: %v", err)
-		}
-		rigConfig := `{
-  "type": "rig",
-  "version": 1,
-  "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git",
-  "default_branch": "main",
-  "beads": {"prefix": "gt"},
-  "merge_queue": {"test_command": "make test"}
-}`
-		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
-			t.Fatalf("write rig config.json: %v", err)
-		}
-
-		honor, warning := resolvePreVerifiedClaim(true, townRoot, "gastown")
-		if !honor {
-			t.Error("honor = false, want true when the rig has a configured gate command")
-		}
-		if warning != "" {
-			t.Errorf("warning = %q, want empty when the claim is honored", warning)
-		}
-	})
 }

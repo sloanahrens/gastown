@@ -17,14 +17,14 @@ type divergedPushGit interface {
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 }
 
-// recoverDivergedPush runs after a plain (non-force) push of branch to remote
-// fails as non-fast-forward. That happens whenever local history was rebased
-// after an earlier dispatch already pushed this same branch to origin — the
-// branch-reuse formula step rebases onto origin/target unconditionally, and
-// gt done's own contamination-triggered auto-rebase can miss a prior push
-// from a different session/checkpoint. Either way, origin's tip and the new
-// local tip usually carry the same work, just rebased onto a newer base — not
-// real work loss (gt-bf5x).
+// recoverDivergedPush runs when origin's tip for branch is not an ancestor of
+// the local head: gt done's pushBranchToOrigin calls it before pushing, and
+// the tap guard uses it for pushes a plain push refused. That happens whenever
+// local history was rebased after an earlier dispatch already pushed this same
+// branch to origin — gt done always rebases onto the target, and so does the
+// branch-reuse formula step. Usually origin's tip and the new local tip carry
+// the same work, just rebased onto a newer base — not real work loss
+// (gt-bf5x).
 //
 // Two shapes of "same work" are safe to lease-over:
 //
@@ -179,82 +179,4 @@ func shortSHA(sha string) string {
 		return sha[:8]
 	}
 	return sha
-}
-
-// rebaseGit is the subset of *git.Git that autoRebaseOnTarget needs. Defined as
-// an interface so tests can drive the decision logic without standing up a full
-// git repo for every gating case.
-type rebaseGit interface {
-	Rebase(onto string) error
-	AbortRebase() error
-}
-
-// pushedBranchGit is the subset of *git.Git that branchAlreadyOnRemote needs.
-type pushedBranchGit interface {
-	FetchBranch(remote, branch string) error
-	Rev(ref string) (string, error)
-}
-
-// branchAlreadyOnRemote reports whether branch already exists on remote, along
-// with a reason naming the ref that proves it — for skip messages that must
-// distinguish "I pushed it earlier in this session" from "a previous dispatch
-// left it there".
-//
-// refresh asks for a fetch of that one ref first. Callers normally fetched
-// earlier, but only the remote behind their target branch: in a fork-backed
-// rig that is upstream, which leaves origin/<branch> — the ref every branch
-// push here actually targets — stale enough to miss a push from an earlier
-// dispatch and wrongly conclude the branch is new (gt-i0z3). A fetch failure
-// is not an error: the branch not existing yet is the ordinary case (nothing
-// has been pushed), and a network failure is not evidence either way, so both
-// fall back to the last local value.
-func branchAlreadyOnRemote(g pushedBranchGit, remote, branch string, refresh bool) (exists bool, reason string) {
-	ref := remote + "/" + branch
-	if refresh {
-		_ = g.FetchBranch(remote, branch)
-	}
-	if _, err := g.Rev(ref); err != nil {
-		return false, ""
-	}
-	return true, fmt.Sprintf("%s already exists on %s from an earlier dispatch", ref, remote)
-}
-
-// autoRebaseOnTarget rebases the current branch onto base when the branch is
-// behind the target. It is a no-op when there is nothing to rebase, when the
-// polecat ran the formula's pre-verify step (rebasing again would invalidate
-// the gate results that --pre-verified attests to), or when the branch is
-// already on the remote (rebasing after pushing would require a force-push).
-//
-// pushedReason names *what* proves the branch is already on the remote — a
-// checkpoint this session wrote, or a ref that exists from an earlier dispatch
-// (the branch-reuse path). It is the skip reason when non-empty, so the
-// warning the polecat sees says which one (gt-i0z3: it used to always claim
-// "checkpoint", even when the checkpoint played no part).
-//
-// Returns:
-//   - rebased: true if a rebase actually ran successfully.
-//   - skipReason: non-empty when behind > 0 but the rebase was intentionally
-//     skipped. Empty when behind == 0 (no rebase needed) or when rebased == true.
-//   - err: rebase failure, after AbortRebase has been attempted to clean up.
-//
-// gh#3400.
-func autoRebaseOnTarget(g rebaseGit, base string, behind int, preVerified bool, pushedReason string) (rebased bool, skipReason string, err error) {
-	if behind <= 0 {
-		return false, "", nil
-	}
-	switch {
-	case preVerified:
-		return false, "--pre-verified is set", nil
-	case pushedReason != "":
-		return false, pushedReason, nil
-	}
-
-	fmt.Printf("→ Auto-rebasing onto %s (%d commits behind)\n", base, behind)
-	if rebaseErr := g.Rebase(base); rebaseErr != nil {
-		_ = g.AbortRebase()
-		return false, "", fmt.Errorf("auto-rebase onto %s failed: %w\n"+
-			"Resolve conflicts manually (git fetch origin && git rebase %s), commit the resolution, then rerun gt done.",
-			base, rebaseErr, base)
-	}
-	return true, "", nil
 }

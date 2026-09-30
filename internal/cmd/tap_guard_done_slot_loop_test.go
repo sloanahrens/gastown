@@ -159,7 +159,7 @@ func TestRunTapGuardDangerous_DoneSlotLoopRefusalText(t *testing.T) {
 		doneSlotLoopReason,
 		"run `gt done` once",
 		"gt escalate -s medium",
-		"--skip-tests",
+		"No flag skips the gate",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("refusal text is missing %q:\n%s", want, stderr)

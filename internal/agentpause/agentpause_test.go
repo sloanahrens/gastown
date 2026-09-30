@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/intent"
 )
 
 func TestPauseIsPausedRoundTrip(t *testing.T) {
@@ -414,5 +416,69 @@ func TestListPaused(t *testing.T) {
 			t.Errorf("ListPaused[%q] reason = %q, want %q (got: %v)",
 				addr, byAddress[addr], reason, byAddress)
 		}
+	}
+}
+
+// TestPauseAndResumeKeepTheSeatIntent: the pause marker is the seat's intent
+// record (gt-4k3fj.1). Pausing and resuming change the hold only; the restart
+// budget and incarnation the supervisor keeps in the same file survive both.
+func TestPauseAndResumeKeepTheSeatIntent(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: "polecat", Name: "flint"}
+	stamp := time.Now().UTC().Truncate(time.Second)
+	if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+		r.IncarnationID = "inc-7"
+		r.Restarts = []time.Time{stamp}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Pause(town, "gastown", "polecat", "flint", "inspect", "human", "working"); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	rec, err := intent.Read(town, seat)
+	if err != nil || !rec.Held() || rec.IncarnationID != "inc-7" || len(rec.Restarts) != 1 {
+		t.Fatalf("after Pause: %+v %v; want held with incarnation and budget kept", rec, err)
+	}
+
+	if err := Resume(town, "gastown", "polecat", "flint"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	rec, err = intent.Read(town, seat)
+	if err != nil || rec.Held() || rec.IncarnationID != "inc-7" || len(rec.Restarts) != 1 {
+		t.Fatalf("after Resume: %+v %v; want free with incarnation and budget kept", rec, err)
+	}
+}
+
+// TestResumeClearsASupervisorFreeze: a seat the supervisor froze on an
+// exhausted restart budget reads as paused, and `gt agent resume` frees it.
+func TestResumeClearsASupervisorFreeze(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: "polecat", Name: "flint"}
+	if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+		r.Frozen = true
+		r.Restarts = []time.Time{time.Now(), time.Now(), time.Now()}
+		r.Reason = "restart budget exhausted"
+		r.PausedBy = "supervisor"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if paused, st, err := IsPaused(town, "gastown", "polecat", "flint"); err != nil || !paused || st.PausedBy != "supervisor" {
+		t.Fatalf("frozen seat: paused=%v st=%+v err=%v; want paused by supervisor", paused, st, err)
+	}
+	if err := Resume(town, "gastown", "polecat", "flint"); err != nil {
+		t.Fatal(err)
+	}
+	if paused, _, err := IsPaused(town, "gastown", "polecat", "flint"); err != nil || paused {
+		t.Fatalf("after resume: paused=%v err=%v", paused, err)
+	}
+	// Resuming a frozen seat also empties its budget; otherwise the next
+	// restart would freeze it again at once.
+	if rec, _ := intent.Read(town, seat); len(rec.Restarts) != 0 {
+		t.Fatalf("restarts after resuming a frozen seat = %d, want 0", len(rec.Restarts))
 	}
 }

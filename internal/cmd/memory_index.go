@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,8 +17,37 @@ import (
 // refinery, and deacon session (gt-hp7t).
 //
 // The index keeps the cheap part, which memories exist and what each is about,
-// and defers the full text to `gt memories <key>`, a retrieval path that
-// already existed and does a substring match over key and value.
+// and defers the full text to `bd kv get <key>`. Entries show the full kv key
+// so that lookup needs no translation from a display name.
+
+// Memories live in two kv namespaces: gt.<type>.<key>, which the retired
+// gt remember wrote, and memory.<key>, which `bd remember` writes. Both corpora
+// are live, so every reader has to accept both prefixes (gt-o51s).
+const (
+	memoryKeyPrefix       = "gt."
+	memoryLegacyKeyPrefix = "memory."
+)
+
+// isMemoryKey reports whether a beads kv key holds a memory, in either the gt.*
+// or the legacy memory.* namespace.
+func isMemoryKey(key string) bool {
+	return strings.HasPrefix(key, memoryKeyPrefix) || strings.HasPrefix(key, memoryLegacyKeyPrefix)
+}
+
+// validMemoryTypes are the recognized memory type categories.
+// Typed memories are stored as gt.<type>.<key> in the kv store.
+// Legacy untyped memories (gt.<key>) are treated as "general".
+var validMemoryTypes = map[string]string{
+	"feedback":  "Guidance or corrections from users — behavioral rules for future work",
+	"project":   "Ongoing work context, goals, deadlines, decisions",
+	"user":      "Info about the user's role, preferences, expertise",
+	"reference": "Pointers to external resources (URLs, tools, dashboards)",
+	"general":   "Uncategorized memories (default)",
+}
+
+// memoryTypeOrder defines the injection priority during gt prime.
+// Feedback first (behavioral corrections), then user context, then the rest.
+var memoryTypeOrder = []string{"feedback", "user", "project", "reference", "general"}
 
 const (
 	// memorySummaryMaxChars bounds the preview rendered for a single memory.
@@ -34,9 +65,9 @@ const (
 
 // memoryEntry is one stored memory selected for display.
 type memoryEntry struct {
-	memType  string
-	shortKey string
-	value    string
+	memType string
+	key     string // full kv key, as bd kv get takes it
+	value   string
 }
 
 // collectMemories groups the kv store's memories by type, each group sorted by
@@ -51,16 +82,15 @@ func collectMemories(kvs map[string]string) map[string][]memoryEntry {
 		memType, shortKey := parseMemoryKey(k)
 		if shortKey == "" {
 			// A key that is nothing but a namespace prefix (`gt.`, `memory.`,
-			// or either one plus a bare type) has no key to show and cannot be
-			// addressed by the `gt memories <key>` path the index points at, so
-			// it is not an index entry. It is still listed by `gt memories`.
+			// or either one plus a bare type) names no memory, so it is not an
+			// index entry. bd kv list still shows it.
 			continue
 		}
-		grouped[memType] = append(grouped[memType], memoryEntry{memType: memType, shortKey: shortKey, value: v})
+		grouped[memType] = append(grouped[memType], memoryEntry{memType: memType, key: k, value: v})
 	}
 	for t := range grouped {
 		sort.Slice(grouped[t], func(i, j int) bool {
-			return grouped[t][i].shortKey < grouped[t][j].shortKey
+			return grouped[t][i].key < grouped[t][j].key
 		})
 	}
 	return grouped
@@ -71,7 +101,7 @@ func collectMemories(kvs map[string]string) map[string][]memoryEntry {
 //
 // Every memory stays discoverable at every budget: an entry renders as a
 // "key: preview" line, falls back to a bare key when the budget is nearly
-// spent, and is only dropped, with a count and a pointer to `gt memories`, if
+// spent, and is only dropped, with a count and a pointer to `bd kv list`, if
 // even bare keys overflow.
 func renderMemoryIndex(grouped map[string][]memoryEntry, maxChars int) string { //nolint:unparam // budget is parameterized so tests can drive the degradation ladder
 	total := 0
@@ -105,8 +135,8 @@ func renderMemoryIndex(grouped map[string][]memoryEntry, maxChars int) string { 
 		var section strings.Builder
 		for _, m := range mems {
 			spent := b.Len() + len(header) + section.Len()
-			full := fmt.Sprintf("- **%s**: %s\n", m.shortKey, memorySummary(m.value))
-			keyOnly := fmt.Sprintf("- %s\n", m.shortKey)
+			full := fmt.Sprintf("- **%s**: %s\n", m.key, memorySummary(m.value))
+			keyOnly := fmt.Sprintf("- %s\n", m.key)
 
 			switch {
 			case spent+len(full) <= maxChars:
@@ -118,7 +148,7 @@ func renderMemoryIndex(grouped map[string][]memoryEntry, maxChars int) string { 
 				continue
 			}
 			if example == "" {
-				example = m.shortKey
+				example = m.key
 			}
 		}
 
@@ -129,16 +159,15 @@ func renderMemoryIndex(grouped map[string][]memoryEntry, maxChars int) string { 
 	}
 
 	if omitted > 0 {
-		fmt.Fprintf(&b, "\n%d more memories not listed (index budget) — see `gt memories`.\n", omitted)
+		fmt.Fprintf(&b, "\n%d more memories not listed (index budget) — see `bd kv list`.\n", omitted)
 	}
 
-	b.WriteString("\nPreviews only — full text: `gt memories <key>`")
+	b.WriteString("\nPreviews only — full text: `bd kv get <key>`")
 	if example != "" {
-		// Keys are short in practice, but `gt remember --key` does not length-
-		// limit them, and an unbounded echo here would be the one way for this
-		// section to blow past its budget. A truncated key still works as a
-		// search term.
-		fmt.Fprintf(&b, " (e.g. `gt memories %s`)", truncateWords([]rune(example), memoryExampleMaxChars))
+		// Keys are short in practice, but nothing length-limits them, and an
+		// unbounded echo here would be the one way for this section to blow
+		// past its budget.
+		fmt.Fprintf(&b, " (e.g. `bd kv get %s`)", truncateWords([]rune(example), memoryExampleMaxChars))
 	}
 	b.WriteString(".\n")
 
@@ -173,7 +202,7 @@ func memorySummary(value string) string {
 // A terminator must be followed by a space, and the period of an abbreviation
 // ("e.g.", "i.e.") or an ordinal ("1.", "A.") is not a terminator. A wrong
 // guess costs only a longer or shorter preview, since the full text is one
-// `gt memories <key>` away, so these rules stay deliberately simple.
+// `bd kv get <key>` away, so these rules stay deliberately simple.
 func firstSentenceEnd(runes []rune) int {
 	for i := 1; i < len(runes); i++ {
 		if runes[i] != ' ' {
@@ -232,4 +261,61 @@ func truncateWords(runes []rune, max int) string { //nolint:unparam // max is pa
 		}
 	}
 	return string(cut)
+}
+
+// parseMemoryKey extracts the type and short key from a full kv key.
+// Handles both typed keys (gt.<type>.<key> or memory.<type>.<key>) and legacy
+// untyped keys (gt.<key> or memory.<key>).
+func parseMemoryKey(kvKey string) (memType, shortKey string) {
+	prefix := memoryLegacyKeyPrefix
+	if strings.HasPrefix(kvKey, memoryKeyPrefix) {
+		prefix = memoryKeyPrefix
+	}
+
+	rest := strings.TrimPrefix(kvKey, prefix)
+	if rest == "" {
+		return "general", ""
+	}
+
+	// Check if first segment is a known type
+	if dotIdx := strings.Index(rest, "."); dotIdx > 0 {
+		candidate := rest[:dotIdx]
+		if _, ok := validMemoryTypes[candidate]; ok {
+			return candidate, rest[dotIdx+1:]
+		}
+	}
+
+	// Legacy untyped memory
+	return "general", rest
+}
+
+// parseBdKvListJSON parses bd kv list --json output into displayable string values.
+func parseBdKvListJSON(data []byte) (map[string]string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing kv list: %w", err)
+	}
+
+	kvs := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s *string
+		if err := json.Unmarshal(v, &s); err == nil {
+			if s != nil {
+				kvs[k] = *s
+			}
+			continue
+		}
+
+		if !isMemoryKey(k) {
+			continue
+		}
+
+		// Keep non-string memory values visible without promoting bd metadata.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, v); err != nil {
+			continue
+		}
+		kvs[k] = compact.String()
+	}
+	return kvs, nil
 }

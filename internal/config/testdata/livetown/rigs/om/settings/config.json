@@ -1,0 +1,16 @@
+{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "GOFLAGS=-p=6 make test",
+    "lint_command": "make lint",
+    "editorial": {
+      "required": true
+    }
+  },
+  "role_agents": {
+    "witness": "deepseek-flash-patrol",
+    "refinery": "deepseek-flash-patrol"
+  }
+}

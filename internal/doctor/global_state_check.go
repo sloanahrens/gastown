@@ -41,7 +41,7 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		if os.IsNotExist(err) {
 			result.Message = "Global state not initialized"
-			result.FixHint = "Run: gt enable"
+			result.FixHint = "Run from the town root: gt install . --force --shell"
 			result.Status = StatusWarning
 			return result
 		}
@@ -87,14 +87,14 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(errors) > 0 {
 		result.Status = StatusError
 		result.Message = errors[0]
-		result.FixHint = "Run: gt shell install"
+		result.FixHint = "Run from the town root: gt install . --force --shell"
 	} else if len(warnings) > 0 {
 		result.Status = StatusWarning
 		result.Message = warnings[0]
 		if !s.Enabled {
-			result.FixHint = "Run: gt enable"
+			result.FixHint = "Run from the town root: gt install . --force --shell"
 		} else {
-			result.FixHint = "Run: gt shell install"
+			result.FixHint = "Run from the town root: gt install . --force --shell"
 		}
 	} else {
 		result.Message = "Global state healthy"

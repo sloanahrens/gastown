@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean gate test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate test-integration lint-tools
 
 # The gate (docs/testing.md, "The gate"). Two targets are the only test entry
 # points, and every caller runs them verbatim: CI, gt done, the land path and
@@ -23,7 +23,6 @@
 # `gate: FAILED at <stage>` line on stderr.
 
 BINARY := gt
-BINARY_DESKTOP := gt-desktop
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
 E2E_IMAGE ?= gastown-test
@@ -67,8 +66,6 @@ ifeq ($(shell uname),Darwin)
 endif
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-server ./cmd/gt-proxy-server
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
@@ -83,6 +80,7 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
 	golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
@@ -96,12 +94,6 @@ docs-lint:
 # checkout; BEADS_REF defaults to origin/main. Builds bd in a temp dir only.
 bd-command-tree:
 	scripts/refresh-bd-command-tree.sh
-
-desktop-build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop
-
-desktop-run:
-	go run ./cmd/gt-desktop
 
 check-up-to-date:
 	@# Deploy merged code only (gt-o848l): HEAD must be in origin/main with no
@@ -316,7 +308,46 @@ test-timing:
 	bash scripts/test-timing.sh $(PKGS)
 
 test-makefile:
-	bash scripts/test-makefile.sh
+	bash scripts/check-install-path_test.sh
+	bash scripts/install-binary_test.sh
+	bash scripts/check-deploy-source_test.sh
+	bash -n scripts/install-gt.sh
+	bash -n scripts/lib/install-gt-lib.sh
+	bash scripts/install-gt_test.sh
+	bash -n scripts/install-after-merge.sh
+	bash scripts/install-after-merge_test.sh
+	bash -n plugins/dolt-log-rotate/run.sh
+	bash -n plugins/dolt-log-rotate/run_test.sh
+	bash plugins/dolt-log-rotate/run_test.sh
+	bash -n plugins/stuck-agent-dog/run.sh
+	bash -n plugins/stuck-agent-dog/run_test.sh
+	bash plugins/stuck-agent-dog/run_test.sh
+	bash -n plugins/compactor-dog/run.sh
+	bash -n plugins/compactor-dog/run_test.sh
+	bash plugins/compactor-dog/run_test.sh
+	bash -n plugins/stuck-work-dog/run.sh
+	bash -n plugins/stuck-work-dog/run_test.sh
+	bash plugins/stuck-work-dog/run_test.sh
+	bash -n plugins/rebuild-gt/run.sh
+	bash -n plugins/rebuild-gt/run_test.sh
+	bash plugins/rebuild-gt/run_test.sh
+	bash -n plugins/gitignore-reconcile/run.sh
+	bash -n plugins/git-hygiene/run.sh
+	bash -n plugins/submodule-commit/run.sh
+	bash -n plugins/submodule-commit/run_test.sh
+	bash plugins/submodule-commit/run_test.sh
+	bash -n plugins/rig-list-consumers/run_test.sh
+	bash plugins/rig-list-consumers/run_test.sh
+	bash -n plugins/quality-review/run.sh
+	bash -n plugins/quality-review/run_test.sh
+	bash plugins/quality-review/run_test.sh
+	bash -n plugins/seat-refill/run.sh
+	bash -n plugins/seat-refill/run_test.sh
+	bash plugins/seat-refill/run_test.sh
+	bash -n scripts/docs-lint.sh
+	bash scripts/docs-lint_test.sh
+	bash -n scripts/repo-guards.sh
+	bash scripts/repo-guards_test.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

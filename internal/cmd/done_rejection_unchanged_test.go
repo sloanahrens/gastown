@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The scenarios below reproduce gt-0jzd5 against real repositories: a branch is
@@ -380,5 +381,45 @@ func TestReportUnchangedSinceRejection_NoRejectionNotes(t *testing.T) {
 
 	if err := checkRefusal(t, f, "Findings: look at the do_flush helper.\n", tipsOf(nil)); err != nil {
 		t.Fatalf("notes without a rejection blocked the submission: %v", err)
+	}
+}
+
+// TestReportUnchangedSinceRejection_ReadsLandsHeadLine: Land() writes its
+// rejections on the work bead with the rejected tip on a Head: line and the
+// work bead (not an MR wisp) on the MR: line. The guard takes the tip from
+// Head: directly, so an unchanged resubmission after a Land rejection is
+// refused with no MR record to look up (ADR 0004).
+func TestReportUnchangedSinceRejection_ReadsLandsHeadLine(t *testing.T) {
+	t.Parallel()
+	f := newRejectedReworkFixture(t)
+	notes := land.FormatRejectionNote(land.RejectionNote{
+		Kind: "gate", Reason: "gate failed on the merged tree", Branch: f.branch, Target: "main",
+		MR: "gt-0jzd5", Head: f.rejectedSHA,
+	})
+	noMRs := tipsOf(map[string]string{})
+	if err := checkRefusal(t, f, notes, noMRs); err == nil {
+		t.Fatal("an unchanged resubmission after a Land rejection was accepted")
+	}
+
+	writeTestFile(t, filepath.Join(f.polecat, "fix.txt"), "addressed\n")
+	runGitCmd(t, f.polecat, "add", "-A")
+	runGitCmd(t, f.polecat, "commit", "-m", "fix: address the finding")
+	if err := checkRefusal(t, f, notes, noMRs); err != nil {
+		t.Fatalf("a changed resubmission was refused: %v", err)
+	}
+}
+
+// A Head: this repository does not hold cannot be compared. "Cannot tell"
+// passes, as it does for an MR with no commit_sha: refusing would strand the
+// polecat on work it cannot unblock.
+func TestReportUnchangedSinceRejection_UnknownHeadPasses(t *testing.T) {
+	t.Parallel()
+	f := newRejectedReworkFixture(t)
+	notes := land.FormatRejectionNote(land.RejectionNote{
+		Kind: "gate", Reason: "r", Branch: f.branch, Target: "main", MR: "gt-0jzd5",
+		Head: "1111111111111111111111111111111111111111",
+	})
+	if err := checkRefusal(t, f, notes, tipsOf(map[string]string{})); err != nil {
+		t.Fatalf("an unknown rejected head refused the submission: %v", err)
 	}
 }

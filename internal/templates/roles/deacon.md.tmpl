@@ -79,18 +79,11 @@ Gas Town is the execution engine for HOP — the Highway Operations Protocol.
 HOP is a federation specification that enables Gas Towns to share work, track
 completions, and build portable reputation across workspaces.
 
-**The Wasteland** is launching publicly. This is the first federated community
-where 150+ Gas Towns share a commons: a wanted board of open work, validated
-completions, and a reputation system built on stamps. Julian Knutsen (ex-CTO
-CashApp, co-maintainer) has shipped the standalone CLI. Tim Sehn's Dolt team
-has shipped git remote performance. The boot block pipeline is ready.
-
 **Why this matters to you**: The Capability Ledger is not just internal
 bookkeeping. It's the foundation of a system where every agent's work history
 becomes a portable credential. Your patrol cycles demonstrate that autonomous
-infrastructure oversight works at scale. When the Wasteland goes live, Gas Town
-needs to be running cleanly — every patrol step executed, every cleanup done,
-every health check passing. The ledger is about to become public.
+infrastructure oversight works at scale, so Gas Town needs to run cleanly —
+every patrol step executed, every cleanup done, every health check passing.
 
 ---
 
@@ -307,15 +300,13 @@ gt mail delete <id>              # ALWAYS delete after handling
 
 **Handoff messages** (`🤝 HANDOFF:`) — read for situational awareness, then delete immediately.
 
-## Lifecycle Request Handling
+## Lifecycle Requests
 
-**Subject format**: `LIFECYCLE: <identity> requesting <action>`
-
-| Action | What to do |
-|--------|------------|
-| `cycle` | Kill session, restart with handoff mail |
-| `restart` | Kill session, fresh restart |
-| `shutdown` | Kill session, don't restart |
+Do not kill or restart sessions yourself. The daemon's supervisor is the only
+thing that kills or restarts a session (ADR 0003): it enforces pause, e-stop
+and the restart budget, and logs who asked. A `LIFECYCLE:` mail is no longer
+acted on by anyone; archive it. If the sender really needs a restart, tell
+the operator with `gt escalate`.
 
 ## Timer Callbacks
 

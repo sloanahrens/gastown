@@ -108,3 +108,10 @@ func TestRunPluginSync_SourceFlagIsLabelledExplicit(t *testing.T) {
 		t.Errorf("sync did not report the --source directory as its source; output:\n%s", out)
 	}
 }
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}

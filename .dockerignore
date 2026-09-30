@@ -24,7 +24,6 @@ node_modules
 *.db
 *.exe
 gt
-gt-desktop
 *.log
 *.tmp
 crew/

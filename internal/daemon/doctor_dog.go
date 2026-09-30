@@ -28,32 +28,6 @@ const (
 	defaultDoctorDogBackupStaleSeconds = 3600.0
 )
 
-// DoctorDogConfig holds configuration for the doctor_dog patrol.
-type DoctorDogConfig struct {
-	// Enabled controls whether the doctor dog runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "5m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// Databases lists the expected production databases.
-	// If empty, uses the default set.
-	Databases []string `json:"databases,omitempty"`
-
-	// Advisory thresholds — when exceeded, recommendations are added to the report.
-	// Agents (Mayor/Deacon) read the report and decide what actions to take.
-	// Zero values mean "use default".
-
-	// LatencyAlertMs: latency threshold in ms. Default: 5000 (5s).
-	LatencyAlertMs float64 `json:"latency_alert_ms,omitempty"`
-
-	// OrphanAlertCount: database count threshold. Default: 20.
-	OrphanAlertCount int `json:"orphan_alert_count,omitempty"`
-
-	// BackupStaleSeconds: backup age threshold in seconds. Default: 3600 (1hr).
-	BackupStaleSeconds float64 `json:"backup_stale_seconds,omitempty"`
-}
-
 // doctorDogThresholds returns the effective thresholds, using config overrides or defaults.
 func doctorDogThresholds(config *DaemonPatrolConfig) (latencyMs float64, orphanCount int, backupStaleSec float64) {
 	latencyMs = defaultDoctorDogLatencyAlertMs

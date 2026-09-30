@@ -35,29 +35,6 @@ const (
 	compactorQueryTimeout = 30 * time.Second
 )
 
-// CompactorDogConfig holds configuration for the compactor_dog patrol.
-type CompactorDogConfig struct {
-	Enabled     bool   `json:"enabled"`
-	IntervalStr string `json:"interval,omitempty"`
-	// Threshold is the minimum commit count before this patrol escalates.
-	// The daemon monitors and escalates — it does not compact. Defaults to
-	// 2000; see defaultCompactorCommitThreshold for why that is well above the
-	// plugin's 500/1000 escalation lines.
-	Threshold int `json:"threshold,omitempty"`
-	// Databases lists specific database names to check.
-	// If empty, falls back to wisp_reaper config, then auto-discovery.
-	Databases []string `json:"databases,omitempty"`
-
-	// Deprecated: has no effect. The daemon patrol no longer compacts, so there
-	// is no mode to select. Compaction is operator-only:
-	// plugins/compactor-dog/run.sh --compact. The field is still parsed so that
-	// a stale daemon.json value is reported rather than silently dropped.
-	Mode string `json:"mode,omitempty"`
-	// Deprecated: has no effect. The daemon patrol no longer compacts, so there
-	// is no recent history to preserve. See Mode.
-	KeepRecent int `json:"keep_recent,omitempty"`
-}
-
 // compactorDogInterval returns the configured interval, or the default (24h).
 func compactorDogInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.CompactorDog != nil {

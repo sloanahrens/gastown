@@ -25,9 +25,9 @@ the checklist, then run `gt done`.
 
 **Speed principle:** You run the cheap gates (build, typecheck, lint) AFTER
 rebasing onto the target branch (pre-verify step), and you submit with plain
-`gt done` — never `--pre-verified`. That command re-runs the full gate set
-including the container suite under a slot cap and disables the auto-rebase,
-duplicating work the refinery and `gt done` already do.
+`gt done`. It rebases, runs the local gate (lint, build, the unit tier of
+the tests) and pushes; no flag skips that gate. The container suite runs once,
+on the merged tree, when the landing worker lands your branch.
 
 **Monorepo extras:** After implementation, you push a PR, wait for GitHub Actions
 CI to pass (fixing any failures), then wait for AI reviewers (CodeRabbit, Greptile)
@@ -575,10 +575,10 @@ gt slot run --role <rig>/<your-name> -- go test ./internal/that/package/
 
 Skip any empty/unconfigured commands silently.
 
-**3. Submit to merge queue** (never `--pre-verified`: it re-runs the full
-gate set under a slot cap and disables the auto-rebase):
+**3. Submit for landing** (`gt done` rebases, runs the local gate and pushes;
+no flag skips the gate):
 
-Run `gt done` once and leave it waiting: it takes the container-gate slot itself and is bounded. Never poll the slot or script a retry around it (gt-7dxw). Before you run `gt done` or `gt slot run`, read the container-gate rule in `docs/reference.md` — never-retry, the escalation path at the cap, and the wrapped form for a container suite you must run yourself.
+Run `gt done` once and let it finish: it runs the local gate itself and needs no container slot. Never script a retry around gt done (gt-7dxw). If it exits non-zero, fix what it names, commit, and run it once more. Before you run `gt slot run`, read the container-gate rule in `docs/reference.md` — never-retry, and the wrapped form for a container suite you must run yourself.
 
 ```bash
 gt done --target {{base_branch}}

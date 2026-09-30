@@ -1,0 +1,20 @@
+{
+  "type": "rig-settings",
+  "version": 1,
+  "namepool": {
+    "style": "minerals"
+  },
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "GOFLAGS=-p=8 make test",
+    "lint_command": "make lint",
+    "batch_enabled": true,
+    "batch_min_age": "5m",
+    "batch_min_count": 2,
+    "batch_max": 12
+  },
+  "role_agents": {
+    "witness": "deepseek-flash-patrol",
+    "refinery": "deepseek-flash-refinery"
+  }
+}

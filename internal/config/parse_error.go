@@ -2,7 +2,6 @@ package config
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,13 +20,18 @@ type ParseError struct {
 	Offset int64 // byte offset reported by the decoder, 0 when unknown
 	Line   int   // 1-based, 0 when unknown
 	Column int   // 1-based, 0 when unknown
-	Err    error
+	// Keys lists every undeclared key by dotted path, in file order, when
+	// the file was rejected for unknown keys.
+	Keys []string
+	Err  error
 }
 
 func (e *ParseError) Error() string {
 	where := "does not parse"
 	if e.Offset > 0 {
 		where = fmt.Sprintf("does not parse at offset %d (line %d, column %d)", e.Offset, e.Line, e.Column)
+	} else if e.Line > 0 {
+		where = fmt.Sprintf("does not parse at line %d", e.Line)
 	}
 	msg := strings.ReplaceAll(e.Err.Error(), "\n", " ")
 	return fmt.Sprintf("%s: %s: %s; gt will not start the town from it and will never rewrite it: fix the file by hand", e.Path, where, msg)
@@ -38,27 +42,13 @@ func (e *ParseError) Is(target error) bool { return target == ErrUnparseable }
 
 func (e *ParseError) Unwrap() error { return e.Err }
 
-// DecodeJSONFile decodes data (read from path) into v and returns a
-// *ParseError, with the decoder's byte offset turned into a line and column,
-// when it does not decode.
+// DecodeJSONFile is the one parser for town config files (gt-y3pgh.1). It
+// decodes data (read from path) into v strictly: one JSON value, and every
+// object key declared by v's type. Any failure is a *ParseError naming the
+// file, the offset turned into a line and column, and for unknown keys every
+// undeclared key path.
 func DecodeJSONFile(path string, data []byte, v any) error {
-	err := json.Unmarshal(data, v)
-	if err == nil {
-		return nil
-	}
-	pe := &ParseError{Path: path, Err: err}
-	var syn *json.SyntaxError
-	var typ *json.UnmarshalTypeError
-	switch {
-	case errors.As(err, &syn):
-		pe.Offset = syn.Offset
-	case errors.As(err, &typ):
-		pe.Offset = typ.Offset
-	}
-	if pe.Offset > 0 {
-		pe.Line, pe.Column = lineColumn(data, pe.Offset)
-	}
-	return pe
+	return decodeJSONStrict(path, data, v)
 }
 
 // lineColumn converts a decoder offset (bytes consumed, so the failing byte is
@@ -89,43 +79,4 @@ func CheckJSONFileParses(path string, v any) error {
 		return err
 	}
 	return DecodeJSONFile(path, data, v)
-}
-
-// refuseToReplaceUnparseable is the guard every writer of a town config file
-// runs first: a file it could not have read must not be replaced by whatever
-// the caller built from defaults.
-func refuseToReplaceUnparseable(path string, v any) error {
-	if err := CheckJSONFileParses(path, v); err != nil {
-		if errors.Is(err, ErrUnparseable) {
-			return err
-		}
-		return fmt.Errorf("checking %s before writing: %w", path, err)
-	}
-	return nil
-}
-
-// daemonPatrolConfigCheck decodes an existing daemon.json into the daemon's
-// own type, which this package cannot import (G3-19). The daemon package
-// installs it at init, so every gt binary checks a daemon.json the same way
-// the startup gate does; without it only syntax is checked.
-var daemonPatrolConfigCheck func(path string) error
-
-// RegisterDaemonPatrolConfigCheck installs the daemon.json decode check that
-// SaveDaemonPatrolConfig runs before replacing the file.
-func RegisterDaemonPatrolConfigCheck(fn func(path string) error) {
-	daemonPatrolConfigCheck = fn
-}
-
-func checkExistingDaemonPatrolConfig(path string) error {
-	if daemonPatrolConfigCheck != nil {
-		if err := daemonPatrolConfigCheck(path); err != nil {
-			if errors.Is(err, ErrUnparseable) {
-				return err
-			}
-			return fmt.Errorf("checking %s before writing: %w", path, err)
-		}
-		return nil
-	}
-	var anyJSON any
-	return refuseToReplaceUnparseable(path, &anyJSON)
 }

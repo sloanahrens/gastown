@@ -174,21 +174,10 @@ container suite verified at `gt done` asks for it in its own command
 slot for it. The session's own exported value is deliberately not an input: the slot
 decision and the environment the suite reads are one fact (gt-0hbm).
 
-That command text is a proxy for the thing the rule is about — a container
-starting — so a slot-free gate run is watched while it runs: a container that
-appears with no slot holder owning it is the run's, and the gate fails on it
-instead of letting a suite that ignored its own opt-out run beside the rest of
-the town (gt-0ss4). The gate's log records what the watch saw, so a slot-free
-run that started nothing says so.
-
-Run `gt done` **once**, then leave it alone. Its gate waits for the slot before
-it runs the container suites, printing a `still waiting for the container-gate
-slot …` line every couple of minutes while it does; a quiet pane between those
-lines is the ordinary case, not a hang. It gives up with a slot-acquire timeout
-once the cap (`merge_queue.test_verify_slot_timeout`, 60m by default) expires.
-On a slot-cap or run-budget failure the sanctioned move is a bead comment with
-the error and the verify-log path, then `gt escalate -s medium` asking the mayor
-for a one-shot `--skip-tests` ruling — not a second invocation.
+Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
+names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
+names and run `gt done` once more. A failure you believe your change did not cause goes in a
+bead comment, then `gt escalate -s medium`. No flag skips the gate.
 
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a
@@ -694,10 +683,9 @@ gt sling <bead> <rig>                    # Auto-convoy for dashboard visibility
 
 Agent overrides:
 
-- `gt start --agent <alias>` overrides the Mayor/Deacon runtime for this launch.
 - `gt sling <bead> <rig> --agent <alias>` honours a `polecat_pool` seat or refuses the sling; a seat that is full never spends on the other agent instead.
 - `gt mayor start|attach|restart --agent <alias>` and `gt deacon start|attach|restart --agent <alias>` do the same.
-- `gt start crew <name> --agent <alias>` and `gt crew at <name> --agent <alias>` override the crew worker runtime.
+- `gt crew start <name> --agent <alias>` and `gt crew at <name> --agent <alias>` override the crew worker runtime.
 
 ### Communication
 
@@ -798,7 +786,7 @@ bd dep add <child> <parent>  # child depends on parent
 ### Reading a bead's history
 
 `bd history <id>` prints one snapshot per retained Dolt commit. A flatten
-(`gt maintain`, `gt dolt flatten`, compactor-dog) discards those commits, and
+(`gt maintain`, compactor-dog, or the offline procedure in [dolt-history-offline.md](dolt-history-offline.md)) discards those commits, and
 the command does not say so — a bead whose snapshots begin at the flatten reads
 exactly like one whose snapshots begin at its creation, so a field showing a
 single value looks like a field that never changed.

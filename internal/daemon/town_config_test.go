@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -147,18 +146,16 @@ func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T
 	requireUnchanged(t, path, typeBroken)
 }
 
-// TestRestartSessionRefusesWhenTheStartupGateRefuses: the daemon's lifecycle
-// restart builds a tmux session directly, so it must ask the startup gate
-// first and surface the refusal before touching anything else.
-//
-//testpolicy:allow parallel — sets the package-wide bdgate check.
-func TestRestartSessionRefusesWhenTheStartupGateRefuses(t *testing.T) {
-	refusal := &config.ParseError{Path: "/town/settings/config.json", Offset: 3, Line: 1, Column: 3, Err: errors.New("invalid character")}
-	bdgate.Set(func() error { return refusal })
-	t.Cleanup(func() { bdgate.Set(nil) })
-	d := &Daemon{} // any field access past the gate would panic
-	err := d.restartSession("gt-witness", "gastown/witness")
-	if !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "gastown/witness") {
-		t.Fatalf("restartSession with a refusing gate = %v, want the refusal naming the identity", err)
+// TestNewRefusesAnUnknownDaemonJSONKey: a misspelled patrol key is a
+// refusal naming the key, not a patrol silently left at its default
+// (gt-y3pgh.1, G3-17).
+func TestNewRefusesAnUnknownDaemonJSONKey(t *testing.T) {
+	town := t.TempDir()
+	const misspelled = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"witness": {"enabeld": false}}}`
+	path := writeTownFile(t, town, "mayor/daemon.json", misspelled)
+	d, err := New(&Config{TownRoot: town, LogFile: filepath.Join(town, "daemon", "daemon.log"), PidFile: filepath.Join(town, "daemon", "daemon.pid")})
+	if d != nil || !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "patrols.witness.enabeld") {
+		t.Fatalf("New = %v, %v; want a refusal naming patrols.witness.enabeld", d, err)
 	}
+	requireUnchanged(t, path, misspelled)
 }

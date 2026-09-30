@@ -101,9 +101,6 @@ type SessionConfig struct {
 	// ReadyDelay sleeps for the runtime's configured readiness delay.
 	ReadyDelay bool
 
-	// AutoRespawn sets the auto-respawn hook so the session survives crashes.
-	AutoRespawn bool
-
 	// RemainOnExit sets remain-on-exit immediately after session creation.
 	RemainOnExit bool
 
@@ -251,12 +248,8 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		}
 	}
 
-	// 9. Auto-respawn hook.
-	if cfg.AutoRespawn {
-		if err := t.SetAutoRespawnHook(cfg.SessionID); err != nil {
-			fmt.Printf("warning: failed to set auto-respawn hook for %s: %v\n", cfg.Role, err)
-		}
-	}
+	// 9. (Removed) The tmux auto-respawn hook: a dead session is restarted by
+	// the daemon's supervisor, within its budget (gt-4k3fj.3, G1-06).
 
 	// 10. Accept startup dialogs (workspace trust + bypass permissions).
 	if cfg.AcceptBypass {

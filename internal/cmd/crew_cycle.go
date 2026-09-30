@@ -2,14 +2,7 @@ package cmd
 
 import (
 	"fmt"
-
-	"github.com/spf13/cobra"
 )
-
-// crewCycleSession is the --session flag for crew next/prev commands.
-// When run via tmux key binding (run-shell), the session context may not be
-// correct, so we pass the session name explicitly via #{session_name} expansion.
-var crewCycleSession string
 
 // cycleCrewSession switches to the next or previous crew session in the same rig.
 // direction: 1 for next, -1 for previous
@@ -34,12 +27,4 @@ func cycleCrewSession(direction int, sessionOverride string) error {
 	}
 
 	return cycleInGroup(direction, currentSession, sessions)
-}
-
-func runCrewNext(cmd *cobra.Command, args []string) error {
-	return cycleCrewSession(1, crewCycleSession)
-}
-
-func runCrewPrev(cmd *cobra.Command, args []string) error {
-	return cycleCrewSession(-1, crewCycleSession)
 }

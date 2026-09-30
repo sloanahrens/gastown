@@ -195,11 +195,11 @@ func (c *PatrolHooksWiredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(cfg.Patrols) > 0 {
+	if cfg.Patrols.Count() > 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("Daemon configured with %d patrol(s)", len(cfg.Patrols)),
+			Message: fmt.Sprintf("Daemon configured with %d patrol(s)", cfg.Patrols.Count()),
 		}
 	}
 

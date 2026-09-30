@@ -621,21 +621,6 @@ type DaemonConfig struct {
 	PollInterval      string `json:"poll_interval,omitempty"`      // e.g., "10s"
 }
 
-// DaemonPatrolConfig represents the daemon patrol configuration (mayor/daemon.json).
-// This configures how patrols are triggered and managed.
-type DaemonPatrolConfig struct {
-	Type      string                  `json:"type"`                // "daemon-patrol-config"
-	Version   int                     `json:"version"`             // schema version
-	Heartbeat *HeartbeatConfig        `json:"heartbeat,omitempty"` // heartbeat settings
-	Patrols   map[string]PatrolConfig `json:"patrols,omitempty"`   // named patrol configurations
-}
-
-// HeartbeatConfig represents heartbeat settings for daemon.
-type HeartbeatConfig struct {
-	Enabled  bool   `json:"enabled"`            // whether heartbeat is enabled
-	Interval string `json:"interval,omitempty"` // e.g., "3m"
-}
-
 // PatrolConfig represents a single patrol configuration.
 type PatrolConfig struct {
 	Enabled  bool     `json:"enabled"`            // whether this patrol is enabled
@@ -655,26 +640,14 @@ func NewDaemonPatrolConfig() *DaemonPatrolConfig {
 	return &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: CurrentDaemonPatrolConfigVersion,
-		Heartbeat: &HeartbeatConfig{
+		Heartbeat: &PatrolConfig{
 			Enabled:  true,
 			Interval: "3m",
 		},
-		Patrols: map[string]PatrolConfig{
-			"deacon": {
-				Enabled:  true,
-				Interval: "5m",
-				Agent:    "deacon",
-			},
-			"witness": {
-				Enabled:  true,
-				Interval: "5m",
-				Agent:    "witness",
-			},
-			"refinery": {
-				Enabled:  true,
-				Interval: "5m",
-				Agent:    "refinery",
-			},
+		Patrols: &PatrolsConfig{
+			Deacon:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
+			Witness:  &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
+			Refinery: &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
 		},
 	}
 }
@@ -737,6 +710,15 @@ type RigConfig struct {
 	LocalRepo   string       `json:"local_repo,omitempty"`
 	CreatedAt   time.Time    `json:"created_at"` // when the rig was created
 	Beads       *BeadsConfig `json:"beads,omitempty"`
+
+	// The fields below are written by internal/rig (rig.RigConfig) into the
+	// same file. They are declared here so strict decoding accepts the file
+	// the rig manager writes (gt-y3pgh.1); the two types merge in gt-y3pgh.2.
+	DefaultBranch   string                `json:"default_branch,omitempty"`
+	MergeQueue      *MergeQueueConfig     `json:"merge_queue,omitempty"`
+	Witness         *WitnessSessionConfig `json:"witness,omitempty"`
+	PolecatPoolSize int                   `json:"polecat_pool_size,omitempty"`
+	PolecatNames    []string              `json:"polecat_names,omitempty"`
 }
 
 // WorkflowConfig represents workflow settings for a rig.
@@ -1522,6 +1504,13 @@ type MergeQueueConfig struct {
 
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
+
+	// Gate is the one command the landing worker runs on the merged tree
+	// (land.LandGate, ADR 0004). Exit 0 lands; anything else rejects. Empty
+	// means `make gate` when the repo's Makefile has that target, else
+	// `make test`. A Docker-backed gate carries its own slot wrapper, e.g.
+	// "gt slot run --role hm/crew/sloan -- make test".
+	Gate string `json:"gate,omitempty"`
 
 	// TestVerifyRunTimeout overrides the wall-clock run budget for gt done's
 	// default test-verify gate, once the container-gate slot is held (gt-pnkd).

@@ -37,13 +37,12 @@ import (
 // the backstop for the shapes it cannot see.
 const (
 	doneSlotLoopReason      = "Never poll the slot or script a gt done retry"
-	doneSlotLoopAlternative = "Alternative: run `gt done` once, as its own command. It waits for the " +
-		"container-gate slot itself, prints a progress line while it waits, and gives up with a " +
-		"slot-acquire timeout if it cannot get one. Do not loop, watch, or script a retry around " +
-		"`gt done` or `gt slot`: a polling loop holds the gate other agents are queued behind, one " +
-		"pass at a time (gt-7dxw). If `gt done` fails on the test-verify slot cap or the run budget, " +
-		"add a bead comment with the error and the verify log path, then `gt escalate -s medium` " +
-		"asking the mayor for a one-shot `--skip-tests` ruling, and wait (gt-pnkd)."
+	doneSlotLoopAlternative = "Alternative: run `gt done` once, as its own command. It runs the " +
+		"local gate itself and exits non-zero naming what failed. Do not loop, watch, or script a " +
+		"retry around `gt done` or `gt slot`: a polling loop holds the gate other agents are queued " +
+		"behind, one pass at a time (gt-7dxw). If `gt done` fails, fix what it names and run it once " +
+		"more; if you believe the failure is not caused by your change, add a bead comment with the " +
+		"error, then `gt escalate -s medium`, and wait. No flag skips the gate."
 )
 
 // doneSlotLoopKeywords are the block-shaped shell loop openers. The deacon
