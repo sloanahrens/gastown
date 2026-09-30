@@ -255,22 +255,21 @@ func lookupFailBD(hasWork bool) *fakeCLI {
 // does NOT kill a polecat when the agent bead lookup fails but hasAssignedOpenWork
 // confirms the polecat has an open work bead assigned. This is the regression test
 // for the working-bead-lookup-failed kill bug (GH#3342 followup).
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 
 	bd := lookupFailBD(true /* hasWork */)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier:         notifyfake.New(),
+		bdPath:           "bd",
+		execCmd:          bd.run,
 	}
 
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
@@ -292,22 +291,21 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 // TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork verifies that reapIdlePolecat
 // DOES kill a polecat when the agent bead lookup fails, no work is assigned, and the
 // agent process is not running. Ensures the hasAssignedOpenWork guard doesn't over-protect.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 
 	bd := lookupFailBD(false /* no work */)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier:         notifyfake.New(),
+		bdPath:           "bd",
+		execCmd:          bd.run,
 	}
 
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
@@ -337,11 +335,9 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 // This is the regression test for GH#3342: a failed gt sling rollback can clear
 // the hook while the agent is actively working, causing the daemon to incorrectly
 // reap the session.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 	// Register "myr" prefix so session name resolves to "myr-mycat"
-	registerMyr(t)
+	t.Parallel()
 
 	// No work bead is assigned (a failed sling rollback cleared the hook).
 	bd := newWorkBD(t)
@@ -349,12 +345,13 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("codex", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("codex", time.Now().Add(-time.Hour)),
+		notifier:         notifyfake.New(),
+		bdPath:           "bd",
+		execCmd:          bd.run,
 	}
 
 	// Write a stale heartbeat (working state, 20 minutes old) so the reaper considers it
@@ -379,11 +376,9 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 // TestReapIdlePolecat_ReapsIdleNoHook verifies that reapIdlePolecat DOES kill
 // a polecat whose hook_bead is missing AND whose agent process is NOT running
 // (idle shell). This ensures the GH#3342 fix doesn't prevent legitimate reaping.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 	// Register "myr" prefix so session name resolves to "myr-mycat"
-	registerMyr(t)
+	t.Parallel()
 
 	// No work bead is assigned (a failed sling rollback cleared the hook).
 	bd := newWorkBD(t)
@@ -391,12 +386,13 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier:         notifyfake.New(),
+		bdPath:           "bd",
+		execCmd:          bd.run,
 	}
 
 	// Write a stale heartbeat (working state, 20 minutes old) so the reaper considers it
@@ -430,18 +426,17 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 // reused polecat name inherits the PREVIOUS incarnation's heartbeat file
 // (state=exiting, hours old) until the new incarnation writes its own — the
 // reaper must not treat that inherited staleness as the new session's idle time.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-3*time.Minute)),
-		notifier: notifyfake.New(),
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("bash", time.Now().Add(-3*time.Minute)),
+		notifier:         notifyfake.New(),
 	}
 
 	// Heartbeat left behind by a PREVIOUS incarnation of this name: state=exiting,
@@ -479,21 +474,20 @@ func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing
 // in state=exiting" — because once the gt done process is gone and nothing is
 // renewing, the session really is abandoned and the reaper must still reclaim
 // the API slot.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier:         notifyfake.New(),
 	}
 
-	sessionName := session.PolecatSessionName(session.PrefixFor("myr"), "mycat")
+	sessionName := session.PolecatSessionName(myrPrefixes().PrefixForRig("myr"), "mycat")
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", sessionName+".json")
 	writeStaleExitingHeartbeat := func(t *testing.T) {
 		t.Helper()
@@ -546,10 +540,8 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 // the idle threshold; an unknown one must wait for the 3x ceiling like a live
 // one. The session's pane runs a shell, so the old error-dropping check read
 // the failure as dead and reaped at 2.5x.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 
 	bd := lookupFailBD(false /* no work */)
 
@@ -558,12 +550,13 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
 	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: timed out"))
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     tm,
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		prefixRegistryFn: myrPrefixes,
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             tm,
+		notifier:         notifyfake.New(),
+		bdPath:           "bd",
+		execCmd:          bd.run,
 	}
 
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")

@@ -1670,7 +1670,6 @@ func checkAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T, beadsFor a
 // Regression test for the double-prefix bug (tr-testrig-N instead of tr-N).
 func TestOverflowNameSessionFormat(t *testing.T) {
 	t.Parallel()
-	// TestMain registers "tr" for testrig, so PrefixFor("testrig") returns "tr".
 
 	tmpDir := t.TempDir()
 
@@ -1708,7 +1707,9 @@ func TestOverflowNameSessionFormat(t *testing.T) {
 	}
 
 	// Create session manager
-	sessMgr := NewSessionManager(nil, r)
+	prefixes := session.NewPrefixRegistry()
+	prefixes.Register("tr", "testrig")
+	sessMgr := &SessionManager{rig: r, prefixes: prefixes}
 	sessionName := sessMgr.SessionName(overflowName)
 
 	// Verify session name is tr-3, NOT tr-testrig-3

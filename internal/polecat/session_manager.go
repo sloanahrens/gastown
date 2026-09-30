@@ -72,6 +72,9 @@ type SessionManager struct {
 	// gits opens git on the polecat's worktree; its zero value opens
 	// *git.Git.
 	gits gitOpener
+	// prefixes resolves the rig's session prefix; nil reads
+	// session.DefaultRegistry.
+	prefixes *session.PrefixRegistry
 }
 
 // sessionTmux is the tmux surface a SessionManager drives. *tmux.Tmux
@@ -164,10 +167,11 @@ type SessionInfo struct {
 // Validates that the polecat name doesn't contain the rig prefix to prevent
 // double-prefix bugs (e.g., "gt-gastown_manager-gastown_manager-142").
 func (m *SessionManager) SessionName(polecat string) string {
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), polecat)
+	prefix := m.prefix()
+	sessionName := session.PolecatSessionName(prefix, polecat)
 
 	// Validate session name format to detect double-prefix bugs
-	if err := validateSessionName(sessionName, m.rig.Name); err != nil {
+	if err := validateSessionName(sessionName, prefix, m.rig.Name); err != nil {
 		// Log warning but don't fail - allow the session to be created
 		// so we can track and clean up malformed sessions later
 		fmt.Fprintf(os.Stderr, "Warning: malformed session name: %v\n", err)
@@ -176,13 +180,21 @@ func (m *SessionManager) SessionName(polecat string) string {
 	return sessionName
 }
 
+// prefix returns the rig's session prefix.
+func (m *SessionManager) prefix() string {
+	if m.prefixes != nil {
+		return m.prefixes.PrefixForRig(m.rig.Name)
+	}
+	return session.PrefixFor(m.rig.Name)
+}
+
 // validateSessionName checks for double-prefix session names.
 // Returns an error if the session name has the rig prefix duplicated.
 // Example bad name: "gt-gastown_manager-gastown_manager-142"
-func validateSessionName(sessionName, rigName string) error {
+func validateSessionName(sessionName, rigPrefix, rigName string) error {
 	// Expected format: gt-<rig>-<name>
 	// Check if the name part starts with the rig prefix (indicates double-prefix bug)
-	prefix := session.PrefixFor(rigName) + "-"
+	prefix := rigPrefix + "-"
 	if !strings.HasPrefix(sessionName, prefix) {
 		return nil // Not our rig, can't validate
 	}
@@ -862,7 +874,7 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	prefix := session.PrefixFor(m.rig.Name) + "-"
+	prefix := m.prefix() + "-"
 	var infos []SessionInfo
 
 	for _, sessionID := range sessions {

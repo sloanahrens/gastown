@@ -9,53 +9,28 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-func TestDefaultRegistrySwapAndPrefixFor(t *testing.T) {
-	old := DefaultRegistry()
-	defer SetDefaultRegistry(old)
-
+func TestIsKnownSession_UsesRegistryAndHQPrefix(t *testing.T) {
+	t.Parallel()
 	r := NewPrefixRegistry()
 	r.Register("xy", "xrig")
-	SetDefaultRegistry(r)
 
-	if got := DefaultRegistry(); got != r {
-		t.Fatalf("DefaultRegistry() did not return swapped registry")
-	}
-	if got := PrefixFor("xrig"); got != "xy" {
-		t.Fatalf("PrefixFor(xrig) = %q, want %q", got, "xy")
-	}
-	if got := PrefixFor("unknown-rig"); got != DefaultPrefix {
-		t.Fatalf("PrefixFor(unknown-rig) = %q, want %q", got, DefaultPrefix)
-	}
-}
-
-func TestIsKnownSession_UsesDefaultRegistryAndHQPrefix(t *testing.T) {
-	old := DefaultRegistry()
-	defer SetDefaultRegistry(old)
-
-	r := NewPrefixRegistry()
-	r.Register("xy", "xrig")
-	SetDefaultRegistry(r)
-
-	if !IsKnownSession("hq-mayor") {
+	if !r.IsKnownSession("hq-mayor") {
 		t.Fatal("expected hq-mayor to always be known")
 	}
-	if !IsKnownSession("xy-worker") {
+	if !r.IsKnownSession("xy-worker") {
 		t.Fatal("expected xy-worker to be known via registry prefix")
 	}
-	if IsKnownSession("zz-worker") {
+	if r.IsKnownSession("zz-worker") {
 		t.Fatal("expected zz-worker to be unknown")
 	}
 }
 
-func TestInitRegistryDoesNotLoadAgentRegistryGlobally(t *testing.T) {
+func TestLoadRegistryDoesNotLoadAgentRegistryGlobally(t *testing.T) {
+	t.Parallel()
 	// InitRegistry used to merge the town's settings/agents.json into a
 	// process-global agent registry; rig files merged later leaked into every
 	// other rig (gt-rg4f1). It now only reports a malformed file: agents are
 	// resolved against config.AgentRegistryFor(town, rig).
-	//
-	// NOTE: cannot use t.Parallel() — mutates the global prefix registry.
-	old := DefaultRegistry()
-	defer SetDefaultRegistry(old)
 
 	townRoot := t.TempDir()
 
@@ -83,19 +58,17 @@ func TestInitRegistryDoesNotLoadAgentRegistryGlobally(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InitRegistry(townRoot); err != nil {
-		t.Fatalf("InitRegistry: %v", err)
+	if _, err := LoadRegistry(townRoot); err != nil {
+		t.Fatalf("LoadRegistry: %v", err)
 	}
 
 	if got := config.GetProcessNames("claude"); len(got) != 2 {
-		t.Fatalf("GetProcessNames(claude) = %v after InitRegistry, want the built-in [node claude]", got)
+		t.Fatalf("GetProcessNames(claude) = %v after LoadRegistry, want the built-in [node claude]", got)
 	}
 }
 
-func TestInitRegistryReportsMalformedAgentRegistry(t *testing.T) {
-	// NOTE: cannot use t.Parallel() — mutates the global prefix registry.
-	old := DefaultRegistry()
-	defer SetDefaultRegistry(old)
+func TestLoadRegistryReportsMalformedAgentRegistry(t *testing.T) {
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	settingsDir := filepath.Join(townRoot, "settings")
@@ -106,19 +79,18 @@ func TestInitRegistryReportsMalformedAgentRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InitRegistry(townRoot); err == nil {
-		t.Fatal("InitRegistry with malformed agents.json: want an error, got nil")
+	if _, err := LoadRegistry(townRoot); err == nil {
+		t.Fatal("LoadRegistry with malformed agents.json: want an error, got nil")
 	}
 }
 
-func TestInitRegistryNoAgentsJSON(t *testing.T) {
-	// InitRegistry must not fail when settings/agents.json is absent.
-	old := DefaultRegistry()
-	defer SetDefaultRegistry(old)
+func TestLoadRegistryNoAgentsJSON(t *testing.T) {
+	t.Parallel()
+	// LoadRegistry must not fail when settings/agents.json is absent.
 
 	townRoot := t.TempDir()
 
-	if err := InitRegistry(townRoot); err != nil {
-		t.Fatalf("InitRegistry with no agents.json: %v", err)
+	if _, err := LoadRegistry(townRoot); err != nil {
+		t.Fatalf("LoadRegistry with no agents.json: %v", err)
 	}
 }
