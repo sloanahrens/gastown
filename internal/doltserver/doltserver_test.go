@@ -3099,6 +3099,45 @@ func TestIsDoltRetryableError_IncludesReadOnly(t *testing.T) {
 	}
 }
 
+// TestCheckReadOnly_NoDatabaseIsUnknownNotWritable pins that a probe with
+// nothing to aim at reports Unknown rather than the old (false, nil), which
+// read as "writable" (gt-udrrw, gt-bfale). RecoverReadOnly still treats this
+// one Unknown as its documented no-op.
+func TestCheckReadOnly_NoDatabaseIsUnknownNotWritable(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := CheckReadOnly(townRoot)
+	if !got.IsUnknown() {
+		t.Fatalf("CheckReadOnly with no database = %v, want Unknown", got)
+	}
+	if got.IsPass() || got.IsFail() {
+		t.Fatalf("CheckReadOnly with no database reports IsPass=%v IsFail=%v, want neither", got.IsPass(), got.IsFail())
+	}
+	if !errors.Is(got.Err(), errNoProbeDatabase) {
+		t.Fatalf("CheckReadOnly with no database Err() = %v, want errNoProbeDatabase", got.Err())
+	}
+}
+
+// TestVerifyServerDataDir_NoServerIsUnknown pins that a server that is not
+// running cannot be called legitimate or an imposter: the check did not run.
+func TestVerifyServerDataDir_NoServerIsUnknown(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := VerifyServerDataDir(townRoot)
+	if !got.IsUnknown() {
+		t.Fatalf("VerifyServerDataDir with no server = %v, want Unknown", got)
+	}
+	if got.Err() == nil {
+		t.Fatal("Unknown must carry a reason, got nil Err()")
+	}
+}
+
 func TestRecoverReadOnly_NoServer(t *testing.T) {
 	// When no server is running, CheckReadOnly returns false (can't probe),
 	// so RecoverReadOnly should be a no-op.

@@ -24,9 +24,7 @@ internal/daemon/notification.go:*NotificationManager.shouldSendLocked
 internal/daemon/patrol_last_run.go:loadPatrolLastRun
 internal/daemon/pidfile.go:verifyPIDOwnership
 internal/doctor/editorial_coverage_check.go:*coverageNoteIndex.parked
-internal/doltserver/doltserver.go:CheckReadOnly
 internal/doltserver/doltserver.go:InitRig
-internal/doltserver/doltserver.go:VerifyServerDataDir
 internal/git/git.go:*Git.BranchExists
 internal/git/git.go:*Git.HasUpstreamRemote
 internal/git/git.go:*Git.IsAncestor
