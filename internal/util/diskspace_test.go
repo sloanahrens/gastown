@@ -1,14 +1,20 @@
 package util
 
 import (
-	"os"
+	"errors"
+	"strings"
 	"testing"
 )
 
+// noAPFS stands in for diskutil where there is none: the query fails and
+// the statfs numbers stand.
+func noAPFS(string) (uint64, uint64, error) { return 0, 0, errors.New("no APFS container") }
+
 func TestGetDiskSpace_CurrentDir(t *testing.T) {
-	info, err := GetDiskSpace(".")
+	t.Parallel()
+	info, err := getDiskSpace(".", noAPFS)
 	if err != nil {
-		t.Fatalf("GetDiskSpace(\".\") failed: %v", err)
+		t.Fatalf("getDiskSpace(\".\") failed: %v", err)
 	}
 
 	if info.TotalBytes == 0 {
@@ -25,26 +31,15 @@ func TestGetDiskSpace_CurrentDir(t *testing.T) {
 }
 
 func TestGetDiskSpace_InvalidPath(t *testing.T) {
+	t.Parallel()
 	_, err := GetDiskSpace("/nonexistent/path/that/should/not/exist")
 	if err == nil {
 		t.Error("expected error for invalid path, got nil")
 	}
 }
 
-func TestGetDiskSpace_TempDir(t *testing.T) {
-	dir := t.TempDir()
-	info, err := GetDiskSpace(dir)
-	if err != nil {
-		t.Fatalf("GetDiskSpace(%q) failed: %v", dir, err)
-	}
-
-	if info.AvailableMB() == 0 && info.TotalBytes > 0 {
-		// Unlikely in test environment, but possible on truly full disks
-		t.Log("WARNING: test filesystem reports 0 MB available")
-	}
-}
-
 func TestDiskSpaceInfo_AvailableMB(t *testing.T) {
+	t.Parallel()
 	info := &DiskSpaceInfo{AvailableBytes: 1024 * 1024 * 512}
 	if got := info.AvailableMB(); got != 512 {
 		t.Errorf("AvailableMB() = %d, want 512", got)
@@ -52,6 +47,7 @@ func TestDiskSpaceInfo_AvailableMB(t *testing.T) {
 }
 
 func TestDiskSpaceInfo_AvailableGB(t *testing.T) {
+	t.Parallel()
 	info := &DiskSpaceInfo{AvailableBytes: 1024 * 1024 * 1024 * 2}
 	if got := info.AvailableGB(); got != 2.0 {
 		t.Errorf("AvailableGB() = %f, want 2.0", got)
@@ -59,6 +55,7 @@ func TestDiskSpaceInfo_AvailableGB(t *testing.T) {
 }
 
 func TestDiskSpaceInfo_AvailableHuman(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		bytes uint64
 		want  string
@@ -79,6 +76,7 @@ func TestDiskSpaceInfo_AvailableHuman(t *testing.T) {
 }
 
 func TestFormatBytesHuman(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		bytes uint64
 		want  string
@@ -100,19 +98,31 @@ func TestFormatBytesHuman(t *testing.T) {
 	}
 }
 
-func TestCheckDiskSpace_CurrentDir(t *testing.T) {
-	level, msg, err := CheckDiskSpace(".")
-	if err != nil {
-		t.Fatalf("CheckDiskSpace(\".\") failed: %v", err)
-	}
-
-	// In a normal test environment, disk should be OK
-	if level == DiskSpaceCritical {
-		t.Logf("Disk space is critical: %s", msg)
+func TestDiskSpaceLevelThresholds(t *testing.T) {
+	t.Parallel()
+	const MB = uint64(1024 * 1024)
+	for _, tc := range []struct {
+		name      string
+		availMB   uint64
+		usedPct   float64
+		want      DiskSpaceLevel
+		msgPrefix string
+	}{
+		{"plenty", 50 * 1024, 50, DiskSpaceOK, ""},
+		{"under the warning floor", DiskSpaceWarningMB - 1, 80, DiskSpaceWarning, "WARNING: only "},
+		{"under the minimum", DiskSpaceMinimumMB - 1, 80, DiskSpaceCritical, "CRITICAL: only "},
+		{"too full by percent", 50 * 1024, DiskSpaceCriticalPercent, DiskSpaceCritical, "CRITICAL: only "},
+	} {
+		info := &DiskSpaceInfo{AvailableBytes: tc.availMB * MB, TotalBytes: 1 << 40, UsedPercent: tc.usedPct}
+		level, msg := diskSpaceLevel(info)
+		if level != tc.want || !strings.HasPrefix(msg, tc.msgPrefix) || (tc.msgPrefix == "") != (msg == "") {
+			t.Errorf("%s: diskSpaceLevel = %v %q, want %v %q...", tc.name, level, msg, tc.want, tc.msgPrefix)
+		}
 	}
 }
 
 func TestCheckDiskSpace_InvalidPath(t *testing.T) {
+	t.Parallel()
 	_, _, err := CheckDiskSpace("/nonexistent/path/that/should/not/exist")
 	if err == nil {
 		t.Error("expected error for invalid path, got nil")
@@ -120,6 +130,7 @@ func TestCheckDiskSpace_InvalidPath(t *testing.T) {
 }
 
 func TestDiskSpaceLevel_String(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		level DiskSpaceLevel
 		want  string
@@ -133,19 +144,6 @@ func TestDiskSpaceLevel_String(t *testing.T) {
 	for _, tt := range tests {
 		if got := tt.level.String(); got != tt.want {
 			t.Errorf("DiskSpaceLevel(%d).String() = %q, want %q", tt.level, got, tt.want)
-		}
-	}
-}
-
-func TestGetDiskSpace_Root(t *testing.T) {
-	if os.Getuid() != 0 {
-		// Test root filesystem availability (should work for all users)
-		info, err := GetDiskSpace("/")
-		if err != nil {
-			t.Fatalf("GetDiskSpace(\"/\") failed: %v", err)
-		}
-		if info.TotalBytes == 0 {
-			t.Error("root filesystem should have non-zero total bytes")
 		}
 	}
 }

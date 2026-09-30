@@ -5,6 +5,7 @@ import (
 )
 
 func TestRemoveFromSlice(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		slice    []string
@@ -73,6 +74,7 @@ func TestRemoveFromSlice(t *testing.T) {
 }
 
 func TestContainsString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		slice    []string
