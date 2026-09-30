@@ -13,11 +13,15 @@ import (
 
 // convoyScheduleOpts holds options for convoy schedule operations.
 type convoyScheduleOpts struct {
-	Formula     string
-	HookRawBead bool
-	Force       bool
-	DryRun      bool
-	NoBoot      bool
+	Formula string
+	// FormulaExplicit is true when Formula came from the operator's own
+	// --formula, not from resolveFormula's default. Only an explicit formula
+	// outranks the one the convoy recorded at sling time.
+	FormulaExplicit bool
+	HookRawBead     bool
+	Force           bool
+	DryRun          bool
+	NoBoot          bool
 }
 
 // convoyCandidate is one tracked bead of a convoy queued for dispatch; both
@@ -84,6 +88,28 @@ func convoyRecordedAgent(record convoyRecord, townRoot, rig string) (agent, desc
 			record.ID, record.Err)
 	}
 	return convoy.RedispatchAgent(record.Description, townRoot, rig)
+}
+
+// convoyOptsWithRecordedFormula applies the formula a convoy recorded at sling
+// time to opts, plus a description of that choice for logging (empty when opts
+// is unchanged). `gt sling <convoy>` re-dispatches beads that were already slung
+// once, so like the automatic feeders it must not fall back to the default
+// formula when the original sling asked for another (gt-4lor, gt-o9sbq).
+//
+// Precedence: the operator's explicit --formula, then --hook-raw-bead (no
+// formula at all), then the convoy's record, then the default the caller
+// resolved. A convoy that could not be read carries no record; the unreadable
+// read is already named by convoyRecordedAgent's description.
+func convoyOptsWithRecordedFormula(opts convoyScheduleOpts, record convoyRecord) (convoyScheduleOpts, string) {
+	if opts.FormulaExplicit || opts.HookRawBead || record.Err != nil {
+		return opts, ""
+	}
+	formula := convoy.FormulaFromConvoyDescription(record.Description)
+	if formula == "" {
+		return opts, ""
+	}
+	opts.Formula = formula
+	return opts, fmt.Sprintf("formula %q recorded on convoy at sling time", formula)
 }
 
 // convoyRecordByID reads a convoy's description, carrying a failed read as an
@@ -205,6 +231,10 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 		return nil
 	}
 
+	// The convoy's sling-time agent and formula record, read once for every
+	// candidate below.
+	record := convoyRecordByID(convoyID)
+	opts, formulaDesc := convoyOptsWithRecordedFormula(opts, record)
 	formula := opts.Formula
 
 	if opts.DryRun {
@@ -228,12 +258,12 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	fmt.Printf("%s Scheduling %d issue(s) from convoy %s...\n",
 		style.Bold.Render("📋"), len(candidates), convoyID)
 
-	// The convoy's sling-time agent record, read once for every candidate below.
-	record := convoyRecordByID(convoyID)
-
 	successCount := 0
 	for _, job := range planConvoyDispatch(candidates, record, townRoot) {
 		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
+		if formulaDesc != "" {
+			fmt.Printf("  %s %s\n", style.Dim.Render("→"), formulaDesc)
+		}
 		err := scheduleBead(job.candidate.ID, job.candidate.RigName, convoyScheduleOptionsFor(opts, job.agent))
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), job.candidate.ID, err)
@@ -330,8 +360,10 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 	fmt.Printf("%s Dispatching %d issue(s) from convoy %s...\n",
 		style.Bold.Render("▶"), len(candidates), convoyID)
 
-	// The convoy's sling-time agent record, read once for every candidate below.
+	// The convoy's sling-time agent and formula record, read once for every
+	// candidate below.
 	record := convoyRecordByID(convoyID)
+	opts, formulaDesc := convoyOptsWithRecordedFormula(opts, record)
 
 	jobs := planConvoyDispatch(candidates, record, townRoot)
 
@@ -346,6 +378,9 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		c := job.candidate
 		fmt.Printf("\n[%d/%d] Dispatching %s → %s...\n", i+1, len(jobs), c.ID, c.RigName)
 		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
+		if formulaDesc != "" {
+			fmt.Printf("  %s %s\n", style.Dim.Render("→"), formulaDesc)
+		}
 		_, err := executeSling(convoySlingParams(job, opts, townRoot))
 		if !tally.record(c.ID, err) {
 			continue

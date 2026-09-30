@@ -524,18 +524,20 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				}
 				if deferred {
 					return runConvoyScheduleByID(args[0], convoyScheduleOpts{
-						Formula:     formula,
-						HookRawBead: slingHookRawBead,
-						Force:       slingForce,
-						DryRun:      slingDryRun,
+						Formula:         formula,
+						FormulaExplicit: slingFormula != "",
+						HookRawBead:     slingHookRawBead,
+						Force:           slingForce,
+						DryRun:          slingDryRun,
 					})
 				}
 				return runConvoySlingByID(args[0], convoyScheduleOpts{
-					Formula:     formula,
-					HookRawBead: slingHookRawBead,
-					Force:       slingForce,
-					DryRun:      slingDryRun,
-					NoBoot:      slingNoBoot,
+					Formula:         formula,
+					FormulaExplicit: slingFormula != "",
+					HookRawBead:     slingHookRawBead,
+					Force:           slingForce,
+					DryRun:          slingDryRun,
+					NoBoot:          slingNoBoot,
 				})
 			case "epic":
 				if err := validateNoTaskOnlySchedulerFlags(cmd, "epic"); err != nil {

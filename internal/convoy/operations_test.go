@@ -1145,7 +1145,7 @@ func TestDispatchIssue_Success(t *testing.T) {
 	townRoot := t.TempDir()
 	gtPath, logPath := makeGTStub(t, 0)
 
-	err := dispatchIssue(context.Background(), townRoot, "test-abc", "myrig", gtPath, "", "")
+	err := dispatchIssue(context.Background(), townRoot, "test-abc", "myrig", gtPath, "", "", "")
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
@@ -1172,7 +1172,7 @@ func TestDispatchIssue_PassesAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	gtPath, logPath := makeGTStub(t, 0)
 
-	err := dispatchIssue(context.Background(), townRoot, "test-agent", "myrig", gtPath, "", "deepseek-flash")
+	err := dispatchIssue(context.Background(), townRoot, "test-agent", "myrig", gtPath, "", "deepseek-flash", "")
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
@@ -1333,7 +1333,7 @@ func TestDispatchIssue_Failure(t *testing.T) {
 	townRoot := t.TempDir()
 	gtPath, _ := makeGTStub(t, 1)
 
-	err := dispatchIssue(context.Background(), townRoot, "test-fail", "myrig", gtPath, "", "")
+	err := dispatchIssue(context.Background(), townRoot, "test-fail", "myrig", gtPath, "", "", "")
 	if err == nil {
 		t.Fatal("dispatchIssue should return error when gt exits 1")
 	}
@@ -2234,4 +2234,138 @@ func (s *unreadableStorage) GetIssueComments(context.Context, string) ([]*beadsd
 // record.
 func (s *unreadableStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadsdk.Dependency, error) {
 	return s.Storage.(dependencyRecordReader).GetDependencyRecords(ctx, issueID)
+}
+
+// TestDispatchIssue_PassesFormula is the gt-o9sbq regression test: a bead slung
+// with --formula must be re-dispatched with the same formula, or the feed runs
+// it under gt sling's default formula instead (gt-4lor).
+func TestDispatchIssue_PassesFormula(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	gtPath, logPath := makeGTStub(t, 0)
+
+	err := dispatchIssue(context.Background(), townRoot, "test-formula", "myrig", gtPath, "", "deepseek-flash", "mol-custom")
+	if err != nil {
+		t.Fatalf("dispatchIssue returned error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub log not written: %v", err)
+	}
+	logStr := strings.TrimSpace(string(logData))
+	expected := "sling test-formula myrig --no-boot --agent=deepseek-flash --formula=mol-custom"
+	if logStr != expected {
+		t.Errorf("gt stub called with %q, want %q", logStr, expected)
+	}
+}
+
+// TestFormulaFromConvoyDescription is the table over the one parse of a
+// convoy's sling-time formula record that every re-dispatch path reads.
+func TestFormulaFromConvoyDescription(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{"formula field is read", "Auto-created convoy\n\nmerge: mr\nformula: mol-custom\n", "mol-custom"},
+		{"formula field absent", "Auto-created convoy\n\nmerge: mr\n", ""},
+		{"whitespace-only value is not a formula", "merge: mr\nformula:   \n", ""},
+		{"empty description", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FormulaFromConvoyDescription(tc.description); got != tc.want {
+				t.Errorf("FormulaFromConvoyDescription() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFeedNextReadyIssue_PassesRecordedFormula drives the event-driven feeder
+// end to end: a convoy that recorded a formula at sling time re-feeds its next
+// ready bead with --formula, and one that recorded none passes nothing (gt-o9sbq).
+func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{
+			name:        "recorded formula is passed",
+			description: "Auto-created convoy\n\nmerge: mr\nformula: mol-custom\n",
+			want:        "sling test-ready1 testrig --no-boot --formula=mol-custom",
+		},
+		{
+			name:        "no recorded formula passes none",
+			description: "Auto-created convoy\n\nmerge: mr\n",
+			want:        "sling test-ready1 testrig --no-boot",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+
+			ctx := context.Background()
+			now := time.Now().UTC()
+
+			convoy := &beadsdk.Issue{
+				ID:          "test-convoy1",
+				Title:       "Test Convoy",
+				Description: tc.description,
+				Status:      beadsdk.StatusOpen,
+				Priority:    2,
+				IssueType:   beadsdk.TypeTask,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			ready := &beadsdk.Issue{
+				ID:        "test-ready1",
+				Title:     "Ready Task",
+				Status:    beadsdk.StatusOpen,
+				Priority:  2,
+				IssueType: beadsdk.TypeTask,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			for _, iss := range []*beadsdk.Issue{convoy, ready} {
+				if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+					t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+				}
+			}
+			dep := &beadsdk.Dependency{
+				IssueID:     convoy.ID,
+				DependsOnID: ready.ID,
+				Type:        beadsdk.DependencyType("tracks"),
+				CreatedAt:   now,
+				CreatedBy:   "test",
+			}
+			if err := store.AddDependency(ctx, dep, "test"); err != nil {
+				t.Fatalf("AddDependency: %v", err)
+			}
+
+			townRoot := setupTownRoot(t)
+			gtPath, logPath := makeGTStub(t, 0)
+			logger, _ := makeLogger()
+
+			feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("gt stub was not called (no log file): %v", err)
+			}
+			if got := strings.TrimSpace(string(logData)); got != tc.want {
+				t.Errorf("gt stub called with %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
