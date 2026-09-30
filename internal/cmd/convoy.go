@@ -930,12 +930,12 @@ func runConvoyAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add 'tracks' relations for each issue
-	addedCount := 0
+	var added []string
 	for _, issueID := range issuesToAdd {
 		if err := addTrackingRelationFn(townBeads, convoyID, issueID); err != nil {
 			style.PrintWarning("couldn't add %s: %s", issueID, err)
 		} else {
-			addedCount++
+			added = append(added, issueID)
 		}
 	}
 
@@ -943,9 +943,9 @@ func runConvoyAdd(cmd *cobra.Command, args []string) error {
 	if reopened {
 		fmt.Println()
 	}
-	fmt.Printf("%s Added %d issue(s) to convoy 🚚 %s\n", style.Bold.Render("✓"), addedCount, convoyID)
-	if addedCount > 0 {
-		fmt.Printf("  Issues: %s\n", strings.Join(issuesToAdd[:addedCount], ", "))
+	fmt.Printf("%s Added %d issue(s) to convoy 🚚 %s\n", style.Bold.Render("✓"), len(added), convoyID)
+	if len(added) > 0 {
+		fmt.Printf("  Issues: %s\n", strings.Join(added, ", "))
 	}
 
 	return nil
