@@ -16,6 +16,14 @@ import (
 // unexplained build failure on a host that otherwise looks healthy (gt-1a0t).
 type MacOSSDKCheck struct {
 	BaseCheck
+
+	// goos is the OS the check believes it runs on; "" is runtime.GOOS.
+	// Tests of the macOS path set darwin so they run on every OS: reading
+	// the real runtime.GOOS, on the Linux CI runner every one of them hit
+	// the not-applicable branch and failed (gt-22hdp.39).
+	goos string
+	// resolve reports the SDK a build links against; nil is resolveSDK.
+	resolve func() (path, source string, err error)
 }
 
 // NewMacOSSDKCheck creates a new macOS SDK check.
@@ -33,7 +41,7 @@ func NewMacOSSDKCheck() *MacOSSDKCheck {
 // SDKROOT wins because the daemon passes it through to every polecat and
 // refinery build (config.DaemonEnvPath); xcrun is the fallback for a shell that
 // sets nothing.
-var resolveSDK = func() (path, source string, err error) {
+func resolveSDK() (path, source string, err error) {
 	if root := strings.TrimSpace(os.Getenv("SDKROOT")); root != "" {
 		return root, "SDKROOT", nil
 	}
@@ -183,15 +191,16 @@ const maxReportedStubs = 5
 // selected through the file the daemon reads, or a reinstall when none is.
 const sdkFixHint = "Point SDKROOT at a well-formed SDK in settings/daemon.env (see Reference, Daemon Environment), or reinstall Command Line Tools"
 
-// sdkCheckGOOS is the OS the check believes it runs on. A variable so the
-// tests of the macOS path run on every OS: they stub the SDK, but read the
-// real runtime.GOOS, so on the Linux CI runner every one of them hit the
-// not-applicable branch and failed (gt-22hdp.39).
-var sdkCheckGOOS = runtime.GOOS
-
 // Run reports whether the SDK a cgo build links against is well-formed.
 func (c *MacOSSDKCheck) Run(_ *CheckContext) *CheckResult {
-	if sdkCheckGOOS != "darwin" {
+	goos, resolve := c.goos, c.resolve
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if resolve == nil {
+		resolve = resolveSDK
+	}
+	if goos != "darwin" {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -199,7 +208,7 @@ func (c *MacOSSDKCheck) Run(_ *CheckContext) *CheckResult {
 		}
 	}
 
-	sdkPath, source, err := resolveSDK()
+	sdkPath, source, err := resolve()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),

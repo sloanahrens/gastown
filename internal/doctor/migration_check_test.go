@@ -3,10 +3,8 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -98,11 +96,24 @@ func setupRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 	}
 }
 
+// noEnv is an environment with no variables set: GT_DOLT_PORT would override
+// the port fallbacks these tests expect, and agent sessions set it.
+func noEnv(string) (string, bool) { return "", false }
+
+// reachableCheck is a DoltServerReachableCheck with an empty environment,
+// every address reachable, and verify answering the database probe.
+func reachableCheck(verify func(*doltserver.Config, []string) ([]string, []string, error)) *DoltServerReachableCheck {
+	c := NewDoltServerReachableCheck()
+	c.lookupEnv = noEnv
+	c.dial = func(string) error { return nil }
+	c.verify = verify
+	return c
+}
+
 func TestGetServerAddr(t *testing.T) {
-	// GT_DOLT_PORT would override the DefaultPort fallback these cases expect;
-	// the hermetic harness (and agent sessions) set it, so clear it.
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
 	check := NewDoltServerReachableCheck()
+	check.lookupEnv = noEnv
 
 	tests := []struct {
 		name     string
@@ -193,11 +204,11 @@ func TestGetServerAddr_NoMetadata(t *testing.T) {
 }
 
 func TestGetServerAddr_UsesConfigYAMLPort(t *testing.T) {
-	// GT_DOLT_PORT takes precedence over config.yaml in ResolveDoltPort; the
-	// hermetic harness (and agent sessions) set it, so clear it — empty means
-	// unset to resolveDoltPortFromEnv — to test the config.yaml path.
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
+	// GT_DOLT_PORT takes precedence over config.yaml in ResolveDoltPort, so
+	// the check reads an environment without it to test the config.yaml path.
 	check := NewDoltServerReachableCheck()
+	check.lookupEnv = noEnv
 	townRoot := t.TempDir()
 
 	// Create config.yaml with custom port
@@ -225,37 +236,27 @@ func TestGetServerAddr_UsesConfigYAMLPort(t *testing.T) {
 }
 
 func TestDoltServerReachableCheck_FailsWhenExpectedRigDatabaseMissing(t *testing.T) {
-	check := NewDoltServerReachableCheck()
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{"gastown"})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigMetadata(t, townRoot, "gastown", "gastown")
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	host, portStr, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, port := "127.0.0.1", 13306
 	beadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-	setupServerMetadata(t, beadsDir, host, mustAtoi(t, portStr))
-	writeServerMetadata(t, beadsDir, "gastown", host, mustAtoi(t, portStr))
+	setupServerMetadata(t, beadsDir, host, port)
+	writeServerMetadata(t, beadsDir, "gastown", host, port)
 	hqBeadsDir := filepath.Join(townRoot, ".beads")
-	setupServerMetadata(t, hqBeadsDir, host, mustAtoi(t, portStr))
-	writeServerMetadata(t, hqBeadsDir, "hq", host, mustAtoi(t, portStr))
+	setupServerMetadata(t, hqBeadsDir, host, port)
+	writeServerMetadata(t, hqBeadsDir, "hq", host, port)
 
-	origVerify := verifyExpectedDatabasesAtConfig
-	verifyExpectedDatabasesAtConfig = func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
+	check := reachableCheck(func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
 		if len(expected) != 2 || expected[0] != "hq" || expected[1] != "gastown" {
 			t.Fatalf("unexpected expected database list: %#v", expected)
 		}
 		return []string{"hq"}, []string{"gastown"}, nil
-	}
-	defer func() { verifyExpectedDatabasesAtConfig = origVerify }()
+	})
 
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 	if result.Status != StatusError {
@@ -270,37 +271,27 @@ func TestDoltServerReachableCheck_FailsWhenExpectedRigDatabaseMissing(t *testing
 }
 
 func TestDoltServerReachableCheck_FailsWhenDatabaseVerificationErrors(t *testing.T) {
-	check := NewDoltServerReachableCheck()
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{"gastown"})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigMetadata(t, townRoot, "gastown", "gastown")
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	host, portStr, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, port := "127.0.0.1", 13306
 	beadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-	setupServerMetadata(t, beadsDir, host, mustAtoi(t, portStr))
-	writeServerMetadata(t, beadsDir, "gastown", host, mustAtoi(t, portStr))
+	setupServerMetadata(t, beadsDir, host, port)
+	writeServerMetadata(t, beadsDir, "gastown", host, port)
 	hqBeadsDir := filepath.Join(townRoot, ".beads")
-	setupServerMetadata(t, hqBeadsDir, host, mustAtoi(t, portStr))
-	writeServerMetadata(t, hqBeadsDir, "hq", host, mustAtoi(t, portStr))
+	setupServerMetadata(t, hqBeadsDir, host, port)
+	writeServerMetadata(t, hqBeadsDir, "hq", host, port)
 
-	origVerify := verifyExpectedDatabasesAtConfig
-	verifyExpectedDatabasesAtConfig = func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
+	check := reachableCheck(func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
 		if len(expected) != 2 || expected[0] != "hq" || expected[1] != "gastown" {
 			t.Fatalf("unexpected expected database list: %#v", expected)
 		}
 		return nil, nil, fmt.Errorf("panic from sibling db")
-	}
-	defer func() { verifyExpectedDatabasesAtConfig = origVerify }()
+	})
 
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 	if result.Status != StatusError {
@@ -315,49 +306,30 @@ func TestDoltServerReachableCheck_FailsWhenDatabaseVerificationErrors(t *testing
 }
 
 func TestDoltServerReachableCheck_UsesConfiguredDatabaseNameNotRigName(t *testing.T) {
-	check := NewDoltServerReachableCheck()
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{"laneassist"})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigMetadata(t, townRoot, "laneassist", "lc")
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	host, portStr, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	host, port := "127.0.0.1", 13306
 	beadsDir := filepath.Join(townRoot, "laneassist", "mayor", "rig", ".beads")
-	writeServerMetadata(t, beadsDir, "lc", host, mustAtoi(t, portStr))
+	writeServerMetadata(t, beadsDir, "lc", host, port)
 	hqBeadsDir := filepath.Join(townRoot, ".beads")
-	writeServerMetadata(t, hqBeadsDir, "hq", host, mustAtoi(t, portStr))
+	writeServerMetadata(t, hqBeadsDir, "hq", host, port)
 
-	origVerify := verifyExpectedDatabasesAtConfig
-	verifyExpectedDatabasesAtConfig = func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
+	check := reachableCheck(func(_ *doltserver.Config, expected []string) ([]string, []string, error) {
 		if len(expected) != 2 || expected[0] != "hq" || expected[1] != "lc" {
 			t.Fatalf("unexpected expected database list: %#v", expected)
 		}
 		return []string{"hq", "lc"}, nil, nil
-	}
-	defer func() { verifyExpectedDatabasesAtConfig = origVerify }()
+	})
 
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK, got %v: %s", result.Status, result.Message)
 	}
-}
-
-func mustAtoi(t *testing.T, value string) int {
-	t.Helper()
-	port, err := strconv.Atoi(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return port
 }
 
 func writeServerMetadata(t *testing.T, beadsDir, database, host string, port int) {
