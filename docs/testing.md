@@ -32,7 +32,7 @@ A package whose unit-tier test files call a container entry point is Docker-back
 
 | tier | what runs | build tag | test names | command |
 |---|---|---|---|---|
-| unit | in-process only: fakes, fake clock, `t.TempDir`, `git` | none | `TestX` | `make gate` |
+| unit | in-process only: fakes, fake clock, `t.TempDir`, `git` (not in a package listed in `gitfree.txt`) | none | `TestX` | `make gate` |
 | integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` | `make test-integration` |
 
 - `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is a measurement, not a gate. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
@@ -76,7 +76,7 @@ A test that needs a Dolt database on the shared test container leases one from t
 | `no-env` | call `os.Setenv`, `os.Unsetenv` or `t.Setenv` |
 | `no-chdir` | call `os.Chdir` or `t.Chdir` |
 | `no-skip` | call `t.Skip`, `t.Skipf` or `t.SkipNow` |
-| `no-subprocess` | run `exec.Command` on anything but `git` |
+| `no-subprocess` | run `exec.Command` on anything but `git`; a package in `gitfree.txt` may not run git either (the `no-git` rule, [below](#no-git-in-a-converted-packages-unit-tier)) |
 | `no-network` | dial or listen: `net.Dial*`, `net.Listen*`, `net.File*Conn`/`FileListener`, `httptest.New*Server`, or a `net.Dialer`/`net.ListenConfig` (literal, `var` or `new`). The check is syntax-only, so a Dialer reached through a type alias or a struct field is not caught. |
 | `fake-clock-epoch` | call `clockwork.NewFakeClock()`, which starts at `time.Now()`; use `NewFakeClockAt` with a fixed epoch |
 | `no-build` | run the `go` tool |
@@ -294,6 +294,41 @@ func TestIntegrationSessionsContract(t *testing.T) {
 ```
 
 Write the integration runner first. If a contract case fails against the real implementation, the contract is wrong: correct it to what the real system does, then make the fake copy it. Every behavior the fake claims should be pinned by a contract case. That includes the error and missing-object paths, not only the happy path: `RunSessionsContract` pins no-server, missing-session (kill, pane command, capture, send, environment), unset-variable and create-validation behavior.
+
+## Seams for external tools
+
+An external tool such as git, bd or tmux gets one seam and one fake, whichever package calls it (gt-2wt0p):
+
+- The tool's adapter package owns its command lines. Only `internal/git` builds git argv, only `internal/beads` builds bd's and only `internal/tmux` builds tmux's. The adapter's own tests answer its exec runner with canned output (see [The exec runner](#the-exec-runner)); `internal/git` does this through `Git.exec` and `scripted` in `internal/git/helpers_test.go`.
+- A consumer depends on a narrow interface that it declares itself, made of the domain methods it calls on the adapter. `internal/land`'s `Repo` lists `Rev`, `IsAncestor`, `MergeNoFF` and the rest of what a landing needs. `*git.Git` satisfies it in production, and the consumer's tests pass the fake. A consumer never sees argv.
+- Each tool has one shared fake: `internal/beads/beadsfake`, `internal/tmux/tmuxfake` and `internal/git/gitfake`. A consumer does not write its own. `gitfake` is an in-memory model of repositories: commits with parents and trees, refs, remotes and worktrees. It grows only by the methods a converted consumer needs.
+- A contract suite pins the fake to the real tool, as in [Fakes and contracts](#fakes-and-contracts): the unit tier runs it against the fake and the integration tier against the real adapter. A behavior the fake has but no contract case pins is not trusted.
+
+When you convert a consumer's tests, delete by default:
+- A slow test survives only if it asserts our logic, such as parsing, argument choice, a decision or error mapping. It then runs against the fake or canned output.
+- A test that asserts the tool's own behavior through a thin wrapper is deleted.
+- A multi-step workflow test whose value is the real tool's semantics moves to the integration tier. An adapter package may keep a meaningful set there, pruned of duplicates and of what the contract suite already pins. A consumer keeps one to three.
+- Record every deleted test with its reason.
+
+The per-package argv fakes that predate `gitfake` (`internal/version/fakegit_test.go`, `internal/checkpoint/fakegit_test.go`) move onto it when those packages are converted.
+
+### No git in a converted package's unit tier
+
+The `no-subprocess` rule lets a unit test run git, because most packages still do. A converted package gives up that exemption by adding its line to `internal/testpolicy/gitfree.txt`. `TestGitFree` then holds it to the `no-git` rule:
+- Its unit-tier tests may not call `exec.Command("git", ...)`, or build a real wrapper with `git.NewGit` or `git.NewGitWithDir` (unqualified `NewGit` inside `internal/git`).
+- Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, so git reached through production code fails the test that reached it. The static rule cannot see that path.
+
+`go test -tags integration` compiles both tiers together, and the integration tier needs real git, so such a package has two TestMains, one per tier:
+
+```go
+//go:build !integration
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
+}
+```
+
+and the same without the option in a `//go:build integration` file. The list only grows: adding a package raises `minGitFree` in `internal/testpolicy/gitfree_test.go` in the same change. An unlisted package is not checked.
 
 ## Converting a package
 
