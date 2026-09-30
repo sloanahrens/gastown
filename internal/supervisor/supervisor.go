@@ -58,6 +58,11 @@ var (
 	ErrIntentUnreadable = errors.New("intent record unreadable")
 )
 
+// ErrDeclined is wrapped by a restart executor that started nothing on
+// purpose (a fork-backed rig, a safety stop, a session someone else already
+// raised). The attempt is logged as declined and does not spend budget.
+var ErrDeclined = errors.New("restart declined by the executor")
+
 // ErrNoStarter is returned by Restart on a Supervisor built without one.
 var ErrNoStarter = errors.New("supervisor has no restart executor")
 
@@ -142,7 +147,7 @@ type ActionLine struct {
 	Session string    `json:"session"`
 	Reason  string    `json:"reason,omitempty"`
 	Actor   string    `json:"actor"`
-	Outcome string    `json:"outcome"` // done, refused, failed
+	Outcome string    `json:"outcome"` // done, refused, failed, declined
 	Detail  string    `json:"detail,omitempty"`
 }
 
@@ -152,9 +157,10 @@ func ActionLogPath(townRoot string) string {
 }
 
 const (
-	outcomeDone    = "done"
-	outcomeRefused = "refused"
-	outcomeFailed  = "failed"
+	outcomeDone     = "done"
+	outcomeRefused  = "refused"
+	outcomeFailed   = "failed"
+	outcomeDeclined = "declined"
 )
 
 // record logs an action line to the logger and appends it to the action log.
@@ -321,13 +327,26 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 
 	runErr := s.o.Restart(seat)
 	outcome := outcomeDone
-	if runErr != nil {
+	switch {
+	case errors.Is(runErr, ErrDeclined):
+		outcome = outcomeDeclined
+		l.Detail = runErr.Error()
+	case runErr != nil:
 		outcome = outcomeFailed
 		l.Detail = runErr.Error()
 	}
 	rec, uerr := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
 		if r.LastAction != nil {
 			r.LastAction.Outcome = outcome
+		}
+		if outcome == outcomeDeclined {
+			// Nothing was started: give back the stamp this attempt took.
+			for i := len(r.Restarts) - 1; i >= 0; i-- {
+				if r.Restarts[i].Equal(now) {
+					r.Restarts = append(r.Restarts[:i], r.Restarts[i+1:]...)
+					break
+				}
+			}
 		}
 		return nil
 	})

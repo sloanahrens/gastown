@@ -46,6 +46,9 @@ func (d *Daemon) sup() *supervisor.Supervisor {
 		if d.bdPath != "" {
 			opts.Mirror = d.mirrorAgentBead
 		}
+		if d.restartSeatFn != nil {
+			opts.Restart = d.restartSeatFn
+		}
 		d.supervisor = supervisor.New(opts)
 	})
 	return d.supervisor
@@ -65,23 +68,14 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 		if err := d.tmux.KillSessionWithProcesses(seat.SessionName()); err != nil {
 			return fmt.Errorf("clearing the old deacon session: %w", err)
 		}
-		if err := d.startDeacon(); err != nil && !errors.Is(err, deacon.ErrAlreadyRunning) {
-			return err
-		}
-		return nil
+		return declineIf(d.startDeacon(), deacon.ErrAlreadyRunning)
 	case session.RoleWitness:
 		mgr := witness.NewManager(&rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)})
-		if err := mgr.Start(false, "", nil); err != nil && !errors.Is(err, witness.ErrAlreadyRunning) {
-			return err
-		}
-		return nil
+		return declineIf(mgr.Start(false, "", nil), witness.ErrAlreadyRunning)
 	case session.RoleRefinery:
 		mgr := refinery.NewManager(&rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)})
 		mgr.SetStartAttribution("daemon-heartbeat", "daemon")
-		if err := mgr.Start(false, ""); err != nil && !errors.Is(err, refinery.ErrAlreadyRunning) {
-			return err
-		}
-		return nil
+		return declineIf(mgr.Start(false, ""), refinery.ErrAlreadyRunning, refinery.ErrSafetyStopped, refinery.ErrForkRig)
 	case session.RoleMayor:
 		mgr := mayor.NewManager(d.config.TownRoot)
 		if err := mgr.Stop(); err != nil && !errors.Is(err, mayor.ErrNotRunning) {
@@ -93,6 +87,18 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 		// witness becomes a daemon tick (gt-4k3fj.6); dogs by their handler.
 		return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
 	}
+}
+
+// declineIf wraps err as supervisor.ErrDeclined when it is one of the
+// errors by which a role manager says it started nothing on purpose, so the
+// attempt does not spend the seat's restart budget.
+func declineIf(err error, declined ...error) error {
+	for _, d := range declined {
+		if errors.Is(err, d) {
+			return fmt.Errorf("%w: %w", supervisor.ErrDeclined, err)
+		}
+	}
+	return err
 }
 
 // mirrorAgentBead writes the seat's hold to its agent bead for display

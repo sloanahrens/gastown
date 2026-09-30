@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -212,4 +216,142 @@ func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "gt-intended") {
 		t.Fatalf("crash detection ignored the intent record's work bead: %s", logBuf)
 	}
+}
+
+// The patrol-disabled sweep kills through the supervisor: a paused witness
+// stays, an unpaused one goes, and the kill is logged with its actor.
+func TestKillWitnessSessions_HonorsPauseAndLogsActor(t *testing.T) {
+	registerRigs(t, "aa", "bb")
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession("aa-witness", "claude", time.Now())
+	tm.addSession("bb-witness", "claude", time.Now())
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm, rigPool: newRigWorkerPool(1, 10*time.Second, nil), ctx: context.Background()}
+	writeKnownRigs(t, d.config.TownRoot, "aa", "bb")
+	if err := agentpause.Pause(d.config.TownRoot, "aa", "witness", "", "debugging", "human", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	d.killWitnessSessions()
+
+	if has, _ := tm.HasSession("aa-witness"); !has {
+		t.Error("a paused witness was killed by the patrol-disabled sweep")
+	}
+	if has, _ := tm.HasSession("bb-witness"); has {
+		t.Error("an unpaused witness survived the patrol-disabled sweep")
+	}
+	lines, _ := os.ReadFile(supervisor.ActionLogPath(d.config.TownRoot))
+	if !strings.Contains(string(lines), `"actor":"daemon/patrol-disabled"`) {
+		t.Errorf("sweep kills missing from the action log: %s", lines)
+	}
+}
+
+// Ghost sessions belong to no seat: they go through KillStray, which the
+// town e-stop refuses.
+func TestKillDefaultPrefixGhosts_HonorsTheTownEstop(t *testing.T) {
+	registerRigs(t, "aa")
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession("gt-witness", "claude", time.Now())
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm}
+	_ = estop.Activate(d.config.TownRoot, estop.TriggerManual, "drill")
+
+	d.killDefaultPrefixGhosts()
+
+	if has, _ := tm.HasSession("gt-witness"); !has {
+		t.Fatal("a ghost was killed under a town e-stop")
+	}
+	_ = estop.Deactivate(d.config.TownRoot, false)
+	d.killDefaultPrefixGhosts()
+	if has, _ := tm.HasSession("gt-witness"); has {
+		t.Fatal("the ghost survived once the e-stop cleared")
+	}
+	lines, _ := os.ReadFile(supervisor.ActionLogPath(d.config.TownRoot))
+	if !strings.Contains(string(lines), `"verb":"kill-stray"`) {
+		t.Errorf("ghost kill missing from the action log: %s", lines)
+	}
+}
+
+// The mayor's dead-agent debounce is persisted: three consecutive dead
+// samples, even across three daemon values, before one restart. A missing
+// session is restarted at once.
+func TestEnsureMayorRunning_PersistedDebounce(t *testing.T) {
+	town := t.TempDir()
+	clk := newFixedClock()
+	tm := newFakeTmux(clk)
+	tm.addSession(session.MayorSessionName(), "bash", clk.Now()) // agent gone, shell left
+	var restarts []string
+	newD := func() (*Daemon, *strings.Builder) {
+		var buf strings.Builder
+		return &Daemon{config: &Config{TownRoot: town}, logger: log.New(&buf, "", 0), tmux: tm, clock: clk,
+			restartSeatFn: func(seat supervisor.Seat) error { restarts = append(restarts, seat.SessionName()); return nil }}, &buf
+	}
+	for i := 1; i <= 2; i++ {
+		d, buf := newD()
+		d.ensureMayorRunning()
+		if len(restarts) != 0 || !strings.Contains(buf.String(), "waiting before restart") {
+			t.Fatalf("sample %d: restarts=%v log=%s", i, restarts, buf)
+		}
+		clk.Advance(3 * time.Minute)
+	}
+	d, _ := newD()
+	d.ensureMayorRunning()
+	if len(restarts) != 1 {
+		t.Fatalf("third dead sample: restarts = %v, want one", restarts)
+	}
+
+	// No session at all: no debounce.
+	_ = tm.KillSession(session.MayorSessionName())
+	clk.Advance(3 * time.Minute)
+	d, _ = newD()
+	d.ensureMayorRunning()
+	if len(restarts) != 2 {
+		t.Fatalf("missing session: restarts = %v, want a second one at once", restarts)
+	}
+}
+
+// A stale working dog under a town e-stop keeps its session.
+func TestDetectStaleWorkingDogs_HonorsTheTownEstop(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+	mgr := dog.NewManager(townRoot, &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}})
+	sm := handlerDogSessions(d)
+	testSetupWorkingDogState(t, townRoot, "stale", constants.MolConvoyFeed, time.Now().Add(-3*time.Hour))
+	sessionName := sm.SessionName("stale")
+	sm.tm.addSession(sessionName, "claude", time.Now().Add(-3*time.Hour))
+	_ = estop.Activate(townRoot, estop.TriggerManual, "drill")
+
+	d.detectStaleWorkingDogs(mgr, sm, &config.DaemonThresholds{})
+
+	if has, _ := sm.tm.HasSession(sessionName); !has {
+		t.Fatal("a dog session was killed under a town e-stop")
+	}
+	if dg, _ := mgr.Get("stale"); dg.State != dog.StateWorking {
+		t.Fatalf("dog work cleared although its session was kept: state %q", dg.State)
+	}
+}
+
+// writeKnownRigs writes mayor/rigs.json naming rigs.
+func writeKnownRigs(t *testing.T, townRoot string, rigs ...string) {
+	t.Helper()
+	entries := make([]string, len(rigs))
+	for i, r := range rigs {
+		entries[i] = `"` + r + `": {}`
+	}
+	path := filepath.Join(townRoot, "mayor", "rigs.json")
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte(`{"rigs": {`+strings.Join(entries, ", ")+`}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// registerRigs maps each rig to a prefix equal to its name for the test.
+func registerRigs(t *testing.T, rigs ...string) {
+	t.Helper()
+	old := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	for _, r := range rigs {
+		reg.Register(r, r)
+	}
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }

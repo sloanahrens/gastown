@@ -225,8 +225,12 @@ func writeDaemonSafetyStopMockTmux(t *testing.T, binDir, logPath string) {
 	t.Helper()
 	script := `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "` + logPath + `"
-case "$1" in
-  has-session)
+# tmux.run prepends -u and -L <socket>, so match anywhere in the argv. A
+# missing session answers the way tmux does, so it reads as absent rather
+# than as a failed query.
+case "$*" in
+  *has-session*)
+    echo "can't find session" >&2
     exit 1
     ;;
   *)

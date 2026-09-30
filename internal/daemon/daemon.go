@@ -38,7 +38,6 @@ import (
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
@@ -49,7 +48,6 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/wisp"
-	"github.com/steveyegge/gastown/internal/witness"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -167,6 +165,9 @@ type Daemon struct {
 	// sup()); tests may set it, otherwise it is built on first use.
 	supOnce    sync.Once
 	supervisor *supervisor.Supervisor
+	// restartSeatFn replaces restartSeat, the supervisor's restart executor,
+	// in tests that cannot run the role managers against a fake tmux.
+	restartSeatFn func(supervisor.Seat) error
 
 	// telemetry exports metrics and logs to VictoriaMetrics / VictoriaLogs.
 	// Nil when telemetry is disabled (GT_OTEL_METRICS_URL / GT_OTEL_LOGS_URL not set).
@@ -240,12 +241,6 @@ type Daemon struct {
 	// compactorDogChecked is true once this process has evaluated due-ness, so
 	// that "not due" is logged after a restart and not every 15 minutes.
 	compactorDogChecked bool
-
-	// mayorZombieCount tracks consecutive patrol cycles where the Mayor tmux
-	// session exists but the agent process is not detected. A count >= 3
-	// triggers a zombie restart, debouncing transient gaps during handoffs.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
-	mayorZombieCount int
 
 	// rigPool runs per-rig heartbeat operations (witness checks, refinery checks,
 	// polecat health, idle reaping, branch pruning) with bounded concurrency and
@@ -2253,57 +2248,72 @@ func (d *Daemon) hasPendingEvents(channel, rig string) bool {
 	return false
 }
 
-// ensureWitnessRunning ensures the witness for a specific rig is running.
-// Discover, don't track: uses Manager.Start() which checks tmux directly (gt-zecmc).
+// ensureWitnessRunning keeps the witness for a rig running: the liveness
+// function decides, and a dead witness is restarted through the supervisor.
+// In a rig that is not operational (docked/parked) a leftover witness is
+// killed through the supervisor instead (hq-snx61).
 func (d *Daemon) ensureWitnessRunning(rigName string) {
-	// Check rig operational state before auto-starting
+	seat := supervisor.SeatFor(rigName, constants.RoleWitness, "")
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping witness auto-start for %s: %s", rigName, reason)
-		// Kill leftover witness session if rig is not operational (docked/parked).
-		// Without this, sessions started before the rig was docked survive until
-		// the next explicit 'gt rig dock' command. (hq-snx61)
-		name := session.WitnessSessionName(session.PrefixFor(rigName))
-		if exists, _ := d.tmux.HasSession(name); exists {
-			d.logger.Printf("Killing leftover witness %s (rig %s)", name, reason)
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing leftover witness %s: %v", name, err)
-			}
-		}
+		d.killLeftover(seat, "rig "+reason, "daemon/rig-state")
 		return
 	}
 
-	// Manager.Start() handles: zombie detection, session creation, env vars, theming,
-	// startup readiness waits, and crucially - startup/propulsion nudges (GUPP).
-	// It returns ErrAlreadyRunning if Claude is already running in tmux.
-	r := &rig.Rig{
-		Name: rigName,
-		Path: filepath.Join(d.config.TownRoot, rigName),
-	}
-	mgr := witness.NewManager(r)
-
-	// NOTE: Hung session detection removed for witnesses (serial killer bug).
-	// Idle witnesses legitimately produce no tmux output while waiting for work.
-	// The deacon's patrol health-scan step handles stuck detection with proper
-	// context (checks for active work before declaring something stuck).
-	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
-
-	if err := mgr.Start(false, "", nil); err != nil {
-		if err == witness.ErrAlreadyRunning {
-			// Already running - this is the expected case
-			d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
-			// "Running" is decided by session and process existence, which a
-			// session that consumes no input also satisfies. Probe it, so a
-			// wedged witness is not skipped indefinitely (gt-eigw).
-			d.probeRunningWitness(rigName)
-			return
-		}
-		d.logger.Printf("Error starting witness for %s: %v", rigName, err)
+	// NOTE: no stall restart for witnesses (serial killer bug): an idle
+	// witness legitimately produces no output while it waits for work.
+	res := d.assessSeat(seat, liveness.Input{})
+	switch res.Verdict {
+	case liveness.Unknown:
+		d.logger.Printf("Witness for %s: liveness unknown (%v); not acting this tick", rigName, res.Err)
+		return
+	case liveness.Alive, liveness.Stalled:
+		d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
+		// "Running" is decided by session and process existence, which a
+		// session that consumes no input also satisfies. Probe it, so a
+		// wedged witness is not skipped indefinitely (gt-eigw).
+		d.probeRunningWitness(rigName)
 		return
 	}
 
+	if err := d.sup().Restart(seat, "witness "+res.Reason, "daemon/ensure-witness"); err != nil {
+		d.logStartOutcome("witness", rigName, err)
+		return
+	}
 	d.metrics.recordRestart(d.ctx, "witness")
 	telemetry.RecordDaemonRestart(d.ctx, "witness-"+rigName)
 	d.logger.Printf("Witness session for %s started successfully", rigName)
+}
+
+// killLeftover kills a seat's session, if it has one, through the
+// supervisor. Used where a role must not run (docked rig, disabled patrol,
+// safety stop).
+func (d *Daemon) killLeftover(seat supervisor.Seat, reason, actor string) {
+	name := seat.SessionName()
+	exists, err := d.tmux.HasSession(name)
+	if err != nil {
+		d.logger.Printf("Not killing leftover %s (%s): session query failed: %v", name, reason, err)
+		return
+	}
+	if !exists {
+		return
+	}
+	d.logger.Printf("Killing leftover %s (%s)", name, reason)
+	if err := d.sup().Kill(seat, reason, actor); err != nil {
+		d.logRefusal("Killing leftover "+name, err)
+	}
+}
+
+// logStartOutcome logs a supervisor Restart that did not start a role.
+func (d *Daemon) logStartOutcome(role, rigName string, err error) {
+	switch {
+	case errors.Is(err, supervisor.ErrRefused):
+		d.logger.Printf("Not starting %s for %s: %v", role, rigName, err)
+	case errors.Is(err, supervisor.ErrDeclined):
+		d.logger.Printf("Skipping %s auto-start for %s: %v", role, rigName, err)
+	default:
+		d.logger.Printf("Error starting %s for %s: %v", role, rigName, err)
+	}
 }
 
 // ensureRefineriesRunning ensures refineries are running for configured rigs.
@@ -2317,22 +2327,16 @@ func (d *Daemon) ensureRefineriesRunning() {
 	})
 }
 
-// ensureRefineryRunning ensures the refinery for a specific rig is running.
-// Discover, don't track: uses Manager.Start() which checks tmux directly (gt-zecmc).
+// ensureRefineryRunning keeps the refinery for a rig running when it has
+// work: the liveness function decides, and a dead refinery with pending
+// events is restarted through the supervisor. A leftover refinery in a rig
+// that is not operational or is under a safety stop is killed through the
+// supervisor.
 func (d *Daemon) ensureRefineryRunning(rigName string) {
-	// Check rig operational state before auto-starting
+	seat := supervisor.SeatFor(rigName, constants.RoleRefinery, "")
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, reason)
-		// Kill leftover refinery session if rig is not operational (docked/parked).
-		// Without this, sessions started before the rig was docked survive until
-		// the next explicit 'gt rig dock' command. (hq-snx61)
-		name := session.RefinerySessionName(session.PrefixFor(rigName))
-		if exists, _ := d.tmux.HasSession(name); exists {
-			d.logger.Printf("Killing leftover refinery %s (rig %s)", name, reason)
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing leftover refinery %s: %v", name, err)
-			}
-		}
+		d.killLeftover(seat, "rig "+reason, "daemon/rig-state")
 		return
 	}
 	if stop, err := refinery.ActiveSafetyStop(d.config.TownRoot, rigName); err != nil {
@@ -2340,176 +2344,98 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 		return
 	} else if stop != nil {
 		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, stop.Reason())
-		name := session.RefinerySessionName(session.PrefixFor(rigName))
-		if exists, _ := d.tmux.HasSession(name); exists {
-			d.logger.Printf("Killing leftover refinery %s (%s)", name, stop.Reason())
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing leftover refinery %s: %v", name, err)
-			}
-		}
+		d.killLeftover(seat, stop.Reason(), "daemon/safety-stop")
 		return
 	}
 
-	// Event gate: don't spawn a new Claude session when there's nothing to process.
-	// If a refinery session is already running, Start() returns ErrAlreadyRunning (cheap).
-	// But spawning a NEW session with an empty queue burns API credits for nothing.
-	// The refinery formula uses await-event internally, so it will wake when events appear.
+	// NOTE: no stall restart for refineries (serial killer bug): an idle
+	// refinery legitimately produces no output while it waits for MRs.
+	res := d.assessSeat(seat, liveness.Input{})
+	switch res.Verdict {
+	case liveness.Unknown:
+		d.logger.Printf("Refinery for %s: liveness unknown (%v); not acting this tick", rigName, res.Err)
+		return
+	case liveness.Alive, liveness.Stalled:
+		d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
+		// The check above cannot see a session that is alive but consuming
+		// no input -- exactly the state be-refinery was in for ~15 minutes
+		// while three MRs aged behind it (gt-eigw). Probe it.
+		d.probeRunningRefinery(rigName)
+		return
+	}
+
+	// Event gate: a new Claude session with an empty queue burns API
+	// credits for nothing; the refinery formula's await-event wakes a
+	// running one when events appear.
 	if !d.hasPendingEvents("refinery", rigName) {
-		// Check if session already exists before skipping — let running sessions continue
-		r := &rig.Rig{
-			Name: rigName,
-			Path: filepath.Join(d.config.TownRoot, rigName),
-		}
-		mgr := refinery.NewManager(r)
-		if running, _ := mgr.IsRunning(); !running {
-			d.logger.Printf("No pending refinery events and no session running for %s, skipping spawn", rigName)
-			return
-		}
-	}
-
-	// Manager.Start() handles: zombie detection, session creation, env vars, theming,
-	// WaitForClaudeReady, and crucially - startup/propulsion nudges (GUPP).
-	// It returns ErrAlreadyRunning if Claude is already running in tmux.
-	r := &rig.Rig{
-		Name: rigName,
-		Path: filepath.Join(d.config.TownRoot, rigName),
-	}
-	mgr := refinery.NewManager(r)
-	// Attribute the spawn to the daemon heartbeat (gt-uj9k), so a session_start
-	// burst can be traced to this caller rather than guessed at from timings.
-	mgr.SetStartAttribution("daemon-heartbeat", "daemon")
-
-	// NOTE: Hung session detection removed for refineries (serial killer bug).
-	// Idle refineries legitimately produce no tmux output while waiting for MRs.
-	// The deacon's patrol health-scan step handles stuck detection with proper
-	// context (checks for active work before declaring something stuck).
-	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
-
-	if err := mgr.Start(false, ""); err != nil {
-		if errors.Is(err, refinery.ErrAlreadyRunning) {
-			// Already running - this is the expected case when fix is working
-			d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
-			// The check above cannot see a session that is alive but consuming
-			// no input -- exactly the state be-refinery was in for ~15 minutes
-			// while three MRs aged behind it (gt-eigw). Probe it.
-			d.probeRunningRefinery(rigName)
-			return
-		}
-		if errors.Is(err, refinery.ErrSafetyStopped) {
-			d.logger.Printf("Skipping refinery auto-start for %s: %v", rigName, err)
-			return
-		}
-		if errors.Is(err, refinery.ErrForkRig) {
-			d.logger.Printf("Skipping refinery auto-start for %s: %v", rigName, err)
-			return
-		}
-		d.logger.Printf("Error starting refinery for %s: %v", rigName, err)
+		d.logger.Printf("No pending refinery events and no session running for %s, skipping spawn", rigName)
 		return
 	}
 
+	if err := d.sup().Restart(seat, "refinery "+res.Reason+" with pending events", "daemon/ensure-refinery"); err != nil {
+		d.logStartOutcome("refinery", rigName, err)
+		return
+	}
 	d.metrics.recordRestart(d.ctx, "refinery")
 	telemetry.RecordDaemonRestart(d.ctx, "refinery-"+rigName)
 	d.logger.Printf("Refinery session for %s started successfully", rigName)
 }
 
-// ensureMayorRunning ensures the Mayor is running.
-// Uses mayor.Manager for consistent startup behavior.
-// If the tmux session exists but the agent is dead (zombie), the daemon
-// stops the zombie session and starts a fresh one.
-func (d *Daemon) ensureMayorRunning() {
-	mgr := mayor.NewManager(d.config.TownRoot)
+// mayorDeadSamples is how many consecutive dead-agent samples the Mayor
+// needs before a restart: during a handoff its agent is briefly
+// undetectable. The count lives in the Mayor's intent record, so it
+// survives daemon restarts.
+const mayorDeadSamples = 3
 
-	if err := mgr.Start(""); err != nil {
-		if err == mayor.ErrAlreadyRunning {
-			// Session exists — verify agent is actually alive.
-			// During handoffs the agent is briefly undetectable, so we
-			// only restart if the session has been a zombie for multiple
-			// consecutive patrol cycles (debounce).
-			alive, aliveErr := d.isMayorAgentAlive(mgr)
-			if aliveErr != nil {
-				// Unknown is not a zombie cycle: neither count it toward the
-				// restart debounce nor reset the count (gt-fcxe9.1).
-				d.logger.Printf("Mayor agent liveness unknown (%v); not counted as a zombie cycle", aliveErr)
-			} else if !alive {
-				d.mayorZombieCount++
-				if d.mayorZombieCount >= 3 {
-					d.logger.Printf("Mayor zombie detected (%d cycles), restarting", d.mayorZombieCount)
-					if stopErr := mgr.Stop(); stopErr != nil && stopErr != mayor.ErrNotRunning {
-						d.logger.Printf("Error stopping zombie Mayor: %v", stopErr)
-						return
-					}
-					d.mayorZombieCount = 0
-					if startErr := mgr.Start(""); startErr != nil {
-						d.logger.Printf("Error restarting Mayor after zombie cleanup: %v", startErr)
-						return
-					}
-					d.logger.Println("Mayor restarted after zombie cleanup")
-				} else {
-					d.logger.Printf("Mayor agent not detected (cycle %d/3), waiting before restart", d.mayorZombieCount)
-				}
-			} else {
-				d.mayorZombieCount = 0
-			}
-			return
-		}
-		d.logger.Printf("Error starting Mayor: %v", err)
+// mayorSeat is the Mayor's seat.
+var mayorSeat = supervisor.SeatFor("", constants.RoleMayor, "")
+
+// ensureMayorRunning keeps the Mayor running. A missing session is restarted
+// at once; a session whose agent is gone only after mayorDeadSamples
+// consecutive samples. Unknown is never acted on.
+func (d *Daemon) ensureMayorRunning() {
+	res := d.assessSeat(mayorSeat, liveness.Input{})
+	switch res.Verdict {
+	case liveness.Unknown:
+		d.logger.Printf("Mayor agent liveness unknown (%v); not counted as a zombie cycle", res.Err)
+		return
+	case liveness.Alive, liveness.Stalled:
 		return
 	}
-
-	d.mayorZombieCount = 0
+	if res.Reason == liveness.ReasonAgentGone && res.Sample != nil && res.Sample.DeadSamples < mayorDeadSamples {
+		d.logger.Printf("Mayor agent not detected (sample %d/%d), waiting before restart", res.Sample.DeadSamples, mayorDeadSamples)
+		return
+	}
+	if err := d.sup().Restart(mayorSeat, "mayor "+res.Reason, "daemon/ensure-mayor"); err != nil {
+		d.logStartOutcome("mayor", "town", err)
+		return
+	}
 	d.logger.Println("Mayor started successfully")
 }
 
-// isMayorAgentAlive checks if the Mayor's agent process is running in tmux.
-// A non-nil error means the answer is unknown, not that the Mayor is dead.
-func (d *Daemon) isMayorAgentAlive(mgr *mayor.Manager) (bool, error) {
-	t := tmux.NewTmux()
-	return t.IsAgentAliveChecked(mgr.SessionName())
-}
-
-// killDeaconSessions kills leftover deacon and boot tmux sessions.
-// Called when the deacon patrol is disabled to prevent stale deacons from
-// running their own patrol loops and spawning agents. (hq-2mstj)
+// killDeaconSessions kills leftover deacon and boot tmux sessions through
+// the supervisor. Called when the deacon patrol is disabled to prevent stale
+// deacons from running their own patrol loops and spawning agents. (hq-2mstj)
 func (d *Daemon) killDeaconSessions() {
-	for _, name := range []string{session.DeaconSessionName(), session.BootSessionName()} {
-		exists, _ := d.tmux.HasSession(name)
-		if exists {
-			d.logger.Printf("Killing leftover %s session (patrol disabled)", name)
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing %s session: %v", name, err)
-			}
-		}
+	for _, seat := range []supervisor.Seat{deaconSeat, supervisor.SeatFor("", constants.RoleDeacon, "boot")} {
+		d.killLeftover(seat, "patrol disabled", "daemon/patrol-disabled")
 	}
 }
 
-// killWitnessSessions kills leftover witness tmux sessions for all rigs.
-// Called when the witness patrol is disabled. (hq-2mstj)
+// killWitnessSessions kills leftover witness sessions for all rigs through
+// the supervisor. Called when the witness patrol is disabled. (hq-2mstj)
 func (d *Daemon) killWitnessSessions() {
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		name := session.WitnessSessionName(session.PrefixFor(rigName))
-		exists, _ := d.tmux.HasSession(name)
-		if exists {
-			d.logger.Printf("Killing leftover %s session (patrol disabled)", name)
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing %s session: %v", name, err)
-			}
-		}
+		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleWitness, ""), "patrol disabled", "daemon/patrol-disabled")
 		return nil
 	})
 }
 
-// killRefinerySessions kills leftover refinery tmux sessions for all rigs.
-// Called when the refinery patrol is disabled. (hq-2mstj)
+// killRefinerySessions kills leftover refinery sessions for all rigs through
+// the supervisor. Called when the refinery patrol is disabled. (hq-2mstj)
 func (d *Daemon) killRefinerySessions() {
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		name := session.RefinerySessionName(session.PrefixFor(rigName))
-		exists, _ := d.tmux.HasSession(name)
-		if exists {
-			d.logger.Printf("Killing leftover %s session (patrol disabled)", name)
-			if err := d.tmux.KillSessionWithProcesses(name); err != nil {
-				d.logger.Printf("Error killing %s session: %v", name, err)
-			}
-		}
+		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleRefinery, ""), "patrol disabled", "daemon/patrol-disabled")
 		return nil
 	})
 }
@@ -2546,8 +2472,8 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 		exists, _ := d.tmux.HasSession(ghostName)
 		if exists {
 			d.logger.Printf("Killing ghost session %s (default prefix, stale registry artifact)", ghostName)
-			if err := d.tmux.KillSessionWithProcesses(ghostName); err != nil {
-				d.logger.Printf("Error killing ghost session %s: %v", ghostName, err)
+			if err := d.sup().KillStray(ghostName, "default-prefix ghost (stale registry artifact)", "daemon/ghosts"); err != nil {
+				d.logRefusal("Killing ghost session "+ghostName, err)
 			}
 		}
 	}
@@ -2582,8 +2508,8 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 				} else {
 					// Both exist — ghost is definitely a duplicate, kill it.
 					d.logger.Printf("Killing duplicate ghost polecat session %s (correct session %s exists)", ghostName, correctName)
-					if err := d.tmux.KillSessionWithProcesses(ghostName); err != nil {
-						d.logger.Printf("Error killing ghost session %s: %v", ghostName, err)
+					if err := d.sup().KillStray(ghostName, "duplicate of "+correctName, "daemon/ghosts"); err != nil {
+						d.logRefusal("Killing ghost session "+ghostName, err)
 					}
 				}
 			}

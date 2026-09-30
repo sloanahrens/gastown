@@ -56,6 +56,12 @@ func (v Verdict) String() string {
 	}
 }
 
+// The two reasons a verdict is Dead.
+const (
+	ReasonNoSession = "no session"
+	ReasonAgentGone = "agent process not running"
+)
+
 // Probe is the tmux surface Assess reads. *tmux.Tmux implements it.
 type Probe interface {
 	HasSession(name string) (bool, error)
@@ -126,14 +132,14 @@ func Assess(p Probe, in Input) Result {
 		return Result{Verdict: Unknown, Reason: "session query failed", Err: err, Sample: in.Prev}
 	}
 	if !exists {
-		return dead(in.Prev, now, "no session")
+		return dead(in.Prev, now, ReasonNoSession)
 	}
 	alive, err := p.IsAgentAliveChecked(in.Session)
 	if err != nil {
 		return Result{Verdict: Unknown, Reason: "agent process query failed", Err: err, Sample: in.Prev}
 	}
 	if !alive {
-		return dead(in.Prev, now, "agent process not running")
+		return dead(in.Prev, now, ReasonAgentGone)
 	}
 
 	cur := sample(p, in, now)

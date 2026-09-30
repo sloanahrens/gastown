@@ -13,9 +13,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -123,8 +125,8 @@ func (d *Daemon) cleanupStuckDogs(mgr *dog.Manager, sm dogSessions) {
 		}
 
 		d.logger.Printf("Handler: dog %s (%s) is working but agent is dead, killing session and clearing work", dg.Name, sessionID)
-		if err := d.tmux.KillSessionWithProcesses(sessionID); err != nil {
-			d.logger.Printf("Handler: failed to kill agent-dead session for dog %s (%s): %v", dg.Name, sessionID, err)
+		if err := d.sup().Kill(dogSeat(dg.Name), "working dog with a dead agent", "daemon/dog-handler"); err != nil {
+			d.logRefusal(fmt.Sprintf("Handler: killing agent-dead session for dog %s (%s)", dg.Name, sessionID), err)
 			continue
 		}
 		d.clearDogWorkIfMatches(mgr, dg, "dead agent")
@@ -176,8 +178,9 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm dogSessions, daemon
 		if running {
 			// Kill the tmux session before clearing state so a failed kill does not
 			// return the dog to the idle pool with stale work still running.
-			if err := d.tmux.KillSessionWithProcesses(sm.SessionName(dg.Name)); err != nil {
-				d.logger.Printf("Handler: failed to stop session for stale dog %s: %v", dg.Name, err)
+			why := fmt.Sprintf("stale working dog (inactive %v)", staleDuration.Truncate(time.Minute))
+			if err := d.sup().Kill(dogSeat(dg.Name), why, "daemon/dog-handler"); err != nil {
+				d.logRefusal(fmt.Sprintf("Handler: stopping session for stale dog %s", dg.Name), err)
 				continue
 			}
 		}
@@ -218,8 +221,9 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm dogSessions, daemonCfg *confi
 			}
 			if running {
 				d.logger.Printf("Handler: reaping idle dog %s session (idle %v)", dg.Name, idleDuration.Truncate(time.Minute))
-				if err := sm.Stop(dg.Name, true); err != nil {
-					d.logger.Printf("Handler: failed to stop session for idle dog %s: %v", dg.Name, err)
+				why := fmt.Sprintf("idle dog (idle %v)", idleDuration.Truncate(time.Minute))
+				if err := d.sup().Kill(dogSeat(dg.Name), why, "daemon/dog-handler"); err != nil {
+					d.logRefusal(fmt.Sprintf("Handler: stopping session for idle dog %s", dg.Name), err)
 				}
 			}
 		}
@@ -229,10 +233,14 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm dogSessions, daemonCfg *confi
 			d.logger.Printf("Handler: removing long-idle dog %s from kennel (idle %v, pool %d/%d)",
 				dg.Name, idleDuration.Truncate(time.Minute), poolSize, poolMax)
 
-			// Ensure session is dead before removing.
+			// Ensure session is dead before removing; a refused or failed
+			// kill keeps the dog in the kennel.
 			running, _ := sm.IsRunning(dg.Name)
 			if running {
-				_ = sm.Stop(dg.Name, true)
+				if err := d.sup().Kill(dogSeat(dg.Name), "removing long-idle dog", "daemon/dog-handler"); err != nil {
+					d.logRefusal(fmt.Sprintf("Handler: stopping session for long-idle dog %s", dg.Name), err)
+					continue
+				}
 			}
 
 			if err := mgr.Remove(dg.Name); err != nil {
@@ -629,4 +637,9 @@ func (d *Daemon) findDog(mgr dogManager, sm dogSessionStarter) *dog.Dog {
 		return nil
 	}
 	return findDispatchableDog(realMgr, realSM, d.config.TownRoot, d.logger)
+}
+
+// dogSeat is a dog's seat: town-level, named.
+func dogSeat(name string) supervisor.Seat {
+	return supervisor.SeatFor("", constants.RoleDog, name)
 }

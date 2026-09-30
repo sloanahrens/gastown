@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -395,5 +396,24 @@ func TestSeatForSession(t *testing.T) {
 	}
 	if IntentSeat(SeatFor("", "deacon", "boot")).Path("/t") != "/t/.runtime/agents/deacon.boot.json" {
 		t.Fatalf("boot seat path = %s", IntentSeat(SeatFor("", "deacon", "boot")).Path("/t"))
+	}
+}
+
+// TestDeclinedRestartIsNotCharged: an executor that started nothing (a fork
+// rig, a safety stop, a session someone else already raised) wraps
+// ErrDeclined, and the attempt does not spend the seat's budget.
+func TestDeclinedRestartIsNotCharged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	s := New(Options{TownRoot: h.town, Tmux: h.tmux, Now: func() time.Time { return h.now },
+		Restart: func(Seat) error { return fmt.Errorf("%w: refinery is fork-backed", ErrDeclined) }})
+	for i := 0; i < 5; i++ {
+		if err := s.Restart(flint, "dead", "daemon"); !errors.Is(err, ErrDeclined) || errors.Is(err, ErrRefused) {
+			t.Fatalf("attempt %d = %v, want ErrDeclined", i+1, err)
+		}
+	}
+	rec, _ := intent.Read(h.town, IntentSeat(flint))
+	if len(rec.Restarts) != 0 || rec.Held() || rec.LastAction.Outcome != "declined" {
+		t.Fatalf("record after declined restarts = %+v, want no budget spent", rec)
 	}
 }
