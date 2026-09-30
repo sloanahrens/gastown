@@ -38,6 +38,11 @@ func TestMRProtectedJoinAgainstRealEngine(t *testing.T) {
 		// labelSetAt, if non-zero, adds a wisp_events label_set row anchoring
 		// the state:merge-requested TTL to this time instead of createdAt.
 		labelSetAt time.Time
+		// labelAddedAt, if non-zero, adds the row bd itself journals when
+		// "bd update --set-labels" adds the label (event_type label_added,
+		// comment "Added label: <label>"); the witness no longer writes
+		// label_set rows (gt-fcxe9.12).
+		labelAddedAt time.Time
 	}
 
 	wisps := []wisp{
@@ -63,6 +68,14 @@ func TestMRProtectedJoinAgainstRealEngine(t *testing.T) {
 		{id: "cleanup-fallback-expired", status: "open", createdAt: now.Add(-100 * time.Hour),
 			labels: []string{"cleanup", "state:merge-requested"}},
 
+		// Anchored by bd's own label_added journal row, fresh -> protected.
+		{id: "cleanup-bd-fresh", status: "open", createdAt: now.Add(-100 * time.Hour),
+			labels: []string{"cleanup", "state:merge-requested"}, labelAddedAt: now.Add(-1 * time.Hour)},
+
+		// Anchored by bd's label_added row, past the TTL -> reapable.
+		{id: "cleanup-bd-expired", status: "open", createdAt: now.Add(-100 * time.Hour),
+			labels: []string{"cleanup", "state:merge-requested"}, labelAddedAt: now.Add(-100 * time.Hour)},
+
 		// Cleanup-labeled only, no state:merge-requested -> never protected by
 		// this branch.
 		{id: "cleanup-only", status: "open", createdAt: now.Add(-1 * time.Hour), labels: []string{"cleanup"}},
@@ -82,6 +95,9 @@ func TestMRProtectedJoinAgainstRealEngine(t *testing.T) {
 		if !w.labelSetAt.IsZero() {
 			insertWispLabelSetEvent(t, ctx, engine, w.id, "state:merge-requested", w.labelSetAt)
 		}
+		if !w.labelAddedAt.IsZero() {
+			insertWispLabelAddedEvent(t, ctx, engine, w.id, "state:merge-requested", w.labelAddedAt)
+		}
 	}
 
 	joinClause, whereCondition := mrProtectedJoin(maxProtection, cutoff)
@@ -90,6 +106,7 @@ func TestMRProtectedJoinAgainstRealEngine(t *testing.T) {
 	got := runIDQuery(t, ctx, engine, query)
 
 	want := []string{
+		"cleanup-bd-expired",
 		"cleanup-expired",
 		"cleanup-fallback-expired",
 		"cleanup-only",
@@ -124,6 +141,7 @@ func newWispTestEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
 		{Name: "issue_id", Type: types.Text, Nullable: false, Source: "wisp_events"},
 		{Name: "event_type", Type: types.Text, Nullable: false, Source: "wisp_events"},
 		{Name: "old_value", Type: types.Text, Nullable: true, Source: "wisp_events"},
+		{Name: "comment", Type: types.Text, Nullable: true, Source: "wisp_events"},
 		{Name: "created_at", Type: types.Datetime, Nullable: false, Source: "wisp_events"},
 	}), db.GetForeignKeyCollection()))
 
@@ -154,6 +172,13 @@ func insertWispLabelSetEvent(t *testing.T, ctx *gmssql.Context, engine *sqle.Eng
 	mustExec(t, ctx, engine, fmt.Sprintf(
 		"INSERT INTO wisp_events (issue_id, event_type, old_value, created_at) VALUES ('%s', 'label_set', '%s', '%s')",
 		issueID, oldValue, createdAt.UTC().Format("2006-01-02 15:04:05")))
+}
+
+func insertWispLabelAddedEvent(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, issueID, label string, createdAt time.Time) {
+	t.Helper()
+	mustExec(t, ctx, engine, fmt.Sprintf(
+		"INSERT INTO wisp_events (issue_id, event_type, comment, created_at) VALUES ('%s', 'label_added', 'Added label: %s', '%s')",
+		issueID, label, createdAt.UTC().Format("2006-01-02 15:04:05")))
 }
 
 func mustExec(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) {

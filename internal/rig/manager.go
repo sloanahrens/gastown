@@ -718,9 +718,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("rig init left a duplicate Dolt database: %w", err)
 	}
 
-	// Set issue_prefix on the correct server-side database. bd 1.0+ rejects
-	// `bd config set issue_prefix`, so write both config.yaml and Dolt config
-	// directly after metadata points at the canonical rig database.
+	// Set issue_prefix and the custom types on the correct server-side
+	// database, after metadata points at the canonical rig database: in
+	// config.yaml, and in the database through bd (seedRigDatabaseConfig).
 	{
 		rigRootBeadsDir := filepath.Join(rigPath, ".beads")
 		resolvedBeadsDir := beads.ResolveBeadsDir(rigRootBeadsDir)
@@ -731,11 +731,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
 		}
-		if err := beads.EnsureDoltConfigValue(resolvedBeadsDir, "issue_prefix", opts.BeadsPrefix); err != nil {
-			fmt.Printf("  Warning: Could not set issue_prefix in rig database: %v\n", err)
+		database := doltserver.DatabaseForBeadsDir(resolvedBeadsDir)
+		setPrefix := func(prefix string) error {
+			return doltserver.SetRigIssuePrefix(m.townRoot, resolvedBeadsDir, database, prefix)
 		}
-		_ = beads.EnsureDoltConfigValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
-		_ = beads.EnsureDoltConfigValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
+		for _, w := range seedRigDatabaseConfig(beads.NewRigLocal(filepath.Dir(resolvedBeadsDir)), setPrefix, opts.BeadsPrefix) {
+			fmt.Printf("  Warning: %s\n", w)
+		}
 	}
 
 	// Provision PRIME.md with Gas Town context for all workers in this rig.

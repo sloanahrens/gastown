@@ -2397,7 +2397,7 @@ func TestIsDoltRetryableError_CatalogRace(t *testing.T) {
 	// After CREATE DATABASE, the Dolt server may not immediately make the
 	// database visible in its in-memory catalog. Subsequent USE queries
 	// fail with "Unknown database '<name>'". This must be retryable so that
-	// doltSQLWithRetry and doltSQLScriptWithRetry handle the race gracefully.
+	// doltSQLScriptWithRetry handles the race gracefully.
 	catalogErrors := []string{
 		"Unknown database 'myrig'",
 		"Unknown database 'wl_commons'",
@@ -3075,8 +3075,7 @@ func TestHealthMetrics_ReadOnlyField(t *testing.T) {
 
 func TestIsDoltRetryableError_IncludesReadOnly(t *testing.T) {
 	// Verify that read-only errors are recognized as retryable.
-	// This is critical for the recovery path: doltSQLWithRetry must
-	// retry on read-only before escalating to doltSQLWithRecovery.
+	// doltSQLScriptWithRetry must retry on read-only before giving up.
 	tests := []struct {
 		msg  string
 		want bool

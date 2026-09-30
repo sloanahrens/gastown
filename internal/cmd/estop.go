@@ -98,6 +98,7 @@ and nudges all sessions to alert them that work can continue.
 Examples:
   gt thaw                    # Thaw everything
   gt thaw --rig gastown      # Thaw only gastown`,
+	Args: cobra.NoArgs,
 	RunE: runThaw,
 }
 

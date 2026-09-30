@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -667,29 +666,6 @@ func TestListCrewWorkers_FiltersWorktrees(t *testing.T) {
 		if !found {
 			t.Errorf("listCrewWorkers should include canonical worker %q, got: %v", name, workers)
 		}
-	}
-}
-
-// TestAddWispLabelSQL_WritesWispLabels is the regression guard for gt-3vx:
-// after CreateAgentBead, the gt:agent label must also go into wisp_labels so
-// doctor checks that join wisp_labels find the bead. A failed write must be
-// returned, not discarded.
-func TestAddWispLabelSQL_WritesWispLabels(t *testing.T) {
-	t.Parallel()
-	bd := newFakeBD()
-	dir := t.TempDir()
-	db := bd.db(dir)
-	db.OnSQL(csvAnswer())
-	if err := addWispLabelSQL(bd.ctx(t.TempDir()), dir, "gt-gastown-witness", "gt:agent"); err != nil {
-		t.Fatal(err)
-	}
-	want := "INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES ('gt-gastown-witness', 'gt:agent')"
-	if got := db.SQLStatements(); len(got) != 1 || got[0] != want {
-		t.Errorf("statements = %q, want %q", got, want)
-	}
-	db.OnSQL(func(string) ([][]string, error) { return nil, errors.New("no Dolt server") })
-	if err := addWispLabelSQL(bd.ctx(t.TempDir()), dir, "gt-x", "gt:agent"); err == nil || !strings.Contains(err.Error(), "no Dolt server") {
-		t.Errorf("failed write = %v, want the bd error", err)
 	}
 }
 

@@ -2799,7 +2799,7 @@ func InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err
 		// CREATE DATABASE returns before the catalog is fully updated, so
 		// subsequent USE/query operations can fail with "Unknown database".
 		// Non-fatal: the database was created, so we log a warning and continue
-		// to EnsureMetadata. The retry wrappers (doltSQLWithRetry) will handle
+		// to EnsureMetadata. The retry wrapper (doltSQLScriptWithRetry) handles
 		// any residual catalog propagation delays in subsequent operations.
 		if err := waitForCatalog(townRoot, rigName); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: catalog visibility wait timed out (will retry on use): %v\n", err)
@@ -4411,33 +4411,6 @@ func RecoverReadOnly(townRoot string) error {
 	return fmt.Errorf("Dolt server still read-only after restart (%d verification attempts)", maxAttempts)
 }
 
-// doltSQLWithRecovery executes a SQL statement with retry logic and, if retries
-// are exhausted due to read-only errors, attempts server restart before a final retry.
-// This is the gt-level recovery path for polecat management operations (spawn, done).
-func doltSQLWithRecovery(townRoot, rigDB, query string) error {
-	err := doltSQLWithRetry(townRoot, rigDB, query)
-	if err == nil {
-		return nil
-	}
-
-	// If the final error is a read-only error, attempt recovery
-	if !IsReadOnlyError(err.Error()) {
-		return err
-	}
-
-	// Attempt server recovery
-	if recoverErr := RecoverReadOnly(townRoot); recoverErr != nil {
-		return fmt.Errorf("read-only recovery failed: %w (original: %v)", recoverErr, err)
-	}
-
-	// Retry the operation after recovery
-	if retryErr := doltSQL(townRoot, rigDB, query); retryErr != nil {
-		return fmt.Errorf("operation failed after read-only recovery: %w", retryErr)
-	}
-
-	return nil
-}
-
 // MeasureQueryLatency times a SELECT active_branch() query against the Dolt server.
 // Per Tim Sehn (Dolt CEO): active_branch() is a lightweight probe that won't block
 // behind queued queries, unlike SELECT 1 which goes through the full query executor.
@@ -4756,56 +4729,6 @@ func waitForCatalog(townRoot, dbName string) error {
 	return fmt.Errorf("database %q not visible after %d attempts: %w", dbName, maxAttempts, lastErr)
 }
 
-// doltSQL executes a SQL statement against a specific rig database on the Dolt server.
-// Uses explicit --host/--port flags to connect to the running server (same rationale
-// as serverExecSQL — embedded mode doesn't share the server's catalog).
-// The USE prefix selects the database since --use-db is not available on all dolt versions.
-func doltSQL(townRoot, rigDB, query string) error {
-	config := DefaultConfig(townRoot)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Prepend USE <db> to select the target database.
-	fullQuery := fmt.Sprintf("USE %s; %s", rigDB, query)
-	cmd := buildServerSQLCmd(ctx, config, "-q", fullQuery)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-// doltSQLWithRetry executes a SQL statement with exponential backoff on transient errors.
-func doltSQLWithRetry(townRoot, rigDB, query string) error {
-	const maxRetries = 5
-	const baseBackoff = 500 * time.Millisecond
-	const maxBackoff = 15 * time.Second
-
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := doltSQL(townRoot, rigDB, query); err != nil {
-			lastErr = err
-			if !isDoltRetryableError(err) {
-				return err
-			}
-			if attempt < maxRetries {
-				backoff := baseBackoff
-				for i := 1; i < attempt; i++ {
-					backoff *= 2
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-						break
-					}
-				}
-				time.Sleep(backoff)
-			}
-			continue
-		}
-		return nil
-	}
-	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
-}
-
 // isDoltRetryableError returns true if the error is a transient Dolt failure worth retrying.
 // Covers manifest lock contention, read-only mode, optimistic lock failures, timeouts,
 // and catalog propagation delays after CREATE DATABASE.
@@ -4821,27 +4744,6 @@ func isDoltRetryableError(err error) bool {
 		strings.Contains(msg, "lock wait timeout") ||
 		strings.Contains(msg, "try restarting transaction") ||
 		strings.Contains(msg, "Unknown database")
-}
-
-// CommitServerWorkingSet stages all pending changes and commits them on the current branch via SQL.
-// This flushes the Dolt working set to HEAD so that DOLT_BRANCH (which forks from
-// HEAD, not the working set) will include all recent writes. Critical for the sling
-// flow where BD_DOLT_AUTO_COMMIT=off leaves writes in working set only.
-//
-// NOTE: This flushes ALL pending working set changes on the target branch, not just
-// those from a specific polecat. In batch sling, polecat B's flush may capture
-// polecat A's writes. This is benign because beads are keyed by unique ID, so
-// duplicate data across branches merges cleanly.
-func CommitServerWorkingSet(townRoot, rigDB, message string) error {
-	if err := doltSQLWithRecovery(townRoot, rigDB, "CALL DOLT_ADD('-A')"); err != nil {
-		return fmt.Errorf("staging working set in %s: %w", rigDB, err)
-	}
-	escaped := strings.ReplaceAll(message, "'", "''")
-	query := fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-m', '%s')", escaped)
-	if err := doltSQLWithRecovery(townRoot, rigDB, query); err != nil {
-		return fmt.Errorf("committing working set in %s: %w", rigDB, err)
-	}
-	return nil
 }
 
 // doltSQLScript executes a multi-statement SQL script via a temp file.
@@ -4877,10 +4779,10 @@ func doltSQLScript(townRoot, script string) error {
 	return nil
 }
 
-// doltSQLScriptWithRetry executes a SQL script with exponential backoff on transient errors.
-// Callers must ensure scripts are idempotent, as partial execution may have occurred
-// before the retry. Uses the same retry classification as doltSQLWithRetry but with
-// fewer retries and shorter backoff since multi-statement scripts are more expensive.
+// doltSQLScriptWithRetry executes a SQL script, retrying with exponential
+// backoff while isDoltRetryableError holds. Callers must make scripts
+// idempotent, since a failed attempt may have run part of the script.
+// Retries are few and short because multi-statement scripts are expensive.
 func doltSQLScriptWithRetry(townRoot, script string) error {
 	const maxRetries = 3
 	const baseBackoff = 500 * time.Millisecond
