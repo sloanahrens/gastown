@@ -10,7 +10,6 @@ internal/deacon
 internal/doctor
 internal/dog
 internal/feed
-internal/formula
 internal/hooks
 internal/mail
 internal/mayor
@@ -24,6 +23,4 @@ internal/scheduler/capacity
 internal/session
 internal/telemetry
 internal/templates
-internal/testutil
-internal/util
 internal/witness

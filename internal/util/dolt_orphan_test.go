@@ -8,11 +8,10 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func TestIsDoltSQLServerArgs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		args string
 		want bool
@@ -34,6 +33,7 @@ func TestIsDoltSQLServerArgs(t *testing.T) {
 }
 
 func TestDoltSQLServerConfigPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		args string
 		want string
@@ -51,6 +51,7 @@ func TestDoltSQLServerConfigPath(t *testing.T) {
 }
 
 func TestIsBeadsTestConfigPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
@@ -68,6 +69,7 @@ func TestIsBeadsTestConfigPath(t *testing.T) {
 }
 
 func TestParseDoltProcessTable(t *testing.T) {
+	t.Parallel()
 	out := `  PID  PPID   ELAPSED COMMAND
     1     0 10-00:00:00 /sbin/launchd
 76098     1    18:39:00 dolt sql-server --config /tmp/beads-bd-tests-1739512292/T/dolt-server-config.yaml
@@ -90,6 +92,7 @@ func TestParseDoltProcessTable(t *testing.T) {
 }
 
 func TestClassifyDoltOrphan(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		entry      doltProcEntry
@@ -145,6 +148,7 @@ func TestClassifyDoltOrphan(t *testing.T) {
 }
 
 func TestTownDoltServerPID(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if pid := townDoltServerPID(dir); pid != 0 {
 		t.Errorf("townDoltServerPID() with no pid file = %d, want 0", pid)
@@ -168,6 +172,7 @@ func TestTownDoltServerPID(t *testing.T) {
 // ForbiddenTownRoot, or the process table scan (which isn't sandboxed) finds
 // it with nothing to match against.
 func TestTownServerPIDsUsesForbiddenTownRoot(t *testing.T) {
+	t.Parallel()
 	sandboxRoot := t.TempDir() // no daemon/dolt.pid — mirrors a hermetic town
 
 	realRoot := t.TempDir()
@@ -179,35 +184,21 @@ func TestTownServerPIDsUsesForbiddenTownRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if pids := townServerPIDs(sandboxRoot); len(pids) != 0 {
+	if pids := townServerPIDsWith(sandboxRoot, ""); len(pids) != 0 {
 		t.Errorf("townServerPIDs() without ForbiddenTownRoot set = %v, want empty", pids)
 	}
 
-	t.Setenv(workspace.EnvForbiddenTownRoot, realRoot)
-
-	pids := townServerPIDs(sandboxRoot)
+	pids := townServerPIDsWith(sandboxRoot, realRoot)
 	if !pids[35519] {
 		t.Errorf("townServerPIDs() = %v, want to include the real town's PID 35519", pids)
 	}
 }
 
-// TestFindStaleBeadsTestTempDirs exercises the real process table (via ps),
-// so it only verifies dirs unrelated to any live dolt sql-server on this
-// machine are found — it does not assert on live-server exclusion, which
-// would require controlling the actual process table.
+// TestFindStaleBeadsTestTempDirs reads a scripted process table, so it also
+// asserts that a directory a live dolt sql-server still uses is kept.
 func TestFindStaleBeadsTestTempDirs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	origTempDir := os.Getenv("TMPDIR")
-	t.Cleanup(func() {
-		if origTempDir == "" {
-			os.Unsetenv("TMPDIR")
-		} else {
-			os.Setenv("TMPDIR", origTempDir)
-		}
-	})
-	if err := os.Setenv("TMPDIR", tmpDir); err != nil {
-		t.Fatal(err)
-	}
 
 	staleName := "beads-bd-tests-" + strconv.Itoa(1)
 	stalePath := filepath.Join(tmpDir, staleName)
@@ -231,7 +222,21 @@ func TestFindStaleBeadsTestTempDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stale, err := FindStaleBeadsTestTempDirs()
+	livePath := filepath.Join(tmpDir, "beads-bd-tests-3")
+	if err := os.MkdirAll(filepath.Join(livePath, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(livePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() ([]doltProcEntry, error) {
+		return []doltProcEntry{
+			{PID: 10, PPID: 1, Etime: "01:00:00", Args: "dolt sql-server --config " + filepath.Join(livePath, "dolt", "config.yaml")},
+			{PID: 11, PPID: 1, Etime: "01:00:00", Args: "/bin/sleep 60"},
+		}, nil
+	}
+
+	stale, err := findStaleBeadsTestTempDirs(tmpDir, snapshot)
 	if err != nil {
 		t.Fatalf("FindStaleBeadsTestTempDirs() error = %v", err)
 	}
@@ -244,6 +249,9 @@ func TestFindStaleBeadsTestTempDirs(t *testing.T) {
 		if s == freshPath {
 			t.Errorf("FindStaleBeadsTestTempDirs() returned fresh dir %q, should have been filtered by age", freshPath)
 		}
+		if s == livePath {
+			t.Errorf("FindStaleBeadsTestTempDirs() returned %q, which a live dolt sql-server still uses", livePath)
+		}
 		if s == unrelated {
 			t.Errorf("FindStaleBeadsTestTempDirs() returned non-beads dir %q", unrelated)
 		}
@@ -254,6 +262,7 @@ func TestFindStaleBeadsTestTempDirs(t *testing.T) {
 }
 
 func TestRemoveStaleBeadsTestTempDirs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	valid := filepath.Join(tmpDir, "beads-bd-tests-123")
 	if err := os.MkdirAll(valid, 0755); err != nil {

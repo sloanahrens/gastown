@@ -34,6 +34,7 @@ func embeddedFormulaStep(t *testing.T, formula, id string) *Step {
 // operator hold (the file internal/dispatch.OperatorHold reads) and ESTOP
 // before slinging.
 func TestDeaconPatrolGatedDispatchHonorsHold(t *testing.T) {
+	t.Parallel()
 	d := deaconPatrolStep(t, "dispatch-gated-molecules").Description
 	for _, want := range []string{"seat-refill.hold", "GT_SEAT_REFILL_HOLD", "$GT_ROOT/ESTOP", "ESTOP.<rig>"} {
 		if !strings.Contains(d, want) {
@@ -49,6 +50,7 @@ func TestDeaconPatrolGatedDispatchHonorsHold(t *testing.T) {
 // redispatch`: exit 2 is cooldown or deferred (hold, pool full), and the
 // formula keeps that message for the next patrol instead of archiving it.
 func TestDeaconPatrolRedispatchExit2IsRetried(t *testing.T) {
+	t.Parallel()
 	d := deaconPatrolStep(t, "inbox-check").Description
 	for _, want := range []string{"2=try again later", "pool is full", "Leave an exit-2 message unarchived"} {
 		if !strings.Contains(d, want) {
@@ -94,6 +96,7 @@ func TestDeaconPatrolRedispatchExit2IsRetried(t *testing.T) {
 // convoy issues by hand, so it checks the operator hold, ESTOP and the target
 // rig's ESTOP.<rig> before the first sling.
 func TestConvoyFeedDispatchHonorsHold(t *testing.T) {
+	t.Parallel()
 	d := embeddedFormulaStep(t, "mol-convoy-feed", "dispatch-work").Description
 	for _, want := range []string{"seat-refill.hold", "GT_SEAT_REFILL_HOLD", "$GT_ROOT/ESTOP", "ESTOP.<rig>"} {
 		if !strings.Contains(d, want) {

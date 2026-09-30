@@ -16,6 +16,31 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 )
 
+// skipStoreAndJournalCannotShareADatabase skips a test that drives a real
+// ConvoyManager over a real store and asserts on the closes it reads from that
+// store's journal.
+//
+// The manager's journal is bd's (bd events tail, gt-7iwy0.2), and the store
+// these tests can open is the beadsdk v1.0.5 one (testutil.OpenTestStore). No
+// database serves both under the town's bd 1.2.2, as observed under gt slot
+// run on 2026-09-30:
+//
+//   - the pool's SDK-migrated database has no bd_events_journal table, so
+//     bd events tail fails with "table not found: bd_events_journal";
+//   - a bd-initialized database has the journal, but the v1.0.5 store cannot
+//     write to it: CreateIssue fails recording its event ("Field 'id' doesn't
+//     have a default value"), and bd list fails on the same schema with
+//     "table \"i\" does not have column \"row_lock\"".
+//
+// What they pin is covered, and running, in the fast tier: convoy_manager_test.go
+// drives the same paths over memStore, and TestMemStoreMatchesBeadsStore pins
+// that store's observable behavior against a real Dolt store. These tests come
+// back when the store library tracks the bd CLI's schema (gt-idv8s).
+func skipStoreAndJournalCannotShareADatabase(t *testing.T) {
+	t.Helper()
+	t.Skip("needs a store and a bd events journal on one database; the v1.0.5 store and bd 1.2.2 disagree on the schema (gt-idv8s). Covered in the fast tier by convoy_manager_test.go + TestMemStoreMatchesBeadsStore")
+}
+
 // TestIntegrationConvoyManager_FullLifecycle starts a real ConvoyManager with a real beads
 // store and mock gt, lets both goroutines tick (event poll + stranded scan),
 // verifies log output, then stops and verifies clean shutdown.
@@ -25,6 +50,7 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
+	skipStoreAndJournalCannotShareADatabase(t)
 
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -154,6 +180,7 @@ func TestIntegrationConvoyManager_LoggingFlow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
+	skipStoreAndJournalCannotShareADatabase(t)
 
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

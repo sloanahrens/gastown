@@ -64,9 +64,11 @@ func moveDir(src, dest string) error {
 // Git wraps git operations for a working directory.
 type Git struct {
 	workDir string
-	gitDir  string  // Optional: explicit git directory (for bare repos)
-	gh      ghFunc  // runs the gh CLI; nil means the real gh on PATH
-	exec    runFunc // runs git; nil means the real git on PATH
+	gitDir  string        // Optional: explicit git directory (for bare repos)
+	gh      ghFunc        // runs the gh CLI; nil means the real gh on PATH
+	exec    runFunc       // runs git; nil means the real git on PATH
+	timeout time.Duration // deadline for every call when set (WithTimeout)
+	env     []string      // added to every call's environment (WithEnv)
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would
@@ -190,8 +192,11 @@ func (g *Git) runOutput(args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: g.timeout})
 	if err != nil {
+		if g.timeout > 0 && errors.Is(err, errTimedOut) {
+			return "", &timeoutError{command: args[0], after: g.timeout}
+		}
 		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
@@ -282,10 +287,11 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, timeout: timeout})
+	timeout = g.deadline(timeout)
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: timeout})
 	if err != nil {
 		if errors.Is(err, errTimedOut) {
-			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
+			return "", &timeoutError{command: args[0], after: timeout}
 		}
 		return "", g.wrapError(err, stdout, stderr, args)
 	}
@@ -309,10 +315,11 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: extraEnv, timeout: timeout})
+	timeout = g.deadline(timeout)
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: append(append([]string(nil), g.env...), extraEnv...), timeout: timeout})
 	if err != nil {
 		if timeout > 0 && errors.Is(err, errTimedOut) {
-			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
+			return "", &timeoutError{command: args[0], after: timeout}
 		}
 		return "", g.wrapError(err, stdout, stderr, args)
 	}
@@ -331,8 +338,11 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, stdin: stdin})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, stdin: stdin, timeout: g.timeout})
 	if err != nil {
+		if g.timeout > 0 && errors.Is(err, errTimedOut) {
+			return "", &timeoutError{command: args[0], after: g.timeout}
+		}
 		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
@@ -1204,6 +1214,12 @@ func normalizeGitRemoteURL(raw string) string {
 // Push pushes to the remote branch with a timeout to prevent indefinite hangs
 // when the remote is unreachable.
 func (g *Git) Push(remote, branch string, force bool) error {
+	return g.PushWithTimeout(remote, branch, force, pushTimeout)
+}
+
+// PushWithTimeout is Push with its deadline given, for a push that can
+// outgrow the default (a large backup pack).
+func (g *Git) PushWithTimeout(remote, branch string, force bool, timeout time.Duration) error {
 	if err := g.RefuseForkBackedDefaultPush(remote, branch, g.RemoteDefaultBranch()); err != nil {
 		return err
 	}
@@ -1211,7 +1227,7 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithTimeout(pushTimeout, args...)
+	_, err := g.runWithTimeout(timeout, args...)
 	return err
 }
 
@@ -2534,8 +2550,11 @@ func (g *Git) runMergeCheck(args ...string) (string, error) {
 		return "", err
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, timeout: g.timeout})
 	if err != nil {
+		if g.timeout > 0 && errors.Is(err, errTimedOut) {
+			return "", &timeoutError{command: args[0], after: g.timeout}
+		}
 		// ZFC: Return raw output for observation, don't interpret CONFLICT
 		return "", g.wrapError(err, stdout, stderr, args)
 	}

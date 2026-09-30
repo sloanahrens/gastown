@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package util
 
@@ -22,7 +22,7 @@ import (
 // which cmd.Process.Kill() — and so exec.CommandContext's default cancel — does
 // not. The command here has the gate's shape cut to two levels: a shell that
 // backgrounds a long-lived grandchild and waits on it.
-func TestKillProcessGroup_TakesTheGrandchild(t *testing.T) {
+func TestIntegrationKillProcessGroup_TakesTheGrandchild(t *testing.T) {
 	t.Parallel()
 
 	cmd, done, grandchild := startInGroup(t, "sleep 60 & echo $!; wait")
@@ -42,7 +42,7 @@ func TestKillProcessGroup_TakesTheGrandchild(t *testing.T) {
 // half: a group that ignores SIGTERM must still be gone when KillProcessGroup
 // returns, and reaching it must have cost the escalation rather than leaving
 // the group standing behind a polite signal.
-func TestKillProcessGroup_EscalatesPastSIGTERM(t *testing.T) {
+func TestIntegrationKillProcessGroup_EscalatesPastSIGTERM(t *testing.T) {
 	// Not parallel: this test writes ProcessGroupKillGrace, and parallel
 	// siblings would race it.
 	stubProcessGroupKillGrace(t, 300*time.Millisecond)
@@ -77,7 +77,7 @@ func TestKillProcessGroup_EscalatesPastSIGTERM(t *testing.T) {
 // before the shell even wrote the pid, failing with "no pid was written"
 // (a 1 ms deadline reproduces that every time). cmd.Cancel runs the same way
 // whichever ended the context.
-func TestSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
+func TestIntegrationSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 	// Not parallel: this test writes ProcessGroupKillGrace, and parallel
 	// siblings would race it.
 	stubProcessGroupKillGrace(t, 300*time.Millisecond)
@@ -114,7 +114,7 @@ func TestSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 // It runs against the shipped ProcessGroupKillGrace rather than a stub: the
 // trap has to win the window this test leaves it, and a default too short to
 // hold one is the regression worth failing on.
-func TestSetProcessGroup_CancelSendsSIGTERMFirst(t *testing.T) {
+func TestIntegrationSetProcessGroup_CancelSendsSIGTERMFirst(t *testing.T) {
 	t.Parallel()
 
 	marker := filepath.Join(t.TempDir(), "reaped")

@@ -10,6 +10,7 @@ import (
 // witness formula must tell the agent to read the scan's verdict rather than
 // hold sample 1 in its own context, where a respawn would lose it.
 func TestWitnessPatrolReadsPersistedStallVerdict(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +42,7 @@ func TestWitnessPatrolReadsPersistedStallVerdict(t *testing.T) {
 // gt patrol report may respawn the witness after a quiet report, so the
 // formula must say so and tell the agent it need not act on it.
 func TestWitnessPatrolWarnsOfReportRespawn(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
 	if err != nil {
 		t.Fatal(err)

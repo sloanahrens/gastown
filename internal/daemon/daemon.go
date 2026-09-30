@@ -1404,8 +1404,14 @@ func (d *Daemon) heartbeatWork(state *State) {
 		d.killWitnessSessions()
 	}
 
-	// 6. Ensure Mayor is running (restart if dead)
-	d.ensureMayorRunning()
+	// 6. Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
+	// in mayor/daemon.json turns the supervision off (the town runs without a
+	// resident Mayor while polecats and om cover the work).
+	if d.isPatrolActive(constants.RoleMayor) {
+		d.ensureMayorRunning()
+	} else {
+		d.logger.Printf("Mayor patrol disabled in config, skipping")
+	}
 
 	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
 	// Pressure-gated: dog dispatch spawns new agent sessions.
