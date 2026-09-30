@@ -2,40 +2,12 @@ package cmd
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
-
-func captureConvoyStdoutErr(t *testing.T, fn func() error) (string, error) {
-	t.Helper()
-
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stdout = w
-
-	runErr := fn()
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatalf("copy stdout: %v", err)
-	}
-	_ = r.Close()
-
-	return buf.String(), runErr
-}
 
 func writeRoutingBdStub(t *testing.T, scriptBody string) {
 	t.Helper()
@@ -83,294 +55,197 @@ func makeRoutingTownWorkspace(t *testing.T) (string, string) {
 	return townRoot, expectedWD
 }
 
-func TestRunConvoyList_UsesTownRootAndStripsBeadsDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
+// convoyCLIFixture is a convoyCLI over a temp town with an in-process bd.
+// Nothing it does starts a process or reads the cwd, the environment or a
+// package global.
+type convoyCLIFixture struct {
+	c       convoyCLI
+	root    string
+	bd      *inprocBD
+	rec     *callsBD
+	out     *bytes.Buffer
+	ensured []string // beads dirs the convoy types were registered in
+}
+
+func newConvoyCLIFixture(t *testing.T, answer func(f *inprocBD, cmd string, args []string) bdAnswer) *convoyCLIFixture {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
 	}
-
-	townRoot, expectedWD := makeRoutingTownWorkspace(t)
-	chdirConvoyTest(t, townRoot)
-	t.Setenv("BEADS_DIR", "/wrong/.beads")
-
-	scriptBody := fmt.Sprintf(`
-# Allow-stale version probe is exempt from BEADS_DIR check.
-if [ "$*" = "--allow-stale version" ]; then
-  exit 0
-fi
-
-if [ "$BEADS_DIR" != "%s/.beads" ]; then
-  echo "expected hardened BEADS_DIR, got $BEADS_DIR" >&2
-  exit 1
-fi
-
-case "$*" in
-	  "list --label=gt:convoy --json --limit=0 --all --flat")
-	    if [ "$PWD" != "%s" ]; then
-	      echo "expected town root, got $PWD" >&2
-	      exit 1
-	    fi
-	    echo '[{"id":"hq-cv-town","title":"Town convoy","status":"open","created_at":"2026-03-09T00:00:00Z","labels":["gt:convoy"]}]'
-	    ;;
-	  "list --json --limit=0 --all --flat")
-	    echo '[]'
-	    ;;
-  "dep list hq-cv-town --direction=down --type=tracks --json")
-    if [ "$PWD" != "%s" ]; then
-      echo "expected town root, got $PWD" >&2
-      exit 1
-    fi
-    echo '[]'
-    ;;
-  "show hq-cv-town --json")
-    if [ "$PWD" != "%s" ]; then
-      echo "expected town root, got $PWD" >&2
-      exit 1
-    fi
-    echo '[{"id":"hq-cv-town","title":"Town convoy","status":"open","issue_type":"convoy","dependencies":[]}]'
-    ;;
-  *)
-    echo "unexpected bd args: $*" >&2
-    exit 1
-    ;;
-esac
-`, expectedWD, expectedWD, expectedWD, expectedWD)
-	writeRoutingBdStub(t, scriptBody)
-
-	oldJSON, oldAll, oldStatus, oldTree := convoyListJSON, convoyListAll, convoyListStatus, convoyListTree
-	convoyListJSON = true
-	convoyListAll = true
-	convoyListStatus = ""
-	convoyListTree = false
-	t.Cleanup(func() {
-		convoyListJSON = oldJSON
-		convoyListAll = oldAll
-		convoyListStatus = oldStatus
-		convoyListTree = oldTree
-	})
-
-	out, err := captureConvoyStdoutErr(t, func() error {
-		return runConvoyList(nil, nil)
-	})
-	if err != nil {
-		t.Fatalf("runConvoyList: %v", err)
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		return answer(f, cmd, args)
+	}}
+	fx := &convoyCLIFixture{root: root, bd: bd, rec: &callsBD{bd: bd}, out: &bytes.Buffer{}}
+	fx.c = convoyCLI{
+		townRoot: func() (string, error) { return root, nil },
+		bd:       fx.rec.run,
+		out:      fx.out,
+		warn:     io.Discard,
+		entropy:  strings.NewReader("abcde"),
+		sender:   func() string { return "mayor/" },
+		ensureTypes: func(beadsDir string) error {
+			fx.ensured = append(fx.ensured, beadsDir)
+			return nil
+		},
 	}
-	if !strings.Contains(out, `"id": "hq-cv-town"`) {
-		t.Fatalf("expected convoy JSON output, got:\n%s", out)
+	return fx
+}
+
+// assertAllPinnedToTown fails unless every bd call ran from the town root
+// against the town's .beads database, whatever BEADS_DIR the caller had.
+func (fx *convoyCLIFixture) assertAllPinnedToTown(t *testing.T) {
+	t.Helper()
+	calls := fx.rec.recorded()
+	if len(calls) == 0 {
+		t.Fatal("no bd calls")
+	}
+	townBeads := filepath.Join(fx.root, ".beads")
+	for _, c := range calls {
+		if c.Dir != fx.root {
+			t.Errorf("bd %q ran in %q, want town root %q", c.Args, c.Dir, fx.root)
+		}
+		if got := callEnv(c, "BEADS_DIR"); got != townBeads {
+			t.Errorf("bd %q BEADS_DIR = %q, want %q", c.Args, got, townBeads)
+		}
 	}
 }
 
-func TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-
-	townRoot, expectedWD := makeRoutingTownWorkspace(t)
-	chdirConvoyTest(t, townRoot)
-	t.Setenv("BEADS_DIR", "/wrong/.beads")
-
-	scriptBody := fmt.Sprintf(`
-# Allow-stale version probe is exempt from BEADS_DIR check.
-if [ "$*" = "--allow-stale version" ]; then
-  exit 0
-fi
-
-if [ "$BEADS_DIR" != "%s/.beads" ]; then
-  echo "expected hardened BEADS_DIR, got $BEADS_DIR" >&2
-  exit 1
-fi
-
-case "$*" in
-  "show hq-cv-status --json")
-    if [ "$PWD" != "%s" ]; then
-      echo "expected town root, got $PWD" >&2
-      exit 1
-    fi
-    echo '[{"id":"hq-cv-status","title":"Status convoy","status":"open","issue_type":"convoy","created_at":"2026-03-09T00:00:00Z","labels":[],"dependencies":[]}]'
-    ;;
-  "dep list hq-cv-status --direction=down --type=tracks --json")
-    if [ "$PWD" != "%s" ]; then
-      echo "expected town root, got $PWD" >&2
-      exit 1
-    fi
-    echo '[]'
-    ;;
-  *)
-    echo "unexpected bd args: $*" >&2
-    exit 1
-    ;;
-esac
-`, expectedWD, expectedWD, expectedWD)
-	writeRoutingBdStub(t, scriptBody)
-
-	oldJSON := convoyStatusJSON
-	convoyStatusJSON = false
-	t.Cleanup(func() { convoyStatusJSON = oldJSON })
-
-	out, err := captureConvoyStdoutErr(t, func() error {
-		return runConvoyStatus(nil, []string{"hq-cv-status"})
+// TestRunConvoyList_UsesTownRootAndStripsBeadsDir: gt convoy list --json
+// --all reads the convoys and their tracked issues from the town root,
+// pinned to the town database.
+func TestRunConvoyList_UsesTownRootAndStripsBeadsDir(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer {
+		switch cmd {
+		case "list":
+			if argsMention(args, "--label=gt:convoy") {
+				return bdOut(`[{"id":"hq-cv-town","title":"Town convoy","status":"open","created_at":"2026-03-09T00:00:00Z","labels":["gt:convoy"]}]`)
+			}
+			return bdOut("[]")
+		case "show":
+			return bdOut(`[{"id":"hq-cv-town","title":"Town convoy","status":"open","issue_type":"convoy","dependencies":[]}]`)
+		}
+		return bdOut("[]")
 	})
-	if err != nil {
-		t.Fatalf("runConvoyStatus: %v", err)
+
+	if err := fx.c.list(convoyListOptions{json: true, all: true}); err != nil {
+		t.Fatalf("list: %v", err)
 	}
+	if !strings.Contains(fx.out.String(), `"id": "hq-cv-town"`) {
+		t.Fatalf("expected convoy JSON output, got:\n%s", fx.out.String())
+	}
+	if !fx.bd.logged("list --label=gt:convoy --json --limit=0 --all --flat") {
+		t.Errorf("convoys not listed with --all; bd log:\n%s", fx.bd.log())
+	}
+	fx.assertAllPinnedToTown(t)
+}
+
+// TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir: gt convoy status <id>
+// reads the convoy from the town root, pinned to the town database, and
+// reports its progress.
+func TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer {
+		if cmd == "show" {
+			return bdOut(`[{"id":"hq-cv-status","title":"Status convoy","status":"open","issue_type":"convoy","created_at":"2026-03-09T00:00:00Z","labels":[],"dependencies":[]}]`)
+		}
+		return bdOut("[]")
+	})
+
+	if err := fx.c.status(false, []string{"hq-cv-status"}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	out := fx.out.String()
 	if !strings.Contains(out, "hq-cv-status") || !strings.Contains(out, "Progress:  0/0 completed") {
 		t.Fatalf("unexpected status output:\n%s", out)
 	}
+	fx.assertAllPinnedToTown(t)
 }
 
-// TestConvoyCreate_UsesTrackingHelper verifies convoy create delegates tracking
-// to the in-process helper instead of shelling out to `bd dep add`.
-func TestConvoyCreate_UsesTrackingHelper(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-
-	townRoot, expectedWD := makeRoutingTownWorkspace(t)
-	chdirConvoyTest(t, townRoot)
-
-	// Write sentinel files to skip EnsureCustomTypes/Statuses (they call bd
-	// config set/get which isn't relevant to routing).
-	beadsDir := filepath.Join(townRoot, ".beads")
-	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()), 0644)
-	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-statuses-configured"), []byte("staged_ready,staged_warnings"), 0644)
-
-	var helperTownRoot, helperConvoyID, helperIssueID string
-	oldAddTracking := addTrackingRelationFn
-	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
-		helperTownRoot = townRoot
-		helperConvoyID = convoyID
-		helperIssueID = issueID
-		return nil
-	}
-	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
-
-	scriptBody := `
-case "$1" in
-  create)
-    echo '[{"id":"hq-cv-test"}]'
-    ;;
-  init|config)
-    exit 0
-    ;;
-  *)
-    echo '[]'
-    ;;
-esac
-`
-	writeRoutingBdStub(t, scriptBody)
-
-	// Override the entropy source for deterministic convoy IDs.
-	oldEntropy := convoyIDEntropy
-	convoyIDEntropy = strings.NewReader("abcde")
-	t.Cleanup(func() { convoyIDEntropy = oldEntropy })
-
-	_, err := captureConvoyStdoutErr(t, func() error {
-		return runConvoyCreate(nil, []string{"test-convoy", "mo-2sh.1"})
-	})
-	if err != nil {
-		t.Fatalf("runConvoyCreate: %v", err)
-	}
-
-	if helperTownRoot != expectedWD {
-		t.Errorf("tracking helper townRoot = %q, want %q", helperTownRoot, expectedWD)
-	}
-	if helperConvoyID != "hq-cv-pqrst" {
-		t.Errorf("tracking helper convoyID = %q, want %q", helperConvoyID, "hq-cv-pqrst")
-	}
-	if helperIssueID != "mo-2sh.1" {
-		t.Errorf("tracking helper issueID = %q, want %q", helperIssueID, "mo-2sh.1")
-	}
-}
-
-func TestConvoyAdd_UsesTrackingHelper(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-
-	townRoot, expectedWD := makeRoutingTownWorkspace(t)
-	chdirConvoyTest(t, townRoot)
-
-	var helperTownRoot, helperConvoyID string
-	var helperIssues []string
-	oldAddTracking := addTrackingRelationFn
-	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
-		helperTownRoot = townRoot
-		helperConvoyID = convoyID
-		helperIssues = append(helperIssues, issueID)
-		return nil
-	}
-	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
-
-	scriptBody := fmt.Sprintf(`
-case "$*" in
-  "show hq-cv-test --json")
-    if [ "$PWD" != "%s" ]; then
-      echo "expected town root, got $PWD" >&2
-      exit 1
-    fi
-    echo '[{"id":"hq-cv-test","title":"Test Convoy","status":"open","issue_type":"convoy"}]'
-    ;;
-  *)
-    echo "unexpected bd args: $*" >&2
-    exit 1
-    ;;
-esac
-`, expectedWD)
-	writeRoutingBdStub(t, scriptBody)
-
-	_, err := captureConvoyStdoutErr(t, func() error {
-		return runConvoyAdd(nil, []string{"hq-cv-test", "ag-95s.1", "ag-95s.2"})
-	})
-	if err != nil {
-		t.Fatalf("runConvoyAdd: %v", err)
-	}
-
-	if helperTownRoot != expectedWD {
-		t.Errorf("tracking helper townRoot = %q, want %q", helperTownRoot, expectedWD)
-	}
-	if helperConvoyID != "hq-cv-test" {
-		t.Errorf("tracking helper convoyID = %q, want %q", helperConvoyID, "hq-cv-test")
-	}
-	if got := strings.Join(helperIssues, ","); got != "ag-95s.1,ag-95s.2" {
-		t.Errorf("tracking helper issues = %q, want %q", got, "ag-95s.1,ag-95s.2")
-	}
-}
-
-func TestConvoyAdd_ReportsOnlyIssuesActuallyAdded(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-
-	townRoot, _ := makeRoutingTownWorkspace(t)
-	chdirConvoyTest(t, townRoot)
-
-	oldAddTracking := addTrackingRelationFn
-	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
-		if issueID == "ag-95s.2" {
-			return fmt.Errorf("simulated tracking failure")
+// convoyWriteBD answers `bd show` of the convoy hq-cv-test and fails
+// `bd dep add` for the issue failDep; every other call succeeds silently.
+func convoyWriteBD(failDep string) func(f *inprocBD, cmd string, args []string) bdAnswer {
+	return func(f *inprocBD, cmd string, args []string) bdAnswer {
+		switch cmd {
+		case "show":
+			return bdOut(`[{"id":"hq-cv-test","title":"Test Convoy","status":"open","issue_type":"convoy"}]`)
+		case "dep":
+			if failDep != "" && argsMention(args, failDep) {
+				return bdAnswer{stderr: "simulated tracking failure", code: 1}
+			}
+		case "create":
+			return bdOut(`[{"id":"hq-cv-test"}]`)
 		}
-		return nil
+		return bdOut("")
 	}
-	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
+}
 
-	writeRoutingBdStub(t, `
-case "$*" in
-  "show hq-cv-test --json")
-    echo '[{"id":"hq-cv-test","title":"Test Convoy","status":"open","issue_type":"convoy"}]'
-    ;;
-  *)
-    echo "unexpected bd args: $*" >&2
-    exit 1
-    ;;
-esac
-`)
+// TestConvoyCreate_UsesTrackingHelper: convoy create writes the convoy in the
+// town database under an hq-cv-* ID drawn from its entropy, then records one
+// tracks edge per issue.
+func TestConvoyCreate_UsesTrackingHelper(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
 
-	out, err := captureConvoyStdoutErr(t, func() error {
-		return runConvoyAdd(nil, []string{"hq-cv-test", "ag-95s.1", "ag-95s.2", "ag-95s.3"})
-	})
-	if err != nil {
-		t.Fatalf("runConvoyAdd: %v", err)
+	if err := fx.c.create(convoyCreateOptions{}, []string{"test-convoy", "mo-2sh.1"}); err != nil {
+		t.Fatalf("create: %v", err)
 	}
+	if !strings.Contains(fx.bd.log(), "create --type=task --id=hq-cv-pqrst --title=test-convoy") {
+		t.Errorf("convoy hq-cv-pqrst not created; bd log:\n%s", fx.bd.log())
+	}
+	if !fx.bd.logged("dep add hq-cv-pqrst mo-2sh.1 --type=tracks") {
+		t.Errorf("tracks edge not recorded; bd log:\n%s", fx.bd.log())
+	}
+	for _, c := range fx.rec.recorded() {
+		if len(c.Args) > 0 && c.Args[0] == "create" && callEnv(c, "BEADS_DIR") != filepath.Join(fx.root, ".beads") {
+			t.Errorf("create BEADS_DIR = %q, want the town database", callEnv(c, "BEADS_DIR"))
+		}
+	}
+}
 
+// TestConvoyCreate_RegistersTypesInTownBeadsDir is the hq-dt4 regression:
+// the convoy types and statuses are registered in the town's .beads
+// directory, not the workspace root, or every convoy reads as empty.
+func TestConvoyCreate_RegistersTypesInTownBeadsDir(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+
+	if err := fx.c.create(convoyCreateOptions{}, []string{"test-convoy", "gt-abc"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if want := filepath.Join(fx.root, ".beads"); len(fx.ensured) != 1 || fx.ensured[0] != want {
+		t.Fatalf("types registered in %v, want [%s]", fx.ensured, want)
+	}
+}
+
+// TestConvoyAdd_UsesTrackingHelper: convoy add checks the convoy in the town
+// database and records a tracks edge for each issue, in order.
+func TestConvoyAdd_UsesTrackingHelper(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+
+	if err := fx.c.add([]string{"hq-cv-test", "ag-95s.1", "ag-95s.2"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	for _, want := range []string{"show hq-cv-test --json", "dep add hq-cv-test ag-95s.1 --type=tracks", "dep add hq-cv-test ag-95s.2 --type=tracks"} {
+		if !fx.bd.logged(want) {
+			t.Errorf("missing bd call %q; bd log:\n%s", want, fx.bd.log())
+		}
+	}
+}
+
+// TestConvoyAdd_ReportsOnlyIssuesActuallyAdded: an issue whose tracks edge
+// fails is left out of the added count and list.
+func TestConvoyAdd_ReportsOnlyIssuesActuallyAdded(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD("ag-95s.2"))
+
+	if err := fx.c.add([]string{"hq-cv-test", "ag-95s.1", "ag-95s.2", "ag-95s.3"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	out := fx.out.String()
 	if !strings.Contains(out, "Added 2 issue(s)") {
 		t.Errorf("output should report 2 added issues, got:\n%s", out)
 	}
