@@ -78,19 +78,15 @@ func mechanicalTriageGt(d *Daemon) <-chan cliCall {
 // and checks it ran as Boot, from the deacon directory.
 func awaitTriage(t *testing.T, townRoot string, triaged <-chan cliCall) {
 	t.Helper()
-	select {
-	case c := <-triaged:
-		if want := filepath.Join(townRoot, "deacon"); c.dir != want {
-			t.Errorf("boot triage ran in %q, want %q", c.dir, want)
-		}
-		if got := c.getenv("GT_ROLE"); got != "deacon/boot" {
-			t.Errorf("boot triage ran with GT_ROLE=%q, want deacon/boot", got)
-		}
-		if got := c.getenv("GT_TOWN_ROOT"); got != townRoot {
-			t.Errorf("boot triage ran with GT_TOWN_ROOT=%q, want %q", got, townRoot)
-		}
-	case <-time.After(time.Minute):
-		t.Fatal("mechanical triage did not run `gt boot triage`")
+	c := <-triaged // a triage that never runs fails on the test timeout
+	if want := filepath.Join(townRoot, "deacon"); c.dir != want {
+		t.Errorf("boot triage ran in %q, want %q", c.dir, want)
+	}
+	if got := c.getenv("GT_ROLE"); got != "deacon/boot" {
+		t.Errorf("boot triage ran with GT_ROLE=%q, want deacon/boot", got)
+	}
+	if got := c.getenv("GT_TOWN_ROOT"); got != townRoot {
+		t.Errorf("boot triage ran with GT_TOWN_ROOT=%q, want %q", got, townRoot)
 	}
 }
 

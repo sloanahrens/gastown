@@ -21,6 +21,14 @@ import (
 // once here rather than per test so the store tests stay eligible for
 // t.Parallel (gt-fx3c): t.Setenv panics inside a parallel test.
 func TestMain(m *testing.M) {
+	// Signal-target helper (pid_identity_integration_test.go): this binary
+	// re-executed under a chosen argv0/argv so a test owns a process that
+	// looks like `gt daemon run` or `dolt sql-server`, and can prove the stop
+	// paths signal it — without any test ever pointing a stop path at a host
+	// PID.
+	if os.Getenv(signalTargetHelperEnv) == "1" {
+		runSignalTargetHelper()
+	}
 	setup := func() { _ = os.Setenv("BEADS_TEST_MODE", "1") }
 	os.Exit(runDaemonTests(m, setup, testutil.WithDolt()))
 }

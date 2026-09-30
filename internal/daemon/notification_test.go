@@ -84,13 +84,18 @@ func TestNotificationManager_SendIfReady(t *testing.T) {
 func TestNotificationManager_StaleSlot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	mgr := NewNotificationManager(dir, 1*time.Millisecond) // Very short maxAge
+	mgr := NewNotificationManager(dir, time.Minute)
+	clk := newFixedClock()
+	mgr.clock = clk
 
 	if err := mgr.RecordSend("sess1", "heartbeat", "hello"); err != nil {
 		t.Fatalf("RecordSend: %v", err)
 	}
+	if ok, _ := mgr.ShouldSend("sess1", "heartbeat"); ok {
+		t.Fatal("expected ShouldSend=false for a fresh pending slot")
+	}
 
-	time.Sleep(5 * time.Millisecond)
+	clk.Advance(time.Minute + time.Second)
 
 	ok, err := mgr.ShouldSend("sess1", "heartbeat")
 	if err != nil {

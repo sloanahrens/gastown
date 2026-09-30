@@ -121,11 +121,10 @@ type closeRecorder struct {
 func (c *closeRecorder) Close() error { c.closed = true; return nil }
 
 // TestVerifyBeadsStoresBlocksOnBDSchemaLevel drives the startup gate through
-// the bdSchemaLevel seam: a failed read and a bd that reports no schema level
+// its schema-level reader: a failed read and a bd that reports no schema level
 // (a pre-machine-surface build) each block startup and close every store.
 func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
-	old := bdSchemaLevel
-	t.Cleanup(func() { bdSchemaLevel = old })
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		level int
@@ -136,9 +135,10 @@ func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
 		{"no level reported", 0, nil, "reports no db_schema_version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bdSchemaLevel = func(context.Context, string) (int, error) { return tc.level, tc.err }
+			t.Parallel()
+			schemaLevel := func(context.Context, string) (int, error) { return tc.level, tc.err }
 			store := &closeRecorder{}
-			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store}, probesFor(nil))
+			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store}, schemaLevel, probesFor(nil))
 			if err == nil || !strings.Contains(err.Error(), "daemon startup blocked") || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("verifyBeadsStores = %v, want a startup block naming %q", err, tc.want)
 			}

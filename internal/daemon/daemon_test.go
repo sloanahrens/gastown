@@ -58,21 +58,18 @@ func TestDaemonPathCandidatesIncludesLaunchdToolDirs(t *testing.T) {
 }
 
 func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
-	oldCleanup := cleanupLegacySocketsForDaemon
-	t.Cleanup(func() { cleanupLegacySocketsForDaemon = oldCleanup })
-
+	t.Parallel()
 	var calls int
 	var gotRoot string
-	cleanupLegacySocketsForDaemon = func(townRoot string) (int, int) {
-		calls++
-		gotRoot = townRoot
-		return 1, 2
-	}
-
 	townRoot := t.TempDir()
 	d := &Daemon{
 		config: DefaultConfig(townRoot),
 		logger: log.New(io.Discard, "", 0),
+	}
+	d.seams.cleanupLegacySockets = func(townRoot string) (int, int) {
+		calls++
+		gotRoot = townRoot
+		return 1, 2
 	}
 	d.cleanupLegacySocketSessions()
 	if calls != 1 {
@@ -410,17 +407,8 @@ func TestDaemon_StopsManagerAndScanner(t *testing.T) {
 		t.Fatalf("manager Start: %v", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		manager.Stop()
-		close(done)
-	}()
-	select {
-	case <-done:
-		// Success
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not complete within 5s")
-	}
+	// A Stop that blocks fails the run at go test's -timeout.
+	manager.Stop()
 }
 
 // TestIsRunningFromPID_StalePIDReturnsNoError verifies that isRunningFromPID

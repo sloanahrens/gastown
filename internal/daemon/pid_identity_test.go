@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,25 +17,6 @@ import (
 // prove the PID is the process it means to stop. These tests drive the
 // identity decisions on their seams; pid_identity_integration_test.go runs
 // the real ps-and-signal chain against processes it spawned.
-
-// signalTargetHelperEnv makes this test binary, re-executed by
-// pid_identity_integration_test.go, a signal target (see TestMain).
-const signalTargetHelperEnv = "GT_DAEMON_TEST_SIGNAL_TARGET"
-
-// runSignalTargetHelper is the helper process body: wait to be signaled,
-// and exit on its own after a minute so a failed test cannot leak it.
-func runSignalTargetHelper() {
-	time.Sleep(time.Minute)
-	os.Exit(0)
-}
-
-// skipOnWindows skips where verifyGTDaemonPID accepts every live PID.
-func skipOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("identity checks read argv via ps(1); Windows keeps the flock guard only")
-	}
-}
 
 func TestIsGTDaemonArgs(t *testing.T) {
 	t.Parallel()
@@ -58,32 +38,40 @@ func TestIsGTDaemonArgs(t *testing.T) {
 	}
 }
 
-func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := t.TempDir()
-	origArgs, origCWD := processArgsFn, processCWDFn
-	t.Cleanup(func() { processArgsFn, processCWDFn = origArgs, origCWD })
-	processCWDFn = func(int) string { return townRoot }
+// fixedProcess is a processInfo that answers every PID with argv and cwd.
+func fixedProcess(argv []string, cwd string) processInfo {
+	return processInfo{
+		args: func(int) []string { return argv },
+		cwd:  func(int) string { return cwd },
+	}
+}
 
-	processArgsFn = func(int) []string { return nil }
-	if err := verifyGTDaemonPID(townRoot, 4242); err == nil {
+func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	verify := func(argv []string, pid int) error {
+		return verifyGTDaemonPIDOn("darwin", fixedProcess(argv, townRoot), townRoot, pid)
+	}
+
+	if err := verify(nil, 4242); err == nil {
 		t.Error("an unreadable command line was accepted as the daemon")
 	}
-	processArgsFn = func(int) []string {
-		return []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}
-	}
-	if err := verifyGTDaemonPID(townRoot, 4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
+	if err := verify([]string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}, 4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
 		t.Errorf("Docker's backend accepted as the daemon: %v", err)
 	}
-	processArgsFn = func(int) []string { return []string{"gt", "daemon", "run"} }
-	if err := verifyGTDaemonPID(townRoot, 4242); err != nil {
+	daemon := []string{"gt", "daemon", "run"}
+	if err := verify(daemon, 4242); err != nil {
 		t.Errorf("gt daemon run rejected: %v", err)
 	}
-	if err := verifyGTDaemonPID(townRoot, os.Getpid()); err == nil {
+	if err := verify(daemon, os.Getpid()); err == nil {
 		t.Error("this process accepted as the daemon")
 	}
-	if err := verifyGTDaemonPID(townRoot, 0); err == nil {
+	if err := verify(daemon, 0); err == nil {
 		t.Error("PID 0 accepted")
+	}
+	// Windows has no ps(1): the daemon.lock flock is the guard there.
+	if err := verifyGTDaemonPIDOn("windows", fixedProcess(nil, ""), townRoot, 4242); err != nil {
+		t.Errorf("windows refused a PID it cannot inspect: %v", err)
 	}
 }
 
@@ -91,7 +79,7 @@ func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 // daemon's working directory. A daemon in another town — or one whose cwd
 // cannot be read — is not this town's to signal.
 func TestVerifyGTDaemonPIDIsTownScoped(t *testing.T) {
-	skipOnWindows(t)
+	t.Parallel()
 	parent := t.TempDir()
 	townRoot := filepath.Join(parent, "town")
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
@@ -108,10 +96,6 @@ func TestVerifyGTDaemonPIDIsTownScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origArgs, origCWD := processArgsFn, processCWDFn
-	t.Cleanup(func() { processArgsFn, processCWDFn = origArgs, origCWD })
-	processArgsFn = func(int) []string { return []string{"gt", "daemon", "run"} }
-
 	cases := []struct {
 		name     string
 		townRoot string
@@ -127,8 +111,7 @@ func TestVerifyGTDaemonPIDIsTownScoped(t *testing.T) {
 		{"cwd unreadable", townRoot, "", "unreadable"},
 	}
 	for _, c := range cases {
-		processCWDFn = func(int) string { return c.cwd }
-		err := verifyGTDaemonPID(c.townRoot, 4242)
+		err := verifyGTDaemonPIDOn("darwin", fixedProcess([]string{"gt", "daemon", "run"}, c.cwd), c.townRoot, 4242)
 		switch {
 		case c.wantErr == "" && err != nil:
 			t.Errorf("%s: rejected: %v", c.name, err)
@@ -157,13 +140,13 @@ func newStopTestManager(t *testing.T, pid int) (*DoltServerManager, *strings.Bui
 
 // The Dolt manager's stop path signals the PID isRunning reports, which comes
 // from a pid file plus "something answers on the port"; it is signaled only
-// once verifyDoltSQLServerFn proves it is this town's dolt (gt-p7zy0,
+// once its verifyDolt check proves it is this town's dolt (gt-p7zy0,
 // gt-l9s6f). A refusal never signals. A PID provably not this town's dolt
 // makes the pid file stale, so it goes; one whose identity could not be read
 // keeps it for a later attempt. The PID is this test binary's own, so a
 // regression that signaled it would kill the test run, not a host process.
-// Not parallel: it swaps verifyDoltSQLServerFn.
 func TestDoltStopRefusalNeverSignals(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		err         error
@@ -173,10 +156,9 @@ func TestDoltStopRefusalNeverSignals(t *testing.T) {
 		{"another town's dolt", fmt.Errorf("serves elsewhere: %w", doltserver.ErrOtherTownDolt), false},
 		{"identity unverified", fmt.Errorf("ps failed: %w", doltserver.ErrIdentityUnverified), true},
 	}
-	orig := verifyDoltSQLServerFn
-	t.Cleanup(func() { verifyDoltSQLServerFn = orig })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			pid := os.Getpid()
 			m, logs := newStopTestManager(t, pid)
 			if err := os.MkdirAll(filepath.Join(m.townRoot, "daemon"), 0o755); err != nil {
@@ -185,7 +167,7 @@ func TestDoltStopRefusalNeverSignals(t *testing.T) {
 			if _, err := writePIDFile(m.pidFile(), pid); err != nil {
 				t.Fatal(err)
 			}
-			verifyDoltSQLServerFn = func(string, int) error { return c.err }
+			m.verifyDoltFn = func(string, int) error { return c.err }
 
 			if err := m.Stop(); err != nil {
 				t.Fatalf("Stop: %v", err)

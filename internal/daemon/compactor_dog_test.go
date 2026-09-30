@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // compactorDogTestDaemon builds a daemon rooted at townRoot with the
@@ -32,22 +34,11 @@ func compactorDogTestDaemon(townRoot string, logBuf *bytes.Buffer) *Daemon {
 	}
 }
 
-// awaitCompactorDogIdle blocks until no cycle is in flight. A cycle sets
-// compactorDogRunning false as its last action, after the last-run time has
-// been recorded, so returning from here means the record is written.
+// awaitCompactorDogIdle blocks until the cycle a trigger started, if any, has
+// finished, its last-run record included.
 func awaitCompactorDogIdle(t *testing.T, d *Daemon) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		d.compactorDogMu.Lock()
-		running := d.compactorDogRunning
-		d.compactorDogMu.Unlock()
-		if !running {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("compactor_dog cycle did not finish")
+	d.compactorDogCycles.Wait()
 }
 
 // TestCompactorDogFiresAcrossRestarts is the regression test for gt-ima2: the
@@ -59,6 +50,7 @@ func awaitCompactorDogIdle(t *testing.T, d *Daemon) {
 // Daemon on each step (same town root, no in-memory carry-over), so no single
 // process lives anywhere near the 24h interval.
 func TestCompactorDogFiresAcrossRestarts(t *testing.T) {
+	t.Parallel()
 	const interval = 24 * time.Hour
 	const step = 3 * time.Hour
 
@@ -67,27 +59,19 @@ func TestCompactorDogFiresAcrossRestarts(t *testing.T) {
 	var mu sync.Mutex
 	var runs []time.Time
 
-	origCycle, origNow := compactorDogCycleFn, compactorDogNow
-	defer func() {
-		compactorDogCycleFn = origCycle
-		compactorDogNow = origNow
-	}()
-
-	// The cycle itself needs Dolt; the subject here is the schedule.
-	compactorDogCycleFn = func(*Daemon) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		runs = append(runs, compactorDogNow())
-		return true
-	}
-
 	start := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
 
 	for i := 0; i < 10; i++ {
 		at := start.Add(time.Duration(i) * step)
-		compactorDogNow = func() time.Time { return at }
-
 		d := compactorDogTestDaemon(townRoot, nil)
+		d.clock = clockwork.NewFakeClockAt(at)
+		// The cycle itself needs Dolt; the subject here is the schedule.
+		d.compactorDogCycleFn = func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			runs = append(runs, at)
+			return true
+		}
 		if got := compactorDogInterval(d.patrolConfig); got != interval {
 			t.Fatalf("test assumes a %v run interval, config gives %v", interval, got)
 		}
@@ -116,6 +100,7 @@ func TestCompactorDogFiresAcrossRestarts(t *testing.T) {
 // corrupt last-run file must not be read as "not due", because a monitor that
 // stays silent is the failure, whatever broke it.
 func TestCompactorDogRunsWhenLastRunStateUnreadable(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	path := patrolLastRunPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -129,16 +114,13 @@ func TestCompactorDogRunsWhenLastRunStateUnreadable(t *testing.T) {
 	var mu sync.Mutex
 	var ran bool
 
-	origCycle := compactorDogCycleFn
-	defer func() { compactorDogCycleFn = origCycle }()
-	compactorDogCycleFn = func(*Daemon) bool {
+	d := compactorDogTestDaemon(townRoot, &buf)
+	d.compactorDogCycleFn = func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		ran = true
 		return true
 	}
-
-	d := compactorDogTestDaemon(townRoot, &buf)
 	d.triggerCompactorDog()
 	awaitCompactorDogIdle(t, d)
 
@@ -157,6 +139,7 @@ func TestCompactorDogRunsWhenLastRunStateUnreadable(t *testing.T) {
 // TestCompactorDogSkipsWhenNotDue covers the other half of the schedule: inside
 // the interval the patrol must stay down, and say so once per process.
 func TestCompactorDogSkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 	if err := savePatrolLastRun(townRoot, "compactor_dog", now.Add(-2*time.Hour)); err != nil {
@@ -167,20 +150,14 @@ func TestCompactorDogSkipsWhenNotDue(t *testing.T) {
 	var mu sync.Mutex
 	ran := false
 
-	origCycle, origNow := compactorDogCycleFn, compactorDogNow
-	defer func() {
-		compactorDogCycleFn = origCycle
-		compactorDogNow = origNow
-	}()
-	compactorDogCycleFn = func(*Daemon) bool {
+	d := compactorDogTestDaemon(townRoot, &buf)
+	d.clock = clockwork.NewFakeClockAt(now)
+	d.compactorDogCycleFn = func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		ran = true
 		return true
 	}
-	compactorDogNow = func() time.Time { return now }
-
-	d := compactorDogTestDaemon(townRoot, &buf)
 
 	// A first check, then a second one: the skip must hold across both, and the
 	// first must be visible in the log.
@@ -207,22 +184,20 @@ func TestCompactorDogSkipsWhenNotDue(t *testing.T) {
 // behind the full 24h interval before the next attempt, instead of retrying on
 // the next 15-minute check.
 func TestCompactorDogFailedCycleNotRecorded(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	var buf bytes.Buffer
 	var mu sync.Mutex
 	cycles := 0
 
-	origCycle := compactorDogCycleFn
-	defer func() { compactorDogCycleFn = origCycle }()
-	compactorDogCycleFn = func(*Daemon) bool {
+	d := compactorDogTestDaemon(townRoot, &buf)
+	d.compactorDogCycleFn = func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		cycles++
 		return false
 	}
-
-	d := compactorDogTestDaemon(townRoot, &buf)
 
 	// Two triggers in a row: with no last-run recorded after the first, the
 	// second must find the patrol due again rather than waiting out the
@@ -252,14 +227,13 @@ func TestCompactorDogFailedCycleNotRecorded(t *testing.T) {
 // TestRecordCompactorDogRunPersists checks the record itself: a completed cycle
 // must leave a last-run time the next process can read.
 func TestRecordCompactorDogRunPersists(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	at := time.Date(2026, 9, 22, 9, 30, 0, 0, time.UTC)
 
-	origNow := compactorDogNow
-	defer func() { compactorDogNow = origNow }()
-	compactorDogNow = func() time.Time { return at }
-
-	compactorDogTestDaemon(townRoot, nil).recordCompactorDogRun()
+	d := compactorDogTestDaemon(townRoot, nil)
+	d.clock = clockwork.NewFakeClockAt(at)
+	d.recordCompactorDogRun()
 
 	lastRun, found, err := loadPatrolLastRun(townRoot, "compactor_dog")
 	if err != nil {
@@ -284,6 +258,7 @@ func TestRecordCompactorDogRunPersists(t *testing.T) {
 // observable without a server: EnsureRunning probes health instead of spawning
 // one, and the probe records that it ran.
 func TestCompactorDogBringsDoltUpBeforeItsCycle(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := compactorDogTestDaemon(townRoot, nil)
 
@@ -300,9 +275,7 @@ func TestCompactorDogBringsDoltUpBeforeItsCycle(t *testing.T) {
 		healthCheckFn: func() error { record("dolt"); return nil },
 	}
 
-	origCycle := compactorDogCycleFn
-	defer func() { compactorDogCycleFn = origCycle }()
-	compactorDogCycleFn = func(*Daemon) bool { record("cycle"); return true }
+	d.compactorDogCycleFn = func() bool { record("cycle"); return true }
 
 	d.triggerCompactorDog()
 	awaitCompactorDogIdle(t, d)

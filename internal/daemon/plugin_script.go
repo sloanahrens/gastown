@@ -80,6 +80,7 @@ const scriptSkippedMarker = "[plugin-result skipped]"
 type scriptRunner struct {
 	mu      sync.Mutex
 	running map[string]time.Time
+	active  sync.WaitGroup // one per run in flight, done when it finishes
 }
 
 func newScriptRunner() *scriptRunner {
@@ -95,6 +96,7 @@ func (r *scriptRunner) tryStart(name string) bool {
 		return false
 	}
 	r.running[name] = time.Now()
+	r.active.Add(1)
 	return true
 }
 
@@ -102,6 +104,12 @@ func (r *scriptRunner) finish(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.running, name)
+	r.active.Done()
+}
+
+// wait blocks until every run started so far has finished.
+func (r *scriptRunner) wait() {
+	r.active.Wait()
 }
 
 // runningCount reports how many script plugins are in flight. Safe on a nil

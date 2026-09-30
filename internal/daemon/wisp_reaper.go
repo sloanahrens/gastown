@@ -366,7 +366,7 @@ func (d *Daemon) waitReaperDispatch(delay time.Duration) {
 		d.reaperSlingWaitFn(delay)
 		return
 	}
-	time.Sleep(delay)
+	d.clk().Sleep(delay)
 }
 
 // summarizeCommandOutput renders subprocess output for a single log line, capped
@@ -397,10 +397,6 @@ func summarizeCommandOutput(out []byte) string {
 	return s[:head] + elision + s[tail:]
 }
 
-// reaperWriterFor resolves the bd writer a live reaper run writes through;
-// tests replace it so no bd runs.
-var reaperWriterFor = reaper.WriterForDatabase
-
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
 // the beads dir whose metadata names that database, and nil for a dry run:
 // the reaper selects with SQL but writes only through bd (gt-fcxe9.12).
@@ -408,7 +404,10 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 	if dryRun {
 		return nil, nil
 	}
-	return reaperWriterFor(d.config.TownRoot, dbName)
+	if d.reaperWriterForFn != nil {
+		return d.reaperWriterForFn(d.config.TownRoot, dbName)
+	}
+	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
 }
 
 // reapWispsInline is the fallback that runs the reaper cycle inline when

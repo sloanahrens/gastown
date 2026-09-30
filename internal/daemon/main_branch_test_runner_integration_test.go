@@ -121,18 +121,20 @@ func TestIntegrationRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T
 // no flock, no owner file and no docker-ps check: invisible to the refinery
 // gates and gt done verifies it is supposed to queue behind.
 func TestIntegrationAcquireMainBranchTestSlot_TakesTheRealHold(t *testing.T) {
-	stubNoContainers(t)
 	townRoot := t.TempDir()
+	gate := slot.NewGate(slot.WithRuntime(noContainers{}))
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	d.seams.slots = gate
 
 	inherited := slot.SlotLockPath(townRoot, 0) + "|" + strconv.Itoa(os.Getpid()+100000) + "|gastown/main-branch-test"
 	t.Setenv(slot.ReentrantEnvVar, inherited)
 
-	h, err := acquireMainBranchTestSlot(townRoot, "gastown")
+	h, err := d.acquireMainBranchTestSlot("gastown")
 	if err != nil {
 		t.Fatalf("acquireMainBranchTestSlot: %v", err)
 	}
 
-	rep, err := slot.Status(townRoot)
+	rep, err := gate.Status(townRoot)
 	if err != nil {
 		t.Fatalf("slot.Status while held: %v", err)
 	}
@@ -155,7 +157,7 @@ func TestIntegrationAcquireMainBranchTestSlot_TakesTheRealHold(t *testing.T) {
 	if err := h.Release(); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if rep, _ = slot.Status(townRoot); rep.Held {
+	if rep, _ = gate.Status(townRoot); rep.Held {
 		t.Fatalf("the hold outlived Release: %+v", rep)
 	}
 }

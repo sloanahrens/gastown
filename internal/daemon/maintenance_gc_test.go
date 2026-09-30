@@ -250,16 +250,12 @@ type gcFakes struct {
 	pauseFails  bool
 }
 
-func withGCFakes(t *testing.T) *gcFakes {
+func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 	t.Helper()
 	f := &gcFakes{sizes: map[string]int64{}, shrinkTo: map[string]int64{}, gcErr: map[string]error{}, quietUntil: -1}
 
-	prevSize, prevGC, prevQuiet := maintenanceDBSizeFn, maintenanceGCExecFn, maintenanceQuietFn
-	prevEsc, prevExec, prevDispatch := maintenanceEscalateFn, maintenanceExecFn, maintenanceGCDispatchFn
-	prevDBs, prevExternal, prevPause := maintenanceGCDatabasesFn, maintenanceGCExternalFn, maintenanceConvoyPauseFn
-
 	// Discovery returns the databases the fake sizes know about.
-	maintenanceGCDatabasesFn = func(string) ([]string, error) {
+	d.maint.gcDatabases = func(string) ([]string, error) {
 		var dbs []string
 		for db := range f.sizes {
 			dbs = append(dbs, db)
@@ -267,8 +263,8 @@ func withGCFakes(t *testing.T) *gcFakes {
 		sort.Strings(dbs)
 		return dbs, nil
 	}
-	maintenanceGCExternalFn = func(*Daemon) (bool, string) { return false, "" }
-	maintenanceConvoyPauseFn = func(*Daemon) (func(), bool) {
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return false, "" }
+	d.maint.convoyPause = func(*Daemon) (func(), bool) {
 		f.pauses++
 		if f.pauseFails {
 			return nil, false
@@ -276,14 +272,14 @@ func withGCFakes(t *testing.T) *gcFakes {
 		return func() { f.resumes++ }, true
 	}
 
-	maintenanceDBSizeFn = func(_ string, db string) (int64, error) {
+	d.maint.dbSize = func(_ string, db string) (int64, error) {
 		s, ok := f.sizes[db]
 		if !ok {
 			return 0, os.ErrNotExist
 		}
 		return s, nil
 	}
-	maintenanceGCExecFn = func(_ context.Context, _ *Daemon, db string) error {
+	d.maint.gcExec = func(_ context.Context, _ *Daemon, db string) error {
 		f.gcCalls = append(f.gcCalls, db)
 		if err := f.gcErr[db]; err != nil {
 			return err
@@ -293,28 +289,23 @@ func withGCFakes(t *testing.T) *gcFakes {
 		}
 		return nil
 	}
-	maintenanceQuietFn = func(*Daemon) (bool, string) {
+	d.maint.quiet = func(*Daemon) (bool, string) {
 		f.quietCalls++
 		if f.quietUntil >= 0 && f.quietCalls > f.quietUntil {
 			return false, "refinery holds gate slot 0"
 		}
 		return true, ""
 	}
-	maintenanceEscalateFn = func(_ *Daemon, source, message string) {
+	d.maint.escalate = func(_ *Daemon, source, message string) {
 		f.escalations = append(f.escalations, source+"|"+message)
 	}
-	maintenanceExecFn = func(context.Context, string, string, int) ([]byte, error) {
+	d.maint.exec = func(context.Context, string, string, int) ([]byte, error) {
 		f.flattens++
 		return nil, nil
 	}
 	// Run the dispatched cycle inline so the test observes its result.
-	maintenanceGCDispatchFn = func(fn func()) { fn() }
+	d.maint.dispatch = func(fn func()) { fn() }
 
-	t.Cleanup(func() {
-		maintenanceDBSizeFn, maintenanceGCExecFn, maintenanceQuietFn = prevSize, prevGC, prevQuiet
-		maintenanceEscalateFn, maintenanceExecFn, maintenanceGCDispatchFn = prevEsc, prevExec, prevDispatch
-		maintenanceGCDatabasesFn, maintenanceGCExternalFn, maintenanceConvoyPauseFn = prevDBs, prevExternal, prevPause
-	})
 	return f
 }
 
@@ -330,8 +321,9 @@ func gcTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer) {
 var testGCPolicy = maintenanceGCPolicy{minBytes: 256 * mib, growthRatio: 2.0}
 
 func TestMaintenanceGCCycleCollectsEligibleSmallestFirst(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"gt": 633 * mib, "hq": 631 * mib, "om": 185 * mib, "beads": 1 * mib}
 	f.shrinkTo = map[string]int64{"gt": 480 * mib, "hq": 97 * mib}
 
@@ -374,8 +366,9 @@ func TestMaintenanceGCCycleCollectsEligibleSmallestFirst(t *testing.T) {
 }
 
 func TestMaintenanceGCCycleRespectsBaseline(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	// gt was gc'd to 480MiB last time; 900MiB is under 2x, hq has doubled.
 	if err := recordMaintenanceGCBaseline(d.config.TownRoot, "gt", 480*mib, time.Now()); err != nil {
 		t.Fatal(err)
@@ -396,8 +389,9 @@ func TestMaintenanceGCCycleRespectsBaseline(t *testing.T) {
 }
 
 func TestMaintenanceGCCycleNothingEligibleSkipsQuietProbe(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"om": 42 * mib}
 
 	if out := d.maintenanceGCCycle([]string{"om"}, "/unused", testGCPolicy); out.outcome != gcOutcomeCompleted {
@@ -409,8 +403,9 @@ func TestMaintenanceGCCycleNothingEligibleSkipsQuietProbe(t *testing.T) {
 }
 
 func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib, "om": 700 * mib}
 	f.quietUntil = 1 // quiet before hq, busy before gt
 
@@ -431,8 +426,9 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 }
 
 func TestMaintenanceGCCycleStopsAndEscalatesOnceOnError(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib, "om": 700 * mib}
 	f.gcErr["gt"] = errors.New("Error 1105: gc failed: boom")
 
@@ -463,8 +459,9 @@ func TestMaintenanceGCCycleStopsAndEscalatesOnceOnError(t *testing.T) {
 }
 
 func TestMaintenanceGCCycleSizeErrorSkipsDatabase(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib} // "ghost" has no directory
 
 	out := d.maintenanceGCCycle([]string{"ghost", "hq"}, "/unused", testGCPolicy)
@@ -494,8 +491,9 @@ func gcModeConfig(dbs []string, mode string) *DaemonPatrolConfig {
 }
 
 func TestScheduledMaintenanceGCModeNeverFlattensAndMarksRun(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 631 * mib}
 	f.shrinkTo = map[string]int64{"hq": 97 * mib}
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
@@ -522,8 +520,9 @@ func TestScheduledMaintenanceGCModeNeverFlattensAndMarksRun(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCModeDeferralRetriesNextTick(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 631 * mib}
 	f.quietUntil = 0 // busy
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
@@ -541,8 +540,9 @@ func TestScheduledMaintenanceGCModeDeferralRetriesNextTick(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCModeFailureDoesNotRetryInWindow(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 631 * mib}
 	f.gcErr["hq"] = errors.New("boom")
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
@@ -557,8 +557,9 @@ func TestScheduledMaintenanceGCModeFailureDoesNotRetryInWindow(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCModeSkipsWhileCycleRunning(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 631 * mib}
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
 	d.maintenanceGCRunning.Store(true)
@@ -572,8 +573,7 @@ func TestScheduledMaintenanceGCModeSkipsWhileCycleRunning(t *testing.T) {
 // --- the quiet-window probe ---------------------------------------------------
 
 func TestMaintenanceQuiet(t *testing.T) {
-	prevSlots, prevPolecats := maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn
-	t.Cleanup(func() { maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn = prevSlots, prevPolecats })
+	t.Parallel()
 
 	cases := []struct {
 		name     string
@@ -600,15 +600,16 @@ func TestMaintenanceQuiet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			maintenanceSlotHoldersFn = func(string) ([]string, error) { return nil, nil }
-			if tc.slots != nil {
-				maintenanceSlotHoldersFn = tc.slots
-			}
-			maintenanceWorkingPolecatsFn = func(*Daemon) ([]string, error) { return nil, nil }
-			if tc.polecats != nil {
-				maintenanceWorkingPolecatsFn = tc.polecats
-			}
+			t.Parallel()
 			d := idleTestDaemon(t)
+			d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+			if tc.slots != nil {
+				d.maint.slotHolders = tc.slots
+			}
+			d.maint.workingPolecats = func(*Daemon) ([]string, error) { return nil, nil }
+			if tc.polecats != nil {
+				d.maint.workingPolecats = tc.polecats
+			}
 			tc.set(d)
 			quiet, reason := d.maintenanceQuiet()
 			if quiet != tc.want {
@@ -624,12 +625,10 @@ func TestMaintenanceQuiet(t *testing.T) {
 // The gc cycle holds off a daemon upgrade-restart, but must not block its own
 // quiet probe (which would make every run defer forever).
 func TestMaintenanceGCRunningBlocksUpgradeButNotItsOwnQuietProbe(t *testing.T) {
-	prevSlots, prevPolecats := maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn
-	t.Cleanup(func() { maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn = prevSlots, prevPolecats })
-	maintenanceSlotHoldersFn = func(string) ([]string, error) { return nil, nil }
-	maintenanceWorkingPolecatsFn = func(*Daemon) ([]string, error) { return nil, nil }
-
+	t.Parallel()
 	d := idleTestDaemon(t)
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+	d.maint.workingPolecats = func(*Daemon) ([]string, error) { return nil, nil }
 	d.maintenanceGCRunning.Store(true)
 	if d.isIdleForUpgrade() {
 		t.Error("isIdleForUpgrade() = true while a gc cycle runs")
@@ -660,11 +659,9 @@ func writeTestRigsJSON(t *testing.T, town string, rigNames ...string) {
 // busy: the guard cannot tell whether a polecat is working there. A rig with
 // no polecats directory at all is simply a rig without polecats.
 func TestMaintenanceQuietFailsClosedWhenPolecatListingFails(t *testing.T) {
-	prevSlots := maintenanceSlotHoldersFn
-	t.Cleanup(func() { maintenanceSlotHoldersFn = prevSlots })
-	maintenanceSlotHoldersFn = func(string) ([]string, error) { return nil, nil }
-
+	t.Parallel()
 	d := idleTestDaemon(t)
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
 	town := d.config.TownRoot
 	writeTestRigsJSON(t, town, "broken", "nopolecats")
 	if err := os.MkdirAll(filepath.Join(town, "broken"), 0o755); err != nil {
@@ -684,6 +681,7 @@ func TestMaintenanceQuietFailsClosedWhenPolecatListingFails(t *testing.T) {
 
 	// The not-exist case alone stays quiet.
 	d2 := idleTestDaemon(t)
+	d2.maint.slotHolders = d.maint.slotHolders
 	writeTestRigsJSON(t, d2.config.TownRoot, "nopolecats")
 	if quiet, reason := d2.maintenanceQuiet(); !quiet {
 		t.Errorf("maintenanceQuiet() = false (%s) for a rig with no polecats directory", reason)

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -41,6 +42,7 @@ import (
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -104,6 +106,10 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// prefixRegistryFn replaces the process-wide rig-prefix registry (see
+	// prefixRegistry) in tests; nil reads session.DefaultRegistry().
+	prefixRegistryFn func() *session.PrefixRegistry
+
 	// openGitFn opens the git repository at a directory (see gitAt); nil
 	// opens a *git.Git. Tests hand it a gitfake world.
 	openGitFn func(dir string) daemonGit
@@ -121,10 +127,18 @@ type Daemon struct {
 	// (see bootTriageExecutable); nil uses the daemon's own executable.
 	bootTriageExeFn func() (string, error)
 
+	// seams replaces the heartbeat, upgrade, dog-dispatch and main-branch
+	// collaborators in tests (see daemonSeams); the zero value is production.
+	seams daemonSeams
+
 	// countCommitsFn replaces the dolt_log count scheduled_maintenance reads
 	// per database (compactorCountCommits), so tests drive the mode decision
 	// without a Dolt server. Nil queries the server.
 	countCommitsFn func(dbName string) (int, error)
+
+	// maint replaces scheduled maintenance's side effects in tests (see
+	// maintenanceSeams); the zero value is production.
+	maint maintenanceSeams
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
@@ -274,6 +288,19 @@ type Daemon struct {
 	// that "not due" is logged after a restart and not every 15 minutes.
 	compactorDogChecked bool
 
+	// compactorDogCycles tracks the in-flight cycle goroutine, so a caller can
+	// wait for one to finish (its last-run record included).
+	compactorDogCycles sync.WaitGroup
+
+	// compactorDogCycleFn replaces the compactor's monitoring cycle (see
+	// compactorDogCycle) in tests; nil runs the real one.
+	compactorDogCycleFn func() bool
+
+	// reaperWriterForFn resolves the bd writer a live reaper run writes
+	// through (see reaperWriter); nil uses reaper.WriterForDatabase. Tests set
+	// it so no bd runs.
+	reaperWriterForFn func(townRoot, dbName string) (reaper.Writer, error)
+
 	// rigPool runs per-rig heartbeat operations (witness checks, refinery checks,
 	// polecat health, idle reaping, branch pruning) with bounded concurrency and
 	// per-rig context timeouts so one slow rig cannot block all others.
@@ -408,6 +435,22 @@ type Daemon struct {
 	// converted in the gt-gxpwc rework after crew review found this patrol was
 	// still starved (no persisted last-run or startup catch-up at all).
 	doltBackupRunning atomic.Bool
+
+	// doltBackupCycles tracks the in-flight dolt_backup goroutine, so a caller
+	// can wait for one to finish.
+	doltBackupCycles sync.WaitGroup
+
+	// goos is the platform the platform-gated patrols decide on (see
+	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
+	goos string
+}
+
+// platform is the GOOS the daemon's platform-gated patrols decide on.
+func (d *Daemon) platform() string {
+	if d.goos != "" {
+		return d.goos
+	}
+	return runtime.GOOS
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -474,12 +517,14 @@ func augmentDaemonPath(logger *log.Logger) {
 	augmented := append(additions, parts...)
 	newPath := strings.Join(augmented, string(os.PathListSeparator))
 	if newPath != current {
-		_ = os.Setenv("PATH", newPath)
+		processEnv{}.Setenv("PATH", newPath)
 		logger.Printf("PATCH-007: augmented daemon PATH with user/local bin dirs (was=%q, now=%q)", current, newPath)
 	}
 }
 
-var cleanupLegacySocketsForDaemon = func(townRoot string) (int, int) {
+// cleanupLegacySockets removes the town's legacy default- and base-socket
+// sessions (see daemonSeams.cleanupLegacySocketsFor).
+func cleanupLegacySockets(townRoot string) (int, int) {
 	defaultCleaned := session.CleanupLegacyDefaultSocket()
 	baseCleaned := session.CleanupLegacyBaseSocket(townRoot)
 	return defaultCleaned, baseCleaned
@@ -528,7 +573,7 @@ func New(config *Config) (*Daemon, error) {
 
 	// Set GT_TOWN_ROOT in the daemon process env so Go code (e.g.,
 	// sessionPrefixPattern) can read it without relying on GT_ROOT.
-	os.Setenv("GT_TOWN_ROOT", config.TownRoot)
+	processEnv{}.Setenv("GT_TOWN_ROOT", config.TownRoot)
 
 	// Also set GT_TOWN_ROOT in tmux global environment so run-shell subprocesses
 	// (e.g., gt cycle next/prev) can find the workspace even when CWD is $HOME.
@@ -564,7 +609,7 @@ func New(config *Config) (*Daemon, error) {
 		logger.Printf("Loaded patrol config from %s", PatrolConfigFile(config.TownRoot))
 		// Propagate env vars from daemon.json to this process and all spawned sessions.
 		for k, v := range patrolConfig.Env {
-			os.Setenv(k, v)
+			processEnv{}.Setenv(k, v)
 			logger.Printf("Set env %s=%s from daemon.json", k, v)
 		}
 	}
@@ -600,15 +645,15 @@ func New(config *Config) (*Daemon, error) {
 	if os.Getenv("GT_DOLT_PORT") == "" {
 		if port := agentconfig.ResolveConfiguredDoltPort(config.TownRoot); port > 0 {
 			portStr := strconv.Itoa(port)
-			os.Setenv("GT_DOLT_PORT", portStr)
-			os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-			os.Setenv("BEADS_DOLT_PORT", portStr)
+			processEnv{}.Setenv("GT_DOLT_PORT", portStr)
+			processEnv{}.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
+			processEnv{}.Setenv("BEADS_DOLT_PORT", portStr)
 			logger.Printf("Set GT_DOLT_PORT=%s from resolved Dolt config (fallback)", portStr)
 		}
 	} else {
 		portStr := os.Getenv("GT_DOLT_PORT")
-		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-		os.Setenv("BEADS_DOLT_PORT", portStr)
+		processEnv{}.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
+		processEnv{}.Setenv("BEADS_DOLT_PORT", portStr)
 	}
 
 	// Propagate Dolt host to process env so bd doesn't fall back to 127.0.0.1
@@ -696,11 +741,22 @@ type envWriter interface {
 	Unsetenv(key string)
 }
 
-// processEnv writes the daemon's own process environment.
+// processEnv writes the daemon's own process environment. It is the one
+// place the daemon does: New publishes the town root, daemon.json's env, the
+// augmented PATH and the Dolt endpoint here so every session, bd and gt it
+// starts inherits them, and the libraries that build those children
+// (config.AgentEnv, internal/beads) read the process environment.
 type processEnv struct{}
 
-func (processEnv) Setenv(key, value string) { _ = os.Setenv(key, value) }
-func (processEnv) Unsetenv(key string)      { _ = os.Unsetenv(key) }
+func (processEnv) Setenv(key, value string) {
+	//testpolicy:allow prod-no-setenv — the daemon process publishes its environment to every child it starts (see processEnv)
+	_ = os.Setenv(key, value)
+}
+
+func (processEnv) Unsetenv(key string) {
+	//testpolicy:allow prod-no-setenv — the daemon process publishes its environment to every child it starts (see processEnv)
+	_ = os.Unsetenv(key)
+}
 
 func applyDoltServerConfigEnv(config *DoltServerConfig) {
 	applyDoltServerConfigEnvTo(processEnv{}, config)
@@ -743,7 +799,7 @@ func applyConfiguredDoltHostEnvTo(env envWriter, townRoot string, logf func(form
 
 func (d *Daemon) cleanupLegacySocketSessions() {
 	d.legacySocketCleanupOnce.Do(func() {
-		defaultCleaned, baseCleaned := cleanupLegacySocketsForDaemon(d.config.TownRoot)
+		defaultCleaned, baseCleaned := d.seams.cleanupLegacySocketsFor(d.config.TownRoot)
 		if defaultCleaned > 0 {
 			d.logger.Printf("legacy_socket_cleanup: cleaned %d session(s) from default socket", defaultCleaned)
 		}
@@ -1336,11 +1392,8 @@ func (d *Daemon) heartbeat(state *State) {
 	if d.checkUpgradeRestart(time.Now()) {
 		return
 	}
-	heartbeatWorkFn(d, state)
+	d.seams.runHeartbeatWork(d, state)
 }
-
-// heartbeatWorkFn is the body of a heartbeat; a test seam.
-var heartbeatWorkFn = (*Daemon).heartbeatWork
 
 // heartbeatWork is the recovery work of one heartbeat, run after the
 // shutdown, E-stop and upgrade-restart guards in heartbeat.
@@ -1606,9 +1659,8 @@ type beadsDBAccessor interface {
 
 // bdSchemaLevel returns the schema level the bd on PATH migrates a database
 // to (bd version --json db_schema_version). Zero with a nil error means bd
-// did not report one: a build from before the machine surface. Tests
-// replace it.
-var bdSchemaLevel = func(ctx context.Context, townRoot string) (int, error) {
+// did not report one: a build from before the machine surface.
+func bdSchemaLevel(ctx context.Context, townRoot string) (int, error) {
 	stdout, stderr, err := deps.NewBDProcessRunner(townRoot)(ctx, nil, "version", "--json")
 	if err != nil {
 		return 0, fmt.Errorf("bd version --json: %w (%s)", err, strings.TrimSpace(string(stderr)))
@@ -1623,9 +1675,10 @@ var bdSchemaLevel = func(ctx context.Context, townRoot string) (int, error) {
 // verifyBeadsStores is the daemon's startup gate on opened stores: bd must
 // report the schema level it migrates to, and every store must be at that
 // level with a journal bd can tail. Every read goes through bd (probeFor;
-// gt-7iwy0.2), not the store handles. On refusal it closes every store.
-func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage, probeFor func(townRoot, name string) (storeProbe, error)) error {
-	bdSchema, err := bdSchemaLevel(ctx, townRoot)
+// gt-7iwy0.2), not the store handles; schemaLevel reads bd's level
+// (bdSchemaLevel in production). On refusal it closes every store.
+func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage, schemaLevel func(ctx context.Context, townRoot string) (int, error), probeFor func(townRoot, name string) (storeProbe, error)) error {
+	bdSchema, err := schemaLevel(ctx, townRoot)
 	if err == nil && bdSchema <= 0 {
 		err = fmt.Errorf("bd version --json reports no db_schema_version (a bd build from before the machine surface); install the beads fork's bd with make safe-install")
 	}
@@ -2425,7 +2478,7 @@ func (d *Daemon) killWitnessSessions() {
 // sessions that correspond to rigs with their own prefix are stale duplicates.
 // Fix for: hq-ouz, hq-eqf, hq-3i4.
 func (d *Daemon) killDefaultPrefixGhosts() {
-	reg := session.DefaultRegistry()
+	reg := d.prefixRegistry()
 	allRigs := reg.AllRigs() // rigName → shortPrefix
 	if len(allRigs) == 0 {
 		return
@@ -2459,7 +2512,7 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 	// Also check for ghost polecat sessions: gt-<polecatName> where the polecat
 	// actually belongs to a rig with a different prefix.
 	for _, rigName := range d.getKnownRigs() {
-		rigPrefix := session.PrefixFor(rigName)
+		rigPrefix := reg.PrefixForRig(rigName)
 		if rigPrefix == session.DefaultPrefix {
 			continue // This rig uses "gt" — its sessions are fine
 		}
@@ -2493,6 +2546,15 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 			}
 		}
 	}
+}
+
+// prefixRegistry is the rig-prefix registry the daemon reads: prefixRegistryFn's
+// when a test set one, else the process-wide session registry.
+func (d *Daemon) prefixRegistry() *session.PrefixRegistry {
+	if d.prefixRegistryFn != nil {
+		return d.prefixRegistryFn()
+	}
+	return session.DefaultRegistry()
 }
 
 // openBeadsStores opens beads stores for the town (hq) and all known rigs.
@@ -2537,7 +2599,7 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 		return storeOpenResult{Missing: missing}, nil
 	}
 
-	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores, newBDStoreProbe); err != nil {
+	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores, bdSchemaLevel, newBDStoreProbe); err != nil {
 		return storeOpenResult{Missing: missing}, err
 	}
 
@@ -3025,8 +3087,9 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
 
-	// Wait a bit for graceful shutdown
-	time.Sleep(constants.ShutdownNotifyDelay)
+	// Wait a bit for graceful shutdown. StopDaemon runs outside any Daemon, so
+	// it waits on the real clock.
+	clockwork.NewRealClock().Sleep(constants.ShutdownNotifyDelay)
 
 	// Check if still running
 	if isProcessAlive(process) {
@@ -3121,8 +3184,8 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 			continue
 		}
 
-		// Wait for graceful shutdown
-		time.Sleep(200 * time.Millisecond)
+		// Wait for graceful shutdown (outside any Daemon: the real clock).
+		clockwork.NewRealClock().Sleep(200 * time.Millisecond)
 
 		// Check if still alive
 		if isProcessAlive(process) {
@@ -3214,7 +3277,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	}
 
 	// Build the expected tmux session name
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 
 	// Check if tmux session exists
 	sessionAlive, err := d.tmux.HasSession(sessionName)
@@ -3510,7 +3573,7 @@ func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) {
 //     gt done — persistentPreRun resets heartbeat to "working" on every gt sub-command,
 //     so after gt done finishes the heartbeat shows "working" with a stale timestamp.
 func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Duration) {
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 
 	// Only check sessions that are actually alive
 	alive, err := d.tmux.HasSession(sessionName)

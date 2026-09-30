@@ -357,7 +357,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm dogSessions, rigsConfig *c
 // finish it either. Skipping such dogs for new plugin dispatch prevents that
 // abandon-and-strand cycle (gt-bygj); recovering the stranded hook itself is
 // a separate concern (the reaper / deacon patrol).
-func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logger *log.Logger) *dog.Dog {
+func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logger *log.Logger, wisps wispOps) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {
 		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
@@ -379,7 +379,7 @@ func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logg
 		if running {
 			continue
 		}
-		result, err := dogHasHookedFormulaWithIDFn(townRoot, beadsDir, d.Name)
+		result, err := wisps.hookedFormula(townRoot, beadsDir, d.Name)
 		if err != nil {
 			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
 		} else if result.hasHooked {
@@ -389,13 +389,13 @@ func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logg
 			// close it so the dog becomes dispatchable again (next tick; the
 			// wisp is gone then, which is also why this WARN is naturally
 			// logged once).
-			tree, treeErr := wispTreeFn(townRoot, result.wispID)
+			tree, treeErr := wisps.wispTree(townRoot, result.wispID)
 			if treeErr != nil {
 				// Fail safe: without the tree we cannot tell an abandoned wisp
 				// from a live one, so leave it alone and keep skipping.
 				logger.Printf("Handler: wisp tree read failed for dog %s wisp %s: %v; not closing", d.Name, result.wispID, treeErr)
 			} else if isWispStale(d, result, tree) {
-				closed, closeErr := closeStaleWispFn(townRoot, result.wispID, tree)
+				closed, closeErr := wisps.closeStaleWisp(townRoot, result.wispID, tree)
 				if closeErr != nil {
 					logger.Printf("Handler: closing abandoned wisp %s for dog %s failed: %v", result.wispID, d.Name, closeErr)
 				} else if closed > 0 {
@@ -412,21 +412,6 @@ func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logg
 	}
 	return nil
 }
-
-// dogHasHookedFormulaWithIDFn is the production seam for hooked-formula checks
-// that need the wisp root ID (for stale-wisp cleanup). Production code always
-// resolves to dogHasHookedFormulaWithID; tests override it deterministically.
-var dogHasHookedFormulaWithIDFn = dogHasHookedFormulaWithID
-
-// wispTreeFn reads a formula wisp's root plus every descendant. Production
-// code resolves to wispTree; tests override it so findDispatchableDog's
-// abandoned-wisp branch is exercisable without a real bd/Dolt backend.
-var wispTreeFn = wispTree
-
-// closeStaleWispFn closes an abandoned formula wisp and its steps. Production
-// code resolves to closeStaleWisp; tests override it to verify the wisp ID and
-// tree are the ones the handler read without needing a real bd/Dolt backend.
-var closeStaleWispFn = closeStaleWisp
 
 // wispTree reads a formula wisp's root and every descendant under the
 // daemon's read-only routing env (BD_DOLT_AUTO_COMMIT=off / BD_READONLY).
@@ -551,7 +536,7 @@ const wispAbandonedReason = "abandoned: idle dog, no step progress"
 // The tree is passed in rather than re-read: findDispatchableDog already read
 // it to make the staleness call, and a second bd round trip per idle dog per
 // tick is exactly the cost gt-da2x's read path is arranged to avoid.
-func closeStaleWisp(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+func closeStaleWisp(townRoot, _ string, tree []beads.WispStep) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
 	defer cancel()
 	return beads.CloseWispTree(ctx, townRoot, bdMutationRoutingEnv(townRoot), wispAbandonedReason, tree)
@@ -638,7 +623,7 @@ func (d *Daemon) findDog(mgr dogManager, sm dogSessionStarter) *dog.Dog {
 	if !ok1 || !ok2 {
 		return nil
 	}
-	return findDispatchableDog(realMgr, realSM, d.config.TownRoot, d.logger)
+	return findDispatchableDog(realMgr, realSM, d.config.TownRoot, d.logger, d.seams.wisps)
 }
 
 // dogSeat is a dog's seat: town-level, named.

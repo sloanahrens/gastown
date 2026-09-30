@@ -97,23 +97,13 @@ func maintenanceMode(config *DaemonPatrolConfig) string {
 	return MaintenanceModeMonitor
 }
 
-// maintenanceExecFn runs `gt maintain --force --threshold N`. A package
-// variable, following this package's *Fn seam convention (wispTreeFn,
-// closeStaleWispFn), so a test can drive the flatten
-// branch without a real gt binary and a real town — and, more importantly, can
-// assert that monitor mode never reaches it at all.
-var maintenanceExecFn = func(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error) {
+// runGtMaintain runs `gt maintain --force --threshold N`, the flatten
+// branch's destructive step.
+func runGtMaintain(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, gtPath, "maintain", "--force", "--threshold", strconv.Itoa(threshold))
 	cmd.Dir = dir
 	util.SetDetachedProcessGroup(cmd)
 	return cmd.CombinedOutput()
-}
-
-// maintenanceEscalateFn reports maintenance findings to the mayor. Seamed for
-// the same reason as maintenanceExecFn: monitor mode's whole contract is that
-// it escalates instead of compacting, and that contract needs a test.
-var maintenanceEscalateFn = func(d *Daemon, source, message string) {
-	d.escalate(source, message)
 }
 
 // maintenanceTarget is a database at or above the maintenance threshold.
@@ -282,7 +272,7 @@ func (d *Daemon) runScheduledMaintenance() {
 		if d.maintenanceGCRunning.Load() {
 			return
 		}
-		if external, why := maintenanceGCExternalFn(d); external {
+		if external, why := d.maintenance().gcExternal(d); external {
 			// The size trigger reads the server's data dir from this host's
 			// disk; against a remote server it would read the wrong one.
 			d.logger.Printf("scheduled_maintenance: mode=%s skipped: %s — gc mode needs a local server", MaintenanceModeGC, why)
@@ -290,7 +280,7 @@ func (d *Daemon) runScheduledMaintenance() {
 			return
 		}
 		dataDir := d.maintenanceDataDir()
-		databases, err := maintenanceGCDatabasesFn(dataDir)
+		databases, err := d.maintenance().gcDatabases(dataDir)
 		if err != nil || len(databases) == 0 {
 			d.logger.Printf("scheduled_maintenance: mode=%s: no databases discovered in %s (err=%v)", MaintenanceModeGC, dataDir, err)
 			return
@@ -343,7 +333,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	} else {
 		d.logger.Printf("scheduled_maintenance: mode=%s — escalating %d database(s), rewriting nothing",
 			MaintenanceModeMonitor, len(targets))
-		maintenanceEscalateFn(d, "scheduled_maintenance", maintenanceMonitorMessage(targets, threshold))
+		d.maintenance().escalate(d, "scheduled_maintenance", maintenanceMonitorMessage(targets, threshold))
 	}
 
 	d.lastMaintenanceRun = now
@@ -369,14 +359,14 @@ func (d *Daemon) maintenanceFlatten(threshold int) {
 	d.logger.Printf("scheduled_maintenance: mode=%s — running gt maintain --force --threshold %d",
 		MaintenanceModeFlatten, threshold)
 
-	output, err := maintenanceExecFn(d.ctx, d.gtPath, d.config.TownRoot, threshold)
+	output, err := d.maintenance().exec(d.ctx, d.gtPath, d.config.TownRoot, threshold)
 	if err != nil {
 		d.logger.Printf("scheduled_maintenance: gt maintain failed: %v\nOutput: %s", err, string(output))
 		detail := fmt.Sprintf("gt maintain --force failed: %v", err)
 		if tail := tailLines(output, maintenanceTailLines); len(tail) > 0 {
 			detail += "\n" + strings.Join(tail, "\n")
 		}
-		maintenanceEscalateFn(d, "scheduled_maintenance", detail)
+		d.maintenance().escalate(d, "scheduled_maintenance", detail)
 		return
 	}
 
