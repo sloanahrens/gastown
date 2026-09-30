@@ -18,9 +18,6 @@ import (
 func TestMain(m *testing.M) {
 	// Every test sees the same prefix registry, set once here rather than
 	// swapped per test, so the tests can run in parallel.
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	session.SetDefaultRegistry(reg)
+	session.SetDefaultRegistry(testPrefixRegistry())
 	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
 }
