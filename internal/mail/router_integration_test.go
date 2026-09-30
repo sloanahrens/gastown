@@ -84,9 +84,8 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 	createAgent("gt-testrig-crew-alice", "Test crew alice")
 	createAgent("gt-testrig-polecat-bob", "Test polecat bob")
 
-	// Create dog directory for workspace fallback validation (deacon/dogs/fido).
-	// The workspace fallback handles cases where agent beads are missing or
-	// the bead DB is unavailable (e.g., after Dolt reset).
+	// A leftover kennel directory must not make a retired dog addressable
+	// through the workspace fallback (gt-29q6g).
 	dogDir := filepath.Join(townRoot, "deacon", "dogs", "fido")
 	if err := os.MkdirAll(dogDir, 0755); err != nil {
 		t.Fatalf("creating dog dir: %v", err)
@@ -105,21 +104,19 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 
 		// Town-level agents (validated against beads)
 		{"mayor", "mayor/", false, ""},
-		{"deacon", "deacon/", false, ""},
 
 		// Rig-level agents (validated against beads)
 		{"witness", "testrig/witness", false, ""},
 		{"crew member", "testrig/alice", false, ""},
 		{"polecat", "testrig/bob", false, ""},
 
-		// Dog agents (validated via workspace fallback: deacon/dogs/<name> directory)
-		{"dog agent", "deacon/dogs/fido", false, ""},
-
 		// Invalid addresses - should fail
 		{"bare name", "ruby", true, "no agent found"},
 		{"nonexistent rig agent", "testrig/nonexistent", true, "no agent found"},
 		{"wrong rig", "wrongrig/alice", true, "no agent found"},
 		{"misrouted town agent", "testrig/mayor", true, "no agent found"},
+		{"retired dog with kennel dir", "deacon/dogs/fido", true, "no agent found"},
+		{"retired deacon despite its bead", "deacon/", true, "no agent found"}, // gt-4k3fj.6.1
 	}
 
 	for _, tt := range tests {
