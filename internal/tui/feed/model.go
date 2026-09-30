@@ -668,7 +668,7 @@ func nudgeTarget(agent *ProblemAgent) string {
 	switch agent.Role {
 	case constants.RoleMayor, constants.RoleDeacon:
 		return agent.Role
-	case constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleWitness:
 		return agent.Rig + "/" + agent.Role
 	case constants.RoleCrew:
 		return agent.Rig + "/crew/" + agent.Name

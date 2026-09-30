@@ -101,11 +101,6 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 		return runWitnessStatusLine(t, rigName)
 	}
 
-	// Refinery status line
-	if role == "refinery" || strings.HasSuffix(statusLineSession, "-refinery") {
-		return runRefineryStatusLine(rigName)
-	}
-
 	// Crew/Polecat status line
 	return runWorkerStatusLine(polecat, crew, issue)
 }
@@ -169,9 +164,8 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Track per-rig status for LED indicators and sorting
 	type rigStatus struct {
-		hasWitness  bool
-		hasRefinery bool
-		opState     string // "OPERATIONAL", "PARKED", or "DOCKED"
+		hasWitness bool
+		opState    string // "OPERATIONAL", "PARKED", or "DOCKED"
 	}
 	rigStatuses := make(map[string]*rigStatus)
 
@@ -186,8 +180,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		working int
 	}
 	healthByType := map[AgentType]*agentHealth{
-		AgentWitness:  {},
-		AgentRefinery: {},
+		AgentWitness: {},
 	}
 
 	// Track deacon presence (just icon, no count)
@@ -209,8 +202,6 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 			switch agent.Type {
 			case AgentWitness:
 				rigStatuses[agent.Rig].hasWitness = true
-			case AgentRefinery:
-				rigStatuses[agent.Rig].hasRefinery = true
 			}
 		}
 
@@ -243,7 +234,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	// Only show agent types that have sessions
 	// Note: Polecats excluded - idle state is misleading noise
 	// Deacon gets just an icon (no count) - shown separately below
-	agentOrder := []AgentType{AgentWitness, AgentRefinery}
+	agentOrder := []AgentType{AgentWitness}
 	var agentParts []string
 	for _, agentType := range agentOrder {
 		health := healthByType[agentType]
@@ -281,8 +272,8 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Sort by: 1) running state, 2) operational state, 3) alphabetical
 	sort.Slice(rigs, func(i, j int) bool {
-		isRunningI := rigs[i].status.hasWitness || rigs[i].status.hasRefinery
-		isRunningJ := rigs[j].status.hasWitness || rigs[j].status.hasRefinery
+		isRunningI := rigs[i].status.hasWitness
+		isRunningJ := rigs[j].status.hasWitness
 
 		// Primary sort: running rigs before non-running rigs
 		if isRunningI != isRunningJ {
@@ -305,7 +296,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	var rigParts []string
 	var lastGroup string
 	for _, rig := range rigs {
-		isRunning := rig.status.hasWitness || rig.status.hasRefinery
+		isRunning := rig.status.hasWitness
 		var currentGroup string
 		if isRunning {
 			currentGroup = "running"
@@ -320,7 +311,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		lastGroup = currentGroup
 
 		status := rig.status
-		led := GetRigLED(status.hasWitness, status.hasRefinery, status.opState)
+		led := GetRigLED(status.hasWitness, status.opState)
 
 		// All icons get 1 space, Park gets 2
 		space := " "
@@ -433,25 +424,6 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 	}
 
 	fmt.Print(strings.Join(parts, " | ") + " |")
-	return nil
-}
-
-// runRefineryStatusLine outputs status for a refinery session.
-// Shows: MQ length, current item, hook or mail preview
-func runRefineryStatusLine(rigName string) error {
-	if rigName == "" {
-		// Try to extract from session name: <prefix>-refinery
-		if identity, err := session.ParseSessionName(statusLineSession); err == nil && identity.Role == session.RoleRefinery {
-			rigName = identity.Rig
-		}
-	}
-
-	if rigName == "" {
-		fmt.Printf("%s ? |", AgentTypeIcons[AgentRefinery])
-		return nil
-	}
-
-	fmt.Print("idle |")
 	return nil
 }
 

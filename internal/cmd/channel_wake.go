@@ -98,8 +98,6 @@ func channelConsumerSessionName(role, rigName string) (string, error) {
 	switch role {
 	case constants.RoleWitness:
 		return session.WitnessSessionName(prefix), nil
-	case constants.RoleRefinery:
-		return session.RefinerySessionName(prefix), nil
 	default:
 		return "", fmt.Errorf("no session name is known for channel consumer role %q", role)
 	}

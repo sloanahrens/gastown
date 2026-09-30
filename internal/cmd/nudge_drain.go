@@ -41,7 +41,7 @@ func drainSessionNudges(townRoot string) []nudge.QueuedNudge {
 // step boundaries drainSessionNudges already covers (gt-dekkl).
 //
 // stderr, not stdout: those commands' stdout is machine-read — the refinery
-// patrol does MR=$(gt mq next <rig> --quiet), stuck-work-dog pipes
+// patrol used to do MR=$(gt mq next <rig> --quiet), plugins pipe
 // `gt mq list --json` into jq, boot-triage pipes `gt mail inbox --json` into
 // python — so a nudge block on stdout corrupts the parse, and the drain has
 // already dropped the nudge from the queue by then, losing it outright.

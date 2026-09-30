@@ -384,9 +384,6 @@ func targetToSessionName(target string) (string, error) {
 	case len(parts) == 2 && parts[1] == "witness":
 		// gastown/witness -> {prefix}-witness
 		return session.WitnessSessionName(session.PrefixFor(parts[0])), nil
-	case len(parts) == 2 && parts[1] == "refinery":
-		// gastown/refinery -> {prefix}-refinery
-		return session.RefinerySessionName(session.PrefixFor(parts[0])), nil
 	case len(parts) == 2 && parts[0] == "deacon" && parts[1] == "dogs":
 		return "", fmt.Errorf("invalid target: need dog name (e.g., deacon/dogs/alpha)")
 	case len(parts) == 3 && parts[0] == "deacon" && parts[1] == "dogs":

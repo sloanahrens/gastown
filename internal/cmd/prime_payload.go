@@ -365,8 +365,6 @@ func primeStepVars(ctx RoleContext, hookedBead *beads.Issue, formulaName string)
 	switch ctx.Role {
 	case RoleWitness:
 		return buildWitnessPatrolVars(ctx)
-	case RoleRefinery:
-		return buildRefineryPatrolVars(ctx)
 	}
 	return nil
 }
@@ -386,8 +384,6 @@ func primeStepFormulaName(ctx RoleContext, hookedBead *beads.Issue, explicit str
 	switch ctx.Role {
 	case RoleWitness:
 		return constants.MolWitnessPatrol
-	case RoleRefinery:
-		return constants.MolRefineryPatrol
 	case RoleDeacon:
 		return constants.MolDeaconPatrol
 	}

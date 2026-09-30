@@ -11,19 +11,19 @@ func TestRunPatrolNew_UnsupportedRole(t *testing.T) {
 	// but we can verify role validation logic
 
 	// Test the role switch logic directly
-	validRoles := []string{"deacon", "witness", "refinery"}
-	invalidRoles := []string{"mayor", "polecat", "crew", "unknown", ""}
+	validRoles := []string{"deacon", "witness"}
+	invalidRoles := []string{"mayor", "polecat", "crew", "refinery", "unknown", ""}
 
 	for _, role := range validRoles {
 		r := Role(role)
-		if r != RoleDeacon && r != RoleWitness && r != RoleRefinery {
+		if r != RoleDeacon && r != RoleWitness {
 			t.Errorf("role %q should be valid for patrol new", role)
 		}
 	}
 
 	for _, role := range invalidRoles {
 		r := Role(role)
-		if r == RoleDeacon || r == RoleWitness || r == RoleRefinery {
+		if r == RoleDeacon || r == RoleWitness {
 			t.Errorf("role %q should be invalid for patrol new", role)
 		}
 	}

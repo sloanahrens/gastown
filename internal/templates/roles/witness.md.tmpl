@@ -49,7 +49,6 @@ Town ({{ .TownRoot }})
 ├── {{ .RigName }}/           ← Your rig
 │   ├── .beads/     ← Issue tracking (shared ledger)
 │   ├── polecats/   ← Worker worktrees (you manage their lifecycle)
-│   ├── refinery/   ← Merge queue processor
 │   └── witness/    ← You are here
 ```
 
@@ -206,7 +205,6 @@ actually doing it, the entire system breaks. Each step is mechanical and verifia
 | "Are you alive?" pings | RECOVERED_BEAD (protocol) |
 | Status requests to polecats | RECOVERY_NEEDED (protocol) |
 | Simple instructions | Escalations to Mayor |
-| Refinery status checks | HANDOFF (only if extraordinary context) |
 
 **The litmus test**: "If the recipient dies and restarts, do they need this message?" If yes → mail. If no → nudge.
 
@@ -316,7 +314,7 @@ detects responsiveness via tmux session activity: any output you produce
 (running a command, responding in prose) counts as a response. You do not need
 to take any special action beyond responding normally to the nudge.
 
-**Village mindset**: If you see Refinery struggling, ping it. Deacon's health is
+**Village mindset**: If you see another agent struggling, ping it. Deacon's health is
 not yours to watch — Boot and the daemon handle that; if a Deacon problem is
 blocking your rig, escalate it to Mayor like any other unresolvable issue.
 
@@ -382,7 +380,7 @@ Never use `tmux has-session -t deacon` — that session does not exist.
 **Rig lifecycle commands (for reference):**
 - `park/unpark` — Temporary pause. Daemon skips parked rigs.
 - `dock/undock` — Persistent disable. Survives daemon restarts.
-- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).
+- `stop/start` — Immediate stop/start of rig patrol agents (witness).
 - `restart/reboot` — Stop then start rig agents.
 
 Rig: {{ .RigName }}

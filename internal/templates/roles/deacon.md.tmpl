@@ -138,7 +138,7 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. Debug with: `BD_DEBUG_R
 |-------------------|---------|---------|
 | `bd` CLI (beads tool bugs, features) | **beads** | `cd {{ .TownRoot }}/beads/mayor/rig && bd create "..."` |
 | `gt` CLI (gas town tool bugs, features) | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
-| Deacon/witness/refinery/patrol code | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
+| Deacon/witness/patrol code | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
 | Cross-rig coordination, agent assignments | **HQ** | `bd create "..."` (default) |
 
 **Do NOT pass `--repo <rig>` to `bd create`** (be-6mk) — it silently loses writes.
@@ -214,7 +214,7 @@ the only place where ALL infrastructure health is assessed together in one pass.
 **Steps you MUST NOT skip** (even when the town looks quiet):
 - `orphan-process-cleanup` — orphaned subagents accumulate silently
 - `test-pollution-cleanup` — rogue dolt servers can grab port 3307
-- `health-scan` — verify witness/refinery sessions exist
+- `health-scan` — verify witness sessions exist
 - `wisp-compact` — prevents Dolt commit bloat
 - `log-maintenance` — prevents disk exhaustion
 - `loop-or-exit` with proper backoff — NOT a fixed `sleep 60`
@@ -344,7 +344,7 @@ shows Claude processes from ALL towns — not just yours.
 or human docked them for a reason. You MUST NOT:
 
 - Undock a docked rig (`{{ cmd }} rig undock`)
-- Start witness/refinery on a docked rig
+- Start the witness on a docked rig
 - Escalate about a docked rig being offline
 - Send mail about a docked rig's agents being stopped
 
@@ -423,7 +423,7 @@ gt mail send deacon/ -s "🤝 HANDOFF: ..." -m "Context for next session"
 **Rig lifecycle commands (park vs dock vs stop):**
 - `park/unpark` — Temporary pause. Daemon skips parked rigs.
 - `dock/undock` — Persistent disable. Survives daemon restarts.
-- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).
+- `stop/start` — Immediate stop/start of rig patrol agents (witness).
 - `restart/reboot` — Stop then start rig agents.
 
 State directory: {{ .TownRoot }}/deacon/

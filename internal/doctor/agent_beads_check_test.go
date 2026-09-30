@@ -89,7 +89,7 @@ func TestAgentBeadsExistCheck_ExpectedIDs(t *testing.T) {
 	}
 
 	// Verify the expected IDs are in the details
-	expectedIDs := []string{"sw-sallaWork-witness", "sw-sallaWork-refinery"}
+	expectedIDs := []string{"sw-sallaWork-witness"}
 	for _, expectedID := range expectedIDs {
 		found := false
 		for _, detail := range result.Details {
@@ -429,7 +429,7 @@ func TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing(t *testing.T) {
 	if result.Status == StatusOK {
 		t.Fatalf("expected town-only rig agent beads to be reported missing, got OK: %s", result.Message)
 	}
-	for _, want := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+	for _, want := range []string{"gs-gastown-witness"} {
 		found := false
 		for _, detail := range result.Details {
 			if strings.HasPrefix(detail, want) {
@@ -465,7 +465,7 @@ func TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate(t *test
 	}
 	log := string(data)
 	rigDir := resolvePath(t, filepath.Join(tmpDir, "gastown", "mayor", "rig"))
-	for _, id := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+	for _, id := range []string{"gs-gastown-witness"} {
 		want := "create " + id + " cwd=" + rigDir
 		if !strings.Contains(log, want) {
 			t.Errorf("expected Fix() to create %s IN THE RIG DATABASE (create running in %s) despite town duplicate, got log: %q", id, rigDir, log)
@@ -594,7 +594,7 @@ func TestAgentBeadsExistCheck_FixLabelsLegacyOpenBeadInsteadOfCreating(t *testin
 		t.Errorf("Fix() must not create beads that already exist (label them instead), got log: %q", log)
 	}
 	rigDir := resolvePath(t, filepath.Join(tmpDir, "gastown", "mayor", "rig"))
-	for _, id := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+	for _, id := range []string{"gs-gastown-witness"} {
 		want := "update " + id + " cwd=" + rigDir
 		if !strings.Contains(log, want) {
 			t.Errorf("expected Fix() to add gt:agent label to legacy bead %s in the rig database, got log: %q", id, log)

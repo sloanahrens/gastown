@@ -700,7 +700,6 @@ func TestAgentMarkerTriple(t *testing.T) {
 		{"gastown/flint", "gastown", constants.RolePolecat, "flint", true},
 		{"gastown/polecats/flint", "gastown", constants.RolePolecat, "flint", true},
 		{"gastown/witness", "gastown", constants.RoleWitness, "", true},
-		{"gastown/refinery", "gastown", constants.RoleRefinery, "", true},
 		{"gastown/crew/opal", "gastown", constants.RoleCrew, "opal", true},
 		{"mayor/", "", constants.RoleMayor, "", true},
 		{"deacon/", "", constants.RoleDeacon, "", true},

@@ -65,7 +65,7 @@ formula checklist (from `mol-polecat-work`, shown inline at prime time) and sign
 1. Receive work via your hook (formula checklist + issue)
 2. Work through formula steps in order (shown inline at prime time)
 3. Complete and self-clean (`gt done`) — you exit AND nuke yourself
-4. Refinery merges your work from the MQ
+4. The landing worker lands your branch on main
 
 **Three operating states:**
 - **Working** — actively doing assigned work (normal)
@@ -75,7 +75,7 @@ formula checklist (from `mol-polecat-work`, shown inline at prime time) and sign
 Done means gone. Run `gt prime` to see your formula steps.
 
 **You do NOT:**
-- Push directly to main (Refinery merges after Witness verification)
+- Push directly to main (the landing worker lands submitted work)
 - Skip verification steps
 - Work on anything other than your assigned issue
 
@@ -199,7 +199,7 @@ Never `git reset --soft origin/main` (or `--mixed`/`--hard`). A reset moves
 HEAD to the remote tip while your index and working tree stay as they were when
 your worktree was cut — so the next commit records (old tree) - (new tip), a
 REVERT of every commit merged since you started, hidden inside your own change.
-Two polecat MRs reached the merge queue that way, deleting 9 and 17 files of
+Two polecat submissions reached landing that way, deleting 9 and 17 files of
 other people's merged work. The command is blocked by the dangerous-command
 guard, and `gt done` refuses a branch that undoes merged work.
 
@@ -274,25 +274,25 @@ the project's definition of done. Many projects require a specific test harness
 (not just `go test` or `dotnet test`). If AGENTS.md exists, its "Core rule"
 section defines what "done" means for this project.
 
-The `gt done` command pushes your branch, creates an MR bead in the MQ, nukes
+The `gt done` command pushes your branch, marks the bead ready to land, nukes
 your sandbox, and exits your session. **You are gone after `gt done`.**
 
 ### Do NOT Push Directly to Main
 
 **You are a polecat. You NEVER push directly to main.**
 
-Your work goes through the merge queue:
+Your work goes through the landing worker:
 1. You work on your branch
-2. `gt done` pushes your branch and submits an MR to the merge queue
-3. Refinery merges to main after Witness verification
+2. `gt done` pushes your branch and marks the bead ready to land (gt:ready-to-land)
+3. The daemon's landing worker gates and lands it on main
 
-**Do NOT create GitHub PRs either.** The merge queue handles everything.
+**Do NOT create GitHub PRs either.** The landing worker handles everything.
 
 ### The Landing Rule
 
-> **Work is NOT landed until it's in the Refinery MQ.**
+> **Work is NOT landed until `gt done` has marked it ready to land.**
 
-**Local branch → `gt done` → MR in queue → Refinery merges → LANDED**
+**Local branch → `gt done` → ready to land → landing worker lands → LANDED**
 
 ---
 
@@ -354,7 +354,7 @@ Before writing or editing any comment, directive, formula, plugin.md, or doc: if
 
 ## Do NOT
 
-- Push to main (Refinery does this)
+- Push to main (the landing worker does this)
 - Work on unrelated issues (file beads instead)
 - Skip tests or self-review
 - Guess when confused (ask Witness)

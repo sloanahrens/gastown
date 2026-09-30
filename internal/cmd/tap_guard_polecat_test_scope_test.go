@@ -76,8 +76,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 // -run), never the container-suite rule's "run it wrapped" line: that advice
 // is what sent zircon, coral and lapis into full 77-package runs beside the
 // refinery's gate, doubling its wall time (gt-v6se). The wrapped form is then
-// blocked too. The refinery keeps both: bare make test blocked with the
-// wrapped advice, wrapped make test allowed.
+// blocked too.
 func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 	t.Setenv(dockerTestsEnv, "")
 	bare := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
@@ -101,22 +100,6 @@ func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 		if strings.Contains(stderr, "Run it wrapped") {
 			t.Errorf("%s: block must not tell a polecat to run the suite wrapped, got: %s", name, stderr)
 		}
-	}
-
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-	t.Chdir(t.TempDir())
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, bare, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	})
-	if err == nil || !strings.Contains(stderr, "Run it wrapped") {
-		t.Errorf("refinery bare make test must still be blocked with the wrapped advice, err=%v stderr=%s", err, stderr)
-	}
-	withStdin(t, wrapped, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	if err != nil {
-		t.Errorf("refinery wrapped make test must be allowed, got %v", err)
 	}
 }
 

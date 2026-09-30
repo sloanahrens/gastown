@@ -96,8 +96,8 @@ func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
 	t.Parallel()
 	targets := patrolWatchdogTargets("/town", []string{"gastown"})
 
-	if len(targets) != 3 {
-		t.Fatalf("expected 3 targets (deacon + witness/refinery for 1 rig), got %d", len(targets))
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets (deacon + witness for 1 rig), got %d", len(targets))
 	}
 	if targets[0].Role != "deacon" || targets[0].Rig != "" {
 		t.Errorf("expected first target to be the town-level deacon, got %+v", targets[0])
@@ -106,7 +106,7 @@ func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
 		t.Errorf("expected deacon assignee 'deacon/', got %q", targets[0].Assignee)
 	}
 
-	var sawWitness, sawRefinery bool
+	var sawWitness bool
 	for _, target := range targets[1:] {
 		if target.Rig != "gastown" {
 			t.Errorf("expected rig 'gastown', got %q", target.Rig)
@@ -117,15 +117,10 @@ func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
 			if target.Assignee != "gastown/witness" {
 				t.Errorf("expected witness assignee 'gastown/witness', got %q", target.Assignee)
 			}
-		case "refinery":
-			sawRefinery = true
-			if target.Assignee != "gastown/refinery" {
-				t.Errorf("expected refinery assignee 'gastown/refinery', got %q", target.Assignee)
-			}
 		}
 	}
-	if !sawWitness || !sawRefinery {
-		t.Errorf("expected both witness and refinery targets for the rig, got %+v", targets)
+	if !sawWitness {
+		t.Errorf("expected a witness target for the rig, got %+v", targets)
 	}
 
 	// Every target reads its patrol wisps from the TOWN database, rig-scoped
@@ -133,7 +128,7 @@ func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
 	// BeadsDir=roleInfo.TownRoot (internal/cmd/patrol_report.go). A rig workdir
 	// resolves through <rig>/.beads/redirect into the rig database, which holds
 	// no patrol wisp at all, and the resulting empty result read as a resolved
-	// "never patrolled" for every witness and refinery (hq-3h7ac).
+	// "never patrolled" for every witness (hq-3h7ac).
 	for _, target := range targets {
 		if target.WorkDir != "/town" {
 			t.Errorf("%s %s: expected WorkDir to be the town root %q, got %q",
@@ -237,7 +232,7 @@ func TestAssessPatrolWatchdogTargets_UnreadableReceipt_IsUnknown(t *testing.T) {
 func TestAssessPatrolWatchdogTargets_FreshAliveRole_Passes(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
-	targets := []patrolWatchdogTarget{stubTarget("refinery", "gastown")}
+	targets := []patrolWatchdogTarget{stubTarget("witness", "gastown")}
 
 	findings := assessPatrolWatchdogTargets(
 		targets,
@@ -262,7 +257,7 @@ func TestPatrolWatchdogAlertKey_TownLevelRole(t *testing.T) {
 }
 
 // TestPartitionPausedRigs_SkipsParkedAndDocked is the fix for gt-7g14a: a
-// parked rig has no witness and no refinery, so the watchdog must not build
+// parked rig has no witness, so the watchdog must not build
 // targets for it, while an unparked rig beside it is untouched.
 func TestPartitionPausedRigs_SkipsParkedAndDocked(t *testing.T) {
 	t.Parallel()
@@ -296,8 +291,8 @@ func TestPartitionPausedRigs_SkipsParkedAndDocked(t *testing.T) {
 			t.Errorf("parked/docked rig %q still produced a %s target", target.Rig, target.Role)
 		}
 	}
-	if len(targets) != 1+2*len(active) {
-		t.Errorf("expected the deacon plus two roles per active rig, got %d targets", len(targets))
+	if len(targets) != 1+len(active) {
+		t.Errorf("expected the deacon plus one witness per active rig, got %d targets", len(targets))
 	}
 }
 
@@ -342,11 +337,11 @@ func TestPausedRigLog_OneNoticePerRigPerInterval(t *testing.T) {
 }
 
 // TestPatrolWatchdogRigAlertKeys covers the keys a paused rig's transition
-// clears — both of the rig's patrol roles, and only that rig's.
+// clears — the rig's witness patrol, and only that rig's.
 func TestPatrolWatchdogRigAlertKeys(t *testing.T) {
 	t.Parallel()
 	got := patrolWatchdogRigAlertKeys("hm")
-	want := []string{"patrol_watchdog:hm/witness", "patrol_watchdog:hm/refinery"}
+	want := []string{"patrol_watchdog:hm/witness"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}

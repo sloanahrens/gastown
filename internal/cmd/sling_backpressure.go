@@ -8,29 +8,31 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-// Merge-queue backpressure (gt-xidg, plan Task 3 / A3).
+// Landing-queue backpressure (gt-xidg, plan Task 3 / A3).
 //
 // Dispatch used to be unlimited: `gt sling` spawned a polecat whenever it was
-// asked, whatever the rig's merge queue looked like. The queue is what the
-// town can actually absorb, and it is the refinery's one lane — so a run of
-// slings while the queue was already deep produced polecats whose MRs waited
-// behind a backlog, spending GPU and merge-gate capacity on work that could
-// not land any sooner.
+// asked, whatever the rig's landing queue looked like. The queue is what the
+// town can actually absorb, and the landing worker is its one lane per rig —
+// so a run of slings while the queue was already deep produced polecats whose
+// work waited behind a backlog, spending capacity on work that could not land
+// any sooner. The queue is the rig's open gt:ready-to-land beads; it was the
+// refinery's merge queue until gt-v4ssj.6.
 //
 // The knob is `merge_queue.max_ready_for_dispatch` in the target rig's
 // settings file (`<rig>/settings/config.json`, where batch_max and the gate
 // commands already live); zero, the default, leaves the guard off entirely.
 // Above the ceiling a sling is refused with the count, and two things pass
 // anyway: a bead labeled `rework` (the town has already paid for that work
-// once, and its MR is what the queue is waiting on) and an explicit --force.
+// once, and it is what the queue is waiting on) and an explicit --force.
 
 // errQueueBackpressure identifies a refusal, so callers and tests can match it
 // with errors.Is without depending on the rig name in the message.
-var errQueueBackpressure = errors.New("merge queue backpressure")
+var errQueueBackpressure = errors.New("landing queue backpressure")
 
 // queueBackpressureError is the typed refusal. It carries the numbers so a
 // caller can report them without parsing the message, and the message is the
@@ -43,16 +45,16 @@ type queueBackpressureError struct {
 }
 
 func (e *queueBackpressureError) Error() string {
-	return fmt.Sprintf(dispatch.SlingRefusalMarker+" %s has %d ready MRs (> %d); pass --force or label the bead rework",
+	return fmt.Sprintf(dispatch.SlingRefusalMarker+" %s has %d beads waiting to land (> %d); pass --force or label the bead rework",
 		e.Rig, e.Ready, e.Max)
 }
 
 func (e *queueBackpressureError) Unwrap() error { return errQueueBackpressure }
 
 // dispatchMRLister is the slice of beads the guard reads. An interface so
-// tests can count ready MRs without a Dolt server.
+// tests can count beads waiting to land without a Dolt server.
 type dispatchMRLister interface {
-	ListMergeRequests(opts beads.ListOptions) ([]*beads.Issue, error)
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
 }
 
 // newDispatchMRLister is a var so tests can substitute a fake lister and
@@ -61,8 +63,8 @@ var newDispatchMRLister = func(rigPath string) dispatchMRLister {
 	return beads.New(rigPath)
 }
 
-// checkSlingBackpressure refuses a dispatch while the target rig's merge queue
-// is over its configured ready-MR ceiling. It returns nil whenever the guard
+// checkSlingBackpressure refuses a dispatch while the target rig's landing queue
+// is over its configured ceiling. It returns nil whenever the guard
 // does not apply: no knob configured, --force, a rework bead, or an unreadable
 // queue.
 //
@@ -92,7 +94,7 @@ func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) er
 		return nil
 	}
 
-	// Rework is not new pressure on the queue: it is the bead whose MR is
+	// Rework is not new pressure on the queue: it is the bead whose work is
 	// already in it (or was rejected out of it), and requeueing it is the way
 	// the queue drains. An unreadable bead is treated as unlabeled — the
 	// sling's own bead validation reports that failure, and the refusal below
@@ -103,11 +105,11 @@ func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) er
 		}
 	}
 
-	ready, err := countReadyMergeRequests(newDispatchMRLister(rigPath), rigName)
+	ready, err := countReadyToLand(newDispatchMRLister(rigPath), rigName)
 	if err != nil {
 		// Fail open. A queue we cannot read is not evidence of a queue that is
 		// full, and refusing on a Dolt hiccup would stop the whole town.
-		style.PrintWarning("could not read %s merge queue for dispatch backpressure: %v", rigName, err)
+		style.PrintWarning("could not read %s landing queue for dispatch backpressure: %v", rigName, err)
 		return nil
 	}
 	if ready > maxReady {
@@ -116,23 +118,21 @@ func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) er
 	return nil
 }
 
-// countReadyMergeRequests counts the rig's ready MRs — the same predicate
-// `gt mq list --ready` uses — in one bulk, wisps-aware query. MRs are created
-// as ephemeral wisps, so `bd list --label` would undercount the queue it is
-// here to measure; ListMergeRequests reads both tables.
-func countReadyMergeRequests(lister dispatchMRLister, rigName string) (int, error) {
-	issues, err := lister.ListMergeRequests(beads.ListOptions{
-		Status:   "open",
-		Label:    "gt:merge-request",
+// countReadyToLand counts the rig's work beads waiting for the landing
+// worker: open beads labeled gt:ready-to-land. It replaced the ready-MR count
+// when the merge queue was deleted (gt-v4ssj.6); the landing worker drains
+// this queue the way the refinery drained MRs.
+func countReadyToLand(lister dispatchMRLister, _ string) (int, error) {
+	issues, err := lister.List(beads.ListOptions{
+		Label:    land.LabelReadyToLand,
 		Priority: -1, // no priority filter
-		Rig:      rigName,
 	})
 	if err != nil {
 		return 0, err
 	}
 	ready := 0
 	for _, issue := range issues {
-		if isMergeRequestReadyForSelection(issue) {
+		if !beads.IssueStatus(issue.Status).IsTerminal() {
 			ready++
 		}
 	}

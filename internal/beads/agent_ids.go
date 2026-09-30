@@ -42,11 +42,10 @@ func DogBeadIDTown(name string) string {
 
 // ValidAgentRoles are the known agent role types for ID pattern validation.
 var ValidAgentRoles = []string{
-	constants.RoleMayor,    // Town-level: gt-mayor
-	constants.RoleDeacon,   // Town-level: gt-deacon
-	"dog",                  // Town-level with name: gt-dog-<name>
-	constants.RoleWitness,  // Per-rig: gt-<rig>-witness
-	constants.RoleRefinery, // Per-rig: gt-<rig>-refinery
+	constants.RoleMayor,   // Town-level: gt-mayor
+	constants.RoleDeacon,  // Town-level: gt-deacon
+	"dog",                 // Town-level with name: gt-dog-<name>
+	constants.RoleWitness, // Per-rig: gt-<rig>-witness
 	constants.RoleCrew,    // Per-rig with name: gt-<rig>-crew-<name>
 	constants.RolePolecat, // Per-rig with name: gt-<rig>-polecat-<name>
 }
@@ -58,7 +57,7 @@ var TownLevelRoles = []string{constants.RoleMayor, constants.RoleDeacon}
 var TownLevelNamedRoles = []string{"dog"}
 
 // RigLevelRoles are agent roles that have a rig but no name.
-var RigLevelRoles = []string{constants.RoleWitness, constants.RoleRefinery}
+var RigLevelRoles = []string{constants.RoleWitness}
 
 // NamedRoles are agent roles that include a worker name (rig-level).
 var NamedRoles = []string{constants.RoleCrew, constants.RolePolecat}
@@ -329,16 +328,6 @@ func WitnessBeadID(rig string) string {
 	return WitnessBeadIDWithPrefix("gt", rig)
 }
 
-// RefineryBeadIDWithPrefix returns the Refinery agent bead ID for a rig using the specified prefix.
-func RefineryBeadIDWithPrefix(prefix, rig string) string {
-	return AgentBeadIDWithPrefix(prefix, rig, constants.RoleRefinery, "")
-}
-
-// RefineryBeadID returns the Refinery agent bead ID for a rig using "gt" prefix.
-func RefineryBeadID(rig string) string {
-	return RefineryBeadIDWithPrefix("gt", rig)
-}
-
 // CrewBeadIDWithPrefix returns a Crew worker agent bead ID using the specified prefix.
 func CrewBeadIDWithPrefix(prefix, rig, name string) string {
 	return AgentBeadIDWithPrefix(prefix, rig, constants.RoleCrew, name)
@@ -464,7 +453,7 @@ func IsAgentSessionBead(beadID string) bool {
 	}
 	// Known agent roles
 	switch role {
-	case constants.RoleMayor, constants.RoleDeacon, constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew, constants.RolePolecat, "dog":
+	case constants.RoleMayor, constants.RoleDeacon, constants.RoleWitness, constants.RoleCrew, constants.RolePolecat, "dog":
 		return true
 	default:
 		return false

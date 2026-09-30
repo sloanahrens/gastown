@@ -579,7 +579,7 @@ func rigMergeQueueDepth(rigPath, rigName string) (ready, ceiling int) {
 	if configured := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), rigName).GetMaxReadyForDispatch(); configured > 0 {
 		ceiling = configured
 	}
-	ready, err := countReadyMergeRequests(newDispatchMRLister(rigPath), rigName)
+	ready, err := countReadyToLand(newDispatchMRLister(rigPath), rigName)
 	if err != nil {
 		return 0, ceiling
 	}

@@ -576,7 +576,7 @@ func EnsureDaemonPatrolConfig(townRoot string) error {
 	})
 }
 
-// AddRigToDaemonPatrols adds a rig to the witness and refinery patrol rigs
+// AddRigToDaemonPatrols adds a rig to the witness patrol rigs
 // arrays in daemon.json. A missing daemon.json, patrols section or patrol
 // entry is left missing. It goes through the locked writer, so a daemon.json
 // that does not parse is refused rather than rewritten.
@@ -591,7 +591,7 @@ func AddRigToDaemonPatrols(townRoot string, rigName string) error {
 	})
 }
 
-// RemoveRigFromDaemonPatrols removes a rig from the witness and refinery
+// RemoveRigFromDaemonPatrols removes a rig from the witness
 // patrol rigs arrays in daemon.json, under the same rules as
 // AddRigToDaemonPatrols.
 func RemoveRigFromDaemonPatrols(townRoot string, rigName string) error {
@@ -619,7 +619,7 @@ func editDaemonPatrolRigs(townRoot string, edit func([]string) []string) error {
 			return errNoDaemonPatrolEdit
 		}
 		changed := false
-		for _, name := range []string{"witness", "refinery"} {
+		for _, name := range []string{"witness"} {
 			p := cfg.Patrols.RolePatrol(name)
 			if p == nil {
 				continue
@@ -1406,7 +1406,7 @@ func withRoleSettingsFlag(reg *AgentRegistry, rc *RuntimeConfig, role, rigPath s
 // roles where settings and session directory are the same (mayor, deacon).
 func RoleSettingsDir(role, rigPath string) string {
 	switch role {
-	case constants.RoleCrew, constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleCrew, constants.RoleWitness:
 		return filepath.Join(rigPath, role)
 	case constants.RolePolecat:
 		return filepath.Join(rigPath, "polecats")

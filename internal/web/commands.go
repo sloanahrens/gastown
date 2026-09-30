@@ -26,22 +26,22 @@ type CommandMeta struct {
 // Commands not in this list are blocked for security.
 var AllowedCommands = map[string]CommandMeta{
 	// === Read-only commands (always safe) ===
-	"status":      {Safe: true, Desc: "Show town status", Category: "Status"},
-	"agents list": {Safe: true, Desc: "List active agents", Category: "Status"},
-	"convoy list": {Safe: true, Desc: "List convoys", Category: "Convoys"},
+	"status":        {Safe: true, Desc: "Show town status", Category: "Status"},
+	"agents list":   {Safe: true, Desc: "List active agents", Category: "Status"},
+	"convoy list":   {Safe: true, Desc: "List convoys", Category: "Convoys"},
 	"convoy show":   {Safe: true, Desc: "Show convoy details", Category: "Convoys", Args: "<convoy-id>", ArgType: "convoys"},
 	"convoy status": {Safe: true, Desc: "Show convoy status with tracked issues", Category: "Convoys", Args: "<convoy-id> --json", ArgType: "convoys"},
-	"mail inbox":  {Safe: true, Desc: "Check inbox", Category: "Mail"},
-	"mail check":  {Safe: true, Desc: "Check for new mail", Category: "Mail"},
-	"mail peek":   {Safe: true, Desc: "Peek at message", Category: "Mail", Args: "<message-id>"},
-	"rig list":    {Safe: true, Desc: "List rigs", Category: "Rigs"},
-	"rig show":    {Safe: true, Desc: "Show rig details", Category: "Rigs", Args: "<rig-name>", ArgType: "rigs"},
-	"doctor":      {Safe: true, Desc: "Health check", Category: "Diagnostics"},
-	"hooks list":  {Safe: true, Desc: "List hooks", Category: "Hooks"},
-	"activity":    {Safe: true, Desc: "Show recent activity", Category: "Status"},
-	"info":        {Safe: true, Desc: "Show workspace info", Category: "Status"},
-	"log":         {Safe: true, Desc: "View logs", Category: "Diagnostics"},
-	"audit":       {Safe: true, Desc: "View audit log", Category: "Diagnostics"},
+	"mail inbox":    {Safe: true, Desc: "Check inbox", Category: "Mail"},
+	"mail check":    {Safe: true, Desc: "Check for new mail", Category: "Mail"},
+	"mail peek":     {Safe: true, Desc: "Peek at message", Category: "Mail", Args: "<message-id>"},
+	"rig list":      {Safe: true, Desc: "List rigs", Category: "Rigs"},
+	"rig show":      {Safe: true, Desc: "Show rig details", Category: "Rigs", Args: "<rig-name>", ArgType: "rigs"},
+	"doctor":        {Safe: true, Desc: "Health check", Category: "Diagnostics"},
+	"hooks list":    {Safe: true, Desc: "List hooks", Category: "Hooks"},
+	"activity":      {Safe: true, Desc: "Show recent activity", Category: "Status"},
+	"info":          {Safe: true, Desc: "Show workspace info", Category: "Status"},
+	"log":           {Safe: true, Desc: "View logs", Category: "Diagnostics"},
+	"audit":         {Safe: true, Desc: "View audit log", Category: "Diagnostics"},
 
 	// Polecat read-only
 	"polecat list --all": {Safe: true, Desc: "List all polecats", Category: "Polecats"},
@@ -75,10 +75,9 @@ var AllowedCommands = map[string]CommandMeta{
 	"rig start": {Confirm: true, Desc: "Start rig", Category: "Rigs", Args: "<rig-name>", ArgType: "rigs"},
 
 	// Agent lifecycle (careful)
-	"witness start":  {Confirm: true, Desc: "Start witness", Category: "Agents", Args: "<rig-name>", ArgType: "rigs"},
-	"refinery start": {Confirm: true, Desc: "Start refinery", Category: "Agents", Args: "<rig-name>", ArgType: "rigs"},
-	"mayor attach":   {Confirm: true, Desc: "Attach mayor", Category: "Agents"},
-	"deacon start":   {Confirm: true, Desc: "Start deacon", Category: "Agents"},
+	"witness start": {Confirm: true, Desc: "Start witness", Category: "Agents", Args: "<rig-name>", ArgType: "rigs"},
+	"mayor attach":  {Confirm: true, Desc: "Attach mayor", Category: "Agents"},
+	"deacon start":  {Confirm: true, Desc: "Start deacon", Category: "Agents"},
 
 	// Polecat actions
 	"polecat add":    {Confirm: true, Desc: "Add polecat", Category: "Polecats", Args: "<rig> <name>", ArgType: "rigs"},

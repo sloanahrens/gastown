@@ -105,9 +105,9 @@ func TestPrefixMatchingDisabled(t *testing.T) {
 	}
 	// "stat" is a declared alias of status, so it still resolves; these are
 	// bare abbreviations.
-	for _, args := range [][]string{{"statu"}, {"refin"}, {"mq", "lis"}} {
+	for _, args := range [][]string{{"statu"}, {"witn"}} {
 		c, _, err := rootCmd.Find(args)
-		if err == nil && (len(args) == 1 || c != mqCmd) {
+		if err == nil {
 			t.Errorf("gt %s resolved to %q; an abbreviation must not resolve", strings.Join(args, " "), c.CommandPath())
 		}
 	}

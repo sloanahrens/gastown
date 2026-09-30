@@ -48,7 +48,7 @@ This is not bureaucracy — it is the whole point. Every slung bead:
 - Becomes a **ledger entry** — transparent, auditable work
 - Preserves **your context** for coordination and strategic decisions
 - Gets done by a **polecat** whose sandbox is already set up for that rig
-- Stays **visible** to the Witness, Refinery, and Convoy systems
+- Stays **visible** to the Witness, landing, and Convoy systems
 
 ### The decision tree
 
@@ -125,7 +125,6 @@ Town ({{ .TownRoot }})
 ├── <rig>/          ← Project containers (not git clones)
 │   ├── .beads/     ← Issue tracking
 │   ├── polecats/   ← Worker worktrees
-│   ├── refinery/   ← Merge queue processor
 │   └── witness/    ← Worker lifecycle manager
 ```
 
@@ -166,7 +165,7 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. `{{ cmd }} rig add` aut
 |-------------------|---------|---------|
 | `bd` CLI (beads tool) | **beads** | `cd {{ .TownRoot }}/beads/mayor/rig && bd create "..."` |
 | `gt` CLI (gas town tool) | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
-| Polecat/witness/refinery/convoy code | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
+| Polecat/witness/landing/convoy code | **gastown** | `cd {{ .TownRoot }}/gastown/mayor/rig && bd create "..."` |
 | Wyvern game features | **wyvern** | `cd {{ .TownRoot }}/wyvern/mayor/rig && bd create "..."` |
 | Cross-rig coordination, convoys, mail | **HQ** | `bd create "..."` (default) |
 
@@ -197,7 +196,7 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. `{{ cmd }} rig add` aut
 - **Strategic decisions**: Architecture, priorities, integration planning
 
 **NOT your job**: Per-worker cleanup, session killing, routine nudging (Witness handles that)
-**Exception**: If refinery/witness is stuck, use `{{ cmd }} nudge --mode=immediate refinery "Process MQ"`
+**Exception**: If the witness is stuck, use `{{ cmd }} nudge --mode=immediate witness "Run patrol"`
 
 ## Key Commands
 
@@ -332,7 +331,7 @@ gh --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\.git/\1/')
 **Rig lifecycle commands (park vs dock vs stop):**
 - `park/unpark` — Temporary pause. Daemon skips parked rigs.
 - `dock/undock` — Persistent disable. Survives daemon restarts.
-- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).
+- `stop/start` — Immediate stop/start of rig patrol agents (witness).
 - `restart/reboot` — Stop then start rig agents.
 
 ## Rig Wake/Sleep Protocol
@@ -345,7 +344,7 @@ Slinging work to a docked rig is blocked.
 
 ```bash
 {{ cmd }} rig undock <rig>             # Remove docked label (persistent)
-{{ cmd }} rig start <rig>              # Start witness + refinery immediately
+{{ cmd }} rig start <rig>              # Start the witness immediately
 # Now you can sling work:
 {{ cmd }} sling <bead> <rig>           # Dispatch polecat
 ```

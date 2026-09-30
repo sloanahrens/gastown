@@ -625,35 +625,6 @@ fi
 
 # --- Build -------------------------------------------------------------------
 
-# in_flight_count — MRs a refinery is mid-merge on, or "" when the list could
-# not be read at all. Both readings fail open, but only one is worth a warning,
-# so the caller decides (gt-oqbw).
-in_flight_count() {
-  gt mq list gastown --status=in_progress --json 2>/dev/null | python3 -c '
-import json, sys
-try:
-    print(len(json.load(sys.stdin)))
-except Exception:
-    pass
-' 2>/dev/null | tail -1
-}
-
-# install_requires_quiet [WARN] — return when no merge is in flight, defer when
-# one is. Called before the build.
-install_requires_quiet() {
-  local n
-  n=$(in_flight_count)
-  if [ -z "$n" ] || ! [[ "$n" =~ ^[0-9]+$ ]]; then
-    if [ "${1:-}" = "warn" ]; then
-      log "WARNING: could not read in-flight MR count from 'gt mq list'; failing open (treating as quiet) rather than parking the rebuild"
-    fi
-    return 0
-  fi
-  if [ "$n" -gt 0 ]; then
-    blocked_defer "not quiet: $n merge(s) in flight in gastown"
-  fi
-}
-
 # Yield to a running gate (gt-htx3): make build competes for CPU with a gate
 # suite whose tests are load-sensitive, so a rebuild while a refinery, batch,
 # main-branch-test or om-review role holds a container-gate slot is deferred,
@@ -750,8 +721,6 @@ if [ -n "$GATE_BUSY" ]; then
     blocked_defer "not quiet: $GATE_BUSY"
   fi
 fi
-
-install_requires_quiet warn
 
 if [ "$RESERVE" = "1" ]; then
   # Counted before the wait, not after: the run is blocked from the moment it

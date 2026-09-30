@@ -20,7 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/lock"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -60,7 +59,6 @@ const (
 	RoleDeacon   Role = "deacon"
 	RoleBoot     Role = "boot"
 	RoleWitness  Role = "witness"
-	RoleRefinery Role = "refinery"
 	RolePolecat  Role = "polecat"
 	RoleCrew     Role = "crew"
 	RoleDog      Role = "dog"
@@ -75,7 +73,7 @@ const (
 // hand-maintained list that has to be kept in sync by hand (gt-9pn).
 func AllRoles() []Role {
 	return []Role{
-		RoleMayor, RoleDeacon, RoleBoot, RoleWitness, RoleRefinery,
+		RoleMayor, RoleDeacon, RoleBoot, RoleWitness,
 		RolePolecat, RoleCrew, RoleDog, RoleUnknown,
 	}
 }
@@ -387,7 +385,7 @@ func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
 
 func roleRequiresWorktreeIntegrity(role Role) bool {
 	switch role {
-	case RolePolecat, RoleCrew, RoleWitness, RoleRefinery, RoleDog, RoleBoot:
+	case RolePolecat, RoleCrew, RoleWitness, RoleDog, RoleBoot:
 		return true
 	default:
 		return false
@@ -828,7 +826,7 @@ func (p primeTools) mailInject(ctx RoleContext, cwd string) {
 
 func shouldSkipStartupMailInject(role string) bool {
 	switch strings.ToLower(role) {
-	case string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot):
+	case string(RoleWitness), string(RoleDeacon), string(RoleBoot):
 		return true
 	default:
 		return false
@@ -947,15 +945,6 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	if hookedBead == nil {
 		return false, nil
 	}
-	if ctx.Role == RoleRefinery {
-		if stop, err := refinery.ActiveSafetyStop(ctx.TownRoot, ctx.Rig); err != nil {
-			return true, fmt.Errorf("checking refinery safety stop: %w", err)
-		} else if stop != nil {
-			outputRefinerySafetyStopDirective(ctx, stop)
-			return true, nil
-		}
-	}
-
 	attachment := beads.ParseAttachmentFields(hookedBead)
 	hasWorkflow := hasWorkflowAttachment(attachment)
 
@@ -980,14 +969,6 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	}
 
 	return true, nil
-}
-
-func outputRefinerySafetyStopDirective(ctx RoleContext, stop *refinery.SafetyStop) {
-	fmt.Println()
-	fmt.Printf("%s\n", style.Bold.Render("## REFINERY SAFETY STOP ACTIVE"))
-	fmt.Printf("Refinery %s is %s.\n", ctx.Rig, stop.Reason())
-	fmt.Println("Hooked refinery work remains parked; do not run patrol, MR, or merge workflow until Mayor clears the safety_stop label.")
-	fmt.Println()
 }
 
 func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
@@ -1490,8 +1471,6 @@ func buildRoleAnnouncement(ctx RoleContext) string {
 		return "Boot, checking in."
 	case RoleWitness:
 		return fmt.Sprintf("%s Witness, checking in.", ctx.Rig)
-	case RoleRefinery:
-		return fmt.Sprintf("%s Refinery, checking in.", ctx.Rig)
 	case RolePolecat:
 		return fmt.Sprintf("%s Polecat %s, checking in.", ctx.Rig, ctx.Polecat)
 	case RoleCrew:
@@ -1526,8 +1505,6 @@ func getAgentIdentity(ctx RoleContext) string {
 		return "boot"
 	case RoleWitness:
 		return fmt.Sprintf("%s/witness", ctx.Rig)
-	case RoleRefinery:
-		return fmt.Sprintf("%s/refinery", ctx.Rig)
 	default:
 		return ""
 	}
@@ -1602,12 +1579,6 @@ func getAgentBeadID(ctx RoleContext) string {
 			return beads.WitnessBeadIDWithPrefix(prefix, ctx.Rig)
 		}
 		return ""
-	case RoleRefinery:
-		if ctx.Rig != "" {
-			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
-			return beads.RefineryBeadIDWithPrefix(prefix, ctx.Rig)
-		}
-		return ""
 	case RolePolecat:
 		if ctx.Rig != "" && ctx.Polecat != "" {
 			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
@@ -1630,7 +1601,7 @@ func getAgentBeadID(ctx RoleContext) string {
 // Uses the shared SetupRedirect helper which handles both tracked and local beads.
 func ensureBeadsRedirect(ctx RoleContext) {
 	// Only applies to worktree-based roles that use shared beads
-	if ctx.Role != RoleCrew && ctx.Role != RolePolecat && ctx.Role != RoleRefinery && ctx.Role != RoleWitness {
+	if ctx.Role != RoleCrew && ctx.Role != RolePolecat && ctx.Role != RoleWitness {
 		return
 	}
 

@@ -758,11 +758,6 @@ func TestNudgeTarget(t *testing.T) {
 			expected: "gastown/witness",
 		},
 		{
-			name:     "refinery",
-			agent:    &ProblemAgent{Role: "refinery", Name: "refinery", Rig: "gastown"},
-			expected: "gastown/refinery",
-		},
-		{
 			name:     "crew",
 			agent:    &ProblemAgent{Role: "crew", Name: "joe", Rig: "gastown"},
 			expected: "gastown/crew/joe",

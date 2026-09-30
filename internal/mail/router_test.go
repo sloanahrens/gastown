@@ -188,7 +188,9 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"deacon/dogs/my-dog", []string{"hq-dog-my-dog"}},
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
-		{"gastown/refinery", []string{"gt-refinery"}},
+		// Refinery role removed (gt-v4ssj.6): no longer a singleton, so it is
+		// ambiguous like any other worker name.
+		{"gastown/refinery", []string{"gt-crew-refinery", "gt-refinery"}},
 		{"beads/witness", []string{"bd-witness"}},
 
 		// Ambiguous addresses - try both crew and polecat variants
@@ -1156,7 +1158,6 @@ func TestParseGroupAddress(t *testing.T) {
 		// Role-based patterns (all agents of a role type)
 		{"@witnesses", GroupTypeRole, "witness", "", false},
 		{"@dogs", GroupTypeRole, "dog", "", false},
-		{"@refineries", GroupTypeRole, "refinery", "", false},
 		{"@deacons", GroupTypeRole, "deacon", "", false},
 
 		// Rig pattern (all agents in a rig)
@@ -1170,8 +1171,9 @@ func TestParseGroupAddress(t *testing.T) {
 		// Invalid patterns
 		{"mayor/", "", "", "", true},
 		{"@invalid", "", "", "", true},
-		{"@crew/", "", "", "", true}, // Empty rig
-		{"@rig", "", "", "", true},   // Missing rig name
+		{"@refineries", "", "", "", true}, // refinery role removed (gt-v4ssj.6)
+		{"@crew/", "", "", "", true},      // Empty rig
+		{"@rig", "", "", "", true},        // Missing rig name
 		{"", "", "", "", true},
 	}
 
@@ -1278,11 +1280,6 @@ func TestAgentBeadToAddress(t *testing.T) {
 			name: "non-gt prefix no description fallback witness",
 			bead: &agentBead{ID: "bd-beads-witness"},
 			want: "beads/witness",
-		},
-		{
-			name: "non-gt prefix no description fallback refinery",
-			bead: &agentBead{ID: "db-debt_buying-refinery"},
-			want: "debt_buying/refinery",
 		},
 		{
 			name: "non-gt prefix no description fallback polecat",

@@ -140,9 +140,6 @@ func isPolecatOrRefineryContext() bool {
 	if os.Getenv("GT_POLECAT") != "" {
 		return true
 	}
-	if isRefineryRole() {
-		return true
-	}
 	cwd, err := os.Getwd()
 	if err == nil && strings.Contains(cwd, "/polecats/") {
 		return true

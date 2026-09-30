@@ -617,7 +617,7 @@ func normalizeHookShowTarget(target string) string {
 		name := parts[1]
 		// Check for known roles — don't expand those
 		switch strings.ToLower(name) {
-		case "witness", "refinery", "mayor", "deacon":
+		case "witness", "mayor", "deacon":
 			// Already a valid canonical address
 		default:
 			// Check if it's a crew member by looking for the directory

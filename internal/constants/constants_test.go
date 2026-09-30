@@ -16,7 +16,7 @@ func TestRoleEmoji(t *testing.T) {
 		{RoleMayor, EmojiMayor},
 		{RoleDeacon, EmojiDeacon},
 		{RoleWitness, EmojiWitness},
-		{RoleRefinery, EmojiRefinery},
+		{"refinery", "❓"}, // role removed (gt-v4ssj.6)
 		{RoleCrew, EmojiCrew},
 		{RolePolecat, EmojiPolecat},
 		{"unknown", "❓"},

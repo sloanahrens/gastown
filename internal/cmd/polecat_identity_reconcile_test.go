@@ -377,7 +377,6 @@ func TestResolveReconcileID(t *testing.T) {
 	}{
 		{name: "polecat default", arg: "gastown/garnet", want: "gt-gastown-polecat-garnet"},
 		{name: "witness", arg: "gastown/witness", want: "gt-gastown-witness"},
-		{name: "refinery", arg: "gastown/refinery", want: "gt-gastown-refinery"},
 		{name: "crew", arg: "gastown/crew/sloan", want: "gt-gastown-crew-sloan"},
 		{name: "raw id override", rawID: "gt-gastown-witness", want: "gt-gastown-witness"},
 		{name: "id and arg mutually exclusive", rawID: "gt-gastown-witness", arg: "gastown/witness", wantErr: "mutually exclusive"},

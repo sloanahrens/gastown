@@ -113,12 +113,12 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 		t.Fatalf("RenderRole() error = %v", err)
 	}
 
-	for _, want := range []string{"Fork-backed rig", "GitHub PR/no-merge workflow", "Do NOT submit upstream changes to the local Refinery/MQ"} {
+	for _, want := range []string{"Fork-backed rig", "GitHub PR/no-merge workflow", "Do NOT submit upstream changes for local landing"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("fork polecat output missing %q:\n%s", want, output)
 		}
 	}
-	for _, forbidden := range []string{"Merge Queue Workflow (gastown, beads repos)", "Refinery merges to main", "Merges your work when complete"} {
+	for _, forbidden := range []string{"Landing Workflow (gastown, beads repos)", "the landing worker lands on main", "Lands your work when complete"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("fork polecat output contains stale MQ guidance %q:\n%s", forbidden, output)
 		}
@@ -258,117 +258,6 @@ func TestRenderRole_Witness_NoCycleBasedStop(t *testing.T) {
 		if !strings.Contains(output, required) {
 			t.Errorf("witness template missing loop mandate %q", required)
 		}
-	}
-}
-
-func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	// Test with custom default branch (e.g., "develop")
-	data := RoleData{
-		Role:          "refinery",
-		RigName:       "myrig",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/myrig/refinery/rig",
-		DefaultBranch: "develop",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("refinery", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	// Check that the custom default branch is used in target-resolution guidance.
-	// The refinery template intentionally uses placeholders
-	// (<rebase-target>/<merge-target>) instead of literal branch commands, so this
-	// test verifies the rendered rule text + placeholders.
-	fallback := fmt.Sprintf("fallback `%s`", data.DefaultBranch)
-	alwaysUse := fmt.Sprintf("always use `%s`", data.DefaultBranch)
-	if !strings.Contains(output, "Target Resolution Rule (single source):") {
-		t.Error("output missing target resolution rule heading")
-	}
-	if !strings.Contains(output, fallback) {
-		t.Errorf("output missing %q - DefaultBranch not being used in target fallback guidance", fallback)
-	}
-	if !strings.Contains(output, alwaysUse) {
-		t.Errorf("output missing %q - DefaultBranch not being used in integration-disabled guidance", alwaysUse)
-	}
-	if !strings.Contains(output, "git rebase origin/<rebase-target>") {
-		t.Error("output missing placeholder rebase command")
-	}
-	if !strings.Contains(output, "git checkout <merge-target>") {
-		t.Error("output missing placeholder checkout command")
-	}
-	if !strings.Contains(output, "git push origin <merge-target>") {
-		t.Error("output missing placeholder push command")
-	}
-
-	// Verify it does NOT contain hardcoded "main" in git commands
-	// (main may appear in other contexts like "main branch" descriptions, so we check specific patterns)
-	if strings.Contains(output, "git rebase origin/main") {
-		t.Error("output still contains hardcoded 'git rebase origin/main' - should use DefaultBranch")
-	}
-	if strings.Contains(output, "git checkout main") {
-		t.Error("output still contains hardcoded 'git checkout main' - should use DefaultBranch")
-	}
-	if strings.Contains(output, "git push origin main") {
-		t.Error("output still contains hardcoded 'git push origin main' - should use DefaultBranch")
-	}
-}
-
-// TestRenderRole_Refinery_ClaimCheckTwoOutcomes locks in the two-outcome
-// judgment gt-i76q flagged as an untested relaxation: a title-vs-diff
-// mismatch must resolve to exactly one of "title disproved" (with the title
-// rewritten and an externally-checkable completion criterion) or "genuinely
-// incomplete" (reject). It exists so a future template edit cannot silently
-// drop the reject branch or the completion criterion — the two failure modes
-// that would turn this from a judgment call into a rubber stamp — without
-// failing a test.
-func TestRenderRole_Refinery_ClaimCheckTwoOutcomes(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "refinery",
-		RigName:       "myrig",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/myrig/refinery/rig",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("refinery", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, "A title-vs-diff mismatch is a claim check, not an incompleteness test.") {
-		t.Error("output missing the claim-check framing that gates a title/diff mismatch")
-	}
-	if !strings.Contains(output, "The title is disproved or outdated") {
-		t.Error("output missing the 'title disproved' outcome")
-	}
-	if !strings.Contains(output, `bd update <bead> --title "DISPROVEN:`) {
-		t.Error("output missing the title-rewrite command for the disproved outcome")
-	}
-	if !strings.Contains(output, "Completion criterion: `bd show <bead>` no longer asserts") {
-		t.Error("output missing the externally-checkable completion criterion for a title rewrite")
-	}
-	if !strings.Contains(output, "The work is genuinely incomplete") || !strings.Contains(output, "reject as before") {
-		t.Error("output missing the 'genuinely incomplete' reject outcome - without it a mismatch can only ever be waved through")
-	}
-	if !strings.Contains(output, "Gating on shape alone nearly rejected a completed P0 (gt-ido).") {
-		t.Error("output missing the gt-ido rationale for why shape-only gating was relaxed")
 	}
 }
 
@@ -1149,7 +1038,7 @@ func TestRoleNames(t *testing.T) {
 	}
 
 	names := tmpl.RoleNames()
-	expected := []string{"mayor", "witness", "refinery", "polecat", "crew", "deacon", "boot"}
+	expected := []string{"mayor", "witness", "polecat", "crew", "deacon", "boot"}
 
 	if len(names) != len(expected) {
 		t.Errorf("RoleNames() = %v, want %v", names, expected)
@@ -1530,7 +1419,7 @@ func renderPolecatForTest(t *testing.T) string {
 	output, err := tmpl.RenderRole("polecat", RoleData{
 		Role: "polecat", RigName: "myrig", Polecat: "TestCat",
 		TownRoot: "/test/town", TownName: "town",
-		WorkDir:  "/test/town/myrig/polecats/TestCat",
+		WorkDir:      "/test/town/myrig/polecats/TestCat",
 		MayorSession: "gt-town-mayor", DeaconSession: "gt-town-deacon",
 	})
 	if err != nil {
@@ -1550,7 +1439,7 @@ func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
 	}
 	const marker = "An interrupt is a delivery artifact"
 	for role, want := range map[string]bool{
-		"witness": true, "deacon": true, "refinery": true, "polecat": true,
+		"witness": true, "deacon": true, "polecat": true,
 		"mayor": false, "crew": false,
 	} {
 		data := RoleData{Role: role, RigName: "gastown", TownRoot: "/t", TownName: "t", Polecat: "p", DefaultBranch: "main"}

@@ -4454,12 +4454,11 @@ func (t *Tmux) ApplyWindowStyle(session string, ws *WindowStyle) error {
 // Includes legacy keys ("coordinator", "health-check") for backwards compatibility.
 var roleIcons = map[string]string{
 	// Standard role names (from constants)
-	constants.RoleMayor:    constants.EmojiMayor,
-	constants.RoleDeacon:   constants.EmojiDeacon,
-	constants.RoleWitness:  constants.EmojiWitness,
-	constants.RoleRefinery: constants.EmojiRefinery,
-	constants.RoleCrew:     constants.EmojiCrew,
-	constants.RolePolecat:  constants.EmojiPolecat,
+	constants.RoleMayor:   constants.EmojiMayor,
+	constants.RoleDeacon:  constants.EmojiDeacon,
+	constants.RoleWitness: constants.EmojiWitness,
+	constants.RoleCrew:    constants.EmojiCrew,
+	constants.RolePolecat: constants.EmojiPolecat,
 	// Legacy names (for backwards compatibility)
 	"coordinator":  constants.EmojiMayor,
 	"health-check": constants.EmojiDeacon,
@@ -5257,4 +5256,3 @@ func (t *Tmux) SetPaneDiedHook(session, agentID string) error {
 	_, err := t.run("set-hook", "-t", session, "pane-died", hookCmd)
 	return err
 }
-

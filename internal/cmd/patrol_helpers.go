@@ -8,7 +8,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
 	"golang.org/x/text/cases"
@@ -34,7 +33,7 @@ func patrolAssignee(roleName, rig string) string {
 
 // PatrolConfig holds role-specific patrol configuration.
 type PatrolConfig struct {
-	RoleName      string       // "deacon", "witness", "refinery"
+	RoleName      string       // "deacon", "witness"
 	PatrolMolName string       // "mol-deacon-patrol", etc.
 	BeadsDir      string       // where to look for beads
 	Assignee      string       // agent identity for pinning
@@ -213,12 +212,6 @@ func burnPreviousPatrolWisps(cfg PatrolConfig) {
 // self-cleaning regardless of the caller.
 // Returns the patrol ID or an error.
 func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
-	if stop, err := refineryPatrolSafetyStop(cfg); err != nil {
-		return "", err
-	} else if stop != nil {
-		return "", refinery.NewSafetyStoppedError(stop)
-	}
-
 	// Resolve the beads directory following redirects.
 	// This ensures bd targets the correct database (e.g., rig database
 	// instead of HQ) regardless of inherited BEADS_DIR. See gt-ctir.
@@ -344,8 +337,6 @@ func renderPatrolWispDescription(cfg PatrolConfig) (string, error) {
 	switch cfg.PatrolMolName {
 	case constants.MolWitnessPatrol:
 		vars = buildWitnessPatrolVars(ctx)
-	case constants.MolRefineryPatrol:
-		vars = buildRefineryPatrolVars(ctx)
 	}
 	vars = append(vars, cfg.ExtraVars...)
 	return renderFormulaRootAndStepsFull(cfg.PatrolMolName, cfg.BeadsDir, rigName, vars)
@@ -419,15 +410,4 @@ func outputPatrolContext(cfg PatrolConfig, status primePatrolStatus) {
 		fmt.Println()
 		fmt.Printf("Current patrol ID: %s\n", status.PatrolID)
 	}
-}
-
-func refineryPatrolSafetyStop(cfg PatrolConfig) (*refinery.SafetyStop, error) {
-	if cfg.RoleName != "refinery" {
-		return nil, nil
-	}
-	rigName := strings.TrimSuffix(cfg.Assignee, "/refinery")
-	if rigName == cfg.Assignee || rigName == "" {
-		return nil, nil
-	}
-	return refinery.ActiveSafetyStop(cfg.BeadsDir, rigName)
 }

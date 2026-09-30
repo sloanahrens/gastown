@@ -5,11 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Composer-stall detection for the rig's refinery (gt-hkhu).
@@ -94,125 +90,6 @@ type RefineryStallResult struct {
 	Action string
 	// Error is set when the submit attempt failed or the input did not clear.
 	Error error
-}
-
-// DetectRefineryStallResult holds the outcome of a refinery stall check.
-type DetectRefineryStallResult struct {
-	// Checked is 1 when a live refinery session with a live agent was
-	// inspected, 0 otherwise.
-	Checked int
-	// Stalls holds confirmed composer stalls (at most one — there is one
-	// refinery per rig).
-	Stalls []RefineryStallResult
-	// Errors holds transient failures (pane capture, activity lookup).
-	Errors []error
-}
-
-// DetectStalledRefinery checks the rig's refinery session for a
-// composed-but-unsubmitted instruction and, on a confirmed stall, submits it.
-//
-// It is a no-op when the refinery is not running or its agent process is dead:
-// those are the daemon's and zombie detection's cases, not this one. It only
-// acts on the third state — session alive, agent alive, and nothing happening.
-//
-// The caller owns the follow-up. A "still-pending" action means the keystroke
-// did not free the composer and the session needs a restart, which is the
-// operator's interim fix and stays a human/patrol decision rather than
-// something this scan does silently.
-//
-// dryRun reports a confirmed stall without sending anything to the live
-// session — the submit is the only side effect a patrol scan has on a running
-// agent's pane, and a caller that wants detection without that mutation
-// (om major on gt-wisp-q9os) sets this instead of acting on the result.
-func DetectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefineryStallResult {
-	return newHandlers().detectStalledRefinery(workDir, rigName, dryRun)
-}
-
-func (h *handlers) detectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefineryStallResult {
-	result := &DetectRefineryStallResult{}
-
-	townRoot, err := workspace.Find(workDir)
-	if err != nil || townRoot == "" {
-		townRoot = workDir
-	}
-	initRegistryFromTownRoot(townRoot)
-
-	sessionName := session.RefinerySessionName(session.PrefixFor(rigName))
-	t := tmux.NewTmux()
-
-	running, err := t.HasSession(sessionName)
-	if err != nil {
-		result.Errors = append(result.Errors,
-			fmt.Errorf("checking refinery session %s: %w", sessionName, err))
-		return result
-	}
-	if !running {
-		return result // Not running — the daemon starts the refinery on heartbeat.
-	}
-	result.Checked = 1
-
-	alive, aliveErr := t.IsAgentAliveChecked(sessionName)
-	if aliveErr != nil {
-		result.Errors = append(result.Errors,
-			fmt.Errorf("refinery %s agent liveness unknown: %w", sessionName, aliveErr))
-		return result
-	}
-	if !alive {
-		// Session alive, agent process dead: the daemon's respawn path.
-		return result
-	}
-
-	frozenFor := config.LoadOperationalConfig(townRoot).GetWitnessConfig().ComposerStallFrozenForD()
-	clock := tmux.NewPendingInputClock(constants.TownRuntimePath(townRoot))
-	stall, err := t.DetectComposerStallTracked(sessionName, frozenFor, clock)
-	if err != nil {
-		result.Errors = append(result.Errors, err)
-		return result
-	}
-	if !stall.Stalled {
-		return result
-	}
-
-	item := RefineryStallResult{
-		Session:        sessionName,
-		Agent:          "refinery",
-		StallType:      "composer-stall",
-		State:          stall.State.String(),
-		Inactivity:     stall.Inactivity,
-		PendingFor:     stall.PendingFor,
-		PendingSamples: stall.PendingSamples,
-	}
-
-	if dryRun {
-		item.Action = ComposerStallActionDetectedDryRun
-		result.Stalls = append(result.Stalls, item)
-		return result
-	}
-
-	if err := t.SubmitPendingInput(sessionName, stall.Queued); err != nil {
-		item.Action = ComposerStallActionStillPending
-		item.Error = err
-		result.Stalls = append(result.Stalls, item)
-		return result
-	}
-	// The input has been acted on, so the wait it accumulated is over.
-	clock.Reset(sessionName)
-
-	item.Action = composerStallActionFor(stall.Queued)
-	if err := h.confirmComposerCleared(t, sessionName, frozenFor); err != nil {
-		if errors.Is(err, errComposerUnverifiable) {
-			// The flush could not be verified, but nothing says it failed.
-			// Report that beside the submit, without claiming the composer is
-			// still holding input — that action is what sends the patrol to a
-			// restart.
-			item.Error = err
-		} else {
-			item.Action = ComposerStallActionStillPending
-			item.Error = err
-		}
-	}
-	result.Stalls = append(result.Stalls, item)
-	return result
 }
 
 // composerStallActionFor maps the submit mechanism that a pending state needs

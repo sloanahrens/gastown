@@ -25,7 +25,6 @@ const (
 	AgentMayor AgentType = iota
 	AgentDeacon
 	AgentWitness
-	AgentRefinery
 	AgentCrew
 	AgentPolecat
 	AgentPersonal // Non-GT session (user's terminal session)
@@ -46,7 +45,6 @@ var AgentTypeColors = map[AgentType]string{
 	AgentMayor:    "#[fg=red,bold]",
 	AgentDeacon:   "#[fg=yellow,bold]",
 	AgentWitness:  "#[fg=cyan]",
-	AgentRefinery: "#[fg=blue]",
 	AgentCrew:     "#[fg=green]",
 	AgentPolecat:  "#[fg=white,dim]",
 	AgentPersonal: "#[fg=magenta]",
@@ -55,21 +53,19 @@ var AgentTypeColors = map[AgentType]string{
 
 // rigTypeOrder defines the display order of rig-level agent types.
 var rigTypeOrder = map[AgentType]int{
-	AgentRefinery: 0,
-	AgentWitness:  1,
-	AgentCrew:     2,
-	AgentPolecat:  3,
+	AgentWitness: 0,
+	AgentCrew:    1,
+	AgentPolecat: 2,
 }
 
 // AgentTypeIcons maps agent types to display icons.
 // Uses centralized emojis from constants package.
 var AgentTypeIcons = map[AgentType]string{
-	AgentMayor:    constants.EmojiMayor,
-	AgentDeacon:   constants.EmojiDeacon,
-	AgentWitness:  constants.EmojiWitness,
-	AgentRefinery: constants.EmojiRefinery,
-	AgentCrew:     constants.EmojiCrew,
-	AgentPolecat:  constants.EmojiPolecat,
+	AgentMayor:   constants.EmojiMayor,
+	AgentDeacon:  constants.EmojiDeacon,
+	AgentWitness: constants.EmojiWitness,
+	AgentCrew:    constants.EmojiCrew,
+	AgentPolecat: constants.EmojiPolecat,
 }
 
 var agentsCmd = &cobra.Command{
@@ -166,8 +162,6 @@ func categorizeSession(name string) *AgentSession {
 		sess.Type = AgentDeacon
 	case session.RoleWitness:
 		sess.Type = AgentWitness
-	case session.RoleRefinery:
-		sess.Type = AgentRefinery
 	case session.RoleCrew:
 		sess.Type = AgentCrew
 	case session.RolePolecat:
@@ -391,8 +385,6 @@ func (a *AgentSession) displayLabel() string {
 		return fmt.Sprintf("%s%s Deacon#[default]", color, icon)
 	case AgentWitness:
 		return fmt.Sprintf("%s%s %s/witness#[default]", color, icon, a.Rig)
-	case AgentRefinery:
-		return fmt.Sprintf("%s%s %s/refinery#[default]", color, icon, a.Rig)
 	case AgentCrew:
 		return fmt.Sprintf("%s%s %s/crew/%s#[default]", color, icon, a.Rig, a.AgentName)
 	case AgentPolecat:
@@ -576,8 +568,6 @@ func runAgentsList(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s Deacon\n", icon)
 		case AgentWitness:
 			fmt.Printf("  %s witness\n", icon)
-		case AgentRefinery:
-			fmt.Printf("  %s refinery\n", icon)
 		case AgentCrew:
 			fmt.Printf("  %s crew/%s\n", icon, agent.AgentName)
 		case AgentPolecat:
@@ -782,8 +772,6 @@ func guessSessionFromWorkerDir(workerDir, townRoot string) string {
 		return session.PolecatSessionName(session.PrefixFor(rig), workerName)
 	case constants.RoleWitness:
 		return session.WitnessSessionName(session.PrefixFor(rig))
-	case constants.RoleRefinery:
-		return session.RefinerySessionName(session.PrefixFor(rig))
 	}
 
 	return ""

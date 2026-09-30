@@ -102,7 +102,7 @@ func TestIsPolecatSession(t *testing.T) {
 		{"GT_ROLE compound polecat", "gastown/polecats/topaz", "", true},
 		{"GT_ROLE short polecat form", "gastown/topaz", "", true},
 		{"GT_ROLE witness beats stale GT_POLECAT", "gastown/witness", "topaz", false},
-		{"GT_ROLE refinery beats stale GT_POLECAT", "gastown/refinery", "topaz", false},
+		{"GT_ROLE witness beats stale GT_POLECAT", "gastown/witness", "topaz", false},
 		{"GT_ROLE mayor beats stale GT_POLECAT", "mayor", "topaz", false},
 		{"GT_ROLE crew beats stale GT_POLECAT", "gastown/crew/alice", "topaz", false},
 		{"GT_ROLE unset falls back to GT_POLECAT", "", "topaz", true},

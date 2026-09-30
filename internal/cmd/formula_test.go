@@ -534,7 +534,7 @@ func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
 	}
 
 	// Hand-edit one formula the way a human debugging a stuck patrol would.
-	const edited = "mol-refinery-patrol.formula.toml"
+	const edited = "mol-witness-patrol.formula.toml"
 	path := filepath.Join(root, ".beads", "formulas", edited)
 	if err := os.WriteFile(path, []byte("# hand-edited\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -585,7 +585,7 @@ func TestBuildFormulaSyncReport_DryRunForceNamesTheDestination(t *testing.T) {
 	if _, err := formulaSyncMessage(root); err != nil {
 		t.Fatalf("formulaSyncMessage (initial): %v", err)
 	}
-	const edited = "mol-refinery-patrol.formula.toml"
+	const edited = "mol-witness-patrol.formula.toml"
 	path := filepath.Join(root, ".beads", "formulas", edited)
 	if err := os.WriteFile(path, []byte("# hand-edited\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -641,7 +641,7 @@ func TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent(t *testing.T) {
 	if _, err := formulaSyncMessage(root); err != nil {
 		t.Fatalf("formulaSyncMessage (initial): %v", err)
 	}
-	const edited = "mol-refinery-patrol.formula.toml"
+	const edited = "mol-witness-patrol.formula.toml"
 	if err := os.WriteFile(filepath.Join(root, ".beads", "formulas", edited),
 		[]byte("# hand-edited\n"), 0o644); err != nil {
 		t.Fatal(err)

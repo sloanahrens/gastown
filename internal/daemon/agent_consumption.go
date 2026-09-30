@@ -148,22 +148,14 @@ func (a runningAgent) restartHint() string {
 	return fmt.Sprintf("gt %s restart %s", a.Role, a.Rig)
 }
 
-// probeRunningWitness and probeRunningRefinery are the entry points for the
-// heartbeat's already-running paths: they resolve the session name the way the
-// rest of the daemon does and hand it to the probe.
+// probeRunningWitness is the entry point for the
+// heartbeat's already-running path: it resolves the session name the way the
+// rest of the daemon does and hands it to the probe.
 func (d *Daemon) probeRunningWitness(rigName string) {
 	d.checkAgentInputConsumption(runningAgent{
 		Role:    "witness",
 		Rig:     rigName,
 		Session: session.WitnessSessionName(session.PrefixFor(rigName)),
-	})
-}
-
-func (d *Daemon) probeRunningRefinery(rigName string) {
-	d.checkAgentInputConsumption(runningAgent{
-		Role:    "refinery",
-		Rig:     rigName,
-		Session: session.RefinerySessionName(session.PrefixFor(rigName)),
 	})
 }
 

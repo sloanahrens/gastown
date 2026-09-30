@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -183,7 +182,7 @@ func TestEnsurePrimePatrol_RigScopedRoleWithoutARigSeedsNothing(t *testing.T) {
 	spawned := 0
 	patrolSeams(t, noPatrolFound, func(PatrolConfig) (string, error) { spawned++; return "gt-wisp-new", nil })
 
-	for _, role := range []Role{RoleWitness, RoleRefinery} {
+	for _, role := range []Role{RoleWitness} {
 		status, err := ensurePrimePatrol(RoleContext{Role: role, TownRoot: t.TempDir()})
 		if err != nil {
 			t.Fatalf("%s: error = %v", role, err)
@@ -217,85 +216,6 @@ func TestEnsurePrimePatrol_PausedDeaconSeedsNothing(t *testing.T) {
 	}
 }
 
-// refinerySafetyStopSeam stubs the precheck refinery.ActiveSafetyStop makes
-// through patrolSuspended, so tests can drive it deterministically instead of
-// depending on a live bd binary (om review, gt-e1ie).
-func refinerySafetyStopSeam(t *testing.T, fn func(townRoot, rig string) (*refinery.SafetyStop, error)) {
-	t.Helper()
-	orig := refineryActiveSafetyStopFn
-	refineryActiveSafetyStopFn = fn
-	t.Cleanup(func() { refineryActiveSafetyStopFn = orig })
-}
-
-// A refinery safety stop is an operator stop wherever it is observed — before
-// the seed or arriving from the seed itself — so neither route may be reported
-// as a prime failure. The precheck is stubbed so this drives the
-// arrives-from-the-seed route specifically, without the precheck already
-// catching it first.
-func TestEnsurePrimePatrol_RefinerySafetyStopIsSuspendedNotFailed(t *testing.T) {
-	refinerySafetyStopSeam(t, func(string, string) (*refinery.SafetyStop, error) { return nil, nil })
-	patrolSeams(t, noPatrolFound, func(PatrolConfig) (string, error) {
-		return "", refinery.NewSafetyStoppedError(&refinery.SafetyStop{StopID: "gt-x", Label: "safety_stop:gt-x"})
-	})
-
-	status, err := ensurePrimePatrol(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: t.TempDir()})
-	if err != nil {
-		t.Fatalf("ensurePrimePatrol() error = %v, want a suspension", err)
-	}
-	if status.Suspended == "" || status.PatrolID != "" {
-		t.Fatalf("status = %+v, want a suspended refinery and no patrol", status)
-	}
-}
-
-// The precheck route: a safety stop found before the seed ever runs must also
-// suspend without spawning, not just the stop arriving from the seed itself.
-func TestEnsurePrimePatrol_RefinerySafetyStopPrecheckSuspendsWithoutSpawning(t *testing.T) {
-	refinerySafetyStopSeam(t, func(string, string) (*refinery.SafetyStop, error) {
-		return &refinery.SafetyStop{StopID: "gt-y", Label: "safety_stop:gt-y"}, nil
-	})
-	spawned := 0
-	patrolSeams(t, noPatrolFound, func(PatrolConfig) (string, error) { spawned++; return "gt-wisp-new", nil })
-
-	status, err := ensurePrimePatrol(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: t.TempDir()})
-	if err != nil {
-		t.Fatalf("ensurePrimePatrol() error = %v, want a suspension", err)
-	}
-	if !strings.Contains(status.Suspended, "gt-y") {
-		t.Fatalf("status = %+v, want the precheck stop's id reported", status)
-	}
-	if spawned != 0 {
-		t.Fatalf("seeded %d patrol(s) despite an active precheck safety stop", spawned)
-	}
-}
-
-// An unreadable safety-stop check is not a confirmed stop: it must fail
-// closed (no seed) but be distinguishable from a real operator pause, not
-// silently reported the same way.
-func TestEnsurePrimePatrol_RefinerySafetyStopUnreadableIsUncertainNotSuspended(t *testing.T) {
-	refinerySafetyStopSeam(t, func(string, string) (*refinery.SafetyStop, error) {
-		return nil, errors.New("bd show: connection refused")
-	})
-	spawned := 0
-	patrolSeams(t, noPatrolFound, func(PatrolConfig) (string, error) { spawned++; return "gt-wisp-new", nil })
-
-	status, err := ensurePrimePatrol(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: t.TempDir()})
-	if err != nil {
-		t.Fatalf("ensurePrimePatrol() error = %v, want nil (uncertain, not fatal)", err)
-	}
-	if status.Suspended != "" {
-		t.Fatalf("status = %+v, want no Suspended — an unreadable check is not a confirmed stop", status)
-	}
-	if !strings.Contains(status.Uncertain, "unreadable") {
-		t.Fatalf("status = %+v, want Uncertain to say the safety-stop check was unreadable", status)
-	}
-	if !status.PrecheckUncertain {
-		t.Fatalf("status = %+v, want PrecheckUncertain so the display layer withholds the checklist too", status)
-	}
-	if spawned != 0 {
-		t.Fatalf("seeded %d patrol(s) despite an unreadable safety-stop check", spawned)
-	}
-}
-
 func TestEnsurePrimePatrol_NonPatrolRolesAreUntouched(t *testing.T) {
 	patrolSeams(t,
 		func(PatrolConfig) (string, string, bool, error) {
@@ -312,34 +232,6 @@ func TestEnsurePrimePatrol_NonPatrolRolesAreUntouched(t *testing.T) {
 		if status.Role != "" || status.PatrolID != "" {
 			t.Fatalf("%s: status = %+v, want a no-op", role, status)
 		}
-	}
-}
-
-func TestPrimePatrolSection_NamesThePatrolAndItsChecklist(t *testing.T) {
-	t.Parallel()
-	live := primePatrolSection(primePatrolStatus{
-		Role: RoleWitness, Formula: constants.MolWitnessPatrol, PatrolID: "gt-wisp-abc",
-	})
-	for _, want := range []string{"gt-wisp-abc", "hooked", "prime --step 1", constants.MolWitnessPatrol} {
-		if !strings.Contains(live, want) {
-			t.Fatalf("live section %q must contain %q", live, want)
-		}
-	}
-
-	seeded := primePatrolSection(primePatrolStatus{
-		Role: RoleRefinery, Formula: constants.MolRefineryPatrol, PatrolID: "gt-wisp-new", Seeded: true,
-	})
-	if !strings.Contains(seeded, "created and hooked") {
-		t.Fatalf("seeded section %q must say the wisp was created", seeded)
-	}
-
-	suspended := primePatrolSection(primePatrolStatus{Role: RoleWitness, Suspended: "Rig testrig is parked"})
-	if !strings.Contains(suspended, "parked") {
-		t.Fatalf("suspended section %q must carry the reason", suspended)
-	}
-
-	if got := primePatrolSection(primePatrolStatus{}); got != "" {
-		t.Fatalf("a non-patrol role rendered %q, want nothing", got)
 	}
 }
 
@@ -430,38 +322,6 @@ func TestRunPrimeCompactResume_NonPatrolRoleTouchesNoPatrolState(t *testing.T) {
 	}
 }
 
-// Every patrol role reads its wisp through one builder, or prime seeds a wisp
-// the emitters and `gt hook` cannot see (gt-e1ie).
-func TestPatrolConfigForRole_AddressesEachRoleTheWayHookQueriesIt(t *testing.T) {
-	t.Parallel()
-	want := map[Role]struct {
-		mol      string
-		assignee string
-	}{
-		RoleWitness:  {constants.MolWitnessPatrol, "testrig/witness"},
-		RoleRefinery: {constants.MolRefineryPatrol, "testrig/refinery"},
-		RoleDeacon:   {constants.MolDeaconPatrol, "deacon/"},
-	}
-	for role, expect := range want {
-		cfg, ok := patrolConfigForRole(RoleContext{Role: role, Rig: "testrig", TownRoot: "/town"})
-		if !ok {
-			t.Fatalf("%s: patrolConfigForRole() = not a patrol role", role)
-		}
-		if cfg.PatrolMolName != expect.mol || cfg.Assignee != expect.assignee {
-			t.Fatalf("%s: %s on %s, want %s on %s", role, cfg.PatrolMolName, cfg.Assignee, expect.mol, expect.assignee)
-		}
-		if cfg.BeadsDir != "/town" {
-			t.Fatalf("%s: beads dir %q, want the town root", role, cfg.BeadsDir)
-		}
-	}
-
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleMayor, RoleBoot, RoleUnknown} {
-		if _, ok := patrolConfigForRole(RoleContext{Role: role, Rig: "testrig"}); ok {
-			t.Fatalf("%s must not be a patrol role", role)
-		}
-	}
-}
-
 // Three emitters and the patrol commands share these strings; a role named
 // wrongly in the handoff command sends observations to the wrong session.
 func TestPatrolWorkLoopSteps_CarryTheRoleHandoffSubject(t *testing.T) {
@@ -543,30 +403,6 @@ func TestOutputMoleculeContext_RendersFromStatusWithoutReDiscovering(t *testing.
 	}
 }
 
-// An unreadable operator-stop check (PrecheckUncertain) must still withhold
-// the checklist, matching patrolSuspended's original all-or-nothing gate:
-// whether a patrol should even run is unknown, not just whether one already
-// exists. A generic discovery/seed Uncertain (PrecheckUncertain false) is not
-// this gate — it still shows the checklist, as the pre-gt-e1ie discovery-failed
-// path always did.
-func TestOutputMoleculeContext_PrecheckUncertainWithholdsChecklist(t *testing.T) {
-	status := primePatrolStatus{
-		Role: RoleRefinery, Formula: constants.MolRefineryPatrol,
-		Uncertain: "Refinery testrig safety stop unreadable (bd show: connection refused)", PrecheckUncertain: true,
-	}
-	out := captureStdout(t, func() {
-		outputMoleculeContext(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: t.TempDir()}, status)
-	})
-	if !strings.Contains(out, "state unknown") {
-		t.Fatalf("output must say the patrol state is unknown:\n%s", out)
-	}
-	for _, forbidden := range []string{"Refinery Patrol Work Loop", "Patrol Work Loop", "Formula Checklist"} {
-		if strings.Contains(out, forbidden) {
-			t.Fatalf("an unreadable safety-stop check must withhold the checklist, got %q in:\n%s", forbidden, out)
-		}
-	}
-}
-
 // A dry-run resume skips the seed step entirely, so the molecule section has
 // no status to render from and must stay silent rather than print a
 // zero-value "Patrol Active" line for nothing.
@@ -608,14 +444,6 @@ func TestPatrolConfigForRole_ExtraVarsFlowToEveryCaller(t *testing.T) {
 	if !hasVarKey(witnessCfg.ExtraVars, "rig") {
 		t.Fatalf("witness ExtraVars = %v, want a rig= var", witnessCfg.ExtraVars)
 	}
-
-	refineryCfg, ok := patrolConfigForRole(RoleContext{Role: RoleRefinery, Rig: "testrig", TownRoot: town})
-	if !ok {
-		t.Fatal("refinery: not a patrol role")
-	}
-	if !hasVarKey(refineryCfg.ExtraVars, "rig") {
-		t.Fatalf("refinery ExtraVars = %v, want a rig= var", refineryCfg.ExtraVars)
-	}
 }
 
 func hasVarKey(vars []string, key string) bool {
@@ -625,4 +453,35 @@ func hasVarKey(vars []string, key string) bool {
 		}
 	}
 	return false
+}
+
+// Every patrol role reads its wisp through one builder, or prime seeds a wisp
+// the emitters and `gt hook` cannot see (gt-e1ie).
+func TestPatrolConfigForRole_AddressesEachRoleTheWayHookQueriesIt(t *testing.T) {
+	t.Parallel()
+	want := map[Role]struct {
+		mol      string
+		assignee string
+	}{
+		RoleWitness: {constants.MolWitnessPatrol, "testrig/witness"},
+		RoleDeacon:  {constants.MolDeaconPatrol, "deacon/"},
+	}
+	for role, expect := range want {
+		cfg, ok := patrolConfigForRole(RoleContext{Role: role, Rig: "testrig", TownRoot: "/town"})
+		if !ok {
+			t.Fatalf("%s: patrolConfigForRole() = not a patrol role", role)
+		}
+		if cfg.PatrolMolName != expect.mol || cfg.Assignee != expect.assignee {
+			t.Fatalf("%s: %s on %s, want %s on %s", role, cfg.PatrolMolName, cfg.Assignee, expect.mol, expect.assignee)
+		}
+		if cfg.BeadsDir != "/town" {
+			t.Fatalf("%s: beads dir %q, want the town root", role, cfg.BeadsDir)
+		}
+	}
+
+	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleMayor, RoleBoot, RoleUnknown} {
+		if _, ok := patrolConfigForRole(RoleContext{Role: role, Rig: "testrig"}); ok {
+			t.Fatalf("%s must not be a patrol role", role)
+		}
+	}
 }

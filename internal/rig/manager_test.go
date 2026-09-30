@@ -1028,10 +1028,9 @@ esac
 	}
 	createdAgents = strings.Split(strings.TrimSpace(string(data)), "\n")
 
-	// Should create witness and refinery for the rig
+	// Should create the witness for the rig
 	expectedAgents := map[string]bool{
-		"gt-demo-witness":  false,
-		"gt-demo-refinery": false,
+		"gt-demo-witness": false,
 	}
 
 	for _, id := range createdAgents {

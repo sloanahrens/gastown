@@ -363,7 +363,7 @@ func resolveSessionSeat(args []string) (sessionSeat, error) {
 // alone and are checked against the rig instead (resolveSessionSeat).
 func sessionRoleForName(name string) string {
 	switch name {
-	case constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleWitness:
 		return name
 	default:
 		return constants.RolePolecat

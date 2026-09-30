@@ -1967,8 +1967,7 @@ func TestBuildStartupCommand_UsesRoleAgentsFromTownSettings(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleRefinery: "gemini",
-		constants.RoleWitness:  "codex",
+		constants.RoleWitness: "codex",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -1979,16 +1978,6 @@ func TestBuildStartupCommand_UsesRoleAgentsFromTownSettings(t *testing.T) {
 	if err := SaveRigSettings(RigSettingsPath(rigPath), rigSettings); err != nil {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
-
-	t.Run("refinery role gets gemini from role_agents", func(t *testing.T) {
-		cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleRefinery}, rigPath, "")
-		if err != nil {
-			t.Fatalf("BuildStartupCommand returned an error: %v", err)
-		}
-		if !strings.Contains(cmd, "gemini") {
-			t.Fatalf("expected gemini for refinery role, got: %q", cmd)
-		}
-	})
 
 	t.Run("witness role gets codex from role_agents", func(t *testing.T) {
 		cmd, err := BuildStartupCommand(map[string]string{"GT_ROLE": constants.RoleWitness}, rigPath, "")
@@ -2068,7 +2057,7 @@ func TestBuildAgentStartupCommand_UsesRoleAgents(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleRefinery: "codex",
+		constants.RoleWitness: "codex",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -2081,15 +2070,15 @@ func TestBuildAgentStartupCommand_UsesRoleAgents(t *testing.T) {
 	}
 
 	// BuildAgentStartupCommand passes role via GT_ROLE env var (compound format)
-	cmd, err := BuildAgentStartupCommand(constants.RoleRefinery, "testrig", townRoot, rigPath, "")
+	cmd, err := BuildAgentStartupCommand(constants.RoleWitness, "testrig", townRoot, rigPath, "")
 	if err != nil {
 		t.Fatalf("BuildAgentStartupCommand returned an error: %v", err)
 	}
 	if !strings.Contains(cmd, "codex") {
-		t.Fatalf("expected codex for refinery role, got: %q", cmd)
+		t.Fatalf("expected codex for witness role, got: %q", cmd)
 	}
-	if !strings.Contains(cmd, "GT_ROLE=testrig/refinery") {
-		t.Fatalf("expected GT_ROLE=testrig/refinery in command: %q", cmd)
+	if !strings.Contains(cmd, "GT_ROLE=testrig/witness") {
+		t.Fatalf("expected GT_ROLE=testrig/witness in command: %q", cmd)
 	}
 }
 
@@ -2224,11 +2213,11 @@ func TestResolveRoleAgentConfig_FallsBackOnInvalidAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
 
-	// Configure town settings with an invalid agent for refinery
+	// Configure town settings with an invalid agent for witness
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleRefinery: "nonexistent-agent-xyz", // Invalid agent
+		constants.RoleWitness: "nonexistent-agent-xyz", // Invalid agent
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -2241,7 +2230,7 @@ func TestResolveRoleAgentConfig_FallsBackOnInvalidAgent(t *testing.T) {
 	}
 
 	// Should fall back to default (claude) when agent is invalid
-	rc := ResolveRoleAgentConfig(constants.RoleRefinery, townRoot, rigPath)
+	rc := ResolveRoleAgentConfig(constants.RoleWitness, townRoot, rigPath)
 	// Command can be "claude" or a resolved platform-specific claude binary path.
 	if !isClaudeCommand(rc.Command) {
 		t.Errorf("expected fallback to claude or path ending in /claude, got: %s", rc.Command)
@@ -2642,7 +2631,7 @@ func TestRoleSettingsDir(t *testing.T) {
 	}{
 		{"crew", filepath.Join(rigPath, "crew")},
 		{"witness", filepath.Join(rigPath, "witness")},
-		{"refinery", filepath.Join(rigPath, "refinery")},
+		{"refinery", ""}, // role removed (gt-v4ssj.6)
 		{"polecat", filepath.Join(rigPath, "polecats")},
 		{"mayor", ""},
 		{"deacon", ""},
@@ -2686,8 +2675,8 @@ func TestDaemonPatrolConfigRoundTrip(t *testing.T) {
 	if loaded.Heartbeat == nil || !loaded.Heartbeat.Enabled {
 		t.Error("Heartbeat not preserved")
 	}
-	if loaded.Patrols.Count() != 4 {
-		t.Errorf("Patrols count = %d, want 4", loaded.Patrols.Count())
+	if loaded.Patrols.Count() != 3 {
+		t.Errorf("Patrols count = %d, want 3", loaded.Patrols.Count())
 	}
 	if custom := loaded.Patrols.RolePatrol("handler"); custom == nil || custom.Agent != "custom-agent" {
 		t.Error("custom patrol not preserved")
@@ -2793,8 +2782,8 @@ func TestEnsureDaemonPatrolConfig(t *testing.T) {
 		if loaded.Type != "daemon-patrol-config" {
 			t.Errorf("Type = %q, want 'daemon-patrol-config'", loaded.Type)
 		}
-		if loaded.Patrols.Count() != 3 {
-			t.Errorf("Patrols count = %d, want 3 (deacon, witness, refinery)", loaded.Patrols.Count())
+		if loaded.Patrols.Count() != 2 {
+			t.Errorf("Patrols count = %d, want 2 (deacon, witness)", loaded.Patrols.Count())
 		}
 	})
 
@@ -2851,11 +2840,11 @@ func TestNewDaemonPatrolConfig(t *testing.T) {
 	if cfg.Heartbeat.Interval != "3m" {
 		t.Errorf("Heartbeat.Interval = %q, want '3m'", cfg.Heartbeat.Interval)
 	}
-	if cfg.Patrols.Count() != 3 {
-		t.Errorf("Patrols count = %d, want 3", cfg.Patrols.Count())
+	if cfg.Patrols.Count() != 2 {
+		t.Errorf("Patrols count = %d, want 2", cfg.Patrols.Count())
 	}
 
-	for _, name := range []string{"deacon", "witness", "refinery"} {
+	for _, name := range []string{"deacon", "witness"} {
 		patrol := cfg.Patrols.RolePatrol(name)
 		if patrol == nil {
 			t.Errorf("missing %s patrol", name)
@@ -2873,7 +2862,7 @@ func TestNewDaemonPatrolConfig(t *testing.T) {
 func TestAddRigToDaemonPatrols(t *testing.T) {
 	t.Parallel()
 
-	t.Run("adds rig to witness and refinery", func(t *testing.T) {
+	t.Run("adds rig to witness", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		mayorDir := filepath.Join(townRoot, "mayor")
@@ -2909,11 +2898,6 @@ func TestAddRigToDaemonPatrols(t *testing.T) {
 		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 2 || witness.Rigs[0] != "gastown" || witness.Rigs[1] != "newrig" {
 			t.Errorf("witness rigs = %v, want [gastown newrig]", witness.Rigs)
-		}
-
-		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
-		if len(refinery.Rigs) != 2 || refinery.Rigs[0] != "gastown" || refinery.Rigs[1] != "newrig" {
-			t.Errorf("refinery rigs = %v, want [gastown newrig]", refinery.Rigs)
 		}
 
 		// Deacon should be untouched
@@ -3051,7 +3035,7 @@ func TestAddRigToDaemonPatrols(t *testing.T) {
 func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 	t.Parallel()
 
-	t.Run("removes rig from witness and refinery", func(t *testing.T) {
+	t.Run("removes rig from witness", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		mayorDir := filepath.Join(townRoot, "mayor")
@@ -3086,10 +3070,6 @@ func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 			t.Errorf("witness rigs = %v, want [gastown myrig]", witness.Rigs)
 		}
 
-		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
-		if len(refinery.Rigs) != 2 || refinery.Rigs[0] != "gastown" || refinery.Rigs[1] != "myrig" {
-			t.Errorf("refinery rigs = %v, want [gastown myrig]", refinery.Rigs)
-		}
 	})
 
 	t.Run("no-op when rig not present", func(t *testing.T) {
@@ -3245,10 +3225,6 @@ func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 			t.Errorf("witness rigs = %v, want [gastown]", witness.Rigs)
 		}
 
-		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
-		if len(refinery.Rigs) != 1 || refinery.Rigs[0] != "gastown" {
-			t.Errorf("refinery rigs = %v, want [gastown]", refinery.Rigs)
-		}
 	})
 }
 
@@ -4394,12 +4370,11 @@ func TestRoleAgentConfigWithCustomAgent(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude-opus"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor:    "opencode-mayor",
-		constants.RoleDeacon:   "claude-haiku",
-		constants.RolePolecat:  "claude-opus",
-		constants.RoleRefinery: "claude-opus",
-		constants.RoleWitness:  "claude-sonnet",
-		constants.RoleCrew:     "claude-sonnet",
+		constants.RoleMayor:   "opencode-mayor",
+		constants.RoleDeacon:  "claude-haiku",
+		constants.RolePolecat: "claude-opus",
+		constants.RoleWitness: "claude-sonnet",
+		constants.RoleCrew:    "claude-sonnet",
 	}
 	townSettings.Agents = map[string]*RuntimeConfig{
 		"opencode-mayor": {
@@ -5367,11 +5342,11 @@ func TestBuildStartupCommandWithAgentOverride_PriorityOverRoleAgents(t *testing.
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
 
-	// Configure town settings with role_agents: refinery = codex
+	// Configure town settings with role_agents: witness = codex
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleRefinery: "codex",
+		constants.RoleWitness: "codex",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -5383,9 +5358,9 @@ func TestBuildStartupCommandWithAgentOverride_PriorityOverRoleAgents(t *testing.
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	// agentOverride = "gemini" should take priority over role_agents[refinery] = "codex"
+	// agentOverride = "gemini" should take priority over role_agents[witness] = "codex"
 	cmd, err := BuildStartupCommandWithAgentOverride(
-		map[string]string{"GT_ROLE": constants.RoleRefinery},
+		map[string]string{"GT_ROLE": constants.RoleWitness},
 		rigPath,
 		"",
 		"gemini", // explicit override
@@ -6056,7 +6031,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 
 	t.Run("standard tier returns handled with nil rc for all roles", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "standard")
-		for _, role := range []string{"mayor", "deacon", "witness", "refinery", "polecat", "crew"} {
+		for _, role := range []string{"mayor", "deacon", "witness", "polecat", "crew"} {
 			rc, handled := tryResolveFromEphemeralTier(nil, role)
 			if !handled {
 				t.Errorf("standard tier should return handled=true for %s", role)

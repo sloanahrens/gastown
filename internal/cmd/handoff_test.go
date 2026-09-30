@@ -92,12 +92,6 @@ func TestSessionWorkDir(t *testing.T) {
 			wantDir:     townRoot + "/gastown/witness",
 			wantErr:     false,
 		},
-		{
-			name:        "refinery runs from refinery/rig directory",
-			sessionName: "gt-refinery",
-			wantDir:     townRoot + "/gastown/refinery/rig",
-			wantErr:     false,
-		},
 	}
 
 	for _, tt := range tests {

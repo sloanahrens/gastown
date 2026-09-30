@@ -16,7 +16,6 @@ func TestDoctorRegistersEditorialChecksWithRig(t *testing.T) {
 	t.Parallel()
 	d := newDoctorForCommand("testrig")
 	want := map[string]bool{
-		"editorial-coverage": false,
 		"harness-drift":      false,
 		"editorial-required": false,
 	}
@@ -35,13 +34,13 @@ func TestDoctorRegistersEditorialChecksWithRig(t *testing.T) {
 func TestDoctorCheckFlagFiltersToNamedCheck(t *testing.T) {
 	t.Parallel()
 	d := newDoctorForCommand("testrig")
-	d.Only([]string{"editorial-coverage"})
+	d.Only([]string{"editorial-required"})
 	checks := d.Checks()
-	if len(checks) != 1 || checks[0].Name() != "editorial-coverage" {
+	if len(checks) != 1 || checks[0].Name() != "editorial-required" {
 		names := make([]string, len(checks))
 		for i, c := range checks {
 			names[i] = c.Name()
 		}
-		t.Fatalf("expected --check to filter to exactly [editorial-coverage], got %v", names)
+		t.Fatalf("expected --check to filter to exactly [editorial-required], got %v", names)
 	}
 }

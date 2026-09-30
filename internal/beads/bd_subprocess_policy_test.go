@@ -18,7 +18,6 @@ import (
 var hardenedPackages = []string{
 	"internal/deacon",
 	"internal/plugin",
-	"internal/refinery",
 	"internal/witness",
 }
 
