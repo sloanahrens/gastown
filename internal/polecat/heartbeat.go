@@ -14,7 +14,6 @@ import (
 
 // SessionHeartbeatStaleThreshold is the age at which a polecat session heartbeat
 // is considered stale, indicating the agent process is likely dead.
-// Configurable via operational.polecat.heartbeat_stale_threshold in settings/config.json.
 const SessionHeartbeatStaleThreshold = 3 * time.Minute
 
 // HeartbeatState represents the agent-reported state in a heartbeat v2 (gt-3vr5).

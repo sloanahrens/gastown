@@ -400,7 +400,6 @@ const (
 	massDeathThreshold = 3                // Number of deaths to trigger alert
 
 	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
-	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
 )
 

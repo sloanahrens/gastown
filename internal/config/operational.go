@@ -11,24 +11,12 @@ import (
 
 // Session defaults.
 const (
-	DefaultClaudeStartTimeout      = 60 * time.Second
-	DefaultShellReadyTimeout       = 5 * time.Second
-	DefaultGracefulShutdownTimeout = 3 * time.Second
-	DefaultBdCommandTimeout        = 30 * time.Second
-	DefaultBdSubprocessTimeout     = 5 * time.Second
-	DefaultGUPPViolationTimeout    = 30 * time.Minute
-	DefaultHungSessionThreshold    = 30 * time.Minute
 	DefaultStartupNudgeVerifyDelay = 25 * time.Second
 	DefaultStartupNudgeMaxRetries  = 2
 )
 
 // Nudge defaults.
 const (
-	DefaultNudgeReadyTimeout      = 10 * time.Second
-	DefaultNudgeRetryInterval     = 500 * time.Millisecond
-	DefaultNudgeLockTimeout       = 30 * time.Second
-	DefaultNudgeNormalTTL         = 30 * time.Minute
-	DefaultNudgeUrgentTTL         = 2 * time.Hour
 	DefaultNudgeMaxQueueDepth     = 50
 	DefaultNudgeStaleClaimTimeout = 5 * time.Minute
 	// DefaultNudgeMaxDeliveryAttempts bounds how many times a nudge may be
@@ -43,13 +31,8 @@ const (
 
 // Daemon defaults.
 const (
-	DefaultMassDeathWindow                = 30 * time.Second
-	DefaultMassDeathThreshold             = 3
-	DefaultPolecatIdleSessionTimeout      = 15 * time.Minute
-	DefaultMaxLifecycleMessageAge         = 6 * time.Hour
-	DefaultSyncFailureEscalationThreshold = 3
-	DefaultDoctorMolCooldown              = 5 * time.Minute
-	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
+	DefaultPolecatIdleSessionTimeout = 15 * time.Minute
+	DefaultRecoveryHeartbeatInterval = 3 * time.Minute
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
@@ -59,38 +42,9 @@ const (
 	DefaultPressureMaxSessions    = 0
 )
 
-// Polecat defaults.
-const (
-	DefaultPolecatHeartbeatStale  = 3 * time.Minute
-	DefaultPolecatDoltMaxRetries  = 10
-	DefaultPolecatDoltBaseBackoff = 500 * time.Millisecond
-	DefaultPolecatDoltBackoffMax  = 30 * time.Second
-	DefaultPolecatPendingMaxAge   = 5 * time.Minute
-	DefaultPolecatNamepoolSize    = 50
-)
-
-// Dolt defaults.
-const (
-	DefaultDoltHealthCheckInterval = 30 * time.Second
-	DefaultDoltCmdTimeout          = 15 * time.Second
-	DefaultDoltMaxConnections      = 1000
-	DefaultDoltSlowQueryThreshold  = 1 * time.Second
-)
-
 // Mail defaults.
 const (
-	DefaultMailIdleNotifyTimeout  = 3 * time.Second
-	DefaultMailBdReadTimeout      = 60 * time.Second
-	DefaultMailBdWriteTimeout     = 60 * time.Second
-	DefaultMailMaxConcurrentAcks  = 8
 	DefaultMailReplyReminderDelay = 30 * time.Second
-)
-
-// Web defaults.
-const (
-	DefaultWebMaxConcurrentCmds = 12
-	DefaultWebMaxSubjectLen     = 500
-	DefaultWebMaxBodyLen        = 100_000
 )
 
 // Polecat recovery defaults.
@@ -177,62 +131,6 @@ func (c *OperationalConfig) GetSessionConfig() *SessionThresholds {
 	return &SessionThresholds{}
 }
 
-// ClaudeStartTimeout returns the configured or default Claude start timeout.
-func (s *SessionThresholds) ClaudeStartTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.ClaudeStartTimeout, DefaultClaudeStartTimeout)
-	}
-	return DefaultClaudeStartTimeout
-}
-
-// ShellReadyTimeoutD returns the configured or default shell ready timeout.
-func (s *SessionThresholds) ShellReadyTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.ShellReadyTimeout, DefaultShellReadyTimeout)
-	}
-	return DefaultShellReadyTimeout
-}
-
-// GracefulShutdownTimeoutD returns the configured or default graceful shutdown timeout.
-func (s *SessionThresholds) GracefulShutdownTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.GracefulShutdownTimeout, DefaultGracefulShutdownTimeout)
-	}
-	return DefaultGracefulShutdownTimeout
-}
-
-// BdCommandTimeoutD returns the configured or default bd command timeout.
-func (s *SessionThresholds) BdCommandTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.BdCommandTimeout, DefaultBdCommandTimeout)
-	}
-	return DefaultBdCommandTimeout
-}
-
-// BdSubprocessTimeoutD returns the configured or default bd subprocess timeout.
-func (s *SessionThresholds) BdSubprocessTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.BdSubprocessTimeout, DefaultBdSubprocessTimeout)
-	}
-	return DefaultBdSubprocessTimeout
-}
-
-// GUPPViolationTimeoutD returns the configured or default GUPP violation timeout.
-func (s *SessionThresholds) GUPPViolationTimeoutD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.GUPPViolationTimeout, DefaultGUPPViolationTimeout)
-	}
-	return DefaultGUPPViolationTimeout
-}
-
-// HungSessionThresholdD returns the configured or default hung session threshold.
-func (s *SessionThresholds) HungSessionThresholdD() time.Duration {
-	if s != nil {
-		return ParseDurationOrDefault(s.HungSessionThreshold, DefaultHungSessionThreshold)
-	}
-	return DefaultHungSessionThreshold
-}
-
 // StartupNudgeVerifyDelayD returns the configured or default startup nudge verify delay.
 func (s *SessionThresholds) StartupNudgeVerifyDelayD() time.Duration {
 	if s != nil {
@@ -257,46 +155,6 @@ func (c *OperationalConfig) GetNudgeConfig() *NudgeThresholds {
 		return c.Nudge
 	}
 	return &NudgeThresholds{}
-}
-
-// ReadyTimeoutD returns the configured or default nudge ready timeout.
-func (n *NudgeThresholds) ReadyTimeoutD() time.Duration {
-	if n != nil {
-		return ParseDurationOrDefault(n.ReadyTimeout, DefaultNudgeReadyTimeout)
-	}
-	return DefaultNudgeReadyTimeout
-}
-
-// RetryIntervalD returns the configured or default nudge retry interval.
-func (n *NudgeThresholds) RetryIntervalD() time.Duration {
-	if n != nil {
-		return ParseDurationOrDefault(n.RetryInterval, DefaultNudgeRetryInterval)
-	}
-	return DefaultNudgeRetryInterval
-}
-
-// LockTimeoutD returns the configured or default nudge lock timeout.
-func (n *NudgeThresholds) LockTimeoutD() time.Duration {
-	if n != nil {
-		return ParseDurationOrDefault(n.LockTimeout, DefaultNudgeLockTimeout)
-	}
-	return DefaultNudgeLockTimeout
-}
-
-// NormalTTLD returns the configured or default normal nudge TTL.
-func (n *NudgeThresholds) NormalTTLD() time.Duration {
-	if n != nil {
-		return ParseDurationOrDefault(n.NormalTTL, DefaultNudgeNormalTTL)
-	}
-	return DefaultNudgeNormalTTL
-}
-
-// UrgentTTLD returns the configured or default urgent nudge TTL.
-func (n *NudgeThresholds) UrgentTTLD() time.Duration {
-	if n != nil {
-		return ParseDurationOrDefault(n.UrgentTTL, DefaultNudgeUrgentTTL)
-	}
-	return DefaultNudgeUrgentTTL
 }
 
 // MaxQueueDepthV returns the configured or default max queue depth.
@@ -347,22 +205,6 @@ func (c *OperationalConfig) GetDaemonConfig() *DaemonThresholds {
 	return &DaemonThresholds{}
 }
 
-// MassDeathWindowD returns the configured or default mass death window.
-func (d *DaemonThresholds) MassDeathWindowD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.MassDeathWindow, DefaultMassDeathWindow)
-	}
-	return DefaultMassDeathWindow
-}
-
-// MassDeathThresholdV returns the configured or default mass death threshold.
-func (d *DaemonThresholds) MassDeathThresholdV() int {
-	if d != nil && d.MassDeathThreshold != nil {
-		return *d.MassDeathThreshold
-	}
-	return DefaultMassDeathThreshold
-}
-
 // PolecatIdleSessionTimeoutD returns the configured or default polecat idle session timeout.
 // Polecats that have been idle (no hooked work, heartbeat state=idle) longer than this
 // threshold are auto-killed to prevent API slot burn. Default 15 minutes — long enough
@@ -372,30 +214,6 @@ func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
 		return ParseDurationOrDefault(d.PolecatIdleSessionTimeout, DefaultPolecatIdleSessionTimeout)
 	}
 	return DefaultPolecatIdleSessionTimeout
-}
-
-// MaxLifecycleMessageAgeD returns the configured or default max lifecycle message age.
-func (d *DaemonThresholds) MaxLifecycleMessageAgeD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.MaxLifecycleMessageAge, DefaultMaxLifecycleMessageAge)
-	}
-	return DefaultMaxLifecycleMessageAge
-}
-
-// SyncFailureEscalationThresholdV returns the configured or default threshold.
-func (d *DaemonThresholds) SyncFailureEscalationThresholdV() int {
-	if d != nil && d.SyncFailureEscalationThreshold != nil {
-		return *d.SyncFailureEscalationThreshold
-	}
-	return DefaultSyncFailureEscalationThreshold
-}
-
-// DoctorMolCooldownD returns the configured or default doctor mol cooldown.
-func (d *DaemonThresholds) DoctorMolCooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.DoctorMolCooldown, DefaultDoctorMolCooldown)
-	}
-	return DefaultDoctorMolCooldown
 }
 
 // RecoveryHeartbeatIntervalD returns the configured or default recovery heartbeat interval.
@@ -430,106 +248,6 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 	return DefaultPressureMaxSessions
 }
 
-// --- Polecat accessors ---
-
-// GetPolecatConfig returns the polecat thresholds, never nil.
-func (c *OperationalConfig) GetPolecatConfig() *PolecatThresholds {
-	if c != nil && c.Polecat != nil {
-		return c.Polecat
-	}
-	return &PolecatThresholds{}
-}
-
-// HeartbeatStaleThresholdD returns the configured or default polecat heartbeat stale threshold.
-func (p *PolecatThresholds) HeartbeatStaleThresholdD() time.Duration {
-	if p != nil {
-		return ParseDurationOrDefault(p.HeartbeatStaleThreshold, DefaultPolecatHeartbeatStale)
-	}
-	return DefaultPolecatHeartbeatStale
-}
-
-// DoltMaxRetriesV returns the configured or default Dolt max retries.
-func (p *PolecatThresholds) DoltMaxRetriesV() int {
-	if p != nil && p.DoltMaxRetries != nil {
-		return *p.DoltMaxRetries
-	}
-	return DefaultPolecatDoltMaxRetries
-}
-
-// DoltBaseBackoffD returns the configured or default Dolt base backoff.
-func (p *PolecatThresholds) DoltBaseBackoffD() time.Duration {
-	if p != nil {
-		return ParseDurationOrDefault(p.DoltBaseBackoff, DefaultPolecatDoltBaseBackoff)
-	}
-	return DefaultPolecatDoltBaseBackoff
-}
-
-// DoltBackoffMaxD returns the configured or default Dolt backoff max.
-func (p *PolecatThresholds) DoltBackoffMaxD() time.Duration {
-	if p != nil {
-		return ParseDurationOrDefault(p.DoltBackoffMax, DefaultPolecatDoltBackoffMax)
-	}
-	return DefaultPolecatDoltBackoffMax
-}
-
-// PendingMaxAgeD returns the configured or default pending max age.
-func (p *PolecatThresholds) PendingMaxAgeD() time.Duration {
-	if p != nil {
-		return ParseDurationOrDefault(p.PendingMaxAge, DefaultPolecatPendingMaxAge)
-	}
-	return DefaultPolecatPendingMaxAge
-}
-
-// NamepoolSizeV returns the configured or default namepool size.
-func (p *PolecatThresholds) NamepoolSizeV() int {
-	if p != nil && p.NamepoolSize != nil {
-		return *p.NamepoolSize
-	}
-	return DefaultPolecatNamepoolSize
-}
-
-// --- Dolt accessors ---
-
-// GetDoltConfig returns the dolt thresholds, never nil.
-func (c *OperationalConfig) GetDoltConfig() *DoltThresholds {
-	if c != nil && c.Dolt != nil {
-		return c.Dolt
-	}
-	return &DoltThresholds{}
-}
-
-// HealthCheckIntervalD returns the configured or default health check interval.
-func (dt *DoltThresholds) HealthCheckIntervalD() time.Duration {
-	if dt != nil {
-		return ParseDurationOrDefault(dt.HealthCheckInterval, DefaultDoltHealthCheckInterval)
-	}
-	return DefaultDoltHealthCheckInterval
-}
-
-// CmdTimeoutD returns the configured or default cmd timeout.
-func (dt *DoltThresholds) CmdTimeoutD() time.Duration {
-	if dt != nil {
-		return ParseDurationOrDefault(dt.CmdTimeout, DefaultDoltCmdTimeout)
-	}
-	return DefaultDoltCmdTimeout
-}
-
-// MaxConnectionsV returns the configured or default max connections.
-func (dt *DoltThresholds) MaxConnectionsV() int {
-	if dt != nil && dt.MaxConnections != nil {
-		return *dt.MaxConnections
-	}
-	return DefaultDoltMaxConnections
-}
-
-// SlowQueryThresholdD returns the configured or default slow query threshold.
-func (dt *DoltThresholds) SlowQueryThresholdD() time.Duration {
-	if dt != nil {
-		return ParseDurationOrDefault(dt.SlowQueryThreshold, DefaultDoltSlowQueryThreshold)
-	}
-	return DefaultDoltSlowQueryThreshold
-}
-
 // --- Mail accessors ---
 
 // GetMailConfig returns the mail thresholds, never nil.
@@ -540,38 +258,6 @@ func (c *OperationalConfig) GetMailConfig() *MailThresholds {
 	return &MailThresholds{}
 }
 
-// IdleNotifyTimeoutD returns the configured or default idle notify timeout.
-func (m *MailThresholds) IdleNotifyTimeoutD() time.Duration {
-	if m != nil {
-		return ParseDurationOrDefault(m.IdleNotifyTimeout, DefaultMailIdleNotifyTimeout)
-	}
-	return DefaultMailIdleNotifyTimeout
-}
-
-// BdReadTimeoutD returns the configured or default bd read timeout.
-func (m *MailThresholds) BdReadTimeoutD() time.Duration {
-	if m != nil {
-		return ParseDurationOrDefault(m.BdReadTimeout, DefaultMailBdReadTimeout)
-	}
-	return DefaultMailBdReadTimeout
-}
-
-// BdWriteTimeoutD returns the configured or default bd write timeout.
-func (m *MailThresholds) BdWriteTimeoutD() time.Duration {
-	if m != nil {
-		return ParseDurationOrDefault(m.BdWriteTimeout, DefaultMailBdWriteTimeout)
-	}
-	return DefaultMailBdWriteTimeout
-}
-
-// MaxConcurrentAckOpsV returns the configured or default max concurrent ack ops.
-func (m *MailThresholds) MaxConcurrentAckOpsV() int {
-	if m != nil && m.MaxConcurrentAckOps != nil {
-		return *m.MaxConcurrentAckOps
-	}
-	return DefaultMailMaxConcurrentAcks
-}
-
 // ReplyReminderDelayD returns the configured or default reply reminder delay.
 // A zero duration means reply reminders are disabled.
 func (m *MailThresholds) ReplyReminderDelayD() time.Duration {
@@ -579,40 +265,6 @@ func (m *MailThresholds) ReplyReminderDelayD() time.Duration {
 		return ParseDurationOrDefault(m.ReplyReminderDelay, DefaultMailReplyReminderDelay)
 	}
 	return DefaultMailReplyReminderDelay
-}
-
-// --- Web accessors ---
-
-// GetWebConfig returns the web thresholds, never nil.
-func (c *OperationalConfig) GetWebConfig() *WebThresholds {
-	if c != nil && c.Web != nil {
-		return c.Web
-	}
-	return &WebThresholds{}
-}
-
-// MaxConcurrentCommandsV returns the configured or default max concurrent commands.
-func (w *WebThresholds) MaxConcurrentCommandsV() int {
-	if w != nil && w.MaxConcurrentCommands != nil {
-		return *w.MaxConcurrentCommands
-	}
-	return DefaultWebMaxConcurrentCmds
-}
-
-// MaxSubjectLenV returns the configured or default max subject length.
-func (w *WebThresholds) MaxSubjectLenV() int {
-	if w != nil && w.MaxSubjectLen != nil {
-		return *w.MaxSubjectLen
-	}
-	return DefaultWebMaxSubjectLen
-}
-
-// MaxBodyLenV returns the configured or default max body length.
-func (w *WebThresholds) MaxBodyLenV() int {
-	if w != nil && w.MaxBodyLen != nil {
-		return *w.MaxBodyLen
-	}
-	return DefaultWebMaxBodyLen
 }
 
 // --- Polecat recovery accessors ---

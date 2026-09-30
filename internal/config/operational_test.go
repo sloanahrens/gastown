@@ -15,14 +15,8 @@ func TestSessionThresholds_Defaults(t *testing.T) {
 	var op *OperationalConfig
 	session := op.GetSessionConfig()
 
-	if got := session.ClaudeStartTimeoutD(); got != DefaultClaudeStartTimeout {
-		t.Errorf("ClaudeStartTimeout: got %v, want %v", got, DefaultClaudeStartTimeout)
-	}
-	if got := session.GUPPViolationTimeoutD(); got != DefaultGUPPViolationTimeout {
-		t.Errorf("GUPPViolationTimeout: got %v, want %v", got, DefaultGUPPViolationTimeout)
-	}
-	if got := session.HungSessionThresholdD(); got != DefaultHungSessionThreshold {
-		t.Errorf("HungSessionThreshold: got %v, want %v", got, DefaultHungSessionThreshold)
+	if got := session.StartupNudgeVerifyDelayD(); got != DefaultStartupNudgeVerifyDelay {
+		t.Errorf("StartupNudgeVerifyDelay: got %v, want %v", got, DefaultStartupNudgeVerifyDelay)
 	}
 	if got := session.StartupNudgeMaxRetriesV(); got != DefaultStartupNudgeMaxRetries {
 		t.Errorf("StartupNudgeMaxRetries: got %v, want %v", got, DefaultStartupNudgeMaxRetries)
@@ -35,40 +29,17 @@ func TestSessionThresholds_Overrides(t *testing.T) {
 	retries := 5
 	op := &OperationalConfig{
 		Session: &SessionThresholds{
-			ClaudeStartTimeout:     "120s",
-			GUPPViolationTimeout:   "1h",
-			HungSessionThreshold:   "45m",
-			StartupNudgeMaxRetries: &retries,
+			StartupNudgeVerifyDelay: "40s",
+			StartupNudgeMaxRetries:  &retries,
 		},
 	}
 
 	session := op.GetSessionConfig()
-	if got := session.ClaudeStartTimeoutD(); got != 120*time.Second {
-		t.Errorf("ClaudeStartTimeout: got %v, want 120s", got)
-	}
-	if got := session.GUPPViolationTimeoutD(); got != time.Hour {
-		t.Errorf("GUPPViolationTimeout: got %v, want 1h", got)
-	}
-	if got := session.HungSessionThresholdD(); got != 45*time.Minute {
-		t.Errorf("HungSessionThreshold: got %v, want 45m", got)
+	if got := session.StartupNudgeVerifyDelayD(); got != 40*time.Second {
+		t.Errorf("StartupNudgeVerifyDelay: got %v, want 40s", got)
 	}
 	if got := session.StartupNudgeMaxRetriesV(); got != 5 {
 		t.Errorf("StartupNudgeMaxRetries: got %v, want 5", got)
-	}
-}
-
-func TestSessionThresholds_InvalidDuration(t *testing.T) {
-	t.Parallel()
-
-	op := &OperationalConfig{
-		Session: &SessionThresholds{
-			ClaudeStartTimeout: "not-a-duration",
-		},
-	}
-
-	session := op.GetSessionConfig()
-	if got := session.ClaudeStartTimeoutD(); got != DefaultClaudeStartTimeout {
-		t.Errorf("invalid duration should fallback to default: got %v, want %v", got, DefaultClaudeStartTimeout)
 	}
 }
 
@@ -78,9 +49,6 @@ func TestNudgeThresholds_Defaults(t *testing.T) {
 	op := &OperationalConfig{}
 	nudge := op.GetNudgeConfig()
 
-	if got := nudge.ReadyTimeoutD(); got != DefaultNudgeReadyTimeout {
-		t.Errorf("ReadyTimeout: got %v, want %v", got, DefaultNudgeReadyTimeout)
-	}
 	if got := nudge.MaxQueueDepthV(); got != DefaultNudgeMaxQueueDepth {
 		t.Errorf("MaxQueueDepth: got %v, want %v", got, DefaultNudgeMaxQueueDepth)
 	}
@@ -136,12 +104,6 @@ func TestDaemonThresholds_Defaults(t *testing.T) {
 	if got := daemon.PolecatIdleSessionTimeoutD(); got != DefaultPolecatIdleSessionTimeout {
 		t.Errorf("PolecatIdleSessionTimeout: got %v, want %v", got, DefaultPolecatIdleSessionTimeout)
 	}
-	if got := daemon.MassDeathThresholdV(); got != DefaultMassDeathThreshold {
-		t.Errorf("MassDeathThreshold: got %v, want %v", got, DefaultMassDeathThreshold)
-	}
-	if got := daemon.MaxLifecycleMessageAgeD(); got != DefaultMaxLifecycleMessageAge {
-		t.Errorf("MaxLifecycleMessageAge: got %v, want %v", got, DefaultMaxLifecycleMessageAge)
-	}
 	if got := daemon.RecoveryHeartbeatIntervalD(); got != DefaultRecoveryHeartbeatInterval {
 		t.Errorf("RecoveryHeartbeatInterval: got %v, want %v", got, DefaultRecoveryHeartbeatInterval)
 	}
@@ -150,11 +112,9 @@ func TestDaemonThresholds_Defaults(t *testing.T) {
 func TestDaemonThresholds_Overrides(t *testing.T) {
 	t.Parallel()
 
-	threshold := 8
 	op := &OperationalConfig{
 		Daemon: &DaemonThresholds{
 			PolecatIdleSessionTimeout: "2h",
-			MassDeathThreshold:        &threshold,
 		},
 	}
 
@@ -162,12 +122,9 @@ func TestDaemonThresholds_Overrides(t *testing.T) {
 	if got := daemon.PolecatIdleSessionTimeoutD(); got != 2*time.Hour {
 		t.Errorf("PolecatIdleSessionTimeout: got %v, want 2h", got)
 	}
-	if got := daemon.MassDeathThresholdV(); got != 8 {
-		t.Errorf("MassDeathThreshold: got %v, want 8", got)
-	}
 	// Non-overridden fields should still return defaults
-	if got := daemon.MassDeathWindowD(); got != DefaultMassDeathWindow {
-		t.Errorf("MassDeathWindow: got %v, want %v (default)", got, DefaultMassDeathWindow)
+	if got := daemon.RecoveryHeartbeatIntervalD(); got != DefaultRecoveryHeartbeatInterval {
+		t.Errorf("RecoveryHeartbeatInterval: got %v, want %v (default)", got, DefaultRecoveryHeartbeatInterval)
 	}
 }
 
@@ -186,34 +143,6 @@ func TestDaemonThresholds_NewFieldOverrides(t *testing.T) {
 	}
 }
 
-func TestPolecatThresholds_Defaults(t *testing.T) {
-	t.Parallel()
-
-	op := &OperationalConfig{}
-	polecat := op.GetPolecatConfig()
-
-	if got := polecat.HeartbeatStaleThresholdD(); got != DefaultPolecatHeartbeatStale {
-		t.Errorf("HeartbeatStale: got %v, want %v", got, DefaultPolecatHeartbeatStale)
-	}
-	if got := polecat.DoltMaxRetriesV(); got != DefaultPolecatDoltMaxRetries {
-		t.Errorf("DoltMaxRetries: got %v, want %v", got, DefaultPolecatDoltMaxRetries)
-	}
-}
-
-func TestDoltThresholds_Defaults(t *testing.T) {
-	t.Parallel()
-
-	op := &OperationalConfig{}
-	dolt := op.GetDoltConfig()
-
-	if got := dolt.HealthCheckIntervalD(); got != DefaultDoltHealthCheckInterval {
-		t.Errorf("HealthCheckInterval: got %v, want %v", got, DefaultDoltHealthCheckInterval)
-	}
-	if got := dolt.SlowQueryThresholdD(); got != DefaultDoltSlowQueryThreshold {
-		t.Errorf("SlowQueryThreshold: got %v, want %v", got, DefaultDoltSlowQueryThreshold)
-	}
-}
-
 func TestLoadOperationalConfig_NonexistentDir(t *testing.T) {
 	t.Parallel()
 
@@ -223,8 +152,8 @@ func TestLoadOperationalConfig_NonexistentDir(t *testing.T) {
 		t.Fatal("LoadOperationalConfig should never return nil")
 	}
 	// Defaults should work
-	if got := op.GetSessionConfig().GUPPViolationTimeoutD(); got != DefaultGUPPViolationTimeout {
-		t.Errorf("expected default GUPP timeout, got %v", got)
+	if got := op.GetSessionConfig().StartupNudgeMaxRetriesV(); got != DefaultStartupNudgeMaxRetries {
+		t.Errorf("expected default startup nudge retries, got %v", got)
 	}
 }
 
@@ -244,8 +173,8 @@ func TestLoadOperationalConfig_WithConfig(t *testing.T) {
 		Version: 1,
 		Operational: &OperationalConfig{
 			Session: &SessionThresholds{
-				GUPPViolationTimeout:   "45m",
-				StartupNudgeMaxRetries: &retries,
+				StartupNudgeVerifyDelay: "45s",
+				StartupNudgeMaxRetries:  &retries,
 			},
 			Daemon: &DaemonThresholds{
 				PolecatIdleSessionTimeout: "3h",
@@ -263,8 +192,8 @@ func TestLoadOperationalConfig_WithConfig(t *testing.T) {
 
 	op := LoadOperationalConfig(dir)
 
-	if got := op.GetSessionConfig().GUPPViolationTimeoutD(); got != 45*time.Minute {
-		t.Errorf("GUPPViolationTimeout: got %v, want 45m", got)
+	if got := op.GetSessionConfig().StartupNudgeVerifyDelayD(); got != 45*time.Second {
+		t.Errorf("StartupNudgeVerifyDelay: got %v, want 45s", got)
 	}
 	if got := op.GetSessionConfig().StartupNudgeMaxRetriesV(); got != 7 {
 		t.Errorf("StartupNudgeMaxRetries: got %v, want 7", got)
@@ -284,15 +213,6 @@ func TestMailThresholds_Defaults(t *testing.T) {
 	op := &OperationalConfig{}
 	mail := op.GetMailConfig()
 
-	if got := mail.IdleNotifyTimeoutD(); got != DefaultMailIdleNotifyTimeout {
-		t.Errorf("IdleNotifyTimeout: got %v, want %v", got, DefaultMailIdleNotifyTimeout)
-	}
-	if got := mail.BdReadTimeoutD(); got != DefaultMailBdReadTimeout {
-		t.Errorf("BdReadTimeout: got %v, want %v", got, DefaultMailBdReadTimeout)
-	}
-	if got := mail.MaxConcurrentAckOpsV(); got != DefaultMailMaxConcurrentAcks {
-		t.Errorf("MaxConcurrentAckOps: got %v, want %v", got, DefaultMailMaxConcurrentAcks)
-	}
 	if got := mail.ReplyReminderDelayD(); got != DefaultMailReplyReminderDelay {
 		t.Errorf("ReplyReminderDelay: got %v, want %v", got, DefaultMailReplyReminderDelay)
 	}
@@ -322,31 +242,6 @@ func TestMailThresholds_ReplyReminderDelayDisabled(t *testing.T) {
 	}
 	if got := op.GetMailConfig().ReplyReminderDelayD(); got != 0 {
 		t.Errorf("ReplyReminderDelay disabled: got %v, want 0", got)
-	}
-}
-
-func TestWebThresholds_Overrides(t *testing.T) {
-	t.Parallel()
-
-	maxCmds := 20
-	maxSubject := 1000
-	op := &OperationalConfig{
-		Web: &WebThresholds{
-			MaxConcurrentCommands: &maxCmds,
-			MaxSubjectLen:         &maxSubject,
-		},
-	}
-
-	web := op.GetWebConfig()
-	if got := web.MaxConcurrentCommandsV(); got != 20 {
-		t.Errorf("MaxConcurrentCommands: got %v, want 20", got)
-	}
-	if got := web.MaxSubjectLenV(); got != 1000 {
-		t.Errorf("MaxSubjectLen: got %v, want 1000", got)
-	}
-	// Non-overridden field
-	if got := web.MaxBodyLenV(); got != DefaultWebMaxBodyLen {
-		t.Errorf("MaxBodyLen: got %v, want %v (default)", got, DefaultWebMaxBodyLen)
 	}
 }
 
@@ -536,5 +431,24 @@ func TestContainerGateThresholds_YieldOverrides(t *testing.T) {
 		if got := cg.MaxGateYieldD(); got != DefaultContainerGateMaxGateYield {
 			t.Errorf("MaxGateYield %q: got %v, want default %v", bad, got, DefaultContainerGateMaxGateYield)
 		}
+	}
+}
+
+// TestOperationalConfig_RetiredKeysDecode: keys whose accessors were deleted
+// (gt-e2kxa) still decode strictly, so an older settings file keeps loading.
+func TestOperationalConfig_RetiredKeysDecode(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"operational": {
+		"session": {"claude_start_timeout": "60s", "gupp_violation_timeout": "30m"},
+		"nudge": {"ready_timeout": "10s", "urgent_ttl": "2h"},
+		"daemon": {"mass_death_threshold": 3, "doctor_mol_cooldown": "5m"},
+		"polecat": {"namepool_size": 50, "dolt_backoff_max": "30s"},
+		"dolt": {"max_connections": 1000},
+		"mail": {"bd_read_timeout": "60s", "max_concurrent_ack_ops": 8},
+		"web": {"max_body_len": 100000}
+	}}`)
+	if err := DecodeJSONFile("config.json", data, &TownSettings{}); err != nil {
+		t.Fatalf("retired operational keys must still decode: %v", err)
 	}
 }
