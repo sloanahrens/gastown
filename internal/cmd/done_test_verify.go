@@ -54,11 +54,9 @@ const defaultTestVerifyRunFloor = 30 * time.Minute
 // why a budget that runs out is attributed rather than reported as findings.
 const defaultLintVerifyTimeout = 10 * time.Minute
 
-// testVerifyPackagesPlaceholder is the retired token that once filled
-// merge_queue.test_verify_command with the branch's changed packages. The
-// gate now runs one whole-suite definition (`make gate` for gastown, D9), so
-// a command that still carries the token is refused rather than run with the
-// token left in it.
+// testVerifyPackagesPlaceholder is a token the gate refuses in
+// merge_queue.test_verify_command: the gate runs the rig's whole suite and
+// fills no package list (gt-ik4a1.1).
 const testVerifyPackagesPlaceholder = "{packages}"
 
 // testVerifyProgressInterval is how often a *waiting* (slot) or *running*
@@ -168,9 +166,7 @@ type testVerifyResult struct {
 	skipReason string
 
 	success bool
-	// packages is always empty: the gate no longer resolves a changed-package
-	// list (D9, gt-ik4a1.1). It stays until gt done's MR-bead writer, which
-	// records it when non-empty, moves to the land path.
+	// packages is always empty (gt-ik4a1.1); cmd/done.go still reads it.
 	packages []string
 	scope    string // always "full": the gate runs the rig's whole test_command
 	// slotUsed is true only when the gate's run can start a container-backed
