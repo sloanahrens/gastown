@@ -3395,7 +3395,7 @@ type stashOwnerFilter struct {
 
 // stashOwnerFilter returns the filter for the current worktree. A stash is
 // attributed by the branch label git wrote into its message. A detached HEAD
-// owns only stashes labelled "(no branch)": counting every stash would charge
+// owns only stashes labeled "(no branch)": counting every stash would charge
 // a detached worktree with the work of every sibling on a real branch, which
 // parked clean detached polecats as NEEDS_RECOVERY. Detached worktrees still
 // share the "(no branch)" pool with each other, an over-count that is safe.
