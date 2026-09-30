@@ -14,14 +14,6 @@ import (
 // state leaks into a live town — and returns the exit code. setup, when not
 // nil, runs once the harness has scrubbed the environment.
 func runDaemonTests(m *testing.M, setup func(), opts ...testutil.HermeticOption) int {
-	// Signal-target helper (pid_identity_test.go): this binary re-executed
-	// under a chosen argv0/argv so a test owns a process that looks like
-	// `gt daemon run` or `dolt sql-server`, and can prove the stop paths
-	// signal it — without any test ever pointing a stop path at a host PID.
-	if os.Getenv(signalTargetHelperEnv) == "1" {
-		runSignalTargetHelper()
-	}
-
 	h, err := testutil.StartHermetic(opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon TestMain: %v\n", err)

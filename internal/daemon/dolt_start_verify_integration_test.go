@@ -20,7 +20,7 @@ import (
 // path against a fake `dolt` on PATH. body is the fake's shell script. The
 // health probe is stubbed to succeed, standing in for a foreign process that
 // holds the port and answers it (gt-4cu7u). Tests using it are not parallel:
-// they set PATH and portListenerPIDFn.
+// they set PATH.
 func startVerifyManager(t *testing.T, body string, listener func(m *DoltServerManager) int) *DoltServerManager {
 	t.Helper()
 	binDir := t.TempDir()
@@ -36,9 +36,7 @@ func startVerifyManager(t *testing.T, body string, listener func(m *DoltServerMa
 	m.config.DataDir = filepath.Join(m.townRoot, "dolt")
 	m.config.LogFile = filepath.Join(m.townRoot, "daemon", "dolt-server.log")
 
-	orig := portListenerPIDFn
-	t.Cleanup(func() { portListenerPIDFn = orig })
-	portListenerPIDFn = func(int) int { return listener(m) }
+	m.portListenerFn = func(int) int { return listener(m) }
 	return m
 }
 

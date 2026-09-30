@@ -1474,14 +1474,12 @@ func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
 }
 
 // stubMainBranchTestGateVerdicts hands each gate of a run a fixed verdict by
-// stubbing mainBranchTestGateFn, so a test can mix a genuine failure with an
+// d's gate seam, so a test can mix a genuine failure with an
 // interruption in one run. The real path reaches that shape only by timing a
 // cancellation against map-order iteration, which no test can aim. A gate the
 // map does not name fails the test rather than quietly running the real command.
-func stubMainBranchTestGateVerdicts(t *testing.T, verdicts map[string]error) {
-	t.Helper()
-	prev := mainBranchTestGateFn
-	mainBranchTestGateFn = func(_ *Daemon, _ context.Context, _, _, _, label, _ string) error {
+func stubMainBranchTestGateVerdicts(t *testing.T, d *Daemon, verdicts map[string]error) {
+	d.seams.gate = func(_ *Daemon, _ context.Context, _, _, _, label, _ string) error {
 		verdict, ok := verdicts[label]
 		if !ok {
 			t.Errorf("the run walked gate %q, which this test gave no verdict for", label)
@@ -1489,7 +1487,6 @@ func stubMainBranchTestGateVerdicts(t *testing.T, verdicts map[string]error) {
 		}
 		return verdict
 	}
-	t.Cleanup(func() { mainBranchTestGateFn = prev })
 }
 
 // interruptedGateError is the shape runCommandOnWorktree returns for a gate the
@@ -1509,21 +1506,22 @@ func interruptedGateError(label string) error {
 // assertion, not a proxy: that predicate is exactly what sends the cycle down
 // the branch that skips failures, counts nothing, and clears no alert.
 func TestRunGatesOnWorktree_FailureSurvivesAnInterruptedGate(t *testing.T) {
+	t.Parallel()
 	// Which gate the loop walks first is map order, and the verdicts here are
 	// keyed by gate, so the shape under test is the same in either order — as it
 	// was for the flag this replaces, whose OR made one cancellation suppress a
 	// failure regardless of where it landed in the iteration.
 	// Both verdicts are the gate's own body, without the `gate %q:` prefix the
 	// loop adds — the shape runCommandOnWorktree actually returns.
-	stubMainBranchTestGateVerdicts(t, map[string]error{
-		"lint": errors.New("lint failed: exit status 1"),
-		"test": interruptedGateError("test"),
-	})
 
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
 	}
+	stubMainBranchTestGateVerdicts(t, d, map[string]error{
+		"lint": errors.New("lint failed: exit status 1"),
+		"test": interruptedGateError("test"),
+	})
 	err := d.runGatesOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), map[string]string{
 		"lint": "make lint",
 		"test": "make test",
@@ -1552,15 +1550,16 @@ func TestRunGatesOnWorktree_FailureSurvivesAnInterruptedGate(t *testing.T) {
 // cycle refuses to count (gt-59yz). Without this, "the failure always wins" would
 // be free to escalate a red main for a run that only ever got stopped.
 func TestRunGatesOnWorktree_AllStoppedGatesKeepTheSentinel(t *testing.T) {
-	stubMainBranchTestGateVerdicts(t, map[string]error{
-		"lint": interruptedGateError("lint"),
-		"test": interruptedGateError("test"),
-	})
+	t.Parallel()
 
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
 	}
+	stubMainBranchTestGateVerdicts(t, d, map[string]error{
+		"lint": interruptedGateError("lint"),
+		"test": interruptedGateError("test"),
+	})
 	err := d.runGatesOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), map[string]string{
 		"lint": "make lint",
 		"test": "make test",
@@ -1761,13 +1760,13 @@ func TestContains(t *testing.T) {
 	}
 }
 
-// stubNoContainers overrides package slot's docker-ps lookup for the
-// duration of t so these tests never shell out to the real docker CLI (see
-// internal/cmd/mq_batch_slot_test.go's stubNoContainers for the same need).
-func stubNoContainers(t *testing.T) {
-	t.Helper()
-	t.Cleanup(slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil }))
-}
+// noContainers is a container runtime with nothing running, so a gate built
+// on it never shells out to the real docker CLI.
+type noContainers struct{}
+
+func (noContainers) List() ([]string, error)    { return nil, nil }
+func (noContainers) Remove(string) error        { return nil }
+func (noContainers) Info() (slot.VMInfo, error) { return slot.VMInfo{}, nil }
 
 // TestAcquireMainBranchTestSlot_AcquiresAndReleases is the regression test
 // for gt-hpce: testRigMainBranch's gate/test run must be a first-class
@@ -1776,10 +1775,13 @@ func stubNoContainers(t *testing.T) {
 // bug, but for the daemon's own baseline run rather than a formula-invoked
 // test_command).
 func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
 	townRoot := t.TempDir()
+	gate := slot.NewGate(slot.WithRuntime(noContainers{}))
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	d.seams.slots = gate
 
-	h, err := acquireMainBranchTestSlot(townRoot, "gastown")
+	h, err := d.acquireMainBranchTestSlot("gastown")
 	if err != nil {
 		t.Fatalf("acquireMainBranchTestSlot: %v", err)
 	}
@@ -1787,7 +1789,7 @@ func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
 		t.Fatalf("acquireMainBranchTestSlot returned a nil handle")
 	}
 
-	rep, err := slot.Status(townRoot)
+	rep, err := gate.Status(townRoot)
 	if err != nil {
 		t.Fatalf("slot.Status while held: %v", err)
 	}
@@ -1799,7 +1801,7 @@ func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 
-	rep, err = slot.Status(townRoot)
+	rep, err = gate.Status(townRoot)
 	if err != nil {
 		t.Fatalf("slot.Status after release: %v", err)
 	}
@@ -1915,12 +1917,13 @@ func TestTriggerMainBranchTests_OverdueRunsAndPersists(t *testing.T) {
 // before anything looks at main again. triggerMainBranchTests must leave the
 // last-run file untouched so the next short check tick retries instead.
 func TestTriggerMainBranchTests_AllSkippedDoesNotPersist(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
 
 	if started := d.triggerMainBranchTests(); !started {
 		t.Fatal("expected the trigger to start a cycle when no last-run is recorded")
@@ -1996,22 +1999,16 @@ func poolHeldBy(roles ...string) slot.Report {
 }
 
 // stubGatePool pins the container-gate pool's held/owner picture for the
-// duration of t so the skip decision is driven by a named pool state instead of
+// daemon d so the skip decision is driven by a named pool state instead of
 // racing a real refinery into a real flock — the same need hostLoadFn serves
 // for the host-busy gate (gt-lf2r).
-func stubGatePool(t *testing.T, rep slot.Report) {
-	t.Helper()
-	prev := mainBranchTestGatePoolStatusFn
-	mainBranchTestGatePoolStatusFn = func(string) (slot.Report, error) { return rep, nil }
-	t.Cleanup(func() { mainBranchTestGatePoolStatusFn = prev })
+func stubGatePool(d *Daemon, rep slot.Report) {
+	d.seams.gatePoolStatus = func(string) (slot.Report, error) { return rep, nil }
 }
 
 // stubGatePoolError makes the pool unreadable, for the fail-open path.
-func stubGatePoolError(t *testing.T, err error) {
-	t.Helper()
-	prev := mainBranchTestGatePoolStatusFn
-	mainBranchTestGatePoolStatusFn = func(string) (slot.Report, error) { return slot.Report{}, err }
-	t.Cleanup(func() { mainBranchTestGatePoolStatusFn = prev })
+func stubGatePoolError(d *Daemon, err error) {
+	d.seams.gatePoolStatus = func(string) (slot.Report, error) { return slot.Report{}, err }
 }
 
 // writeTestTownRig lays out the minimum a cycle needs to reach a rig: the rig
@@ -2220,12 +2217,13 @@ func TestNoteGateBusySkip_MeasuresTheUnbrokenRun(t *testing.T) {
 // the rig skip — naming that holder — before the fetch and worktree-add, not
 // after waiting 60m for a slot the merge gate needs.
 func TestTestRigMainBranch_SkipsBeforeSetupWhenRefineryHoldsSlot(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
 
 	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
 
@@ -2249,12 +2247,13 @@ func TestTestRigMainBranch_SkipsBeforeSetupWhenRefineryHoldsSlot(t *testing.T) {
 // repo, so "tested normally" surfaces as a setup failure — any error other than
 // the gate-busy sentinel is the proof that the skip decision let it through.
 func TestTestRigMainBranch_FreePoolIsNotSkipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy())
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubGatePool(d, poolHeldBy())
 
 	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
 
@@ -2273,13 +2272,14 @@ func TestTestRigMainBranch_FreePoolIsNotSkipped(t *testing.T) {
 // skip_when_gate_busy=false a refinery hold must not stop the rig, which is what
 // lets a town that would rather compete for the slot opt out.
 func TestTestRigMainBranch_GateBusyCheckCanBeDisabled(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	no := false
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true, SkipWhenGateBusy: &no})
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
 
 	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
 
@@ -2296,12 +2296,13 @@ func TestTestRigMainBranch_GateBusyCheckCanBeDisabled(t *testing.T) {
 // it as one would let a broken lock directory stop the patrol that catches
 // regressions in main.
 func TestTestRigMainBranch_UnreadablePoolDoesNotSkip(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePoolError(t, errors.New("lock dir unreadable"))
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubGatePoolError(d, errors.New("lock dir unreadable"))
 
 	err := d.testRigMainBranch("gastown", filepath.Join(townRoot, "gastown"), time.Minute)
 
@@ -2318,13 +2319,14 @@ func TestTestRigMainBranch_UnreadablePoolDoesNotSkip(t *testing.T) {
 // failed" over a rig nothing looked at is the reading that clears the failure
 // alert on an unverified main.
 func TestRunMainBranchTests_AllSkippedCycleCountsSkips(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	var logged, escalated bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
-	captureMainBranchTestEscalations(t, &escalated)
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
+	captureMainBranchTestEscalations(d, &escalated)
 
 	d.runMainBranchTests()
 
@@ -2357,10 +2359,10 @@ func TestRunMainBranchTests_AllSkippedCycleCountsSkips(t *testing.T) {
 // stub would be flaky — the pool state is therefore shared, and both rigs
 // skipping is the case both orders produce.
 func TestRunMainBranchTests_CountsSkipsAcrossRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
 	addTestTownRig(t, townRoot, "otherrig", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{
@@ -2368,7 +2370,8 @@ func TestRunMainBranchTests_CountsSkipsAcrossRigs(t *testing.T) {
 		// The bound is off so the tally is the only thing this test reports on.
 		GateBusyStarveAfterStr: "0",
 	})
-	captureMainBranchTestEscalations(t, &bytes.Buffer{})
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
+	captureMainBranchTestEscalations(d, &bytes.Buffer{})
 
 	d.runMainBranchTests()
 
@@ -2378,14 +2381,12 @@ func TestRunMainBranchTests_CountsSkipsAcrossRigs(t *testing.T) {
 }
 
 // stubMainBranchTestRigVerdicts hands the patrol cycle a fixed verdict per rig
-// by stubbing mainBranchTestRigFn, so a cycle test can mix a pass, a failure and
+// through d's testRig seam, so a cycle test can mix a pass, a failure and
 // an interruption without standing up a bare repo (or a real mid-run context
 // cancellation) behind any of them. A rig the map does not name fails the test
 // rather than quietly running the real path.
-func stubMainBranchTestRigVerdicts(t *testing.T, verdicts map[string]error) {
-	t.Helper()
-	prev := mainBranchTestRigFn
-	mainBranchTestRigFn = func(_ *Daemon, rigName, _ string, _ time.Duration) error {
+func stubMainBranchTestRigVerdicts(t *testing.T, d *Daemon, verdicts map[string]error) {
+	d.seams.testRig = func(_ *Daemon, rigName, _ string, _ time.Duration) error {
 		verdict, ok := verdicts[rigName]
 		if !ok {
 			t.Errorf("the cycle walked rig %q, which this test gave no verdict for", rigName)
@@ -2393,7 +2394,6 @@ func stubMainBranchTestRigVerdicts(t *testing.T, verdicts map[string]error) {
 		}
 		return verdict
 	}
-	t.Cleanup(func() { mainBranchTestRigFn = prev })
 }
 
 // TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert is the mixed
@@ -2408,17 +2408,18 @@ func stubMainBranchTestRigVerdicts(t *testing.T, verdicts map[string]error) {
 // at all" is exactly "the alert was left as it stands" — a log line saying so
 // could not tell a withheld clear apart from a failed one.
 func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.T) {
+	t.Parallel()
 	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
-	stubMainBranchTestRigVerdicts(t, map[string]error{
-		"gastown":  nil,
-		"otherrig": errMainBranchTestInterrupted,
-	})
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubMainBranchTestRigVerdicts(t, d, map[string]error{
+		"gastown":  nil,
+		"otherrig": errMainBranchTestInterrupted,
+	})
 	d.notifier = rec
 
 	d.runMainBranchTests()
@@ -2446,14 +2447,15 @@ func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.
 // Without it the fix would be free to over-correct into an alert that can never
 // clear.
 func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
+	t.Parallel()
 	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
-	stubMainBranchTestRigVerdicts(t, map[string]error{"gastown": nil, "otherrig": nil})
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubMainBranchTestRigVerdicts(t, d, map[string]error{"gastown": nil, "otherrig": nil})
 	d.notifier = rec
 
 	d.runMainBranchTests()
@@ -2472,17 +2474,18 @@ func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
 // the interruption branch first and this cycle escalates nothing while a rig is
 // demonstrably broken.
 func TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates(t *testing.T) {
+	t.Parallel()
 	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
-	stubMainBranchTestRigVerdicts(t, map[string]error{
-		"gastown":  errors.New("main branch test failed on internal/widget"),
-		"otherrig": errMainBranchTestInterrupted,
-	})
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	stubMainBranchTestRigVerdicts(t, d, map[string]error{
+		"gastown":  errors.New("main branch test failed on internal/widget"),
+		"otherrig": errMainBranchTestInterrupted,
+	})
 	d.notifier = rec
 
 	d.runMainBranchTests()
@@ -2506,16 +2509,17 @@ func TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates(t *test
 // not moved yet. The bound is 1ns so the second cycle crosses it without the
 // test waiting out the default 6h.
 func TestRunMainBranchTests_StarvedRigEscalates(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
-	stubGatePool(t, poolHeldBy("gastown/refinery"))
 
 	var logged, escalated bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{
 		Enabled:                true,
 		GateBusyStarveAfterStr: "1ns",
 	})
-	captureMainBranchTestEscalations(t, &escalated)
+	stubGatePool(d, poolHeldBy("gastown/refinery"))
+	captureMainBranchTestEscalations(d, &escalated)
 
 	d.runMainBranchTests()
 	if escalated.Len() > 0 {
@@ -2545,16 +2549,13 @@ func TestRunMainBranchTests_StarvedRigEscalates(t *testing.T) {
 
 // captureMainBranchTestEscalations redirects the starvation escalation into buf
 // for the duration of the calling test. Seamed for the same reason
-// maintenanceEscalateFn is: the escalation is the only signal that a yielding
+// the maintenance escalation is: the escalation is the only signal that a yielding
 // patrol has stopped testing a rig, so it needs a test that drives it — and one
 // that asserts the escalation does not fire, on the cycles that must not.
-func captureMainBranchTestEscalations(t *testing.T, buf *bytes.Buffer) {
-	t.Helper()
-	prev := mainBranchTestEscalateFn
-	mainBranchTestEscalateFn = func(_ *Daemon, key, source, message string) {
+func captureMainBranchTestEscalations(d *Daemon, buf *bytes.Buffer) {
+	d.seams.mainBranchEscalate = func(_ *Daemon, key, source, message string) {
 		fmt.Fprintf(buf, "key=%s source=%s\n%s\n", key, source, message)
 	}
-	t.Cleanup(func() { mainBranchTestEscalateFn = prev })
 }
 
 // addTestTownRig adds a second rig to a town laid out by writeTestTownRig.

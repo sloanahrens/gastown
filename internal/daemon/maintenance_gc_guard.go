@@ -47,9 +47,9 @@ func (d *Daemon) tryDoltTask(name string) (release func(), ok bool) {
 	return d.doltMaintMu.RUnlock, true
 }
 
-// maintenanceConvoyPauseFn pauses the ConvoyManager's Dolt reads for one
-// database's gc and returns the resume function. Seamed for tests.
-var maintenanceConvoyPauseFn = func(d *Daemon) (resume func(), ok bool) {
+// pauseConvoyForGC pauses the ConvoyManager's Dolt reads for one database's
+// gc and returns the resume function.
+func pauseConvoyForGC(d *Daemon) (resume func(), ok bool) {
 	cm := d.convoyManager
 	if cm == nil {
 		return func() {}, true
@@ -85,7 +85,8 @@ func (d *Daemon) doltRestartHeldForGC() bool {
 		// Dispatched: this runs under the Dolt manager's lock on the daemon
 		// loop, and gt escalate can take minutes (60s x retries). The restart
 		// it is releasing must not wait on the alert.
-		go maintenanceEscalateFn(d, "scheduled_maintenance", msg)
+		m := d.maintenance()
+		m.dispatch(func() { m.escalate(d, "scheduled_maintenance", msg) })
 	}
 	return false
 }
@@ -115,14 +116,7 @@ func discoverMaintenanceDatabases(dataDir string) ([]string, error) {
 	return out, nil
 }
 
-// maintenanceGCDatabasesFn discovers gc mode's databases. Seamed for tests.
-var maintenanceGCDatabasesFn = discoverMaintenanceDatabases
-
 // --- external server -------------------------------------------------------------
-
-// maintenanceGCExternalFn reports whether the Dolt server is not one this
-// daemon can measure on local disk. Seamed for tests.
-var maintenanceGCExternalFn = func(d *Daemon) (bool, string) { return d.maintenanceGCExternal() }
 
 // maintenanceGCExternal is true when the Dolt server is externally managed or
 // not on a loopback host: its data dir is not this host's, so the size
@@ -240,7 +234,7 @@ func (d *Daemon) closeDeferredGCWindow(now time.Time, interval string) {
 	if !shouldEscalateDeferredWindows(st.ConsecutiveDeferredWindows, threshold) {
 		return
 	}
-	maintenanceEscalateFn(d, "scheduled_maintenance", deferredWindowsMessage(st, closed))
+	d.maintenance().escalate(d, "scheduled_maintenance", deferredWindowsMessage(st, closed))
 }
 
 // deferredWindowsMessage renders the skipped-window escalation.

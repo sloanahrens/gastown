@@ -319,19 +319,13 @@ func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: discardLogger} // patrol inactive: run returns at once
-	if !d.triggerScheduledSlings() {
-		t.Fatal("first trigger should start")
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for d.scheduledSlingsRunning.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("first cycle did not clear the flag")
-		}
-		time.Sleep(time.Millisecond)
-	}
 	d.scheduledSlingsRunning.Store(true)
 	if d.triggerScheduledSlings() {
-		t.Error("second trigger must skip while running")
+		t.Error("a trigger must skip while a cycle is running")
+	}
+	d.scheduledSlingsRunning.Store(false)
+	if !d.triggerScheduledSlings() {
+		t.Fatal("a trigger with no cycle running should start one")
 	}
 }
 

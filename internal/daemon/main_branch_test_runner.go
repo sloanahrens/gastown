@@ -756,44 +756,6 @@ var errMainBranchTestInterrupted = errors.New("main_branch_test run interrupted"
 // all-green run uses to clear the failure alert (gt-lf2r).
 var errMainBranchTestGateBusy = errors.New("skipped: gate busy")
 
-// mainBranchTestGatePoolStatusFn reads the container-gate pool's held/owner
-// picture for the skip decision. A package variable, following this package's
-// *Fn seam convention (maintenanceExecFn), so a test can
-// pin a pool state — "gastown/refinery holds slot 0" — without racing a real
-// refinery into a real flock.
-//
-// slot.StatusPoolLocksOnly, not slot.StatusPool: the decision reads nothing
-// but held/owner, and its doc comment names exactly this caller shape as the
-// one that should not pay for the `docker ps` cross-check (gt-a8kx). The
-// container half answers "is an unwrapped suite running", which is the
-// question AcquirePoolReal already asks below — and answers on the state it
-// actually takes the slot in, rather than on a stale check from before the
-// setup commands ran.
-var mainBranchTestGatePoolStatusFn = func(townRoot string) (slot.Report, error) {
-	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	pool := slot.PoolFromConfig(cg)
-	return slot.StatusPoolLocksOnly(townRoot, pool)
-}
-
-// mainBranchTestRigFn runs one rig's main-branch check for a cycle. A package
-// variable, following this package's *Fn seam convention (
-// mainBranchTestGatePoolStatusFn), so a cycle test can hand the loop a pass, a
-// failure, or an interruption directly: the alert arithmetic below is decided
-// over the *verdicts*, and reaching each shape through the real path would mean
-// a bare repo, a gate config, and a real mid-run context cancellation for the
-// interrupted one.
-var mainBranchTestRigFn = func(d *Daemon, rigName, rigPath string, timeout time.Duration) error {
-	return d.testRigMainBranch(rigName, rigPath, timeout)
-}
-
-// mainBranchTestEscalateFn reports a rig starved off its baseline test by a
-// persistently busy gate. Seamed for the same reason as maintenanceEscalateFn:
-// the escalation is the only signal that a yielding patrol has stopped testing
-// a rig at all, so it needs a test that drives it.
-var mainBranchTestEscalateFn = func(d *Daemon, key, source, message string) {
-	d.escalateAlert(key, source, message)
-}
-
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates
 // failures. Returns the number of rigs actually tested (ran, failed, or was
@@ -850,7 +812,7 @@ func (d *Daemon) runMainBranchTests() int {
 		}
 
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
-		err := mainBranchTestRigFn(d, rigName, rigPath, timeout)
+		err := d.seams.mainBranchTestRig(d, rigName, rigPath, timeout)
 		if errors.Is(err, errMainBranchTestGateBusy) {
 			// A skip, not a verdict: this rig was not tested, so it must not
 			// count toward the "tested" total the summary and the alert-clearing
@@ -959,7 +921,7 @@ func (d *Daemon) reportGateBusyStarved(rigName string) {
 			"bound: patrols.main_branch_test.gate_busy_starve_after (%s); set it to 0 to keep skipping without this escalation, or skip_when_gate_busy=false to compete for the slot instead of yielding.",
 		rigName, skippedFor.Round(time.Minute), starveAfter)
 	d.logger.Printf("main_branch_test: %s: STARVED: not tested for %s while a merge gate held the pool", rigName, skippedFor.Round(time.Minute))
-	mainBranchTestEscalateFn(d, mainBranchTestGateBusyAlertKey(rigName), "main_branch_test", msg)
+	d.seams.escalateMainBranch(d, mainBranchTestGateBusyAlertKey(rigName), "main_branch_test", msg)
 }
 
 // noteGateBusySkip starts or advances rigName's unbroken run of gate-busy skips
@@ -1015,7 +977,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	// mainBranchTestSetupTimeout, rather than the 60m slot wait the merge gates
 	// were losing.
 	if mainBranchTestSkipWhenGateBusy(d.patrolConfig) {
-		rep, err := mainBranchTestGatePoolStatusFn(d.config.TownRoot)
+		rep, err := d.seams.mainBranchGatePoolStatus(d.config.TownRoot)
 		if err != nil {
 			// Failing open: a pool this daemon cannot read is not evidence of
 			// a merge gate, and skipping on it would let a broken lock dir
@@ -1087,7 +1049,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	// descending from it queues behind this hold instead of skipping its
 	// lock (gt-off9, see acquireMainBranchTestSlot).
 	d.mainBranchTestWaitingSlot.Store(true)
-	h, err := acquireMainBranchTestSlot(d.config.TownRoot, rigName)
+	h, err := d.acquireMainBranchTestSlot(rigName)
 	d.mainBranchTestWaitingSlot.Store(false)
 	if err != nil {
 		return fmt.Errorf("acquiring container-gate slot: %w", err)
@@ -1149,9 +1111,13 @@ func (d *Daemon) runRigGates(ctx context.Context, rigName, commit, workDir strin
 // nobody holds — its hold would then be invisible to everyone else, with no
 // flock, no owner file and no docker-ps check. See AcquirePoolReal's doc
 // comment.
-func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
+func (d *Daemon) acquireMainBranchTestSlot(rigName string) (*slot.Handle, error) {
+	townRoot := d.config.TownRoot
 	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
 	pool := slot.PoolFromConfig(cg)
+	if g := d.seams.slots; g != nil {
+		return g.AcquirePoolReal(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
+	}
 	return slot.AcquirePoolReal(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
 }
 
@@ -1167,21 +1133,11 @@ func (d *Daemon) commitTested(rigName, worktreePath string) string {
 	return strings.TrimSpace(commit)
 }
 
-// mainBranchTestGateFn runs one gate of a rig's main-branch check. A package
-// variable, following this package's *Fn seam convention
-// (mainBranchTestGatePoolStatusFn, mainBranchTestEscalateFn), so a test can hand
-// the loop a verdict per gate: gates are walked in map order, so aiming a real
-// mid-run cancellation at the gate a mixed-cycle test needs is not something a
-// test can set up without racing the iteration.
-var mainBranchTestGateFn = func(d *Daemon, ctx context.Context, rigName, commit, workDir, label, command string) error {
-	return d.runCommandOnWorktree(ctx, rigName, commit, workDir, label, command)
-}
-
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
 func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDir string, gates map[string]string) error {
 	var failures, stopped []string
 	for name, cmd := range gates {
-		if err := mainBranchTestGateFn(d, ctx, rigName, commit, workDir, name, cmd); err != nil {
+		if err := d.seams.mainBranchGate(d, ctx, rigName, commit, workDir, name, cmd); err != nil {
 			// The gates' messages are joined as text, which would drop the
 			// sentinel: a canceled run has to stay recognizable as a stopped
 			// run, not become an ordinary failure on the way out (gt-59yz).

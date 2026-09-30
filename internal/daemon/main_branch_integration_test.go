@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 func TestMainBranchIntegrationCommandFor(t *testing.T) {
@@ -247,8 +248,7 @@ func TestRunRigIntegration_InterruptedIsNotAVerdict(t *testing.T) {
 // integration tier of the tree it checked out. Before gt-22hdp.39 it ran only
 // the test command, and nothing ran the tier at all.
 func TestTestRigMainBranch_RunsTheIntegrationTier(t *testing.T) {
-	stubNoContainers(t)
-	stubGatePool(t, poolHeldBy())
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
 	rigPath := filepath.Join(townRoot, "gastown")
@@ -267,6 +267,8 @@ func TestTestRigMainBranch_RunsTheIntegrationTier(t *testing.T) {
 	var logged bytes.Buffer
 	gate := newGateShell(gateExit("", 0))
 	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
+	stubGatePool(d, poolHeldBy())
+	d.seams.slots = slot.NewGate(slot.WithRuntime(noContainers{}))
 	d.ctx = context.Background()
 
 	// The rig's bare repo, cloned from an origin whose main declares the tier.

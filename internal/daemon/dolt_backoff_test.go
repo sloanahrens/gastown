@@ -4,22 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-)
-
-const (
-	// testDeadlockTimeout is the maximum time to wait for a goroutine to
-	// complete before assuming a deadlock. Generous to avoid flakes on slow CI.
-	testDeadlockTimeout = 5 * time.Second
-
-	// testConcurrentHold is how long a test goroutine holds a lock or sleeps
-	// to give other goroutines a chance to contend.
-	testConcurrentHold = 200 * time.Millisecond
 )
 
 func TestAdvanceBackoff(t *testing.T) {
@@ -451,9 +440,6 @@ func TestRestartingFlag_PreventsConcurrentRestarts(t *testing.T) {
 
 func TestStartLocked_SkipsIfAlreadyRunning(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("isProcessAlive uses Signal(nil) on Windows which doesn't reliably detect live processes")
-	}
 	// Verify that startLocked() re-checks isRunning() to close the TOCTOU window.
 	// If the server is already running (m.process is alive), startLocked() should
 	// return nil without attempting to start a second instance.
@@ -478,17 +464,12 @@ func TestStartLocked_SkipsIfAlreadyRunning(t *testing.T) {
 		},
 	}
 
-	// Set m.process to our own process so isRunning() returns true.
-	// Our own process is always alive.
-	self, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.process = self
+	// A server that is already running, as isRunning() reports it.
+	m.runningFn = func() (int, bool) { return os.Getpid(), true }
 
 	// Call startLocked() with the mutex held (as the contract requires).
 	m.mu.Lock()
-	err = m.startLocked()
+	err := m.startLocked()
 	m.mu.Unlock()
 
 	if err != nil {
@@ -562,13 +543,8 @@ func TestRestartWithBackoff_SkipsIfStartedDuringSleep(t *testing.T) {
 	close(sleepDone)
 
 	// Wait for restartWithBackoff to complete
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected nil error when server started during backoff, got: %v", err)
-		}
-	case <-time.After(testDeadlockTimeout):
-		t.Fatal("restartWithBackoff never completed — possible deadlock")
+	if err := <-done; err != nil {
+		t.Fatalf("expected nil error when server started during backoff, got: %v", err)
 	}
 
 	// Verify the skip was logged
@@ -732,11 +708,16 @@ func TestConcurrentEnsureRunning_OnlyOneRestart(t *testing.T) {
 		startCount.Add(1)
 		return nil
 	}
+	const n = 10
+	// The restarter's backoff sleep holds until every other caller has
+	// returned, so each of them meets the restart in progress.
+	returned := make(chan struct{}, n)
 	m.sleepFn = func(d time.Duration) {
-		time.Sleep(testConcurrentHold) // Hold to let other goroutines try
+		for i := 0; i < n-1; i++ {
+			<-returned
+		}
 	}
 
-	const n = 10
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 
@@ -746,6 +727,7 @@ func TestConcurrentEnsureRunning_OnlyOneRestart(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_ = m.EnsureRunning()
+			returned <- struct{}{}
 		}()
 	}
 
@@ -787,25 +769,16 @@ func TestConcurrentEnsureRunning_BackoffSleepReleasesLock(t *testing.T) {
 		done2 <- m.EnsureRunning()
 	}()
 
-	select {
-	case err := <-done2:
-		if err != nil {
-			t.Errorf("concurrent caller got error: %v", err)
-		}
-	case <-time.After(testDeadlockTimeout):
-		t.Fatal("concurrent caller blocked while restart was sleeping")
+	// A caller blocked on the mutex while the restart sleeps would hang here.
+	if err := <-done2; err != nil {
+		t.Errorf("concurrent caller got error: %v", err)
 	}
 
 	// Let first goroutine finish
 	close(sleepDone)
 
-	select {
-	case err := <-done1:
-		if err != nil {
-			t.Errorf("first caller got error: %v", err)
-		}
-	case <-time.After(testDeadlockTimeout):
-		t.Fatal("first caller never completed")
+	if err := <-done1; err != nil {
+		t.Errorf("first caller got error: %v", err)
 	}
 }
 

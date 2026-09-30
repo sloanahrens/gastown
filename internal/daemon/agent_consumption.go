@@ -55,8 +55,9 @@ import (
 // consumptionRecheckDelay is the settle time allowed for the pane to repaint
 // after a flush before the session is re-probed. Claude Code needs a moment to
 // consume queued messages, and judging on the first frame would report a
-// recovered session as still wedged. Var so tests can zero it.
-var consumptionRecheckDelay = 750 * time.Millisecond
+// recovered session as still wedged. The wait runs on the daemon's clock, so
+// tests move a fake clock past it.
+const consumptionRecheckDelay = 750 * time.Millisecond
 
 // consumptionEscalationInterval is how long the daemon stays quiet about the
 // same still-wedged session after escalating once. Without it, a session that
@@ -223,9 +224,7 @@ func (d *Daemon) probeInputConsumption(agent runningAgent, escalate func(source,
 	// so the re-probe judges the flush on the silence window alone.
 	clock.Reset(agent.Session)
 
-	if consumptionRecheckDelay > 0 {
-		time.Sleep(consumptionRecheckDelay)
-	}
+	d.clk().Sleep(consumptionRecheckDelay)
 
 	after, err := d.tmux.DetectComposerStallTracked(agent.Session, frozenFor, clock)
 	if err != nil {
