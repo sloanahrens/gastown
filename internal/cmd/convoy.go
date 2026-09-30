@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -30,7 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/tui/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -90,7 +88,6 @@ var (
 	convoyListStatus   string
 	convoyListAll      bool
 	convoyListTree     bool
-	convoyInteractive  bool
 	convoyStrandedJSON bool
 	convoyCloseReason  string
 	convoyCloseNotify  string
@@ -179,9 +176,6 @@ var convoyCmd = &cobra.Command{
 	GroupID: GroupWork,
 	Short:   "Track batches of work across rigs",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if convoyInteractive {
-			return runConvoyTUI()
-		}
 		return requireSubcommand(cmd, args)
 	},
 	Long: `Manage convoys - the primary unit for tracking batched work.
@@ -212,7 +206,7 @@ COMMANDS:
   close     Close a convoy (verifies all items done, or use --force)
   land      Land an owned convoy (cleanup worktrees, close convoy)
   status    Show convoy progress, tracked issues, and active workers
-  list      List convoys (the dashboard view)
+  list      List convoys
   watch     Subscribe to convoy completion notifications
   unwatch   Unsubscribe from convoy completion notifications`,
 }
@@ -373,9 +367,6 @@ func init() {
 	convoyListCmd.Flags().StringVar(&convoyListStatus, "status", "", "Filter by status (open, closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListAll, "all", false, "Show all convoys (open and closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListTree, "tree", false, "Show convoy + child status tree")
-
-	// Interactive TUI flag (on parent command)
-	convoyCmd.Flags().BoolVarP(&convoyInteractive, "interactive", "i", false, "Interactive tree view")
 
 	// Check flags
 	convoyCheckCmd.Flags().BoolVar(&convoyCheckDryRun, "dry-run", false, "Preview what would close without acting")
@@ -2205,11 +2196,8 @@ func convoyLabels(owned bool) string {
 	return "gt:convoy"
 }
 
-func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string) ([]convoyListIssue, error) {
+func listConvoyIssues(townBeads, status string, all bool) ([]convoyListIssue, error) {
 	args := []string{"list", "--label=gt:convoy", "--json", "--limit=0"}
-	for _, label := range extraLabels {
-		args = append(args, "--label="+label)
-	}
 	if status != "" {
 		args = append(args, "--status="+status)
 	} else if all {
@@ -2238,7 +2226,7 @@ func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string)
 		return nil, err
 	}
 	for _, issue := range legacy {
-		if seen[issue.ID] || issue.IssueType != "convoy" || !hasAllLabels(issue.Labels, extraLabels) {
+		if seen[issue.ID] || issue.IssueType != "convoy" {
 			continue
 		}
 		convoys = append(convoys, issue)
@@ -2257,15 +2245,6 @@ func readConvoyIssues(townBeads string, args ...string) ([]convoyListIssue, erro
 		return nil, err
 	}
 	return issues, nil
-}
-
-func hasAllLabels(labels, required []string) bool {
-	for _, label := range required {
-		if !hasLabel(labels, label) {
-			return false
-		}
-	}
-	return true
 }
 
 // convoyMergeFromFields extracts the merge strategy from a convoy description
@@ -2382,7 +2361,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 
 	// Drop tracked edges whose target is not a bead ID: no query can resolve
 	// one, so it came back as trackedStatusUnknown and held the convoy open
-	// forever (gt-gsky). The dashboard drops the same edge (gt-44z1).
+	// forever (gt-gsky, gt-44z1).
 	//
 	// A well-formed cross-rig target that is merely unreachable stays unknown
 	// and still blocks auto-close — the gt-bs6 contract.
@@ -2838,19 +2817,6 @@ func formatWorkerAge(d time.Duration) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
-// runConvoyTUI launches the interactive convoy TUI.
-func runConvoyTUI() error {
-	townBeads, err := getTownBeadsDir()
-	if err != nil {
-		return err
-	}
-
-	m := convoy.New(townBeads)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err = p.Run()
-	return err
 }
 
 // resolveConvoyNumber converts a numeric shortcut (1, 2, 3...) to a convoy ID.

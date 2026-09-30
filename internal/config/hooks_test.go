@@ -5,8 +5,8 @@
 // - All SessionStart hooks with `gt prime` include the `--hook` flag
 // - The registry.toml includes all required roles for session-prime
 //
-// These tests exist because hook misconfiguration causes seance to fail
-// (predecessor sessions become undiscoverable).
+// These tests exist because hook misconfiguration silences session_start
+// events, so a session's start goes unrecorded.
 
 package config
 
@@ -75,7 +75,7 @@ func findTownRoot() (string, error) {
 
 // TestSessionStartHooksHaveHookFlag ensures all SessionStart hooks with
 // `gt prime` include the `--hook` flag. Without this flag, sessions won't
-// emit session_start events and seance can't discover predecessor sessions.
+// emit session_start events.
 func TestSessionStartHooksHaveHookFlag(t *testing.T) {
 	townRoot, err := findTownRoot()
 	if err != nil {
@@ -135,7 +135,7 @@ func TestSessionStartHooksHaveHookFlag(t *testing.T) {
 
 	if len(failures) > 0 {
 		t.Errorf("SessionStart hooks missing --hook flag in gt prime command:\n  %s\n\n"+
-			"The --hook flag is required for seance to discover predecessor sessions.\n"+
+			"The --hook flag is required for a session to emit its session_start event.\n"+
 			"Fix by changing 'gt prime' to 'gt prime --hook' in these files.",
 			strings.Join(failures, "\n  "))
 	}
@@ -165,7 +165,7 @@ func TestRegistrySessionPrimeIncludesAllRoles(t *testing.T) {
 		t.Fatal("session-prime hook not found in registry.toml")
 	}
 
-	// All roles that should be able to use seance
+	// All roles whose session start must be recorded
 	requiredRoles := []string{"crew", "polecat", "witness", "refinery", "mayor", "deacon"}
 
 	roleSet := make(map[string]bool)
@@ -183,14 +183,14 @@ func TestRegistrySessionPrimeIncludesAllRoles(t *testing.T) {
 	if len(missingRoles) > 0 {
 		t.Errorf("session-prime hook missing roles: %v\n\n"+
 			"Current roles: %v\n"+
-			"All roles need session-prime for seance to discover their predecessor sessions.",
+			"All roles need session-prime to emit their session_start event.",
 			missingRoles, sessionPrime.Roles)
 	}
 
 	// Also verify the command has --hook
 	if !strings.Contains(sessionPrime.Command, "--hook") {
 		t.Errorf("session-prime command missing --hook flag:\n  %s\n\n"+
-			"The --hook flag is required for seance to discover predecessor sessions.",
+			"The --hook flag is required for a session to emit its session_start event.",
 			sessionPrime.Command)
 	}
 }
@@ -290,7 +290,7 @@ func TestAllAgentSessionStartHooksHaveHookFlag(t *testing.T) {
 
 	if len(failures) > 0 {
 		t.Errorf("SessionStart hooks missing --hook flag in gt prime command:\n  %s\n\n"+
-			"The --hook flag is required for seance to discover predecessor sessions.\n"+
+			"The --hook flag is required for a session to emit its session_start event.\n"+
 			"This validation covers all JSON-based agent settings (Claude, Gemini, etc.).",
 			strings.Join(failures, "\n  "))
 	}

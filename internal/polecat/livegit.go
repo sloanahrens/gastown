@@ -64,8 +64,8 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 // works and one that does not. `gt polecat list --all --json` probes one
 // worktree per seat; with the networked probe that is an ls-remote — plus the
 // remote-https helper it spawns — per seat, which measured 14.4s of a 15.0s
-// run across 15 seats and is what put the command over 90s at the dashboard's
-// 47 seats (gt-8q0s). Making those probes concurrent shrank that to 1.9s but
+// run across 15 seats and is what put the command over 90s at 47 seats
+// (gt-8q0s). Making those probes concurrent shrank that to 1.9s but
 // left the round trips in place; the local probe removes them, and the pool
 // then has only local subprocesses left to overlap. It keeps every other fact
 // identical.

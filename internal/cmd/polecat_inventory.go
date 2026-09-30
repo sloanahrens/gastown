@@ -80,7 +80,7 @@ type polecatInventoryEnv struct {
 	// GitProbeLocalOnly drops the network from the worktree probe: branch
 	// preservation is read from the rig's local remote-tracking refs instead of
 	// an ls-remote against the remote. The list path sets it, because it pays
-	// this probe once per seat and the dashboard polls it — an ls-remote per
+	// this probe once per seat and status consumers poll it — an ls-remote per
 	// seat is what pushed `gt polecat list --all` past 90s (gt-8q0s). It is a
 	// cost trade, not a verdict vocabulary: both probes judge the same facts
 	// and differ only in the branch tip they judge, so they disagree in both
@@ -398,9 +398,9 @@ func probePolecatWorktree(worktreePath string, localOnly bool) polecat.LiveGitSt
 // worth being able to assert on directly (see TestPolecatListInventoryEnvProbe).
 func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polecatMRIndex, activeMRSource polecat.IssueReader, spawn polecatSpawnFacts) polecatInventoryEnv {
 	return polecatInventoryEnv{
-		// The dashboard polls this command, so it must not pay a network round
-		// trip per seat: the probe reads branch preservation from the rig's
-		// local refs instead of running an ls-remote per seat (gt-8q0s).
+		// Status consumers poll this command, so it must not pay a network
+		// round trip per seat: the probe reads branch preservation from the
+		// rig's local refs instead of running an ls-remote per seat (gt-8q0s).
 		GitProbeLocalOnly: true,
 		MRs:               mrIndex,
 		// The active_mr policy resolves MR ids through the index it already has

@@ -62,9 +62,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | Command | What it does |
 |---------|-------------|
 | `gt compact` | TTL-based compaction: promotes/deletes wisps past their TTL |
-| `gt krc prune` | Prunes expired events from the KRC event store |
-| `gt krc config reset` | Resets KRC TTL configuration to defaults |
-| `gt krc decay` | Shows forensic value decay report (pruning guidance) |
 
 ## Dolt Database Cleanup
 
@@ -139,7 +136,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Layer | Scope | Key Commands |
 |-------|-------|-------------|
-| **L0** | Ephemeral data | `gt compact`, `gt krc prune` (TTL-based lifecycle) |
+| **L0** | Ephemeral data | `gt compact` (TTL-based lifecycle) |
 | **L1** | Processes | `gt deacon cleanup-orphans` |
 | **L2** | Git artifacts | `gt polecat gc` |
 | **L3** | Agents/sessions | `gt polecat nuke`, `gt done`, `gt shutdown`, `gt down` |

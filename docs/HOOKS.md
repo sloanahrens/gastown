@@ -347,4 +347,3 @@ When no base config exists, the system uses sensible defaults:
 - **SessionStart**: PATH setup + `gt prime --hook`
 - **PreCompact**: PATH setup + `gt prime --hook`
 - **UserPromptSubmit**: PATH setup + `gt mail check --inject`
-- **Stop**: PATH setup + `gt costs record`

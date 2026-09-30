@@ -8,7 +8,6 @@ import (
 )
 
 // TestBdListChildren_FallsBackToDepsTable is the regression test for GH #3700:
-// `gt mountain <epic>` failed with "no slingable tasks in DAG" because
 // `bd list --parent=<epic>` returned `[]` even though parent-child links
 // existed. The deps table query (`bd sql ... type='parent-child'`) is
 // authoritative; the new fallback in bdListChildren consults it whenever

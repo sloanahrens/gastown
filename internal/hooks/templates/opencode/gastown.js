@@ -128,12 +128,6 @@ export const GasTown = async ({ $, directory }) => {
         // Reset so next system.transform gets fresh context.
         primePromise = loadPrime("compact", eventSessionID(event));
       }
-      if (event?.type === "session.deleted") {
-        const sessionID = event.properties?.info?.id;
-        if (sessionID) {
-          await captureRun(`${gtCommand()} costs record --session ${shellQuote(sessionID)}`);
-        }
-      }
     },
     "experimental.chat.system.transform": async (input, output) => {
       // If session.created hasn't fired yet, start loading now.

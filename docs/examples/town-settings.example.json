@@ -76,22 +76,6 @@
 
     "agent_email_domain": "gastown.local",
 
-    "web_timeouts": {
-        "cmd_timeout": "15s",
-        "gh_cmd_timeout": "10s",
-        "tmux_cmd_timeout": "2s",
-        "fetch_timeout": "8s",
-        "default_run_timeout": "30s",
-        "max_run_timeout": "60s"
-    },
-
-    "worker_status": {
-        "stale_threshold": "5m",
-        "stuck_threshold": "30m",
-        "heartbeat_fresh_threshold": "5m",
-        "mayor_active_threshold": "5m"
-    },
-
     "feed_curator": {
         "done_dedupe_window": "10s",
         "sling_aggregate_window": "30s",

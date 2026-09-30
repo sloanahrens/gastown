@@ -85,9 +85,9 @@ func assertFeedLacks(t *testing.T, feedPath string, actors ...string) {
 	}
 }
 
-// The KRC pruner renames a rewritten events file over the path. Before
-// claude-9jq the curator kept reading the old inode and stopped curating the
-// feed until the next daemon restart.
+// A rotator renames a rewritten events file over the path. Before claude-9jq
+// the curator kept reading the old inode and stopped curating the feed until
+// the next daemon restart.
 func TestCurator_FollowsRenameRotation(t *testing.T) {
 	// Build each line once: feedLine stamps time.Now() to the second, and a
 	// rebuilt copy straddling a second boundary would not match the anchor.

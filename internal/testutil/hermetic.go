@@ -47,7 +47,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
-	"github.com/steveyegge/gastown/internal/krc"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -901,13 +900,11 @@ func explainedByRig(name string, rigs map[string]bool) bool {
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
 // file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
-// write-temp-then-rename sibling like .events.jsonl.tmp (internal/krc's
-// prune rewrite of the raw events log races the snapshot diff the same way,
-// gt-hotx). Town tooling routinely writes via create-tmp-then-rename, so any
-// concurrent invocation by any agent during a test window creates and then
-// removes one of these — indistinguishable from the .lock churn already
-// tolerated below (gt-wdr, the file-entry analog of gt-ro0's event-actor
-// exemption).
+// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp. Town tooling
+// routinely writes via create-tmp-then-rename, so any concurrent invocation
+// by any agent during a test window creates and then removes one of these —
+// indistinguishable from the .lock churn already tolerated below (gt-wdr,
+// the file-entry analog of gt-ro0's event-actor exemption).
 //
 // gt-lqri: the .tmp suffix alone is a fails-open exemption — a test that
 // abandons a .tmp file, or tooling that hard-crashes before renaming, looks
@@ -923,19 +920,14 @@ func isAtomicWriteTemp(name string) bool {
 
 // atomicWriteTemps maps each live target file on the snapshot's watched
 // surface to the exact suffixes its atomic writers append while building a
-// replacement, before renaming it over the target. .feed.jsonl has two
-// independent writers with different suffixes — krc's periodic prune
-// (replaceWithLines, gt-hotx) and the feed curator's separate truncate
-// rotation — so both must be listed, or the writer that isn't gets its
-// crash residue reported as a leak (exactly the bug this map replaced:
-// hardcoding a single ".tmp" sibling per file missed the curator's
-// ".truncate.tmp"). Suffixes are the producers' own exported constants
-// rather than re-typed literals, so a renamed suffix breaks the build here
-// instead of silently going stale.
+// replacement, before renaming it over the target. Every writer must be
+// listed: an unlisted one gets its crash residue reported as a leak (exactly
+// the bug this map replaced: hardcoding a single ".tmp" sibling per file
+// missed the curator's ".truncate.tmp"). Suffixes are the producers' own
+// exported constants rather than re-typed literals, so a renamed suffix
+// breaks the build here instead of silently going stale.
 var atomicWriteTemps = map[string][]string{
-	events.EventsFile:      {krc.ReplaceTempSuffix},
-	feed.FeedFile:          {krc.ReplaceTempSuffix, feed.TruncateTempSuffix},
-	krc.AutoPruneStateFile: {krc.ReplaceTempSuffix},
+	feed.FeedFile: {feed.TruncateTempSuffix},
 }
 
 // atomicTempPrefixes are CreateTemp patterns that produce temps on the

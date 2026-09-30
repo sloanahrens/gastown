@@ -107,7 +107,6 @@ func TestAllDogFormulas_CanBeWisped(t *testing.T) {
 		constants.MolConvoyFeed,
 		constants.MolConvoyCleanup,
 		"mol-dep-propagate",
-		"mol-digest-generate",
 		"mol-orphan-scan",
 		"mol-session-gc",
 	}
@@ -197,34 +196,3 @@ func TestPolecatFormulas_CanBeWisped(t *testing.T) {
 	}
 }
 
-// TestTownShutdownFormula_CanBeWisped verifies the town shutdown formula passes validation.
-// This formula is used by Mayor to orchestrate full Gas Town shutdown/restart.
-func TestTownShutdownFormula_CanBeWisped(t *testing.T) {
-	formulaPath := filepath.Join("formulas", "mol-town-shutdown.formula.toml")
-	data, err := os.ReadFile(formulaPath)
-	if err != nil {
-		t.Skipf("Formula file not found: %v", err)
-	}
-
-	f, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Failed to parse mol-town-shutdown formula: %v", err)
-	}
-
-	// Verify it's a workflow formula
-	if f.Type != TypeWorkflow {
-		t.Errorf("Expected workflow type, got %s", f.Type)
-	}
-
-	// All template variables must be defined
-	if err := f.ValidateTemplateVariables(); err != nil {
-		t.Errorf("Would fail wisp creation: %v", err)
-	}
-
-	// shutdown_reason should be defined but not required (has a use case without it)
-	if v, ok := f.Vars["shutdown_reason"]; !ok {
-		t.Error("Missing 'shutdown_reason' variable")
-	} else if v.Required {
-		t.Error("'shutdown_reason' should not be required (optional parameter)")
-	}
-}

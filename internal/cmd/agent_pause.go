@@ -269,9 +269,9 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 	}
 
 	// 2. Mirror agent_state=paused onto the agent bead for display (`gt
-	//    polecat identity show`, dashboards). Best-effort and never
-	//    consulted by any scanner — the marker file above is what gates
-	//    restarts, so a Dolt blip here cannot undo the pause.
+	//    polecat identity show`). Best-effort and never consulted by any
+	//    scanner — the marker file above is what gates restarts, so a Dolt
+	//    blip here cannot undo the pause.
 	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStatePaused)); err != nil {
 		style.PrintWarning("could not mirror agent_state=paused to bead %s: %v", target.BeadID, err)
 	}

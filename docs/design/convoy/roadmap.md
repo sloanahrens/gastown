@@ -281,9 +281,6 @@ pipeline that mountains build on.
 
 | Component | Description |
 |-----------|-------------|
-| `gt mountain <epic>` | CLI: validate + stage + label + launch |
-| `gt mountain status` | CLI: rich progress view (active, ready, blocked, skipped) |
-| `gt mountain pause/resume/cancel` | CLI: lifecycle management |
 | Witness failure tracking | Patrol step: count polecat failures per convoy issue, auto-skip after 3 |
 | Deacon mountain-audit | Patrol step: periodic progress check, dispatch Dog on stall |
 | `mol-mountain-dog` formula | Dog formula: investigate stall, sling orphaned issues, escalate |

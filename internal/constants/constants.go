@@ -120,8 +120,7 @@ const (
 	// progressing before it's considered a GUPP (Gas Town Universal Propulsion
 	// Principle) violation. GUPP states: if you have work on your hook, you run it.
 	//
-	// Single source of truth — referenced by daemon lifecycle patrol,
-	// TUI feed stuck detection, and web fetcher worker status.
+	// Single source of truth — referenced by the daemon's lifecycle patrol.
 	// Configurable via operational.session.gupp_violation_timeout.
 	GUPPViolationTimeout = 30 * time.Minute
 
@@ -185,9 +184,6 @@ const (
 	// (gt-058d)
 	FileLastHandoffTS = "last_handoff_ts"
 
-	// FileQuotaJSON is the quota state file in mayor/.
-	FileQuotaJSON = "quota.json"
-
 	// FileSessionID holds the runtime session ID a SessionStart hook resolved,
 	// so later `gt prime` runs in the same worktree reuse it instead of minting
 	// a new one. Lives in .runtime/.
@@ -214,7 +210,7 @@ const (
 	//   convoy        - Cross-project work tracking
 	//   slot          - Exclusive access / merge slots
 	//   queue         - Message queue routing (gt mail queue)
-	//   event         - Session/cost events (gt costs record)
+	//   event         - Session events
 	//   message       - Mail system (gt mail send, mailbox, router)
 	//   molecule      - Work decomposition (patrol checks, gt swarm)
 	//   gate          - Async coordination (bd gate wait, park/resume)
@@ -502,11 +498,6 @@ func RigSettingsPath(rigPath string) string {
 // MayorAccountsPath returns the path to mayor/accounts.json within a town root.
 func MayorAccountsPath(townRoot string) string {
 	return townRoot + "/" + DirMayor + "/" + FileAccountsJSON
-}
-
-// MayorQuotaPath returns the path to mayor/quota.json within a town root.
-func MayorQuotaPath(townRoot string) string {
-	return townRoot + "/" + DirMayor + "/" + FileQuotaJSON
 }
 
 // DefaultRateLimitPatterns are the default patterns that indicate a session

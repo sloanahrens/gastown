@@ -1251,8 +1251,8 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 // variables: bd rejects that bond anyway, and its own message does not say which
 // formula wanted them. A required variable the formula never interpolates is not
 // an error — bd does not demand a value for it, and failing there would block a
-// bond that works (mol-shutdown-dance's {target} is single-braced prose
-// substitution, not a placeholder). Values already in vars are never overwritten.
+// bond that works (a single-braced {name} in prose is a substitution, not a
+// placeholder). Values already in vars are never overwritten.
 //
 // When the formula cannot be loaded, vars are returned unchanged and bd reports
 // the real problem — a gt-side load failure must not block a bond bd can do.

@@ -715,9 +715,6 @@ gt handoff --shutdown        # Terminate (polecats)
 gt session stop <rig>/<agent>
 gt peek <agent>              # Check health
 gt nudge <agent> "message"   # Send message to agent
-gt seance                    # List discoverable predecessor sessions
-gt seance --talk <id>        # Talk to predecessor (full context)
-gt seance --talk <id> -p "Where is X?"  # One-shot question
 ```
 
 **Session Discovery**: Each session has a startup nudge that becomes searchable
