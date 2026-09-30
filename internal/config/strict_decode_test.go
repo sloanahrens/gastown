@@ -145,3 +145,31 @@ func TestDecodeYAMLFileRejectsUnknownKeys(t *testing.T) {
 		t.Fatalf("broken yaml = %v", err)
 	}
 }
+
+// TestDecodeJSONFileAmbiguousPromotedFieldIsUnknown: encoding/json ignores a
+// key two embedded structs declare at the same depth, and a shallower field
+// shadows a promoted one; the walker must agree on both.
+func TestDecodeJSONFileAmbiguousPromotedFieldIsUnknown(t *testing.T) {
+	t.Parallel()
+	type a struct {
+		X int `json:"x"`
+	}
+	type b struct {
+		X string `json:"x"`
+	}
+	var ambiguous struct {
+		a
+		b
+	}
+	var pe *ParseError
+	if err := DecodeJSONFile("f.json", []byte(`{"x": 1}`), &ambiguous); !errors.As(err, &pe) || len(pe.Keys) != 1 || pe.Keys[0] != "x" {
+		t.Fatalf("ambiguous promoted key = %v, want it reported unknown", err)
+	}
+	var shadowed struct {
+		a
+		X string `json:"x"`
+	}
+	if err := DecodeJSONFile("f.json", []byte(`{"x": "s"}`), &shadowed); err != nil || shadowed.X != "s" {
+		t.Fatalf("shadowing field = %v (%q)", err, shadowed.X)
+	}
+}

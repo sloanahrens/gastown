@@ -252,18 +252,41 @@ func lookupField(fields map[string]reflect.Type, key string) (reflect.Type, bool
 var jsonFieldCache sync.Map // reflect.Type -> map[string]reflect.Type
 
 // jsonFields returns the JSON object keys a struct type declares, including
-// the fields promoted from embedded structs, mapped to their types.
+// the fields promoted from embedded structs, mapped to their types. It
+// follows encoding/json's rule for promoted names: a shallower field wins,
+// and two fields of one name at the same depth cancel out, so encoding/json
+// ignores that key and the walker reports it as unknown.
 func jsonFields(t reflect.Type) map[string]reflect.Type {
 	if cached, ok := jsonFieldCache.Load(t); ok {
 		return cached.(map[string]reflect.Type)
 	}
+	byName := map[string][]fieldAt{}
+	collectJSONFields(t, 0, byName)
 	fields := make(map[string]reflect.Type)
-	collectJSONFields(t, fields)
+	for name, cands := range byName {
+		best, n := cands[0], 0
+		for _, c := range cands {
+			switch {
+			case c.depth < best.depth:
+				best, n = c, 1
+			case c.depth == best.depth:
+				n++
+			}
+		}
+		if n == 1 {
+			fields[name] = best.typ
+		}
+	}
 	jsonFieldCache.Store(t, fields)
 	return fields
 }
 
-func collectJSONFields(t reflect.Type, into map[string]reflect.Type) {
+type fieldAt struct {
+	typ   reflect.Type
+	depth int
+}
+
+func collectJSONFields(t reflect.Type, depth int, into map[string][]fieldAt) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		tag := f.Tag.Get("json")
@@ -277,7 +300,7 @@ func collectJSONFields(t reflect.Type, into map[string]reflect.Type) {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {
-				collectJSONFields(ft, into)
+				collectJSONFields(ft, depth+1, into)
 				continue
 			}
 		}
@@ -287,9 +310,7 @@ func collectJSONFields(t reflect.Type, into map[string]reflect.Type) {
 		if name == "" {
 			name = f.Name
 		}
-		if _, taken := into[name]; !taken {
-			into[name] = f.Type
-		}
+		into[name] = append(into[name], fieldAt{typ: f.Type, depth: depth})
 	}
 }
 
