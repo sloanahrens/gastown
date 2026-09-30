@@ -921,7 +921,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	if opts.ResumeBranch != "" {
 		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
 		// worktree directly to it.
-		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch); err != nil {
 			cleanupOnError()
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
@@ -1132,7 +1132,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	if opts.ResumeBranch != "" {
 		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
 		// worktree directly to it.
-		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch); err != nil {
 			cleanupOnError()
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
@@ -1784,7 +1784,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		// the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
 		// The worktree being repaired is exempt — it holds the branch now and is
 		// removed once the temp worktree is up (gt-0kk2).
-		if err := heldByOtherWorktree(repoGit, opts.ResumeBranch, oldClonePath); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch, oldClonePath); err != nil {
 			return nil, fmt.Errorf("repairing polecat %s: %w", name, err)
 		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
@@ -2058,7 +2058,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}
 
 	// gt-0kk2: this worktree must not end up on a branch another worktree holds.
-	if err := heldByOtherWorktree(polecatGit, branchName, clonePath); err != nil {
+	if err := m.claimBranch(polecatGit, branchName, clonePath); err != nil {
 		return nil, fmt.Errorf("refusing to reuse %s: %w\n"+
 			"That polecat is working on the branch — resume it there, or reap it if it is dead; "+
 			"to start this bead elsewhere anyway, dispatch it on a fresh branch (omit --branch)",
@@ -2190,7 +2190,7 @@ func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 		if slices.ContainsFunc(exempt, func(p string) bool { return sameWorktreePath(wt.Path, p) }) {
 			continue
 		}
-		return fmt.Errorf("%w: %s is already checked out at %s", ErrBranchHeld, branch, wt.Path)
+		return &branchHeldError{branch: branch, holder: wt.Path}
 	}
 	if deleted != "" {
 		if err := g.WorktreePrune(); err != nil {
@@ -2199,6 +2199,111 @@ func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 		}
 	}
 	return nil
+}
+
+// branchHeldError is the ErrBranchHeld refusal that names the worktree holding
+// the branch, so a caller can look at that holder before giving up (gt-l9td).
+type branchHeldError struct {
+	branch string
+	holder string
+}
+
+func (e *branchHeldError) Error() string {
+	return fmt.Sprintf("%s: %s is already checked out at %s", ErrBranchHeld, e.branch, e.holder)
+}
+
+func (e *branchHeldError) Unwrap() error { return ErrBranchHeld }
+
+// claimBranch is heldByOtherWorktree for a resume: when the holder is an idle,
+// unreaped polecat whose reuse gate reads as reusable, its checkout of the
+// branch is released instead of refused. That gate has already established the
+// holder has no dirty tree and no commit on the branch that is not preserved on
+// origin or an MR target, so the holder's checkout guards nothing and the
+// branch ref survives its detach. Any other holder, or any doubt about this
+// one, still refuses (gt-l9td).
+func (m *Manager) claimBranch(g *git.Git, branch string, exempt ...string) error {
+	err := heldByOtherWorktree(g, branch, exempt...)
+	var held *branchHeldError
+	if !errors.As(err, &held) {
+		return err
+	}
+	if releaseErr := m.releaseIdleHolder(held.holder); releaseErr != nil {
+		return fmt.Errorf("%w\n(holder not released: %v)", err, releaseErr)
+	}
+	return heldByOtherWorktree(g, branch, exempt...)
+}
+
+// releaseIdleHolder detaches HEAD in the worktree at holderPath, provided it is
+// a polecat of this rig that is idle, sessionless and reusable. It takes the
+// holder's lock without waiting: a holder being reused or reaped right now is
+// not idle, and waiting on it while the caller holds its own lock could
+// deadlock two polecats resuming each other's branches.
+func (m *Manager) releaseIdleHolder(holderPath string) error {
+	name := m.polecatNameForWorktree(holderPath)
+	if name == "" {
+		return fmt.Errorf("%s is not a polecat worktree of this rig", holderPath)
+	}
+
+	lockDir := filepath.Join(m.rig.Path, ".runtime", "locks")
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		return fmt.Errorf("creating lock dir: %w", err)
+	}
+	fl := flock.New(filepath.Join(lockDir, fmt.Sprintf("polecat-%s.lock", name)))
+	locked, err := fl.TryLock()
+	if err != nil {
+		return fmt.Errorf("locking polecat %s: %w", name, err)
+	}
+	if !locked {
+		return fmt.Errorf("polecat %s is busy", name)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	current, err := m.loadFromBeads(name, nil)
+	if err != nil {
+		return fmt.Errorf("reading polecat %s: %w", name, err)
+	}
+	if current.State != StateIdle {
+		return fmt.Errorf("polecat %s is %s, not idle", name, current.State)
+	}
+	if m.tmux != nil {
+		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		running, err := m.tmux.HasSession(sessionName)
+		if err != nil {
+			return fmt.Errorf("cannot tell whether polecat %s has a session: %w", name, err)
+		}
+		if running {
+			return fmt.Errorf("polecat %s still has a session", name)
+		}
+	}
+	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
+		return fmt.Errorf("polecat %s is not reusable: %s", name, decision.Reason)
+	}
+	if err := git.NewGit(holderPath).CheckoutDetachForce("HEAD"); err != nil {
+		return fmt.Errorf("detaching polecat %s: %w", name, err)
+	}
+	return nil
+}
+
+// polecatNameForWorktree returns the name of this rig's polecat whose worktree
+// is at path, or "" when path is not one.
+func (m *Manager) polecatNameForWorktree(path string) string {
+	// git reports the physical path, and the rig path may be a logical one.
+	polecatsDir := filepath.Join(m.rig.Path, "polecats")
+	if resolved, err := filepath.EvalSymlinks(polecatsDir); err == nil {
+		polecatsDir = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	rel, err := filepath.Rel(polecatsDir, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	name := strings.Split(rel, string(filepath.Separator))[0]
+	if name == "" || !m.exists(name) || !sameWorktreePath(m.clonePath(name), path) {
+		return ""
+	}
+	return name
 }
 
 // killExistingPolecatSession clears an existing tmux session before reusing or
