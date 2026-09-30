@@ -165,20 +165,14 @@ See [Integration Branches](concepts/integration-branches.md) for integration bra
 **Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
 tests are opt-in (`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start
 one must hold the town-wide container-gate slot. `gt done`'s default test-verify gate
-therefore runs the rig's `test_command` with the opt-in written **off** — the whole suite
-runs, its container-backed tests skip, and the gate takes no slot, so a submission never
-queues behind the daemon's main-branch patrol or the refinery's batch gate (gt-wx53).
-The Docker suite then runs once per submission in the refinery's gate, which does hold a
-slot. A rig that wants its container suite verified at `gt done` too asks for it in its
-own command (`test_command: "GT_TEST_DOCKER=1 make test"`), and the gate honours that and
-takes a slot for it. The gate applies that value to the run itself rather than leaving it
-to inheritance, so the slot decision and the environment the suite reads are one fact
-(gt-0hbm); the session's own exported value is deliberately not an input, because
-`make test` defaults the variable to 1 and reading it would queue the gate behind a slot
-its own tree already holds. The gate's value only wins if the rig's recipe reads the
-variable rather than hardcoding it — gastown's `make test` defaults it
-(`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason, and
-`TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
+runs the rig's `test_command` with the opt-in written **off**, so it takes no slot. For
+gastown that command is `make gate`, whose recipe writes `GT_TEST_DOCKER=0` itself: the
+unit tier never starts a container, whoever runs it. The container suites run post-merge
+in `make test-integration` (see [Testing](testing.md), "The gate"). A rig that wants its
+container suite verified at `gt done` asks for it in its own command
+(`test_command: "GT_TEST_DOCKER=1 make <target>"`), and the gate honours that and takes a
+slot for it. The session's own exported value is deliberately not an input: the slot
+decision and the environment the suite reads are one fact (gt-0hbm).
 
 That command text is a proxy for the thing the rule is about — a container
 starting — so a slot-free gate run is watched while it runs: a container that
