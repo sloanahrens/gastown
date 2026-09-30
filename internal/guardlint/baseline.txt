@@ -16,8 +16,8 @@ internal/beads/client_helpers.go:clearAgentActiveMRIfMatches
 internal/cmd/done_test_verify_container_watch.go:gateSlotHeld
 internal/cmd/prime.go:checkSlungWork
 internal/cmd/prime.go:ralphLoopPluginInstalledIn
+# deliberate: CONTEXT.md is optional, so prime carries on without it; a non-NotExist read error is warned on stderr instead of aborting startup (gt-bfale)
 internal/cmd/prime_payload.go:staticRoleText
-internal/cmd/sling_schedule.go:shouldDeferDispatch
 internal/cmd/up.go:disableCurrentAgentDND
 internal/daemon/notification.go:*NotificationManager.SendIfReady
 internal/daemon/notification.go:*NotificationManager.shouldSendLocked

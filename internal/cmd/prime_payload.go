@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +195,12 @@ func staticRoleText(ctx RoleContext) (text string, fromTemplate bool, err error)
 	}
 	contextPath := filepath.Join(ctx.TownRoot, "CONTEXT.md")
 	data, readErr := os.ReadFile(contextPath)
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		// CONTEXT.md is optional, so prime carries on without it — but an
+		// unreadable one is not an absent one, and the operator's context
+		// silently missing from an agent's prompt is the failure to avoid.
+		fmt.Fprintf(os.Stderr, "gt prime: could not read %s; operator context NOT injected: %v\n", contextPath, readErr)
+	}
 	if readErr != nil || len(data) == 0 {
 		explain(true, "CONTEXT.md: not found at "+contextPath)
 		return text, fromTemplate, nil

@@ -220,6 +220,39 @@ func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
 	}
 }
 
+// Serial for the same reason as TestStaticRoleText_TemplatePlusContextFile,
+// and because it swaps os.Stderr. A CONTEXT.md that exists but cannot be read
+// must be said out loud, not dropped as if it were absent (gt-udrrw, gt-bfale).
+func TestStaticRoleText_UnreadableContextFileWarns(t *testing.T) {
+	town := t.TempDir()
+	// A directory named CONTEXT.md exists but cannot be read as a file.
+	if err := os.Mkdir(filepath.Join(town, "CONTEXT.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+
+	var text string
+	var err error
+	stderr := captureStderr(t, func() { text, _, err = staticRoleText(ctx) })
+	if err != nil {
+		t.Fatalf("an unreadable optional CONTEXT.md must not abort prime: %v", err)
+	}
+	if text == "" {
+		t.Fatal("role text must still render without the operator context")
+	}
+	if !strings.Contains(stderr, "operator context NOT injected") {
+		t.Fatalf("stderr should say the operator context was not injected, got %q", stderr)
+	}
+
+	// An absent CONTEXT.md stays quiet.
+	empty := t.TempDir()
+	ctx.TownRoot, ctx.WorkDir = empty, empty
+	stderr = captureStderr(t, func() { _, _, err = staticRoleText(ctx) })
+	if err != nil || strings.Contains(stderr, "NOT injected") {
+		t.Fatalf("absent CONTEXT.md must be silent: err=%v stderr=%q", err, stderr)
+	}
+}
+
 func TestUseCompactResumePath(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
