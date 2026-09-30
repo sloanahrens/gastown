@@ -1,6 +1,7 @@
-package cmd
+package convoy
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +133,7 @@ esac
 `, logPath, expectedTownWD, expectedTownWD, expectedRigWD, expectedRigWD)
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	got := getIssueDetailsBatch([]string{"hq-town", "ws-rig"})
+	got := StdTown(townRoot).IssueDetailsBatch([]string{"hq-town", "ws-rig"})
 	if len(got) != 2 {
 		t.Fatalf("expected 2 details, got %d: %#v", len(got), got)
 	}
@@ -208,7 +209,7 @@ esac
 `, logPath)
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	got := getIssueDetailsBatch([]string{"hq-town", "ws-one", "ws-missing"})
+	got := StdTown(townRoot).IssueDetailsBatch([]string{"hq-town", "ws-one", "ws-missing"})
 	if len(got) != 2 {
 		t.Fatalf("expected 2 recovered details, got %d: %#v", len(got), got)
 	}
@@ -311,7 +312,7 @@ esac
 `, expectedRigWD, expectedRigWD, expectedTownWD, expectedTownWD)
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	tracked, err := getTrackedIssues(townBeads, "hq-cv-route")
+	tracked, err := StdTown(townBeads).TrackedIssues("hq-cv-route")
 	if err != nil {
 		t.Fatalf("getTrackedIssues: %v", err)
 	}
@@ -367,7 +368,7 @@ esac
 `)
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	tracked, err := getTrackedIssues(townBeads, "hq-cv-ext")
+	tracked, err := StdTown(townBeads).TrackedIssues("hq-cv-ext")
 	if err != nil {
 		t.Fatalf("getTrackedIssues: %v", err)
 	}
@@ -394,7 +395,7 @@ esac
 // contract: when the tracked bead lives in a cross-rig DB that cannot be
 // resolved from the convoy owner's cwd (routes.jsonl missing, rig parked, or
 // rig beads DB unreachable), the returned tracked entry carries status
-// trackedStatusUnknown instead of an empty string. Empty status was
+// TrackedStatusUnknown instead of an empty string. Empty status was
 // indistinguishable from a legitimately open bead and silenced the real
 // failure mode noted in #2786.
 func TestGetTrackedIssues_UnknownStatusForUnreachableCrossRig(t *testing.T) {
@@ -407,7 +408,7 @@ func TestGetTrackedIssues_UnknownStatusForUnreachableCrossRig(t *testing.T) {
 
 	// bd sql returns a single cross-rig tracks edge. `bd show` fails for the
 	// target bead (simulating an unreachable / unrouted rig DB). The function
-	// must still return the tracked dep, with Status = trackedStatusUnknown.
+	// must still return the tracked dep, with Status = TrackedStatusUnknown.
 	scriptBody := `
 case "$*" in
   "--allow-stale version")
@@ -428,7 +429,7 @@ esac
 `
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	tracked, err := getTrackedIssues(townBeads, "hq-cv-unreach")
+	tracked, err := StdTown(townBeads).TrackedIssues("hq-cv-unreach")
 	if err != nil {
 		t.Fatalf("getTrackedIssues: %v", err)
 	}
@@ -438,8 +439,8 @@ esac
 	if tracked[0].ID != "ws-foo" {
 		t.Fatalf("tracked[0].ID = %q, want %q", tracked[0].ID, "ws-foo")
 	}
-	if tracked[0].Status != trackedStatusUnknown {
-		t.Fatalf("tracked[0].Status = %q, want %q", tracked[0].Status, trackedStatusUnknown)
+	if tracked[0].Status != TrackedStatusUnknown {
+		t.Fatalf("tracked[0].Status = %q, want %q", tracked[0].Status, TrackedStatusUnknown)
 	}
 }
 
@@ -447,7 +448,7 @@ esac
 // damaged before the write-time gate existed (gt-gsky): a tracks edge whose
 // target is a convoy *title*.
 //
-// No query resolves such a target, so it came back trackedStatusUnknown and
+// No query resolves such a target, so it came back TrackedStatusUnknown and
 // held the convoy open forever — the reported convoy had every real issue
 // closed and still never auto-closed. A well-formed but unreachable cross-rig
 // target is still unknown and still blocks auto-close (gt-bs6).
@@ -478,7 +479,7 @@ esac
 `
 	writeExternalTrackingBdStub(t, scriptBody)
 
-	tracked, err := getTrackedIssues(townBeads, "hq-cv-damaged")
+	tracked, err := StdTown(townBeads).TrackedIssues("hq-cv-damaged")
 	if err != nil {
 		t.Fatalf("getTrackedIssues: %v", err)
 	}
@@ -491,13 +492,10 @@ esac
 
 	// The convoy's only real issue is closed, so it is now closable — which is
 	// what the phantom edge used to prevent.
-	_, err = captureConvoyStdoutErr(t, func() error {
-		ready, err := closeConvoyIfComplete(townBeads, "hq-cv-damaged", "Damaged convoy", tracked, true)
-		if !ready {
-			t.Errorf("convoy not ready to close after the phantom edge was dropped: %#v", tracked)
-		}
-		return err
-	})
+	ready, err := Town{Root: townBeads}.closeIfComplete("hq-cv-damaged", "Damaged convoy", tracked, true)
+	if !ready {
+		t.Errorf("convoy not ready to close after the phantom edge was dropped: %#v", tracked)
+	}
 	if err != nil {
 		t.Fatalf("closeConvoyIfComplete: %v", err)
 	}
@@ -514,22 +512,20 @@ func TestCloseConvoyIfComplete_UnknownBlocksAutoClose(t *testing.T) {
 	// No bd stub — closeConvoyIfComplete does not shell out when the convoy
 	// isn't closable, which is exactly the scenario under test.
 	townBeads := t.TempDir()
-	tracked := []trackedIssueInfo{
-		{ID: "ws-foo", Status: trackedStatusUnknown},
+	tracked := []TrackedIssue{
+		{ID: "ws-foo", Status: TrackedStatusUnknown},
 		{ID: "ws-bar", Status: "closed"},
 	}
 
-	out, err := captureConvoyStdoutErr(t, func() error {
-		ready, err := closeConvoyIfComplete(townBeads, "hq-cv-unreach", "Mixed", tracked, false)
-		if ready {
-			t.Fatalf("closeConvoyIfComplete reported ready with unknown tracked status")
-		}
-		return err
-	})
+	var out bytes.Buffer
+	ready, err := Town{Root: townBeads, Out: &out}.closeIfComplete("hq-cv-unreach", "Mixed", tracked, false)
+	if ready {
+		t.Fatalf("closeConvoyIfComplete reported ready with unknown tracked status")
+	}
 	if err != nil {
 		t.Fatalf("closeConvoyIfComplete: %v", err)
 	}
-	if !strings.Contains(out, "unknown") {
-		t.Fatalf("diagnostic missing 'unknown' label: %q", out)
+	if !strings.Contains(out.String(), "unknown") {
+		t.Fatalf("diagnostic missing 'unknown' label: %q", out.String())
 	}
 }

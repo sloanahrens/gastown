@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -316,7 +317,7 @@ func getEpicChildren(epicID string) ([]epicChild, error) {
 
 	// Prefer raw SQL — handles cross-database deps. Falls back to bd dep list
 	// if bd sql is not available (older bd versions).
-	childIDs, err := bdDepListRawIDs(sqlDir, epicID, "down", "depends_on")
+	childIDs, err := convoyops.DepListRawIDs(sqlDir, epicID, "down", "depends_on")
 	if err != nil {
 		// bd sql not supported — fall back to bd dep list.
 		childIDs, err = bdDepListFallback(dir, epicID)

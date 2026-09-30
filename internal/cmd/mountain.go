@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -377,7 +378,7 @@ func showMountainDetail(townBeads, inputID string) error {
 	}
 
 	// Get convoy info.
-	showOut, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	showOut, err := beads.RunBdJSON(townBeads, "show", convoyID, "--json")
 	if err != nil {
 		return fmt.Errorf("convoy %q not found", convoyID)
 	}
@@ -396,7 +397,7 @@ func showMountainDetail(townBeads, inputID string) error {
 	}
 
 	cv := convoys[0]
-	if !hasLabel(cv.Labels, "mountain") {
+	if !convoyops.HasLabel(cv.Labels, "mountain") {
 		return fmt.Errorf("%s is not a mountain (no mountain label)", convoyID)
 	}
 
@@ -560,7 +561,7 @@ func showMountainDetail(townBeads, inputID string) error {
 
 // findMountainConvoys lists all open convoys with the mountain label.
 func findMountainConvoys(townBeads string) ([]mountainConvoyInfo, error) {
-	issues, err := listConvoyIssues(townBeads, "open", false, "mountain")
+	issues, err := convoyops.StdTown(townBeads).ListConvoys("open", false, "mountain")
 	if err != nil {
 		return nil, fmt.Errorf("listing mountain convoys: %w", err)
 	}
@@ -586,7 +587,7 @@ func resolveMountainID(townBeads, inputID string) (string, error) {
 		return "", fmt.Errorf("cannot resolve %s: %w", inputID, err)
 	}
 
-	if isConvoyIssue(result.IssueType, result.Labels) {
+	if convoyops.IsConvoyIssue(result.IssueType, result.Labels) {
 		return inputID, nil
 	}
 
@@ -608,7 +609,7 @@ func resolveMountainID(townBeads, inputID string) (string, error) {
 
 // hasBeadLabel checks if a bead has a specific label by querying bd show.
 func hasBeadLabel(townBeads, beadID, label string) bool {
-	out, err := runBdJSON(townBeads, "show", beadID, "--json")
+	out, err := beads.RunBdJSON(townBeads, "show", beadID, "--json")
 	if err != nil {
 		return false
 	}
@@ -620,7 +621,7 @@ func hasBeadLabel(townBeads, beadID, label string) bool {
 		return false
 	}
 
-	return hasLabel(results[0].Labels, label)
+	return convoyops.HasLabel(results[0].Labels, label)
 }
 
 // renderProgressBar renders a simple Unicode progress bar.
