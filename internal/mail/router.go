@@ -42,6 +42,9 @@ type Router struct {
 	workDir  string // fallback directory to run bd commands in
 	townRoot string // town root directory (e.g., ~/gt)
 	tmux     notifyTmux
+	// bd runs bd for the router and the mailboxes it opens; nil is the bd
+	// on PATH.
+	bd beads.BDRunner
 
 	// IdleNotifyTimeout controls how long to wait for a session to become
 	// idle before falling back to a queued nudge. Zero uses the default.
@@ -66,7 +69,7 @@ type notifyTmux interface {
 // The town root is auto-detected from workDir if possible.
 func NewRouter(workDir string) *Router {
 	// Try to detect town root from workDir
-	townRoot := detectTownRoot(workDir)
+	townRoot := detectTownRoot(workDir, os.Getenv)
 
 	return &Router{
 		workDir:  workDir,
@@ -202,7 +205,7 @@ func (r *Router) expandAnnounce(announceName string) (*config.AnnounceConfig, er
 // searching to the filesystem root and returning the outermost workspace.
 // Falls back to GT_TOWN_ROOT/GT_ROOT env vars when workspace.Find cannot
 // locate a workspace (e.g., running from outside any workspace).
-func detectTownRoot(startDir string) string {
+func detectTownRoot(startDir string, getenv func(string) string) string {
 	// workspace.Find handles nested workspaces correctly: it always searches
 	// to the filesystem root and returns the outermost mayor/town.json match.
 	townRoot, err := workspace.Find(startDir)
@@ -213,7 +216,7 @@ func detectTownRoot(startDir string) string {
 	// Fallback: try GT_TOWN_ROOT or GT_ROOT env vars when workspace detection
 	// fails (e.g., running from outside any workspace directory).
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if envRoot := os.Getenv(envName); envRoot != "" {
+		if envRoot := getenv(envName); envRoot != "" {
 			if ok, _ := workspace.IsWorkspace(envRoot); ok {
 				return envRoot
 			}
@@ -765,12 +768,12 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	defer cancel()
 
 	// Query issues table (backward compat during migration)
-	stdout, issuesErr := runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	stdout, issuesErr := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 
 	// Also query wisps table for migrated agent beads (best-effort)
 	wispCtx, wispCancel := bdReadCtx()
 	defer wispCancel()
-	wispOut, _ := runBdCommand(wispCtx, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
+	wispOut, _ := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
 
 	// Merge results: collect agent beads from both sources
 	seenIDs := make(map[string]bool)
@@ -1215,7 +1218,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 	}
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	_, err := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 	telemetry.RecordMailMessage(context.Background(), "send", telemetry.MailMessageInfo{
 		ID:       msg.ID,
 		From:     msg.From,
@@ -1352,7 +1355,7 @@ func (r *Router) sendToQueue(msg *Message) error {
 	}
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err = runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
 		return fmt.Errorf("sending to queue %s: %w", queueName, err)
 	}
@@ -1436,7 +1439,7 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 	}
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err = runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
 		return fmt.Errorf("sending to announce %s: %w", announceName, err)
 	}
@@ -1457,7 +1460,7 @@ func (r *Router) sendToChannel(msg *Message) error {
 	if r.townRoot == "" {
 		return fmt.Errorf("town root not set, cannot send to channel: %s", channelName)
 	}
-	b := beads.New(r.townRoot)
+	b := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
 	_, fields, err := b.GetChannelBead(channelName)
 	if err != nil {
 		return fmt.Errorf("getting channel %s: %w", channelName, err)
@@ -1522,7 +1525,7 @@ func (r *Router) sendToChannel(msg *Message) error {
 	}
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err = runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	_, err = runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
 		return fmt.Errorf("sending to channel %s: %w", channelName, err)
 	}
@@ -1581,7 +1584,7 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-	stdout, err := runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	stdout, err := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
 		return fmt.Errorf("querying announce messages: %w", err)
 	}
@@ -1607,7 +1610,7 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		deleteArgs := []string{"close", messages[i].ID, "--reason=retention pruning"}
 		// Best-effort deletion - don't fail if one delete fails
 		delCtx, delCancel := bdWriteCtx()
-		_, _ = runBdCommand(delCtx, deleteArgs, filepath.Dir(beadsDir), beadsDir)
+		_, _ = runBdCommand(delCtx, r.bd, deleteArgs, filepath.Dir(beadsDir), beadsDir)
 		delCancel()
 	}
 
@@ -1634,7 +1637,9 @@ func isDeaconSelfProbe(subject string) bool {
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 	beadsDir := r.resolveBeadsDir()
 	workDir := filepath.Dir(beadsDir) // Parent of .beads
-	return NewMailboxFromAddress(address, workDir), nil
+	mb := NewMailboxFromAddress(address, workDir)
+	mb.bd = r.bd
+	return mb, nil
 }
 
 // MailSummary holds the aggregate unread-mail state for one address, as
@@ -1685,7 +1690,7 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 		}
 	}
 
-	tmpMailbox := &Mailbox{workDir: workDir}
+	tmpMailbox := &Mailbox{workDir: workDir, bd: r.bd}
 
 	var issueRows []issueBatchRow
 	var issueErr error
@@ -1696,7 +1701,7 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		issueRows, issueErr = queryIssueMessagesBatch(workDir, beadsDir, variants)
+		issueRows, issueErr = queryIssueMessagesBatch(r.bd, workDir, beadsDir, variants)
 	}()
 	go func() {
 		defer wg.Done()
@@ -1942,7 +1947,7 @@ func (r *Router) isSessionMuted(sessionID string) bool {
 	if r.townRoot == "" || sessionID == "" || sessionID == session.OverseerSessionName() {
 		return false
 	}
-	bd := beads.New(r.townRoot)
+	bd := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
 	level, err := bd.GetAgentNotificationLevel(sessionID)
 	if err != nil {
 		return false
@@ -2097,7 +2102,7 @@ func (r *Router) isRecipientMuted(address string) bool {
 		return false // Can't determine agent bead, allow notification
 	}
 
-	bd := beads.New(r.townRoot)
+	bd := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
 	level, err := bd.GetAgentNotificationLevel(agentBeadID)
 	if err != nil {
 		return false // Agent bead might not exist, allow notification

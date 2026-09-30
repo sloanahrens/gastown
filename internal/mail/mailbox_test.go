@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 )
 
 func TestNewMailbox(t *testing.T) {
+	t.Parallel()
 	m := NewMailbox("/tmp/test")
 	if filepath.ToSlash(m.path) != "/tmp/test/inbox.jsonl" {
 		t.Errorf("NewMailbox path = %q, want %q", m.path, "/tmp/test/inbox.jsonl")
@@ -26,6 +26,7 @@ func TestNewMailbox(t *testing.T) {
 }
 
 func TestNewMailboxBeads(t *testing.T) {
+	t.Parallel()
 	m := NewMailboxBeads("gastown/Toast", "/work/dir")
 	if m.identity != "gastown/Toast" {
 		t.Errorf("identity = %q, want %q", m.identity, "gastown/Toast")
@@ -36,6 +37,7 @@ func TestNewMailboxBeads(t *testing.T) {
 }
 
 func TestMailboxLegacyAppend(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -74,6 +76,7 @@ func TestMailboxLegacyAppend(t *testing.T) {
 }
 
 func TestMailboxLegacyList(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -110,6 +113,7 @@ func TestMailboxLegacyList(t *testing.T) {
 }
 
 func TestMailboxLegacyGet(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -139,6 +143,7 @@ func TestMailboxLegacyGet(t *testing.T) {
 }
 
 func TestMailboxLegacyMarkRead(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -172,6 +177,7 @@ func TestMailboxLegacyMarkRead(t *testing.T) {
 }
 
 func TestMailboxLegacyDelete(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -210,6 +216,7 @@ func TestMailboxLegacyDelete(t *testing.T) {
 }
 
 func TestMailboxLegacyCount(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -247,6 +254,7 @@ func TestMailboxLegacyCount(t *testing.T) {
 }
 
 func TestMailboxLegacyCountExcludesDeaconSelfProbes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -272,6 +280,7 @@ func TestMailboxLegacyCountExcludesDeaconSelfProbes(t *testing.T) {
 }
 
 func TestMailboxLegacyListUnread(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -296,6 +305,7 @@ func TestMailboxLegacyListUnread(t *testing.T) {
 }
 
 func TestMailboxMarkReadOnlyExcludesFromUnread(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -346,6 +356,7 @@ func TestMailboxMarkReadOnlyExcludesFromUnread(t *testing.T) {
 }
 
 func TestMailboxLegacyListByThread(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -385,6 +396,7 @@ func TestMailboxLegacyListByThread(t *testing.T) {
 }
 
 func TestMailboxLegacyEmptyInbox(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -399,6 +411,7 @@ func TestMailboxLegacyEmptyInbox(t *testing.T) {
 }
 
 func TestMailboxBeadsAppendError(t *testing.T) {
+	t.Parallel()
 	m := NewMailboxBeads("gastown/Toast", "/work/dir")
 
 	err := m.Append(&Message{})
@@ -408,6 +421,7 @@ func TestMailboxBeadsAppendError(t *testing.T) {
 }
 
 func TestMailboxIdentityAndPath(t *testing.T) {
+	t.Parallel()
 	// Legacy mailbox
 	legacy := NewMailbox("/tmp/test")
 	if legacy.Identity() != "" {
@@ -428,6 +442,7 @@ func TestMailboxIdentityAndPath(t *testing.T) {
 }
 
 func TestMailboxPersistence(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mailbox and add message
@@ -456,6 +471,7 @@ func TestMailboxPersistence(t *testing.T) {
 }
 
 func TestNewMailboxWithBeadsDir(t *testing.T) {
+	t.Parallel()
 	m := NewMailboxWithBeadsDir("gastown/Toast", "/work/dir", "/custom/.beads")
 	if m.identity != "gastown/Toast" {
 		t.Errorf("identity = %q, want 'gastown/Toast'", m.identity)
@@ -474,84 +490,50 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 // closeInDir must pass --actor explicitly using the mailbox's own identity
 // so the close always matches the assignee it was filed under.
 func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	fakeBD := filepath.Join(binDir, "bd")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-if [ "$1" = "close" ]; then
-  exit 0
-fi
-printf 'unexpected bd args: %s\n' "$*" >&2
-exit 1
-`
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-
+	t.Parallel()
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		if c.Args[0] == "close" {
+			return "", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
 	m := NewMailboxWithBeadsDir("deacon/", t.TempDir(), t.TempDir())
+	m.bd = bd.run
 	if err := m.closeInDir("hq-wisp-xv525", t.TempDir()); err != nil {
 		t.Fatalf("closeInDir: %v", err)
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
-	if !strings.Contains(string(logBytes), "--actor=deacon/") {
-		t.Fatalf("bd close missing --actor=deacon/ matching assignee identity; log:\n%s", string(logBytes))
+	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=deacon/") {
+		t.Fatalf("bd close missing --actor=deacon/ matching assignee identity; calls:\n%s", log)
 	}
 }
 
 func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
+	t.Parallel()
 	beadsDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	fakeBD := filepath.Join(binDir, "bd")
-	script := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-if [ "$1" = "list" ]; then
-  case "$*" in
-    *"--assignee gastown/synth"*)
-      printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/"]}]'
-      exit 0
-      ;;
-    *"--label cc:gastown/synth"*)
-      printf '%s\n' '[{"id":"issue-cc-open","title":"CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"issue-cc-hooked","title":"CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]}]'
-      exit 0
-      ;;
-  esac
-  printf '%s\n' 'No issues found.'
-  exit 0
-fi
-if [ "$1" = "sql" ]; then
-  printf '%s\n' '[{"id":"wisp-direct-open","title":"Wisp direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-direct-hooked","title":"Wisp direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:59Z","updated_at":"2026-06-12T11:59:59Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-cc-open","title":"Wisp CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:58Z","updated_at":"2026-06-12T11:59:58Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"wisp-cc-hooked","title":"Wisp CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:57Z","updated_at":"2026-06-12T11:59:57Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"issue-direct-open","title":"Duplicate wisp","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:56Z","updated_at":"2026-06-12T11:59:56Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0}]'
-  exit 0
-fi
-printf 'unexpected bd args: %s\n' "$*" >&2
-exit 1
-`
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		argv := strings.Join(c.Args, " ")
+		switch c.Args[0] {
+		case "list":
+			switch {
+			case strings.Contains(argv, "--assignee gastown/synth"):
+				return `[{"id":"issue-direct-open","title":"Direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:05Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-hooked","title":"Direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:04Z","labels":["gt:message","from:mayor/"]},{"id":"issue-direct-closed","title":"Direct closed","description":"","status":"closed","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:03Z","labels":["gt:message","from:mayor/"]}]`, "", 0
+			case strings.Contains(argv, "--label cc:gastown/synth"):
+				return `[{"id":"issue-cc-open","title":"CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:02Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]},{"id":"issue-cc-hooked","title":"CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T12:00:01Z","labels":["gt:message","cc:gastown/synth","from:mayor/"]}]`, "", 0
+			}
+			return "No issues found.\n", "", 0
+		case "sql":
+			return `[{"id":"wisp-direct-open","title":"Wisp direct open","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-direct-hooked","title":"Wisp direct hooked","description":"","status":"hooked","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:59Z","updated_at":"2026-06-12T11:59:59Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0},{"id":"wisp-cc-open","title":"Wisp CC open","description":"","status":"open","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:58Z","updated_at":"2026-06-12T11:59:58Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"wisp-cc-hooked","title":"Wisp CC hooked","description":"","status":"hooked","priority":2,"assignee":"mayor/","created_at":"2026-06-12T11:59:57Z","updated_at":"2026-06-12T11:59:57Z","labels_csv":"gt:message,cc:gastown/synth,from:mayor/","assignee_match":0,"cc_match":1},{"id":"issue-direct-open","title":"Duplicate wisp","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T11:59:56Z","updated_at":"2026-06-12T11:59:56Z","labels_csv":"gt:message,from:mayor/","assignee_match":1,"cc_match":0}]`, "", 0
+		}
+		return "", "unexpected bd args: " + argv, 1
+	}}
 
 	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
 	msgs, err := m.listFromDir(beadsDir)
 	if err != nil {
 		t.Fatalf("listFromDir: %v", err)
@@ -593,53 +575,38 @@ exit 1
 		}
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
+	sqlCalls := 0
+	for _, c := range bd.recorded() {
+		if c.Args[0] == "sql" {
+			sqlCalls++
+		}
 	}
-	if got := strings.Count(string(logBytes), "sql "); got != 1 {
-		t.Fatalf("bd sql calls = %d, want 1; log:\n%s", got, string(logBytes))
+	if sqlCalls != 1 {
+		t.Fatalf("bd sql calls = %d, want 1; calls:\n%s", sqlCalls, strings.Join(bd.argvs(), "\n"))
 	}
 }
 
 func TestQueryWispMessagesEscapesIdentitySQLLiterals(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	binDir := t.TempDir()
-	sqlLogPath := filepath.Join(t.TempDir(), "bd-sql.log")
-	fakeBD := filepath.Join(binDir, "bd")
-	script := `#!/bin/sh
-if [ "$1" = "sql" ]; then
-  printf '%s\n' "$3" >> "$BD_SQL_LOG"
-  printf '%s\n' '[]'
-  exit 0
-fi
-printf 'unexpected bd args: %s\n' "$*" >&2
-exit 1
-`
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_SQL_LOG", sqlLogPath)
+	t.Parallel()
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		if c.Args[0] == "sql" {
+			return "[]\n", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
 
 	m := NewMailboxWithBeadsDir("mayor/", t.TempDir(), t.TempDir())
+	m.bd = bd.run
 	_, err := m.queryWispMessages(t.TempDir(), []string{"mayor/", "mayor", `rig/o\'malley`})
 	if err != nil {
 		t.Fatalf("queryWispMessages: %v", err)
 	}
 
-	sqlLog, err := os.ReadFile(sqlLogPath)
-	if err != nil {
-		t.Fatalf("read SQL log: %v", err)
+	calls := bd.recorded()
+	if len(calls) != 1 || calls[0].Args[0] != "sql" {
+		t.Fatalf("bd calls = %q, want one sql call", bd.argvs())
 	}
-	queries := strings.Split(strings.TrimSpace(string(sqlLog)), "\n")
-	if len(queries) != 1 {
-		t.Fatalf("bd sql calls = %d, want 1; log:\n%s", len(queries), string(sqlLog))
-	}
-	sql := queries[0]
+	sql := calls[0].Args[2]
 	for _, want := range []string{
 		`'mayor/'`,
 		`'mayor'`,
@@ -655,6 +622,7 @@ exit 1
 }
 
 func TestSQLStringListEscapesSQLLiterals(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		values []string
@@ -678,6 +646,7 @@ func TestSQLStringListEscapesSQLLiterals(t *testing.T) {
 }
 
 func TestParseWispTimestamp(t *testing.T) {
+	t.Parallel()
 	want := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name  string
@@ -710,6 +679,7 @@ func TestParseWispTimestamp(t *testing.T) {
 }
 
 func TestMailboxLegacyMultipleOperations(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -753,6 +723,7 @@ func TestMailboxLegacyMultipleOperations(t *testing.T) {
 }
 
 func TestMailboxLegacyAppendWithMissingDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	deepPath := filepath.Join(tmpDir, "deep", "nested", "inbox")
 	m := NewMailbox(deepPath)
@@ -774,6 +745,7 @@ func TestMailboxLegacyAppendWithMissingDir(t *testing.T) {
 }
 
 func TestMailboxLegacyDeleteAll(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -806,6 +778,7 @@ func TestMailboxLegacyDeleteAll(t *testing.T) {
 }
 
 func TestMailboxLegacyMarkReadTwice(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -833,6 +806,7 @@ func TestMailboxLegacyMarkReadTwice(t *testing.T) {
 }
 
 func TestMailboxLegacyCorruptionDetection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -866,6 +840,7 @@ func TestMailboxLegacyCorruptionDetection(t *testing.T) {
 }
 
 func TestMailboxLegacyArchiveCorruptionDetection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -885,6 +860,7 @@ func TestMailboxLegacyArchiveCorruptionDetection(t *testing.T) {
 }
 
 func TestMailboxLegacyConcurrentMarkRead(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
@@ -935,6 +911,7 @@ func TestMailboxLegacyConcurrentMarkRead(t *testing.T) {
 }
 
 func TestMailboxLegacyAtomicArchive(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	m := NewMailbox(tmpDir)
 
