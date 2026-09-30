@@ -114,7 +114,6 @@ func isAgentSession(name string) bool {
 		constants.RoleMayor,
 		constants.RolePolecat,
 		constants.RoleCrew,
-		"dog",
 	} {
 		if strings.Contains(name, marker) {
 			return true

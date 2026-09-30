@@ -36,13 +36,6 @@ func OverseerSessionName() string {
 	return HQPrefix + "overseer"
 }
 
-// DogSessionName returns the session name for a named dog agent.
-// Dogs are town-level (managed by deacon), so they use the hq- prefix.
-// Pattern: hq-dog-<name> (e.g., hq-dog-alpha).
-func DogSessionName(name string) string {
-	return fmt.Sprintf("%sdog-%s", HQPrefix, name)
-}
-
 // AssigneeSessionName converts an assignee (rig/name, rig/crew/name or
 // rig/polecats/name) to its tmux session name. persistent is true for a crew
 // identity. An assignee in any other shape has no session name.

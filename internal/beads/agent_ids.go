@@ -2,7 +2,6 @@
 package beads
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -13,23 +12,16 @@ import (
 const TownBeadsPrefix = "hq"
 
 // Town-level agent bead IDs use the "hq-" prefix and are stored in town beads.
-// These are global agents that operate at the town level (mayor, dogs).
+// These are global agents that operate at the town level (mayor).
 //
 // The naming convention is:
 //   - hq-<role>       for singletons (mayor)
-//   - hq-dog-<name>   for named agents (dogs)
 //   - hq-<role>-role  for role definition beads
 
 // MayorBeadIDTown returns the Mayor agent bead ID for town-level beads.
 // This uses the "hq-" prefix for town-level storage.
 func MayorBeadIDTown() string {
 	return TownBeadsPrefix + "-mayor"
-}
-
-// DogBeadIDTown returns a Dog agent bead ID for town-level beads.
-// Dogs are town-level agents, so they follow the pattern: hq-dog-<name>
-func DogBeadIDTown(name string) string {
-	return fmt.Sprintf("%s-dog-%s", TownBeadsPrefix, name)
 }
 
 // NamedRoles are agent roles that include a worker name (rig-level).

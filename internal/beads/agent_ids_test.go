@@ -13,27 +13,6 @@ func TestMayorBeadIDTown(t *testing.T) {
 	}
 }
 
-// TestDogBeadIDTown tests town-level Dog bead IDs.
-func TestDogBeadIDTown(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"alpha", "hq-dog-alpha"},
-		{"rex", "hq-dog-rex"},
-		{"spot", "hq-dog-spot"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DogBeadIDTown(tt.name)
-			if got != tt.want {
-				t.Errorf("DogBeadIDTown(%q) = %q, want %q", tt.name, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestAgentBeadIDWithPrefix tests agent bead ID generation, including dedup when prefix == rig.
 func TestAgentBeadIDWithPrefix(t *testing.T) {
 	tests := []struct {

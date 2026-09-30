@@ -286,7 +286,6 @@ type GroupType string
 const (
 	GroupTypeRig      GroupType = "rig"      // @rig/<rigname> - all agents in a rig
 	GroupTypeTown     GroupType = "town"     // @town - all town-level agents
-	GroupTypeRole     GroupType = "role"     // @witnesses, @dogs, etc. - all agents of a role
 	GroupTypeRigRole  GroupType = "rig-role" // @crew/<rigname>, @polecats/<rigname> - role in a rig
 	GroupTypeOverseer GroupType = "overseer" // @overseer - human operator
 )
@@ -294,7 +293,7 @@ const (
 // ParsedGroup represents a parsed @group address.
 type ParsedGroup struct {
 	Type     GroupType
-	RoleType string // witness, crew, polecat, dog, etc.
+	RoleType string // crew, polecat, etc.
 	Rig      string // rig name for rig-scoped groups
 	Original string // original @group string
 }
@@ -308,7 +307,6 @@ type ParsedGroup struct {
 //   - @witnesses: All witnesses across rigs
 //   - @crew/<rigname>: Crew workers in a specific rig
 //   - @polecats/<rigname>: Polecats in a specific rig
-//   - @dogs: All Deacon dogs
 //   - @overseer: Human operator (special case)
 func parseGroupAddress(address string) *ParsedGroup {
 	if !isGroupAddress(address) {
@@ -324,8 +322,6 @@ func parseGroupAddress(address string) *ParsedGroup {
 		return &ParsedGroup{Type: GroupTypeOverseer, Original: address}
 	case "town":
 		return &ParsedGroup{Type: GroupTypeTown, Original: address}
-	case "dogs":
-		return &ParsedGroup{Type: GroupTypeRole, RoleType: "dog", Original: address}
 	}
 
 	// Parse patterns with slashes: @rig/<name>, @crew/<rig>, @polecats/<rig>
@@ -371,10 +367,7 @@ func agentBeadToAddress(bead *agentBead) string {
 	}
 
 	id := bead.ID
-	if addr := dogAddressFromAgentBeadID(id); addr != "" {
-		return addr
-	}
-	if isDogAgentBeadIDWithoutName(id) {
+	if isRetiredDogBeadID(id) {
 		return ""
 	}
 
@@ -419,9 +412,6 @@ func agentBeadToAddress(bead *agentBead) string {
 				return rig + "/" + name
 			}
 			return rig + "/"
-		case "dog":
-			// Town-level named: gt-dog-alpha
-			return dogAddressFromParts(parts, i)
 		}
 	}
 
@@ -574,8 +564,6 @@ func (r *Router) resolveGroup(group *ParsedGroup) ([]string, error) {
 		return r.resolveOverseer()
 	case GroupTypeTown:
 		return r.resolveTownAgents()
-	case GroupTypeRole:
-		return r.resolveAgentsByRole(group.RoleType, "")
 	case GroupTypeRig:
 		return r.resolveAgentsByRig(group.Rig)
 	case GroupTypeRigRole:
@@ -920,7 +908,7 @@ func (r *Router) validateRecipient(identity string) error {
 	case "mayor", "mayor/":
 		return nil
 	}
-	if _, ok := DogAddressName(identity); !ok && isReservedTownSubpath(identity) {
+	if isReservedTownSubpath(identity) {
 		return fmt.Errorf("no agent found")
 	}
 
@@ -979,7 +967,7 @@ func (r *Router) validateRecipient(identity string) error {
 // validateAgentWorkspace checks if an agent's workspace directory exists on disk.
 // Used as a fallback when the agent isn't found in the bead registry.
 func (r *Router) validateAgentWorkspace(identity string) bool {
-	if _, ok := DogAddressName(identity); !ok && isReservedTownSubpath(identity) {
+	if isReservedTownSubpath(identity) {
 		return false
 	}
 
@@ -1007,13 +995,17 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 		if parts[1] == "crew" || parts[1] == "polecats" {
 			return dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2]))
 		}
-		// Dog addresses: deacon/dogs/<name>
-		if _, ok := DogAddressName(identity); ok && dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
-			return true
-		}
 	}
 
 	return false
+}
+
+// isReservedTownSubpath reports whether address sits under a town-level
+// directory that holds no mailboxes of its own: mayor/<x>, and deacon/<x>,
+// which covers the retired deacon/dogs/<name> namespace (gt-29q6g).
+func isReservedTownSubpath(address string) bool {
+	return strings.HasPrefix(address, constants.RoleMayor+"/") ||
+		strings.HasPrefix(address, "deacon/")
 }
 
 // dirExists returns true if the path exists and is a directory.
@@ -1982,8 +1974,6 @@ func senderCanReceiveReply(from string) bool {
 		default:
 			return true
 		}
-	case 3:
-		return parts[0] == "deacon" && parts[1] == "dogs" && validReplyAddressPart(parts[2])
 	default:
 		return false
 	}
@@ -2044,9 +2034,6 @@ func addressToAgentBeadID(address string) string {
 	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead
 	}
-	if dogName, ok := DogAddressName(address); ok {
-		return session.DogSessionName(dogName)
-	}
 	switch address {
 	case constants.RoleMayor, constants.RoleMayor + "/":
 		return session.MayorSessionName()
@@ -2091,9 +2078,6 @@ func AddressToSessionIDs(address string) []string {
 	// Overseer address: "overseer" (human operator)
 	if address == "overseer" {
 		return []string{session.OverseerSessionName()}
-	}
-	if dogName, ok := DogAddressName(address); ok {
-		return []string{session.DogSessionName(dogName)}
 	}
 
 	// Mayor address: "mayor/" or "mayor"
