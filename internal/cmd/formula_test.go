@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -665,5 +666,44 @@ func TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent(t *testing.T) {
 	}
 	if !strings.Contains(formatFormulaSyncReport(report), "were overwritten") {
 		t.Error("a real --force run should say the copies were overwritten")
+	}
+}
+
+// gt formula list/show hand bd's answer to the operator: --json gets the
+// payload bd printed before machine mode, and the prose form runs bd outside
+// machine mode.
+func TestPassBdFormulaOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub bd is a POSIX shell script")
+	}
+	binDir := t.TempDir()
+	stub := `#!/bin/sh
+if [ -n "$BD_MACHINE" ]; then
+  echo '{"schema_version":1,"contract_version":1,"data":[{"name":"mol-x"}],"pagination":null,"error":null}'
+else
+  echo 'mol-x  a formula'
+fi
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write stub bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_MACHINE", "")
+
+	var err error
+	got := captureOutput(func() { err = passBdFormulaOutput([]string{"formula", "list", "--json"}, true) })
+	if err != nil {
+		t.Fatalf("--json: %v", err)
+	}
+	if strings.TrimSpace(got) != `[{"name":"mol-x"}]` {
+		t.Errorf("--json printed %q, want the envelope's data", got)
+	}
+
+	got = captureOutput(func() { err = passBdFormulaOutput([]string{"formula", "list"}, false) })
+	if err != nil {
+		t.Fatalf("prose: %v", err)
+	}
+	if strings.TrimSpace(got) != "mol-x  a formula" {
+		t.Errorf("prose printed %q, want bd's own text", got)
 	}
 }

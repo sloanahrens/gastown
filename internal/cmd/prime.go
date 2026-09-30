@@ -879,7 +879,15 @@ func execPrimeExternalCommand(ctx context.Context, workDir, name string, args ..
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = primeExternalToolWaitDelay
 
-	return stdout, stderr, cmd.Run()
+	err := cmd.Run()
+	if name == "bd" && err == nil {
+		// ConfigureCommand put bd in machine mode; callers read the payload
+		// it printed before.
+		payload := beads.LegacyPayload(args, stdout.Bytes())
+		stdout.Reset()
+		stdout.Write(payload)
+	}
+	return stdout, stderr, err
 }
 
 // memoryTypeLabels maps type keys to human-readable section headers for prime injection.

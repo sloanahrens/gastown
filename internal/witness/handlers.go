@@ -100,7 +100,7 @@ func DefaultBdCli() *BdCli {
 // could park in wait4 forever on a wedged bd child (gt-7itep) — a git
 // credential prompt or similar blocking grandchild is exactly the shape
 // confirmed on the hang.
-func bdSubprocessCommand(ctx context.Context, workDir string, args []string) *exec.Cmd {
+func bdSubprocessCommand(ctx context.Context, workDir string, args []string) *beads.Cmd {
 	return beads.CommandContextBounded(ctx, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
 }
 

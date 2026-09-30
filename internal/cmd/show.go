@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func init() {
@@ -119,9 +120,11 @@ func newBdShowInvocation(args []string, environ []string) bdShowInvocation {
 	cmd := bdc.Build()
 	commandArgs := append([]string(nil), cmd.Args[1:]...)
 
+	// bd show replaces this process and prints to the operator's terminal, so
+	// it runs without machine mode.
 	return bdShowInvocation{
 		Dir:         cmd.Dir,
-		Env:         cmd.Env,
+		Env:         beads.WithoutMachineEnv(cmd.Env),
 		ExecArgs:    cmd.Args,
 		CommandArgs: commandArgs,
 	}

@@ -2,6 +2,7 @@
 package beads
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -564,7 +565,18 @@ func ResetEnsuredDirs() {
 // Without this filter, callers that merge the parsed value back into a
 // `bd config set` would pollute the config with strings like
 // "status.custom (not set)", which fail bd's regex validation (gt-kbi).
+//
+// Under machine mode bd prints {"key": ..., "value": ...} (value "" when the
+// key is unset), bare or inside the envelope; both are read too.
 func ParseConfigOutput(output []byte) string {
+	if payload := LegacyPayload([]string{"config", "get"}, output); len(bytes.TrimSpace(payload)) > 0 && bytes.TrimSpace(payload)[0] == '{' {
+		var got struct {
+			Value string `json:"value"`
+		}
+		if json.Unmarshal(payload, &got) == nil {
+			return strings.TrimSpace(got.Value)
+		}
+	}
 	for _, line := range strings.Split(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "Note:") && !strings.Contains(line, "(not set)") {
