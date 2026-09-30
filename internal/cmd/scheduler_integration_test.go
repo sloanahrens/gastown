@@ -36,6 +36,20 @@ import (
 // leak into later tests (all using the same database).
 var schedulerTestCounter atomic.Int32
 
+// schedulerTownSlots bounds how many scheduler towns are live at once. The
+// integration binary runs parallel tests GOMAXPROCS-wide, which the unit tests
+// compiled into it want; nineteen scheduler towns at once each spent up to
+// 260s in bd and gt subprocesses on the one Dolt container, against ~20s
+// four at a time.
+var schedulerTownSlots = make(chan struct{}, 4)
+
+// holdSchedulerTownSlot takes a scheduler town slot for the rest of t.
+func holdSchedulerTownSlot(t *testing.T) {
+	t.Helper()
+	schedulerTownSlots <- struct{}{}
+	t.Cleanup(func() { <-schedulerTownSlots })
+}
+
 // initBeadsDBForServer initializes a beads DB that can operate against the
 // shared Dolt test server. Uses local init (bd init --prefix --server-port)
 // which reliably creates the schema and records the ephemeral port in
@@ -165,6 +179,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	}
 
 	requireDoltServer(t)
+	holdSchedulerTownSlot(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
@@ -830,6 +845,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	}
 
 	requireDoltServer(t)
+	holdSchedulerTownSlot(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())

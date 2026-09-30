@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -22,7 +21,10 @@ import (
 // shared production Dolt data dir.
 func TestMain(m *testing.M) {
 	flag.Parse()
-	_ = flag.Set("test.parallel", strconv.Itoa(integrationParallelism(runtime.GOOS, explicitParallel())))
+	if runtime.GOOS == "windows" {
+		// Concurrent bd processes collide on file locks on Windows.
+		_ = flag.Set("test.parallel", "1")
+	}
 
 	h, err := testutil.StartHermetic(testutil.WithDolt())
 	if err != nil {
@@ -38,35 +40,4 @@ func TestMain(m *testing.M) {
 	code := h.Finish(m.Run())
 	removeBuiltGT()
 	os.Exit(code)
-}
-
-// integrationTestParallel is how many parallel integration tests run at once
-// unless -parallel names a number. Each scheduler test spends ~6s in two bd
-// inits and runs a dozen bd and gt subprocesses against the one shared Dolt
-// container; run one at a time, that family alone took ~450s.
-const integrationTestParallel = 4
-
-// integrationParallelism is the -test.parallel the integration binary runs
-// with: 1 on Windows, where concurrent bd processes collide on file locks;
-// otherwise explicit when -parallel was given, else integrationTestParallel.
-func integrationParallelism(goos string, explicit int) int {
-	switch {
-	case goos == "windows":
-		return 1
-	case explicit > 0:
-		return explicit
-	default:
-		return integrationTestParallel
-	}
-}
-
-// explicitParallel returns the -test.parallel given on the command line, or 0.
-func explicitParallel() int {
-	n := 0
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "test.parallel" {
-			n, _ = strconv.Atoi(f.Value.String())
-		}
-	})
-	return n
 }
