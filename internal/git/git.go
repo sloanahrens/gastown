@@ -1361,14 +1361,36 @@ func (g *Git) FirstParentLog(base, head string) ([]string, error) {
 // PatchID returns the stable patch-id of the diff between base and head
 // (git diff base..head | git patch-id --stable), i.e. the first field of the
 // tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase
-// that leaves the diff content identical, and changes whenever the content
-// does — used to detect whether a reviewed range still matches its target.
+// that leaves the diff content identical — used to detect whether a reviewed
+// range still matches its target.
+//
+// Hashing strips every whitespace character from the diff's lines, so two
+// diffs that differ only in whitespace share an id. A caller that must see a
+// whitespace-only edit wants PatchIDVerbatim.
 func (g *Git) PatchID(base, head string) (string, error) {
-	diff, err := g.run("diff", base+".."+head)
+	return g.patchID(base, head, "--stable")
+}
+
+// PatchIDVerbatim returns the patch-id of the diff between base and head with
+// whitespace kept (git diff base..head | git patch-id --verbatim), for callers
+// whose question is "is this the same diff?" rather than "is this the same
+// change?": stripped whitespace reads a reindent or a fixed trailing space as
+// no edit at all. git rejects --verbatim alongside --stable, so this id is
+// order-sensitive where PatchID's is not (gt-2colr).
+func (g *Git) PatchIDVerbatim(base, head string) (string, error) {
+	return g.patchID(base, head, "--verbatim")
+}
+
+// patchID is the shared plumbing; mode is git patch-id's hashing algorithm.
+// The diff comes from runOutput, not run: run's trim eats the trailing
+// whitespace of the diff's last line, which is a real change to the line when
+// the mode preserves whitespace (gt-2colr).
+func (g *Git) patchID(base, head, mode string) (string, error) {
+	diff, err := g.runOutput("diff", base+".."+head)
 	if err != nil {
 		return "", err
 	}
-	out, err := g.runWithStdin(diff, "patch-id", "--stable")
+	out, err := g.runWithStdin(diff, "patch-id", mode)
 	if err != nil {
 		return "", err
 	}

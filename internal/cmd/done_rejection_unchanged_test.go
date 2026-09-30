@@ -309,6 +309,35 @@ func TestReportUnchangedSinceRejection_AllowsFixCommit(t *testing.T) {
 	}
 }
 
+// TestReportUnchangedSinceRejection_AllowsWhitespaceOnlyFix is the reported
+// bug (gt-2colr): the lint finding named a trailing space, and stripping it is
+// the whole of the fix, so the reworked diff differs from the rejected
+// attempt's on nothing but whitespace. Comparing stable patch-ids hides that
+// difference — they strip whitespace before hashing — and the guard refused the
+// fix as its own rejected attempt, leaving the polecat nothing to change.
+func TestReportUnchangedSinceRejection_AllowsWhitespaceOnlyFix(t *testing.T) {
+	t.Parallel()
+	f := newRejectedReworkFixture(t)
+
+	// The rejected attempt: the fixture's change, carrying the trailing space
+	// the lint finding named.
+	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork \n")
+	runGitCmd(t, f.polecat, "add", "-A")
+	runGitCmd(t, f.polecat, "commit", "-m", "implement the feature")
+	rejected := revParse(t, f.polecat, "HEAD")
+	runGitCmd(t, f.polecat, "push", "origin", f.branch)
+
+	// The rework: the same change, whitespace stripped.
+	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\n")
+	runGitCmd(t, f.polecat, "add", "-A")
+	runGitCmd(t, f.polecat, "commit", "-m", "fix: strip the trailing whitespace the lint finding named")
+
+	err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": rejected}))
+	if err != nil {
+		t.Fatalf("a whitespace-only fix was refused as the rejected attempt: %v", err)
+	}
+}
+
 // TestReportUnchangedSinceRejection_AllowsFixAlreadyPushedOverTheBranch is the
 // false-positive shape the design has to survive: the rework pushed its fix, so
 // origin/<branch> now holds the NEW content. Reading the branch ref instead of
