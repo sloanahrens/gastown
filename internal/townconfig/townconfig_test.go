@@ -244,7 +244,7 @@ func TestAccessorsReturnCopies(t *testing.T) {
 // read fails the gate; it is never taken for an absent file.
 func TestCheckRefusesAnUnreadableFile(t *testing.T) {
 	t.Parallel()
-	for _, file := range []string{FileSettings, FileDaemonEnv, FileDolt, FileDaemon} {
+	for _, file := range []string{FileTown, FileRigs, FileSettings, FileDaemonEnv, FileDolt, FileDaemon} {
 		root := copyLiveTown(t)
 		path := filepath.Join(root, file)
 		if err := os.Remove(path); err != nil {

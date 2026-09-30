@@ -44,11 +44,11 @@
 - `internal/config/parse_error.go` (modify): `ParseError` gains `Keys []string`; `Error()` prints line-only locations; `DecodeJSONFile` becomes the strict decoder (the one parser).
 - `internal/config/strict_decode.go` (create): token-stream unknown-key walker `unknownKeys(data, reflect.Type) []keyRef`; trailing-data check; `DecodeYAMLFile`.
 - `internal/config/writer.go` (create): `WriteConfigJSON[T]`, `UpdateConfigJSON[T]`, flock helper.
-- `internal/config/flock_unix.go`, `flock_windows.go` (create): `lockFile(path) (unlock func(), err error)`.
+- `internal/config/flock_unix.go`, `flock_other.go` (create): `lockConfigFile(path) (unlock func(), err error)`; non-unix refuses to write (Windows support is being deleted in D7).
 - `internal/config/daemon_config.go` (create): canonical daemon.json schema moved from internal/daemon, plus retired `dolt_remotes`.
 - `internal/config/types.go`, `loader.go`, `agents.go`, `overseer.go`, `daemon_env.go` (modify): loaders onto the strict decoder, savers onto the writer.
 - `internal/townconfig/townconfig.go` (create): `Town`, `Load`, `Check`, resolvers, errors.
-- `internal/townconfig/testdata/live/...` (create): scrubbed copies of the live files.
+- `internal/config/testdata/livetown/...` (create): scrubbed copies of the live files, shared by the config and townconfig tests.
 - `internal/daemon/*.go` (modify, own commit): struct definitions become aliases of the config types; `CheckTownConfig` calls `townconfig.Check`; `ReadPatrolConfig`/`SavePatrolConfig` delegate.
 - `internal/cmd/bd_handshake.go`, `internal/doctor/town_config_check.go` (modify, same wiring commit): call `townconfig.Check`.
 
@@ -97,7 +97,7 @@ func TestDecodeYAMLFileRejectsUnknownKeys(t *testing.T) { /* KnownFields; ParseE
 
 ### Task 3: Locked atomic writer
 
-**Files:** Create `internal/config/writer.go`, `flock_unix.go`, `flock_windows.go`, `writer_test.go`; modify every `Save*` in `internal/config` and `SaveAgentRegistry`, `SaveOverseerConfig`, `EnsureDaemonPatrolConfig`, `AddRigToDaemonPatrols`, `RemoveRigFromDaemonPatrols`.
+**Files:** Create `internal/config/writer.go`, `flock_unix.go`, `flock_other.go`, `writer_test.go`; modify every `Save*` in `internal/config` and `SaveAgentRegistry`, `SaveOverseerConfig`, `EnsureDaemonPatrolConfig`, `AddRigToDaemonPatrols`, `RemoveRigFromDaemonPatrols`.
 
 **Interfaces:**
 - Produces:
@@ -113,7 +113,7 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 
 - [x] **Step 1: failing tests** — refuses over a syntax error, over an unknown key, over a type error (file bytes unchanged); keeps an existing file's mode; 20 concurrent `UpdateConfigJSON` increments of a counter end at 20; the stopgap's `TestSaversNeverReplaceAnUnparseableFile` still passes.
 - [x] **Step 2:** fails.
-- [x] **Step 3:** lock `<path>.lock` via `syscall.Flock(LOCK_EX)`; read; strict decode into a fresh `T`; marshal indent + trailing newline; `os.CreateTemp` in the dir, write, `Sync`, chmod (existing mode or perm), rename, fsync dir.
+- [x] **Step 3:** lock `<path>.lock` via `syscall.Flock(LOCK_EX)`; read; strict decode into a fresh `T`; apply only the caller's changes onto the file's own JSON (absent keys stay absent); marshal indent + trailing newline; `os.CreateTemp` in the dir, write, `Sync`, chmod (existing mode or perm), rename, fsync dir.
 - [x] **Step 4:** tests pass, including `-race` on the concurrency test.
 - [x] **Step 5:** commit `feat(config): one flock-guarded atomic writer for town config files`.
 
@@ -127,7 +127,7 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 
 ### Task 5: The kernel
 
-**Files:** Create `internal/townconfig/townconfig.go`, `townconfig_test.go`, `live_test.go`, `testdata/live/{mayor/town.json,mayor/rigs.json,mayor/daemon.json,settings/config.json,settings/daemon.env,.dolt-data/config.yaml}`, rig files under `testdata/live-rigs/`.
+**Files:** Create `internal/townconfig/townconfig.go`, `townconfig_test.go`, `live_test.go`, fixtures from `internal/config/testdata/livetown`.
 
 **Interfaces:**
 ```go
