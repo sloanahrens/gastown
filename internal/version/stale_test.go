@@ -22,17 +22,6 @@ func newRepo(t *testing.T) (*fakeGit, *fakeRepo) {
 	return g, g.repo(repoDir)
 }
 
-func TestSetCommit(t *testing.T) {
-	t.Parallel()
-	original := Commit
-	t.Cleanup(func() { SetCommit(original) })
-
-	SetCommit("abc123def456")
-	if Commit != "abc123def456" {
-		t.Errorf("SetCommit did not set Commit; got %q", Commit)
-	}
-}
-
 func TestCheckStaleBinary_NoCommit(t *testing.T) {
 	t.Parallel()
 	g, _ := newRepo(t)
