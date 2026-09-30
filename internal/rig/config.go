@@ -35,7 +35,7 @@ var SystemDefaults = map[string]interface{}{
 	"status":                  "operational",
 	"auto_restart":            true,
 	"auto_start_on_up":        false, // If true, rig agents start on gt up even when docked
-	"max_polecats":            10,
+	"max_polecats":            0,     // 0 = no per-rig concurrency cap; see polecat admission
 	"priority_adjustment":     0,
 	"dnd":                     false,
 	"polecat_branch_template": "", // Empty = use default behavior (polecat/{name}/...)

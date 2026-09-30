@@ -206,7 +206,8 @@ or `POST /telemetry` with rate limit event
 **Code**:
 - `internal/cmd/polecat_spawn.go` — `SpawnPolecatForSling()` (line ~62):
   Dolt health check, connection capacity, polecat count cap (25), per-bead
-  respawn circuit breaker, per-rig directory cap (30), idle polecat reuse
+  respawn circuit breaker, per-rig `max_polecats` concurrency cap (rig config,
+  `0` = uncapped) and directory cap (30), idle polecat reuse
 - `internal/polecat/manager.go` — `CheckDoltHealth()` (line ~223): retry with
   exponential backoff + jitter; `CheckDoltServerCapacity()` (line ~276):
   connection count admission gate

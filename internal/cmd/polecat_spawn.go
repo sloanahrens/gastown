@@ -496,6 +496,12 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
 	}
 
+	// The reclaim sweep frees a slot that counts toward capacity, so it runs
+	// before admission: after it, a rig whose slots are all held by broken
+	// sandboxes refuses the spawn, and the refusal stops the sweep that would
+	// free one (gt-1kbi).
+	reclaimBrokenIdleUnlessNamed(polecatMgr, opts)
+
 	var admission *polecatAdmissionHandle
 	if !opts.SkipAdmission {
 		admission, _, err = acquirePolecatAdmissionFn(townRoot, rigName, opts.HookBead, "spawn-or-reuse")
@@ -531,8 +537,6 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 				opts.HookBead, rigName, opts.HookBead)
 		}
 	}
-
-	reclaimBrokenIdleUnlessNamed(polecatMgr, opts)
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
 	// paying for a new worktree.

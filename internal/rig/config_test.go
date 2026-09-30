@@ -38,10 +38,13 @@ func TestGetConfig_SystemDefaults(t *testing.T) {
 		t.Error("expected auto_restart to be true by default")
 	}
 
-	// Test int default
+	// Test int default. max_polecats defaults to 0, which is "no per-rig
+	// concurrency cap": an unset rig must not be throttled by the compiled-in
+	// default (gt-1kbi). The per-rig directory cap floors at
+	// minPolecatDirsPerRig either way, so nothing else about the default moves.
 	maxPolecats := rig.GetIntConfig("max_polecats")
-	if maxPolecats != 10 {
-		t.Errorf("expected max_polecats=10, got %d", maxPolecats)
+	if maxPolecats != 0 {
+		t.Errorf("expected max_polecats=0 (uncapped), got %d", maxPolecats)
 	}
 }
 

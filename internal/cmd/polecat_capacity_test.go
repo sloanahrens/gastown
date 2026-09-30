@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
@@ -546,4 +547,164 @@ func TestStandaloneFormulaExistingPolecatNoopDoesNotRequireCapacity(t *testing.T
 	if err := runSlingFormula(context.Background(), []string{"test-formula", "gastown/polecats/toast"}); err != nil {
 		t.Fatalf("runSlingFormula: %v", err)
 	}
+}
+
+// setupPolecatCapacityRigs creates a direct-dispatch town (scheduler.max_polecats
+// = -1, no admission from the town cap) with one polecats directory per named
+// rig. Like setupPolecatCapacityRig it chdirs into the town, so these tests run
+// without t.Parallel().
+func setupPolecatCapacityRigs(t *testing.T, rigNames ...string) string {
+	t.Helper()
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	configureScheduler(t, townRoot, -1, 1)
+	rigs := make(map[string]config.RigEntry, len(rigNames))
+	for _, name := range rigNames {
+		if err := os.MkdirAll(filepath.Join(townRoot, name, "polecats"), 0755); err != nil {
+			t.Fatalf("mkdir rig %s: %v", name, err)
+		}
+		rigs[name] = config.RigEntry{GitURL: "https://example.invalid/" + name + ".git"}
+	}
+	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
+		Version: config.CurrentRigsVersion,
+		Rigs:    rigs,
+	}); err != nil {
+		t.Fatalf("SaveRigsConfig: %v", err)
+	}
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	return townRoot
+}
+
+func setRigMaxPolecats(t *testing.T, townRoot, rigName string, cap int) {
+	t.Helper()
+	if err := wisp.NewConfig(townRoot, rigName).Set("max_polecats", cap); err != nil {
+		t.Fatalf("seed %s max_polecats=%d: %v", rigName, cap, err)
+	}
+}
+
+// TestAcquirePolecatAdmissionEnforcesRigCapInDirectMode is gt-1kbi: with the town
+// in direct dispatch (scheduler.max_polecats = -1) admission used to be a no-op,
+// so a rig's max_polecats could not hold it to N concurrent polecats. The town
+// cap stays off; the rig cap must still refuse the second slot.
+func TestAcquirePolecatAdmissionEnforcesRigCapInDirectMode(t *testing.T) {
+	townRoot := setupPolecatCapacityRigs(t, "gastown")
+	setRigMaxPolecats(t, townRoot, "gastown", 1)
+
+	first, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
+	if err != nil {
+		t.Fatalf("first admission: %v", err)
+	}
+	defer first.Release()
+	if first.disabled {
+		t.Fatal("admission is disabled for a capped rig, so the rig cap cannot bind")
+	}
+
+	second, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-two", "test")
+	if second != nil {
+		defer second.Release()
+	}
+	var admissionErr *polecatCapacityAdmissionError
+	if !errors.As(err, &admissionErr) {
+		t.Fatalf("second admission error = %v, want polecatCapacityAdmissionError", err)
+	}
+	if admissionErr.RigMax != 1 || admissionErr.RigUsed != 1 {
+		t.Fatalf("denial = %+v, want rig max=1 used=1", admissionErr)
+	}
+	for _, want := range []string{"max_polecats", "gt rig config set gastown max_polecats"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("denial error %q should mention %q", err.Error(), want)
+		}
+	}
+
+	first.Release()
+	third, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-three", "test")
+	if err != nil {
+		t.Fatalf("admission after the first slot was released: %v", err)
+	}
+	defer third.Release()
+}
+
+// TestAcquirePolecatAdmissionLeavesUncappedRigAlone pins the default: a rig with
+// no max_polecats of its own is uncapped, so nothing about this change throttles
+// the rigs that never asked for a cap (gt-1kbi).
+func TestAcquirePolecatAdmissionLeavesUncappedRigAlone(t *testing.T) {
+	townRoot := setupPolecatCapacityRigs(t, "gastown")
+
+	handle, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
+	if err != nil {
+		t.Fatalf("admission for an uncapped rig in direct mode: %v", err)
+	}
+	defer handle.Release()
+	if !handle.disabled {
+		t.Fatal("an uncapped rig in direct dispatch should bypass admission")
+	}
+	if _, err := os.Stat(polecatAdmissionDir(townRoot)); !os.IsNotExist(err) {
+		t.Fatalf("reservation dir exists for an uncapped rig: %v", err)
+	}
+}
+
+// TestAcquirePolecatAdmissionRigCapIsPerRig: one rig's cap must not spend another
+// rig's slots.
+func TestAcquirePolecatAdmissionRigCapIsPerRig(t *testing.T) {
+	townRoot := setupPolecatCapacityRigs(t, "gastown", "hm")
+	setRigMaxPolecats(t, townRoot, "gastown", 1)
+
+	first, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
+	if err != nil {
+		t.Fatalf("first gastown admission: %v", err)
+	}
+	defer first.Release()
+
+	other, _, err := acquirePolecatAdmission(townRoot, "hm", "hm-one", "test")
+	if err != nil {
+		t.Fatalf("hm admission while gastown is full: %v", err)
+	}
+	defer other.Release()
+
+	if _, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-two", "test"); err == nil {
+		t.Fatal("gastown admitted a second polecat at its cap")
+	}
+}
+
+// TestAcquirePolecatAdmissionRigCapBindsUnderTownCap covers the branch where both
+// caps are on: the rig cap is read from the town snapshot's per-rig accounting,
+// and it refuses even though the town still has free slots.
+func TestAcquirePolecatAdmissionRigCapBindsUnderTownCap(t *testing.T) {
+	townRoot := setupPolecatCapacityRigs(t, "gastown", "hm")
+	configureScheduler(t, townRoot, 5, 1)
+	setRigMaxPolecats(t, townRoot, "gastown", 1)
+
+	first, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
+	if err != nil {
+		t.Fatalf("first gastown admission: %v", err)
+	}
+	defer first.Release()
+
+	second, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-two", "test")
+	if second != nil {
+		defer second.Release()
+	}
+	var admissionErr *polecatCapacityAdmissionError
+	if !errors.As(err, &admissionErr) {
+		t.Fatalf("second admission error = %v, want polecatCapacityAdmissionError", err)
+	}
+	if admissionErr.RigMax != 1 {
+		t.Fatalf("denial = %+v, want the rig cap to be the refusing one", admissionErr)
+	}
+
+	// The town still has room: another rig is not collateral damage.
+	other, _, err := acquirePolecatAdmission(townRoot, "hm", "hm-one", "test")
+	if err != nil {
+		t.Fatalf("hm admission while gastown is at its rig cap: %v", err)
+	}
+	defer other.Release()
 }
