@@ -522,47 +522,6 @@ func isLeadingBranchCreation(command string) bool {
 		(containsToken(lower, "-b") || containsToken(lower, "-c"))
 }
 
-// gt-mo53: the rehearsal step is a multi-line block (fetch / checkout -b
-// temp / merge) and a session runs it as one compound Bash call, so the
-// branch creation sits on a LATER segment — the position
-// isLeadingBranchCreation deliberately does not match. "Branch creation"
-// here means a whole segment that is "git checkout -b <name>" or "git
-// switch -c <name>" (an extra flag between the subcommand and the flag,
-// e.g. "git checkout -q -b temp", still matches), where <name> is one of
-// refRehearsalBranchNames — a creation of any other branch is the feature-
-// branch shape this guard blocks and stays blocked for every role.
-func isRehearsalBranchCreation(command string) bool {
-	for _, seg := range splitShellSegments(shellTokenize(strings.TrimSpace(command))) {
-		if len(seg) < 3 || !strings.EqualFold(seg[0], "git") {
-			continue
-		}
-		lower := make([]string, len(seg))
-		for i, tok := range seg {
-			lower[i] = strings.ToLower(tok)
-		}
-		hasFlag := false
-		for i, tok := range lower {
-			if (tok == "checkout" || tok == "switch") && i+1 < len(lower) {
-				switch lower[i+1] {
-				case "-b", "-c":
-					// The branch name is the token after the flag.
-					if i+2 < len(lower) && refRehearsalBranchNames[lower[i+2]] {
-						hasFlag = true
-					}
-				case "-branch", "-create":
-					// Long forms take the name as a separate argument.
-					if i+2 < len(lower) && refRehearsalBranchNames[lower[i+2]] {
-						hasFlag = true
-					}
-				}
-			}
-		}
-		if hasFlag {
-			return true
-		}
-	}
-	return false
-}
 func containsToken(tokens []string, want string) bool {
 	for _, t := range tokens {
 		if t == want {

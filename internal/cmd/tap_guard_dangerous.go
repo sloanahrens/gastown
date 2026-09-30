@@ -2018,12 +2018,6 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 	return "", ""
 }
 
-const refineryRawNotesPushReason = "raw git push of refs/notes/ from a refinery session"
-const refineryRawNotesPushAlternative = "Alternative: `gt mq review` and `gt mq rekey-note` publish " +
-	"refs/notes/om through a bounded timeout that kills git and any credential helper if the remote " +
-	"hangs; let the gate publish the note, or bound a manual push yourself: " +
-	"`GIT_TERMINAL_PROMPT=0 timeout 60 git push origin refs/notes/om` (gt-qhhlr)."
-
 // inCommandPosition reports whether tokens[i] ("git") is being run rather
 // than mentioned. It fails closed: git counts as a command unless the
 // segment's own program is one that only carries text (echo, printf, gt

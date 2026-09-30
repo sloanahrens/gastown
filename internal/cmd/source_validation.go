@@ -60,24 +60,3 @@ func validateConcreteSourceIssue(issueID string, issue *beads.Issue) error {
 	}
 	return nil
 }
-
-func validateMergeRequestSource(mr *beads.Issue, expectedIssueID string, expectedIssue *beads.Issue) error {
-	if mr == nil {
-		return fmt.Errorf("merge request is missing")
-	}
-	fields := beads.ParseMRFields(mr)
-	if fields == nil || strings.TrimSpace(fields.SourceIssue) == "" {
-		return fmt.Errorf("merge request %s has missing source_issue", mr.ID)
-	}
-	sourceIssueID := strings.TrimSpace(fields.SourceIssue)
-	if sourceIssueID != strings.TrimSpace(expectedIssueID) {
-		return fmt.Errorf("merge request %s source_issue %s does not match expected %s", mr.ID, sourceIssueID, expectedIssueID)
-	}
-	if expectedIssue == nil {
-		return fmt.Errorf("source_issue %s was not pre-resolved for merge request validation", sourceIssueID)
-	}
-	if resolvedID := strings.TrimSpace(expectedIssue.ID); resolvedID != "" && resolvedID != sourceIssueID {
-		return fmt.Errorf("pre-resolved source_issue %s does not match merge request source_issue %s", resolvedID, sourceIssueID)
-	}
-	return validateConcreteSourceIssue(sourceIssueID, expectedIssue)
-}

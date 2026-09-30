@@ -499,19 +499,6 @@ func TestSourceValidationRejectsInternalIssues(t *testing.T) {
 	}
 }
 
-func TestValidateMergeRequestSourceRejectsMissingAndMismatchedSource(t *testing.T) {
-	t.Parallel()
-	missing := &beads.Issue{ID: "gt-mr", Description: "branch: polecat/test/gt-work\n"}
-	if err := validateMergeRequestSource(missing, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "missing source_issue") {
-		t.Fatalf("missing source validation error = %v, want missing source_issue", err)
-	}
-
-	mismatched := &beads.Issue{ID: "gt-mr", Description: "source_issue: gt-other\n"}
-	if err := validateMergeRequestSource(mismatched, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "does not match expected") {
-		t.Fatalf("mismatched source validation error = %v, want mismatch", err)
-	}
-}
-
 // TestDoneBeadsInitWithoutRedirect verifies that beads initialization works
 // normally when no redirect file exists.
 func TestDoneBeadsInitWithoutRedirect(t *testing.T) {

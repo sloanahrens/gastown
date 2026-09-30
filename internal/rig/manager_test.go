@@ -130,9 +130,6 @@ func TestDiscoverRigs(t *testing.T) {
 	if !rig.HasWitness {
 		t.Error("expected HasWitness = true")
 	}
-	if !rig.HasRefinery {
-		t.Error("expected HasRefinery = true")
-	}
 }
 
 func TestDiscoverRigs_SortedByName(t *testing.T) {
@@ -477,10 +474,9 @@ func TestListRigNames(t *testing.T) {
 
 func TestRigSummary(t *testing.T) {
 	rig := &Rig{
-		Name:        "test",
-		Polecats:    []string{"a", "b", "c"},
-		HasWitness:  true,
-		HasRefinery: false,
+		Name:       "test",
+		Polecats:   []string{"a", "b", "c"},
+		HasWitness: true,
 	}
 
 	summary := rig.Summary()
@@ -493,9 +489,6 @@ func TestRigSummary(t *testing.T) {
 	}
 	if !summary.HasWitness {
 		t.Error("expected HasWitness = true")
-	}
-	if summary.HasRefinery {
-		t.Error("expected HasRefinery = false")
 	}
 }
 

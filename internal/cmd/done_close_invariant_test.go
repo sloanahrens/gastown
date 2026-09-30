@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -22,165 +21,27 @@ func (f fakeCloseTimeCommitCounter) CommitsAhead(base, branch string) (int, erro
 	return f.count, f.err
 }
 
-type fakeCloseTimeMRTracker struct {
-	issues map[string]*beads.Issue
-	err    error
-}
-
-func (f fakeCloseTimeMRTracker) Show(id string) (*beads.Issue, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.issues[id], nil
-}
-
-func (f fakeCloseTimeMRTracker) NonTerminalMRsForIssue(issueID string) ([]*beads.Issue, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	var matches []*beads.Issue
-	for _, issue := range f.issues {
-		if !beads.MatchesMRSourceIssue(issue.Description, issueID) {
-			continue
-		}
-		if beads.IssueStatus(issue.Status).IsTerminal() {
-			continue
-		}
-		matches = append(matches, issue)
-	}
-	return matches, nil
-}
-
 // TestCloseTimeInvariantSkipReason_ZeroCommitsAllowed covers gt-6hmz exit
 // (a): a branch with zero commits the target lacks may always close, even
-// with no MR and no override reason.
+// with no override reason.
 func TestCloseTimeInvariantSkipReason_ZeroCommitsAllowed(t *testing.T) {
 	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 0}
-	tracker := fakeCloseTimeMRTracker{} // no pending MR
 
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "", "polecat/basalt/gt-6hmz+abc", "main", "")
+	got := closeTimeInvariantSkipReason(counter, "gt-6hmz", "polecat/basalt/gt-6hmz+abc", "main", "")
 	if got != "" {
 		t.Errorf("expected close allowed on zero commits ahead, got skip reason %q", got)
 	}
 }
 
-// TestCloseTimeInvariantSkipReason_AllowsCloseWhenOpenMRTracksIssue covers
-// gt-6hmz exit (b) — this is the "gt done's own close passes because the MR
-// exists" case: real unmerged commits, but the pending MR bead is open.
-func TestCloseTimeInvariantSkipReason_AllowsCloseWhenOpenMRTracksIssue(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
-		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "open"},
-	}}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "gt-wisp-mr1", "polecat/basalt/gt-6hmz+abc", "main", "")
-	if got != "" {
-		t.Errorf("expected close allowed when the pending MR is open, got skip reason %q", got)
-	}
-}
-
-// TestCloseTimeInvariantSkipReason_AllowsCloseWhenMRClaimedInProgress covers
-// the refinery-claim race (gt-6hmz om-editorial finding 3): the refinery
-// transitions an MR open -> in_progress the moment it claims it
-// (internal/refinery/types.go:183), between MR creation and this close
-// check. in_progress must still count as "tracking", not "gone".
-func TestCloseTimeInvariantSkipReason_AllowsCloseWhenMRClaimedInProgress(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
-		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "in_progress"},
-	}}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "gt-wisp-mr1", "polecat/basalt/gt-6hmz+abc", "main", "")
-	if got != "" {
-		t.Errorf("expected close allowed when the pending MR was claimed in_progress, got skip reason %q", got)
-	}
-}
-
-// TestCloseTimeInvariantSkipReason_RefusesWhenPendingMRClosed ensures a
-// pendingMRID pointing at an already-terminal MR (closed/tombstone) does not
-// count as tracking — that MR no longer protects the unmerged commits.
-func TestCloseTimeInvariantSkipReason_RefusesWhenPendingMRClosed(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
-		"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "closed"},
-	}}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "gt-wisp-mr1", "polecat/basalt/gt-6hmz+abc", "main", "")
-	if got == "" {
-		t.Fatal("expected refusal when the pending MR is already closed")
-	}
-}
-
-// TestCloseTimeInvariantSkipReason_FallsBackToIssueLookupWhenPendingMRIDEmpty
-// covers gt-h8ld: active_mr was never written back onto the agent bead (the
-// caller passes pendingMRID=""), but an MR bead tracking issueID genuinely
-// exists and is still open. Exit (b) must not blame a missing MR that
-// exists — it should fall back to re-listing by issueID and find it.
-func TestCloseTimeInvariantSkipReason_FallsBackToIssueLookupWhenPendingMRIDEmpty(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
-		"gt-wisp-n65n": {
-			ID:          "gt-wisp-n65n",
-			Status:      "open",
-			Description: "branch: polecat/emerald/gt-h8ld+abc\nsource_issue: gt-h8ld\n",
-		},
-	}}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
-	if got != "" {
-		t.Errorf("expected close allowed via issueID fallback when active_mr was never recorded, got skip reason %q", got)
-	}
-}
-
-// TestCloseTimeInvariantSkipReason_FallbackFindsInProgressMR mirrors the
-// refinery-claim race (gt-6hmz om-editorial finding 3) for the fallback
-// path: the MR the fallback finds by issueID has already been claimed
-// (in_progress), not just open.
-func TestCloseTimeInvariantSkipReason_FallbackFindsInProgressMR(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
-		"gt-wisp-n65n": {
-			ID:          "gt-wisp-n65n",
-			Status:      "in_progress",
-			Description: "branch: polecat/emerald/gt-h8ld+abc\nsource_issue: gt-h8ld\n",
-		},
-	}}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
-	if got != "" {
-		t.Errorf("expected close allowed via issueID fallback when the found MR is in_progress, got skip reason %q", got)
-	}
-}
-
-// TestCloseTimeInvariantSkipReason_FallbackFindsNothingStillRefuses ensures
-// the fallback doesn't turn into a fail-open: when pendingMRID is empty and
-// no non-terminal MR tracks issueID either, the refusal must still fire.
-func TestCloseTimeInvariantSkipReason_FallbackFindsNothingStillRefuses(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 3}
-	tracker := fakeCloseTimeMRTracker{} // no MRs at all
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
-	if got == "" {
-		t.Fatal("expected refusal when the fallback also finds no tracking MR")
-	}
-}
-
 // TestCloseTimeInvariantSkipReason_SupersedePrefixAllowed covers gt-6hmz
-// exit (c): an explicit operator override bypasses the git/MR checks
+// exit (b): an explicit operator override bypasses the git check
 // entirely, even when they would otherwise refuse.
 func TestCloseTimeInvariantSkipReason_SupersedePrefixAllowed(t *testing.T) {
 	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 9} // would refuse on its own
-	tracker := fakeCloseTimeMRTracker{}             // no pending MR — would refuse on its own
 
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "", "polecat/basalt/gt-6hmz+abc", "main", "supersede: folded into gt-6hmz attempt 5")
+	got := closeTimeInvariantSkipReason(counter, "gt-6hmz", "polecat/basalt/gt-6hmz+abc", "main", "supersede: folded into gt-6hmz attempt 5")
 	if got != "" {
 		t.Errorf("expected supersede: override to allow close, got skip reason %q", got)
 	}
@@ -191,24 +52,22 @@ func TestCloseTimeInvariantSkipReason_SupersedePrefixAllowed(t *testing.T) {
 func TestCloseTimeInvariantSkipReason_CancelPrefixAllowed(t *testing.T) {
 	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 9}
-	tracker := fakeCloseTimeMRTracker{}
 
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "", "polecat/basalt/gt-6hmz+abc", "main", "Cancel: work no longer needed")
+	got := closeTimeInvariantSkipReason(counter, "gt-6hmz", "polecat/basalt/gt-6hmz+abc", "main", "Cancel: work no longer needed")
 	if got != "" {
 		t.Errorf("expected cancel: override to allow close, got skip reason %q", got)
 	}
 }
 
 // TestCloseTimeInvariantSkipReason_RefusedWhenNoneHold is the refusal case:
-// real unmerged commits, no pending MR, no override reason. The refusal
+// real unmerged commits and no override reason. The refusal
 // message must name the branch and the exact unmerged commit count so a
 // human reviewing the skip warning knows what to look at.
 func TestCloseTimeInvariantSkipReason_RefusedWhenNoneHold(t *testing.T) {
 	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{count: 5}
-	tracker := fakeCloseTimeMRTracker{}
 
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "", "polecat/basalt/gt-6hmz+abc", "main", "")
+	got := closeTimeInvariantSkipReason(counter, "gt-6hmz", "polecat/basalt/gt-6hmz+abc", "main", "")
 	if got == "" {
 		t.Fatal("expected close to be refused when no exit condition holds")
 	}
@@ -220,21 +79,6 @@ func TestCloseTimeInvariantSkipReason_RefusedWhenNoneHold(t *testing.T) {
 	}
 }
 
-// TestCloseTimeInvariantSkipReason_MRLookupErrorTreatedAsNotTracking ensures
-// a lookup failure for exit (b) does not silently allow the close — an
-// error resolving the pending MR must not be treated the same as it being
-// open.
-func TestCloseTimeInvariantSkipReason_MRLookupErrorTreatedAsNotTracking(t *testing.T) {
-	t.Parallel()
-	counter := fakeCloseTimeCommitCounter{count: 2}
-	tracker := fakeCloseTimeMRTracker{err: errPlaceholder}
-
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "gt-wisp-mr1", "polecat/basalt/gt-6hmz+abc", "main", "")
-	if got == "" {
-		t.Fatal("expected refusal when the pending MR lookup itself fails, not a silent allow")
-	}
-}
-
 // TestCloseTimeInvariantSkipReason_CommitsAheadErrorFailsOpen documents the
 // deliberate fail-open behavior when branch state itself can't be
 // determined (e.g. git error): the check declines to block an otherwise
@@ -243,9 +87,8 @@ func TestCloseTimeInvariantSkipReason_MRLookupErrorTreatedAsNotTracking(t *testi
 func TestCloseTimeInvariantSkipReason_CommitsAheadErrorFailsOpen(t *testing.T) {
 	t.Parallel()
 	counter := fakeCloseTimeCommitCounter{err: errPlaceholder}
-	tracker := fakeCloseTimeMRTracker{}
 
-	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "", "polecat/basalt/gt-6hmz+abc", "main", "")
+	got := closeTimeInvariantSkipReason(counter, "gt-6hmz", "polecat/basalt/gt-6hmz+abc", "main", "")
 	if got != "" {
 		t.Errorf("expected fail-open when commit-ahead count is inconclusive, got skip reason %q", got)
 	}
@@ -275,8 +118,7 @@ func TestHasOperatorOverridePrefix(t *testing.T) {
 // TestDoneCloseTimeInvariantSkipReason_ZeroCommitsAgainstRealGit exercises
 // the branch/target resolution wrapper against a real git repo (rather than
 // fakes), confirming it correctly identifies "zero commits ahead" — exit
-// (a) — without needing a live bd server: aheadCount==0 short-circuits
-// before the wrapper's beads client is ever asked about the pending MR.
+// (a) — without needing a live bd server.
 func TestDoneCloseTimeInvariantSkipReason_ZeroCommitsAgainstRealGit(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -290,10 +132,9 @@ func TestDoneCloseTimeInvariantSkipReason_ZeroCommitsAgainstRealGit(t *testing.T
 	testRunGit(t, dir, "commit", "-m", "initial")
 	testRunGit(t, dir, "checkout", "-b", "polecat/basalt/gt-6hmz+abc")
 
-	bd := beads.New(dir)
 	// townRoot/rigName don't resolve to a real rig config, so the wrapper
 	// falls back to defaultBranch "main" — which matches the repo above.
-	got := doneCloseTimeInvariantSkipReason(bd, dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz", "")
+	got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz")
 	if got != "" {
 		t.Errorf("expected close allowed with zero commits ahead of main, got skip reason %q", got)
 	}
@@ -314,8 +155,7 @@ func TestDoneCloseTimeInvariantSkipReason_OnDefaultBranchAllowsClose(t *testing.
 	testRunGit(t, dir, "add", ".")
 	testRunGit(t, dir, "commit", "-m", "initial")
 
-	bd := beads.New(dir)
-	got := doneCloseTimeInvariantSkipReason(bd, dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz", "")
+	got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz")
 	if got != "" {
 		t.Errorf("expected close allowed when on the default branch, got skip reason %q", got)
 	}
@@ -385,8 +225,7 @@ func TestDoneCloseTimeInvariantSkipReason_StaleLocalMainAllowsZeroCommitClose(t 
 		t.Fatal("test setup invalid: expected local stale main to diverge from the branch")
 	}
 
-	bd := beads.New(work)
-	got := doneCloseTimeInvariantSkipReason(bd, work, filepath.Join(tmp, "no-such-town"), "no-such-rig", "gt-6hmz", "")
+	got := doneCloseTimeInvariantSkipReason(work, filepath.Join(tmp, "no-such-town"), "no-such-rig", "gt-6hmz")
 	if got != "" {
 		t.Errorf("expected close allowed comparing against origin/main (zero polecat commits), got skip reason %q — wrapper likely compared against stale local main instead", got)
 	}
