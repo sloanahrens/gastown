@@ -87,6 +87,68 @@ func TestAcceptBypassPermissionsWarning_UnreadableFallsBackToDownEnter(t *testin
 	}
 }
 
+// TestAcceptBypassPermissionsWarning_StaleDialogTextIsNotAnswered is the state
+// the phrase match alone gets wrong: the workspace-trust warning carries
+// "Bypass Permissions mode" in its prose, so a dismissed trust dialog left
+// above a live prompt reaches this function, and its stale option list still
+// parses — Down+Enter would be typed into the agent's composer with nothing
+// reporting it (gt-g1f9s).
+func TestAcceptBypassPermissionsWarning_StaleDialogTextIsNotAnswered(t *testing.T) {
+	t.Parallel()
+
+	staleDialogs := map[string]string{
+		"trust dialog prose": claudeTrustDialogWarning,
+		"bypass dialog":      bypassPermissionsDialog,
+	}
+	for name, dialog := range staleDialogs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pane := &fakePane{content: dialog + "\n\n❯ "}
+			// Driven through the poll window: an unfixed build answers the
+			// stale option list and only then waits on verifyDialogDismissed,
+			// so a direct call would hang instead of failing.
+			_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptBypassPermissionsWarning("gt-x") })
+			if err != nil {
+				t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
+			}
+			if got := pane.sentKeys(); len(got) != 0 {
+				t.Errorf("keys = %q, want none: the dialog text above the prompt is stale", got)
+			}
+		})
+	}
+}
+
+// TestAcceptBypassPermissionsWarning_StaleTextWithoutAgentPrompt covers the
+// same scrollback with no agent prompt to exit on: the stale check has to rule
+// the text out on its own, and the shell prompt below it is that check's
+// signal, not the agent-prompt early exit's (gt-g1f9s).
+func TestAcceptBypassPermissionsWarning_StaleTextWithoutAgentPrompt(t *testing.T) {
+	t.Parallel()
+	pane := &fakePane{content: "Bypass Permissions mode\n1. No\n2. Yes, I accept\nuser@host:~$"}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptBypassPermissionsWarning("gt-x") })
+	if err != nil {
+		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
+	}
+	if got := pane.sentKeys(); len(got) != 0 {
+		t.Errorf("keys = %q, want none: the dialog text above the shell prompt is stale", got)
+	}
+}
+
+// TestAcceptBypassPermissionsWarning_AnswersLiveDialogUnderOldPrompt keeps the
+// stale check narrow: a prompt line *above* the modal is scrollback, not a live
+// prompt, so the dialog on screen is still answered (gt-g1f9s).
+func TestAcceptBypassPermissionsWarning_AnswersLiveDialogUnderOldPrompt(t *testing.T) {
+	t.Parallel()
+	pane := &fakePane{content: "user@host:~$\n" + bypassDialog, confirm: showPrompt}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptBypassPermissionsWarning("gt-x") })
+	if err != nil {
+		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
+	}
+	if got := pane.sentKeys(); !reflect.DeepEqual(got, []string{"Down", "Enter"}) {
+		t.Errorf("keys = %q, want Down then Enter", got)
+	}
+}
+
 // TestAcceptStartupDialogs_NoDialogs verifies the combined function returns
 // on first captures when no dialogs are present.
 func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
