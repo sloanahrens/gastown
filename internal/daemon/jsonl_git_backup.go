@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/util"
@@ -71,11 +72,6 @@ const (
 	// sets this by hand (gt-kxa1).
 	gitPostBufferBytes = "524288000" // 500 MB
 )
-
-// errGitCmdTimeout marks a git command killed because its context deadline
-// expired. The kill signal gives git no chance to release .git/index.lock, so
-// callers of index-mutating commands clear one up on this error (gt-1aj2).
-var errGitCmdTimeout = errors.New("command timed out")
 
 // testPollutionPatterns matches issue IDs or titles that indicate test data leaked
 // into production exports. These records are filtered out before writing JSONL.
@@ -225,7 +221,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// silently no-op'ing forever. A missing repo used to mean this patrol
 	// never ran a single cycle (0 successes across every dispatch) with no
 	// signal anywhere that offsite backup was dead (gt-kme).
-	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		d.logger.Printf("jsonl_git_backup: cannot initialize git repo %s: %v", gitRepo, err)
 		mol.failStep("export", "git repo init failed: "+err.Error())
 		d.escalateAlert(alertKeyJSONLInit, "jsonl_git_backup", fmt.Sprintf("cannot initialize offsite backup repo %s: %v", gitRepo, err))
@@ -583,12 +579,20 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 
 	// Stage all JSONL files (flat legacy files + subdirectory structure).
 	// Use "." instead of "*/" to correctly handle initially-untracked subdirectories.
-	if err := d.runGitIndexCmd(gitRepo, localBudget(), "add", "-A", "."); err != nil {
+	if err := d.runGitIndexOp(gitRepo, "git add -A .", func() error {
+		return d.backupGitAt(gitRepo, localBudget()).Add("-A", ".")
+	}); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
-	// Check if there are staged changes.
-	if err := d.runGitIndexCmd(gitRepo, localBudget(), "diff", "--cached", "--quiet"); err == nil {
+	// Check if there are staged changes. A failed check is not "no
+	// changes": the commit below decides.
+	var staged []gtgit.StagedChange
+	if err := d.runGitIndexOp(gitRepo, "git diff --cached", func() error {
+		var err error
+		staged, err = d.backupGitAt(gitRepo, localBudget()).StagedChanges()
+		return err
+	}); err == nil && len(staged) == 0 {
 		d.logger.Printf("jsonl_git_backup: no changes to commit")
 		return nil
 	}
@@ -608,8 +612,9 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	}
 
 	// Commit.
-	if err := d.runGitIndexCmd(gitRepo, localBudget(), "commit", "-m", msg,
-		"--author=Gas Town Daemon <daemon@gastown.local>"); err != nil {
+	if err := d.runGitIndexOp(gitRepo, "git commit", func() error {
+		return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, "Gas Town Daemon <daemon@gastown.local>")
+	}); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
 
@@ -625,16 +630,17 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// error (not a graceful skip) so it surfaces through the same
 	// consecutive-failure escalation as a real push failure, instead of
 	// silently "succeeding" forever (gt-kme).
-	if !d.hasGitRemote(gitRepo, "origin") {
+	local := d.backupGitAt(gitRepo, gitCmdTimeout)
+	if _, err := local.RemoteURL("origin"); err != nil {
 		return fmt.Errorf("committed locally but no 'origin' remote configured — backup is not offsite")
 	}
 
 	// Detect current branch name for push (master vs main).
-	branch := d.currentGitBranch(gitRepo)
-	if branch == "" {
+	branch, err := local.CurrentBranch()
+	if err != nil || branch == "" {
 		branch = "main" // fallback
 	}
-	if err := d.runGitCmd(gitRepo, gitPushTimeout, "push", "origin", branch); err != nil {
+	if err := d.backupGitAt(gitRepo, gitPushTimeout).Push("origin", branch, false); err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}
 	d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
@@ -646,24 +652,13 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 // skipping forever when the directory doesn't exist yet. A remote is NOT
 // configured here — that still requires an explicit `git remote add origin`
 // — but at least the local half stops being permanently inert (gt-kme).
-func ensureGitRepoInitialized(gitRepo string) error {
+func (d *Daemon) ensureGitRepoInitialized(gitRepo string) error {
+	g := d.backupGitAt(gitRepo, gitCmdTimeout)
 	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
 		if err := os.MkdirAll(gitRepo, 0755); err != nil {
 			return fmt.Errorf("creating %s: %w", gitRepo, err)
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "init", "-b", "main")
-		cmd.Env = gitChildEnv()
-		util.SetDetachedProcessGroup(cmd)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			errMsg := strings.TrimSpace(stderr.String())
-			if errMsg != "" {
-				return fmt.Errorf("git init: %s", errMsg)
-			}
+		if err := g.InitRepo("main"); err != nil {
 			return fmt.Errorf("git init: %w", err)
 		}
 	}
@@ -671,27 +666,8 @@ func ensureGitRepoInitialized(gitRepo string) error {
 	// Set unconditionally (idempotent) rather than only on fresh init, so a
 	// pre-existing repo created before this fix — or one where the config was
 	// lost — also gets covered on the next daemon start (gt-kxa1).
-	if err := setGitPostBuffer(gitRepo); err != nil {
+	if err := g.ConfigSet("http.postBuffer", gitPostBufferBytes); err != nil {
 		return fmt.Errorf("git config http.postBuffer: %w", err)
-	}
-	return nil
-}
-
-// setGitPostBuffer sets http.postBuffer on gitRepo to gitPostBufferBytes.
-func setGitPostBuffer(gitRepo string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "config", "http.postBuffer", gitPostBufferBytes)
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
-		}
-		return err
 	}
 	return nil
 }
@@ -726,22 +702,11 @@ func postBufferHint(packSize string) string {
 // postBuffer escalation hints. Returns "" on any failure — the hint is still
 // useful without this detail, so callers don't need to handle an error.
 func (d *Daemon) gitPackSizeSummary(gitRepo string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "count-objects", "-v")
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	size, err := d.backupGitAt(gitRepo, gitCmdTimeout).PackSize()
+	if err != nil || size == "" {
 		return ""
 	}
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		if kb, ok := strings.CutPrefix(line, "size-pack:"); ok {
-			return strings.TrimSpace(kb) + " KiB"
-		}
-	}
-	return ""
+	return size + " KiB"
 }
 
 // discoverJsonlBackupDatabases lists production database directories under
@@ -777,112 +742,63 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 	return databases
 }
 
-// gitChildEnv returns os.Environ() augmented with HOME/USER/LOGNAME/SSH_AUTH_SOCK
-// when missing. Daemon-launched git falls back to getpwuid(uid) for committer/author
-// identity if $USER and $LOGNAME are absent; on macOS that lookup can fail with
-// "No user exists for uid N" once the long-lived daemon's connection to
-// opendirectoryd is no longer reachable. Forwarding these vars lets git use them
+// gitIdentityEnv returns the HOME/USER/LOGNAME entries missing from the
+// daemon's environment, recovered from the user database. Daemon-launched git
+// falls back to getpwuid(uid) for committer/author identity if $USER and
+// $LOGNAME are absent; on macOS that lookup can fail with "No user exists
+// for uid N" once the long-lived daemon's connection to opendirectoryd is no
+// longer reachable. Adding these to the backup's git calls lets git use them
 // directly and skip the system passwd lookup. See gh#zt1w.
-func gitChildEnv() []string {
-	return gitChildEnvFrom(os.Environ(), user.Current)
+func gitIdentityEnv() []string {
+	return gitIdentityEnvFrom(os.Environ(), user.Current)
 }
 
-// gitChildEnvFrom is gitChildEnv over env, recovering missing identity from
-// current.
-func gitChildEnvFrom(env []string, current func() (*user.User, error)) []string {
+// gitIdentityEnvFrom is gitIdentityEnv over env, recovering missing identity
+// from current. It adds nothing when env has all three, or when current
+// fails (git then errors as it would have).
+func gitIdentityEnvFrom(env []string, current func() (*user.User, error)) []string {
 	have := make(map[string]bool, len(env))
 	for _, kv := range env {
 		if eq := strings.IndexByte(kv, '='); eq > 0 {
 			have[kv[:eq]] = true
 		}
 	}
-
 	if have["HOME"] && have["USER"] && have["LOGNAME"] {
-		return env
+		return nil
 	}
-
-	// Recover identity vars from os/user. user.Current() consults $USER/$HOME
-	// before falling back to getpwuid; if all three are missing it may itself
-	// fail, in which case we return env unchanged and let git error normally.
 	u, err := current()
 	if err != nil {
-		return env
+		return nil
 	}
+	var add []string
 	if !have["HOME"] && u.HomeDir != "" {
-		env = append(env, "HOME="+u.HomeDir)
+		add = append(add, "HOME="+u.HomeDir)
 	}
 	if !have["USER"] && u.Username != "" {
-		env = append(env, "USER="+u.Username)
+		add = append(add, "USER="+u.Username)
 	}
 	if !have["LOGNAME"] && u.Username != "" {
-		env = append(env, "LOGNAME="+u.Username)
+		add = append(add, "LOGNAME="+u.Username)
 	}
-	return env
+	return add
 }
 
-// hasGitRemote checks if the named remote exists in the git repo.
-func (d *Daemon) hasGitRemote(gitRepo, name string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "remote", "get-url", name)
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.Run() == nil
-}
-
-// currentGitBranch returns the current branch name, or empty string on error.
-func (d *Daemon) currentGitBranch(gitRepo string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return ""
+// backupGitAt opens the backup repository at dir: openGitFn's when a test
+// set one, else a *git.Git whose every call carries the recovered identity
+// (gitIdentityEnv) and is killed after timeout.
+func (d *Daemon) backupGitAt(dir string, timeout time.Duration) daemonGit {
+	if d.openGitFn != nil {
+		return d.openGitFn(dir)
 	}
-	return strings.TrimSpace(stdout.String())
+	return gtgit.NewGit(dir).WithEnv(gitIdentityEnv()).WithTimeout(timeout)
 }
 
-// runGitCmd runs a git command in the specified directory with the given timeout.
-func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-				return fmt.Errorf("%w after %s: %s", errGitCmdTimeout, timeout, errMsg)
-			}
-			return fmt.Errorf("%w after %s", errGitCmdTimeout, timeout)
-		}
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
-		}
-		return err
-	}
-	return nil
-}
-
-// runGitIndexCmd runs a git command that reads or writes gitRepo's index,
+// runGitIndexOp runs op, a git command that reads or writes gitRepo's index,
 // steering around the index lock a previous tick may have left behind. A tick
 // whose `git add` is killed on its deadline cannot release that lock, and
 // without this every later tick fails "index.lock: File exists" until a human
-// removes it (gt-1aj2).
-func (d *Daemon) runGitIndexCmd(gitRepo string, timeout time.Duration, args ...string) error {
-	desc := "git " + strings.Join(args, " ")
-
+// removes it (gt-1aj2). desc names the command in the log.
+func (d *Daemon) runGitIndexOp(gitRepo, desc string, op func() error) error {
 	// Two attempts at most: the first may find a lock orphaned by an earlier
 	// tick, the second runs only after this clears that lock.
 	var err error
@@ -892,14 +808,14 @@ func (d *Daemon) runGitIndexCmd(gitRepo string, timeout time.Duration, args ...s
 		}
 
 		started := time.Now()
-		err = d.runGitCmd(gitRepo, timeout, args...)
+		err = op()
 		if err == nil {
 			return nil
 		}
 
 		// A killed command leaves its own lock behind; clear it now so one slow
 		// tick cannot fail the next two and escalate.
-		if errors.Is(err, errGitCmdTimeout) {
+		if errors.Is(err, gtgit.ErrTimedOut) {
 			if d.clearIndexLockModifiedSince(gitRepo, started) {
 				d.logger.Printf("jsonl_git_backup: cleared %s orphaned by timed-out %s", gitIndexLockPath(gitRepo), desc)
 			}
@@ -1254,7 +1170,7 @@ var errSpikeBaselineBootstrap = errors.New("no backup commit history yet")
 // Returns errSpikeBaselineBootstrap for a repo with no commits (first run),
 // errNoSpikeBaseline when commits exist but none carry counts and no cache can
 // bridge them, or a wrapped error when git itself fails.
-func recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) {
+func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) {
 	window := make(map[string][]spikeCommit) // db → newest-first
 	order := []string{}
 
@@ -1269,22 +1185,10 @@ func recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) {
 	// pool (not a tight --max-count, which truncates by commit-graph order and
 	// can drop newer commits in favor of older side-branches) and keep the
 	// topological order.
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-
 	fetch := 64 // generous pool; well under any realistic backup repo's commits
-	const sep = "\x1f"
-	args := []string{"-C", gitRepo, "log", "--all", "--topo-order", "--max-count",
-		strconv.Itoa(fetch), "--format=%H" + sep + "%cI" + sep + "%s"}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = gitChildEnv()
-	util.SetDetachedProcessGroup(cmd)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git log: %w: %s", err, strings.TrimSpace(stderr.String()))
+	log, err := d.backupGitAt(gitRepo, gitCmdTimeout).LogAll(fetch)
+	if err != nil {
+		return nil, fmt.Errorf("git log: %w", err)
 	}
 
 	type commitSubject struct {
@@ -1294,29 +1198,19 @@ func recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) {
 	var commits []commitSubject
 	total := 0
 	seen := map[string]bool{}
-	scanner := bufio.NewScanner(&stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		fields := strings.SplitN(line, sep, 3)
-		if len(fields) != 3 {
-			continue
-		}
-		hash, ts, subject := fields[0], fields[1], fields[2]
+	for _, entry := range log {
 		// Count every commit, not just the count-bearing ones: a repo with
 		// zero commits is the bootstrap case (proceed), while commits that
 		// carry no counts are unreadable history (halt) — see the tail below.
 		total++
-		counts := parseCommitCounts(subject)
-		if len(counts) == 0 || seen[hash] {
+		counts := parseCommitCounts(entry.Subject)
+		if len(counts) == 0 || seen[entry.Hash] {
 			continue
 		}
-		seen[hash] = true
+		seen[entry.Hash] = true
 		date := ""
-		if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
-			date = parsed.Format(time.RFC3339)
+		if !entry.Time.IsZero() {
+			date = entry.Time.Format(time.RFC3339)
 		}
 		commits = append(commits, commitSubject{date: date, counts: counts})
 	}
@@ -1652,7 +1546,7 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
 	var spikes []spikeInfo
-	spikeBase, err := recomputeSpikeBaseline(gitRepo)
+	spikeBase, err := d.recomputeSpikeBaseline(gitRepo)
 	if errors.Is(err, errSpikeBaselineBootstrap) {
 		// The backup repo has no commits yet, so there is no previous level to
 		// compare against and no spike is possible. Proceed with the export:
