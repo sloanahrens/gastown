@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
@@ -94,6 +97,71 @@ func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	return store, func() { _ = store.Close() }
+}
+
+// setupJournaledTown makes a town whose hq .beads is a bd-initialized
+// workspace on the package's container, as a real town's is, and returns its
+// root with a bd handle on hq and the in-process store opened from its config.
+//
+// A ConvoyManager test needs both halves on one database: the manager reads
+// closes through bd (bd events tail, gt-7iwy0.2, from the store's canonical
+// .beads) and convoy tracking through the store. OpenTestStore's pooled
+// database is migrated by the store library and has no bd_events_journal, and
+// the library cannot write to bd's schema (gt-idv8s). So, as in production, bd
+// makes the database and every write, journaled (SuppressBDSideEffects sets
+// BD_EVENTS_JOURNAL=1), and the store only reads.
+func setupJournaledTown(t *testing.T) (string, *beads.Beads, beadsdk.Storage) {
+	t.Helper()
+	townRoot := t.TempDir()
+	bd, store := initJournaledWorkspace(t, townRoot, "hq")
+	return townRoot, bd, store
+}
+
+// addJournaledRig adds rig to townRoot as setupJournaledTown made its hq: a
+// bd workspace reached at <town>/<rig>/.beads, where doltserver.FindRigBeadsDir
+// looks, and a route sending prefix- ids to it. The workspace is made outside
+// the town and linked in: bd init walks up from a directory inside the town,
+// finds hq's workspace and refuses to init over it (a real rig is a git clone,
+// which bounds that walk).
+func addJournaledRig(t *testing.T, townRoot, rig, prefix string) (*beads.Beads, beadsdk.Storage) {
+	t.Helper()
+	rigDir := t.TempDir()
+	bd, store := initJournaledWorkspace(t, rigDir, prefix)
+	if err := os.Symlink(rigDir, filepath.Join(townRoot, rig)); err != nil {
+		t.Fatalf("link rig %s: %v", rig, err)
+	}
+	route := fmt.Sprintf(`{"prefix":"%s-","path":"%s/.beads"}`+"\n", prefix, rig)
+	f, err := os.OpenFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open routes: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(route); err != nil {
+		t.Fatalf("write route for %s: %v", rig, err)
+	}
+	return bd, store
+}
+
+// initJournaledWorkspace runs bd init --prefix prefix in dir against the
+// package's container and opens the store its metadata.json names.
+func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, beadsdk.Storage) {
+	t.Helper()
+	testutil.RequireDoltContainer(t)
+	port, err := strconv.Atoi(testutil.DoltContainerPort())
+	if err != nil {
+		t.Fatalf("container port %q: %v", testutil.DoltContainerPort(), err)
+	}
+	args := []string{"init", "--prefix", prefix, "--quiet", "--server", "--server-port", strconv.Itoa(port)}
+	if out, err := beads.RunTestContainerInit(t.Context(), dir, args, nil); err != nil {
+		t.Fatalf("bd init %s in %s: %v\n%s", prefix, dir, err, out)
+	}
+	bd := beads.NewIsolatedWithPort(dir, port)
+	store, err := beads.OpenStoreFromConfig(context.Background(), filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatalf("open store on the bd workspace in %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return bd, store
 }
 
 // storeTestSlots bounds how many store-backed tests this package runs at once.
