@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -56,33 +55,29 @@ func installReceiptsPath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", "install-receipts.jsonl")
 }
 
-// isAncestorFn reports (isAncestor, known). known is false when git could not
-// answer (no repo, unknown commit, git error); a test seam.
-var isAncestorFn = func(repo, ancestor, descendant string) (bool, bool) {
+// isAncestor reports (isAncestor, known) for two commits in repo. known is
+// false when git could not answer (no repo, unknown commit, git error).
+func (d *Daemon) isAncestor(repo, ancestor, descendant string) (ok, known bool) {
 	if repo == "" || ancestor == "" || descendant == "" {
 		return false, false
 	}
-	err := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant).Run()
-	if err == nil {
-		return true, true
+	ok, err := d.gitAt(repo).IsAncestor(ancestor, descendant)
+	if err != nil {
+		return false, false
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
-		return false, true
-	}
-	return false, false
+	return ok, true
 }
 
 // provenAncestor is true only when git answered and said yes. A failed or
 // erroring check is never treated as ancestry.
-func provenAncestor(repo, ancestor, descendant string) bool {
-	ok, known := isAncestorFn(repo, ancestor, descendant)
+func (d *Daemon) provenAncestor(repo, ancestor, descendant string) bool {
+	ok, known := d.isAncestor(repo, ancestor, descendant)
 	return known && ok
 }
 
 // provenNotAncestor is true only when git answered and said no.
-func provenNotAncestor(repo, ancestor, descendant string) bool {
-	ok, known := isAncestorFn(repo, ancestor, descendant)
+func (d *Daemon) provenNotAncestor(repo, ancestor, descendant string) bool {
+	ok, known := d.isAncestor(repo, ancestor, descendant)
 	return known && !ok
 }
 
@@ -92,17 +87,13 @@ var upgradeEscalateFn = func(d *Daemon, key, msg string) {
 	go d.escalateAlert(key, "upgrade-restart", msg)
 }
 
-// mergedAtFn returns the committer time of commit in repo as UTC RFC3339
-// (the shell writer's format), or "" when git cannot answer; a test seam.
-var mergedAtFn = func(repo, commit string) string {
+// mergedAt returns the committer time of commit in repo as UTC RFC3339 (the
+// shell writer's format), or "" when git cannot answer.
+func (d *Daemon) mergedAt(repo, commit string) string {
 	if repo == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", repo, "show", "-s", "--format=%cI", commit).Output()
-	if err != nil {
-		return ""
-	}
-	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
+	t, err := d.gitAt(repo).CommitTime(commit)
 	if err != nil {
 		return ""
 	}
@@ -174,8 +165,8 @@ func appendInstallReceipt(townRoot string, r installReceipt) error {
 // to, or an ancestor of, own (merge-base --is-ancestor A A is true). Decided
 // only by git ancestry in the marker's repo; when git cannot answer the marker
 // is NOT covered, so the daemon restarts rather than silently clearing it.
-func markerCovered(m *restartPendingMarker, own string) bool {
-	return provenAncestor(m.Repo, m.Commit, own)
+func (d *Daemon) markerCovered(m *restartPendingMarker, own string) bool {
+	return d.provenAncestor(m.Repo, m.Commit, own)
 }
 
 // restartHadNoEffect reports whether a previous restart for this marker
@@ -183,12 +174,12 @@ func markerCovered(m *restartPendingMarker, own string) bool {
 // advance (attempted_from an ancestor of own, own not an ancestor of
 // attempted_from) counts as progress; anything git cannot prove is treated as
 // no effect so an unanswerable check can never loop the daemon.
-func restartHadNoEffect(m *restartPendingMarker, own string) bool {
+func (d *Daemon) restartHadNoEffect(m *restartPendingMarker, own string) bool {
 	if m.AttemptedFrom == "" {
 		return false
 	}
-	advanced := provenAncestor(m.Repo, m.AttemptedFrom, own) &&
-		provenNotAncestor(m.Repo, own, m.AttemptedFrom)
+	advanced := d.provenAncestor(m.Repo, m.AttemptedFrom, own) &&
+		d.provenNotAncestor(m.Repo, own, m.AttemptedFrom)
 	return !advanced
 }
 
@@ -196,7 +187,7 @@ func restartHadNoEffect(m *restartPendingMarker, own string) bool {
 // gastown checkout can resolve it), or "" when the build does not know it.
 // "unknown" is treated as absent.
 func (d *Daemon) ownCommitForUpgrade() string {
-	raw := strings.TrimSpace(buildCommitFn())
+	raw := strings.TrimSpace(d.buildCommit())
 	if raw == "" || raw == "unknown" {
 		return ""
 	}
@@ -234,7 +225,7 @@ func (d *Daemon) loadMarkerForUpgrade() (m *restartPendingMarker, own string, ok
 // clearCoveredMarker deletes a marker own already covers and appends its
 // daemon_restarted receipt. Returns true when it cleared the marker.
 func (d *Daemon) clearCoveredMarker(m *restartPendingMarker, own string, now time.Time) bool {
-	if !markerCovered(m, own) {
+	if !d.markerCovered(m, own) {
 		return false
 	}
 	townRoot := d.config.TownRoot
@@ -244,7 +235,7 @@ func (d *Daemon) clearCoveredMarker(m *restartPendingMarker, own string, now tim
 		Commit:     m.Commit,
 		PrevCommit: m.AttemptedFrom,
 		Source:     m.Source,
-		MergedAt:   mergedAtFn(m.Repo, m.Commit),
+		MergedAt:   d.mergedAt(m.Repo, m.Commit),
 	}
 	if t, err := time.Parse(time.RFC3339, m.RequestedAt); err == nil {
 		rec.DurationS = int(now.Sub(t).Seconds())
@@ -291,7 +282,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		d.upgradeWaitEscalated = false
 	}
 
-	if restartHadNoEffect(m, own) {
+	if d.restartHadNoEffect(m, own) {
 		if !d.upgradeWaitEscalated {
 			d.upgradeWaitEscalated = true
 			d.logger.Printf("upgrade-restart: restarted from %s for %s but now running %s; not restarting again", m.AttemptedFrom, m.Commit, own)

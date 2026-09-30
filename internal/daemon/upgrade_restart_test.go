@@ -7,38 +7,34 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// fakeHistory answers isAncestor from a linear history: index order is
-// ancestry order (a..b..c). A commit outside the history is "unknown".
-func fakeHistory(t *testing.T, commits ...string) {
+// upgradeRepo is where fakeHistory's commits live, as a marker's repo.
+const upgradeRepo = "/repo"
+
+// fakeHistory gives d a gitfake repository at upgradeRepo holding a linear
+// history, one commit per name in ancestry order (a..b..c), each name a
+// branch on its commit. A name outside the history resolves to nothing, so
+// git reports it unknown. With no names there is no repository at all.
+func fakeHistory(t *testing.T, d *Daemon, names ...string) {
 	t.Helper()
-	pos := map[string]int{}
-	for i, c := range commits {
-		pos[c] = i
+	f := useGitfake(t, d)
+	if len(names) == 0 {
+		return
 	}
-	orig := isAncestorFn
-	isAncestorFn = func(repo, ancestor, descendant string) (bool, bool) {
-		a, okA := pos[ancestor]
-		b, okB := pos[descendant]
-		if !okA || !okB {
-			return false, false
-		}
-		return a <= b, true
+	f.InitBare(t, upgradeRepo)
+	for _, n := range names {
+		id := f.Commit(t, upgradeRepo, "main", n, map[string]string{"n": n})
+		f.SetRef(t, upgradeRepo, "refs/heads/"+n, id)
 	}
-	t.Cleanup(func() { isAncestorFn = orig })
 }
 
-func withOwnCommit(t *testing.T, c string) {
-	t.Helper()
-	orig := buildCommitFn
-	buildCommitFn = func() string { return c }
-	t.Cleanup(func() { buildCommitFn = orig })
+func withOwnCommit(d *Daemon, c string) {
+	d.buildCommitFn = func() string { return c }
 }
 
 func captureEscalations(t *testing.T) *[]string {
@@ -50,17 +46,8 @@ func captureEscalations(t *testing.T) *[]string {
 	return &keys
 }
 
-// noMergedAt keeps tests from running git show against a fake repo path.
-func noMergedAt(t *testing.T) {
-	t.Helper()
-	orig := mergedAtFn
-	mergedAtFn = func(repo, commit string) string { return "" }
-	t.Cleanup(func() { mergedAtFn = orig })
-}
-
 func upgradeTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	noMergedAt(t)
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
 		t.Fatal(err)
@@ -113,10 +100,10 @@ func TestUpgradeCoveredMarkerClearedWithReceipt(t *testing.T) {
 		{"ancestor", "aaa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fakeHistory(t, "aaa", "bbb", "ccc")
-			withOwnCommit(t, "bbb")
 			captureEscalations(t)
 			d := upgradeTestDaemon(t)
+			withOwnCommit(d, "bbb")
+			fakeHistory(t, d, "aaa", "bbb", "ccc")
 			writeMarker(t, d, restartPendingMarker{Commit: tc.marker, Source: "post-merge",
 				RequestedAt: time.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339), Repo: "/repo"})
 
@@ -139,10 +126,10 @@ func TestUpgradeCoveredMarkerClearedWithReceipt(t *testing.T) {
 
 // The receipt's duration_s is an integer, matching the shell writer.
 func TestUpgradeReceiptDurationIsInteger(t *testing.T) {
-	fakeHistory(t, "aaa")
-	withOwnCommit(t, "aaa")
 	captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa")
 	writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: "/repo",
 		RequestedAt: time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)})
 	d.checkUpgradeRestart(time.Now())
@@ -161,10 +148,10 @@ func TestUpgradeReceiptDurationIsInteger(t *testing.T) {
 }
 
 func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
-	fakeHistory(t, "aaa", "bbb")
-	withOwnCommit(t, "aaa")
 	keys := captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
 	d.mayorDispatchRunning.Store(true)
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 
@@ -196,10 +183,10 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 }
 
 func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
-	fakeHistory(t, "aaa", "bbb")
-	withOwnCommit(t, "aaa")
 	captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
 	// An unknown field from a future writer must survive the daemon's rewrite.
 	if err := os.WriteFile(restartMarkerPath(d.config.TownRoot),
 		[]byte(`{"commit":"bbb","repo":"/repo","future_field":42}`), 0o644); err != nil {
@@ -224,10 +211,10 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 }
 
 func TestUpgradeNoEffectRestartDoesNotLoop(t *testing.T) {
-	fakeHistory(t, "aaa", "bbb")
-	withOwnCommit(t, "aaa")
 	keys := captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo", AttemptedFrom: "aaa"})
 
 	if d.checkUpgradeRestart(time.Now()) || d.checkUpgradeRestart(time.Now()) {
@@ -242,10 +229,10 @@ func TestUpgradeNoEffectRestartDoesNotLoop(t *testing.T) {
 // restart again: the attempted_from guard only stops a restart that changed
 // nothing.
 func TestUpgradeAdvancedPastAttemptMayRestartAgain(t *testing.T) {
-	fakeHistory(t, "aaa", "bbb", "ccc")
-	withOwnCommit(t, "bbb")
 	keys := captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "bbb")
+	fakeHistory(t, d, "aaa", "bbb", "ccc")
 	writeMarker(t, d, restartPendingMarker{Commit: "ccc", Repo: "/repo", AttemptedFrom: "aaa"})
 
 	if !d.checkUpgradeRestart(time.Now()) {
@@ -260,10 +247,10 @@ func TestUpgradeAdvancedPastAttemptMayRestartAgain(t *testing.T) {
 // rather than silently clearing the marker, and the attempted_from guard
 // stops it from looping when it comes back.
 func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
-	fakeHistory(t) // every lookup reports "unknown"
-	withOwnCommit(t, "abc1234")
 	keys := captureEscalations(t)
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "abc1234")
+	fakeHistory(t, d) // every lookup reports "unknown"
 	writeMarker(t, d, restartPendingMarker{Commit: "abc1234def5678"})
 
 	if !d.checkUpgradeRestart(time.Now()) {
@@ -278,7 +265,7 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 
 	// The next daemon (same fake binary) sees attempted_from and cannot prove
 	// it advanced: escalate once, never exit again.
-	d2 := &Daemon{config: d.config, logger: d.logger}
+	d2 := &Daemon{config: d.config, logger: d.logger, openGitFn: d.openGitFn, buildCommitFn: d.buildCommitFn}
 	if d2.checkUpgradeRestart(time.Now()) || d2.checkUpgradeRestart(time.Now()) {
 		t.Fatal("unprovable progress after an attempted restart must not loop")
 	}
@@ -290,10 +277,10 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 func TestUpgradeUnknownOwnCommitIgnoresMarker(t *testing.T) {
 	for _, own := range []string{"", "unknown"} {
 		t.Run("own="+own, func(t *testing.T) {
-			fakeHistory(t, "aaa", "bbb")
-			withOwnCommit(t, own)
 			keys := captureEscalations(t)
 			d := upgradeTestDaemon(t)
+			withOwnCommit(d, own)
+			fakeHistory(t, d, "aaa", "bbb")
 			writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 			if d.checkUpgradeRestart(time.Now()) {
 				t.Fatal("daemon that cannot name its own commit must not restart")
@@ -308,10 +295,10 @@ func TestUpgradeUnknownOwnCommitIgnoresMarker(t *testing.T) {
 // C7: at startup a covered marker clears, but the daemon never exits.
 func TestUpgradeStartupClearsCoveredOnlyNeverRestarts(t *testing.T) {
 	t.Run("covered clears", func(t *testing.T) {
-		fakeHistory(t, "aaa", "bbb")
-		withOwnCommit(t, "bbb")
 		captureEscalations(t)
 		d := upgradeTestDaemon(t)
+		withOwnCommit(d, "bbb")
+		fakeHistory(t, d, "aaa", "bbb")
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 		d.clearCoveredRestartMarker(time.Now())
 		if markerExists(t, d) || len(readReceipts(t, d)) != 1 {
@@ -319,10 +306,10 @@ func TestUpgradeStartupClearsCoveredOnlyNeverRestarts(t *testing.T) {
 		}
 	})
 	t.Run("newer and idle does not restart", func(t *testing.T) {
-		fakeHistory(t, "aaa", "bbb")
-		withOwnCommit(t, "aaa")
 		keys := captureEscalations(t)
 		d := upgradeTestDaemon(t)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 		d.clearCoveredRestartMarker(time.Now())
 		if d.upgradeRestartRequested.Load() {
@@ -363,8 +350,6 @@ func TestUpgradeShutdownLeavesDoltRunning(t *testing.T) {
 }
 
 func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
-	fakeHistory(t, "aaa", "bbb")
-	withOwnCommit(t, "aaa")
 	captureEscalations(t)
 	calls := 0
 	orig := heartbeatWorkFn
@@ -372,6 +357,8 @@ func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
 	t.Cleanup(func() { heartbeatWorkFn = orig })
 
 	d := upgradeTestDaemon(t)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
 	d.heartbeat(&State{})
 	if calls != 1 {
 		t.Fatalf("no marker: heartbeatWork calls = %d, want 1", calls)
@@ -386,55 +373,71 @@ func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
 	}
 }
 
-// The real ancestry seam against a throwaway repo: a proven yes, a proven no,
-// and "unknown" for a missing commit or repo (never a false "covered").
-func TestIsAncestorFnRealGit(t *testing.T) {
+// The ancestry check against a repository: a proven yes, a proven no, and
+// "unknown" for a missing commit or repo (never a false "covered").
+func TestIsAncestorAnswersFromTheRepo(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	repo := t.TempDir()
-	git := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "GIT_CONFIG_GLOBAL=/dev/null")
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("git %v: %v", args, err)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	git("init", "-q")
-	git("commit", "-q", "--allow-empty", "-m", "a")
-	a := git("rev-parse", "HEAD")
-	git("commit", "-q", "--allow-empty", "-m", "b")
-	b := git("rev-parse", "HEAD")
+	d := &Daemon{}
+	fakeHistory(t, d, "a", "b")
 
 	for _, tc := range []struct {
 		name, repo, anc, desc string
 		ok, known             bool
 	}{
-		{"ancestor", repo, a, b, true, true},
-		{"equal", repo, b, b, true, true},
-		{"short sha", repo, a[:7], b, true, true},
-		{"not ancestor", repo, b, a, false, true},
-		{"missing commit", repo, "0123456789abcdef0123456789abcdef01234567", b, false, false},
-		{"no repo", "", a, b, false, false},
-		{"bad repo", filepath.Join(repo, "nope"), a, b, false, false},
+		{"ancestor", upgradeRepo, "a", "b", true, true},
+		{"equal", upgradeRepo, "b", "b", true, true},
+		{"not ancestor", upgradeRepo, "b", "a", false, true},
+		{"missing commit", upgradeRepo, "0123456789abcdef0123456789abcdef01234567", "b", false, false},
+		{"no repo", "", "a", "b", false, false},
+		{"bad repo", "/repo/nope", "a", "b", false, false},
+		{"no ancestor", upgradeRepo, "", "b", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, known := isAncestorFn(tc.repo, tc.anc, tc.desc)
-			if ok != tc.ok || known != tc.known {
-				t.Fatalf("isAncestorFn = (%v, %v), want (%v, %v)", ok, known, tc.ok, tc.known)
+			if ok, known := d.isAncestor(tc.repo, tc.anc, tc.desc); ok != tc.ok || known != tc.known {
+				t.Fatalf("isAncestor = (%v, %v), want (%v, %v)", ok, known, tc.ok, tc.known)
 			}
 		})
 	}
-	if got := mergedAtFn(repo, b); !strings.HasSuffix(got, "Z") {
-		t.Fatalf("mergedAtFn = %q, want UTC RFC3339", got)
+}
+
+// mergedAt is the commit's committer time as UTC RFC3339, the shell
+// writer's format, and "" when git cannot answer.
+func TestMergedAtIsTheCommitterTimeInUTC(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	fakeHistory(t, d, "a")
+	got := d.mergedAt(upgradeRepo, "a")
+	if _, err := time.Parse(time.RFC3339, got); err != nil || !strings.HasSuffix(got, "Z") {
+		t.Fatalf("mergedAt = %q, want UTC RFC3339", got)
 	}
-	if got := mergedAtFn(repo, "0123456789abcdef0123456789abcdef01234567"); got != "" {
-		t.Fatalf("mergedAtFn(missing) = %q, want empty", got)
+	for _, tc := range []struct{ repo, commit string }{
+		{upgradeRepo, "0123456789abcdef0123456789abcdef01234567"},
+		{"", "a"},
+		{"/repo/nope", "a"},
+	} {
+		if got := d.mergedAt(tc.repo, tc.commit); got != "" {
+			t.Errorf("mergedAt(%q, %q) = %q, want empty", tc.repo, tc.commit, got)
+		}
+	}
+}
+
+// resolveOwnCommit widens the short build commit through the town's gastown
+// checkout, and keeps it as built when the checkout cannot resolve it.
+func TestResolveOwnCommitWidensThroughTheGastownCheckout(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+	f := useGitfake(t, d)
+	own := strings.Repeat("ab", 20)
+	d.buildCommitFn = func() string { return own[:7] }
+	if got := d.resolveOwnCommit(); got != own[:7] {
+		t.Fatalf("resolveOwnCommit with no checkout = %q, want the build commit %q", got, own[:7])
+	}
+	checkout := filepath.Join(d.config.TownRoot, "gastown", "mayor", "rig")
+	f.InitBare(t, checkout)
+	id := f.Commit(t, checkout, "main", "build", map[string]string{"a": "a"})
+	d.buildCommitFn = func() string { return "main" }
+	if got := d.resolveOwnCommit(); got != id {
+		t.Fatalf("resolveOwnCommit = %q, want the checkout's full id %s", got, id)
 	}
 }
 
