@@ -197,7 +197,7 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 		cmd.Dir = dbDir
 		util.SetProcessGroup(cmd)
 
-		output, err := cmd.CombinedOutput()
+		output, err := d.combinedOutput(cmd)
 		cancel()
 		if err == nil {
 			d.logger.Printf("dolt_backup: %s: synced to %s", db, backupName)
@@ -233,7 +233,7 @@ func (d *Daemon) syncOffsiteBackup() {
 
 	cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", backupDir+"/", icloudDir+"/")
 	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := d.combinedOutput(cmd); err != nil {
 		d.logger.Printf("dolt_backup: offsite sync failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	} else {
 		d.logger.Printf("dolt_backup: offsite synced to iCloud")
@@ -278,7 +278,7 @@ func (d *Daemon) hasBackupRemote(dataDir, db, backupName string) bool {
 	cmd.Dir = dbDir
 	util.SetDetachedProcessGroup(cmd)
 
-	output, err := cmd.Output()
+	output, _, err := d.runCmd(cmd)
 	if err != nil {
 		return false
 	}

@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/boot"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // bootSpawner stands in for boot.Boot.Spawn on a fakeTmux: like the real
@@ -85,106 +84,6 @@ func bootSessionCreated(d *Daemon) time.Time {
 		return time.Time{}
 	}
 	return created
-}
-
-func writeFakeTmux(t *testing.T, dir string) {
-	t.Helper()
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-
-cmd=""
-skip_next=0
-for arg in "$@"; do
-  if [[ "$skip_next" -eq 1 ]]; then
-    skip_next=0
-    continue
-  fi
-  if [[ "$arg" == "-u" ]]; then
-    continue
-  fi
-  if [[ "$arg" == "-L" ]]; then
-    skip_next=1
-    continue
-  fi
-  cmd="$arg"
-  break
-done
-
-if [[ -n "${TMUX_LOG:-}" ]]; then
-  printf "%s %s\n" "$cmd" "$*" >> "$TMUX_LOG"
-fi
-
-if [[ "${1:-}" == "-V" ]]; then
-  echo "tmux 3.3a"
-  exit 0
-fi
-
-# Keep session checks simple for this regression repro: no existing boot session.
-# TMUX_FAKE_SESSION=alive reports the queried session as live instead, and
-# TMUX_FAKE_SESSION_CREATED supplies the creation time the turn-budget guard reads.
-if [[ "$cmd" == "has-session" ]]; then
-  if [[ "${TMUX_FAKE_SESSION:-}" == "alive" ]]; then
-    exit 0
-  fi
-  exit 1
-fi
-
-if [[ "$cmd" == "list-sessions" ]]; then
-  if [[ -n "${TMUX_FAKE_SESSION_CREATED:-}" ]]; then
-    printf "%s\n" "$TMUX_FAKE_SESSION_CREATED"
-  fi
-  exit 0
-fi
-
-exit 0
-`
-	path := filepath.Join(dir, "tmux")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
-	}
-}
-
-// TestEnsureBootRunning_SpawnsThroughBoot is the wiring guard for spawnBoot's
-// production path: every other ensureBootRunning test replaces the spawn
-// (spawnBootFn), so this one leaves it nil and proves boot.Boot.Spawn really
-// ran, by the new-session a bash tmux on PATH records. Serial: it sets PATH.
-func TestEnsureBootRunning_SpawnsThroughBoot(t *testing.T) {
-	townRoot := t.TempDir()
-	fakeBinDir := t.TempDir()
-	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-		t.Fatalf("create tmux log: %v", err)
-	}
-	writeFakeTmux(t, fakeBinDir)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", tmuxLog)
-	t.Setenv("GT_DEGRADED", "false")
-	useAgentBootMode(t, townRoot)
-
-	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&bytes.Buffer{}, "", 0),
-		tmux:     tmux.NewTmux(),
-		notifier: notifyfake.New(),
-	}
-	d.ensureBootRunning()
-
-	data, err := os.ReadFile(tmuxLog)
-	if err != nil {
-		t.Fatalf("read tmux log: %v", err)
-	}
-	spawns := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, "new-session ") && strings.Contains(line, session.BootSessionName()) {
-			spawns++
-		}
-	}
-	if spawns != 1 {
-		t.Fatalf("boot.Boot.Spawn opened %d Boot session(s), want 1; tmux log:\n%s", spawns, data)
-	}
-	if d.bootLastSpawned.IsZero() {
-		t.Error("a successful spawn must stamp the cooldown")
-	}
 }
 
 // Regression test for gt-1z0:

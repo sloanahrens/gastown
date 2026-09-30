@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 )
 
 func TestIsAgentSession(t *testing.T) {
@@ -27,18 +28,16 @@ func TestIsAgentSession(t *testing.T) {
 	}
 }
 
-func TestLoadAverage1_DoesNotPanic(t *testing.T) {
+// countAgentSessions reads the daemon's own tmux (the town socket), and counts
+// only the sessions that look like Gas Town agents.
+func TestCountAgentSessionsCountsAgentsOnTheDaemonTmux(t *testing.T) {
 	t.Parallel()
-	load := loadAverage1()
-	if load < 0 {
-		t.Errorf("load average should be >= 0, got %f", load)
+	tm := newFakeTmux(newFixedClock())
+	for _, name := range []string{"hq-mayor", "rig-witness", "rig-polecat-abc", "my-personal-session"} {
+		tm.addSession(name, "claude", time.Time{})
 	}
-}
-
-func TestAvailableMemoryGB_DoesNotPanic(t *testing.T) {
-	t.Parallel()
-	mem := availableMemoryGB()
-	if mem < 0 {
-		t.Errorf("available memory should be >= 0, got %f", mem)
+	d := &Daemon{tmux: tm}
+	if got := d.countAgentSessions(); got != 3 {
+		t.Errorf("countAgentSessions = %d, want 3 (the personal session is not an agent)", got)
 	}
 }

@@ -3,12 +3,9 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // runDaemonTests is the body of both tiers' TestMain: it runs the package's
@@ -34,19 +31,10 @@ func runDaemonTests(m *testing.M, setup func(), opts ...testutil.HermeticOption)
 		setup()
 	}
 
-	// Isolate tmux sessions on a package-specific socket.
-	var tmuxSocket string
-	if _, err := exec.LookPath("tmux"); err == nil {
-		tmuxSocket = fmt.Sprintf("gt-test-daemon-%d", os.Getpid())
-		tmux.SetDefaultSocket(tmuxSocket)
-	}
-
+	// No per-package tmux socket: the harness already binds tmux's default to
+	// an isolated per-process socket (and kills it at Finish), and the unit
+	// tier drives a fakeTmux rather than a server.
 	code := m.Run()
 
-	if tmuxSocket != "" {
-		_ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run()
-		socketPath := filepath.Join(tmux.SocketDir(), tmuxSocket)
-		_ = os.Remove(socketPath)
-	}
 	return h.Finish(code)
 }

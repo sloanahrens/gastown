@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -138,16 +137,14 @@ func TestFakeCLIRecordsAndAnswers(t *testing.T) {
 		"convoy stranded": {stdout: "[]"},
 		"sling":           {stderr: "boom", code: 2},
 	}))
-	cmd := exec.CommandContext(context.Background(), "/opt/bin/gt", "convoy", "stranded", "--json")
-	cmd.Dir = "/town"
-	cmd.Env = []string{"BEADS_DIR=/a", "BEADS_DIR=/town/.beads"}
+	cmd := &exec.Cmd{Path: "/opt/bin/gt", Args: []string{"gt", "convoy", "stranded", "--json"}, Dir: "/town",
+		Env: []string{"BEADS_DIR=/a", "BEADS_DIR=/town/.beads"}}
 	out, _, err := f.run(cmd)
 	if err != nil || string(out) != "[]" {
 		t.Fatalf("convoy stranded = %q, %v; want [] and success", out, err)
 	}
 	var stderr strings.Builder
-	cmd = exec.CommandContext(context.Background(), "gt", "sling", "gt-1")
-	cmd.Stderr = &stderr
+	cmd = &exec.Cmd{Path: "gt", Args: []string{"gt", "sling", "gt-1"}, Stderr: &stderr}
 	if _, _, err = f.run(cmd); err == nil || stderr.String() != "boom" {
 		t.Fatalf("sling = %q, %v; want boom written to the caller's stderr, and a failure", stderr.String(), err)
 	}

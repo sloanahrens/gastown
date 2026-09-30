@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +26,7 @@ func scriptPlugin(t *testing.T, name, script string) *plugin.Plugin {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return &plugin.Plugin{
@@ -75,20 +77,36 @@ func TestScriptTimeout(t *testing.T) {
 	}
 }
 
+// scriptBash is a fakeCLI for `bash run.sh` that answers every run with reply.
+func scriptBash(reply cliReply) *fakeCLI {
+	return newFakeCLI(func([]string) cliReply { return reply })
+}
+
 func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 	t.Parallel()
-	p := scriptPlugin(t, "ok", "echo hello; echo root=$GT_TOWN_ROOT name=$GT_PLUGIN_NAME runner=$GT_PLUGIN_RUNNER role=$GT_ROLE >&2; pwd\n")
-	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
+	p := scriptPlugin(t, "ok", "exit 0\n")
+	bash := scriptBash(cliReply{stdout: "hello\n"})
+	res := runPluginScript(context.Background(), bash.run, scriptEnv{environ: []string{"PATH=/usr/bin"}}, p, "/town", 5*time.Second)
 	if !res.ok() {
 		t.Fatalf("expected success, got %+v", res)
 	}
-	for _, want := range []string{"hello", "root=/town", "name=ok", "runner=daemon", "role=daemon/plugin", p.Path} {
-		if !strings.Contains(res.output, want) {
-			t.Errorf("output lacks %q:\n%s", want, res.output)
-		}
+	if !strings.Contains(res.output, "hello") {
+		t.Errorf("output lacks the script's stdout:\n%s", res.output)
 	}
 	if !strings.HasPrefix(res.status(), "exit 0") {
 		t.Errorf("status = %q", res.status())
+	}
+	calls := bash.recorded()
+	if len(calls) != 1 || calls[0].name != "bash" || !slices.Equal(calls[0].args, []string{"run.sh"}) || calls[0].dir != p.Path {
+		t.Fatalf("ran %+v, want `bash run.sh` in the plugin directory", calls)
+	}
+	for key, want := range map[string]string{
+		"PATH": "/usr/bin", "GT_ROOT": "/town", "GT_TOWN_ROOT": "/town", "GT_PLUGIN_NAME": "ok",
+		"GT_PLUGIN_RUNNER": "daemon", "GT_ROLE": "daemon/plugin", "BD_ACTOR": "daemon",
+	} {
+		if got := calls[0].getenv(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -96,28 +114,53 @@ func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 // default server. The daemon hands over the town socket it resolved at start;
 // without it stuck-agent-dog reads a live Deacon as crashed (claude-l5w).
 func TestRunPluginScript_ExportsTownTmuxSocket(t *testing.T) {
-	prev := tmux.GetDefaultSocket()
-	t.Cleanup(func() { tmux.SetDefaultSocket(prev) })
-	t.Setenv("GT_TMUX_SOCKET", "stale-ambient")
+	t.Parallel()
+	ambient := []string{"GT_TMUX_SOCKET=stale-ambient"}
+	p := scriptPlugin(t, "sock", "exit 0\n")
 
-	tmux.SetDefaultSocket("gt-town")
-	p := scriptPlugin(t, "sock", "echo socket=$GT_TMUX_SOCKET\n")
-	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
-	if !strings.Contains(res.output, "socket=gt-town") {
-		t.Errorf("GT_TMUX_SOCKET not the town socket:\n%s", res.output)
+	bash := scriptBash(cliReply{})
+	runPluginScript(context.Background(), bash.run, scriptEnv{environ: ambient, tmuxSocket: "gt-town"}, p, "/town", 5*time.Second)
+	if got := bash.recorded()[0].getenv("GT_TMUX_SOCKET"); got != "gt-town" {
+		t.Errorf("GT_TMUX_SOCKET = %q, want the town socket", got)
 	}
 
-	tmux.SetDefaultSocket("")
-	res = runPluginScript(context.Background(), p, "/town", 5*time.Second)
-	if !strings.Contains(res.output, "socket=stale-ambient") {
-		t.Errorf("no resolved socket should leave the ambient value alone:\n%s", res.output)
+	bash = scriptBash(cliReply{})
+	runPluginScript(context.Background(), bash.run, scriptEnv{environ: ambient}, p, "/town", 5*time.Second)
+	if got := bash.recorded()[0].getenv("GT_TMUX_SOCKET"); got != "stale-ambient" {
+		t.Errorf("no resolved socket should leave the ambient value alone, got %q", got)
+	}
+}
+
+// daemonScriptEnv is the wiring for the pair above: the socket handed to a
+// script is the one the tmux package resolved for this process.
+func TestDaemonScriptEnvCarriesTheResolvedSocket(t *testing.T) {
+	t.Parallel()
+	if got, want := daemonScriptEnv().tmuxSocket, tmux.GetDefaultSocket(); got != want {
+		t.Errorf("daemonScriptEnv().tmuxSocket = %q, want tmux.GetDefaultSocket() %q", got, want)
+	}
+}
+
+// A script that ran out its timeout reports as timed out, not by its exit.
+func TestRunPluginScript_TimeoutIsReportedAsTimeout(t *testing.T) {
+	t.Parallel()
+	p := scriptPlugin(t, "slow", "exit 0\n")
+	// A timeout already spent: the run's context is past its deadline when
+	// the script returns, as it is when a kill ends a script at its timeout.
+	killed := func(*exec.Cmd) ([]byte, []byte, error) { return nil, nil, errors.New("signal: killed") }
+	res := runPluginScript(context.Background(), killed, scriptEnv{}, p, "/town", -time.Second)
+	if !res.timedOut || res.ok() || res.exitCode != -1 {
+		t.Fatalf("expected a timeout, got %+v", res)
+	}
+	if !strings.HasPrefix(res.status(), "timed out") {
+		t.Errorf("status = %q", res.status())
 	}
 }
 
 func TestRunPluginScript_FailureExitCode(t *testing.T) {
 	t.Parallel()
-	p := scriptPlugin(t, "bad", "echo boom >&2; exit 3\n")
-	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
+	p := scriptPlugin(t, "bad", "exit 3\n")
+	bash := scriptBash(cliReply{stderr: "boom\n", code: 3})
+	res := runPluginScript(context.Background(), bash.run, scriptEnv{}, p, "/town", 5*time.Second)
 	if res.ok() || res.exitCode != 3 || res.timedOut {
 		t.Fatalf("expected exit 3, got %+v", res)
 	}
@@ -386,10 +429,20 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 	t.Parallel()
 	mgr, sm, router, rec := &fakeMgr{}, &fakeSM{}, &fakeRouter{}, &fakeRecorder{}
 	logs := &lockedBuffer{}
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(logs, "", 0), ctx: context.Background()}
+	release := make(chan struct{})
+	bash := newFakeCLIFor(func(c cliCall) cliReply {
+		switch filepath.Base(c.dir) {
+		case "failing":
+			return cliReply{stderr: "the disk is full\n", code: 7}
+		case "slow":
+			<-release
+		}
+		return cliReply{}
+	})
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(logs, "", 0), ctx: context.Background(), execCmd: bash.run}
 	d.findDogFn = func() *dog.Dog { return &dog.Dog{Name: "alpha"} }
 
-	bad := scriptPlugin(t, "failing", "echo the disk is full >&2; exit 7\n")
+	bad := scriptPlugin(t, "failing", "exit 7\n")
 	d.startScriptPlugin(bad, mgr, sm, router, rec)
 	waitFor(t, func() bool { return len(rec.records()) == 1 && len(sm.startedNames()) == 1 })
 	if recs := rec.records(); recs[0].Result != plugin.ResultFailure {
@@ -415,17 +468,14 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 	}
 
 	// A second start while the first still runs is a no-op. The script holds
-	// until the test opens its gate, so the second start certainly overlaps.
-	gate := filepath.Join(t.TempDir(), "gate")
-	slow := scriptPlugin(t, "slow", "while [ ! -e "+shellQuote(gate)+" ]; do sleep 0.01; done\n")
+	// until the test releases it, so the second start certainly overlaps.
+	slow := scriptPlugin(t, "slow", "exit 0\n")
 	d.startScriptPlugin(slow, mgr, sm, router, rec)
 	d.startScriptPlugin(slow, mgr, sm, router, rec)
 	if !strings.Contains(logs.String(), "script plugin slow still running, skipping") {
 		t.Errorf("the overlapping start was not refused:\n%s", logs.String())
 	}
-	if err := os.WriteFile(gate, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	close(release)
 	waitFor(t, func() bool { return d.scripts.runningCount() == 0 })
 	if n := len(rec.records()); n != 3 {
 		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 3", n)

@@ -137,9 +137,9 @@ func TestBuildDoltSQLCmd_RemoteNoPasswordSuppressesPrompt(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_LocalIgnoresInheritedCredentials(t *testing.T) {
-	t.Setenv("DOLT_CLI_PASSWORD", "secret-from-env")
-
+	t.Parallel()
 	m := &DoltServerManager{
+		environFn: func() []string { return []string{"PATH=/usr/bin", "DOLT_CLI_PASSWORD=secret-from-env"} },
 		config: &DoltServerConfig{
 			Port:    3307,
 			User:    "root",
@@ -169,9 +169,9 @@ func TestBuildDoltSQLCmd_LocalIgnoresInheritedCredentials(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_RemoteNoPasswordPreservesInheritedCredentials(t *testing.T) {
-	t.Setenv("DOLT_CLI_PASSWORD", "secret-from-env")
-
+	t.Parallel()
 	m := &DoltServerManager{
+		environFn: func() []string { return []string{"PATH=/usr/bin", "DOLT_CLI_PASSWORD=secret-from-env"} },
 		config: &DoltServerConfig{
 			Host:    "10.0.0.5",
 			Port:    3307,

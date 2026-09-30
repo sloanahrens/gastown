@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -348,59 +348,32 @@ func TestExecScheduledRunner_SlingArgv(t *testing.T) {
 }
 
 // TestExecScheduledSlingRunner_ListBeadsArgvContract runs the real argv through
-// a stub bd that models the two behaviours the patrol depends on: bd v0.59+
-// needs --flat for --json to emit JSON at all, and bd's default list filter
-// hides closed issues. Dropping either makes the newest completed run invisible
-// and the interval guard meaningless — the two integration bugs that unit tests
+// a bd that models the two behaviours the patrol depends on: bd v0.59+ needs
+// --flat for --json to emit JSON at all, and bd's default list filter hides
+// closed issues. Dropping either makes the newest completed run invisible and
+// the interval guard meaningless — the two integration bugs that unit tests
 // over hand-crafted JSON could not see.
 func TestExecScheduledSlingRunner_ListBeadsArgvContract(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	payloadPath := filepath.Join(t.TempDir(), "payload.json")
 	payload := `[{"id":"gt-done","status":"closed","close_reason":"audit complete","created_at":"2026-09-12T10:00:00.5Z"},` +
 		`{"id":"gt-open","status":"open","created_at":"2026-09-11T10:00:00Z"}]`
-	if err := os.WriteFile(payloadPath, []byte(payload), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-
-	stub := `#!/bin/sh
-{
-  for a in "$@"; do printf 'arg %s\n' "$a"; done
-} >> ` + shellQuote(logPath) + `
-
-if [ "$1" != "list" ]; then exit 0; fi
-
-has_flat=0
-has_all=0
-for a in "$@"; do
-  [ "$a" = "--flat" ] && has_flat=1
-  [ "$a" = "--all" ] && has_all=1
-done
-
-# bd v0.59+: without --flat, --json still prints human-readable tree text.
-if [ "$has_flat" != 1 ]; then
-  echo 'gt-done  [closed] doc-audit 2026-09-12'
-  exit 0
-fi
-
-if [ "$has_all" = 1 ]; then
-  cat ` + shellQuote(payloadPath) + `
-else
-  # bd's default filter excludes closed issues.
-  printf '[{"id":"gt-open","status":"open","created_at":"2026-09-11T10:00:00Z"}]'
-fi
-exit 0
-`
-	stubDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
+	bd := newFakeCLI(func(args []string) cliReply {
+		if len(args) == 0 || args[0] != "list" {
+			return cliReply{}
+		}
+		// bd v0.59+: without --flat, --json still prints human-readable tree text.
+		if !slices.Contains(args, "--flat") {
+			return cliReply{stdout: "gt-done  [closed] doc-audit 2026-09-12\n"}
+		}
+		if slices.Contains(args, "--all") {
+			return cliReply{stdout: payload}
+		}
+		// bd's default filter excludes closed issues.
+		return cliReply{stdout: `[{"id":"gt-open","status":"open","created_at":"2026-09-11T10:00:00Z"}]`}
+	})
+	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: bd.run}
 	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
 	if err != nil {
 		t.Fatalf("listBeads: %v", err)
@@ -415,14 +388,18 @@ exit 0
 		t.Errorf("closed run = %+v", got[0])
 	}
 
-	logged, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	calls := bd.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %+v, want one list", calls)
 	}
-	for _, want := range []string{"arg --json", "arg --flat", "arg --all", "arg --label"} {
-		if !strings.Contains(string(logged), want+"\n") {
-			t.Errorf("bd argv is missing %q; logged:\n%s", want, logged)
+	for _, want := range []string{"--json", "--flat", "--all", "--label"} {
+		if !slices.Contains(calls[0].args, want) {
+			t.Errorf("bd argv is missing %q: %q", want, calls[0].args)
 		}
+	}
+	// The rig dir is the cwd, so bd's cwd routing lands on the rig database.
+	if calls[0].dir != rigDir {
+		t.Errorf("bd ran in %q, want the rig dir %q", calls[0].dir, rigDir)
 	}
 }
 
@@ -430,15 +407,8 @@ exit 0
 // is a failed read. Read as "no runs", it re-dispatched on every tick (B5-05).
 func TestExecScheduledSlingRunnerListBeadsRejectsProse(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stubDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte("#!/bin/sh\necho 'No issues found.'\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
+	bd := newFakeCLI(func([]string) cliReply { return cliReply{stdout: "No issues found.\n"} })
+	r := &execScheduledSlingRunner{townRoot: t.TempDir(), bdPath: "bd", gtPath: "gt", execCmd: bd.run}
 	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
 	if err == nil {
 		t.Fatalf("listBeads on prose = %v, nil; want an error", got)

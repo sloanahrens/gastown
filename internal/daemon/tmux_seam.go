@@ -13,6 +13,7 @@ import (
 // real-time waits (nudge debounce, kill grace period) are paid.
 type sessionTmux interface {
 	HasSession(name string) (bool, error)
+	ListSessions() ([]string, error)
 	KillSession(name string) error
 	KillSessionWithProcesses(name string) error
 	IsAgentAliveChecked(session string) (bool, error)
@@ -44,3 +45,12 @@ type dogSessions interface {
 }
 
 var _ dogSessions = (*dog.SessionManager)(nil)
+
+// dogSessions returns the dog session surface over mgr: dogSessionsFn's when
+// a test set one, else a *dog.SessionManager on the town's tmux.
+func (d *Daemon) dogSessions(mgr *dog.Manager) dogSessions {
+	if d.dogSessionsFn != nil {
+		return d.dogSessionsFn(mgr)
+	}
+	return dog.NewSessionManager(tmux.NewTmux(), d.config.TownRoot, mgr)
+}

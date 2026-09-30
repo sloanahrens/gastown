@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package daemon
 
@@ -10,6 +10,11 @@ import (
 	"testing"
 	"time"
 )
+
+// These run startLocked's real spawn path: a child that exits during startup,
+// and one killed when a foreign process holds the port, are process semantics
+// no fake can show. verifyStartedLocked's decisions are unit-tested in
+// dolt_start_verify_test.go.
 
 // startVerifyManager returns a manager whose startLocked runs the real spawn
 // path against a fake `dolt` on PATH. body is the fake's shell script. The
@@ -56,7 +61,7 @@ func processGone(pid int) bool {
 
 // A dolt that cannot bind exits at once while the foreign holder keeps
 // answering the health probe. The start must fail, not report healthy.
-func TestStartLocked_FailsWhenDoltExitsDuringStartup(t *testing.T) {
+func TestIntegrationStartLocked_FailsWhenDoltExitsDuringStartup(t *testing.T) {
 	m := startVerifyManager(t, "exit 1", func(*DoltServerManager) int { return 0 })
 
 	err := startLockedForTest(m)
@@ -71,27 +76,9 @@ func TestStartLocked_FailsWhenDoltExitsDuringStartup(t *testing.T) {
 	}
 }
 
-// A dolt that is alive but does not own the port (someone else does) is also
-// a failed start; the child we spawned must not be left running.
-func TestStartLocked_FailsWhenForeignProcessHoldsPort(t *testing.T) {
-	const foreignPID = 1 // never our child
-	m := startVerifyManager(t, "exec sleep 30", func(*DoltServerManager) int { return foreignPID })
-
-	err := startLockedForTest(m)
-	if err == nil || !strings.Contains(err.Error(), "not the dolt sql-server we started") {
-		t.Fatalf("startLocked = %v, want a foreign-holder error", err)
-	}
-	if m.process != nil {
-		t.Errorf("m.process = %v, want nil", m.process)
-	}
-	if _, statErr := os.Stat(m.pidFile()); !os.IsNotExist(statErr) {
-		t.Errorf("pid file still exists (stat err = %v)", statErr)
-	}
-}
-
 // The listener being the process we started is the success case, and so is a
 // listener lsof cannot identify: the check fails only on proof.
-func TestStartLocked_SucceedsWhenWeOwnThePort(t *testing.T) {
+func TestIntegrationStartLocked_SucceedsWhenWeOwnThePort(t *testing.T) {
 	cases := map[string]func(m *DoltServerManager) int{
 		"we hold the port": func(m *DoltServerManager) int { return m.process.Pid },
 		"listener unknown": func(*DoltServerManager) int { return 0 },
@@ -118,15 +105,23 @@ func TestStartLocked_SucceedsWhenWeOwnThePort(t *testing.T) {
 	}
 }
 
-// The foreign-holder path kills our child; confirm it actually goes away.
-func TestStartLocked_ForeignHolderKillsSpawnedChild(t *testing.T) {
+// A dolt that is alive but does not own the port (someone else does) is a
+// failed start, and the child we spawned must actually go away.
+func TestIntegrationStartLocked_ForeignHolderKillsSpawnedChild(t *testing.T) {
 	var childPID int
 	m := startVerifyManager(t, "exec sleep 30", func(m *DoltServerManager) int {
 		childPID = m.process.Pid
 		return 1
 	})
-	if err := startLockedForTest(m); err == nil {
-		t.Fatal("startLocked = nil, want error")
+	err := startLockedForTest(m)
+	if err == nil || !strings.Contains(err.Error(), "not the dolt sql-server we started") {
+		t.Fatalf("startLocked = %v, want a foreign-holder error", err)
+	}
+	if m.process != nil {
+		t.Errorf("m.process = %v, want nil", m.process)
+	}
+	if _, statErr := os.Stat(m.pidFile()); !os.IsNotExist(statErr) {
+		t.Errorf("pid file still exists (stat err = %v)", statErr)
 	}
 	if childPID == 0 || !processGone(childPID) {
 		t.Errorf("spawned dolt (PID %d) still running after the failed start", childPID)

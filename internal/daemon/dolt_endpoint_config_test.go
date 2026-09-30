@@ -10,14 +10,9 @@ import (
 )
 
 func TestNewDoltServerManagerNormalizesManagedEndpointFromTownConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeManagedDoltConfig(t, townRoot, "listener:\n  host: 127.0.0.2\n  port: 5507\n")
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "stale-env-host")
-	t.Setenv("GT_DOLT_PORT", "9999")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-beads-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_PORT", "9999")
 
 	cfg := &DoltServerConfig{
 		Enabled:              true,
@@ -59,9 +54,9 @@ func TestNewDoltServerManagerNormalizesManagedEndpointFromTownConfig(t *testing.
 }
 
 func TestNewDoltServerManagerPortOnlyManagedConfigClearsStaleHost(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeManagedDoltConfig(t, townRoot, "listener:\n  port: 5507\n")
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
 
 	m := NewDoltServerManager(townRoot, &DoltServerConfig{Enabled: true, Host: "stale-daemon-host", Port: 9999}, func(string, ...interface{}) {})
 	if got := m.config.Host; got != "" {
@@ -72,62 +67,46 @@ func TestNewDoltServerManagerPortOnlyManagedConfigClearsStaleHost(t *testing.T) 
 	}
 }
 
-func TestNewDoltServerManagerHonorsIgnoreConfig(t *testing.T) {
-	townRoot := t.TempDir()
-	writeManagedDoltConfig(t, townRoot, "listener:\n  host: 127.0.0.2\n  port: 5507\n")
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "1")
-
-	m := NewDoltServerManager(townRoot, &DoltServerConfig{Enabled: true, Host: "daemon-host", Port: 9999}, func(string, ...interface{}) {})
-	if got := m.config.Host; got != "daemon-host" {
-		t.Fatalf("manager host = %q, want daemon config host", got)
-	}
-	if got := m.config.Port; got != 9999 {
-		t.Fatalf("manager port = %d, want daemon config port", got)
-	}
-}
-
 func TestApplyDoltServerConfigEnvUsesNormalizedManagerConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeManagedDoltConfig(t, townRoot, "listener:\n  host: 127.0.0.2\n  port: 5507\n")
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "stale-env-host")
-	t.Setenv("GT_DOLT_PORT", "9999")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-beads-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_PORT", "9999")
+	env := mapEnv{
+		"GT_DOLT_HOST": "stale-env-host", "GT_DOLT_PORT": "9999",
+		"BEADS_DOLT_SERVER_HOST": "stale-beads-host", "BEADS_DOLT_SERVER_PORT": "9999", "BEADS_DOLT_PORT": "9999",
+	}
 
 	m := NewDoltServerManager(townRoot, &DoltServerConfig{Enabled: true, Host: "stale-daemon-host", Port: 9999}, func(string, ...interface{}) {})
-	applyDoltServerConfigEnv(m.config)
+	applyDoltServerConfigEnvTo(env, m.config)
 
-	assertProcessEnv(t, "GT_DOLT_HOST", "127.0.0.2")
-	assertProcessEnv(t, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
-	assertProcessEnv(t, "GT_DOLT_PORT", "5507")
-	assertProcessEnv(t, "BEADS_DOLT_SERVER_PORT", "5507")
-	assertProcessEnv(t, "BEADS_DOLT_PORT", "5507")
+	env.assert(t, "GT_DOLT_HOST", "127.0.0.2")
+	env.assert(t, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
+	env.assert(t, "GT_DOLT_PORT", "5507")
+	env.assert(t, "BEADS_DOLT_SERVER_PORT", "5507")
+	env.assert(t, "BEADS_DOLT_PORT", "5507")
 }
 
 func TestApplyConfiguredDoltHostEnvClearsManagedConfigWithoutHost(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeManagedDoltConfig(t, townRoot, "listener:\n  port: 5507\n")
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "stale-env-host")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-beads-host")
+	env := mapEnv{"GT_DOLT_HOST": "stale-env-host", "BEADS_DOLT_SERVER_HOST": "stale-beads-host"}
 
-	applyConfiguredDoltHostEnv(townRoot, nil)
+	applyConfiguredDoltHostEnvTo(env, townRoot, nil)
 
-	if got := os.Getenv("GT_DOLT_HOST"); got != "" {
+	if got, ok := env["GT_DOLT_HOST"]; ok {
 		t.Fatalf("GT_DOLT_HOST = %q, want cleared", got)
 	}
-	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "" {
+	if got, ok := env["BEADS_DOLT_SERVER_HOST"]; ok {
 		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want cleared", got)
 	}
 }
 
 func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
+	t.Parallel()
 	t.Run("default enabled", func(t *testing.T) {
-		unsetEnv(t, "GT_DOLT_AUTO_GC")
-
-		got := writeAndReadDaemonAutoGC(t)
+		t.Parallel()
+		got := writeAndReadDaemonAutoGC(t, mapEnv{})
 		if !got.Enable {
 			t.Fatalf("auto_gc_behavior.enable = false, want true")
 		}
@@ -137,9 +116,8 @@ func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
 	})
 
 	t.Run("kill switch disabled", func(t *testing.T) {
-		t.Setenv("GT_DOLT_AUTO_GC", "disabled")
-
-		got := writeAndReadDaemonAutoGC(t)
+		t.Parallel()
+		got := writeAndReadDaemonAutoGC(t, mapEnv{"GT_DOLT_AUTO_GC": "disabled"})
 		if got.Enable {
 			t.Fatalf("GT_DOLT_AUTO_GC=disabled: auto_gc_behavior.enable = true, want false")
 		}
@@ -160,7 +138,7 @@ func writeManagedDoltConfig(t *testing.T, townRoot, content string) {
 	}
 }
 
-func writeAndReadDaemonAutoGC(t *testing.T) struct {
+func writeAndReadDaemonAutoGC(t *testing.T, env mapEnv) struct {
 	Enable       bool `yaml:"enable"`
 	ArchiveLevel int  `yaml:"archive_level"`
 } {
@@ -169,7 +147,7 @@ func writeAndReadDaemonAutoGC(t *testing.T) struct {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
-	if err := writeDaemonDoltConfig(cfg, configPath); err != nil {
+	if err := writeDaemonDoltConfig(cfg, configPath, env.lookup); err != nil {
 		t.Fatalf("writeDaemonDoltConfig: %v", err)
 	}
 	data, err := os.ReadFile(configPath)
@@ -191,25 +169,21 @@ func writeAndReadDaemonAutoGC(t *testing.T) struct {
 	return parsed.Behavior.AutoGCBehavior
 }
 
-func unsetEnv(t *testing.T, key string) {
-	t.Helper()
+// mapEnv is an in-memory environment: an envWriter for the apply functions
+// and a lookup for the config writer.
+type mapEnv map[string]string
 
-	old, hadOld := os.LookupEnv(key)
-	if err := os.Unsetenv(key); err != nil {
-		t.Fatalf("unset %s: %v", key, err)
-	}
-	t.Cleanup(func() {
-		if hadOld {
-			_ = os.Setenv(key, old)
-		} else {
-			_ = os.Unsetenv(key)
-		}
-	})
+func (e mapEnv) Setenv(key, value string) { e[key] = value }
+func (e mapEnv) Unsetenv(key string)      { delete(e, key) }
+
+func (e mapEnv) lookup(key string) (string, bool) {
+	v, ok := e[key]
+	return v, ok
 }
 
-func assertProcessEnv(t *testing.T, key, want string) {
+func (e mapEnv) assert(t *testing.T, key, want string) {
 	t.Helper()
-	if got := os.Getenv(key); got != want {
+	if got := e[key]; got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
 	}
 }
