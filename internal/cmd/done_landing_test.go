@@ -9,7 +9,7 @@ import (
 func TestDoneExitCodesAreDistinctAndClearOfCobra(t *testing.T) {
 	t.Parallel()
 	seen := map[int]bool{}
-	for _, c := range []int{doneExitPushFailed, doneExitPushUnverified, doneExitReadyFailed, doneExitCloseFailed, doneExitRebaseConflict, doneExitGateFailed} {
+	for _, c := range []int{doneExitPushFailed, doneExitPushUnverified, doneExitReadyFailed, doneExitCloseFailed, doneExitRebaseConflict, doneExitGateFailed, doneExitGateUnavailable} {
 		if c <= 2 || seen[c] {
 			t.Errorf("exit code %d collides with 0/1/2 or another outcome", c)
 		}

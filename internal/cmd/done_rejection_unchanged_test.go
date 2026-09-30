@@ -408,3 +408,18 @@ func TestReportUnchangedSinceRejection_ReadsLandsHeadLine(t *testing.T) {
 		t.Fatalf("a changed resubmission was refused: %v", err)
 	}
 }
+
+// A Head: this repository does not hold cannot be compared. "Cannot tell"
+// passes, as it does for an MR with no commit_sha: refusing would strand the
+// polecat on work it cannot unblock.
+func TestReportUnchangedSinceRejection_UnknownHeadPasses(t *testing.T) {
+	t.Parallel()
+	f := newRejectedReworkFixture(t)
+	notes := land.FormatRejectionNote(land.RejectionNote{
+		Kind: "gate", Reason: "r", Branch: f.branch, Target: "main", MR: "gt-0jzd5",
+		Head: "1111111111111111111111111111111111111111",
+	})
+	if err := checkRefusal(t, f, notes, tipsOf(map[string]string{})); err != nil {
+		t.Fatalf("an unknown rejected head refused the submission: %v", err)
+	}
+}

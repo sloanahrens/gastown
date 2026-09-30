@@ -604,7 +604,7 @@ gt done runs the local gate itself (lint, build and the unit tier of the tests; 
 
 **Never script a retry around gt done** — no `for`/`while`/`until` loop, no
 watcher, no generated retry script; the dangerous-command guard refuses the
-loop shape. If gt done exits non-zero it names what failed (exit codes 10-15,
+loop shape. If gt done exits non-zero it names what failed (exit codes 10-16,
 see `gt done --help`) and your session stays up: fix what it names, commit,
 and run `gt done` once more. If you believe a gate failure is not caused by
 your change, add a bead comment with the error, then `gt escalate -s medium`

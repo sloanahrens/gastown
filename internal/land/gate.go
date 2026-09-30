@@ -158,6 +158,9 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 				test = c
 			}
 		}
+		if unitOnly && optsIntoContainers(test) {
+			return CommandGate{}, fmt.Errorf("the rig's test_command %q opts into the container suite, which the unit tier cannot run: it holds no container-gate slot (gt-0ss4)", test)
+		}
 		return goGate(lint, test, unitOnly), nil
 	}
 	var steps []Step
@@ -176,6 +179,15 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 		return CommandGate{}, fmt.Errorf("no gate configured for %s: it is not a Go module and the rig sets no lint_command, build_command or test_command", dir)
 	}
 	return CommandGate{Steps: steps}, nil
+}
+
+// containerOptInRE matches a command that sets GT_TEST_DOCKER to anything but
+// an explicit off, which re-enables the container suite over the unit tier's
+// GT_TEST_DOCKER=0.
+var containerOptInRE = regexp.MustCompile(`GT_TEST_DOCKER=([^0\s;&|]|0\S)`)
+
+func optsIntoContainers(cmd string) bool {
+	return containerOptInRE.MatchString(cmd)
 }
 
 // WithSlot returns g with its test step run under the town's container-gate

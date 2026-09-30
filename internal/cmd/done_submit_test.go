@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -267,5 +268,17 @@ func TestRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
 	}
 	if strings.Contains(ok.bdLog, "--remove-label=done-intent:") {
 		t.Errorf("a reported run cleared the label before updateAgentStateOnDone:\n%s", ok.bdLog)
+	}
+}
+
+// TestRunDoneGateThatCouldNotRunExits16: a gate that could not run says
+// nothing about the code, so it gets its own exit code and the polecat is told
+// to escalate rather than fix code.
+func TestRunDoneGateThatCouldNotRunExits16(t *testing.T) {
+	broken := &recordingGate{result: land.GateResult{Err: errors.New("sh: not found")}}
+	r := runDoneSubmit(t, broken, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
+	assertDoneExitCode(t, r.err, doneExitGateUnavailable, "not a verdict on your change")
+	if got := gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch); got != "" {
+		t.Errorf("a gate that did not run pushed the branch: %s", got)
 	}
 }

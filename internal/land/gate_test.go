@@ -304,3 +304,25 @@ func TestCommandGateLintKilledByDeadlineIsInfra(t *testing.T) {
 		t.Fatalf("gate = %+v, want an infrastructure error from the lint step alone", res)
 	}
 }
+
+// The unit tier holds no container slot, so a rig whose test command opts
+// itself into the container suite cannot run there: RigGate refuses rather
+// than start containers beside the rest of the town (gt-0ss4).
+func TestRigGateUnitTierRefusesAContainerOptIn(t *testing.T) {
+	t.Parallel()
+	goDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(goDir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"GT_TEST_DOCKER=1 make test", "export GT_TEST_DOCKER=1; make test", "env GT_TEST_DOCKER=true go test ./..."} {
+		if _, err := RigGate(goDir, &config.MergeQueueConfig{TestCommand: cmd}, true); err == nil {
+			t.Errorf("unit tier accepted %q", cmd)
+		}
+		if _, err := RigGate(goDir, &config.MergeQueueConfig{TestCommand: cmd}, false); err != nil {
+			t.Errorf("full tier refused %q: %v", cmd, err)
+		}
+	}
+	if _, err := RigGate(goDir, &config.MergeQueueConfig{TestCommand: "GT_TEST_DOCKER=0 make test"}, true); err != nil {
+		t.Errorf("an explicit opt-out was refused: %v", err)
+	}
+}

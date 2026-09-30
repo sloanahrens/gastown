@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no_merge` modes and the default test-verify gate are gone. Every failure exits
   non-zero before the Witness hears anything and keeps the session: 10 push
   failed, 11 push unverified, 12 ready mark failed, 13 no-code close failed,
-  14 rebase conflict, 15 local gate failed. `land.Lander.Land` merges the
+  14 rebase conflict, 15 local gate failed, 16 local gate could not run. `land.Lander.Land` merges the
   declared head into a throwaway worktree of the target, gates the merged tree
   while om reviews the same range, pushes with `--force-with-lease`, reads the
   tip back, and records the landing in `<town>/.runtime/landings/<rig>.jsonl`, a

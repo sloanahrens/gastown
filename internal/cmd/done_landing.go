@@ -24,9 +24,12 @@ const (
 	// doneExitRebaseConflict: the rebase onto the target conflicted and was
 	// aborted; the branch is as it was.
 	doneExitRebaseConflict = 14
-	// doneExitGateFailed: the local gate failed or could not run; nothing was
-	// pushed.
+	// doneExitGateFailed: the local gate ran and failed; nothing was pushed.
 	doneExitGateFailed = 15
+	// doneExitGateUnavailable: the local gate could not run (no gate
+	// configured, a tool missing, golangci-lint's lock never released). It is
+	// not a verdict on the change; nothing was pushed.
+	doneExitGateUnavailable = 16
 )
 
 // doneExit builds the coded error for an unsubmitted outcome. cause may be nil.

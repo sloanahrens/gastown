@@ -67,6 +67,7 @@ Process exit codes (the work was not submitted; the Witness is not told
   13  the no-code completion could not close the bead
   14  rebase onto the target conflicted
   15  the local gate failed
+  16  the local gate could not run (not a verdict on the change)
 
 Examples:
   gt done                              # Submit branch, notify COMPLETED, exit session
@@ -1408,7 +1409,7 @@ func squashAutoSaveBeforeSubmit(g *git.Git, cwd, branch, baseRef string, issue *
 func runDoneLocalGate(r *doneRun, head string) error {
 	gate, err := doneLocalGate(r.townRoot, r.rigName, r.cwd)
 	if err != nil {
-		return doneExit(doneExitGateFailed, "no local gate to run", err)
+		return doneExit(doneExitGateUnavailable, "no local gate could be built; this is not a verdict on your change, so escalate (gt escalate -s medium) rather than edit code", err)
 	}
 	fmt.Printf("→ Running the local gate on %s\n", shortSHA(head))
 	// The gate can run for many minutes; keep the exiting heartbeat fresh so
@@ -1419,7 +1420,7 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	cancel()
 	stopHeartbeat()
 	if res.Err != nil {
-		return doneExit(doneExitGateFailed, "the local gate could not run: "+res.Summary(), res.Err)
+		return doneExit(doneExitGateUnavailable, "the local gate could not run ("+res.Summary()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", res.Err)
 	}
 	if !res.Passed {
 		return doneExit(doneExitGateFailed, fmt.Sprintf("the local gate failed on %s: %s\n%s", shortSHA(head), res.Summary(), res.FailureTail()), nil)

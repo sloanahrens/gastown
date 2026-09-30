@@ -167,12 +167,13 @@ See [Integration Branches](concepts/integration-branches.md) for integration bra
 town-wide container-gate slot. `gt done`'s local gate (`land.RigGate`, the unit tier) runs
 `make lint`, `go build ./...` and `make test` with `GT_TEST_DOCKER=0`, so the container-backed
 tests skip and the gate takes no slot (gt-wx53). The Docker suite runs once per landing, on the
-merged tree, in the landing worker's gate, which holds a slot (ADR 0004). gastown's `make test`
+merged tree, in the landing worker's gate, which holds a slot (ADR 0004; the worker is gt-v4ssj.2). A rig whose
+`test_command` opts into containers (`GT_TEST_DOCKER=1`) is refused by the unit tier. gastown's `make test`
 defaults the variable (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) rather than hardcoding it, so a
 caller's `0` wins; `TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
 
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
-names what failed (exit codes 10-15, `gt done --help`) and the session stays up; fix what it
+names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
 names and run `gt done` once more. A failure you believe your change did not cause goes in a
 bead comment, then `gt escalate -s medium`. No flag skips the gate.
 

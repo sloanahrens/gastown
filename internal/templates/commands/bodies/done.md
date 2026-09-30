@@ -44,7 +44,7 @@ gt done
 **`gt done` runs the local gate itself (lint, build and the unit tier of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
 
 **Never script a retry around `gt done`.** The dangerous-command guard refuses
-the loop shape. If it exits non-zero it names what failed (exit codes 10-15,
+the loop shape. If it exits non-zero it names what failed (exit codes 10-16,
 `gt done --help`) and your session stays up: fix it, commit, and run `gt done`
 once more. If you believe a gate failure is not caused by your change, add a
 bead comment with the error, then `gt escalate -s medium`, and wait.

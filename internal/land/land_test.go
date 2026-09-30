@@ -548,3 +548,57 @@ func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
 		t.Errorf("rejection not noted: %q", b.Notes)
 	}
 }
+
+// failingBeads fails AppendNotes, or Show after the first call.
+type failingBeads struct {
+	*beadsfake.Fake
+	failNotes bool
+	shows     int
+	failShow  bool
+}
+
+func (b *failingBeads) AppendNotes(id, note string) error {
+	if b.failNotes {
+		return errors.New("database is locked")
+	}
+	return b.Fake.AppendNotes(id, note)
+}
+
+func (b *failingBeads) Show(id string) (*beads.Issue, error) {
+	b.shows++
+	if b.failShow && b.shows > 1 {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return b.Fake.Show(id)
+}
+
+// A rejection whose write failed still reports as a rejection, with the
+// failure on RecordErr and in Error(), and leaves the bead ready: the caller
+// sees the alarm instead of a clean rejection.
+func TestLandRejectionRecordFailuresAreObservable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		b    func(*beadsfake.Fake) Beads
+		want string
+	}{
+		{"note write fails", func(f *beadsfake.Fake) Beads { return &failingBeads{Fake: f, failNotes: true} }, "appending the rejection note"},
+		{"re-read fails", func(f *beadsfake.Fake) Beads { return &failingBeads{Fake: f, failShow: true} }, "re-reading the bead"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}} }
+			l := f.lander()
+			l.Beads = tc.b(f.bd)
+			_, err := l.Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Land error = %v, want a rejection carrying %q", err, tc.want)
+			}
+			if b := f.bead(); b.Status == "open" || !beads.HasLabel(b, LabelReadyToLand) {
+				t.Errorf("bead changed although the rejection write failed: status=%s labels=%v", b.Status, b.Labels)
+			}
+		})
+	}
+}
