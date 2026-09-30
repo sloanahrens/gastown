@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -354,4 +355,73 @@ func registerRigs(t *testing.T, rigs ...string) {
 	}
 	session.SetDefaultRegistry(reg)
 	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+}
+
+// unknownTmuxDaemon returns a daemon whose tmux cannot answer, whose restart
+// executor records instead of starting anything, and whose town has an
+// operational rig "testrig" with a pending refinery event (a fake bd on PATH
+// answers the rig-bead read). Serial: it sets PATH.
+func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
+	t.Helper()
+	town := t.TempDir()
+	writeDaemonTownFile(t, town, "testrig/config.json", `{"beads":{"prefix":"gt"}}`)
+	writeDaemonTownFile(t, town, "events/refinery/testrig/pending.event", "{}")
+	binDir := t.TempDir()
+	writeDaemonNoSafetyStopMockBD(t, binDir, filepath.Join(binDir, "bd.log"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tm := newFakeTmux(newFixedClock())
+	tm.mu.Lock()
+	tm.hasErr = errors.New("tmux: server timed out")
+	tm.mu.Unlock()
+	var buf strings.Builder
+	var restarts []string
+	d := &Daemon{
+		config: DefaultConfig(town), logger: log.New(&buf, "", 0), tmux: tm,
+		restartSeatFn: func(seat supervisor.Seat) error { restarts = append(restarts, seat.SessionName()); return nil },
+	}
+	return d, &buf, &restarts
+}
+
+// Unknown is never acted on (G1-09): a tmux that cannot answer starts no
+// witness, refinery or mayor.
+func TestEnsurePaths_UnknownStartsNothing(t *testing.T) {
+	for name, ensure := range map[string]func(*Daemon){
+		"witness":  func(d *Daemon) { d.ensureWitnessRunning("testrig") },
+		"refinery": func(d *Daemon) { d.ensureRefineryRunning("testrig") },
+		"mayor":    func(d *Daemon) { d.ensureMayorRunning() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, buf, restarts := unknownTmuxDaemon(t)
+			ensure(d)
+			if len(*restarts) != 0 {
+				t.Fatalf("restarted %v on an unknown liveness answer\nlog:\n%s", *restarts, buf)
+			}
+			if !strings.Contains(buf.String(), "liveness unknown") {
+				t.Fatalf("the unknown answer was not logged\nlog:\n%s", buf)
+			}
+		})
+	}
+}
+
+// An unreadable intent record is an Unknown liveness answer: the Deacon is
+// not started over it.
+func TestEnsureDeaconRunning_UnreadableIntentStartsNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := supervisor.IntentSeat(deaconSeat).Path(town)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte("{broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	started := false
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&buf, "", 0), tmux: newFakeTmux(newFixedClock()),
+		startDeaconFn: func() error { started = true; return nil }}
+
+	d.ensureDeaconRunning()
+
+	if started || !strings.Contains(buf.String(), "liveness unknown") {
+		t.Fatalf("started=%v with an unreadable intent record\nlog:\n%s", started, buf.String())
+	}
 }

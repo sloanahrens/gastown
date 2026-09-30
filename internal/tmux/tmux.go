@@ -725,9 +725,10 @@ const processKillGracePeriod = 2 * time.Second
 //
 // This ensures Claude processes and all their children are properly terminated.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
-	// Disarm auto-respawn BEFORE killing anything. The pane-died hook would
-	// otherwise respawn the process 3 seconds after we kill it, creating a
-	// zombie that fights every kill attempt.
+	// Disarm any pane-died hook BEFORE killing anything. gt no longer installs
+	// the auto-respawn hook (gt-4k3fj.3), but a session made by an older
+	// binary may still carry it, and it would respawn the process 3 seconds
+	// after we kill it, creating a zombie that fights every kill attempt.
 	_ = t.SetRemainOnExit(name, false)
 	_, _ = t.run("set-hook", "-t", name, "-u", "pane-died")
 
@@ -799,7 +800,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 // the calling process (e.g., gt done) is running inside the session it's terminating.
 // Without exclusion, the caller would be killed before completing the cleanup.
 func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []string) error {
-	// Disarm auto-respawn BEFORE killing anything (same as KillSessionWithProcesses).
+	// Disarm any pane-died hook BEFORE killing anything (same as KillSessionWithProcesses).
 	_ = t.SetRemainOnExit(name, false)
 	_, _ = t.run("set-hook", "-t", name, "-u", "pane-died")
 

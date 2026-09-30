@@ -136,9 +136,13 @@ func Pause(townRoot, rig, role, name, reason, pausedBy, priorAgentState string) 
 	return err
 }
 
-// Resume clears the hold: desired=run, not frozen, no pause reason. The
-// record itself stays, because it also carries the seat's restart budget
-// and incarnation; resuming a frozen seat empties the budget. Resuming an agent that has no record is a no-op.
+// Resume clears the hold: desired=run, not frozen, no pause reason.
+//
+// Unlike the marker file this package used to own, the record is not
+// deleted: it also carries the seat's restart budget and incarnation, which
+// outlive a pause. Resuming a seat the supervisor froze also empties its
+// budget, or the next restart would freeze it again. Resuming an agent that
+// has no record is a no-op.
 func Resume(townRoot, rig, role, name string) error {
 	path := FilePath(townRoot, rig, role, name)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
