@@ -13,14 +13,12 @@ internal/doltserver
 internal/feed
 internal/formula
 internal/hooks
-internal/krc
 internal/mail
 internal/mayor
 internal/nudge
 internal/plugin
 internal/polecat
 internal/protocol
-internal/quota
 internal/reaper
 internal/rig
 internal/runtime
