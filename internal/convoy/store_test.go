@@ -123,7 +123,7 @@ func TestGetTrackingConvoys_FiltersByTracksType(t *testing.T) {
 	}
 
 	// getTrackingConvoys(trackedIssue.ID) should return only hq-cv-test1 (tracks), not hq-cv-other (blocks)
-	convoyIDs := getTrackingConvoys(ctx, store, trackedIssue.ID, nil)
+	convoyIDs := getTrackingConvoys(ctx, store, t.TempDir(), trackedIssue.ID, nil)
 	if len(convoyIDs) != 1 || convoyIDs[0] != convoyIssue.ID {
 		t.Errorf("getTrackingConvoys = %v, want [%s]", convoyIDs, convoyIssue.ID)
 	}
