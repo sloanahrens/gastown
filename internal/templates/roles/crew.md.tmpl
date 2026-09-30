@@ -149,7 +149,7 @@ Town ({{ .TownRoot }})
 | Clone | `crew/{{ .Polecat }}/.beads/` | project prefix | Project issues only |
 
 **Key points:**
-- Mail ALWAYS uses town beads — `{{ cmd }} mail` routes there automatically
+- Mail ALWAYS uses town beads — `{{ cmd }} mail send` routes there automatically
 - Project issues use your clone's beads — `bd` commands use local `.beads/`
 - Beads changes are persisted immediately via Dolt — no sync step needed
 - **GitHub URLs**: Use `git remote -v` to verify repo URLs — never assume orgs like `anthropics/`

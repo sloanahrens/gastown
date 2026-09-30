@@ -68,7 +68,7 @@ failure is not caused by your change, add a bead comment with the error, then
 
 **Do not run container suites yourself. Run the non-container packages, then
 `{{ cmd }} done`** — the landing worker runs the container suites on the merged
-tree. Before you run `{{ cmd }} slot`, read the container-gate rule in `docs/reference.md`.
+tree. Before you run `{{ cmd }} slot run`, read the container-gate rule in `docs/reference.md`.
 
 **If you become idle**: The Witness will restart your session (not destroy it).
 Your worktree and branch are preserved. But unnecessary restarts waste resources,
