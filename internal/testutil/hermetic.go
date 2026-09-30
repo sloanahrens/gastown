@@ -1013,7 +1013,8 @@ func explainedByRig(name string, rigs map[string]bool) bool {
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
 // file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
-// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp. Town tooling
+// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp or the
+// daemon's .events.jsonl.prune.tmp. Town tooling
 // routinely writes via create-tmp-then-rename, so any concurrent invocation
 // by any agent during a test window creates and then removes one of these —
 // indistinguishable from the .lock churn already tolerated below (gt-wdr,
@@ -1040,7 +1041,8 @@ func isAtomicWriteTemp(name string) bool {
 // exported constants rather than re-typed literals, so a renamed suffix
 // breaks the build here instead of silently going stale.
 var atomicWriteTemps = map[string][]string{
-	feed.FeedFile: {feed.TruncateTempSuffix},
+	events.EventsFile: {events.PruneTempSuffix},
+	feed.FeedFile:     {feed.TruncateTempSuffix},
 }
 
 // atomicTempPrefixes are CreateTemp patterns that produce temps on the

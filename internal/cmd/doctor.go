@@ -215,6 +215,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// root cause of cascading failures (Dolt data loss, polecat death, lost commits).
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
+	d.Register(doctor.NewEventsLogCheck())
 
 	// Container-suite gate slot: informational check exposing the Docker
 	// VM's CPU/memory bound so operators can see why container-backed
