@@ -39,9 +39,45 @@ type rejectedAttempt struct {
 	branch  string
 	mrID    string
 	summary string
+	// kind is the failure class the rejection header names ("gate",
+	// "conflict", "not_pushed", ...); empty when the rejection carries none.
+	kind string
 	// head is the rejected tip when the rejection names it (Land's Head:
 	// line, ADR 0004); it is the content to compare, with no MR to look up.
 	head string
+}
+
+// rejectionKindsNotCausedByDiff are the rejection classes that say nothing
+// about the content judged: the diff is fine, and the same diff can be the
+// right resubmission. A conflict is against a target that has since moved (gt
+// done has just rebased onto it), a not_pushed head is a push that did not
+// land, an empty merge means the target already holds the content, and a
+// policy refusal is about the bead's state (unchecked acceptance criteria).
+// Refusing the identical diff for these strands a polecat on work it cannot
+// unblock by editing. An unclassified or unknown class still blocks: only a
+// class known to be off the diff is let through.
+var rejectionKindsNotCausedByDiff = map[string]bool{
+	"conflict":   true,
+	"not_pushed": true,
+	"empty":      true,
+	"policy":     true,
+}
+
+// rejectionKindFromSummary reads the class out of a rejection's first line,
+// "(attempt N): <class> - <reason>" (land.FormatRejectionNote). A header with
+// no class reads as "": its reason is free text, and the first word of free
+// text is not a class.
+func rejectionKindFromSummary(summary string) string {
+	_, rest, found := strings.Cut(summary, "):")
+	if !found {
+		return ""
+	}
+	class, _, found := strings.Cut(rest, " - ")
+	class = strings.ToLower(strings.TrimSpace(class))
+	if !found || class == "" || strings.ContainsAny(class, " \t") {
+		return ""
+	}
+	return class
 }
 
 // rejectedAttemptsFromNotes returns the rejections recorded in a bead's notes.
@@ -59,6 +95,7 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 		var a rejectedAttempt
 		lines := strings.Split(block, "\n")
 		a.summary = strings.TrimSpace(lines[0])
+		a.kind = rejectionKindFromSummary(a.summary)
 		for _, line := range lines[1:] {
 			key, value, found := strings.Cut(line, ":")
 			if !found {
@@ -90,7 +127,9 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 }
 
 // reportUnchangedSinceRejection refuses the submission when the branch's diff
-// is byte-identical to a rejected attempt's, and returns nil otherwise.
+// is byte-identical to a rejected attempt's, and returns nil otherwise. An
+// attempt rejected for a reason the diff did not cause
+// (rejectionKindsNotCausedByDiff) is not compared at all.
 //
 // tipOf resolves an MR bead id to the tip that MR was submitted with. Every
 // way of not knowing passes: a rejection without an MR record, an MR whose
@@ -118,6 +157,9 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 
 	var unchanged []unchangedRejection
 	for _, a := range attempts {
+		if rejectionKindsNotCausedByDiff[a.kind] {
+			continue
+		}
 		sha, ok := a.head, a.head != ""
 		if !ok {
 			sha, ok = tipOf(a.mrID)

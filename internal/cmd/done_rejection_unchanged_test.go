@@ -51,6 +51,7 @@ MR: gt-wisp-v8j9`,
 				branch:  "polecat/topaz/gt-glfh+mudjlvex",
 				mrID:    "gt-wisp-v8j9",
 				summary: "(attempt 1): lint - docs-lint finding unaddressed",
+				kind:    "lint",
 			}},
 		},
 		{
@@ -64,8 +65,8 @@ Branch: polecat/b/gt-one+s2
 Target: main
 MR: gt-wisp-2`,
 			want: []rejectedAttempt{
-				{branch: "polecat/a/gt-one+s1", mrID: "gt-wisp-1", summary: "(attempt 1): build - go build failed"},
-				{branch: "polecat/b/gt-one+s2", mrID: "gt-wisp-2", summary: "(attempt 2): tests - gate red"},
+				{branch: "polecat/a/gt-one+s1", mrID: "gt-wisp-1", summary: "(attempt 1): build - go build failed", kind: "build"},
+				{branch: "polecat/b/gt-one+s2", mrID: "gt-wisp-2", summary: "(attempt 2): tests - gate red", kind: "tests"},
 			},
 		},
 		{
@@ -82,6 +83,7 @@ MR: gt-wisp-1`,
 				branch:  "polecat/zircon/gt-test",
 				mrID:    "gt-wisp-1",
 				summary: "(attempt 1): tests - gate red",
+				kind:    "tests",
 			}},
 		},
 		{
@@ -97,6 +99,7 @@ MR: gt-wisp-999`,
 				branch:  "polecat/zircon/gt-test",
 				mrID:    "gt-wisp-1",
 				summary: "(attempt 1): tests - gate red",
+				kind:    "tests",
 			}},
 		},
 		{
@@ -109,6 +112,7 @@ MR: "gt-wisp-1"`,
 				branch:  "polecat/zircon/gt-test",
 				mrID:    "gt-wisp-1",
 				summary: "(attempt 1): tests - gate red",
+				kind:    "tests",
 			}},
 		},
 		{
@@ -421,5 +425,82 @@ func TestReportUnchangedSinceRejection_UnknownHeadPasses(t *testing.T) {
 	})
 	if err := checkRefusal(t, f, notes, tipsOf(map[string]string{})); err != nil {
 		t.Fatalf("an unknown rejected head refused the submission: %v", err)
+	}
+}
+
+// A rejection the diff did not cause is not a reason to refuse the same diff
+// (gt-ol9r8): the change-set is identical and correct, and nothing in it can be
+// edited to answer a push that did not land or a bead-state refusal. Only the
+// classes that judge the content (gate, review, tests, ...) and an unclassified
+// rejection keep the refusal.
+func TestReportUnchangedSinceRejection_OnlyDiffCausedKindsRefuse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		kind   string
+		refuse bool
+	}{
+		{"gate", true},
+		{"review", true},
+		{"tests", true},
+		{"editorial", true},
+		{"", true},
+		{"some_future_kind", true},
+		{"conflict", false},
+		{"not_pushed", false},
+		{"empty", false},
+		{"policy", false},
+	}
+	for _, tc := range cases {
+		t.Run("kind="+tc.kind, func(t *testing.T) {
+			t.Parallel()
+			f := newRejectedReworkFixture(t)
+			notes := land.FormatRejectionNote(land.RejectionNote{
+				Kind: tc.kind, Reason: "rejected", Branch: f.branch, Target: "main",
+				MR: "gt-0jzd5", Head: f.rejectedSHA,
+			})
+			err := checkRefusal(t, f, notes, tipsOf(nil))
+			if tc.refuse && err == nil {
+				t.Fatalf("an unchanged resubmission after a %q rejection was accepted", tc.kind)
+			}
+			if !tc.refuse && err != nil {
+				t.Fatalf("an unchanged resubmission after a %q rejection, which the diff did not cause, was refused: %v", tc.kind, err)
+			}
+		})
+	}
+}
+
+// Each attempt is judged on its own class: a diff-caused rejection of this
+// exact diff still refuses when a later attempt was rejected for a reason the
+// diff did not cause.
+func TestReportUnchangedSinceRejection_EarlierDiffCausedRejectionStillRefuses(t *testing.T) {
+	t.Parallel()
+	f := newRejectedReworkFixture(t)
+	notes := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: "gate", Reason: "gate red", Branch: f.branch, Target: "main",
+		MR: "gt-0jzd5", Head: f.rejectedSHA,
+	}) + "\n" + land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 2, Kind: "not_pushed", Reason: "head not on origin", Branch: f.branch, Target: "main",
+		MR: "gt-0jzd5", Head: "1111111111111111111111111111111111111111",
+	})
+	if err := checkRefusal(t, f, notes, tipsOf(nil)); err == nil {
+		t.Fatal("a later non-diff rejection lifted the refusal for an earlier gate rejection of the same diff")
+	}
+}
+
+func TestRejectionKindFromSummary(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"(attempt 1): gate - gate failed on the merged tree": "gate",
+		"(attempt 2): Not_Pushed - head not on origin":       "not_pushed",
+		"(attempt 1): lint - docs - lint":                    "lint",
+		"(attempt 1): gate failed on the merged tree":        "",
+		"(attempt 1): head is not reachable - tip abc":       "",
+		"(attempt 1): ":     "",
+		"no attempt header": "",
+	}
+	for summary, want := range cases {
+		if got := rejectionKindFromSummary(summary); got != want {
+			t.Errorf("rejectionKindFromSummary(%q) = %q, want %q", summary, got, want)
+		}
 	}
 }
