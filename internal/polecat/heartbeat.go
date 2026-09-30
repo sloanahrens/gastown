@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // SessionHeartbeatStaleThreshold is the age at which a polecat session heartbeat
@@ -180,7 +182,11 @@ func TouchSessionHeartbeatWithState(townRoot, sessionName string, state Heartbea
 		return
 	}
 
-	_ = os.WriteFile(heartbeatFile(townRoot, sessionName), data, 0644)
+	// Temp file + rename, never truncate-then-write: ReadSessionHeartbeat
+	// treats an unparseable file as "no heartbeat", and the witness then
+	// ignores the agent-reported state and restarts a polecat that is mid
+	// gt done (gt-sle0).
+	_ = atomicfile.WriteFile(heartbeatFile(townRoot, sessionName), data, 0644)
 }
 
 // ReadSessionHeartbeat reads the heartbeat for a polecat session.
