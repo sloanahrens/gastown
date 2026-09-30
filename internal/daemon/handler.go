@@ -509,7 +509,7 @@ func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormul
 	// no cancellation hook, which would leave the 5s timeout above unable to
 	// release a bd whose descendants hold the stdout pipe open — and this call
 	// runs on every dispatch tick.
-	util.SetProcessGroup(cmd)
+	util.SetProcessGroup(cmd.Cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

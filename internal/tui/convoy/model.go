@@ -93,7 +93,7 @@ func loadConvoys(townBeads string) ([]ConvoyItem, error) {
 	// Get list of open issues and filter locally so legacy type=convoy beads remain visible.
 	listArgs := []string{"list", "--json", "--limit=0"}
 	listCmd := beads.CommandContextWithEnv(ctx, townBeads, nil, listArgs...)
-	util.SetDetachedProcessGroup(listCmd)
+	util.SetDetachedProcessGroup(listCmd.Cmd)
 	var stdout bytes.Buffer
 	listCmd.Stdout = &stdout
 
@@ -152,7 +152,7 @@ func loadTrackedIssues(townBeads, convoyID string) ([]IssueItem, int, int) {
 
 	// Query tracked issues using bd dep list (returns full issue details)
 	cmd := beads.CommandContextWithEnv(ctx, townBeads, nil, "dep", "list", convoyID, "-t", "tracks", "--json")
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
@@ -223,7 +223,7 @@ func refreshIssueStatus(ctx context.Context, tracked []struct {
 	args = append(args, "--json")
 
 	cmd := beads.CommandContextWithEnv(ctx, "", nil, args...)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

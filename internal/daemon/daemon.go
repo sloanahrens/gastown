@@ -825,6 +825,9 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Println("Convoy manager started")
 	}
 
+	// Landing workers (gt-v4ssj.2): opt-in, one goroutine per rig.
+	d.startLandingWorkers()
+
 	// Wire a recovery callback so that when Dolt transitions from unhealthy
 	// back to healthy, the convoy manager runs a sweep to catch any convoys
 	// that completed during the outage and were missed by the event poller.
@@ -3327,7 +3330,7 @@ func (d *Daemon) emitMassDeathEvent() {
 // silently suppressing alerts.
 func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
-	setSysProcAttr(cmd)
+	setSysProcAttr(cmd.Cmd)
 
 	output, err := cmd.Output()
 	if err != nil {

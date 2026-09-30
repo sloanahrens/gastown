@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1605,6 +1607,12 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 
 	// Scheduled beads are not stranded — they're waiting for dispatch capacity.
 	if scheduledSet[t.ID] {
+		return false
+	}
+
+	// Work submitted for landing is not stranded: its session ended on
+	// purpose and the landing worker owns it (gt-v4ssj.2).
+	if slices.Contains(t.Labels, land.LabelReadyToLand) {
 		return false
 	}
 

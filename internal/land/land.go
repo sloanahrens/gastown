@@ -49,6 +49,15 @@ type Lander struct {
 	Landings *LandingsFile
 	Out      io.Writer
 	Now      func() time.Time
+	// RangeChecks run on base..head before the merge (the landing worker
+	// passes AttributionCheck). A returned Rejection is written to the bead
+	// like any other.
+	RangeChecks []RangeCheck
+	// ReviewErrorLands lands a green merged tree whose om review could not
+	// run (binary missing, malformed verdict, timeout), recording the verdict
+	// as "error:<reason>", so om infrastructure never blocks the queue. When
+	// false, such a landing stops with an *InfraError instead.
+	ReviewErrorLands bool
 
 	afterPush func() // test seam: runs between the push and the read-back
 }
@@ -86,6 +95,9 @@ type Rejection struct {
 	GateTail    string
 	Findings    []Finding
 	Conflicting []string
+	// ReviewSummary and ReviewScore are om's, when om asked for changes.
+	ReviewSummary string
+	ReviewScore   float64
 	// Rework is false when only a human can lift the refusal (no_merge).
 	Rework    bool
 	RecordErr error
@@ -219,6 +231,15 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
+	for _, check := range l.RangeChecks {
+		rej, err := check(g, base, w.Head)
+		if err != nil {
+			return Result{}, &InfraError{Stage: "range check", Err: err}
+		}
+		if rej != nil {
+			return Result{}, l.reject(issue, w, rej, nil)
+		}
+	}
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
 	} else if same {
@@ -265,13 +286,17 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "gate failed on the merged tree: " + gateRes.Summary(), GateTail: gateRes.FailureTail()}
 		return Result{}, l.reject(issue, w, rej, reviewFindings(verdict, reviewErr))
 	}
-	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges {
+	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped {
 		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
 	}
 	if reviewErr != nil {
-		return Result{}, &InfraError{Stage: "review", Err: reviewErr}
-	}
-	if !verdict.Approved() {
+		if !l.ReviewErrorLands || ctx.Err() != nil {
+			return Result{}, &InfraError{Stage: "review", Err: reviewErr}
+		}
+		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr)}
+		res.Verdict = verdict
+		l.logf("%s: WARNING om review did not run (%v); the merged tree is green, so it lands with om_verdict %q", w.BeadID, reviewErr, verdict.Verdict)
+	} else if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
@@ -471,6 +496,15 @@ func (l *Lander) gateAndReview(ctx context.Context, dir, base, merged string) (G
 	return gateRes, verdict, reviewErr
 }
 
+// reviewErrorReason is err on one bounded line, for the recorded verdict.
+func reviewErrorReason(err error) string {
+	reason := NoteField(err.Error())
+	if len(reason) > 200 {
+		reason = reason[:200] + "..."
+	}
+	return reason
+}
+
 // reviewFindings is the verdict to carry onto a gate rejection: om's
 // findings travel with it when om also asked for changes.
 func reviewFindings(v Verdict, err error) *Verdict {
@@ -495,6 +529,8 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	}
 	if verdict != nil {
 		rej.Findings = verdict.Findings
+		rej.ReviewSummary = verdict.Summary
+		rej.ReviewScore = verdict.Score
 		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}

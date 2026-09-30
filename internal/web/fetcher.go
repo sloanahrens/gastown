@@ -202,18 +202,33 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	err := runProc(f.runProc, ctx, cmd)
+	err := runProc(f.runProc, ctx, cmd.Cmd)
+	// runProc runs the embedded exec.Cmd, so stdout is the machine envelope.
+	payload := bytes.NewBuffer(beads.LegacyPayload(args, stdout.Bytes()))
 	if err != nil {
 		if deadlineExceeded(ctx) {
 			return nil, fmt.Errorf("bd timed out after %v", timeout)
 		}
-		// If we got some output, return it anyway (bd may exit non-zero with warnings)
-		if stdout.Len() > 0 {
-			return &stdout, nil
+		// If we got some output, return it anyway (bd may exit non-zero with warnings).
+		// A typed failure's envelope is the failure, not output: handing it to a
+		// caller that parses a list would read the failure as an empty panel.
+		if stdout.Len() > 0 && !isBDErrorEnvelope(stdout.Bytes()) {
+			return payload, nil
 		}
 		return nil, err
 	}
-	return &stdout, nil
+	return payload, nil
+}
+
+// isBDErrorEnvelope reports whether out is the machine-mode envelope of a
+// failed bd call (error.kind set).
+func isBDErrorEnvelope(out []byte) bool {
+	var env struct {
+		Error *struct {
+			Kind string `json:"kind"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(bytes.TrimSpace(out), &env) == nil && env.Error != nil && env.Error.Kind != ""
 }
 
 // fetchCircuitBreaker tracks consecutive failures for a fetch operation

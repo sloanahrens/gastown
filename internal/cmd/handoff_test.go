@@ -1512,3 +1512,17 @@ func TestWriteHandoffMarker(t *testing.T) {
 		t.Fatalf("marker without reason = %q, want bare session", got)
 	}
 }
+
+func TestIssueSummaryLines(t *testing.T) {
+	got := issueSummaryLines([]byte(`[{"id":"gt-a","title":"First","priority":0},{"id":"gt-b","title":"Second"}]`))
+	want := []string{"gt-a [P0] First", "gt-b Second"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %q, want %q", got, want)
+	}
+	if lines := issueSummaryLines([]byte(`[]`)); len(lines) != 0 {
+		t.Fatalf("empty result gave lines %q, want none", lines)
+	}
+	if lines := issueSummaryLines([]byte("No issues ready\n")); lines != nil {
+		t.Fatalf("non-JSON gave lines %q, want nil", lines)
+	}
+}

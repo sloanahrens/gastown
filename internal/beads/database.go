@@ -236,6 +236,7 @@ func SuppressBDSideEffects(env []string) []string {
 		"BD_EXPORT_GIT_ADD",
 		"BD_NO_GIT_OPS",
 		"BD_EVENTS_JOURNAL",
+		"BD_MACHINE",
 	} {
 		env = StripEnvKey(env, key)
 	}
@@ -252,6 +253,10 @@ func SuppressBDSideEffects(env []string) []string {
 		// closes from the events journal (gt-7iwy0.2), and the rig
 		// config.yaml that would enable it is git-tracked in mayor/rig.
 		"BD_EVENTS_JOURNAL=1",
+		// Machine mode on every call: exact ids and the envelope
+		// (gt-fd2cu.5). Callers read the payload through LegacyPayload or
+		// decodeMachineEnvelope, never the raw stdout.
+		machineEnvEntry,
 	)
 }
 

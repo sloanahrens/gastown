@@ -557,6 +557,38 @@ func TestRunBdCmd_ReturnsStdoutOnNonZeroAndTimeout(t *testing.T) {
 		}
 	})
 
+	t.Run("non-zero exit with a bd error envelope returns the error", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc: func(_ context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"no db"}}`)
+				return errors.New("exit status 25")
+			},
+		}
+		if _, err := f.runBdCmd(t.TempDir(), "list", "--json"); err == nil || err.Error() != "exit status 25" {
+			t.Fatalf("runBdCmd = %v, want the child's exit error, not the envelope as output", err)
+		}
+	})
+
+	t.Run("a machine envelope is unwrapped to bd's payload", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc: func(_ context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, `{"schema_version":1,"contract_version":1,"data":[{"id":"gt-1"}],"pagination":null,"error":null}`)
+				return nil
+			},
+		}
+		stdout, err := f.runBdCmd(t.TempDir(), "list", "--json")
+		if err != nil {
+			t.Fatalf("runBdCmd: %v", err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != `[{"id":"gt-1"}]` {
+			t.Fatalf("runBdCmd payload = %q, want the envelope's data", got)
+		}
+	})
+
 	t.Run("timeout returns explicit error", func(t *testing.T) {
 		clock := clockwork.NewFakeClock()
 		started := make(chan struct{})

@@ -100,7 +100,7 @@ func DefaultBdCli() *BdCli {
 // could park in wait4 forever on a wedged bd child (gt-7itep) — a git
 // credential prompt or similar blocking grandchild is exactly the shape
 // confirmed on the hang.
-func bdSubprocessCommand(ctx context.Context, workDir string, args []string) *exec.Cmd {
+func bdSubprocessCommand(ctx context.Context, workDir string, args []string) *beads.Cmd {
 	return beads.CommandContextBounded(ctx, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
 }
 
@@ -3228,6 +3228,21 @@ func holdBeadReason(bd *BdCli, workDir, beadID string) (string, error) {
 	return "", nil
 }
 
+// beadSubmittedForLanding reports whether beadID carries gt:ready-to-land.
+func beadSubmittedForLanding(bd *BdCli, workDir, beadID string) (bool, error) {
+	output, err := bd.Exec(workDir, "show", beadID, "--json")
+	if err != nil {
+		return false, err
+	}
+	var issues []struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+		return false, fmt.Errorf("reading bead %s: %w", beadID, err)
+	}
+	return len(issues) > 0 && slices.Contains(issues[0].Labels, land.LabelReadyToLand), nil
+}
+
 // hookBeadHeld reports whether the work a hook bead carries is held, and the
 // marker that held it (gt-n38c6). It fails CLOSED, like agentpause.PauseGate:
 // "we could not read the record" is not "nothing holds this work", and a
@@ -3289,6 +3304,13 @@ func (h *handlers) resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, pol
 	}
 	status, ok := getBeadStatus(bd, workDir, hookBead)
 	if !ok || (status != "hooked" && status != "in_progress") {
+		return false
+	}
+	// Work submitted for landing is not abandoned: gt done ended the session
+	// on purpose and the landing worker owns the bead until it lands, so
+	// neither the reset nor the "already on main" close below may touch it
+	// (gt-v4ssj.2). A failed read leaves the bead alone this pass.
+	if submitted, err := beadSubmittedForLanding(bd, workDir, hookBead); err != nil || submitted {
 		return false
 	}
 

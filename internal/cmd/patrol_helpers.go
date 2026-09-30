@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -223,7 +224,7 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	burnPreviousPatrolWisps(cfg)
 
 	// Find the proto ID for the patrol molecule
-	cmdCatalog := exec.Command("gt", "formula", "list")
+	cmdCatalog := exec.Command("gt", "formula", "list", "--json")
 	cmdCatalog.Dir = cfg.BeadsDir
 	var stdoutCatalog, stderrCatalog bytes.Buffer
 	cmdCatalog.Stdout = &stdoutCatalog
@@ -237,17 +238,17 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 		return "", fmt.Errorf("failed to list formulas: %w", err)
 	}
 
-	// Find patrol molecule in formula list
-	// Format: "formula-name         description"
+	var catalog []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(stdoutCatalog.Bytes(), &catalog); err != nil {
+		return "", fmt.Errorf("failed to parse formula list: %w", err)
+	}
 	var protoID string
-	catalogLines := strings.Split(stdoutCatalog.String(), "\n")
-	for _, line := range catalogLines {
-		if strings.Contains(line, cfg.PatrolMolName) {
-			parts := strings.Fields(line)
-			if len(parts) > 0 {
-				protoID = parts[0]
-				break
-			}
+	for _, f := range catalog {
+		if strings.Contains(f.Name, cfg.PatrolMolName) {
+			protoID = f.Name
+			break
 		}
 	}
 
@@ -258,7 +259,7 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	// Create the patrol wisp (root only — steps are read inline at prime time,
 	// not tracked as individual DB rows). Child wisps are reserved for pour=true
 	// formulas like releases where checkpoint recovery matters.
-	spawnArgs := []string{"mol", "wisp", "create", protoID, "--root-only", "--actor", cfg.RoleName}
+	spawnArgs := []string{"mol", "wisp", "create", protoID, "--root-only", "--json", "--actor", cfg.RoleName}
 	for _, v := range cfg.ExtraVars {
 		spawnArgs = append(spawnArgs, "--var", v)
 	}
@@ -275,34 +276,9 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 		return "", fmt.Errorf("failed to create patrol wisp: %s", stderrSpawn.String())
 	}
 
-	// Parse the created molecule ID from output
-	// Format: "Root issue: <rig>-wisp-<hash>" where rig prefix varies
-	var patrolID string
-	spawnOutput := stdoutSpawn.String()
-	for _, line := range strings.Split(spawnOutput, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Root issue:") {
-			patrolID = strings.TrimSpace(strings.TrimPrefix(line, "Root issue:"))
-			break
-		}
-	}
-	// Fallback: look for any token containing "-wisp-"
-	if patrolID == "" {
-		for _, line := range strings.Split(spawnOutput, "\n") {
-			for _, p := range strings.Fields(line) {
-				if strings.Contains(p, "-wisp-") {
-					patrolID = p
-					break
-				}
-			}
-			if patrolID != "" {
-				break
-			}
-		}
-	}
-
-	if patrolID == "" {
-		return "", fmt.Errorf("created wisp but could not parse ID from output")
+	patrolID, err := parseWispIDFromJSON(stdoutSpawn.Bytes())
+	if err != nil {
+		return "", fmt.Errorf("created wisp but could not parse ID from output: %w", err)
 	}
 
 	// Hook the wisp to the agent so gt mol status sees it

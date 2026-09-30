@@ -251,6 +251,13 @@ func shouldReuseExistingFormula(existing *beads.Issue, delayedDogInfo *DogDispat
 	return delayedDogInfo.worksOnHook(existing)
 }
 
+// formulaShowHasBody reports whether `bd formula show` printed a formula: not
+// empty and not the JSON null a machine-mode envelope carries for no data.
+func formulaShowHasBody(out []byte) bool {
+	s := strings.TrimSpace(string(out))
+	return s != "" && s != "null"
+}
+
 // verifyFormulaExists checks that the formula exists using bd formula show.
 // Formulas are TOML files (.formula.toml).
 // Requests stale-read compatibility for consistency with verifyBeadExists.
@@ -260,13 +267,14 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 	}
 	// Try bd formula show (handles all formula file formats)
 	// Use Output() instead of Run() to detect bd exit 0 bug:
-	// when formula not found, bd may exit 0 but produce empty stdout.
+	// when formula not found, bd may exit 0 but produce empty stdout
+	// (an envelope with null data under machine mode).
 	// Stderr discarded — first attempt may fail expectedly (retry with mol- prefix).
 	if out, err := BdCmd("formula", "show", formulaName).
 		AllowStale().
 		Dir(workDir).
 		WithGTRoot(townRoot).
-		Stderr(io.Discard).Output(); err == nil && len(out) > 0 {
+		Stderr(io.Discard).Output(); err == nil && formulaShowHasBody(out) {
 		return nil
 	}
 
@@ -275,7 +283,7 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 		AllowStale().
 		Dir(workDir).
 		WithGTRoot(townRoot).
-		Stderr(io.Discard).Output(); err == nil && len(out) > 0 {
+		Stderr(io.Discard).Output(); err == nil && formulaShowHasBody(out) {
 		return nil
 	}
 	if _, err := formula.GetEmbeddedFormulaContent(formulaName); err == nil {

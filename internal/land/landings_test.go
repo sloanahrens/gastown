@@ -94,3 +94,35 @@ func TestLandingsFileFind(t *testing.T) {
 		t.Fatalf("Find = %+v, %v, %v", got, ok, err)
 	}
 }
+
+func TestLandingsLatestForBeadAndRecent(t *testing.T) {
+	t.Parallel()
+	f, err := RigLandingsFile(t.TempDir(), "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := f.LatestForBead("gt-a"); ok || err != nil {
+		t.Fatalf("absent file: ok=%v err=%v", ok, err)
+	}
+	for _, r := range []LandingRecord{
+		{BeadID: "gt-a", Head: "h1", LandedCommit: "l1"},
+		{BeadID: "gt-b", Head: "h2", LandedCommit: "l2"},
+		{BeadID: "gt-a", Head: "h3", LandedCommit: "l3"},
+	} {
+		if err := f.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, ok, err := f.LatestForBead("gt-a")
+	if err != nil || !ok || rec.Head != "h3" {
+		t.Fatalf("LatestForBead = %+v %v %v; want the h3 record", rec, ok, err)
+	}
+	recent, err := f.Recent(2)
+	if err != nil || len(recent) != 2 || recent[0].BeadID != "gt-b" || recent[1].Head != "h3" {
+		t.Fatalf("Recent(2) = %+v %v", recent, err)
+	}
+	// Find keeps its exact bead+head match.
+	if rec, ok, _ := f.Find("gt-a", "h1"); !ok || rec.LandedCommit != "l1" {
+		t.Fatalf("Find(gt-a, h1) = %+v %v", rec, ok)
+	}
+}

@@ -1358,6 +1358,30 @@ func (g *Git) FirstParentLog(base, head string) ([]string, error) {
 	return strings.Split(strings.TrimSpace(out), "\n"), nil
 }
 
+// CommitMessage is one commit's sha and full message.
+type CommitMessage struct {
+	SHA     string
+	Message string
+}
+
+// CommitMessages returns the full message of every commit in base..head,
+// newest first. The landing worker's attribution check reads them.
+func (g *Git) CommitMessages(base, head string) ([]CommitMessage, error) {
+	out, err := g.run("log", "--format=%H%x1f%B%x1e", base+".."+head)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []CommitMessage
+	for _, rec := range strings.Split(out, "\x1e") {
+		sha, body, ok := strings.Cut(strings.TrimSpace(rec), "\x1f")
+		if !ok {
+			continue
+		}
+		msgs = append(msgs, CommitMessage{SHA: sha, Message: body})
+	}
+	return msgs, nil
+}
+
 // PatchID returns the stable patch-id of the diff between base and head
 // (git diff base..head | git patch-id --stable), i.e. the first field of the
 // tool's output. Unlike a commit sha, the patch-id is unchanged by a rebase

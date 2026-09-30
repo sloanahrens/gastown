@@ -50,7 +50,7 @@ func trackedIssueIDs(beadsDir, convoyID string) []string {
 	defer cancel()
 
 	cmd := beads.CommandContextWithEnv(ctx, beadsDir, nil, "dep", "list", convoyID, "-t", "tracks", "--json")
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -112,7 +112,7 @@ func batchIssueStatus(ids []string) map[string]string {
 	args := append([]string{"show"}, ids...)
 	args = append(args, "--json")
 	cmd := beads.CommandContextWithEnv(ctx, "", nil, args...)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

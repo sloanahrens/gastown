@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1596,30 +1597,20 @@ func collectHandoffState() string {
 	}
 
 	// Get ready beads
-	readyOutput, err := beads.CommandWithEnv("", nil, "ready").Output()
-	if err == nil {
-		readyStr := strings.TrimSpace(string(readyOutput))
-		if readyStr != "" && !strings.Contains(readyStr, "No issues ready") {
-			// Limit to first 10 lines
-			lines := strings.Split(readyStr, "\n")
-			if len(lines) > 10 {
-				lines = append(lines[:10], "... (more issues)")
-			}
-			parts = append(parts, "## Ready Work\n"+strings.Join(lines, "\n"))
+	if lines := bdIssueSummaryLines("ready", "--json"); len(lines) > 0 {
+		// Limit to first 10 lines
+		if len(lines) > 10 {
+			lines = append(lines[:10], "... (more issues)")
 		}
+		parts = append(parts, "## Ready Work\n"+strings.Join(lines, "\n"))
 	}
 
 	// Get in-progress beads
-	inProgressOutput, err := beads.CommandWithEnv("", nil, "list", "--status=in_progress").Output()
-	if err == nil {
-		ipStr := strings.TrimSpace(string(inProgressOutput))
-		if ipStr != "" && !strings.Contains(ipStr, "No issues") {
-			lines := strings.Split(ipStr, "\n")
-			if len(lines) > 5 {
-				lines = append(lines[:5], "... (more)")
-			}
-			parts = append(parts, "## In Progress\n"+strings.Join(lines, "\n"))
+	if lines := bdIssueSummaryLines("list", "--status=in_progress", "--json"); len(lines) > 0 {
+		if len(lines) > 5 {
+			lines = append(lines[:5], "... (more)")
 		}
+		parts = append(parts, "## In Progress\n"+strings.Join(lines, "\n"))
 	}
 
 	if len(parts) == 0 {
@@ -1627,6 +1618,38 @@ func collectHandoffState() string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+// bdIssueSummaryLines runs a bd read that lists issues and returns one summary
+// line per issue. It returns nil when bd fails or lists nothing, so the caller
+// omits the section.
+func bdIssueSummaryLines(args ...string) []string {
+	out, err := beads.CommandWithEnv("", nil, beads.InjectFlatForListJSON(args)...).Output()
+	if err != nil {
+		return nil
+	}
+	return issueSummaryLines(out)
+}
+
+// issueSummaryLines renders a bd issue-array payload as "id [P<n>] title" lines.
+func issueSummaryLines(payload []byte) []string {
+	var issues []struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Priority *int   `json:"priority"`
+	}
+	if json.Unmarshal(payload, &issues) != nil {
+		return nil
+	}
+	lines := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		line := issue.ID
+		if issue.Priority != nil {
+			line += fmt.Sprintf(" [P%d]", *issue.Priority)
+		}
+		lines = append(lines, line+" "+issue.Title)
+	}
+	return lines
 }
 
 // collectGitState captures deterministic workspace state using the Go git library.

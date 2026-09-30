@@ -400,3 +400,17 @@ func TestShouldAcceptPermissionWarning_ResolvedPreset(t *testing.T) {
 		t.Error("session without GT_AGENT is Claude by default")
 	}
 }
+
+func TestFormulaShowHasBody(t *testing.T) {
+	for out, want := range map[string]bool{
+		"":                    false,
+		"\n":                  false,
+		"null\n":              false,
+		`{"formula":"mol-x"}`: true,
+		"formula: mol-x\n":    true,
+	} {
+		if got := formulaShowHasBody([]byte(out)); got != want {
+			t.Errorf("formulaShowHasBody(%q) = %v, want %v", out, got, want)
+		}
+	}
+}

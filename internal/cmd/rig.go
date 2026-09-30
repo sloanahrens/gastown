@@ -1196,7 +1196,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				workDir := filepath.Dir(beadsDir)
 				bdCmd := beads.CommandWithEnv(workDir, nil, "config", "get", "issue_prefix")
 				if out, bdErr := bdCmd.Output(); bdErr == nil {
-					detected := strings.TrimSpace(string(out))
+					detected := beads.ParseConfigOutput(out)
 					if detected != "" {
 						if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
 							return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
