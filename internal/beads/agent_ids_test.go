@@ -97,7 +97,7 @@ func TestValidateAgentID(t *testing.T) {
 
 		// Per-rig agents (canonical format: gt-<rig>-<role>)
 		{"valid witness gastown", "gt-gastown-witness", false, ""},
-		{"valid refinery beads", "gt-beads-refinery", false, ""},
+		{"refinery no longer a role", "gt-beads-refinery", true, ""}, // refinery role removed (gt-v4ssj.6)
 
 		// Named agents (canonical format: gt-<rig>-<role>-<name>)
 		{"valid polecat", "gt-gastown-polecat-nux", false, ""},
@@ -111,7 +111,7 @@ func TestValidateAgentID(t *testing.T) {
 
 		// Valid: hyphenated rig names
 		{"hyphenated rig witness", "ob-my-project-witness", false, ""},
-		{"hyphenated rig refinery", "gt-foo-bar-refinery", false, ""},
+		{"hyphenated rig refinery", "gt-foo-bar-refinery", true, ""}, // refinery role removed (gt-v4ssj.6)
 		{"hyphenated rig crew", "bd-my-cool-project-crew-fang", false, ""},
 		{"hyphenated rig polecat", "gt-some-long-rig-name-polecat-nux", false, ""},
 		{"hyphenated rig and name", "gt-my-rig-polecat-war-boy", false, ""},
@@ -132,7 +132,7 @@ func TestValidateAgentID(t *testing.T) {
 
 		// Collapsed form: rig-level role without rig (prefix == rig)
 		{"collapsed witness", "gt-witness", false, ""},
-		{"collapsed refinery", "gt-refinery", false, ""},
+		{"collapsed refinery", "gt-refinery", true, ""}, // refinery role removed (gt-v4ssj.6)
 		{"collapsed polecat", "ff-polecat-nux", false, ""},
 		{"collapsed crew", "ff-crew-dave", false, ""},
 
@@ -149,9 +149,8 @@ func TestValidateAgentID(t *testing.T) {
 		{"polecat named crew", "gt-gastown-polecat-crew", false, ""},
 		{"crew named polecat", "gt-gastown-crew-polecat", false, ""},
 
-		// Invalid: witness/refinery with extra parts (no named role to the left)
+		// Invalid: witness with extra parts (no named role to the left)
 		{"witness with name", "gt-gastown-witness-extra", true, "cannot have name suffix"},
-		{"refinery with name", "gt-beads-refinery-extra", true, "cannot have name suffix"},
 
 		// Invalid: empty components
 		{"empty after prefix", "gt-", true, "must include content after prefix"},
@@ -235,7 +234,6 @@ func TestAgentBeadIDRoundTrip(t *testing.T) {
 
 		// Collapsed cases (prefix == rig)
 		{"collapsed witness", "ff", "ff", "witness", ""},
-		{"collapsed refinery", "ff", "ff", "refinery", ""},
 		{"collapsed polecat", "ff", "ff", "polecat", "nux"},
 		{"collapsed crew", "ff", "ff", "crew", "dave"},
 	}
@@ -265,4 +263,3 @@ func TestAgentBeadIDRoundTrip(t *testing.T) {
 		})
 	}
 }
-

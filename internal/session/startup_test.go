@@ -146,12 +146,6 @@ func TestAgentIdentityBeaconAddress(t *testing.T) {
 			wantNot: []string{"gastown/witness"},
 		},
 		{
-			name:    "refinery",
-			id:      AgentIdentity{Role: RoleRefinery, Rig: "gastown"},
-			want:    "refinery (rig: gastown)",
-			wantNot: []string{"gastown/refinery"},
-		},
-		{
 			name:    "crew",
 			id:      AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max"},
 			want:    "crew max (rig: gastown)",
@@ -185,7 +179,6 @@ func TestBeaconAddressVsAddress(t *testing.T) {
 	// while Address produces the traditional path-like output.
 	ids := []AgentIdentity{
 		{Role: RoleWitness, Rig: "gastown"},
-		{Role: RoleRefinery, Rig: "gastown"},
 		{Role: RoleCrew, Rig: "gastown", Name: "max"},
 		{Role: RolePolecat, Rig: "gastown", Name: "Toast"},
 	}

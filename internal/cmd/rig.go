@@ -22,7 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -615,7 +614,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Created rig identity bead: %s\n", rigBeadID)
 		}
 
-		// Create agent beads for the rig (witness, refinery)
+		// Create agent beads for the rig (witness)
 		// This ensures they exist before the daemon tries to start them
 		prefix := newRig.Config.Prefix
 		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
@@ -626,16 +625,6 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
 		} else {
 			fmt.Printf("  Created agent bead: %s\n", witnessID)
-		}
-
-		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
-		if _, err := bd.CreateAgentBead(refineryID,
-			fmt.Sprintf("Refinery for %s - processes merge queue.", name),
-			&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
-		); err != nil {
-			fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
-		} else {
-			fmt.Printf("  Created agent bead: %s\n", refineryID)
 		}
 	}
 
@@ -690,12 +679,11 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 
 // GetRigLED returns the LED indicator for a rig based on session and operational state.
 // Used by both rig list and statusline for consistent indicators:
-//   - 🟢 = both witness and refinery running (fully active)
-//   - 🟡 = one session running (partially active)
+//   - 🟢 = witness running (active)
 //   - ⚫ = nothing running (stopped)
 //   - 🅿️ = parked (intentionally paused)
 //   - 🛑 = docked (global shutdown)
-func GetRigLED(hasWitness, hasRefinery bool, opState string) string {
+func GetRigLED(hasWitness bool, opState string) string {
 	// Check operational state FIRST — parked/docked overrides session state.
 	// Sessions may still be running during the race window after park/dock
 	// but before sessions are killed (GH#2555).
@@ -706,23 +694,17 @@ func GetRigLED(hasWitness, hasRefinery bool, opState string) string {
 		return "🛑"
 	}
 
-	if hasWitness && hasRefinery {
+	if hasWitness {
 		return "🟢"
-	}
-	if hasWitness || hasRefinery {
-		return "🟡"
 	}
 	return "⚫"
 }
 
 // rigStatePriority returns a sort priority for a rig's state.
-// Lower values sort first: active > partial > stopped > parked > docked.
-func rigStatePriority(hasWitness, hasRefinery bool, opState string) int {
-	if hasWitness && hasRefinery {
+// Lower values sort first: active > stopped > parked > docked.
+func rigStatePriority(hasWitness bool, opState string) int {
+	if hasWitness {
 		return 0
-	}
-	if hasWitness || hasRefinery {
-		return 1
 	}
 	switch opState {
 	case "PARKED":
@@ -770,7 +752,6 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		RepoPath string `json:"repo_path"`
 		Status   string `json:"status"`
 		Witness  string `json:"witness"`
-		Refinery string `json:"refinery"`
 		Polecats int    `json:"polecats"`
 		Crew     int    `json:"crew"`
 		// sorting fields (not exported to JSON)
@@ -791,17 +772,11 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		opState, _ := getRigOperationalState(townRoot, name)
 
 		witnessSession := session.WitnessSessionName(prefix)
-		refinerySession := session.RefinerySessionName(prefix)
 		witnessRunning, _ := t.HasSession(witnessSession)
-		refineryRunning, _ := t.HasSession(refinerySession)
 
 		witnessStatus := "stopped"
 		if witnessRunning {
 			witnessStatus = "running"
-		}
-		refineryStatus := "stopped"
-		if refineryRunning {
-			refineryStatus = "running"
 		}
 
 		summary := r.Summary()
@@ -811,10 +786,9 @@ func runRigList(cmd *cobra.Command, args []string) error {
 			RepoPath:    r.RepoPath(),
 			Status:      strings.ToLower(opState),
 			Witness:     witnessStatus,
-			Refinery:    refineryStatus,
 			Polecats:    summary.PolecatCount,
 			Crew:        summary.CrewCount,
-			sortPrio:    rigStatePriority(witnessRunning, refineryRunning, opState),
+			sortPrio:    rigStatePriority(witnessRunning, opState),
 		})
 	}
 
@@ -839,7 +813,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		led := GetRigLED(ri.Witness == "running", ri.Refinery == "running", strings.ToUpper(ri.Status))
+		led := GetRigLED(ri.Witness == "running", strings.ToUpper(ri.Status))
 		// 🅿️ needs extra space for alignment
 		space := " "
 		if led == "🅿️" {
@@ -852,13 +826,8 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		if ri.Witness == "running" {
 			witnessIcon = style.Success.Render("●")
 		}
-		refineryIcon := style.Dim.Render("○")
-		if ri.Refinery == "running" {
-			refineryIcon = style.Success.Render("●")
-		}
 
-		fmt.Printf("   Witness: %s %s  Refinery: %s %s\n",
-			witnessIcon, ri.Witness, refineryIcon, ri.Refinery)
+		fmt.Printf("   Witness: %s %s\n", witnessIcon, ri.Witness)
 		fmt.Printf("   Polecats: %d  Crew: %d\n", ri.Polecats, ri.Crew)
 		fmt.Println()
 	}
@@ -902,17 +871,15 @@ func runRigMenu(cmd *cobra.Command, args []string) error {
 		opState, _ := getRigOperationalState(townRoot, name)
 
 		witnessSession := session.WitnessSessionName(prefix)
-		refinerySession := session.RefinerySessionName(prefix)
 		hasWitness, _ := t.HasSession(witnessSession)
-		hasRefinery, _ := t.HasSession(refinerySession)
 
-		led := GetRigLED(hasWitness, hasRefinery, opState)
+		led := GetRigLED(hasWitness, opState)
 		rigs = append(rigs, menuRig{
 			name:     name,
 			led:      led,
-			running:  hasWitness || hasRefinery,
+			running:  hasWitness,
 			opState:  opState,
-			sortPrio: rigStatePriority(hasWitness, hasRefinery, opState),
+			sortPrio: rigStatePriority(hasWitness, opState),
 		})
 	}
 
@@ -1229,7 +1196,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				workDir := filepath.Dir(beadsDir)
 				bdCmd := beads.CommandWithEnv(workDir, nil, "config", "get", "issue_prefix")
 				if out, bdErr := bdCmd.Output(); bdErr == nil {
-					detected := strings.TrimSpace(string(out))
+					detected := beads.ParseConfigOutput(out)
 					if detected != "" {
 						if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
 							return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
@@ -1348,7 +1315,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 			}
 		}
 
-		// Create agent beads for the rig (witness, refinery)
+		// Create agent beads for the rig (witness)
 		// This ensures they exist before the daemon tries to start them
 		prefix := result.BeadsPrefix
 		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
@@ -1360,18 +1327,6 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
 			} else {
 				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), witnessID)
-			}
-		}
-
-		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
-		if _, err := bd.Show(refineryID); err != nil {
-			if _, err := bd.CreateAgentBead(refineryID,
-				fmt.Sprintf("Refinery for %s - processes merge queue.", name),
-				&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
-			); err != nil {
-				fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
-			} else {
-				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), refineryID)
 			}
 		}
 	}
@@ -1650,20 +1605,6 @@ func runRigBoot(cmd *cobra.Command, args []string) error {
 		started = append(started, "witness")
 	}
 
-	// 2. Start the refinery
-	refMgr := refinery.NewManager(r)
-	if err := refMgr.Start(false, ""); err != nil { // false = background mode
-		if errors.Is(err, refinery.ErrAlreadyRunning) {
-			skipped = append(skipped, "refinery (already running)")
-		} else if errors.Is(err, refinery.ErrForkRig) {
-			skipped = append(skipped, "refinery (fork-backed rig; use PR workflow)")
-		} else {
-			return fmt.Errorf("starting refinery: %w", err)
-		}
-	} else {
-		started = append(started, "refinery")
-	}
-
 	// Report results
 	if len(started) > 0 {
 		fmt.Printf("%s Started: %s\n", style.Success.Render("✓"), strings.Join(started, ", "))
@@ -1729,21 +1670,6 @@ func runRigStart(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			started = append(started, "witness")
-		}
-
-		// 2. Start the refinery
-		refMgr := refinery.NewManager(r)
-		if err := refMgr.Start(false, ""); err != nil {
-			if errors.Is(err, refinery.ErrAlreadyRunning) {
-				skipped = append(skipped, "refinery")
-			} else if errors.Is(err, refinery.ErrForkRig) {
-				skipped = append(skipped, "refinery (fork-backed rig; use PR workflow)")
-			} else {
-				fmt.Printf("  %s Failed to start refinery: %v\n", style.Warning.Render("⚠"), err)
-				hasError = true
-			}
-		} else {
-			started = append(started, "refinery")
 		}
 
 		// Report results for this rig
@@ -1814,15 +1740,6 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
 		if err := polecatMgr.StopAll(rigShutdownForce); err != nil {
 			errors = append(errors, fmt.Sprintf("polecat sessions: %v", err))
-		}
-	}
-
-	// 2. Stop the refinery
-	refMgr := refinery.NewManager(r)
-	if running, _ := refMgr.IsRunning(); running {
-		fmt.Printf("  Stopping refinery...\n")
-		if err := refMgr.Stop(); err != nil {
-			errors = append(errors, fmt.Sprintf("refinery: %v", err))
 		}
 	}
 
@@ -1931,19 +1848,6 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 		witnessRunning, _ = witMgr.IsRunning()
 	}()
 
-	// Refinery status + queue
-	refMgr := refinery.NewManager(r)
-	var refineryRunning bool
-	var refineryQueue []refinery.QueueItem
-	dataWg.Add(1)
-	go func() {
-		defer dataWg.Done()
-		refineryRunning, _ = refMgr.IsRunning()
-		if refineryRunning {
-			refineryQueue, _ = refMgr.Queue()
-		}
-	}()
-
 	// Polecats list (involves per-polecat beads + git queries)
 	polecatGit := git.NewGit(r.Path)
 	polecatMgr := polecat.NewManager(r, polecatGit, t)
@@ -2025,18 +1929,6 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s\n", style.Bold.Render("Witness"))
 	if witnessRunning {
 		fmt.Printf("  %s running\n", style.Success.Render("●"))
-	} else {
-		fmt.Printf("  %s stopped\n", style.Dim.Render("○"))
-	}
-	fmt.Println()
-
-	// Refinery
-	fmt.Printf("%s\n", style.Bold.Render("Refinery"))
-	if refineryRunning {
-		fmt.Printf("  %s running\n", style.Success.Render("●"))
-		if len(refineryQueue) > 0 {
-			fmt.Printf("  Queue: %d items\n", len(refineryQueue))
-		}
 	} else {
 		fmt.Printf("  %s stopped\n", style.Dim.Render("○"))
 	}
@@ -2153,15 +2045,6 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// 2. Stop the refinery
-		refMgr := refinery.NewManager(r)
-		if running, _ := refMgr.IsRunning(); running {
-			fmt.Printf("  Stopping refinery...\n")
-			if err := refMgr.Stop(); err != nil {
-				errors = append(errors, fmt.Sprintf("refinery: %v", err))
-			}
-		}
-
 		// 3. Stop the witness
 		witMgr := witness.NewManager(r)
 		if running, _ := witMgr.IsRunning(); running {
@@ -2255,15 +2138,6 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// 2. Stop the refinery
-		refMgr := refinery.NewManager(r)
-		if running, _ := refMgr.IsRunning(); running {
-			fmt.Printf("    Stopping refinery...\n")
-			if err := refMgr.Stop(); err != nil {
-				stopErrors = append(stopErrors, fmt.Sprintf("refinery: %v", err))
-			}
-		}
-
 		// 3. Stop the witness
 		witMgr := witness.NewManager(r)
 		if running, _ := witMgr.IsRunning(); running {
@@ -2300,20 +2174,6 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			started = append(started, "witness")
-		}
-
-		// 2. Start the refinery
-		if err := refMgr.Start(false, ""); err != nil {
-			if errors.Is(err, refinery.ErrAlreadyRunning) {
-				skipped = append(skipped, "refinery")
-			} else if errors.Is(err, refinery.ErrForkRig) {
-				skipped = append(skipped, "refinery (fork-backed rig; use PR workflow)")
-			} else {
-				fmt.Printf("    %s Failed to start refinery: %v\n", style.Warning.Render("⚠"), err)
-				startErrors = append(startErrors, fmt.Sprintf("refinery: %v", err))
-			}
-		} else {
-			started = append(started, "refinery")
 		}
 
 		// Report results for this rig
@@ -2540,4 +2400,51 @@ func autoAssignNamepoolTheme(townRoot, rigName string, mgr *rig.Manager) {
 	} else {
 		fmt.Printf("  Namepool theme: %s (auto-assigned for cross-rig uniqueness)\n", chosenTheme)
 	}
+}
+
+// findCurrentRig determines the current rig from the working directory.
+// Returns the rig name and rig object, or an error if not in a rig.
+func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", nil, fmt.Errorf("getting current directory: %w", err)
+	}
+
+	// Get relative path from town root to cwd
+	relPath, err := filepath.Rel(townRoot, cwd)
+	if err != nil {
+		return "", nil, fmt.Errorf("computing relative path: %w", err)
+	}
+
+	// The first component of the relative path should be the rig name
+	parts := strings.Split(relPath, string(filepath.Separator))
+	rigName := ""
+	if len(parts) > 0 && parts[0] != "" && parts[0] != "." {
+		rigName = parts[0]
+	}
+
+	// When gt is invoked via shell alias (cd ~/gt && gt), cwd is the town
+	// root and relPath is ".". Fall back to GT_RIG env var.
+	if rigName == "" {
+		rigName = os.Getenv("GT_RIG")
+	}
+	if rigName == "" {
+		return "", nil, fmt.Errorf("not inside a rig directory (and GT_RIG not set)")
+	}
+
+	// Load rig manager and get the rig
+	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	if err != nil {
+		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+	}
+
+	g := git.NewGit(townRoot)
+	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
+	r, err := rigMgr.GetRig(rigName)
+	if err != nil {
+		return "", nil, fmt.Errorf("rig '%s' not found: %w", rigName, err)
+	}
+
+	return rigName, r, nil
 }

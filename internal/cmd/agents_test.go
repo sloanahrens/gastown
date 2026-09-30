@@ -88,7 +88,6 @@ func TestCategorizeSession_AllTypes(t *testing.T) {
 		// Rig-level sessions require a registered prefix. Use "gt" which is
 		// commonly registered in the default PrefixRegistry.
 		{"witness", "gt-witness", AgentWitness},
-		{"refinery", "gt-refinery", AgentRefinery},
 		{"crew", "gt-crew-max", AgentCrew},
 		{"polecat", "gt-furiosa", AgentPolecat},
 	}
@@ -187,7 +186,6 @@ func TestDisplayLabel_AllTypes(t *testing.T) {
 		{"mayor", AgentSession{Name: "hq-mayor", Type: AgentMayor}, "Mayor"},
 		{"deacon", AgentSession{Name: "hq-deacon", Type: AgentDeacon}, "Deacon"},
 		{"witness", AgentSession{Name: "gt-witness", Type: AgentWitness, Rig: "gastown"}, "gastown/witness"},
-		{"refinery", AgentSession{Name: "gt-refinery", Type: AgentRefinery, Rig: "gastown"}, "gastown/refinery"},
 		{"crew", AgentSession{Name: "gt-crew-max", Type: AgentCrew, Rig: "gastown", AgentName: "max"}, "crew/max"},
 		{"polecat", AgentSession{Name: "gt-furiosa", Type: AgentPolecat, Rig: "gastown", AgentName: "furiosa"}, "furiosa"},
 	}
@@ -293,7 +291,6 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 		"gt-crew-zed",   // crew (gastown)
 		"gt-witness",    // witness (gastown)
 		"hq-deacon",     // deacon
-		"gt-refinery",   // refinery (gastown)
 		"hq-mayor",      // mayor
 		"gt-furiosa",    // polecat (gastown)
 		"mr-witness",    // witness (myrig)
@@ -305,19 +302,17 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 	// Expected order:
 	// 1. mayor (town-level)
 	// 2. deacon (town-level)
-	// 3. gastown/refinery (rig "gastown" < "myrig", refinery before witness)
-	// 4. gastown/witness
-	// 5. gastown/crew/alpha (crew after witness, alpha < zed)
-	// 6. gastown/crew/zed
-	// 7. gastown/polecat/furiosa (polecat last within rig)
-	// 8. myrig/witness
+	// 3. gastown/witness (rig "gastown" < "myrig")
+	// 4. gastown/crew/alpha (crew after witness, alpha < zed)
+	// 5. gastown/crew/zed
+	// 6. gastown/polecat/furiosa (polecat last within rig)
+	// 7. myrig/witness
 	wantOrder := []struct {
 		wantType AgentType
 		wantName string
 	}{
 		{AgentMayor, "hq-mayor"},
 		{AgentDeacon, "hq-deacon"},
-		{AgentRefinery, "gt-refinery"},
 		{AgentWitness, "gt-witness"},
 		{AgentCrew, "gt-crew-alpha"},
 		{AgentCrew, "gt-crew-zed"},
@@ -593,8 +588,6 @@ func TestGuessSessionFromWorkerDir(t *testing.T) {
 		{"polecat worker", "/town/gastown/polecats/furiosa", "gt-furiosa"},
 		{"witness worker", "/town/gastown/witness/main", "gt-witness"},
 		{"witness worker rig", "/town/gastown/witness/rig", "gt-witness"},
-		{"refinery worker", "/town/gastown/refinery/main", "gt-refinery"},
-		{"refinery worker rig", "/town/gastown/refinery/rig", "gt-refinery"},
 		{"unknown type", "/town/gastown/unknown/thing", ""},
 		{"too few path parts", "/town/gastown", ""},
 		{"different rig", "/town/myrig/crew/alpha", "mr-crew-alpha"},

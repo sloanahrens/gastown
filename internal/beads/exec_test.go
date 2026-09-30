@@ -3,7 +3,6 @@ package beads
 import (
 	"context"
 	"os"
-	"os/exec"
 	"testing"
 )
 
@@ -36,8 +35,11 @@ func TestCommandWithEnvPreservesCallerEnv(t *testing.T) {
 	if cmd.Dir != "/tmp" {
 		t.Fatalf("Dir = %q, want /tmp", cmd.Dir)
 	}
-	if len(cmd.Env) != len(env) {
-		t.Fatalf("Env len = %d, want %d (env must pass through unmodified)", len(cmd.Env), len(env))
+	if len(cmd.Env) != len(env)+1 {
+		t.Fatalf("Env len = %d, want %d (the caller's env plus BD_MACHINE=1)", len(cmd.Env), len(env)+1)
+	}
+	if !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
+		t.Fatalf("Env = %v, want BD_MACHINE=1", cmd.Env)
 	}
 	found := false
 	for _, e := range cmd.Env {
@@ -59,8 +61,8 @@ func TestCommandContextWithEnvPreservesCallerEnv(t *testing.T) {
 	if cmd.Dir != "/work" {
 		t.Fatalf("Dir = %q, want /work", cmd.Dir)
 	}
-	if len(cmd.Env) != len(env) {
-		t.Fatalf("Env len = %d, want %d", len(cmd.Env), len(env))
+	if len(cmd.Env) != len(env)+1 || !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
+		t.Fatalf("Env = %v, want %v plus BD_MACHINE=1", cmd.Env, env)
 	}
 	if cmd.SysProcAttr != nil {
 		t.Fatal("CommandContextWithEnv must not impose a process-group policy; callers set their own")
@@ -76,8 +78,8 @@ func TestCommandWithPathUsesGivenArgv0(t *testing.T) {
 	if cmd.Dir != "/work" {
 		t.Fatalf("Dir = %q, want /work", cmd.Dir)
 	}
-	if len(cmd.Env) != len(env) {
-		t.Fatalf("Env len = %d, want %d", len(cmd.Env), len(env))
+	if len(cmd.Env) != len(env)+1 || !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
+		t.Fatalf("Env = %v, want %v plus BD_MACHINE=1", cmd.Env, env)
 	}
 }
 
@@ -99,7 +101,7 @@ func TestCommandContextWithBinUsesGivenArgv0AndAppliesPolicy(t *testing.T) {
 func TestNilEnvCarriesPWD(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		cmd  *exec.Cmd
+		cmd  *Cmd
 	}{
 		{"CommandWithEnv", CommandWithEnv("/work", nil, "list")},
 		{"CommandContextWithEnv", CommandContextWithEnv(context.Background(), "/work", nil, "list")},
@@ -138,7 +140,7 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
 		name string
-		cmd  *exec.Cmd
+		cmd  *Cmd
 		want bool
 	}{
 		{"Command", Command("/work", "", MutationRouting, "list"), false},

@@ -42,7 +42,6 @@ import (
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -345,6 +344,11 @@ type Daemon struct {
 	// started and not yet finished, so a caller can wait for a triggered
 	// cycle to end instead of polling mayorDispatchRunning against a clock.
 	mayorDispatchCycles sync.WaitGroup
+
+	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
+	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go).
+	specDispatchRunning atomic.Bool
+	specDispatchCycles  sync.WaitGroup
 
 	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
 	// patrol, on its own goroutine: it checks every known rig's witness and
@@ -1067,6 +1071,17 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
+	// Start the spec dispatcher ticker if enabled (default off, gt-4k3fj.5).
+	var specDispatchTicker *time.Ticker
+	var specDispatchChan <-chan time.Time
+	if d.isPatrolActive("spec_dispatch") {
+		interval := specDispatchInterval(d.patrolConfig)
+		specDispatchTicker = time.NewTicker(interval)
+		specDispatchChan = specDispatchTicker.C
+		defer specDispatchTicker.Stop()
+		d.logger.Printf("Spec dispatch ticker started (interval %v)", interval)
+	}
+
 	// Start the patrol watchdog ticker if configured. Flags a patrol role
 	// (witness, deacon, refinery) whose session is alive but whose last
 	// COMPLETED patrol cycle is older than N x its cadence (gt-4z3b7).
@@ -1231,6 +1246,13 @@ func (d *Daemon) Run() (err error) {
 				d.triggerMayorDispatch()
 			}
 
+		case <-specDispatchChan:
+			// Spec dispatcher tick — lints ready spec beads and slings clean
+			// ones within the seat budget, on its own goroutine (gt-4k3fj.5).
+			if !d.isShutdownInProgress() {
+				d.triggerSpecDispatch()
+			}
+
 		case <-patrolWatchdogChan:
 			// Patrol watchdog — flags a role (witness, deacon, refinery)
 			// whose session is alive but whose last completed patrol cycle
@@ -1358,21 +1380,6 @@ func (d *Daemon) heartbeatWork(state *State) {
 		d.logger.Printf("Witness patrol disabled in config, skipping")
 		// Kill leftover witness sessions from before patrol was disabled. (hq-2mstj)
 		d.killWitnessSessions()
-	}
-
-	// 5. Ensure Refineries are running for all rigs (restart if dead)
-	// Check patrol config - can be disabled in mayor/daemon.json
-	// Pressure-gated: refineries consume API credits, defer when system is loaded.
-	if d.isPatrolActive("refinery") {
-		if p := d.checkPressure("refinery"); !p.OK {
-			d.logger.Printf("Deferring refinery spawn: %s", p.Reason)
-		} else {
-			d.ensureRefineriesRunning()
-		}
-	} else {
-		d.logger.Printf("Refinery patrol disabled in config, skipping")
-		// Kill leftover refinery sessions from before patrol was disabled. (hq-2mstj)
-		d.killRefinerySessions()
 	}
 
 	// 6. Ensure Mayor is running (restart if dead)
@@ -2326,71 +2333,6 @@ func (d *Daemon) logStartOutcome(role, rigName string, err error) {
 	}
 }
 
-// ensureRefineriesRunning ensures refineries are running for configured rigs.
-// Called on each heartbeat to maintain refinery merge queue processing.
-// Respects the rigs filter in daemon.json patrol config.
-func (d *Daemon) ensureRefineriesRunning() {
-	rigs := d.getPatrolRigs("refinery")
-	d.rigPool.runPerRig(d.ctx, rigs, func(ctx context.Context, rigName string) error {
-		d.ensureRefineryRunning(rigName)
-		return nil
-	})
-}
-
-// ensureRefineryRunning keeps the refinery for a rig running when it has
-// work: the liveness function decides, and a dead refinery with pending
-// events is restarted through the supervisor. A leftover refinery in a rig
-// that is not operational or is under a safety stop is killed through the
-// supervisor.
-func (d *Daemon) ensureRefineryRunning(rigName string) {
-	seat := supervisor.SeatFor(rigName, constants.RoleRefinery, "")
-	if operational, reason := d.isRigOperational(rigName); !operational {
-		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, reason)
-		d.killLeftover(seat, "rig "+reason, "daemon/rig-state")
-		return
-	}
-	if stop, err := refinery.ActiveSafetyStop(d.config.TownRoot, rigName); err != nil {
-		d.logger.Printf("Skipping refinery auto-start for %s: cannot verify safety stop: %v", rigName, err)
-		return
-	} else if stop != nil {
-		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, stop.Reason())
-		d.killLeftover(seat, stop.Reason(), "daemon/safety-stop")
-		return
-	}
-
-	// NOTE: no stall restart for refineries (serial killer bug): an idle
-	// refinery legitimately produces no output while it waits for MRs.
-	res := d.assessSeat(seat, liveness.Input{})
-	switch res.Verdict {
-	case liveness.Unknown:
-		d.logger.Printf("Refinery for %s: liveness unknown (%v); not acting this tick", rigName, res.Err)
-		return
-	case liveness.Alive, liveness.Stalled:
-		d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
-		// The check above cannot see a session that is alive but consuming
-		// no input -- exactly the state be-refinery was in for ~15 minutes
-		// while three MRs aged behind it (gt-eigw). Probe it.
-		d.probeRunningRefinery(rigName)
-		return
-	}
-
-	// Event gate: a new Claude session with an empty queue burns API
-	// credits for nothing; the refinery formula's await-event wakes a
-	// running one when events appear.
-	if !d.hasPendingEvents("refinery", rigName) {
-		d.logger.Printf("No pending refinery events and no session running for %s, skipping spawn", rigName)
-		return
-	}
-
-	if err := d.sup().Restart(seat, "refinery "+res.Reason+" with pending events", "daemon/ensure-refinery"); err != nil {
-		d.logStartOutcome("refinery", rigName, err)
-		return
-	}
-	d.metrics.recordRestart(d.ctx, "refinery")
-	telemetry.RecordDaemonRestart(d.ctx, "refinery-"+rigName)
-	d.logger.Printf("Refinery session for %s started successfully", rigName)
-}
-
 // mayorDeadSamples is how many consecutive dead-agent samples the Mayor
 // needs before a restart: during a handoff its agent is briefly
 // undetectable. The count lives in the Mayor's intent record, so it
@@ -2441,15 +2383,6 @@ func (d *Daemon) killWitnessSessions() {
 	})
 }
 
-// killRefinerySessions kills leftover refinery sessions for all rigs through
-// the supervisor. Called when the refinery patrol is disabled. (hq-2mstj)
-func (d *Daemon) killRefinerySessions() {
-	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleRefinery, ""), "patrol disabled", "daemon/patrol-disabled")
-		return nil
-	})
-}
-
 // killDefaultPrefixGhosts kills tmux sessions that use the default "gt" prefix
 // for roles that should use a rig-specific prefix. These ghost sessions appear
 // when the daemon starts before a rig is registered or when the registry was
@@ -2477,7 +2410,7 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 	}
 
 	// Kill ghost sessions using the default "gt" prefix for patrol roles.
-	for _, role := range []string{"witness", "refinery"} {
+	for _, role := range []string{"witness"} {
 		ghostName := fmt.Sprintf("%s-%s", session.DefaultPrefix, role)
 		exists, _ := d.tmux.HasSession(ghostName)
 		if exists {
@@ -3397,7 +3330,7 @@ func (d *Daemon) emitMassDeathEvent() {
 // silently suppressing alerts.
 func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
-	setSysProcAttr(cmd)
+	setSysProcAttr(cmd.Cmd)
 
 	output, err := cmd.Output()
 	if err != nil {

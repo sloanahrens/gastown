@@ -38,7 +38,7 @@ func SystemPromptFilePath(role, townRoot, rigPath, agentName string) string {
 		}
 		dir = RoleSettingsDir(role, rigPath)
 		name = "system-prompt-" + agentName + ".md"
-	case constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleWitness:
 		if rigPath == "" {
 			return ""
 		}

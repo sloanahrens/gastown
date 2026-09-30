@@ -136,7 +136,7 @@ func listConvoys(beadsDir, status, closedAfter string) ([]convoyListItem, error)
 	defer cancel()
 
 	cmd := beads.CommandContextWithEnv(ctx, beadsDir, nil, listArgs...)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
@@ -482,7 +482,7 @@ func listMQBeads(rigPath, status string) []mqListItem {
 		"--status="+status,
 		"--json",
 	)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

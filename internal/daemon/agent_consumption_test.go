@@ -287,13 +287,14 @@ func TestRunningAgentRestartHint(t *testing.T) {
 	}
 }
 
-// The two functions the heartbeat calls must probe the pair of role sessions
-// the daemon itself maintains for a rig — a probe aimed at the wrong session
-// name reports a healthy rig while the real session stays wedged.
+// The heartbeat's witness probe must target the witness session the daemon
+// itself maintains for a rig — a probe aimed at the wrong session name reports
+// a healthy rig while the real session stays wedged. (The refinery probe went
+// away with the refinery role, gt-v4ssj.6.)
 //
-// The assertion is on the two targets relative to each other rather than on a
-// literal name: the rig prefix comes from the session registry, which a test
-// binary does not populate, so a hardcoded prefix would test the test.
+// The assertion is on the suffix rather than on a literal name: the rig prefix
+// comes from the session registry, which a test binary does not populate, so a
+// hardcoded prefix would test the test.
 func TestProbeRunningRolesTargetTheRigSessions(t *testing.T) {
 	t.Parallel()
 	tm := newFakeTmux(newFixedClock())
@@ -305,7 +306,6 @@ func TestProbeRunningRolesTargetTheRigSessions(t *testing.T) {
 	}
 
 	d.probeRunningWitness("gastown")
-	d.probeRunningRefinery("gastown")
 
 	var targets []string
 	for _, call := range tm.daemonCalls() {
@@ -314,14 +314,11 @@ func TestProbeRunningRolesTargetTheRigSessions(t *testing.T) {
 		}
 	}
 
-	if len(targets) != 2 {
-		t.Fatalf("probed %v, want exactly one witness session and one refinery session", targets)
+	if len(targets) != 1 {
+		t.Fatalf("probed %v, want exactly one witness session", targets)
 	}
-	if !strings.HasSuffix(targets[0], "-witness") || !strings.HasSuffix(targets[1], "-refinery") {
-		t.Fatalf("probed %v, want a witness session then a refinery session", targets)
-	}
-	if prefix := strings.TrimSuffix(targets[0], "-witness"); prefix != strings.TrimSuffix(targets[1], "-refinery") {
-		t.Errorf("the two probes used different rig prefixes: %q vs %q", targets[0], targets[1])
+	if !strings.HasSuffix(targets[0], "-witness") {
+		t.Fatalf("probed %v, want a witness session", targets)
 	}
 }
 

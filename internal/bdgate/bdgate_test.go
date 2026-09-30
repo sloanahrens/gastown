@@ -37,7 +37,6 @@ func TestEverySessionStartCallsTheGate(t *testing.T) {
 		"internal/polecat/session_manager.go": "func (m *SessionManager) Start(",
 		"internal/crew/manager.go":            "func (m *Manager) Start(",
 		"internal/witness/manager.go":         "func (m *Manager) Start(",
-		"internal/refinery/manager.go":        "func (m *Manager) start(",
 		"internal/deacon/manager.go":          "func (m *Manager) Start(",
 		"internal/mayor/manager.go":           "func (m *Manager) Start(",
 		// A session creator outside the role managers (gt-fcxe9.10): the

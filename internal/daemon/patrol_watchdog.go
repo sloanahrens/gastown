@@ -16,7 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/witness"
 )
 
-// Patrol watchdog: flags a patrol role (witness, deacon, refinery) that is
+// Patrol watchdog: flags a patrol role (witness, deacon) that is
 // awake but NOT patrolling — its session is alive, but its last COMPLETED
 // patrol cycle is older than N x its cadence (gt-4z3b7).
 //
@@ -74,7 +74,7 @@ func patrolWatchdogNudgeEnabled(config *DaemonPatrolConfig) bool {
 // patrolWatchdogTarget names one patrol role instance to check: a specific
 // rig's witness or refinery, or the town-level deacon.
 type patrolWatchdogTarget struct {
-	Role      string // "witness", "deacon", "refinery"
+	Role      string // "witness", "deacon"
 	Rig       string // "" for town-level roles
 	Session   string // tmux session name
 	Assignee  string // bd assignee address (witness.PatrolAssignee)
@@ -91,7 +91,7 @@ type patrolWatchdogTarget struct {
 }
 
 // patrolWatchdogTargets enumerates every patrol role instance the watchdog
-// checks: the town-level deacon plus each known rig's witness and refinery.
+// checks: the town-level deacon plus each known rig's witness.
 func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarget {
 	targets := []patrolWatchdogTarget{{
 		Role:      constants.RoleDeacon,
@@ -111,14 +111,6 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 				Session:   session.WitnessSessionName(prefix),
 				Assignee:  witness.PatrolAssignee(constants.RoleWitness, rigName),
 				PatrolMol: constants.MolWitnessPatrol,
-				WorkDir:   townRoot,
-			},
-			patrolWatchdogTarget{
-				Role:      constants.RoleRefinery,
-				Rig:       rigName,
-				Session:   session.RefinerySessionName(prefix),
-				Assignee:  witness.PatrolAssignee(constants.RoleRefinery, rigName),
-				PatrolMol: constants.MolRefineryPatrol,
 				WorkDir:   townRoot,
 			},
 		)
@@ -306,7 +298,6 @@ func patrolWatchdogAlertKey(target patrolWatchdogTarget) string {
 func patrolWatchdogRigAlertKeys(rigName string) []string {
 	return []string{
 		patrolWatchdogAlertKey(patrolWatchdogTarget{Role: constants.RoleWitness, Rig: rigName}),
-		patrolWatchdogAlertKey(patrolWatchdogTarget{Role: constants.RoleRefinery, Rig: rigName}),
 	}
 }
 

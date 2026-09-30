@@ -59,7 +59,7 @@ func init() {
 // internal/testutil/doltserver.go) — with
 // `go list -test -f '{{.ImportPath}} {{join .Deps "\n"}}' ./internal/...`
 // and filtering for the module's testutil import path. This catches both
-// call-site packages (internal/daemon, internal/mail, internal/refinery,
+// call-site packages (internal/daemon, internal/mail,
 // internal/doltserver, internal/beads, internal/convoy, internal/polecat —
 // test files calling the entry points) and import-only packages (doctor,
 // crew, deacon, ... — the tests import testutil for the hermetic harness,
@@ -88,8 +88,6 @@ var containerSuitePackages = []string{
 	"internal/plugin",
 	"internal/polecat",
 	"internal/protocol",
-	"internal/refinery",
-	"internal/refinery/editorial",
 	"internal/rig",
 	"internal/testutil",
 	"internal/tui/convoy",
@@ -138,9 +136,6 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 // they don't run scoped test suites as part of their normal work.
 func isPolecatOrRefineryContext() bool {
 	if os.Getenv("GT_POLECAT") != "" {
-		return true
-	}
-	if isRefineryRole() {
 		return true
 	}
 	cwd, err := os.Getwd()

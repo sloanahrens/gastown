@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // fakeDispatchMRLister stands in for the rig's beads database. It records
@@ -20,7 +21,7 @@ type fakeDispatchMRLister struct {
 	calls []beads.ListOptions
 }
 
-func (f *fakeDispatchMRLister) ListMergeRequests(opts beads.ListOptions) ([]*beads.Issue, error) {
+func (f *fakeDispatchMRLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	f.calls = append(f.calls, opts)
 	return f.mrs, f.err
 }
@@ -44,8 +45,8 @@ func backpressureTown(t *testing.T, maxReady int) (townRoot, rigName string) {
 	return townRoot, rigName
 }
 
-// readyMRs builds n ready merge requests: open, and with no unresolved
-// blockers, which is the predicate `gt mq list --ready` uses.
+// readyMRs builds n work beads waiting to land: open, labeled
+// gt:ready-to-land (the fake lister already filters on the label).
 func readyMRs(n int) []*beads.Issue {
 	mrs := make([]*beads.Issue, 0, n)
 	for i := 0; i < n; i++ {
@@ -121,9 +122,9 @@ func TestCheckSlingBackpressure(t *testing.T) {
 			wantCalls: 0,
 		},
 		{
-			name:      "blocked MRs are not ready and do not count",
+			name:      "landed beads do not count",
 			maxReady:  12,
-			mrs:       append(readyMRs(12), &beads.Issue{ID: "gt-mrblocked", Status: "open", BlockedBy: []string{"gt-open"}}),
+			mrs:       append(readyMRs(12), &beads.Issue{ID: "gt-landed", Status: "closed"}),
 			hookBead:  "gt-abc",
 			wantCalls: 1,
 		},
@@ -156,7 +157,7 @@ func TestCheckSlingBackpressure(t *testing.T) {
 				if !errors.Is(err, errQueueBackpressure) {
 					t.Fatalf("checkSlingBackpressure() error = %v, want errQueueBackpressure", err)
 				}
-				want := "sling refused: gastown has 13 ready MRs (> 12); pass --force or label the bead rework"
+				want := "sling refused: gastown has 13 beads waiting to land (> 12); pass --force or label the bead rework"
 				if got := err.Error(); got != want {
 					t.Errorf("refusal message = %q, want %q", got, want)
 				}
@@ -170,12 +171,11 @@ func TestCheckSlingBackpressure(t *testing.T) {
 			if tt.wantCalls == 0 {
 				return
 			}
-			// The count has to come from the wisps-aware bulk query: MRs are
-			// created as ephemeral beads, so a per-id read or a `bd list
-			// --label` would miss the queue this guard exists to measure.
+			// The count comes from one bulk query on the ready-to-land label,
+			// never a per-id read.
 			call := lister.calls[0]
-			if call.Label != "gt:merge-request" || call.Status != "open" || call.Rig != rigName || call.Priority != -1 {
-				t.Errorf("queue query = %+v, want the rig-wide open merge-request query", call)
+			if call.Label != land.LabelReadyToLand || call.Priority != -1 {
+				t.Errorf("queue query = %+v, want the bulk ready-to-land query", call)
 			}
 		})
 	}
@@ -238,26 +238,30 @@ func TestCheckSlingBackpressureNoSettingsIsOff(t *testing.T) {
 	}
 }
 
-// TestCountReadyMergeRequests pins the count itself, including the wisp-era
-// detail that a partially-blocked queue is not the same as a deep one.
-func TestCountReadyMergeRequests(t *testing.T) {
+// TestCountReadyToLand pins the count itself: open and in-flight beads carry
+// the ready-to-land label until the landing worker lands them; a closed bead
+// has already landed and is not queue depth.
+func TestCountReadyToLand(t *testing.T) {
 	t.Parallel()
 	lister := &fakeDispatchMRLister{mrs: []*beads.Issue{
-		{ID: "gt-mr1", Status: "open"},
-		{ID: "gt-mr2", Status: "open", BlockedBy: []string{"gt-other"}},
-		{ID: "gt-mr3", Status: "closed"},
-		{ID: "gt-mr4", Status: "open"},
+		{ID: "gt-a", Status: "open"},
+		{ID: "gt-b", Status: "in_progress"},
+		{ID: "gt-c", Status: "closed"},
+		{ID: "gt-d", Status: "hooked"},
 	}}
 
-	got, err := countReadyMergeRequests(lister, "gastown")
+	got, err := countReadyToLand(lister, "gastown")
 	if err != nil {
-		t.Fatalf("countReadyMergeRequests() error = %v", err)
+		t.Fatalf("countReadyToLand() error = %v", err)
 	}
-	if got != 2 {
-		t.Errorf("countReadyMergeRequests() = %d, want 2", got)
+	if got != 3 {
+		t.Errorf("countReadyToLand() = %d, want 3", got)
 	}
 	if len(lister.calls) != 1 {
 		t.Errorf("queue queries = %d, want 1 (one bulk read, never per-id)", len(lister.calls))
+	}
+	if lister.calls[0].Label != land.LabelReadyToLand {
+		t.Errorf("queried label %q, want %q", lister.calls[0].Label, land.LabelReadyToLand)
 	}
 }
 

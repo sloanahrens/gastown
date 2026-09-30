@@ -53,7 +53,7 @@ Abbreviated patrol rules:
 - **resolve-external-deps**: SKIP.
 - **fire-notifications**: SKIP.
 - **heartbeat-mid**: SKIP (short cycle doesn't need mid-cycle refresh).
-- **health-scan**: Quick `gt witness status` / `gt refinery status` only. Skip nudges.
+- **health-scan**: Quick `gt witness status` only. Skip nudges.
 - **dolt-health**: SKIP.
 - **zombie-scan**: SKIP.
 - **plugin-run**: SKIP.
@@ -702,12 +702,10 @@ If ACTIVE work exists:
 For each rig, run:
 ```bash
 gt witness status <rig>
-gt refinery status <rig>
 
 # ONLY if active work exists - health ping (clears backoff as side effect)
 # Use --mode=queue to avoid interrupting in-flight tool calls
 gt nudge --mode=queue <rig>/witness 'HEALTH_CHECK from deacon'
-gt nudge --mode=queue <rig>/refinery 'HEALTH_CHECK from deacon'
 ```
 
 **Health Ping Benefit**: The queued nudge commands serve as a **backoff reset** —
@@ -720,7 +718,6 @@ handled separately by `gt deacon health-check` (which uses immediate delivery).
 | Component | Healthy Signals | Concerning Signals |
 |-----------|-----------------|-------------------|
 | Witness | State: running, recent activity | State: not running, no heartbeat |
-| Refinery | State: running, queue processing | Queue stuck, merge failures |
 
 **Tracking unresponsive cycles:**
 
@@ -729,9 +726,6 @@ Maintain in your patrol state (persisted across cycles):
 health_state:
   <rig>:
     witness:
-      unresponsive_cycles: 0
-      last_seen_healthy: <timestamp>
-    refinery:
       unresponsive_cycles: 0
       last_seen_healthy: <timestamp>
 ```
@@ -747,7 +741,6 @@ health_state:
 **Restart commands:**
 ```bash
 gt witness restart <rig>
-gt refinery restart <rig>
 ```
 
 **Escalation:**

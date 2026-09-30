@@ -149,7 +149,7 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 	// delivering through real tmux/queue transport. Prevents test-suite
 	// runs from delivering "test" messages to live agents (mayor reported
 	// recurring synthetic nudges traced to nudge_test.go invocations).
-	// Mirrors the pattern in sling_helpers.go's nudgeWitness/nudgeRefinery.
+	// Mirrors the pattern in sling_helpers.go's nudgeWitness.
 	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
 		entry := fmt.Sprintf("nudge:%s:%s:%s\n", sessionName, sender, message)
 		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
@@ -562,8 +562,6 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			sender = fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
 		case RoleWitness:
 			sender = fmt.Sprintf("%s/witness", roleInfo.Rig)
-		case RoleRefinery:
-			sender = fmt.Sprintf("%s/refinery", roleInfo.Rig)
 		case RoleDeacon:
 			sender = constants.RoleDeacon
 		default:
@@ -602,7 +600,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	switch target {
 	case constants.RoleMayor:
 		target = session.MayorSessionName()
-	case constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleWitness:
 		// These need the current rig
 		roleInfo, err := GetRole()
 		if err != nil {
@@ -611,12 +609,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if roleInfo.Rig == "" {
 			return fmt.Errorf("cannot determine rig for %s shortcut (not in a rig context)", target)
 		}
-		rigPrefix := session.PrefixFor(roleInfo.Rig)
-		if target == constants.RoleWitness {
-			target = session.WitnessSessionName(rigPrefix)
-		} else {
-			target = session.RefinerySessionName(rigPrefix)
-		}
+		target = session.WitnessSessionName(session.PrefixFor(roleInfo.Rig))
 	}
 
 	// Special case: "deacon" target maps to the Deacon session
@@ -928,10 +921,6 @@ func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
 			if agent.Type != AgentWitness {
 				continue
 			}
-		} else if targetPattern == constants.RoleRefinery {
-			if agent.Type != AgentRefinery {
-				continue
-			}
 		} else {
 			// Assume it's a polecat name (legacy short format)
 			if agent.Type != AgentPolecat || agent.AgentName != targetPattern {
@@ -996,8 +985,6 @@ func sessionNameToAddress(sessionName string) string {
 		return mail.DogAddress(identity.Name)
 	case session.RoleWitness:
 		return fmt.Sprintf("%s/witness", identity.Rig)
-	case session.RoleRefinery:
-		return fmt.Sprintf("%s/refinery", identity.Rig)
 	case session.RoleCrew:
 		return fmt.Sprintf("%s/crew/%s", identity.Rig, identity.Name)
 	case session.RolePolecat:
@@ -1046,8 +1033,6 @@ func addressToAgentBeadID(address string) string {
 	switch role {
 	case constants.RoleWitness:
 		return session.WitnessSessionName(session.PrefixFor(rig))
-	case constants.RoleRefinery:
-		return session.RefinerySessionName(session.PrefixFor(rig))
 	default:
 		// Assume polecat
 		if strings.HasPrefix(role, "crew/") {

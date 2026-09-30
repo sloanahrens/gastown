@@ -11,7 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -133,19 +132,6 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s Failed to stop witness: %v\n", style.Warning.Render("!"), err)
 		} else {
 			stoppedAgents = append(stoppedAgents, "Witness stopped")
-		}
-	}
-
-	// Stop refinery if running
-	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-	refineryRunning, _ := t.HasSession(refinerySession)
-	if refineryRunning {
-		fmt.Printf("  Stopping refinery...\n")
-		refMgr := refinery.NewManager(r)
-		if err := refMgr.Stop(); err != nil {
-			fmt.Printf("  %s Failed to stop refinery: %v\n", style.Warning.Render("!"), err)
-		} else {
-			stoppedAgents = append(stoppedAgents, "Refinery stopped")
 		}
 	}
 

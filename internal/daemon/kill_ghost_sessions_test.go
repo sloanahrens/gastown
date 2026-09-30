@@ -189,7 +189,7 @@ func TestKillDefaultPrefixGhosts_GTIsLegitimate(t *testing.T) {
 	session.SetDefaultRegistry(reg)
 
 	// Even if gt-witness exists, it should NOT be killed.
-	env.addSessions(t, "gt-witness", "gt-refinery")
+	env.addSessions(t, "gt-witness")
 
 	env.daemon.killDefaultPrefixGhosts()
 
@@ -211,13 +211,13 @@ func TestKillDefaultPrefixGhosts_KillsGhostPatrolSessions(t *testing.T) {
 	session.SetDefaultRegistry(reg)
 
 	// Ghost sessions exist with default "gt" prefix.
-	env.addSessions(t, "gt-witness", "gt-refinery")
+	env.addSessions(t, "gt-witness")
 
 	env.daemon.killDefaultPrefixGhosts()
 
 	kills := readKills(t, env.tmuxLog)
-	if len(kills) != 2 {
-		t.Fatalf("expected 2 kills, got %d: %v", len(kills), kills)
+	if len(kills) != 1 {
+		t.Fatalf("expected 1 kill, got %d: %v", len(kills), kills)
 	}
 	killSet := map[string]bool{}
 	for _, k := range kills {
@@ -225,9 +225,6 @@ func TestKillDefaultPrefixGhosts_KillsGhostPatrolSessions(t *testing.T) {
 	}
 	if !killSet["gt-witness"] {
 		t.Error("expected gt-witness to be killed")
-	}
-	if !killSet["gt-refinery"] {
-		t.Error("expected gt-refinery to be killed")
 	}
 }
 

@@ -66,29 +66,6 @@ func TestIsLeadingBranchCreation(t *testing.T) {
 	}
 }
 
-func TestIsRefineryRole(t *testing.T) {
-	tests := []struct {
-		name       string
-		gtRefinery string
-		gtRole     string
-		want       bool
-	}{
-		{"GT_REFINERY set", "1", "", true},
-		{"GT_ROLE refinery compound", "", "gastown/refinery", true},
-		{"GT_ROLE polecat", "", "gastown/polecats/topaz", false},
-		{"neither set", "", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_REFINERY", tt.gtRefinery)
-			t.Setenv("GT_ROLE", tt.gtRole)
-			if got := isRefineryRole(); got != tt.want {
-				t.Errorf("isRefineryRole() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // withStdin replaces os.Stdin with content for the duration of fn, restoring
 // the original afterward. Needed because runTapGuardPRWorkflow reads the
 // command straight off os.Stdin (Claude Code hook protocol).
@@ -112,25 +89,6 @@ func withStdin(t *testing.T, content string, fn func()) {
 	<-done
 }
 
-func TestRunTapGuardPRWorkflow_RefineryRehearsalExemption(t *testing.T) {
-	// gt-r2xm: mol-refinery-patrol step 1's mandated merge rehearsal
-	// ("git checkout -b temp origin/<branch>") must be allowed under the
-	// refinery role even though it matches the same "if": "Bash(git
-	// checkout -b*)" hook pattern that blocks feature branches everywhere
-	// else.
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git checkout -b temp origin/polecat/topaz+abc123"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
-	if err != nil {
-		t.Errorf("expected refinery merge rehearsal to be allowed, got error: %v", err)
-	}
-}
-
 func TestRunTapGuardPRWorkflow_RefineryStillBlocksPRCreate(t *testing.T) {
 	t.Setenv("GT_REFINERY", "1")
 	t.Setenv("GT_ROLE", "gastown/refinery")
@@ -142,27 +100,6 @@ func TestRunTapGuardPRWorkflow_RefineryStillBlocksPRCreate(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected gh pr create to remain blocked for the refinery role, got nil error")
-	}
-}
-
-// gt-mo53: mol-refinery-patrol step 1's rehearsal is a multi-line block
-// (git fetch / git checkout -b temp / git merge) and a session runs it as
-// one compound Bash call — the live reproduction on 2026-09-23 was exactly
-// this shape, blocked (exit 2) while the very first line, a plain fetch,
-// never ran. The isLeadingBranchCreation exemption misses the checkout
-// because it is not the call's first segment, so the exemption must also
-// key on the literal rehearsal branch name at ANY segment position.
-func TestRunTapGuardPRWorkflow_RefineryRehearsalMultiLineExempt(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git fetch --prune origin\ngit checkout -b temp origin/polecat/flint/gt-sda9+mudui3s5\ngit merge --no-ff --no-edit origin/main"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
-	if err != nil {
-		t.Errorf("expected multi-line rehearsal checkout to be exempt for the refinery role, got error: %v", err)
 	}
 }
 
@@ -202,22 +139,6 @@ func TestRunTapGuardPRWorkflow_RefineryArbitraryBranchLaterSegmentStillBlocks(t 
 	})
 	if err == nil {
 		t.Error("expected a non-rehearsal branch name on a later segment to remain blocked for the refinery role, got nil error")
-	}
-}
-
-// mol-polecat-conflict-resolve's rehearsal names "temp-resolve" rather than
-// "temp"; the second literal must be exempted on a later segment too.
-func TestRunTapGuardPRWorkflow_RefineryTempResolveLaterSegmentExempt(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git fetch --prune origin\ngit checkout -b temp-resolve origin/polecat/topaz+abc123"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
-	if err != nil {
-		t.Errorf("expected temp-resolve rehearsal on a later segment to be exempt, got error: %v", err)
 	}
 }
 
@@ -427,30 +348,5 @@ func TestRunTapGuardPRWorkflow_RefineryChainedPRCreateStillBlocks(t *testing.T) 
 	})
 	if err == nil {
 		t.Error("expected chained 'gh pr create && git checkout -b' to remain blocked for the refinery role, got nil error")
-	}
-}
-
-// gt-cyz8: the rehearsal-first chain ("git checkout -b temp ... && gh pr
-// create") still matches the LEADING branch-creation shape the exemption
-// is keyed on, so it stays exempt for the refinery role even though a gh
-// pr create follows on the same line — the "if" glob
-// (Bash(git checkout -b*)) anchors to the command's first word, so that
-// line's routing decision was always the checkout, and the exemption
-// honors that. (The isPRCreateCommand clause in the refinery exemption
-// deliberately does NOT catch this: the PR create is on a later segment,
-// and gt-cyz8 pins the leading-checkout reading as the verdict. The
-// clause closes the opposite chain — a PR create FIRST — see
-// TestRunTapGuardPRWorkflow_RefineryPRCreateThenRehearsalNameStillBlocks.)
-func TestRunTapGuardPRWorkflow_RefineryRehearsalFirstStillExempt(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git checkout -b temp origin/main && gh pr create --title foo"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
-	if err != nil {
-		t.Errorf("expected rehearsal-first chain to stay exempt for the refinery role, got error: %v", err)
 	}
 }

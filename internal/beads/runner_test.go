@@ -164,7 +164,9 @@ func TestPlainRunsExactlyWhatItIsGiven(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := r.calls()
-	if len(calls) != 1 || !calls[0].plain || calls[0].dir != dir || !reflect.DeepEqual(calls[0].env, env) {
+	// The given env plus machine mode: the one thing a plain call adds.
+	wantEnv := []string{"ONLY=this", "BD_MACHINE=1"}
+	if len(calls) != 1 || !calls[0].plain || calls[0].dir != dir || !reflect.DeepEqual(calls[0].env, wantEnv) {
 		t.Fatalf("plain call = %+v", calls)
 	}
 	if got := strings.Join(calls[0].args, " "); got != "config get k" {

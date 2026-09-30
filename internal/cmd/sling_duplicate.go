@@ -110,7 +110,18 @@ type duplicateMatch struct {
 // Blocking reports whether the overlap is strong enough to refuse the sling.
 // Shared test names mean two beads very probably describe one defect; a shared
 // file alone is common between beads that are genuinely distinct work.
-func (m duplicateMatch) Blocking() bool { return len(m.SharedTests) > 0 }
+//
+// Only live work blocks: an open, in-progress or hooked bead. A closed bead
+// (and a pinned, blocked or deferred one, which nobody is working) is reported
+// as a warning and never refuses the sling — gt-bivxl was refused over two
+// CLOSED beads, one closed 43m earlier by an audit, and needed --force by hand
+// (gt-4k3fj.5).
+func (m duplicateMatch) Blocking() bool {
+	return len(m.SharedTests) > 0 && duplicateBlockingStatuses[m.Bead.Status]
+}
+
+// duplicateBlockingStatuses are the statuses whose overlap refuses a sling.
+var duplicateBlockingStatuses = map[string]bool{"open": true, "in_progress": true, "hooked": true}
 
 // slingDuplicateDecision is the outcome of a pre-sling dedupe check: whether to
 // refuse, and the report to print either way. Message is empty when nothing
@@ -260,9 +271,9 @@ func decideSlingDuplicates(beadID string, matches []duplicateMatch) slingDuplica
 		writeMatchList(&b, blocking)
 		fmt.Fprintf(&b, "\nIf this is genuinely distinct work, re-sling with:\n  gt sling %s <target> --force\n", beadID)
 	} else {
-		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s) on file paths only.\n",
+		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them live work sharing a test.\n",
 			style.Warning.Render("⚠"), beadID, len(warning))
-		b.WriteString("  Distinct beads touch the same files all the time, so this sling proceeds.\n\n")
+		b.WriteString("  Shared files alone, or overlap with closed/parked work, does not block; this sling proceeds.\n\n")
 		writeMatchList(&b, warning)
 	}
 

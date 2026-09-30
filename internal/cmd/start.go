@@ -340,7 +340,7 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSe
 	}
 
 	// Categorize sessions by type for ordered shutdown.
-	var polecats, refineries, witnesses []string
+	var polecats, witnesses []string
 	for _, sess := range sessions {
 		// Skip town-level sessions (handled explicitly below)
 		if sess == mayorSession || sess == deaconSession || sess == bootSession {
@@ -352,8 +352,6 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSe
 			switch identity.Role {
 			case session.RoleWitness:
 				witnesses = append(witnesses, sess)
-			case session.RoleRefinery:
-				refineries = append(refineries, sess)
 			default:
 				// Polecats, crew, and any other rig-level sessions
 				polecats = append(polecats, sess)
@@ -393,21 +391,14 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSe
 		}
 	}
 
-	// 2. Stop refineries (work processors)
-	for _, sess := range refineries {
-		if killAndVerify(sess) {
-			stopped++
-		}
-	}
-
-	// 3. Stop witnesses (monitors)
+	// 2. Stop witnesses (monitors)
 	for _, sess := range witnesses {
 		if killAndVerify(sess) {
 			stopped++
 		}
 	}
 
-	// 4. Stop town sessions: Mayor, Boot, Deacon (matching TownSessions() order)
+	// 3. Stop town sessions: Mayor, Boot, Deacon (matching TownSessions() order)
 	if sessionSet[mayorSession] {
 		if killAndVerify(mayorSession) {
 			stopped++

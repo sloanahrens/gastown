@@ -89,17 +89,6 @@ case "$1 $2" in
     else
       cat "$GT_TEST_TOWN/slot.json"
     fi ;;
-  # mq.flip: the first read is quiet and every read after it is busy, so a merge
-  # that goes in flight between the pre-build check and the pre-install one is
-  # observable without racing the test against the plugin.
-  "mq list")
-    if [ -e "$GT_TEST_TOWN/mq.flip" ]; then
-      if [ -e "$GT_TEST_TOWN/mq.flip.seen" ]; then cat "$GT_TEST_TOWN/mq.busy.json"
-      else touch "$GT_TEST_TOWN/mq.flip.seen"; cat "$GT_TEST_TOWN/mq.json"
-      fi
-    else
-      cat "$GT_TEST_TOWN/mq.json"
-    fi ;;
   # The real 'gt slot run' waits for the container-gate slot and then runs the
   # command under it; slot_refuse makes the acquire fail the way contention or a
   # timed-out wait does.
@@ -150,11 +139,10 @@ case "$1 $2" in
 esac
 STUB
   chmod +x "$town/bin/gt"
-  # Quiet by default: no slot held, no MR in flight.
+  # Quiet by default: no slot held.
   echo '{"held": false, "busy": false, "slots": [{"index": 0, "held": false}, {"index": 1, "held": false}]}' > "$town/slot.json"
   # What slot.flip's later reads see: the gate released the slot.
   echo '{"held": false, "busy": false, "slots": [{"index": 0, "held": false}, {"index": 1, "held": false}]}' > "$town/slot.free.json"
-  echo '[]' > "$town/mq.json"
   write_stale "$town" 5
   echo "$town"
 }
@@ -307,26 +295,6 @@ T=$(make_town)
 echo "gt slot status: dolt unreachable" > "$T/slot.json"
 rc=$(run_plugin "$T")
 if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "broken slot status: fail-open, build ran"; else fail "broken slot status: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"; fi
-
-# --- Case 6: an MR in flight defers: the town is not quiet ---
-T=$(make_town)
-echo '[{"id": "gt-wisp-x", "status": "in_progress", "title": "Merge: gt-x"}]' > "$T/mq.json"
-rc=$(run_plugin "$T")
-if [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ]; then pass "MR in flight: deferred"; else fail "MR in flight: rc=$rc: $(cat "$T/run.out")"; fi
-
-# --- Case 6b: a broken 'gt mq list' (non-JSON) fails OPEN like the gate
-# check, but must say so in the log instead of silently reading it as "0 in
-# flight" (gt-oqbw minor: the in-flight check failed open without saying so)
-# ---
-T=$(make_town)
-echo "gt mq list: dolt unreachable" > "$T/mq.json"
-rc=$(run_plugin "$T")
-if [ "$rc" = "0" ] && [ -e "$T/build.marker" ]; then pass "broken mq list: fail-open, build ran"; else fail "broken mq list: rc=$rc marker=$([ -e "$T/build.marker" ] && echo yes || echo no): $(cat "$T/run.out")"; fi
-if grep -q "WARNING: could not read in-flight MR count" "$T/run.out"; then
-  pass "broken mq list: fail-open is logged"
-else
-  fail "broken mq list: fail-open was silent: $(cat "$T/run.out")"
-fi
 
 # --- Case 7: quiet and past the threshold -> build, verify, record the
 # commits that came into force, write the restart marker (no restart) ---
@@ -806,20 +774,6 @@ if [ "$FIRINGS" = "1" ]; then
   pass "starvation: escalated once for two blocked runs past the threshold"
 else
   fail "starvation: $FIRINGS escalations for one block: $(cat "$T/gt.log" 2>/dev/null)"
-fi
-
-# Case 25: a merge that goes in flight while the build runs no longer holds
-# the install back. The re-check existed because the install ended in a daemon
-# restart that killed in-flight work; install-gt only renames the binary and
-# leaves the restart to the daemon's idle point (claude-7fc).
-T=$(make_town)
-echo '[{"id": "gt-wisp-z", "status": "in_progress", "title": "Merge: gt-z"}]' > "$T/mq.busy.json"
-touch "$T/mq.flip"
-rc=$(run_plugin "$T")
-if [ "$rc" = "0" ] && grep -q -- "--result success" "$T/gt.log" 2>/dev/null; then
-  pass "merge goes in flight mid-build: the install still lands"
-else
-  fail "merge goes in flight mid-build: rc=$rc $(cat "$T/run.out")"
 fi
 
 # Case 26: a refusal past the threshold escalates like any other block. A

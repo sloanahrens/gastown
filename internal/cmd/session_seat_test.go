@@ -81,7 +81,6 @@ func TestResolveSessionSeatAcceptsPolecatsAndRigRoles(t *testing.T) {
 		{"gastown/amber", "amber", constants.RolePolecat},
 		{"gastown/onyx", "onyx", constants.RolePolecat},
 		{"gastown/witness", "witness", constants.RoleWitness},
-		{"gastown/refinery", "refinery", constants.RoleRefinery},
 	}
 
 	for _, tt := range tests {
@@ -199,17 +198,17 @@ func TestSessionStartAndRestartRefuseRigRoles(t *testing.T) {
 		t.Run(verb.name, func(t *testing.T) {
 			var err error
 			stdout, _ := captureStdio(t, func() {
-				err = verb.run(nil, []string{"gastown/refinery"})
+				err = verb.run(nil, []string{"gastown/witness"})
 			})
 
 			if err == nil {
-				t.Fatalf("gt session %s gastown/refinery = success, want a refusal", verb.name)
+				t.Fatalf("gt session %s gastown/witness = success, want a refusal", verb.name)
 			}
 			if !strings.Contains(err.Error(), "not a polecat") {
 				t.Errorf("error = %q, want it to say the role is not a polecat", err)
 			}
-			if !strings.Contains(err.Error(), "gt refinery start gastown") {
-				t.Errorf("error = %q, want it to name the command that does start the refinery", err)
+			if !strings.Contains(err.Error(), "gt witness start gastown") {
+				t.Errorf("error = %q, want it to name the command that does start the witness", err)
 			}
 			// The refusal precedes the "Starting session for …" line, so no
 			// caller can read a start that did not happen.

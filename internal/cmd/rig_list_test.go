@@ -96,37 +96,31 @@ func TestRunRigListJSON_RepoPath(t *testing.T) {
 func TestGetRigLED(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		hasWitness  bool
-		hasRefinery bool
-		opState     string
-		want        string
+		name       string
+		hasWitness bool
+		opState    string
+		want       string
 	}{
 		// Operational state overrides session state (GH#2555)
-		{"parked no sessions", false, false, "PARKED", "🅿️"},
-		{"parked with sessions", true, true, "PARKED", "🅿️"},
-		{"parked partial", true, false, "PARKED", "🅿️"},
-		{"docked no sessions", false, false, "DOCKED", "🛑"},
-		{"docked with sessions", true, true, "DOCKED", "🛑"},
+		{"parked no sessions", false, "PARKED", "🅿️"},
+		{"parked with witness", true, "PARKED", "🅿️"},
+		{"docked no sessions", false, "DOCKED", "🛑"},
+		{"docked with witness", true, "DOCKED", "🛑"},
 
-		// Both running - fully active
-		{"both running", true, true, "OPERATIONAL", "🟢"},
-
-		// One running - partially active
-		{"witness only", true, false, "OPERATIONAL", "🟡"},
-		{"refinery only", false, true, "OPERATIONAL", "🟡"},
+		// Witness running - active
+		{"witness running", true, "OPERATIONAL", "🟢"},
 
 		// Nothing running
-		{"stopped operational", false, false, "OPERATIONAL", "⚫"},
-		{"stopped empty state", false, false, "", "⚫"},
+		{"stopped operational", false, "OPERATIONAL", "⚫"},
+		{"stopped empty state", false, "", "⚫"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetRigLED(tt.hasWitness, tt.hasRefinery, tt.opState)
+			got := GetRigLED(tt.hasWitness, tt.opState)
 			if got != tt.want {
-				t.Errorf("GetRigLED(%v, %v, %q) = %q, want %q",
-					tt.hasWitness, tt.hasRefinery, tt.opState, got, tt.want)
+				t.Errorf("GetRigLED(%v, %q) = %q, want %q",
+					tt.hasWitness, tt.opState, got, tt.want)
 			}
 		})
 	}

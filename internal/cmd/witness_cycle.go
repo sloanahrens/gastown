@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -284,4 +286,34 @@ func witnessPrimeEffortText(ctx RoleContext, handoffReason string) string {
 		return "\n" + line + "\n"
 	}
 	return ""
+}
+
+// unitEscalateTimeout bounds the `gt escalate` exec: the escalation fires
+// mostly when Dolt is down, and must not hang the caller.
+const unitEscalateTimeout = 30 * time.Second
+
+// runBoundedEscalate runs `gt escalate` best-effort, bounded by
+// unitEscalateTimeout: it runs on a best-effort path, where a
+// hung escalation must not hang the caller. A failure is warned, never
+// returned.
+func runBoundedEscalate(reason, source, fingerprint, severity, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), unitEscalateTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "gt", "escalate",
+		"--severity", severity,
+		"--reason", reason,
+		"--source", source,
+		"--fingerprint", fingerprint,
+		msg)
+	if err := c.Run(); err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("timed out after %v: %w", unitEscalateTimeout, err)
+		}
+		style.PrintWarning("escalation %s failed: %v", fingerprint, err)
+	}
+}
+
+type unitCycleReport struct {
+	Respawned bool
+	SkipCause string // why the patrol and/or respawn steps did not run; empty when the pane respawned
 }

@@ -156,6 +156,8 @@ func TestTestNamesOverlap(t *testing.T) {
 
 // TestSlingDuplicateCheckCatchesTonightPairs is the acceptance bar on gt-mcq:
 // replaying tonight's two double dispatches against the check must flag both.
+// Since gt-4k3fj.5 only live work (open, in_progress, hooked) refuses the sling;
+// the same overlap with a closed bead is reported as a warning and proceeds.
 func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 	t.Parallel()
 	t.Run("gt-80o and gt-g6b", func(t *testing.T) {
@@ -185,15 +187,16 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				matches := findDuplicateMatches(tc.candidate, []duplicateCandidate{tc.other})
 				decision := decideSlingDuplicates(tc.candidate.ID, matches)
-				if !decision.Blocked {
-					t.Fatalf("expected the pair to be refused; report was:\n%s", decision.Message)
+				wantBlocked := tc.other.Status != "closed"
+				if decision.Blocked != wantBlocked {
+					t.Fatalf("blocked = %v, want %v (other is %s); report was:\n%s", decision.Blocked, wantBlocked, tc.other.Status, decision.Message)
 				}
 				for _, want := range []string{"TestFindStrandedConvoys_MixedConvoys", "TestRunLogCrashEmitsFeedSessionDeath"} {
 					if !strings.Contains(decision.Message, want) {
 						t.Errorf("report should name shared test %s:\n%s", want, decision.Message)
 					}
 				}
-				if !strings.Contains(decision.Message, "--force") {
+				if wantBlocked && !strings.Contains(decision.Message, "--force") {
 					t.Errorf("a refusal must offer the override:\n%s", decision.Message)
 				}
 			})
@@ -210,8 +213,20 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 			[]duplicateCandidate{other})
 
 		decision := decideSlingDuplicates("gt-rl0", matches)
-		if !decision.Blocked {
-			t.Fatalf("expected the pair to be refused; report was:\n%s", decision.Message)
+		if decision.Blocked {
+			t.Fatalf("a CLOSED overlap must never refuse the sling (gt-4k3fj.5); report was:\n%s", decision.Message)
+		}
+		if !strings.Contains(decision.Message, "proceeds") {
+			t.Errorf("a closed overlap should still be reported as proceeding:\n%s", decision.Message)
+		}
+
+		live := other
+		live.Status = "in_progress"
+		liveDecision := decideSlingDuplicates("gt-rl0", findDuplicateMatches(
+			newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc),
+			[]duplicateCandidate{live}))
+		if !liveDecision.Blocked {
+			t.Fatalf("the same overlap with live work must refuse; report was:\n%s", liveDecision.Message)
 		}
 		for _, want := range []string{
 			"TestHermeticHarnessEnforced",
@@ -267,7 +282,7 @@ func TestDecideSlingDuplicates(t *testing.T) {
 	}
 
 	blocking := duplicateMatch{
-		Bead:        duplicateCandidate{ID: "gt-1", Status: "closed", ClosedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+		Bead:        duplicateCandidate{ID: "gt-1", Status: "hooked"},
 		SharedTests: []string{"TestFoo"},
 	}
 	warning := duplicateMatch{
@@ -939,5 +954,31 @@ func TestListDuplicateCandidates_EnrichmentSuccessIsQuiet(t *testing.T) {
 	}
 	if len(got) != 1 || len(got[0].Refs.Tests) == 0 {
 		t.Errorf("expected design/notes tests recovered, got %+v", got)
+	}
+}
+
+// TestDuplicateOverlapBlocksOnlyLiveWork: only open, in_progress and hooked
+// beads refuse a sling; closed (the gt-bivxl case) and parked statuses warn.
+func TestDuplicateOverlapBlocksOnlyLiveWork(t *testing.T) {
+	t.Parallel()
+	for status, want := range map[string]bool{
+		"open": true, "in_progress": true, "hooked": true,
+		"closed": false, "pinned": false, "blocked": false, "deferred": false, "tombstone": false,
+	} {
+		m := duplicateMatch{Bead: duplicateCandidate{ID: "gt-1", Status: status}, SharedTests: []string{"TestFoo"}}
+		if got := m.Blocking(); got != want {
+			t.Errorf("status %s: Blocking() = %v, want %v", status, got, want)
+		}
+		if got := decideSlingDuplicates("gt-x", []duplicateMatch{m}).Blocked; got != want {
+			t.Errorf("status %s: decision blocked = %v, want %v", status, got, want)
+		}
+	}
+	closedAt := time.Now().Add(-43 * time.Minute).UTC().Format(time.RFC3339)
+	twoClosed := []duplicateMatch{
+		{Bead: duplicateCandidate{ID: "gt-fqdj9", Status: "closed", ClosedAt: closedAt}, SharedTests: []string{"TestA"}},
+		{Bead: duplicateCandidate{ID: "gt-ty2fy", Status: "closed"}, SharedTests: []string{"TestB"}},
+	}
+	if d := decideSlingDuplicates("gt-bivxl", twoClosed); d.Blocked {
+		t.Fatalf("gt-bivxl must not be refused over two closed beads:\n%s", d.Message)
 	}
 }

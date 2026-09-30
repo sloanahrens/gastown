@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -42,8 +41,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		roleName = constants.RoleDeacon
 	case RoleWitness:
 		roleName = constants.RoleWitness
-	case RoleRefinery:
-		roleName = constants.RoleRefinery
 	case RolePolecat:
 		roleName = constants.RolePolecat
 	case RoleCrew:
@@ -243,8 +240,6 @@ func outputPrimeContextFallback(ctx RoleContext) {
 		outputMayorContext(ctx)
 	case RoleWitness:
 		outputWitnessContext(ctx)
-	case RoleRefinery:
-		outputRefineryContext(ctx)
 	case RolePolecat:
 		outputPolecatContext(ctx)
 	case RoleCrew:
@@ -477,13 +472,6 @@ func outputCommandQuickReference(ctx RoleContext) {
 		fmt.Printf("| View polecat output | `%s peek %s/<name> 50` | |\n", c, ctx.Rig)
 		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
 
-	case RoleRefinery:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Printf("| Check merge queue | `%s mq list %s` | ~~git branch -r \\| grep polecat~~ (misses MRs) |\n", c, ctx.Rig)
-		fmt.Printf("| Message a polecat | `%s nudge %s/<name> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c, ctx.Rig)
-		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
-
 	case RoleDeacon:
 		fmt.Println("| Want to... | Correct command | Common mistake |")
 		fmt.Println("|------------|----------------|----------------|")
@@ -584,38 +572,6 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("Polecat sessions are ephemeral. No work on hook + no mail = terminate.")
 		fmt.Println("DO NOT wait. DO NOT escalate. DO NOT send idle alerts.")
 		fmt.Println("Just run `" + cli.Name() + " done` and exit.")
-	case RoleRefinery:
-		if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
-			fmt.Println()
-			fmt.Println("---")
-			fmt.Println()
-			fmt.Printf("Rig %s is %s. No patrol needed. Exit cleanly.\n", ctx.Rig, reason)
-			return
-		}
-		if stop, err := refinery.ActiveSafetyStop(ctx.TownRoot, ctx.Rig); err != nil {
-			fmt.Println()
-			fmt.Println("---")
-			fmt.Println()
-			style.PrintWarning("could not check refinery safety stop: %v", err)
-			fmt.Println("No patrol needed. Exit cleanly until safety-stop state can be verified.")
-			return
-		} else if stop != nil {
-			fmt.Println()
-			fmt.Println("---")
-			fmt.Println()
-			fmt.Printf("Refinery %s is %s. No patrol needed. Exit cleanly.\n", ctx.Rig, stop.Reason())
-			return
-		}
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are the Refinery. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Announce: \"Refinery, checking in.\"")
-		fmt.Println("3. Check mail: `" + cli.Name() + " mail inbox` - look for 🤝 HANDOFF messages")
-		fmt.Println("4. Check for attached patrol: `" + cli.Name() + " hook`")
-		fmt.Println("   - If mol attached → **RUN IT** (resume from current step)")
-		fmt.Println("   - If no mol → create patrol: `" + cli.Name() + " patrol new`")
 	case RoleCrew:
 		fmt.Println()
 		fmt.Println("---")

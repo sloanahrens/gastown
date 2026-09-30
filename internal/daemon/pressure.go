@@ -115,7 +115,6 @@ func isAgentSession(name string) bool {
 	for _, marker := range []string{
 		constants.RoleMayor,
 		constants.RoleWitness,
-		constants.RoleRefinery,
 		constants.RolePolecat,
 		constants.RoleDeacon,
 		constants.RoleCrew,

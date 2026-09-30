@@ -287,8 +287,8 @@ func TestPatrolHooksWiredCheck_Fix(t *testing.T) {
 	if loaded.Type != "daemon-patrol-config" {
 		t.Errorf("Type = %q, want 'daemon-patrol-config'", loaded.Type)
 	}
-	if loaded.Patrols.Count() != 3 {
-		t.Errorf("Patrols count = %d, want 3", loaded.Patrols.Count())
+	if loaded.Patrols.Count() != 2 {
+		t.Errorf("Patrols count = %d, want 2", loaded.Patrols.Count())
 	}
 
 	result = check.Run(ctx)

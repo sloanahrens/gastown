@@ -19,6 +19,10 @@ func TestParseBeadsVersion(t *testing.T) {
 		{"bd version 0.55.4", "0.55.4"},
 		{"bd version 1.2.3", "1.2.3"},
 		{"bd version 10.20.30 (release)", "10.20.30"},
+		{`{"version":"1.2.2","commit":"2357327","build":"2357327"}`, "1.2.2"},
+		{`{"schema_version":1,"contract_version":1,"data":{"version":"1.2.2"},"error":null}`, "1.2.2"},
+		{`{"version":"not-semver"}`, ""},
+		{`{"commit":"2357327"}`, ""},
 		{"some other output", ""},
 		{"", ""},
 	}
@@ -67,6 +71,7 @@ func TestBeadsStatusFromOutput(t *testing.T) {
 		// No semver floor: an old number is not evidence of anything. The
 		// schema/contract handshake decides whether the town may run.
 		{"old semver", "bd version 0.1.0", nil, BeadsOK, "0.1.0"},
+		{"machine mode payload", `{"version":"1.2.2","commit":"2357327","contract_version":1}`, nil, BeadsOK, "1.2.2"},
 		{"fork with schema suffix", "bd version 1.2.2 (da4983e: da4983e) schema<=66", nil, BeadsOK, "1.2.2"},
 	}
 	for _, tt := range tests {

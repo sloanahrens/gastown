@@ -289,8 +289,6 @@ const (
 	// RoleWitness is the witness agent role.
 	RoleWitness = "witness"
 
-	// RoleRefinery is the refinery agent role.
-	RoleRefinery = "refinery"
 
 	// RolePolecat is the polecat agent role.
 	RolePolecat = "polecat"
@@ -327,8 +325,6 @@ const (
 	// EmojiWitness is the witness emoji (watchful owl).
 	EmojiWitness = "🦉"
 
-	// EmojiRefinery is the refinery emoji (industrial).
-	EmojiRefinery = "🏭"
 
 	// EmojiCrew is the crew emoji (established worker).
 	EmojiCrew = "👷"
@@ -350,8 +346,6 @@ const (
 	// MolWitnessPatrol is the witness patrol formula name.
 	MolWitnessPatrol = "mol-witness-patrol"
 
-	// MolRefineryPatrol is the refinery patrol formula name.
-	MolRefineryPatrol = "mol-refinery-patrol"
 
 	// MolDogReaper is the wisp reaper dog formula name.
 	MolDogReaper = "mol-dog-reaper"
@@ -383,7 +377,7 @@ const (
 
 // PatrolFormulas returns the list of patrol formula names.
 func PatrolFormulas() []string {
-	return []string{MolDeaconPatrol, MolWitnessPatrol, MolRefineryPatrol}
+	return []string{MolDeaconPatrol, MolWitnessPatrol}
 }
 
 // RoleEmoji returns the emoji for a given role name.
@@ -395,8 +389,6 @@ func RoleEmoji(role string) string {
 		return EmojiDeacon
 	case RoleWitness:
 		return EmojiWitness
-	case RoleRefinery:
-		return EmojiRefinery
 	case RoleCrew:
 		return EmojiCrew
 	case RolePolecat:

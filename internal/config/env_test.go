@@ -103,20 +103,6 @@ func TestAgentEnv_Crew(t *testing.T) {
 	assertEnv(t, env, "BEADS_AGENT_NAME", "myrig/emma")
 }
 
-func TestAgentEnv_Refinery(t *testing.T) {
-	t.Parallel()
-	env := AgentEnv(AgentEnvConfig{
-		Role:     "refinery",
-		Rig:      "myrig",
-		TownRoot: "/town",
-	})
-
-	assertEnv(t, env, "GT_ROLE", "myrig/refinery") // compound format
-	assertEnv(t, env, "GT_RIG", "myrig")
-	assertEnv(t, env, "BD_ACTOR", "myrig/refinery")
-	assertEnv(t, env, "GIT_AUTHOR_NAME", "myrig/refinery")
-}
-
 func TestAgentEnv_Deacon(t *testing.T) {
 	t.Parallel()
 	env := AgentEnv(AgentEnvConfig{

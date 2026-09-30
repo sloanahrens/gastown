@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -105,19 +104,6 @@ func parkOneRig(rigName string) error {
 			fmt.Printf("  %s Failed to stop witness: %v\n", style.Warning.Render("!"), err)
 		} else {
 			stoppedAgents = append(stoppedAgents, "Witness stopped")
-		}
-	}
-
-	// Stop refinery if running
-	refinerySession := session.RefinerySessionName(session.PrefixFor(rigName))
-	refineryRunning, _ := t.HasSession(refinerySession)
-	if refineryRunning {
-		fmt.Printf("  Stopping refinery...\n")
-		refMgr := refinery.NewManager(r)
-		if err := refMgr.Stop(); err != nil {
-			fmt.Printf("  %s Failed to stop refinery: %v\n", style.Warning.Render("!"), err)
-		} else {
-			stoppedAgents = append(stoppedAgents, "Refinery stopped")
 		}
 	}
 

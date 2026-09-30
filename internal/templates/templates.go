@@ -58,7 +58,7 @@ type Templates struct {
 
 // RoleData contains information for rendering role contexts.
 type RoleData struct {
-	Role            string   // mayor, witness, refinery, polecat, crew, deacon
+	Role            string   // mayor, witness, polecat, crew, deacon
 	RigName         string   // e.g., "greenplace"
 	TownRoot        string   // e.g., "/Users/steve/ai"
 	TownName        string   // e.g., "ai" - the town identifier for session names
@@ -184,7 +184,7 @@ func (t *Templates) RenderMessage(name string, data interface{}) (string, error)
 
 // RoleNames returns the list of available role templates.
 func (t *Templates) RoleNames() []string {
-	return []string{"mayor", "witness", "refinery", "polecat", "crew", "deacon", "boot"}
+	return []string{"mayor", "witness", "polecat", "crew", "deacon", "boot"}
 }
 
 // MessageNames returns the list of available message templates.

@@ -132,30 +132,6 @@ func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 	assertBDLogNotContains(t, log, currentBeadsDir, "close bd-source")
 }
 
-func TestRunMqSubmitWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
-	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	setupRoutedSubmitCommandTown(t, workDir)
-	branch := setupRoutedSubmitGitRepo(t, workDir, true)
-	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
-	resetMqSubmitFlagsForTest(t)
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
-	t.Setenv("GT_RIG", "")
-	t.Chdir(workDir)
-
-	mqSubmitBranch = branch
-	mqSubmitIssue = "bd-source"
-	mqSubmitNoCleanup = true
-	if err := runMqSubmit(nil, nil); err != nil {
-		t.Fatalf("runMqSubmit: %v", err)
-	}
-
-	log := readSubmitSourceBDLog(t, logPath)
-	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
-	assertBDLogContains(t, log, currentBeadsDir, "create --json")
-	assertBDLogContains(t, log, ownerBeadsDir, "comments add bd-source")
-	assertBDLogNotContains(t, log, currentBeadsDir, "show bd-source --json")
-}
-
 func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
@@ -482,21 +458,6 @@ func assertBDLogNotContains(t *testing.T, log, beadsDir, args string) {
 	if strings.Contains(log, needle) {
 		t.Fatalf("bd log unexpectedly contains %q:\n%s", needle, log)
 	}
-}
-
-func resetMqSubmitFlagsForTest(t *testing.T) {
-	t.Helper()
-	oldBranch, oldIssue, oldEpic := mqSubmitBranch, mqSubmitIssue, mqSubmitEpic
-	oldPriority := mqSubmitPriority
-	oldNoCleanup, oldSkipDeps, oldResubmit := mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit
-	mqSubmitBranch, mqSubmitIssue, mqSubmitEpic = "", "", ""
-	mqSubmitPriority = -1
-	mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit = false, false, false
-	t.Cleanup(func() {
-		mqSubmitBranch, mqSubmitIssue, mqSubmitEpic = oldBranch, oldIssue, oldEpic
-		mqSubmitPriority = oldPriority
-		mqSubmitNoCleanup, mqSubmitSkipDeps, mqSubmitResubmit = oldNoCleanup, oldSkipDeps, oldResubmit
-	})
 }
 
 func resetDoneFlagsForTest(t *testing.T) {

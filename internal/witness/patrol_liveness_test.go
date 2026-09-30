@@ -16,7 +16,7 @@ func TestPatrolAssignee(t *testing.T) {
 		{"deacon", "", "deacon/"},
 		{"deacon", "gastown", "deacon/"}, // deacon is town-level regardless of rig
 		{"witness", "gastown", "gastown/witness"},
-		{"refinery", "gastown", "gastown/refinery"},
+		{"refinery", "gastown", "refinery"}, // role removed (gt-v4ssj.6): now unknown
 		{"unknown-role", "gastown", "unknown-role"},
 	}
 	for _, c := range cases {

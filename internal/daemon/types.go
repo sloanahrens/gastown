@@ -123,6 +123,7 @@ type (
 	MainBranchTestConfig       = agentconfig.MainBranchTestConfig
 	QuotaDogConfig             = agentconfig.QuotaDogConfig
 	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
+	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
@@ -265,6 +266,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.MayorDispatch.Enabled
 	}
+	// spec_dispatch defaults OFF: it slings on its own, so the operator opts
+	// in (gt-4k3fj.5).
+	if patrol == "spec_dispatch" {
+		if config == nil || config.Patrols == nil || config.Patrols.SpecDispatch == nil {
+			return false
+		}
+		return config.Patrols.SpecDispatch.Enabled
+	}
 	// patrol_watchdog defaults ON for the same reason mayor_dispatch does: it
 	// exists to catch a role going silent while still looking alive (gt-4z3b7),
 	// and a detector that has to be switched on cannot prevent the state it
@@ -281,10 +290,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	}
 
 	switch patrol {
-	case constants.RoleRefinery:
-		if config.Patrols.Refinery != nil {
-			return config.Patrols.Refinery.Enabled
-		}
 	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Enabled
@@ -308,10 +313,6 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 	}
 
 	switch patrol {
-	case constants.RoleRefinery:
-		if config.Patrols.Refinery != nil {
-			return config.Patrols.Refinery.Rigs
-		}
 	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Rigs

@@ -1,118 +1,42 @@
 package checkpoint
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// initTestRepo creates a fresh git repo with an initial commit and returns its path.
-func initTestRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
+// The squash and inspect tests run against fakeRepo (fakegit_test.go), an
+// in-memory repository per test, so they start no git and run in parallel.
+// checkpoint_integration_test.go pins the same behaviour against real git.
 
-	cmds := [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
+// featureRepo returns a fake repository on branch feature, cut from main's
+// initial commit, holding one commit per subject (each adds its own file).
+func featureRepo(t *testing.T, subjects ...string) *fakeRepo {
+	t.Helper()
+	r := newFakeRepo(t)
+	r.checkoutNew("feature")
+	for i, s := range subjects {
+		r.commit(s, string(rune('a'+i))+".go", "package x")
 	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args[1:], err, out)
+	return r
+}
+
+// assertTreeHas fails unless HEAD's tree holds every path.
+func assertTreeHas(t *testing.T, r *fakeRepo, paths ...string) {
+	t.Helper()
+	tree := r.commits[r.headCommit()].tree
+	for _, p := range paths {
+		if _, ok := tree[p]; !ok {
+			t.Errorf("HEAD's tree lacks %s after squash (tree: %v)", p, tree)
 		}
 	}
-
-	// Create initial commit on main
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "-A"},
-		{"git", "commit", "-m", "initial commit"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args[1:], err, out)
-		}
-	}
-
-	return dir
-}
-
-// createBranch creates a branch from current HEAD and switches to it.
-func createBranch(t *testing.T, dir, branch string) {
-	t.Helper()
-	cmd := exec.Command("git", "checkout", "-b", branch)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("checkout -b %s failed: %v\n%s", branch, err, out)
-	}
-}
-
-// addCommit adds a file and commits with the given message.
-func addCommit(t *testing.T, dir, filename, content, msg string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", filename},
-		{"git", "commit", "-m", msg},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args[1:], err, out)
-		}
-	}
-}
-
-// writeRepoFile writes a file into dir.
-func writeRepoFile(t *testing.T, dir, filename, content string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// mustGit runs a git command in dir, failing the test if it exits non-zero.
-func mustGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, out)
-	}
-}
-
-// getCommitSubjects returns the commit subjects on the branch since main.
-func getCommitSubjects(t *testing.T, dir string) []string {
-	t.Helper()
-	cmd := exec.Command("git", "log", "--format=%s", "main..HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git log failed: %v", err)
-	}
-	raw := strings.TrimSpace(string(out))
-	if raw == "" {
-		return nil
-	}
-	return strings.Split(raw, "\n")
 }
 
 func TestCountWIPCommits_NoWIP(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", "add feature B")
+	t.Parallel()
+	r := featureRepo(t, "add feature A", "add feature B")
 
-	count, err := CountWIPCommits(dir, "main")
+	count, err := countWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +46,10 @@ func TestCountWIPCommits_NoWIP(t *testing.T) {
 }
 
 func TestCountWIPCommits_AllWIP(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, WIPCommitPrefix)
 
-	count, err := CountWIPCommits(dir, "main")
+	count, err := countWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,13 +59,10 @@ func TestCountWIPCommits_AllWIP(t *testing.T) {
 }
 
 func TestCountWIPCommits_Mixed(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "real work")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
-	addCommit(t, dir, "c.go", "package c", "more real work")
+	t.Parallel()
+	r := featureRepo(t, "real work", WIPCommitPrefix, "more real work")
 
-	count, err := CountWIPCommits(dir, "main")
+	count, err := countWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,88 +71,112 @@ func TestCountWIPCommits_Mixed(t *testing.T) {
 	}
 }
 
-func TestSquashWIPCommits_NoWIP(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "real work")
+func TestCountWIPCommits_BaseRefMissing(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix)
 
-	wipCount, err := SquashWIPCommits(dir, "main")
+	if _, err := countWIPCommits(r.run, fakeDir, "no-such-base"); err == nil {
+		t.Fatal("expected an error for an unresolvable base ref")
+	}
+}
+
+func TestSquashWIPCommits_NoWIP(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, "real work")
+
+	wipCount, err := squashWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wipCount != 0 {
 		t.Errorf("expected 0, got %d", wipCount)
 	}
-
-	// Verify commit is untouched
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 || subjects[0] != "real work" {
+	if subjects := r.subjectsSince("main"); len(subjects) != 1 || subjects[0] != "real work" {
 		t.Errorf("expected [real work], got %v", subjects)
+	}
+	if w := r.wrote(); len(w) != 0 {
+		t.Errorf("history rewritten with nothing to squash: %v", w)
 	}
 }
 
 func TestSquashWIPCommits_AllWIP(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, WIPCommitPrefix)
 
-	wipCount, err := SquashWIPCommits(dir, "main")
+	wipCount, err := squashWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wipCount != 2 {
 		t.Errorf("expected 2, got %d", wipCount)
 	}
-
-	// Verify squashed into single commit with generic message
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 {
-		t.Errorf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	subjects := r.subjectsSince("main")
+	if len(subjects) != 1 || subjects[0] != "squashed WIP checkpoint commits" {
+		t.Errorf("expected one commit with the generic message, got %v", subjects)
 	}
-	if len(subjects) > 0 && subjects[0] != "squashed WIP checkpoint commits" {
-		t.Errorf("expected generic message, got %q", subjects[0])
-	}
-
-	// Verify files exist
-	for _, f := range []string{"a.go", "b.go"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			t.Errorf("expected %s to exist after squash", f)
-		}
-	}
+	assertTreeHas(t, r, "a.go", "b.go")
 }
 
 func TestSquashWIPCommits_Mixed(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "implement auth handler")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
-	addCommit(t, dir, "c.go", "package c", "add auth tests")
-	addCommit(t, dir, "d.go", "package d", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, "implement auth handler", WIPCommitPrefix, "add auth tests", WIPCommitPrefix)
 
-	wipCount, err := SquashWIPCommits(dir, "main")
+	wipCount, err := squashWIPCommits(r.run, fakeDir, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wipCount != 2 {
 		t.Errorf("expected 2, got %d", wipCount)
 	}
-
-	// Verify squashed into single commit with non-WIP subjects preserved
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 {
-		t.Errorf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	// git log lists newest first, so the newest real subject is the title.
+	subjects := r.subjectsSince("main")
+	if len(subjects) != 1 || subjects[0] != "add auth tests" {
+		t.Errorf("expected one commit titled by the newest real subject, got %v", subjects)
 	}
+	msg := r.commits[r.headCommit()].message
+	if msg != "add auth tests\n\n- implement auth handler" {
+		t.Errorf("message = %q, want the other real subject as a body bullet", msg)
+	}
+	if strings.Contains(msg, WIPCommitPrefix) {
+		t.Errorf("message = %q, want no WIP subject carried over", msg)
+	}
+	assertTreeHas(t, r, "a.go", "b.go", "c.go", "d.go")
+}
 
-	// Verify all files exist
-	for _, f := range []string{"a.go", "b.go", "c.go", "d.go"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			t.Errorf("expected %s to exist after squash", f)
-		}
+// The squash commit sits directly on the merge base, not on the old tip.
+func TestSquashWIPCommits_ResetsToMergeBase(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, "real")
+	base := r.refs["refs/heads/main"]
+
+	if _, err := squashWIPCommits(r.run, fakeDir, "main"); err != nil {
+		t.Fatal(err)
+	}
+	head := r.commits[r.headCommit()]
+	if len(head.parents) != 1 || head.parents[0] != base {
+		t.Errorf("squash parents = %v, want [%s]", head.parents, base)
+	}
+	want := [][]string{{"reset", "--soft", base}, {"commit", "-m", "real"}}
+	if w := r.wrote(); len(w) != 2 || strings.Join(w[0], " ") != strings.Join(want[0], " ") || strings.Join(w[1], " ") != strings.Join(want[1], " ") {
+		t.Errorf("writes = %q, want %q", w, want)
+	}
+}
+
+func TestSquashWIPCommits_NoCommits(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t)
+
+	wipCount, err := squashWIPCommits(r.run, fakeDir, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wipCount != 0 {
+		t.Errorf("expected 0 for no commits, got %d", wipCount)
 	}
 }
 
 func TestIsAutoSaveSubject(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		subject string
 		want    bool
@@ -254,124 +197,81 @@ func TestIsAutoSaveSubject(t *testing.T) {
 }
 
 func TestSquashAutoSaveCommits_AllGenerated_UsesFallbackTitle(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", "fix: auto-save uncommitted implementation work (gt-abc, gt-pvx safety net)")
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, "fix: auto-save uncommitted implementation work (gt-abc, gt-pvx safety net)")
 
-	count, err := SquashAutoSaveCommits(dir, "main", "fix: handle nil pointer in auth (gt-abc)")
+	count, err := squashAutoSaveCommits(r.run, fakeDir, "main", "fix: handle nil pointer in auth (gt-abc)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 2 {
 		t.Errorf("expected 2 squashed, got %d", count)
 	}
-
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 {
-		t.Fatalf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	subjects := r.subjectsSince("main")
+	if len(subjects) != 1 || subjects[0] != "fix: handle nil pointer in auth (gt-abc)" {
+		t.Fatalf("expected the fallback title as the only subject, got %v", subjects)
 	}
-	if subjects[0] != "fix: handle nil pointer in auth (gt-abc)" {
-		t.Errorf("expected fallback title as subject, got %q", subjects[0])
-	}
-
-	for _, f := range []string{"a.go", "b.go"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			t.Errorf("expected %s to exist after squash", f)
-		}
-	}
+	assertTreeHas(t, r, "a.go", "b.go")
 }
 
 func TestSquashAutoSaveCommits_AllGenerated_EmptyFallback(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
+	t.Parallel()
+	r := featureRepo(t, "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
 
-	count, err := SquashAutoSaveCommits(dir, "main", "")
+	count, err := squashAutoSaveCommits(r.run, fakeDir, "main", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
 		t.Errorf("expected 1 squashed, got %d", count)
 	}
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 || subjects[0] != "squashed auto-save checkpoint commits" {
+	if subjects := r.subjectsSince("main"); len(subjects) != 1 || subjects[0] != "squashed auto-save checkpoint commits" {
 		t.Errorf("expected generic subject, got %v", subjects)
 	}
 }
 
 func TestSquashAutoSaveCommits_Mixed_KeepsRealSubject(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "implement auth handler (gt-abc)")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
-	addCommit(t, dir, "c.go", "package c", "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
+	t.Parallel()
+	r := featureRepo(t, "implement auth handler (gt-abc)", WIPCommitPrefix, "fix: auto-save uncommitted implementation work (gt-pvx safety net)")
 
-	count, err := SquashAutoSaveCommits(dir, "main", "fallback title")
+	count, err := squashAutoSaveCommits(r.run, fakeDir, "main", "fallback title")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 2 {
 		t.Errorf("expected 2 squashed, got %d", count)
 	}
-
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 1 {
-		t.Fatalf("expected 1 commit after squash, got %d: %v", len(subjects), subjects)
+	subjects := r.subjectsSince("main")
+	if len(subjects) != 1 || subjects[0] != "implement auth handler (gt-abc)" {
+		t.Fatalf("expected the real subject preserved as title, got %v", subjects)
 	}
-	if subjects[0] != "implement auth handler (gt-abc)" {
-		t.Errorf("expected real subject preserved as title, got %q", subjects[0])
-	}
-
-	for _, f := range []string{"a.go", "b.go", "c.go"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			t.Errorf("expected %s to exist after squash", f)
-		}
-	}
+	assertTreeHas(t, r, "a.go", "b.go", "c.go")
 }
 
 func TestSquashAutoSaveCommits_NoGenerated_Untouched(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", "add feature B")
+	t.Parallel()
+	r := featureRepo(t, "add feature A", "add feature B")
 
-	count, err := SquashAutoSaveCommits(dir, "main", "fallback title")
+	count, err := squashAutoSaveCommits(r.run, fakeDir, "main", "fallback title")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Errorf("expected 0 squashed, got %d", count)
 	}
-	subjects := getCommitSubjects(t, dir)
-	if len(subjects) != 2 {
+	if subjects := r.subjectsSince("main"); len(subjects) != 2 {
 		t.Errorf("expected history untouched (2 commits), got %v", subjects)
-	}
-}
-
-func TestSquashWIPCommits_NoCommits(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-
-	wipCount, err := SquashWIPCommits(dir, "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if wipCount != 0 {
-		t.Errorf("expected 0 for no commits, got %d", wipCount)
 	}
 }
 
 // TestHasAutoSaveCommits_BaseRefMissing covers gt-c1mw: callers that treat a
 // zero-value (false, nil-checked-away) return as "no auto-save commits" must
-// see an actual error here, not a silent false. An unresolvable base ref is
-// the simplest way to make merge-base fail.
+// see an actual error here, not a silent false.
 func TestHasAutoSaveCommits_BaseRefMissing(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix)
 
-	has, err := HasAutoSaveCommits(dir, "no-such-base-ref", "feature")
+	has, err := hasAutoSaveCommits(r.run, fakeDir, "no-such-base-ref", "feature")
 	if err == nil {
 		t.Fatal("expected an error when the base ref cannot be resolved, got nil")
 	}
@@ -381,11 +281,10 @@ func TestHasAutoSaveCommits_BaseRefMissing(t *testing.T) {
 }
 
 func TestHasAutoSaveCommits_None(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
+	t.Parallel()
+	r := featureRepo(t, "add feature A")
 
-	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	has, err := hasAutoSaveCommits(r.run, fakeDir, "main", "feature")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,11 +294,10 @@ func TestHasAutoSaveCommits_None(t *testing.T) {
 }
 
 func TestHasAutoSaveCommits_WIPTip(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix)
 
-	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	has, err := hasAutoSaveCommits(r.run, fakeDir, "main", "feature")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,12 +307,10 @@ func TestHasAutoSaveCommits_WIPTip(t *testing.T) {
 }
 
 func TestHasAutoSaveCommits_WIPNotTip(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", "fix: finish the feature")
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, "fix: finish the feature")
 
-	has, err := HasAutoSaveCommits(dir, "main", "feature")
+	has, err := hasAutoSaveCommits(r.run, fakeDir, "main", "feature")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,116 +319,94 @@ func TestHasAutoSaveCommits_WIPNotTip(t *testing.T) {
 	}
 }
 
-// HasAutoSaveCommits does not check anything out; it must leave the working
-// tree exactly where it found it, unlike the squash helpers above.
-func TestHasAutoSaveCommits_DoesNotMutateRepo(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	before := getCommitSubjects(t, dir)
+// hasAutoSaveCommits is read-only: it must reach a ref other than the current
+// branch without checking it out or rewriting anything.
+func TestHasAutoSaveCommits_ReadsAnotherRefWithoutWriting(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, AutoSaveCommitPrefix)
+	r.checkout("main")
 
-	if _, err := HasAutoSaveCommits(dir, "main", "feature"); err != nil {
+	has, err := hasAutoSaveCommits(r.run, fakeDir, "main", "feature")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	after := getCommitSubjects(t, dir)
-	if len(before) != len(after) || before[0] != after[0] {
-		t.Errorf("HasAutoSaveCommits mutated history: before=%v after=%v", before, after)
+	if !has {
+		t.Error("expected the auto-save commit on feature to be seen from main")
+	}
+	if w := r.wrote(); len(w) != 0 {
+		t.Errorf("hasAutoSaveCommits wrote to the repository: %v", w)
+	}
+	if r.head != "refs/heads/main" {
+		t.Errorf("HEAD moved to %s", r.head)
 	}
 }
 
 func TestInspectAutoSaveTip_RealTip(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", "fix: finish feature A")
+	t.Parallel()
+	r := featureRepo(t, "add feature A", "fix: finish feature A")
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tip.AutoSave {
-		t.Errorf("expected a real tip, got AutoSave with subject %q", tip.Subject)
-	}
-	if tip.Trailing != 0 {
-		t.Errorf("expected 0 trailing auto-save commits, got %d", tip.Trailing)
-	}
-	if tip.Ahead != 2 {
-		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
-	}
-	if tip.Subject != "fix: finish feature A" {
-		t.Errorf("expected the tip subject, got %q", tip.Subject)
+	want := AutoSaveTip{Subject: "fix: finish feature A", Ahead: 2}
+	if tip != want {
+		t.Errorf("tip = %+v, want %+v", tip, want)
 	}
 }
 
 // The gt-iki6 shape: real work with a checkpoint_dog commit on top of it.
 func TestInspectAutoSaveTip_WIPTip(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, "add feature A", WIPCommitPrefix)
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !tip.AutoSave {
-		t.Fatalf("expected the tip to be detected as machine-generated, got %q", tip.Subject)
-	}
-	if tip.Trailing != 1 {
-		t.Errorf("expected 1 trailing auto-save commit, got %d", tip.Trailing)
-	}
-	if tip.Ahead != 2 {
-		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	want := AutoSaveTip{Subject: WIPCommitPrefix, AutoSave: true, Trailing: 1, Ahead: 2}
+	if tip != want {
+		t.Errorf("tip = %+v, want %+v", tip, want)
 	}
 }
 
 func TestInspectAutoSaveTip_AllGenerated(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", AutoSaveCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, AutoSaveCommitPrefix)
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !tip.AutoSave {
-		t.Fatal("expected the tip to be detected as machine-generated")
+	if !tip.AutoSave || tip.Trailing != 2 || tip.Ahead != 2 {
+		t.Errorf("expected the whole branch to be machine-generated (2 of 2), got %+v", tip)
 	}
-	if tip.Trailing != tip.Ahead || tip.Ahead != 2 {
-		t.Errorf("expected the whole branch to be machine-generated (2 of 2), got %d of %d", tip.Trailing, tip.Ahead)
+	if tip.BeneathIsMerge {
+		t.Errorf("BeneathIsMerge = true with nothing beneath the run")
 	}
 }
 
 // A machine-generated commit buried under real work leaves the tip
 // submittable, so Trailing counts only the run at the tip.
 func TestInspectAutoSaveTip_WIPNotTip(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
-	addCommit(t, dir, "b.go", "package b", "fix: finish the feature")
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix, "fix: finish the feature")
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tip.AutoSave {
-		t.Errorf("expected a real tip, got %q", tip.Subject)
-	}
-	if tip.Trailing != 0 {
-		t.Errorf("expected 0 trailing auto-save commits, got %d", tip.Trailing)
-	}
-	if tip.Ahead != 2 {
-		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
+	want := AutoSaveTip{Subject: "fix: finish the feature", Ahead: 2}
+	if tip != want {
+		t.Errorf("tip = %+v, want %+v", tip, want)
 	}
 }
 
 func TestInspectAutoSaveTip_NoCommits(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
+	t.Parallel()
+	r := featureRepo(t)
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,43 +415,44 @@ func TestInspectAutoSaveTip_NoCommits(t *testing.T) {
 	}
 }
 
+func TestInspectAutoSaveTip_BaseRefMissing(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, WIPCommitPrefix)
+
+	if _, err := inspectAutoSaveTip(r.run, fakeDir, "origin/main", "HEAD"); err == nil {
+		t.Fatal("expected an error for an unresolvable base ref")
+	}
+}
+
 // An empty tip subject must not read as the commit beneath it: naming the
 // wrong commit makes the refusal's rewrite advice target the wrong HEAD~N.
 func TestInspectAutoSaveTip_EmptyTipSubject(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	writeRepoFile(t, dir, "b.go", "package b")
-	mustGit(t, dir, "add", "b.go")
-	mustGit(t, dir, "commit", "--allow-empty-message", "-m", "")
+	t.Parallel()
+	r := featureRepo(t, "add feature A", "")
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tip.Ahead != 2 {
-		t.Errorf("expected 2 commits ahead, got %d", tip.Ahead)
-	}
-	if tip.Subject != "" {
-		t.Errorf("expected the empty tip subject, got %q", tip.Subject)
-	}
-	if tip.AutoSave {
-		t.Error("expected an empty subject not to read as machine-generated")
+	want := AutoSaveTip{Subject: "", Ahead: 2}
+	if tip != want {
+		t.Errorf("tip = %+v, want %+v", tip, want)
 	}
 }
 
 // The commit the run folds into decides whether an amend keeps a real message,
 // so a merge there must be visible to the caller.
 func TestInspectAutoSaveTip_MergeBeneathTheRun(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "side")
-	addCommit(t, dir, "side.go", "package side", "add side work")
-	mustGit(t, dir, "checkout", "main")
-	createBranch(t, dir, "feature")
-	mustGit(t, dir, "merge", "--no-ff", "-m", "Merge branch 'side'", "side")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	t.Parallel()
+	r := newFakeRepo(t)
+	r.checkoutNew("side")
+	r.commit("add side work", "side.go", "package side")
+	r.checkout("main")
+	r.checkoutNew("feature")
+	r.merge("Merge branch 'side'", "side")
+	r.commit(WIPCommitPrefix, "b.go", "package b")
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,15 +462,20 @@ func TestInspectAutoSaveTip_MergeBeneathTheRun(t *testing.T) {
 	if !tip.BeneathIsMerge {
 		t.Errorf("expected the merge beneath the run to be reported, got %+v", tip)
 	}
+	var asked bool
+	for _, c := range r.calls {
+		asked = asked || strings.Join(c, " ") == "log -1 --format=%p HEAD~1"
+	}
+	if !asked {
+		t.Errorf("calls = %q, want the parents of HEAD~1 read", r.calls)
+	}
 }
 
 func TestInspectAutoSaveTip_RealCommitBeneathTheRun(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
+	t.Parallel()
+	r := featureRepo(t, "add feature A", WIPCommitPrefix)
 
-	tip, err := InspectAutoSaveTip(dir, "main", "HEAD")
+	tip, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,26 +484,39 @@ func TestInspectAutoSaveTip_RealCommitBeneathTheRun(t *testing.T) {
 	}
 }
 
-// InspectAutoSaveTip never checks anything out or rewrites history, so callers
-// may run it on a branch they are about to submit.
-func TestInspectAutoSaveTip_DoesNotMutateRepo(t *testing.T) {
-	dir := initTestRepo(t)
-	createBranch(t, dir, "feature")
-	addCommit(t, dir, "a.go", "package a", "add feature A")
-	addCommit(t, dir, "b.go", "package b", WIPCommitPrefix)
-	before := getCommitSubjects(t, dir)
+// inspectAutoSaveTip never checks anything out or rewrites history, so
+// callers may run it on a branch they are about to submit.
+func TestInspectAutoSaveTip_DoesNotWrite(t *testing.T) {
+	t.Parallel()
+	r := featureRepo(t, "add feature A", WIPCommitPrefix)
 
-	if _, err := InspectAutoSaveTip(dir, "main", "HEAD"); err != nil {
+	if _, err := inspectAutoSaveTip(r.run, fakeDir, "main", "HEAD"); err != nil {
 		t.Fatal(err)
 	}
-
-	after := getCommitSubjects(t, dir)
-	if len(before) != len(after) {
-		t.Fatalf("InspectAutoSaveTip mutated history: before=%v after=%v", before, after)
+	if w := r.wrote(); len(w) != 0 {
+		t.Errorf("inspectAutoSaveTip wrote to the repository: %v", w)
 	}
-	for i := range before {
-		if before[i] != after[i] {
-			t.Errorf("InspectAutoSaveTip mutated history: before=%v after=%v", before, after)
-		}
+}
+
+func TestParseSubjectRecords(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"one", "tip\x1e", []string{"tip"}},
+		{"empty tip keeps its slot", "\x1e\nbelow\x1e", []string{"", "below"}},
+		{"trailing newline after the sentinel is not a record", "a\x1e\nb\x1e\n", []string{"a", "b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseSubjectRecords(tt.in)
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") || len(got) != len(tt.want) {
+				t.Errorf("parseSubjectRecords(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }

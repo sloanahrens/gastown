@@ -100,8 +100,6 @@ func resolveReconcileID(townRoot, rawID, arg string) (string, error) {
 		switch parts[1] {
 		case constants.RoleWitness:
 			return beads.WitnessBeadIDWithPrefix(prefix, rig), nil
-		case constants.RoleRefinery:
-			return beads.RefineryBeadIDWithPrefix(prefix, rig), nil
 		default:
 			return beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1]), nil
 		}

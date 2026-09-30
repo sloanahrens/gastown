@@ -107,7 +107,11 @@ func ThrowawayPaths(paths []string) []string {
 // checkpoint_dog wrote. An error means the question went unanswered, which a
 // caller must not read as "nothing to report".
 func AddedThrowawayPaths(workDir, baseRef, headRef string) ([]string, error) {
-	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, headRef)
+	return addedThrowawayPaths(realGit, workDir, baseRef, headRef)
+}
+
+func addedThrowawayPaths(git gitRunner, workDir, baseRef, headRef string) ([]string, error) {
+	mergeBase, err := gitOutput(git, workDir, "merge-base", baseRef, headRef)
 	if err != nil {
 		return nil, fmt.Errorf("finding merge-base of %s and %s: %w", baseRef, headRef, err)
 	}
@@ -119,7 +123,7 @@ func AddedThrowawayPaths(workDir, baseRef, headRef string) ([]string, error) {
 	//
 	// -z keeps a path with a newline in it from being split into two, so the
 	// listing must be read verbatim.
-	added, err := gitOutputRaw(workDir, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", mergeBase, headRef)
+	added, err := git(workDir, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", mergeBase, headRef)
 	if err != nil {
 		return nil, fmt.Errorf("listing paths added by %s: %w", headRef, err)
 	}

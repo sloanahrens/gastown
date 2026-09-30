@@ -1,6 +1,7 @@
 package rig
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
@@ -1061,12 +1062,14 @@ func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefi
 	}
 
 	cmd := beads.CommandWithEnv(rigPath, bdSubprocessEnv(resolvedBeadsDir, ""), "config", "get", "issue_prefix")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	// Parse stdout alone: bd's stderr diagnostics are not part of the value.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("round-trip verification failed: bd cannot read issue_prefix from database %q: %v (%s)",
-			rigName, err, strings.TrimSpace(string(output)))
+			rigName, err, strings.TrimSpace(stderr.String()+stdout.String()))
 	}
-	got := strings.TrimSpace(string(output))
+	got := beads.ParseConfigOutput(stdout.Bytes())
 	if got != prefix {
 		return fmt.Errorf("round-trip verification failed: database %q reports issue_prefix %q, expected %q",
 			rigName, got, prefix)
@@ -1463,12 +1466,6 @@ func (m *Manager) initAgentBeads(rigPath, rigName, prefix string) error {
 			roleType: "witness",
 			rig:      rigName,
 			desc:     fmt.Sprintf("Witness for %s - monitors polecat health and progress.", rigName),
-		},
-		{
-			id:       beads.RefineryBeadIDWithPrefix(prefix, rigName),
-			roleType: "refinery",
-			rig:      rigName,
-			desc:     fmt.Sprintf("Refinery for %s - processes merge queue.", rigName),
 		},
 	}
 
@@ -2073,7 +2070,7 @@ func (m *Manager) seedPatrolMoleculesManually(rigPath string) error {
 
 	for _, mol := range patrolMols {
 		// Check if already exists by title
-		checkCmd := beads.CommandWithEnv(rigPath, nil, "list", "--type=molecule", "--format=json")
+		checkCmd := beads.CommandWithEnv(rigPath, nil, "list", "--type=molecule", "--json")
 		output, _ := checkCmd.Output()
 		if strings.Contains(string(output), mol.title) {
 			continue // Already exists
