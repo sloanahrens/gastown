@@ -307,27 +307,6 @@ func outputWitnessContext(ctx RoleContext) {
 	fmt.Printf("Rig: %s\n", style.Dim.Render(ctx.Rig))
 }
 
-func outputRefineryContext(ctx RoleContext) {
-	fmt.Printf("%s\n\n", style.Bold.Render("# Refinery Context"))
-	fmt.Printf("You are the **Refinery** for rig: %s\n\n", style.Bold.Render(ctx.Rig))
-	fmt.Println("## Responsibilities")
-	fmt.Println("- Process the merge queue for this rig")
-	fmt.Println("- Merge polecat work to integration branch")
-	fmt.Println("- Resolve merge conflicts")
-	fmt.Println("- Land completed swarms to main")
-	fmt.Println()
-	fmt.Println("## Key Commands")
-	fmt.Println("- `" + cli.Name() + " merge queue` - Show pending merges")
-	fmt.Println("- `" + cli.Name() + " merge next` - Process next merge")
-	fmt.Println()
-	fmt.Println("## Hookable Mail")
-	fmt.Println("Mail can be hooked for ad-hoc instructions: `" + cli.Name() + " hook attach <mail-id>`")
-	fmt.Println("If mail is on your hook, read and execute its instructions (GUPP applies).")
-	fmt.Println()
-	outputCommandQuickReference(ctx)
-	fmt.Printf("Rig: %s\n", style.Dim.Render(ctx.Rig))
-}
-
 func outputPolecatContext(ctx RoleContext) {
 	fmt.Printf("%s\n\n", style.Bold.Render("# Polecat Context"))
 	fmt.Printf("You are polecat **%s** in rig: %s\n\n",

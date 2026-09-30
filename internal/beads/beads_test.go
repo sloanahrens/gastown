@@ -1174,52 +1174,6 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 	}
 }
 
-func TestPendingMergeCloseReason(t *testing.T) {
-	if got, want := PendingMergeCloseReason("gt-mr-1", 1), "pending_mr: gt-mr-1 (attempt 1)"; got != want {
-		t.Fatalf("PendingMergeCloseReason() = %q, want %q", got, want)
-	}
-	// attempt <= 0 writes no suffix — the legacy shape a closure from before
-	// the attempt number is recorded in (gt-0cp3).
-	if got, want := PendingMergeCloseReason("gt-mr-1", 0), "pending_mr: gt-mr-1"; got != want {
-		t.Fatalf("PendingMergeCloseReason() with attempt 0 = %q, want %q", got, want)
-	}
-	// Trims incidental whitespace on the MR ID rather than baking it into
-	// the reason string.
-	if got, want := PendingMergeCloseReason("  gt-mr-1  ", 2), "pending_mr: gt-mr-1 (attempt 2)"; got != want {
-		t.Fatalf("PendingMergeCloseReason() with whitespace = %q, want %q", got, want)
-	}
-}
-
-func TestIsPendingMergeCloseReason(t *testing.T) {
-	tests := []struct {
-		name   string
-		reason string
-		mrID   string
-		want   bool
-	}{
-		{name: "matches exact MR", reason: "pending_mr: gt-mr-1", mrID: "gt-mr-1", want: true},
-		{name: "matches with surrounding whitespace", reason: "  pending_mr: gt-mr-1  ", mrID: "gt-mr-1", want: true},
-		{name: "matches with attempt suffix", reason: "pending_mr: gt-mr-1 (attempt 1)", mrID: "gt-mr-1", want: true},
-		{name: "matches attempt suffix, prefix case folded", reason: "PENDING_MR: gt-mr-1 (attempt 3)", mrID: "gt-mr-1", want: true},
-		{name: "different MR", reason: "pending_mr: gt-mr-2", mrID: "gt-mr-1", want: false},
-		{name: "different MR with attempt suffix", reason: "pending_mr: gt-mr-2 (attempt 1)", mrID: "gt-mr-1", want: false},
-		{name: "longer id sharing a prefix", reason: "pending_mr: gt-mr-1x (attempt 1)", mrID: "gt-mr-1", want: false},
-		{name: "attempt suffix but id continues with digit", reason: "pending_mr: gt-mr-12", mrID: "gt-mr-1", want: false},
-		{name: "prose after the id", reason: "pending_mr: gt-mr-1 (later re-opened by hand)", mrID: "gt-mr-1", want: false},
-		{name: "empty reason", reason: "", mrID: "gt-mr-1", want: false},
-		{name: "empty mrID", reason: "pending_mr: gt-mr-1", mrID: "", want: false},
-		{name: "unrelated close reason", reason: "duplicate", mrID: "gt-mr-1", want: false},
-		{name: "old-format plain close (no reason)", reason: "", mrID: "gt-mr-1", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsPendingMergeCloseReason(tt.reason, tt.mrID); got != tt.want {
-				t.Fatalf("IsPendingMergeCloseReason(%q, %q) = %v, want %v", tt.reason, tt.mrID, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCreateWithRigRepairsTargetConfigPrefix(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
@@ -2552,116 +2506,6 @@ pr_number: 4474`,
 	}
 }
 
-// TestSetMRFields tests updating issue descriptions with MR fields.
-func TestSetMRFields(t *testing.T) {
-	tests := []struct {
-		name   string
-		issue  *Issue
-		fields *MRFields
-		want   string
-	}{
-		{
-			name:  "nil issue",
-			issue: nil,
-			fields: &MRFields{
-				Branch: "polecat/Nux/gt-xyz",
-				Target: "main",
-			},
-			want: `branch: polecat/Nux/gt-xyz
-target: main`,
-		},
-		{
-			name:  "empty description",
-			issue: &Issue{Description: ""},
-			fields: &MRFields{
-				Branch:      "polecat/Nux/gt-xyz",
-				Target:      "main",
-				SourceIssue: "gt-xyz",
-			},
-			want: `branch: polecat/Nux/gt-xyz
-target: main
-source_issue: gt-xyz`,
-		},
-		{
-			name:  "preserve prose content",
-			issue: &Issue{Description: "This is a description of the work.\n\nIt spans multiple lines."},
-			fields: &MRFields{
-				Branch: "polecat/Toast/gt-abc",
-				Worker: "Toast",
-			},
-			want: `branch: polecat/Toast/gt-abc
-worker: Toast
-
-This is a description of the work.
-
-It spans multiple lines.`,
-		},
-		{
-			name: "replace existing fields",
-			issue: &Issue{
-				Description: `branch: polecat/Nux/gt-old
-target: develop
-source_issue: gt-old
-commit_sha: oldsha
-worker: Nux
-
-Some existing prose content.`,
-			},
-			fields: &MRFields{
-				Branch:      "polecat/Nux/gt-new",
-				Target:      "main",
-				SourceIssue: "gt-new",
-				CommitSHA:   "newsha",
-				Worker:      "Nux",
-				MergeCommit: "abc123",
-			},
-			want: `branch: polecat/Nux/gt-new
-target: main
-source_issue: gt-new
-worker: Nux
-commit_sha: newsha
-merge_commit: abc123
-
-Some existing prose content.`,
-		},
-		{
-			name: "preserve non-MR key-value lines",
-			issue: &Issue{
-				Description: `branch: polecat/Capable/gt-def
-custom_field: some value
-author: someone
-target: main`,
-			},
-			fields: &MRFields{
-				Branch:      "polecat/Capable/gt-ghi",
-				Target:      "integration/epic",
-				CloseReason: "merged",
-			},
-			want: `branch: polecat/Capable/gt-ghi
-target: integration/epic
-close_reason: merged
-
-custom_field: some value
-author: someone`,
-		},
-		{
-			name:   "empty fields clears MR data",
-			issue:  &Issue{Description: "branch: old\ntarget: old\n\nKeep this text."},
-			fields: &MRFields{},
-			want:   "Keep this text.",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SetMRFields(tt.issue, tt.fields)
-			if got != tt.want {
-				t.Errorf("SetMRFields() =\n%q\nwant\n%q", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestMRFieldsRoundTrip tests that parse/format round-trips correctly.
 func TestMRFieldsRoundTrip(t *testing.T) {
 	original := &MRFields{
@@ -2755,34 +2599,6 @@ rig: gastown`
 	}
 	if fields.Rig != "gastown" {
 		t.Errorf("Rig = %q, want gastown", fields.Rig)
-	}
-}
-
-// TestSetMRFieldsPreservesURL tests that URLs in prose are preserved.
-func TestSetMRFieldsPreservesURL(t *testing.T) {
-	// URLs contain colons which could be confused with key: value
-	issue := &Issue{
-		Description: `branch: old-branch
-Check out https://example.com/path for more info.
-Also see http://localhost:8080/api`,
-	}
-
-	fields := &MRFields{
-		Branch: "new-branch",
-		Target: "main",
-	}
-
-	result := SetMRFields(issue, fields)
-
-	// URLs should be preserved
-	if !strings.Contains(result, "https://example.com/path") {
-		t.Error("HTTPS URL was not preserved")
-	}
-	if !strings.Contains(result, "http://localhost:8080/api") {
-		t.Error("HTTP URL was not preserved")
-	}
-	if !strings.Contains(result, "branch: new-branch") {
-		t.Error("branch field was not set")
 	}
 }
 

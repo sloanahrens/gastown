@@ -1308,52 +1308,6 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	}
 }
 
-// renderAgentCompactWithSuffix renders a single-line agent status with an extra suffix
-func renderAgentCompactWithSuffix(w io.Writer, agent AgentRuntime, indent string, hooks []AgentHookInfo, _ string, suffix string) {
-	// Build status indicator (gt-zecmc: use tmux state, not bead state)
-	statusIndicator := buildStatusIndicator(agent)
-
-	// Get hook info
-	hookBead := agent.HookBead
-	hookTitle := agent.WorkTitle
-	if hookBead == "" && hooks != nil {
-		for _, h := range hooks {
-			if h.Agent == agent.Address && h.HasWork {
-				hookBead = h.Molecule
-				hookTitle = h.Title
-				break
-			}
-		}
-	}
-
-	// Build hook suffix
-	hookSuffix := ""
-	if hookBead != "" {
-		if hookTitle != "" {
-			hookSuffix = style.Dim.Render(" → ") + truncateWithEllipsis(hookTitle, 30)
-		} else {
-			hookSuffix = style.Dim.Render(" → ") + hookBead
-		}
-	} else if hookTitle != "" {
-		hookSuffix = style.Dim.Render(" → ") + truncateWithEllipsis(hookTitle, 30)
-	}
-
-	// Mail indicator
-	mailSuffix := ""
-	if agent.UnreadMail > 0 {
-		mailSuffix = fmt.Sprintf(" 📬%d", agent.UnreadMail)
-	}
-
-	// Agent runtime info
-	agentSuffix := ""
-	if agent.AgentInfo != "" {
-		agentSuffix = " " + style.Dim.Render("["+agent.AgentInfo+"]")
-	}
-
-	// Print single line: name + status + agent-info + hook + mail + suffix
-	fmt.Fprintf(w, "%s%-12s %s%s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, hookSuffix, mailSuffix, suffix)
-}
-
 // renderAgentCompact renders a single-line agent status
 func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []AgentHookInfo, _ string) {
 	// Build status indicator (gt-zecmc: use tmux state, not bead state)

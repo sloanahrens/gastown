@@ -40,9 +40,6 @@ type Rig struct {
 	// HasWitness indicates if the rig has a witness agent.
 	HasWitness bool `json:"has_witness"`
 
-	// HasRefinery indicates if the rig has a refinery agent.
-	HasRefinery bool `json:"has_refinery"`
-
 	// HasMayor indicates if the rig has a mayor clone.
 	HasMayor bool `json:"has_mayor"`
 
@@ -58,7 +55,6 @@ type Rig struct {
 var AgentDirs = []string{
 	"polecats",
 	"crew",
-	"refinery/rig",
 	"witness",
 	"mayor/rig",
 }
@@ -69,7 +65,6 @@ type RigSummary struct {
 	PolecatCount int    `json:"polecat_count"`
 	CrewCount    int    `json:"crew_count"`
 	HasWitness   bool   `json:"has_witness"`
-	HasRefinery  bool   `json:"has_refinery"`
 }
 
 // Summary returns a RigSummary for this rig.
@@ -79,7 +74,6 @@ func (r *Rig) Summary() RigSummary {
 		PolecatCount: len(r.Polecats),
 		CrewCount:    len(r.Crew),
 		HasWitness:   r.HasWitness,
-		HasRefinery:  r.HasRefinery,
 	}
 }
 

@@ -1033,8 +1033,8 @@ func TestStoreShowMultipleHydratesDependencyMetadata(t *testing.T) {
 	if len(issue.Dependencies) != 3 {
 		t.Fatalf("Dependencies len = %d, want 3: %#v", len(issue.Dependencies), issue.Dependencies)
 	}
-	if got := FirstUnresolvedBlockerID(issue); got != "gt-blocker" {
-		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-blocker", got)
+	if got := firstUnresolvedBlockerID(issue); got != "gt-blocker" {
+		t.Fatalf("firstUnresolvedBlockerID() = %q, want gt-blocker", got)
 	}
 	if !HasUnresolvedBlockers(issue) {
 		t.Fatal("SDK dependencies should feed shared blocker semantics")

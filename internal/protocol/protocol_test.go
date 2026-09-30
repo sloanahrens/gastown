@@ -88,75 +88,6 @@ func TestIsProtocolMessage(t *testing.T) {
 	}
 }
 
-func TestNewMergeReadyMessage(t *testing.T) {
-	msg := NewMergeReadyMessage("gastown", "nux", "polecat/nux/gt-abc", "gt-abc")
-
-	if msg.Subject != "MERGE_READY nux" {
-		t.Errorf("Subject = %q, want %q", msg.Subject, "MERGE_READY nux")
-	}
-	if msg.From != "gastown/witness" {
-		t.Errorf("From = %q, want %q", msg.From, "gastown/witness")
-	}
-	if msg.To != "gastown/refinery" {
-		t.Errorf("To = %q, want %q", msg.To, "gastown/refinery")
-	}
-	if msg.Priority != mail.PriorityHigh {
-		t.Errorf("Priority = %q, want %q", msg.Priority, mail.PriorityHigh)
-	}
-	if !strings.Contains(msg.Body, "Branch: polecat/nux/gt-abc") {
-		t.Errorf("Body missing branch: %s", msg.Body)
-	}
-	if !strings.Contains(msg.Body, "Issue: gt-abc") {
-		t.Errorf("Body missing issue: %s", msg.Body)
-	}
-}
-
-func TestNewMergedMessage(t *testing.T) {
-	msg := NewMergedMessage("gastown", "nux", "polecat/nux/gt-abc", "gt-abc", "main", "abc123")
-
-	if msg.Subject != "MERGED nux" {
-		t.Errorf("Subject = %q, want %q", msg.Subject, "MERGED nux")
-	}
-	if msg.From != "gastown/refinery" {
-		t.Errorf("From = %q, want %q", msg.From, "gastown/refinery")
-	}
-	if msg.To != "gastown/witness" {
-		t.Errorf("To = %q, want %q", msg.To, "gastown/witness")
-	}
-	if !strings.Contains(msg.Body, "Merge-Commit: abc123") {
-		t.Errorf("Body missing merge commit: %s", msg.Body)
-	}
-}
-
-func TestNewMergeFailedMessage(t *testing.T) {
-	msg := NewMergeFailedMessage("gastown", "nux", "polecat/nux/gt-abc", "gt-abc", "main", "tests", "Test failed")
-
-	if msg.Subject != "MERGE_FAILED nux" {
-		t.Errorf("Subject = %q, want %q", msg.Subject, "MERGE_FAILED nux")
-	}
-	if !strings.Contains(msg.Body, "Failure-Type: tests") {
-		t.Errorf("Body missing failure type: %s", msg.Body)
-	}
-	if !strings.Contains(msg.Body, "Error: Test failed") {
-		t.Errorf("Body missing error: %s", msg.Body)
-	}
-}
-
-func TestNewReworkRequestMessage(t *testing.T) {
-	conflicts := []string{"file1.go", "file2.go"}
-	msg := NewReworkRequestMessage("gastown", "nux", "polecat/nux/gt-abc", "gt-abc", "main", conflicts)
-
-	if msg.Subject != "REWORK_REQUEST nux" {
-		t.Errorf("Subject = %q, want %q", msg.Subject, "REWORK_REQUEST nux")
-	}
-	if !strings.Contains(msg.Body, "Conflict-Files: file1.go, file2.go") {
-		t.Errorf("Body missing conflict files: %s", msg.Body)
-	}
-	if !strings.Contains(msg.Body, "git rebase origin/main") {
-		t.Errorf("Body missing rebase instructions: %s", msg.Body)
-	}
-}
-
 func TestParseMergeReadyPayload(t *testing.T) {
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
@@ -200,32 +131,6 @@ func TestParseMessageType_ConvoyNeedsFeeding(t *testing.T) {
 				t.Errorf("ParseMessageType(%q) = %q, want %q", tt.subject, result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestNewConvoyNeedsFeedingMessage(t *testing.T) {
-	msg := NewConvoyNeedsFeedingMessage("gastown", "hq-cv123", "gt-abc")
-
-	if msg.Subject != "CONVOY_NEEDS_FEEDING hq-cv123" {
-		t.Errorf("Subject = %q, want %q", msg.Subject, "CONVOY_NEEDS_FEEDING hq-cv123")
-	}
-	if msg.From != "gastown/refinery" {
-		t.Errorf("From = %q, want %q", msg.From, "gastown/refinery")
-	}
-	if msg.To != "deacon/" {
-		t.Errorf("To = %q, want %q", msg.To, "deacon/")
-	}
-	if msg.Priority != mail.PriorityHigh {
-		t.Errorf("Priority = %q, want %q", msg.Priority, mail.PriorityHigh)
-	}
-	if !strings.Contains(msg.Body, "ConvoyID: hq-cv123") {
-		t.Errorf("Body missing ConvoyID: %s", msg.Body)
-	}
-	if !strings.Contains(msg.Body, "SourceIssue: gt-abc") {
-		t.Errorf("Body missing SourceIssue: %s", msg.Body)
-	}
-	if !strings.Contains(msg.Body, "Rig: gastown") {
-		t.Errorf("Body missing Rig: %s", msg.Body)
 	}
 }
 
@@ -524,23 +429,6 @@ func TestWrapWitnessHandlers(t *testing.T) {
 	}
 }
 
-func TestWrapRefineryHandlers(t *testing.T) {
-	handler := &mockRefineryHandler{}
-	registry := WrapRefineryHandlers(handler)
-
-	msg := &mail.Message{
-		Subject: "MERGE_READY nux",
-		Body:    "Branch: polecat/nux\nIssue: gt-abc\nPolecat: nux\nRig: gastown",
-	}
-
-	if err := registry.Handle(msg); err != nil {
-		t.Errorf("HandleMergeReady error: %v", err)
-	}
-	if !handler.readyCalled {
-		t.Error("HandleMergeReady was not called")
-	}
-}
-
 func TestWrapWitnessHandlers_InvalidPayload(t *testing.T) {
 	handler := &mockWitnessHandler{}
 	registry := WrapWitnessHandlers(handler)
@@ -568,20 +456,6 @@ func TestWrapWitnessHandlers_InvalidPayload(t *testing.T) {
 	// Handlers should NOT have been called
 	if handler.mergedCalled || handler.failedCalled || handler.reworkCalled {
 		t.Error("handlers should not be called when parse fails")
-	}
-}
-
-func TestWrapRefineryHandlers_InvalidPayload(t *testing.T) {
-	handler := &mockRefineryHandler{}
-	registry := WrapRefineryHandlers(handler)
-
-	msg := &mail.Message{Subject: "MERGE_READY nux", Body: ""}
-	err := registry.Handle(msg)
-	if err == nil {
-		t.Error("expected error for MERGE_READY with empty body")
-	}
-	if handler.readyCalled {
-		t.Error("handler should not be called when parse fails")
 	}
 }
 
@@ -671,119 +545,4 @@ func (m *mockWitnessHandler) HandleMergeFailed(payload *MergeFailedPayload) erro
 func (m *mockWitnessHandler) HandleReworkRequest(payload *ReworkRequestPayload) error {
 	m.reworkCalled = true
 	return nil
-}
-
-type mockRefineryHandler struct {
-	readyCalled bool
-}
-
-func (m *mockRefineryHandler) HandleMergeReady(payload *MergeReadyPayload) error {
-	m.readyCalled = true
-	return nil
-}
-
-func TestDefaultRefineryHandler_HandleMergeReady(t *testing.T) {
-	tmpDir := t.TempDir()
-	handler := NewRefineryHandler("gastown", tmpDir)
-
-	var buf bytes.Buffer
-	handler.SetOutput(&buf)
-
-	payload := &MergeReadyPayload{
-		Branch:   "polecat/nux/gt-abc",
-		Issue:    "gt-abc",
-		Polecat:  "nux",
-		Rig:      "gastown",
-		Verified: "clean git state",
-	}
-	if err := handler.HandleMergeReady(payload); err != nil {
-		t.Errorf("HandleMergeReady error: %v", err)
-	}
-
-	output := buf.String()
-	if !strings.Contains(output, "MERGE_READY received") {
-		t.Errorf("missing MERGE_READY text: %s", output)
-	}
-	if !strings.Contains(output, "nux") {
-		t.Errorf("missing polecat name: %s", output)
-	}
-	if !strings.Contains(output, "polecat/nux/gt-abc") {
-		t.Errorf("missing branch: %s", output)
-	}
-}
-
-func TestDefaultRefineryHandler_NotifyMergeOutcome_Success(t *testing.T) {
-	tmpDir := t.TempDir()
-	// Prevent detectTownRoot from finding the real town via GT_TOWN_ROOT/GT_ROOT.
-	// Without this, NewRouter falls back to the production beads and delivers
-	// synthetic "MERGED nux" messages to the live mail system during test runs.
-	t.Setenv("GT_TOWN_ROOT", tmpDir)
-	t.Setenv("GT_ROOT", tmpDir)
-	handler := NewRefineryHandler("gastown", tmpDir)
-	handler.Router = mail.NewRouterWithTownRoot(tmpDir, "")
-
-	outcome := MergeOutcome{
-		Success:     true,
-		MergeCommit: "abc123",
-	}
-
-	// Testing routing logic only — delivery will fail (no .beads in tmpDir)
-	err := handler.NotifyMergeOutcome("nux", "polecat/nux/gt-abc", "gt-abc", "main", outcome)
-	_ = err
-}
-
-func TestDefaultRefineryHandler_NotifyMergeOutcome_Conflict(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("GT_TOWN_ROOT", tmpDir)
-	t.Setenv("GT_ROOT", tmpDir)
-	handler := NewRefineryHandler("gastown", tmpDir)
-	handler.Router = mail.NewRouterWithTownRoot(tmpDir, "")
-
-	outcome := MergeOutcome{
-		Success:       false,
-		Conflict:      true,
-		ConflictFiles: []string{"file1.go", "file2.go"},
-	}
-
-	err := handler.NotifyMergeOutcome("nux", "polecat/nux/gt-abc", "gt-abc", "main", outcome)
-	_ = err
-}
-
-func TestDefaultRefineryHandler_NotifyMergeOutcome_Failure(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("GT_TOWN_ROOT", tmpDir)
-	t.Setenv("GT_ROOT", tmpDir)
-	handler := NewRefineryHandler("gastown", tmpDir)
-	handler.Router = mail.NewRouterWithTownRoot(tmpDir, "")
-
-	outcome := MergeOutcome{
-		Success:     false,
-		Conflict:    false,
-		FailureType: "tests",
-		Error:       "Test suite failed",
-	}
-
-	err := handler.NotifyMergeOutcome("nux", "polecat/nux/gt-abc", "gt-abc", "main", outcome)
-	_ = err
-}
-
-func TestMergeOutcome_Fields(t *testing.T) {
-	outcome := MergeOutcome{
-		Success:       true,
-		Conflict:      false,
-		FailureType:   "",
-		Error:         "",
-		MergeCommit:   "abc123",
-		ConflictFiles: nil,
-	}
-
-	if !outcome.Success {
-		t.Error("expected Success=true")
-	}
-	if outcome.Conflict {
-		t.Error("expected Conflict=false")
-	}
-	if outcome.MergeCommit != "abc123" {
-		t.Errorf("MergeCommit = %q, want %q", outcome.MergeCommit, "abc123")
-	}
 }

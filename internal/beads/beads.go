@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -391,68 +390,6 @@ func ConcreteWorkIssueRejectReason(issue *Issue) string {
 	return ""
 }
 
-// PendingMergeCloseReason returns the close_reason gt done used to write on
-// a source issue when it self-closed the issue immediately after creating
-// mrID's merge request — before the request had actually merged. As of
-// gt-pqqz, gt done no longer closes the source issue at submission time: the
-// issue stays open through the merge queue and the refinery's
-// closeMergedWorkBead closes it once, at real merge success, with a "Merged
-// in <mrID>" reason instead. This helper and IsPendingMergeCloseReason
-// remain only to recognize the legacy shape on a source issue that was
-// already closed this way before the change rolled out, and to keep
-// recheckMRSourceStillMergeable's pre-merge eligibility check backward
-// compatible with any such in-flight MR.
-//
-// The attempt number is carried in an "(attempt N)" suffix: the source
-// issue's branch is reused across every attempt of an issue, and the
-// witness's stranded-branch scan suppresses a superseded branch by pairing
-// the closure with the newest rejection the closure's attempt reached — an
-// older rejection on the same branch must not hide a newer one (gt-0cp3).
-// attempt <= 0 means "no attempt recorded"; it writes no suffix, the legacy
-// shape.
-func PendingMergeCloseReason(mrID string, attempt int) string {
-	reason := "pending_mr: " + strings.TrimSpace(mrID)
-	if attempt > 0 {
-		reason += " (attempt " + strconv.Itoa(attempt) + ")"
-	}
-	return reason
-}
-
-// IsPendingMergeCloseReason reports whether reason marks an issue as closed
-// specifically because mrID — this exact merge request — was submitted to
-// the queue (see PendingMergeCloseReason). A pre-merge eligibility check can
-// use this to tell an ordinary transient self-close from a source issue a
-// human closed for real abandonment (wontfix, duplicate, superseded by a
-// different MR): only the former should carry a close_reason matching this
-// exact MR. The match is the id exactly, with an optional "(attempt N)"
-// suffix and surrounding whitespace tolerated; prose after the id in any
-// other shape still does not match.
-func IsPendingMergeCloseReason(reason, mrID string) bool {
-	mrID = strings.TrimSpace(mrID)
-	if mrID == "" {
-		return false
-	}
-	trimmed := strings.TrimSpace(reason)
-	base := "pending_mr: " + mrID
-	if strings.EqualFold(trimmed, base) {
-		return true
-	}
-	lower := strings.ToLower(trimmed)
-	if !strings.HasPrefix(lower, strings.ToLower(base)) {
-		return false
-	}
-	// The MR id must end at a boundary: a longer id sharing this one as a
-	// prefix (gt-mr and gt-mr-2) must not match, the same exactness the old
-	// whole-string comparison enforced. attemptSuffixRe's ^ pins the suffix
-	// to the id's end, so " (attempt N)" (whitespace before it) is the only
-	// continuation that matches.
-	return attemptSuffixRe.MatchString(lower[len(base):])
-}
-
-// attemptSuffixRe is the "(attempt N)" suffix PendingMergeCloseReason may
-// append after the MR id.
-var attemptSuffixRe = regexp.MustCompile(`^\s*\(attempt\s+\d+\)\s*$`)
-
 // InternalIssueType reports whether an issue type represents Gas Town runtime
 // state rather than user/code work.
 func InternalIssueType(issueType string) bool {
@@ -601,16 +538,6 @@ func knownDependencyRelation(depType string) string {
 func HasUnresolvedBlockers(issue *Issue) bool {
 	_, count := unresolvedBlockingDependencyIDs(issue)
 	return count > 0
-}
-
-// FirstUnresolvedBlockerID returns the first unresolved blocker ID, or empty if
-// the issue is unblocked or only a blocker count is available.
-func FirstUnresolvedBlockerID(issue *Issue) string {
-	ids, _ := unresolvedBlockingDependencyIDs(issue)
-	if len(ids) == 0 {
-		return ""
-	}
-	return ids[0]
 }
 
 func unresolvedBlockingDependencyIDs(issue *Issue) ([]string, int) {

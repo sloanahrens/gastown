@@ -3,7 +3,6 @@ package git
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,8 +64,9 @@ func moveDir(src, dest string) error {
 // Git wraps git operations for a working directory.
 type Git struct {
 	workDir string
-	gitDir  string // Optional: explicit git directory (for bare repos)
-	gh      ghFunc // runs the gh CLI; nil means the real gh on PATH
+	gitDir  string  // Optional: explicit git directory (for bare repos)
+	gh      ghFunc  // runs the gh CLI; nil means the real gh on PATH
+	exec    runFunc // runs git; nil means the real git on PATH
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would
@@ -170,22 +170,12 @@ func (g *Git) runOutput(args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
-	if g.workDir != "" {
-		cmd.Dir = g.workDir
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args})
 	if err != nil {
-		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
-	return stdout.String(), nil
+	return stdout, nil
 }
 
 // pushTimeout is the maximum time a git push is allowed to run before being
@@ -272,18 +262,9 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", args...)
-	boundRemoteCommand(cmd)
-	if g.workDir != "" {
-		cmd.Dir = g.workDir
-	}
-
-	stdout, stderr, err := runCapturingOutput(cmd)
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, timeout: timeout})
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, errTimedOut) {
 			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 		}
 		return "", g.wrapError(err, stdout, stderr, args)
@@ -308,35 +289,10 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	var cmd *exec.Cmd
-	var cancel context.CancelFunc
-	ctx := context.Background()
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		cmd = exec.CommandContext(ctx, "git", args...)
-	} else {
-		cmd = exec.Command("git", args...)
-	}
-	if cancel != nil {
-		defer cancel()
-		boundRemoteCommand(cmd)
-	} else {
-		util.SetDetachedProcessGroup(cmd)
-	}
-
-	if g.workDir != "" {
-		cmd.Dir = g.workDir
-	}
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	stdout, stderr, err := runCapturingOutput(cmd)
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: extraEnv, timeout: timeout})
 	if err != nil {
-		if timeout > 0 {
-			// Check if the context's deadline was exceeded
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
-			}
+		if timeout > 0 && errors.Is(err, errTimedOut) {
+			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 		}
 		return "", g.wrapError(err, stdout, stderr, args)
 	}
@@ -355,23 +311,12 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
-	if g.workDir != "" {
-		cmd.Dir = g.workDir
-	}
-	cmd.Stdin = strings.NewReader(stdin)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, stdin: stdin})
 	if err != nil {
-		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(stdout), nil
 }
 
 func (g *Git) guardUnsafeTownRootMutation(args []string) error {
@@ -382,7 +327,7 @@ func (g *Git) guardUnsafeTownRootMutation(args []string) error {
 	effectiveWorkDir := gitEffectiveWorkDir(args, g.workDir)
 
 	if gitSubcommandMutatesWorktree(cmd, rest) {
-		if err := EnsureSafeMutationWorkDir(effectiveWorkDir); err != nil {
+		if err := ensureSafeMutationWorkDir(g.runner(), effectiveWorkDir); err != nil {
 			return fmt.Errorf("%w: git %s", err, strings.Join(args, " "))
 		}
 	}
@@ -423,11 +368,15 @@ func gitEffectiveWorkDir(args []string, workDir string) string {
 // EnsureSafeMutationWorkDir fails when workDir's effective git worktree is the
 // Gas Town town root. Raw git callsites use this before mutating commands.
 func EnsureSafeMutationWorkDir(workDir string) error {
+	return ensureSafeMutationWorkDir(realRun, workDir)
+}
+
+func ensureSafeMutationWorkDir(run runFunc, workDir string) error {
 	if workDir == "" {
 		return nil
 	}
 
-	topLevel, ok := gitTopLevel(workDir)
+	topLevel, ok := gitTopLevel(run, workDir)
 	if !ok {
 		return nil
 	}
@@ -437,14 +386,12 @@ func EnsureSafeMutationWorkDir(workDir string) error {
 	return nil
 }
 
-func gitTopLevel(workDir string) (string, bool) {
-	cmd := exec.Command("git", "-C", workDir, "rev-parse", "--show-toplevel")
-	util.SetDetachedProcessGroup(cmd)
-	out, err := cmd.Output()
+func gitTopLevel(run runFunc, workDir string) (string, bool) {
+	out, _, err := run(gitCall{args: []string{"-C", workDir, "rev-parse", "--show-toplevel"}})
 	if err != nil {
 		return "", false
 	}
-	topLevel := strings.TrimSpace(string(out))
+	topLevel := strings.TrimSpace(out)
 	if topLevel == "" {
 		return "", false
 	}
@@ -813,15 +760,9 @@ func (g *Git) cloneInternal(url, dest string, opts cloneOptions) error {
 	}
 	args = append(args, url, tmpDest)
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return g.wrapError(err, stdout.String(), stderr.String(), args)
+	run := g.runner()
+	if stdout, stderr, err := run(gitCall{dir: tmpDir, args: args, env: []string{"GIT_CEILING_DIRECTORIES=" + tmpDir}}); err != nil {
+		return g.wrapError(err, stdout, stderr, args)
 	}
 
 	// Move to final destination (handles cross-filesystem moves)
@@ -834,14 +775,14 @@ func (g *Git) cloneInternal(url, dest string, opts cloneOptions) error {
 		// Configure refspec so worktrees can fetch and see origin/* refs.
 		// For single-branch shallow clones, only set the config without
 		// fetching all branches (which would defeat the purpose of --single-branch).
-		return configureRefspec(dest, opts.singleBranch)
+		return configureRefspec(run, dest, opts.singleBranch)
 	}
 	// Configure hooks path for Gas Town clones
-	if err := configureHooksPath(dest); err != nil {
+	if err := configureHooksPath(run, dest); err != nil {
 		return err
 	}
 	// Initialize submodules if present
-	return InitSubmodules(dest)
+	return initSubmodules(run, dest)
 }
 
 // Clone clones a repository to the destination.
@@ -914,26 +855,22 @@ func (g *Git) CloneBranchPartial(url, dest, branch, filter string) error {
 // configureHooksPath sets core.hooksPath to use the repo's .githooks directory
 // if it exists. This ensures Gas Town agents use the pre-push hook that blocks
 // pushes to non-main branches (internal PRs are not allowed).
-func configureHooksPath(repoPath string) error {
+func configureHooksPath(run runFunc, repoPath string) error {
 	hooksDir := filepath.Join(repoPath, ".githooks")
 	if _, err := os.Stat(hooksDir); os.IsNotExist(err) {
 		// No .githooks directory, nothing to configure
 		return nil
 	}
 
-	cmd := exec.Command("git", "-C", repoPath, "config", "core.hooksPath", ".githooks")
-	util.SetDetachedProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("configuring hooks path: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := run(gitCall{args: []string{"-C", repoPath, "config", "core.hooksPath", ".githooks"}}); err != nil {
+		return fmt.Errorf("configuring hooks path: %s", strings.TrimSpace(stderr))
 	}
 	return nil
 }
 
 // ConfigureHooksPath sets core.hooksPath for the repo/worktree if .githooks exists.
 func (g *Git) ConfigureHooksPath() error {
-	return configureHooksPath(g.workDir)
+	return configureHooksPath(g.runner(), g.workDir)
 }
 
 // configureRefspec sets remote.origin.fetch to the standard refspec for bare repos.
@@ -945,34 +882,28 @@ func (g *Git) ConfigureHooksPath() error {
 // When singleBranch is true, fetches only the default branch's ref instead of all
 // branches. This prevents failures on repos with many branches where a full fetch
 // would error with "some local refs could not be updated".
-func configureRefspec(repoPath string, singleBranch bool) error {
+func configureRefspec(run runFunc, repoPath string, singleBranch bool) error {
 	gitDir := repoPath
 	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err == nil {
 		gitDir = filepath.Join(repoPath, ".git")
 	}
 	gitDir = filepath.Clean(gitDir)
+	git := func(args ...string) (string, string, error) {
+		return run(gitCall{args: append([]string{"--git-dir", gitDir}, args...)})
+	}
 
-	var stderr bytes.Buffer
-	configCmd := exec.Command("git", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-	util.SetDetachedProcessGroup(configCmd)
-	configCmd.Stderr = &stderr
-	if err := configCmd.Run(); err != nil {
-		return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr))
 	}
 
 	// Empty remotes clone successfully but have no refs to fetch. Let callers
 	// perform their own empty-repository validation instead of returning a
 	// misleading "couldn't find remote ref" error from the fetch below.
-	var refsStderr bytes.Buffer
-	refsCmd := exec.Command("git", "--git-dir", gitDir, "show-ref", "--quiet")
-	util.SetDetachedProcessGroup(refsCmd)
-	refsCmd.Stderr = &refsStderr
-	if err := refsCmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+	if _, stderr, err := git("show-ref", "--quiet"); err != nil {
+		if exitCode(err) == 1 {
 			return nil
 		}
-		return fmt.Errorf("checking refs: %s", strings.TrimSpace(refsStderr.String()))
+		return fmt.Errorf("checking refs: %s", strings.TrimSpace(stderr))
 	}
 
 	if singleBranch {
@@ -982,39 +913,26 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 		// which fails on repos with many branches.
 		//
 		// Detect HEAD branch name, then fetch only that specific branch.
-		var headOut bytes.Buffer
-		headCmd := exec.Command("git", "--git-dir", gitDir, "symbolic-ref", "HEAD")
-		util.SetDetachedProcessGroup(headCmd)
-		headCmd.Stdout = &headOut
-		headCmd.Stderr = &stderr
-		if err := headCmd.Run(); err != nil {
+		headOut, _, err := git("symbolic-ref", "HEAD")
+		if err != nil {
 			// Fallback: if HEAD is detached, try fetching all (shouldn't happen for clones)
-			fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "--depth", "1", "origin")
-			util.SetDetachedProcessGroup(fetchCmd)
-			fetchCmd.Stderr = &stderr
-			if fetchErr := fetchCmd.Run(); fetchErr != nil {
-				return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr.String()))
+			if _, stderr, fetchErr := git("fetch", "--depth", "1", "origin"); fetchErr != nil {
+				return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr))
 			}
 			return nil
 		}
-		headRef := strings.TrimSpace(headOut.String())       // e.g. "refs/heads/main"
+		headRef := strings.TrimSpace(headOut)                // e.g. "refs/heads/main"
 		branch := strings.TrimPrefix(headRef, "refs/heads/") // e.g. "main"
 		refspec := branch + ":refs/remotes/origin/" + branch // e.g. "main:refs/remotes/origin/main"
 
-		fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "--depth", "1", "origin", refspec)
-		util.SetDetachedProcessGroup(fetchCmd)
-		fetchCmd.Stderr = &stderr
-		if err := fetchCmd.Run(); err != nil {
-			return fmt.Errorf("fetching origin %s: %s", branch, strings.TrimSpace(stderr.String()))
+		if _, stderr, err := git("fetch", "--depth", "1", "origin", refspec); err != nil {
+			return fmt.Errorf("fetching origin %s: %s", branch, strings.TrimSpace(stderr))
 		}
 		return nil
 	}
 
-	fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "origin")
-	util.SetDetachedProcessGroup(fetchCmd)
-	fetchCmd.Stderr = &stderr
-	if err := fetchCmd.Run(); err != nil {
-		return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := git("fetch", "origin"); err != nil {
+		return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr))
 	}
 
 	return nil
@@ -1142,12 +1060,8 @@ func (g *Git) ClearPushURL(remote string) error {
 	_, err := g.run("config", "--unset-all", fmt.Sprintf("remote.%s.pushurl", remote))
 	if err != nil {
 		// git config --unset-all returns exit code 5 if the key doesn't exist — that's fine.
-		var ge *GitError
-		if errors.As(err, &ge) {
-			var exitErr *exec.ExitError
-			if errors.As(ge.Err, &exitErr) && exitErr.ExitCode() == 5 {
-				return nil
-			}
+		if exitCode(err) == 5 {
+			return nil
 		}
 		return err
 	}
@@ -2594,21 +2508,13 @@ func (g *Git) runMergeCheck(args ...string) (string, error) {
 		return "", err
 	}
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = g.workDir
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args})
 	if err != nil {
 		// ZFC: Return raw output for observation, don't interpret CONFLICT
-		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(stdout), nil
 }
 
 // GetConflictingFiles returns the list of files with merge conflicts.
@@ -3095,7 +3001,7 @@ func (g *Git) WorktreeAdd(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return InitSubmodules(path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddFromRef creates a new worktree at the given path with a new branch
@@ -3110,7 +3016,7 @@ func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 	); err != nil {
 		return err
 	}
-	return InitSubmodules(path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddDetached creates a new worktree at the given path with a detached HEAD.
@@ -3122,7 +3028,7 @@ func (g *Git) WorktreeAddDetached(path, ref string) error {
 	); err != nil {
 		return err
 	}
-	return InitSubmodules(path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddExisting creates a new worktree at the given path for an existing branch.
@@ -3134,7 +3040,7 @@ func (g *Git) WorktreeAddExisting(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return InitSubmodules(path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddExistingForce creates a new worktree even if the branch is already checked out elsewhere.
@@ -3143,7 +3049,7 @@ func (g *Git) WorktreeAddExistingForce(path, branch string) error {
 	if _, err := g.run("worktree", "add", "--force", path, branch); err != nil {
 		return err
 	}
-	return InitSubmodules(path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // submoduleReferencePath returns the mayor/rig path to use as --reference
@@ -3157,7 +3063,7 @@ func (g *Git) submoduleReferencePath() string {
 	if g.gitDir != "" {
 		rigDir := filepath.Dir(g.gitDir)
 		mayorRig := filepath.Join(rigDir, "mayor", "rig")
-		if isValidSubmoduleReference(mayorRig) {
+		if isValidSubmoduleReference(g.runner(), mayorRig) {
 			return mayorRig
 		}
 	}
@@ -3174,7 +3080,7 @@ func (g *Git) submoduleReferencePath() string {
 			}
 			if _, err := os.Stat(filepath.Join(parent, ".repo.git")); err == nil {
 				mayorRig := filepath.Join(parent, "mayor", "rig")
-				if mayorRig != g.workDir && isValidSubmoduleReference(mayorRig) {
+				if mayorRig != g.workDir && isValidSubmoduleReference(g.runner(), mayorRig) {
 					return mayorRig
 				}
 				break
@@ -3189,27 +3095,23 @@ func (g *Git) submoduleReferencePath() string {
 // isValidSubmoduleReference checks if a path is suitable as a --reference
 // for git submodule update. It must have a tracked .gitmodules and not be a
 // shallow clone (git rejects shallow repos as references).
-func isValidSubmoduleReference(repoPath string) bool {
-	if !hasTrackedGitmodules(repoPath) {
+func isValidSubmoduleReference(run runFunc, repoPath string) bool {
+	if !hasTrackedGitmodules(run, repoPath) {
 		return false
 	}
 	// Check if shallow — git rev-parse --is-shallow-repository
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--is-shallow-repository")
-	util.SetDetachedProcessGroup(cmd)
-	out, err := cmd.Output()
+	out, _, err := run(gitCall{args: []string{"-C", repoPath, "rev-parse", "--is-shallow-repository"}})
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) != "true"
+	return strings.TrimSpace(out) != "true"
 }
 
 // IsSparseCheckoutConfigured checks if sparse checkout is enabled for a given repo/worktree.
 // This is used by doctor to detect legacy sparse checkout configurations that should be removed.
 func IsSparseCheckoutConfigured(repoPath string) bool {
-	cmd := exec.Command("git", "-C", repoPath, "config", "core.sparseCheckout")
-	util.SetDetachedProcessGroup(cmd)
-	output, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(output)) == "true"
+	output, _, err := realRun(gitCall{args: []string{"-C", repoPath, "config", "core.sparseCheckout"}})
+	return err == nil && strings.TrimSpace(output) == "true"
 }
 
 // RemoveSparseCheckout disables sparse checkout for a repo/worktree and restores all files.
@@ -3220,12 +3122,8 @@ func RemoveSparseCheckout(repoPath string) error {
 	}
 
 	// Use git sparse-checkout disable which properly restores hidden files
-	cmd := exec.Command("git", "-C", repoPath, "sparse-checkout", "disable")
-	util.SetDetachedProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("disabling sparse checkout: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := realRun(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "disable"}}); err != nil {
+		return fmt.Errorf("disabling sparse checkout: %s", strings.TrimSpace(stderr))
 	}
 	return nil
 }
@@ -4689,18 +4587,17 @@ type SubmoduleChange struct {
 // to share git objects from a local clone instead of fetching from remote.
 // This makes submodule init near-instant for large submodules (e.g. 655MB gitlabhq).
 func InitSubmodules(repoPath string, referencePath ...string) error {
-	return initSubmodules(repoPath, nil, referencePath...)
+	return initSubmodules(realRun, repoPath, referencePath...)
 }
 
-// initSubmodules is InitSubmodules with extra environment for the git
-// process. Tests pass GIT_CONFIG_* here to allow the file:// transport that
-// a local submodule remote needs, which git refuses by default for
-// submodule clones.
-func initSubmodules(repoPath string, extraEnv []string, referencePath ...string) error {
-	if !hasTrackedGitmodules(repoPath) {
+// initSubmodules is InitSubmodules through run. The integration test's
+// runner adds GIT_CONFIG_* to allow the file:// transport that a local
+// submodule remote needs, which git refuses by default for submodule clones.
+func initSubmodules(run runFunc, repoPath string, referencePath ...string) error {
+	if !hasTrackedGitmodules(run, repoPath) {
 		return nil
 	}
-	if err := EnsureSafeMutationWorkDir(repoPath); err != nil {
+	if err := ensureSafeMutationWorkDir(run, repoPath); err != nil {
 		return err
 	}
 
@@ -4709,20 +4606,13 @@ func initSubmodules(repoPath string, extraEnv []string, referencePath ...string)
 	// Use --reference to share objects from a local clone (avoids remote fetch)
 	if len(referencePath) > 0 && referencePath[0] != "" {
 		refPath := referencePath[0]
-		if hasTrackedGitmodules(refPath) {
+		if hasTrackedGitmodules(run, refPath) {
 			args = append(args, "--reference", refPath)
 		}
 	}
 
-	cmd := exec.Command("git", args...)
-	util.SetDetachedProcessGroup(cmd)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("initializing submodules: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := run(gitCall{args: args}); err != nil {
+		return fmt.Errorf("initializing submodules: %s", strings.TrimSpace(stderr))
 	}
 	return nil
 }
@@ -4732,14 +4622,14 @@ func initSubmodules(repoPath string, extraEnv []string, referencePath ...string)
 // untracked file (e.g., in a stale mayor/rig clone or bare repo worktree) even
 // though it has been removed from the repository. Checking only os.Stat would
 // incorrectly trigger submodule init on these stale artifacts.
-func hasTrackedGitmodules(repoPath string) bool {
+func hasTrackedGitmodules(run runFunc, repoPath string) bool {
 	gitmodules := filepath.Join(repoPath, ".gitmodules")
 	if _, err := os.Stat(gitmodules); os.IsNotExist(err) {
 		return false
 	}
 	// Verify .gitmodules is actually tracked in the index.
-	cmd := exec.Command("git", "-C", repoPath, "ls-files", "--error-unmatch", ".gitmodules")
-	return cmd.Run() == nil
+	_, _, err := run(gitCall{args: []string{"-C", repoPath, "ls-files", "--error-unmatch", ".gitmodules"}})
+	return err == nil
 }
 
 // InitSparseCheckout initializes sparse checkout with cone mode and configures
@@ -4750,20 +4640,13 @@ func InitSparseCheckout(repoPath string, paths []string) error {
 	}
 
 	// Initialize sparse checkout in cone mode
-	cmd := exec.Command("git", "-C", repoPath, "sparse-checkout", "init", "--cone")
-	util.SetDetachedProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("initializing sparse checkout: %s", strings.TrimSpace(stderr.String()))
+	if _, stderr, err := realRun(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "init", "--cone"}}); err != nil {
+		return fmt.Errorf("initializing sparse checkout: %s", strings.TrimSpace(stderr))
 	}
 	if len(paths) > 0 {
 		args := append([]string{"-C", repoPath, "sparse-checkout", "set"}, paths...)
-		cmd = exec.Command("git", args...)
-		util.SetDetachedProcessGroup(cmd)
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("setting sparse checkout paths: %s", strings.TrimSpace(stderr.String()))
+		if _, stderr, err := realRun(gitCall{args: args}); err != nil {
+			return fmt.Errorf("setting sparse checkout paths: %s", strings.TrimSpace(stderr))
 		}
 	}
 	return nil
@@ -4855,16 +4738,14 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 	tmpFile.Close()
 
 	// List all submodule.<name>.path entries to find the section matching our path
-	cmd := exec.Command("git", "config", "-f", tmpFile.Name(), "--get-regexp", `^submodule\..*\.path$`)
-	util.SetDetachedProcessGroup(cmd)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	run := g.runner()
+	stdout, _, err := run(gitCall{args: []string{"config", "-f", tmpFile.Name(), "--get-regexp", `^submodule\..*\.path$`}})
+	if err != nil {
 		return "", fmt.Errorf("reading submodule paths from .gitmodules: %w", err)
 	}
 
 	var sectionName string
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -4884,14 +4765,11 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 	}
 
 	// Get the URL for this section
-	urlCmd := exec.Command("git", "config", "-f", tmpFile.Name(), "--get", "submodule."+sectionName+".url")
-	util.SetDetachedProcessGroup(urlCmd)
-	var urlOut bytes.Buffer
-	urlCmd.Stdout = &urlOut
-	if err := urlCmd.Run(); err != nil {
+	urlOut, _, err := run(gitCall{args: []string{"config", "-f", tmpFile.Name(), "--get", "submodule." + sectionName + ".url"}})
+	if err != nil {
 		return "", fmt.Errorf("reading URL for submodule %s: %w", sectionName, err)
 	}
-	url := strings.TrimSpace(urlOut.String())
+	url := strings.TrimSpace(urlOut)
 	if url == "" {
 		return "", fmt.Errorf("submodule URL not found for path %s", submodulePath)
 	}
@@ -4904,37 +4782,35 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 func (g *Git) PushSubmoduleCommit(submodulePath, sha, remote string) error {
 	absPath := filepath.Join(g.workDir, submodulePath)
 	// Detect the remote's default branch (don't assume main)
-	defaultBranch, err := submoduleDefaultBranch(absPath, remote)
+	run := g.runner()
+	defaultBranch, err := submoduleDefaultBranch(run, absPath, remote)
 	if err != nil {
 		return fmt.Errorf("detecting default branch for submodule %s: %w", submodulePath, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", absPath, "push", remote, sha+":refs/heads/"+defaultBranch)
-	util.SetDetachedProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+	_, stderr, err := run(gitCall{args: []string{"-C", absPath, "push", remote, sha + ":refs/heads/" + defaultBranch}, timeout: pushTimeout})
+	if err != nil {
+		if errors.Is(err, errTimedOut) {
 			return fmt.Errorf("pushing submodule %s timed out after %v (remote may be unreachable)", submodulePath, pushTimeout)
 		}
 		abbrev := sha
 		if len(abbrev) > 8 {
 			abbrev = abbrev[:8]
 		}
-		return fmt.Errorf("pushing submodule %s commit %s: %s", submodulePath, abbrev, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("pushing submodule %s commit %s: %s", submodulePath, abbrev, strings.TrimSpace(stderr))
 	}
 	return nil
 }
 
 // submoduleDefaultBranch detects the default branch of a submodule's remote.
 // Tries local refs first to avoid network round-trips, falling back to remote queries.
-func submoduleDefaultBranch(submodulePath, remote string) (string, error) {
+func submoduleDefaultBranch(run runFunc, submodulePath, remote string) (string, error) {
+	git := func(args ...string) (string, error) {
+		out, _, err := run(gitCall{args: append([]string{"-C", submodulePath}, args...)})
+		return out, err
+	}
 	// Try local symbolic-ref first (no network, fastest)
-	symCmd := exec.Command("git", "-C", submodulePath, "symbolic-ref", "refs/remotes/"+remote+"/HEAD")
-	util.SetDetachedProcessGroup(symCmd)
-	if symOut, err := symCmd.Output(); err == nil {
-		ref := strings.TrimSpace(string(symOut))
+	if symOut, err := git("symbolic-ref", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		ref := strings.TrimSpace(symOut)
 		// refs/remotes/origin/HEAD -> refs/remotes/origin/main -> main
 		if parts := strings.Split(ref, "/"); len(parts) > 0 {
 			branch := parts[len(parts)-1]
@@ -4946,18 +4822,14 @@ func submoduleDefaultBranch(submodulePath, remote string) (string, error) {
 
 	// Try local tracking refs (no network)
 	for _, candidate := range []string{"main", "master"} {
-		check := exec.Command("git", "-C", submodulePath, "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/"+candidate)
-		util.SetDetachedProcessGroup(check)
-		if check.Run() == nil {
+		if _, err := git("rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/"+candidate); err == nil {
 			return candidate, nil
 		}
 	}
 
 	// Fallback: network query via ls-remote
 	for _, candidate := range []string{"main", "master"} {
-		check := exec.Command("git", "-C", submodulePath, "ls-remote", "--exit-code", remote, "refs/heads/"+candidate)
-		util.SetDetachedProcessGroup(check)
-		if check.Run() == nil {
+		if _, err := git("ls-remote", "--exit-code", remote, "refs/heads/"+candidate); err == nil {
 			return candidate, nil
 		}
 	}

@@ -1,4 +1,4 @@
-//go:build unix
+//go:build integration && unix
 
 package git
 
@@ -42,7 +42,7 @@ func holdOutputAlias(t *testing.T, want string) []string {
 // turned a successful ls-remote or push into "exec: WaitDelay expired before
 // I/O complete" — the refinery then reported verified_push_failed for a push
 // that had landed.
-func TestRunWithTimeoutSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
+func TestIntegrationRunWithTimeoutSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
 	t.Parallel()
 	g := NewGit(t.TempDir())
 	out, err := g.runWithTimeout(remoteQueryTimeout, holdOutputAlias(t, "tip-sha")...)
@@ -55,7 +55,7 @@ func TestRunWithTimeoutSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
 }
 
 // The env-carrying timed path (git push with GT_* env) behaves the same way.
-func TestRunWithEnvAndTimeoutSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
+func TestIntegrationRunWithEnvAndTimeoutSucceedsWhenGrandchildHoldsOutput(t *testing.T) {
 	t.Parallel()
 	g := NewGit(t.TempDir())
 	out, err := g.runWithEnvAndTimeout(holdOutputAlias(t, "pushed"), []string{"GT_TEST_MARKER=1"}, pushTimeout)

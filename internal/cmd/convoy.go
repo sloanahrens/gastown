@@ -2521,12 +2521,6 @@ func (d issueDetails) IsBlocked() bool {
 	return false
 }
 
-// getIssueDetailsBatch fetches details through the central routed beads lookup.
-// Returns a map from issue ID to details. Missing/invalid issues are omitted from the map.
-func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
-	return getIssueDetailsBatchForTown("", issueIDs)
-}
-
 // getIssueDetailsBatchForTown is getIssueDetailsBatch pinned to townRoot
 // instead of discovering the town ambiently from cwd. Callers that already
 // hold an explicit town root (e.g. getTrackedIssues) must pass it through —

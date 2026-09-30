@@ -26,6 +26,10 @@ func TestParseRoleStringBoot(t *testing.T) {
 		// Double-slash normalization
 		{"gamestore//witness", RoleWitness, "gamestore", ""},
 		{"gamestore//polecats//alpha", RolePolecat, "gamestore", "alpha"},
+		// The deleted refinery role is unknown, not a polecat named "refinery"
+		{"gamestore/refinery", Role("gamestore/refinery"), "", ""},
+		// A bare rig/<name> is still a polecat
+		{"gamestore/alpha", RolePolecat, "gamestore", "alpha"},
 	}
 
 	for _, tt := range tests {

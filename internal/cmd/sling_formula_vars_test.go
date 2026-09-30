@@ -63,16 +63,6 @@ func TestBackfillFormulaDefaultVarsRealFormulas(t *testing.T) {
 				"setup_command=", "test_command=", "typecheck_command=",
 			},
 		},
-		{
-			// A required var the formula never interpolates must not be treated
-			// as missing: bd does not demand it, so failing here would block a
-			// bond that works today. (original_mr is prose-only in this formula,
-			// not a {{placeholder}}.)
-			name:       "mol-polecat-conflict-resolve does not demand its un-interpolated required var",
-			formula:    "mol-polecat-conflict-resolve",
-			extraVars:  []string{"task=gt-abc", "branch=main"},
-			wantAbsent: []string{"original_mr="},
-		},
 	}
 
 	for _, tc := range tests {

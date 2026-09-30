@@ -3,7 +3,6 @@ package git
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -16,10 +15,8 @@ func TestLookupPullRequestRecordedURLSurvivesDeletedHead(t *testing.T) {
 	gh := &fakeGH{reject: "baseRepository", rules: []ghRule{
 		{prefix: []string{"pr", "view", "https://github.com/upstream/repo/pull/42"}, stdout: `{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"MERGED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"fix/deleted-head","headRefOid":"abc123","headRepository":null,"headRepositoryOwner":{"login":"fork-owner"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{URL: "https://github.com/upstream/repo/pull/42", Branch: "fix/deleted-head"})
 	if err != nil {
@@ -38,10 +35,8 @@ func TestLookupPullRequestRecordedURLRejectsHeadDrift(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "view", "https://github.com/upstream/repo/pull/42"}, stdout: `{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"OPEN","mergedAt":"","headRefName":"fix/drift","headRefOid":"new-head","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	_, err := g.LookupPullRequest(PullRequestRef{URL: "https://github.com/upstream/repo/pull/42", Branch: "fix/drift", HeadSHA: "submitted"})
 	if err == nil || !strings.Contains(err.Error(), "head changed") {
@@ -54,10 +49,8 @@ func TestLookupPullRequestQualifiedForkHead(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"api", "-X", "GET", "repos/upstream/repo/pulls"}, stdout: `[{"number":4474,"html_url":"https://github.com/upstream/repo/pull/4474","state":"open","merged_at":null,"head":{"ref":"fix/fork-head","sha":"sha4474","repo":{"full_name":"blairsilverberg/repo","owner":{"login":"blairsilverberg"}},"user":{"login":"blairsilverberg"}},"base":{"repo":{"full_name":"upstream/repo"}}}]`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{Branch: "fix/fork-head", HeadOwner: "blairsilverberg"})
 	if err != nil {
@@ -76,10 +69,8 @@ func TestLookupPullRequestBranchAmbiguityFailsClosed(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "list"}, stdout: `[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"a1","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"b2","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	_, err := g.LookupPullRequest(PullRequestRef{Branch: "shared"})
 	if !errors.Is(err, ErrPullRequestAmbiguous) {
@@ -104,11 +95,10 @@ func TestLookupPullRequestBranchAmbiguityFailsClosed(t *testing.T) {
 // GitHub remote at all. PullRequestProtection must keep the two apart.
 func TestPullRequestProtectionDistinguishesFailedLookupFromOpenPR(t *testing.T) {
 	t.Parallel()
-	dir := initTestRepo(t)
-	g := NewGit(dir)
-	if _, err := g.AddRemote("origin", filepath.Join(t.TempDir(), "local-origin.git")); err != nil {
-		t.Fatalf("AddRemote origin: %v", err)
-	}
+	g := newTestGit(t, newScripted(map[string]reply{
+		"remote get-url upstream": fail(2, "error: No such remote 'upstream'\n"),
+		"remote get-url origin":   ok("/srv/git/local-origin.git\n"),
+	}))
 
 	state, err := g.PullRequestProtection(PullRequestRef{Branch: "some-branch"})
 	if state != PRProtectionUnknown {
@@ -127,10 +117,8 @@ func TestPullRequestProtectionOpenPRIsOpen(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "list"}, stdout: `[{"number":7,"url":"https://github.com/upstream/repo/pull/7","state":"OPEN","mergedAt":"","headRefName":"feature","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	state, err := g.PullRequestProtection(PullRequestRef{Branch: "feature"})
 	if err != nil {
@@ -146,10 +134,8 @@ func TestPullRequestProtectionNoMatchIsNone(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "list"}, stdout: `[]`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	state, err := g.PullRequestProtection(PullRequestRef{Branch: "no-pr"})
 	if err != nil {
@@ -168,10 +154,8 @@ func TestLookupPullRequestBranchHeadSHADisambiguates(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "list"}, stdout: `[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"CLOSED","mergedAt":"","headRefName":"shared","headRefOid":"old","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"CLOSED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"shared","headRefOid":"wanted","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{Branch: "shared", HeadSHA: "wanted"})
 	if err != nil {
@@ -187,10 +171,8 @@ func TestFindPRNumberRequiresOpenPR(t *testing.T) {
 	gh := &fakeGH{rules: []ghRule{
 		{prefix: []string{"pr", "view", "99"}, stdout: `{"number":99,"url":"https://github.com/upstream/repo/pull/99","state":"CLOSED","mergedAt":"","headRefName":"closed","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, gitHubRemotes())
 	g.gh = gh.run
-	addGitHubRemotes(t, g)
 
 	number, err := g.FindPRNumberForRef(PullRequestRef{Number: 99})
 	if err != nil {
@@ -207,8 +189,8 @@ func TestPullRequestApprovalAndMergeUseResolvedURLAndRepo(t *testing.T) {
 		{prefix: []string{"pr", "view"}, stdout: `{"reviewDecision":"APPROVED"}`},
 		{prefix: []string{"pr", "merge"}},
 	}}
-	dir := initTestRepo(t)
-	g := NewGit(dir)
+	g := newTestGit(t, newScripted(nil))
+	dir := g.workDir
 	g.gh = gh.run
 	pr := &PullRequestInfo{Number: 42, URL: "https://github.com/upstream/repo/pull/42", BaseRepo: "upstream/repo", HeadSHA: "abc123"}
 
@@ -287,12 +269,11 @@ type ghExit int
 func (e ghExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 func (e ghExit) ExitCode() int { return int(e) }
 
-func addGitHubRemotes(t *testing.T, g *Git) {
-	t.Helper()
-	if _, err := g.AddRemote("origin", "https://github.com/fork/repo.git"); err != nil && !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("AddRemote origin: %v", err)
-	}
-	if err := g.AddUpstreamRemote("https://github.com/upstream/repo.git"); err != nil {
-		t.Fatalf("AddUpstreamRemote: %v", err)
-	}
+// gitHubRemotes answers the remote lookups of a clone whose origin is the
+// fork github.com/fork/repo and whose upstream is github.com/upstream/repo.
+func gitHubRemotes() *scripted {
+	return newScripted(map[string]reply{
+		"remote get-url upstream": ok("https://github.com/upstream/repo.git\n"),
+		"remote get-url origin":   ok("https://github.com/fork/repo.git\n"),
+	})
 }

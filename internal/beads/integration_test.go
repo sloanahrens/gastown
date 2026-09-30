@@ -53,118 +53,6 @@ func TestGetIntegrationBranchField(t *testing.T) {
 	}
 }
 
-func TestGetBaseBranchField(t *testing.T) {
-	tests := []struct {
-		name        string
-		description string
-		want        string
-	}{
-		{
-			name:        "empty description",
-			description: "",
-			want:        "",
-		},
-		{
-			name:        "field present",
-			description: "base_branch: develop",
-			want:        "develop",
-		},
-		{
-			name:        "alongside integration_branch",
-			description: "integration_branch: integration/gt-epic\nbase_branch: release/v2",
-			want:        "release/v2",
-		},
-		{
-			name:        "field not present",
-			description: "integration_branch: integration/gt-epic",
-			want:        "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := GetBaseBranchField(tt.description)
-			if got != tt.want {
-				t.Errorf("GetBaseBranchField() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAddIntegrationBranchField(t *testing.T) {
-	tests := []struct {
-		name        string
-		description string
-		branchName  string
-		want        string
-	}{
-		{
-			name:        "empty description",
-			description: "",
-			branchName:  "integration/gt-epic",
-			want:        "integration_branch: integration/gt-epic",
-		},
-		{
-			name:        "add to existing",
-			description: "Some description",
-			branchName:  "integration/gt-epic",
-			want:        "integration_branch: integration/gt-epic\nSome description",
-		},
-		{
-			name:        "replace existing",
-			description: "integration_branch: old-branch\nSome description",
-			branchName:  "integration/new-branch",
-			want:        "integration_branch: integration/new-branch\nSome description",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := AddIntegrationBranchField(tt.description, tt.branchName)
-			if got != tt.want {
-				t.Errorf("AddIntegrationBranchField() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAddBaseBranchField(t *testing.T) {
-	tests := []struct {
-		name        string
-		description string
-		baseBranch  string
-		want        string
-	}{
-		{
-			name:        "empty description",
-			description: "",
-			baseBranch:  "develop",
-			want:        "base_branch: develop",
-		},
-		{
-			name:        "add to existing",
-			description: "integration_branch: integration/gt-epic",
-			baseBranch:  "develop",
-			want:        "base_branch: develop\nintegration_branch: integration/gt-epic",
-		},
-		{
-			name:        "replace existing",
-			description: "base_branch: old\nSome text",
-			baseBranch:  "release/v2",
-			want:        "base_branch: release/v2\nSome text",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := AddBaseBranchField(tt.description, tt.baseBranch)
-			if got != tt.want {
-				t.Errorf("AddBaseBranchField() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSanitizeBranchSegment(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -400,7 +288,7 @@ func TestDetectIntegrationBranch(t *testing.T) {
 
 	t.Run("no epic in parent chain returns empty", func(t *testing.T) {
 		shower := &mockIssueShower{issues: map[string]*Issue{
-			"gt-task": {ID: "gt-task", Type: "task", Parent: "gt-other"},
+			"gt-task":  {ID: "gt-task", Type: "task", Parent: "gt-other"},
 			"gt-other": {ID: "gt-other", Type: "task", Parent: ""},
 		}}
 		checker := &mockBranchChecker{}

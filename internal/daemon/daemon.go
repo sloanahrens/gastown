@@ -25,7 +25,6 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
-	"github.com/steveyegge/gastown/internal/channelevents"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
@@ -2235,25 +2234,6 @@ func (d *Daemon) ensureWitnessesRunning() {
 		d.ensureWitnessRunning(rigName)
 		return nil
 	})
-}
-
-// hasPendingEvents checks if there are pending .event files in the given channel directory.
-// Used to gate agent spawning: don't burn API credits starting a Claude session when
-// there's nothing to process. The agent's await-event handles the actual consumption.
-// rig scopes the check for per-rig channels (events/<channel>/<rig>/); it is
-// ignored for town-global channels.
-func (d *Daemon) hasPendingEvents(channel, rig string) bool {
-	eventDir := channelevents.Dir(d.config.TownRoot, channel, rig)
-	entries, err := os.ReadDir(eventDir)
-	if err != nil {
-		return false // Directory doesn't exist or unreadable = no pending events
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".event") {
-			return true
-		}
-	}
-	return false
 }
 
 // ensureWitnessRunning keeps the witness for a rig running: the liveness

@@ -12,7 +12,12 @@ import (
 // (base..head in g) and returns a Rejection when they must not land. An error
 // means the check could not run; it is an infrastructure failure, never a
 // verdict on the work.
-type RangeCheck func(g *git.Git, base, head string) (*Rejection, error)
+type RangeCheck func(g CommitReader, base, head string) (*Rejection, error)
+
+// CommitReader is the part of *git.Git a RangeCheck reads.
+type CommitReader interface {
+	CommitMessages(base, head string) ([]git.CommitMessage, error)
+}
 
 // Attribution is refused only in its real forms: a Co-Authored-By or
 // Signed-off-by trailer naming claude or anthropic, a "Generated with/by ...
@@ -37,7 +42,7 @@ func AttributionLine(msg string) string {
 
 // AttributionCheck refuses a range carrying AI attribution. The author can
 // fix it (reword the commit), so it is rework, not human work.
-func AttributionCheck(g *git.Git, base, head string) (*Rejection, error) {
+func AttributionCheck(g CommitReader, base, head string) (*Rejection, error) {
 	msgs, err := g.CommitMessages(base, head)
 	if err != nil {
 		return nil, fmt.Errorf("reading commit messages %s..%s: %w", shortSHA(base), shortSHA(head), err)
