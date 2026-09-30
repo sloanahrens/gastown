@@ -58,7 +58,7 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      # On PATH, as in the CI integration job: tests that shell out to gt
+      # On PATH: tests that shell out to gt
       # must find this build, not nothing.
       - name: Build gt
         run: |
