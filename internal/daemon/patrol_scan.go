@@ -250,7 +250,7 @@ func (h *patrolScanHost) seat(rig, name string) supervisor.Seat {
 }
 
 func (h *patrolScanHost) sessionName(rig, name string) string {
-	return session.PolecatSessionName(session.PrefixFor(rig), name)
+	return session.PolecatSessionName(h.d.prefixRegistry().PrefixForRig(rig), name)
 }
 
 func (h *patrolScanHost) Polecats(rig string) ([]string, error) {

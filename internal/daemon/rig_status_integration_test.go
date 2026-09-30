@@ -120,7 +120,7 @@ func TestIntegrationIsRigOperational_MissingBeadThroughBD(t *testing.T) {
 		t.Errorf("a missing bead must not be logged as a timeout, got:\n%s", logged)
 	}
 
-	waitForRigStatusAlert(t, "the missing-bead escalation", func() bool {
+	waitForRigStatusAlert(t, f, "the missing-bead escalation", func() bool {
 		raised, _, _ := f.alerts.snapshot()
 		return len(raised) == 1
 	})

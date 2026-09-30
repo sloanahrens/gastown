@@ -91,7 +91,10 @@ func TestScriptPluginFailureHandoff_KeepsPluginAgent(t *testing.T) {
 
 	d.startScriptPlugin(p, mgr, sm, router, rec)
 
-	waitFor(t, func() bool { return len(sm.options()) == 1 })
+	d.scripts.wait()
+	if opts := sm.options(); len(opts) != 1 {
+		t.Fatalf("handoff sessions started = %d, want 1", len(opts))
+	}
 	if opts := sm.options(); opts[0].AgentOverride != "claude-opus" {
 		t.Errorf("handoff AgentOverride = %q, want %q", opts[0].AgentOverride, "claude-opus")
 	}

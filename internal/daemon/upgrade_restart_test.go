@@ -37,12 +37,9 @@ func withOwnCommit(d *Daemon, c string) {
 	d.buildCommitFn = func() string { return c }
 }
 
-func captureEscalations(t *testing.T) *[]string {
-	t.Helper()
+func captureEscalations(d *Daemon) *[]string {
 	var keys []string
-	orig := upgradeEscalateFn
-	upgradeEscalateFn = func(d *Daemon, key, msg string) { keys = append(keys, key) }
-	t.Cleanup(func() { upgradeEscalateFn = orig })
+	d.seams.upgradeEscalate = func(_ *Daemon, key, msg string) { keys = append(keys, key) }
 	return &keys
 }
 
@@ -95,13 +92,14 @@ func readReceipts(t *testing.T, d *Daemon) []installReceipt {
 }
 
 func TestUpgradeCoveredMarkerClearedWithReceipt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, marker string }{
 		{"equal", "bbb"},
 		{"ancestor", "aaa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			captureEscalations(t)
 			d := upgradeTestDaemon(t)
+			captureEscalations(d)
 			withOwnCommit(d, "bbb")
 			fakeHistory(t, d, "aaa", "bbb", "ccc")
 			writeMarker(t, d, restartPendingMarker{Commit: tc.marker, Source: "post-merge",
@@ -126,8 +124,9 @@ func TestUpgradeCoveredMarkerClearedWithReceipt(t *testing.T) {
 
 // The receipt's duration_s is an integer, matching the shell writer.
 func TestUpgradeReceiptDurationIsInteger(t *testing.T) {
-	captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	captureEscalations(d)
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa")
 	writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: "/repo",
@@ -148,8 +147,9 @@ func TestUpgradeReceiptDurationIsInteger(t *testing.T) {
 }
 
 func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
-	keys := captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	keys := captureEscalations(d)
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	d.mayorDispatchRunning.Store(true)
@@ -183,8 +183,9 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 }
 
 func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
-	captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	captureEscalations(d)
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	// An unknown field from a future writer must survive the daemon's rewrite.
@@ -211,8 +212,9 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 }
 
 func TestUpgradeNoEffectRestartDoesNotLoop(t *testing.T) {
-	keys := captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	keys := captureEscalations(d)
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo", AttemptedFrom: "aaa"})
@@ -229,8 +231,9 @@ func TestUpgradeNoEffectRestartDoesNotLoop(t *testing.T) {
 // restart again: the attempted_from guard only stops a restart that changed
 // nothing.
 func TestUpgradeAdvancedPastAttemptMayRestartAgain(t *testing.T) {
-	keys := captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	keys := captureEscalations(d)
 	withOwnCommit(d, "bbb")
 	fakeHistory(t, d, "aaa", "bbb", "ccc")
 	writeMarker(t, d, restartPendingMarker{Commit: "ccc", Repo: "/repo", AttemptedFrom: "aaa"})
@@ -247,8 +250,9 @@ func TestUpgradeAdvancedPastAttemptMayRestartAgain(t *testing.T) {
 // rather than silently clearing the marker, and the attempted_from guard
 // stops it from looping when it comes back.
 func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
-	keys := captureEscalations(t)
+	t.Parallel()
 	d := upgradeTestDaemon(t)
+	keys := captureEscalations(d)
 	withOwnCommit(d, "abc1234")
 	fakeHistory(t, d) // every lookup reports "unknown"
 	writeMarker(t, d, restartPendingMarker{Commit: "abc1234def5678"})
@@ -265,7 +269,7 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 
 	// The next daemon (same fake binary) sees attempted_from and cannot prove
 	// it advanced: escalate once, never exit again.
-	d2 := &Daemon{config: d.config, logger: d.logger, openGitFn: d.openGitFn, buildCommitFn: d.buildCommitFn}
+	d2 := &Daemon{config: d.config, logger: d.logger, openGitFn: d.openGitFn, buildCommitFn: d.buildCommitFn, seams: d.seams}
 	if d2.checkUpgradeRestart(time.Now()) || d2.checkUpgradeRestart(time.Now()) {
 		t.Fatal("unprovable progress after an attempted restart must not loop")
 	}
@@ -275,10 +279,11 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 }
 
 func TestUpgradeUnknownOwnCommitIgnoresMarker(t *testing.T) {
+	t.Parallel()
 	for _, own := range []string{"", "unknown"} {
 		t.Run("own="+own, func(t *testing.T) {
-			keys := captureEscalations(t)
 			d := upgradeTestDaemon(t)
+			keys := captureEscalations(d)
 			withOwnCommit(d, own)
 			fakeHistory(t, d, "aaa", "bbb")
 			writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
@@ -294,9 +299,10 @@ func TestUpgradeUnknownOwnCommitIgnoresMarker(t *testing.T) {
 
 // C7: at startup a covered marker clears, but the daemon never exits.
 func TestUpgradeStartupClearsCoveredOnlyNeverRestarts(t *testing.T) {
+	t.Parallel()
 	t.Run("covered clears", func(t *testing.T) {
-		captureEscalations(t)
 		d := upgradeTestDaemon(t)
+		captureEscalations(d)
 		withOwnCommit(d, "bbb")
 		fakeHistory(t, d, "aaa", "bbb")
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
@@ -306,8 +312,8 @@ func TestUpgradeStartupClearsCoveredOnlyNeverRestarts(t *testing.T) {
 		}
 	})
 	t.Run("newer and idle does not restart", func(t *testing.T) {
-		keys := captureEscalations(t)
 		d := upgradeTestDaemon(t)
+		keys := captureEscalations(d)
 		withOwnCommit(d, "aaa")
 		fakeHistory(t, d, "aaa", "bbb")
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
@@ -323,6 +329,7 @@ func TestUpgradeStartupClearsCoveredOnlyNeverRestarts(t *testing.T) {
 }
 
 func TestUpgradeShutdownLeavesDoltRunning(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		upgrade  bool
@@ -350,13 +357,12 @@ func TestUpgradeShutdownLeavesDoltRunning(t *testing.T) {
 }
 
 func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
-	captureEscalations(t)
+	t.Parallel()
 	calls := 0
-	orig := heartbeatWorkFn
-	heartbeatWorkFn = func(d *Daemon, s *State) { calls++ }
-	t.Cleanup(func() { heartbeatWorkFn = orig })
 
 	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	d.seams.heartbeatWork = func(*Daemon, *State) { calls++ }
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	d.heartbeat(&State{})
@@ -445,6 +451,7 @@ func TestResolveOwnCommitWidensThroughTheGastownCheckout(t *testing.T) {
 // ticker): no request, no shutdown; a request runs shutdown without stopping
 // Dolt and yields ErrRestartForUpgrade for Run to return.
 func TestExitForUpgradeIfRequested(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		requested    bool

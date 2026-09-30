@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -72,7 +71,9 @@ func (d *Daemon) triggerDoltBackup() {
 		d.logger.Printf("dolt_backup: due — %s", dec.note)
 	}
 
+	d.doltBackupCycles.Add(1)
 	go func() {
+		defer d.doltBackupCycles.Done()
 		defer d.doltBackupRunning.Store(false)
 		d.syncDoltBackups()
 	}()
@@ -83,7 +84,7 @@ func (d *Daemon) triggerDoltBackup() {
 func (d *Daemon) syncDoltBackups() {
 	// Dolt backup uses iCloud Drive for offsite sync — only available on macOS.
 	// On Linux this generates HIGH priority escalation spam every ~15 minutes.
-	if runtime.GOOS != "darwin" {
+	if d.platform() != "darwin" {
 		return
 	}
 	if !d.isPatrolActive("dolt_backup") {

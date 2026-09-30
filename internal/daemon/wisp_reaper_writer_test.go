@@ -38,9 +38,8 @@ func (w *recordingReaperWriter) DeleteIssues(...string) error { return nil }
 // TestAutoCloseDBLiveClosesThroughBd: the daemon's live auto-close hands the
 // ids to bd through a writer pinned to the swept database, never to SQL
 // (gt-fcxe9.12). The fake driver fails any Exec.
-//
-// Not parallel: it swaps reaperWriterFor.
 func TestAutoCloseDBLiveClosesThroughBd(t *testing.T) {
+	t.Parallel()
 	db, fake := openReaperSweepFake(t, [][]driver.Value{
 		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
 		{"hq-b", "abandoned hq-b", time.Now().UTC().Add(-60 * 24 * time.Hour)},
@@ -49,15 +48,12 @@ func TestAutoCloseDBLiveClosesThroughBd(t *testing.T) {
 
 	w := &recordingReaperWriter{}
 	var gotTown, gotDB string
-	orig := reaperWriterFor
-	reaperWriterFor = func(townRoot, dbName string) (reaper.Writer, error) {
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0), config: &Config{TownRoot: "/town"}}
+	d.reaperWriterForFn = func(townRoot, dbName string) (reaper.Writer, error) {
 		gotTown, gotDB = townRoot, dbName
 		return w, nil
 	}
-	t.Cleanup(func() { reaperWriterFor = orig })
-
-	var buf strings.Builder
-	d := &Daemon{logger: log.New(&buf, "", 0), config: &Config{TownRoot: "/town"}}
 
 	closed, err := d.autoCloseDB(db, "hq", reaper.MinStaleIssueAge, false)
 	if err != nil {
@@ -93,20 +89,18 @@ func TestReaperWriterDryRunNeedsNoBd(t *testing.T) {
 // TestAutoCloseDBLiveUnmappedDatabaseIsAnError: when no beads dir names the
 // swept database there is no bd to write through; with candidates to close,
 // the sweep for that database fails (the step reports it) and nothing is
-// written. Not parallel: it swaps reaperWriterFor.
+// written.
 func TestAutoCloseDBLiveUnmappedDatabaseIsAnError(t *testing.T) {
+	t.Parallel()
 	db, fake := openReaperSweepFake(t, [][]driver.Value{
 		{"orphan-a", "abandoned", time.Now().UTC().Add(-60 * 24 * time.Hour)},
 	})
 	t.Cleanup(func() { _ = db.Close() })
-	orig := reaperWriterFor
-	reaperWriterFor = func(string, string) (reaper.Writer, error) {
-		return nil, errors.New("no beads directory names database \"orphan_db\"")
-	}
-	t.Cleanup(func() { reaperWriterFor = orig })
-
 	var buf strings.Builder
 	d := &Daemon{logger: log.New(&buf, "", 0), config: &Config{TownRoot: "/town"}}
+	d.reaperWriterForFn = func(string, string) (reaper.Writer, error) {
+		return nil, errors.New("no beads directory names database \"orphan_db\"")
+	}
 	closed, err := d.autoCloseDB(db, "orphan_db", reaper.MinStaleIssueAge, false)
 	if err == nil || !strings.Contains(err.Error(), "orphan_db") {
 		t.Errorf("autoCloseDB error = %v, want one naming the unmapped database", err)

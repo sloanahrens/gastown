@@ -61,6 +61,8 @@ type doneOptions struct {
 	// polecatEnv is GT_POLECAT being set: a polecat must bring at least one
 	// commit unless the branch is already pushed or the work is non-code.
 	polecatEnv bool
+	// preVerified skips the local gate. Only the crew path honors it.
+	preVerified bool
 }
 
 // useRealSubmitDeps wires the submit path to the worktree's git, routed bd,

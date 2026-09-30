@@ -263,12 +263,10 @@ func lookupFailBD(hasWork bool) *fakeCLI {
 // does NOT kill a polecat when the agent bead lookup fails but hasAssignedOpenWork
 // confirms the polecat has an open work bead assigned. This is the regression test
 // for the working-bead-lookup-failed kill bug (GH#3342 followup).
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	bd := lookupFailBD(true /* hasWork */)
 
@@ -302,12 +300,10 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 // TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork verifies that reapIdlePolecat
 // DOES kill a polecat when the agent bead lookup fails, no work is assigned, and the
 // agent process is not running. Ensures the hasAssignedOpenWork guard doesn't over-protect.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	bd := lookupFailBD(false /* no work */)
 
@@ -349,13 +345,11 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 // This is the regression test for GH#3342: a failed gt sling rollback can clear
 // the hook while the agent is actively working, causing the daemon to incorrectly
 // reap the session.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 	// Register "myr" prefix so session name resolves to "myr-mycat"
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	// No work bead is assigned (a failed sling rollback cleared the hook).
 	bd := newWorkBD(t)
@@ -393,13 +387,11 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 // TestReapIdlePolecat_ReapsIdleNoHook verifies that reapIdlePolecat DOES kill
 // a polecat whose hook_bead is missing AND whose agent process is NOT running
 // (idle shell). This ensures the GH#3342 fix doesn't prevent legitimate reaping.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 	// Register "myr" prefix so session name resolves to "myr-mycat"
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	// No work bead is assigned (a failed sling rollback cleared the hook).
 	bd := newWorkBD(t)
@@ -446,12 +438,10 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 // reused polecat name inherits the PREVIOUS incarnation's heartbeat file
 // (state=exiting, hours old) until the new incarnation writes its own — the
 // reaper must not treat that inherited staleness as the new session's idle time.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing.T) {
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
@@ -497,12 +487,10 @@ func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing
 // in state=exiting" — because once the gt done process is gone and nothing is
 // renewing, the session really is abandoned and the reaper must still reclaim
 // the API slot.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
@@ -566,12 +554,10 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 // the idle threshold; an unknown one must wait for the 3x ceiling like a live
 // one. The session's pane runs a shell, so the old error-dropping check read
 // the failure as dead and reaped at 2.5x.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
+	registerMyr(t)
 
 	bd := lookupFailBD(false /* no work */)
 
@@ -610,6 +596,7 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 // gt-fcxe9.1: the patrol watchdog passes a dead session outright, so an
 // unknown liveness answer must read as alive (judge by receipts) and be logged.
 func TestPatrolWatchdogSessionAlive_UnknownReadsAliveAndLogs(t *testing.T) {
+	t.Parallel()
 	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
 	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: timed out"))
 	var logBuf strings.Builder
@@ -633,6 +620,7 @@ func TestPatrolWatchdogSessionAlive_UnknownReadsAliveAndLogs(t *testing.T) {
 // reports it dead. Reading it as alive escalated a role that was gone as
 // "awake but NOT patrolling" and then nudged a nonexistent session.
 func TestPatrolWatchdogSessionAlive_MissingSessionReadsDead(t *testing.T) {
+	t.Parallel()
 	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
 	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: %w", tmux.ErrSessionNotFound))
 	var logBuf strings.Builder
@@ -657,6 +645,7 @@ func TestPatrolWatchdogSessionAlive_MissingSessionReadsDead(t *testing.T) {
 // the intent record gt done writes (read before Dolt), and the bead's
 // gt:ready-to-land label for a seat whose record was never written.
 func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
+	t.Parallel()
 	t.Run("intent record", func(t *testing.T) {
 		bd := newWorkBD(t)
 		old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)

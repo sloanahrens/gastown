@@ -444,7 +444,7 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 
 	bad := scriptPlugin(t, "failing", "exit 7\n")
 	d.startScriptPlugin(bad, mgr, sm, router, rec)
-	waitFor(t, func() bool { return len(rec.records()) == 1 && len(sm.startedNames()) == 1 })
+	d.scripts.wait()
 	if recs := rec.records(); recs[0].Result != plugin.ResultFailure {
 		t.Errorf("record = %+v", recs[0])
 	}
@@ -462,7 +462,7 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 
 	good := scriptPlugin(t, "passing", "exit 0\n")
 	d.startScriptPlugin(good, mgr, sm, router, rec)
-	waitFor(t, func() bool { return len(rec.records()) == 2 })
+	d.scripts.wait()
 	if recs := rec.records(); recs[1].Result != plugin.ResultSuccess || len(sm.startedNames()) != 1 || len(router.sentMessages()) != 1 {
 		t.Errorf("success must not touch a dog: recs=%+v started=%v sent=%d", recs, sm.startedNames(), len(router.sentMessages()))
 	}
@@ -476,20 +476,11 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 		t.Errorf("the overlapping start was not refused:\n%s", logs.String())
 	}
 	close(release)
-	waitFor(t, func() bool { return d.scripts.runningCount() == 0 })
+	d.scripts.wait()
+	if n := d.scripts.runningCount(); n != 0 {
+		t.Errorf("%d script plugins still marked running after they finished", n)
+	}
 	if n := len(rec.records()); n != 3 {
 		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 3", n)
 	}
-}
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("condition not met in time")
 }

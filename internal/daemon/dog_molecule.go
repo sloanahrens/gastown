@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 )
@@ -87,7 +88,7 @@ func (dm *dogMol) closeWisp(id string, extra ...string) error {
 			return err
 		}
 		if attempt < dogCloseMaxAttempts {
-			time.Sleep(time.Duration(attempt) * dogCloseRetryDelay)
+			dm.clk().Sleep(time.Duration(attempt) * dogCloseRetryDelay)
 		}
 	}
 	return err
@@ -121,6 +122,10 @@ type dogMol struct {
 	// waitFn overrides the pour retry backoff when set, so tests exercise the
 	// retry path without spending wall-clock time.
 	waitFn func(time.Duration)
+
+	// clock times the close retries and the pour backoff; nil is the real
+	// clock.
+	clock clockwork.Clock
 }
 
 // pourDogMolecule creates an ephemeral wisp molecule from a formula.
@@ -140,6 +145,7 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 		logger:   d.logger,
 		runBdFn:  d.dogPourBdFn,
 		waitFn:   d.dogPourWaitFn,
+		clock:    d.clock,
 	}
 
 	// Build args: bd mol wisp <formula> --var k=v ... --json
@@ -244,7 +250,15 @@ func (dm *dogMol) wait(d time.Duration) {
 		dm.waitFn(d)
 		return
 	}
-	time.Sleep(d)
+	dm.clk().Sleep(d)
+}
+
+// clk is the clock the molecule's retries wait on; nil is the real clock.
+func (dm *dogMol) clk() clockwork.Clock {
+	if dm.clock == nil {
+		return clockwork.NewRealClock()
+	}
+	return dm.clock
 }
 
 // closeStep marks a molecule step as closed.

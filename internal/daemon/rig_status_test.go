@@ -45,19 +45,23 @@ func (a *rigStatusAlerts) snapshot() (raised, messages, cleared []string) {
 	return append([]string(nil), a.raised...), append([]string(nil), a.messages...), append([]string(nil), a.cleared...)
 }
 
-// waitForRigStatusAlert polls until cond holds, for the escalation hooks that
-// run in their own goroutine. It is waitFor (plugin_script_test.go) with a
-// message, so a failure says which escalation never arrived.
-func waitForRigStatusAlert(t *testing.T, what string, cond func() bool) {
+// drainRigEscalations waits until every escalation d has queued for rigName
+// so far has run: the rig's queue is serial, so a marker queued behind them
+// runs last.
+func drainRigEscalations(d *Daemon, rigName string) {
+	done := make(chan struct{})
+	d.rigOperational.enqueueEscalation(rigName, d.logger.Printf, func() { close(done) })
+	<-done
+}
+
+// waitForRigStatusAlert drains the fixture's escalation queue, where the
+// escalation hooks run, and then requires cond, naming what never arrived.
+func waitForRigStatusAlert(t *testing.T, f *rigStatusFixture, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	drainRigEscalations(f.daemon, f.rigName)
+	if !cond() {
+		t.Fatalf("never saw %s", what)
 	}
-	t.Fatalf("timed out waiting for %s", what)
 }
 
 // rigStatusFixture is a town with one rig whose identity-bead reads are served
@@ -266,8 +270,8 @@ func TestIsRigOperational_MemoizesDeterminationWithinTTL(t *testing.T) {
 			// made, not a condition to wake the Mayor about, and the clear is a
 			// `gt escalate clear` subprocess (the cost class this file exists to
 			// remove) that belongs only to a failure that is over. The hooks run
-			// on their own goroutine, hence the settle before asserting.
-			time.Sleep(50 * time.Millisecond)
+			// on the rig's escalation queue, hence the drain before asserting.
+			drainRigEscalations(f.daemon, f.rigName)
 			if raised, _, cleared := f.alerts.snapshot(); len(raised) != 0 || len(cleared) != 0 {
 				t.Errorf("escalations raised=%v cleared=%v, want neither for a rig whose status was read", raised, cleared)
 			}
@@ -386,7 +390,7 @@ func TestIsRigOperational_EscalationsForARigAreSerialized(t *testing.T) {
 
 	close(releaseRaise)
 	<-raiseDone
-	waitForRigStatusAlert(t, "the clear to follow the raise", func() bool {
+	waitForRigStatusAlert(t, f, "the clear to follow the raise", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(order) == 2
@@ -431,7 +435,7 @@ func TestIsRigOperational_TimeoutFailsClosedAndEscalates(t *testing.T) {
 	}
 
 	key := rigStatusAlertKey(f.rigName)
-	waitForRigStatusAlert(t, "the timeout escalation", func() bool {
+	waitForRigStatusAlert(t, f, "the timeout escalation", func() bool {
 		raised, _, _ := f.alerts.snapshot()
 		return len(raised) == 1
 	})
@@ -473,7 +477,7 @@ func TestIsRigOperational_TimeoutFailsClosedAndEscalates(t *testing.T) {
 	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
 		t.Fatalf("recovered rig reported not operational: %q", reason)
 	}
-	waitForRigStatusAlert(t, "the escalation clear", func() bool {
+	waitForRigStatusAlert(t, f, "the escalation clear", func() bool {
 		_, _, cleared := f.alerts.snapshot()
 		return len(cleared) == 1
 	})
@@ -506,7 +510,7 @@ func TestIsRigOperational_MissingBeadIsDistinctFromTimeout(t *testing.T) {
 		t.Errorf("a missing bead must not be logged as a timeout, got:\n%s", logged)
 	}
 
-	waitForRigStatusAlert(t, "the missing-bead escalation", func() bool {
+	waitForRigStatusAlert(t, f, "the missing-bead escalation", func() bool {
 		raised, _, _ := f.alerts.snapshot()
 		return len(raised) == 1
 	})
