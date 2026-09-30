@@ -62,7 +62,7 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 
-	// Create test rigs (gastown → prefix "ga", niflheim → prefix "ni")
+	// Create test rigs (TestMain registers gastown as "ga" and "gt", niflheim as "nif")
 	createTestRig(t, townRoot, "gastown")
 	createTestRig(t, townRoot, "niflheim")
 
@@ -77,12 +77,11 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 		{"polecat_session", "ga-abc123", false},
 
 		// Different rig names
-		{"niflheim_polecat", "ni-toast", false},
-		{"niflheim_crew", "ni-crew-codex1", false},
+		{"niflheim_polecat", "nif-toast", false},
+		{"niflheim_crew", "nif-crew-codex1", false},
 
 		// Invalid sessions SHOULD be detected as orphans
 		{"unknown_prefix", "xx-crew-max", true},          // Unregistered prefix
-		{"unregistered_prefix", "gt-only-two", true},     // "gt" not in test registry
 		{"non_gt_prefix", "foo-gastown-crew-max", false}, // Not a GT session, ignored
 	}
 
@@ -121,7 +120,7 @@ func TestIntegrationCrewSessionProtection(t *testing.T) {
 	}{
 		{"simple_crew", "ga-crew-max", true},
 		{"crew_with_numbers", "ga-crew-worker1", true},
-		{"crew_different_rig", "ni-crew-codex1", true},
+		{"crew_different_rig", "nif-crew-codex1", true},
 		{"polecat_not_crew", "ga-abc", false},
 		{"mayor_not_crew", "hq-mayor", false},
 	}

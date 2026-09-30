@@ -11,15 +11,9 @@ import (
 )
 
 // TestMain runs the integration tier, which starts real git, tmux and bd,
-// under the hermetic harness.
-//
-// The session prefix registry is process state, so it is set here once, to
-// the prefixes createTestRig gives gastown and niflheim, instead of swapped
-// per test.
+// under the hermetic harness. The prefix registry is the unit tier's, so the
+// untagged tests compiled in beside these resolve the same session names.
 func TestMain(m *testing.M) {
-	reg := session.NewPrefixRegistry()
-	reg.Register("ga", "gastown")
-	reg.Register("ni", "niflheim")
-	session.SetDefaultRegistry(reg)
+	session.SetDefaultRegistry(testPrefixRegistry())
 	os.Exit(testutil.HermeticMain(m))
 }
