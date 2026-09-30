@@ -157,11 +157,25 @@ func (c *CLI) exec(ctx context.Context, stdin string, args ...string) error {
 	if ctxErr := contextErr(ctx); ctxErr != nil {
 		return fmt.Errorf("gt %s: %w (%v)", args[0], ctxErr, err)
 	}
-	detail := strings.TrimSpace(string(out))
-	if detail == "" {
-		detail = "<no output>"
+	return fmt.Errorf("gt %s: %w (%s)", args[0], err, firstOutputLine(string(out)))
+}
+
+// firstOutputLine returns the first non-blank line of a failed gt's combined
+// output, or "<no output>" when it printed nothing.
+//
+// A cobra command prints its error and then its entire usage text, and carrying
+// all of it in the error put that block into every caller's log line: the
+// patrol watchdog's nudge failure wrote gt nudge's usage into daemon.log on
+// every cycle, for every parked rig, until gt tail was unreadable (gt-7g14a).
+// The first line is the error the reader needs — "exit status 1 (Error: session
+// hm-witness not found)" — and the rest is boilerplate no log wants.
+func firstOutputLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
 	}
-	return fmt.Errorf("gt %s: %w (%s)", args[0], err, detail)
+	return "<no output>"
 }
 
 var _ Notifier = (*CLI)(nil)

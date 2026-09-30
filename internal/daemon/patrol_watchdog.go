@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/guard"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/witness"
 )
@@ -97,29 +99,120 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 		WorkDir:   townRoot,
 	}}
 
-	for _, rig := range rigs {
-		prefix := config.GetRigPrefix(townRoot, rig)
+	for _, rigName := range rigs {
+		prefix := config.GetRigPrefix(townRoot, rigName)
 
 		targets = append(targets,
 			patrolWatchdogTarget{
 				Role:      constants.RoleWitness,
-				Rig:       rig,
+				Rig:       rigName,
 				Session:   session.WitnessSessionName(prefix),
-				Assignee:  witness.PatrolAssignee(constants.RoleWitness, rig),
+				Assignee:  witness.PatrolAssignee(constants.RoleWitness, rigName),
 				PatrolMol: constants.MolWitnessPatrol,
 				WorkDir:   townRoot,
 			},
 			patrolWatchdogTarget{
 				Role:      constants.RoleRefinery,
-				Rig:       rig,
+				Rig:       rigName,
 				Session:   session.RefinerySessionName(prefix),
-				Assignee:  witness.PatrolAssignee(constants.RoleRefinery, rig),
+				Assignee:  witness.PatrolAssignee(constants.RoleRefinery, rigName),
 				PatrolMol: constants.MolRefineryPatrol,
 				WorkDir:   townRoot,
 			},
 		)
 	}
 	return targets
+}
+
+// pausedRig is a known rig the watchdog will not check, together with the
+// operational state that put it out of reach.
+type pausedRig struct {
+	Rig   string
+	State rig.OpState
+}
+
+// partitionPausedRigs splits the known rigs into the ones the watchdog should
+// check and the ones an operator has paused.
+//
+// A paused rig has no witness and no refinery to check: `gt rig park` stops
+// both, so the sessions the watchdog would query cannot exist. Querying them
+// anyway was not harmless. Every cycle escalated "awake but NOT patrolling" for
+// rigs nobody had started — the liveness read answered alive for a session that
+// outlived the park, while the patrol receipts confirmed a cycle never
+// completed — and then ran `gt nudge` on a session that really was gone. gt's
+// refusal carried its whole usage block, which daemon.log repeated for beads,
+// om, hm and mango every cycle until `gt tail` was unreadable (gt-7g14a).
+//
+// Docked rigs are skipped too, not just parked ones: PARKED and DOCKED are the
+// two states in which the town has decided no agent runs, and the two states in
+// which `isRigOperational` refuses to auto-start one.
+//
+// opState is injected so tests can drive the split with no town on disk. The
+// daemon passes rig.GetOpState — the resolver `gt rig list` and the dashboard
+// share, which reads the wisp layer `gt rig park` writes and then the rig
+// identity bead's labels as the persistent fallback — rather than parsing the
+// wisp JSON here and drifting from the CLI's idea of parked. A read it could
+// not answer reports the rig operational, so a failed read leaves a rig inside
+// the watchdog's reach; the one outcome that must not happen is a live rig
+// dropping silently out of the patrol that exists to notice its silence.
+func partitionPausedRigs(rigs []string, opState func(rigName string) (rig.OpState, string)) (active []string, paused []pausedRig) {
+	for _, rigName := range rigs {
+		state, _ := opState(rigName)
+		if state == rig.OpStateOperational {
+			active = append(active, rigName)
+			continue
+		}
+		paused = append(paused, pausedRig{Rig: rigName, State: state})
+	}
+	return active, paused
+}
+
+// patrolWatchdogPausedLogInterval bounds how often the watchdog repeats its
+// skip line for the same rig in the same state. The watchdog runs every cycle
+// forever, so without a bound a town with four parked rigs writes four
+// identical lines every cycle — the same log-filling shape gt-7g14a exists to
+// remove. A state change is reported at once regardless of the interval.
+const patrolWatchdogPausedLogInterval = time.Hour
+
+// pausedRigSeen is the last skip notice written for one rig.
+type pausedRigSeen struct {
+	state rig.OpState
+	at    time.Time
+}
+
+// pausedRigLog throttles the skip notice to at most one line per rig per
+// patrolWatchdogPausedLogInterval, and remembers enough to tell the first
+// notice for a state from a repeat of it. The zero value is ready to use.
+type pausedRigLog struct {
+	mu   sync.Mutex
+	seen map[string]pausedRigSeen
+}
+
+// observe records the paused state just read for rigName and reports whether a
+// skip notice is due now, and whether this is the rig's first notice in that
+// state — the transition the caller clears the rig's stale patrol alert on.
+func (l *pausedRigLog) observe(rigName string, state rig.OpState, now time.Time) (notice, entered bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil {
+		l.seen = make(map[string]pausedRigSeen)
+	}
+
+	prev, ok := l.seen[rigName]
+	if ok && prev.state == state && now.Sub(prev.at) < patrolWatchdogPausedLogInterval {
+		return false, false
+	}
+	l.seen[rigName] = pausedRigSeen{state: state, at: now}
+	return true, !ok || prev.state != state
+}
+
+// forget drops a rig's entry, so a rig parked again later reads as a fresh
+// transition instead of being suppressed by the interval that covered its
+// previous, already-cleared park.
+func (l *pausedRigLog) forget(rigName string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.seen, rigName)
 }
 
 // patrolWatchdogFinding is one evaluated target: the guard.Result carries the
@@ -191,6 +284,44 @@ func patrolWatchdogAlertKey(target patrolWatchdogTarget) string {
 		return "patrol_watchdog:" + target.Role
 	}
 	return "patrol_watchdog:" + target.Rig + "/" + target.Role
+}
+
+// patrolWatchdogRigAlertKeys returns the alert keys the watchdog can raise for
+// a rig's two patrol roles, so a rig that leaves the watchdog's reach can close
+// both.
+func patrolWatchdogRigAlertKeys(rigName string) []string {
+	return []string{
+		patrolWatchdogAlertKey(patrolWatchdogTarget{Role: constants.RoleWitness, Rig: rigName}),
+		patrolWatchdogAlertKey(patrolWatchdogTarget{Role: constants.RoleRefinery, Rig: rigName}),
+	}
+}
+
+// reportPausedRigs logs the rigs this cycle skipped and clears their patrol
+// alerts on the transition into a paused state.
+//
+// The clear is what keeps a skip from becoming a permanent alarm. The alert key
+// is normally cleared by the Pass verdict a resumed patrol produces, but a
+// paused rig is never judged again, so an alert raised while it was still being
+// watched — exactly the "awake but NOT patrolling" escalation gt-7g14a reports
+// for hm and mango — would otherwise stay open with no verdict ever coming to
+// close it. Parking a rig is the town's decision that nothing there should be
+// running, so the alert is stale the moment the rig is paused, not evidence.
+func (d *Daemon) reportPausedRigs(active []string, paused []pausedRig) {
+	for _, rigName := range active {
+		d.patrolWatchdogPaused.forget(rigName)
+	}
+
+	now := time.Now()
+	for _, p := range paused {
+		notice, entered := d.patrolWatchdogPaused.observe(p.Rig, p.State, now)
+		if !notice {
+			continue
+		}
+		d.logger.Printf("patrol_watchdog: skipping %s: rig is %s, no agents to check", p.Rig, p.State.Label())
+		if entered {
+			d.clearAlerts("rig is "+p.State.Label(), patrolWatchdogRigAlertKeys(p.Rig)...)
+		}
+	}
 }
 
 // patrolWatchdogEscalationMessage builds the mail body for a Fail verdict.
@@ -267,7 +398,11 @@ func (d *Daemon) runPatrolWatchdog() {
 		return
 	}
 
-	rigs := d.getKnownRigs()
+	rigs, paused := partitionPausedRigs(d.getKnownRigs(), func(rigName string) (rig.OpState, string) {
+		return rig.GetOpState(d.config.TownRoot, rigName)
+	})
+	d.reportPausedRigs(rigs, paused)
+
 	targets := patrolWatchdogTargets(d.config.TownRoot, rigs)
 	cadence := patrolWatchdogCadence(d.patrolConfig)
 	multiplier := patrolWatchdogMultiplier(d.patrolConfig)
