@@ -31,11 +31,6 @@ overwrites the backup destination, but that is the intended behavior."""
 formula = "mol-dog-backup"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "sync"
 title = "Sync databases to backup remotes"

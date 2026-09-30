@@ -53,11 +53,6 @@ command_allowlist = [
 	"gt dog done",
 ]
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "scan"
 title = "Scan databases for reaper candidates"

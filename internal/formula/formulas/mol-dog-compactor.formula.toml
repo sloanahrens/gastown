@@ -84,11 +84,6 @@ operator-invoked compaction that follows."""
 formula = "mol-dog-compactor"
 version = 3
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "inspect"
 title = "Inspect databases for commit count"

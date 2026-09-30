@@ -35,11 +35,6 @@ The daemon:
 formula = "mol-dog-checkpoint"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "scan"
 title = "Scan polecat worktrees for dirty state"

@@ -34,11 +34,6 @@ reporting and multi-rig scope."""
 formula = "mol-session-gc"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "determine-mode"
 title = "Determine GC mode"

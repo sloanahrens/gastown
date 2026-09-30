@@ -41,11 +41,6 @@ It only observes and reports."""
 formula = "mol-dog-doctor"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "probe"
 title = "Probe Dolt server connectivity"
