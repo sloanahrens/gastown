@@ -167,6 +167,10 @@ type Manager struct {
 	// draws from the pool, before it takes the per-polecat lock: the window a
 	// create that does not use the pool lock races into (gt-dziey).
 	afterPoolNameAllocated func(name string)
+	// setupTimeout, when positive, bounds one setup_command run; zero means
+	// setupCmdTimeout. Tests set it so the timeout path takes milliseconds
+	// instead of half an hour.
+	setupTimeout time.Duration
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the
@@ -3434,7 +3438,11 @@ func (m *Manager) runSetupCommand(worktreePath string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), setupCmdTimeout)
+	timeout := setupCmdTimeout
+	if m.setupTimeout > 0 {
+		timeout = m.setupTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	shell, args := setupShellCommand(setupCmd)
@@ -3451,7 +3459,7 @@ func (m *Manager) runSetupCommand(worktreePath string) error {
 	fmt.Println("Running setup_command...")
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("setup_command timed out after %s", setupCmdTimeout)
+			return fmt.Errorf("setup_command timed out after %s", timeout)
 		}
 		return fmt.Errorf("setup_command failed: %w", err)
 	}
