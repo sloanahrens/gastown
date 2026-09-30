@@ -24,9 +24,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 # gt-z56xs.3: the internal/cmd integration tier fails its rig-add and run-done
 # tests and hangs behind TestSchedulerSlingContextIdempotency (gt-6ox58.1).
-# gt-6ox58.2: bd init against the pooled Dolt container fails with "could not
-# resolve initial root" for every client-contract subtest.
-: "${TIER_SWEEP_SKIP=integration:./internal/cmd integration:./internal/beads:^TestIntegrationClientContract$}"
+: "${TIER_SWEEP_SKIP=integration:./internal/cmd}"
 : "${TIER_SWEEP_TIMEOUT:=10m}"
 : "${TIER_SWEEP_LOGDIR:=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")}"
 mkdir -p "$TIER_SWEEP_LOGDIR"
