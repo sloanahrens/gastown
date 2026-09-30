@@ -4,106 +4,71 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
-	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // A bond that Dolt aborts for contention is repeated, not surfaced: the abort
 // rolled the transaction back, so nothing was written and the retry cannot
 // duplicate the wisp (gt-4ckuf).
 func TestBondFormulaDirectRetriesDoltSerializationFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stub is a POSIX shell script")
+	t.Parallel()
+	var mu sync.Mutex
+	attempts := 0
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(c.Args) > 1 && c.Args[0] == "mol" && c.Args[1] == "bond" {
+			attempts++
+			if attempts == 1 {
+				return []byte(`{"error":"bonding: spawning and attaching proto: sql commit (regular): Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction","schema_version":1}`), nil, inprocBDExit(1)
+			}
+		}
+		return []byte(`{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-wisp-retry"}}`), nil, nil
 	}
-	townRoot, logPath := setUpContentionStub(t, `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-if [ "$1" = "mol" ]; then
-  if [ "$(grep -c '^CMD:mol bond' "${BD_LOG}")" -eq 1 ]; then
-    echo '{"error":"bonding: spawning and attaching proto: sql commit (regular): Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction","schema_version":1}'
-    exit 1
-  fi
-  echo '{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-wisp-retry"}}'
-  exit 0
-fi
-exit 0
-`)
 
-	rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
+	townRoot := t.TempDir()
+	rootID, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
 	if err != nil {
 		t.Fatalf("bondFormulaDirect: %v", err)
 	}
 	if rootID != "gt-wisp-retry" {
 		t.Fatalf("rootID = %q, want gt-wisp-retry", rootID)
 	}
-	if got := countStubAttempts(t, logPath, "CMD:mol bond"); got != 2 {
-		t.Fatalf("bond attempts = %d, want 2 (one abort, one success)", got)
+	if attempts != 2 {
+		t.Fatalf("bond attempts = %d, want 2 (one abort, one success)", attempts)
 	}
 }
 
 // A failure bd reports for any other reason is an answer, not contention: one
 // attempt, so a permanent error cannot turn into a retry storm.
 func TestBondFormulaDirectDoesNotRetryNonContentionFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stub is a POSIX shell script")
+	t.Parallel()
+	var mu sync.Mutex
+	attempts := 0
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(c.Args) > 1 && c.Args[0] == "mol" && c.Args[1] == "bond" {
+			attempts++
+		}
+		return []byte(`{"error":"missing required vars: feature","schema_version":1}`), nil, inprocBDExit(1)
 	}
-	townRoot, logPath := setUpContentionStub(t, `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-echo '{"error":"missing required vars: feature","schema_version":1}'
-exit 1
-`)
 
-	_, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{})
+	townRoot := t.TempDir()
+	_, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{})
 	if err == nil {
 		t.Fatal("bondFormulaDirect succeeded, want failure")
 	}
 	if !strings.Contains(err.Error(), "missing required vars") {
 		t.Fatalf("error hides bd's cause: %v", err)
 	}
-	if got := countStubAttempts(t, logPath, "CMD:mol bond"); got != 1 {
-		t.Fatalf("bond attempts = %d, want 1 (no retry for a non-contention cause)", got)
+	if attempts != 1 {
+		t.Fatalf("bond attempts = %d, want 1 (no retry for a non-contention cause)", attempts)
 	}
-}
-
-// setUpContentionStub installs script as the bd on PATH, logs its argv to a
-// temp file, and neutralizes the retry backoff so the loop's tests finish
-// without waiting out real sleeps.
-func setUpContentionStub(t *testing.T, script string) (townRoot, logPath string) {
-	t.Helper()
-	townRoot = t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath = filepath.Join(townRoot, "bd.log")
-	_ = writeBDStub(t, binDir, script, "")
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	prevSleep := bdContentionSleep
-	bdContentionSleep = func(time.Duration) {}
-	t.Cleanup(func() { bdContentionSleep = prevSleep })
-	return townRoot, logPath
-}
-
-// countStubAttempts counts the stub invocations whose logged argv starts with
-// prefix — one line per attempt, which is what pins the retry to a count.
-func countStubAttempts(t *testing.T, logPath, prefix string) int {
-	t.Helper()
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read stub log: %v", err)
-	}
-	count := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			count++
-		}
-	}
-	return count
 }
 
 func TestBdSerializationFailure(t *testing.T) {
