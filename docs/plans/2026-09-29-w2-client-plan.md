@@ -1,4 +1,4 @@
-> Status: in progress on crew/sloan/w2-client (gt-7iwy0.2). Historical once merged; not maintained.
+> Status: implemented on crew/sloan/w2-client (gt-7iwy0.2). Historical once merged; not maintained.
 
 # W2: move the library sites to beads.Client (gt-7iwy0.2) Implementation Plan
 
@@ -34,8 +34,8 @@
 |---|---|---|---|
 | `internal/beads/beads_agent.go:230,277-301` | `store.CreateIssue` (createAgentBeadViaStore) | the existing `bd create --json --id --labels=gt:agent` path only | no |
 | `internal/cmd/tracking_relations.go:44-76` | `store.AddDependency` / `store.RemoveDependency` type tracks | `(*Beads).AddTypedDependency` / `RemoveTypedDependency` (`bd dep add/remove A B --type=tracks`) | no |
-| `internal/doltserver/doltserver.go:2880-2886` | `store.SetConfig("issue_prefix")` (EnsureRigIssuePrefix, opens with CreateIfMissing) | `bd config get issue_prefix`; `bd init --prefix --database --server` when the DB has no schema; refuse otherwise | no |
-| `internal/doltserver/doltserver.go:2905-2911` | `store.SetConfig("issue_prefix")` (SetRigIssuePrefix, doctor fix) | `bd rename-prefix <p>` when the DB has a prefix and no row carries another; refuse an unset prefix naming the missing verb | no |
+| `internal/doltserver/doltserver.go:2880-2886` | `store.SetConfig("issue_prefix")` (EnsureRigIssuePrefix, opens with CreateIfMissing) | `bd config get issue_prefix`; the write stays on the library when the value differs (no bd verb; see Execution notes) | no |
+| `internal/doltserver/doltserver.go:2905-2911` | `store.SetConfig("issue_prefix")` (SetRigIssuePrefix, doctor fix) | same helper as above | no |
 | `internal/daemon/convoy_manager.go:735,857-880` | `store.GetAllEventsSince` + audit event types | `(*Beads).EventsTail(since, limit)` = `bd events tail --since --limit`, seq cursor per store | yes |
 | `internal/cmd/daemon_dispatch.go:448-481` | `b.OpenStore` + store `GetReadyWork` (board count) | `(*Beads).ReadyAll()` = `bd ready --json --limit 0 --exclude-label --exclude-type` | yes |
 | `internal/daemon/daemon.go:1692-1735` | `store.DB()` schema_migrations read and events/wisp_events probe | `deps.ReadDBSchemaLevel` via bd per store dir; `EventsTail(0, 1)` probe; journal-config warning | yes |
@@ -143,4 +143,15 @@ func (b *Beads) EventsTail(since int64, limit int) (*EventsPage, error) // on Ad
 
 ## Execution notes
 
-(filled in during execution)
+- **Task 2:** `bd dep remove` has no `--type` flag in either bd build (537accb installed, 92d15f7 origin/main): the old raw-argv fallback for removal always failed. Removal was untyped in the store too, so the existing `RemoveDependency` covers it and only `AddTypedDependency` is new. `bd show --json` and `bd dep list` omit `external:` targets; the fake models that and the contract pins it.
+- **Task 4:** both bd builds honor `BD_EVENTS_JOURNAL=1` with the journal off in config.yaml; the contract cases pass against both (legacy JSON lines on 537accb, the envelope on 92d15f7), run against a scratch Dolt server with `-parallel 1`.
+- **Task 7 (changed):** bd has no verb that sets `issue_prefix` on an existing database. `bd config get` on an empty database creates the schema without a prefix; after that `bd init` refuses ("already initialized" once metadata.json exists), `bd rename-prefix` fails ("failed to get current prefix"), and `bd bootstrap` names the prefix after the database and leaves `issue_prefix` unset. So both doltserver sites read through bd and skip a matching prefix; the write stays on the library in one helper (`writeRigIssuePrefixViaStore`). Needed on the beads side for gt-7iwy0.3: a verb that sets `issue_prefix` on a database whose prefix is unset or stale without rewriting IDs (for example `bd config set issue_prefix` allowed when unset, or `bd rename-prefix --config-only`).
+- **Task 6:** the daemon package's hermetic TestMain renames databases, so the real probe was checked by running its exact argv by hand against the scratch server (level 66, tail, config get).
+- **Latency (scratch Dolt, 20 journal records, 10 ready issues, 20 runs, median / p90):**
+
+| Read | Library in process | bd subprocess |
+|---|---|---|
+| Journal poll (GetAllEventsSince vs events tail) | 0.95 ms / 1.4 ms | 156 ms / 170 ms |
+| Board (GetReadyWork vs ready --limit 0) | 3.8 ms / 4.6 ms | 179 ms / 338 ms |
+
+  The cost is process start, not the query. At the 5 s poll interval with six stores that is about 0.9 s of bd per tick, run serially; the library also paid a 1.1 s open per store that bd does not keep. Not slow enough to revisit read-only library access (epic rule 7); a batched multi-store tail on the beads side would cut it to one process per tick.
