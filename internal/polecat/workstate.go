@@ -331,6 +331,30 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 	return d
 }
 
+// WorkstateReasonParked and WorkstateReuseStatusParked name the disposition of
+// a slot that would otherwise be reusable but carries an agentpause marker.
+const (
+	WorkstateReasonParked      = "parked"
+	WorkstateReuseStatusParked = "idle-parked"
+)
+
+// WithParked overlays a park refusal on a disposition. Parking is a reuse
+// gate, not a lifecycle fact: a parked slot is still safe to nuke and needs no
+// recovery, but it is never handed new work (gt-0r29l), so it must not be
+// reported as reusable either (gt-q6nrm). A disposition that is already not
+// reusable keeps its own reason: the blockers it names are the more actionable
+// answer, and resuming the park would not free the slot.
+func (d WorkstateDisposition) WithParked(reason string) WorkstateDisposition {
+	if !d.Reusable {
+		return d
+	}
+	d.Reusable = false
+	d.Reason = WorkstateReasonParked
+	d.ReuseStatus = WorkstateReuseStatusParked
+	d.Blockers = append(append([]string(nil), d.Blockers...), reason)
+	return d
+}
+
 func gitDirtyBlocker(in WorkstateInput) string {
 	if in.GitDirtyReason != "" {
 		return in.GitDirtyReason

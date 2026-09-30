@@ -345,8 +345,8 @@ func printDispatchNoOp(report capacity.DispatchReport, snapshot polecatCapacityS
 	case "none":
 		fmt.Println("No ready beads scheduled for dispatch")
 	case "capacity":
-		fmt.Printf("\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
-			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
+		fmt.Printf("\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d parked: %d pending_mr: %d)\n",
+			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.Parked, snapshot.PendingMR)
 	default:
 		fmt.Printf("\n%s No dispatchable beads (reason: %s, skipped: %d)\n",
 			style.Dim.Render("○"), report.Reason, report.Skipped)
@@ -362,8 +362,8 @@ func printDryRunPlan(plan capacity.DispatchPlan, snapshot polecatCapacitySnapsho
 
 	capStr := "unlimited"
 	if snapshot.Max > 0 {
-		capStr = fmt.Sprintf("%d free of %d (working: %d, recovery_blocked: %d, reservations: %d, reusable_idle: %d, pending_mr: %d)",
-			snapshot.Free, snapshot.Max, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
+		capStr = fmt.Sprintf("%d free of %d (working: %d, recovery_blocked: %d, reservations: %d, reusable_idle: %d, parked: %d, pending_mr: %d)",
+			snapshot.Free, snapshot.Max, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.Parked, snapshot.PendingMR)
 	}
 
 	totalReady := len(plan.ToDispatch) + plan.Skipped
