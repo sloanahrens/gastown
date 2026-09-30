@@ -19,6 +19,7 @@ func TestIsDoltSQLServerArgs(t *testing.T) {
 	}{
 		{"dolt sql-server --config /tmp/x/dolt-server-config.yaml", true},
 		{"/usr/local/bin/dolt sql-server --port 3307", true},
+		{"dolt --data-dir /x sql-server", true}, // shared matcher: global flags allowed
 		{"dolt sql", false},
 		{"dolt commit -m foo", false},
 		{"claude --dangerously-skip-permissions", false},

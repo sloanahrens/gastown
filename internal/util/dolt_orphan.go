@@ -94,14 +94,10 @@ func parseDoltProcessTable(out string) []doltProcEntry {
 	return entries
 }
 
-// isDoltSQLServerArgs reports whether argv is a `dolt sql-server` invocation:
-// the first token's basename is "dolt" and the second is "sql-server".
+// isDoltSQLServerArgs reports whether a `ps` args string is a `dolt
+// sql-server` invocation; see IsDoltSQLServerArgs for the matching rules.
 func isDoltSQLServerArgs(args string) bool {
-	fields := strings.Fields(args)
-	if len(fields) < 2 {
-		return false
-	}
-	return filepath.Base(fields[0]) == "dolt" && fields[1] == "sql-server"
+	return IsDoltSQLServerArgs(strings.Fields(args))
 }
 
 // doltSQLServerConfigPath extracts the --config flag's value from a dolt

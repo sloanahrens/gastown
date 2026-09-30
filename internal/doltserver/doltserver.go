@@ -55,6 +55,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // EnsureDoltIdentity configures dolt global identity (user.name, user.email)
@@ -1508,8 +1509,8 @@ func ReapOwnedTestServers(townRoot string) (int, error) {
 		}
 		if processIsAlive(pid) {
 			// Re-verified: the PID may have exited and been reused during
-			// the wait (gt-p7zy0).
-			_ = killVerifiedDolt(pid)
+			// the wait (gt-p7zy0), and re-proved to be this town's (gt-l9s6f).
+			_ = killTownDolt(absRoot, pid)
 			time.Sleep(100 * time.Millisecond)
 			stopped++
 		}
@@ -1573,7 +1574,7 @@ func findOwnedDoltTestServerCandidatesFromPS(output, townRoot, dataDir string) [
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if isDoltSQLServerArgs(fields[1:]) {
+		if util.IsDoltSQLServerArgs(fields[1:]) {
 			pids = append(pids, pid)
 		}
 	}
@@ -1581,28 +1582,7 @@ func findOwnedDoltTestServerCandidatesFromPS(output, townRoot, dataDir string) [
 }
 
 func isDoltSQLServerProcess(pid int) bool {
-	return isDoltSQLServerArgs(ProcessArgs(pid))
-}
-
-// isDoltSQLServerArgs is the one dolt sql-server argv matcher, shared by the
-// owned-test-server scan and the pre-signal identity check. Global flags
-// between the binary and the subcommand (`dolt --data-dir x sql-server`) are
-// allowed: externally started servers use them.
-//
-// It fails closed: a dolt whose argv cannot be read (another uid, a zombie),
-// whose binary path contains a space (strings.Fields splits it), or whose
-// wrapper renames argv0 is not matched, and callers then refuse to signal it.
-// Refusing to stop a genuine wedged dolt is the safe direction.
-func isDoltSQLServerArgs(args []string) bool {
-	if len(args) < 2 || filepath.Base(args[0]) != "dolt" {
-		return false
-	}
-	for _, a := range args[1:] {
-		if a == "sql-server" {
-			return true
-		}
-	}
-	return false
+	return util.IsDoltSQLServerArgs(ProcessArgs(pid))
 }
 
 // ProcessArgs returns pid's argv as ps(1) reports it, or nil if it cannot be
@@ -1616,6 +1596,13 @@ func isDoltSQLServerArgs(args []string) bool {
 // know what that PID is now (gt-p7zy0). Do not remove it in a ZFC sweep.
 func ProcessArgs(pid int) []string {
 	return getProcessArgs(pid)
+}
+
+// ProcessCWD returns pid's working directory, or "" if it cannot be read (no
+// such process, lsof missing, Windows). Like ProcessArgs it is evidence for a
+// pre-signal identity check — here, which town a process belongs to.
+func ProcessCWD(pid int) string {
+	return getProcessCWD(pid)
 }
 
 // processArgsForIdentity is ProcessArgs, as a var so tests can present any
@@ -1652,18 +1639,74 @@ func VerifyDoltSQLServerPID(pid int) error {
 	if len(args) == 0 {
 		return fmt.Errorf("cannot read the command line of PID %d: %w", pid, ErrIdentityUnverified)
 	}
-	if !isDoltSQLServerArgs(args) {
+	if !util.IsDoltSQLServerArgs(args) {
 		return fmt.Errorf("PID %d (command: %q): %w", pid, strings.Join(args, " "), ErrNotDoltSQLServer)
 	}
 	return nil
+}
+
+// ErrOtherTownDolt means pid is a dolt sql-server whose data dir, config or
+// working directory names a different town's: a pid file naming it is stale
+// for this town, and this town must not signal it (gt-l9s6f).
+var ErrOtherTownDolt = errors.New("dolt sql-server belongs to another town")
+
+// VerifyTownDoltSQLServerPID returns nil only when pid is a running dolt
+// sql-server serving townRoot's data directory. VerifyDoltSQLServerPID proves
+// "some dolt"; a PID reused by another town's dolt passes that, and signaling
+// it would take down a server this town does not own. Use this wherever the
+// PID came from this town's own state (its pid file, IsRunning) and the intent
+// is to stop THIS town's server.
+//
+// Paths that act on whatever holds this town's port (evictPortSquatter, the
+// imposter kill in KillImposters) keep VerifyDoltSQLServerPID: a foreign dolt
+// on our port is what they exist to remove.
+//
+// Ownership uses the same evidence as IsRunning (doltProcessMatchesTown:
+// --data-dir, then --config, then cwd, then the state file). A dolt with none
+// of it readable is ErrIdentityUnverified, not ErrOtherTownDolt: nothing shows
+// it is foreign. Like VerifyDoltSQLServerPID it does nothing extra on Windows,
+// where there is no argv or cwd to read.
+func VerifyTownDoltSQLServerPID(townRoot string, pid int) error {
+	if err := VerifyDoltSQLServerPID(pid); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	config := DefaultConfig(townRoot)
+	owner := doltProcessOwnerPath(townRoot, pid)
+	if owner == "" {
+		return fmt.Errorf("cannot tell which town PID %d serves (no readable data-dir, config or cwd): %w", pid, ErrIdentityUnverified)
+	}
+	if !doltProcessMatchesTown(townRoot, pid, config) {
+		return fmt.Errorf("PID %d serves %s, not %s: %w", pid, owner, config.DataDir, ErrOtherTownDolt)
+	}
+	return nil
+}
+
+// IsStalePIDFileErr reports whether a Verify*DoltSQLServerPID error proves the
+// pid file that named the PID is stale for this town: the PID is not dolt, or
+// is another town's dolt. ErrIdentityUnverified is not proof of anything.
+func IsStalePIDFileErr(err error) bool {
+	return errors.Is(err, ErrNotDoltSQLServer) || errors.Is(err, ErrOtherTownDolt)
 }
 
 // killVerifiedDolt SIGKILLs pid only if it is still a verified dolt
 // sql-server at this moment. Used for every force-kill so neither a first
 // SIGKILL nor an escalation after a wait can land on a reused PID.
 func killVerifiedDolt(pid int) error {
-	if err := VerifyDoltSQLServerPID(pid); err != nil {
-		return err
+	return killVerified(pid, VerifyDoltSQLServerPID(pid))
+}
+
+// killTownDolt is killVerifiedDolt for a PID that must be this town's own
+// server (VerifyTownDoltSQLServerPID).
+func killTownDolt(townRoot string, pid int) error {
+	return killVerified(pid, VerifyTownDoltSQLServerPID(townRoot, pid))
+}
+
+func killVerified(pid int, verifyErr error) error {
+	if verifyErr != nil {
+		return verifyErr
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -1674,16 +1717,16 @@ func killVerifiedDolt(pid int) error {
 
 // stopOrphanedServer stops a server IsRunning reported whose data directory
 // is gone. When Stop refuses or fails it force-kills — but only a verified
-// dolt. A PID that is not dolt means the pid file is stale: it is removed and
-// nothing is signaled (gt-p7zy0).
+// dolt of this town. A PID that is not this town's dolt means the pid file is
+// stale: it is removed and nothing is signaled (gt-p7zy0, gt-l9s6f).
 func stopOrphanedServer(townRoot string, pid int) {
 	stopErr := Stop(townRoot)
 	if stopErr == nil || pid <= 0 {
 		return
 	}
-	if err := killVerifiedDolt(pid); err != nil {
+	if err := killTownDolt(townRoot, pid); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
-		if errors.Is(err, ErrNotDoltSQLServer) {
+		if IsStalePIDFileErr(err) {
 			_ = os.Remove(DefaultConfig(townRoot).PidFile)
 		}
 		return
@@ -2278,7 +2321,7 @@ func Stop(townRoot string) error {
 		// port forward, a remote host): there is nothing we own to signal.
 		return fmt.Errorf("Dolt server is reachable but has no verifiable local process to stop")
 	}
-	if err := VerifyDoltSQLServerPID(pid); err != nil {
+	if err := VerifyTownDoltSQLServerPID(townRoot, pid); err != nil {
 		return fmt.Errorf("refusing to stop PID %d: %w", pid, err)
 	}
 

@@ -1091,14 +1091,16 @@ func (m *DoltServerManager) stopLocked() {
 
 	// isRunning trusts the pid file plus "something answers on the port" —
 	// neither says what the PID is. Prove it is a dolt sql-server before
-	// signaling it (gt-p7zy0).
-	if err := verifyDoltSQLServerFn(pid); err != nil {
+	// signaling it (gt-p7zy0), and that it serves THIS town: a reused PID
+	// can be another town's dolt (gt-l9s6f).
+	if err := verifyDoltSQLServerFn(m.townRoot, pid); err != nil {
 		m.logger("Not stopping PID %d: %v", pid, err)
 		m.process = nil
-		// A pid file naming a process that is provably not dolt is stale by
-		// definition; left in place it makes every tick see a "running"
-		// server it can never stop. Keep it when ps could not read the argv.
-		if errors.Is(err, doltserver.ErrNotDoltSQLServer) {
+		// A pid file naming a process that is provably not this town's dolt
+		// is stale by definition; left in place it makes every tick see a
+		// "running" server it can never stop. Keep it when ps could not read
+		// the argv or nothing shows whose server it is.
+		if doltserver.IsStalePIDFileErr(err) {
 			_ = os.Remove(m.pidFile())
 		}
 		return
@@ -1137,7 +1139,7 @@ func (m *DoltServerManager) stopLocked() {
 		// dolt fsck to recover.
 		m.logger("Dolt SQL server did not stop gracefully after %s, forcing termination", doltServerStopBudget)
 		// Re-verify: the PID may have exited and been reused during the wait.
-		if err := verifyDoltSQLServerFn(pid); err != nil {
+		if err := verifyDoltSQLServerFn(m.townRoot, pid); err != nil {
 			m.logger("Not force-killing PID %d: %v", pid, err)
 		} else {
 			_ = sendKillSignal(process)
