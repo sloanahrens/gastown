@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -286,6 +285,7 @@ func (f *namedSlingAddErrFake) AddNamedWithOptions(name string, opts polecat.Add
 // in resolveTarget must hand the named polecat to the spawn, for both target
 // forms. It used to pass only the rig, so the pool picked (gt-2w4f9, gt-n2gi).
 func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		target string
 		create bool
@@ -295,26 +295,15 @@ func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
 		{"gastown/garnet", true},
 	} {
 		t.Run(fmt.Sprintf("%s create=%v", tt.target, tt.create), func(t *testing.T) {
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			prevResolve := resolveTargetAgentFn
-			prevSpawn := spawnPolecatForSling
-			t.Cleanup(func() {
-				resolveTargetAgentFn = prevResolve
-				spawnPolecatForSling = prevSpawn
-			})
-			resolveTargetAgentFn = func(string) (string, string, string, error) {
-				return "", "", "", errors.New("no session")
-			}
+			t.Parallel()
+			h := newSlingHarness(t)
 			var got SlingSpawnOptions
-			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			h.run.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 				got = opts
 				return &SpawnedPolecatInfo{RigName: rigName, PolecatName: opts.Name}, nil
 			}
 
-			res, err := resolveTarget(tt.target, ResolveTargetOptions{Create: tt.create, NoBoot: true, TownRoot: townRoot})
+			res, err := h.run.resolveSlingTarget(tt.target, ResolveTargetOptions{Create: tt.create, NoBoot: true, TownRoot: slingTestTown})
 			if err != nil {
 				t.Fatalf("resolveTarget: %v", err)
 			}
@@ -337,6 +326,7 @@ func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
 // or build its worktree under --create, then let runSling return the dry-run
 // report (gt-hw2gj).
 func TestResolveTarget_DryRunNamedPolecatKeepsHandsOff(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		target string
 		create bool
@@ -346,34 +336,16 @@ func TestResolveTarget_DryRunNamedPolecatKeepsHandsOff(t *testing.T) {
 		{"gastown/garnet", true},
 	} {
 		t.Run(fmt.Sprintf("%s create=%v", tt.target, tt.create), func(t *testing.T) {
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			prevResolve := resolveTargetAgentFn
-			prevSpawn := spawnPolecatForSling
-			t.Cleanup(func() {
-				resolveTargetAgentFn = prevResolve
-				spawnPolecatForSling = prevSpawn
-			})
-			resolveTargetAgentFn = func(string) (string, string, string, error) {
-				return "", "", "", errors.New("no session")
-			}
-			spawned := false
-			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-				spawned = true
-				return nil, errors.New("unexpected spawn")
-			}
+			t.Parallel()
+			h := newSlingHarness(t)
 
-			res, err := resolveTarget(tt.target, ResolveTargetOptions{
-				DryRun: true, Create: tt.create, NoBoot: true, TownRoot: townRoot,
+			res, err := h.run.resolveSlingTarget(tt.target, ResolveTargetOptions{
+				DryRun: true, Create: tt.create, NoBoot: true, TownRoot: slingTestTown,
 			})
 			if err != nil {
 				t.Fatalf("resolveTarget: %v", err)
 			}
-			if spawned {
-				t.Fatalf("dry run spawned or reused %s", tt.target)
-			}
+			h.wantNo("spawn")
 			if res.Agent != "gastown/polecats/garnet" {
 				t.Fatalf("Agent = %q; want gastown/polecats/garnet", res.Agent)
 			}
@@ -474,6 +446,7 @@ func TestNamedSling_HeldIssueReachesTheHint(t *testing.T) {
 // to the pool), and the <rig>/<name> shorthand without --create, which stays
 // a resolve error as before.
 func TestResolveTarget_NamedPolecatTargetRefusals(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		target string
 		create bool
@@ -486,32 +459,14 @@ func TestResolveTarget_NamedPolecatTargetRefusals(t *testing.T) {
 		{"gastown/garnet", false, "resolving target"},
 	} {
 		t.Run(fmt.Sprintf("%s create=%v", tt.target, tt.create), func(t *testing.T) {
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			prevResolve := resolveTargetAgentFn
-			prevSpawn := spawnPolecatForSling
-			t.Cleanup(func() {
-				resolveTargetAgentFn = prevResolve
-				spawnPolecatForSling = prevSpawn
-			})
-			resolveTargetAgentFn = func(string) (string, string, string, error) {
-				return "", "", "", errors.New("no session")
-			}
-			spawned := false
-			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-				spawned = true
-				return nil, errors.New("unexpected spawn")
-			}
+			t.Parallel()
+			h := newSlingHarness(t)
 
-			_, err := resolveTarget(tt.target, ResolveTargetOptions{Create: tt.create, NoBoot: true, TownRoot: townRoot})
+			_, err := h.run.resolveSlingTarget(tt.target, ResolveTargetOptions{Create: tt.create, NoBoot: true, TownRoot: slingTestTown})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v; want it to contain %q", err, tt.want)
 			}
-			if spawned {
-				t.Fatal("spawn was called for a target that must be refused")
-			}
+			h.wantNo("spawn")
 		})
 	}
 }
@@ -519,25 +474,14 @@ func TestResolveTarget_NamedPolecatTargetRefusals(t *testing.T) {
 // TestResolveTarget_NamedRefusalNotDoubled: resolveTarget's wrap must not
 // repeat the polecat the refusal already names.
 func TestResolveTarget_NamedRefusalNotDoubled(t *testing.T) {
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	prevResolve := resolveTargetAgentFn
-	prevSpawn := spawnPolecatForSling
-	t.Cleanup(func() {
-		resolveTargetAgentFn = prevResolve
-		spawnPolecatForSling = prevSpawn
-	})
-	resolveTargetAgentFn = func(string) (string, string, string, error) {
-		return "", "", "", errors.New("no session")
-	}
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		return nil, namedPolecatRefusal(rigName, opts.Name, "gt-new", "",
 			fmt.Errorf("%w: not-idle", polecat.ErrPolecatNeedsRecovery))
 	}
 
-	_, err := resolveTarget("gastown/polecats/garnet", ResolveTargetOptions{NoBoot: true, TownRoot: townRoot})
+	_, err := h.run.resolveSlingTarget("gastown/polecats/garnet", ResolveTargetOptions{NoBoot: true, TownRoot: slingTestTown})
 	if err == nil {
 		t.Fatal("expected the refusal")
 	}

@@ -1,34 +1,45 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
-// TestAreScheduledFailClosed verifies that areScheduled fails closed when
-// running outside a town root — all requested IDs should be treated as scheduled.
-// This prevents false stranded detection and duplicate scheduling on transient errors.
+// TestAreScheduledFailClosed: when no town can be found from the cwd, every
+// requested bead reads as scheduled (fail closed), and no sling context is
+// read at all. This prevents false stranded detection and duplicate
+// scheduling on transient errors.
 func TestAreScheduledFailClosed(t *testing.T) {
-	// Run areScheduled from a temp dir that is NOT a town root.
-	// workspace.FindFromCwd will fail, triggering the fail-closed path.
-	tmpDir := t.TempDir()
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("chdir to temp dir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		root string
+		err  error
+	}{
+		{"no town", "", nil},
+		{"unreadable cwd", "", errors.New("getwd: permission denied")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			requestedIDs := []string{"bead-1", "bead-2", "bead-3"}
+			result := areScheduledWith("", requestedIDs,
+				func() (string, error) { return tt.root, tt.err },
+				func(string, []string) map[string]bool {
+					t.Fatal("areScheduled read sling contexts without a town")
+					return nil
+				})
 
-	requestedIDs := []string{"bead-1", "bead-2", "bead-3"}
-	result := areScheduled(requestedIDs)
-
-	// All IDs should appear as scheduled (fail closed)
-	for _, id := range requestedIDs {
-		if !result[id] {
-			t.Errorf("areScheduled fail-closed: expected %q to be marked as scheduled, but it was not", id)
-		}
+			for _, id := range requestedIDs {
+				if !result[id] {
+					t.Errorf("areScheduled fail-closed: expected %q to be marked as scheduled, but it was not", id)
+				}
+			}
+		})
 	}
 }
 
@@ -38,22 +49,18 @@ func TestAreScheduledFailClosed(t *testing.T) {
 // with an empty root, which would write settings/config.json into the cwd
 // (gt-udrrw, gt-bfale).
 func TestShouldDeferDispatchNoTownIsDirect(t *testing.T) {
-	tmpDir := t.TempDir()
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("chdir to temp dir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
-
-	deferred, err := shouldDeferDispatch()
+	t.Parallel()
+	deferred, err := shouldDeferDispatchWith(
+		func() (string, error) { return "", nil },
+		func(path string) (*config.TownSettings, error) {
+			t.Fatalf("shouldDeferDispatch loaded (and could create) settings at %q outside a town", path)
+			return nil, nil
+		})
 	if err != nil {
 		t.Fatalf("shouldDeferDispatch outside a town: unexpected error %v", err)
 	}
 	if deferred {
 		t.Error("shouldDeferDispatch outside a town = true, want false (direct dispatch)")
-	}
-	if _, statErr := os.Stat(filepath.Join(tmpDir, "settings")); !os.IsNotExist(statErr) {
-		t.Errorf("shouldDeferDispatch wrote settings into the cwd (stat err = %v)", statErr)
 	}
 }
 

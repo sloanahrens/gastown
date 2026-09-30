@@ -9,8 +9,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 // slingHarness is a gt sling with every collaborator faked: beads live in a
@@ -26,16 +28,18 @@ type slingHarness struct {
 	run *slingRun
 	out *bytes.Buffer
 
-	mu        sync.Mutex
-	calls     []string
-	beads     map[string]*beadInfo
-	env       map[string]string
-	rigs      map[string]bool
-	formulas  map[string]bool
-	dead      map[string]bool
-	molecules map[string][]string
-	convoys   map[string]string // bead -> tracking convoy
-	stored    map[string][]beadFieldUpdates
+	mu             sync.Mutex
+	calls          []string
+	beads          map[string]*beadInfo
+	env            map[string]string
+	rigs           map[string]bool
+	formulas       map[string]bool
+	dead           map[string]bool
+	molecules      map[string][]string
+	convoys        map[string]string // bead -> tracking convoy
+	stored         map[string][]beadFieldUpdates
+	crew           map[string]bool         // "<rig>/<name>" crew members on disk
+	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
 }
 
 const slingTestTown = "/town"
@@ -43,16 +47,18 @@ const slingTestTown = "/town"
 func newSlingHarness(t *testing.T) *slingHarness {
 	t.Helper()
 	h := &slingHarness{
-		t:         t,
-		out:       &bytes.Buffer{},
-		beads:     map[string]*beadInfo{},
-		env:       map[string]string{"GT_ROLE": "mayor"},
-		rigs:      map[string]bool{"gastown": true},
-		formulas:  map[string]bool{},
-		dead:      map[string]bool{},
-		molecules: map[string][]string{},
-		convoys:   map[string]string{},
-		stored:    map[string][]beadFieldUpdates{},
+		t:              t,
+		out:            &bytes.Buffer{},
+		beads:          map[string]*beadInfo{},
+		env:            map[string]string{"GT_ROLE": "mayor"},
+		rigs:           map[string]bool{"gastown": true},
+		formulas:       map[string]bool{},
+		dead:           map[string]bool{},
+		molecules:      map[string][]string{},
+		convoys:        map[string]string{},
+		stored:         map[string][]beadFieldUpdates{},
+		crew:           map[string]bool{},
+		hookedFormulas: map[string]*beads.Issue{},
 	}
 	d := &slingDeps{
 		getenv: func(k string) string { h.mu.Lock(); defer h.mu.Unlock(); return h.env[k] },
@@ -174,6 +180,26 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		cleanupSpawned: func(s *SpawnedPolecatInfo, _, convoyID string) {
 			h.record("cleanup spawn %s convoy=%s", s.PolecatName, convoyID)
 		},
+		resolveAgent: func(target string) (string, string, string, error) {
+			h.record("resolve agent %s", target)
+			return "", "", "", errors.New("no session")
+		},
+		dispatchDog: func(name string, opts DogDispatchOptions) (*DogDispatchInfo, error) {
+			if name == "" {
+				name = "alpha"
+			}
+			h.record("dispatch dog %s", name)
+			return &DogDispatchInfo{DogName: name, AgentID: "deacon/dogs/" + name,
+				sessionDelayed: true, workDesc: opts.WorkDesc, ownsWork: true}, nil
+		},
+		cwdTown: func() string { return slingTestTown },
+		crewExists: func(_, rig, name string) bool {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.crew[rig+"/"+name]
+		},
+		peekPool: func(string, string, string) (string, string, error) { return "", "", nil },
+		wakeRig:  func(rig string) { h.record("wake rig %s", rig) },
 
 		requester: func() string { return "tester" },
 		notifyWitness: func(_ string, msg *mail.Message) error {
@@ -244,6 +270,31 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			return nil
 		},
 
+		findHookedFormula: func(_, agent, _ string) (*beads.Issue, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.hookedFormulas[agent], nil
+		},
+		cookFormula: func(name, _, _ string) error { h.record("cook formula %s", name); return nil },
+		createWisp: func(name, _, _ string, vars []string) ([]byte, error) {
+			h.record("create wisp %s vars=%s", name, strings.Join(vars, ","))
+			return []byte(`{"root_id":"gt-wisp-new"}`), nil
+		},
+		hookWisp:             func(id, agent, _ string) error { h.record("hook %s %s", id, agent); return nil },
+		burnWisp:             func(id, _ string) error { h.record("burn wisp %s", id); return nil },
+		cleanupFailedDogWisp: func(id, _ string) error { h.record("cleanup dog wisp %s", id); return nil },
+		cleanupStaleDogWisp:  func(id, _ string) error { h.record("cleanup stale dog wisp %s", id); return nil },
+		clearDogWork: func(dog *DogDispatchInfo) error {
+			if dog != nil && dog.ownsWork {
+				h.record("clear dog work %s", dog.DogName)
+			}
+			return nil
+		},
+		nudgeSession: func(session, msg string) error { h.record("nudge session %s: %s", session, msg); return nil },
+		nudgePane:    func(pane, msg string) error { h.record("nudge pane %s: %s", pane, msg); return nil },
+
+		slingContexts: func(string) slingContextStore { return fakeSlingContexts{h} },
+
 		rollbackArtifacts: func(s *SpawnedPolecatInfo, id, _, convoyID string) {
 			name := ""
 			if s != nil {
@@ -287,6 +338,25 @@ func (h *slingHarness) resolveTarget(target string, opts ResolveTargetOptions) (
 		target = "mayor/" // the town singleton's address
 	}
 	return &ResolvedTarget{Agent: target, Pane: "%9"}, nil
+}
+
+// fakeSlingContexts is a rig's sling contexts: none exist, and every lookup
+// and write lands in the call log.
+type fakeSlingContexts struct{ h *slingHarness }
+
+func (f fakeSlingContexts) FindOpenSlingContext(id string) (*beads.Issue, *capacity.SlingContextFields, error) {
+	f.h.record("find context %s", id)
+	return nil, nil, nil
+}
+
+func (f fakeSlingContexts) CreateSlingContext(_, id string, fields *capacity.SlingContextFields) (*beads.Issue, error) {
+	f.h.record("create context %s -> %s", id, fields.TargetRig)
+	return &beads.Issue{ID: "gt-ctx-new"}, nil
+}
+
+func (f fakeSlingContexts) UpdateSlingContextFields(id string, fields *capacity.SlingContextFields) error {
+	f.h.record("update context %s convoy=%s", id, fields.Convoy)
+	return nil
 }
 
 func (h *slingHarness) newSpawn(rig string) *SpawnedPolecatInfo {

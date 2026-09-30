@@ -57,8 +57,8 @@ type dispatchMRLister interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 }
 
-// newDispatchMRLister is a var so tests can substitute a fake lister and
-// assert whether one was built at all.
+// newDispatchMRLister builds the rig's landing-queue reader. A var so the
+// daemon dispatch tests can substitute a fake lister.
 var newDispatchMRLister = func(rigPath string) dispatchMRLister {
 	return beads.New(rigPath)
 }
@@ -74,6 +74,18 @@ var newDispatchMRLister = func(rigPath string) dispatchMRLister {
 // before the pool decision, which spends a tmux round trip and may claim a
 // local seat.
 func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) error {
+	return slingBackpressure{lookupBead: poolBeadLookup, lister: newDispatchMRLister}.check(townRoot, rigName, opts)
+}
+
+// slingBackpressure is the backpressure guard's reads beyond the rig's
+// settings files: the hooked bead's labels and the rig's landing queue.
+type slingBackpressure struct {
+	lookupBead func(townRoot, beadID string) (poolBead, error)
+	lister     func(rigPath string) dispatchMRLister
+}
+
+// check is checkSlingBackpressure.
+func (g slingBackpressure) check(townRoot, rigName string, opts SlingSpawnOptions) error {
 	rigPath := filepath.Join(townRoot, rigName)
 
 	maxReady := 0
@@ -100,12 +112,12 @@ func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) er
 	// sling's own bead validation reports that failure, and the refusal below
 	// tells the operator the two ways through.
 	if opts.HookBead != "" {
-		if bead, err := poolBeadLookup(townRoot, opts.HookBead); err == nil && bead.hasLabel(reworkLabel) {
+		if bead, err := g.lookupBead(townRoot, opts.HookBead); err == nil && bead.hasLabel(reworkLabel) {
 			return nil
 		}
 	}
 
-	ready, err := countReadyToLand(newDispatchMRLister(rigPath), rigName)
+	ready, err := countReadyToLand(g.lister(rigPath), rigName)
 	if err != nil {
 		// Fail open. A queue we cannot read is not evidence of a queue that is
 		// full, and refusing on a Dolt hiccup would stop the whole town.

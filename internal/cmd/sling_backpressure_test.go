@@ -55,20 +55,19 @@ func readyMRs(n int) []*beads.Issue {
 	return mrs
 }
 
-// stubPoolBeadLookup makes the rework-label read answer from a fixed label set
-// instead of the database.
-func stubPoolBeadLookup(t *testing.T, labels ...string) {
-	t.Helper()
-	orig := poolBeadLookup
-	poolBeadLookup = func(_, beadID string) (poolBead, error) {
-		return poolBead{ID: beadID, Labels: labels}, nil
+// backpressureGuard is the guard reading lister for the queue and labels for
+// the hooked bead.
+func backpressureGuard(lister *fakeDispatchMRLister, labels ...string) slingBackpressure {
+	return slingBackpressure{
+		lookupBead: func(_, beadID string) (poolBead, error) { return poolBead{ID: beadID, Labels: labels}, nil },
+		lister:     func(string) dispatchMRLister { return lister },
 	}
-	t.Cleanup(func() { poolBeadLookup = orig })
 }
 
 // TestCheckSlingBackpressure drives the refusal, every way through it, and the
 // two cases where the guard must not even read the queue (gt-xidg, A3).
 func TestCheckSlingBackpressure(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		maxReady  int
@@ -139,15 +138,11 @@ func TestCheckSlingBackpressure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			townRoot, rigName := backpressureTown(t, tt.maxReady)
-			stubPoolBeadLookup(t, tt.labels...)
-
 			lister := &fakeDispatchMRLister{mrs: tt.mrs, err: tt.listerErr}
-			origLister := newDispatchMRLister
-			newDispatchMRLister = func(string) dispatchMRLister { return lister }
-			t.Cleanup(func() { newDispatchMRLister = origLister })
 
-			err := checkSlingBackpressure(townRoot, rigName, SlingSpawnOptions{
+			err := backpressureGuard(lister, tt.labels...).check(townRoot, rigName, SlingSpawnOptions{
 				TownRoot: townRoot,
 				HookBead: tt.hookBead,
 				Force:    tt.force,
@@ -186,20 +181,14 @@ func TestCheckSlingBackpressure(t *testing.T) {
 // unreadable bead is treated as unlabeled rather than assumed to be rework.
 // The refusal names both ways through, so the operator is never stuck.
 func TestCheckSlingBackpressureUnreadableBeadStillCounts(t *testing.T) {
+	t.Parallel()
 	townRoot, rigName := backpressureTown(t, 12)
-
-	origLookup := poolBeadLookup
-	poolBeadLookup = func(_, _ string) (poolBead, error) {
+	guard := backpressureGuard(&fakeDispatchMRLister{mrs: readyMRs(13)})
+	guard.lookupBead = func(_, _ string) (poolBead, error) {
 		return poolBead{}, errors.New("no such bead")
 	}
-	t.Cleanup(func() { poolBeadLookup = origLookup })
 
-	lister := &fakeDispatchMRLister{mrs: readyMRs(13)}
-	origLister := newDispatchMRLister
-	newDispatchMRLister = func(string) dispatchMRLister { return lister }
-	t.Cleanup(func() { newDispatchMRLister = origLister })
-
-	if err := checkSlingBackpressure(townRoot, rigName, SlingSpawnOptions{HookBead: "gt-abc"}); !errors.Is(err, errQueueBackpressure) {
+	if err := guard.check(townRoot, rigName, SlingSpawnOptions{HookBead: "gt-abc"}); !errors.Is(err, errQueueBackpressure) {
 		t.Fatalf("checkSlingBackpressure() error = %v, want errQueueBackpressure", err)
 	}
 }
@@ -208,14 +197,11 @@ func TestCheckSlingBackpressureUnreadableBeadStillCounts(t *testing.T) {
 // (gt sling --hook-raw-bead and the dog paths): there is no label to read, so
 // the count alone decides.
 func TestCheckSlingBackpressureWithoutBead(t *testing.T) {
+	t.Parallel()
 	townRoot, rigName := backpressureTown(t, 12)
+	guard := backpressureGuard(&fakeDispatchMRLister{mrs: readyMRs(13)})
 
-	lister := &fakeDispatchMRLister{mrs: readyMRs(13)}
-	origLister := newDispatchMRLister
-	newDispatchMRLister = func(string) dispatchMRLister { return lister }
-	t.Cleanup(func() { newDispatchMRLister = origLister })
-
-	if err := checkSlingBackpressure(townRoot, rigName, SlingSpawnOptions{}); !errors.Is(err, errQueueBackpressure) {
+	if err := guard.check(townRoot, rigName, SlingSpawnOptions{}); !errors.Is(err, errQueueBackpressure) {
 		t.Fatalf("checkSlingBackpressure() error = %v, want errQueueBackpressure", err)
 	}
 }
@@ -223,14 +209,11 @@ func TestCheckSlingBackpressureWithoutBead(t *testing.T) {
 // TestCheckSlingBackpressureNoSettingsIsOff covers a rig that never configured
 // the knob: no settings file at all must not read as "everything is full".
 func TestCheckSlingBackpressureNoSettingsIsOff(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-
 	lister := &fakeDispatchMRLister{mrs: readyMRs(13)}
-	origLister := newDispatchMRLister
-	newDispatchMRLister = func(string) dispatchMRLister { return lister }
-	t.Cleanup(func() { newDispatchMRLister = origLister })
 
-	if err := checkSlingBackpressure(townRoot, "newrig", SlingSpawnOptions{HookBead: "gt-abc"}); err != nil {
+	if err := backpressureGuard(lister).check(townRoot, "newrig", SlingSpawnOptions{HookBead: "gt-abc"}); err != nil {
 		t.Fatalf("checkSlingBackpressure() error = %v, want nil", err)
 	}
 	if len(lister.calls) != 0 {

@@ -1342,13 +1342,6 @@ const rawSlingMetadataRollbackReason = "Raw sling metadata failed"
 // rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.
 var rollbackSlingArtifactsFn = rollbackSlingArtifacts
 
-// Seams for runSlingFormula's steps between spawn and commit, so tests can
-// fail each one and assert the rollback guard (gt-7evi4).
-var (
-	storeRawSlingMetadataFn      = storeFieldsInBeadFromTownRoot
-	startSpawnedPolecatSessionFn = func(s *SpawnedPolecatInfo) (string, error) { return s.StartSession() }
-)
-
 // Rollback seams allow tests to assert molecule-cleanup behavior without
 // depending on full beads storage side effects.
 var getBeadInfoForRollback = getBeadInfo

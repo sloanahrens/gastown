@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,8 +16,6 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
-	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 type wispCreateJSON struct {
@@ -76,22 +73,22 @@ func closeFormulaWisp(wispRootID, formulaWorkDir, reason string) error {
 	return nil
 }
 
-var cleanupFailedDogFormulaWispFn = cleanupFailedDogFormulaWisp
-var cleanupStaleDogFormulaWispFn = cleanupStaleDogFormulaWisp
-
 // burnSlingWispFn closes a formula wisp a failed or superseded sling owns.
 var burnSlingWispFn = func(wispRootID, formulaWorkDir string) error {
 	return closeFormulaWisp(wispRootID, formulaWorkDir, "burned: formula sling rolled back")
 }
 
-func cleanupDelayedDogFormulaFailure(currentErr error, delayedDogInfo *DogDispatchInfo, wispRootID, formulaWorkDir string) error {
+// cleanupDelayedDogFormulaFailure undoes a delayed dog's part in a failed
+// formula sling: it burns the wisp the sling created and clears the dog's
+// assignment, and still clears the assignment when the burn fails.
+func (d *slingDeps) cleanupDelayedDogFormulaFailure(currentErr error, delayedDogInfo *DogDispatchInfo, wispRootID, formulaWorkDir string) error {
 	var cleanupErr error
 	if wispRootID != "" {
-		if err := cleanupFailedDogFormulaWispFn(wispRootID, formulaWorkDir); err != nil {
+		if err := d.cleanupFailedDogWisp(wispRootID, formulaWorkDir); err != nil {
 			cleanupErr = fmt.Errorf("cleaning failed dog formula wisp %s: %w", wispRootID, err)
 		}
 	}
-	if err := delayedDogInfo.clearWorkIfMatches(); err != nil {
+	if err := d.clearDogWork(delayedDogInfo); err != nil {
 		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("clearing failed dog assignment: %w", err))
 	}
 	if cleanupErr == nil {
@@ -103,21 +100,23 @@ func cleanupDelayedDogFormulaFailure(currentErr error, delayedDogInfo *DogDispat
 	return errors.Join(currentErr, cleanupErr)
 }
 
-func formulaSlingPrompt(formulaName string) string {
-	if slingArgs != "" {
-		return fmt.Sprintf("Formula %s slung. Args: %s. Run `"+cli.Name()+" hook` to see your hook, then execute using these args.", formulaName, slingArgs)
+// formulaSlingPrompt is the start prompt for a formula slung with args.
+func formulaSlingPrompt(formulaName, args string) string {
+	if args != "" {
+		return fmt.Sprintf("Formula %s slung. Args: %s. Run `"+cli.Name()+" hook` to see your hook, then execute using these args.", formulaName, args)
 	}
 	return fmt.Sprintf("Formula %s slung. Run `"+cli.Name()+" hook` to see your hook, then execute the steps.", formulaName)
 }
 
-func nudgeFormulaDog(delayedDogInfo *DogDispatchInfo, prompt string) {
+// nudgeFormulaDog sends prompt to the dog's session. A failed nudge is only
+// reported: the dog discovers its work via gt prime.
+func (d *slingDeps) nudgeFormulaDog(delayedDogInfo *DogDispatchInfo, prompt string) {
 	dogSession := fmt.Sprintf("hq-dog-%s", delayedDogInfo.DogName)
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(dogSession, prompt); err != nil {
-		fmt.Printf("%s Could not nudge dog %s: %v (will discover work via gt prime)\n",
+	if err := d.nudgeSession(dogSession, prompt); err != nil {
+		fmt.Fprintf(d.out, "%s Could not nudge dog %s: %v (will discover work via gt prime)\n",
 			style.Dim.Render("○"), delayedDogInfo.DogName, err)
 	} else {
-		fmt.Printf("%s Nudged dog %s\n", style.Bold.Render("▶"), delayedDogInfo.DogName)
+		fmt.Fprintf(d.out, "%s Nudged dog %s\n", style.Bold.Render("▶"), delayedDogInfo.DogName)
 	}
 }
 
@@ -162,6 +161,7 @@ func newestHookedFormula(hookedBeads []*beads.Issue, formulaName string) *beads.
 	return newest
 }
 
+// findHookedFormulaSingletonFn is a seam for tests of other commands.
 var findHookedFormulaSingletonFn = findHookedFormulaSingleton
 
 func findHookedFormulaForDogPool(workDir, formulaName string, reusableDog func(*beads.Issue, string) bool) (*beads.Issue, string, error) {
@@ -296,16 +296,46 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 	return fmt.Errorf("formula '%s' not found (check 'bd formula list')", formulaName)
 }
 
-// runSlingFormula handles standalone formula slinging.
+// runSlingFormula handles standalone formula slinging with the flags the
+// cobra command holds, from the cwd's town.
+func runSlingFormula(ctx context.Context, args []string) error {
+	return newSlingRun(slingOptionsFromFlags()).runFormula(ctx, args)
+}
+
+// cookStandaloneFormula cooks a formula's proto for a standalone sling.
+func cookStandaloneFormula(formulaName, workDir, townRoot string) error {
+	return BdCmd("cook", formulaName).
+		Dir(workDir).
+		WithGTRoot(townRoot).
+		Run()
+}
+
+// createFormulaWisp instantiates formulaName as an ephemeral wisp and
+// returns bd's JSON answer.
+func createFormulaWisp(formulaName, workDir, townRoot string, vars []string) ([]byte, error) {
+	wispArgs := []string{"mol", "wisp", formulaName}
+	for _, v := range vars {
+		wispArgs = append(wispArgs, "--var", v)
+	}
+	wispArgs = append(wispArgs, "--json")
+	return BdCmd(wispArgs...).
+		Dir(workDir).
+		WithAutoCommit().
+		WithGTRoot(townRoot).
+		Output()
+}
+
+// runFormula handles standalone formula slinging.
 // Flow: cook → wisp → attach to hook → nudge
-func runSlingFormula(ctx context.Context, args []string) (err error) {
+func (r *slingRun) runFormula(ctx context.Context, args []string) (err error) {
 	formulaName := args[0]
+	out := r.out
 
 	// Get town root early - needed for BEADS_DIR when running bd commands
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
+	if r.townErr != nil {
+		return fmt.Errorf("finding town root: %w", r.townErr)
 	}
+	townRoot := r.townRoot
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 
 	// Resolve target using shared dispatch logic
@@ -314,35 +344,37 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		target = args[1]
 	}
 	var admission *polecatAdmissionHandle
-	if !slingDryRun && target != "" {
+	if !r.opts.dryRun && target != "" {
 		admissionRig := ""
-		if rigName, isRig := IsRigName(target); isRig {
+		if rigName, isRig := r.isRigName(target); isRig {
 			admissionRig = rigName
 		}
 		if admissionRig != "" {
-			admission, _, err = acquirePolecatAdmissionFn(townRoot, admissionRig, formulaName, "formula")
+			admission, _, err = r.admitPolecat(townRoot, admissionRig, formulaName, "formula")
 			if err != nil {
 				return err
 			}
 			defer admission.Release()
 		}
 	}
-	if !slingDryRun {
+	if !r.opts.dryRun {
 		if dogName, isDog := IsDogTarget(target); isDog && dogName == "" {
-			poolUnlock, poolLockErr := tryAcquireSlingAssigneeLock(townRoot, "deacon/dogs")
+			// One pool-wide lock, not one per formula: two formulas slung to
+			// the pool at once must not pick the same idle dog.
+			poolUnlock, poolLockErr := r.lockAssignee(townRoot, "deacon/dogs")
 			if poolLockErr != nil {
 				return fmt.Errorf("serializing dog-pool formula sling for %s: %w", formulaName, poolLockErr)
 			}
 			defer poolUnlock()
 		}
 	}
-	resolved, err := resolveTarget(target, ResolveTargetOptions{
-		DryRun:               slingDryRun,
-		Force:                slingForce,
-		Create:               slingCreate,
-		Account:              slingAccount,
-		Agent:                slingAgent,
-		NoBoot:               slingNoBoot,
+	resolved, err := r.resolveTarget(target, ResolveTargetOptions{
+		DryRun:               r.opts.dryRun,
+		Force:                r.opts.force,
+		Create:               r.opts.create,
+		Account:              r.opts.account,
+		Agent:                r.opts.agent,
+		NoBoot:               r.opts.noBoot,
 		WorkDesc:             formulaName,
 		TownRoot:             townRoot,
 		SkipPolecatAdmission: admission != nil,
@@ -356,7 +388,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	delayedDogInfo := resolved.DelayedDogInfo
 	isSelfSling := resolved.IsSelfSling
 
-	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
+	fmt.Fprintf(out, "%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
 
 	// Rollback guard (gt-7evi4): once resolveTarget has spawned or reused a
 	// polecat, every exit that does not reach the commit point rolls it back
@@ -375,15 +407,15 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		// Burn first: the rollback below may remove the sandbox the wisp's
 		// bd commands run from.
 		if wispRootID != "" && delayedDogInfo == nil {
-			if err := burnSlingWispFn(wispRootID, rollbackWorkDir); err != nil {
-				fmt.Printf("  %s Could not burn wisp %s from the failed sling: %v\n", style.Dim.Render("Warning:"), wispRootID, err)
+			if err := r.burnWisp(wispRootID, rollbackWorkDir); err != nil {
+				fmt.Fprintf(out, "  %s Could not burn wisp %s from the failed sling: %v\n", style.Dim.Render("Warning:"), wispRootID, err)
 			} else {
-				fmt.Printf("  %s Burned wisp %s from the failed sling\n", style.Dim.Render("○"), wispRootID)
+				fmt.Fprintf(out, "  %s Burned wisp %s from the failed sling\n", style.Dim.Render("○"), wispRootID)
 			}
 		}
 		if resolved.NewPolecatInfo != nil {
-			fmt.Printf("%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
-			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, rollbackBeadID, rollbackWorkDir, "")
+			fmt.Fprintf(out, "%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
+			r.rollbackArtifacts(resolved.NewPolecatInfo, rollbackBeadID, rollbackWorkDir, "")
 		}
 	}
 	defer rollbackUnlessCommitted()
@@ -397,40 +429,42 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		rollbackWorkDir = formulaWorkDir
 	}
 
-	if slingDryRun {
-		existing, err := findHookedFormulaSingletonFn(formulaWorkDir, targetAgent, formulaName)
+	if r.opts.dryRun {
+		existing, err := r.findHookedFormula(formulaWorkDir, targetAgent, formulaName)
 		if err != nil {
 			return fmt.Errorf("checking existing hooked formulas for %s: %w", targetAgent, err)
 		}
-		if existing != nil && !slingForce {
-			fmt.Printf("Would reuse existing formula %s on %s via %s\n", formulaName, targetAgent, existing.ID)
+		if existing != nil && !r.opts.force {
+			fmt.Fprintf(out, "Would reuse existing formula %s on %s via %s\n", formulaName, targetAgent, existing.ID)
 			return nil
 		}
 
-		fmt.Printf("Would cook formula: %s\n", formulaName)
-		fmt.Printf("Would create wisp and pin to: %s\n", targetAgent)
-		for _, v := range slingVars {
-			fmt.Printf("  --var %s\n", v)
+		fmt.Fprintf(out, "Would cook formula: %s\n", formulaName)
+		fmt.Fprintf(out, "Would create wisp and pin to: %s\n", targetAgent)
+		for _, v := range r.opts.vars {
+			fmt.Fprintf(out, "  --var %s\n", v)
 		}
-		fmt.Printf("Would nudge pane: %s\n", targetPane)
+		fmt.Fprintf(out, "Would nudge pane: %s\n", targetPane)
 		return nil
 	}
 
 	delayedDogComplete := false
 	// Serialize standalone formula slings per assignee so same-formula retries
 	// and handoffs cannot create duplicate hooked wisps for one target.
-	assigneeUnlock, assigneeLockErr := tryAcquireSlingAssigneeLock(townRoot, targetAgent)
+	assigneeUnlock, assigneeLockErr := r.lockAssignee(townRoot, targetAgent)
 	if assigneeLockErr != nil {
 		lockErr := fmt.Errorf("serializing formula sling for %s: %w", targetAgent, assigneeLockErr)
 		if delayedDogInfo == nil {
 			return lockErr
 		}
-		if clearErr := delayedDogInfo.clearWorkIfMatches(); clearErr != nil {
+		if clearErr := r.clearDogWork(delayedDogInfo); clearErr != nil {
 			return errors.Join(lockErr, fmt.Errorf("clearing failed dog assignment: %w", clearErr))
 		}
 		return lockErr
 	}
 	defer assigneeUnlock()
+	// Deferred after the unlock, so the dog cleanup runs while the assignee
+	// lock is still held.
 	defer func() {
 		if delayedDogInfo == nil || delayedDogComplete {
 			return
@@ -438,14 +472,14 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		if err == nil && wispRootID == "" {
 			return
 		}
-		err = cleanupDelayedDogFormulaFailure(err, delayedDogInfo, wispRootID, formulaWorkDir)
+		err = r.cleanupDelayedDogFormulaFailure(err, delayedDogInfo, wispRootID, formulaWorkDir)
 	}()
 	mode := ""
-	if slingRalph {
+	if r.opts.ralph {
 		mode = "ralph"
 	}
 
-	existing, err := findHookedFormulaSingletonFn(formulaWorkDir, targetAgent, formulaName)
+	existing, err := r.findHookedFormula(formulaWorkDir, targetAgent, formulaName)
 	if err != nil {
 		return fmt.Errorf("checking existing hooked formulas for %s: %w", targetAgent, err)
 	}
@@ -454,51 +488,55 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// holder of the slot. Reporting "already hooked, no-op" would leave that
 	// wisp hooked to a polecat nobody starts; burn it and dispatch fresh.
 	if existing != nil && resolved.NewPolecatInfo != nil {
-		fmt.Printf("  %s Burning stale formula wisp %s left hooked to %s\n",
+		fmt.Fprintf(out, "  %s Burning stale formula wisp %s left hooked to %s\n",
 			style.Warning.Render("⚠"), existing.ID, targetAgent)
-		if err := burnSlingWispFn(existing.ID, formulaWorkDir); err != nil {
+		if err := r.burnWisp(existing.ID, formulaWorkDir); err != nil {
 			return fmt.Errorf("burning stale formula wisp %s on %s: %w", existing.ID, targetAgent, err)
 		}
 		existing = nil
 	}
-	if shouldReuseExistingFormula(existing, delayedDogInfo, slingForce) {
+	if shouldReuseExistingFormula(existing, delayedDogInfo, r.opts.force) {
 		existingMode := ""
 		if fields := beads.ParseAttachmentFields(existing); fields != nil {
 			existingMode = fields.Mode
 		}
 		if existingMode != mode {
-			if err := storeRawSlingMetadataFn(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
+			if err := r.storeFields(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
 				return fmt.Errorf("updating existing formula mode: %w", err)
 			}
 			if mode != "" || existingMode != "" {
-				updateAgentMode(targetAgent, mode, "", townBeadsDir)
+				r.updateAgentMode(targetAgent, mode, "", townBeadsDir)
 			}
 		}
-		fmt.Printf("%s Formula %s already hooked to %s via %s, no-op\n",
+		fmt.Fprintf(out, "%s Formula %s already hooked to %s via %s, no-op\n",
 			style.Dim.Render("○"), formulaName, targetAgent, existing.ID)
 		if delayedDogInfo != nil {
-			if _, err := delayedDogInfo.StartDelayedSession(); err != nil {
+			// The dog was assigned this work but its session was delayed:
+			// start and nudge it before reporting the no-op.
+			if _, err := r.startDelayedDog(delayedDogInfo); err != nil {
 				return fmt.Errorf("starting delayed dog session for existing formula: %w", err)
 			}
 			delayedDogComplete = true
-			if os.Getenv("GT_TEST_NO_NUDGE") == "" {
-				nudgeFormulaDog(delayedDogInfo, formulaSlingPrompt(formulaName))
+			if r.getenv("GT_TEST_NO_NUDGE") == "" {
+				r.nudgeFormulaDog(delayedDogInfo, formulaSlingPrompt(formulaName, r.opts.argsText))
 			}
 		}
 		return nil
 	}
+	// A dog that does not own this work may only reuse it; it must not go on
+	// to create a fresh wisp.
 	if delayedDogInfo != nil && !delayedDogInfo.ownsWork {
 		return fmt.Errorf("dog formula reuse became stale before hook verification; retry dispatch")
 	}
-	if existing != nil && !slingForce && delayedDogInfo != nil && delayedDogInfo.ownsWork {
-		if err := cleanupStaleDogFormulaWispFn(existing.ID, formulaWorkDir); err != nil {
+	if existing != nil && !r.opts.force && delayedDogInfo != nil && delayedDogInfo.ownsWork {
+		if err := r.cleanupStaleDogWisp(existing.ID, formulaWorkDir); err != nil {
 			return fmt.Errorf("cleaning stale dog formula wisp %s: %w", existing.ID, err)
 		}
 	}
 	if admission == nil && strings.Contains(targetAgent, "/polecats/") {
 		parts := strings.Split(targetAgent, "/")
 		if len(parts) >= 3 {
-			admission, _, err = acquirePolecatAdmissionFn(townRoot, parts[0], formulaName, "formula")
+			admission, _, err = r.admitPolecat(townRoot, parts[0], formulaName, "formula")
 			if err != nil {
 				return err
 			}
@@ -507,29 +545,16 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	}
 
 	// Step 1: Cook the formula (ensures proto exists)
-	fmt.Printf("  Cooking formula...\n")
-	if err := BdCmd("cook", formulaName).
-		Dir(formulaWorkDir).
-		WithGTRoot(townRoot).
-		Run(); err != nil {
+	fmt.Fprintf(out, "  Cooking formula...\n")
+	if err := r.cookFormula(formulaName, formulaWorkDir, townRoot); err != nil {
 		telemetry.RecordMolCook(ctx, formulaName, err)
 		return fmt.Errorf("cooking formula: %w", err)
 	}
 	telemetry.RecordMolCook(ctx, formulaName, nil)
 
 	// Step 2: Create wisp instance (ephemeral)
-	fmt.Printf("  Creating wisp...\n")
-	wispArgs := []string{"mol", "wisp", formulaName}
-	for _, v := range slingVars {
-		wispArgs = append(wispArgs, "--var", v)
-	}
-	wispArgs = append(wispArgs, "--json")
-
-	wispOut, err := BdCmd(wispArgs...).
-		Dir(formulaWorkDir).
-		WithAutoCommit().
-		WithGTRoot(townRoot).
-		Output()
+	fmt.Fprintf(out, "  Creating wisp...\n")
+	wispOut, err := r.createWisp(formulaName, formulaWorkDir, townRoot, r.opts.vars)
 	if err != nil {
 		return fmt.Errorf("creating wisp: %w", err)
 	}
@@ -542,26 +567,26 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	}
 	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, "", nil)
 
-	fmt.Printf("%s Wisp created: %s\n", style.Bold.Render("✓"), wispRootID)
+	fmt.Fprintf(out, "%s Wisp created: %s\n", style.Bold.Render("✓"), wispRootID)
 
 	// Step 3: Hook the wisp bead with retry and verification.
 	// See: https://github.com/steveyegge/gastown/issues/148.
-	hookDir := beads.ResolveHookDir(townRoot, wispRootID, "")
+	hookDir := r.hookDir(townRoot, wispRootID, "")
 	rollbackBeadID = wispRootID
-	if err := hookBeadWithRetryFn(wispRootID, targetAgent, hookDir); err != nil {
+	if err := r.hookWisp(wispRootID, targetAgent, hookDir); err != nil {
 		return err
 	}
-	fmt.Printf("%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
+	fmt.Fprintf(out, "%s Attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 
 	// Log sling event to activity feed (formula slinging)
-	actor := resolveSlingActor()
+	actor := r.actor()
 	payload := events.SlingPayload(wispRootID, targetAgent)
 	payload["formula"] = formulaName
-	_ = events.LogFeed(events.TypeSling, actor, payload)
+	_ = r.logFeed(events.TypeSling, actor, payload)
 
 	// Update agent bead's hook_bead field (ZFC: agents track their current work)
 	// Note: formula slinging uses town root as workDir (no polecat-specific path)
-	updateAgentHookBead(targetAgent, wispRootID, "", townBeadsDir)
+	r.updateAgentHook(targetAgent, wispRootID, "", townBeadsDir)
 
 	// Store all attachment fields in a single read-modify-write cycle.
 	// NOTE: For standalone formula sling, the wisp IS the work - do NOT store
@@ -570,25 +595,25 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// creates a wisp that's bonded to a separate base bead.
 	fieldUpdates := beadFieldUpdates{
 		Dispatcher:      actor,
-		Args:            slingArgs,
-		Vars:            append([]string(nil), slingVars...),
+		Args:            r.opts.argsText,
+		Vars:            append([]string(nil), r.opts.vars...),
 		AttachedFormula: formulaName,
 		Mode:            &mode,
-		FormulaVars:     strings.Join(slingVars, "\n"),
+		FormulaVars:     strings.Join(r.opts.vars, "\n"),
 	}
-	if err := storeFieldsInBeadFromTownRoot(townRoot, wispRootID, fieldUpdates); err != nil {
-		fmt.Printf("%s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
-	} else if slingArgs != "" {
-		fmt.Printf("%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
+	if err := r.storeFields(townRoot, wispRootID, fieldUpdates); err != nil {
+		fmt.Fprintf(out, "%s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
+	} else if r.opts.argsText != "" {
+		fmt.Fprintf(out, "%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
 	}
 	if mode != "" {
-		updateAgentMode(targetAgent, mode, "", townBeadsDir)
+		r.updateAgentMode(targetAgent, mode, "", townBeadsDir)
 	}
 
 	// Start delayed dog session now that hook is set
 	// This ensures dog sees the hook when gt prime runs on session start
 	if delayedDogInfo != nil {
-		pane, err := delayedDogInfo.StartDelayedSession()
+		pane, err := r.startDelayedDog(delayedDogInfo)
 		if err != nil {
 			return fmt.Errorf("starting delayed dog session: %w", err)
 		}
@@ -599,7 +624,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Start spawned polecat session now that hook is set.
 	// This ensures polecat sees the wisp when gt prime runs on session start.
 	if resolved.NewPolecatInfo != nil {
-		pane, err := startSpawnedPolecatSessionFn(resolved.NewPolecatInfo)
+		pane, err := r.startSession(resolved.NewPolecatInfo)
 		if err != nil {
 			// The guard rolls back: releases the wisp, cleans up the polecat.
 			return fmt.Errorf("starting polecat session: %w", err)
@@ -615,38 +640,37 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Skip for self-sling - agent is currently processing the sling command and will see
 	// the hooked work on next turn. Nudging would inject text while agent is busy.
 	if isSelfSling {
-		fmt.Printf("%s Self-sling: work hooked, will process on next turn\n", style.Dim.Render("○"))
+		fmt.Fprintf(out, "%s Self-sling: work hooked, will process on next turn\n", style.Dim.Render("○"))
 		return nil
 	}
 
 	// Skip nudge during tests to prevent agent self-interruption
-	if os.Getenv("GT_TEST_NO_NUDGE") != "" {
+	if r.getenv("GT_TEST_NO_NUDGE") != "" {
 		return nil
 	}
 
-	prompt := formulaSlingPrompt(formulaName)
+	prompt := formulaSlingPrompt(formulaName, r.opts.argsText)
 
 	// Dog sessions need a nudge sent to their session (not to the bare pane ID
 	// from StartDelayedSession, which is ambiguous on platforms where tmux pane
 	// IDs are not globally unique). Use NudgeSession which qualifies the target
-	// with the session name. (gt-etc)
+	// with the session name, before the empty-pane return below. (gt-etc)
 	if delayedDogInfo != nil {
-		nudgeFormulaDog(delayedDogInfo, prompt)
+		r.nudgeFormulaDog(delayedDogInfo, prompt)
 		return nil
 	}
 
 	if targetPane == "" {
-		fmt.Printf("%s No pane to nudge (agent will discover work via gt prime)\n", style.Dim.Render("○"))
+		fmt.Fprintf(out, "%s No pane to nudge (agent will discover work via gt prime)\n", style.Dim.Render("○"))
 		return nil
 	}
 
-	t := tmux.NewTmux()
-	if err := t.NudgePane(targetPane, prompt); err != nil {
+	if err := r.nudgePane(targetPane, prompt); err != nil {
 		// Graceful fallback for no-tmux mode
-		fmt.Printf("%s Could not nudge (no tmux?): %v\n", style.Dim.Render("○"), err)
-		fmt.Printf("  Agent will discover work via gt prime / bd show\n")
+		fmt.Fprintf(out, "%s Could not nudge (no tmux?): %v\n", style.Dim.Render("○"), err)
+		fmt.Fprintf(out, "  Agent will discover work via gt prime / bd show\n")
 	} else {
-		fmt.Printf("%s Nudged to start\n", style.Bold.Render("▶"))
+		fmt.Fprintf(out, "%s Nudged to start\n", style.Bold.Render("▶"))
 	}
 
 	return nil

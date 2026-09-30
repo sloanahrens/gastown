@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -304,137 +305,22 @@ func TestGetBeadInfoViaReadsRoutedBeadFromRigDatabase(t *testing.T) {
 	}
 }
 
+// TestSlingRejectsBeadMissingFromTargetRigBeforeSpawn: a bead that resolves
+// from HQ but is absent from the target rig's own database is refused before
+// a polecat is spawned for it.
 func TestSlingRejectsBeadMissingFromTargetRigBeforeSpawn(t *testing.T) {
-	townRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead("gt-r2405", beadInfo{Title: "HQ-owned issue"})
+	h.run.opts.noConvoy = true
+	h.run.resolveTarget = h.run.resolveSlingTarget
+	h.run.verifyInTargetRig = func(id, rig, _ string) error {
+		return fmt.Errorf("bead %s is not present in target rig %q", id, rig)
 	}
 
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigs := &config.RigsConfig{
-		Version: 1,
-		Rigs: map[string]config.RigEntry{
-			"gastown": {
-				GitURL:  "git@github.com:test/gastown.git",
-				AddedAt: time.Now().Truncate(time.Second),
-				BeadsConfig: &config.BeadsConfig{
-					Repo:   "local",
-					Prefix: "zz-",
-				},
-			},
-		},
-	}
-	if err := config.SaveRigsConfig(rigsPath, rigs); err != nil {
-		t.Fatalf("SaveRigsConfig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir target rig dir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"."}`,
-		`{"prefix":"zz-","path":"gastown/mayor/rig"}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -e
-echo "$*" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-if [ "$cmd" = "--allow-stale" ]; then
-  cmd="$1"
-  shift || true
-fi
-case "$cmd" in
-  show)
-    if [ "${BEADS_DIR:-}" = "${TARGET_BEADS_DIR}" ]; then
-      # The direct target-rig DB lookup must fail: the bead only resolves from HQ.
-      exit 1
-    fi
-    echo '[{"title":"HQ-owned issue","status":"open","assignee":"","description":""}]'
-    ;;
-  mol|update|cook)
-    echo "unexpected side effect: $cmd" >&2
-    exit 2
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-echo %*>>"%BD_LOG%"
-set "cmd=%1"
-if "%cmd%"=="show" (
-  if "%BEADS_DIR%"=="%TARGET_BEADS_DIR%" exit /b 1
-  echo [{"title":"HQ-owned issue","status":"open","assignee":"","description":""}]
-  exit /b 0
-)
-if "%cmd%"=="mol" exit /b 2
-if "%cmd%"=="update" exit /b 2
-if "%cmd%"=="cook" exit /b 2
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("TARGET_BEADS_DIR", filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads"))
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevNoConvoy := slingNoConvoy
-	prevNoBoot := slingNoBoot
-	prevSpawn := spawnPolecatForSling
-	t.Cleanup(func() {
-		slingNoConvoy = prevNoConvoy
-		slingNoBoot = prevNoBoot
-		spawnPolecatForSling = prevSpawn
-	})
-	slingNoConvoy = true
-	slingNoBoot = true
-
-	spawnCalled := false
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		spawnCalled = true
-		return &SpawnedPolecatInfo{RigName: rigName, PolecatName: "toast", ClonePath: filepath.Join(townRoot, "fake-polecat")}, nil
-	}
-
-	err = runSling(nil, []string{"gt-r2405", "gastown"})
-	if err == nil {
-		t.Fatal("expected target-rig database validation error")
-	}
-	if !strings.Contains(err.Error(), "not present in target rig") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if spawnCalled {
-		t.Fatal("spawnPolecatForSling was called before target-rig database validation rejected the bead")
-	}
+	wantSlingErr(t, h.sling("gt-r2405", "gastown"), "not present in target rig")
+	h.wantNo("spawn")
+	h.wantNo("hook")
 }
 
 // TestTargetRigDatabaseAllowsRouteResolvedGtBead: a gt- bead whose id also
@@ -595,26 +481,21 @@ exit /b 0
 	return townRoot, logPath
 }
 
+// TestScheduleBeadRejectsMissingTargetRigDatabaseBeforeContext: scheduling
+// a bead absent from the target rig's database is refused before any sling
+// context, cook, convoy or feed write.
 func TestScheduleBeadRejectsMissingTargetRigDatabaseBeforeContext(t *testing.T) {
-	_, logPath := setupCrossDatabaseSlingGuardTest(t)
-
-	err := scheduleBead("gt-r2405", "gastown", ScheduleOptions{})
-	if err == nil {
-		t.Fatal("expected target-rig database validation error")
-	}
-	if !strings.Contains(err.Error(), "not present in target rig") {
-		t.Fatalf("unexpected error: %v", err)
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead("gt-r2405", beadInfo{Title: "HQ-owned issue"})
+	h.run.verifyInTargetRig = func(id, rig, _ string) error {
+		return fmt.Errorf("bead %s is not present in target rig %q", id, rig)
 	}
 
-	logBytes, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		t.Fatalf("read bd log: %v", readErr)
-	}
-	log := string(logBytes)
-	for _, sideEffect := range []string{"create", "update", "cook", "mol", "close", "dep"} {
-		if strings.Contains(log, sideEffect) {
-			t.Fatalf("bd side effect %q ran before target-rig database validation rejected the bead; log:\n%s", sideEffect, log)
-		}
+	err := h.run.scheduleSlingBead("gt-r2405", "gastown", ScheduleOptions{Formula: "mol-polecat-work"})
+	wantSlingErr(t, err, "not present in target rig")
+	for _, sideEffect := range []string{"find context", "create context", "update context", "cook", "create convoy", "feed"} {
+		h.wantNo(sideEffect)
 	}
 }
 
@@ -663,121 +544,66 @@ func TestSchedulerRejectsReviewOnlyForEpicConvoy(t *testing.T) {
 	}
 }
 
+// TestResolveTargetRejectsLivePolecatMissingTargetRigDatabase: a live
+// polecat target, in every address form, is refused when the bead is absent
+// from that polecat's rig database.
 func TestResolveTargetRejectsLivePolecatMissingTargetRigDatabase(t *testing.T) {
-	townRoot, _ := setupCrossDatabaseSlingGuardTest(t)
-
-	prevResolve := resolveTargetAgentFn
-	t.Cleanup(func() { resolveTargetAgentFn = prevResolve })
-	resolveTargetAgentFn = func(target string) (string, string, string, error) {
-		return "gastown/polecats/toast", "%1", filepath.Join(townRoot, "gastown", "polecats", "toast"), nil
-	}
-
+	t.Parallel()
 	for _, target := range []string{"gastown/polecats/toast", "gastown/toast", "gt-gastown-polecat-toast"} {
 		t.Run(target, func(t *testing.T) {
-			_, err := resolveTarget(target, ResolveTargetOptions{
-				BeadID:   "gt-r2405",
-				TownRoot: townRoot,
-			})
-			if err == nil {
-				t.Fatal("expected target-rig database validation error")
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.run.resolveAgent = func(string) (string, string, string, error) {
+				return "gastown/polecats/toast", "%1", slingTestTown + "/gastown/polecats/toast", nil
 			}
-			if !strings.Contains(err.Error(), "not present in target rig") {
-				t.Fatalf("unexpected error: %v", err)
+			h.run.verifyInTargetRig = func(id, rig, _ string) error {
+				h.record("verify %s in %s", id, rig)
+				return fmt.Errorf("bead %s is not present in target rig %q", id, rig)
 			}
+
+			_, err := h.run.resolveSlingTarget(target, ResolveTargetOptions{BeadID: "gt-r2405", TownRoot: slingTestTown})
+			wantSlingErr(t, err, "not present in target rig")
+			h.wantCalls("verify", "verify gt-r2405 in gastown")
 		})
 	}
 }
 
+// TestResolveTargetCreateSpawnsPolecatShorthandWhenPaneMissing: under
+// --create, a <rig>/<name> shorthand with no session and no crew member of
+// that name spawns the named polecat, keeping --create.
 func TestResolveTargetCreateSpawnsPolecatShorthandWhenPaneMissing(t *testing.T) {
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
+	t.Parallel()
+	h := newSlingHarness(t)
+	var gotRig string
+	var got SlingSpawnOptions
+	h.run.spawnPolecat = func(rig string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		gotRig, got = rig, opts
+		return &SpawnedPolecatInfo{RigName: rig, PolecatName: opts.Name}, nil
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevResolve := resolveTargetAgentFn
-	prevSpawn := spawnPolecatForSling
-	t.Cleanup(func() {
-		resolveTargetAgentFn = prevResolve
-		spawnPolecatForSling = prevSpawn
-	})
-	resolveTargetAgentFn = func(target string) (string, string, string, error) {
-		return "", "", "", errors.New("getting pane for gt-toast: exit status 1")
-	}
-
-	spawnCalled := false
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		spawnCalled = true
-		if rigName != "gastown" {
-			t.Fatalf("rigName = %q, want gastown", rigName)
-		}
-		if !opts.Create {
-			t.Fatal("expected Create option to be preserved")
-		}
-		return &SpawnedPolecatInfo{RigName: rigName, PolecatName: "toast", ClonePath: filepath.Join(townRoot, "fake-polecat")}, nil
-	}
-
-	got, err := resolveTarget("gastown/toast", ResolveTargetOptions{Create: true, NoBoot: true})
+	res, err := h.run.resolveSlingTarget("gastown/toast", ResolveTargetOptions{Create: true, NoBoot: true})
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
-	if !spawnCalled {
-		t.Fatal("expected spawnPolecatForSling to be called")
+	if gotRig != "gastown" || got.Name != "toast" || !got.Create {
+		t.Fatalf("spawn(%q, Name=%q Create=%v), want (gastown, toast, true)", gotRig, got.Name, got.Create)
 	}
-	if got.Agent != "gastown/polecats/toast" {
-		t.Fatalf("Agent = %q, want gastown/polecats/toast", got.Agent)
+	if res.Agent != "gastown/polecats/toast" {
+		t.Fatalf("Agent = %q, want gastown/polecats/toast", res.Agent)
 	}
 }
 
+// TestResolveTargetCreateDoesNotSpawnCrewShorthandWhenPaneMissing: a
+// <rig>/<name> shorthand that names a crew member with no session stays a
+// resolve error even under --create; it never becomes a polecat.
 func TestResolveTargetCreateDoesNotSpawnCrewShorthandWhenPaneMissing(t *testing.T) {
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "crew", "toast"), 0755); err != nil {
-		t.Fatalf("mkdir crew: %v", err)
-	}
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.crew["gastown/toast"] = true
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevResolve := resolveTargetAgentFn
-	prevSpawn := spawnPolecatForSling
-	t.Cleanup(func() {
-		resolveTargetAgentFn = prevResolve
-		spawnPolecatForSling = prevSpawn
-	})
-	resolveTargetAgentFn = func(target string) (string, string, string, error) {
-		return "", "", "", errors.New("getting pane for gt-crew-toast: exit status 1")
-	}
-
-	spawnCalled := false
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		spawnCalled = true
-		return nil, errors.New("unexpected spawn")
-	}
-
-	_, err = resolveTarget("gastown/toast", ResolveTargetOptions{Create: true, NoBoot: true})
-	if err == nil {
-		t.Fatal("expected resolve error for missing crew pane")
-	}
-	if spawnCalled {
-		t.Fatal("crew shorthand must not spawn a polecat")
-	}
+	_, err := h.run.resolveSlingTarget("gastown/toast", ResolveTargetOptions{Create: true, NoBoot: true})
+	wantSlingErr(t, err, "resolving target")
+	h.wantNo("spawn")
 }
 
 func TestTargetRigDatabaseLookupFailsClosedWithoutTownRoot(t *testing.T) {
@@ -826,438 +652,93 @@ func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
 	}
 }
 
+// TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure: a formula slung to a
+// rig spawns its polecat before the wisp exists, so a failed wisp create
+// rolls the polecat back, naming no bead and using the polecat's clone as the
+// working directory.
 func TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure(t *testing.T) {
-	townRoot := t.TempDir()
-
-	// Minimal workspace marker so workspace.FindFromCwd() succeeds.
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.createWisp = func(string, string, string, []string) ([]byte, error) {
+		return nil, errors.New("missing required vars")
+	}
+	h.run.rollbackArtifacts = func(s *SpawnedPolecatInfo, id, dir, _ string) {
+		h.record("rollback %s bead=%q dir=%s", s.PolecatName, id, dir)
 	}
 
-	// Register rig so IsRigName("gastown") succeeds.
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigs := &config.RigsConfig{
-		Version: 1,
-		Rigs: map[string]config.RigEntry{
-			"gastown": {
-				GitURL:    "git@github.com:test/gastown.git",
-				LocalRepo: "",
-				AddedAt:   time.Now().Truncate(time.Second),
-				BeadsConfig: &config.BeadsConfig{
-					Repo:   "local",
-					Prefix: "gt-",
-				},
-			},
-		},
-	}
-	if err := config.SaveRigsConfig(rigsPath, rigs); err != nil {
-		t.Fatalf("SaveRigsConfig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir rig beads dir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0755); err != nil {
-		t.Fatalf("mkdir rig dir: %v", err)
-	}
-
-	// Stub bd: cook succeeds; mol wisp fails to simulate missing required vars.
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	bdScript := `#!/bin/sh
-set -e
-cmd="$1"
-shift || true
-case "$cmd" in
-  cook)
-    exit 0
-    ;;
-  mol)
-    sub="$1"
-    shift || true
-    case "$sub" in
-      wisp)
-        echo "missing required vars" 1>&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo missing required vars 1>&2
-    exit /b 1
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Ensure we don't leak global flag/seam state across tests.
-	prevNoBoot := slingNoBoot
-	prevDryRun := slingDryRun
-	prevSpawn := spawnPolecatForSling
-	prevRollback := rollbackSlingArtifactsFn
-	t.Cleanup(func() {
-		slingNoBoot = prevNoBoot
-		slingDryRun = prevDryRun
-		spawnPolecatForSling = prevSpawn
-		rollbackSlingArtifactsFn = prevRollback
-	})
-
-	slingDryRun = false
-	slingNoBoot = true
-
-	fakeWorkDir := filepath.Join(townRoot, "fake-polecat")
-	if err := os.MkdirAll(fakeWorkDir, 0755); err != nil {
-		t.Fatalf("mkdir fakeWorkDir: %v", err)
-	}
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		return &SpawnedPolecatInfo{
-			RigName:     rigName,
-			PolecatName: "Toast",
-			ClonePath:   fakeWorkDir,
-		}, nil
-	}
-
-	rollbackCalled := false
-	rollbackSlingArtifactsFn = func(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
-		rollbackCalled = true
-		if spawnInfo == nil || spawnInfo.PolecatName != "Toast" {
-			t.Fatalf("unexpected spawnInfo in rollback: %+v", spawnInfo)
-		}
-		if beadID != "" {
-			t.Fatalf("unexpected beadID in rollback: %q", beadID)
-		}
-		if hookWorkDir != fakeWorkDir {
-			t.Fatalf("unexpected hookWorkDir in rollback: got %q want %q", hookWorkDir, fakeWorkDir)
-		}
-	}
-
-	err = runSlingFormula(context.Background(), []string{"mol-anything", "gastown"})
-	if err == nil {
-		t.Fatalf("expected error from runSlingFormula")
-	}
-	if !rollbackCalled {
-		t.Fatalf("expected rollbackSlingArtifactsFn to be called")
-	}
+	err := h.run.runFormula(context.Background(), []string{"mol-anything", "gastown"})
+	wantSlingErr(t, err, "creating wisp")
+	h.wantCalls("rollback", `rollback Toast bead="" dir=`+slingTestTown+"/gastown/polecats/Toast")
 }
 
+// TestRunSlingFormulaPersistsVarContext: a standalone formula sling passes
+// its --var values to the wisp and stores the formula, the vars and ralph
+// mode on the wisp it hooks, so they survive the session.
 func TestRunSlingFormulaPersistsVarContext(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.resolveSelf = func() (string, string, string, error) { return "mayor/", "", slingTestTown, nil }
+	h.run.opts.vars = []string{"version=1.2.3", "channel=stable"}
+	h.run.opts.ralph = true
 
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
+	if err := h.run.runFormula(context.Background(), []string{"mol-anything"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
+	h.wantCalls("create wisp", "create wisp mol-anything vars=version=1.2.3,channel=stable")
+	h.wantCalls("hook", "hook gt-wisp-new mayor/")
+	h.wantCalls("agent mode", "agent mode mayor/ ralph")
+
+	stored := h.stored["gt-wisp-new"]
+	if len(stored) != 1 {
+		t.Fatalf("stored field updates = %+v, want one", stored)
 	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
+	u := stored[0]
+	if u.AttachedFormula != "mol-anything" {
+		t.Errorf("AttachedFormula = %q, want mol-anything", u.AttachedFormula)
 	}
-
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -e
-echo "$PWD|$*" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-case "$cmd" in
-  formula)
-    echo '{"name":"mol-anything"}'
-    ;;
-  cook)
-    exit 0
-    ;;
-  list|query)
-    echo '[]'
-    ;;
-  mol)
-    sub="$1"
-    shift || true
-    case "$sub" in
-      wisp)
-        echo '{"new_epic_id":"gt-wisp-xyz"}'
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo %CD%^|%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="formula" (
-  echo {"name":"mol-anything"}
-  exit /b 0
-)
-if "%cmd%"=="list" (
-  echo []
-  exit /b 0
-)
-if "%cmd%"=="query" (
-  echo []
-  exit /b 0
-)
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo {"new_epic_id":"gt-wisp-xyz"}
-    exit /b 0
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	attachedLogPath := filepath.Join(townRoot, "attached-molecule.log")
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", attachedLogPath)
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+	if u.FormulaVars != "version=1.2.3\nchannel=stable" || strings.Join(u.Vars, ",") != "version=1.2.3,channel=stable" {
+		t.Errorf("vars = %q / %q, want both --var values", u.FormulaVars, u.Vars)
 	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevVars := slingVars
-	prevDryRun := slingDryRun
-	prevNoBoot := slingNoBoot
-	prevRalph := slingRalph
-	t.Cleanup(func() {
-		slingVars = prevVars
-		slingDryRun = prevDryRun
-		slingNoBoot = prevNoBoot
-		slingRalph = prevRalph
-	})
-
-	slingVars = []string{"version=1.2.3", "channel=stable"}
-	slingDryRun = false
-	slingNoBoot = true
-	slingRalph = true
-
-	if err := runSlingFormula(context.Background(), []string{"mol-anything"}); err != nil {
-		t.Fatalf("runSlingFormula: %v", err)
-	}
-
-	attachmentBytes, err := os.ReadFile(attachedLogPath)
-	if err != nil {
-		t.Fatalf("read attachment log: %v", err)
-	}
-	attachment := string(attachmentBytes)
-
-	if !strings.Contains(attachment, "attached_formula: mol-anything") {
-		t.Fatalf("formula attachment missing from persisted description:\n%s", attachment)
-	}
-	if !strings.Contains(attachment, "version=1.2.3") || !strings.Contains(attachment, "channel=stable") {
-		t.Fatalf("formula vars missing from persisted description:\n%s", attachment)
-	}
-	if !strings.Contains(attachment, "mode: ralph") {
-		t.Fatalf("ralph mode missing from persisted standalone formula description:\n%s", attachment)
+	if u.Mode == nil || *u.Mode != "ralph" {
+		t.Errorf("Mode = %v, want ralph", u.Mode)
 	}
 }
 
+// TestRunSlingFormulaNoOpWhenSameFormulaAlreadyHooked: slinging a formula
+// already hooked to the target, in the same mode, writes nothing: no cook, no
+// new wisp, no hook and no field update.
 func TestRunSlingFormulaNoOpWhenSameFormulaAlreadyHooked(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.resolveSelf = func() (string, string, string, error) { return "mayor/", "", slingTestTown, nil }
+	h.hookedFormulas["mayor/"] = &beads.Issue{ID: "gt-wisp-existing"}
 
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
+	if err := h.run.runFormula(context.Background(), []string{"mol-anything"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -e
-echo "$PWD|$*" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-case "$cmd" in
-  cook|mol|update)
-    exit 0
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo %CD%^|%*>>"%BD_LOG%"
-set "cmd=%1"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" exit /b 0
-if "%cmd%"=="update" exit /b 0
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevDryRun := slingDryRun
-	prevNoBoot := slingNoBoot
-	prevForce := slingForce
-	prevFindSingleton := findHookedFormulaSingletonFn
-	t.Cleanup(func() {
-		slingDryRun = prevDryRun
-		slingNoBoot = prevNoBoot
-		slingForce = prevForce
-		findHookedFormulaSingletonFn = prevFindSingleton
-	})
-
-	slingDryRun = false
-	slingNoBoot = true
-	slingForce = false
-	findHookedFormulaSingletonFn = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
-		return &beads.Issue{ID: "gt-wisp-existing"}, nil
-	}
-
-	if err := runSlingFormula(context.Background(), []string{"mol-anything"}); err != nil {
-		t.Fatalf("runSlingFormula: %v", err)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read bd log: %v", err)
-	}
-	log := string(logBytes)
-
-	if strings.Contains(log, "cook ") || strings.Contains(log, "mol wisp") || strings.Contains(log, "update ") {
-		t.Fatalf("expected same-formula sling to no-op before creating a new wisp, got:\n%s", log)
+	for _, write := range []string{"cook", "create wisp", "hook", "store fields", "agent mode"} {
+		h.wantNo(write)
 	}
 }
 
+// TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked: re-slinging
+// the hooked formula without --ralph clears the stale ralph mode on the
+// existing wisp and the agent, and still creates no new wisp.
 func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.resolveSelf = func() (string, string, string, error) { return "mayor/", "", slingTestTown, nil }
+	h.hookedFormulas["mayor/"] = &beads.Issue{ID: "gt-wisp-existing", Description: "attached_formula: mol-anything\nmode: ralph"}
 
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
+	if err := h.run.runFormula(context.Background(), []string{"mol-anything"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
+	stored := h.stored["gt-wisp-existing"]
+	if len(stored) != 1 || stored[0].Mode == nil || *stored[0].Mode != "" {
+		t.Fatalf("stored field updates = %+v, want one clearing the mode", stored)
 	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	bdScript := `#!/bin/sh
-exit 0
-`
-	bdScriptWindows := `@echo off
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	attachedLogPath := filepath.Join(townRoot, "attached-molecule.log")
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", attachedLogPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevDryRun := slingDryRun
-	prevNoBoot := slingNoBoot
-	prevForce := slingForce
-	prevRalph := slingRalph
-	prevFindSingleton := findHookedFormulaSingletonFn
-	t.Cleanup(func() {
-		slingDryRun = prevDryRun
-		slingNoBoot = prevNoBoot
-		slingForce = prevForce
-		slingRalph = prevRalph
-		findHookedFormulaSingletonFn = prevFindSingleton
-	})
-
-	slingDryRun = false
-	slingNoBoot = true
-	slingForce = false
-	slingRalph = false
-	findHookedFormulaSingletonFn = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
-		return &beads.Issue{ID: "gt-wisp-existing", Description: "attached_formula: mol-anything\nmode: ralph"}, nil
-	}
-
-	if err := runSlingFormula(context.Background(), []string{"mol-anything"}); err != nil {
-		t.Fatalf("runSlingFormula: %v", err)
-	}
-
-	attachmentBytes, err := os.ReadFile(attachedLogPath)
-	if err != nil {
-		t.Fatalf("read attachment log: %v", err)
-	}
-	if strings.Contains(string(attachmentBytes), "mode: ralph") {
-		t.Fatalf("same-formula normal sling should clear stale ralph mode, got:\n%s", string(attachmentBytes))
-	}
+	h.wantCalls("agent mode", "agent mode mayor/ ")
+	h.wantNo("create wisp")
 }
 
 // TestFormulaVarsForBeadPassesFeatureAndIssueVars verifies that gt sling
@@ -1617,53 +1098,32 @@ func TestStoreFieldsInBeadRawReviewRefreshesAttachedAt(t *testing.T) {
 // deacon (from the deacon itself) injects the ack prompt into the running agent's
 // pane, wedging it mid-command.
 func TestResolveTargetSelfSlingByPane(t *testing.T) {
+	t.Parallel()
 	const callerPane = "%42"
+	for _, tt := range []struct {
+		name       string
+		targetPane string
+		want       bool
+	}{
+		{"named_target_same_pane_is_self_sling", callerPane, true},
+		{"named_target_different_pane_is_not_self_sling", "%99", false},
+		{"empty_pane_is_not_self_sling", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.env["TMUX_PANE"] = callerPane
+			h.run.resolveAgent = func(string) (string, string, string, error) {
+				return "deacon/", tt.targetPane, "/home/deacon", nil
+			}
 
-	prev := resolveTargetAgentFn
-	t.Cleanup(func() { resolveTargetAgentFn = prev })
-
-	t.Run("named_target_same_pane_is_self_sling", func(t *testing.T) {
-		resolveTargetAgentFn = func(_ string) (string, string, string, error) {
-			return "deacon/", callerPane, "/home/deacon", nil
-		}
-		t.Setenv("TMUX_PANE", callerPane)
-
-		result, err := resolveTarget("deacon", ResolveTargetOptions{})
-		if err != nil {
-			t.Fatalf("resolveTarget: %v", err)
-		}
-		if !result.IsSelfSling {
-			t.Error("expected IsSelfSling=true when named target pane matches caller pane")
-		}
-	})
-
-	t.Run("named_target_different_pane_is_not_self_sling", func(t *testing.T) {
-		resolveTargetAgentFn = func(_ string) (string, string, string, error) {
-			return "deacon/", "%99", "/home/deacon", nil
-		}
-		t.Setenv("TMUX_PANE", callerPane)
-
-		result, err := resolveTarget("deacon", ResolveTargetOptions{})
-		if err != nil {
-			t.Fatalf("resolveTarget: %v", err)
-		}
-		if result.IsSelfSling {
-			t.Error("expected IsSelfSling=false when named target pane differs from caller pane")
-		}
-	})
-
-	t.Run("empty_pane_is_not_self_sling", func(t *testing.T) {
-		resolveTargetAgentFn = func(_ string) (string, string, string, error) {
-			return "deacon/", "", "/home/deacon", nil
-		}
-		t.Setenv("TMUX_PANE", callerPane)
-
-		result, err := resolveTarget("deacon", ResolveTargetOptions{})
-		if err != nil {
-			t.Fatalf("resolveTarget: %v", err)
-		}
-		if result.IsSelfSling {
-			t.Error("expected IsSelfSling=false when resolved pane is empty (no tmux)")
-		}
-	})
+			result, err := h.run.resolveSlingTarget("deacon", ResolveTargetOptions{})
+			if err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if result.IsSelfSling != tt.want {
+				t.Errorf("IsSelfSling = %v, want %v (target pane %q, caller pane %q)", result.IsSelfSling, tt.want, tt.targetPane, callerPane)
+			}
+		})
+	}
 }
