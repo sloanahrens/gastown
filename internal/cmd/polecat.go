@@ -608,6 +608,14 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 // rig's Dolt round trips instead of paying them one rig after another
 // (gt-92zx).
 func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time) []polecatSeat {
+	return buildRigSeatsFor(r, sessions, spawnWindow, now, "")
+}
+
+// buildRigSeatsFor is buildRigSeats narrowed to one polecat when only is set:
+// just that worktree's seat, and no orphan-session rows. `gt polecat status`
+// uses it so the state it prints comes out of the same row builder `gt polecat
+// list` renders, not a second derivation that can disagree (gt-aj7).
+func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
 	// The filesystem read and the session filter are the two cheap facts that
 	// decide whether this rig has anything to report. Both are local (a
 	// directory listing, an in-memory lookup), so they come first: the
@@ -620,6 +628,10 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 		return nil
 	}
 	rigSessions := sessions.namesForRig(r.Name)
+	if only != "" {
+		polecatNames = filterPolecatNames(polecatNames, only)
+		rigSessions = nil
+	}
 	if len(polecatNames) == 0 && len(rigSessions) == 0 {
 		return nil
 	}
@@ -736,6 +748,16 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 	}
 
 	return seats
+}
+
+// filterPolecatNames returns names narrowed to the one entry equal to only.
+func filterPolecatNames(names []string, only string) []string {
+	for _, n := range names {
+		if n == only {
+			return []string{n}
+		}
+	}
+	return nil
 }
 
 // rigSeatBuilder builds one rig's rows for `gt polecat list`. It is the seam
@@ -1063,6 +1085,31 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// polecatListRow builds the single row `gt polecat list` would print for one
+// polecat, by the same seat pipeline. ok is false when that pipeline cannot
+// produce one (the tmux listing failed, or the worktree is not a listed seat);
+// the caller then keeps the manager's own reading rather than failing status.
+func polecatListRow(r *rig.Rig, name string) (PolecatListItem, bool) {
+	sessions, err := loadPolecatSessionSet(newPoolSessionLister())
+	if err != nil {
+		return PolecatListItem{}, false
+	}
+	townRoot, _ := workspace.FindFromCwd()
+	seats := buildRigSeatsFor(r, sessions, polecatSpawnGraceWindow(townRoot), time.Now(), name)
+	if len(seats) != 1 {
+		return PolecatListItem{}, false
+	}
+	return seats[0].resolve(), true
+}
+
+// reconcilePolecatWithListRow makes p report the state and issue the list row
+// does. The row is the fuller reading — it also consults the agent bead's
+// agent_state and the spawn grace — so it wins wherever the two differ.
+func reconcilePolecatWithListRow(p *polecat.Polecat, row PolecatListItem) {
+	p.State = row.State
+	p.Issue = row.Issue
+}
+
 // PolecatStatus represents detailed polecat status for JSON output.
 type PolecatStatus struct {
 	Rig            string        `json:"rig"`
@@ -1094,6 +1141,15 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 	p, err := mgr.Get(polecatName)
 	if err != nil {
 		return fmt.Errorf("polecat '%s' not found in rig '%s'", polecatName, rigName)
+	}
+
+	// State and issue come from the row `gt polecat list` shows for this
+	// polecat. Manager.Get derives state from hooked/assigned issues alone, so
+	// an agent bead still saying agent_state=working with no live session read
+	// "idle" here while list read "stalled" — the two surfaces disagreeing on
+	// the one signal the witness acts on (gt-aj7).
+	if row, ok := polecatListRow(r, polecatName); ok {
+		reconcilePolecatWithListRow(p, row)
 	}
 
 	// Get session info

@@ -344,3 +344,36 @@ func TestPolecatListJSONAddsAgentAndMRFields(t *testing.T) {
 		}
 	}
 }
+
+// TestPolecatStatusAgreesWithListOnStaleAgentState pins gt-aj7: an agent bead
+// still saying agent_state=working, with no assigned issue and no live session,
+// is a stall to `gt polecat list`. Manager.Get sees no issue and reports idle,
+// so `gt polecat status` used to print the opposite verdict for the same
+// polecat. Status now takes the list row's state and issue.
+func TestPolecatStatusAgreesWithListOnStaleAgentState(t *testing.T) {
+	setupPolecatTestRegistry(t)
+
+	row := buildPolecatSeatItem("gastown", "jade",
+		&beads.AgentFields{AgentState: string(beads.AgentStateWorking), CleanupStatus: string(polecat.CleanupClean)},
+		nil, nil, polecatSessionSet{}, polecatInventoryEnv{})
+	if row.State != polecat.StateStalled {
+		t.Fatalf("list row state = %q, want %q", row.State, polecat.StateStalled)
+	}
+
+	// What Manager.Get returns for the same polecat: no issue, so idle.
+	p := &polecat.Polecat{Name: "jade", Rig: "gastown", State: polecat.StateIdle}
+	reconcilePolecatWithListRow(p, row)
+	if p.State != row.State || p.Issue != row.Issue {
+		t.Errorf("status reads state=%q issue=%q, list row reads state=%q issue=%q", p.State, p.Issue, row.State, row.Issue)
+	}
+}
+
+func TestFilterPolecatNames(t *testing.T) {
+	names := []string{"jade", "pearl", "quartz"}
+	if got := filterPolecatNames(names, "pearl"); len(got) != 1 || got[0] != "pearl" {
+		t.Errorf("filterPolecatNames(pearl) = %v, want [pearl]", got)
+	}
+	if got := filterPolecatNames(names, "nope"); len(got) != 0 {
+		t.Errorf("filterPolecatNames(nope) = %v, want none", got)
+	}
+}
