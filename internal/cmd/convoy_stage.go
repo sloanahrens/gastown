@@ -37,7 +37,7 @@ type StageInput struct {
 // for cross-database deps where tracked issues live in a different Dolt
 // database (e.g., ds-* issues tracked by an hq-cv-* convoy). See GH #2624.
 func convoyTrackedBeadIDs(townBeads, convoyID string) (map[string]bool, error) {
-	trackedIDs, err := bdDepListRawIDs(townBeads, convoyID, "down", "tracks")
+	trackedIDs, err := convoy.DepListRawIDs(townBeads, convoyID, "down", "tracks")
 	if err != nil {
 		return nil, fmt.Errorf("tracked deps for %s: %w", convoyID, err)
 	}
@@ -551,7 +551,7 @@ type bdDepResult struct {
 // ---------------------------------------------------------------------------
 
 func runBdJSONForBead(beadID string, args ...string) ([]byte, error) {
-	return runBdJSON(resolveBeadDir(beadID), args...)
+	return beads.RunBdJSON(resolveBeadDir(beadID), args...)
 }
 
 // bdShow runs `bd show <id> --json` and returns the parsed bead info.
@@ -640,7 +640,7 @@ func bdListChildrenViaDeps(parentID string) ([]bdShowResult, error) {
 
 	// Production data stores parent-child as a typed dependency target where
 	// issue_id=parent. "down" returns target rows for the epic's children.
-	childIDs, err := bdDepListRawIDs(beadsDir, parentID, "down", "parent-child")
+	childIDs, err := convoy.DepListRawIDs(beadsDir, parentID, "down", "parent-child")
 	if err != nil {
 		return nil, nil // best-effort — caller still gets the empty primary result
 	}

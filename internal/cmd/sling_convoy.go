@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -40,7 +41,7 @@ func isTrackedByConvoy(beadID string) string {
 
 	// Primary: Use raw dep query to find what tracks this issue (direction=up).
 	// This returns convoy IDs that have a "tracks" dep on beadID.
-	trackerIDs, err := bdDepListRawIDs(townBeads, beadID, "up", "tracks")
+	trackerIDs, err := convoyops.DepListRawIDs(townBeads, beadID, "up", "tracks")
 	if err == nil && len(trackerIDs) > 0 {
 		// Check each tracker to find an open convoy
 		for _, trackerID := range trackerIDs {
@@ -48,7 +49,7 @@ func isTrackedByConvoy(beadID string) string {
 			if err != nil {
 				continue
 			}
-			if isConvoyIssue(result.IssueType, result.Labels) && result.Status == "open" {
+			if convoyops.IsConvoyIssue(result.IssueType, result.Labels) && result.Status == "open" {
 				return trackerID
 			}
 		}
@@ -67,7 +68,7 @@ func isTrackedByConvoy(beadID string) string {
 func findConvoyByDescription(townRoot, beadID string) string {
 	townBeads := filepath.Join(townRoot, ".beads")
 
-	convoys, err := listConvoyIssues(townBeads, "open", false)
+	convoys, err := convoyops.StdTown(townBeads).ListConvoys("open", false)
 	if err != nil {
 		return ""
 	}
@@ -96,7 +97,7 @@ func findConvoyByDescription(townRoot, beadID string) string {
 // convoyTracksBead checks if a convoy has a tracks dependency on the given beadID.
 // Uses bdDepListRawIDs for cross-database dep resolution (GH #2624).
 func convoyTracksBead(beadsDir, convoyID, beadID string) bool {
-	trackedIDs, err := bdDepListRawIDs(beadsDir, convoyID, "down", "tracks")
+	trackedIDs, err := convoyops.DepListRawIDs(beadsDir, convoyID, "down", "tracks")
 	if err != nil {
 		return false
 	}
@@ -242,7 +243,7 @@ func printConvoyConflict(beadID, convoyID string) {
 	fmt.Println()
 
 	// Get all beads in the conflicting convoy
-	tracked, err := getTrackedIssues(townBeads, convoyID)
+	tracked, err := convoyops.StdTown(townBeads).TrackedIssues(convoyID)
 	if err == nil && len(tracked) > 0 {
 		fmt.Printf("\n  Beads in convoy %s:\n", convoyID)
 		for _, t := range tracked {

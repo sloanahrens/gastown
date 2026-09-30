@@ -1,4 +1,4 @@
-package cmd
+package convoy
 
 import (
 	"os"
@@ -10,12 +10,12 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		in   trackedIssueInfo
+		in   TrackedIssue
 		want bool
 	}{
 		{
 			name: "closed issue never ready",
-			in: trackedIssueInfo{
+			in: TrackedIssue{
 				Status:  "closed",
 				Blocked: false,
 			},
@@ -23,15 +23,15 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		},
 		{
 			name: "unknown issue never ready",
-			in: trackedIssueInfo{
-				Status:  trackedStatusUnknown,
+			in: TrackedIssue{
+				Status:  TrackedStatusUnknown,
 				Blocked: false,
 			},
 			want: false,
 		},
 		{
 			name: "blank status never ready",
-			in: trackedIssueInfo{
+			in: TrackedIssue{
 				Status:  " ",
 				Blocked: false,
 			},
@@ -39,10 +39,10 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		},
 		{
 			// bd show's blocked flag drops cross-rig blockers, so readiness
-			// does not read it: the stranded scan asks convoyops.BlockReason
+			// does not read it: the stranded scan asks BlockReason
 			// instead (gt-j02xy, TestFindStrandedConvoys_CrossRigBlockerNotReady).
 			name: "bd show blocked flag not consulted",
-			in: trackedIssueInfo{
+			in: TrackedIssue{
 				Status:  "open",
 				Blocked: true,
 			},
@@ -50,7 +50,7 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		},
 		{
 			name: "open unassigned issue ready",
-			in: trackedIssueInfo{
+			in: TrackedIssue{
 				Status:  "open",
 				Blocked: false,
 			},
@@ -58,7 +58,7 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		},
 		{
 			name: "non-open unassigned issue treated ready for recovery",
-			in: trackedIssueInfo{
+			in: TrackedIssue{
 				Status:  "in_progress",
 				Blocked: false,
 			},
@@ -67,7 +67,7 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		{
 			// The orphaned-molecule recovery case for the hook status too.
 			name: "hooked unassigned issue treated ready for recovery",
-			in:   trackedIssueInfo{Status: "hooked"},
+			in:   TrackedIssue{Status: "hooked"},
 			want: true,
 		},
 		{
@@ -80,39 +80,39 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 		// is not ready work stays off the feeders, assigned or not.
 		{
 			name: "blocked-status unassigned issue not ready",
-			in:   trackedIssueInfo{Status: "blocked"},
+			in:   TrackedIssue{Status: "blocked"},
 			want: false,
 		},
 		{
 			name: "deferred unassigned issue not ready",
-			in:   trackedIssueInfo{Status: "deferred"},
+			in:   TrackedIssue{Status: "deferred"},
 			want: false,
 		},
 		{
 			name: "pinned unassigned issue not ready",
-			in:   trackedIssueInfo{Status: "pinned"},
+			in:   TrackedIssue{Status: "pinned"},
 			want: false,
 		},
 		{
 			name: "tombstone issue not ready",
-			in:   trackedIssueInfo{Status: "tombstone"},
+			in:   TrackedIssue{Status: "tombstone"},
 			want: false,
 		},
 		{
 			name: "custom status unassigned issue not ready",
-			in:   trackedIssueInfo{Status: "review"},
+			in:   TrackedIssue{Status: "review"},
 			want: false,
 		},
 		{
 			// Not ready before any session lookup: a frozen status is not
 			// made ready by its holder being gone.
 			name: "deferred assigned issue not ready",
-			in:   trackedIssueInfo{Status: "deferred", Assignee: "gastown/polecats/gone"},
+			in:   TrackedIssue{Status: "deferred", Assignee: "gastown/polecats/gone"},
 			want: false,
 		},
 		{
 			name: "scheduled open issue not ready",
-			in:   trackedIssueInfo{ID: "gt-sched", Status: "open"},
+			in:   TrackedIssue{ID: "gt-sched", Status: "open"},
 			want: false,
 		},
 	}
@@ -133,7 +133,7 @@ func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
 		ID:     "gt-123",
 		Status: "open",
 	}
-	details := &issueDetails{
+	details := &IssueDetails{
 		ID:             "gt-123",
 		Status:         "open",
 		BlockedByCount: 1,
@@ -149,12 +149,12 @@ func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
 func TestApplyFreshIssueDetails_BlankStatusBecomesUnknown(t *testing.T) {
 	t.Parallel()
 	dep := trackedDependency{ID: "gt-123"}
-	details := &issueDetails{ID: "gt-123", Status: "  "}
+	details := &IssueDetails{ID: "gt-123", Status: "  "}
 
 	applyFreshIssueDetails(&dep, details)
 
-	if dep.Status != trackedStatusUnknown {
-		t.Fatalf("dep.Status = %q, want %q", dep.Status, trackedStatusUnknown)
+	if dep.Status != TrackedStatusUnknown {
+		t.Fatalf("dep.Status = %q, want %q", dep.Status, TrackedStatusUnknown)
 	}
 }
 
@@ -162,26 +162,26 @@ func TestIssueDetailsIsBlocked(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		in   issueDetails
+		in   IssueDetails
 		want bool
 	}{
 		{
 			name: "blocked_by_count marks blocked",
-			in: issueDetails{
+			in: IssueDetails{
 				BlockedByCount: 2,
 			},
 			want: true,
 		},
 		{
 			name: "blocked_by list marks blocked",
-			in: issueDetails{
+			in: IssueDetails{
 				BlockedBy: []string{"gt-1"},
 			},
 			want: true,
 		},
 		{
 			name: "open blocks dependency marks blocked",
-			in: issueDetails{
+			in: IssueDetails{
 				Dependencies: []issueDependency{
 					{DependencyType: "blocks", Status: "open"},
 				},
@@ -190,7 +190,7 @@ func TestIssueDetailsIsBlocked(t *testing.T) {
 		},
 		{
 			name: "closed blocks dependency does not mark blocked",
-			in: issueDetails{
+			in: IssueDetails{
 				Dependencies: []issueDependency{
 					{DependencyType: "blocks", Status: "closed"},
 				},
@@ -199,7 +199,7 @@ func TestIssueDetailsIsBlocked(t *testing.T) {
 		},
 		{
 			name: "non-blocking dependency does not mark blocked",
-			in: issueDetails{
+			in: IssueDetails{
 				Dependencies: []issueDependency{
 					{DependencyType: "parent-child", Status: "open"},
 				},

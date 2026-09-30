@@ -56,7 +56,7 @@ var (
 // The format and args work like fmt.Printf.
 // Writes to stderr so warnings never contaminate structured (JSON) output on stdout.
 func PrintWarning(format string, args ...interface{}) {
-	fprintWarning(os.Stderr, format, args...)
+	FprintWarning(os.Stderr, format, args...)
 }
 
 // FprintWarning is PrintWarning writing to w.

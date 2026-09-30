@@ -1,6 +1,7 @@
-package cmd
+package convoy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -77,7 +78,7 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Call findStrandedConvoys — it should query bd list --status=open
-	stranded, err := findStrandedConvoysWith(townBeads, noBlockers)
+	stranded, err := StdTown(townBeads).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -159,7 +160,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	_, err := findStrandedConvoysWith(townBeads, noBlockers)
+	_, err := StdTown(townBeads).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}

@@ -1447,7 +1447,7 @@ func runResetStale(bd *beads.Beads, dryRun bool) error {
 		}
 
 		// Parse assignee: rig/name or rig/crew/name
-		sessionName, isPersistent := assigneeToSessionName(issue.Assignee)
+		sessionName, isPersistent := session.AssigneeSessionName(issue.Assignee)
 		if sessionName == "" {
 			continue // Couldn't parse assignee
 		}
@@ -1520,32 +1520,6 @@ func runResetStale(bd *beads.Beads, dryRun bool) error {
 	}
 
 	return nil
-}
-
-// assigneeToSessionName converts an assignee (rig/name, rig/crew/name, or rig/polecats/name)
-// to tmux session name.
-// Returns the session name and whether this is a persistent identity (crew).
-func assigneeToSessionName(assignee string) (sessionName string, isPersistent bool) {
-	parts := strings.Split(assignee, "/")
-
-	switch len(parts) {
-	case 2:
-		// rig/polecatName -> gt-rig-polecatName
-		return session.PolecatSessionName(session.PrefixFor(parts[0]), parts[1]), false
-	case 3:
-		// rig/crew/name -> gt-rig-crew-name
-		if parts[1] == "crew" {
-			return session.CrewSessionName(session.PrefixFor(parts[0]), parts[2]), true
-		}
-		// rig/polecats/name -> gt-rig-name
-		if parts[1] == "polecats" {
-			return session.PolecatSessionName(session.PrefixFor(parts[0]), parts[2]), false
-		}
-		// Other 3-part formats not recognized
-		return "", false
-	default:
-		return "", false
-	}
 }
 
 // Helper to check if path exists

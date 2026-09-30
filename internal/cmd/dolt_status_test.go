@@ -29,7 +29,7 @@ func TestReadBeadsRuntimeConfigServerMetadata(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	cfg, ok := readBeadsRuntimeConfig(beadsDir)
+	cfg, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir)
 	if !ok {
 		t.Fatal("readBeadsRuntimeConfig did not detect server metadata")
 	}
@@ -61,7 +61,7 @@ func TestReadBeadsRuntimeConfigDefaultServerAddr(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	cfg, ok := readBeadsRuntimeConfig(beadsDir)
+	cfg, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir)
 	if !ok {
 		t.Fatal("readBeadsRuntimeConfig did not detect server metadata")
 	}
@@ -93,7 +93,7 @@ func TestReadBeadsRuntimeConfigPortFileFallback(t *testing.T) {
 		t.Fatalf("write port file: %v", err)
 	}
 
-	cfg, ok := readBeadsRuntimeConfig(beadsDir)
+	cfg, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir)
 	if !ok {
 		t.Fatal("readBeadsRuntimeConfig did not detect server metadata")
 	}
@@ -118,7 +118,7 @@ func TestReadBeadsRuntimeConfigIgnoresEmbeddedMetadata(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	if _, ok := readBeadsRuntimeConfig(beadsDir); ok {
+	if _, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir); ok {
 		t.Fatal("embedded metadata should not be reported as shared-server config")
 	}
 }
