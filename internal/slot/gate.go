@@ -117,7 +117,7 @@ func parseVMInfo(out string) (VMInfo, error) {
 }
 
 // defaultRuntime is the runtime the package-level functions (Acquire, Status,
-// Reap, GateContainers, ...) use. It is replaced only by the deprecated
+// Reap, ...) use. It is replaced only by the deprecated
 // Set*ForTest shims below, for the tests of packages that have not yet moved
 // to injecting a Gate.
 var defaultRuntime = DockerRuntime()
