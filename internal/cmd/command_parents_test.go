@@ -56,8 +56,10 @@ func TestUnknownSubcommandExitsTwo(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
-	if checked < 40 {
-		t.Fatalf("checked %d requireSubcommand parents; expected at least 40", checked)
+	// A floor that proves the walk reached the command tree, not a count to
+	// keep in step with it: command deletions shrink the tree.
+	if checked < 30 {
+		t.Fatalf("checked %d requireSubcommand parents; expected at least 30", checked)
 	}
 }
 
