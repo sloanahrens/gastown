@@ -95,6 +95,12 @@ type polecatInventoryEnv struct {
 	// "status=unverified" it read before there was a source at all, so
 	// admission still pays no beads call per polecat.
 	ActiveMRSource polecat.IssueReader
+	// Parked is the refusal reason when the polecat carries an agentpause
+	// marker (polecat.ParkedReuseBlocker), empty when it does not. A parked
+	// slot is skipped by the reuse path (gt-0r29l), so the verdict must not
+	// advertise it as reusable (gt-q6nrm). Both the list and the capacity
+	// projection read the marker — it is a file read, not a subprocess.
+	Parked string
 }
 
 // polecatActiveMRReader resolves the active_mr policy's two lookups from the
@@ -361,6 +367,9 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	facts.State = item.State
 	item.Disposition = polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
+	if env.Parked != "" {
+		item.Disposition = item.Disposition.WithParked(env.Parked)
+	}
 	// The disposition is the one place the verdict's fact provenance is
 	// labeled (labelFactSources) — copy it rather than re-deriving it here.
 	item.CleanupStatusSource = item.Disposition.CleanupStatusSource
@@ -404,7 +413,17 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		// worktree behind the directory) leaves the probe off, and the verdict
 		// stays on the recorded hint.
 		WorktreePath: resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName),
+		// A rig lives directly under the town root (see
+		// applyRigOccupancyToCapacitySnapshot, which joins them the same way).
+		Parked: parkedReason(filepath.Dir(rigPath), rigName, polecatName),
 	}
+}
+
+// parkedReason is polecat.ParkedReuseBlocker without the boolean: "" means the
+// polecat is not parked.
+func parkedReason(townRoot, rigName, polecatName string) string {
+	reason, _ := polecat.ParkedReuseBlocker(townRoot, rigName, polecatName)
+	return reason
 }
 
 // polecatSeat is one row of the list output, in output order, together with

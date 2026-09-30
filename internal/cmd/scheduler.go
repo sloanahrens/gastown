@@ -199,13 +199,14 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scheduled: %d total, %d ready\n", len(scheduled), readyCount)
 	fmt.Printf("  Active:    %d polecats\n", capacitySnapshot.ActiveSessions)
 	if capacitySnapshot.Max > 0 {
-		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d, pending MR: %d)\n",
+		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d, parked: %d, pending MR: %d)\n",
 			capacitySnapshot.Free,
 			capacitySnapshot.Max,
 			capacitySnapshot.Working,
 			capacitySnapshot.RecoveryBlocked,
 			capacitySnapshot.Reservations,
 			capacitySnapshot.ReusableIdle,
+			capacitySnapshot.Parked,
 			capacitySnapshot.PendingMR,
 		)
 	} else {

@@ -337,7 +337,7 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			snapshot := polecatCapacitySnapshot{}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, tt.activeWork, nil)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, t.TempDir(), "gastown", "synth", tt.fields, tt.activeWork, nil)
 			if snapshot.Working != tt.want.Working || snapshot.RecoveryBlocked != tt.want.RecoveryBlocked || snapshot.ReusableIdle != tt.want.ReusableIdle || snapshot.PendingMR != tt.want.PendingMR || snapshot.capacityUsed != tt.want.capacityUsed {
 				t.Fatalf("snapshot = %+v, want %+v", snapshot, tt.want)
 			}
@@ -377,11 +377,12 @@ func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 			RecoveryBlocked: 1,
 			Reservations:    0,
 			ReusableIdle:    3,
+			Parked:          4,
 			PendingMR:       2,
 			Free:            0,
 		}, 5)
 	})
-	for _, want := range []string{"0 free of 2", "working: 1", "recovery_blocked: 1", "reusable_idle: 3", "pending_mr: 2"} {
+	for _, want := range []string{"0 free of 2", "working: 1", "recovery_blocked: 1", "reusable_idle: 3", "parked: 4", "pending_mr: 2"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run output %q missing %q", out, want)
 		}

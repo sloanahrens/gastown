@@ -27,6 +27,7 @@ type polecatCapacitySnapshot struct {
 	Working         int `json:"working"`
 	RecoveryBlocked int `json:"recovery_blocked"`
 	ReusableIdle    int `json:"reusable_idle"`
+	Parked          int `json:"parked"`
 	PendingMR       int `json:"pending_mr"`
 	Reservations    int `json:"reservations"`
 	Free            int `json:"free"`
@@ -117,6 +118,14 @@ func (s *polecatCapacitySnapshot) addReusableIdle() {
 	s.ReusableIdle++
 }
 
+// addParked counts an idle slot that would be reusable but for its park marker.
+// It is kept apart from ReusableIdle so an operator reading free capacity is
+// not told a parked slot can take work (gt-q6nrm), and apart from
+// RecoveryBlocked because resuming the park, not recovering work, frees it.
+func (s *polecatCapacitySnapshot) addParked() {
+	s.Parked++
+}
+
 func (s *polecatCapacitySnapshot) addPendingMR() {
 	s.PendingMR++
 }
@@ -176,7 +185,7 @@ func (e *polecatCapacityAdmissionError) Error() string {
 		return fmt.Sprintf("polecat admission denied: %s", e.Reason)
 	}
 	return fmt.Sprintf(
-		"polecat admission denied: %s (max=%d occupied=%d working=%d recovery_blocked=%d reservations=%d reusable_idle=%d pending_mr=%d free=%d). Resolve recovery-needed polecats or raise scheduler.max_polecats; inspect with `gt scheduler status --json` or `gt polecat list --all --json`",
+		"polecat admission denied: %s (max=%d occupied=%d working=%d recovery_blocked=%d reservations=%d reusable_idle=%d parked=%d pending_mr=%d free=%d). Resolve recovery-needed polecats or raise scheduler.max_polecats; inspect with `gt scheduler status --json` or `gt polecat list --all --json`",
 		e.Reason,
 		e.Snapshot.Max,
 		e.Snapshot.occupied(),
@@ -184,6 +193,7 @@ func (e *polecatCapacityAdmissionError) Error() string {
 		e.Snapshot.RecoveryBlocked,
 		e.Snapshot.Reservations,
 		e.Snapshot.ReusableIdle,
+		e.Snapshot.Parked,
 		e.Snapshot.PendingMR,
 		e.Snapshot.Free,
 	)
@@ -395,7 +405,7 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 	for _, name := range polecatNames {
 		issue := agents[agentBeadID(name)]
 		fields := parsePolecatAgentFields(issue)
-		applyAgentFieldsToCapacitySnapshot(snapshot, rigName, name, fields, activeWork[name], sessions)
+		applyAgentFieldsToCapacitySnapshot(snapshot, townRoot, rigName, name, fields, activeWork[name], sessions)
 	}
 	return nil
 }
@@ -445,18 +455,25 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
-	// Zero env on purpose: the snapshot reports counts, not per-polecat state,
-	// and a polecat inside its spawn grace produces the same disposition as a
-	// stalled one (recovery-blocked, counts toward capacity). Capacity also
-	// has no MR index — it never reports MR state.
-	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, polecatInventoryEnv{})
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, townRoot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
+	// Near-zero env on purpose: the snapshot reports counts, not per-polecat
+	// state, and a polecat inside its spawn grace produces the same
+	// disposition as a stalled one (recovery-blocked, counts toward capacity).
+	// Capacity also has no MR index — it never reports MR state. The park
+	// marker is the one fact it does read: a parked slot is not free to take
+	// work, and counting it reusable overstated available capacity (gt-q6nrm).
+	env := polecatInventoryEnv{Parked: parkedReason(townRoot, rigName, polecatName)}
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions, env)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 
 func applyWorkstateDispositionToCapacitySnapshot(snapshot *polecatCapacitySnapshot, state polecat.State, disposition polecat.WorkstateDisposition) {
 	if disposition.ReuseStatus == "idle-pr-open" {
 		snapshot.addPendingMR()
+		return
+	}
+	if disposition.ReuseStatus == polecat.WorkstateReuseStatusParked {
+		snapshot.addParked()
 		return
 	}
 	if disposition.Reusable {

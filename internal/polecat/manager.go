@@ -2707,7 +2707,14 @@ func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 // and the reason then carries the read error so a corrupt marker file is not
 // mistaken for an operator's park.
 func (m *Manager) parkedReuseBlocker(name string) (string, bool) {
-	paused, st, err := agentpause.PauseGate(m.townRoot, m.rig.Name, constants.RolePolecat, name)
+	return ParkedReuseBlocker(m.townRoot, m.rig.Name, name)
+}
+
+// ParkedReuseBlocker is parkedReuseBlocker for callers that have no Manager —
+// the list and capacity projections — so every surface reads the marker the
+// same way and reports the same reason.
+func ParkedReuseBlocker(townRoot, rigName, name string) (string, bool) {
+	paused, st, err := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, name)
 	if !paused {
 		return "", false
 	}
