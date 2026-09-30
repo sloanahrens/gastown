@@ -121,6 +121,11 @@ const (
 	ActorDaemon = "daemon" // daemon-originated events, e.g. mass-death detection
 )
 
+// CallerDaemon is the payload "caller" value on the session events the daemon
+// authors (crash detection, idle reap); internal/testutil's hermetic tripwire
+// matches it so daemon activity is not read as test leakage (gt-d9423).
+const CallerDaemon = "daemon"
+
 // Log writes an event to the events log.
 // The event is appended to <town-root>/.events.jsonl, with the town root
 // resolved from the current working directory. Callers that already know

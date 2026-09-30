@@ -366,6 +366,40 @@ func TestTripwire_ToleratesUnknownActor(t *testing.T) {
 	}
 }
 
+// gt-d9423: the daemon's crash detection names a live polecat's tmux session
+// ("gt-opal") as the actor, a prefix the town does not know, so its own two
+// session_death lines red four packages whose tests all passed.
+func TestTripwire_ToleratesDaemonAuthoredSessionDeath(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	appendEvents(t, town,
+		`{"ts":"2026-09-30T06:37:08Z","source":"gt","type":"session_death","actor":"gt-opal","payload":{"agent":"gastown/polecats/opal","caller":"daemon","reason":"crash detected by daemon health check","session":"gt-opal"},"visibility":"feed"}`+"\n"+
+			`{"ts":"2026-09-30T06:37:09Z","source":"gt","type":"session_death","actor":"gt-amber","payload":{"agent":"gastown/polecats/amber","caller":"daemon","reason":"crash detected by daemon health check","session":"gt-amber"},"visibility":"feed"}`+"\n")
+
+	if leaks := snap.diff(); len(leaks) != 0 {
+		t.Errorf("daemon-authored session_death flagged as test leakage: %v", leaks)
+	}
+}
+
+// The daemon tolerance keys on the caller value, not on an event merely having
+// a payload, so the gt-x9o fixture-actor catch is not widened for free.
+func TestTripwire_FlagsFixtureActorWithNonDaemonCaller(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	appendEvents(t, town,
+		`{"ts":"2026-09-30T06:37:08Z","source":"gt","type":"spawn","actor":"myr/mycat","payload":{"caller":"myr/mycat","session":"myr-mycat"},"visibility":"feed"}`+"\n")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected exactly 1 leak (fixture actor), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "myr/mycat") {
+		t.Errorf("fixture actor not flagged: %v", leaks)
+	}
+}
+
 func TestTripwire_ToleratesDogActor(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
