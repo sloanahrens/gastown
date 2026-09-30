@@ -21,16 +21,18 @@ import (
 // would compare equal to itself and be refused as a no-op. The MR bead's
 // commit_sha is the tip as submitted, which no later push rewrites.
 //
-// The comparison itself is patch-ids, not commits: patch-id is base-invariant
-// and content-exact, so a rebase onto a newer target, an amended message and a
-// re-split of the same hunks all leave it unchanged, while any real change to
-// the diff moves it.
+// The comparison itself is patch-ids, not commits: patch-id is base-invariant,
+// so a rebase onto a newer target, an amended message and a re-split of the
+// same hunks all leave it unchanged, while any change to the diff moves it.
+// That last clause needs the verbatim form. Plain patch-id strips whitespace
+// before hashing, so it reads a whitespace-only fix — the natural answer to a
+// formatting finding — as no change at all and refuses it (gt-2colr).
 
 // rejectedReworkGit is the subset of *git.Git the check needs.
 type rejectedReworkGit interface {
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
-	PatchID(base, head string) (string, error)
+	PatchIDVerbatim(base, head string) (string, error)
 }
 
 // rejectedAttempt is one rejection recorded in the source bead's notes: the
@@ -181,14 +183,15 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 	return unchangedSinceRejectionRefusal(issueID, target, localPatchID, unchanged)
 }
 
-// patchIDAgainst is the stable patch-id of the diff a tip carries against its
-// own merge base with target — the diff the MR would have merged.
+// patchIDAgainst is the patch-id of the diff a tip carries against its own
+// merge base with target — the diff the MR would have merged, whitespace
+// included, so a whitespace-only rework is not read as the rejected attempt.
 func patchIDAgainst(g rejectedReworkGit, target, sha string) (string, error) {
 	base, err := g.MergeBase(target, sha)
 	if err != nil {
 		return "", err
 	}
-	return g.PatchID(base, sha)
+	return g.PatchIDVerbatim(base, sha)
 }
 
 // rejectedTipFromMR resolves the tip an MR bead was submitted with, which is

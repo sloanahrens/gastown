@@ -113,6 +113,60 @@ func TestPatchID_DiffersAfterContentEdit(t *testing.T) {
 	}
 }
 
+// TestPatchIDVerbatim_DistinguishesWhitespaceOnlyEdit is gt-2colr from both
+// sides in one run: PatchID cannot tell a rework that answers a whitespace
+// finding from the attempt that was rejected for it, and PatchIDVerbatim can.
+// The first assertion is a premise, not a wish — if a future git stops
+// stripping whitespace, it fails and names the workaround that is now dead.
+//
+// The added line is the whole diff, so its trailing space is the diff's last
+// byte: this is also the case that fails if the diff ever reaches patch-id
+// through run()'s trim again, which both modes read as a shorter line.
+func TestPatchIDVerbatim_DistinguishesWhitespaceOnlyEdit(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	// Two tips off one base whose diffs differ only in the trailing space of
+	// the added line: the rejected attempt and the fix that strips it.
+	rejected := commitFile(t, dir, "feature.txt", "work \n", "implement the feature")
+	cmd := exec.Command("git", "checkout", base)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout %s: %v\n%s", base, err, out)
+	}
+	fixed := commitFile(t, dir, "feature.txt", "work\n", "fix: strip the trailing whitespace")
+
+	stableRejected, err := g.PatchID(base, rejected)
+	if err != nil {
+		t.Fatalf("PatchID rejected tip: %v", err)
+	}
+	stableFixed, err := g.PatchID(base, fixed)
+	if err != nil {
+		t.Fatalf("PatchID fixed tip: %v", err)
+	}
+	if stableRejected != stableFixed {
+		t.Fatalf("PatchID now distinguishes a whitespace-only edit (%s vs %s); the gt-2colr workaround in PatchIDVerbatim may be removable",
+			stableRejected, stableFixed)
+	}
+
+	verbatimRejected, err := g.PatchIDVerbatim(base, rejected)
+	if err != nil {
+		t.Fatalf("PatchIDVerbatim rejected tip: %v", err)
+	}
+	verbatimFixed, err := g.PatchIDVerbatim(base, fixed)
+	if err != nil {
+		t.Fatalf("PatchIDVerbatim fixed tip: %v", err)
+	}
+	if verbatimRejected == verbatimFixed {
+		t.Fatalf("PatchIDVerbatim reads a whitespace-only fix as no change: both %s", verbatimRejected)
+	}
+}
+
 func TestNotesAddShow_RoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
