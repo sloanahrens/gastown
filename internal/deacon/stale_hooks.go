@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -171,6 +172,11 @@ func ScanStaleHooks(townRoot string, cfg *StaleHookConfig) (*StaleHookScanResult
 
 	for _, ref := range scan.Beads {
 		bead := ref.bead
+		// Work submitted for landing is hooked to a dead session by design:
+		// the landing worker owns it until it lands (gt-v4ssj.2).
+		if beads.HasLabel(bead, land.LabelReadyToLand) {
+			continue
+		}
 		updatedAt, ageKnown := parseBeadTime(bead.UpdatedAt)
 
 		hookResult := &StaleHookResult{

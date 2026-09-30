@@ -4580,3 +4580,27 @@ func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
 		})
 	}
 }
+
+func TestResetAbandonedBead_LeavesSubmittedWork(t *testing.T) {
+	h := newTestHandlers()
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) guard.Result {
+		return guard.Pass() // would close it as "already on main" without the guard
+	}
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked","labels":["gt:ready-to-land"]}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+	if h.resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil) {
+		t.Error("resetAbandonedBead reset work submitted for landing")
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") || strings.Contains(call, "update") {
+			t.Errorf("wrote to submitted work: %q", call)
+		}
+	}
+}

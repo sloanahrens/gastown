@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
@@ -665,6 +667,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !slingForce {
 		return fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
 			dispatch.SlingRefusalMarker, beadID, reason)
+	}
+
+	// Guard against re-slinging work submitted for landing (gt-v4ssj.2). Its
+	// session ended on purpose in gt done and its assignee is dead by design,
+	// which the auto-force below would read as abandoned work. The landing
+	// worker owns it until it lands or is handed back; --force does not
+	// override, because the automated redispatch paths pass --force. A human
+	// who needs it back removes the label first.
+	if slices.Contains(info.Labels, land.LabelReadyToLand) {
+		return fmt.Errorf("%s %s is submitted for landing (%s); the landing worker owns it.\nRemove the label first to take it back",
+			dispatch.SlingRefusalMarker, beadID, land.LabelReadyToLand)
 	}
 
 	originalStatus := info.Status

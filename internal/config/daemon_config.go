@@ -53,6 +53,10 @@ type PatrolsConfig struct {
 	// N x its cadence — awake but not patrolling (gt-4z3b7).
 	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
 
+	// LandingWorker lands work beads labeled gt:ready-to-land, one worker per
+	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
+	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
+
 	// DoltRemotes is retired: the dolt_remotes push patrol was removed
 	// (ADR 0002) and nothing reads this key. It is declared so a daemon.json
 	// that still carries it decodes under strict decoding, and it is kept
@@ -495,6 +499,42 @@ type PatrolWatchdogConfig struct {
 	// Nudge controls whether a stale-but-alive role is also sent a "resume
 	// patrol" nudge in addition to being escalated. Defaults to true.
 	Nudge *bool `json:"nudge,omitempty"`
+}
+
+// LandingWorkerConfig holds configuration for the landing_worker patrol.
+type LandingWorkerConfig struct {
+	// Enabled turns the workers on. Defaults to false: the overseer enables
+	// it, because it is the one automated path that pushes main.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the wait between passes of one rig's worker, as a
+	// string (e.g. "60s"). Default 60s.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// LandTimeoutStr bounds one landing, gate and review included (e.g.
+	// "90m"). Default 90m.
+	LandTimeoutStr string `json:"land_timeout,omitempty"`
+
+	// Rigs limits the workers to these rigs. Empty means every known rig.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// Review runs the om editorial review on every landing. Nil or true
+	// means on; only an explicit false turns it off (the landing then records
+	// om_verdict "skipped").
+	Review *bool `json:"review,omitempty"`
+
+	// OMPath is the om binary. Empty means "om" on the daemon's PATH, else
+	// $HOME/go/bin/om.
+	OMPath string `json:"om_path,omitempty"`
+
+	// OMTimeoutStr bounds one om review (e.g. "20m"). Default 20m. An om
+	// that times out does not block the landing: it lands with
+	// om_verdict "error:<reason>".
+	OMTimeoutStr string `json:"om_timeout,omitempty"`
+
+	// PostLandTimeoutStr bounds one run of the rig's
+	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
+	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("witness",

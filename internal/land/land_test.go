@@ -294,10 +294,13 @@ func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}}, nil
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Summary: "b.txt is wrong.", Findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}}, nil
 	}
 	_, err := f.lander().Land(context.Background(), f.work)
-	f.assertRejected(t, err, RejectReview, LabelRework)
+	rej := f.assertRejected(t, err, RejectReview, LabelRework)
+	if !rej.Rework || rej.ReviewSummary != "b.txt is wrong." || rej.ReviewScore != 0.3 || len(rej.Findings) != 1 {
+		t.Errorf("rejection does not carry om's verdict: %+v", rej)
+	}
 	notes := f.bead().Notes
 	if !strings.Contains(notes, "- id:abc123 sev:major b.txt:1 — wrong") || !strings.Contains(notes, "Score: 0.3000") {
 		t.Errorf("notes lack the findings:\n%s", notes)

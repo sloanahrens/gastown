@@ -1017,7 +1017,8 @@ func purgeOldMail(db *sql.DB, w Writer, dbName string, mailDeleteAge time.Durati
 //     design, so staleness is meaningless for them, and closing one breaks
 //     `gt agents resolve` for that role. The rest of the list mirrors
 //     beads.ProtectedIssueLabel plus beads.InternalIssueLabel, and covers
-//     plugin receipts (type:plugin-run).
+//     plugin receipts (type:plugin-run), and work submitted for landing
+//     (gt:ready-to-land), which the landing worker closes (gt-v4ssj.2).
 //   - Agent id patterns (gt-2qzr): defense in depth for an agent bead that
 //     somehow lost its label. `gt agents list` resolves these roles by id.
 //   - Active dependency edges: an issue that is blocked by, or blocks, an open
@@ -1034,7 +1035,8 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 			WHERE l.label IN (
 				'gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent',
 				'gt:wisp', 'gt:message', 'gt:handoff', 'gt:merge-request',
-				'gt:queue', 'gt:convoy', 'gt:formula', 'type:plugin-run'
+				'gt:queue', 'gt:convoy', 'gt:formula', 'type:plugin-run',
+				'gt:ready-to-land'
 			)
 		)
 		AND i.id NOT LIKE '%%-witness' AND i.id NOT LIKE '%%-refinery'

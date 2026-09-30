@@ -336,3 +336,42 @@ func runNukeHookFlowCounting(rel *countingReleaser, p *polecat.Polecat, readHook
 	h.finish()
 	return asks
 }
+
+// submittedReleaser is a fakeWorkReleaser that also answers whether a bead
+// is submitted for landing.
+type submittedReleaser struct {
+	*fakeWorkReleaser
+	submitted map[string]bool
+	err       error
+}
+
+func (s submittedReleaser) SubmittedForLanding(beadID string) (bool, error) {
+	return s.submitted[beadID], s.err
+}
+
+func TestReleasePolecatWorkLeavesSubmittedWork(t *testing.T) {
+	t.Parallel()
+	const me = "gastown/polecats/basalt"
+	for _, tc := range []struct {
+		name      string
+		submitted bool
+		err       error
+		want      bool
+	}{
+		{name: "submitted for landing", submitted: true},
+		{name: "unreadable label", err: errors.New("dolt down")},
+		{name: "not submitted", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rel := submittedReleaser{fakeWorkReleaser: &fakeWorkReleaser{beads: map[string][2]string{"gt-x": {"hooked", me}}},
+				submitted: map[string]bool{"gt-x": tc.submitted}, err: tc.err}
+			out := releasePolecatWork(rel, me, "gt-x", false)
+			if out.Released != tc.want {
+				t.Fatalf("released = %v, want %v (note %q)", out.Released, tc.want, out.SkipNote)
+			}
+			if !tc.want && out.SkipNote == "" {
+				t.Fatal("a skipped release must say why")
+			}
+		})
+	}
+}

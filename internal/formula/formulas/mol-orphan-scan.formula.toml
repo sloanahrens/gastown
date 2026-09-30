@@ -214,6 +214,11 @@ needs = ["triage-orphans"]
 description = """
 Take action on each orphan based on triage.
 
+**Never act on work submitted for landing.** Skip any issue labeled
+`gt:ready-to-land`: its session ended on purpose in `gt done`, and the
+daemon's landing worker owns it until it lands or hands it back as rework.
+Resetting or reassigning it re-feeds finished work to a new polecat.
+
 **1. RESET orphans:**
 ```bash
 bd update <issue> --status=open --assignee=""

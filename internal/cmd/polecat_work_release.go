@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -85,7 +87,34 @@ func heldBy(r polecatWorkReleaser, agentID, beadID string) (bool, string) {
 	case !releasableHookStatuses[status]:
 		return false, fmt.Sprintf("status %s is not held", status)
 	}
+	// Work submitted for landing stays with the landing worker: releasing it
+	// would put it back in front of the convoy feed (gt-v4ssj.2).
+	if sr, ok := r.(landingSubmissionReader); ok {
+		submitted, err := sr.SubmittedForLanding(beadID)
+		switch {
+		case err != nil:
+			return false, fmt.Sprintf("could not check %s for %s: %v", beadID, land.LabelReadyToLand, err)
+		case submitted:
+			note := "submitted for landing (" + land.LabelReadyToLand + "); the landing worker owns it"
+			fmt.Printf("  %s Left hooked work %s alone: %s\n", style.Dim.Render("○"), beadID, note)
+			return false, note
+		}
+	}
 	return true, ""
+}
+
+// landingSubmissionReader is the optional half of a polecatWorkReleaser that
+// says whether a bead is submitted for landing.
+type landingSubmissionReader interface {
+	SubmittedForLanding(beadID string) (bool, error)
+}
+
+func (r bdPolecatWorkReleaser) SubmittedForLanding(beadID string) (bool, error) {
+	info, err := getBeadInfoFromTownRoot(r.townRoot, beadID)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(info.Labels, land.LabelReadyToLand), nil
 }
 
 func releaseHeldBead(r polecatWorkReleaser, agentID, beadID string) workReleaseOutcome {

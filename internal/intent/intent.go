@@ -229,6 +229,31 @@ func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error 
 	return err
 }
 
+// ClearLanded ends a submitted seat's wait once the landing worker has
+// finished workBead (landed it, or handed it back as rework): the seat goes
+// to stop, so nothing reads "submitted" for a bead that is no longer waiting
+// and nothing restarts a session that has no work. A seat that is not
+// submitted, or is submitted for a different bead, is left as it is. It
+// reports whether it changed the record.
+func ClearLanded(townRoot string, s Seat, workBead, actor string, now time.Time) (bool, error) {
+	rec, err := Read(townRoot, s)
+	if err != nil || !rec.Submitted() || (rec.WorkBead != "" && rec.WorkBead != workBead) {
+		return false, err
+	}
+	changed := false
+	_, err = Update(townRoot, s, func(r *Record) error {
+		if !r.Submitted() || (r.WorkBead != "" && r.WorkBead != workBead) {
+			return nil
+		}
+		r.Desired = DesiredStop
+		r.WorkBead = ""
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		changed = true
+		return nil
+	})
+	return changed, err
+}
+
 // RestartsSince counts restarts at or after since.
 func (r Record) RestartsSince(since time.Time) int {
 	n := 0

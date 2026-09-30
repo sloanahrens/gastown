@@ -248,6 +248,7 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 		{"i.id NOT LIKE '%-polecat-%'", "polecat bead id pattern"},
 		{"i.id NOT LIKE '%-dog-%'", "dog bead id pattern"},
 		{"'type:plugin-run'", "plugin receipts are closed by their own fast-track step"},
+		{"'gt:ready-to-land'", "the landing worker closes submitted work with its landed commit (gt-v4ssj.2)"},
 		{"i.priority > 1", "P0/P1 are never stale"},
 	} {
 		if !strings.Contains(clause, want.fragment) {
