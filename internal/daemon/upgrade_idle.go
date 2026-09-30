@@ -39,7 +39,7 @@ func (d *Daemon) daemonWorkIdle() bool {
 	}
 	if d.bootTriageInFlight.Load() || d.scheduledSlingsRunning.Load() ||
 		d.mayorDispatchRunning.Load() || d.patrolWatchdogRunning.Load() ||
-		d.specDispatchRunning.Load() {
+		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() {
 		return false
 	}
 	if d.mainBranchTestRunning.Load() && !d.mainBranchTestWaitingSlot.Load() {

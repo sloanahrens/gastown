@@ -374,6 +374,11 @@ type Daemon struct {
 	specDispatchRunning atomic.Bool
 	specDispatchCycles  sync.WaitGroup
 
+	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
+	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
+	patrolScanRunning atomic.Bool
+	patrolScanCycles  sync.WaitGroup
+
 	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
 	// patrol, on its own goroutine: it checks every known rig's witness and
 	// refinery plus the deacon, each read involving a bd subprocess and a
@@ -1089,6 +1094,18 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Spec dispatch ticker started (interval %v)", interval)
 	}
 
+	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
+	// deterministic replacement for the witness LLM's patrol.
+	var patrolScanTicker *time.Ticker
+	var patrolScanChan <-chan time.Time
+	if d.isPatrolActive("patrol_scan") {
+		interval := patrolScanInterval(d.patrolConfig)
+		patrolScanTicker = time.NewTicker(interval)
+		patrolScanChan = patrolScanTicker.C
+		defer patrolScanTicker.Stop()
+		d.logger.Printf("Patrol scan ticker started (interval %v)", interval)
+	}
+
 	// Start the patrol watchdog ticker if configured. Flags a patrol role
 	// (witness, deacon, refinery) whose session is alive but whose last
 	// COMPLETED patrol cycle is older than N x its cadence (gt-4z3b7).
@@ -1181,7 +1198,12 @@ func (d *Daemon) Run() (err error) {
 				// Deacon self-probe (gt-jmy3): inject a known event through
 				// the deacon's own mail path each cycle and read back
 				// whether the previous cycle's probe was acked in time.
-				d.runDeaconSelfProbe()
+				// Only while a deacon is wanted: with the deacon patrol off
+				// no session will ever ack, and the probe would page the
+				// operator every cycle (ADR 0005).
+				if d.isPatrolActive(constants.RoleDeacon) {
+					d.runDeaconSelfProbe()
+				}
 			}
 
 		case <-compactorDogChan:
@@ -1243,6 +1265,14 @@ func (d *Daemon) Run() (err error) {
 			// ones within the seat budget, on its own goroutine (gt-4k3fj.5).
 			if !d.isShutdownInProgress() {
 				d.triggerSpecDispatch()
+			}
+
+		case <-patrolScanChan:
+			// Patrol scan tick — restarts confirmed-dead polecats through the
+			// supervisor, closes orphaned work molecules and reports stranded
+			// work, per rig, on its own goroutine (gt-4k3fj.6).
+			if !d.isShutdownInProgress() {
+				d.triggerPatrolScan()
 			}
 
 		case <-patrolWatchdogChan:
@@ -2236,10 +2266,30 @@ func (d *Daemon) notifySlack(channel, priority, message string) {
 // ensureWitnessesRunning ensures witnesses are running for configured rigs.
 // Called on each heartbeat to maintain witness patrol loops.
 // Respects the rigs filter in daemon.json patrol config.
+//
+// A rig in patrols.witness.disabled_rigs gets no witness, and a leftover
+// witness session there is killed through the supervisor: that is the per-rig
+// switch that hands a rig to the patrol_scan tick (ADR 0005).
 func (d *Daemon) ensureWitnessesRunning() {
 	rigs := d.getPatrolRigs("witness")
-	d.rigPool.runPerRig(d.ctx, rigs, func(ctx context.Context, rigName string) error {
+	var wanted []string
+	for _, rigName := range rigs {
+		if WitnessWantedInRig(d.patrolConfig, rigName) {
+			wanted = append(wanted, rigName)
+		}
+	}
+	d.rigPool.runPerRig(d.ctx, wanted, func(ctx context.Context, rigName string) error {
 		d.ensureWitnessRunning(rigName)
+		return nil
+	})
+	var off []string
+	for _, rigName := range d.getKnownRigs() {
+		if !WitnessWantedInRig(d.patrolConfig, rigName) {
+			off = append(off, rigName)
+		}
+	}
+	d.rigPool.runPerRig(d.ctx, off, func(ctx context.Context, rigName string) error {
+		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleWitness, ""), "witness disabled for rig", "daemon/patrol-disabled")
 		return nil
 	})
 }
@@ -3241,6 +3291,13 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// Emit session_death event for audit trail / feed visibility
 	_ = events.LogFeedTo(d.config.TownRoot, events.TypeSessionDeath, sessionName,
 		events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName, "crash detected by daemon health check", events.CallerDaemon))
+
+	// Where the patrol_scan tick covers the rig it owns the restart
+	// (gt-4k3fj.6): no CRASHED_POLECAT mail to a witness that may not exist.
+	if d.patrolScanActiveForRig(rigName) {
+		d.logger.Printf("Crash of %s/%s left to patrol_scan (restart through the supervisor)", rigName, polecatName)
+		return
+	}
 
 	// Notify witness — stuck-agent-dog plugin handles context-aware restart
 	d.notifyWitnessOfCrashedPolecat(rigName, polecatName, hookBead)

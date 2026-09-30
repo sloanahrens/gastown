@@ -14,3 +14,4 @@ internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
 internal/util 45s # real tmux and process helpers
 internal/mail 32s # mail through bd and a Dolt container
 internal/deacon 32s # hermetic harness; cause not yet diagnosed, moved on measured wall alone
+internal/testpolicy 38s # budget-tool integration checks spawn go test subprocesses; false-rejected a landing under load (gt-xo7vg)

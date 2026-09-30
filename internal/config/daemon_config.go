@@ -44,6 +44,7 @@ type PatrolsConfig struct {
 	MainBranchTest       *MainBranchTestConfig       `json:"main_branch_test,omitempty"`
 	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
+	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
@@ -377,6 +378,30 @@ type MayorDispatchConfig struct {
 
 	// IntervalStr is how often to check, as a string (e.g., "30m").
 	IntervalStr string `json:"interval,omitempty"`
+}
+
+// PatrolScanConfig configures the patrol_scan tick (ADR 0005, gt-4k3fj.6):
+// the deterministic Go replacement for the witness LLM's patrol. Per rig it
+// restarts confirmed-dead polecats holding unfinished, unheld work through the
+// supervisor, closes orphaned work molecules of polecats that no longer exist,
+// and reports stranded work once per window. Off unless enabled.
+type PatrolScanConfig struct {
+	// Enabled turns the tick on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the tick cadence (default "2m").
+	IntervalStr string `json:"interval,omitempty"`
+
+	// Rigs limits the tick to these rigs; empty means every operational rig.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// DeadSamples is how many consecutive dead liveness samples a seat needs
+	// before a restart (default 2).
+	DeadSamples int `json:"dead_samples,omitempty"`
+
+	// ReportWindow is the minimum gap between two stranded-work comments on
+	// one bead (default "24h").
+	ReportWindow string `json:"report_window,omitempty"`
 }
 
 // SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a

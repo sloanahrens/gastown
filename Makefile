@@ -1,4 +1,4 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -21,6 +21,11 @@
 #                          container-gate slot: the recipe writes
 #                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
 #                          turn containers on. Do not wrap it in `gt slot run`.
+#   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
+#                          ./...`, then `go test` of only the packages the branch
+#                          changed against origin/main. The landing worker runs
+#                          `make gate` on the merged tree, so this is the cheap
+#                          first look, not the gate. No containers, no slot.
 #   make test-slow         the slow tier, after each landing: the packages in
 #                          internal/testpolicy/slow.txt, then the shell tests
 #                          (scripts/test-makefile.sh, which `make
@@ -314,6 +319,29 @@ gate: lint
 tier-check:
 	@echo "tier-check: fast tier, failing any package over the wall limit (every package not in $(SLOW_LIST))" >&2
 	@GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -fast-tier -strict-wall -slow $(SLOW_LIST) -- -timeout 20m ./...
+
+# presubmit is gt done's pre-submit check (gt-ssyxd): the landing worker gates
+# every branch on the merged tree with `make gate`, so a polecat running the
+# whole gate first only doubles the host load. This target lints, builds, and
+# tests just the packages the branch changed (internal/land/cmd/changedpkgs,
+# unit-tested in internal/land/changed_test.go). It skips the budget runner, the
+# drift guard and the slow tier. Judged by exit code alone, like the gate. A
+# package the branch deleted is not tested: there is nothing to run.
+# PRESUBMIT_BASE is the ref the branch is compared against.
+PRESUBMIT_BASE ?= origin/main
+presubmit: LINT_RUNNER_FLAGS := --allow-serial-runners
+presubmit: GATE_START := $(shell date +%s)
+presubmit: lint
+	@echo "presubmit: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
+	@go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
+	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
+	if [ -z "$$pkgs" ]; then echo "presubmit: no Go package changed against $(PRESUBMIT_BASE); no tests to run" >&2; \
+	else \
+		echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
+		GT_TEST_DOCKER=0 go test -timeout 10m $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+	fi; \
+	echo "presubmit: PASSED in $$(( $$(date +%s) - $(GATE_START) ))s wall" >&2
 
 # test-slow is the slow tier: the packages the gate skips, then the shell
 # tests. Both run even when the first fails; either failing fails the target.
