@@ -3,6 +3,7 @@ package doltserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -5305,11 +5306,25 @@ func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T)
 		t.Fatalf("SetRigIssuePrefix with a matching prefix = %v, writes %q; want nil and no write", err, writes)
 	}
 
-	current = ""
-	if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
-		t.Fatalf("EnsureRigIssuePrefix (unset): %v", err)
-	}
-	if len(writes) != 1 || writes[0] != "testrig=tr" {
-		t.Fatalf("unset prefix: writes %q, want testrig=tr", writes)
+	// Unset, stale, or unreadable: the configured prefix is written, as it
+	// was before the bd read existed.
+	for _, tc := range []struct {
+		name    string
+		current string
+		readErr error
+	}{
+		{"unset", "", nil},
+		{"stale", "old", nil},
+		{"read fails", "", errors.New("bd config get: exit status 25")},
+	} {
+		writes = nil
+		current = tc.current
+		readRigIssuePrefix = func(_, beadsDir string) (string, error) { return current, tc.readErr }
+		if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+			t.Fatalf("%s: EnsureRigIssuePrefix: %v", tc.name, err)
+		}
+		if len(writes) != 1 || writes[0] != "testrig=tr" {
+			t.Fatalf("%s: writes %q, want testrig=tr", tc.name, writes)
+		}
 	}
 }

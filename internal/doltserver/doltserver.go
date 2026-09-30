@@ -2889,8 +2889,19 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 // refuse or ignore a workspace whose metadata.json exists (gt-7iwy0.2; the
 // beads-side verb gt-7iwy0.3 needs is an issue_prefix set for a database
 // whose prefix is unset or stale).
+//
+// A value that differs, stale or unset, is overwritten: that is what both
+// callers ask for (rig init seeds it, the doctor fix repairs a mismatch with
+// routes.jsonl), and what they did before the bd read existed. A bd read that
+// fails is reported and the write still made, as it was before: the write is
+// the configured prefix, so making it without the read can repeat a value but
+// never set a wrong one.
 func seedRigIssuePrefix(townRoot, beadsDir, database, prefix string) error {
-	if current, err := readRigIssuePrefix(townRoot, beadsDir); err == nil && current == prefix {
+	current, err := readRigIssuePrefix(townRoot, beadsDir)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "Warning: could not read issue_prefix for %s through bd (%v); writing %q\n", database, err, prefix)
+	case current == prefix:
 		return nil
 	}
 	return writeRigIssuePrefixViaStore(townRoot, beadsDir, database, prefix)
