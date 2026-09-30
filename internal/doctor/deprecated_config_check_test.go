@@ -11,8 +11,8 @@ func TestDeprecatedMergeQueueKeysCheck_Clean(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled":    true,
-			"on_conflict": "assign_back",
+			"test_command":  "make test",
+			"build_command": "make build",
 		},
 	})
 
@@ -29,7 +29,7 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsTargetBranch(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled":       true,
+			"test_command":  "make test",
 			"target_branch": "develop",
 		},
 	})
@@ -47,8 +47,8 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsIntegrationBranches(t *testing.T) 
 	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled":               true,
-			"integration_branches":  true,
+			"test_command":         "make test",
+			"integration_branches": true,
 		},
 	})
 
@@ -65,7 +65,7 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsBothKeys(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled":              true,
+			"test_command":         "make test",
 			"target_branch":        "develop",
 			"integration_branches": true,
 		},
@@ -119,10 +119,10 @@ func TestDeprecatedMergeQueueKeysCheck_Fix(t *testing.T) {
 		"type":    "rig-settings",
 		"version": 1,
 		"merge_queue": map[string]interface{}{
-			"enabled":              true,
 			"target_branch":        "develop",
 			"integration_branches": true,
-			"run_tests":            true,
+			"batch_max":            12,
+			"build_command":        "go build ./...",
 			"test_command":         "go test ./...",
 		},
 	})
@@ -171,13 +171,13 @@ func TestDeprecatedMergeQueueKeysCheck_Fix(t *testing.T) {
 	if _, ok := mq["integration_branches"]; ok {
 		t.Error("integration_branches should have been removed by Fix()")
 	}
+	if _, ok := mq["batch_max"]; ok {
+		t.Error("batch_max should have been removed by Fix()")
+	}
 
 	// Non-deprecated keys should remain
-	if _, ok := mq["enabled"]; !ok {
-		t.Error("enabled should be preserved after Fix()")
-	}
-	if _, ok := mq["run_tests"]; !ok {
-		t.Error("run_tests should be preserved after Fix()")
+	if _, ok := mq["build_command"]; !ok {
+		t.Error("build_command should be preserved after Fix()")
 	}
 	if _, ok := mq["test_command"]; !ok {
 		t.Error("test_command should be preserved after Fix()")
@@ -191,14 +191,14 @@ func TestDeprecatedMergeQueueKeysCheck_MultiRig(t *testing.T) {
 	// Rig 1: clean config (no deprecated keys)
 	createRigWithSettings(t, townRoot, "cleanrig", map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled": true,
+			"test_command": "make test",
 		},
 	})
 
 	// Rig 2: has deprecated keys
 	createRigWithSettings(t, townRoot, "dirtyrig", map[string]interface{}{
 		"merge_queue": map[string]interface{}{
-			"enabled":              true,
+			"test_command":         "make test",
 			"target_branch":        "develop",
 			"integration_branches": true,
 		},

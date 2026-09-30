@@ -164,7 +164,7 @@ func TestSaveRigTheme_PreservesNonThemeSettings(t *testing.T) {
 
 	initialSettings := config.NewRigSettings()
 	initialSettings.Theme = &config.ThemeConfig{Name: "ocean"}
-	initialSettings.MergeQueue.OnConflict = "auto_rebase"
+	initialSettings.MergeQueue.TestCommand = "make test-fast"
 
 	settingsPath := filepath.Join(settingsDir, "config.json")
 	if err := config.SaveRigSettings(settingsPath, initialSettings); err != nil {
@@ -193,8 +193,8 @@ func TestSaveRigTheme_PreservesNonThemeSettings(t *testing.T) {
 	if reloaded.MergeQueue == nil {
 		t.Fatal("MergeQueue is nil after save")
 	}
-	if reloaded.MergeQueue.OnConflict != "auto_rebase" {
-		t.Errorf("MergeQueue.OnConflict = %q, want %q", reloaded.MergeQueue.OnConflict, "auto_rebase")
+	if reloaded.MergeQueue.TestCommand != "make test-fast" {
+		t.Errorf("MergeQueue.TestCommand = %q, want %q", reloaded.MergeQueue.TestCommand, "make test-fast")
 	}
 }
 

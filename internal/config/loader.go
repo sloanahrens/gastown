@@ -189,62 +189,8 @@ func validateRigSettings(c *RigSettings) error {
 	return nil
 }
 
-// ErrInvalidOnConflict indicates an invalid on_conflict strategy.
-var ErrInvalidOnConflict = errors.New("invalid on_conflict strategy")
-
 // validateMergeQueueConfig validates a MergeQueueConfig.
 func validateMergeQueueConfig(c *MergeQueueConfig) error {
-	// Validate on_conflict strategy
-	if c.OnConflict != "" && c.OnConflict != OnConflictAssignBack && c.OnConflict != OnConflictAutoRebase {
-		return fmt.Errorf("%w: got '%s', want '%s' or '%s'",
-			ErrInvalidOnConflict, c.OnConflict, OnConflictAssignBack, OnConflictAutoRebase)
-	}
-
-	// Validate poll_interval if specified
-	if c.PollInterval != "" {
-		if _, err := time.ParseDuration(c.PollInterval); err != nil {
-			return fmt.Errorf("invalid poll_interval: %w", err)
-		}
-	}
-
-	// Validate stale_claim_timeout if specified
-	if c.StaleClaimTimeout != "" {
-		dur, err := time.ParseDuration(c.StaleClaimTimeout)
-		if err != nil {
-			return fmt.Errorf("invalid stale_claim_timeout: %w", err)
-		}
-		if dur <= 0 {
-			return fmt.Errorf("stale_claim_timeout must be positive, got %v", dur)
-		}
-	}
-
-	// Validate non-negative values
-	if c.RetryFlakyTests < 0 {
-		return fmt.Errorf("%w: retry_flaky_tests must be non-negative", ErrMissingField)
-	}
-	if c.MaxConcurrent < 0 {
-		return fmt.Errorf("%w: max_concurrent must be non-negative", ErrMissingField)
-	}
-
-	// Validate batch_min_age if specified
-	if c.BatchMinAge != "" {
-		dur, err := time.ParseDuration(c.BatchMinAge)
-		if err != nil {
-			return fmt.Errorf("invalid batch_min_age: %w", err)
-		}
-		if dur <= 0 {
-			return fmt.Errorf("batch_min_age must be positive, got %v", dur)
-		}
-	}
-
-	if c.BatchMax < 0 {
-		return fmt.Errorf("%w: batch_max must be non-negative", ErrMissingField)
-	}
-
-	if c.BatchMinCount < 0 {
-		return fmt.Errorf("%w: batch_min_count must be non-negative", ErrMissingField)
-	}
-
 	// Zero is the documented "guard off" value, so only a negative is invalid:
 	// a typo'd -1 would silently disable the ceiling the operator meant to set.
 	if c.MaxReadyForDispatch < 0 {
@@ -328,90 +274,21 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.PresubmitCommand != "" {
 			result.PresubmitCommand = local.PresubmitCommand
 		}
-		// gt done's default test-verify gate budgets and command override
-		// (gt-pnkd): same non-empty-wins rule as the five *_command fields
-		// above.
-		if local.TestVerifyRunTimeout != "" {
-			result.TestVerifyRunTimeout = local.TestVerifyRunTimeout
-		}
-		if local.TestVerifySlotTimeout != "" {
-			result.TestVerifySlotTimeout = local.TestVerifySlotTimeout
-		}
-		if local.TestVerifyCommand != "" {
-			result.TestVerifyCommand = local.TestVerifyCommand
-		}
 		if local.BuildCommand != "" {
 			result.BuildCommand = local.BuildCommand
 		}
 		// Merge non-command fields from local if explicitly set
-		if local.Enabled {
-			result.Enabled = local.Enabled
-		}
 		if local.MergeStrategy != "" {
 			result.MergeStrategy = local.MergeStrategy
-		}
-		if local.OnConflict != "" {
-			result.OnConflict = local.OnConflict
-		}
-		if local.RunTests != nil {
-			result.RunTests = local.RunTests
-		}
-		if local.DeleteMergedBranches != nil {
-			result.DeleteMergedBranches = local.DeleteMergedBranches
-		}
-		if local.RetryFlakyTests > 0 {
-			result.RetryFlakyTests = local.RetryFlakyTests
-		}
-		if local.PollInterval != "" {
-			result.PollInterval = local.PollInterval
 		}
 		if local.MaxReadyForDispatch > 0 {
 			result.MaxReadyForDispatch = local.MaxReadyForDispatch
-		}
-		if local.MaxConcurrent > 0 {
-			result.MaxConcurrent = local.MaxConcurrent
-		}
-		if local.StaleClaimTimeout != "" {
-			result.StaleClaimTimeout = local.StaleClaimTimeout
-		}
-		if local.MergeStrategy != "" {
-			result.MergeStrategy = local.MergeStrategy
 		}
 		if local.RequireReview != nil {
 			result.RequireReview = local.RequireReview
 		}
 		if local.IntegrationBranchPolecatEnabled != nil {
 			result.IntegrationBranchPolecatEnabled = local.IntegrationBranchPolecatEnabled
-		}
-		if local.IntegrationBranchRefineryEnabled != nil {
-			result.IntegrationBranchRefineryEnabled = local.IntegrationBranchRefineryEnabled
-		}
-		if local.IntegrationBranchTemplate != "" {
-			result.IntegrationBranchTemplate = local.IntegrationBranchTemplate
-		}
-		if local.IntegrationBranchAutoLand != nil {
-			result.IntegrationBranchAutoLand = local.IntegrationBranchAutoLand
-		}
-		if local.VCSProvider != "" {
-			result.VCSProvider = local.VCSProvider
-		}
-		if local.JudgmentEnabled != nil {
-			result.JudgmentEnabled = local.JudgmentEnabled
-		}
-		if local.ReviewDepth != "" {
-			result.ReviewDepth = local.ReviewDepth
-		}
-		if local.BatchEnabled != nil {
-			result.BatchEnabled = local.BatchEnabled
-		}
-		if local.BatchMinAge != "" {
-			result.BatchMinAge = local.BatchMinAge
-		}
-		if local.BatchMax > 0 {
-			result.BatchMax = local.BatchMax
-		}
-		if local.BatchMinCount > 0 {
-			result.BatchMinCount = local.BatchMinCount
 		}
 		if local.Editorial != nil {
 			result.Editorial = local.Editorial
@@ -444,10 +321,20 @@ func LoadRigSettings(path string) (*RigSettings, error) {
 
 // DeprecatedMergeQueueKeys lists merge_queue config keys that have been
 // removed. Strict decoding rejects them in a rig settings file; gt doctor
-// names them.
+// names them and --fix deletes them.
 // target_branch and integration_branches were replaced by rig default_branch
-// and per-epic integration branch metadata.
-var DeprecatedMergeQueueKeys = []string{"target_branch", "integration_branches"}
+// and per-epic integration branch metadata. The rest configured the deleted
+// refinery and gt done's old test-verify gate; nothing read them after the
+// landing worker replaced both (gt-5nlvq).
+var DeprecatedMergeQueueKeys = []string{
+	"target_branch", "integration_branches",
+	"enabled", "integration_branch_refinery_enabled", "integration_branch_template",
+	"integration_branch_auto_land", "vcs_provider", "on_conflict", "run_tests",
+	"test_verify_run_timeout", "test_verify_slot_timeout", "test_verify_command",
+	"delete_merged_branches", "retry_flaky_tests", "poll_interval", "max_concurrent",
+	"stale_claim_timeout", "judgment_enabled", "review_depth", "batch_enabled",
+	"batch_min_age", "batch_max", "batch_min_count", "cycle_session_after_merge",
+}
 
 // SaveRigSettings saves rig settings to a file.
 func SaveRigSettings(path string, settings *RigSettings) error {
