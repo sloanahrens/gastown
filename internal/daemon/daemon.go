@@ -101,6 +101,10 @@ type Daemon struct {
 	// (see hostLoad); nil measures the real host.
 	hostLoadFn func() hostLoad
 
+	// execCmd runs the gt, bd and helper subprocesses the daemon builds (see
+	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
+	execCmd cmdRunFunc
+
 	// countCommitsFn replaces the dolt_log count scheduled_maintenance reads
 	// per database (compactorCountCommits), so tests drive the mode decision
 	// without a Dolt server. Nil queries the server.
@@ -1868,7 +1872,7 @@ func (d *Daemon) ensureBootRunning() {
 		cmd := exec.Command(idleCheckBin)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s:%s",
 			filepath.Join(d.config.TownRoot, "bin"), os.Getenv("PATH")))
-		if output, err := cmd.CombinedOutput(); err == nil {
+		if output, err := d.combinedOutput(cmd); err == nil {
 			// Exit 0 = idle, use degraded triage (zero tokens)
 			d.runDegradedBootTriage(b)
 			return
@@ -1979,7 +1983,7 @@ func (d *Daemon) runMechanicalBootTriage() {
 		cmd.Dir = filepath.Join(townRoot, "deacon")
 		cmd.Env = append(os.Environ(), "GT_ROOT="+townRoot, "GT_TOWN_ROOT="+townRoot, "GT_ROLE=deacon/boot", "BD_ACTOR=boot")
 		util.SetProcessGroup(cmd) // its Cancel hook kills the whole group on timeout
-		out, err := cmd.CombinedOutput()
+		out, err := d.combinedOutput(cmd)
 		summary := strings.TrimSpace(string(out))
 		if len(summary) > 400 {
 			summary = summary[len(summary)-400:]
@@ -2180,7 +2184,7 @@ func (d *Daemon) notifySlack(channel, priority, message string) {
 	//nolint:gosec // G204: args are constructed internally
 	cmd := exec.Command(notifyBin, "--channel", channel, "--priority", priority, message)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s:%s", filepath.Join(d.config.TownRoot, "bin"), os.Getenv("PATH")))
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := d.combinedOutput(cmd); err != nil {
 		d.logger.Printf("Stuck-agent-dog: gt-notify failed: %v (output: %s)", err, string(output))
 	}
 }
@@ -3276,7 +3280,7 @@ func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
 	setSysProcAttr(cmd.Cmd)
 
-	output, err := cmd.Output()
+	output, err := d.bdOutput(cmd)
 	if err != nil {
 		return false, false
 	}
@@ -3311,7 +3315,7 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		}
 		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := cmd.Output()
+		output, err := d.bdOutput(cmd)
 		if err != nil {
 			continue
 		}
@@ -3339,7 +3343,7 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.
 			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		}
 		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := cmd.Output()
+		output, err := d.bdOutput(cmd)
 		if err != nil {
 			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
 			continue
@@ -3601,7 +3605,7 @@ func (d *Daemon) dispatchQueuedWork() {
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
-	out, err := cmd.CombinedOutput()
+	out, err := d.combinedOutput(cmd)
 	if ctx.Err() == context.DeadlineExceeded {
 		d.logger.Printf("Scheduler dispatch timed out after 5m")
 	} else if err != nil {
