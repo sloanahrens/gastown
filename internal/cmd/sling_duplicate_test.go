@@ -854,3 +854,90 @@ func jsonString(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+// TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly pins the
+// contract of the design/notes enrichment step (gt-vn90g, om major on
+// gt-wisp-ikxn): when the batched bd show fails, the pool fetch still succeeds
+// with list-only refs — a bd hiccup is not a duplicate — but the failure is
+// reported, since a pool without design/notes text silently misses the gt-g6b
+// class of overlap.
+func TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	townRoot := t.TempDir()
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	script := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --allow-stale) shift ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  show) echo "dolt connection refused" >&2; exit 1 ;;
+  list) echo '[{"id":"gt-pool1","title":"Some pool bead","status":"open","description":"Touches internal/cmd/sling_duplicate.go and TestFoo."}]' ;;
+esac
+exit 0
+`
+	writeBDStub(t, binDir, script, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var warnedDir string
+	var warnedErr error
+	previous := duplicateEnrichmentWarnFn
+	duplicateEnrichmentWarnFn = func(beadsDir string, err error) {
+		warnedDir, warnedErr = beadsDir, err
+	}
+	t.Cleanup(func() { duplicateEnrichmentWarnFn = previous })
+
+	got, err := listDuplicateCandidates(townRoot, []string{"open"}, time.Time{})
+	if err != nil {
+		t.Fatalf("a failed enrichment must not fail the pool fetch: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-pool1" {
+		t.Fatalf("expected the list-only candidate gt-pool1, got %+v", got)
+	}
+	if got[0].Refs.empty() {
+		t.Error("list-only refs from the description should survive a failed enrichment")
+	}
+	if warnedErr == nil {
+		t.Fatal("a failed enrichment must be reported, not swallowed")
+	}
+	if warnedDir != townRoot {
+		t.Errorf("warning names %q, want %q", warnedDir, townRoot)
+	}
+	if !strings.Contains(warnedErr.Error(), "dolt connection refused") {
+		t.Errorf("warning error should carry bd's stderr: %v", warnedErr)
+	}
+}
+
+// TestListDuplicateCandidates_EnrichmentSuccessIsQuiet guards the other side:
+// a healthy enrichment must not emit the degraded-check warning.
+func TestListDuplicateCandidates_EnrichmentSuccessIsQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	townRoot := t.TempDir()
+	writeDesignNotesDuplicateBDStub(t, townRoot)
+	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	warned := false
+	previous := duplicateEnrichmentWarnFn
+	duplicateEnrichmentWarnFn = func(string, error) { warned = true }
+	t.Cleanup(func() { duplicateEnrichmentWarnFn = previous })
+
+	got, err := listDuplicateCandidates(filepath.Join(townRoot, "gastown", "mayor", "rig"), []string{"open"}, time.Time{})
+	if err != nil {
+		t.Fatalf("listDuplicateCandidates: %v", err)
+	}
+	if warned {
+		t.Error("a successful enrichment must not warn")
+	}
+	if len(got) != 1 || len(got[0].Refs.Tests) == 0 {
+		t.Errorf("expected design/notes tests recovered, got %+v", got)
+	}
+}
