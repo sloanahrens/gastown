@@ -70,6 +70,12 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 			in:   trackedIssueInfo{Status: "hooked"},
 			want: true,
 		},
+		{
+			// Submitted for landing: the landing worker owns it (gt-v4ssj.2).
+			name: "ready-to-land issue never stranded",
+			in:   trackedIssueInfo{Status: "hooked", Labels: []string{"gt:ready-to-land"}},
+			want: false,
+		},
 		// Readiness is an allowlist (gt-t08jn): every status the tracker says
 		// is not ready work stays off the feeders, assigned or not.
 		{
