@@ -15,7 +15,5 @@ internal/formula 67s # tests exec bash and git
 internal/crew 66s # tests exec git over real clones
 internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
 internal/util 45s # real tmux and process helpers
-internal/git 43s # about 1900 git execs (overbudget.txt, gt-22hdp.35)
-internal/land 41s # land path over real git repos, hermetic harness
 internal/mail 32s # mail through bd and a Dolt container
 internal/deacon 32s # hermetic harness; cause not yet diagnosed, moved on measured wall alone
