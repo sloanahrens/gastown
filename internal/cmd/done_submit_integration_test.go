@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -89,15 +91,6 @@ func (r doneSubmitRun) reportedDone() bool {
 	return strings.Contains(string(data), "POLECAT_DONE")
 }
 
-func gitOut(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
 func originURL(t *testing.T, workDir string) string {
 	return gitOut(t, workDir, "remote", "get-url", "origin")
 }
@@ -116,13 +109,11 @@ func advanceOriginMain(t *testing.T, workDir, name, body string) {
 	gitOut(t, other, "push", "-q", "origin", "main")
 }
 
-const doneTestBranch = "feature/routed-submit"
-
 // TestRunDoneRebasesGatesPushesAndMarksReady is the whole author side: the
 // branch is rebased onto the moved target, its auto-save commit squashed, the
 // rebased tree gated, the exact gated commit pushed, and the work bead marked
 // ready to land. No MR bead is created and nothing reaches main.
-func TestRunDoneRebasesGatesPushesAndMarksReady(t *testing.T) {
+func TestIntegrationRunDoneRebasesGatesPushesAndMarksReady(t *testing.T) {
 	gate := passingDoneGate()
 	r := runDoneSubmit(t, gate, func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, false)
@@ -184,7 +175,7 @@ func submittedIntentFor(t *testing.T, r doneSubmitRun) intent.Record {
 // TestRunDoneReplacesAnOlderBranchTipUnderLease: the branch was pushed by an
 // earlier attempt, then rebased here; the rebased tip replaces it under a
 // lease on the tip origin had.
-func TestRunDoneReplacesAnOlderBranchTipUnderLease(t *testing.T) {
+func TestIntegrationRunDoneReplacesAnOlderBranchTipUnderLease(t *testing.T) {
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, true)
 		advanceOriginMain(t, workDir, "other.txt", "other\n")
@@ -200,7 +191,7 @@ func TestRunDoneReplacesAnOlderBranchTipUnderLease(t *testing.T) {
 
 // TestRunDoneRedLocalGateExits15: a red local gate stops before the push:
 // exit 15, nothing on origin, no ready mark, no done report.
-func TestRunDoneRedLocalGateExits15(t *testing.T) {
+func TestIntegrationRunDoneRedLocalGateExits15(t *testing.T) {
 	gate := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 2, Tail: "FAIL\tpkg/x\n"}}}}
 	r := runDoneSubmit(t, gate, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
 	assertDoneExitCode(t, r.err, doneExitGateFailed, "FAIL\tpkg/x")
@@ -214,7 +205,7 @@ func TestRunDoneRedLocalGateExits15(t *testing.T) {
 
 // TestRunDoneRebaseConflictExits14: the target changed the same lines: exit
 // 14 naming the file, and the worktree is not left mid-rebase.
-func TestRunDoneRebaseConflictExits14(t *testing.T) {
+func TestIntegrationRunDoneRebaseConflictExits14(t *testing.T) {
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, false)
 		advanceOriginMain(t, workDir, "file.txt", "main moved\n")
@@ -230,7 +221,7 @@ func TestRunDoneRebaseConflictExits14(t *testing.T) {
 
 // TestRunDoneExitsReadyRecordFailed: the branch is on origin but bd could not
 // mark the work bead ready: exit 12 and no done report.
-func TestRunDoneExitsReadyRecordFailed(t *testing.T) {
+func TestIntegrationRunDoneExitsReadyRecordFailed(t *testing.T) {
 	t.Setenv("GT_TEST_BD_UPDATE_FAILS", "1")
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
 	assertDoneExitCode(t, r.err, doneExitReadyFailed, "ready to land")
@@ -242,22 +233,11 @@ func TestRunDoneExitsReadyRecordFailed(t *testing.T) {
 	}
 }
 
-// TestDoneLandingFlagsAreGone: gt done has no landing modes and no gate
-// bypass (ADR 0004).
-func TestDoneLandingFlagsAreGone(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"pre-verified", "skip-tests", "skip-verify", "merge", "resume", "priority"} {
-		if doneCmd.Flags().Lookup(name) != nil {
-			t.Errorf("gt done still has --%s", name)
-		}
-	}
-}
-
 // TestRunDoneRefusesToPushOverSomeoneElsesWork: origin's branch holds a
 // commit this worktree does not have (another session reworked the branch).
 // The lease would let gt done replace it, so it compares change-sets first and
 // refuses real divergence (gt-bf5x, gt-i0z3): exit 10, origin untouched.
-func TestRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
+func TestIntegrationRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 	var theirs string
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, true)
@@ -285,7 +265,7 @@ func TestRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 // long stages must not outlive a run that failed and reported nothing, or the
 // witness restarts a polecat that is fixing its branch (gt-wmpy). A run that
 // succeeded leaves it to updateAgentStateOnDone, which clears it last.
-func TestRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
+func TestIntegrationRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
 	red := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 1}}}}
 	r := runDoneSubmit(t, red, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
 	assertDoneExitCode(t, r.err, doneExitGateFailed, "local gate failed")
@@ -305,7 +285,7 @@ func TestRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
 // TestRunDoneGateThatCouldNotRunExits16: a gate that could not run says
 // nothing about the code, so it gets its own exit code and the polecat is told
 // to escalate rather than fix code.
-func TestRunDoneGateThatCouldNotRunExits16(t *testing.T) {
+func TestIntegrationRunDoneGateThatCouldNotRunExits16(t *testing.T) {
 	broken := &recordingGate{result: land.GateResult{Err: errors.New("sh: not found")}}
 	r := runDoneSubmit(t, broken, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
 	assertDoneExitCode(t, r.err, doneExitGateUnavailable, "not a verdict on your change")
@@ -318,7 +298,7 @@ func TestRunDoneGateThatCouldNotRunExits16(t *testing.T) {
 // non-default target is verified as landed on THAT target and closed with it
 // recorded. Checking the rig default instead would refuse work that is on the
 // target it was aimed at, and record the wrong landing branch.
-func TestRunDoneNoCodeChecksTheResolvedTarget(t *testing.T) {
+func TestIntegrationRunDoneNoCodeChecksTheResolvedTarget(t *testing.T) {
 	r := runDoneSubmitWithFlags(t, passingDoneGate(), func() { doneTarget = "release" }, func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, true)
 		// The feature commit is on origin/release but not on origin/main.

@@ -51,6 +51,17 @@ const revertPathsPerCommit = 4
 // Changes the branch merely relocated are printed and accepted: their code is
 // still in the tree, so there is nothing to refuse (gt-x748o).
 func reportRevertedMerges(g *git.Git, target string) error {
+	return reportRevertedMergesWith(g, func() (git.RevertReport, error) { return git.DetectRevertedMerges(g, target, "HEAD") }, target)
+}
+
+// revertReportGit is what the revert report reads from the worktree.
+type revertReportGit interface {
+	DiffStatThreeDot(base, head string) (string, error)
+	CommitSubject(rev string) (string, error)
+}
+
+// reportRevertedMergesWith is reportRevertedMerges with the detection given.
+func reportRevertedMergesWith(g revertReportGit, detect func() (git.RevertReport, error), target string) error {
 	if stat, err := g.DiffStatThreeDot(target, "HEAD"); err != nil {
 		style.PrintWarning("could not compute branch diff against %s: %v", target, err)
 	} else if strings.TrimSpace(stat) != "" {
@@ -61,7 +72,7 @@ func reportRevertedMerges(g *git.Git, target string) error {
 		fmt.Println()
 	}
 
-	report, err := git.DetectRevertedMerges(g, target, "HEAD")
+	report, err := detect()
 	if err != nil {
 		// Refuse rather than submit: this check exists because a branch that
 		// reverts merged work is silently accepted by everything downstream,
@@ -84,7 +95,7 @@ func reportRevertedMerges(g *git.Git, target string) error {
 // informational: it exists so the polecat that wrote the move — and anyone
 // reading its submission — can see what the guard saw and why it did not
 // refuse.
-func relocatedMergesNote(g *git.Git, relocated []git.RevertedMerge) string {
+func relocatedMergesNote(g revertReportGit, relocated []git.RevertedMerge) string {
 	if len(relocated) == 0 {
 		return ""
 	}
@@ -104,7 +115,7 @@ func relocatedMergesNote(g *git.Git, relocated []git.RevertedMerge) string {
 // work. The message deliberately does not name the flag that overrides it:
 // agents read refusal text and self-bypass, so the text says what to do about
 // the branch instead.
-func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) error {
+func revertedMergeRefusal(g revertReportGit, target string, found []git.RevertedMerge) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
 	fmt.Fprintf(&b, "These commits on %s are undone by your branch:\n", target)
@@ -134,7 +145,7 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 
 // commitSubjectOrUnavailable names a commit for a report line, standing in for
 // a subject this repository cannot produce rather than dropping the commit.
-func commitSubjectOrUnavailable(g *git.Git, commit string) string {
+func commitSubjectOrUnavailable(g revertReportGit, commit string) string {
 	subject, err := g.CommitSubject(commit)
 	if err != nil || subject == "" {
 		return "(subject unavailable)"

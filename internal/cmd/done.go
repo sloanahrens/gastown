@@ -618,12 +618,12 @@ var generatedCommentPrefixes = []string{
 	"mr created:",
 }
 
-func doneSourceCloseSkipReason(bd *beads.Beads, issueID string, issue *beads.Issue) (string, bool) {
+func doneSourceCloseSkipReason(bd beads.Client, issueID string, issue *beads.Issue) (string, bool) {
 	currentHead, _ := currentReviewEvidenceHead()
 	return doneSourceCloseSkipReasonForHead(bd, issueID, issue, currentHead)
 }
 
-func doneSourceCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
+func doneSourceCloseSkipReasonForHead(bd beads.Client, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
 		return skipReason, fatal
@@ -643,7 +643,7 @@ func doneSourceCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *be
 	return "", false
 }
 
-func doneReviewOnlyCloseSkipReason(bd *beads.Beads, issueID string, issue *beads.Issue) (string, bool) {
+func doneReviewOnlyCloseSkipReason(bd beads.Client, issueID string, issue *beads.Issue) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
 		return skipReason, fatal
@@ -659,7 +659,7 @@ func doneReviewOnlyCloseSkipReason(bd *beads.Beads, issueID string, issue *beads
 	return doneReviewOnlyCloseSkipReasonForHead(bd, issueID, issue, currentHead)
 }
 
-func doneReviewOnlyCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
+func doneReviewOnlyCloseSkipReasonForHead(bd beads.Client, issueID string, issue *beads.Issue, currentHead string) (string, bool) {
 	issue, skipReason, fatal := loadDoneSourceIssue(bd, issueID, issue)
 	if skipReason != "" {
 		return skipReason, fatal
@@ -689,7 +689,7 @@ func doneReviewOnlyCloseSkipReasonForHead(bd *beads.Beads, issueID string, issue
 	return "", false
 }
 
-func loadDoneSourceIssue(bd *beads.Beads, issueID string, issue *beads.Issue) (*beads.Issue, string, bool) {
+func loadDoneSourceIssue(bd beads.Client, issueID string, issue *beads.Issue) (*beads.Issue, string, bool) {
 	if issueID == "" {
 		return nil, "", false
 	}
@@ -715,7 +715,7 @@ func currentReviewEvidenceHead() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func hasFreshReviewReportEvidence(bd *beads.Beads, issueID string, issue *beads.Issue, assignmentAt time.Time, assignee, currentHead string) (bool, error) {
+func hasFreshReviewReportEvidence(bd beads.Client, issueID string, issue *beads.Issue, assignmentAt time.Time, assignee, currentHead string) (bool, error) {
 	if issue != nil {
 		if hasFreshReviewEvidenceComment(issue.Comments, assignmentAt, assignee, currentHead) {
 			return true, nil
@@ -872,12 +872,17 @@ type doneRun struct {
 	agentBeadID      string
 	defaultBranch    string
 	heartbeatSession string
+	// cleanupStatus is the worktree's git state as last observed or set by
+	// --cleanup-status; a successful push moves it on.
+	cleanupStatus string
+	opts          doneOptions
+	deps          doneSubmitDeps
 }
 
 // doneSubmission is what a COMPLETED run handed over.
 type doneSubmission struct {
 	sourceIssue *beads.Issue
-	sourceBD    *beads.Beads
+	sourceBD    beads.Client
 }
 
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
@@ -991,13 +996,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// run: reportDone's only error comes before the Witness nudge. A run that
 	// succeeds leaves the label to updateAgentStateOnDone, which clears it last.
 	if r.agentBeadID != "" {
-		agentBd := beads.New(r.cwd).ForAgentBead()
-		setDoneIntentLabel(agentBd, r.agentBeadID, exitType)
-		defer func() {
-			if retErr != nil {
-				clearDoneIntentLabel(agentBd, r.agentBeadID)
-			}
-		}()
+		release := holdDoneIntent(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, exitType)
+		defer func() { release(retErr) }()
 	}
 
 	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the witness
@@ -1013,7 +1013,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if exitType == ExitCompleted {
+		r.cleanupStatus = doneCleanupStatus
+		r.useRealSubmitDeps(os.Getenv)
 		err = submitForLanding(r)
+		doneCleanupStatus = r.cleanupStatus
 		if err != nil {
 			// Nothing is reported done, but the worktree's git state is still
 			// recorded: a session that dies before re-running gt done must not
@@ -1139,7 +1142,7 @@ func submitForLanding(r *doneRun) error {
 	// Refuse uncommitted changes (hq-xthqf): they would be lost. Runtime
 	// artifacts (.claude/, .beads/, .runtime/ ...) are toolchain-managed and
 	// excluded.
-	workStatus, err := r.g.CheckUncommittedWork()
+	workStatus, err := r.deps.repo.CheckUncommittedWork()
 	if err != nil {
 		return fmt.Errorf("checking git status: %w", err)
 	}
@@ -1152,12 +1155,12 @@ func submitForLanding(r *doneRun) error {
 	isNoMergeTask := false
 	reviewOnlySource := false
 	if r.issueID != "" {
-		sourceInfo, sourceErr := resolveSubmitSourceIssue(r.cwd, r.issueID)
+		issue, issueBD, sourceErr := r.deps.source(r.issueID)
 		if sourceErr != nil {
 			return fmt.Errorf("source issue validation failed: %w", sourceErr)
 		}
-		sub.sourceIssue = sourceInfo.Issue
-		sub.sourceBD = sourceInfo.BD
+		sub.sourceIssue = issue
+		sub.sourceBD = issueBD
 		if af := beads.ParseAttachmentFields(sub.sourceIssue); af != nil {
 			isNoMergeTask = af.NoMerge || af.ReviewOnly
 			reviewOnlySource = af.ReviewOnly
@@ -1170,16 +1173,17 @@ func submitForLanding(r *doneRun) error {
 	}
 	// In fork-backed rigs the clean base is upstream/<target>, never the
 	// fork's origin/<target>.
-	baseRef := r.g.CleanBaseRef("origin", r.defaultBranch, target)
+	repo := r.deps.repo
+	baseRef := repo.CleanBaseRef("origin", r.defaultBranch, target)
 	fetchRemote := git.RemoteForRef(baseRef)
 	if fetchRemote == "" {
 		fetchRemote = "origin"
 	}
-	if err := r.g.Fetch(fetchRemote); err != nil {
+	if err := repo.Fetch(fetchRemote); err != nil {
 		return fmt.Errorf("fetching %s before rebasing onto %s: %w", fetchRemote, baseRef, err)
 	}
 
-	aheadCount, err := r.g.CommitsAhead(baseRef, "HEAD")
+	aheadCount, err := repo.CommitsAhead(baseRef, "HEAD")
 	if err != nil {
 		return fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
 	}
@@ -1193,46 +1197,20 @@ func submitForLanding(r *doneRun) error {
 		return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", r.branch)
 	}
 
-	if err := rebaseOntoTarget(r.g, baseRef); err != nil {
+	if err := rebaseOntoTarget(repo, baseRef); err != nil {
 		return err
 	}
 
-	// Refuse a branch that reverts work already merged to the target
-	// (gt-63sz). After the rebase: a rebase replays the same diff, so the
-	// check must see the branch as it will be pushed.
-	if doneAllowReverts {
-		style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", baseRef)
-	} else if err := reportRevertedMerges(r.g, baseRef); err != nil {
+	// After the rebase: a rebase replays the same diff, so the checks must
+	// see the branch as it will be pushed.
+	if err := r.deps.checkBranch(baseRef, sub); err != nil {
 		return err
 	}
-	// Refuse a branch that would add throwaway files to the target (gt-ozo4).
-	if doneAllowThrowawayPaths {
-		style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", baseRef)
-	} else if err := reportThrowawayPaths(r.g, baseRef); err != nil {
-		return err
-	}
-	// Refuse a rework byte-identical to a rejected attempt (gt-0jzd5).
-	var sourceNotes string
-	if sub.sourceIssue != nil {
-		sourceNotes = sub.sourceIssue.Notes
-	}
-	rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sub.sourceBD, mrID) }
-	if err := reportUnchangedSinceRejection(r.g, sourceNotes, r.issueID, baseRef, rejectedTip); err != nil {
+	if err := r.deps.rewriteBranch(baseRef, sub); err != nil {
 		return err
 	}
 
-	if err := squashAutoSaveBeforeSubmit(r.g, r.cwd, r.branch, baseRef, sub.sourceIssue, r.issueID); err != nil {
-		return err
-	}
-	// Strip AI attribution trailers from the commit messages (gt-v4ssj.10).
-	// After the squash, so the messages checked are the ones that will land.
-	if err := stripAttributionTrailers(r.g, baseRef); err != nil {
-		return err
-	}
-	// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).
-	stripOverlayCLAUDEmd(r.g, r.defaultBranch, baseRef)
-
-	head, err := r.g.Rev("HEAD")
+	head, err := repo.Rev("HEAD")
 	if err != nil {
 		return fmt.Errorf("resolving HEAD: %w", err)
 	}
@@ -1242,11 +1220,11 @@ func submitForLanding(r *doneRun) error {
 
 	// Push submodule commits first, so the parent's pointer never names a
 	// commit the submodule's remote lacks (gt-dzs).
-	pushSubmoduleChanges(r.g, baseRef)
+	r.deps.pushSubmodules(baseRef)
 	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
 		return err
 	}
-	doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
+	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
 
 	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName}
 	if err := markReadyToLand(sub.sourceBD, work); err != nil {
@@ -1263,14 +1241,51 @@ func submitForLanding(r *doneRun) error {
 	return nil
 }
 
+// checkBranchForSubmit refuses a rebased branch that reverts work already
+// merged to the target (gt-63sz), adds throwaway files (gt-ozo4), or is
+// byte-identical to a rejected attempt (gt-0jzd5).
+func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error {
+	if r.opts.allowReverts {
+		style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", baseRef)
+	} else if err := reportRevertedMerges(r.g, baseRef); err != nil {
+		return err
+	}
+	if r.opts.allowThrowawayPaths {
+		style.PrintWarning("skipping throwaway-file check (--allow-throwaway-paths): the branch may add scratch files to %s", baseRef)
+	} else if err := reportThrowawayPaths(r.g, baseRef); err != nil {
+		return err
+	}
+	var sourceNotes string
+	if sub.sourceIssue != nil {
+		sourceNotes = sub.sourceIssue.Notes
+	}
+	rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sub.sourceBD, mrID) }
+	return reportUnchangedSinceRejection(r.g, sourceNotes, r.issueID, baseRef, rejectedTip)
+}
+
+// rewriteBranchForSubmit squashes auto-save commits, then strips AI
+// attribution trailers (gt-v4ssj.10; after the squash, so the messages
+// checked are the ones that will land) and the Gas Town overlay from
+// CLAUDE.md / CLAUDE.local.md (gt-p35).
+func rewriteBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error {
+	if err := squashAutoSaveBeforeSubmit(r.g, r.cwd, r.branch, baseRef, sub.sourceIssue, r.issueID); err != nil {
+		return err
+	}
+	if err := stripAttributionTrailers(r.g, baseRef); err != nil {
+		return err
+	}
+	stripOverlayCLAUDEmd(r.g, r.defaultBranch, baseRef)
+	return nil
+}
+
 // resolveDoneTarget picks the branch to land on: --target, then the bead's
 // formula_vars base_branch, then the rig default. resolveMRTarget refuses a
 // self-target and an unexplained polecat/* target (gt-a8i3, gt-w2jc).
 func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
 	target := r.defaultBranch
 	explicit := false
-	if doneTarget != "" {
-		target = doneTarget
+	if r.opts.target != "" {
+		target = r.opts.target
 		explicit = true
 		fmt.Printf("  Target branch: %s (from --target flag)\n", target)
 	} else if source != nil {
@@ -1294,10 +1309,11 @@ func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
 // (gastown#1484). The error text must not mention --cleanup-status=clean:
 // agents read errors and self-bypass.
 func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string, isNoMergeTask bool) error {
-	if os.Getenv("GT_POLECAT") != "" && doneCleanupStatus != "clean" && !isNoMergeTask {
+	repo := r.deps.repo
+	if r.opts.polecatEnv && r.cleanupStatus != "clean" && !isNoMergeTask {
 		// A branch already pushed with its work whose target has since moved
 		// on is not empty-handed (GH#wd7).
-		pushed, unpushed, pushErr := r.g.BranchPushedToRemote(r.branch, "origin")
+		pushed, unpushed, pushErr := repo.BranchPushedToRemote(r.branch, "origin")
 		if pushErr != nil || !pushed || unpushed != 0 {
 			return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
 				"Polecats must have at least 1 commit to submit.\n"+
@@ -1316,7 +1332,8 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 	if bd == nil {
 		bd = beads.New(r.cwd)
 	}
-	if skipReason, fatal := doneSourceCloseSkipReason(bd, r.issueID, sub.sourceIssue); skipReason != "" {
+	reviewHead, _ := repo.Rev("HEAD")
+	if skipReason, fatal := doneSourceCloseSkipReasonForHead(bd, r.issueID, sub.sourceIssue, reviewHead); skipReason != "" {
 		style.PrintWarning("%s", skipReason)
 		fmt.Printf("  The bead will remain open for witness/mayor review.\n")
 		notifyDoneCloseSkipped(r.townRoot, r.rigName, r.sender, r.issueID, skipReason)
@@ -1328,11 +1345,11 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 
 	closeReason := "Completed with no code changes (already fixed or already landed)"
 	if !isNoMergeTask {
-		if r.g.ForkBackedRemote("origin") {
+		if repo.ForkBackedRemote("origin") {
 			return fmt.Errorf("cannot close no-code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", r.branch, baseRef)
 		}
-		headSHA, _ := r.g.Rev("HEAD")
-		if verifyErr := r.g.VerifyPushedCommitReachableFromPushTarget("origin", target, headSHA); verifyErr != nil {
+		headSHA, _ := repo.Rev("HEAD")
+		if verifyErr := repo.VerifyPushedCommitReachableFromPushTarget("origin", target, headSHA); verifyErr != nil {
 			noteVerifiedPushFailure(bd, r.cwd, r.issueID, target, headSHA, verifyErr)
 			return fmt.Errorf("cannot close no-code bead: %w", verifyErr)
 		}
@@ -1342,7 +1359,7 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 	}
 	// Force-close bypasses molecule dependency checks; the retry absorbs
 	// transient Dolt lock contention (A2).
-	if closeErr := forceCloseIssueWithRetry(bd.ForceCloseWithReason, r.issueID, closeReason, "Issue %s closed (no code to land)"); closeErr != nil {
+	if closeErr := forceCloseIssueWithRetrySleep(bd.ForceCloseWithReason, r.issueID, closeReason, "Issue %s closed (no code to land)", r.deps.sleep); closeErr != nil {
 		return doneExit(doneExitCloseFailed, fmt.Sprintf("could not close issue %s after 3 attempts", r.issueID), closeErr)
 	}
 	return nil
@@ -1351,7 +1368,7 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 // rebaseOntoTarget rebases the branch onto baseRef when it is behind. A
 // conflict aborts the rebase, leaving the branch as it was, and exits 14
 // naming the conflicting files.
-func rebaseOntoTarget(g *git.Git, baseRef string) error {
+func rebaseOntoTarget(g doneRepo, baseRef string) error {
 	behind, err := g.CommitsAhead("HEAD", baseRef)
 	if err != nil {
 		return fmt.Errorf("counting commits behind %s: %w", baseRef, err)
@@ -1400,7 +1417,7 @@ func squashAutoSaveBeforeSubmit(g *git.Git, cwd, branch, baseRef string, issue *
 // runDoneLocalGate runs the local pre-submit gate on the rebased tree at
 // head. A red gate exits 15 before anything is pushed.
 func runDoneLocalGate(r *doneRun, head string) error {
-	gate, err := doneLocalGate(r.townRoot, r.rigName, r.cwd)
+	gate, err := r.deps.localGate(r.townRoot, r.rigName, r.cwd)
 	if err != nil {
 		return doneExit(doneExitGateUnavailable, "no local gate could be built; this is not a verdict on your change, so escalate (gt escalate -s medium) rather than edit code", err)
 	}
@@ -1427,11 +1444,11 @@ func runDoneLocalGate(r *doneRun, head string) error {
 // or squashed branch replaces an earlier attempt's tip; a concurrent push to
 // the branch makes the lease fail instead of being clobbered. One retry
 // absorbs a push that errored while origin took the objects (gt-0opm).
-func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head, baseRef string) error {
+func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef string) error {
 	fmt.Printf("Pushing branch to origin...\n")
 	var lastPushErr error
 	attempt := func() error {
-		lastPushErr = pushBranchToOrigin(r.g, r.townRoot, r.rigName, r.branch, head, baseRef)
+		lastPushErr = pushBranchToOrigin(r.deps.repo, r.townRoot, r.rigName, r.branch, head, baseRef)
 		return lastPushErr
 	}
 	firstErr := attempt()
@@ -1439,8 +1456,8 @@ func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head, baseRef strin
 		style.PrintWarning("push failed for branch '%s': %v — re-checking origin before treating the work as unlanded", r.branch, firstErr)
 	}
 	recovered, verifyErr := landBranchPush(attempt,
-		func() error { return verifyPushLanded(r.g, r.townRoot, r.rigName, r.branch, head) },
-		time.Sleep)
+		func() error { return verifyPushLanded(r.deps.repo, r.townRoot, r.rigName, r.branch, head) },
+		r.deps.sleep)
 	if verifyErr != nil {
 		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr)
 		msg := unlandedPushMessage(r.branch, firstErr, verifyErr)
@@ -1474,7 +1491,7 @@ func recordSubmittedIntent(r *doneRun) {
 // markReadyToLand writes the READY TO LAND block, then the label the landing
 // worker picks by, then reads the bead back. The block goes first so a bead
 // that carries the label always says what to land.
-func markReadyToLand(bd *beads.Beads, w land.Work) error {
+func markReadyToLand(bd beads.Client, w land.Work) error {
 	if bd == nil {
 		return errors.New("no beads client for the work bead")
 	}
@@ -1559,7 +1576,13 @@ func reportDone(r *doneRun, exitType string) error {
 // and HEAD, and pushes each submodule's new commit to its remote before the
 // parent repo push. This prevents the parent's submodule pointer from
 // referencing commits that don't exist on the submodule's remote (gt-dzs).
-func pushSubmoduleChanges(g *git.Git, baseRef string) {
+// submodulePusher is what pushSubmoduleChanges needs from the worktree.
+type submodulePusher interface {
+	SubmoduleChanges(base, head string) ([]git.SubmoduleChange, error)
+	PushSubmoduleCommit(path, sha, remote string) error
+}
+
+func pushSubmoduleChanges(g submodulePusher, baseRef string) {
 	subChanges, err := g.SubmoduleChanges(baseRef, "HEAD")
 	if err != nil {
 		// Non-fatal: repos without submodules return nil, nil.
@@ -1628,13 +1651,14 @@ func notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, reason string) {
 	}
 }
 
-func noteVerifiedPushFailure(sourceBD *beads.Beads, cwd, issueID, branch, commit string, verifyErr error) {
+func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error) {
 	if issueID == "" || cwd == "" {
 		return
 	}
 	bd := sourceBD
 	if bd == nil {
-		bd, _, _ = routedIssueBeads(cwd, issueID)
+		routed, _, _ := routedIssueBeads(cwd, issueID)
+		bd = routed
 	}
 	inProgress := "in_progress"
 	_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
@@ -1651,7 +1675,23 @@ func noteVerifiedPushFailure(sourceBD *beads.Beads, cwd, issueID, branch, commit
 // Every error return is fatal to the submission: a ready mark naming a commit
 // origin does not have would make the landing worker merge a tree that lacks
 // the fix.
-func verifyPushLanded(g *git.Git, townRoot, rigName, branch, commit string) error {
+func verifyPushLanded(g doneRepo, townRoot, rigName, branch, commit string) error {
+	var bare pushVerifier
+	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+		bare = git.NewGitWithDir(bareRepoPath, "")
+	}
+	return verifyPushLandedVia(g, bare, branch, commit)
+}
+
+// pushVerifier asks a remote whether it holds commit on branch.
+type pushVerifier interface {
+	VerifyPushedCommit(remote, branch, commit string) error
+}
+
+// verifyPushLandedVia is verifyPushLanded with the rig's bare repo given
+// (nil when the rig has none).
+func verifyPushLandedVia(g doneRepo, bare pushVerifier, branch, commit string) error {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		head, headErr := g.Rev("HEAD")
@@ -1676,10 +1716,8 @@ func verifyPushLanded(g *git.Git, townRoot, rigName, branch, commit string) erro
 	// exactly the unpushed-commit case the guard exists to catch, and gt done
 	// reported a verified push that never happened. A local ref is never
 	// evidence of a remote push; only a query of the remote is.
-	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
-	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
-		bareGit := git.NewGitWithDir(bareRepoPath, "")
-		if bareErr := bareGit.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
+	if bare != nil {
+		if bareErr := bare.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
 			return nil
 		}
 	}
@@ -1689,7 +1727,7 @@ func verifyPushLanded(g *git.Git, townRoot, rigName, branch, commit string) erro
 // describePushVerificationFailure renders a failed push assertion with the full
 // local and remote SHAs (gt-2wqt): the operator has to see both to know how far
 // behind origin is before the work is re-pushed.
-func describePushVerificationFailure(g *git.Git, branch, commit string, cause error) error {
+func describePushVerificationFailure(g doneRepo, branch, commit string, cause error) error {
 	remoteTip, tipErr := g.PushRemoteBranchTip("origin", branch)
 	if tipErr != nil || strings.TrimSpace(remoteTip) == "" {
 		remoteTip = "(missing on origin)"
@@ -1711,7 +1749,7 @@ func describePushVerificationFailure(g *git.Git, branch, commit string, cause er
 // ancestor of head, the change-sets are compared first (recoverDivergedPush):
 // a rebase or a rework on top of origin's commits is pushed over under the
 // lease, and real divergence is refused (gt-bf5x, gt-i0z3).
-func pushBranchToOrigin(g *git.Git, townRoot, rigName, branch, head, baseRef string) error {
+func pushBranchToOrigin(g doneRepo, townRoot, rigName, branch, head, baseRef string) error {
 	expected, err := g.PushRemoteBranchTip("origin", branch)
 	if err != nil {
 		return fmt.Errorf("reading origin/%s before the push: %w", branch, err)
@@ -1803,6 +1841,18 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 	return fmt.Sprintf("push failed for branch '%s': %v [after retry: %v]", branch, pushErr, verifyErr)
 }
 
+// holdDoneIntent writes the done-intent label and returns what runDone
+// defers: it clears the label when the run failed, and leaves it to
+// updateAgentStateOnDone when the run reported done (gt-wmpy).
+func holdDoneIntent(bd beads.Client, agentBeadID, exitType string) func(runErr error) {
+	setDoneIntentLabel(bd, agentBeadID, exitType)
+	return func(runErr error) {
+		if runErr != nil {
+			clearDoneIntentLabel(bd, agentBeadID)
+		}
+	}
+}
+
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
 // EARLY in gt done, before push/MR. This allows the Witness to detect polecats that
 // crashed mid-gt-done: if the session is dead but done-intent exists, the polecat was
@@ -1810,7 +1860,7 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 //
 // Follows the existing idle:N / backoff-until:TIMESTAMP label pattern.
 // Non-fatal: if this fails, gt done continues without the safety net.
-func setDoneIntentLabel(bd *beads.Beads, agentBeadID, exitType string) {
+func setDoneIntentLabel(bd beads.Client, agentBeadID, exitType string) {
 	if agentBeadID == "" {
 		return
 	}
@@ -1826,7 +1876,7 @@ func setDoneIntentLabel(bd *beads.Beads, agentBeadID, exitType string) {
 // clearDoneIntentLabel removes any done-intent:* label from the agent bead.
 // Called at the end of updateAgentStateOnDone on clean exit.
 // Uses read-modify-write pattern (same as clearAgentBackoffUntil).
-func clearDoneIntentLabel(bd *beads.Beads, agentBeadID string) {
+func clearDoneIntentLabel(bd beads.Client, agentBeadID string) {
 	if agentBeadID == "" {
 		return
 	}

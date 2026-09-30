@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -196,4 +197,15 @@ func TestStripAttributionTrailers_RewritesMergeCommit(t *testing.T) {
 	if got := gitOut(t, dir, "rev-list", "--parents", "-n", "1", "HEAD"); len(strings.Fields(got)) != 3 {
 		t.Errorf("merge commit lost a parent: %q", got)
 	}
+}
+
+// gitOut runs git in dir and returns its trimmed output, failing the test
+// on error.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

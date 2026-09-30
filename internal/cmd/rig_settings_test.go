@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,9 +28,9 @@ func setupTestRigForSettings(t *testing.T) (string, string) {
 	// Create town.json (primary marker for workspace detection)
 	townConfig := &config.TownConfig{
 		Type:      "town",
-		Version:    config.CurrentTownVersion,
-		Name:       "test-town",
-		CreatedAt:  time.Now().Truncate(time.Second),
+		Version:   config.CurrentTownVersion,
+		Name:      "test-town",
+		CreatedAt: time.Now().Truncate(time.Second),
 	}
 	townConfigPath := filepath.Join(mayorDir, "town.json")
 	if err := config.SaveTownConfig(townConfigPath, townConfig); err != nil {
@@ -64,22 +65,11 @@ func setupTestRigForSettings(t *testing.T) (string, string) {
 		t.Fatalf("save rig config: %v", err)
 	}
 
-	// Change to town root so workspace.FindFromCwdOrError works
-	oldCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get current directory: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir to town root: %v", err)
-	}
-	t.Cleanup(func() {
-		os.Chdir(oldCwd)
-	})
-
 	return townRoot, "testrig"
 }
 
 func TestRigSettingsShow(t *testing.T) {
+	t.Parallel()
 	t.Run("shows existing settings file", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
@@ -96,8 +86,7 @@ func TestRigSettingsShow(t *testing.T) {
 		}
 
 		// Run show command
-		cmd := rigSettingsShowCmd
-		err := runRigSettingsShow(cmd, []string{rigName})
+		err := rigSettingsShow(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName})
 		if err != nil {
 			t.Fatalf("runRigSettingsShow error: %v", err)
 		}
@@ -113,11 +102,10 @@ func TestRigSettingsShow(t *testing.T) {
 	})
 
 	t.Run("shows helpful message when file doesn't exist", func(t *testing.T) {
-		_, rigName := setupTestRigForSettings(t)
+		townRoot, rigName := setupTestRigForSettings(t)
 
 		// Run show command (no settings file created)
-		cmd := rigSettingsShowCmd
-		err := runRigSettingsShow(cmd, []string{rigName})
+		err := rigSettingsShow(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName})
 		if err != nil {
 			t.Fatalf("runRigSettingsShow error: %v", err)
 		}
@@ -148,8 +136,7 @@ func TestRigSettingsShow(t *testing.T) {
 		}
 
 		// Run show command
-		cmd := rigSettingsShowCmd
-		err := runRigSettingsShow(cmd, []string{rigName})
+		err := rigSettingsShow(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName})
 		if err != nil {
 			t.Fatalf("runRigSettingsShow error: %v", err)
 		}
@@ -169,13 +156,13 @@ func TestRigSettingsShow(t *testing.T) {
 }
 
 func TestRigSettingsSet(t *testing.T) {
+	t.Parallel()
 	t.Run("sets top-level keys", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set agent
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "agent", "claude"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", "claude"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -196,8 +183,7 @@ func TestRigSettingsSet(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set role_agents.witness
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "role_agents.witness", "gemini"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.witness", "gemini"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -221,8 +207,7 @@ func TestRigSettingsSet(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set merge_queue.max_concurrent
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "merge_queue.max_concurrent", "5"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "5"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -247,8 +232,7 @@ func TestRigSettingsSet(t *testing.T) {
 
 		// parseValue("true") infers bool, but Agent is a string field.
 		// setNestedValue should fall back to storing it as the string "true".
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "agent", "true"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", "true"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -268,8 +252,7 @@ func TestRigSettingsSet(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set merge_queue.max_concurrent as number
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "merge_queue.max_concurrent", "10"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "10"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -291,8 +274,7 @@ func TestRigSettingsSet(t *testing.T) {
 
 		// parseValue("42") infers int, but Agent is a string field.
 		// setNestedValue should fall back to storing it as the string "42".
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "agent", "42"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", "42"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -312,8 +294,7 @@ func TestRigSettingsSet(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// parseValue("false") infers bool, but role_agents values are strings.
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "role_agents.witness", "false"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.witness", "false"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -334,8 +315,7 @@ func TestRigSettingsSet(t *testing.T) {
 
 		// parseValue parses this as a JSON array, but role_agents values are strings.
 		// setNestedValue should fall back to storing the raw string representation.
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "role_agents.witness", `["gemini", "claude"]`})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.witness", `["gemini", "claude"]`})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -363,8 +343,7 @@ func TestRigSettingsSet(t *testing.T) {
 		}
 
 		// Set a value (should create file)
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "agent", "claude"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", "claude"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -399,8 +378,7 @@ func TestRigSettingsSet(t *testing.T) {
 		}
 
 		// Set a nested value (should merge, not replace)
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "merge_queue.max_concurrent", "7"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "7"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -419,10 +397,9 @@ func TestRigSettingsSet(t *testing.T) {
 	})
 
 	t.Run("error case: invalid rig", func(t *testing.T) {
-		_, _ = setupTestRigForSettings(t)
+		townRoot, _ := setupTestRigForSettings(t)
 
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{"nonexistent", "agent", "claude"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{"nonexistent", "agent", "claude"})
 		if err == nil {
 			t.Fatal("expected error for invalid rig")
 		}
@@ -444,8 +421,7 @@ func TestRigSettingsSet(t *testing.T) {
 
 		// Try to set a deeply nested path that doesn't make sense
 		// This should fail during unmarshaling back to struct
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "invalid.deeply.nested.path", "value"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "invalid.deeply.nested.path", "value"})
 		// This might succeed (creates the path) but fail validation, or might fail earlier
 		// The behavior depends on how setNestedValue handles invalid paths
 		if err != nil {
@@ -465,8 +441,7 @@ func TestRigSettingsSet(t *testing.T) {
 		}
 
 		// Try to set an unknown top-level key (regression test for false success bug)
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "something_else", "blah"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "something_else", "blah"})
 		if err == nil {
 			t.Fatal("expected error for unknown top-level key 'something_else'")
 		}
@@ -486,6 +461,7 @@ func TestRigSettingsSet(t *testing.T) {
 }
 
 func TestRigSettingsUnset(t *testing.T) {
+	t.Parallel()
 	t.Run("unsets top-level keys", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
@@ -499,8 +475,7 @@ func TestRigSettingsUnset(t *testing.T) {
 		}
 
 		// Unset the agent key
-		cmd := rigSettingsUnsetCmd
-		err := runRigSettingsUnset(cmd, []string{rigName, "agent"})
+		err := rigSettingsUnset(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent"})
 		if err != nil {
 			t.Fatalf("runRigSettingsUnset error: %v", err)
 		}
@@ -544,8 +519,7 @@ func TestRigSettingsUnset(t *testing.T) {
 		}
 
 		// Unset just the witness key
-		cmd := rigSettingsUnsetCmd
-		err := runRigSettingsUnset(cmd, []string{rigName, "role_agents.witness"})
+		err := rigSettingsUnset(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.witness"})
 		if err != nil {
 			t.Fatalf("runRigSettingsUnset error: %v", err)
 		}
@@ -575,8 +549,7 @@ func TestRigSettingsUnset(t *testing.T) {
 		}
 
 		// Try to unset non-existent key
-		cmd := rigSettingsUnsetCmd
-		err := runRigSettingsUnset(cmd, []string{rigName, "nonexistent"})
+		err := rigSettingsUnset(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "nonexistent"})
 		if err == nil {
 			t.Fatal("expected error for non-existent key")
 		}
@@ -586,10 +559,9 @@ func TestRigSettingsUnset(t *testing.T) {
 	})
 
 	t.Run("error case: invalid rig", func(t *testing.T) {
-		_, _ = setupTestRigForSettings(t)
+		townRoot, _ := setupTestRigForSettings(t)
 
-		cmd := rigSettingsUnsetCmd
-		err := runRigSettingsUnset(cmd, []string{"nonexistent", "agent"})
+		err := rigSettingsUnset(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{"nonexistent", "agent"})
 		if err == nil {
 			t.Fatal("expected error for invalid rig")
 		}
@@ -599,11 +571,10 @@ func TestRigSettingsUnset(t *testing.T) {
 	})
 
 	t.Run("error case: settings file not found", func(t *testing.T) {
-		_, rigName := setupTestRigForSettings(t)
+		townRoot, rigName := setupTestRigForSettings(t)
 
 		// Don't create settings file
-		cmd := rigSettingsUnsetCmd
-		err := runRigSettingsUnset(cmd, []string{rigName, "agent"})
+		err := rigSettingsUnset(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent"})
 		if err == nil {
 			t.Fatal("expected error when settings file doesn't exist")
 		}
@@ -614,6 +585,7 @@ func TestRigSettingsUnset(t *testing.T) {
 }
 
 func TestRigSettingsEdgeCases(t *testing.T) {
+	t.Parallel()
 	t.Run("empty key path", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
@@ -626,8 +598,7 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 		}
 
 		// Try to set with empty key path
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "", "value"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "", "value"})
 		if err == nil {
 			t.Fatal("expected error for empty key path")
 		}
@@ -637,12 +608,11 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 	})
 
 	t.Run("deeply nested paths", func(t *testing.T) {
-		_, rigName := setupTestRigForSettings(t)
+		townRoot, rigName := setupTestRigForSettings(t)
 
 		// Set a deeply nested path (though this might not map to actual struct fields)
 		// We'll test that the path creation works
-		cmd := rigSettingsSetCmd
-		err := runRigSettingsSet(cmd, []string{rigName, "a.b.c.d.e", "deepvalue"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "a.b.c.d.e", "deepvalue"})
 		// This might succeed in creating the path, but fail validation
 		// The important thing is it doesn't crash
 		if err != nil {
@@ -655,9 +625,8 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set value with special characters
-		cmd := rigSettingsSetCmd
 		specialValue := `test"value'with\special/chars`
-		err := runRigSettingsSet(cmd, []string{rigName, "agent", specialValue})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", specialValue})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -679,9 +648,8 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 
 		// Set a JSON array value
 		// Note: This might not map to actual RigSettings fields, but tests JSON parsing
-		cmd := rigSettingsSetCmd
 		jsonArray := `["item1", "item2", "item3"]`
-		err := runRigSettingsSet(cmd, []string{rigName, "test_array", jsonArray})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "test_array", jsonArray})
 		// This might succeed but the field won't be in the struct
 		// We're testing that JSON parsing works
 		if err != nil {
@@ -707,9 +675,8 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set a JSON object value
-		cmd := rigSettingsSetCmd
 		jsonObject := `{"key1": "value1", "key2": 42}`
-		err := runRigSettingsSet(cmd, []string{rigName, "test_object", jsonObject})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "test_object", jsonObject})
 		// Similar to array test - might succeed but not map to struct
 		if err != nil {
 			t.Logf("JSON object set returned error (may be expected): %v", err)
@@ -733,14 +700,13 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 		rigPath := filepath.Join(townRoot, rigName)
 
 		// Set multiple values
-		cmd := rigSettingsSetCmd
-		if err := runRigSettingsSet(cmd, []string{rigName, "agent", "claude"}); err != nil {
+		if err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "agent", "claude"}); err != nil {
 			t.Fatalf("set agent: %v", err)
 		}
-		if err := runRigSettingsSet(cmd, []string{rigName, "role_agents.witness", "gemini"}); err != nil {
+		if err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.witness", "gemini"}); err != nil {
 			t.Fatalf("set witness: %v", err)
 		}
-		if err := runRigSettingsSet(cmd, []string{rigName, "role_agents.refinery", "claude-sonnet"}); err != nil {
+		if err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "role_agents.refinery", "claude-sonnet"}); err != nil {
 			t.Fatalf("set refinery: %v", err)
 		}
 

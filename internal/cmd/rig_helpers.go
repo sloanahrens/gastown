@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,11 @@ func getRig(rigName string) (string, *rig.Rig, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return getRigIn(townRoot, rigName)
+}
 
+// getRigIn is getRig in a known town.
+func getRigIn(townRoot, rigName string) (string, *rig.Rig, error) {
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
 	if err != nil {
@@ -225,4 +230,23 @@ func getAllRigs() ([]*rig.Rig, error) {
 		return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 	return discoverRigsForTownRoot(townRoot)
+}
+
+// rigCmdEnv is where a rig command finds its rig and writes its report. The
+// cobra entry points use the cwd's town and stdout; tests give a town and a
+// buffer, so they need neither a chdir nor a stdout swap.
+type rigCmdEnv struct {
+	findRig func(rigName string) (string, *rig.Rig, error)
+	out     io.Writer
+	errOut  io.Writer
+}
+
+func cwdRigCmdEnv() rigCmdEnv { return rigCmdEnv{findRig: getRig, out: os.Stdout, errOut: os.Stderr} }
+
+func townRigCmdEnv(townRoot string, out, errOut io.Writer) rigCmdEnv {
+	return rigCmdEnv{
+		findRig: func(rigName string) (string, *rig.Rig, error) { return getRigIn(townRoot, rigName) },
+		out:     out,
+		errOut:  errOut,
+	}
 }
