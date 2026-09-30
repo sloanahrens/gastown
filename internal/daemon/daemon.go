@@ -1068,9 +1068,8 @@ func (d *Daemon) Run() (err error) {
 		d.triggerPatrolWatchdog()
 	}
 
-	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
-	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
-	// per-session approach which has been tested to work for continuous recovery.
+	// No tmux pane-died respawn hooks: a dead session is restarted by the
+	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
 	// Initial heartbeat
 	d.heartbeat(state)
