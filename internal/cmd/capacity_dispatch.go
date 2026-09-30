@@ -898,27 +898,13 @@ func listAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
 }
 
 func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
-	var records []slingContextRecord
-	seen := make(map[string]bool)
-	dirs, err := beadsSearchDirs(townRoot)
+	recs, err := beads.ListOpenSlingContextRecords(townRoot)
 	if err != nil {
 		return nil, err
 	}
-	for _, dir := range dirs {
-		beadsDir := beads.ResolveBeadsDir(dir)
-		b := beads.NewWithBeadsDir(dir, beadsDir)
-		contexts, err := b.ListOpenSlingContexts()
-		if err != nil {
-			return nil, fmt.Errorf("listing sling contexts in %s: %w", beadsDir, err)
-		}
-		for _, ctx := range contexts {
-			key := beadsDir + "\x00" + ctx.ID
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			records = append(records, slingContextRecord{issue: ctx, workDir: dir, beadsDir: beadsDir})
-		}
+	records := make([]slingContextRecord, 0, len(recs))
+	for _, r := range recs {
+		records = append(records, slingContextRecord{issue: r.Issue, workDir: r.WorkDir, beadsDir: r.BeadsDir})
 	}
 	return records, nil
 }

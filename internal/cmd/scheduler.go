@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -441,35 +440,6 @@ func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFie
 		TargetRig: fields.TargetRig,
 		Blocked:   !ready,
 	}, true
-}
-
-// beadsSearchDirs returns directories to scan for scheduled beads:
-// the town root plus any rig directories that have a .beads/ subdirectory.
-func beadsSearchDirs(townRoot string) ([]string, error) {
-	dirs := []string{townRoot}
-	seen := map[string]bool{townRoot: true}
-	entries, err := os.ReadDir(townRoot)
-	if err != nil {
-		return nil, fmt.Errorf("discovering scheduler beads search dirs: %w", err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "mayor" || e.Name() == "settings" {
-			continue
-		}
-		rigDir := filepath.Join(townRoot, e.Name())
-		beadsDir := filepath.Join(rigDir, ".beads")
-		if _, err := os.Stat(beadsDir); err == nil && !seen[rigDir] {
-			dirs = append(dirs, rigDir)
-			seen[rigDir] = true
-		}
-		mayorRigDir := filepath.Join(rigDir, "mayor", "rig")
-		mayorBeadsDir := filepath.Join(mayorRigDir, ".beads")
-		if _, err := os.Stat(mayorBeadsDir); err == nil && !seen[mayorRigDir] {
-			dirs = append(dirs, mayorRigDir)
-			seen[mayorRigDir] = true
-		}
-	}
-	return dirs, nil
 }
 
 // countActivePolecats counts all running polecat tmux sessions across all rigs.

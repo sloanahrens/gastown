@@ -82,8 +82,66 @@ func convoyTestTown(t *testing.T, routes string) string {
 func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	m := NewConvoyManager(townRoot, logger, "gt", scanInterval, stores, openStores, isRigParked)
 	m.execCmd = gt.run
+	answerScanThrough(m, gt)
 	return m
 }
+
+// answerScanThrough routes m's stranded scan and completion check through gt,
+// as `gt convoy stranded --json` and `gt convoy check <id>` calls. The manager
+// runs both in process (gt-638go.4); this keeps these tests' fake gt, its
+// recorded calls and its replies driving them as they drove the subprocesses.
+func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
+	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "stranded", "--json")
+		cmd.Dir = m.townRoot
+		stdout, stderr, err := gt.run(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("convoy stranded: %s", strings.TrimSpace(string(stderr)))
+		}
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal(stdout, &stranded); err != nil {
+			return nil, fmt.Errorf("parsing stranded JSON: %w", err)
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(ctx context.Context, convoyID string) error {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "check", convoyID)
+		cmd.Dir = m.townRoot
+		if _, stderr, err := gt.run(cmd); err != nil {
+			return fmt.Errorf("convoy check %s: %s", convoyID, strings.TrimSpace(string(stderr)))
+		}
+		return nil
+	}
+}
+
+// installScanFakes replaces m's stranded scan with one that returns
+// strandedJSON, and its completion check with one that appends
+// "convoy check <id>" to checkLogPath (or does nothing when it is empty).
+func (m *ConvoyManager) installScanFakes(strandedJSON, checkLogPath string) {
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal([]byte(strandedJSON), &stranded); err != nil {
+			return nil, err
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
+		if checkLogPath == "" {
+			return nil
+		}
+		f, err := os.OpenFile(checkLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = fmt.Fprintf(f, "convoy check %s\n", convoyID)
+		return err
+	}
+}
+
+// noStranded is a stranded scan that finds nothing, so a manager that runs
+// its scan loop touches no town.
+func noStranded(context.Context) ([]strandedConvoyInfo, error) { return nil, nil }
 
 // argvLog renders gt's recorded calls whose argv starts with prefix, one
 // space-joined argv per line — the call log the shell stubs these tests once
@@ -780,30 +838,6 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	}
 }
 
-func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
-	t.Parallel()
-	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
-	var result []strandedConvoyInfo
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 convoy, got %d", len(result))
-	}
-	c := result[0]
-	if c.ID != "hq-cv1" || c.Title != "My Convoy" || c.ReadyCount != 2 {
-		t.Errorf("unexpected convoy: %+v", c)
-	}
-	if len(c.ReadyIssues) != 2 || c.ReadyIssues[0] != "gt-a" || c.ReadyIssues[1] != "gt-b" {
-		t.Errorf("unexpected ready_issues: %v", c.ReadyIssues)
-	}
-	// The agent recorded by `gt convoy stranded --json` must survive decoding:
-	// dropping it here is how the feeder lost the sling-time --agent (gt-yg24).
-	if c.Agent != "deepseek-flash" {
-		t.Errorf("Agent = %q, want %q", c.Agent, "deepseek-flash")
-	}
-}
-
 func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
 	t.Parallel()
 
@@ -1049,42 +1083,6 @@ func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
 	}
 	if !skipLogged {
 		t.Errorf("expected skip log for unknown prefix issue zz-issue1, got: %v", logged)
-	}
-}
-
-func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
-	t.Parallel()
-
-	townRoot := t.TempDir()
-
-	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stderr: "something went wrong\n", code: 1}}))
-
-	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("expected error to contain stderr message, got: %v", err)
-	}
-}
-
-func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
-	t.Parallel()
-
-	townRoot := t.TempDir()
-
-	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "this is not valid JSON at all\n"}}))
-
-	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "parsing stranded JSON") {
-		t.Errorf("expected error to mention 'parsing stranded JSON', got: %v", err)
 	}
 }
 

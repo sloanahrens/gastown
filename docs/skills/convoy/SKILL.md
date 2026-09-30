@@ -57,7 +57,7 @@ The convoy system tracks batches of work across rigs. A convoy is a bead that `t
 
 Three creation paths (sling, create, stage), two feed paths, same safety guards:
 - **Event-driven** (`operations.go`): Polls beads stores every ~5s for close events. Calls `feedNextReadyIssue` which checks `IsSlingableType` + `isIssueBlocked` before dispatch. **Skips staged convoys** (`isConvoyStaged` check).
-- **Stranded scan** (`convoy_manager.go`): Runs every 30s. `feedFirstReady` iterates all ready issues. The ready list is pre-filtered by `IsSlingableType` in `findStrandedConvoys` (cmd/convoy.go). **Only sees open convoys** — staged convoys never appear.
+- **Stranded scan** (`convoy_manager.go`): Runs every 30s. `feedFirstReady` iterates all ready issues. The ready list is pre-filtered by `IsSlingableType` in `Town.FindStranded` (`internal/convoy/stranded.go`). **Only sees open convoys** — staged convoys never appear.
 
 ## Safety guards (the three rules)
 
@@ -74,7 +74,7 @@ var slingableTypes = map[string]bool{
 }
 ```
 
-Epics, sub-epics, convoys, decisions -- all skip. Applied in both `feedNextReadyIssue` (event path) and `findStrandedConvoys` (stranded path).
+Epics, sub-epics, convoys, decisions -- all skip. Applied in both `feedNextReadyIssue` (event path) and `Town.FindStranded` (stranded path).
 
 ### 2. Blocks dep checking (`isIssueBlocked`)
 
@@ -381,7 +381,8 @@ See `docs/design/convoy/testing.md` for the general convoy test plan covering fa
 |------|-------------|
 | `internal/convoy/operations.go` | Core feeding: `CheckConvoysForIssue`, `feedNextReadyIssue`, `IsSlingableType`, `isIssueBlocked` |
 | `internal/daemon/convoy_manager.go` | `ConvoyManager` goroutines: `runEventPoll` (5s), `runStrandedScan` (30s), `feedFirstReady` |
-| `internal/cmd/convoy.go` | All `gt convoy` subcommands + `findStrandedConvoys` type filter |
+| `internal/cmd/convoy.go` | `gt convoy` flag parsing and output |
+| `internal/convoy/check.go`, `stranded.go`, `tracked.go` | `Town.CheckOne`/`CheckAll`, `Town.FindStranded`, `Town.TrackedIssues`: the logic behind `gt convoy check`, `stranded` and `status`, called in process by the daemon and deacon |
 | `internal/cmd/sling.go` | Batch detection at ~242, auto-rig-resolution, deprecation warning |
 | `internal/cmd/sling_batch.go` | `runBatchSling`, `resolveRigFromBeadIDs`, `allBeadIDs`, cross-rig guard |
 | `internal/cmd/sling_convoy.go` | `createAutoConvoy`, `createBatchConvoy`, `printConvoyConflict` |

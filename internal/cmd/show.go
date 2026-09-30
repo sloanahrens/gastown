@@ -109,11 +109,7 @@ func newBdShowInvocation(args []string, environ []string) bdShowInvocation {
 		}
 	}
 
-	bdc := &bdCmd{
-		args:   append([]string{"show"}, args...),
-		env:    environ,
-		stderr: os.Stderr,
-	}
+	bdc := beads.NewBdCmd(append([]string{"show"}, args...)...).WithEnv(environ)
 	if dir != "" {
 		bdc.Dir(dir)
 	}
