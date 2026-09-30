@@ -379,6 +379,10 @@ type sessionLister interface {
 
 var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 
+// polecatDispositionFunc reads one polecat's own bead state for the pool. A nil
+// func is a pool that cannot read any polecat's state.
+type polecatDispositionFunc func(rigName, polecatName string) (polecat.WorkstateDisposition, error)
+
 // listPolecatSessions returns every live polecat session with its agent and
 // creation time. Polecats are identified by the GT_ROLE their session
 // carries ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on
@@ -396,6 +400,19 @@ var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 // mere presence, so a session that outlives its polecat's done+MR-open state
 // never counts twice against two different capacity models.
 func listPolecatSessions(t sessionLister, townRoot string) ([]poolSession, error) {
+	var disposition polecatDispositionFunc
+	if townRoot != "" {
+		disposition = func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+			return poolPolecatDisposition(townRoot, rigName, polecatName)
+		}
+	}
+	return listPolecatSessionsWith(t, disposition, time.Now())
+}
+
+// listPolecatSessionsWith is listPolecatSessions with the polecat-state read and
+// the clock explicit. now stands in for a session whose creation time tmux
+// cannot report.
+func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc, now time.Time) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
@@ -412,9 +429,9 @@ func listPolecatSessions(t sessionLister, townRoot string) ([]poolSession, error
 			// Unknown age counts as "just spawned": it forces the stagger
 			// rather than silently disabling it (a zero time would look
 			// two thousand years old).
-			created = time.Now()
+			created = now
 		}
-		if rigName, polecatName, ok := parsePolecatRole(role); ok && !polecatSeatOccupied(townRoot, rigName, polecatName) {
+		if rigName, polecatName, ok := parsePolecatRole(role); ok && !polecatSeatOccupied(disposition, rigName, polecatName) {
 			continue
 		}
 		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created})
@@ -442,27 +459,26 @@ func parsePolecatRole(role string) (rig, name string, ok bool) {
 
 // polecatSeatOccupied reports whether the named polecat's own bead state
 // still counts as occupying a seat. It fails open (true, "still occupied")
-// on a lookup error or a townRoot-less caller (the peek helpers in tests):
-// a pool that cannot read a polecat's state is not a pool that knows the
-// seat is free, and undercounting risks the GPU overrun the pool exists to
-// prevent (gt-md4z) rather than the overflow-refusal this fix targets.
-func polecatSeatOccupied(townRoot, rigName, polecatName string) bool {
-	if townRoot == "" {
+// on a lookup error or a caller with no way to read the state (a townRoot-less
+// listPolecatSessions): a pool that cannot read a polecat's state is not a pool
+// that knows the seat is free, and undercounting risks the GPU overrun the pool
+// exists to prevent (gt-md4z) rather than the overflow-refusal this fix targets.
+func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatName string) bool {
+	if disposition == nil {
 		return true
 	}
-	disposition, err := poolPolecatDisposition(townRoot, rigName, polecatName)
+	d, err := disposition(rigName, polecatName)
 	if err != nil {
 		return true
 	}
-	return disposition.ReuseStatus != "idle-pr-open"
+	return d.ReuseStatus != "idle-pr-open"
 }
 
 // poolPolecatDisposition reads one polecat's own agent bead and classifies it
 // through the same WorkstateDisposition every other capacity model reads
 // (polecat_capacity.go, `gt polecat list`), so "done with an open MR" means
-// the same thing here as it does everywhere else. A var so tests can drive
-// it without a live database.
-var poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+// the same thing here as it does everywhere else.
+func poolPolecatDisposition(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	_, fields, err := beads.New(filepath.Join(townRoot, rigName)).ForAgentBead().GetAgentBead(agentID)
@@ -576,18 +592,15 @@ func (osPoolSeatFS) WriteFile(name string, data []byte, perm os.FileMode) error 
 }
 func (osPoolSeatFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
-// poolSeatClaimFS is the filesystem every seat claim operation goes through. A
-// var, like the other seams in this file, so a test can inject one.
-var poolSeatClaimFS poolSeatFS = osPoolSeatFS{}
-
 // poolSeatClaimStore holds the claim this process made. A process holds at most
 // one — a sling spawns one polecat at a time, and the claim is dropped before
 // the next decision — so a package var keeps it reachable from StartSession,
 // the one place that knows the session has become countable, without threading
-// a handle through the spawn call chain. A var, not a value, so tests can stand
-// in for a second sling process.
+// a handle through the spawn call chain. The filesystem the claim was written to
+// is kept with it, so the release removes it from the same place.
 type poolSeatClaimStore struct {
 	mu  sync.Mutex
+	fs  poolSeatFS
 	dir string
 	id  string
 }
@@ -601,23 +614,23 @@ func (c *poolSeatClaimStore) ownID() string {
 	return c.id
 }
 
-func (c *poolSeatClaimStore) hold(dir, id string) {
+func (c *poolSeatClaimStore) hold(fsys poolSeatFS, dir, id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.dir, c.id = dir, id
+	c.fs, c.dir, c.id = fsys, dir, id
 }
 
 // release drops this process's claim. Idempotent, and a no-op when the process
 // never claimed a seat (an overflow route, an explicit --agent, a dry run).
 func (c *poolSeatClaimStore) release() {
 	c.mu.Lock()
-	dir, id := c.dir, c.id
-	c.dir, c.id = "", ""
+	fsys, dir, id := c.fs, c.dir, c.id
+	c.fs, c.dir, c.id = nil, "", ""
 	c.mu.Unlock()
-	if dir == "" || id == "" {
+	if dir == "" || id == "" || fsys == nil {
 		return
 	}
-	_ = poolSeatClaimFS.Remove(filepath.Join(dir, id+".json"))
+	_ = fsys.Remove(filepath.Join(dir, id+".json"))
 }
 
 // releasePoolSeatClaim drops this process's seat claim. Every path a claim
@@ -627,18 +640,56 @@ func (c *poolSeatClaimStore) release() {
 // of a spawn whose session never started (gt-t8q5).
 func releasePoolSeatClaim() { processPoolSeatClaims.release() }
 
+// poolSeatLedger is the seat claim set of one town, with the collaborators it
+// reads and writes through: the filesystem, the claim this process holds, the
+// decision lock, the process-liveness probe, this process's PID, and the clock.
+// realPoolSeatLedger wires the real ones.
+type poolSeatLedger struct {
+	townRoot string
+	fs       poolSeatFS
+	store    *poolSeatClaimStore
+	// lock takes the decision lock and returns its release.
+	lock  func() (func(), error)
+	alive func(pid int) bool
+	pid   int
+	now   func() time.Time
+}
+
+// realPoolSeatLedger is the ledger a sling uses: the town's claim directory on
+// disk, this process's claim store and PID, and the flock that makes
+// count-then-claim atomic.
+func realPoolSeatLedger(townRoot string) *poolSeatLedger {
+	return &poolSeatLedger{
+		townRoot: townRoot,
+		fs:       osPoolSeatFS{},
+		store:    processPoolSeatClaims,
+		lock: func() (func(), error) {
+			l, err := lockPoolDecision(townRoot)
+			if err != nil {
+				return nil, err
+			}
+			return func() { _ = l.Unlock() }, nil
+		},
+		alive: processAlive,
+		pid:   os.Getpid(),
+		now:   time.Now,
+	}
+}
+
+func (l *poolSeatLedger) dir() string { return poolSeatClaimDir(l.townRoot) }
+
 // poolSeatDecision is the locked window in which a sling counts the seats other
 // slings have claimed and takes one of its own.
 type poolSeatDecision struct {
-	lock     *flock.Flock
-	townRoot string
+	ledger *poolSeatLedger
+	unlock func()
 	// note is set when a claim could not be taken; the caller appends it to
 	// the reason so a racy decision never passes for a reserved one.
 	note string
 }
 
-// beginPoolSeatDecision merges the claims other slings hold into sessions and
-// opens the window to claim one. The caller must call done(), error or not.
+// begin merges the claims other slings hold into sessions and opens the window
+// to claim one. The caller must call done(), error or not.
 //
 // A dry run merges the same claims — so it prints the route a real sling would
 // take — but neither cleans up nor claims: a preview must not change the pool's
@@ -647,14 +698,14 @@ type poolSeatDecision struct {
 // An error means the claims could not be read: the seats other slings hold are
 // then unknown rather than absent, and the caller must not decide as if the set
 // were empty (gt-t8q5).
-func beginPoolSeatDecision(townRoot string, live bool, sessions []poolSession) ([]poolSession, *poolSeatDecision, error) {
-	d := &poolSeatDecision{townRoot: townRoot}
-	ownID := processPoolSeatClaims.ownID()
+func (l *poolSeatLedger) begin(live bool, sessions []poolSession) ([]poolSession, *poolSeatDecision, error) {
+	d := &poolSeatDecision{ledger: l}
+	ownID := l.store.ownID()
 	if !live {
-		claims, err := poolSeatClaimSessions(townRoot, ownID)
+		claims, err := l.claimSessions(ownID)
 		return append(sessions, claims...), d, err
 	}
-	lock, err := lockPoolDecision(townRoot)
+	unlock, err := l.lock()
 	if err != nil {
 		// The route is still decided, from live sessions alone — the behavior
 		// before claims existed — and the reason says the seat could not be
@@ -662,9 +713,9 @@ func beginPoolSeatDecision(townRoot string, live bool, sessions []poolSession) (
 		d.note = "seat not reserved: " + err.Error()
 		return sessions, d, nil
 	}
-	d.lock = lock
-	cleanupStalePoolSeatClaims(townRoot, time.Now())
-	claims, claimErr := poolSeatClaimSessions(townRoot, ownID)
+	d.unlock = unlock
+	l.cleanupStale()
+	claims, claimErr := l.claimSessions(ownID)
 	return append(sessions, claims...), d, claimErr
 }
 
@@ -673,37 +724,43 @@ func beginPoolSeatDecision(townRoot string, live bool, sessions []poolSession) (
 // again, on the seat whose slings are all overflow routes with no stagger to
 // slow them down.
 func (d *poolSeatDecision) claimFor(agent string, pool *config.PolecatPool, beadID string) {
-	if d.lock == nil || pool == nil {
+	if d.unlock == nil || pool == nil {
 		return
 	}
 	capped := agent == pool.LocalAgent || (agent == pool.OverflowAgent && pool.OverflowCapped())
 	if !capped {
 		return
 	}
-	claim, err := writePoolSeatClaim(d.townRoot, agent, beadID)
+	claim, err := d.ledger.write(agent, beadID)
 	if err != nil {
 		d.note = "seat not reserved: " + err.Error()
 		return
 	}
-	processPoolSeatClaims.hold(poolSeatClaimDir(d.townRoot), claim.ID)
+	d.ledger.store.hold(d.ledger.fs, d.ledger.dir(), claim.ID)
 }
 
 func (d *poolSeatDecision) done() {
-	if d.lock == nil {
+	if d.unlock == nil {
 		return
 	}
-	_ = d.lock.Unlock()
+	d.unlock()
 }
 
-// poolSeatClaimSessions renders the claims other slings hold as poolSessions so
-// the policy in choosePoolAgent counts them. ownID is skipped: a process still
+// poolSeatClaimSessions renders the claims other slings hold in townRoot as
+// poolSessions; see poolSeatLedger.claimSessions.
+func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
+	return realPoolSeatLedger(townRoot).claimSessions(ownID)
+}
+
+// claimSessions renders the claims other slings hold as poolSessions so the
+// policy in choosePoolAgent counts them. ownID is skipped: a process still
 // holding a claim is about to drop it, and counting both the claim and the
 // session it stands for would read one polecat as two seats.
 //
 // An error is the claim set failing to read, which the caller must answer for
 // rather than treating as no claims (gt-t8q5).
-func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
-	claims, err := readPoolSeatClaims(townRoot)
+func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
+	claims, err := l.read()
 	if err != nil {
 		return nil, err
 	}
@@ -720,9 +777,9 @@ func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
 	return out, nil
 }
 
-// readPoolSeatClaims reads the claims on disk, discarding entries that cannot
-// be read or that do not name themselves (a half-written or hand-edited file
-// must not hold a seat).
+// read reads the claims on disk, discarding entries that cannot be read or that
+// do not name themselves (a half-written or hand-edited file must not hold a
+// seat).
 //
 // A missing directory is "no claim has ever been made here" and reads as an
 // empty set. Any other failure to read the directory is an error, because a
@@ -730,9 +787,9 @@ func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
 // left out are the ones the cap is holding, and a decision that counted them as
 // none would take the seat of a polecat another sling is already spawning
 // (gt-t8q5).
-func readPoolSeatClaims(townRoot string) ([]poolSeatClaim, error) {
-	dir := poolSeatClaimDir(townRoot)
-	entries, err := poolSeatClaimFS.ReadDir(dir)
+func (l *poolSeatLedger) read() ([]poolSeatClaim, error) {
+	dir := l.dir()
+	entries, err := l.fs.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -745,18 +802,18 @@ func readPoolSeatClaims(townRoot string) ([]poolSeatClaim, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		data, err := poolSeatClaimFS.ReadFile(path)
+		data, err := l.fs.ReadFile(path)
 		if err != nil {
-			_ = poolSeatClaimFS.Remove(path)
+			_ = l.fs.Remove(path)
 			continue
 		}
 		var claim poolSeatClaim
 		if err := json.Unmarshal(data, &claim); err != nil {
-			_ = poolSeatClaimFS.Remove(path)
+			_ = l.fs.Remove(path)
 			continue
 		}
 		if claim.ID == "" || claim.PID <= 0 || claim.CreatedAt.IsZero() || claim.ID+".json" != entry.Name() {
-			_ = poolSeatClaimFS.Remove(path)
+			_ = l.fs.Remove(path)
 			continue
 		}
 		claims = append(claims, claim)
@@ -764,13 +821,13 @@ func readPoolSeatClaims(townRoot string) ([]poolSeatClaim, error) {
 	return claims, nil
 }
 
-// cleanupStalePoolSeatClaims drops claims that cannot become sessions: the
-// process that made them is gone, or it has held the seat past the TTL. Both
-// mean the seat is free, and a stale claim is worse than a missing one — it
-// would push a bead to the overflow agent for a seat nobody is using.
-func cleanupStalePoolSeatClaims(townRoot string, now time.Time) {
-	dir := poolSeatClaimDir(townRoot)
-	claims, err := readPoolSeatClaims(townRoot)
+// cleanupStale drops claims that cannot become sessions: the process that made
+// them is gone, or it has held the seat past the TTL. Both mean the seat is
+// free, and a stale claim is worse than a missing one — it would push a bead to
+// the overflow agent for a seat nobody is using.
+func (l *poolSeatLedger) cleanupStale() {
+	now := l.now()
+	claims, err := l.read()
 	if err != nil {
 		// A claim set that could not be read is one this pass cannot prune:
 		// the claims it might drop are the ones it cannot see, so it drops
@@ -780,31 +837,30 @@ func cleanupStalePoolSeatClaims(townRoot string, now time.Time) {
 		return
 	}
 	for _, claim := range claims {
-		if processAlive(claim.PID) && now.Sub(claim.CreatedAt) <= poolSeatClaimTTL {
+		if l.alive(claim.PID) && now.Sub(claim.CreatedAt) <= poolSeatClaimTTL {
 			continue
 		}
-		_ = poolSeatClaimFS.Remove(filepath.Join(dir, claim.ID+".json"))
+		_ = l.fs.Remove(filepath.Join(l.dir(), claim.ID+".json"))
 	}
 }
 
-// writePoolSeatClaim claims a seat for this process and the bead it is about
-// to spawn for.
-func writePoolSeatClaim(townRoot, agent, beadID string) (poolSeatClaim, error) {
-	now := time.Now().UTC()
-	return publishPoolSeatClaim(townRoot, poolSeatClaim{
-		ID:        fmt.Sprintf("%d-%d", os.Getpid(), now.UnixNano()),
-		PID:       os.Getpid(),
+// write claims a seat for this process and the bead it is about to spawn for.
+func (l *poolSeatLedger) write(agent, beadID string) (poolSeatClaim, error) {
+	now := l.now().UTC()
+	return l.publish(poolSeatClaim{
+		ID:        fmt.Sprintf("%d-%d", l.pid, now.UnixNano()),
+		PID:       l.pid,
 		Agent:     agent,
 		Bead:      beadID,
 		CreatedAt: now,
 	})
 }
 
-// publishPoolSeatClaim writes a claim atomically (write, then rename), so a
-// concurrent decision never reads a half-written claim.
-func publishPoolSeatClaim(townRoot string, claim poolSeatClaim) (poolSeatClaim, error) {
-	dir := poolSeatClaimDir(townRoot)
-	if err := poolSeatClaimFS.MkdirAll(dir, 0755); err != nil {
+// publish writes a claim atomically (write, then rename), so a concurrent
+// decision never reads a half-written claim.
+func (l *poolSeatLedger) publish(claim poolSeatClaim) (poolSeatClaim, error) {
+	dir := l.dir()
+	if err := l.fs.MkdirAll(dir, 0755); err != nil {
 		return poolSeatClaim{}, fmt.Errorf("creating seat claim dir: %w", err)
 	}
 	path := filepath.Join(dir, claim.ID+".json")
@@ -813,11 +869,11 @@ func publishPoolSeatClaim(townRoot string, claim poolSeatClaim) (poolSeatClaim, 
 	if err != nil {
 		return poolSeatClaim{}, err
 	}
-	if err := poolSeatClaimFS.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := l.fs.WriteFile(tmpPath, data, 0644); err != nil {
 		return poolSeatClaim{}, fmt.Errorf("writing seat claim: %w", err)
 	}
-	if err := poolSeatClaimFS.Rename(tmpPath, path); err != nil {
-		_ = poolSeatClaimFS.Remove(tmpPath)
+	if err := l.fs.Rename(tmpPath, path); err != nil {
+		_ = l.fs.Remove(tmpPath)
 		return poolSeatClaim{}, fmt.Errorf("publishing seat claim: %w", err)
 	}
 	return claim, nil
@@ -872,6 +928,45 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 		Run()
 }
 
+// poolRouter is the pool decision for one town with its collaborators
+// explicit: the town's polecat_pool, the tmux sessions it counts, each
+// polecat's own bead state, the bead lookup and label write, the seat claims,
+// and the clock. realPoolRouter wires the real ones; the free functions below
+// are thin wrappers over it.
+type poolRouter struct {
+	// pool returns the town's polecat_pool, nil when none is configured or the
+	// settings cannot be read.
+	pool        func() *config.PolecatPool
+	sessions    func() sessionLister
+	disposition polecatDispositionFunc
+	lookupBead  func(beadID string) (poolBead, error)
+	addLabel    func(beadID, label string) error
+	seats       *poolSeatLedger
+	now         func() time.Time
+}
+
+// realPoolRouter wires the pool decision to the town on disk, the tmux server,
+// bd, and this process's seat claim.
+func realPoolRouter(townRoot string) *poolRouter {
+	return &poolRouter{
+		pool: func() *config.PolecatPool {
+			ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+			if err != nil || ts == nil {
+				return nil
+			}
+			return ts.PolecatPool
+		},
+		sessions: newPoolSessionLister,
+		disposition: func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+			return poolPolecatDisposition(townRoot, rigName, polecatName)
+		},
+		lookupBead: func(beadID string) (poolBead, error) { return poolBeadLookup(townRoot, beadID) },
+		addLabel:   func(beadID, label string) error { return poolBeadLabelAdd(townRoot, beadID, label) },
+		seats:      realPoolSeatLedger(townRoot),
+		now:        time.Now,
+	}
+}
+
 // resolvePolecatPoolAgent applies the town's polecat_pool to a sling, whatever
 // agent it asked for. It reads the bead's type and labels, claims the seat it
 // routes to while it decides (so a sling racing this one sees the seat as
@@ -881,7 +976,7 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 // choice stands. It returns errPoolBackpressure when every seat the bead could
 // take is at its cap.
 func resolvePolecatPoolAgent(townRoot, beadID, requested string) (agent, reason string, err error) {
-	return poolRoute(townRoot, beadID, requested, true)
+	return realPoolRouter(townRoot).route(beadID, requested, true, false)
 }
 
 // resolvePolecatPoolAgentExplicit is resolvePolecatPoolAgent for a caller whose
@@ -889,7 +984,7 @@ func resolvePolecatPoolAgent(townRoot, beadID, requested string) (agent, reason 
 // set aside so the request is judged by the seat rules alone. Caps still hold —
 // a requested pool seat at its cap is refused as before (gt-4k3fj.5, gt-sisll).
 func resolvePolecatPoolAgentExplicit(townRoot, beadID, requested string) (agent, reason string, err error) {
-	return poolRouteWith(townRoot, beadID, requested, true, true)
+	return realPoolRouter(townRoot).route(beadID, requested, true, true)
 }
 
 // withoutRouteLabels drops the route:* overrides from a bead's labels.
@@ -910,7 +1005,7 @@ func withoutRouteLabels(labels []string) []string {
 // since that is the route a live sling would take — without claiming a seat or
 // consuming the bead's one local attempt.
 func peekPolecatPoolAgent(townRoot, beadID, requested string) (agent, reason string, err error) {
-	return poolRoute(townRoot, beadID, requested, false)
+	return realPoolRouter(townRoot).route(beadID, requested, false, false)
 }
 
 // errPoolBackpressure identifies a pool refusal so callers and tests can match
@@ -953,17 +1048,12 @@ func poolUncountedFallback(pool *config.PolecatPool) string {
 	return "the role default"
 }
 
-// poolRoute decides the route. live distinguishes a sling that will spawn from
-// a dry run: only a live sling claims a seat or writes labels.
-func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason string, err error) {
-	return poolRouteWith(townRoot, beadID, requested, live, false)
-}
-
-// poolRouteWith is poolRoute; explicit sets the bead's route:* labels aside
-// so a named agent outranks them.
-func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (agent, reason string, err error) {
-	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	if err != nil || ts == nil || ts.PolecatPool == nil {
+// route decides the route. live distinguishes a sling that will spawn from a
+// dry run: only a live sling claims a seat or writes labels. explicit sets the
+// bead's route:* labels aside so a named agent outranks them.
+func (r *poolRouter) route(beadID, requested string, live, explicit bool) (agent, reason string, err error) {
+	pool := r.pool()
+	if pool == nil {
 		return "", "", nil
 	}
 	// A bead lookup failure is not fatal: the policy falls back to the seat
@@ -972,17 +1062,17 @@ func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (age
 	var bead poolBead
 	var beadErr error
 	if beadID != "" {
-		bead, beadErr = poolBeadLookup(townRoot, beadID)
+		bead, beadErr = r.lookupBead(beadID)
 	}
 	if explicit && requested != "" {
 		bead.Labels = withoutRouteLabels(bead.Labels)
 	}
-	sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
+	sessions, err := listPolecatSessionsWith(r.sessions(), r.disposition, r.now())
 	if err != nil {
 		// A seat the pool does not own is not the pool's to override on a
 		// tmux hiccup any more than it is the pool's to admit (gt-67fj): the
 		// request stands untouched, same as choosePoolAgent's rule 2.
-		if !poolOwnsAgent(ts.PolecatPool, requested) {
+		if !poolOwnsAgent(pool, requested) {
 			return "", "", nil
 		}
 		// Without a session count the pool cannot be trusted: fall back to
@@ -991,21 +1081,21 @@ func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (age
 		// counted is not a town at its cap, so the overflow cap stays off
 		// here too — the refusal below would otherwise stop every sling on a
 		// tmux hiccup.
-		return ts.PolecatPool.OverflowAgent,
-			"pool: cannot list sessions (" + err.Error() + "), using " + poolUncountedFallback(ts.PolecatPool), nil
+		return pool.OverflowAgent,
+			"pool: cannot list sessions (" + err.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
 	if live {
 		// The claim this process holds stood for its previous spawn, whose
 		// session is countable by now. Drop it before counting, or a batch
 		// sling reads its own last polecat as two seats.
-		releasePoolSeatClaim()
+		r.seats.store.release()
 	}
-	sessions, seat, claimErr := beginPoolSeatDecision(townRoot, live, sessions)
+	sessions, seat, claimErr := r.seats.begin(live, sessions)
 	defer seat.done()
 	if claimErr != nil {
 		// As above: a seat the pool does not own stands untouched rather than
 		// being overridden by a claims-read failure (gt-67fj).
-		if !poolOwnsAgent(ts.PolecatPool, requested) {
+		if !poolOwnsAgent(pool, requested) {
 			return "", "", nil
 		}
 		// The seats other slings hold could not be read, so the count this
@@ -1018,12 +1108,12 @@ func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (age
 		// No seat is claimed on this path — the fallback is a route taken
 		// without a reservation, and the cap it bypasses is the one that could
 		// not be counted.
-		return ts.PolecatPool.OverflowAgent,
-			"pool: cannot read seat claims (" + claimErr.Error() + "), using " + poolUncountedFallback(ts.PolecatPool), nil
+		return pool.OverflowAgent,
+			"pool: cannot read seat claims (" + claimErr.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
-	agent, reason, refused := choosePoolAgent(ts.PolecatPool, bead, requested, sessions, time.Now())
+	agent, reason, refused := choosePoolAgent(pool, bead, requested, sessions, r.now())
 	if live && !refused {
-		seat.claimFor(agent, ts.PolecatPool, beadID)
+		seat.claimFor(agent, pool, beadID)
 	}
 	if beadErr != nil {
 		reason = fmt.Sprintf("%s [bead %s unreadable: %v]", reason, beadID, beadErr)
@@ -1035,7 +1125,7 @@ func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (age
 		return agent, reason, &poolBackpressureError{Reason: reason}
 	}
 	if live && beadID != "" && strings.Contains(reason, idleFillReason) {
-		if err := poolBeadLabelAdd(townRoot, beadID, localAttemptLabel); err != nil {
+		if err := r.addLabel(beadID, localAttemptLabel); err != nil {
 			reason = fmt.Sprintf("%s [%s label failed: %v]", reason, localAttemptLabel, err)
 		}
 	}

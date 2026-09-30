@@ -324,6 +324,11 @@ func statusPhrase(c duplicateCandidate) string {
 // A nil candidate means the check did not run — either the bead names no tests
 // or files, or the rig's bead directory could not be resolved.
 func checkSlingDuplicates(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+	return slingDuplicatePools.check(townRoot, beadID, info)
+}
+
+// check is checkSlingDuplicates against p's pools.
+func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
 	if info == nil {
 		return nil, nil, nil
 	}
@@ -343,7 +348,7 @@ func checkSlingDuplicates(townRoot, beadID string, info *beadInfo) (*duplicateCa
 	if beadsDir == "" {
 		return candidate, nil, nil
 	}
-	pool, err := duplicatePoolFor(beadsDir)
+	pool, err := p.poolFor(beadsDir)
 	if err != nil {
 		return candidate, nil, fmt.Errorf("duplicate check skipped: %w", err)
 	}
@@ -356,22 +361,28 @@ func checkSlingDuplicates(townRoot, beadID string, info *beadInfo) (*duplicateCa
 // gt-3vr/gt-rl0 — would both miss each other, because the pool snapshot
 // predates both. A nil candidate (the check was skipped) is a no-op.
 func noteSlingCandidateDispatched(townRoot string, candidate *duplicateCandidate) {
+	slingDuplicatePools.noteSlingCandidateDispatched(townRoot, candidate)
+}
+
+// noteSlingCandidateDispatched is the package function of that name against
+// p's pools.
+func (p *duplicatePools) noteSlingCandidateDispatched(townRoot string, candidate *duplicateCandidate) {
 	if candidate == nil {
 		return
 	}
 	if beadsDir := duplicateBeadsDir(townRoot, candidate.ID); beadsDir != "" {
-		noteDispatchedCandidate(beadsDir, *candidate)
+		p.noteDispatched(beadsDir, *candidate)
 	}
 }
 
-// noteDispatchedCandidate appends one already-dispatched bead to a rig's cached
-// pool. It is a no-op when the pool was never fetched: a fresh fetch would find
-// the bead in the database anyway, now that its hook has landed.
-func noteDispatchedCandidate(beadsDir string, candidate duplicateCandidate) {
-	duplicatePoolMu.Lock()
-	defer duplicatePoolMu.Unlock()
+// noteDispatched appends one already-dispatched bead to a rig's cached pool.
+// It is a no-op when the pool was never fetched: a fresh fetch would find the
+// bead in the database anyway, now that its hook has landed.
+func (p *duplicatePools) noteDispatched(beadsDir string, candidate duplicateCandidate) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	entry, ok := duplicatePoolCache[beadsDir]
+	entry, ok := p.cache[beadsDir]
 	if !ok {
 		return
 	}
@@ -408,65 +419,76 @@ type duplicatePoolEntry struct {
 	candidates []duplicateCandidate
 }
 
-var (
-	// fetchDuplicatePoolFn is the pool reader, swappable in tests.
-	fetchDuplicatePoolFn = fetchDuplicatePool
+// duplicatePools caches one comparison pool per rig bead database, read by
+// fetch. The process shares slingDuplicatePools; a test builds its own.
+type duplicatePools struct {
+	fetch func(beadsDir string) ([]duplicateCandidate, error)
+	mu    sync.Mutex
+	cache map[string]*duplicatePoolEntry
+}
 
-	// duplicateEnrichmentWarnFn reports a failed design/notes enrichment of
-	// the pool, swappable in tests. The pool is cached for duplicatePoolTTL,
-	// so this fires once per fetch, not once per sling.
-	duplicateEnrichmentWarnFn = warnDuplicateEnrichmentFailed
+func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error)) *duplicatePools {
+	return &duplicatePools{fetch: fetch, cache: map[string]*duplicatePoolEntry{}}
+}
 
-	duplicatePoolMu    sync.Mutex
-	duplicatePoolCache = map[string]*duplicatePoolEntry{}
-)
+// slingDuplicatePools is the process-wide cache, read from the bd on PATH.
+var slingDuplicatePools = newDuplicatePools(fetchDuplicatePool)
 
-// duplicatePoolFor returns the comparison pool for a rig, reusing a snapshot
-// taken within duplicatePoolTTL. Returns a slice shared with the cache; callers
-// must not mutate it.
-func duplicatePoolFor(beadsDir string) ([]duplicateCandidate, error) {
-	duplicatePoolMu.Lock()
-	defer duplicatePoolMu.Unlock()
+// poolFor returns the comparison pool for a rig, reusing a snapshot taken
+// within duplicatePoolTTL. Returns a slice shared with the cache; callers must
+// not mutate it.
+func (p *duplicatePools) poolFor(beadsDir string) ([]duplicateCandidate, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if entry, ok := duplicatePoolCache[beadsDir]; ok && time.Since(entry.fetchedAt) < duplicatePoolTTL {
+	if entry, ok := p.cache[beadsDir]; ok && time.Since(entry.fetchedAt) < duplicatePoolTTL {
 		return entry.candidates, nil
 	}
 
-	candidates, err := fetchDuplicatePoolFn(beadsDir)
+	candidates, err := p.fetch(beadsDir)
 	if err != nil {
 		return nil, err
 	}
-	duplicatePoolCache[beadsDir] = &duplicatePoolEntry{fetchedAt: time.Now(), candidates: candidates}
+	p.cache[beadsDir] = &duplicatePoolEntry{fetchedAt: time.Now(), candidates: candidates}
 	return candidates, nil
 }
 
 // resetDuplicatePoolCache clears the process-wide pool cache. Tests call it to
 // isolate one another; production code never needs to.
 func resetDuplicatePoolCache() {
-	duplicatePoolMu.Lock()
-	defer duplicatePoolMu.Unlock()
-	duplicatePoolCache = map[string]*duplicatePoolEntry{}
+	slingDuplicatePools.mu.Lock()
+	defer slingDuplicatePools.mu.Unlock()
+	slingDuplicatePools.cache = map[string]*duplicatePoolEntry{}
 }
 
 // fetchDuplicatePool reads the live and recently-closed beads of one rig.
 func fetchDuplicatePool(beadsDir string) ([]duplicateCandidate, error) {
-	active, err := listDuplicateCandidates(beadsDir, duplicatePoolStatuses, time.Time{})
+	return fetchDuplicatePoolVia(nil, warnDuplicateEnrichmentFailed, beadsDir)
+}
+
+// fetchDuplicatePoolVia is fetchDuplicatePool with bd answered by run (nil:
+// bd on PATH) and a failed design/notes enrichment reported to warn. The pool
+// is cached for duplicatePoolTTL, so warn fires once per fetch, not once per
+// sling.
+func fetchDuplicatePoolVia(run beads.BDRunner, warn func(beadsDir string, err error), beadsDir string) ([]duplicateCandidate, error) {
+	active, err := listDuplicateCandidatesVia(run, warn, beadsDir, duplicatePoolStatuses, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	closed, err := listDuplicateCandidates(beadsDir, []string{"closed"}, time.Now().Add(-duplicateLookback))
+	closed, err := listDuplicateCandidatesVia(run, warn, beadsDir, []string{"closed"}, time.Now().Add(-duplicateLookback))
 	if err != nil {
 		return nil, err
 	}
 	return append(active, closed...), nil
 }
 
-// listDuplicateCandidates runs one bd list and reduces every row to its
-// comparison fields, then enriches every row with a batched bd show for
-// design and notes text. bd list --json never carries those two fields, and
-// --closed-after excludes rows that were never closed, so live and closed
-// work take separate list queries; neither can be folded into the other.
-func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
+// listDuplicateCandidatesVia runs one bd list through run (nil: bd on PATH)
+// and reduces every row to its comparison fields, then enriches every row with
+// a batched bd show for design and notes text, reporting a failed enrichment
+// to warn. bd list --json never carries those two fields, and --closed-after
+// excludes rows that were never closed, so live and closed work take separate
+// list queries; neither can be folded into the other.
+func listDuplicateCandidatesVia(run beads.BDRunner, warn func(beadsDir string, err error), beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
 	args := []string{
 		"list",
 		"--status=" + strings.Join(statuses, ","),
@@ -479,7 +501,7 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 		args = append(args, "--closed-after="+closedAfter.UTC().Format(time.RFC3339))
 	}
 
-	out, err := beads.RunBdJSONAllowStale(beadsDir, args...)
+	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{AllowStale: true, Run: run}, beadsDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s beads: %w", strings.Join(statuses, ","), err)
 	}
@@ -512,10 +534,10 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 	// The degrade is reported, though: a pool without design/notes text is
 	// blind to exactly the overlap this check was extended to catch, and the
 	// operator must be able to tell that apart from "no duplicates found".
-	fullText, ftErr := fetchDuplicateFullText(beadsDir, ids)
+	fullText, ftErr := fetchDuplicateFullText(run, beadsDir, ids)
 	if ftErr != nil {
 		fullText = nil
-		duplicateEnrichmentWarnFn(beadsDir, ftErr)
+		warn(beadsDir, ftErr)
 	}
 
 	candidates := make([]duplicateCandidate, 0, len(rows))
@@ -552,18 +574,19 @@ type duplicateFullText struct {
 }
 
 // fetchDuplicateFullText recovers design and notes text for a pool of beads
-// with a single batched "bd show <ids...>" call, so the pool comparison sees
+// with a single batched "bd show <ids...>" call through run (nil: bd on
+// PATH), so the pool comparison sees
 // the same fields the sling-time candidate already does (checkSlingDuplicates
 // reads its candidate via bd show, which carries design and notes; bd list
 // does not). Returns nil, nil for an empty pool — nothing to enrich.
-func fetchDuplicateFullText(beadsDir string, ids []string) (map[string]duplicateFullText, error) {
+func fetchDuplicateFullText(run beads.BDRunner, beadsDir string, ids []string) (map[string]duplicateFullText, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	args := append([]string{"show"}, ids...)
 	args = append(args, "--json")
 
-	out, err := beads.RunBdJSONAllowStale(beadsDir, args...)
+	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{AllowStale: true, Run: run}, beadsDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetching design/notes for %d bead(s): %w", len(ids), err)
 	}

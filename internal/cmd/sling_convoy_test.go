@@ -1,147 +1,91 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
-// TestConvoyTracksBeadExactMatch verifies that convoyTracksBead finds a bead
-// when the dep query returns the raw beadID.
-func TestConvoyTracksBeadExactMatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	binDir := t.TempDir()
-	beadsDir := t.TempDir()
-
-	// Stub bd sql to return a tracked dep with raw beadID
-	bdScript := `#!/bin/sh
-echo '[{"depends_on_id":"gt-abc123"}]'
-`
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+origPath)
-
-	if !convoyTracksBead(beadsDir, "hq-cv-test1", "gt-abc123") {
-		t.Error("convoyTracksBead should return true for exact match")
-	}
+// callsBD records each bd call whole (dir, environment, argv) before the
+// in-process bd answers it, for tests whose rule is where a call goes rather
+// than what it says.
+type callsBD struct {
+	mu    sync.Mutex
+	calls []beads.BDCall
+	bd    *inprocBD
 }
 
-// TestConvoyTracksBeadExternalRef verifies that convoyTracksBead finds a bead
-// when the dep query returns an external-formatted reference.
-func TestConvoyTracksBeadExternalRef(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	binDir := t.TempDir()
-	beadsDir := t.TempDir()
-
-	// Stub bd sql to return a tracked dep with external:prefix:beadID format
-	bdScript := `#!/bin/sh
-echo '[{"depends_on_id":"external:gt-abc:gt-abc123"}]'
-`
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+origPath)
-
-	if !convoyTracksBead(beadsDir, "hq-cv-test2", "gt-abc123") {
-		t.Error("convoyTracksBead should return true for external ref match")
-	}
+func (r *callsBD) run(ctx context.Context, c beads.BDCall) ([]byte, []byte, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, c)
+	r.mu.Unlock()
+	return r.bd.run(ctx, c)
 }
 
-// TestConvoyTracksBeadNoMatch verifies that convoyTracksBead returns false
-// when the convoy tracks a different bead.
-func TestConvoyTracksBeadNoMatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	binDir := t.TempDir()
-	beadsDir := t.TempDir()
-
-	// Stub bd sql to return a tracked dep with a different beadID
-	bdScript := `#!/bin/sh
-echo '[{"depends_on_id":"gt-other456"}]'
-`
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+origPath)
-
-	if convoyTracksBead(beadsDir, "hq-cv-test3", "gt-abc123") {
-		t.Error("convoyTracksBead should return false when bead not tracked")
-	}
+// recorded is every call so far, --allow-stale probes included.
+func (r *callsBD) recorded() []beads.BDCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]beads.BDCall(nil), r.calls...)
 }
 
-// TestConvoyTracksBeadEmptyDeps verifies that convoyTracksBead returns false
-// when the convoy has no tracked deps.
-func TestConvoyTracksBeadEmptyDeps(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
+// callEnv is the value of key in a call's environment, "" when unset.
+func callEnv(c beads.BDCall, key string) string {
+	for _, kv := range c.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v
+		}
 	}
-
-	binDir := t.TempDir()
-	beadsDir := t.TempDir()
-
-	// Stub bd sql to return empty array
-	bdScript := `#!/bin/sh
-echo '[]'
-`
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+origPath)
-
-	if convoyTracksBead(beadsDir, "hq-cv-test4", "gt-abc123") {
-		t.Error("convoyTracksBead should return false for empty deps")
-	}
+	return ""
 }
 
-// TestConvoyTracksBeadMultipleDeps verifies that convoyTracksBead finds the
-// target bead among multiple tracked deps.
-func TestConvoyTracksBeadMultipleDeps(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
+// sqlRowsBD is a bd whose `bd sql` answers rows, or fails when code is set.
+func sqlRowsBD(rows string, code int) *inprocBD {
+	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "sql" {
+			return bdAnswer{stdout: rows, code: code}
+		}
+		return bdOut("[]")
+	}}
+}
+
+// TestConvoyTracksBead: a convoy tracks a bead when the raw tracks-dep rows
+// name it, directly or wrapped as external:<rig>:<id>; a failing bd reads as
+// not tracked.
+func TestConvoyTracksBead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rows string
+		code int
+		want bool
+	}{
+		{"exact match", `[{"depends_on_id":"gt-abc123"}]`, 0, true},
+		{"external ref", `[{"depends_on_id":"external:gt-abc:gt-abc123"}]`, 0, true},
+		{"other bead", `[{"depends_on_id":"gt-other456"}]`, 0, false},
+		{"no deps", `[]`, 0, false},
+		{"among several", `[{"depends_on_id":"gt-other1"},{"depends_on_id":"external:gt-abc:gt-abc123"},{"depends_on_id":"gt-other2"}]`, 0, true},
+		{"bd fails", ``, 1, false},
 	}
-
-	binDir := t.TempDir()
-	beadsDir := t.TempDir()
-
-	// Stub bd sql to return multiple tracked deps, one of which matches
-	bdScript := `#!/bin/sh
-echo '[{"depends_on_id":"gt-other1"},{"depends_on_id":"external:gt-abc:gt-abc123"},{"depends_on_id":"gt-other2"}]'
-`
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", binDir+":"+origPath)
-
-	if !convoyTracksBead(beadsDir, "hq-cv-test5", "gt-abc123") {
-		t.Error("convoyTracksBead should return true when bead found among multiple deps")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := sqlRowsBD(tc.rows, tc.code)
+			town := slingConvoyTown{root: t.TempDir(), bd: bd.run}
+			if got := town.convoyTracksBead("hq-cv-test", "gt-abc123"); got != tc.want {
+				t.Fatalf("convoyTracksBead = %v, want %v; bd log:\n%s", got, tc.want, bd.log())
+			}
+			if !strings.Contains(bd.log(), "sql SELECT") || !strings.Contains(bd.log(), "hq-cv-test") {
+				t.Fatalf("tracked deps were not read by raw sql on the convoy:\n%s", bd.log())
+			}
+		})
 	}
 }
 
@@ -160,29 +104,11 @@ func TestBdDepListRawIDsValidation(t *testing.T) {
 	}
 }
 
-func TestBdDepListRawIDsUsesAutoCommitEnv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	writeBDStub(t, binDir, `#!/usr/bin/env sh
-{
-	printf 'args:'
-	for arg in "$@"; do
-		printf '[%s]' "$arg"
-	done
-	printf '\nBD_READONLY=%s\n' "${BD_READONLY-}"
-	printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT-}"
-} >> "$BD_STUB_LOG"
-printf '[{"depends_on_id":"external:ag:ag-95s.1"}]\n'
-`, "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_STUB_LOG", logPath)
-	t.Setenv("BD_READONLY", "true")
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-
+// TestDepListRawIDsTurnsAutoCommitOnOverStaleEnv: the raw dep query runs with
+// Dolt auto-commit on and read-only mode off even when the inherited
+// environment says otherwise, and unwraps external:<rig>:<id> targets.
+func TestDepListRawIDsTurnsAutoCommitOnOverStaleEnv(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	beadsDir := filepath.Join(workDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -191,27 +117,33 @@ printf '[{"depends_on_id":"external:ag:ag-95s.1"}]\n'
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"hq"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	rec := &callsBD{bd: sqlRowsBD(`[{"depends_on_id":"external:ag:ag-95s.1"}]`, 0)}
+	town := convoyops.Town{
+		Root: workDir,
+		Env:  []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"},
+		Run:  rec.run,
+	}
 
-	ids, err := convoyops.DepListRawIDs(workDir, "hq-cv-test", "down", "tracks")
+	ids, err := town.DepListRawIDs(workDir, "hq-cv-test", "down", "tracks")
 	if err != nil {
-		t.Fatalf("bdDepListRawIDs: %v", err)
+		t.Fatalf("DepListRawIDs: %v", err)
 	}
 	if len(ids) != 1 || ids[0] != "ag-95s.1" {
 		t.Fatalf("ids = %v, want [ag-95s.1]", ids)
 	}
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	calls := rec.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want 1: %+v", len(calls), calls)
 	}
-	log := string(logBytes)
-	for _, want := range []string{
-		"args:[sql][SELECT COALESCE",
-		"\nBD_READONLY=\n",
-		"BD_DOLT_AUTO_COMMIT=on",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("bd stub log missing %q:\n%s", want, log)
-		}
+	c := calls[0]
+	if len(c.Args) < 2 || c.Args[0] != "sql" || !strings.HasPrefix(c.Args[1], "SELECT COALESCE") {
+		t.Fatalf("argv = %q, want sql SELECT COALESCE...", c.Args)
+	}
+	if got := callEnv(c, "BD_READONLY"); got != "" {
+		t.Errorf("BD_READONLY = %q, want it stripped", got)
+	}
+	if got := callEnv(c, "BD_DOLT_AUTO_COMMIT"); got != "on" {
+		t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on", got)
 	}
 }
 

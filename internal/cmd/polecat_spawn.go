@@ -214,6 +214,66 @@ func reuseIdlePolecatForSling(
 	opts SlingSpawnOptions,
 	recordRespawn func(),
 ) (*SpawnedPolecatInfo, error) {
+	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName), rigName, opts, recordRespawn)
+}
+
+// idleReuseEnv is what the idle-reuse path reads and writes besides the polecat
+// manager: the integration-branch detection, the worktree check, the session
+// name, the rig's default branch, the spawn feed event and the step timer.
+// realIdleReuseEnv wires the real ones.
+type idleReuseEnv struct {
+	// integrationBranch returns the integration branch the hooked bead's epic
+	// carries (without origin/), or "" when none applies.
+	integrationBranch func(hookBead string) string
+	verifyWorktree    func(clonePath string) error
+	sessionName       func(polecatName string) string
+	defaultBranch     func() string
+	logSpawn          func(rigName, polecatName string)
+	step              func(name string)
+}
+
+func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleReuseEnv {
+	return idleReuseEnv{
+		integrationBranch: func(hookBead string) string {
+			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
+		},
+		verifyWorktree: verifyWorktreeExists,
+		sessionName:    polecat.NewSessionManager(t, r).SessionName,
+		defaultBranch:  r.DefaultBranch,
+		logSpawn: func(rigName, polecatName string) {
+			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
+		},
+		step: func(name string) { slingSteps.step(name) },
+	}
+}
+
+// detectSpawnIntegrationBranch auto-detects the integration branch of the
+// hooked bead's parent epic, when the rig has integration branches enabled.
+// It returns "" when none applies or detection fails.
+func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead string) string {
+	if !polecatIntegrationEnabled(townRoot, rigName) {
+		return ""
+	}
+	repoGit, repoErr := getRigGit(r.Path)
+	if repoErr != nil {
+		return ""
+	}
+	detected, detectErr := beads.DetectIntegrationBranch(beads.New(r.Path), repoGit, hookBead)
+	if detectErr != nil {
+		return ""
+	}
+	return detected
+}
+
+// reuseIdlePolecatForSlingWith is reuseIdlePolecatForSling with its
+// collaborators explicit.
+func reuseIdlePolecatForSlingWith(
+	polecatMgr idlePolecatReuse,
+	env idleReuseEnv,
+	rigName string,
+	opts SlingSpawnOptions,
+	recordRespawn func(),
+) (*SpawnedPolecatInfo, error) {
 	polecatName := opts.Name
 	heldIssue := "" // work the named polecat already holds, for the refusal hint
 	if polecatName != "" {
@@ -241,16 +301,9 @@ func reuseIdlePolecatForSling(
 	baseBranch := opts.BaseBranch
 	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
-			if polecatIntegrationEnabled(townRoot, rigName) {
-				repoGit, repoErr := getRigGit(r.Path)
-				if repoErr == nil {
-					bd := beads.New(r.Path)
-					detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
-					if detectErr == nil && detected != "" {
-						baseBranch = "origin/" + detected
-						fmt.Printf("  Auto-detected integration branch: %s\n", detected)
-					}
-				}
+			if detected := env.integrationBranch(opts.HookBead); detected != "" {
+				baseBranch = "origin/" + detected
+				fmt.Printf("  Auto-detected integration branch: %s\n", detected)
 			}
 		}
 		if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
@@ -288,16 +341,15 @@ func reuseIdlePolecatForSling(
 	if err != nil {
 		return nil, fmt.Errorf("getting idle polecat after reuse: %w", err)
 	}
-	if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
+	if err := env.verifyWorktree(polecatObj.ClonePath); err != nil {
 		return nil, fmt.Errorf("worktree verification failed for reused %s: %w", polecatName, err)
 	}
 
-	polecatSessMgr := polecat.NewSessionManager(t, r)
-	sessionName := polecatSessMgr.SessionName(polecatName)
+	sessionName := env.sessionName(polecatName)
 
 	fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
-	slingSteps.step("reuse")
-	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
+	env.step("reuse")
+	env.logSpawn(rigName, polecatName)
 	recordRespawn()
 
 	return &SpawnedPolecatInfo{
@@ -306,7 +358,7 @@ func reuseIdlePolecatForSling(
 		ClonePath:   polecatObj.ClonePath,
 		SessionName: sessionName,
 		Pane:        "",
-		BaseBranch:  resolveSpawnBaseBranch(baseBranch, r.DefaultBranch()),
+		BaseBranch:  resolveSpawnBaseBranch(baseBranch, env.defaultBranch()),
 		Branch:      polecatObj.Branch,
 		// A reused sandbox predates this sling: rollback keeps it. Its new
 		// branch stays checked out there, so rollback leaves that too.
@@ -418,13 +470,44 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
 	}
+	return realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+}
 
+// slingSeatSpawn is the front of SpawnPolecatForSling: the rig's backpressure,
+// the pool's seat decision, and the ownership of the seat that decision
+// claimed. prepare is everything after the seat is chosen — the rig, the
+// polecat and its worktree. realSlingSeatSpawn wires the real ones.
+type slingSeatSpawn struct {
+	backpressure func(townRoot, rigName string, opts SlingSpawnOptions) error
+	// resolvePool is resolvePolecatPoolAgent, or its explicit variant when
+	// explicit is set.
+	resolvePool func(townRoot, beadID, requested string, explicit bool) (agent, reason string, err error)
+	releaseSeat func()
+	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
+}
+
+func realSlingSeatSpawn() slingSeatSpawn {
+	return slingSeatSpawn{
+		backpressure: checkSlingBackpressure,
+		resolvePool: func(townRoot, beadID, requested string, explicit bool) (string, string, error) {
+			if explicit {
+				return resolvePolecatPoolAgentExplicit(townRoot, beadID, requested)
+			}
+			return resolvePolecatPoolAgent(townRoot, beadID, requested)
+		},
+		releaseSeat: releasePoolSeatClaim,
+		prepare:     prepareSlingPolecat,
+	}
+}
+
+// spawn is SpawnPolecatForSling once the town root is known.
+func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	// Pre-dispatch backpressure (gt-xidg, plan Task 3 / A3): the rig's merge
 	// queue is the limit on what the town can absorb, so a sling is refused
 	// while the rig has more ready MRs than merge_queue.max_ready_for_dispatch
 	// allows. It runs before the pool decision below, which costs a tmux round
 	// trip and may claim a local seat for a polecat that will never spawn.
-	if err := checkSlingBackpressure(townRoot, rigName, opts); err != nil {
+	if err := s.backpressure(townRoot, rigName, opts); err != nil {
 		return nil, err
 	}
 
@@ -438,11 +521,8 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// (gt-4lbz). An agent the pool does not own leaves it with no opinion and the
 	// request stands. The reason line always names the agent the pool chose, and
 	// a pool whose seats are all at their cap refuses the sling.
-	resolvePool := resolvePolecatPoolAgent
-	if opts.AgentBeatsRoute && opts.Agent != "" {
-		resolvePool = resolvePolecatPoolAgentExplicit
-	}
-	poolAgent, poolReason, poolErr := resolvePool(townRoot, opts.HookBead, opts.Agent)
+	explicit := opts.AgentBeatsRoute && opts.Agent != ""
+	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, opts.HookBead, opts.Agent, explicit)
 	if poolErr != nil {
 		return nil, poolErr
 	}
@@ -465,14 +545,21 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// failed spawn kept stands for a polecat that never existed: every other
 	// sling counts it as a seat taken, and cleanup leaves it alone for
 	// poolSeatClaimTTL (30m) because the process holding it is still alive
-	// (gt-t8q5).
-	claimHandedOver := false
-	defer func() {
-		if !claimHandedOver {
-			releasePoolSeatClaim()
-		}
-	}()
+	// (gt-t8q5). The spawn succeeds only by returning the polecat whose
+	// session the caller will start, so success is the hand-over.
+	info, err := s.prepare(townRoot, rigName, opts)
+	if err != nil {
+		s.releaseSeat()
+		return nil, err
+	}
+	return info, nil
+}
 
+// prepareSlingPolecat is the part of SpawnPolecatForSling after the pool chose
+// the seat: load the rig, reuse or allocate the polecat, and build its
+// worktree. Every error return leaves no session behind, so its caller drops
+// the seat claim on any error.
+func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	// Load rig config
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
@@ -563,7 +650,6 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	if reusedIdle != nil {
 		// A reused sandbox still has its session started by the caller, which
 		// is where the claim stops standing for a seat.
-		claimHandedOver = true
 		return reusedIdle, nil
 	}
 
@@ -593,16 +679,9 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			// Auto-detect: check if the hooked bead's parent epic has an integration branch
-			if polecatIntegrationEnabled(townRoot, rigName) {
-				repoGit, repoErr := getRigGit(r.Path)
-				if repoErr == nil {
-					bd := beads.New(r.Path)
-					detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
-					if detectErr == nil && detected != "" {
-						baseBranch = "origin/" + detected
-						fmt.Printf("  Auto-detected integration branch: %s\n", detected)
-					}
-				}
+			if detected := detectSpawnIntegrationBranch(townRoot, rigName, r, opts.HookBead); detected != "" {
+				baseBranch = "origin/" + detected
+				fmt.Printf("  Auto-detected integration branch: %s\n", detected)
 			}
 		}
 		if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
@@ -658,8 +737,6 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 
 	// The spawn is real: the claim now belongs to a polecat whose session the
 	// caller will start, and StartSession is what drops it.
-	claimHandedOver = true
-
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,
 		PolecatName: polecatName,

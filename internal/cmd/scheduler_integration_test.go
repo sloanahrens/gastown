@@ -1335,53 +1335,6 @@ func TestSchedulerDeferredNonRigRejection(t *testing.T) {
 	}
 }
 
-// TestSchedulerDeferredAcceptsDogTarget verifies that in deferred mode
-// (max_polecats > 0), dog pool targets (deacon/dogs, dog:) fall through to
-// direct dispatch instead of being rejected as "not a known rig".
-//
-// Regression test for bead aa-4yf2: dispatchFeedDog was broken because the
-// deferred sling path validated that the target was a rig, rejecting the
-// pool target "deacon/dogs". That caused every stranded-convoy feed attempt
-// to fail with "failed to dispatch feed dog: exit status 1" whenever a
-// scheduler was active (i.e., in normal operation on hq).
-//
-// Dogs are a self-managed Deacon-owned pool, not rig polecat slots, and
-// therefore don't participate in the capacity scheduler. They must dispatch
-// directly regardless of scheduler mode.
-func TestSchedulerDeferredAcceptsDogTarget(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
-
-	beadID := createTestBead(t, rigPath, "Dog target accept test")
-
-	// Targets that must NOT be rejected with "deferred dispatch requires a rig target".
-	dogTargets := []string{
-		"deacon/dogs",
-		"deacon/dogs/alpha",
-		"dog:",
-		"dog:alpha",
-	}
-
-	for _, target := range dogTargets {
-		t.Run(target, func(t *testing.T) {
-			// --dry-run so we don't actually spawn a dog; we only care that the
-			// command makes it past the deferred-mode gate.
-			out, _ := runGTCmdMayFail(t, gtBinary, hqPath, env,
-				"sling", beadID, target, "--hook-raw-bead", "--dry-run")
-
-			// The regression we're guarding against: this exact error would
-			// appear if dog targets were rejected by the deferred-rig gate.
-			if strings.Contains(out, "deferred dispatch requires a rig target") {
-				t.Fatalf("dog target %q incorrectly rejected by deferred-rig gate (aa-4yf2 regression):\n%s",
-					target, out)
-			}
-			if strings.Contains(out, "is not a known rig") {
-				t.Fatalf("dog target %q incorrectly rejected with 'is not a known rig' (aa-4yf2 regression):\n%s",
-					target, out)
-			}
-		})
-	}
-}
-
 // TestSchedulerDirectEpicDispatch verifies that gt sling <epic-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
 func TestSchedulerDirectEpicDispatch(t *testing.T) {

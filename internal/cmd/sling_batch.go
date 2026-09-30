@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,82 +17,141 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// batchSlingOptions are the gt sling flags a batch sling reads.
+type batchSlingOptions struct {
+	formula       string
+	hookRawBead   bool
+	dryRun        bool
+	force         bool
+	maxConcurrent int
+	ralph         bool
+	argsText      string
+	vars          []string
+	merge         string
+	baseBranch    string
+	account       string
+	agent         string
+	noConvoy      bool
+	owned         bool
+	noMerge       bool
+	reviewOnly    bool
+	noBoot        bool
+}
+
+// batchSlingOptionsFrom is the part of a sling's options a batch reads.
+// runSling passes its run's options, which carry --stdin and --pr as
+// resolved, not the raw flags.
+func batchSlingOptionsFrom(o slingOptions) batchSlingOptions {
+	return batchSlingOptions{
+		formula:       o.formula,
+		hookRawBead:   o.hookRawBead,
+		dryRun:        o.dryRun,
+		force:         o.force,
+		maxConcurrent: o.maxConcurrent,
+		ralph:         o.ralph,
+		argsText:      o.argsText,
+		vars:          append([]string(nil), o.vars...),
+		merge:         o.merge,
+		baseBranch:    o.baseBranch,
+		account:       o.account,
+		agent:         o.agent,
+		noConvoy:      o.noConvoy,
+		owned:         o.owned,
+		noMerge:       o.noMerge,
+		reviewOnly:    o.reviewOnly,
+		noBoot:        o.noBoot,
+	}
+}
+
+// batchSling slings several beads to one rig, one fresh polecat each. Its
+// guards and dispatch go through the funcs it holds; realBatchSling wires the
+// running gt's, and a unit test wires fakes so nothing is spawned.
+type batchSling struct {
+	opts              batchSlingOptions
+	out               io.Writer
+	verifyBead        func(beadID string) error
+	verifyInTargetRig func(beadID, targetRig, townRoot string) error
+	crossRigGuard     func(beadID, targetAgent, townRoot string) error
+	resolveFormula    func(explicit string, hookRawBead bool, townRoot, rigName string) string
+	cook              func(formulaName, workDir, townRoot string) error
+	execute           func(params SlingParams) (*SlingResult, error)
+	wakeRig           func(rigName string)
+	sleep             func(time.Duration)
+}
+
+// realBatchSling is a batch sling with opts and the running gt's collaborators.
+func realBatchSling(opts slingOptions) batchSling {
+	return batchSling{
+		opts:              batchSlingOptionsFrom(opts),
+		out:               os.Stdout,
+		verifyBead:        verifyBeadExists,
+		verifyInTargetRig: verifyBeadExistsInTargetRigDatabase,
+		crossRigGuard:     checkCrossRigGuard,
+		resolveFormula:    resolveFormula,
+		cook:              CookFormula,
+		execute:           executeSling,
+		wakeRig:           wakeRigAgents,
+		sleep:             time.Sleep,
+	}
+}
+
 // runBatchSling handles slinging multiple beads to a rig.
 // Each bead gets its own freshly spawned polecat.
 func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error {
+	return runBatchSlingWith(slingOptionsFromFlags(), beadIDs, rigName, townBeadsDir)
+}
+
+// runBatchSlingWith is runBatchSling with opts in place of the flags.
+func runBatchSlingWith(opts slingOptions, beadIDs []string, rigName string, townBeadsDir string) error {
+	return realBatchSling(opts).run(beadIDs, rigName, townBeadsDir)
+}
+
+// run is runBatchSling with this batch sling's options and collaborators.
+func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) error {
 	// Validate all beads exist before spawning any polecats
 	for _, beadID := range beadIDs {
-		if err := verifyBeadExists(beadID); err != nil {
+		if err := b.verifyBead(beadID); err != nil {
 			return fmt.Errorf("bead '%s' not found", beadID)
 		}
 	}
 	townRoot := filepath.Dir(townBeadsDir)
 	for _, beadID := range beadIDs {
-		if err := verifyBeadExistsInTargetRigDatabase(beadID, rigName, townRoot); err != nil {
+		if err := b.verifyInTargetRig(beadID, rigName, townRoot); err != nil {
 			return err
 		}
 	}
 
 	// Cross-rig guard: check all beads match the target rig before spawning (gt-myecw)
-	if !slingForce {
-		for _, beadID := range beadIDs {
-			prefix := beads.ExtractPrefix(beadID)
-			beadRig := beads.GetRigNameForPrefix(townRoot, prefix)
-			if prefix != "" && beadRig != "" && beadRig != rigName {
-				others := make([]string, 0, len(beadIDs)-1)
-				for _, id := range beadIDs {
-					if id != beadID {
-						others = append(others, id)
-					}
-				}
-				// Build the full command suggestion safely — avoid appending to
-				// beadIDs which may share a backing array with the caller's args.
-				allArgs := make([]string, len(beadIDs)+1)
-				copy(allArgs, beadIDs)
-				allArgs[len(beadIDs)] = rigName
-				return fmt.Errorf("bead %s (prefix %q) belongs to rig %q, but target is %q\n\n"+
-					"  Options:\n"+
-					"    1. Remove the mismatched bead from this batch:\n"+
-					"         gt sling %s\n"+
-					"    2. Sling the mismatched bead to its own rig:\n"+
-					"         gt sling %s %s\n"+
-					"    3. Use --force to override the cross-rig guard:\n"+
-					"         gt sling %s --force\n",
-					beadID, strings.TrimSuffix(prefix, "-"), beadRig, rigName,
-					strings.Join(others, " "),
-					beadID, beadRig,
-					strings.Join(allArgs, " "))
-			} else if err := checkCrossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
-				// Fall back to generic guard for edge cases (empty prefix, town-level beads)
-				return err
-			}
+	if !b.opts.force {
+		if err := b.guardCrossRig(beadIDs, rigName, townRoot); err != nil {
+			return err
 		}
 	}
 
 	// Issue #288: Auto-apply formula for batch sling (resolved via flags)
-	formulaName := resolveFormula(slingFormula, slingHookRawBead, filepath.Dir(townBeadsDir), rigName)
+	formulaName := b.resolveFormula(b.opts.formula, b.opts.hookRawBead, townRoot, rigName)
 
-	if slingDryRun {
-		fmt.Printf("%s Batch slinging %d beads to rig '%s':\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
+	if b.opts.dryRun {
+		fmt.Fprintf(b.out, "%s Batch slinging %d beads to rig '%s':\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
 		if formulaName != "" {
-			fmt.Printf("  Would cook %s formula once\n", formulaName)
+			fmt.Fprintf(b.out, "  Would cook %s formula once\n", formulaName)
 		} else {
-			fmt.Printf("  Would hook raw beads (no formula)\n")
+			fmt.Fprintf(b.out, "  Would hook raw beads (no formula)\n")
 		}
 		for _, beadID := range beadIDs {
 			if formulaName != "" {
-				fmt.Printf("  Would spawn polecat and apply %s to: %s\n", formulaName, beadID)
+				fmt.Fprintf(b.out, "  Would spawn polecat and apply %s to: %s\n", formulaName, beadID)
 			} else {
-				fmt.Printf("  Would spawn polecat and hook raw: %s\n", beadID)
+				fmt.Fprintf(b.out, "  Would spawn polecat and hook raw: %s\n", beadID)
 			}
 		}
 		return nil
 	}
 
-	fmt.Printf("%s Batch slinging %d beads to rig '%s'...\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
+	fmt.Fprintf(b.out, "%s Batch slinging %d beads to rig '%s'...\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
 
-	if slingMaxConcurrent > 0 {
-		fmt.Printf("  Spawn batch size: %d (spawns N, pauses, spawns N more)\n", slingMaxConcurrent)
+	if b.opts.maxConcurrent > 0 {
+		fmt.Fprintf(b.out, "  Spawn batch size: %d (spawns N, pauses, spawns N more)\n", b.opts.maxConcurrent)
 	}
 
 	// Cook formula once before the loop for efficiency
@@ -100,8 +160,8 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 	// Pre-cook formula before the loop (batch optimization: cook once, instantiate many)
 	if formulaName != "" {
 		workDir := beads.ResolveHookDir(townRoot, beadIDs[0], "")
-		if err := CookFormula(formulaName, workDir, townRoot); err != nil {
-			fmt.Printf("  %s Could not pre-cook formula %s: %v\n", style.Dim.Render("Warning:"), formulaName, err)
+		if err := b.cook(formulaName, workDir, townRoot); err != nil {
+			fmt.Fprintf(b.out, "  %s Could not pre-cook formula %s: %v\n", style.Dim.Render("Warning:"), formulaName, err)
 			// Fall back: each executeSling call will try to cook individually
 		} else {
 			formulaCooked = true
@@ -119,7 +179,7 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 	activeCount := 0 // Track active spawns for --max-concurrent throttling
 
 	var slingMode string
-	if slingRalph {
+	if b.opts.ralph {
 		slingMode = "ralph"
 	}
 
@@ -128,12 +188,12 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 		// Spawn-rate throttle: when --max-concurrent is set, pause between batches
 		// of N spawns. This does NOT limit total concurrent polecats — all spawned
 		// polecats remain running. It only slows down how fast they are created.
-		if slingMaxConcurrent > 0 && activeCount >= slingMaxConcurrent {
-			fmt.Printf("\n%s Spawn batch of %d complete, pausing before next batch...\n",
-				style.Warning.Render("⏳"), slingMaxConcurrent)
+		if b.opts.maxConcurrent > 0 && activeCount >= b.opts.maxConcurrent {
+			fmt.Fprintf(b.out, "\n%s Spawn batch of %d complete, pausing before next batch...\n",
+				style.Warning.Render("⏳"), b.opts.maxConcurrent)
 			// Wait for sessions to settle before spawning more
 			for wait := 0; wait < 30; wait++ {
-				time.Sleep(2 * time.Second)
+				b.sleep(2 * time.Second)
 				if wait >= 2 {
 					break
 				}
@@ -143,25 +203,25 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 			activeCount = 0
 		}
 
-		fmt.Printf("\n[%d/%d] Slinging %s...\n", i+1, len(beadIDs), beadID)
+		fmt.Fprintf(b.out, "\n[%d/%d] Slinging %s...\n", i+1, len(beadIDs), beadID)
 
 		params := SlingParams{
 			BeadID:           beadID,
 			FormulaName:      formulaName,
 			RigName:          rigName,
-			Args:             slingArgs,
-			Vars:             slingVars,
-			Merge:            slingMerge,
-			BaseBranch:       slingBaseBranch,
-			Account:          slingAccount,
-			Agent:            slingAgent,
-			NoConvoy:         slingNoConvoy,
-			Owned:            slingOwned,
-			NoMerge:          slingNoMerge,
-			ReviewOnly:       slingReviewOnly,
-			Force:            slingForce,
-			HookRawBead:      slingHookRawBead,
-			NoBoot:           slingNoBoot,
+			Args:             b.opts.argsText,
+			Vars:             b.opts.vars,
+			Merge:            b.opts.merge,
+			BaseBranch:       b.opts.baseBranch,
+			Account:          b.opts.account,
+			Agent:            b.opts.agent,
+			NoConvoy:         b.opts.noConvoy,
+			Owned:            b.opts.owned,
+			NoMerge:          b.opts.noMerge,
+			ReviewOnly:       b.opts.reviewOnly,
+			Force:            b.opts.force,
+			HookRawBead:      b.opts.hookRawBead,
+			NoBoot:           b.opts.noBoot,
 			Mode:             slingMode,
 			SkipCook:         formulaCooked,
 			FormulaFailFatal: false, // Batch: warn + hook raw on formula failure
@@ -170,7 +230,7 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 			BeadsDir:         townBeadsDir,
 		}
 
-		result, err := executeSling(params)
+		result, err := b.execute(params)
 		if err != nil {
 			errMsg := ""
 			if result != nil {
@@ -184,7 +244,7 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 				polecatName = result.PolecatName
 			}
 			results = append(results, batchResult{beadID: beadID, polecat: polecatName, success: false, errMsg: errMsg})
-			fmt.Printf("  %s %s\n", style.Dim.Render("✗"), errMsg)
+			fmt.Fprintf(b.out, "  %s %s\n", style.Dim.Render("✗"), errMsg)
 			continue
 		}
 
@@ -195,12 +255,12 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 		// spawns without delay cause database lock timeouts when multiple bd
 		// operations (agent bead creation, hook setting) overlap.
 		if i < len(beadIDs)-1 {
-			time.Sleep(2 * time.Second)
+			b.sleep(2 * time.Second)
 		}
 	}
 
-	if !slingNoBoot {
-		wakeRigAgents(rigName)
+	if !b.opts.noBoot {
+		b.wakeRig(rigName)
 	}
 
 	// Print summary
@@ -211,11 +271,11 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 		}
 	}
 
-	fmt.Printf("\n%s Batch sling complete: %d/%d succeeded\n", style.Bold.Render("📊"), successCount, len(beadIDs))
+	fmt.Fprintf(b.out, "\n%s Batch sling complete: %d/%d succeeded\n", style.Bold.Render("📊"), successCount, len(beadIDs))
 	if successCount < len(beadIDs) {
 		for _, r := range results {
 			if !r.success {
-				fmt.Printf("  %s %s: %s\n", style.Dim.Render("✗"), r.beadID, r.errMsg)
+				fmt.Fprintf(b.out, "  %s %s: %s\n", style.Dim.Render("✗"), r.beadID, r.errMsg)
 			}
 		}
 	}
@@ -223,6 +283,44 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 		return fmt.Errorf("batch sling failed: 0/%d succeeded", len(beadIDs))
 	}
 
+	return nil
+}
+
+// guardCrossRig refuses a batch whose beads belong to another rig than
+// rigName (gt-myecw), naming the mismatched bead and the ways out.
+func (b batchSling) guardCrossRig(beadIDs []string, rigName, townRoot string) error {
+	for _, beadID := range beadIDs {
+		prefix := beads.ExtractPrefix(beadID)
+		beadRig := beads.GetRigNameForPrefix(townRoot, prefix)
+		if prefix != "" && beadRig != "" && beadRig != rigName {
+			others := make([]string, 0, len(beadIDs)-1)
+			for _, id := range beadIDs {
+				if id != beadID {
+					others = append(others, id)
+				}
+			}
+			// Build the full command suggestion safely — avoid appending to
+			// beadIDs which may share a backing array with the caller's args.
+			allArgs := make([]string, len(beadIDs)+1)
+			copy(allArgs, beadIDs)
+			allArgs[len(beadIDs)] = rigName
+			return fmt.Errorf("bead %s (prefix %q) belongs to rig %q, but target is %q\n\n"+
+				"  Options:\n"+
+				"    1. Remove the mismatched bead from this batch:\n"+
+				"         gt sling %s\n"+
+				"    2. Sling the mismatched bead to its own rig:\n"+
+				"         gt sling %s %s\n"+
+				"    3. Use --force to override the cross-rig guard:\n"+
+				"         gt sling %s --force\n",
+				beadID, strings.TrimSuffix(prefix, "-"), beadRig, rigName,
+				strings.Join(others, " "),
+				beadID, beadRig,
+				strings.Join(allArgs, " "))
+		} else if err := b.crossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
+			// Fall back to generic guard for edge cases (empty prefix, town-level beads)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -405,10 +503,4 @@ func deletePolecatBranch(branchName string, repoGit *git.Git, hasPendingMR bool)
 
 	fmt.Printf("  %s keeping local branch %s: no remote ref contains %s — delete it manually once the work is safe\n",
 		style.Warning.Render("⚠"), branchName, shortSHA(tip))
-}
-
-// closeConvoy closes a convoy with the given reason.
-// It is a best-effort operation that logs warnings on failure.
-func closeConvoy(convoyID, reason string) {
-	realSlingRollback().closeConvoy(convoyID, reason)
 }

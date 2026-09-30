@@ -87,17 +87,21 @@ func TestConvoyCreate_InvalidMergeFlag(t *testing.T) {
 // Args validation
 // ---------------------------------------------------------------------------
 
+// TestConvoyCreate_NoArgsNoFlag: convoy create with neither issue arguments
+// nor --from-epic is refused before it touches bd.
 func TestConvoyCreate_NoArgsNoFlag(t *testing.T) {
-	// Reset flags
-	convoyFromEpic = ""
-	convoyMerge = ""
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
 
-	err := runConvoyCreate(convoyCreateCmd, []string{})
+	err := fx.c.create(convoyCreateOptions{}, []string{})
 	if err == nil {
 		t.Fatal("expected error with no args and no --from-epic")
 	}
 	if !strings.Contains(err.Error(), "at least one argument") {
 		t.Errorf("error should mention missing args, got: %s", err)
+	}
+	if calls := fx.rec.recorded(); len(calls) != 0 {
+		t.Errorf("bd ran before the arguments were refused: %+v", calls)
 	}
 }
 

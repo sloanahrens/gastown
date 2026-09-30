@@ -7,20 +7,18 @@ import "testing"
 // sling to the rig refused with "bead already has N attached molecule(s)".
 // The fix treats this state as orphaned so sling can self-heal.
 func TestIsOrphanMolecule_HookedNoAssignee(t *testing.T) {
-	prev := isHookedAgentDeadFn
-	t.Cleanup(func() { isHookedAgentDeadFn = prev })
-	isHookedAgentDeadFn = func(string) bool { return false }
-
+	t.Parallel()
 	info := &beadInfo{Status: "hooked", Assignee: ""}
-	if !isOrphanMolecule(info) {
+	if !isOrphanMoleculeWith(info, func(string) bool { return false }) {
 		t.Errorf("isOrphanMolecule(status=hooked, assignee='') = false, want true (gh-3697)")
 	}
 }
 
+// TestIsOrphanMolecule_TableDriven: an unassigned live bead is orphaned, an
+// assigned one only when its holder's session is dead, and closed or blocked
+// beads never are.
 func TestIsOrphanMolecule_TableDriven(t *testing.T) {
-	prev := isHookedAgentDeadFn
-	t.Cleanup(func() { isHookedAgentDeadFn = prev })
-
+	t.Parallel()
 	tests := []struct {
 		name     string
 		info     *beadInfo
@@ -79,8 +77,8 @@ func TestIsOrphanMolecule_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isHookedAgentDeadFn = tt.deadFn
-			got := isOrphanMolecule(tt.info)
+			t.Parallel()
+			got := isOrphanMoleculeWith(tt.info, tt.deadFn)
 			if got != tt.expected {
 				t.Errorf("isOrphanMolecule() = %v, want %v", got, tt.expected)
 			}
