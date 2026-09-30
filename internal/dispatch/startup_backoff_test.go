@@ -8,12 +8,14 @@ import (
 )
 
 func TestStartupBackoff_NoRecordAllowsDispatch(t *testing.T) {
+	t.Parallel()
 	if got := startupBackoff(t.TempDir(), "gt-abc", time.Now()); got != "" {
 		t.Errorf("no failure recorded, got backoff %q", got)
 	}
 }
 
 func TestStartupBackoff_HoldsWithinWindowThenReleases(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	if err := recordStartupFailure(town, "gt-abc", "startup blocked: trust dialog", at); err != nil {
@@ -33,6 +35,7 @@ func TestStartupBackoff_HoldsWithinWindowThenReleases(t *testing.T) {
 }
 
 func TestStartupBackoff_ConsecutiveFailuresBackOffExponentially(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	for range 2 {
@@ -49,6 +52,7 @@ func TestStartupBackoff_ConsecutiveFailuresBackOffExponentially(t *testing.T) {
 }
 
 func TestStartupBackoffWindow_DoublesAndCaps(t *testing.T) {
+	t.Parallel()
 	cases := map[int]time.Duration{
 		1:   5 * time.Minute,
 		2:   10 * time.Minute,
@@ -65,6 +69,7 @@ func TestStartupBackoffWindow_DoublesAndCaps(t *testing.T) {
 }
 
 func TestClearStartupFailure_ResetsTheBackoffAndTheCount(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	_ = recordStartupFailure(town, "gt-abc", "startup blocked", at)
@@ -82,6 +87,7 @@ func TestClearStartupFailure_ResetsTheBackoffAndTheCount(t *testing.T) {
 }
 
 func TestStartupBackoff_UnreadableRecordFailsOpen(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := recordStartupFailure(town, "gt-abc", "x", time.Now()); err != nil {
 		t.Fatal(err)
@@ -95,6 +101,7 @@ func TestStartupBackoff_UnreadableRecordFailsOpen(t *testing.T) {
 }
 
 func TestRecordStartupFailure_RejectsPathLikeBeadIDs(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	for _, id := range []string{"", ".", "..", "../x", "a/b"} {
 		if err := recordStartupFailure(town, id, "x", time.Now()); err == nil {
@@ -104,6 +111,7 @@ func TestRecordStartupFailure_RejectsPathLikeBeadIDs(t *testing.T) {
 }
 
 func TestRecordStartupFailure_ReasonIsOneBoundedLine(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	at := time.Now()
 	_ = recordStartupFailure(town, "gt-abc", "\nfirst line\nsecond line", at)
