@@ -7,6 +7,7 @@ import (
 )
 
 func TestCrewWorker_Summary(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	worker := &CrewWorker{
 		Name:      "test-worker",
@@ -28,6 +29,7 @@ func TestCrewWorker_Summary(t *testing.T) {
 }
 
 func TestCrewWorker_JSONMarshaling(t *testing.T) {
+	t.Parallel()
 	now := time.Now().Round(time.Second) // Round for JSON precision
 	worker := &CrewWorker{
 		Name:      "test-worker",
@@ -62,6 +64,7 @@ func TestCrewWorker_JSONMarshaling(t *testing.T) {
 }
 
 func TestSummary_JSONMarshaling(t *testing.T) {
+	t.Parallel()
 	summary := Summary{
 		Name:   "worker-1",
 		Branch: "main",
@@ -86,6 +89,7 @@ func TestSummary_JSONMarshaling(t *testing.T) {
 }
 
 func TestCrewWorker_ZeroValues(t *testing.T) {
+	t.Parallel()
 	var worker CrewWorker
 
 	// Test zero value behavior
