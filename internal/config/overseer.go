@@ -57,20 +57,7 @@ func SaveOverseerConfig(path string, config *OverseerConfig) error {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("creating directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding overseer config: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: overseer config doesn't contain secrets
-		return fmt.Errorf("writing overseer config: %w", err)
-	}
-
-	return nil
+	return WriteConfigJSON(path, config, 0644)
 }
 
 // validateOverseerConfig validates an OverseerConfig.

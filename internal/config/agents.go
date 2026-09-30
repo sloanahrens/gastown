@@ -1094,16 +1094,7 @@ func IsKnownPreset(name string) bool {
 
 // SaveAgentRegistry writes the agent registry to a file.
 func SaveAgentRegistry(path string, registry *AgentRegistry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(registry, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644) //nolint:gosec // G306: config file
+	return WriteConfigJSON(path, registry, 0644)
 }
 
 // NewExampleAgentRegistry creates an example registry with comments.

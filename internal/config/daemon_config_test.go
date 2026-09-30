@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,36 @@ func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 		if !errors.Is(err, ErrUnparseable) {
 			t.Errorf("%s = %v, want ErrUnparseable", body, err)
 		}
+	}
+}
+
+func TestDaemonPatrolRigEditorsRefuseAnUnparseableFile(t *testing.T) {
+	t.Parallel()
+	const broken = `{"patrols": {"witness": {"enabled": true, "rigs": ["a"]}, "bogus": {}}}`
+	for name, edit := range map[string]func(string) error{
+		"add":    func(root string) error { return AddRigToDaemonPatrols(root, "b") },
+		"remove": func(root string) error { return RemoveRigFromDaemonPatrols(root, "a") },
+		"ensure": EnsureDaemonPatrolConfig,
+	} {
+		root := t.TempDir()
+		path := DaemonPatrolConfigPath(root)
+		writeFile(t, path, broken)
+		if err := edit(root); !errors.Is(err, ErrUnparseable) {
+			t.Errorf("%s over a broken daemon.json = %v, want ErrUnparseable", name, err)
+		}
+		if got, _ := os.ReadFile(path); string(got) != broken {
+			t.Errorf("%s rewrote the broken file: %q", name, got)
+		}
+	}
+}
+
+func TestDaemonPatrolRigEditorsLeaveAMissingFileMissing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := AddRigToDaemonPatrols(root, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(DaemonPatrolConfigPath(root)); !os.IsNotExist(err) {
+		t.Fatalf("AddRigToDaemonPatrols created daemon.json: %v", err)
 	}
 }
