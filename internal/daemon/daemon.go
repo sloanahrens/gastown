@@ -351,6 +351,12 @@ type Daemon struct {
 	// `gt nudge` — running inline would hold the tick loop (gt-4z3b7).
 	patrolWatchdogRunning atomic.Bool
 
+	// patrolWatchdogPaused throttles the watchdog's "skipping <rig>" line to
+	// one per rig per patrolWatchdogPausedLogInterval, and remembers the
+	// transition into a paused state so the rig's stale patrol alert is
+	// cleared exactly once (gt-7g14a).
+	patrolWatchdogPaused pausedRigLog
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog and mainBranchTestRunning

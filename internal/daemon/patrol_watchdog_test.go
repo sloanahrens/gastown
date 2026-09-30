@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/guard"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestPatrolWatchdogInterval(t *testing.T) {
@@ -256,5 +258,96 @@ func TestPatrolWatchdogAlertKey_TownLevelRole(t *testing.T) {
 	key := patrolWatchdogAlertKey(stubTarget("deacon", ""))
 	if key != "patrol_watchdog:deacon" {
 		t.Errorf("unexpected alert key %q", key)
+	}
+}
+
+// TestPartitionPausedRigs_SkipsParkedAndDocked is the fix for gt-7g14a: a
+// parked rig has no witness and no refinery, so the watchdog must not build
+// targets for it, while an unparked rig beside it is untouched.
+func TestPartitionPausedRigs_SkipsParkedAndDocked(t *testing.T) {
+	t.Parallel()
+	states := map[string]rig.OpState{
+		"working":  rig.OpStateOperational,
+		"hm":       rig.OpStateParked,
+		"mango":    rig.OpStateDocked,
+		"neverwas": rig.OpStateOperational,
+	}
+
+	active, paused := partitionPausedRigs(
+		[]string{"working", "hm", "mango", "neverwas"},
+		func(rigName string) (rig.OpState, string) {
+			return states[rigName], "test"
+		},
+	)
+
+	if want := []string{"working", "neverwas"}; !reflect.DeepEqual(active, want) {
+		t.Errorf("active = %v, want %v", active, want)
+	}
+	want := []pausedRig{{Rig: "hm", State: rig.OpStateParked}, {Rig: "mango", State: rig.OpStateDocked}}
+	if !reflect.DeepEqual(paused, want) {
+		t.Errorf("paused = %v, want %v", paused, want)
+	}
+
+	// The point of the split: a parked rig's roles never reach the target list,
+	// so nothing reads their sessions, receipts, alerts or nudges.
+	targets := patrolWatchdogTargets("/town", active)
+	for _, target := range targets {
+		if target.Rig == "hm" || target.Rig == "mango" {
+			t.Errorf("parked/docked rig %q still produced a %s target", target.Rig, target.Role)
+		}
+	}
+	if len(targets) != 1+2*len(active) {
+		t.Errorf("expected the deacon plus two roles per active rig, got %d targets", len(targets))
+	}
+}
+
+// TestPausedRigLog_OneNoticePerRigPerInterval pins the log budget the fix asks
+// for: one line per skipped rig per hour, with a state change reported at once.
+func TestPausedRigLog_OneNoticePerRigPerInterval(t *testing.T) {
+	t.Parallel()
+	var l pausedRigLog
+	start := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	notice, entered := l.observe("hm", rig.OpStateParked, start)
+	if !notice || !entered {
+		t.Fatalf("first observation: notice=%v entered=%v, want true/true", notice, entered)
+	}
+
+	// Every cycle for the next hour is silent — the runaway line gt-7g14a
+	// reports is exactly these repeats.
+	for _, at := range []time.Time{start.Add(time.Minute), start.Add(30 * time.Minute)} {
+		if notice, entered := l.observe("hm", rig.OpStateParked, at); notice || entered {
+			t.Errorf("at %s: notice=%v entered=%v, want false/false", at, notice, entered)
+		}
+	}
+
+	if notice, entered := l.observe("hm", rig.OpStateParked, start.Add(61*time.Minute)); !notice || entered {
+		t.Errorf("past the interval: notice=%v entered=%v, want true/false", notice, entered)
+	}
+
+	// A different paused state is news, and so is the rig coming back.
+	if notice, entered := l.observe("hm", rig.OpStateDocked, start.Add(62*time.Minute)); !notice || !entered {
+		t.Errorf("state change: notice=%v entered=%v, want true/true", notice, entered)
+	}
+	l.forget("hm")
+	if notice, entered := l.observe("hm", rig.OpStateParked, start.Add(63*time.Minute)); !notice || !entered {
+		t.Errorf("after unpark and re-park: notice=%v entered=%v, want true/true", notice, entered)
+	}
+
+	// Rigs are throttled independently: mango's first line is never suppressed
+	// by hm's.
+	if notice, entered := l.observe("mango", rig.OpStateParked, start); !notice || !entered {
+		t.Errorf("second rig: notice=%v entered=%v, want true/true", notice, entered)
+	}
+}
+
+// TestPatrolWatchdogRigAlertKeys covers the keys a paused rig's transition
+// clears — both of the rig's patrol roles, and only that rig's.
+func TestPatrolWatchdogRigAlertKeys(t *testing.T) {
+	t.Parallel()
+	got := patrolWatchdogRigAlertKeys("hm")
+	want := []string{"patrol_watchdog:hm/witness", "patrol_watchdog:hm/refinery"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
 	}
 }

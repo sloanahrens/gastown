@@ -179,6 +179,37 @@ func TestCLIErrorWithoutOutput(t *testing.T) {
 	}
 }
 
+// TestCLIErrorIsOneLine: a cobra command answers a failure with its error and
+// then its whole usage block, and callers log the error verbatim. Carrying all
+// of it wrote gt nudge's usage into daemon.log every cycle the patrol watchdog
+// nudged a session that no longer existed (gt-7g14a), so the error keeps the
+// first line only — the exit status and the error itself.
+func TestCLIErrorIsOneLine(t *testing.T) {
+	t.Parallel()
+	exitErr := errors.New("exit status 1")
+	r := &recordedRun{
+		out: []byte("\nError: session \"hm-witness\" not found (cannot queue nudge for nonexistent session)\n" +
+			"Usage:\n  gt nudge <target> <message> [flags]\n\nFlags:\n  -m, --mode string   delivery mode\n"),
+		err: exitErr,
+	}
+	err := newTestCLI(r).Nudge(t.Context(), "hm/witness", "resume patrol")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n"); len(lines) != 1 {
+		t.Errorf("err spans %d lines, want 1:\n%s", len(lines), err.Error())
+	}
+	for _, boilerplate := range []string{"Usage:", "Flags:", "delivery mode"} {
+		if strings.Contains(err.Error(), boilerplate) {
+			t.Errorf("err = %q, want no %q from gt's usage block", err.Error(), boilerplate)
+		}
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "exit status 1") || !strings.Contains(msg, `session "hm-witness" not found`) {
+		t.Errorf("err = %q, want both the exit status and the first line of what gt printed", msg)
+	}
+}
+
 // TestCLIDeadlineIsReported: a caller that retries on timeout (the daemon's
 // escalateAlertErr) must be able to tell a timeout from a refusal.
 func TestCLIDeadlineIsReported(t *testing.T) {
