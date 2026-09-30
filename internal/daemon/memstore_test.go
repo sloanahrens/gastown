@@ -55,6 +55,10 @@ type memStore struct {
 	journal      []beads.EventRecord
 	journalFloor int64
 	tails        int
+	// truncateAlways, while truncateOnce is set, is returned by the next
+	// EventsTail, which then clears truncateOnce.
+	truncateAlways *beads.EventsTruncatedError
+	truncateOnce   bool
 }
 
 var _ beadsdk.Storage = (*memStore)(nil)
@@ -119,6 +123,12 @@ func (s *memStore) EventsTail(since int64, limit int) (*beads.EventsPage, error)
 	s.tails++
 	if s.eventsErr != nil {
 		return nil, s.eventsErr
+	}
+	if s.truncateOnce && s.truncateAlways != nil {
+		s.truncateOnce = false
+		t := *s.truncateAlways
+		t.Since = since
+		return nil, &t
 	}
 	if s.journalFloor > 0 && since < s.journalFloor-1 {
 		return nil, &beads.EventsTruncatedError{Since: since, Floor: s.journalFloor, Head: int64(len(s.journal))}

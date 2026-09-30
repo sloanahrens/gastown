@@ -240,11 +240,6 @@ type ConvoyManager struct {
 	// the cursor needs no overlap window and replays nothing.
 	eventCursors sync.Map // map[string]int64
 
-	// seeded is true once the first poll cycle has run (warm-up).
-	// The first cycle advances high-water marks without processing events,
-	// preventing a burst of historical event replay on daemon restart.
-	seeded atomic.Bool
-
 	// processedCloses tracks issue IDs whose current closed state has already
 	// been processed. This prevents duplicate convoy checks when the same close
 	// is seen from multiple stores, and when a closed issue is updated again
@@ -705,8 +700,7 @@ func (m *ConvoyManager) Resume() {
 }
 
 // pollStoresSnapshot polls events from all non-parked stores in the snapshot.
-// The first call is a warm-up: it advances high-water marks without
-// processing events, preventing a burst of historical replay on restart.
+// A store read for the first time is warmed up (see pollStore).
 // A per-cycle seen set deduplicates close events across stores so each
 // issueID is processed at most once per poll cycle.
 // Returns true if any store poll encountered an error.
@@ -721,7 +715,6 @@ func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bo
 			hadError = true
 		}
 	}
-	m.seeded.CompareAndSwap(false, true)
 	return hadError
 }
 
@@ -744,25 +737,37 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		m.recoveryMode.Store(true)
 		return err
 	}
+	// A store with no cursor yet is warmed up: its journal is read to the
+	// head without processing, so a daemon restart, or a store that opens
+	// late or failed its first read, never replays the retained journal.
+	// Warm-up is per store and ends only when that store's read completes.
 	var since int64
-	if v, ok := m.eventCursors.Load(name); ok {
+	v, known := m.eventCursors.Load(name)
+	if known {
 		since = v.(int64)
 	}
-
-	// The first poll cycle is warm-up only: it advances cursors without
-	// processing, so a daemon restart does not replay the journal.
-	warmup := !m.seeded.Load()
+	warmup := !known
 	for {
 		page, err := journal.EventsTail(since, eventPageSize)
 		if err != nil {
 			var trunc *beads.EventsTruncatedError
-			if errors.As(err, &trunc) && trunc.Floor-1 > since {
-				m.logger("Convoy: event poll (%s): journal pruned past %d (oldest retained %d, head %d); resuming at %d, the stranded scan covers the gap",
-					name, since, trunc.Floor, trunc.Head, trunc.Floor-1)
-				m.recoveryMode.Store(true)
-				since = trunc.Floor - 1
-				m.eventCursors.Store(name, since)
-				continue
+			if errors.As(err, &trunc) {
+				// Resume at the oldest retained record, accepting the gap. A
+				// window that would not move the cursor forward (bd reporting
+				// a floor at or below it) skips to the head instead, so the
+				// read cannot refuse the same cursor forever.
+				resume := trunc.Floor - 1
+				if resume <= since {
+					resume = trunc.Head
+				}
+				if resume > since {
+					m.logger("Convoy: event poll (%s): journal pruned past %d (oldest retained %d, head %d); resuming at %d, the stranded scan covers the gap",
+						name, since, trunc.Floor, trunc.Head, resume)
+					m.recoveryMode.Store(true)
+					since = resume
+					m.eventCursors.Store(name, since)
+					continue
+				}
 			}
 			m.logger("Convoy: event poll error (%s): %v", name, err)
 			// Signal recovery mode so the stranded scan shortens its interval
@@ -780,7 +785,11 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		if page.NextSince > since {
 			since = page.NextSince
 		}
-		m.eventCursors.Store(name, since)
+		if !warmup || !page.More {
+			// A warm-up records its cursor only once it reaches the head, so
+			// one cut short by an error is redone rather than processed.
+			m.eventCursors.Store(name, since)
+		}
 		if !page.More {
 			return nil
 		}

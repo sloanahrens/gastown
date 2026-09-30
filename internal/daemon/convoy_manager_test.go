@@ -1,9 +1,9 @@
 package daemon
 
 import (
-	"errors"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
@@ -151,7 +152,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	}
 
 	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should have logged the close detection
@@ -1464,7 +1465,7 @@ func TestPollEvents_TruncatedJournalResumesAtFloor(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.eventCursors.Store("hq", int64(2))
 	if m.pollStoresSnapshot(m.stores) {
 		t.Errorf("a pruned cursor is a gap to log, not a poll failure; logs: %v", logged)
@@ -1507,7 +1508,7 @@ func TestPollEvents_PagesThroughJournal(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 	closes := 0
 	for _, s := range logged {
@@ -1562,6 +1563,72 @@ func TestPollEvents_WarmupAndUpdateOnClosedIssue(t *testing.T) {
 	}
 	if closes != 1 {
 		t.Errorf("close detections for gt-live = %d, want 1 (the notes update is not a second close): %v", closes, logged)
+	}
+}
+
+// startCursorsAtZero marks every store as read from the start of its
+// journal, so the next poll processes the whole journal instead of warming
+// the store up.
+func startCursorsAtZero(m *ConvoyManager) {
+	for name := range m.stores {
+		m.eventCursors.Store(name, int64(0))
+	}
+}
+
+// A store whose first read fails is still warmed up by its next successful
+// read, not replayed: warm-up is per store, keyed on the missing cursor.
+func TestPollEvents_FailedFirstReadStillWarmsUp(t *testing.T) {
+	t.Parallel()
+	hq, hqCleanup := newMemStore(t)
+	defer hqCleanup()
+	rig, rigCleanup := newMemStore(t)
+	defer rigCleanup()
+	mustCreateClosed(t, rig, "gt-old-close")
+	rig.eventsErr = errors.New("bd events tail: store_unavailable")
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m.pollStoresSnapshot(m.stores)
+	if _, ok := m.eventCursors.Load("gastown"); ok {
+		t.Fatal("a failed first read recorded a cursor")
+	}
+	rig.eventsErr = nil
+	m.pollStoresSnapshot(m.stores)
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") {
+			t.Fatalf("the store's first successful read replayed history: %v", logged)
+		}
+	}
+	if v, _ := m.eventCursors.Load("gastown"); v != int64(2) {
+		t.Errorf("cursor = %v, want 2 (warmed to the head)", v)
+	}
+}
+
+// A truncation window that would not move the cursor forward skips to the
+// head instead of refusing the same cursor on every poll.
+func TestPollEvents_TruncationWithoutProgressSkipsToHead(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	mustCreateClosed(t, store, "gt-a")
+	mustCreateClosed(t, store, "gt-b")
+	store.truncateAlways = &beads.EventsTruncatedError{Floor: 2, Head: 4}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.eventCursors.Store("hq", int64(3))
+	store.truncateOnce = true
+	if m.pollStoresSnapshot(m.stores) {
+		t.Errorf("poll reported an error; logs: %v", logged)
+	}
+	if v, _ := m.eventCursors.Load("hq"); v != int64(4) {
+		t.Errorf("cursor = %v, want 4 (the head)", v)
 	}
 }
 
@@ -2666,7 +2733,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// The close event from the rig store should be detected
@@ -2730,7 +2797,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Both close events should be detected
@@ -2809,7 +2876,8 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, isParked)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
+	m.eventCursors.Delete("shippercrm") // parked: never read, so never given a cursor
 	m.pollStoresSnapshot(m.stores)
 
 	// Active rig's close event should be detected
@@ -2868,7 +2936,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	found := false
@@ -2917,7 +2985,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
 
 	// First poll: should detect our close event
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	closeCount := 0
@@ -2972,7 +3040,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	firstCloseCount := 0
@@ -3065,7 +3133,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	closeCount := 0
@@ -3119,7 +3187,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 		"gastown": rigStore,
 	}
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should see exactly 1 close detection for our issue, not 2
@@ -3251,7 +3319,7 @@ exit 0
 	}
 
 	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Only check for close events involving OUR issue — other tests may have
@@ -3299,7 +3367,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should log the nil hq warning

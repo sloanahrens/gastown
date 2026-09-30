@@ -165,3 +165,58 @@ func TestParseConfigGetValue(t *testing.T) {
 		}
 	}
 }
+
+// exitStatus is a scripted process failure carrying an exit code.
+type exitStatus int
+
+func (e exitStatus) Error() string { return "exit status " + itoa(int(e)) }
+func (e exitStatus) ExitCode() int { return int(e) }
+
+// The real probe, driven through recorded runners: every read is pinned to
+// the store's directory with gastown's journal override cleared, runs in
+// machine mode, and maps bd's typed failures (gt-7iwy0.2).
+func TestBDStoreProbe_ReadsThroughPinnedBD(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var envs [][]string
+	run := func(_ context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
+		envs = append(envs, extraEnv)
+		switch args[0] {
+		case "sql":
+			return []byte(`{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"schema_skew","message":"ahead"}}`), nil, exitStatus(26)
+		case "config":
+			return []byte(`{"schema_version":1,"contract_version":1,"data":{"key":"events-journal","location":"config.yaml","value":"false"},"pagination":null,"error":null}`), nil, nil
+		}
+		return nil, nil, errors.New("unexpected " + strings.Join(args, " "))
+	}
+	tail := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		return []byte(`{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"no store"}}`), nil, exitStatus(25)
+	}
+	p := &bdStoreProbe{dir: dir, run: run, client: beads.NewWithBeadsDirAndRunner(dir, dir, tail)}
+
+	if _, err := p.SchemaLevel(context.Background()); err == nil || !strings.Contains(err.Error(), "ahead of this bd") {
+		t.Errorf("SchemaLevel on exit 26 = %v, want the schema-ahead refusal", err)
+	}
+	if v, err := p.JournalConfig(); err != nil || v != "false" {
+		t.Errorf("JournalConfig = %q, %v; want false", v, err)
+	}
+	if _, err := p.EventsTail(0, 1); err == nil {
+		t.Error("EventsTail on exit 25 succeeded")
+	}
+	for _, env := range envs {
+		joined := strings.Join(env, " ")
+		for _, want := range []string{"BEADS_DIR=" + dir, "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("probe env %q lacks %q", env, want)
+			}
+		}
+	}
+
+	// A journal pruned below seq 1 is readable, not broken.
+	probe := fakeStoreProbe{level: 66, journal: "true", tailErr: &beads.EventsTruncatedError{Floor: 50, Head: 90}}
+	err := checkBeadsStoreCompatibility(context.Background(), dir, []string{"hq"}, 66,
+		probesFor(map[string]*fakeStoreProbe{"hq": &probe}), nil)
+	if err != nil {
+		t.Errorf("a pruned journal refused startup: %v", err)
+	}
+}
