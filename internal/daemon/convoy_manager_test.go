@@ -31,7 +31,7 @@ type scanTestOpts struct {
 // scanTestPaths is the town and the in-process gt mockGtForScanTest builds.
 type scanTestPaths struct {
 	townRoot string
-	gt       *fakeGt // records every call; argvLog reads them back
+	gt       *fakeCLI // records every call; argvLog reads them back
 }
 
 // mockGtForScanTest builds a town and a fake gt for scan tests: `convoy
@@ -47,16 +47,16 @@ func mockGtForScanTest(t *testing.T, opts scanTestOpts) scanTestPaths {
 	}
 
 	var slings atomic.Int32
-	gt := newFakeGt(func(args []string) gtReply {
+	gt := newFakeCLI(func(args []string) cliReply {
 		switch {
 		case len(args) >= 2 && args[0] == "convoy" && args[1] == "stranded":
-			return gtReply{stdout: strandedJSON + "\n"}
+			return cliReply{stdout: strandedJSON + "\n"}
 		case len(args) >= 1 && args[0] == "sling":
 			if opts.slingFailOnce && slings.Add(1) == 1 {
-				return gtReply{code: 1}
+				return cliReply{code: 1}
 			}
 		}
-		return gtReply{}
+		return cliReply{}
 	})
 
 	return scanTestPaths{townRoot: convoyTestTown(t, opts.routes), gt: gt}
@@ -79,16 +79,16 @@ func convoyTestTown(t *testing.T, routes string) string {
 }
 
 // newFakeGtManager is NewConvoyManager with its gt calls answered by gt.
-func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeGt, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
+func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	m := NewConvoyManager(townRoot, logger, "gt", scanInterval, stores, openStores, isRigParked)
-	m.execGt = gt.run
+	m.execCmd = gt.run
 	return m
 }
 
 // argvLog renders gt's recorded calls whose argv starts with prefix, one
 // space-joined argv per line — the call log the shell stubs these tests once
 // used wrote. It is empty when no such call was made.
-func argvLog(gt *fakeGt, prefix ...string) []byte {
+func argvLog(gt *fakeCLI, prefix ...string) []byte {
 	var b strings.Builder
 	for _, args := range gt.argvs(prefix...) {
 		b.WriteString(strings.Join(args, " "))
@@ -99,7 +99,7 @@ func argvLog(gt *fakeGt, prefix ...string) []byte {
 
 // mustArgvLog is argvLog for a call the test requires: it fails the test when
 // gt saw no call starting with prefix.
-func mustArgvLog(t *testing.T, gt *fakeGt, prefix ...string) []byte {
+func mustArgvLog(t *testing.T, gt *fakeCLI, prefix ...string) []byte {
 	t.Helper()
 	data := argvLog(gt, prefix...)
 	if len(data) == 0 {
@@ -323,7 +323,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 
 func TestConvoyManager_DoubleStop_Idempotent(t *testing.T) {
 	t.Parallel()
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"convoy stranded": {stdout: "[]\n"}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "[]\n"}}))
 
 	townRoot := t.TempDir()
 	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
@@ -338,7 +338,7 @@ func TestStart_DoubleCall_Guarded(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"convoy stranded": {stdout: "[]\n"}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "[]\n"}}))
 
 	var logMu sync.Mutex
 	var logged []string
@@ -809,7 +809,7 @@ func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -865,7 +865,7 @@ func TestFeedFirstReady_SkipsConvoyClosedSinceScan(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -929,11 +929,11 @@ func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
 
 	// First sling call exits 1 (failure), subsequent succeed
 	var slings atomic.Int32
-	gtf := newFakeGt(func(args []string) gtReply {
+	gtf := newFakeCLI(func(args []string) cliReply {
 		if args[0] == "sling" && slings.Add(1) == 1 {
-			return gtReply{stderr: "dispatch failed\n", code: 1}
+			return cliReply{stderr: "dispatch failed\n", code: 1}
 		}
-		return gtReply{}
+		return cliReply{}
 	})
 
 	var logged []string
@@ -985,7 +985,7 @@ func TestFeedFirstReady_AllIssuesFail_LogsNoneDispatchable(t *testing.T) {
 	// All sling calls fail. Verify the "no dispatchable issues" log message.
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"sling": {stderr: "always fail\n", code: 1}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"sling": {stderr: "always fail\n", code: 1}}))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1019,7 +1019,7 @@ func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1057,7 +1057,7 @@ func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
 
 	townRoot := t.TempDir()
 
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"convoy stranded": {stderr: "something went wrong\n", code: 1}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stderr: "something went wrong\n", code: 1}}))
 
 	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 
@@ -1075,7 +1075,7 @@ func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
 
 	townRoot := t.TempDir()
 
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"convoy stranded": {stdout: "this is not valid JSON at all\n"}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "this is not valid JSON at all\n"}}))
 
 	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 
@@ -1093,7 +1093,7 @@ func TestScan_FindStrandedError_LogsAndContinues(t *testing.T) {
 
 	townRoot := t.TempDir()
 
-	gtf := newFakeGt(gtBySub(map[string]gtReply{"convoy stranded": {stderr: "stranded command failed\n", code: 1}}))
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stderr: "stranded command failed\n", code: 1}}))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1373,7 +1373,7 @@ func TestFeedFirstReady_UnknownRig_Skips(t *testing.T) {
 	// "hq-" prefix routes to town-level path "." which has no rig name
 	townRoot := convoyTestTown(t, `{"prefix":"hq-","path":"."}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1411,7 +1411,7 @@ func TestFeedFirstReady_ParkedRig_Skips(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"sh-","path":"shippercrm/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1452,7 +1452,7 @@ func TestFeedFirstReady_EmptyReadyIssues_NoOp(t *testing.T) {
 	t.Parallel()
 
 	townRoot := convoyTestTown(t, "")
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1485,7 +1485,7 @@ func TestFeedFirstReady_PassesDaemonActor(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 
@@ -1704,7 +1704,7 @@ func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1751,7 +1751,7 @@ func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
 	// lookup must fail open rather than block dispatch of unrelated issues.
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1879,9 +1879,9 @@ func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T
 
 // holdTestTown builds a town whose gt- prefix routes to rig "gt" and a fake
 // gt that records each sling, for the hermetic feedFirstReady tests.
-func holdTestTown(t *testing.T) (townRoot string, gt *fakeGt) {
+func holdTestTown(t *testing.T) (townRoot string, gt *fakeCLI) {
 	t.Helper()
-	return convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n"), newFakeGt(nil)
+	return convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n"), newFakeCLI(nil)
 }
 
 func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
@@ -1967,16 +1967,16 @@ func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 	var m *ConvoyManager
 	inFlight := make(chan struct{})
 	var once sync.Once
-	gtf := newFakeGt(func(args []string) gtReply {
+	gtf := newFakeCLI(func(args []string) cliReply {
 		switch args[0] {
 		case "convoy":
-			return gtReply{stdout: string(jsonBytes) + "\n"}
+			return cliReply{stdout: string(jsonBytes) + "\n"}
 		case "sling":
 			once.Do(func() { close(inFlight) })
 			<-m.ctx.Done()
-			return gtReply{code: -1}
+			return cliReply{code: -1}
 		}
-		return gtReply{}
+		return cliReply{}
 	})
 
 	var logMu sync.Mutex
@@ -2792,7 +2792,7 @@ func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 
 	townRoot := t.TempDir()
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -2953,9 +2953,9 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 	data, _ := json.Marshal(stranded)
 
 	var inFlight, peak atomic.Int32
-	gtf := newFakeGt(func(args []string) gtReply {
+	gtf := newFakeCLI(func(args []string) cliReply {
 		if args[0] != "convoy" || args[1] != "stranded" {
-			return gtReply{}
+			return cliReply{}
 		}
 		n := inFlight.Add(1)
 		defer inFlight.Add(-1)
@@ -2965,7 +2965,7 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 				break
 			}
 		}
-		return gtReply{stdout: string(data) + "\n"}
+		return cliReply{stdout: string(data) + "\n"}
 	})
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
@@ -3106,7 +3106,7 @@ func TestDoltRecoveryCallback_NilSafe(t *testing.T) {
 // feedTestRig sets up the minimal town fixture feedFirstReady needs: a routes
 // file mapping the gt- prefix to a rig, and a fake gt that records sling
 // invocations. Returns the town root, the fake and the log sink.
-func feedTestRig(t *testing.T) (townRoot string, gt *fakeGt, logged *[]string) {
+func feedTestRig(t *testing.T) (townRoot string, gt *fakeCLI, logged *[]string) {
 	t.Helper()
 	townRoot, gt = holdTestTown(t)
 	return townRoot, gt, &[]string{}
@@ -4043,7 +4043,7 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -4102,7 +4102,7 @@ func TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed(t *testing.T) {
 
 	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtf := newFakeGt(nil)
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
