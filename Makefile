@@ -44,8 +44,6 @@ ifeq ($(shell uname),Darwin)
 endif
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-server ./cmd/gt-proxy-server
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;

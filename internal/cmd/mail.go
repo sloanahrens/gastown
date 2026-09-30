@@ -55,7 +55,6 @@ var (
 var mailCmd = &cobra.Command{
 	Use:         "mail",
 	GroupID:     GroupComm,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
 	Short:       "Agent messaging system",
 	RunE:        requireSubcommand,
 	Long: `Send and receive messages between agents.

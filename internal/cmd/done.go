@@ -39,7 +39,6 @@ import (
 var doneCmd = &cobra.Command{
 	Use:         "done",
 	GroupID:     GroupWork,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
 	Short:       "Signal work ready for merge queue",
 	Long: `Signal that your work is complete and ready for the merge queue.
 

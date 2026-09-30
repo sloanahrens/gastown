@@ -22,7 +22,6 @@ internal/nudge
 internal/plugin
 internal/polecat
 internal/protocol
-internal/proxy
 internal/quota
 internal/reaper
 internal/refinery
