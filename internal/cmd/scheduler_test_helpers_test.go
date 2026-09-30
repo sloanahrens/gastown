@@ -6,13 +6,16 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -63,13 +66,30 @@ func configureScheduler(t *testing.T, hqPath string, maxPolecats, batchSize int)
 
 // --- gt command helpers ---
 
+// gtTestCmdTimeout bounds one gt subprocess. A gt that never exited used to
+// hold the package's sequential test, and every parallel test parked behind
+// it, until the go test timeout (gt-6ox58.1).
+const gtTestCmdTimeout = 2 * time.Minute
+
+// gtTestCommand builds a gt subprocess bounded by gtTestCmdTimeout. On timeout
+// gt gets SIGQUIT, so its goroutine dump lands in the failure's stderr, and
+// os.Kill if it is still running WaitDelay later.
+func gtTestCommand(binary, dir string, env, args []string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), gtTestCmdTimeout)
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+	cmd.WaitDelay = 10 * time.Second
+	return cmd, cancel
+}
+
 // runGTCmdOutput runs a gt command and returns stdout only.
 // Fails the test if the command exits non-zero.
 func runGTCmdOutput(t *testing.T, binary, dir string, env []string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(binary, args...)
-	cmd.Dir = dir
-	cmd.Env = env
+	cmd, cancel := gtTestCommand(binary, dir, env, args)
+	defer cancel()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -83,9 +103,8 @@ func runGTCmdOutput(t *testing.T, binary, dir string, env []string, args ...stri
 // Does NOT fail the test on non-zero exit.
 func runGTCmdMayFail(t *testing.T, binary, dir string, env []string, args ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(binary, args...)
-	cmd.Dir = dir
-	cmd.Env = env
+	cmd, cancel := gtTestCommand(binary, dir, env, args)
+	defer cancel()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

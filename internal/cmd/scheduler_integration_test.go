@@ -164,7 +164,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 		t.Fatalf("bd not installed: %v", err)
 	}
 
-	requireIsolatedDoltServer(t)
+	requireDoltServer(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
@@ -308,10 +308,38 @@ func hasSlingContext(t *testing.T, hqPath, workBeadID string) bool {
 // Tests
 // --------------------------------------------------------------------------
 
-// TestSchedulerCircuitBreakerExclusion verifies that a bead with dispatch_failures
-// >= maxDispatchFailures is excluded from scheduler list and dry-run dispatch.
-func TestSchedulerCircuitBreakerExclusion(t *testing.T) {
+// TestSchedulerSingleRigChecks runs the single-rig checks that leave the town
+// as they found it (refusals, a dry run, a circuit-broken context the
+// scheduler skips) against one town, so they pay for its bd inits once. They
+// run in order: none creates a queued context or a convoy, which
+// CircuitBreakerExclusion and SlingDryRun assert on the whole town.
+func TestSchedulerSingleRigChecks(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+	t.Run("CircuitBreakerExclusion", func(t *testing.T) { checkSchedulerCircuitBreakerExclusion(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("SlingDryRun", func(t *testing.T) { checkSchedulerSlingDryRun(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("DeferredTaskWithoutRig", func(t *testing.T) { checkSchedulerDeferredTaskWithoutRig(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("DeferredNonRigRejection", func(t *testing.T) { checkSchedulerDeferredNonRigRejection(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("ScheduleBead_RefusesClosed", func(t *testing.T) { checkScheduleBeadRefusesClosed(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("ScheduleBead_RefusesTombstone", func(t *testing.T) { checkScheduleBeadRefusesTombstone(t, hqPath, rigPath, gtBinary, env) })
+	t.Run("ScheduleBead_ClosedForceDoesNotBypass", func(t *testing.T) { checkScheduleBeadClosedForceDoesNotBypass(t, hqPath, rigPath, gtBinary, env) })
+}
+
+// TestSchedulerMultiRigChecks is TestSchedulerSingleRigChecks for the
+// multi-rig refusals and the epic dry run.
+func TestSchedulerMultiRigChecks(t *testing.T) {
+	t.Parallel()
+	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
+	t.Run("ConvoyFlagRejection", func(t *testing.T) { checkSchedulerConvoyFlagRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
+	t.Run("EpicFlagRejection", func(t *testing.T) { checkSchedulerEpicFlagRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
+	t.Run("EpicDetection", func(t *testing.T) { checkSchedulerEpicDetection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
+	t.Run("MixedBatchRejection", func(t *testing.T) { checkSchedulerMixedBatchRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
+	t.Run("BatchEpicRejection", func(t *testing.T) { checkSchedulerBatchEpicRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
+}
+
+// checkSchedulerCircuitBreakerExclusion verifies that a bead with dispatch_failures
+// >= maxDispatchFailures is excluded from scheduler list and dry-run dispatch.
+func checkSchedulerCircuitBreakerExclusion(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	// Create a bead and manually set up a circuit-broken sling context.
 	beadID := createTestBead(t, rigPath, "Circuit breaker test")
@@ -352,6 +380,7 @@ func TestSchedulerCircuitBreakerExclusion(t *testing.T) {
 // creates an auto-convoy, stores the convoy ID in the sling context, and the
 // convoy is resolvable via bd show.
 func TestSchedulerAutoConvoyCreation(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Auto convoy test")
@@ -430,6 +459,7 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 // TestSchedulerBlockedStatusReporting verifies that scheduler list correctly reports
 // blocked:true/false and scheduler status reports correct queued_ready count.
 func TestSchedulerBlockedStatusReporting(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	// Create three beads: one to be ready, one to be blocked, one blocker
@@ -552,6 +582,7 @@ func TestSchedulerBlockedStatusReporting(t *testing.T) {
 }
 
 func TestSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Queued open source readiness")
@@ -584,6 +615,7 @@ func TestSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
 }
 
 func TestSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	readyID := createTestBead(t, rigPath, "Ready beside missing source")
@@ -643,6 +675,7 @@ func TestSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
 }
 
 func TestSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	readyID := createTestBead(t, rigPath, "Ready beside closed source")
@@ -685,10 +718,9 @@ func TestSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T) {
 	}
 }
 
-// TestSchedulerSlingDryRun verifies that gt sling deferred dispatch (max_polecats > 0) --dry-run
+// checkSchedulerSlingDryRun verifies that gt sling deferred dispatch (max_polecats > 0) --dry-run
 // has no side effects: no sling context created, no convoy created.
-func TestSchedulerSlingDryRun(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+func checkSchedulerSlingDryRun(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "Dry run test")
 
@@ -731,6 +763,7 @@ func TestSchedulerSlingDryRun(t *testing.T) {
 // TestSchedulerSlingContextIdempotency verifies that scheduling a bead twice
 // produces only a single sling context (idempotency).
 func TestSchedulerSlingContextIdempotency(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Idempotency test")
@@ -760,6 +793,7 @@ func TestSchedulerSlingContextIdempotency(t *testing.T) {
 // TestSchedulerSlingContextWorkBeadPristine verifies that scheduling a bead
 // does NOT modify the work bead's description or labels.
 func TestSchedulerSlingContextWorkBeadPristine(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Pristine test")
@@ -795,7 +829,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 		t.Fatalf("bd not installed: %v", err)
 	}
 
-	requireIsolatedDoltServer(t)
+	requireDoltServer(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
@@ -919,6 +953,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 // discover scheduled beads across multiple rigs. beadsSearchDirs scans all
 // rig directories under the town root.
 func TestSchedulerMultiRigDispatch(t *testing.T) {
+	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	// Create one bead in each rig.
@@ -966,6 +1001,7 @@ func TestSchedulerMultiRigDispatch(t *testing.T) {
 }
 
 func TestSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
+	t.Parallel()
 	hqPath, _, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	beadID := createTestBead(t, rig2Path, "Routed cross-rig source")
@@ -1017,6 +1053,7 @@ func TestSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
 // auto-resolves each child's target rig from its prefix. An epic in rig1 with
 // children in rig1 and rig2 should schedule each child to its respective rig.
 func TestSchedulerMultiRigEpicAutoResolve(t *testing.T) {
+	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	// Create an epic in rig1.
@@ -1079,10 +1116,9 @@ func TestSchedulerMultiRigEpicAutoResolve(t *testing.T) {
 	}
 }
 
-// TestSchedulerConvoyFlagRejection verifies that task-only flags are rejected
+// checkSchedulerConvoyFlagRejection verifies that task-only flags are rejected
 // when gt sling deferred dispatch (max_polecats > 0) auto-detects a convoy ID.
-func TestSchedulerConvoyFlagRejection(t *testing.T) {
-	hqPath, _, _, gtBinary, env := setupMultiRigSchedulerTown(t)
+func checkSchedulerConvoyFlagRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
 
 	// Create a convoy in HQ.
 	convoyID := createTestBeadOfType(t, hqPath, "Flag rejection convoy", "convoy")
@@ -1100,10 +1136,9 @@ func TestSchedulerConvoyFlagRejection(t *testing.T) {
 	}
 }
 
-// TestSchedulerEpicFlagRejection verifies that task-only flags are rejected
+// checkSchedulerEpicFlagRejection verifies that task-only flags are rejected
 // when gt sling deferred dispatch (max_polecats > 0) auto-detects an epic ID.
-func TestSchedulerEpicFlagRejection(t *testing.T) {
-	hqPath, rig1Path, _, gtBinary, env := setupMultiRigSchedulerTown(t)
+func checkSchedulerEpicFlagRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
 
 	// Create an epic in rig1.
 	epicID := createTestBeadOfType(t, rig1Path, "Flag rejection epic", "epic")
@@ -1124,10 +1159,9 @@ func TestSchedulerEpicFlagRejection(t *testing.T) {
 	}
 }
 
-// TestSchedulerEpicDetection verifies that gt sling <epic-id> deferred dispatch (max_polecats > 0)
+// checkSchedulerEpicDetection verifies that gt sling <epic-id> deferred dispatch (max_polecats > 0)
 // auto-detects the epic and routes to the epic handler (dry-run).
-func TestSchedulerEpicDetection(t *testing.T) {
-	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
+func checkSchedulerEpicDetection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
 
 	// Create an epic with cross-rig children.
 	epicID := createTestBeadOfType(t, rig1Path, "Detection epic", "epic")
@@ -1151,12 +1185,11 @@ func TestSchedulerEpicDetection(t *testing.T) {
 	}
 }
 
-// TestSchedulerMixedBatchRejection verifies that gt sling with a task + epic
+// checkSchedulerMixedBatchRejection verifies that gt sling with a task + epic
 // (without a rig target) fails. The epic ID is not a valid target, so the
 // command rejects it. With deferred dispatch, the 2-arg case expects a rig
 // as the second argument.
-func TestSchedulerMixedBatchRejection(t *testing.T) {
-	hqPath, rig1Path, _, gtBinary, env := setupMultiRigSchedulerTown(t)
+func checkSchedulerMixedBatchRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
 
 	// Create a task bead and an epic in rig1.
 	taskID := createTestBead(t, rig1Path, "Task bead")
@@ -1174,6 +1207,7 @@ func TestSchedulerMixedBatchRejection(t *testing.T) {
 // auto-resolves each tracked issue's target rig from its prefix. A convoy in HQ
 // tracking beads in rig1 and rig2 should schedule each bead to its respective rig.
 func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
+	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	// Create a convoy in HQ (the typical location for convoys).
@@ -1247,6 +1281,7 @@ func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
 // TestSchedulerDisabledMode verifies that max_polecats=0 behaves as direct dispatch
 // (same as -1). Beads should NOT be queued — they fall through to normal dispatch.
 func TestSchedulerDisabledMode(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	// Reconfigure scheduler to disabled mode (max_polecats=0)
@@ -1272,6 +1307,7 @@ func TestSchedulerDisabledMode(t *testing.T) {
 // TestSchedulerDirectModeNoQueue verifies that max_polecats=-1 (direct dispatch mode)
 // does not queue beads. Scheduler run and status should show zero queued.
 func TestSchedulerDirectModeNoQueue(t *testing.T) {
+	t.Parallel()
 	hqPath, _, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	// Reconfigure scheduler to direct dispatch mode
@@ -1291,10 +1327,9 @@ func TestSchedulerDirectModeNoQueue(t *testing.T) {
 	}
 }
 
-// TestSchedulerDeferredTaskWithoutRig verifies that in deferred mode (max_polecats > 0),
+// checkSchedulerDeferredTaskWithoutRig verifies that in deferred mode (max_polecats > 0),
 // gt sling <task-bead> (without a rig) returns an error requiring a rig target.
-func TestSchedulerDeferredTaskWithoutRig(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+func checkSchedulerDeferredTaskWithoutRig(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "No rig test")
 
@@ -1308,10 +1343,9 @@ func TestSchedulerDeferredTaskWithoutRig(t *testing.T) {
 	}
 }
 
-// TestSchedulerDeferredNonRigRejection verifies that in deferred mode (max_polecats > 0),
+// checkSchedulerDeferredNonRigRejection verifies that in deferred mode (max_polecats > 0),
 // gt sling <bead> <non-rig> is rejected rather than falling through to direct dispatch.
-func TestSchedulerDeferredNonRigRejection(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+func checkSchedulerDeferredNonRigRejection(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "Non-rig rejection test")
 	otherBead := createTestBead(t, rigPath, "Not a rig target")
@@ -1338,6 +1372,7 @@ func TestSchedulerDeferredNonRigRejection(t *testing.T) {
 // TestSchedulerDirectEpicDispatch verifies that gt sling <epic-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
 func TestSchedulerDirectEpicDispatch(t *testing.T) {
+	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	// Reconfigure to direct dispatch mode
@@ -1366,10 +1401,9 @@ func TestSchedulerDirectEpicDispatch(t *testing.T) {
 	}
 }
 
-// TestSchedulerBatchEpicRejection verifies that in deferred mode (max_polecats > 0),
+// checkSchedulerBatchEpicRejection verifies that in deferred mode (max_polecats > 0),
 // gt sling <epic-id> <task-id> <rig> rejects the epic ID rather than scheduling it as a task.
-func TestSchedulerBatchEpicRejection(t *testing.T) {
-	hqPath, rig1Path, _, gtBinary, env := setupMultiRigSchedulerTown(t)
+func checkSchedulerBatchEpicRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
 
 	// Create an epic and a task bead in rig1.
 	epicID := createTestBeadOfType(t, rig1Path, "Batch epic", "epic")
@@ -1388,6 +1422,7 @@ func TestSchedulerBatchEpicRejection(t *testing.T) {
 // TestSchedulerInvalidJSONContextCleanup verifies that sling context beads with
 // invalid JSON descriptions get closed as "invalid-context" during stale cleanup.
 func TestSchedulerInvalidJSONContextCleanup(t *testing.T) {
+	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	// Create a bead and a valid sling context for it.
@@ -1616,6 +1651,7 @@ func TestSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
 // TestSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
 func TestSchedulerDirectConvoyDispatch(t *testing.T) {
+	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
 	// Reconfigure to direct dispatch mode
@@ -1654,14 +1690,13 @@ func TestSchedulerDirectConvoyDispatch(t *testing.T) {
 	}
 }
 
-// TestScheduleBead_RefusesClosed verifies that scheduleBead (deferred dispatch
+// checkScheduleBeadRefusesClosed verifies that scheduleBead (deferred dispatch
 // path) refuses to schedule a closed bead. Mirrors the closed-bead guards in
 // runSling and executeSling. Regression test for hq-ki2: the daemon's stranded
 // scan was creating ghost convoys for already-closed cross-prefix beads via
 // scheduleBead → CreateSlingContext, because scheduleBead was the only sling
 // entry point missing the closed-bead guard.
-func TestScheduleBead_RefusesClosed(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+func checkScheduleBeadRefusesClosed(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "Closed bead refused by scheduleBead")
 
@@ -1689,10 +1724,9 @@ func TestScheduleBead_RefusesClosed(t *testing.T) {
 	}
 }
 
-// TestScheduleBead_RefusesTombstone verifies that scheduleBead refuses to
-// schedule a tombstoned bead. Companion to TestScheduleBead_RefusesClosed.
-func TestScheduleBead_RefusesTombstone(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+// checkScheduleBeadRefusesTombstone verifies that scheduleBead refuses to
+// schedule a tombstoned bead. Companion to checkScheduleBeadRefusesClosed.
+func checkScheduleBeadRefusesTombstone(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "Tombstone bead refused by scheduleBead")
 
@@ -1712,11 +1746,10 @@ func TestScheduleBead_RefusesTombstone(t *testing.T) {
 	}
 }
 
-// TestScheduleBead_ClosedForceDoesNotBypass verifies that --force does NOT
+// checkScheduleBeadClosedForceDoesNotBypass verifies that --force does NOT
 // bypass the closed-bead guard in scheduleBead. To re-dispatch a closed bead,
 // the bead must be reopened first (matching runSling/executeSling semantics).
-func TestScheduleBead_ClosedForceDoesNotBypass(t *testing.T) {
-	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+func checkScheduleBeadClosedForceDoesNotBypass(t *testing.T, hqPath, rigPath, gtBinary string, env []string) {
 
 	beadID := createTestBead(t, rigPath, "Closed bead --force does not bypass")
 

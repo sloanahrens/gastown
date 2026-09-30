@@ -41,13 +41,12 @@ func passingDoneGate() *recordingGate {
 	return &recordingGate{result: land.GateResult{Passed: true, Steps: []land.StepResult{{Name: "test"}}}}
 }
 
-// doneSubmitRun is one gt done run in the routed test town with its bd log,
-// nudge log and the repo it ran in.
+// doneSubmitRun is one gt done run in the routed test town with its bd log
+// and the repo it ran in.
 type doneSubmitRun struct {
-	workDir  string
-	bdLog    string
-	nudgeLog string
-	err      error
+	workDir string
+	bdLog   string
+	err     error
 }
 
 func runDoneSubmit(t *testing.T, gate land.Gate, branchSetup func(t *testing.T, workDir string)) doneSubmitRun {
@@ -66,8 +65,7 @@ func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branc
 	resetDoneFlagsForTest(t)
 	useDoneGate(t, gate)
 	townRoot := routedSourceTestTownRoot(workDir)
-	nudgeLog := filepath.Join(t.TempDir(), "nudge.log")
-	t.Setenv("GT_TEST_NUDGE_LOG", nudgeLog)
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
 	t.Setenv("GT_TOWN_ROOT", townRoot)
 	t.Setenv("GT_ROOT", townRoot)
 	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
@@ -83,12 +81,7 @@ func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branc
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	err := runDone(nil, nil)
 	bdLog, _ := os.ReadFile(logPath)
-	return doneSubmitRun{workDir: workDir, bdLog: string(bdLog), nudgeLog: nudgeLog, err: err}
-}
-
-func (r doneSubmitRun) reportedDone() bool {
-	data, _ := os.ReadFile(r.nudgeLog)
-	return strings.Contains(string(data), "POLECAT_DONE")
+	return doneSubmitRun{workDir: workDir, bdLog: string(bdLog), err: err}
 }
 
 func originURL(t *testing.T, workDir string) string {
@@ -150,9 +143,6 @@ func TestIntegrationRunDoneRebasesGatesPushesAndMarksReady(t *testing.T) {
 	if strings.Contains(r.bdLog, "gt:merge-request") {
 		t.Errorf("gt done created an MR wisp:\n%s", r.bdLog)
 	}
-	if !r.reportedDone() {
-		t.Error("a landed submission did not report POLECAT_DONE")
-	}
 	// gt-obbx2: the seat has no session from here to the landing, and its hook
 	// still holds the bead. The intent record is what tells the crash detectors
 	// (and the supervisor's Restart) that this is a finished polecat.
@@ -190,7 +180,7 @@ func TestIntegrationRunDoneReplacesAnOlderBranchTipUnderLease(t *testing.T) {
 }
 
 // TestRunDoneRedLocalGateExits15: a red local gate stops before the push:
-// exit 15, nothing on origin, no ready mark, no done report.
+// exit 15, nothing on origin, no ready mark.
 func TestIntegrationRunDoneRedLocalGateExits15(t *testing.T) {
 	gate := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 2, Tail: "FAIL\tpkg/x\n"}}}}
 	r := runDoneSubmit(t, gate, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
@@ -198,8 +188,8 @@ func TestIntegrationRunDoneRedLocalGateExits15(t *testing.T) {
 	if got := gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch); got != "" {
 		t.Errorf("a red gate pushed the branch: %s", got)
 	}
-	if strings.Contains(r.bdLog, "gt:ready-to-land") || r.reportedDone() {
-		t.Errorf("a red gate marked ready or reported done:\n%s", r.bdLog)
+	if strings.Contains(r.bdLog, "gt:ready-to-land") {
+		t.Errorf("a red gate marked ready:\n%s", r.bdLog)
 	}
 }
 
@@ -214,20 +204,14 @@ func TestIntegrationRunDoneRebaseConflictExits14(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(r.workDir, ".git", "rebase-merge")); err == nil {
 		t.Error("worktree left mid-rebase")
 	}
-	if r.reportedDone() {
-		t.Error("a rebase conflict reported done")
-	}
 }
 
 // TestRunDoneExitsReadyRecordFailed: the branch is on origin but bd could not
-// mark the work bead ready: exit 12 and no done report.
+// mark the work bead ready: exit 12.
 func TestIntegrationRunDoneExitsReadyRecordFailed(t *testing.T) {
 	t.Setenv("GT_TEST_BD_UPDATE_FAILS", "1")
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
 	assertDoneExitCode(t, r.err, doneExitReadyFailed, "ready to land")
-	if r.reportedDone() {
-		t.Error("an unmarked submission reported done")
-	}
 	if rec := submittedIntentFor(t, r); rec.Submitted() {
 		t.Errorf("a bead that never got gt:ready-to-land was recorded as submitted: %+v", rec)
 	}

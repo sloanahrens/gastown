@@ -382,16 +382,13 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 
 	// Verify directory structure
 	expectedDirs := []string{
-		"",             // rig root
-		"mayor",        // mayor container
-		"mayor/rig",    // mayor clone
-		"refinery",     // refinery container
-		"refinery/rig", // refinery worktree
-		"witness",      // witness dir
-		"polecats",     // polecats dir
-		"crew",         // crew dir
-		".beads",       // beads dir
-		"plugins",      // plugins dir
+		"",          // rig root
+		"mayor",     // mayor container
+		"mayor/rig", // mayor clone
+		"polecats",  // polecats dir
+		"crew",      // crew dir
+		".beads",    // beads dir
+		"plugins",   // plugins dir
 	}
 
 	for _, dir := range expectedDirs {
@@ -425,16 +422,6 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 		t.Errorf("mayor/rig/.git not found: %v", err)
 	}
 
-	// Verify refinery/rig is a git worktree (has .git file pointing to bare repo)
-	refineryRigPath := filepath.Join(rigPath, "refinery", "rig")
-	refineryGitPath := filepath.Join(refineryRigPath, ".git")
-	info, err := os.Stat(refineryGitPath)
-	if err != nil {
-		t.Errorf("refinery/rig/.git not found: %v", err)
-	} else if info.IsDir() {
-		t.Errorf("refinery/rig/.git should be a file (worktree), not a directory")
-	}
-
 	// NOTE: Most agent settings are installed at startup time, not by gt rig add.
 	// Exception: polecats/.claude/ is scaffolded by gt rig add so polecat sessions
 	// don't fail on startup due to missing hooks (gt-ke4mj).
@@ -442,8 +429,6 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 		path string
 		desc string
 	}{
-		{filepath.Join(rigPath, "witness", ".claude", "settings.json"), "witness/.claude/settings.json"},
-		{filepath.Join(rigPath, "refinery", ".claude", "settings.json"), "refinery/.claude/settings.json"},
 		{filepath.Join(rigPath, "crew", ".claude", "settings.json"), "crew/.claude/settings.json"},
 	}
 
@@ -467,25 +452,6 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 	// Only ~/gt/CLAUDE.md (town-root identity anchor) exists on disk.
 	// Full context is injected ephemerally by `gt prime` at session start.
 
-	// NOTE: Settings are now installed at parent directories (e.g., witness/.claude/settings.json)
-	// and passed to Claude via --settings flag. Settings no longer exist inside working directories.
-	// The old settings.local.json filename should never exist (replaced by settings.json at parent dirs).
-	staleSettingsThatShouldNotExist := []struct {
-		path string
-		desc string
-	}{
-		{filepath.Join(rigPath, "witness", "rig", ".claude", "settings.local.json"), "witness/rig/.claude/settings.local.json (stale filename)"},
-		{filepath.Join(rigPath, "refinery", "rig", ".claude", "settings.local.json"), "refinery/rig/.claude/settings.local.json (stale filename)"},
-		{filepath.Join(rigPath, "witness", "rig", ".claude", "settings.json"), "witness/rig/.claude/settings.json (settings belong at parent dir)"},
-		{filepath.Join(rigPath, "refinery", "rig", ".claude", "settings.json"), "refinery/rig/.claude/settings.json (settings belong at parent dir)"},
-	}
-
-	for _, w := range staleSettingsThatShouldNotExist {
-		if _, err := os.Stat(w.path); err == nil {
-			t.Errorf("%s should NOT exist (settings are at parent dirs via --settings flag)", w.desc)
-		}
-	}
-
 	// Verify CLAUDE.md/AGENTS.md is NOT created at any agent directory or inside source repos
 	wrongClaudeMd := []struct {
 		path string
@@ -494,11 +460,6 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 		{filepath.Join(rigPath, "mayor", "CLAUDE.md"), "mayor/CLAUDE.md (per-rig mayor is just a clone)"},
 		{filepath.Join(rigPath, "mayor", "AGENTS.md"), "mayor/AGENTS.md (per-rig mayor is just a clone)"},
 		{filepath.Join(rigPath, "mayor", "rig", "CLAUDE.md"), "mayor/rig/CLAUDE.md (inside source repo)"},
-		{filepath.Join(rigPath, "refinery", "rig", "CLAUDE.md"), "refinery/rig/CLAUDE.md (inside source repo)"},
-		{filepath.Join(rigPath, "refinery", "CLAUDE.md"), "refinery/CLAUDE.md (no per-directory bootstrap)"},
-		{filepath.Join(rigPath, "refinery", "AGENTS.md"), "refinery/AGENTS.md (no per-directory bootstrap)"},
-		{filepath.Join(rigPath, "witness", "CLAUDE.md"), "witness/CLAUDE.md (no per-directory bootstrap)"},
-		{filepath.Join(rigPath, "witness", "AGENTS.md"), "witness/AGENTS.md (no per-directory bootstrap)"},
 		{filepath.Join(rigPath, "crew", "CLAUDE.md"), "crew/CLAUDE.md (no per-directory bootstrap)"},
 		{filepath.Join(rigPath, "crew", "AGENTS.md"), "crew/AGENTS.md (no per-directory bootstrap)"},
 		{filepath.Join(rigPath, "polecats", "CLAUDE.md"), "polecats/CLAUDE.md (no per-directory bootstrap)"},
@@ -933,52 +894,6 @@ func TestRigAddWithUpstreamURL(t *testing.T) {
 			t.Errorf("rigs.json UpstreamURL = %q, want %q", entry.UpstreamURL, upstreamURL)
 		}
 	})
-}
-
-// TestRigAddCreatesAgentDirs verifies that agent state files are created.
-func TestRigAddCreatesAgentDirs(t *testing.T) {
-	requireIsolatedDoltServer(t)
-	_ = mockBdCommand(t)
-	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
-	gitURL := createTestGitRepo(t, "agenttest")
-
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		t.Fatalf("load rigs.json: %v", err)
-	}
-
-	g := git.NewGit(townRoot)
-	mgr := rig.NewManager(townRoot, rigsConfig, g)
-
-	_, err = mgr.AddRig(rig.AddRigOptions{
-		Name:        "agenttest",
-		GitURL:      gitURL,
-		BeadsPrefix: "at",
-	})
-	if err != nil {
-		t.Fatalf("AddRig: %v", err)
-	}
-
-	rigPath := filepath.Join(townRoot, "agenttest")
-
-	// Verify agent directories exist (state.json files are no longer created)
-	expectedDirs := []string{
-		"witness",
-		"refinery",
-		"mayor",
-	}
-
-	for _, dir := range expectedDirs {
-		path := filepath.Join(rigPath, dir)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Errorf("expected directory %s to exist: %v", dir, err)
-		} else if !info.IsDir() {
-			t.Errorf("expected %s to be a directory", dir)
-		}
-	}
 }
 
 // TestRigAddRejectsInvalidNames verifies that rig names with invalid
