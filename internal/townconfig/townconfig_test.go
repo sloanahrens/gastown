@@ -125,6 +125,22 @@ func TestLoadOutsideATown(t *testing.T) {
 	}
 }
 
+// TestCheckJudgesOnlyTheFilesPresent: Check is the parse gate. A root with no
+// files passes (first run), and a broken file fails it even without
+// town.json.
+func TestCheckJudgesOnlyTheFilesPresent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := Check(root); err != nil {
+		t.Fatalf("Check(empty dir) = %v, want nil", err)
+	}
+	write(t, root, FileDaemon, `{"patrols": {"witness": {"enabled": false, "rigz": []}}}`)
+	err := Check(root)
+	if !errors.Is(err, config.ErrUnparseable) || errors.Is(err, ErrNotATown) {
+		t.Fatalf("Check(broken daemon.json, no town.json) = %v, want only the parse error", err)
+	}
+}
+
 func TestOptionalFilesMayBeAbsent(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

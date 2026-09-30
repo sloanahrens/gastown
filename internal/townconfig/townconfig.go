@@ -71,7 +71,32 @@ type Town struct {
 
 // Load reads every kernel file under root. The error joins one error per
 // broken file (each a single line naming the file); on error the Town is nil.
+// A root without mayor/town.json is ErrNotATown.
 func Load(root string) (*Town, error) {
+	t, errs := load(root)
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// Check reports every kernel file under root that exists and does not load,
+// one line per file. Unlike Load it does not require mayor/town.json: it
+// answers "do the files that are here load", and finding the town is the
+// caller's job (a first run has no files yet). The startup gate, the daemon
+// and gt doctor call it.
+func Check(root string) error {
+	_, errs := load(root)
+	var kept []error
+	for _, err := range errs {
+		if !errors.Is(err, ErrNotATown) {
+			kept = append(kept, err)
+		}
+	}
+	return errors.Join(kept...)
+}
+
+func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
 	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
@@ -79,17 +104,7 @@ func Load(root string) (*Town, error) {
 			errs = append(errs, err)
 		}
 	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
-	}
-	return t, nil
-}
-
-// Check loads root and reports only whether its config files are valid.
-// The startup gate, the daemon and gt doctor call it.
-func Check(root string) error {
-	_, err := Load(root)
-	return err
+	return t, errs
 }
 
 func (t *Town) path(file string) string { return filepath.Join(t.root, file) }
