@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +23,7 @@ func TestDaemonJSONSettersRefuseAnUnparseableFile(t *testing.T) {
 			return getLifecycleConfig(town, "lifecycle.reaper.enabled")
 		},
 		"get maintenance": func(town string) error {
-			return getMaintenanceConfig(town, "maintenance.window")
+			return getMaintenanceConfig(io.Discard, town, "maintenance.window")
 		},
 	} {
 		town := t.TempDir()

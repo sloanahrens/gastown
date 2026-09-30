@@ -1,4 +1,4 @@
-package cmd
+package convoy
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
-	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
 // xrigStrandedStore is one rig's beads store for the stranded scan's blocker
@@ -104,9 +103,9 @@ exit 0
 // stores, the daemon's wiring: every store is held up front.
 func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck, func(), error) {
 	return func(townRoot string) (blockCheck, func(), error) {
-		resolver := convoyops.NewStoreResolver(townRoot, stores)
-		return func(id string) convoyops.Block {
-			return convoyops.BlockOf(context.Background(), stores["hq"], id, resolver)
+		resolver := NewStoreResolver(townRoot, stores)
+		return func(id string) Block {
+			return BlockOf(context.Background(), stores["hq"], id, resolver)
 		}, func() {}, nil
 	}
 }
@@ -114,7 +113,7 @@ func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck
 // noBlockers is a blocker check that finds nothing, for scans about something
 // other than dependencies.
 func noBlockers(string) (blockCheck, func(), error) {
-	return func(string) convoyops.Block { return convoyops.Block{} }, func() {}, nil
+	return func(string) Block { return Block{} }, func() {}, nil
 }
 
 // TestFindStrandedConvoys_CrossRigBlockerNotReady is gt-j02xy on the daemon's
@@ -143,7 +142,7 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 			hq := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{}}
 			check := storeBlockCheck(map[string]beadsdk.Storage{"hq": hq, "gastown": gastown, "oag": oag})
 
-			stranded, err := findStrandedConvoysWith(townRoot, check)
+			stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), check)
 			if err != nil {
 				t.Fatalf("findStrandedConvoysWith: %v", err)
 			}
@@ -189,7 +188,7 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 				stores["oag"] = oag
 			}
 
-			stranded, err := findStrandedConvoysWith(townRoot, storeBlockCheck(stores))
+			stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), storeBlockCheck(stores))
 			if err != nil {
 				t.Fatalf("findStrandedConvoysWith: %v", err)
 			}
@@ -217,9 +216,9 @@ func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 	opened := 0
 	open := func(string) (blockCheck, func(), error) {
 		opened++
-		return func(string) convoyops.Block { return convoyops.Block{} }, func() {}, nil
+		return func(string) Block { return Block{} }, func() {}, nil
 	}
-	if _, err := findStrandedConvoysWith(townBeads, open); err != nil {
+	if _, err := StdTown(townBeads).findStrandedWith(context.Background(), open); err != nil {
 		t.Fatalf("findStrandedConvoysWith: %v", err)
 	}
 	if opened != 0 {
@@ -235,12 +234,12 @@ func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 func TestFindStrandedConvoys_TownStoreDownFailsTheScan(t *testing.T) {
 	townRoot := strandedXrigTown(t)
 	down := func(townRoot string) (blockCheck, func(), error) {
-		return openStrandedBlockCheckWith(townRoot, func(string) (beadsdk.Storage, error) {
+		return openStrandedBlockCheckWith(context.Background(), townRoot, func(string) (beadsdk.Storage, error) {
 			return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
 		})
 	}
 
-	stranded, err := findStrandedConvoysWith(townRoot, down)
+	stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), down)
 	if err == nil {
 		t.Fatalf("want an error when the town store will not open, got stranded %+v", stranded)
 	}

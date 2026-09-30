@@ -450,14 +450,20 @@ func sanitizeOTELAttrValue(s string, maxLen int) string {
 //  3. mayor/daemon.json env.GT_DOLT_PORT
 //  4. 0 (caller should skip injection — DefaultPort 3307 remains the default)
 func ResolveDoltPort(townRoot string) int {
-	if port := resolveDoltPortFromEnv(); port > 0 {
+	return ResolveDoltPortWithEnv(townRoot, os.Getenv)
+}
+
+// ResolveDoltPortWithEnv is ResolveDoltPort reading the environment through
+// getenv instead of the process's.
+func ResolveDoltPortWithEnv(townRoot string, getenv func(string) string) int {
+	if port := resolveDoltPortFromEnv(getenv); port > 0 {
 		return port
 	}
 	if townRoot == "" {
 		return 0
 	}
 
-	if port := resolveDoltPortFromConfigYAML(townRoot); port > 0 {
+	if port := resolveDoltPortFromConfigYAML(townRoot, getenv); port > 0 {
 		return port
 	}
 
@@ -482,7 +488,7 @@ func ResolveConfiguredDoltPort(townRoot string) int {
 	if _, port, ok := ManagedDoltEndpoint(townRoot); ok {
 		return port
 	}
-	if port := resolveDoltPortFromEnv(); port > 0 {
+	if port := resolveDoltPortFromEnv(os.Getenv); port > 0 {
 		return port
 	}
 	if port := resolveDoltPortFromDaemonJSON(townRoot); port > 0 {
@@ -588,8 +594,8 @@ func resolveDoltPort(townRoot string) int {
 	return ResolveDoltPort(townRoot)
 }
 
-func resolveDoltPortFromEnv() int {
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+func resolveDoltPortFromEnv(getenv func(string) string) int {
+	if p := getenv("GT_DOLT_PORT"); p != "" {
 		if port, err := strconv.Atoi(p); err == nil && port > 0 {
 			return port
 		}
@@ -597,8 +603,8 @@ func resolveDoltPortFromEnv() int {
 	return 0
 }
 
-func resolveDoltPortFromConfigYAML(townRoot string) int {
-	if townRoot == "" || os.Getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
+func resolveDoltPortFromConfigYAML(townRoot string, getenv func(string) string) int {
+	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
 		return 0
 	}
 	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
@@ -641,20 +647,26 @@ func resolveDoltPortFromDaemonJSON(townRoot string) int {
 //  3. mayor/daemon.json env.GT_DOLT_HOST
 //  4. "" (caller should use its default localhost behavior)
 func ResolveDoltHost(townRoot string) string {
-	if host := strings.TrimSpace(os.Getenv("GT_DOLT_HOST")); host != "" {
+	return ResolveDoltHostWithEnv(townRoot, os.Getenv)
+}
+
+// ResolveDoltHostWithEnv is ResolveDoltHost reading the environment through
+// getenv instead of the process's.
+func ResolveDoltHostWithEnv(townRoot string, getenv func(string) string) string {
+	if host := strings.TrimSpace(getenv("GT_DOLT_HOST")); host != "" {
 		return host
 	}
 	if townRoot == "" {
 		return ""
 	}
-	if host := resolveDoltHostFromConfigYAML(townRoot); host != "" {
+	if host := resolveDoltHostFromConfigYAML(townRoot, getenv); host != "" {
 		return host
 	}
 	return resolveDoltHostFromDaemonJSON(townRoot)
 }
 
-func resolveDoltHostFromConfigYAML(townRoot string) string {
-	if townRoot == "" || os.Getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
+func resolveDoltHostFromConfigYAML(townRoot string, getenv func(string) string) string {
+	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
 		return ""
 	}
 	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")

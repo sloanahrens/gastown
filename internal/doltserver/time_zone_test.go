@@ -1,17 +1,15 @@
 package doltserver
 
 import (
-	"errors"
+	"strings"
 	"testing"
 )
 
 // TestDefaultConfig_TimeZoneEmptyEnvOptsOut verifies that an explicitly empty
 // GT_DOLT_TIME_ZONE disables the override (caller wants Dolt's host-TZ default).
 func TestDefaultConfig_TimeZoneEmptyEnvOptsOut(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_TIME_ZONE", "")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_TIME_ZONE", "").host().DefaultConfig(t.TempDir())
 
 	if config.TimeZone != "" {
 		t.Errorf("TimeZone = %q with explicit empty env, want empty (opt-out)", config.TimeZone)
@@ -21,10 +19,8 @@ func TestDefaultConfig_TimeZoneEmptyEnvOptsOut(t *testing.T) {
 // TestDefaultConfig_TimeZoneEnvOverride verifies that GT_DOLT_TIME_ZONE
 // replaces the default.
 func TestDefaultConfig_TimeZoneEnvOverride(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_TIME_ZONE", "America/Los_Angeles")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_TIME_ZONE", "America/Los_Angeles").host().DefaultConfig(t.TempDir())
 
 	if config.TimeZone != "America/Los_Angeles" {
 		t.Errorf("TimeZone = %q, want America/Los_Angeles", config.TimeZone)
@@ -33,6 +29,7 @@ func TestDefaultConfig_TimeZoneEnvOverride(t *testing.T) {
 
 // TestBuildTimeZoneQuery verifies the exact SQL emitted by applyTimeZone.
 func TestBuildTimeZoneQuery(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		tz   string
 		want string
@@ -49,57 +46,39 @@ func TestBuildTimeZoneQuery(t *testing.T) {
 	}
 }
 
-// TestApplyTimeZone_EmptyShortCircuits verifies that an empty TimeZone opts
-// out of the SET GLOBAL — the SQL seam must never be invoked.
+// TestApplyTimeZone_EmptyShortCircuits verifies that the override is opted out of: no SET
+// GLOBAL reaches dolt.
 func TestApplyTimeZone_EmptyShortCircuits(t *testing.T) {
-	prev := applyTimeZoneFn
-	t.Cleanup(func() { applyTimeZoneFn = prev })
-
-	called := false
-	applyTimeZoneFn = func(_, _ string) error {
-		called = true
-		return nil
+	t.Parallel()
+	f := newFakeHost()
+	for _, v := range []string{""} {
+		f.host().applyTimeZone(t.TempDir(), &Config{TimeZone: v})
 	}
-
-	applyTimeZone("/some/town", &Config{TimeZone: ""})
-
-	if called {
-		t.Errorf("applyTimeZoneFn called for empty TimeZone")
+	if ran := f.ranMatching("SET GLOBAL"); len(ran) != 0 {
+		t.Errorf("SET GLOBAL sent for an opted-out value: %q", ran)
 	}
 }
 
-// TestApplyTimeZone_DispatchesQuery verifies that a non-empty TimeZone
-// dispatches the expected SET GLOBAL statement against the seam.
+// TestApplyTimeZone_DispatchesQuery verifies that a set value sends the expected
+// SET GLOBAL statement to the town's running server.
 func TestApplyTimeZone_DispatchesQuery(t *testing.T) {
-	prev := applyTimeZoneFn
-	t.Cleanup(func() { applyTimeZoneFn = prev })
+	t.Parallel()
+	f := newFakeHost().townPort(4520).on("dolt *", fakeReply{})
+	f.host().applyTimeZone(t.TempDir(), &Config{TimeZone: "+00:00"})
 
-	var gotTownRoot, gotQuery string
-	applyTimeZoneFn = func(townRoot, query string) error {
-		gotTownRoot = townRoot
-		gotQuery = query
-		return nil
-	}
-
-	applyTimeZone("/town/root", &Config{TimeZone: "+00:00"})
-
-	if gotTownRoot != "/town/root" {
-		t.Errorf("townRoot = %q, want /town/root", gotTownRoot)
-	}
-	if want := "SET GLOBAL time_zone = '+00:00'"; gotQuery != want {
-		t.Errorf("query = %q, want %q", gotQuery, want)
+	ran := f.ranMatching("SET GLOBAL")
+	if len(ran) != 1 || !strings.HasSuffix(ran[0], "sql -q SET GLOBAL time_zone = '+00:00'") || !strings.Contains(ran[0], "--port 4520") {
+		t.Errorf("dolt calls = %q, want one %q against port 4520", ran, "SET GLOBAL time_zone = '+00:00'")
 	}
 }
 
-// TestApplyTimeZone_ErrorIsBestEffort verifies that a SQL failure does not
-// panic or propagate.
+// TestApplyTimeZone_ErrorIsBestEffort verifies that a SQL failure does not panic or
+// propagate: the server is already up, and failing here would fail the start.
 func TestApplyTimeZone_ErrorIsBestEffort(t *testing.T) {
-	prev := applyTimeZoneFn
-	t.Cleanup(func() { applyTimeZoneFn = prev })
-
-	applyTimeZoneFn = func(_, _ string) error {
-		return errors.New("simulated SQL failure")
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{stderr: "simulated SQL failure", code: 1})
+	f.host().applyTimeZone(t.TempDir(), &Config{TimeZone: "+00:00"})
+	if len(f.ranMatching("SET GLOBAL")) != 1 {
+		t.Errorf("the statement was not attempted: %q", f.commands())
 	}
-
-	applyTimeZone("/town/root", &Config{TimeZone: "+00:00"})
 }

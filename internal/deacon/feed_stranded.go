@@ -1,6 +1,7 @@
 package deacon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -181,24 +183,32 @@ func (s *ConvoyFeedState) RecordFeed() {
 	s.LastFeedTime = time.Now().UTC()
 }
 
-// FindStrandedConvoys runs `gt convoy stranded --json` and parses the output.
+// FindStrandedConvoys runs the stranded scan: convoys with ready work and no
+// workers, or empty convoys that need cleanup.
 func FindStrandedConvoys(townRoot string) ([]StrandedConvoy, error) {
-	cmd := exec.Command("gt", "convoy", "stranded", "--json")
-	cmd.Dir = townRoot
-	cmd.Env = deaconReadOnlyRoutingEnv(townRoot)
-	util.SetDetachedProcessGroup(cmd)
-
-	output, err := cmd.Output()
+	town := convoy.Town{Root: townRoot, Env: deaconReadOnlyRoutingEnv(townRoot)}
+	found, err := town.FindStranded(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("running gt convoy stranded: %w", err)
+		return nil, fmt.Errorf("finding stranded convoys: %w", err)
 	}
 
-	var stranded []StrandedConvoy
-	if err := json.Unmarshal(output, &stranded); err != nil {
-		return nil, fmt.Errorf("parsing stranded convoys: %w", err)
+	stranded := make([]StrandedConvoy, 0, len(found))
+	for _, c := range found {
+		stranded = append(stranded, StrandedConvoy{
+			ID:           c.ID,
+			Title:        c.Title,
+			TrackedCount: c.TrackedCount,
+			ReadyCount:   c.ReadyCount,
+			ReadyIssues:  c.ReadyIssues,
+		})
 	}
-
 	return stranded, nil
+}
+
+// feedOps are the convoy operations FeedStranded runs; tests replace them.
+type feedOps struct {
+	findStranded func(townRoot string) ([]StrandedConvoy, error)
+	closeEmpty   func(townRoot, convoyID string) error
 }
 
 // FeedStranded detects stranded convoys and takes mechanical actions where safe.
@@ -207,6 +217,10 @@ func FindStrandedConvoys(townRoot string) ([]StrandedConvoy, error) {
 // raw data (tracked_count, ready_count) for the deacon agent to inspect and decide.
 // Rate limits by maxPerCycle and per-convoy cooldown.
 func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *FeedResult {
+	return feedStranded(townRoot, maxPerCycle, cooldown, feedOps{findStranded: FindStrandedConvoys, closeEmpty: closeEmptyConvoy})
+}
+
+func feedStranded(townRoot string, maxPerCycle int, cooldown time.Duration, ops feedOps) *FeedResult {
 	result := &FeedResult{}
 
 	if maxPerCycle <= 0 {
@@ -217,7 +231,7 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 	}
 
 	// Find stranded convoys
-	stranded, err := FindStrandedConvoys(townRoot)
+	stranded, err := ops.findStranded(townRoot)
 	if err != nil {
 		result.Errors++
 		result.Details = append(result.Details, FeedConvoyResult{
@@ -268,7 +282,7 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 			}
 
 			// Truly empty convoy (0 tracked issues) — auto-close
-			if err := closeEmptyConvoy(townRoot, convoy.ID); err != nil {
+			if err := ops.closeEmpty(townRoot, convoy.ID); err != nil {
 				result.Errors++
 				result.Details = append(result.Details, FeedConvoyResult{
 					ConvoyID: convoy.ID,
@@ -351,15 +365,10 @@ func FeedStranded(townRoot string, maxPerCycle int, cooldown time.Duration) *Fee
 	return result
 }
 
-// closeEmptyConvoy runs `gt convoy check <id>` to auto-close an empty convoy.
+// closeEmptyConvoy auto-closes an empty convoy through the completion check.
 func closeEmptyConvoy(townRoot, convoyID string) error {
-	cmd := exec.Command("gt", "convoy", "check", convoyID)
-	cmd.Dir = townRoot
-	cmd.Env = deaconMutationRoutingEnv(townRoot)
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	town := convoy.Town{Root: townRoot, Env: deaconMutationRoutingEnv(townRoot), Out: os.Stdout, Warn: os.Stderr}
+	return town.CheckOne(convoyID, false)
 }
 
 // dispatchFeedDog dispatches a dog to feed a stranded convoy via gt sling.

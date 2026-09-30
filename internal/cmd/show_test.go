@@ -189,3 +189,17 @@ func countEnvKey(env []string, key string) int {
 	}
 	return count
 }
+
+// parseEnv converts an environment slice to a map for easier testing.
+func parseEnv(env []string) map[string]string {
+	m := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			m[parts[0]] = parts[1]
+		} else if len(parts) == 1 {
+			m[parts[0]] = ""
+		}
+	}
+	return m
+}

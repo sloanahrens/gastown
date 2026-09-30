@@ -10,9 +10,19 @@ import (
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
-// stubStrandedGT puts a `gt` on PATH that reports one stranded convoy with a
-// ready issue and logs every invocation, so FeedStranded reaches its
-// dispatch step without a town.
+// oneStrandedOps is a scan that finds one stranded convoy with a ready
+// issue, so feedStranded reaches its dispatch step without a town.
+func oneStrandedOps() feedOps {
+	return feedOps{
+		findStranded: func(string) ([]StrandedConvoy, error) {
+			return []StrandedConvoy{{ID: "hq-cv-s1", Title: "s", TrackedCount: 1, ReadyCount: 1, ReadyIssues: []string{"gt-a"}}}, nil
+		},
+		closeEmpty: func(string, string) error { return nil },
+	}
+}
+
+// stubStrandedGT puts a `gt` on PATH that logs every invocation, so a test
+// sees whether the feed dog was slung.
 func stubStrandedGT(t *testing.T) (logPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -22,9 +32,6 @@ func stubStrandedGT(t *testing.T) (logPath string) {
 	logPath = filepath.Join(bin, "gt.log")
 	script := `#!/bin/sh
 echo "$*" >> "` + logPath + `"
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[{"id":"hq-cv-s1","title":"s","tracked_count":1,"ready_count":1,"ready_issues":["gt-a"]}]'
-fi
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(bin, "gt"), []byte(script), 0755); err != nil {
@@ -42,7 +49,7 @@ func TestFeedStranded_OperatorHold_DispatchesNoFeedDog(t *testing.T) {
 	gtLog := stubStrandedGT(t)
 	townRoot := holdTown(t)
 
-	result := FeedStranded(townRoot, 0, 0)
+	result := feedStranded(townRoot, 0, 0, oneStrandedOps())
 
 	data, _ := os.ReadFile(gtLog)
 	if strings.Contains(string(data), "sling") {
@@ -72,7 +79,7 @@ func TestFeedStranded_OperatorHold_DispatchesNoFeedDog(t *testing.T) {
 func TestFeedStranded_NoHold_DispatchesFeedDog(t *testing.T) {
 	t.Setenv("GT_SEAT_REFILL_HOLD", "")
 	gtLog := stubStrandedGT(t)
-	result := FeedStranded(t.TempDir(), 0, 0)
+	result := feedStranded(t.TempDir(), 0, 0, oneStrandedOps())
 	data, _ := os.ReadFile(gtLog)
 	if result.Fed != 1 || !strings.Contains(string(data), "sling mol-convoy-feed deacon/dogs") {
 		t.Errorf("Fed = %d, gt calls %q; want one feed dog", result.Fed, data)

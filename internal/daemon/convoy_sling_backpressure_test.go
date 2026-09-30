@@ -52,6 +52,7 @@ func refusingFeedRig(t *testing.T, refusal string) (townRoot string, gt *fakeCLI
 func newFeedManager(townRoot string, logger func(string, ...interface{}), gt *fakeCLI) *ConvoyManager {
 	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
 	m.execCmd = gt.run
+	answerScanThrough(m, gt)
 	return m
 }
 
