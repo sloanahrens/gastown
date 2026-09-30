@@ -612,6 +612,47 @@ func TestStatusUnquotesCQuotedPaths(t *testing.T) {
 	}
 }
 
+// TestSkipWorktreeFilesKeysAreRealPaths guards the pairing between Status()'s
+// unquoted paths and the skip-worktree set it consults. `git ls-files -v`
+// C-quotes a path with a quote, backslash or non-ASCII byte just as porcelain
+// does; when the set kept those quoted keys, Status()'s lookup by the
+// unquoted path missed, so a sparse-checkout-hidden file with such a name was
+// reported as a real deletion.
+func TestSkipWorktreeFilesKeysAreRealPaths(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	names := []string{`weird"quote.txt`, "café.txt", "plain.txt"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("content\n"), 0644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+		if err := g.Add(name); err != nil {
+			t.Fatalf("Add %q: %v", name, err)
+		}
+	}
+	if err := g.Commit("add files"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	for _, name := range names {
+		if out, err := exec.Command("git", "-C", dir, "update-index", "--skip-worktree", "--", name).CombinedOutput(); err != nil {
+			t.Fatalf("update-index %q: %v\n%s", name, err, out)
+		}
+	}
+
+	got := g.skipWorktreeFiles()
+	if len(got) != len(names) {
+		t.Errorf("skipWorktreeFiles() = %v, want exactly %q", got, names)
+	}
+	for _, name := range names {
+		if !got[name] {
+			t.Errorf("skipWorktreeFiles() missing %q; got %v", name, got)
+		}
+	}
+}
+
 func TestAddAndCommit(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
