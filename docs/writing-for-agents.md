@@ -49,7 +49,7 @@ Adding feels safe and removing feels risky, so stale layers settle until the liv
 
 **R6. An agent-facing file over 1,500 words is split by branch, or its reference material moves behind a pointer.**
 
-Attention thins across a long file. Inline what every reader needs; push behind a pointer what only some readers reach. (The lint gate enforces a looser 2,000 on the always-loaded files; this rule is the audit's target.)
+Attention thins across a long file. Inline what every reader needs; push behind a pointer what only some readers reach. (`scripts/docs-lint.sh` gates the whole agent-facing tier, formulas included, at 1,500. Its `CEILING_EXEMPT` list names the few step-delivered formulas allowed over, each with its reason.)
 
 ### Completion criterion
 

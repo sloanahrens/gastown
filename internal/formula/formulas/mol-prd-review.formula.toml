@@ -4,22 +4,9 @@ description = """
 Parallel PRD review via specialized analysts. Uncovers missing requirements,
 ambiguities, feasibility risks, and scope issues before implementation begins.
 
-Each leg examines the PRD from a different perspective. Findings are
-synthesized into a prioritized list of clarifying questions for the human.
-
-## Legs (parallel execution)
-- **requirements**: Are success criteria defined? What does done look like?
-- **gaps**: What's missing? What hasn't been thought through?
-- **ambiguity**: What's unclear, contradictory, or underspecified?
-- **feasibility**: Is this buildable? What are the hard technical problems?
-- **scope**: What's in/out? Where is scope creep risk?
-- **stakeholders**: Who's affected? Are there conflicting needs?
-
-## Execution Model
-1. Each leg spawns as a separate polecat
-2. Polecats work in parallel
-3. Each writes analysis to their designated output file
-4. Synthesis step combines all findings into consolidated questions for the human
+Six legs (requirements, gaps, ambiguity, feasibility, scope, stakeholders) each
+run as a polecat in parallel and write one analysis file. The synthesis step
+turns them into a prioritized list of clarifying questions for the human.
 
 ## Output
 A .prd-reviews/<review-id>/ directory containing:
@@ -116,9 +103,7 @@ Analyze whether the requirements are complete enough to build from.
 - Undefined acceptance conditions: what does "working" mean?
 - Unmeasured outcomes: are there metrics or thresholds?
 - Missing non-functional requirements: performance, scale, reliability?
-- No definition of failure modes or error states
-- Happy path only: what happens when things go wrong?
-- Missing rollback / undo / recovery requirements
+- Happy path only: no failure modes, error states, rollback, or recovery
 - No mention of monitoring, alerting, or observability
 
 **Questions to answer:**
@@ -144,9 +129,7 @@ Identify requirements that are completely absent from the PRD.
 - Concurrent access: what if two users do this simultaneously?
 - Rate limiting and abuse prevention
 - Audit logging and compliance requirements
-- Internationalization / localization needs
-- Accessibility requirements
-- Mobile / offline behavior (if applicable)
+- Localization, accessibility, and mobile / offline behavior (if applicable)
 - Admin tooling: how will support teams debug issues?
 - Deprecation / cleanup: how does old behavior get removed?
 
@@ -164,12 +147,11 @@ description = """
 Find statements in the PRD that are ambiguous or open to multiple interpretations.
 
 **Look for:**
-- Vague language: "fast", "simple", "reasonable", "appropriate", "as needed"
+- Vague language: "fast", "simple", "reasonable", "as needed"
 - Undefined terms: domain concepts used without definition
 - Contradictions: two requirements that can't both be true
 - Implicit assumptions: things assumed true that might not be
-- Conditional requirements without defined conditions: "when X, do Y" but X isn't specified
-- Scope boundaries stated unclearly: "similar to X" without defining similarity
+- Undefined conditions ("when X, do Y" with no X) or comparisons ("similar to X")
 - User/persona confusion: mixing different user types without distinguishing them
 - "Should" vs "must" vs "could": what's actually required vs nice-to-have?
 - Undefined ordering: when multiple things need to happen, what order?
@@ -190,11 +172,9 @@ Assess the technical feasibility and identify hard engineering challenges.
 **Look for:**
 - Features that assume capabilities the system doesn't have
 - Third-party dependencies that may not support this use case
-- Performance requirements that may be fundamentally hard to meet
-- Consistency guarantees that conflict with the distributed architecture
-- Real-time requirements that require architectural changes
+- Performance, scale, real-time, or consistency requirements the architecture
+  cannot meet without substantial work
 - Privacy / security requirements with significant implementation cost
-- Scale requirements that would require substantial infrastructure work
 - Implicit coupling: does this require changing things the PRD doesn't mention?
 - Missing prerequisite work: what has to be built first?
 
@@ -214,14 +194,12 @@ Analyze scope boundaries and identify scope creep risk.
 
 **Look for:**
 - Missing explicit out-of-scope statements
-- Features that will inevitably be asked for given what's being built
-- Overlap with existing features that will cause confusion
+- Features that will inevitably be asked for, or overlap existing ones
 - Minimum viable definition: what's the smallest version that delivers value?
-- Requirements that are really phase 2 in disguise
 - Dependencies on other teams or systems that aren't scoped
 - "While we're in there" refactors that aren't actually required
 - Unclear prioritization between requirements if tradeoffs arise
-- Missing phasing: should this be incremental or big bang?
+- Missing phasing: phase-2 work in disguise, or incremental vs big bang?
 
 **Questions to answer:**
 - What's the MVP here? What could be cut without losing core value?
@@ -241,12 +219,10 @@ Identify all affected stakeholders and assess whether their needs conflict.
 - Unstated users: are there actors the PRD doesn't mention?
 - Operator / admin perspective: what do ops / support teams need?
 - Developer experience: will this make other engineers' lives harder?
-- Security team requirements not mentioned
-- Compliance / legal requirements not mentioned
+- Security, compliance, or legal requirements not mentioned
 - Third-party integrators who will be affected
 - Conflicting user needs: what's good for user A may hurt user B
-- Internal team dependencies: who else needs to be involved in design/build?
-- Launch coordination: who needs to be notified at launch?
+- Teams who must join the design or build, or hear about the launch
 
 **Questions to answer:**
 - Who is NOT mentioned in this PRD who will care about it?
@@ -266,13 +242,9 @@ Combine all leg analyses into a consolidated PRD review with prioritized questio
 **Your input:**
 All leg analyses from: {{.output.directory}}/
 
-**Your task:**
-1. Read all leg analyses
-2. Identify overlapping findings across legs (these are higher-confidence gaps)
-3. Deduplicate and prioritize
-4. Group into must-answer-before-build vs important-but-not-blocking
-5. Write the synthesized review
-6. Mail the human overseer with the questions
+**Your task:** read every leg analysis; findings several legs share are
+higher-confidence gaps. Deduplicate, prioritize, group into must-answer-before-build
+and important-but-not-blocking, write the review, and mail the human overseer.
 
 **Output file:** {{.output.directory}}/{{.output.synthesis}}
 

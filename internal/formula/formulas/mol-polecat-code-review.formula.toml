@@ -15,9 +15,6 @@ You are a self-cleaning worker. You:
 3. Complete and self-clean via `gt done` (submit findings + nuke yourself)
 4. You are GONE - your findings are recorded in beads
 
-**Self-cleaning:** When you run `gt done`, you submit your findings, nuke your
-sandbox, and exit. There is no idle state. Done means gone.
-
 **Important:** This formula defines the template. Your molecule already has step
 beads created from it. Use `bd mol current` to find them - do NOT read this file directly.
 
@@ -224,13 +221,8 @@ BODY
 } | gt mail send {{rig}}/witness -s "CRITICAL: Security issue found" --stdin
 ```
 
-**3. Prepare bead descriptions:**
-For each finding, prepare:
-- Clear title
-- File/line location
-- Description of the issue
-- Why it matters
-- Suggested fix (if known)
+**3. Prepare bead descriptions:** title, file:line, the issue, why it
+matters, and the fix if known.
 
 **Exit criteria:** Findings prioritized and ready to file."""
 
@@ -342,23 +334,12 @@ needs = ["summarize-review"]
 description = """
 Signal completion and clean up. You cease to exist after this step.
 
-**Self-Cleaning Model:**
-Once you run `gt done`, you're gone. The command:
-1. Syncs beads (final sync)
-2. Nukes your sandbox
-3. Exits your session immediately
+`gt done` syncs beads, nukes your sandbox and exits your session. Other
+polecats fix what you filed; you are not involved after this.
 
-**Run gt done:**
 ```bash
 gt done
 ```
-
-**What happens next (not your concern):**
-- Other polecats may be assigned to fix the issues you found
-- Witness may escalate critical findings
-- The codebase improves based on your findings
-
-You are NOT involved in any of that. You're gone. Done means gone.
 
 **Exit criteria:** Beads synced, sandbox nuked, session exited."""
 

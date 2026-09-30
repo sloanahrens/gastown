@@ -76,16 +76,6 @@ echo "scheduled_maintenance mode: ${MAINT_MODE:-monitor}"
   rules in Step 6. The daemon's `compactor_dog.threshold` is raised to 20000
   in gc mode.
 
-## Config
-
-```bash
-DOLT_HOST="${GT_DOLT_HOST:-127.0.0.1}"
-DOLT_PORT="${GT_DOLT_PORT:-3307}"
-DOLT_USER="root"
-DOLT_DATA_DIR="$HOME/gt/.dolt-data"
-STATE_FILE="$HOME/gt/.dolt-data/.compactor-state.json"
-```
-
 ## Compaction is operator-only
 
 `run.sh` defaults to **monitor-only** (check-only) mode. No data is modified.
@@ -116,159 +106,34 @@ escalation is due. A DB over 1000 is always a candidate. Do not pass
 "candidate" for the report, but the script doesn't escalate it (see "How this
 runs").
 
-## Step 1: Discover production databases
+## Steps 1-5: Gather the data
 
-Find all active production databases on the Dolt server:
+`bash plugins/compactor-dog/run.sh` (monitor-only) lists the production
+databases and each one's commit count. Its database filter is a name-pattern
+heuristic: `gt dolt list` derives the production set from each rig's
+`metadata.json`, so cross-check the two when a rig is added or renamed (that is
+how `beads`, since renamed `be`, was miscounted).
+
+For growth rate and time since flatten, query each database:
 
 ```bash
-echo "=== Compactor Dog: Checking commit health ==="
-
-PROD_DBS=$(dolt sql -q "SHOW DATABASES" \
-  --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-  --result-format csv 2>/dev/null \
-  | tail -n +2 \
-  | grep -v -E '^(information_schema|mysql|dolt_cluster|testdb_|beads_t|beads_pt|doctest_)' \
-  | tr -d '\r')
-
-if [ -z "$PROD_DBS" ]; then
-  echo "SKIP: No production databases found (is Dolt running?)"
-  exit 0
-fi
-
-echo "Production databases: $(echo "$PROD_DBS" | tr '\n' ' ')"
+dolt sql -q "SELECT count(*) AS total,
+  SUM(date > DATE_SUB(NOW(), INTERVAL 1 HOUR)) AS last_1h,
+  SUM(date > DATE_SUB(NOW(), INTERVAL 24 HOUR)) AS last_24h,
+  MIN(date) AS oldest_commit FROM dolt_log" \
+  --host "${GT_DOLT_HOST:-127.0.0.1}" --port "${GT_DOLT_PORT:-3307}" -u root -d "$DB"
 ```
 
-**Keep this list in sync with the town.** This grep blocklist is a name-pattern
-heuristic; `gt dolt list` derives the production set from each rig's
-`metadata.json`, and `gt dolt cleanup` treats anything *not* in that set as an
-orphan, so a database can be "production" here and "orphan" there (that's how
-`beads`, since renamed `be`, was miscounted). Update this pattern when a rig is
-added or renamed, and cross-check against `gt dolt list`.
-
-## Step 2: Count commits per database
-
-Query each database's commit history:
+A database with five or fewer commits was recently flattened. `gt polecat list`
+shows the swarm that explains a fast-growing one. The last run, from its
+receipt (receipts are ephemeral wisps, hidden from bd without --include-infra:
+drop the flag and this reports "never" even when runs exist, gt-idwq, so read a
+"never" as a failed measurement; `gt plugin history compactor-dog` cross-checks):
 
 ```bash
-echo ""
-echo "=== Commit Counts ==="
-
-REPORT=""
-TOTAL_COMMITS=0
-NOW=$(date +%s)
-
-while IFS= read -r DB; do
-  [ -z "$DB" ] && continue
-
-  # Total commit count
-  COUNT=$(dolt sql -q "SELECT count(*) AS cnt FROM dolt_log" \
-    --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-    -d "$DB" --result-format csv 2>/dev/null \
-    | tail -1 | tr -d '\r')
-
-  # Commits in last hour (growth rate indicator)
-  RECENT=$(dolt sql -q "SELECT count(*) AS cnt FROM dolt_log WHERE date > DATE_SUB(NOW(), INTERVAL 1 HOUR)" \
-    --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-    -d "$DB" --result-format csv 2>/dev/null \
-    | tail -1 | tr -d '\r')
-
-  # Commits in last 24h
-  DAILY=$(dolt sql -q "SELECT count(*) AS cnt FROM dolt_log WHERE date > DATE_SUB(NOW(), INTERVAL 24 HOUR)" \
-    --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-    -d "$DB" --result-format csv 2>/dev/null \
-    | tail -1 | tr -d '\r')
-
-  # Oldest commit date (approximation of last flatten)
-  OLDEST=$(dolt sql -q "SELECT MIN(date) AS oldest FROM dolt_log" \
-    --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-    -d "$DB" --result-format csv 2>/dev/null \
-    | tail -1 | tr -d '\r')
-
-  LINE="$DB: total=$COUNT, last_1h=$RECENT, last_24h=$DAILY, oldest_commit=$OLDEST"
-  echo "  $LINE"
-  REPORT="$REPORT\n$LINE"
-  TOTAL_COMMITS=$((TOTAL_COMMITS + ${COUNT:-0}))
-done <<< "$PROD_DBS"
-
-echo ""
-echo "Total commits across all DBs: $TOTAL_COMMITS"
-```
-
-## Step 3: Check swarm activity
-
-Count active polecats to gauge expected commit velocity:
-
-```bash
-echo ""
-echo "=== Swarm Activity ==="
-
-# Count active tmux sessions (proxy for agent activity)
-POLECAT_SESSIONS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-  | grep -c 'polecat\|pcat' || echo 0)
-TOTAL_SESSIONS=$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')
-
-echo "  Active polecats: $POLECAT_SESSIONS"
-echo "  Total sessions: $TOTAL_SESSIONS"
-```
-
-## Step 4: Load previous state
-
-Check when the last compaction or flatten happened:
-
-```bash
-echo ""
-echo "=== Previous State ==="
-
-if [ -f "$STATE_FILE" ]; then
-  LAST_CHECK=$(cat "$STATE_FILE" 2>/dev/null)
-  echo "  Last state: $LAST_CHECK"
-else
-  echo "  No previous state found (first run)"
-  LAST_CHECK="{}"
-fi
-
-# Check for recent compactor-dog or flatten runs in beads.
-# Receipts are ephemeral wisps, hidden from bd without --include-infra: drop the
-# flag and this reports "never" even when runs exist (gt-idwq), so read a
-# "never" as a failed measurement. `gt plugin history compactor-dog` cross-checks.
 RECENT_RUNS=$(bd list --label plugin:compactor-dog --status closed --include-infra --json 2>/dev/null \
   | jq -r '.[0].created_at // "never"' 2>/dev/null || echo "unknown")
 echo "  Last compactor run: $RECENT_RUNS"
-
-# Check for flatten evidence (single-commit history = recently flattened)
-FLATTEN_CANDIDATES=""
-while IFS= read -r DB; do
-  [ -z "$DB" ] && continue
-  COUNT=$(dolt sql -q "SELECT count(*) AS cnt FROM dolt_log" \
-    --host "$DOLT_HOST" --port "$DOLT_PORT" -u "$DOLT_USER" \
-    -d "$DB" --result-format csv 2>/dev/null \
-    | tail -1 | tr -d '\r')
-  if [ "${COUNT:-0}" -le 5 ]; then
-    FLATTEN_CANDIDATES="$FLATTEN_CANDIDATES $DB(${COUNT})"
-  fi
-done <<< "$PROD_DBS"
-
-if [ -n "$FLATTEN_CANDIDATES" ]; then
-  echo "  Recently flattened DBs:$FLATTEN_CANDIDATES"
-fi
-```
-
-## Step 5: Save current state
-
-Record this check's data for the next run to compare growth rates:
-
-```bash
-# Save state for next run
-cat > "$STATE_FILE" << STATEOF
-{
-  "checked_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "total_commits": $TOTAL_COMMITS,
-  "active_polecats": $POLECAT_SESSIONS
-}
-STATEOF
-
-echo ""
-echo "State saved to $STATE_FILE"
 ```
 
 ## Step 6: Make the judgment call
@@ -314,29 +179,14 @@ replace the Recommendation line with what you actually saw, e.g. runaway
 growth, and do not recommend compaction):
 
 ```bash
-gt escalate "Dolt compaction recommended" \
-  -s MEDIUM \
-  --reason "Commit growth analysis:
-$REPORT
-
-Total: $TOTAL_COMMITS commits across all DBs
-Active polecats: $POLECAT_SESSIONS
-Recommendation: Run compaction on databases exceeding comfort threshold.
+gt escalate "Dolt compaction recommended" -s MEDIUM \
+  --reason "<per-DB counts and growth; the swarm size; which DBs exceed comfort>.
 See dolt-storage.md for procedure."
 ```
 
-**If everything looks comfortable, just record the result:**
-
-```bash
-echo "All databases within comfortable commit ranges. No action needed."
-```
+If everything looks comfortable, no action is needed.
 
 ## Record Result
-
-```bash
-SUMMARY="Compactor check: $TOTAL_COMMITS total commits across $(echo "$PROD_DBS" | wc -l | tr -d ' ') DBs, $POLECAT_SESSIONS active polecats"
-echo "=== $SUMMARY ==="
-```
 
 Receipt outcomes, with who records them:
 

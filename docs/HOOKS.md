@@ -13,16 +13,12 @@ Gas Town manages context injection for all supported agents. The mechanism varie
 | GitHub Copilot | JSON lifecycle hooks | `workDir/.github/hooks/gastown.json` |
 | Codex, others | Startup nudge fallback | *(no file — nudge only)* |
 
-> **GitHub Copilot note**: Copilot CLI supports full executable lifecycle hooks
-> (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `sessionEnd`) via
-> `.github/hooks/gastown.json`. This is the same lifecycle coverage as Claude Code,
-> delivered in Copilot's JSON format rather than Claude's `settings.json` format.
-> The `gt hooks` commands below apply to Claude Code (and Gemini) only.
+Copilot's JSON hooks cover the same lifecycle as Claude Code's. The `gt hooks`
+commands below apply to Claude Code (and Gemini) only.
 
-Gas Town manages `.claude/settings.json` files in gastown-managed parent directories
-and passes them to Claude Code via the `--settings` flag. This keeps customer repos
-clean while providing role-specific hook configuration. The hooks system provides
-a single source of truth with a base config and per-role/per-rig overrides.
+Gas Town writes `.claude/settings.json` into its own parent directories and
+passes it to Claude Code via `--settings`, so customer repos stay clean. One
+base config plus per-role/per-rig overrides is the single source of truth.
 
 ## Architecture
 
@@ -82,98 +78,27 @@ close can carry. Only ids naming the bead the current branch was cut for are
 judged; other closes and unresolvable input pass.
 
 The `boot` override adds the raw-tmux-send-keys guard (`gt tap guard
-boot-sendkeys`, gt-3mp1) on the `Bash|Monitor` matcher. Boot is the ephemeral
-agent that starts the Deacon after a town restart; typing into the Deacon's
-pane with a raw `tmux send-keys` can leave text staged but unsubmitted in the
-TUI, so boot must use `gt nudge --mode=immediate deacon` instead. The guard reads
-`tool_input.command` off stdin and blocks only a genuine tmux send-keys
-invocation — after gt-3mp1 it no longer relies on an `if` glob to decide when
-to run, because that glob fired on unrelated boot commands.
+boot-sendkeys`, gt-3mp1) on the `Bash|Monitor` matcher: a raw `tmux send-keys`
+into another pane can leave text staged but unsubmitted, so boot uses
+`gt nudge --mode=immediate` instead. The guard reads `tool_input.command` off
+stdin and blocks only a genuine tmux send-keys invocation.
 
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
 ## Commands
 
-### `gt hooks sync`
+Each takes `--help` for its flags.
 
-Regenerate all `.claude/settings.json` files from base + overrides.
-Preserves non-hooks fields (editorMode, enabledPlugins, etc.).
-
-```bash
-gt hooks sync             # Write all settings files
-gt hooks sync --dry-run   # Preview changes without writing
-```
-
-### `gt hooks diff`
-
-Show what `sync` would change, without writing anything.
-
-```bash
-gt hooks diff             # Show differences
-gt hooks diff --no-color  # Plain output
-```
-
-### `gt hooks base`
-
-Edit the shared base config in `$EDITOR`.
-
-```bash
-gt hooks base             # Open in editor
-gt hooks base --show      # Print current base config
-```
-
-### `gt hooks override <target>`
-
-Edit overrides for a specific role or rig+role.
-
-```bash
-gt hooks override crew              # Edit crew override
-gt hooks override gastown/witness   # Edit gastown witness override
-gt hooks override crew --show       # Print current override
-```
-
-### `gt hooks list`
-
-Show all managed settings.local.json locations and their sync status.
-
-```bash
-gt hooks list             # Show all targets
-gt hooks list --json      # Machine-readable output
-```
-
-### `gt hooks scan`
-
-Scan the workspace for existing hooks (reads current settings files).
-
-```bash
-gt hooks scan             # List all hooks
-gt hooks scan --verbose   # Show hook commands
-gt hooks scan --json      # JSON output
-```
-
-### `gt hooks init`
-
-Bootstrap base config from existing settings.local.json files. Analyzes all
-current settings, extracts common hooks as the base, and creates overrides
-for per-target differences.
-
-```bash
-gt hooks init             # Bootstrap base and overrides
-gt hooks init --dry-run   # Preview what would be created
-```
-
-Only works when no base config exists yet. Use `gt hooks base` to edit
-an existing base config.
-
-### `gt hooks registry` / `gt hooks install`
-
-Browse and install hooks from the registry.
-
-```bash
-gt hooks registry                  # List available hooks
-gt hooks install <hook-id>         # Install a hook to base config
-```
+| Command | Does |
+|---|---|
+| `gt hooks sync [--dry-run]` | Regenerate every managed settings file from base + overrides, keeping non-hooks fields |
+| `gt hooks diff` | Show what `sync` would change |
+| `gt hooks base [--show]` | Edit (or print) the shared base config |
+| `gt hooks override <target> [--show]` | Edit (or print) a role or rig+role override |
+| `gt hooks list` / `gt hooks scan` | Show managed targets and their sync status / the hooks in current settings files |
+| `gt hooks init [--dry-run]` | Bootstrap base and overrides from existing settings files; only when no base exists |
+| `gt hooks registry` / `gt hooks install <id>` | Browse the registry / copy a hook into the base config |
 
 ## Current Registry Hooks
 
@@ -198,50 +123,24 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 - **tmux clear-history** (gastown root) - clears terminal history on session start
 - **SessionStart .beads/ validation** (gastown/crew, beads/crew) - validates CWD
 
-## Design Decision: Registry as Catalog vs Source of Truth
+## Registry is a catalog, not the source of truth
 
-> **Decision: The registry is a catalog, not the source of truth.**
->
-> The registry (`registry.toml`) lists available hooks. The base/overrides system
-> (`~/.gt/hooks-base.json` + `~/.gt/hooks-overrides/`) defines what is active.
-> `gt hooks install` copies from the registry into the base/overrides config.
->
-> This separation provides:
-> - Per-machine customization (PATH differences across machines)
-> - Per-role overrides without polluting the shared registry
-> - Clear distinction between "what hooks exist" and "what hooks are active where"
->
-> The registry is the menu. The base/overrides are the order.
+`registry.toml` lists the hooks that exist; base + overrides decide which are
+active where. `gt hooks install` copies from one to the other. The split keeps
+per-machine differences (PATH) and per-role overrides out of the shared registry.
 
 ## Known Gaps
 
-1. **Registry doesn't cover all active hooks** — the hooks listed above should
-   be added so `gt hooks install` can manage them.
-
-2. **No `gt tap disable/enable` convenience commands** — Per-worktree
-   enable/disable is possible via the override mechanism (`gt hooks override`
-   with empty hooks list), but there is no convenience wrapper yet.
-
-3. **Private hooks (settings.local.json)** — Claude Code supports
-   `settings.local.json` for personal overrides. Gas Town doesn't manage
-   these yet. Low priority since Gas Town is primarily agent-operated.
-
-4. **Hook ordering** — No action needed currently. The merge chain
-   (base -> override) produces deterministic order, and per-matcher merge
-   ensures one entry per event type.
+1. The registry does not cover all active hooks (the list above).
+2. No `gt tap disable/enable` wrapper: per-worktree disable is an override with
+   an empty hooks list.
+3. Gas Town does not manage Claude Code's `settings.local.json`.
 
 ## Integration
 
-### `gt rig add`
-
-When a new rig is created, hooks are automatically synced for all the
-new rig's targets (crew, witness, refinery, polecats).
-
-### `gt doctor`
-
-The `hooks-sync` check verifies all settings.local.json files match what
-`gt hooks sync` would generate. Use `gt doctor --fix` to auto-fix
-out-of-sync targets.
+`gt rig add` syncs hooks for the new rig's targets. The `hooks-sync` doctor
+check flags any settings file that differs from what `gt hooks sync` would
+write; `gt doctor --fix` rewrites it.
 
 ## Per-matcher merge semantics
 
@@ -302,11 +201,9 @@ Override for polecats:
 ```
 
 Result: polecat sessions get **both** `dangerous-command` and
-`polecat-paths` on the same `"Bash|Monitor"` matcher — not just the
-override's hook. To disable a single one of several bare-matcher guards, there
-is currently no per-hook removal: an override entry with an empty hooks list
-removes the *entire* matcher's hooks from every layer, not just the
-override layer's own contribution.
+`polecat-paths` on the `"Bash|Monitor"` matcher. There is no per-hook removal:
+an override entry with an empty hooks list removes the *entire* matcher's hooks
+from every layer.
 
 Example base (empty `""` matcher — replaces):
 ```json
