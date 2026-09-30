@@ -334,3 +334,50 @@ esac
 		t.Errorf("tracking helper issues = %q, want %q", got, "ag-95s.1,ag-95s.2")
 	}
 }
+
+func TestConvoyAdd_ReportsOnlyIssuesActuallyAdded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	townRoot, _ := makeRoutingTownWorkspace(t)
+	chdirConvoyTest(t, townRoot)
+
+	oldAddTracking := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
+		if issueID == "ag-95s.2" {
+			return fmt.Errorf("simulated tracking failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
+
+	writeRoutingBdStub(t, `
+case "$*" in
+  "show hq-cv-test --json")
+    echo '[{"id":"hq-cv-test","title":"Test Convoy","status":"open","issue_type":"convoy"}]'
+    ;;
+  *)
+    echo "unexpected bd args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	out, err := captureConvoyStdoutErr(t, func() error {
+		return runConvoyAdd(nil, []string{"hq-cv-test", "ag-95s.1", "ag-95s.2", "ag-95s.3"})
+	})
+	if err != nil {
+		t.Fatalf("runConvoyAdd: %v", err)
+	}
+
+	if !strings.Contains(out, "Added 2 issue(s)") {
+		t.Errorf("output should report 2 added issues, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Issues: ag-95s.1, ag-95s.3") {
+		t.Errorf("output should list the issues actually added (1 and 3), got:\n%s", out)
+	}
+	if strings.Contains(out, "ag-95s.2") {
+		t.Errorf("output must not list the failed issue ag-95s.2, got:\n%s", out)
+	}
+}
