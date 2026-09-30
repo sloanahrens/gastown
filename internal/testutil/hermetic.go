@@ -978,7 +978,7 @@ func atomicTempLeak(base string) bool {
 // whose actor does not belong to the town (first path segment neither a rig
 // from mayor/rigs.json nor a built-in town-level actor). Fixture actors like
 // "myr/mycat" (the gt-x9o incident) are caught; concurrent legitimate agents
-// pass.
+// pass. Events the daemon authored are tolerated (gt-d9423).
 //
 // gt-5few: offset is a byte position recorded by Stat at snapshot time, but
 // the town's agents append to the live file whenever they like, so a line can
@@ -1044,15 +1044,31 @@ func atLineStart(f *os.File, offset int64) bool {
 	return prev[0] == '\n'
 }
 
-// appendedEventLeaks classifies one complete appended line: malformed JSON, or
-// an event whose actor prefix the town does not know.
+// appendedEventLeaks classifies one complete appended line: malformed JSON, an
+// event the town's own daemon authored (tolerated), or an event whose actor
+// prefix the town does not know.
+//
+// A line stamped with the daemon's caller is tolerated because a test run
+// cannot make the daemon session_death another agent (gt-d9423): the daemon
+// writes the tmux session name as the actor, which is not an actor prefix the
+// town knows, and the events package refuses in-process test writes to the live
+// town (gt-x9o), including test-spawned subprocesses (gt-lwi). The tolerance is
+// fails-open for a test that drives the daemon's crash-detection path against
+// the live town root — the leak this tripwire exists to catch; the check leaves
+// the unit tier in gt-ik4a1.3.
 func appendedEventLeaks(line string, known map[string]bool) []string {
 	var ev struct {
-		Actor string `json:"actor"`
-		Type  string `json:"type"`
+		Actor   string `json:"actor"`
+		Type    string `json:"type"`
+		Payload struct {
+			Caller string `json:"caller"`
+		} `json:"payload"`
 	}
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
 		return []string{fmt.Sprintf("unparseable event appended to .events.jsonl: %.120s", line)}
+	}
+	if ev.Payload.Caller == events.CallerDaemon {
+		return nil
 	}
 	prefix, _, _ := strings.Cut(strings.TrimSuffix(ev.Actor, "/"), "/")
 	if !known[prefix] {
