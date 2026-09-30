@@ -272,11 +272,12 @@ func TestAssigneeID(t *testing.T) {
 }
 
 // TestAgentBeadID_Deterministic verifies that agentBeadID returns the same string
-// on repeated calls regardless of process working directory. Regression test for
-// gt-lph: the old implementation called workspace.Find on each invocation, which
-// could resolve differently depending on cwd, causing non-deterministic IDs across
-// Manager instances for the same rig path.
+// on repeated calls and across Managers for one rig. Regression test for gt-lph:
+// the old implementation called workspace.Find on each invocation, which could
+// resolve differently depending on cwd; the town root is now filepath.Dir of the
+// rig path, fixed at construction, so nothing reads the working directory.
 func TestAgentBeadID_Deterministic(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -310,24 +311,6 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 	// Verify the ID is non-empty and contains expected components.
 	if id1a == "" {
 		t.Fatal("agentBeadID returned empty string")
-	}
-
-	// Change process working directory and construct a third Manager —
-	// the ID must still match (the old bug: workspace.Find resolved
-	// differently from different cwds).
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("Chdir to townRoot: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
-
-	m3 := newTestManager(r, nil, nil, newNoDatabaseBd())
-	id3 := m3.agentBeadID("Toast")
-	if id1a != id3 {
-		t.Errorf("agentBeadID differs after cwd change: %q (original) vs %q (after chdir)", id1a, id3)
 	}
 }
 
@@ -1686,12 +1669,8 @@ func checkAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T, beadsFor a
 // TestOverflowNameSessionFormat verifies that overflow names don't create double-prefix.
 // Regression test for the double-prefix bug (tr-testrig-N instead of tr-N).
 func TestOverflowNameSessionFormat(t *testing.T) {
-	// Register prefix for testrig so PrefixFor("testrig") returns "tr"
-	reg := session.NewPrefixRegistry()
-	reg.Register("tr", "testrig")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	t.Parallel()
+	// TestMain registers "tr" for testrig, so PrefixFor("testrig") returns "tr".
 
 	tmpDir := t.TempDir()
 

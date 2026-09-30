@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/gofrs/flock"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
@@ -53,6 +55,14 @@ const (
 	// Dolt hiccups without punishing interactive workflows.
 	doltStateRetries = 3
 )
+
+// clk is m.clock, or the real clock when none was set.
+func (m *Manager) clk() clockwork.Clock {
+	if m.clock == nil {
+		return clockwork.NewRealClock()
+	}
+	return m.clock
+}
 
 // doltBackoff calculates exponential backoff with ±25% jitter for a given attempt (1-indexed).
 // Formula: base * 2^(attempt-1) * (1 ± 25% random), capped at doltBackoffMax.
@@ -170,12 +180,14 @@ type Manager struct {
 	// draws from the pool, before it takes the per-polecat lock: the window a
 	// create that does not use the pool lock races into (gt-dziey).
 	afterPoolNameAllocated func(name string)
+	// beforePolecatLock, when set, runs as lockPolecat is about to wait on a
+	// polecat's lock, so a test can see a caller reach the wait.
+	beforePolecatLock func(name string)
+	// clock paces the Dolt retry backoff; nil is the real clock.
+	clock clockwork.Clock
 	// diskSpace reports the free space at a path; nil means
 	// util.CheckDiskSpace, which runs diskutil on macOS.
 	diskSpace func(path string) (util.DiskSpaceLevel, string, error)
-	// ensureExcludes writes gt's patterns into a worktree's local git
-	// exclude file; nil means rig.EnsureLocalExcludePatterns, which runs git.
-	ensureExcludes func(worktreePath string) error
 	// runSetup runs setup_command's shell; nil runs it for real
 	// (runSetupProcess). Tests record the call instead.
 	runSetup setupRunner
@@ -293,6 +305,9 @@ func (m *Manager) lockPolecat(name string) (*flock.Flock, error) {
 	}
 	lockPath := filepath.Join(lockDir, fmt.Sprintf("polecat-%s.lock", name))
 	fl := flock.New(lockPath)
+	if m.beforePolecatLock != nil {
+		m.beforePolecatLock(name)
+	}
 	if err := fl.Lock(); err != nil {
 		return nil, fmt.Errorf("acquiring polecat lock for %s: %w", name, err)
 	}
@@ -346,7 +361,7 @@ func (m *Manager) CheckDoltHealth() error {
 		if attempt < doltMaxRetries {
 			backoff := doltBackoff(attempt)
 			style.PrintWarning("Dolt health check attempt %d failed, retrying in %v...", attempt, backoff)
-			time.Sleep(backoff)
+			m.clk().Sleep(backoff)
 		}
 	}
 
@@ -419,7 +434,7 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 		if attempt < doltMaxRetries {
 			backoff := doltBackoff(attempt)
 			style.PrintWarning("agent bead creation attempt %d failed, retrying in %v: %v", attempt, backoff, err)
-			time.Sleep(backoff)
+			m.clk().Sleep(backoff)
 		}
 	}
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
@@ -454,7 +469,7 @@ func (m *Manager) SetAgentStateWithRetry(name string, state string) error {
 		if attempt < doltStateRetries {
 			backoff := doltBackoff(attempt)
 			style.PrintWarning("SetAgentState attempt %d failed, retrying in %v: %v", attempt, backoff, err)
-			time.Sleep(backoff)
+			m.clk().Sleep(backoff)
 		}
 	}
 	return fmt.Errorf("setting agent state after %d attempts: %w", doltStateRetries, lastErr)
@@ -3806,10 +3821,7 @@ func (m *Manager) checkDiskSpace(path string) (util.DiskSpaceLevel, string, erro
 }
 
 func (m *Manager) ensureLocalExcludes(worktreePath string) error {
-	if m.ensureExcludes != nil {
-		return m.ensureExcludes(worktreePath)
-	}
-	return rig.EnsureLocalExcludePatterns(worktreePath)
+	return rig.EnsureLocalExcludePatternsIn(worktreePath, m.gits.Open(worktreePath))
 }
 
 // hasActiveSession asks the manager's tmux whether sessionName exists, or

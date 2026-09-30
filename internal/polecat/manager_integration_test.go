@@ -54,9 +54,9 @@ func startLiveSession(t *testing.T, sessionName string) {
 	})
 }
 
-// TestManagerGetPrefersHookedBeadOverStaleAgentHook verifies that manager.Get
+// TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook verifies that manager.Get
 // reports the current hooked work bead when agent hook_bead is stale.
-func TestManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) {
+func TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
 	}
@@ -151,7 +151,7 @@ func TestManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) {
 	}
 }
 
-func TestManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing.T) {
+func TestIntegrationManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
 	}

@@ -3,8 +3,8 @@ package polecat
 import (
 	"errors"
 	"os"
+	"sync"
 	"testing"
-	"time"
 )
 
 // TestAddNamedWithOptions_ReservesNameBeforeCreating guards the gt-2w4f9
@@ -30,7 +30,7 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 	// process would. Once it has seen the reserved directory it waits on the
 	// named polecat's lock (reconcile's orphan sweep), so it may only finish
 	// after the named create; without the reservation it finishes at once —
-	// with the same name.
+	// with the same name. The hook waits for whichever happens first.
 	type result struct {
 		name string
 		err  error
@@ -38,6 +38,13 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 	done := make(chan result, 1)
 	var early *result
 	mgr.afterNamedReserved = func(name string) {
+		waiting := make(chan struct{})
+		var once sync.Once
+		mgr.beforePolecatLock = func(locked string) {
+			if locked == name {
+				once.Do(func() { close(waiting) })
+			}
+		}
 		go func() {
 			n, err := mgr.AllocateName()
 			done <- result{n, err}
@@ -45,7 +52,7 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 		select {
 		case r := <-done:
 			early = &r
-		case <-time.After(2 * time.Second):
+		case <-waiting:
 		}
 	}
 
@@ -58,12 +65,8 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 	}
 	r := early
 	if r == nil {
-		select {
-		case got := <-done:
-			r = &got
-		case <-time.After(30 * time.Second):
-			t.Fatal("concurrent AllocateName never finished")
-		}
+		got := <-done
+		r = &got
 	}
 	if r.err != nil {
 		t.Fatalf("concurrent AllocateName: %v", r.err)
