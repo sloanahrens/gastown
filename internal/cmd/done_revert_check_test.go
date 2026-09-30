@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -143,27 +144,30 @@ func TestDetectRevertedMerges_StaleResetOverFreshBase(t *testing.T) {
 		t.Fatalf("scenario precondition: %d commits ahead of origin/main, want 1", ahead)
 	}
 
-	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	report, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
-	if len(found) != 1 {
-		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(found), found)
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report)
+	}
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges reported %d relocated commits on a stale tree: %+v", len(report.Relocated), report.Relocated)
 	}
 	wantCommit, err := g.Rev("origin/main")
 	if err != nil {
 		t.Fatalf("rev: %v", err)
 	}
-	if found[0].Commit != wantCommit {
-		t.Errorf("reverted commit = %s, want the origin/main tip %s", found[0].Commit, wantCommit)
+	if report.Reverted[0].Commit != wantCommit {
+		t.Errorf("reverted commit = %s, want the origin/main tip %s", report.Reverted[0].Commit, wantCommit)
 	}
 	// All three paths of the merged commit must be reported, not just the ones
 	// the blob-equality test can see. shared.txt is the hard case: the polecat
 	// edited it as well as reverted main's change to it, so no blob comparison
 	// separates them — only the line-level inversion does.
 	for _, want := range []string{"merged.txt", "keep.txt", "shared.txt"} {
-		if !containsString(found[0].Paths, want) {
-			t.Errorf("reverted paths %v missing %s", found[0].Paths, want)
+		if !containsString(report.Reverted[0].Paths, want) {
+			t.Errorf("reverted paths %v missing %s", report.Reverted[0].Paths, want)
 		}
 	}
 }
@@ -218,13 +222,21 @@ func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
 
 func assertNoRevertedMerges(t *testing.T, repo string) {
 	t.Helper()
-	found, err := git.DetectRevertedMerges(git.NewGit(repo), "origin/main", "HEAD")
+	report := detectRevertedMerges(t, repo)
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges refused legitimate work: %+v", report)
+	}
+}
+
+// detectRevertedMerges runs the check the way gt done does: against
+// origin/main, on the branch as it stands.
+func detectRevertedMerges(t *testing.T, repo string) git.RevertReport {
+	t.Helper()
+	report, err := git.DetectRevertedMerges(git.NewGit(repo), "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
-	if len(found) != 0 {
-		t.Errorf("detectRevertedMerges refused legitimate work: %+v", found)
-	}
+	return report
 }
 
 // TestDetectRevertedMerges_MovingAPureAdditionIsNoRevert is the gt-tlw9u false
@@ -324,12 +336,12 @@ func TestDetectRevertedMerges_ShallowBoundaryDeletionIsNoRevert(t *testing.T) {
 	runGitCmd(t, s.polecat, "rm", "victim.txt")
 	runGitCmd(t, s.polecat, "commit", "-m", "feat: retire victim.txt (gt-test)")
 
-	found, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
+	report, err := git.DetectRevertedMerges(git.NewGit(s.polecat), "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
-	if len(found) != 0 {
-		t.Errorf("detectRevertedMerges refused a deletion of a path main never changed after the clone was cut: %+v", found)
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges refused a deletion of a path main never changed after the clone was cut: %+v", report)
 	}
 }
 
@@ -358,18 +370,18 @@ func TestDetectRevertedMerges_DeletingAFileMainDidAddRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rev origin/main: %v", err)
 	}
-	found, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
+	report, err := git.DetectRevertedMerges(g, "origin/main", "HEAD")
 	if err != nil {
 		t.Fatalf("detectRevertedMerges: %v", err)
 	}
-	if len(found) != 1 {
-		t.Fatalf("detectRevertedMerges found %d reverted commits, want the one that added live.txt: %+v", len(found), found)
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want the one that added live.txt: %+v", len(report.Reverted), report)
 	}
-	if found[0].Commit != wantCommit {
-		t.Errorf("reverted commit = %s, want %s (the commit that added live.txt)", found[0].Commit, wantCommit)
+	if report.Reverted[0].Commit != wantCommit {
+		t.Errorf("reverted commit = %s, want %s (the commit that added live.txt)", report.Reverted[0].Commit, wantCommit)
 	}
-	if !containsString(found[0].Paths, "live.txt") {
-		t.Errorf("reverted paths %v missing live.txt", found[0].Paths)
+	if !containsString(report.Reverted[0].Paths, "live.txt") {
+		t.Errorf("reverted paths %v missing live.txt", report.Reverted[0].Paths)
 	}
 }
 
@@ -424,6 +436,326 @@ func TestReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 	if err := reportRevertedMerges(git.NewGit(clean.polecat), "origin/main"); err != nil {
 		t.Errorf("reportRevertedMerges refused a clean branch: %v", err)
 	}
+}
+
+// The constants below build the gt-x748o shape: a Go package whose file gains
+// a comment block and one code line on main, and a polecat checkout cut AFTER
+// that commit. The branch under test is therefore not stale, and the only
+// thing that may explain a revert observation is where the content went.
+const (
+	pkgAdditiveSubject = "add the summary line to the reject record"
+	pkgRefactorSubject = "refactor: extract rejectionRequest (gt-test)"
+
+	// pkgFooBase predates main's additive commit, and is also what a polecat
+	// tree holds when the block was taken out of the file entirely.
+	pkgFooBase = `package pkg
+
+type request struct {
+	ID            string
+	FailureType   string
+	ErrorMsg      string
+	AttemptNumber int
+	Summary       string
+}
+
+func Reject(reason string) request {
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+	}
+}
+`
+
+	// pkgFooWithSummaryLiteral is main's additive commit: a comment and one
+	// code line inside an existing struct literal, the shape bfbba004 added and
+	// gt-s4f6's refactor relocated (gt-x748o).
+	pkgFooWithSummaryLiteral = `package pkg
+
+type request struct {
+	ID            string
+	FailureType   string
+	ErrorMsg      string
+	AttemptNumber int
+	Summary       string
+}
+
+func Reject(reason string) request {
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		// A manual reject carries no verdict to build a Receipt from, so the
+		// deacon falls back to the plain attempt-count redispatch.
+		Summary: reason,
+	}
+}
+`
+
+	// pkgFooWithHelper relocates that literal into a helper in the same file,
+	// re-wrapping the comment and letting gofmt realign the moved key — both of
+	// which rewrite the lines at their new position without changing behavior.
+	pkgFooWithHelper = `package pkg
+
+type request struct {
+	ID            string
+	FailureType   string
+	ErrorMsg      string
+	AttemptNumber int
+	Summary       string
+}
+
+// rejectionRequest builds the record a rejection is remembered by.
+func rejectionRequest(reason string) request {
+	// The reason doubles as the summary line, so a manual reject still records
+	// one and the deacon can name the attempt.
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		Summary:       reason,
+	}
+}
+
+func Reject(reason string) request {
+	return rejectionRequest(reason)
+}
+`
+
+	// pkgSiblingHelper is the same relocation one file over: the package keeps
+	// the code, the path it was observed on does not.
+	pkgSiblingHelper = `package pkg
+
+// rejectionRequest builds the record a rejection is remembered by.
+func rejectionRequest(reason string) request {
+	// The reason doubles as the summary line, so a manual reject still records
+	// one and the deacon can name the attempt.
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		Summary:       reason,
+	}
+}
+`
+
+	// pkgOtherPackageHelper is the same code landing in a DIFFERENT package.
+	pkgOtherPackageHelper = `package other
+
+// rejectionRequest builds the record a rejection is remembered by.
+func rejectionRequest(reason string) pkgRequest {
+	// The reason doubles as the summary line, so a manual reject still records
+	// one and the deacon can name the attempt.
+	return pkgRequest{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		Summary:       reason,
+	}
+}
+`
+
+	// pkgOtherBase is the sibling package's unchanged content.
+	pkgOtherBase = `package other
+
+type pkgRequest struct {
+	ID string
+}
+`
+
+	// pkgFooWithCommentBlock is main's additive commit when it adds comments
+	// and nothing else — the case the relocation test must not excuse, because
+	// comments are excluded from its evidence.
+	pkgFooWithCommentBlock = `package pkg
+
+type request struct {
+	ID            string
+	FailureType   string
+	ErrorMsg      string
+	AttemptNumber int
+	Summary       string
+}
+
+func Reject(reason string) request {
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		// A manual reject carries no verdict to build a Receipt from, so the
+		// deacon falls back to the plain attempt-count redispatch.
+	}
+}
+`
+)
+
+// newPackageRelocationScenario builds the gt-x748o repositories around one
+// additive commit on main. key names additiveFoo: two builds under one key
+// would hand out whichever ran first.
+func newPackageRelocationScenario(t *testing.T, key, additiveFoo string) scenarioPaths {
+	t.Helper()
+	p := cachedGitFixtureStrings(t, "packageRelocation/"+key, func(dir string) []string {
+		sp := buildPackageRelocationScenario(t, dir, additiveFoo)
+		return []string{sp.seed, sp.polecat}
+	})
+	return scenarioPaths{seed: p[0], polecat: p[1]}
+}
+
+func buildPackageRelocationScenario(t *testing.T, dir, additiveFoo string) scenarioPaths {
+	t.Helper()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	polecat := filepath.Join(dir, "polecat")
+
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCmd(t, "", "clone", remote, seed)
+	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
+	runGitCmd(t, seed, "config", "user.name", "Seed")
+	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/foo.go"), pkgFooBase)
+	writeTestFileAt(t, filepath.Join(seed, "internal/other/bar.go"), pkgOtherBase)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", "base")
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	// main's additive commit, and the point the polecat's checkout is cut at:
+	// the branch under test descends from it, so nothing about it is stale.
+	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/foo.go"), additiveFoo)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", pkgAdditiveSubject)
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	runGitCmd(t, "", "clone", remote, polecat)
+	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
+	runGitCmd(t, polecat, "config", "user.name", "Polecat")
+	runGitCmd(t, polecat, "switch", "-c", "polecat/zircon/gt-test")
+	return scenarioPaths{seed: seed, polecat: polecat}
+}
+
+// TestDetectRevertedMerges_RelocatedBlockIsNotARevert is the gt-x748o incident:
+// the polecat moves a merged change's code into a helper, re-indenting it and
+// rewriting the comment around it. The behavior is intact, so the branch must
+// be reported as a relocation and not refused.
+func TestDetectRevertedMerges_RelocatedBlockIsNotARevert(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		edits map[string]string
+	}{
+		{
+			name:  "into a helper in the same file",
+			edits: map[string]string{"internal/pkg/foo.go": pkgFooWithHelper},
+		},
+		{
+			name: "into a sibling file of the same package",
+			edits: map[string]string{
+				"internal/pkg/foo.go":    pkgFooBase,
+				"internal/pkg/helper.go": pkgSiblingHelper,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+			commitPolecat(t, s.polecat, tt.edits, pkgRefactorSubject)
+
+			report := detectRevertedMerges(t, s.polecat)
+			if len(report.Reverted) != 0 {
+				t.Fatalf("detectRevertedMerges refused a relocation: %+v", report.Reverted)
+			}
+			if len(report.Relocated) != 1 {
+				t.Fatalf("detectRevertedMerges reported %d relocations, want 1: %+v", len(report.Relocated), report.Relocated)
+			}
+			wantCommit, err := git.NewGit(s.polecat).Rev("origin/main")
+			if err != nil {
+				t.Fatalf("rev origin/main: %v", err)
+			}
+			if report.Relocated[0].Commit != wantCommit {
+				t.Errorf("relocated commit = %s, want main's additive commit %s", report.Relocated[0].Commit, wantCommit)
+			}
+			if !containsString(report.Relocated[0].Paths, "internal/pkg/foo.go") {
+				t.Errorf("relocated paths %v missing internal/pkg/foo.go", report.Relocated[0].Paths)
+			}
+		})
+	}
+}
+
+// TestDetectRevertedMerges_CodeLeavingThePackageIsARevert is the fail-closed
+// control for the relocation reading: the same move, one package over, deletes
+// the code from the package that holds the file it was observed on. Where the
+// code went is not visible from here, so the observation stands.
+func TestDetectRevertedMerges_CodeLeavingThePackageIsARevert(t *testing.T) {
+	t.Parallel()
+	s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+	commitPolecat(t, s.polecat, map[string]string{
+		"internal/pkg/foo.go":   pkgFooBase,
+		"internal/other/bar.go": pkgOtherPackageHelper,
+	}, pkgRefactorSubject)
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges called a cross-package move a relocation: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
+	}
+	if !containsString(report.Reverted[0].Paths, "internal/pkg/foo.go") {
+		t.Errorf("reverted paths %v missing internal/pkg/foo.go", report.Reverted[0].Paths)
+	}
+}
+
+// TestDetectRevertedMerges_CommentOnlyChangeIsARevert pins the second edge of
+// excluding comments from the relocation evidence: with no code line to find,
+// there is no evidence of a move, so a comment block that survives verbatim
+// elsewhere in the package is still reported as reverted.
+func TestDetectRevertedMerges_CommentOnlyChangeIsARevert(t *testing.T) {
+	t.Parallel()
+	s := newPackageRelocationScenario(t, "comment-block", pkgFooWithCommentBlock)
+	commitPolecat(t, s.polecat, map[string]string{"internal/pkg/foo.go": pkgFooWithHelper}, pkgRefactorSubject)
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges excused a change with no code line to look for: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
+	}
+}
+
+// TestReportRevertedMerges_ReportsRelocationAndContinues checks the
+// operator-facing half: the guard states what it accepted — the commit and the
+// path the content left — and lets the submission through.
+func TestReportRevertedMerges_ReportsRelocationAndContinues(t *testing.T) {
+	t.Parallel()
+	s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+	commitPolecat(t, s.polecat, map[string]string{"internal/pkg/foo.go": pkgFooWithHelper}, pkgRefactorSubject)
+
+	g := git.NewGit(s.polecat)
+	if err := reportRevertedMerges(g, "origin/main"); err != nil {
+		t.Fatalf("reportRevertedMerges refused a relocated block: %v", err)
+	}
+	note := relocatedMergesNote(g, detectRevertedMerges(t, s.polecat).Relocated)
+	for _, want := range []string{"Relocated", pkgAdditiveSubject, "internal/pkg/foo.go"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("relocation note missing %q:\n%s", want, note)
+		}
+	}
+}
+
+// writeTestFileAt writes content to a path whose parent directories the file
+// itself creates; writeTestFile assumes they exist.
+func writeTestFileAt(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir for %s: %v", path, err)
+	}
+	writeTestFile(t, path, content)
 }
 
 func containsString(haystack []string, needle string) bool {
