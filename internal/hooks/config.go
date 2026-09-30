@@ -258,7 +258,11 @@ func LoadSettings(path string) (*SettingsJSON, error) {
 // SyncManagedClaudeSettings merges computed managed hooks into a Claude
 // settings.json file while preserving non-hook settings fields.
 func SyncManagedClaudeSettings(target Target, dryRun bool) (SyncResult, error) {
-	expected, err := ComputeExpected(target.Key)
+	return envConfigHome().syncManagedClaudeSettings(target, dryRun)
+}
+
+func (h configHome) syncManagedClaudeSettings(target Target, dryRun bool) (SyncResult, error) {
+	expected, err := h.computeExpected(target.Key)
 	if err != nil {
 		return 0, fmt.Errorf("computing expected config: %w", err)
 	}
@@ -482,7 +486,11 @@ func DefaultOverrides() map[string]*HooksConfig {
 // are merged first, then on-disk overrides layer on top. On-disk overrides can
 // replace or extend base hooks by providing matching PreToolUse entries.
 func ComputeExpected(target string) (*HooksConfig, error) {
-	base, err := LoadBase()
+	return envConfigHome().computeExpected(target)
+}
+
+func (h configHome) computeExpected(target string) (*HooksConfig, error) {
+	base, err := h.loadBase()
 	if err != nil {
 		if os.IsNotExist(err) {
 			base = DefaultBase()
@@ -505,7 +513,7 @@ func ComputeExpected(target string) (*HooksConfig, error) {
 		}
 
 		// Then layer on-disk overrides on top
-		override, err := LoadOverride(overrideKey)
+		override, err := h.loadOverride(overrideKey)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -785,22 +793,36 @@ func (c *HooksConfig) AddEntry(eventType string, entry HookEntry) bool {
 	return true
 }
 
-// gtPrimaryDir returns the highest-priority .gt config directory.
+// configHome holds what the hook config directories are resolved from:
+// $GT_HOME and the user's home directory. Production reads both from the
+// environment (envConfigHome); unit tests name a sandbox instead of setting
+// HOME.
+type configHome struct {
+	gtHome string // $GT_HOME; "" when unset
+	home   string // os.UserHomeDir(); "" when it cannot be determined
+}
+
+// envConfigHome reads the config home from the environment.
+func envConfigHome() configHome {
+	home, _ := os.UserHomeDir()
+	return configHome{gtHome: os.Getenv("GT_HOME"), home: home}
+}
+
+// primaryDir returns the highest-priority .gt config directory.
 // If GT_HOME is set, returns $GT_HOME/.gt; otherwise returns ~/.gt.
 // This is the target for all write operations and the first location checked
 // during cascaded reads.
-func gtPrimaryDir() string {
-	if h := os.Getenv("GT_HOME"); h != "" {
-		return filepath.Join(h, ".gt")
+func (h configHome) primaryDir() string {
+	if h.gtHome != "" {
+		return filepath.Join(h.gtHome, ".gt")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	if h.home == "" {
 		return filepath.Join(os.TempDir(), ".gt")
 	}
-	return filepath.Join(home, ".gt")
+	return filepath.Join(h.home, ".gt")
 }
 
-// gtConfigDirs returns the ordered list of directories to search for hook
+// configDirs returns the ordered list of directories to search for hook
 // configs, from highest to lowest priority:
 //
 //  1. $GT_HOME/.gt  (only when GT_HOME is set and differs from $HOME)
@@ -808,48 +830,53 @@ func gtPrimaryDir() string {
 //
 // The binary's built-in defaults act as the implicit final fallback and are
 // NOT represented here — callers handle them separately.
-func gtConfigDirs() []string {
-	primary := gtPrimaryDir()
+func (h configHome) configDirs() []string {
+	primary := h.primaryDir()
 	dirs := []string{primary}
 
 	// Add ~/.gt as a lower-priority fallback only when GT_HOME redirects
 	// the primary dir away from the user's home directory.
-	if os.Getenv("GT_HOME") != "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			fallback := filepath.Join(home, ".gt")
-			if fallback != primary {
-				dirs = append(dirs, fallback)
-			}
+	if h.gtHome != "" && h.home != "" {
+		fallback := filepath.Join(h.home, ".gt")
+		if fallback != primary {
+			dirs = append(dirs, fallback)
 		}
 	}
 	return dirs
 }
 
 // BasePath returns the path to the base hooks config file in the primary dir.
-func BasePath() string {
-	return filepath.Join(gtPrimaryDir(), "hooks-base.json")
+func BasePath() string { return envConfigHome().basePath() }
+
+func (h configHome) basePath() string {
+	return filepath.Join(h.primaryDir(), "hooks-base.json")
 }
 
 // OverridePath returns the path to the override config for a given target in
 // the primary dir.
-func OverridePath(target string) string {
+func OverridePath(target string) string { return envConfigHome().overridePath(target) }
+
+func (h configHome) overridePath(target string) string {
 	// Replace "/" with "__" for filesystem safety (e.g., "gastown/crew" -> "gastown__crew")
 	safe := strings.ReplaceAll(target, "/", "__")
-	return filepath.Join(gtPrimaryDir(), "hooks-overrides", safe+".json")
+	return filepath.Join(h.primaryDir(), "hooks-overrides", safe+".json")
 }
 
 // OverridesDir returns the path to the overrides directory in the primary dir.
-func OverridesDir() string {
-	return filepath.Join(gtPrimaryDir(), "hooks-overrides")
+func OverridesDir() string { return envConfigHome().overridesDir() }
+
+func (h configHome) overridesDir() string {
+	return filepath.Join(h.primaryDir(), "hooks-overrides")
 }
 
 // LoadBase loads the base hooks configuration using cascading directory search.
-// Directories are tried in priority order (gtConfigDirs): the first file found
+// Directories are tried in priority order (configDirs): the first file found
 // wins. Returns os.ErrNotExist if no file exists in any location; callers
 // should fall back to DefaultBase() in that case.
-func LoadBase() (*HooksConfig, error) {
-	for _, dir := range gtConfigDirs() {
+func LoadBase() (*HooksConfig, error) { return envConfigHome().loadBase() }
+
+func (h configHome) loadBase() (*HooksConfig, error) {
+	for _, dir := range h.configDirs() {
 		cfg, err := loadConfig(filepath.Join(dir, "hooks-base.json"))
 		if err == nil {
 			return cfg, nil
@@ -862,11 +889,13 @@ func LoadBase() (*HooksConfig, error) {
 }
 
 // LoadOverride loads an override configuration for the given target using
-// cascading directory search. The first file found across gtConfigDirs wins.
+// cascading directory search. The first file found across configDirs wins.
 // Returns os.ErrNotExist if no override exists in any location.
-func LoadOverride(target string) (*HooksConfig, error) {
+func LoadOverride(target string) (*HooksConfig, error) { return envConfigHome().loadOverride(target) }
+
+func (h configHome) loadOverride(target string) (*HooksConfig, error) {
 	safe := strings.ReplaceAll(target, "/", "__")
-	for _, dir := range gtConfigDirs() {
+	for _, dir := range h.configDirs() {
 		cfg, err := loadConfig(filepath.Join(dir, "hooks-overrides", safe+".json"))
 		if err == nil {
 			return cfg, nil
@@ -880,14 +909,20 @@ func LoadOverride(target string) (*HooksConfig, error) {
 
 // SaveBase writes the base hooks configuration to the primary .gt directory
 // ($GT_HOME/.gt if set, otherwise ~/.gt).
-func SaveBase(cfg *HooksConfig) error {
-	return saveConfig(BasePath(), cfg)
+func SaveBase(cfg *HooksConfig) error { return envConfigHome().saveBase(cfg) }
+
+func (h configHome) saveBase(cfg *HooksConfig) error {
+	return saveConfig(h.basePath(), cfg)
 }
 
 // SaveOverride writes an override configuration for the given target to the
 // primary .gt directory.
 func SaveOverride(target string, cfg *HooksConfig) error {
-	return saveConfig(OverridePath(target), cfg)
+	return envConfigHome().saveOverride(target, cfg)
+}
+
+func (h configHome) saveOverride(target string, cfg *HooksConfig) error {
+	return saveConfig(h.overridePath(target), cfg)
 }
 
 // MarshalConfig serializes a HooksConfig to pretty-printed JSON.

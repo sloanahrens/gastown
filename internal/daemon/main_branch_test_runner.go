@@ -653,8 +653,7 @@ type rigGateConfig struct {
 // Gates are resolved separately via rig.LoadNamedGateCommands, which reads
 // only the rig-root tier: named gates live outside config.MergeQueueConfig
 // (see LoadNamedGateCommands's doc comment), so ResolveMergeQueueConfig
-// cannot see them — the same rig-root-only read the refinery's
-// currentGateSetSHAFn uses for the same reason (internal/refinery/engineer.go).
+// cannot see them.
 //
 // Both resolvers swallow their own read/parse errors (returning nil/empty),
 // so unlike the old direct-JSON-parsing version, this can no longer fail.

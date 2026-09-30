@@ -10,14 +10,12 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-func setupNudgeTestRegistry(t *testing.T) {
-	t.Helper()
+// nudgeTestRegistry maps the rig prefixes the nudge tests use.
+func nudgeTestRegistry() *session.PrefixRegistry {
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
 	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	return reg
 }
 
 func TestNudgeHelpUsesTownRootMessagingConfig(t *testing.T) {
@@ -55,7 +53,7 @@ func TestNudgeStdinConflict(t *testing.T) {
 }
 
 func TestResolveNudgePattern(t *testing.T) {
-	setupNudgeTestRegistry(t)
+	t.Parallel()
 	// Create test agent sessions (using rig prefixes)
 	agents := []*AgentSession{
 		{Name: "hq-mayor", Type: AgentMayor},
@@ -139,7 +137,7 @@ func TestResolveNudgePattern(t *testing.T) {
 }
 
 func TestSessionNameToAddress(t *testing.T) {
-	setupNudgeTestRegistry(t)
+	t.Parallel()
 	tests := []struct {
 		name        string
 		sessionName string
@@ -179,7 +177,7 @@ func TestSessionNameToAddress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sessionNameToAddress(tt.sessionName)
+			got := sessionNameToAddressIn(nudgeTestRegistry(), tt.sessionName)
 			if got != tt.expected {
 				t.Errorf("sessionNameToAddress(%q) = %q, want %q", tt.sessionName, got, tt.expected)
 			}

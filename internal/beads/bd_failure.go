@@ -33,10 +33,10 @@ var bdNotFoundSentence = regexp.MustCompile(`(?i)\b(?:issue|wisp)\s+'?[a-z0-9][\
 // does not exist, as opposed to bd being unable to answer. The authority, in
 // order: bd's machine-mode exit status (not_found = 20; the other typed exits
 // are never absence), a JSON error on stdout (envelope kind "not_found", or
-// the legacy --json error sentence), then bd's own not-found sentence on
-// stderr, which pre-machine-mode bd builds exit 1 with. Nothing else counts:
-// a substring "not found" is what Dolt prints when a database or table is
-// missing (G3-01, G5-02).
+// the not-found sentence of an untyped "internal" or legacy --json error),
+// then bd's own not-found sentence on stderr, which pre-machine-mode bd builds
+// exit 1 with. Nothing else counts: a substring "not found" is what Dolt
+// prints when a database or table is missing (G3-01, G5-02).
 func BDReportedNotFound(exitCode int, stdout, stderr []byte) bool {
 	switch exitCode {
 	case bdNotFoundExit:
@@ -45,7 +45,10 @@ func BDReportedNotFound(exitCode int, stdout, stderr []byte) bool {
 		return false
 	}
 	if kind, msg, ok := jsonErrorOf(stdout); ok {
-		if kind != "" {
+		// "internal" is bd's catch-all for an error it did not type: its
+		// comments add and dep add report an unknown id that way (exit 1),
+		// so the sentence decides, as it does for a legacy error (be-2bc).
+		if kind != "" && kind != "internal" {
 			return kind == "not_found"
 		}
 		return bdNotFoundSentence.MatchString(msg)

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -161,7 +162,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	}
 
 	for _, s := range sessions {
-		agent := categorizeSession(s)
+		agent := categorizeSession(session.DefaultRegistry(), s)
 		if agent == nil {
 			continue
 		}

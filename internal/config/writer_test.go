@@ -135,13 +135,13 @@ func TestSaveTownSettingsCreatesThePrivateMode(t *testing.T) {
 }
 
 // TestUpdateConfigJSONWritesOnlyWhatChanged: a rewrite must not write a
-// struct's zero value for a key the file leaves out. The refinery reads
-// merge_queue.enabled as a pointer, so "enabled": false where the key was
-// absent would switch the merge queue off.
+// struct's zero value for a key the file leaves out: a *bool such as
+// merge_queue.integration_branch_polecat_enabled defaults to true when
+// absent, so writing false there would switch the setting off.
 func TestUpdateConfigJSONWritesOnlyWhatChanged(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")
-	writeFile(t, path, `{"type":"rig","version":1,"name":"r","git_url":"x","created_at":"2026-01-01T00:00:00Z","merge_queue":{"test_command":"make test","batch_min_age":"5m"}}`)
+	writeFile(t, path, `{"type":"rig","version":1,"name":"r","git_url":"x","created_at":"2026-01-01T00:00:00Z","merge_queue":{"test_command":"make test","build_command":"make build"}}`)
 	err := UpdateConfigJSON(path, 0o600, func(c *RigConfig, _ bool) error {
 		c.DefaultBranch = "main"
 		c.MergeQueue.TestCommand = "make test-fast"
@@ -152,10 +152,10 @@ func TestUpdateConfigJSONWritesOnlyWhatChanged(t *testing.T) {
 	}
 	got := jsonTree(t, path).(map[string]any)
 	mq := got["merge_queue"].(map[string]any)
-	if _, ok := mq["enabled"]; ok {
-		t.Errorf("rewrite added merge_queue.enabled: %v", mq)
+	if len(mq) != 2 {
+		t.Errorf("rewrite added merge_queue keys: %v", mq)
 	}
-	if mq["test_command"] != "make test-fast" || mq["batch_min_age"] != "5m" || got["default_branch"] != "main" {
+	if mq["test_command"] != "make test-fast" || mq["build_command"] != "make build" || got["default_branch"] != "main" {
 		t.Errorf("changes not applied or untouched values lost: %v", got)
 	}
 	if _, ok := got["beads"]; ok {

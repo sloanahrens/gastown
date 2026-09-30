@@ -144,10 +144,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	case constants.RoleMayor + "/", constants.RoleMayor, "overseer":
 		return nil
 	}
-	validDogAddress := false
-	if _, ok := DogAddressName(normalized); ok {
-		validDogAddress = true
-	} else if isReservedTownSubpath(normalized) {
+	if isReservedTownSubpath(normalized) {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
 	}
 
@@ -188,9 +185,6 @@ func (r *Resolver) validateAgentAddress(address string) error {
 			// Explicit: rig/crew/name or rig/polecats/name
 			if (parts[1] == constants.RoleCrew || parts[1] == "polecats") &&
 				dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
-				return nil
-			}
-			if validDogAddress && dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
 				return nil
 			}
 		}
@@ -460,15 +454,24 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 	}}, nil
 }
 
+// isRetiredDogBeadID reports whether id is an agent bead of the retired dog
+// role (hq-dog-<name>, gt-dog-<name>). Those beads outlive the role, but dogs
+// have no mailbox any more (gt-29q6g), so they map to no address.
+func isRetiredDogBeadID(id string) bool {
+	for _, prefix := range []string{"hq-dog", "gt-dog"} {
+		if id == prefix || strings.HasPrefix(id, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentBeadIDToAddress converts an agent bead ID to a mail address.
 // Handles both gt- (rig agents) and hq- (town agents) prefixes:
 //   - hq-mayor → mayor/
 //   - gt-gastown-crew-max → gastown/crew/max
 func AgentBeadIDToAddress(id string) string {
-	if addr := dogAddressFromAgentBeadID(id); addr != "" {
-		return addr
-	}
-	if isDogAgentBeadIDWithoutName(id) {
+	if isRetiredDogBeadID(id) {
 		return ""
 	}
 
@@ -511,9 +514,6 @@ func AgentBeadIDToAddress(id string) string {
 				role = "polecats"
 			}
 			return rig + "/" + role
-		case "dog":
-			// Town-level named: gt-dog-alpha
-			return dogAddressFromParts(parts, i)
 		}
 	}
 

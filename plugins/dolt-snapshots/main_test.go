@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,5 +452,38 @@ func TestConvoyRow_SnapshotLogic(t *testing.T) {
 				t.Errorf("needStaged = %v, want %v", needStaged, tt.wantStaged)
 			}
 		})
+	}
+}
+
+func TestReopenIfReplaced(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	if nf, err := reopenIfReplaced(f, path); nf != nil || err != nil {
+		t.Fatalf("same file: got %v, %v", nf, err)
+	}
+
+	tmp := path + ".prune.tmp"
+	if err := os.WriteFile(tmp, []byte("retained\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	nf, err := reopenIfReplaced(f, path)
+	if err != nil || nf == nil {
+		t.Fatalf("replaced file: got %v, %v", nf, err)
+	}
+	defer nf.Close()
+	if pos, _ := nf.Seek(0, io.SeekCurrent); pos != int64(len("retained\n")) {
+		t.Errorf("reopened at %d, want the end (%d)", pos, len("retained\n"))
 	}
 }

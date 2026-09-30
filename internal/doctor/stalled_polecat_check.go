@@ -123,7 +123,7 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			id := rigName + "/" + polecatName
 
 			// Check if tmux session is alive
-			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+			sessionName := session.PolecatSessionName(ctx.prefixes().PrefixForRig(rigName), polecatName)
 			alive, err := sessionChecker.HasSession(sessionName)
 			if err != nil {
 				unknown = append(unknown, fmt.Sprintf("%s: could not check session liveness: %v", id, err))

@@ -2,8 +2,5 @@
 # This list only shrinks: converting a package deletes its line.
 internal/beads
 internal/cmd
-internal/config
-internal/hooks
 internal/mayor
-internal/plugin
 internal/telemetry

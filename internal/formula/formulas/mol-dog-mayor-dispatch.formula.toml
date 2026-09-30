@@ -50,11 +50,6 @@ The daemon:
 formula = "mol-dog-mayor-dispatch"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "inspect"
 title = "Inspect free seats and actionable ready work"

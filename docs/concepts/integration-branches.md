@@ -173,13 +173,12 @@ reports `ready_to_land: true`. See [Landing](#landing).
 
 ## Auto-Detection
 
-Integration branches work without manual targeting. Three systems auto-detect them:
+Integration branches work without manual targeting. Two systems auto-detect them:
 
 | System | What It Does | Config Gate |
 |--------|-------------|-------------|
-| `gt done` / `gt mq submit` | Targets MR at integration branch instead of main | `integration_branch_refinery_enabled` |
+| `gt done` / `gt mq submit` | Targets MR at integration branch instead of main | none |
 | Polecat spawn | Sources worktree from integration branch | `integration_branch_polecat_enabled` |
-| Refinery patrol | Checks if integration branches are ready to land | `integration_branch_auto_land` |
 
 ### Detection Algorithm
 
@@ -187,17 +186,15 @@ When `gt done` or `gt mq submit` runs:
 
 | Step | Action | Result |
 |------|--------|--------|
-| 1 | Load config, check `integration_branch_refinery_enabled` | If false, skip detection |
-| 2 | Get current issue ID from branch name | e.g., `gt-auth-tokens` |
-| 3 | Walk parent chain (max 10 levels) | Find ancestor epics |
-| 4 | For each epic: read `integration_branch:` from metadata | Get stored branch name |
-| 5 | Fallback: generate name from template | e.g., `integration/{title}` |
-| 6 | Check if branch exists (local, then remote) | Verify it's real |
-| 7 | If found, target MR at that branch | Instead of main |
+| 1 | Get current issue ID from branch name | e.g., `gt-auth-tokens` |
+| 2 | Walk parent chain (max 10 levels) | Find ancestor epics |
+| 3 | For each epic: read `integration_branch:` from metadata | Get stored branch name |
+| 4 | Fallback: generate name from the default template | e.g., `integration/{title}` |
+| 5 | Check if branch exists (local, then remote) | Verify it's real |
+| 6 | If found, target MR at that branch | Instead of main |
 
 The `--epic` flag on `gt mq submit` bypasses auto-detection and resolves
-the target branch using the configured template (defaulting to
-`integration/{epic}`).
+the target branch from the default template.
 
 ## Branch Naming
 
@@ -214,8 +211,7 @@ the target branch using the configured template (defaulting to
 | Priority | Source | Example |
 |----------|--------|---------|
 | 1 (highest) | `--branch` flag on create | `--branch "feat/{epic}"` |
-| 2 | `integration_branch_template` in config | `"{user}/{epic}"` |
-| 3 (lowest) | Default | `"integration/{title}"` |
+| 2 (lowest) | Default | `"integration/{title}"` |
 
 ### Template Variables
 
@@ -331,16 +327,12 @@ pipeline follows:
 
 ### Integration Branch Settings
 
-All integration branch fields live under `merge_queue` in rig settings (`settings/config.json`):
+One integration branch field lives under `merge_queue` in rig settings (`settings/config.json`):
 
 ```json
 {
   "merge_queue": {
-    "enabled": true,
-    "integration_branch_polecat_enabled": true,
-    "integration_branch_refinery_enabled": true,
-    "integration_branch_template": "integration/{title}",
-    "integration_branch_auto_land": false
+    "integration_branch_polecat_enabled": true
   }
 }
 ```
@@ -348,13 +340,11 @@ All integration branch fields live under `merge_queue` in rig settings (`setting
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `integration_branch_polecat_enabled` | `*bool` | `true` | Polecats auto-source worktrees from integration branches |
-| `integration_branch_refinery_enabled` | `*bool` | `true` | `gt mq submit` and `gt done` auto-detect integration branches as MR targets |
-| `integration_branch_template` | `string` | `"integration/{title}"` | Branch name template (supports `{title}`, `{epic}`, `{prefix}`, `{user}`) |
-| `integration_branch_auto_land` | `*bool` | `false` | No effect: gt does not land integration branches (gt-fcxe9.4) |
 
-**Note:** `*bool` fields use pointer semantics — `null`/omitted means "use default"
-(true for polecat/refinery enabled). Set explicitly to `false`
-to disable.
+**Note:** the field uses pointer semantics — `null`/omitted means true. Set it
+explicitly to `false` to disable. `integration_branch_refinery_enabled`,
+`integration_branch_template` and `integration_branch_auto_land` were removed
+(gt-5nlvq): nothing read them.
 
 ## Landing
 
@@ -472,7 +462,6 @@ before slinging any child work.
 
 Auto-detection handles this. If you find yourself manually targeting, check that:
 - The integration branch actually exists
-- `integration_branch_refinery_enabled` is not `false`
 - The issue is a child (or descendant) of the epic
 
 ## See Also

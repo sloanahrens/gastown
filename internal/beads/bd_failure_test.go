@@ -36,6 +36,10 @@ func TestBDReportedNotFound(t *testing.T) {
 	}{
 		{"machine exit 20", 20, "", "", true},
 		{"envelope kind", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"not_found","message":"issue gt-x not found"}}`, "", true},
+		// bd 461b0f0's comments add and dep add report an unknown id as the
+		// catch-all kind, not not_found; the resolver sentence still decides.
+		{"envelope internal kind with resolver sentence", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"resolving dependency ID gt-nosuch: resolving issue ID gt-nosuch: no issue found matching \"gt-nosuch\""}}`, "", true},
+		{"envelope internal kind without sentence", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"table not found: issues"}}`, "", false},
 		{"envelope other kind", 25, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"database not found: gastown"}}`, "", false},
 		{"legacy show --json", 1, `{"error": "no issues found matching the provided IDs", "schema_version": 1}`, "Issue gt-x not found\nHint: this ID may have never existed", true},
 		{"legacy stderr sentence", 1, "", "Issue gt-zz not found\nHint: ...", true},

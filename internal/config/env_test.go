@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -750,16 +751,15 @@ func TestSanitizeAgentEnv_ClearsBDTargetSelectors(t *testing.T) {
 }
 
 func TestAgentEnv_ExcludesAnthropicBaseURL(t *testing.T) {
-	// Not parallel — t.Setenv modifies process environment.
-
+	t.Parallel()
 	// Even when ANTHROPIC_BASE_URL is set in the process environment,
 	// AgentEnv must NOT forward it. Agents that need a custom base URL
 	// get it from their agent config's Env block (rc.Env), not inheritance.
 	// Passthrough caused cross-provider contamination: a MiniMax deacon's
 	// base URL leaked into Claude polecats, causing 401 auth failures.
-	t.Setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+	getenv := envOf("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
 
-	env := AgentEnv(AgentEnvConfig{Role: "polecat", Rig: "testrig", AgentName: "ember"})
+	env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "polecat", Rig: "testrig", AgentName: "ember"})
 	if val, ok := env["ANTHROPIC_BASE_URL"]; ok {
 		t.Errorf("AgentEnv should not forward ANTHROPIC_BASE_URL, got %q", val)
 	}
@@ -827,15 +827,15 @@ func TestAgentEnv_IncludesClaudeCodeClearing(t *testing.T) {
 }
 
 func TestAgentEnv_ClearsBDTargetSelectors(t *testing.T) {
-	// Not parallel: t.Setenv modifies process environment.
+	t.Parallel()
+	kv := []string{"GT_DOLT_PORT", "13307", "GT_DOLT_HOST", "dolt.example"}
 	for _, key := range bdTargetSelectorEnvVars {
-		t.Setenv(key, "stale")
+		kv = append(kv, key, "stale")
 	}
-	t.Setenv("GT_DOLT_PORT", "13307")
-	t.Setenv("GT_DOLT_HOST", "dolt.example")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	getenv := envOf(kv...)
 
 	env := AgentEnv(AgentEnvConfig{
+		Getenv:    getenv,
 		Role:      "polecat",
 		Rig:       "myrig",
 		AgentName: "Toast",
@@ -888,12 +888,11 @@ func TestAgentEnv_DisablesBdBackup(t *testing.T) {
 // are propagated from the process env to agent sessions, preventing bd from
 // auto-starting rogue Dolt instances. (GH#2412)
 func TestAgentEnv_PropagatesDoltPort(t *testing.T) {
+	t.Parallel()
 	// Subtest: GT_DOLT_PORT set → both vars propagated
 	t.Run("gt_dolt_port_set", func(t *testing.T) {
-		t.Setenv("GT_DOLT_PORT", "13307")
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "")
-		env := AgentEnv(AgentEnvConfig{Role: "crew", Rig: "myrig", AgentName: "alice"})
+		getenv := envOf("GT_DOLT_PORT", "13307")
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "crew", Rig: "myrig", AgentName: "alice"})
 		assertEnv(t, env, "GT_DOLT_PORT", "13307")
 		assertEnv(t, env, "BEADS_DOLT_SERVER_PORT", "13307")
 		assertEnv(t, env, "BEADS_DOLT_PORT", "13307")
@@ -901,10 +900,8 @@ func TestAgentEnv_PropagatesDoltPort(t *testing.T) {
 
 	// Subtest: GT_DOLT_PORT overrides stale Beads port aliases
 	t.Run("gt_dolt_port_overrides_stale_beads_ports", func(t *testing.T) {
-		t.Setenv("GT_DOLT_PORT", "13307")
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "88888")
-		t.Setenv("BEADS_DOLT_PORT", "99999")
-		env := AgentEnv(AgentEnvConfig{Role: "polecat", Rig: "myrig", AgentName: "Toast"})
+		getenv := envOf("GT_DOLT_PORT", "13307", "BEADS_DOLT_SERVER_PORT", "88888", "BEADS_DOLT_PORT", "99999")
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "polecat", Rig: "myrig", AgentName: "Toast"})
 		assertEnv(t, env, "GT_DOLT_PORT", "13307")
 		assertEnv(t, env, "BEADS_DOLT_SERVER_PORT", "13307")
 		assertEnv(t, env, "BEADS_DOLT_PORT", "13307")
@@ -913,10 +910,8 @@ func TestAgentEnv_PropagatesDoltPort(t *testing.T) {
 	// Subtest: only BEADS_DOLT_PORT set (no GT_DOLT_PORT) → ignored because
 	// Beads aliases are derived outputs, not endpoint authority.
 	t.Run("beads_only", func(t *testing.T) {
-		t.Setenv("GT_DOLT_PORT", "")
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "3307")
-		env := AgentEnv(AgentEnvConfig{Role: "witness", Rig: "myrig"})
+		getenv := envOf("BEADS_DOLT_PORT", "3307")
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "witness", Rig: "myrig"})
 		if _, ok := env["GT_DOLT_PORT"]; ok {
 			t.Error("GT_DOLT_PORT should not be set when env is empty")
 		}
@@ -926,10 +921,8 @@ func TestAgentEnv_PropagatesDoltPort(t *testing.T) {
 
 	// Subtest: neither set → neither propagated
 	t.Run("neither_set", func(t *testing.T) {
-		t.Setenv("GT_DOLT_PORT", "")
-		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-		t.Setenv("BEADS_DOLT_PORT", "")
-		env := AgentEnv(AgentEnvConfig{Role: "mayor"})
+		getenv := envOf()
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "mayor"})
 		if _, ok := env["GT_DOLT_PORT"]; ok {
 			t.Error("GT_DOLT_PORT should not be set")
 		}
@@ -943,18 +936,17 @@ func TestAgentEnv_PropagatesDoltPort(t *testing.T) {
 }
 
 func TestAgentEnv_PropagatesDoltHost(t *testing.T) {
+	t.Parallel()
 	t.Run("gt_host_overrides_stale_beads_host", func(t *testing.T) {
-		t.Setenv("GT_DOLT_HOST", "127.0.0.2")
-		t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-		env := AgentEnv(AgentEnvConfig{Role: "crew", Rig: "myrig", AgentName: "alice"})
+		getenv := envOf("GT_DOLT_HOST", "127.0.0.2", "BEADS_DOLT_SERVER_HOST", "stale-host")
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "crew", Rig: "myrig", AgentName: "alice"})
 		assertEnv(t, env, "GT_DOLT_HOST", "127.0.0.2")
 		assertEnv(t, env, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
 	})
 
 	t.Run("beads_host_ignored_without_gt_or_config", func(t *testing.T) {
-		t.Setenv("GT_DOLT_HOST", "")
-		t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-		env := AgentEnv(AgentEnvConfig{Role: "crew", Rig: "myrig", AgentName: "alice"})
+		getenv := envOf("BEADS_DOLT_SERVER_HOST", "stale-host")
+		env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "crew", Rig: "myrig", AgentName: "alice"})
 		assertNotSet(t, env, "GT_DOLT_HOST")
 		assertNotSet(t, env, "BEADS_DOLT_SERVER_HOST")
 	})
@@ -1037,11 +1029,12 @@ func TestSanitizeOTELAttrValue(t *testing.T) {
 }
 
 func TestAgentEnv_OTELPromptAndTown(t *testing.T) {
-	t.Setenv("GT_OTEL_METRICS_URL", "http://localhost:8428/opentelemetry/api/v1/push")
-	t.Setenv("GT_OTEL_LOGS_URL", "http://localhost:9428/insert/opentelemetry/v1/logs")
+	t.Parallel()
+	getenv := envOf("GT_OTEL_METRICS_URL", "http://localhost:8428/opentelemetry/api/v1/push", "GT_OTEL_LOGS_URL", "http://localhost:9428/insert/opentelemetry/v1/logs")
 
 	beacon := "[GAS TOWN] polecat rust (rig: gastown) <- witness • 2025-12-30T15:42 • assigned:gt-abc12\n\nRun `gt prime --hook`"
 	env := AgentEnv(AgentEnvConfig{
+		Getenv:    getenv,
 		Role:      "polecat",
 		Rig:       "gastown",
 		AgentName: "rust",
@@ -1072,11 +1065,12 @@ func TestAgentEnv_OTELPromptAndTown(t *testing.T) {
 }
 
 func TestAgentEnv_OTELNoPromptNoTown(t *testing.T) {
-	t.Setenv("GT_OTEL_METRICS_URL", "http://localhost:8428/opentelemetry/api/v1/push")
-	t.Setenv("GT_OTEL_LOGS_URL", "http://localhost:9428/insert/opentelemetry/v1/logs")
+	t.Parallel()
+	getenv := envOf("GT_OTEL_METRICS_URL", "http://localhost:8428/opentelemetry/api/v1/push", "GT_OTEL_LOGS_URL", "http://localhost:9428/insert/opentelemetry/v1/logs")
 
 	env := AgentEnv(AgentEnvConfig{
-		Role: "mayor",
+		Getenv: getenv,
+		Role:   "mayor",
 		// No Prompt, no TownRoot
 	})
 
@@ -1167,8 +1161,8 @@ func TestParsePortFromConfigYAML(t *testing.T) {
 }
 
 func TestResolveDoltPort_FromConfigYAML(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -1182,25 +1176,27 @@ func TestResolveDoltPort_FromConfigYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 3309 {
-		t.Errorf("resolveDoltPort() = %d, want 3309", got)
+		t.Errorf("ResolveDoltPort() = %d, want 3309", got)
 	}
 }
 
 func TestResolveDoltPort_FromEnvVar(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "3310")
+	getenv := envOf("GT_DOLT_PORT", "3310")
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 3310 {
-		t.Errorf("resolveDoltPort() = %d, want 3310", got)
+		t.Errorf("ResolveDoltPort() = %d, want 3310", got)
 	}
 }
 
 func TestResolveDoltPort_GTDoltPortTakesPrecedenceOverConfigYAML(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "9999")
+	getenv := envOf("GT_DOLT_PORT", "9999")
 
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -1214,14 +1210,15 @@ func TestResolveDoltPort_GTDoltPortTakesPrecedenceOverConfigYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 9999 {
-		t.Errorf("resolveDoltPort() = %d, want 9999 (env var > config.yaml)", got)
+		t.Errorf("ResolveDoltPort() = %d, want 9999 (env var > config.yaml)", got)
 	}
 }
 
 func TestResolveDoltPort_IgnoresRunningStateFile(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	daemonDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -1231,15 +1228,15 @@ func TestResolveDoltPort_IgnoresRunningStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 0 {
-		t.Errorf("resolveDoltPort() = %d, want 0 (transient state ignored)", got)
+		t.Errorf("ResolveDoltPort() = %d, want 0 (transient state ignored)", got)
 	}
 }
 
 func TestResolveDoltPort_ConfigYAMLBeatsRunningStateFile(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	daemonDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -1256,15 +1253,15 @@ func TestResolveDoltPort_ConfigYAMLBeatsRunningStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 3309 {
-		t.Errorf("resolveDoltPort() = %d, want 3309 (config.yaml > transient state)", got)
+		t.Errorf("ResolveDoltPort() = %d, want 3309 (config.yaml > transient state)", got)
 	}
 }
 
 func TestResolveDoltPort_IgnoresStoppedStateFile(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_PORT", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	daemonDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -1281,14 +1278,15 @@ func TestResolveDoltPort_IgnoresStoppedStateFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 3309 {
-		t.Errorf("resolveDoltPort() = %d, want 3309", got)
+		t.Errorf("ResolveDoltPort() = %d, want 3309", got)
 	}
 }
 
 func TestResolveDoltPort_FromDaemonJSON(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "") // isolate from live Dolt server
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -1299,24 +1297,25 @@ func TestResolveDoltPort_FromDaemonJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 3311 {
-		t.Errorf("resolveDoltPort() = %d, want 3311", got)
+		t.Errorf("ResolveDoltPort() = %d, want 3311", got)
 	}
 }
 
 func TestResolveDoltPort_NoConfig(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "") // isolate from live Dolt server
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
-	got := resolveDoltPort(tmpDir)
+	got := ResolveDoltPortWithEnv(tmpDir, getenv)
 	if got != 0 {
-		t.Errorf("resolveDoltPort() = %d, want 0 (no config)", got)
+		t.Errorf("ResolveDoltPort() = %d, want 0 (no config)", got)
 	}
 }
 
 func TestResolveDoltHost_FromConfigYAML(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -1326,14 +1325,15 @@ func TestResolveDoltHost_FromConfigYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveDoltHost(tmpDir)
+	got := ResolveDoltHostWithEnv(tmpDir, getenv)
 	if got != "127.0.0.2" {
 		t.Errorf("ResolveDoltHost() = %q, want 127.0.0.2", got)
 	}
 }
 
 func TestResolveDoltHost_FromDaemonJSON(t *testing.T) {
-	t.Setenv("GT_DOLT_HOST", "")
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -1343,25 +1343,25 @@ func TestResolveDoltHost_FromDaemonJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveDoltHost(tmpDir)
+	got := ResolveDoltHostWithEnv(tmpDir, getenv)
 	if got != "127.0.0.3" {
 		t.Errorf("ResolveDoltHost() = %q, want 127.0.0.3", got)
 	}
 }
 
 func TestResolveDoltHost_IgnoresBeadsAlias(t *testing.T) {
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-	got := ResolveDoltHost(t.TempDir())
+	t.Parallel()
+	getenv := envOf("BEADS_DOLT_SERVER_HOST", "stale-host")
+	got := ResolveDoltHostWithEnv(t.TempDir(), getenv)
 	if got != "" {
 		t.Errorf("ResolveDoltHost() = %q, want empty", got)
 	}
 }
 
 func TestResolveConfiguredDoltPort_ConfigYAMLBeatsEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_PORT", "9999")
+	getenv := envOf("GT_DOLT_PORT", "9999")
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1370,26 +1370,27 @@ func TestResolveConfiguredDoltPort_ConfigYAMLBeatsEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveConfiguredDoltPort(tmpDir)
+	got := resolveConfiguredDoltPort(tmpDir, getenv)
 	if got != 3307 {
 		t.Errorf("ResolveConfiguredDoltPort() = %d, want 3307", got)
 	}
 }
 
 func TestResolveConfiguredDoltPort_FallsBackToEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "3310")
+	getenv := envOf("GT_DOLT_PORT", "3310")
 
-	got := ResolveConfiguredDoltPort(tmpDir)
+	got := resolveConfiguredDoltPort(tmpDir, getenv)
 	if got != 3310 {
 		t.Errorf("ResolveConfiguredDoltPort() = %d, want 3310", got)
 	}
 }
 
 func TestResolveConfiguredDoltPort_IgnoreConfigUsesEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "1")
-	t.Setenv("GT_DOLT_PORT", "3310")
+	getenv := envOf("GT_DOLT_IGNORE_CONFIG", "1", "GT_DOLT_PORT", "3310")
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1398,15 +1399,16 @@ func TestResolveConfiguredDoltPort_IgnoreConfigUsesEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveConfiguredDoltPort(tmpDir)
+	got := resolveConfiguredDoltPort(tmpDir, getenv)
 	if got != 3310 {
 		t.Errorf("ResolveConfiguredDoltPort() = %d, want 3310", got)
 	}
 }
 
 func TestResolveConfiguredDoltPort_DaemonJSONFallback(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "")
+	getenv := envOf()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1415,16 +1417,16 @@ func TestResolveConfiguredDoltPort_DaemonJSONFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveConfiguredDoltPort(tmpDir)
+	got := resolveConfiguredDoltPort(tmpDir, getenv)
 	if got != 5507 {
 		t.Errorf("ResolveConfiguredDoltPort() = %d, want 5507", got)
 	}
 }
 
 func TestResolveConfiguredDoltHost_ConfigYAMLBeatsEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "stale-host")
+	getenv := envOf("GT_DOLT_HOST", "stale-host")
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1433,25 +1435,26 @@ func TestResolveConfiguredDoltHost_ConfigYAMLBeatsEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ResolveConfiguredDoltHost(tmpDir)
+	got := resolveConfiguredDoltHost(tmpDir, getenv)
 	if got != "127.0.0.2" {
 		t.Errorf("ResolveConfiguredDoltHost() = %q, want 127.0.0.2", got)
 	}
 }
 
 func TestResolveConfiguredDoltHost_FallsBackToEnv(t *testing.T) {
-	t.Setenv("GT_DOLT_HOST", "127.0.0.4")
+	t.Parallel()
+	getenv := envOf("GT_DOLT_HOST", "127.0.0.4")
 
-	got := ResolveConfiguredDoltHost(t.TempDir())
+	got := resolveConfiguredDoltHost(t.TempDir(), getenv)
 	if got != "127.0.0.4" {
 		t.Errorf("ResolveConfiguredDoltHost() = %q, want 127.0.0.4", got)
 	}
 }
 
 func TestResolveConfiguredDoltHost_ConfigYAMLWithoutHostDoesNotFallBackToEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "stale-host")
+	getenv := envOf("GT_DOLT_HOST", "stale-host")
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1460,14 +1463,15 @@ func TestResolveConfiguredDoltHost_ConfigYAMLWithoutHostDoesNotFallBackToEnv(t *
 		t.Fatal(err)
 	}
 
-	if got := ResolveConfiguredDoltHost(tmpDir); got != "" {
+	if got := resolveConfiguredDoltHost(tmpDir, getenv); got != "" {
 		t.Errorf("ResolveConfiguredDoltHost() = %q, want empty host from managed config", got)
 	}
 }
 
 func TestNormalizeConfiguredDoltEnv_ConfigYAMLBeatsStaleEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	getenv := envOf()
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1476,14 +1480,14 @@ func TestNormalizeConfiguredDoltEnv_ConfigYAMLBeatsStaleEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	env := NormalizeConfiguredDoltEnv([]string{
+	env := normalizeConfiguredDoltEnv([]string{
 		"GT_DOLT_HOST=stale-host",
 		"GT_DOLT_PORT=9999",
 		"BEADS_DOLT_SERVER_HOST=stale-host",
 		"BEADS_DOLT_SERVER_PORT=9999",
 		"BEADS_DOLT_PORT=9999",
 		"KEEP=1",
-	}, tmpDir)
+	}, tmpDir, getenv)
 	got := envSliceMap(env)
 	if got["GT_DOLT_HOST"] != "127.0.0.2" || got["GT_DOLT_PORT"] != "5507" {
 		t.Fatalf("GT endpoint = %q:%q, want config endpoint in %v", got["GT_DOLT_HOST"], got["GT_DOLT_PORT"], env)
@@ -1499,8 +1503,9 @@ func TestNormalizeConfiguredDoltEnv_ConfigYAMLBeatsStaleEnv(t *testing.T) {
 }
 
 func TestNormalizeConfiguredDoltEnv_ConfigYAMLWithoutHostClearsStaleHost(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	getenv := envOf()
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1509,7 +1514,7 @@ func TestNormalizeConfiguredDoltEnv_ConfigYAMLWithoutHostClearsStaleHost(t *test
 		t.Fatal(err)
 	}
 
-	env := NormalizeConfiguredDoltEnv([]string{"GT_DOLT_HOST=stale-host", "GT_DOLT_PORT=9999"}, tmpDir)
+	env := normalizeConfiguredDoltEnv([]string{"GT_DOLT_HOST=stale-host", "GT_DOLT_PORT=9999"}, tmpDir, getenv)
 	got := envSliceMap(env)
 	if _, ok := got["GT_DOLT_HOST"]; ok {
 		t.Fatalf("GT_DOLT_HOST leaked from config without host: %v", env)
@@ -1531,12 +1536,8 @@ func envSliceMap(env []string) map[string]string {
 }
 
 func TestAgentEnv_InjectsDoltPort(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Parallel()
+	getenv := envOf("BEADS_DOLT_SERVER_HOST", "stale-host")
 	tmpDir := t.TempDir()
 	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -1564,7 +1565,9 @@ func TestAgentEnv_InjectsDoltPort(t *testing.T) {
 
 	for _, tc := range roles {
 		t.Run(tc.name, func(t *testing.T) {
-			env := AgentEnv(tc.cfg)
+			cfg := tc.cfg
+			cfg.Getenv = getenv
+			env := AgentEnv(cfg)
 			assertEnv(t, env, "GT_DOLT_HOST", "127.0.0.2")
 			assertEnv(t, env, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
 			assertEnv(t, env, "GT_DOLT_PORT", "3307")
@@ -1575,22 +1578,22 @@ func TestAgentEnv_InjectsDoltPort(t *testing.T) {
 }
 
 func TestAgentEnv_NoDoltPortWithoutTownRoot(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "") // isolate from live Dolt server
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "") // isolate from live Dolt server
+	t.Parallel()
+	getenv := envOf()
 	env := AgentEnv(AgentEnvConfig{
-		Role: "mayor",
+		Getenv: getenv,
+		Role:   "mayor",
 	})
 	assertNotSet(t, env, "GT_DOLT_PORT")
 	assertNotSet(t, env, "BEADS_DOLT_PORT")
 }
 
 func TestAgentEnv_NoDoltPortWithoutConfig(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "") // isolate from live Dolt server
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "") // isolate from live Dolt server
+	t.Parallel()
+	getenv := envOf()
 	tmpDir := t.TempDir()
 	env := AgentEnv(AgentEnvConfig{
+		Getenv:   getenv,
 		Role:     "mayor",
 		TownRoot: tmpDir,
 	})
@@ -1599,13 +1602,9 @@ func TestAgentEnv_NoDoltPortWithoutConfig(t *testing.T) {
 }
 
 func TestClaudeConfigDir_Default(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("getting home dir: %v", err)
-	}
-
-	got, err := ClaudeConfigDir()
+	t.Parallel()
+	home := t.TempDir()
+	got, err := claudeConfigDir(envOf(), func() (string, error) { return home, nil })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1616,10 +1615,11 @@ func TestClaudeConfigDir_Default(t *testing.T) {
 }
 
 func TestClaudeConfigDir_EnvVar(t *testing.T) {
+	t.Parallel()
 	customDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", customDir)
+	getenv := envOf("CLAUDE_CONFIG_DIR", customDir)
 
-	got, err := ClaudeConfigDir()
+	got, err := claudeConfigDir(getenv, func() (string, error) { return "", errors.New("home must not be read") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1629,9 +1629,11 @@ func TestClaudeConfigDir_EnvVar(t *testing.T) {
 }
 
 func TestAgentEnv_EffortLevel(t *testing.T) {
+	t.Parallel()
 	t.Run("defaults to high when no config exists", func(t *testing.T) {
-		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
+		getenv := envOf()
 		env := AgentEnv(AgentEnvConfig{
+			Getenv:   getenv,
 			Role:     "crew",
 			TownRoot: "/tmp/nonexistent-town",
 		})
@@ -1642,25 +1644,22 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 
 	t.Run("ignores shell env var", func(t *testing.T) {
 		// The env var is deprecated — config takes over, falling back to "high"
-		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
-		stderr := captureStderr(t, func() {
-			env := AgentEnv(AgentEnvConfig{
-				Role:     "crew",
-				TownRoot: "/tmp/nonexistent-town",
-			})
-			if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
-				t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (env var should be ignored)", got, "high")
-			}
+		getenv := envOf("CLAUDE_CODE_EFFORT_LEVEL", "max")
+		env := AgentEnv(AgentEnvConfig{
+			Getenv:   getenv,
+			Role:     "crew",
+			TownRoot: "/tmp/nonexistent-town",
 		})
-		if stderr != "" {
-			t.Fatalf("AgentEnv emitted stderr for ignored CLAUDE_CODE_EFFORT_LEVEL: %q", stderr)
+		if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
+			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (env var should be ignored)", got, "high")
 		}
 	})
 
 	t.Run("always sets the key", func(t *testing.T) {
-		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
+		getenv := envOf()
 		env := AgentEnv(AgentEnvConfig{
-			Role: "witness",
+			Getenv: getenv,
+			Role:   "witness",
 		})
 		if _, ok := env["CLAUDE_CODE_EFFORT_LEVEL"]; !ok {
 			t.Error("CLAUDE_CODE_EFFORT_LEVEL should always be set")
@@ -1669,8 +1668,8 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 }
 
 func TestExpandEnvRefs(t *testing.T) {
-	t.Setenv("GT_TEST_KEY", "gsk_live_value")
-	t.Setenv("GT_TEST_URL", "https://example.test/v1")
+	t.Parallel()
+	getenv := envOf("GT_TEST_KEY", "gsk_live_value", "GT_TEST_URL", "https://example.test/v1")
 
 	tests := []struct {
 		name string
@@ -1726,7 +1725,7 @@ func TestExpandEnvRefs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExpandEnvRefs(tt.in)
+			got := expandEnvRefsIn(tt.in, getenv)
 			if tt.want == nil {
 				if len(got) != 0 {
 					t.Fatalf("ExpandEnvRefs(nil) = %v, want empty", got)
@@ -1746,10 +1745,11 @@ func TestExpandEnvRefs(t *testing.T) {
 }
 
 func TestExpandEnvRefsDoesNotMutateInput(t *testing.T) {
-	t.Setenv("GT_TEST_KEY", "gsk_live_value")
+	t.Parallel()
+	getenv := envOf("GT_TEST_KEY", "gsk_live_value")
 	in := map[string]string{"ANTHROPIC_API_KEY": "${GT_TEST_KEY}"}
 
-	ExpandEnvRefs(in)
+	expandEnvRefsIn(in, getenv)
 
 	if in["ANTHROPIC_API_KEY"] != "${GT_TEST_KEY}" {
 		t.Errorf("input mutated: ANTHROPIC_API_KEY = %q, want the reference preserved", in["ANTHROPIC_API_KEY"])
@@ -1757,6 +1757,7 @@ func TestExpandEnvRefsDoesNotMutateInput(t *testing.T) {
 }
 
 func TestEnvRefNames(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -1785,4 +1786,14 @@ func TestEnvRefNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+// envOf is a getenv over the given key/value pairs; every other variable is
+// unset.
+func envOf(kv ...string) func(string) string {
+	m := make(map[string]string, len(kv)/2)
+	for i := 0; i+1 < len(kv); i += 2 {
+		m[kv[i]] = kv[i+1]
+	}
+	return func(key string) string { return m[key] }
 }

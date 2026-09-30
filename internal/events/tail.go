@@ -77,6 +77,13 @@ func OpenTail(path string) (*Tail, error) {
 	return t, nil
 }
 
+// Offset is how many bytes of the current file the tail has consumed. Right
+// after OpenTail it is the size the tail started from, so a caller can read
+// the history before it without overlapping what Poll will return.
+func (t *Tail) Offset() int64 {
+	return t.pos
+}
+
 // Close releases the open file.
 func (t *Tail) Close() error {
 	return t.f.Close()

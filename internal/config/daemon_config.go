@@ -47,6 +47,7 @@ type PatrolsConfig struct {
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
+	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
 	// per run; the open bead is the double-dispatch guard (gt-nj23).
@@ -385,6 +386,24 @@ type MayorDispatchConfig struct {
 
 	// IntervalStr is how often to check, as a string (e.g., "30m").
 	IntervalStr string `json:"interval,omitempty"`
+}
+
+// EventsPruneConfig bounds the town's raw event log, .events.jsonl, which
+// otherwise only grows (gt-ori5j). On when the key is absent; an explicit
+// entry must set "enabled". Empty fields take the daemon's defaults
+// (see events_prune.go).
+type EventsPruneConfig struct {
+	// Enabled controls whether the patrol runs.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is how often to prune, as a string (e.g., "1h").
+	IntervalStr string `json:"interval,omitempty"`
+
+	// MaxAgeStr drops events older than this, as a string (e.g., "168h").
+	MaxAgeStr string `json:"max_age,omitempty"`
+
+	// MaxBytes caps the file size; over it, the newest half of the cap is kept.
+	MaxBytes int64 `json:"max_bytes,omitempty"`
 }
 
 // PatrolScanConfig configures the patrol_scan tick (ADR 0005, gt-4k3fj.6):

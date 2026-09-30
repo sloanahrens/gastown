@@ -8,6 +8,7 @@ import (
 )
 
 func TestLoadBuiltinRoleDefinition(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		role        string
@@ -70,6 +71,7 @@ func TestLoadBuiltinRoleDefinition(t *testing.T) {
 }
 
 func TestLoadBuiltinRoleDefinition_UnknownRole(t *testing.T) {
+	t.Parallel()
 	_, err := loadBuiltinRoleDefinition("nonexistent")
 	if err == nil {
 		t.Error("expected error for unknown role, got nil")
@@ -77,6 +79,7 @@ func TestLoadBuiltinRoleDefinition_UnknownRole(t *testing.T) {
 }
 
 func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
+	t.Parallel()
 	_, err := LoadRoleDefinition("/tmp/town", "", "nonexistent")
 	if err == nil {
 		t.Error("expected error for unknown role, got nil")
@@ -88,6 +91,7 @@ func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
 }
 
 func TestAllRoles(t *testing.T) {
+	t.Parallel()
 	roles := AllRoles()
 	if len(roles) != 3 {
 		t.Errorf("AllRoles() returned %d roles, want 3", len(roles))
@@ -107,6 +111,7 @@ func TestAllRoles(t *testing.T) {
 }
 
 func TestTownRoles(t *testing.T) {
+	t.Parallel()
 	roles := TownRoles()
 	if len(roles) != 1 {
 		t.Errorf("TownRoles() returned %d roles, want 1", len(roles))
@@ -124,6 +129,7 @@ func TestTownRoles(t *testing.T) {
 }
 
 func TestRigRoles(t *testing.T) {
+	t.Parallel()
 	roles := RigRoles()
 	if len(roles) != 2 {
 		t.Errorf("RigRoles() returned %d roles, want 2", len(roles))
@@ -141,6 +147,7 @@ func TestRigRoles(t *testing.T) {
 }
 
 func TestExpandPattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		pattern  string
 		town     string
@@ -188,6 +195,7 @@ func TestExpandPattern(t *testing.T) {
 }
 
 func TestDuration_UnmarshalText(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected time.Duration
@@ -212,6 +220,7 @@ func TestDuration_UnmarshalText(t *testing.T) {
 }
 
 func TestLoadRoleDefinition_InvalidTownOverride(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory with an invalid TOML override
 	townRoot := t.TempDir()
 	rolesDir := townRoot + "/roles"
@@ -234,6 +243,7 @@ func TestLoadRoleDefinition_InvalidTownOverride(t *testing.T) {
 }
 
 func TestLoadRoleDefinition_InvalidRigOverride(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := t.TempDir()
 	rolesDir := rigPath + "/roles"
@@ -256,6 +266,7 @@ func TestLoadRoleDefinition_InvalidRigOverride(t *testing.T) {
 }
 
 func TestLoadRoleDefinition_ValidOverride(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rolesDir := townRoot + "/roles"
 	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
@@ -278,6 +289,7 @@ func TestLoadRoleDefinition_ValidOverride(t *testing.T) {
 }
 
 func TestLoadRoleDefinition_NoOverrideFiles(t *testing.T) {
+	t.Parallel()
 	// Use temp dirs with no roles/ subdirectory - should succeed with defaults only
 	townRoot := t.TempDir()
 	rigPath := t.TempDir()

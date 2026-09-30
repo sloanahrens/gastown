@@ -11,7 +11,9 @@ import (
 // liveTown holds scrubbed copies of the operator town's config files as they
 // stood on 2026-09-29 (tokens, emails, usernames and home paths replaced), less
 // the patrols.quota_resume key gt-638go.2 deleted from the schema and the
-// merge_queue.post_merge_command/post_merge_timeout keys gt-6zf1o deleted: a
+// merge_queue.post_merge_command/post_merge_timeout keys gt-6zf1o deleted and
+// the refinery-era merge_queue keys gt-5nlvq deleted (batch_*,
+// test_verify_command, cycle_session_after_merge): a
 // live file must lose such a key before a binary carrying the deletion is
 // installed, or the startup gate refuses the town.
 // Strict decoding must accept every key they carry: a kernel that refused the

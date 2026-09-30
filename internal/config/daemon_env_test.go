@@ -7,6 +7,7 @@ import (
 )
 
 func TestLoadDaemonEnv_MissingFileReturnsEmptyMap(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	env, err := LoadDaemonEnv(townRoot)
@@ -19,6 +20,7 @@ func TestLoadDaemonEnv_MissingFileReturnsEmptyMap(t *testing.T) {
 }
 
 func TestLoadDaemonEnv_ParsesKeyValuePairs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	settingsDir := filepath.Join(townRoot, "settings")
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
@@ -55,6 +57,7 @@ func TestLoadDaemonEnv_ParsesKeyValuePairs(t *testing.T) {
 }
 
 func TestLoadDaemonEnv_MissingEqualsIsError(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	settingsDir := filepath.Join(townRoot, "settings")
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
@@ -70,6 +73,7 @@ func TestLoadDaemonEnv_MissingEqualsIsError(t *testing.T) {
 }
 
 func TestDaemonEnvPath(t *testing.T) {
+	t.Parallel()
 	got := DaemonEnvPath("/town")
 	want := filepath.Join("/town", "settings", "daemon.env")
 	if got != want {

@@ -32,7 +32,6 @@
 package testutil
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -923,9 +922,18 @@ func ScratchTown(t *testing.T) string {
 // concurrent legitimate agents in a busy town create lock files and append
 // events, so removals and lock-file churn are ignored.
 type townSnapshot struct {
-	root       string
-	eventsSize int64
-	entries    map[string]bool // relative paths, e.g. ".dolt-data/testdb_x"
+	root    string
+	entries map[string]bool // relative paths, e.g. ".dolt-data/testdb_x"
+
+	// events follows .events.jsonl by path from snapshot time (gt-yirj6).
+	// The daemon's events_prune replaces the file (tmp + rename) with its
+	// newest lines, so a saved byte offset can point past the new end or into
+	// the middle of retained history; the tail re-syncs after the last line
+	// it had passed. Nil when the file did not exist at snapshot time.
+	events *events.Tail
+	// eventsMidLine is set when the snapshot ended inside a line an agent was
+	// still appending (gt-5few): the first line the tail returns is its end.
+	eventsMidLine bool
 }
 
 // watchedSubdirs are town-root subdirectories whose direct children are
@@ -934,19 +942,32 @@ type townSnapshot struct {
 var watchedSubdirs = []string{".beads", ".dolt-data"}
 
 func snapshotTown(root string) *townSnapshot {
-	s := &townSnapshot{root: root, entries: map[string]bool{}}
-	if fi, err := os.Stat(filepath.Join(root, ".events.jsonl")); err == nil {
-		s.eventsSize = fi.Size()
-	}
-	for name := range listDir(root) {
-		s.entries[name] = true
-	}
-	for _, sub := range watchedSubdirs {
-		for name := range listDir(filepath.Join(root, sub)) {
-			s.entries[filepath.ToSlash(filepath.Join(sub, name))] = true
+	s := &townSnapshot{root: root, entries: townEntries(root)}
+	path := filepath.Join(root, ".events.jsonl")
+	if _, err := os.Stat(path); err == nil {
+		// OpenTail creates a missing file, hence the Stat: the snapshot must
+		// not write to the town it watches.
+		if tail, err := events.OpenTail(path); err == nil {
+			s.events = tail
+			s.eventsMidLine = !endsAtLineStart(path, tail.Offset())
 		}
 	}
 	return s
+}
+
+// townEntries lists the town root's entries and those of its watched
+// subdirectories.
+func townEntries(root string) map[string]bool {
+	entries := map[string]bool{}
+	for name := range listDir(root) {
+		entries[name] = true
+	}
+	for _, sub := range watchedSubdirs {
+		for name := range listDir(filepath.Join(root, sub)) {
+			entries[filepath.ToSlash(filepath.Join(sub, name))] = true
+		}
+	}
+	return entries
 }
 
 // diff re-snapshots the town and returns a description of every leak: new
@@ -964,10 +985,10 @@ func snapshotTown(root string) *townSnapshot {
 func (s *townSnapshot) diff() []string {
 	var leaks []string
 
-	after := snapshotTown(s.root)
+	after := townEntries(s.root)
 	rigs := rigNames(s.root)
 	var added []string
-	for name := range after.entries {
+	for name := range after {
 		if s.entries[name] || strings.HasSuffix(name, ".lock") || explainedByRig(name, rigs) {
 			continue
 		}
@@ -989,9 +1010,7 @@ func (s *townSnapshot) diff() []string {
 		leaks = append(leaks, fmt.Sprintf("new entry: %s", name))
 	}
 
-	if after.eventsSize > s.eventsSize {
-		leaks = append(leaks, suspiciousAppendedEvents(s.root, s.eventsSize)...)
-	}
+	leaks = append(leaks, s.suspiciousAppendedEvents()...)
 
 	return leaks
 }
@@ -1013,7 +1032,8 @@ func explainedByRig(name string, rigs map[string]bool) bool {
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
 // file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
-// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp. Town tooling
+// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp or the
+// daemon's .events.jsonl.prune.tmp. Town tooling
 // routinely writes via create-tmp-then-rename, so any concurrent invocation
 // by any agent during a test window creates and then removes one of these —
 // indistinguishable from the .lock churn already tolerated below (gt-wdr,
@@ -1040,7 +1060,8 @@ func isAtomicWriteTemp(name string) bool {
 // exported constants rather than re-typed literals, so a renamed suffix
 // breaks the build here instead of silently going stale.
 var atomicWriteTemps = map[string][]string{
-	feed.FeedFile: {feed.TruncateTempSuffix},
+	events.EventsFile: {events.PruneTempSuffix},
+	feed.FeedFile:     {feed.TruncateTempSuffix},
 }
 
 // atomicTempPrefixes are CreateTemp patterns that produce temps on the
@@ -1079,69 +1100,73 @@ func atomicTempLeak(base string) bool {
 	return false
 }
 
-// suspiciousAppendedEvents reads .events.jsonl from offset and flags events
-// whose actor does not belong to the town (first path segment neither a rig
-// from mayor/rigs.json nor a built-in town-level actor). Fixture actors like
-// "myr/mycat" (the gt-x9o incident) are caught; concurrent legitimate agents
-// pass. Events the daemon authored are tolerated (gt-d9423).
+// suspiciousAppendedEvents reads the events appended to .events.jsonl since
+// the snapshot and flags those whose actor does not belong to the town (first
+// path segment neither a rig from mayor/rigs.json nor a built-in town-level
+// actor). Fixture actors like "myr/mycat" (the gt-x9o incident) are caught;
+// concurrent legitimate agents pass. Events the daemon authored are tolerated
+// (gt-d9423). It closes the snapshot's tail, so it runs once.
 //
-// gt-5few: offset is a byte position recorded by Stat at snapshot time, but
-// the town's agents append to the live file whenever they like, so a line can
-// be partially present at either end of the window being scanned:
+// gt-5few: the town's agents append to the live file whenever they like, so a
+// line can be partially present at either end of the window being scanned:
 //
-//   - head — Stat ran mid-append, so offset points into a line and the scan
-//     starts with that line's tail. This is what the refinery kept hitting:
-//     the "unparseable event" fragments in the gt-5few comments are real
-//     live-town lines missing their leading `{"ts":` (7 bytes).
+//   - head — the snapshot ran mid-append, so the window starts with that
+//     line's tail. This is what the refinery kept hitting: the "unparseable
+//     event" fragments in the gt-5few comments are real live-town lines
+//     missing their leading `{"ts":` (7 bytes).
 //   - tail — a writer is mid-append at scan time, leaving a last line with no
-//     trailing newline.
+//     trailing newline. The tail returns complete lines only.
 //
 // Both fragments fail to parse and were reported as leaked state, though the
 // writer was a concurrent legitimate agent. A truncation says nothing about
 // the actor that produced the line, so partial lines are skipped at both
 // ends; every complete appended line is still checked in full.
-func suspiciousAppendedEvents(root string, offset int64) []string {
-	f, err := os.Open(filepath.Join(root, ".events.jsonl")) //nolint:gosec // path derives from detected town root
-	if err != nil {
-		return nil
-	}
-	defer f.Close() //nolint:errcheck // read-only
-	if _, err := f.Seek(offset, 0); err != nil {
-		return nil
+func (s *townSnapshot) suspiciousAppendedEvents() []string {
+	var lines []string
+	if s.events != nil {
+		lines, _ = s.events.Poll() //nolint:errcheck // a read failure mid-way still returns the lines read
+		_ = s.events.Close()
+		s.events = nil
+		if s.eventsMidLine && len(lines) > 0 {
+			lines = lines[1:]
+		}
+	} else {
+		lines = completeLines(filepath.Join(s.root, ".events.jsonl"))
 	}
 
-	known := knownActorPrefixes(root)
+	known := knownActorPrefixes(s.root)
 	var leaks []string
-	r := bufio.NewReader(f)
-	if !atLineStart(f, offset) {
-		// The snapshot boundary landed inside a line, so that line was at
-		// least partly written before the snapshot. Discard the remainder
-		// and start at the next line boundary.
-		if _, err := r.ReadString('\n'); err != nil {
-			return nil // nothing in the window but the partial line
-		}
-	}
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			// err is io.EOF (or a read failure). Any bytes returned had no
-			// trailing newline: a write in flight at scan time, not an
-			// appended event with an actor to judge.
-			return leaks
-		}
+	for _, line := range lines {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
 			leaks = append(leaks, appendedEventLeaks(trimmed, known)...)
 		}
 	}
+	return leaks
 }
 
-// atLineStart reports whether offset is a line boundary: the start of the
-// file, or immediately after a newline. Unknown positions are treated as
-// boundaries so the scan degrades to the pre-gt-5few behavior.
-func atLineStart(f *os.File, offset int64) bool {
+// completeLines returns the newline-terminated lines of the file at path: all
+// of an events file created after the snapshot.
+func completeLines(path string) []string {
+	data, err := os.ReadFile(path) //nolint:gosec // path derives from detected town root
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	return lines[:len(lines)-1] // the last element followed no newline
+}
+
+// endsAtLineStart reports whether offset is a line boundary of the file at
+// path: the start of the file, or immediately after a newline. Unknown
+// positions are treated as boundaries.
+func endsAtLineStart(path string, offset int64) bool {
 	if offset <= 0 {
 		return true
 	}
+	f, err := os.Open(path) //nolint:gosec // path derives from detected town root
+	if err != nil {
+		return true
+	}
+	defer f.Close() //nolint:errcheck // read-only
 	var prev [1]byte
 	if _, err := f.ReadAt(prev[:], offset-1); err != nil {
 		return true

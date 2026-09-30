@@ -2813,7 +2813,11 @@ func (b *Beads) showMultipleLocal(ids []string) (map[string]*Issue, error) {
 	args := append([]string{"show", "--json"}, ids...)
 	out, err := b.run(args...)
 	if err != nil {
-		return nil, fmt.Errorf("bd show: %w", err)
+		found, ok := partialShowFound(err)
+		if !ok {
+			return nil, fmt.Errorf("bd show: %w", err)
+		}
+		out = found
 	}
 
 	var issues []*Issue
@@ -2827,6 +2831,31 @@ func (b *Beads) showMultipleLocal(ids []string) (map[string]*Issue, error) {
 	}
 
 	return result, nil
+}
+
+// partialShowFound returns the issues a multi-id bd show found when the only
+// ids it failed on are ones it says do not exist (machine mode: partial, exit
+// 22, every failed id not_found). ShowMultiple leaves missing ids out, so that
+// is an answer, not a failure; any other failed id leaves it unknown.
+func partialShowFound(err error) ([]byte, bool) {
+	kind, failed, ok := machineErrorOf(err)
+	if !ok || kind != "partial" || len(failed) == 0 {
+		return nil, false
+	}
+	for _, f := range failed {
+		if f.Kind != "not_found" {
+			return nil, false
+		}
+	}
+	var ue *unavailableError
+	if !errors.As(err, &ue) {
+		return nil, false
+	}
+	env, isEnv, _ := decodeMachineEnvelope(ue.stdout, "bd show")
+	if !isEnv || len(env.Data) == 0 {
+		return nil, false
+	}
+	return env.Data, true
 }
 
 // Blocked returns issues that are blocked by dependencies.

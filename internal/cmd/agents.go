@@ -136,11 +136,12 @@ func init() {
 	rootCmd.AddCommand(agentsCmd)
 }
 
-// categorizeSession determines the agent type from a session name.
-func categorizeSession(name string) *AgentSession {
+// categorizeSession determines the agent type from a session name, reading
+// rig prefixes from reg.
+func categorizeSession(reg *session.PrefixRegistry, name string) *AgentSession {
 	sess := &AgentSession{Name: name}
 
-	identity, err := session.ParseSessionName(name)
+	identity, err := session.ParseSessionNameWithRegistry(name, reg)
 	if err != nil {
 		return nil
 	}
@@ -171,7 +172,7 @@ func getAgentSessions(includePolecats bool) ([]*AgentSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filterAndSortSessions(sessions, includePolecats), nil
+	return filterAndSortSessions(session.DefaultRegistry(), sessions, includePolecats), nil
 }
 
 // socketGroup holds sessions for a single tmux socket.
@@ -232,7 +233,7 @@ func getAllSocketSessions(includePolecats bool) []socketGroup {
 	// Town socket: GT agent sessions
 	townTmux := tmux.NewTmuxWithSocket(townSocket) // explicit socket avoids default-socket ambiguity
 	if sessions, err := townTmux.ListSessions(); err == nil && len(sessions) > 0 {
-		agents := filterAndSortSessions(sessions, includePolecats)
+		agents := filterAndSortSessions(session.DefaultRegistry(), sessions, includePolecats)
 		for _, a := range agents {
 			a.Socket = townSocket
 		}
@@ -290,10 +291,10 @@ func getAllSocketSessions(includePolecats bool) []socketGroup {
 }
 
 // filterAndSortSessions filters raw session names into categorized, sorted agents.
-func filterAndSortSessions(sessionNames []string, includePolecats bool) []*AgentSession {
+func filterAndSortSessions(reg *session.PrefixRegistry, sessionNames []string, includePolecats bool) []*AgentSession {
 	var agents []*AgentSession
 	for _, name := range sessionNames {
-		agent := categorizeSession(name)
+		agent := categorizeSession(reg, name)
 		if agent == nil {
 			continue
 		}
@@ -694,7 +695,7 @@ func buildCollisionReport(townRoot string) (*CollisionReport, error) {
 		}
 
 		// Check if the locked session exists in tmux
-		expectedSession := guessSessionFromWorkerDir(workerDir, townRoot)
+		expectedSession := guessSessionFromWorkerDir(session.DefaultRegistry(), workerDir, townRoot)
 		if expectedSession != "" {
 			found := false
 			for _, s := range gtSessions {
@@ -720,7 +721,7 @@ func buildCollisionReport(townRoot string) (*CollisionReport, error) {
 	return report, nil
 }
 
-func guessSessionFromWorkerDir(workerDir, townRoot string) string {
+func guessSessionFromWorkerDir(reg *session.PrefixRegistry, workerDir, townRoot string) string {
 	relPath, err := filepath.Rel(townRoot, workerDir)
 	if err != nil {
 		return ""
@@ -737,9 +738,9 @@ func guessSessionFromWorkerDir(workerDir, townRoot string) string {
 
 	switch workerType {
 	case constants.RoleCrew:
-		return session.CrewSessionName(session.PrefixFor(rig), workerName)
+		return session.CrewSessionName(reg.PrefixForRig(rig), workerName)
 	case "polecats":
-		return session.PolecatSessionName(session.PrefixFor(rig), workerName)
+		return session.PolecatSessionName(reg.PrefixForRig(rig), workerName)
 	}
 
 	return ""

@@ -40,7 +40,13 @@ func cyclePolecatSession(direction int, sessionOverride string) error {
 // Delegates to session.ParseSessionName for consistent parsing of hyphenated
 // rig names (e.g., gt-my-rig-Toast correctly yields rig="my-rig", name="Toast").
 func parsePolecatSessionName(sessionName string) (rigName, polecatName string, ok bool) { //nolint:unparam // polecatName kept for API consistency
-	identity, err := session.ParseSessionName(sessionName)
+	return parsePolecatSessionNameIn(session.DefaultRegistry(), sessionName)
+}
+
+// parsePolecatSessionNameIn is parsePolecatSessionName reading rig prefixes
+// from reg.
+func parsePolecatSessionNameIn(reg *session.PrefixRegistry, sessionName string) (rigName, polecatName string, ok bool) {
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return "", "", false
 	}

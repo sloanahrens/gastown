@@ -30,7 +30,6 @@ import (
 type MalformedSessionNameCheck struct {
 	BaseCheck
 	sessionListerForTest SessionLister // Injectable for testing; nil uses real tmux
-	registryForTest      *session.PrefixRegistry
 }
 
 type sessionRename struct {
@@ -56,11 +55,6 @@ func (c *MalformedSessionNameCheck) Run(ctx *CheckContext) *CheckResult {
 		lister = &realSessionLister{t: tmux.NewTmux()}
 	}
 
-	reg := c.registryForTest
-	if reg == nil {
-		reg = session.DefaultRegistry()
-	}
-
 	sessions, err := lister.ListSessions()
 	if err != nil {
 		return &CheckResult{
@@ -71,7 +65,7 @@ func (c *MalformedSessionNameCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	malformed := detectLegacySessionNames(sessions, reg)
+	malformed := detectLegacySessionNames(sessions, ctx.prefixes())
 
 	if len(malformed) == 0 {
 		return &CheckResult{

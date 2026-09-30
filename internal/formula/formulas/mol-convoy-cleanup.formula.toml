@@ -33,11 +33,6 @@ This is infrastructure work. The agent running this formula:
 formula = "mol-convoy-cleanup"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "load-convoy"
 title = "Load convoy and verify completion"

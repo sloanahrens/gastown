@@ -2,15 +2,12 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -131,7 +128,7 @@ type TownSettings struct {
 	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
 	// "dolt_backup", "jsonl_git_backup", "scheduled_maintenance",
-	// "main_branch_test", "landing_worker", "handler").
+	// "main_branch_test", "landing_worker", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
 }
@@ -187,17 +184,15 @@ type OperationalConfig struct {
 	// and kept verbatim across rewrites.
 	Deacon json.RawMessage `json:"deacon,omitempty"`
 
-	// Polecat configures polecat session thresholds.
-	Polecat *PolecatThresholds `json:"polecat,omitempty"`
-
-	// Dolt configures Dolt server operation thresholds.
-	Dolt *DoltThresholds `json:"dolt,omitempty"`
+	// Polecat, Dolt and Web have no reader (gt-e2kxa): the code uses its own
+	// constants. They are declared so a settings file that still carries
+	// them decodes, and kept verbatim across rewrites.
+	Polecat json.RawMessage `json:"polecat,omitempty"`
+	Dolt    json.RawMessage `json:"dolt,omitempty"`
+	Web     json.RawMessage `json:"web,omitempty"`
 
 	// Mail configures mail system thresholds.
 	Mail *MailThresholds `json:"mail,omitempty"`
-
-	// Web configures web API thresholds.
-	Web *WebThresholds `json:"web,omitempty"`
 
 	// Recovery configures stalled-polecat recovery thresholds. The key is
 	// still "witness": the retired witness role owned these knobs, and the
@@ -234,53 +229,26 @@ type ContainerGateThresholds struct {
 
 // SessionThresholds configures session management timeouts.
 type SessionThresholds struct {
-	// ClaudeStartTimeout is how long to wait for Claude to start (default "60s").
-	ClaudeStartTimeout string `json:"claude_start_timeout,omitempty"`
-
-	// ShellReadyTimeout is how long to wait for shell prompt after command (default "5s").
-	ShellReadyTimeout string `json:"shell_ready_timeout,omitempty"`
-
-	// GracefulShutdownTimeout is wait after Ctrl-C before force-kill (default "3s").
-	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
-
-	// BdCommandTimeout is timeout for bd CLI command execution (default "30s").
-	BdCommandTimeout string `json:"bd_command_timeout,omitempty"`
-
-	// BdSubprocessTimeout is timeout for bd subprocess calls in TUI (default "5s").
-	BdSubprocessTimeout string `json:"bd_subprocess_timeout,omitempty"`
-
-	// GUPPViolationTimeout is how long an agent can have hooked work
-	// without progressing before GUPP violation (default "30m").
-	GUPPViolationTimeout string `json:"gupp_violation_timeout,omitempty"`
-
-	// HungSessionThreshold is how long a tmux session can be inactive
-	// before considered hung (default "30m").
-	HungSessionThreshold string `json:"hung_session_threshold,omitempty"`
-
 	// StartupNudgeVerifyDelay is wait after startup nudge before checking (default "5s").
 	StartupNudgeVerifyDelay string `json:"startup_nudge_verify_delay,omitempty"`
 
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the code uses the
+	// internal/constants values. They are declared so a settings file that
+	// still carries them decodes.
+	ClaudeStartTimeout      string `json:"claude_start_timeout,omitempty"`
+	ShellReadyTimeout       string `json:"shell_ready_timeout,omitempty"`
+	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
+	BdCommandTimeout        string `json:"bd_command_timeout,omitempty"`
+	BdSubprocessTimeout     string `json:"bd_subprocess_timeout,omitempty"`
+	GUPPViolationTimeout    string `json:"gupp_violation_timeout,omitempty"`
+	HungSessionThreshold    string `json:"hung_session_threshold,omitempty"`
 }
 
 // NudgeThresholds configures nudge queue and delivery timeouts.
 type NudgeThresholds struct {
-	// ReadyTimeout is how long NudgeSession waits for pane to accept input (default "10s").
-	ReadyTimeout string `json:"ready_timeout,omitempty"`
-
-	// RetryInterval is base interval between send-keys retry attempts (default "500ms").
-	RetryInterval string `json:"retry_interval,omitempty"`
-
-	// LockTimeout is how long to hold the nudge lock (default "30s").
-	LockTimeout string `json:"lock_timeout,omitempty"`
-
-	// NormalTTL is time-to-live for normal-priority nudges (default "30m").
-	NormalTTL string `json:"normal_ttl,omitempty"`
-
-	// UrgentTTL is time-to-live for urgent-priority nudges (default "2h").
-	UrgentTTL string `json:"urgent_ttl,omitempty"`
-
 	// MaxQueueDepth is max pending nudges per session (default 50).
 	MaxQueueDepth *int `json:"max_queue_depth,omitempty"`
 
@@ -297,16 +265,19 @@ type NudgeThresholds struct {
 	// eligible for delivery again (default "30s"). Spaces out retries so a
 	// persistently failing injection cannot re-inject at the poll interval.
 	RequeueBackoff string `json:"requeue_backoff,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the code uses the
+	// internal/constants and internal/nudge values. They are declared so a
+	// settings file that still carries them decodes.
+	ReadyTimeout  string `json:"ready_timeout,omitempty"`
+	RetryInterval string `json:"retry_interval,omitempty"`
+	LockTimeout   string `json:"lock_timeout,omitempty"`
+	NormalTTL     string `json:"normal_ttl,omitempty"`
+	UrgentTTL     string `json:"urgent_ttl,omitempty"`
 }
 
 // DaemonThresholds configures daemon lifecycle and patrol thresholds.
 type DaemonThresholds struct {
-	// MassDeathWindow is time window for detecting mass session death (default "30s").
-	MassDeathWindow string `json:"mass_death_window,omitempty"`
-
-	// MassDeathThreshold is session deaths within window to trigger alert (default 3).
-	MassDeathThreshold *int `json:"mass_death_threshold,omitempty"`
-
 	// DogIdleSessionTimeout, DogIdleRemoveTimeout, StaleWorkingTimeout and
 	// MaxDogPoolSize are retired with the dog pack (gt-ckunw): nothing reads
 	// them. They are declared so a config that still carries them decodes.
@@ -328,16 +299,6 @@ type DaemonThresholds struct {
 	// a fresh branch on the existing worktree.
 	PolecatSelfTerminate *bool `json:"polecat_self_terminate,omitempty"`
 
-	// MaxLifecycleMessageAge is max age of lifecycle mail before discard (default "6h").
-	MaxLifecycleMessageAge string `json:"max_lifecycle_message_age,omitempty"`
-
-	// SyncFailureEscalationThreshold is consecutive git pull failures before
-	// logging escalates from WARN to ERROR (default 3).
-	SyncFailureEscalationThreshold *int `json:"sync_failure_escalation_threshold,omitempty"`
-
-	// DoctorMolCooldown is min interval between mol-dog-doctor molecules (default "5m").
-	DoctorMolCooldown string `json:"doctor_mol_cooldown,omitempty"`
-
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
@@ -349,6 +310,15 @@ type DaemonThresholds struct {
 	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
 	BootMode            string `json:"boot_mode,omitempty"`
 	DeaconGracePeriod   string `json:"deacon_grace_period,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the daemon uses its own
+	// constants. They are declared so a settings file that still carries
+	// them decodes.
+	MassDeathWindow                string `json:"mass_death_window,omitempty"`
+	MassDeathThreshold             *int   `json:"mass_death_threshold,omitempty"`
+	MaxLifecycleMessageAge         string `json:"max_lifecycle_message_age,omitempty"`
+	SyncFailureEscalationThreshold *int   `json:"sync_failure_escalation_threshold,omitempty"`
+	DoctorMolCooldown              string `json:"doctor_mol_cooldown,omitempty"`
 
 	// PressureCPUThreshold is the per-core load average above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
@@ -365,72 +335,19 @@ type DaemonThresholds struct {
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
 }
 
-// PolecatThresholds configures polecat session and retry thresholds.
-type PolecatThresholds struct {
-	// HeartbeatStaleThreshold is age at which polecat heartbeat is stale (default "3m").
-	HeartbeatStaleThreshold string `json:"heartbeat_stale_threshold,omitempty"`
-
-	// DoltMaxRetries is max retries for Dolt operations (default 10).
-	DoltMaxRetries *int `json:"dolt_max_retries,omitempty"`
-
-	// DoltBaseBackoff is base backoff for Dolt retry loop (default "500ms").
-	DoltBaseBackoff string `json:"dolt_base_backoff,omitempty"`
-
-	// DoltBackoffMax is cap for Dolt retry backoff (default "30s").
-	DoltBackoffMax string `json:"dolt_backoff_max,omitempty"`
-
-	// PendingMaxAge is max age for .pending reservation marker (default "5m").
-	PendingMaxAge string `json:"pending_max_age,omitempty"`
-
-	// NamepoolSize is number of name slots in pool (default 50).
-	NamepoolSize *int `json:"namepool_size,omitempty"`
-}
-
-// DoltThresholds configures Dolt server operation thresholds.
-type DoltThresholds struct {
-	// HealthCheckInterval is how often Dolt health check fires (default "30s").
-	HealthCheckInterval string `json:"health_check_interval,omitempty"`
-
-	// CmdTimeout is timeout for individual dolt CLI commands (default "15s").
-	CmdTimeout string `json:"cmd_timeout,omitempty"`
-
-	// MaxConnections is max concurrent connections (default 1000).
-	MaxConnections *int `json:"max_connections,omitempty"`
-
-	// SlowQueryThreshold is duration above which a query is flagged slow (default "1s").
-	SlowQueryThreshold string `json:"slow_query_threshold,omitempty"`
-}
-
 // MailThresholds configures mail system thresholds.
 type MailThresholds struct {
-	// IdleNotifyTimeout is how long to wait for idle notify (default "3s").
-	IdleNotifyTimeout string `json:"idle_notify_timeout,omitempty"`
-
-	// BdReadTimeout is timeout for bd read operations (default "60s").
-	BdReadTimeout string `json:"bd_read_timeout,omitempty"`
-
-	// BdWriteTimeout is timeout for bd write operations (default "60s").
-	BdWriteTimeout string `json:"bd_write_timeout,omitempty"`
-
-	// MaxConcurrentAckOps is max concurrent mail acknowledge operations (default 8).
-	MaxConcurrentAckOps *int `json:"max_concurrent_ack_ops,omitempty"`
-
 	// ReplyReminderDelay is how long after mail delivery to nudge the recipient
 	// to reply via gt mail send rather than in chat (default "30s").
 	// Set to "0s" to disable reply reminders entirely.
 	ReplyReminderDelay string `json:"reply_reminder_delay,omitempty"`
-}
 
-// WebThresholds configures web API thresholds.
-type WebThresholds struct {
-	// MaxConcurrentCommands is max concurrent gt subprocesses via web API (default 12).
-	MaxConcurrentCommands *int `json:"max_concurrent_commands,omitempty"`
-
-	// MaxSubjectLen is max subject length for mail API (default 500).
-	MaxSubjectLen *int `json:"max_subject_len,omitempty"`
-
-	// MaxBodyLen is max body length for mail API (default 100000).
-	MaxBodyLen *int `json:"max_body_len,omitempty"`
+	// The keys below have no reader (gt-e2kxa). They are declared so a
+	// settings file that still carries them decodes.
+	IdleNotifyTimeout   string `json:"idle_notify_timeout,omitempty"`
+	BdReadTimeout       string `json:"bd_read_timeout,omitempty"`
+	BdWriteTimeout      string `json:"bd_write_timeout,omitempty"`
+	MaxConcurrentAckOps *int   `json:"max_concurrent_ack_ops,omitempty"`
 }
 
 // RecoveryThresholds configures stalled-polecat recovery thresholds.
@@ -810,6 +727,12 @@ func (rc *RuntimeConfig) BuildCommand() string {
 // If prompt is provided, it overrides the config's InitialPrompt.
 // For opencode, uses --prompt flag; for other agents, uses positional argument.
 func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
+	return rc.buildCommandWithPrompt(prompt, os.Stderr)
+}
+
+// buildCommandWithPrompt is BuildCommandWithPrompt writing its dropped-prompt
+// warning to warn.
+func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) string {
 	resolved := normalizeRuntimeConfig(rc)
 	base := resolved.BuildCommand()
 
@@ -826,7 +749,7 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 			// with prompt_mode: "none") to create a claude override, inadvertently
 			// suppressing the daemon's startup beacon injection and causing a crash-loop
 			// that looks like a deacon failure. Warn so misconfiguration is self-diagnosing.
-			fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+			fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
 		}
 		return base
 	}
@@ -856,6 +779,12 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 
 // BuildArgsWithPrompt returns the runtime command and args suitable for exec.
 func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
+	return rc.buildArgsWithPrompt(prompt, os.Stderr)
+}
+
+// buildArgsWithPrompt is BuildArgsWithPrompt writing its dropped-prompt
+// warning to warn.
+func (rc *RuntimeConfig) buildArgsWithPrompt(prompt string, warn io.Writer) []string {
 	resolved := normalizeRuntimeConfig(rc)
 	args := append([]string{resolved.Command}, resolved.Args...)
 
@@ -874,7 +803,7 @@ func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
 			args = append(args, p)
 		}
 	} else if p != "" {
-		fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+		fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
 	}
 
 	return args
@@ -1031,19 +960,19 @@ func defaultRuntimeCommand(reg *AgentRegistry, provider string) string {
 		cmd := preset.Command
 		// Resolve claude path for Claude preset (handles alias installations)
 		if preset.Name == AgentClaude && cmd == "claude" {
-			return resolveClaudePath()
+			return resolveClaudePath(reg.host())
 		}
 		return cmd
 	}
-	return resolveClaudePath() // fallback for unknown providers
+	return resolveClaudePath(reg.host()) // fallback for unknown providers
 }
 
 // resolveClaudePath finds the claude binary, checking PATH first then common installation locations.
 // This handles the case where claude is installed as an alias (not in PATH) which doesn't work
 // in non-interactive shells spawned by tmux.
-func resolveClaudePath() string {
+func resolveClaudePath(h host) string {
 	// First, try to find claude in PATH
-	if path, err := exec.LookPath("claude"); err == nil {
+	if path, err := h.lookPath("claude"); err == nil {
 		return path
 	}
 
@@ -1278,53 +1207,20 @@ func BuiltinRoleThemes() map[string]string {
 
 // MergeQueueConfig represents merge queue settings for a rig.
 type MergeQueueConfig struct {
-	// Enabled controls whether the merge queue is active.
-	Enabled bool `json:"enabled"`
-
 	// IntegrationBranchPolecatEnabled controls whether polecats auto-source
 	// their worktrees from integration branches when the parent epic has one.
 	// Nil defaults to true.
 	IntegrationBranchPolecatEnabled *bool `json:"integration_branch_polecat_enabled,omitempty"`
-
-	// IntegrationBranchRefineryEnabled controls whether mq submit and gt done
-	// auto-detect integration branches as MR targets.
-	// Nil defaults to true.
-	IntegrationBranchRefineryEnabled *bool `json:"integration_branch_refinery_enabled,omitempty"`
-
-	// IntegrationBranchTemplate is the pattern for integration branch names.
-	// Supports variables: {epic}, {prefix}, {user}
-	// - {epic}: Full epic ID (e.g., "RA-123")
-	// - {prefix}: Epic prefix before first hyphen (e.g., "RA")
-	// - {user}: Git user.name (e.g., "klauern")
-	// Default: "integration/{epic}"
-	IntegrationBranchTemplate string `json:"integration_branch_template,omitempty"`
-
-	// IntegrationBranchAutoLand has no effect: gt does not land integration
-	// branches since gt mq integration land was removed (gt-fcxe9.4). Kept so
-	// existing rig settings still parse; the landing path (gt-v4ssj) decides
-	// its fate.
-	IntegrationBranchAutoLand *bool `json:"integration_branch_auto_land,omitempty"`
 
 	// MergeStrategy controls how the refinery lands approved work: "direct" (default)
 	// merges directly to the base branch, "pr" uses the VCS provider's merge API
 	// which respects branch protection/restriction rules.
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
-	// VCSProvider selects the VCS platform for PR operations when
-	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
-	VCSProvider string `json:"vcs_provider,omitempty"`
-
 	// RequireReview controls whether the refinery requires at least one approving
 	// review before merging a PR. Only meaningful when merge_strategy="pr".
 	// Nil defaults to false (no review required).
 	RequireReview *bool `json:"require_review,omitempty"`
-
-	// OnConflict specifies conflict resolution strategy: "assign_back" or "auto_rebase".
-	OnConflict string `json:"on_conflict"`
-
-	// RunTests controls whether to run tests before merging.
-	// Nil defaults to true (tests are run).
-	RunTests *bool `json:"run_tests,omitempty"`
 
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
@@ -1344,31 +1240,6 @@ type MergeQueueConfig struct {
 	// "gt slot run --role hm/crew/sloan -- make test".
 	Gate string `json:"gate,omitempty"`
 
-	// TestVerifyRunTimeout overrides the wall-clock run budget for gt done's
-	// default test-verify gate, once the container-gate slot is held (gt-pnkd).
-	// A Go duration string, e.g. "40m". Empty uses the 30m floor: the gate
-	// runs the rig's full hermetic test_command (gt-btw1), so there is no
-	// changed-package count to scale by. The slot wait is never counted
-	// against it.
-	TestVerifyRunTimeout string `json:"test_verify_run_timeout,omitempty"`
-
-	// TestVerifySlotTimeout overrides how long gt done's default test-verify
-	// gate waits to acquire the container-gate slot (gt-pnkd). A Go duration
-	// string, e.g. "90m". Empty waits 60m, matching the container-gate slot's
-	// own `gt slot run --timeout` default. This is a queue-wait bound, not a
-	// test bound: exceeding it is reported as slot contention, never as a
-	// test failure.
-	TestVerifySlotTimeout string `json:"test_verify_slot_timeout,omitempty"`
-
-	// TestVerifyCommand overrides the command gt done's default test-verify
-	// gate runs, replacing the rig's full hermetic test_command (gt-btw1).
-	// The literal token {packages} is replaced with the space-joined
-	// changed-package list, e.g. "make test-changed PKGS='{packages}'" —
-	// the route to scoped verification for rigs that want the gate to test
-	// only the changed packages rather than the full suite. On a non-Go rig
-	// this field is ignored and test_command runs in full.
-	TestVerifyCommand string `json:"test_verify_command,omitempty"`
-
 	// LintCommand is the command to run for linting (used by formulas).
 	LintCommand string `json:"lint_command,omitempty"`
 
@@ -1380,59 +1251,6 @@ type MergeQueueConfig struct {
 
 	// TypecheckCommand is the command to run for type checking (e.g., tsc --noEmit).
 	TypecheckCommand string `json:"typecheck_command,omitempty"`
-
-	// DeleteMergedBranches controls whether to delete branches after merging.
-	// Nil defaults to true (merged branches are deleted).
-	DeleteMergedBranches *bool `json:"delete_merged_branches,omitempty"`
-
-	// RetryFlakyTests is the number of times to retry flaky tests.
-	RetryFlakyTests int `json:"retry_flaky_tests"`
-
-	// PollInterval is how often to poll for new merge requests (e.g., "30s").
-	PollInterval string `json:"poll_interval"`
-
-	// MaxConcurrent is the maximum number of concurrent merges.
-	MaxConcurrent int `json:"max_concurrent"`
-
-	// StaleClaimTimeout is how long a claimed MR can go without updates before
-	// being considered abandoned and eligible for re-claim (e.g., "30m").
-	StaleClaimTimeout string `json:"stale_claim_timeout,omitempty"`
-
-	// JudgmentEnabled controls whether the refinery performs quality review
-	// before merging. When true, the refinery patrol's quality-review step
-	// evaluates the diff for correctness, security, and code quality.
-	// Nil defaults to false (no quality review).
-	JudgmentEnabled *bool `json:"judgment_enabled,omitempty"`
-
-	// ReviewDepth controls the thoroughness of quality review when judgment
-	// is enabled. Valid values: "quick", "standard", "deep".
-	// Nil defaults to "standard".
-	ReviewDepth string `json:"review_depth,omitempty"`
-
-	// BatchEnabled controls whether the refinery batches multiple ready MRs
-	// into a single rebase-stack + one full-suite gate + bisect-on-red cycle
-	// instead of processing them one at a time. Nil defaults to false.
-	BatchEnabled *bool `json:"batch_enabled,omitempty"`
-
-	// BatchMinAge is how long a ready MR must sit in the queue before it's
-	// eligible for batching (e.g. "1h"). Prevents batching MRs that would
-	// merge fast on their own. Empty defaults to "1h".
-	BatchMinAge string `json:"batch_min_age,omitempty"`
-
-	// BatchMax is the maximum number of MRs to include in a single batch.
-	// Zero or unset defaults to 12.
-	BatchMax int `json:"batch_max,omitempty"`
-
-	// BatchMinCount is the minimum number of batch-eligible ready MRs
-	// required before the refinery batches instead of processing them one
-	// at a time. Zero or unset defaults to 4.
-	BatchMinCount int `json:"batch_min_count,omitempty"`
-
-	// CycleSessionAfterMerge makes `gt mq post-merge` / `gt mq batch run`
-	// respawn the rig's refinery session in place after each landed unit
-	// (one MR or one batch), so every unit starts in a fresh context.
-	// Off by default; opt in per rig.
-	CycleSessionAfterMerge bool `json:"cycle_session_after_merge,omitempty"`
 
 	// MaxReadyForDispatch is the ready-MR ceiling above which a new dispatch
 	// is refused: the merge queue, not the pool, is the real limit on how
@@ -1458,61 +1276,14 @@ type MergeQueueConfig struct {
 	PostLandCommand string `json:"post_land_command,omitempty"`
 }
 
-// EditorialConfig controls the om editorial gate for a rig's merge queue:
-// whether `gt mq review` must approve an MR before it can push, and the
-// parameters of that review (which script to invoke, the minimum om
-// version, how many times to retry a non-converging resubmit, and how many
-// reviews may run concurrently in a batch).
+// EditorialConfig is the merge_queue.editorial block. Only Required is
+// read: the editorial-required doctor check warns when a rig carries an
+// .om.json rubric without it.
 type EditorialConfig struct {
-	// Required controls whether the push precondition refuses to land an MR
-	// without a matching approve note. Defaults to false: upstream behavior
-	// is unchanged for rigs that never set this.
+	// Required marks the rig as expecting om editorial review. Defaults to
+	// false.
 	Required bool `json:"required"`
-
-	// Command is the gate script to invoke, relative to the rig root.
-	// Empty defaults to "scripts/om-gate.sh" (see WithDefaults).
-	Command string `json:"command,omitempty"`
-
-	// MinVersion is the minimum om semver the harness will accept.
-	// Empty means no floor.
-	MinVersion string `json:"min_version,omitempty"`
-
-	// MaxAttempts is the hard cap on resubmit attempts before the deacon
-	// stops redispatching and escalates to a human. Zero or unset defaults
-	// to 5 (see WithDefaults).
-	MaxAttempts int `json:"max_attempts,omitempty"`
-
-	// ReviewParallelism bounds how many `gt mq review` invocations may run
-	// concurrently when reviewing a batch. Zero or unset defaults to 3
-	// (see WithDefaults).
-	ReviewParallelism int `json:"review_parallelism,omitempty"`
 }
-
-// WithDefaults returns a copy of the editorial config with its zero-value
-// fields filled with the documented defaults. Safe to call on a nil
-// receiver (yields an all-defaults, Required=false config).
-func (c *EditorialConfig) WithDefaults() EditorialConfig {
-	var result EditorialConfig
-	if c != nil {
-		result = *c
-	}
-	if result.Command == "" {
-		result.Command = "scripts/om-gate.sh"
-	}
-	if result.MaxAttempts <= 0 {
-		result.MaxAttempts = 5
-	}
-	if result.ReviewParallelism <= 0 {
-		result.ReviewParallelism = 3
-	}
-	return result
-}
-
-// OnConflict strategy constants.
-const (
-	OnConflictAssignBack = "assign_back"
-	OnConflictAutoRebase = "auto_rebase"
-)
 
 // IsPolecatIntegrationEnabled returns whether polecat integration branch
 // sourcing is enabled. Nil-safe, defaults to true.
@@ -1523,51 +1294,6 @@ func (c *MergeQueueConfig) IsPolecatIntegrationEnabled() bool {
 	return *c.IntegrationBranchPolecatEnabled
 }
 
-// IsRefineryIntegrationEnabled returns whether refinery/submit integration
-// branch auto-detection is enabled. Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsRefineryIntegrationEnabled() bool {
-	if c.IntegrationBranchRefineryEnabled == nil {
-		return true
-	}
-	return *c.IntegrationBranchRefineryEnabled
-}
-
-// IsIntegrationBranchAutoLandEnabled reports the (no-effect) auto-land
-// setting passed to the refinery formula. Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsIntegrationBranchAutoLandEnabled() bool {
-	if c.IntegrationBranchAutoLand == nil {
-		return false
-	}
-	return *c.IntegrationBranchAutoLand
-}
-
-// IsRunTestsEnabled returns whether tests should run before merging.
-// Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsRunTestsEnabled() bool {
-	if c.RunTests == nil {
-		return true
-	}
-	return *c.RunTests
-}
-
-// IsDeleteMergedBranchesEnabled returns whether merged branches should be deleted.
-// Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsDeleteMergedBranchesEnabled() bool {
-	if c.DeleteMergedBranches == nil {
-		return true
-	}
-	return *c.DeleteMergedBranches
-}
-
-// IsJudgmentEnabled returns whether quality review is enabled for merges.
-// Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsJudgmentEnabled() bool {
-	if c.JudgmentEnabled == nil {
-		return false
-	}
-	return *c.JudgmentEnabled
-}
-
 // IsRequireReviewEnabled returns whether PR reviews are required before merging.
 // Nil-safe, defaults to false.
 func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
@@ -1575,51 +1301,6 @@ func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
 		return false
 	}
 	return *c.RequireReview
-}
-
-// GetReviewDepth returns the configured review depth.
-// Nil-safe, defaults to "standard".
-func (c *MergeQueueConfig) GetReviewDepth() string {
-	if c.ReviewDepth == "" {
-		return "standard"
-	}
-	return c.ReviewDepth
-}
-
-// IsBatchEnabled returns whether batch-then-bisect merge queue processing
-// is enabled. Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsBatchEnabled() bool {
-	if c.BatchEnabled == nil {
-		return false
-	}
-	return *c.BatchEnabled
-}
-
-// GetBatchMinAge returns the configured minimum queue age before an MR is
-// eligible for batching. Nil-safe, defaults to "1h".
-func (c *MergeQueueConfig) GetBatchMinAge() string {
-	if c.BatchMinAge == "" {
-		return "1h"
-	}
-	return c.BatchMinAge
-}
-
-// GetBatchMax returns the configured maximum batch size.
-// Nil-safe, defaults to 12.
-func (c *MergeQueueConfig) GetBatchMax() int {
-	if c.BatchMax <= 0 {
-		return 12
-	}
-	return c.BatchMax
-}
-
-// GetBatchMinCount returns the configured minimum number of batch-eligible
-// ready MRs required before batching kicks in. Nil-safe, defaults to 4.
-func (c *MergeQueueConfig) GetBatchMinCount() int {
-	if c.BatchMinCount <= 0 {
-		return 4
-	}
-	return c.BatchMinCount
 }
 
 // GetMaxReadyForDispatch returns the ready-MR ceiling above which a new
@@ -1632,77 +1313,6 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 	return c.MaxReadyForDispatch
 }
 
-// HasAnyGateCommand reports whether at least one of the five gate commands
-// (setup, typecheck, lint, test, build) is configured. Nil-safe.
-//
-// Used to decide whether a --pre-verified claim is even possible to honor:
-// a rig with zero configured gate commands has nothing a polecat could have
-// run, so the claim has no basis (gt-k4sy).
-func (c *MergeQueueConfig) HasAnyGateCommand() bool {
-	if c == nil {
-		return false
-	}
-	return c.SetupCommand != "" || c.TypecheckCommand != "" || c.LintCommand != "" ||
-		c.TestCommand != "" || c.BuildCommand != ""
-}
-
-// GateSetSHA returns a sha256 hex digest identifying the ordered set of
-// non-empty gate commands (setup, typecheck, lint, build, test) in cfg.
-// Nil-safe: a nil cfg hashes the same as an empty gate set.
-//
-// A `gt done --pre-verified` stamp records this alongside its verification
-// so the refinery's fast-path can detect when the gate set has changed
-// since the polecat verified — a rig that adds, removes, or edits a gate
-// command must invalidate any pre-verification recorded against the old
-// set (om-gate T8).
-func GateSetSHA(cfg *MergeQueueConfig) string {
-	if cfg == nil {
-		cfg = &MergeQueueConfig{}
-	}
-	ordered := []string{cfg.SetupCommand, cfg.TypecheckCommand, cfg.LintCommand, cfg.BuildCommand, cfg.TestCommand}
-	nonEmpty := make([]string, 0, len(ordered))
-	for _, c := range ordered {
-		if c != "" {
-			nonEmpty = append(nonEmpty, c)
-		}
-	}
-	sum := sha256.Sum256([]byte(strings.Join(nonEmpty, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
-// CombineGateSetSHA folds a set of named gate commands (name -> shell
-// command) into the hash GateSetSHA produces, yielding one hash that
-// changes if either binding changes. Nil or empty namedGates hashes
-// identically to GateSetSHA(cfg) alone.
-//
-// This is the single algorithm the pre-verification producer (`gt done`,
-// stamping pre_verified_gates) and consumer (the refinery's fast-path
-// staleness check) must both call — hashed two ways, the values never agree
-// and the fast-path never fires (om-gate T8).
-func CombineGateSetSHA(cfg *MergeQueueConfig, namedGates map[string]string) string {
-	base := GateSetSHA(cfg)
-	if len(namedGates) == 0 {
-		return base
-	}
-
-	names := make([]string, 0, len(namedGates))
-	for name := range namedGates {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	b.WriteString(base)
-	for _, name := range names {
-		b.WriteString("\x00")
-		b.WriteString(name)
-		b.WriteString("\x00")
-		b.WriteString(namedGates[name])
-	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])
-}
-
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b
@@ -1711,20 +1321,7 @@ func boolPtr(b bool) *bool {
 // DefaultMergeQueueConfig returns a MergeQueueConfig with sensible defaults.
 func DefaultMergeQueueConfig() *MergeQueueConfig {
 	return &MergeQueueConfig{
-		Enabled:                          true,
-		IntegrationBranchPolecatEnabled:  boolPtr(true),
-		IntegrationBranchRefineryEnabled: boolPtr(true),
-		OnConflict:                       OnConflictAssignBack,
-		RunTests:                         boolPtr(true),
-		TestCommand:                      "",
-		DeleteMergedBranches:             boolPtr(true),
-		RetryFlakyTests:                  1,
-		PollInterval:                     "30s",
-		MaxConcurrent:                    1,
-		StaleClaimTimeout:                "30m",
-		BatchEnabled:                     boolPtr(false),
-		BatchMinAge:                      "1h",
-		BatchMax:                         12,
+		IntegrationBranchPolecatEnabled: boolPtr(true),
 	}
 }
 

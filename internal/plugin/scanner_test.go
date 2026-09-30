@@ -8,6 +8,7 @@ import (
 )
 
 func TestParsePluginMD(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "test-plugin"
 description = "A test plugin"
@@ -81,6 +82,7 @@ These are the instructions.
 }
 
 func TestDoltShellPluginsPreferGTDoltEnv(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	for _, rel := range []string{
 		filepath.Join("plugins", "compactor-dog", "run.sh"),
@@ -103,6 +105,7 @@ func TestDoltShellPluginsPreferGTDoltEnv(t *testing.T) {
 }
 
 func TestParsePluginMD_MissingName(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 description = "No name"
 +++
@@ -117,6 +120,7 @@ description = "No name"
 }
 
 func TestParsePluginMD_MissingFrontmatter(t *testing.T) {
+	t.Parallel()
 	content := []byte(`# No Frontmatter
 
 Just instructions.
@@ -129,6 +133,7 @@ Just instructions.
 }
 
 func TestParsePluginMD_ManualGate(t *testing.T) {
+	t.Parallel()
 	// Plugin with no gate section should have nil Gate
 	content := []byte(`+++
 name = "manual-plugin"
@@ -156,6 +161,7 @@ version = 1
 }
 
 func TestParsePluginMD_MalformedTOML(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "broken
 description = no quotes
@@ -170,6 +176,7 @@ description = no quotes
 }
 
 func TestParsePluginMD_UnclosedFrontmatter(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "unclosed"
 description = "No closing delimiter"
@@ -181,6 +188,7 @@ description = "No closing delimiter"
 }
 
 func TestParsePluginMD_EmptyFrontmatter(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 +++
 
@@ -193,6 +201,7 @@ func TestParsePluginMD_EmptyFrontmatter(t *testing.T) {
 }
 
 func TestParsePluginMD_CooldownGateNoDuration(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "no-duration"
 description = "Cooldown without duration"
@@ -221,6 +230,7 @@ type = "cooldown"
 }
 
 func TestParsePluginMD_UnknownGateType(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "unknown-gate"
 description = "Unknown gate type"
@@ -246,6 +256,7 @@ type = "never-heard-of-this"
 }
 
 func TestParsePluginMD_CronGate(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "cron-plugin"
 description = "Runs on schedule"
@@ -274,6 +285,7 @@ schedule = "*/5 * * * *"
 }
 
 func TestParsePluginMD_InstructionsOnly(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "minimal"
 +++
@@ -297,6 +309,7 @@ Multiple lines.
 }
 
 func TestScanner_DiscoverAll(t *testing.T) {
+	t.Parallel()
 	// Create temp directory structure
 	tmpDir, err := os.MkdirTemp("", "plugin-test")
 	if err != nil {
@@ -378,11 +391,12 @@ version = 1
 }
 
 func TestParsePluginMD_GitHubSheriff(t *testing.T) {
+	t.Parallel()
 	// Verify the actual github-sheriff plugin.md parses correctly.
 	// This catches frontmatter regressions in the shipped plugin.
 	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "github-sheriff", "plugin.md"))
 	if err != nil {
-		t.Skipf("github-sheriff plugin not found (expected in plugins/): %v", err)
+		t.Fatalf("github-sheriff plugin not found (expected in plugins/): %v", err)
 	}
 
 	plugin, err := parsePluginMD(content, "/test/github-sheriff", LocationRig, "gastown")
@@ -426,6 +440,7 @@ func TestParsePluginMD_GitHubSheriff(t *testing.T) {
 }
 
 func TestParsePluginMD_WithRunScript(t *testing.T) {
+	t.Parallel()
 	// Use a temp dir with a fixture plugin.md and run.sh so the test
 	// doesn't depend on the local filesystem layout (fails in CI).
 	pluginDir := t.TempDir()
@@ -457,7 +472,7 @@ Deterministic cleanup plugin with run.sh script.
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), pluginContent, 0644); err != nil {
 		t.Fatalf("writing plugin.md fixture: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "run.sh"), []byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(pluginDir, "run.sh"), []byte("echo ok\n"), 0o644); err != nil {
 		t.Fatalf("writing run.sh fixture: %v", err)
 	}
 
@@ -516,6 +531,7 @@ Deterministic cleanup plugin with run.sh script.
 }
 
 func TestScanner_RigOverridesTown(t *testing.T) {
+	t.Parallel()
 	// Create temp directory structure
 	tmpDir, err := os.MkdirTemp("", "plugin-test")
 	if err != nil {
@@ -580,6 +596,7 @@ version = 1
 }
 
 func TestLoadPlugin_DetectsRunScript(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "plugin-runsh-test")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -602,7 +619,7 @@ version = 1
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), pluginContent, 0644); err != nil {
 		t.Fatalf("failed to write plugin.md: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "run.sh"), []byte("#!/bin/bash\necho hello\n"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(pluginDir, "run.sh"), []byte("echo hello\n"), 0o644); err != nil {
 		t.Fatalf("failed to write run.sh: %v", err)
 	}
 
@@ -652,6 +669,7 @@ version = 1
 }
 
 func TestParsePluginMD_ExecWrapper(t *testing.T) {
+	t.Parallel()
 	content := []byte(`+++
 name = "exitbox-sandbox"
 description = "Sandbox polecat execution with exitbox"
@@ -700,6 +718,7 @@ Wraps polecat sessions in an exitbox sandbox for filesystem and network isolatio
 }
 
 func TestPlugin_IsExecWrapper_False(t *testing.T) {
+	t.Parallel()
 	// Regular plugin should not be an exec-wrapper
 	p := &Plugin{
 		Name: "regular",
@@ -716,6 +735,7 @@ func TestPlugin_IsExecWrapper_False(t *testing.T) {
 }
 
 func TestPlugin_ExecWrapperSummary(t *testing.T) {
+	t.Parallel()
 	p := &Plugin{
 		Name:     "exitbox-sandbox",
 		Location: LocationRig,
@@ -733,6 +753,7 @@ func TestPlugin_ExecWrapperSummary(t *testing.T) {
 }
 
 func TestScanner_DiscoverExecWrappers(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "plugin-wrapper-test")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)

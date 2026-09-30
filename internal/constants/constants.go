@@ -23,11 +23,9 @@ const (
 	// 180s because the first turn must complete before ❯ appears: hooks fire
 	// (gt prime injects patrol context), then the full API round-trip runs.
 	// With large patrol formulas this regularly exceeds 60s, especially on Opus.
-	// Configurable via operational.session.claude_start_timeout.
 	ClaudeStartTimeout = 180 * time.Second
 
 	// ShellReadyTimeout is how long to wait for shell prompt after command.
-	// Configurable via operational.session.shell_ready_timeout.
 	ShellReadyTimeout = 5 * time.Second
 
 	// DefaultDebounceMs is the default debounce for SendKeys operations.
@@ -66,24 +64,19 @@ const (
 
 	// GracefulShutdownTimeout is how long to wait after sending Ctrl-C before
 	// forcefully killing a session.
-	// Configurable via operational.session.graceful_shutdown_timeout.
 	GracefulShutdownTimeout = 3 * time.Second
 
 	// NudgeReadyTimeout is how long NudgeSession waits for the target pane to
 	// accept input before giving up.
-	// Configurable via operational.nudge.ready_timeout.
 	NudgeReadyTimeout = 10 * time.Second
 
 	// NudgeRetryInterval is the base interval between send-keys retry attempts.
-	// Configurable via operational.nudge.retry_interval.
 	NudgeRetryInterval = 500 * time.Millisecond
 
 	// BdCommandTimeout is the default timeout for bd (beads CLI) command execution.
-	// Configurable via operational.session.bd_command_timeout.
 	BdCommandTimeout = 30 * time.Second
 
 	// BdSubprocessTimeout is the timeout for bd subprocess calls in TUI panels.
-	// Configurable via operational.session.bd_subprocess_timeout.
 	BdSubprocessTimeout = 5 * time.Second
 
 	// DialogPollInterval is the interval between pane content checks when
@@ -113,7 +106,6 @@ const (
 	// component. Prevents tight restart loops when a patrol agent (e.g.,
 	// witness) completes quickly on idle rigs and immediately hands off.
 	// (gt-058d)
-	// Configurable via operational.session.min_handoff_cooldown.
 	MinHandoffCooldown = 2 * time.Minute
 
 	// GUPPViolationTimeout is how long an agent can have work on hook without
@@ -121,12 +113,10 @@ const (
 	// Principle) violation. GUPP states: if you have work on your hook, you run it.
 	//
 	// Single source of truth — referenced by the daemon's lifecycle patrol.
-	// Configurable via operational.session.gupp_violation_timeout.
 	GUPPViolationTimeout = 30 * time.Minute
 
 	// HungSessionThreshold is how long a tmux session can be inactive before
 	// it's considered hung. Overridable per-role via RoleHealthConfig.
-	// Configurable via operational.session.hung_session_threshold.
 	HungSessionThreshold = 30 * time.Minute
 )
 

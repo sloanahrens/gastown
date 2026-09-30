@@ -4,41 +4,27 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// setTestHome sets HOME (and USERPROFILE on Windows) so that
-// os.UserHomeDir() returns tmpDir on all platforms, and clears GT_HOME so
-// gtConfigDirs() can't fall through to a real town's ~/.gt config — a test
-// running inside a live gastown session (polecat, refinery, ...) normally has
-// GT_HOME set, and gtConfigDirs() checks it before HOME, so leaving it set
-// would make the test read live hooks-base.json/overrides.
-func setTestHome(t *testing.T, tmpDir string) {
-	t.Helper()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("GT_HOME", "")
-	if runtime.GOOS == "windows" {
-		t.Setenv("USERPROFILE", tmpDir)
-	}
-}
-
 func TestLoadSaveBase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	cfg := DefaultBase()
 
-	if err := SaveBase(cfg); err != nil {
+	if err := home.saveBase(cfg); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	if _, err := os.Stat(BasePath()); err != nil {
+	if _, err := os.Stat(home.basePath()); err != nil {
 		t.Fatalf("base config file not created: %v", err)
 	}
 
-	loaded, err := LoadBase()
+	loaded, err := home.loadBase()
 	if err != nil {
 		t.Fatalf("LoadBase failed: %v", err)
 	}
@@ -55,8 +41,9 @@ func TestLoadSaveBase(t *testing.T) {
 }
 
 func TestLoadSaveOverride(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	cfg := &HooksConfig{
 		PreToolUse: []HookEntry{
@@ -67,11 +54,11 @@ func TestLoadSaveOverride(t *testing.T) {
 		},
 	}
 
-	if err := SaveOverride("crew", cfg); err != nil {
+	if err := home.saveOverride("crew", cfg); err != nil {
 		t.Fatalf("SaveOverride failed: %v", err)
 	}
 
-	loaded, err := LoadOverride("crew")
+	loaded, err := home.loadOverride("crew")
 	if err != nil {
 		t.Fatalf("LoadOverride failed: %v", err)
 	}
@@ -85,10 +72,11 @@ func TestLoadSaveOverride(t *testing.T) {
 }
 
 func TestLoadOverrideRejectsDuplicateMatchers(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	overridePath := OverridePath("crew")
+	overridePath := home.overridePath("crew")
 	if err := os.MkdirAll(filepath.Dir(overridePath), 0755); err != nil {
 		t.Fatalf("creating overrides dir: %v", err)
 	}
@@ -103,7 +91,7 @@ func TestLoadOverrideRejectsDuplicateMatchers(t *testing.T) {
 		t.Fatalf("writing override: %v", err)
 	}
 
-	_, err := LoadOverride("crew")
+	_, err := home.loadOverride("crew")
 	if err == nil {
 		t.Fatal("expected duplicate matcher error")
 	}
@@ -113,8 +101,9 @@ func TestLoadOverrideRejectsDuplicateMatchers(t *testing.T) {
 }
 
 func TestLoadSaveOverrideRigRole(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	cfg := &HooksConfig{
 		SessionStart: []HookEntry{
@@ -122,7 +111,7 @@ func TestLoadSaveOverrideRigRole(t *testing.T) {
 		},
 	}
 
-	if err := SaveOverride("gastown/crew", cfg); err != nil {
+	if err := home.saveOverride("gastown/crew", cfg); err != nil {
 		t.Fatalf("SaveOverride failed: %v", err)
 	}
 
@@ -131,7 +120,7 @@ func TestLoadSaveOverrideRigRole(t *testing.T) {
 		t.Fatalf("expected override file at %s: %v", expectedPath, err)
 	}
 
-	loaded, err := LoadOverride("gastown/crew")
+	loaded, err := home.loadOverride("gastown/crew")
 	if err != nil {
 		t.Fatalf("LoadOverride failed: %v", err)
 	}
@@ -142,21 +131,23 @@ func TestLoadSaveOverrideRigRole(t *testing.T) {
 }
 
 func TestLoadMissingFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	_, err := LoadBase()
+	_, err := home.loadBase()
 	if err == nil {
 		t.Error("expected error loading missing base config")
 	}
 
-	_, err = LoadOverride("crew")
+	_, err = home.loadOverride("crew")
 	if err == nil {
 		t.Error("expected error loading missing override config")
 	}
 }
 
 func TestValidTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target string
 		valid  bool
@@ -186,6 +177,7 @@ func TestValidTarget(t *testing.T) {
 }
 
 func TestNormalizeTarget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input      string
 		normalized string
@@ -215,6 +207,7 @@ func TestNormalizeTarget(t *testing.T) {
 }
 
 func TestGetApplicableOverrides(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target   string
 		expected []string
@@ -240,6 +233,7 @@ func TestGetApplicableOverrides(t *testing.T) {
 }
 
 func TestDefaultBase(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultBase()
 
 	if len(cfg.SessionStart) == 0 {
@@ -266,6 +260,7 @@ func TestDefaultBase(t *testing.T) {
 }
 
 func TestMerge(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "base-session"}}},
@@ -304,6 +299,7 @@ func TestMerge(t *testing.T) {
 // base has PreToolUse with matchers ["Bash(git*)", "Bash(rm*)"], override has
 // PreToolUse with matcher ["Bash(git*)"]. The "Bash(rm*)" matcher must be preserved.
 func TestMergePerMatcherPreservation(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash(git*)", Hooks: []Hook{{Type: "command", Command: "git-guard"}}},
@@ -340,6 +336,7 @@ func TestMergePerMatcherPreservation(t *testing.T) {
 }
 
 func TestMergeDifferentMatchersBothIncluded(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Write", Hooks: []Hook{{Type: "command", Command: "write-check"}}},
@@ -365,6 +362,7 @@ func TestMergeDifferentMatchersBothIncluded(t *testing.T) {
 }
 
 func TestMergeExplicitDisable(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Write", Hooks: []Hook{{Type: "command", Command: "write-check"}}},
@@ -388,6 +386,7 @@ func TestMergeExplicitDisable(t *testing.T) {
 }
 
 func TestMergeEmptyOverride(t *testing.T) {
+	t.Parallel()
 	base := DefaultBase()
 	override := &HooksConfig{}
 
@@ -399,15 +398,16 @@ func TestMergeEmptyOverride(t *testing.T) {
 }
 
 func TestComputeExpected(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "base-cmd"}}},
 		},
 	}
-	if err := SaveBase(base); err != nil {
+	if err := home.saveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -416,7 +416,7 @@ func TestComputeExpected(t *testing.T) {
 			{Matcher: "Bash(git*)", Hooks: []Hook{{Type: "command", Command: "crew-guard"}}},
 		},
 	}
-	if err := SaveOverride("crew", crewOverride); err != nil {
+	if err := home.saveOverride("crew", crewOverride); err != nil {
 		t.Fatalf("SaveOverride crew failed: %v", err)
 	}
 
@@ -425,11 +425,11 @@ func TestComputeExpected(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gastown-crew-session"}}},
 		},
 	}
-	if err := SaveOverride("gastown/crew", gcOverride); err != nil {
+	if err := home.saveOverride("gastown/crew", gcOverride); err != nil {
 		t.Fatalf("SaveOverride gastown/crew failed: %v", err)
 	}
 
-	expected, err := ComputeExpected("gastown/crew")
+	expected, err := home.computeExpected("gastown/crew")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -459,8 +459,9 @@ func TestComputeExpected(t *testing.T) {
 // created before SessionStart was added to DefaultBase. SessionStart should
 // be backfilled from DefaultBase so settings.json files contain startup hooks.
 func TestComputeExpectedBackfillsSessionStart(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Simulate a stale hooks-base.json that was created before SessionStart existed.
 	// It has Stop, PreCompact, UserPromptSubmit but no SessionStart.
@@ -475,15 +476,15 @@ func TestComputeExpectedBackfillsSessionStart(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt mail check --inject"}}},
 		},
 	}
-	if err := SaveBase(staleBase); err != nil {
+	if err := home.saveBase(staleBase); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
 	// All targets should get SessionStart backfilled from DefaultBase
 	for _, target := range []string{"mayor", "crew", "witness", "gastown/crew"} {
-		expected, err := ComputeExpected(target)
+		expected, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s) failed: %v", target, err)
+			t.Fatalf("home.computeExpected(%s) failed: %v", target, err)
 		}
 		if len(expected.SessionStart) == 0 {
 			t.Errorf("%s: expected SessionStart to be backfilled from DefaultBase, got none", target)
@@ -514,14 +515,15 @@ func TestComputeExpectedBackfillsSessionStart(t *testing.T) {
 }
 
 func TestComputeExpectedFailsOnDuplicateOverrideMatcher(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	if err := SaveBase(DefaultBase()); err != nil {
+	if err := home.saveBase(DefaultBase()); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	overridePath := OverridePath("crew")
+	overridePath := home.overridePath("crew")
 	if err := os.MkdirAll(filepath.Dir(overridePath), 0755); err != nil {
 		t.Fatalf("creating overrides dir: %v", err)
 	}
@@ -536,7 +538,7 @@ func TestComputeExpectedFailsOnDuplicateOverrideMatcher(t *testing.T) {
 		t.Fatalf("writing override: %v", err)
 	}
 
-	_, err := ComputeExpected("crew")
+	_, err := home.computeExpected("crew")
 	if err == nil {
 		t.Fatal("expected ComputeExpected to fail on duplicate matcher")
 	}
@@ -546,11 +548,12 @@ func TestComputeExpectedFailsOnDuplicateOverrideMatcher(t *testing.T) {
 }
 
 func TestComputeExpectedNoBase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Mayor should get DefaultBase (no built-in overrides)
-	expected, err := ComputeExpected("mayor")
+	expected, err := home.computeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -561,9 +564,9 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 
 	// Crew should get DefaultBase + built-in crew override (PreCompact)
-	crew, err := ComputeExpected("crew")
+	crew, err := home.computeExpected("crew")
 	if err != nil {
-		t.Fatalf("ComputeExpected(crew) failed: %v", err)
+		t.Fatalf("home.computeExpected(crew) failed: %v", err)
 	}
 	// Crew has a built-in PreCompact override, so it won't equal bare DefaultBase
 	if len(crew.PreCompact) == 0 {
@@ -578,9 +581,9 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	// the ungated base guards from DefaultBase. dangerous-command comes from
 	// DefaultBase, so an override that replaced rather than unioned its Bash
 	// entry would silently drop it (gt-8ki9).
-	mayor, err := ComputeExpected("mayor")
+	mayor, err := home.computeExpected("mayor")
 	if err != nil {
-		t.Fatalf("ComputeExpected(mayor) failed: %v", err)
+		t.Fatalf("home.computeExpected(mayor) failed: %v", err)
 	}
 	requireUngatedGuardCommand(t, "mayor", mayor, "tap guard pr-workflow")
 	requireUngatedGuardCommand(t, "mayor", mayor, "tap guard dangerous-command")
@@ -603,9 +606,7 @@ func TestComputeExpectedNoBase(t *testing.T) {
 // defaults reintroduces the failure, so assert its absence here rather than
 // trusting review to notice.
 func TestBuiltinHooksNeverUseIf(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
+	t.Parallel()
 	check := func(label string, cfg *HooksConfig) {
 		t.Helper()
 		for _, eventType := range EventTypes {
@@ -662,12 +663,13 @@ func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, co
 // change that let a same-matcher override replace the base entry, would remove
 // the only protection against one polecat editing another's worktree.
 func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	polecats, err := ComputeExpected("gastown/polecats")
+	polecats, err := home.computeExpected("gastown/polecats")
 	if err != nil {
-		t.Fatalf("ComputeExpected(gastown/polecats): %v", err)
+		t.Fatalf("home.computeExpected(gastown/polecats): %v", err)
 	}
 
 	const guardCommand = "tap guard polecat-paths"
@@ -733,9 +735,9 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 
 	// Other roles must not receive the guard — it is a polecat-only boundary.
 	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
 		for _, eventType := range EventTypes {
 			for _, entry := range cfg.GetEntries(eventType) {
@@ -757,17 +759,18 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 // and one that dropped it from the unattended roles would restore the 4h26m
 // park the bead records.
 func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	const (
 		guardCommand = "tap guard question-tool"
 		matcher      = "AskUserQuestion"
 	)
 	for _, target := range []string{"gastown/polecats"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
 		entry, ok := findPreToolUse(cfg, matcher)
 		if !ok {
@@ -789,9 +792,9 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 
 	// The attended roles keep their question dialog, on every event.
 	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
 		for _, eventType := range EventTypes {
 			for _, entry := range cfg.GetEntries(eventType) {
@@ -820,8 +823,9 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 // computed — reverting to the narrower bare "Bash" matcher the bug shipped
 // with.
 func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	tools := strings.Split(shellExecutingToolMatcher, "|")
 	for _, want := range []string{"Bash", "Monitor"} {
@@ -853,11 +857,11 @@ func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
 	// End-to-end: every role's fully computed config must expose its
 	// self-filtering guards under shellExecutingToolMatcher.
 	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "boot"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
-		assertNoBareBashMatcher("ComputeExpected("+target+")", cfg)
+		assertNoBareBashMatcher("home.computeExpected("+target+")", cfg)
 	}
 
 	// The templates bypass DefaultBase/DefaultOverrides entirely and are
@@ -915,14 +919,15 @@ func loadClaudeTemplateHooks(t *testing.T, tmplFile string) *HooksConfig {
 // reached ComputeExpected's output — a regression this test would have
 // caught (gt-8stz review, finding 48f9948f3436).
 func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	const guardCommand = "tap guard permission-request"
 	for _, target := range []string{"gastown/polecats"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
 		if len(cfg.PermissionRequest) == 0 {
 			t.Fatalf("%s: generated settings carry no PermissionRequest entries at all", target)
@@ -953,9 +958,9 @@ func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testin
 	// Interactive roles must carry no PermissionRequest entry at all — their
 	// prompts stay with the person at the pane (gt-8stz).
 	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
-		cfg, err := ComputeExpected(target)
+		cfg, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s): %v", target, err)
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
 		}
 		if len(cfg.PermissionRequest) != 0 {
 			t.Errorf("%s must not receive a PermissionRequest entry, got: %+v", target, cfg.PermissionRequest)
@@ -964,12 +969,13 @@ func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testin
 }
 
 func TestComputeExpectedPolecatsKeepUserPromptMailCheck(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	cfg, err := ComputeExpected("polecats")
+	cfg, err := home.computeExpected("polecats")
 	if err != nil {
-		t.Fatalf("ComputeExpected(polecats): %v", err)
+		t.Fatalf("home.computeExpected(polecats): %v", err)
 	}
 	if len(cfg.UserPromptSubmit) == 0 {
 		t.Fatal("polecats should retain UserPromptSubmit mail-check")
@@ -979,8 +985,9 @@ func TestComputeExpectedPolecatsKeepUserPromptMailCheck(t *testing.T) {
 // TestComputeExpectedBuiltinPlusOnDisk verifies that on-disk overrides layer
 // on top of built-in defaults rather than replacing them.
 func TestComputeExpectedBuiltinPlusOnDisk(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Save an on-disk mayor override that adds a custom SessionStart hook
 	customOverride := &HooksConfig{
@@ -988,11 +995,11 @@ func TestComputeExpectedBuiltinPlusOnDisk(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "custom-mayor-session"}}},
 		},
 	}
-	if err := SaveOverride("mayor", customOverride); err != nil {
+	if err := home.saveOverride("mayor", customOverride); err != nil {
 		t.Fatalf("SaveOverride failed: %v", err)
 	}
 
-	expected, err := ComputeExpected("mayor")
+	expected, err := home.computeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -1006,6 +1013,7 @@ func TestComputeExpectedBuiltinPlusOnDisk(t *testing.T) {
 }
 
 func TestHooksEqual(t *testing.T) {
+	t.Parallel()
 	a := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "test"}}},
@@ -1034,6 +1042,7 @@ func TestHooksEqual(t *testing.T) {
 }
 
 func TestLoadSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Write raw JSON to test LoadSettings (SettingsJSON uses json:"-" tags)
@@ -1072,6 +1081,7 @@ func TestLoadSettings(t *testing.T) {
 }
 
 func TestLoadSettingsIntegrityError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "settings.json")
 	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":"bad"}}`), 0644); err != nil {
@@ -1088,6 +1098,7 @@ func TestLoadSettingsIntegrityError(t *testing.T) {
 }
 
 func TestDiscoverTargets(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
@@ -1128,6 +1139,7 @@ func TestDiscoverTargets(t *testing.T) {
 }
 
 func TestDiscoverTargets_RoleNames(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
@@ -1172,6 +1184,7 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 }
 
 func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
@@ -1201,6 +1214,7 @@ func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {
 }
 
 func TestDiscoverTargets_BootAbsent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
@@ -1220,6 +1234,7 @@ func TestDiscoverTargets_BootAbsent(t *testing.T) {
 }
 
 func TestDiscoverRoleLocations(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
@@ -1266,6 +1281,7 @@ func TestDiscoverRoleLocations(t *testing.T) {
 }
 
 func TestDiscoverRoleLocations_SkipsNonRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a directory that isn't a rig (no crew/witness/polecats/refinery subdirs)
@@ -1287,6 +1303,7 @@ func TestDiscoverRoleLocations_SkipsNonRigs(t *testing.T) {
 }
 
 func TestDiscoverWorktrees(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create worktree subdirectories
@@ -1316,6 +1333,7 @@ func TestDiscoverWorktrees(t *testing.T) {
 }
 
 func TestDiscoverWorktrees_EmptyDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dirs := DiscoverWorktrees(tmpDir)
 	if len(dirs) != 0 {
@@ -1324,6 +1342,7 @@ func TestDiscoverWorktrees_EmptyDir(t *testing.T) {
 }
 
 func TestDiscoverWorktrees_PrefersNestedGitWorktreeRoots(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	worktree := filepath.Join(tmpDir, "fury", "gastown")
@@ -1354,6 +1373,7 @@ func TestDiscoverWorktrees_PrefersNestedGitWorktreeRoots(t *testing.T) {
 }
 
 func TestDiscoverWorktrees_InvalidDir(t *testing.T) {
+	t.Parallel()
 	dirs := DiscoverWorktrees("/nonexistent/path/that/does/not/exist")
 	if dirs != nil {
 		t.Errorf("expected nil for invalid dir, got %v", dirs)
@@ -1361,6 +1381,7 @@ func TestDiscoverWorktrees_InvalidDir(t *testing.T) {
 }
 
 func TestDiscoverRoleLocations_ReadError(t *testing.T) {
+	t.Parallel()
 	_, err := DiscoverRoleLocations("/nonexistent/path/that/does/not/exist")
 	if err == nil {
 		t.Error("expected error for nonexistent directory")
@@ -1368,6 +1389,7 @@ func TestDiscoverRoleLocations_ReadError(t *testing.T) {
 }
 
 func TestTargetDisplayKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		target   Target
 		expected string
@@ -1384,6 +1406,7 @@ func TestTargetDisplayKey(t *testing.T) {
 }
 
 func TestGetSetEntries(t *testing.T) {
+	t.Parallel()
 	cfg := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "test"}}},
@@ -1414,6 +1437,7 @@ func TestGetSetEntries(t *testing.T) {
 }
 
 func TestToMap(t *testing.T) {
+	t.Parallel()
 	cfg := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "start"}}},
@@ -1439,6 +1463,7 @@ func TestToMap(t *testing.T) {
 }
 
 func TestAddEntry(t *testing.T) {
+	t.Parallel()
 	cfg := &HooksConfig{}
 
 	added := cfg.AddEntry("PreToolUse", HookEntry{
@@ -1476,6 +1501,7 @@ func TestAddEntry(t *testing.T) {
 }
 
 func TestMarshalConfig(t *testing.T) {
+	t.Parallel()
 	cfg := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "test"}}},
@@ -1511,6 +1537,7 @@ func TestMarshalConfig(t *testing.T) {
 // DefaultOverrides role, and ComputeExpected's merged output so a future
 // hand-added guard can't reintroduce the bug in any layer.
 func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
+	t.Parallel()
 	assertNoParenMatchers := func(t *testing.T, label string, cfg *HooksConfig) {
 		t.Helper()
 		for _, entry := range cfg.PreToolUse {
@@ -1526,13 +1553,13 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "boot", "gastown/crew", "gastown/witness"} {
-		expected, err := ComputeExpected(target)
+		expected, err := home.computeExpected(target)
 		if err != nil {
-			t.Fatalf("ComputeExpected(%s) failed: %v", target, err)
+			t.Fatalf("home.computeExpected(%s) failed: %v", target, err)
 		}
-		assertNoParenMatchers(t, "ComputeExpected("+target+")", expected)
+		assertNoParenMatchers(t, "home.computeExpected("+target+")", expected)
 	}
 
 	// A stale paren-style matcher in the templates reintroduces gt-5ihs for
@@ -1547,8 +1574,9 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 // a Stop hook running "gt costs record". It must not reach the expected
 // config, or every sync rewrites a hook that fails on every Stop (gt-31vjc).
 func TestComputeExpectedDropsRetiredCommandHooks(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	staleBase := &HooksConfig{
 		Stop: []HookEntry{
@@ -1561,11 +1589,11 @@ func TestComputeExpectedDropsRetiredCommandHooks(t *testing.T) {
 			}},
 		},
 	}
-	if err := SaveBase(staleBase); err != nil {
+	if err := home.saveBase(staleBase); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	expected, err := ComputeExpected("mayor")
+	expected, err := home.computeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -1584,6 +1612,7 @@ func TestComputeExpectedDropsRetiredCommandHooks(t *testing.T) {
 }
 
 func TestRunsRetiredGTSubcommand(t *testing.T) {
+	t.Parallel()
 	for cmd, want := range map[string]bool{
 		"gt costs record &":                     true,
 		"/Users/x/.local/bin/gt costs record &": true,
@@ -1603,5 +1632,40 @@ func TestRunsRetiredGTSubcommand(t *testing.T) {
 		if got := runsRetiredGTSubcommand(cmd); got != want {
 			t.Errorf("runsRetiredGTSubcommand(%q) = %v, want %v", cmd, got, want)
 		}
+	}
+}
+
+// TestConfigHomeCascade pins the read cascade: with GT_HOME set, its .gt is
+// read (and written) first and ~/.gt is the fallback; a base found in either
+// wins over the built-in default, the GT_HOME one over ~/.gt.
+func TestConfigHomeCascade(t *testing.T) {
+	t.Parallel()
+	gtHome, userHome := t.TempDir(), t.TempDir()
+	home := configHome{gtHome: gtHome, home: userHome}
+	want := []string{filepath.Join(gtHome, ".gt"), filepath.Join(userHome, ".gt")}
+	if got := home.configDirs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("configDirs() = %v, want %v", got, want)
+	}
+	if got := (configHome{gtHome: userHome, home: userHome}).configDirs(); len(got) != 1 {
+		t.Errorf("GT_HOME == HOME: configDirs() = %v, want one dir", got)
+	}
+
+	userOnly := configHome{home: userHome}
+	fallback := &HooksConfig{SessionStart: []HookEntry{{Matcher: "", Hooks: []Hook{{Type: "command", Command: "from-home"}}}}}
+	if err := userOnly.saveBase(fallback); err != nil {
+		t.Fatal(err)
+	}
+	got, err := home.loadBase()
+	if err != nil || got.SessionStart[0].Hooks[0].Command != "from-home" {
+		t.Fatalf("loadBase() = %+v, %v; want the ~/.gt fallback", got, err)
+	}
+
+	primary := &HooksConfig{SessionStart: []HookEntry{{Matcher: "", Hooks: []Hook{{Type: "command", Command: "from-gt-home"}}}}}
+	if err := home.saveBase(primary); err != nil {
+		t.Fatal(err)
+	}
+	got, err = home.loadBase()
+	if err != nil || got.SessionStart[0].Hooks[0].Command != "from-gt-home" {
+		t.Fatalf("loadBase() = %+v, %v; want the $GT_HOME/.gt copy", got, err)
 	}
 }

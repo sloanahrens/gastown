@@ -51,7 +51,13 @@ func sourceHistory(sourceDir string) (hist blobHistory, prefix string) {
 	if err != nil {
 		return nil, ""
 	}
-	hist = blobHistory{}
+	return parseRawLog(out), prefix
+}
+
+// parseRawLog reads the blob history out of `git log --raw --no-abbrev`
+// output.
+func parseRawLog(out []byte) blobHistory {
+	hist := blobHistory{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -76,7 +82,7 @@ func sourceHistory(sourceDir string) (hist blobHistory, prefix string) {
 			hist[p][id] = true
 		}
 	}
-	return hist, prefix
+	return hist
 }
 
 // gitBlobID returns the git object id git would assign to data as a blob.

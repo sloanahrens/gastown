@@ -1080,12 +1080,7 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	mq = config.MergeSettingsCommand(mq, localMQ)
-	if mq != nil && mq.Editorial != nil {
-		defaulted := mq.Editorial.WithDefaults()
-		mq.Editorial = &defaulted
-	}
-	return mq
+	return config.MergeSettingsCommand(mq, localMQ)
 }
 
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
@@ -1096,11 +1091,8 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 // only carries the polecat's five *_command fields), so ResolveMergeQueueConfig
 // alone cannot see it.
 //
-// gt done calls this to fold the refinery's named gates into the
-// pre_verified_gates stamp via config.CombineGateSetSHA, so the value it
-// stamps is computed the same way the refinery's fast-path recomputes it
-// (om-gate T8). Returns nil if config.json is missing, unreadable, or
-// defines no named gates.
+// Returns nil if config.json is missing, unreadable, or defines no named
+// gates.
 func LoadNamedGateCommands(townRoot, rigName string) map[string]string {
 	if townRoot == "" || rigName == "" {
 		return nil

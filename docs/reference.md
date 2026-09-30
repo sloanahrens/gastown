@@ -69,22 +69,14 @@ town-level Gas Town beads.
     }
   },
   "merge_queue": {
-    "enabled": true,
-    "run_tests": true,
     "setup_command": "",
     "typecheck_command": "",
     "lint_command": "",
     "test_command": "",
     "build_command": "",
-    "on_conflict": "assign_back",
-    "delete_merged_branches": true,
-    "retry_flaky_tests": 1,
-    "poll_interval": "30s",
-    "max_concurrent": 1,
-    "integration_branch_polecat_enabled": true,
-    "integration_branch_refinery_enabled": true,
-    "integration_branch_template": "integration/{title}",
-    "integration_branch_auto_land": false
+    "gate": "make gate",
+    "post_land_command": "make test-slow",
+    "integration_branch_polecat_enabled": true
   }
 }
 ```
@@ -140,26 +132,23 @@ Town-level role defaults live in `mayor/config.json` under:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `bool` | `true` | Whether the merge queue is active |
-| `run_tests` | `bool` | `true` | Run tests before merging |
 | `setup_command` | `string` | `""` | Setup/install command (e.g., `pnpm install`) |
 | `typecheck_command` | `string` | `""` | Type check command (e.g., `tsc --noEmit`) |
 | `lint_command` | `string` | `""` | Lint command (e.g., `eslint .`) |
 | `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and writes the container opt-in off for the run unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
 | `presubmit_command` | `string` | `""` | What `gt done` runs on the rebased branch before it pushes. Empty = `make presubmit` when a Go repo's Makefile has that target (lint, build, and the tests of the changed packages only), else `make gate`. The landing worker still runs the full `make gate` on the merged tree. A command that turns `GT_TEST_DOCKER=1` on is refused, as for `test_command`. |
-| `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty uses the 30m floor (the gate runs the rig's full hermetic `test_command`, so there is no changed-package count to scale by). Slot wait is never counted against it. |
-| `test_verify_slot_timeout` | `string` | `"60m"` | How long `gt done`'s default test-verify gate waits for the container-gate slot. Exceeding it is reported as slot contention, not a test failure. Only applies when the gate takes a slot at all (see below). |
-| `test_verify_command` | `string` | `""` | Not read: the land path runs `merge_queue.gate`, else `make gate` (see [Testing](testing.md), "The gate"). No gate scopes itself to changed packages. |
 | `build_command` | `string` | `""` | Build command (e.g., `go build ./...`) |
-| `on_conflict` | `string` | `"assign_back"` | Conflict strategy: `assign_back` or `auto_rebase` |
-| `delete_merged_branches` | `bool` | `true` | Delete source branches after merging |
-| `retry_flaky_tests` | `int` | `1` | Number of times to retry flaky tests |
-| `poll_interval` | `string` | `"30s"` | How often Refinery polls for new MRs |
-| `max_concurrent` | `int` | `1` | Maximum concurrent merges |
+| `gate` | `string` | `""` | The command the landing worker runs on the merged tree. Empty = `make gate` when the Makefile has that target, else `make test` under the container slot. Honored from the rig root `config.json` tier only: the resolver does not overlay it from the other two. |
+| `post_land_command` | `string` | `""` | Run once per landing at the landed commit (the slow tier). Read from `settings/config.json` only. Empty disables it. |
+| `max_ready_for_dispatch` | `int` | `0` | `gt sling` refuses new work while the rig has more ready MRs than this. 0 = guard off. |
+| `merge_strategy` | `string` | `""` | Passed to the polecat formula as `merge_strategy` |
+| `require_review` | `*bool` | `false` | Passed to the polecat formula as `require_review=true` |
+| `editorial.required` | `bool` | `false` | Read by the `editorial-required` doctor check only |
 | `integration_branch_polecat_enabled` | `*bool` | `true` | Polecats auto-source worktrees from integration branches |
-| `integration_branch_refinery_enabled` | `*bool` | `true` | `gt done` / `gt mq submit` auto-target integration branches |
-| `integration_branch_template` | `string` | `"integration/{title}"` | Branch name template (`{title}`, `{epic}`, `{prefix}`, `{user}`) |
-| `integration_branch_auto_land` | `*bool` | `false` | Refinery patrol auto-lands when all children closed |
+
+Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
+`batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict
+decoding; `gt doctor --fix` deletes them.
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 

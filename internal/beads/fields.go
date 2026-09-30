@@ -676,7 +676,7 @@ type MRFields struct {
 	// the rig's gate commands and observed a clean exit. The refinery's
 	// fast-path additionally requires PreVerifiedGates to match the rig's
 	// current gate-set hash before trusting the stamp.
-	PreVerifiedGates string // sha256 of the ordered gate-command set (config.GateSetSHA) at verification time
+	PreVerifiedGates string // sha256 of the ordered gate-command set at verification time
 	PreVerifiedExit  int    // observed exit code of the gate run (always 0 when stamped)
 	PreVerifiedLog   string // sha256 of the captured gate-run log
 }

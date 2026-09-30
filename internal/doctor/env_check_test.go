@@ -53,7 +53,7 @@ func expectedEnv(role, rig, agentName string) map[string]string {
 
 // testCtx returns a CheckContext with the test town root.
 func testCtx() *CheckContext {
-	return &CheckContext{TownRoot: testTownRoot}
+	return &CheckContext{TownRoot: testTownRoot, sessionPrefixes: testPrefixRegistry()}
 }
 
 func TestEnvVarsCheck_NoSessions(t *testing.T) {

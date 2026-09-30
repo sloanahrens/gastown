@@ -41,11 +41,6 @@ If the convoy is still stranded afterwards, a later run feeds it again. This kee
 formula = "mol-convoy-feed"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "load-convoy"
 title = "Load convoy and identify ready issues"

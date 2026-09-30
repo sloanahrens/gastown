@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	gtevents "github.com/steveyegge/gastown/internal/events"
 )
 
 // writeTestEvents writes GtEvent JSON lines to a temporary .events.jsonl file
@@ -349,5 +351,58 @@ func TestMatchesFilters(t *testing.T) {
 				t.Errorf("matchesFilters() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// gt feed --follow keeps streaming after the daemon's events_prune renames a
+// pruned copy over the file (gt-ori5j); a raw descriptor went deaf there.
+func TestPrintGtEvents_FollowSurvivesPrune(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, ".events.jsonl")
+	line := func(msg string, at time.Time) []byte {
+		b, _ := json.Marshal(GtEvent{
+			Timestamp: at.Format(time.RFC3339), Source: "test", Type: "create",
+			Actor: "a", Visibility: "feed", Payload: map[string]interface{}{"message": msg},
+		})
+		return append(b, '\n')
+	}
+	history := append(line("ancient", now.Add(-30*24*time.Hour)), line("recent", now)...)
+	if err := os.WriteFile(eventsPath, history, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
+	done := make(chan error, 1)
+	go func() {
+		done <- PrintGtEvents(dir, PrintOptions{Follow: true, Ctx: ctx, Out: &out, tick: tick})
+	}()
+	tick <- time.Time{} // initial batch printed, follow loop waiting
+
+	if _, err := gtevents.Prune(eventsPath, gtevents.PruneOptions{MaxAge: 24 * time.Hour}, now); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write(line("after-prune", now))
+	_ = f.Close()
+
+	tick <- time.Time{}
+	tick <- time.Time{}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("PrintGtEvents: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{"ancient", "recent", "after-prune"} {
+		if strings.Count(output, want) != 1 {
+			t.Errorf("%q printed %d times, want once:\n%s", want, strings.Count(output, want), output)
+		}
 	}
 }

@@ -3,105 +3,48 @@ Reap stale wisps and close stale issues across all Dolt databases.
 
 The daemon's wisp_reaper patrol is the executor: it runs the sweep inline
 (wisp_reaper.go) and pours this molecule only as the cycle's receipt, closing
-or failing each step as it goes. No agent runs it. The same SQL operations are
-exposed as `gt reaper scan`/`reap`/`purge`/`auto-close`, and the step bodies below double as the
-runbook for an operator running them by hand. The daemon's sweep covers scan,
-reap, purge and auto-close; it does not run `gt convoy check`, so the
-convoy-check step is for a hand run.
+or failing each step as it goes. No agent runs it. The step bodies double as
+the runbook for an operator running `gt reaper scan`/`reap`/`purge`/`auto-close`
+by hand. The daemon's sweep does not run `gt convoy check`; that step is for a
+hand run.
 
-## What a cycle does
-
-1. Scan all production databases for candidates
-2. Reap (close) wisps past max_age whose parent is closed/missing, plus step-wisps whose parent molecule is already closed
-3. Purge (delete) closed wisps past purge_age + old closed mail
-4. Auto-close stale issues (>stale_issue_age, not P0/P1, not infrastructure
-   types/agent beads, no active deps) — dry-run and echo the count first, hand
-   the dry run's preview hash to the live run, and skip entirely when
-   auto_close=false
-5. Close completed convoys via `gt convoy check` (tracked-bead status, never staleness)
-6. Report findings and flag anomalies
-
-## Variables
-
-| Variable | Source | Description |
-|----------|--------|-------------|
-| max_age | config | Max wisp age before reaping (default 24h) |
-| purge_age | config | Max closed wisp age before purging (default 7d) |
-| stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
-| mail_delete_age | config | Max closed mail age before purging (default 7d) |
-| auto_close | config | If "false", SKIP the auto-close step entirely. The daemon's sweep auto-closes only when daemon.json sets `patrols.wisp_reaper.auto_close=true` |
-| alert_threshold | config | Open wisp count that triggers escalation (default 3000) |
-| dry_run | config | If "true", report without acting |
-| databases | config | Comma-separated DB list (default: auto-discover) |
-| db_delay | config | Delay between databases to reduce Dolt load (default 250ms) |
+Variables and their defaults are under [vars] at the end of this file.
 
 ## Safety
 
-Reaping closes wisps — reversible (can reopen). Purging deletes rows — irreversible
-but only targets already-closed wisps past retention.
+Reaping closes wisps and is reversible. Purging deletes rows, irreversibly, but
+only already-closed wisps past retention.
 
-Auto-close is the one destructive step that writes to the durable issue tracker,
-so it carries the whole of the 2026-09-16 mis-close (gt-2qzr, 102 beads) as its
-guard rails. It only targets issues that are not P0/P1, not an infrastructure
-type (epic, convoy, molecule, rig, agent, event), not an agent or infrastructure
-bead by label or id pattern, and have no active dependencies. On top of that:
-
-- `gt reaper auto-close` REFUSES a stale-age below 7d as a SOFT error (gt-ecpj):
-  nothing is closed, the notice names the number of candidates that threshold
-  would take, and the command exits 0 — the notice is the refusal, not a stop,
-  so the cycle completes. Never pass `--force` to get past a notice: a mis-set
-  threshold is a report to fix, not a wall to climb, and the count is the blast
-  radius `--force` would authorize.
-- It REFUSES a run whose candidate count exceeds `--max-closes` (default 20 per
-  database). Nothing is closed on a refusal.
-- The daemon's sweep auto-closes only when daemon.json sets
-  `patrols.wisp_reaper.auto_close=true`; unset or `false` leaves it off, and
-  `false` also disarms a hand run. Do not pass `--force`.
-- It REFUSES a live run that does not carry the preview hash of the set it is
-  about to close (`--preview=<hash>`, gt-39bu). The live command refuses on its
-  own, so the writing stays behind the counting whatever order the two commands
-  were run in. Do not pass `--force` to get past it — re-run the dry run.
-- **Dry run first, every run.** Run `gt reaper auto-close --dry-run` and report
-  the candidate count before running it for real. If the count is a surprise,
-  stop and escalate — do not run it live "to see".
+Auto-close is the one step that writes to the durable issue tracker, and it
+carries the 2026-09-16 mis-close (gt-2qzr, 102 beads) as guard rails: it skips
+P0/P1, infrastructure types and agent beads, and anything with active
+dependencies; it refuses a stale-age below 7d (a soft error, exit 0), a run over
+`--max-closes`, and a live run without the dry run's preview hash. Every refusal
+is the designed stop. **Never pass `--force`**: re-run the dry run, or report the
+mis-set threshold.
 
 ## Scope Boundary (gt-61x)
 
-This formula's writes are limited to wisp/issue/mail ROWS via the gt reaper
-subcommands and `gt convoy check` listed in the steps. The command_allowlist
-declared below records that scope; no runtime guard enforces it now that no
-agent session runs the formula. Database-level operations are OUT OF SCOPE
-for this formula:
+Writes are limited to wisp/issue/mail ROWS via the gt reaper subcommands and
+`gt convoy check`. Database-level operations are OUT OF SCOPE:
 
 - NEVER run `gt dolt cleanup` (with or without --force)
 - NEVER drop, remove, or delete database directories by any means
 - NEVER bypass a refusal from a safety check (a refusal IS the designed stop)
 
-If orphan databases or other database-level problems surface during a run,
-report them and escalate to the mayor (`gt escalate`) — do not act on them.
-Forced cleanup by agents requires recorded authorization
-(`gt dolt cleanup --force --authorized-by <bead-id>`), and databases under an
-open hold bead (label `dolt-hold:<dbname>` or blanket `dolt-hold`) are
-excluded from cleanup regardless.
+Report orphan databases or other database-level problems and escalate to the
+mayor (`gt escalate`); do not act on them.
 
-## Anomaly Detection
+## Anomalies
 
-A run (the daemon's, or a hand run) should watch for and flag:
-- Dangling parent references (wisps referencing purged parents)
-- Sudden spikes in reap candidates (suggests a wisp lifecycle problem)
-- Open wisp counts exceeding alert_threshold
-- Dolt commit failures (data may not be persisted)
-
-NOT anomalies (do NOT escalate these):
-- Scan/reap count mismatch (scan finds N, reap closes M < N): this is a benign
-  race condition — the witness closes wisps for dead sessions concurrently.
-  This is expected behavior, not a bug."""
+Flag dangling parent references, sudden spikes in reap candidates, open wisps
+over alert_threshold, and Dolt commit failures. A scan/reap count mismatch
+(reap closes fewer than scan found) is a benign race, NOT an anomaly: do not
+escalate it."""
 formula = "mol-dog-reaper"
 version = 7
 
-# Declared command allowlist (gt-9iv): the commands this formula's scope covers.
-# It was enforced on the agent sessions that used to run the formula; nothing
-# enforces it now. See the Scope Boundary section above.
+# Declared command allowlist (gt-9iv), no longer enforced: see Scope Boundary.
 command_allowlist = [
 	"gt reaper",
 	"gt convoy check",
@@ -109,11 +52,6 @@ command_allowlist = [
 	"gt escalate",
 	"gt dog done",
 ]
-
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
 
 [[steps]]
 id = "scan"
@@ -136,16 +74,10 @@ gt reaper scan --db=<name> \\
   --json
 ```
 
-**3. Inspect results for anomalies:**
-- Check the `anomalies` array in the JSON output
-- Treat an absent `molecule_step_candidates` field as zero
-- Flag any `dangling_parent_ref` anomalies — these indicate wisps with
-  parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate
-
-**4. Decide whether to proceed:**
-- If no candidates found across all databases, including `molecule_step_candidates`, skip remaining steps
-- If anomalies are severe, consider escalating before proceeding
+**3. Inspect results:** flag the `anomalies` array (a `dangling_parent_ref`
+is a wisp whose parent was purged), and escalate if `open_wisps` exceeds
+{{alert_threshold}}. An absent `molecule_step_candidates` is zero. With no
+candidates in any database, skip the remaining steps.
 
 **Exit criteria:** Scan complete, candidates identified, anomalies flagged."""
 
@@ -163,16 +95,9 @@ gt reaper reap --db=<name> \\
   --max-age={{max_age}} --db-delay={{db_delay}} {{#if dry_run}}--dry-run{{/if}} --json
 ```
 
-**2. Inspect results:**
-- Compare reaped and molecule-step counts to scan candidates. A mismatch (scan > reap) is NORMAL
-  and expected — the witness may close wisps for dead polecat sessions between
-  scan and reap. Do NOT escalate scan/reap count mismatches.
-- Only escalate if reap returns an actual error (not a zero count).
-- Check for any anomalies in the response
-
-**3. Alert check:**
-If total open wisps across all databases exceed {{alert_threshold}},
-log a warning and consider escalating.
+**2. Inspect results:** scan > reap is NORMAL (a race with other closers); do
+not escalate it. Escalate only an actual error, or total open wisps over
+{{alert_threshold}}.
 
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
@@ -191,15 +116,11 @@ gt reaper purge --db=<name> \\
   {{#if dry_run}}--dry-run{{/if}} --json
 ```
 
-**2. Inspect results for anomalies:**
-- Check for `dolt_commit_failed` anomalies — purged data may not be persisted
-- Verify purge counts are reasonable (not suspiciously high or low)
+**2. Inspect results:** a `dolt_commit_failed` anomaly means purged data may
+not be persisted; flag counts that look suspiciously high or low.
 
-**Safety:** Only deletes wisps that are already closed AND past the purge
-retention window, and it spares any wisp a live agent bead still names as
-active_mr or hook_bead — deleting one strands a pointer the polecat can never
-resolve again (gt-gyb6). Active wisps are never touched. Reverse dependency
-references are cleaned up to prevent dangling parent refs.
+Purge spares any wisp a live agent bead still names as active_mr or hook_bead
+(gt-gyb6), and cleans reverse dependency references.
 
 **Exit criteria:** Old closed wisps and mail purged."""
 
@@ -223,11 +144,10 @@ gt reaper auto-close --db=<name> \\
   --db-delay={{db_delay}} --dry-run --json
 ```
 
-Echo the candidate count in your report BEFORE the live run. The count is the
-whole point of this step: it is the only chance to notice that the threshold or
-a filter is wrong while nothing has been written. If the count is larger than
-you can account for, or exceeds --max-closes (default 20), STOP and escalate —
-do not run live, and do not reach for --force.
+Echo the candidate count in your report BEFORE the live run: it is the only
+chance to notice a wrong threshold or filter while nothing has been written. If
+the count is larger than you can account for, or exceeds --max-closes (default
+20), STOP and escalate — do not run live, and do not reach for --force.
 
 The dry run prints this set's preview hash (`--preview=<hash>` in the text
 output, `preview_hash` under `--json`). Keep it for step 2.
@@ -246,15 +166,12 @@ was updated or closed in between), refuses and closes nothing: re-run the dry
 run rather than reaching for `--force`.
 
 **3. Inspect results:**
-- Review the count of closed issues against the dry-run count — they should match
-- Verify exclusions held: P0/P1, epics, convoys, molecules, agent beads, and
-  dependency-linked issues must never appear as candidates
-- A "REFUSED" line (per-run cap, preview) means the run was blocked and nothing
-  was closed. That is a designed stop, not a bug to work around.
-- A "below the floor" notice (gt-ecpj) is a soft error: the command closed
-  nothing, reported the set the mis-set threshold would take, and exited 0.
-  Report it in the cycle report — a threshold that mis-sat below 7d is a config
-  fix, and the cycle continues.
+- The closed count should match the dry-run count
+- P0/P1, epics, convoys, molecules, agent beads, and dependency-linked issues
+  must never appear as candidates
+- A "REFUSED" line (per-run cap, preview) closed nothing: a designed stop
+- A "below the floor" notice (gt-ecpj) closed nothing and exited 0: report the
+  mis-set threshold as a config fix, and continue
 
 {{#if dry_run}}**Dry run is set** — step 2 performs no writes.{{/if}}
 
@@ -271,24 +188,17 @@ Close convoys whose tracked beads are ALL closed. Convoy lifecycle is driven
 by tracked-bead status, never by staleness — `gt reaper auto-close` therefore
 excludes convoys entirely, and this step is what retires them (hq-jnap).
 
-The refinery closes convoys post-merge, but tracked beads closed by other
-paths (manual close, audits/sweeps, `gt done --status DEFERRED`) leave the
-convoy open with nothing left to track. This step bridges that gap.
+Tracked beads closed outside a landing (manual close, sweeps,
+`gt done --status DEFERRED`) leave a convoy open with nothing left to track.
 
 **1. Run convoy check (cross-prefix aware, town-level):**
 ```bash
 gt convoy check {{#if dry_run}}# dry_run set: run 'gt convoy list' and report instead of closing{{/if}}
 ```
 
-`gt convoy check` closes every open convoy whose tracked issues are all
-closed and notifies subscribers. It NEVER closes a convoy with open tracked
-issues — if a convoy looks stale but its tracked beads are open, that is a
-dispatch problem to flag, not a cleanup target.
-
-**2. Inspect results:**
-- Note which convoys were closed and why
-- If a convoy has been open >7d with all tracked issues open and unassigned,
-  flag it in the report (stranded convoy — needs feeding, not closing)
+It NEVER closes a convoy with open tracked issues. A convoy open >7d with all
+tracked issues open and unassigned is stranded: flag it in the report (it needs
+feeding, not closing).
 
 **Exit criteria:** All completed convoys closed; stranded convoys flagged."""
 
@@ -337,7 +247,7 @@ description = "Max issue staleness before auto-close (e.g., '720h' = 30 days; '3
 default = "720h"
 
 [vars.auto_close]
-description = "If 'false', skip the auto-close step entirely. Empty (default) means armed."
+description = "If 'false', skip the auto-close step. Empty (default) means armed; the daemon's sweep auto-closes only when daemon.json sets patrols.wisp_reaper.auto_close=true."
 default = ""
 
 [vars.mail_delete_age]
@@ -345,7 +255,7 @@ description = "Max closed mail age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
 [vars.alert_threshold]
-description = "Open wisp count that triggers escalation warning"
+description = "Open wisp count that triggers escalation warning (default 3000)"
 default = "3000"
 
 [vars.dry_run]

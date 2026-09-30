@@ -8,8 +8,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -447,13 +449,12 @@ func appendEvents(t *testing.T, town, content string) {
 func TestTripwire_ToleratesMidLineSnapshotOffset(t *testing.T) {
 	t.Parallel()
 	town := makeFakeTown(t)
+	// The snapshot lands 7 bytes into a line an agent is still appending.
+	appendEvents(t, town, `{"ts":"`)
 	snap := snapshotTown(town)
-	appendEvents(t, town, `{"ts":"2026-09-18T21:29:48Z","source":"gt","type":"session_start","actor":"gastown/polecats/garnet","visibility":"feed"}`+"\n")
+	appendEvents(t, town, `2026-09-18T21:29:48Z","source":"gt","type":"session_start","actor":"gastown/polecats/garnet","visibility":"feed"}`+"\n")
 
-	// diff() would use the snapshot's own boundary, which is a line start in
-	// this fixture; drive the detector directly at the truncation the town
-	// actually produced so the mid-line path is exercised. +7 skips `{"ts":"`.
-	leaks := suspiciousAppendedEvents(town, snap.eventsSize+7)
+	leaks := snap.diff()
 	if len(leaks) != 0 {
 		t.Errorf("mid-line snapshot offset flagged a concurrent live-town event: %v", leaks)
 	}
@@ -462,14 +463,15 @@ func TestTripwire_ToleratesMidLineSnapshotOffset(t *testing.T) {
 func TestTripwire_DetectsFixtureActorAfterMidLineSnapshotOffset(t *testing.T) {
 	t.Parallel()
 	town := makeFakeTown(t)
+	// Concurrent legitimate traffic first (the line the snapshot lands in),
+	// then the leak that must still be caught.
+	appendEvents(t, town, `{"ts":"`)
 	snap := snapshotTown(town)
-	// Concurrent legitimate traffic first (the line the offset lands in), then
-	// the leak that must still be caught.
 	appendEvents(t, town,
-		`{"ts":"2026-09-18T21:29:48Z","source":"gt","type":"nudge","actor":"gastown/witness","visibility":"feed"}`+"\n"+
+		`2026-09-18T21:29:48Z","source":"gt","type":"nudge","actor":"gastown/witness","visibility":"feed"}`+"\n"+
 			`{"ts":"2026-09-18T21:29:49Z","source":"gt","type":"spawn","actor":"myr/mycat","visibility":"feed"}`+"\n")
 
-	leaks := suspiciousAppendedEvents(town, snap.eventsSize+7)
+	leaks := snap.diff()
 	if len(leaks) != 1 {
 		t.Fatalf("expected exactly 1 leak (fixture actor), got %d: %v", len(leaks), leaks)
 	}
@@ -505,6 +507,61 @@ func TestTripwire_FlagsCompleteMalformedLine(t *testing.T) {
 	}
 	if !strings.Contains(leaks[0], "unparseable") {
 		t.Errorf("malformed line not flagged as unparseable: %v", leaks)
+	}
+}
+
+// gt-yirj6: the daemon's events_prune replaces .events.jsonl with its newest
+// lines while tests run. The pruned file is smaller than the snapshot's end
+// and starts inside what was history, so a saved byte offset scans nothing
+// (missing the leak appended after the prune) or replays retained history
+// (flagging the old fixture line). The tripwire re-syncs after the last line
+// it had passed and judges exactly the lines appended since the snapshot.
+func TestTripwire_FollowsPruneBetweenSnapshotAndScan(t *testing.T) {
+	t.Parallel()
+	town := makeFakeTown(t)
+	path := filepath.Join(town, ".events.jsonl")
+	var history strings.Builder
+	for range 40 {
+		history.WriteString(`{"ts":"2026-09-18T20:00:00Z","source":"gt","type":"nudge","actor":"gastown/witness","visibility":"feed"}` + "\n")
+	}
+	// Pre-snapshot history the tripwire must never report, kept by the prune.
+	history.WriteString(`{"ts":"2026-09-18T20:00:01Z","source":"gt","type":"spawn","actor":"old/fixture","visibility":"feed"}` + "\n")
+	appendEvents(t, town, history.String())
+
+	snap := snapshotTown(town)
+	appendEvents(t, town, `{"ts":"2026-09-18T21:00:00Z","source":"gt","type":"nudge","actor":"gastown/refinery","visibility":"feed"}`+"\n")
+	res, err := events.Prune(path, events.PruneOptions{MaxBytes: 1024}, time.Now())
+	if err != nil || !res.Pruned() {
+		t.Fatalf("Prune = %+v, %v; want a rewrite", res, err)
+	}
+	appendEvents(t, town, `{"ts":"2026-09-18T21:00:01Z","source":"gt","type":"spawn","actor":"myr/mycat","visibility":"feed"}`+"\n")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 || !strings.Contains(leaks[0], "myr/mycat") {
+		t.Fatalf("leaks = %v, want only the fixture actor appended after the prune", leaks)
+	}
+}
+
+// An events file that appears during the run is judged from its start.
+func TestTripwire_ScansEventsFileCreatedAfterSnapshot(t *testing.T) {
+	t.Parallel()
+	town := makeFakeTown(t)
+	if err := os.Remove(filepath.Join(town, ".events.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	snap := snapshotTown(town)
+	writeFile(t, filepath.Join(town, ".events.jsonl"),
+		`{"ts":"2026-09-18T21:00:01Z","source":"gt","type":"spawn","actor":"myr/mycat","visibility":"feed"}`+"\n")
+
+	leaks := snap.diff()
+	var eventLeaks []string
+	for _, l := range leaks {
+		if strings.Contains(l, "actor") {
+			eventLeaks = append(eventLeaks, l)
+		}
+	}
+	if len(eventLeaks) != 1 || !strings.Contains(eventLeaks[0], "myr/mycat") {
+		t.Fatalf("leaks = %v, want the fixture actor in the new events file", leaks)
 	}
 }
 

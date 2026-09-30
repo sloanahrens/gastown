@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -190,62 +189,8 @@ func validateRigSettings(c *RigSettings) error {
 	return nil
 }
 
-// ErrInvalidOnConflict indicates an invalid on_conflict strategy.
-var ErrInvalidOnConflict = errors.New("invalid on_conflict strategy")
-
 // validateMergeQueueConfig validates a MergeQueueConfig.
 func validateMergeQueueConfig(c *MergeQueueConfig) error {
-	// Validate on_conflict strategy
-	if c.OnConflict != "" && c.OnConflict != OnConflictAssignBack && c.OnConflict != OnConflictAutoRebase {
-		return fmt.Errorf("%w: got '%s', want '%s' or '%s'",
-			ErrInvalidOnConflict, c.OnConflict, OnConflictAssignBack, OnConflictAutoRebase)
-	}
-
-	// Validate poll_interval if specified
-	if c.PollInterval != "" {
-		if _, err := time.ParseDuration(c.PollInterval); err != nil {
-			return fmt.Errorf("invalid poll_interval: %w", err)
-		}
-	}
-
-	// Validate stale_claim_timeout if specified
-	if c.StaleClaimTimeout != "" {
-		dur, err := time.ParseDuration(c.StaleClaimTimeout)
-		if err != nil {
-			return fmt.Errorf("invalid stale_claim_timeout: %w", err)
-		}
-		if dur <= 0 {
-			return fmt.Errorf("stale_claim_timeout must be positive, got %v", dur)
-		}
-	}
-
-	// Validate non-negative values
-	if c.RetryFlakyTests < 0 {
-		return fmt.Errorf("%w: retry_flaky_tests must be non-negative", ErrMissingField)
-	}
-	if c.MaxConcurrent < 0 {
-		return fmt.Errorf("%w: max_concurrent must be non-negative", ErrMissingField)
-	}
-
-	// Validate batch_min_age if specified
-	if c.BatchMinAge != "" {
-		dur, err := time.ParseDuration(c.BatchMinAge)
-		if err != nil {
-			return fmt.Errorf("invalid batch_min_age: %w", err)
-		}
-		if dur <= 0 {
-			return fmt.Errorf("batch_min_age must be positive, got %v", dur)
-		}
-	}
-
-	if c.BatchMax < 0 {
-		return fmt.Errorf("%w: batch_max must be non-negative", ErrMissingField)
-	}
-
-	if c.BatchMinCount < 0 {
-		return fmt.Errorf("%w: batch_min_count must be non-negative", ErrMissingField)
-	}
-
 	// Zero is the documented "guard off" value, so only a negative is invalid:
 	// a typo'd -1 would silently disable the ceiling the operator meant to set.
 	if c.MaxReadyForDispatch < 0 {
@@ -329,90 +274,21 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.PresubmitCommand != "" {
 			result.PresubmitCommand = local.PresubmitCommand
 		}
-		// gt done's default test-verify gate budgets and command override
-		// (gt-pnkd): same non-empty-wins rule as the five *_command fields
-		// above.
-		if local.TestVerifyRunTimeout != "" {
-			result.TestVerifyRunTimeout = local.TestVerifyRunTimeout
-		}
-		if local.TestVerifySlotTimeout != "" {
-			result.TestVerifySlotTimeout = local.TestVerifySlotTimeout
-		}
-		if local.TestVerifyCommand != "" {
-			result.TestVerifyCommand = local.TestVerifyCommand
-		}
 		if local.BuildCommand != "" {
 			result.BuildCommand = local.BuildCommand
 		}
 		// Merge non-command fields from local if explicitly set
-		if local.Enabled {
-			result.Enabled = local.Enabled
-		}
 		if local.MergeStrategy != "" {
 			result.MergeStrategy = local.MergeStrategy
-		}
-		if local.OnConflict != "" {
-			result.OnConflict = local.OnConflict
-		}
-		if local.RunTests != nil {
-			result.RunTests = local.RunTests
-		}
-		if local.DeleteMergedBranches != nil {
-			result.DeleteMergedBranches = local.DeleteMergedBranches
-		}
-		if local.RetryFlakyTests > 0 {
-			result.RetryFlakyTests = local.RetryFlakyTests
-		}
-		if local.PollInterval != "" {
-			result.PollInterval = local.PollInterval
 		}
 		if local.MaxReadyForDispatch > 0 {
 			result.MaxReadyForDispatch = local.MaxReadyForDispatch
-		}
-		if local.MaxConcurrent > 0 {
-			result.MaxConcurrent = local.MaxConcurrent
-		}
-		if local.StaleClaimTimeout != "" {
-			result.StaleClaimTimeout = local.StaleClaimTimeout
-		}
-		if local.MergeStrategy != "" {
-			result.MergeStrategy = local.MergeStrategy
 		}
 		if local.RequireReview != nil {
 			result.RequireReview = local.RequireReview
 		}
 		if local.IntegrationBranchPolecatEnabled != nil {
 			result.IntegrationBranchPolecatEnabled = local.IntegrationBranchPolecatEnabled
-		}
-		if local.IntegrationBranchRefineryEnabled != nil {
-			result.IntegrationBranchRefineryEnabled = local.IntegrationBranchRefineryEnabled
-		}
-		if local.IntegrationBranchTemplate != "" {
-			result.IntegrationBranchTemplate = local.IntegrationBranchTemplate
-		}
-		if local.IntegrationBranchAutoLand != nil {
-			result.IntegrationBranchAutoLand = local.IntegrationBranchAutoLand
-		}
-		if local.VCSProvider != "" {
-			result.VCSProvider = local.VCSProvider
-		}
-		if local.JudgmentEnabled != nil {
-			result.JudgmentEnabled = local.JudgmentEnabled
-		}
-		if local.ReviewDepth != "" {
-			result.ReviewDepth = local.ReviewDepth
-		}
-		if local.BatchEnabled != nil {
-			result.BatchEnabled = local.BatchEnabled
-		}
-		if local.BatchMinAge != "" {
-			result.BatchMinAge = local.BatchMinAge
-		}
-		if local.BatchMax > 0 {
-			result.BatchMax = local.BatchMax
-		}
-		if local.BatchMinCount > 0 {
-			result.BatchMinCount = local.BatchMinCount
 		}
 		if local.Editorial != nil {
 			result.Editorial = local.Editorial
@@ -445,10 +321,20 @@ func LoadRigSettings(path string) (*RigSettings, error) {
 
 // DeprecatedMergeQueueKeys lists merge_queue config keys that have been
 // removed. Strict decoding rejects them in a rig settings file; gt doctor
-// names them.
+// names them and --fix deletes them.
 // target_branch and integration_branches were replaced by rig default_branch
-// and per-epic integration branch metadata.
-var DeprecatedMergeQueueKeys = []string{"target_branch", "integration_branches"}
+// and per-epic integration branch metadata. The rest configured the deleted
+// refinery and gt done's old test-verify gate; nothing read them after the
+// landing worker replaced both (gt-5nlvq).
+var DeprecatedMergeQueueKeys = []string{
+	"target_branch", "integration_branches",
+	"enabled", "integration_branch_refinery_enabled", "integration_branch_template",
+	"integration_branch_auto_land", "vcs_provider", "on_conflict", "run_tests",
+	"test_verify_run_timeout", "test_verify_slot_timeout", "test_verify_command",
+	"delete_merged_branches", "retry_flaky_tests", "poll_interval", "max_concurrent",
+	"stale_claim_timeout", "judgment_enabled", "review_depth", "batch_enabled",
+	"batch_min_age", "batch_max", "batch_min_count", "cycle_session_after_merge",
+}
 
 // SaveRigSettings saves rig settings to a file.
 func SaveRigSettings(path string, settings *RigSettings) error {
@@ -867,9 +753,13 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 // townRoot is the path to the town directory (e.g., ~/gt).
 // rigPath is the path to the rig directory (e.g., ~/gt/gastown).
 func ResolveAgentConfig(townRoot, rigPath string) *RuntimeConfig {
+	return resolveAgentConfig(processHost, townRoot, rigPath)
+}
+
+func resolveAgentConfig(h host, townRoot, rigPath string) *RuntimeConfig {
 	resolveConfigMu.Lock()
 	defer resolveConfigMu.Unlock()
-	return resolveAgentConfigInternal(AgentRegistryFor(townRoot, rigPath), townRoot, rigPath)
+	return resolveAgentConfigInternal(agentRegistryFor(h, townRoot, rigPath), townRoot, rigPath)
 }
 
 // resolveAgentConfigInternal is the lock-free version of ResolveAgentConfig.
@@ -916,9 +806,13 @@ func resolveAgentConfigInternal(reg *AgentRegistry, townRoot, rigPath string) *R
 // Returns the resolved RuntimeConfig, the selected agent name, and an error if the override name
 // does not exist in town custom agents or built-in presets.
 func ResolveAgentConfigWithOverride(townRoot, rigPath, agentOverride string) (*RuntimeConfig, string, error) {
+	return resolveAgentConfigWithOverride(processHost, townRoot, rigPath, agentOverride)
+}
+
+func resolveAgentConfigWithOverride(h host, townRoot, rigPath, agentOverride string) (*RuntimeConfig, string, error) {
 	resolveConfigMu.Lock()
 	defer resolveConfigMu.Unlock()
-	return resolveAgentConfigWithOverrideInternal(AgentRegistryFor(townRoot, rigPath), townRoot, rigPath, agentOverride)
+	return resolveAgentConfigWithOverrideInternal(agentRegistryFor(h, townRoot, rigPath), townRoot, rigPath, agentOverride)
 }
 
 // resolveAgentConfigWithOverrideInternal is the lock-free version.
@@ -1032,7 +926,7 @@ func ValidateAgentConfig(reg *AgentRegistry, agentName string, townSettings *Tow
 	}
 
 	// Check if binary exists on system
-	if _, err := exec.LookPath(rc.Command); err != nil {
+	if _, err := reg.host().lookPath(rc.Command); err != nil {
 		return fmt.Errorf("agent %q binary %q not found in PATH", agentName, rc.Command)
 	}
 
@@ -1043,7 +937,7 @@ func ValidateAgentConfig(reg *AgentRegistry, agentName string, townSettings *Tow
 	// an agent named directly (the builtin preset); an agent resolved out of
 	// settings skips this function, and BuildStartupCommandWithAgentOverride
 	// stops the spawn instead.
-	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+	if missing := unsetEnvRefs(rc.Env, reg.host().getenv); len(missing) > 0 {
 		return fmt.Errorf("agent %q env references %s, which is not set in the environment",
 			agentName, strings.Join(missing, ", "))
 	}
@@ -1051,14 +945,14 @@ func ValidateAgentConfig(reg *AgentRegistry, agentName string, townSettings *Tow
 	return nil
 }
 
-// unsetEnvRefs returns the ${VAR} names referenced by env values that have no
-// value in the process environment, deduplicated and sorted.
-func unsetEnvRefs(env map[string]string) []string {
+// unsetEnvRefs returns the ${VAR} names referenced by env values that getenv
+// has no value for, deduplicated and sorted.
+func unsetEnvRefs(env map[string]string, getenv func(string) string) []string {
 	seen := make(map[string]bool)
 	var missing []string
 	for _, v := range env {
 		for _, name := range envRefNames(v) {
-			if os.Getenv(name) != "" || seen[name] {
+			if getenv(name) != "" || seen[name] {
 				continue
 			}
 			seen[name] = true
@@ -1133,9 +1027,13 @@ func costTierPresetByName(name string) *RuntimeConfig {
 // townRoot is the path to the town directory (e.g., ~/gt).
 // rigPath is the path to the rig directory (e.g., ~/gt/gastown), or empty for town-level roles.
 func ResolveRoleAgentConfig(role, townRoot, rigPath string) *RuntimeConfig {
+	return resolveRoleAgentConfig(processHost, role, townRoot, rigPath)
+}
+
+func resolveRoleAgentConfig(h host, role, townRoot, rigPath string) *RuntimeConfig {
 	resolveConfigMu.Lock()
 	defer resolveConfigMu.Unlock()
-	reg := AgentRegistryFor(townRoot, rigPath)
+	reg := agentRegistryFor(h, townRoot, rigPath)
 	rc := resolveRoleAgentConfigCore(reg, role, townRoot, rigPath)
 	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
 	return withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, "")
@@ -1167,9 +1065,13 @@ func tryResolveNamedAgent(reg *AgentRegistry, agentName, warnPrefix string, town
 //
 // workerName is the crew member name (e.g., "denali").
 func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConfig {
+	return resolveWorkerAgentConfig(processHost, workerName, townRoot, rigPath)
+}
+
+func resolveWorkerAgentConfig(h host, workerName, townRoot, rigPath string) *RuntimeConfig {
 	resolveConfigMu.Lock()
 	defer resolveConfigMu.Unlock()
-	reg := AgentRegistryFor(townRoot, rigPath)
+	reg := agentRegistryFor(h, townRoot, rigPath)
 
 	// Tier 1: rig's per-worker override
 	if workerName != "" && rigPath != "" {
@@ -1215,8 +1117,13 @@ func ResolveWorkerAgentConfig(workerName, townRoot, rigPath string) *RuntimeConf
 //
 // Invalid effort levels are warned about and skipped.
 func ResolveRoleEffort(role, townRoot, rigPath string) string {
+	return resolveRoleEffort(os.Getenv, role, townRoot, rigPath)
+}
+
+// resolveRoleEffort is ResolveRoleEffort reading GT_COST_TIER through getenv.
+func resolveRoleEffort(getenv func(string) string, role, townRoot, rigPath string) string {
 	// Tier 1: ephemeral cost tier override (mirrors agent resolution)
-	if tierName := os.Getenv("GT_COST_TIER"); tierName != "" && IsValidTier(tierName) {
+	if tierName := getenv("GT_COST_TIER"); tierName != "" && IsValidTier(tierName) {
 		if roleEffort := CostTierRoleEffort(CostTier(tierName)); roleEffort != nil {
 			if effort, ok := roleEffort[role]; ok {
 				return effort
@@ -1355,7 +1262,7 @@ func RoleSettingsDir(role, rigPath string) string {
 // explicitly wants the default agent for this role, and persisted RoleAgents
 // should be skipped to prevent stale config from leaking through.
 func tryResolveFromEphemeralTier(reg *AgentRegistry, role string) (*RuntimeConfig, bool) {
-	tierName := os.Getenv("GT_COST_TIER")
+	tierName := reg.host().getenv("GT_COST_TIER")
 	if tierName == "" || !IsValidTier(tierName) {
 		return nil, false
 	}
@@ -1849,7 +1756,7 @@ func inferAgentName(rc *RuntimeConfig) string {
 func GetRuntimeCommand(rigPath string) string {
 	if rigPath == "" {
 		// Try to detect town root from cwd for town-level agents (mayor, deacon)
-		townRoot, err := findTownRootFromCwd()
+		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommand()
 		}
@@ -1864,7 +1771,7 @@ func GetRuntimeCommand(rigPath string) string {
 // using agentOverride if non-empty.
 func GetRuntimeCommandWithAgentOverride(rigPath, agentOverride string) (string, error) {
 	if rigPath == "" {
-		townRoot, err := findTownRootFromCwd()
+		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommand(), nil
 		}
@@ -1887,7 +1794,7 @@ func GetRuntimeCommandWithAgentOverride(rigPath, agentOverride string) (string, 
 func GetRuntimeCommandWithPrompt(rigPath, prompt string) string {
 	if rigPath == "" {
 		// Try to detect town root from cwd for town-level agents (mayor, deacon)
-		townRoot, err := findTownRootFromCwd()
+		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommandWithPrompt(prompt)
 		}
@@ -1901,7 +1808,7 @@ func GetRuntimeCommandWithPrompt(rigPath, prompt string) string {
 // using agentOverride if non-empty.
 func GetRuntimeCommandWithPromptAndAgentOverride(rigPath, prompt, agentOverride string) (string, error) {
 	if rigPath == "" {
-		townRoot, err := findTownRootFromCwd()
+		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommandWithPrompt(prompt), nil
 		}
@@ -1923,8 +1830,8 @@ func GetRuntimeCommandWithPromptAndAgentOverride(rigPath, prompt, agentOverride 
 // findTownRootFromCwd locates the town root by walking up from cwd.
 // It looks for the mayor/town.json marker file.
 // Returns empty string and no error if not found (caller should use defaults).
-func findTownRootFromCwd() (string, error) {
-	cwd, err := os.Getwd()
+func findTownRootFromCwd(h host) (string, error) {
+	cwd, err := h.getwd()
 	if err != nil {
 		return "", fmt.Errorf("getting cwd: %w", err)
 	}
@@ -1997,6 +1904,10 @@ func ExtractSimpleRole(gtRole string) string {
 // session alone rather than typing an empty credential into its pane
 // (gt-wisp-jsm).
 func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (string, error) {
+	return buildStartupCommand(processHost, envVars, rigPath, prompt)
+}
+
+func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt string) (string, error) {
 	var rc *RuntimeConfig
 	var townRoot string
 
@@ -2010,12 +1921,12 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 		townRoot = filepath.Dir(rigPath)
 		if role == "crew" && envVars["GT_CREW"] != "" {
 			// Per-worker agent resolution: check worker_agents before role_agents
-			rc = ResolveWorkerAgentConfig(envVars["GT_CREW"], townRoot, rigPath)
+			rc = resolveWorkerAgentConfig(h, envVars["GT_CREW"], townRoot, rigPath)
 		} else if role != "" {
 			// Use role-based agent resolution for per-role model selection
-			rc = ResolveRoleAgentConfig(role, townRoot, rigPath)
+			rc = resolveRoleAgentConfig(h, role, townRoot, rigPath)
 		} else {
-			rc = ResolveAgentConfig(townRoot, rigPath)
+			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
 		// For town-level agents (mayor, deacon), prefer GT_ROOT from envVars
@@ -2024,16 +1935,16 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 		townRoot = envVars["GT_ROOT"]
 		if townRoot == "" {
 			var err error
-			townRoot, err = findTownRootFromCwd()
+			townRoot, err = findTownRootFromCwd(h)
 			if err != nil {
 				rc = DefaultRuntimeConfig()
 			}
 		}
 		if rc == nil {
 			if role != "" {
-				rc = ResolveRoleAgentConfig(role, townRoot, "")
+				rc = resolveRoleAgentConfig(h, role, townRoot, "")
 			} else {
-				rc = ResolveAgentConfig(townRoot, "")
+				rc = resolveAgentConfig(h, townRoot, "")
 			}
 		}
 	}
@@ -2067,14 +1978,14 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 	// shadow built-in preset names (e.g., custom "codex" running "opencode"),
 	// or wrap the real binary with a launcher (e.g., `env -u VAR claude ...`).
 	// Pass rc.Args so wrapper-unwrap can find the real binary.
-	processNames := AgentRegistryFor(townRoot, rigPath).ResolveProcessNames(rc.ResolvedAgent, rc.Command, rc.Args...)
+	processNames := agentRegistryFor(h, townRoot, rigPath).ResolveProcessNames(rc.ResolvedAgent, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
 	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
 	// resolving any ${VAR} reference here rather than at config load so it
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference is an error, not an empty export: this is the only check an
 	// agent resolved out of settings passes (gt-yih1).
-	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+	if missing := unsetEnvRefs(rc.Env, h.getenv); len(missing) > 0 {
 		name := rc.ResolvedAgent
 		if name == "" {
 			name = rc.Provider
@@ -2082,7 +1993,7 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
 			name, strings.Join(missing, ", "))
 	}
-	for k, v := range ExpandEnvRefs(rc.Env) {
+	for k, v := range expandEnvRefsIn(rc.Env, h.getenv) {
 		resolvedEnv[k] = v
 	}
 
@@ -2239,6 +2150,10 @@ func PrependEnv(command string, envVars map[string]string) string {
 //  2. role_agents[GT_ROLE] (if GT_ROLE is in envVars)
 //  3. Default agent resolution (rig's Agent → town's DefaultAgent → "claude")
 func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, prompt, agentOverride string) (string, error) {
+	return buildStartupCommandWithAgentOverride(processHost, envVars, rigPath, prompt, agentOverride)
+}
+
+func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rigPath, prompt, agentOverride string) (string, error) {
 	var rc *RuntimeConfig
 	var townRoot string
 
@@ -2249,18 +2164,18 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		townRoot = filepath.Dir(rigPath)
 		if agentOverride != "" {
 			var err error
-			rc, _, err = ResolveAgentConfigWithOverride(townRoot, rigPath, agentOverride)
+			rc, _, err = resolveAgentConfigWithOverride(h, townRoot, rigPath, agentOverride)
 			if err != nil {
 				return "", err
 			}
 		} else if role == "crew" && envVars["GT_CREW"] != "" {
 			// Per-worker agent resolution: check worker_agents before role_agents
-			rc = ResolveWorkerAgentConfig(envVars["GT_CREW"], townRoot, rigPath)
+			rc = resolveWorkerAgentConfig(h, envVars["GT_CREW"], townRoot, rigPath)
 		} else if role != "" {
 			// No override, use role-based agent resolution
-			rc = ResolveRoleAgentConfig(role, townRoot, rigPath)
+			rc = resolveRoleAgentConfig(h, role, townRoot, rigPath)
 		} else {
-			rc = ResolveAgentConfig(townRoot, rigPath)
+			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
 		// For town-level agents (mayor, deacon), prefer GT_ROOT from envVars
@@ -2269,7 +2184,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		townRoot = envVars["GT_ROOT"]
 		if townRoot == "" {
 			var err error
-			townRoot, err = findTownRootFromCwd()
+			townRoot, err = findTownRootFromCwd(h)
 			if err != nil {
 				// Can't find town root from cwd - but if agentOverride is specified,
 				// try to use the preset directly. This allows `gt deacon start --agent codex`
@@ -2288,14 +2203,14 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		if rc == nil {
 			if agentOverride != "" {
 				var resolveErr error
-				rc, _, resolveErr = ResolveAgentConfigWithOverride(townRoot, "", agentOverride)
+				rc, _, resolveErr = resolveAgentConfigWithOverride(h, townRoot, "", agentOverride)
 				if resolveErr != nil {
 					return "", resolveErr
 				}
 			} else if role != "" {
-				rc = ResolveRoleAgentConfig(role, townRoot, "")
+				rc = resolveRoleAgentConfig(h, role, townRoot, "")
 			} else {
-				rc = ResolveAgentConfig(townRoot, "")
+				rc = resolveAgentConfig(h, townRoot, "")
 			}
 		}
 	}
@@ -2305,7 +2220,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	// resolution paths (including agent overrides) — previously only the
 	// non-override ResolveRoleAgentConfig path included it, causing hooks
 	// to silently not fire for polecats launched with --agent.
-	reg := AgentRegistryFor(townRoot, rigPath)
+	reg := agentRegistryFor(h, townRoot, rigPath)
 	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
 	// Same for the rendered role system prompt: when the agent's file exists,
 	// Claude gets it via --append-system-prompt-file and gt prime omits the
@@ -2354,7 +2269,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference stops the spawn: this is the only check an agent resolved out
 	// of settings passes (gt-yih1).
-	if missing := unsetEnvRefs(rc.Env); len(missing) > 0 {
+	if missing := unsetEnvRefs(rc.Env, h.getenv); len(missing) > 0 {
 		name := agentForProcess
 		if name == "" {
 			name = rc.Provider
@@ -2362,7 +2277,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
 			name, strings.Join(missing, ", "))
 	}
-	for k, v := range ExpandEnvRefs(rc.Env) {
+	for k, v := range expandEnvRefsIn(rc.Env, h.getenv) {
 		resolvedEnv[k] = v
 	}
 
@@ -2442,8 +2357,15 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 // Issue (gt.issue), Topic (gt.topic), SessionName (gt.session), etc.
 // The rigPath, prompt, and agentOverride are passed through directly.
 func BuildStartupCommandFromConfig(cfg AgentEnvConfig, rigPath, prompt, agentOverride string) (string, error) {
+	return buildStartupCommandFromConfig(processHost, cfg, rigPath, prompt, agentOverride)
+}
+
+func buildStartupCommandFromConfig(h host, cfg AgentEnvConfig, rigPath, prompt, agentOverride string) (string, error) {
+	if cfg.Getenv == nil {
+		cfg.Getenv = h.getenv
+	}
 	envVars := AgentEnv(cfg)
-	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
+	return buildStartupCommandWithAgentOverride(h, envVars, rigPath, prompt, agentOverride)
 }
 
 // BuildAgentStartupCommand is a convenience function for starting agent
@@ -2452,24 +2374,34 @@ func BuildStartupCommandFromConfig(cfg AgentEnvConfig, rigPath, prompt, agentOve
 // For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but
 // provide townRoot.
 func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) (string, error) {
+	return buildAgentStartupCommand(processHost, role, rig, townRoot, rigPath, prompt)
+}
+
+func buildAgentStartupCommand(h host, role, rig, townRoot, rigPath, prompt string) (string, error) {
 	envVars := AgentEnv(AgentEnvConfig{
 		Role:     role,
 		Rig:      rig,
 		TownRoot: townRoot,
 		Prompt:   prompt,
+		Getenv:   h.getenv,
 	})
-	return BuildStartupCommand(envVars, rigPath, prompt)
+	return buildStartupCommand(h, envVars, rigPath, prompt)
 }
 
 // BuildAgentStartupCommandWithAgentOverride is like BuildAgentStartupCommand, but uses agentOverride if non-empty.
 func BuildAgentStartupCommandWithAgentOverride(role, rig, townRoot, rigPath, prompt, agentOverride string) (string, error) {
+	return buildAgentStartupCommandWithAgentOverride(processHost, role, rig, townRoot, rigPath, prompt, agentOverride)
+}
+
+func buildAgentStartupCommandWithAgentOverride(h host, role, rig, townRoot, rigPath, prompt, agentOverride string) (string, error) {
 	envVars := AgentEnv(AgentEnvConfig{
 		Role:     role,
 		Rig:      rig,
 		TownRoot: townRoot,
 		Prompt:   prompt,
+		Getenv:   h.getenv,
 	})
-	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
+	return buildStartupCommandWithAgentOverride(h, envVars, rigPath, prompt, agentOverride)
 }
 
 // BuildPolecatStartupCommand builds the startup command for a polecat.

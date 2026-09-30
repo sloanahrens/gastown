@@ -61,7 +61,7 @@ docs/guides/marked.md:7: stray-markup: committed tool-call or merge-conflict mar
 docs/plans/conflict.md:1: status-conflict: more than one \"> Status:\" line
 docs/plans/old-plan.md:1: status-header: first non-blank line must start with \"> Status:\"
 internal/formula/formulas/mol-release.formula.toml:12: polecat-main-push: pushes main/master and offers a polecat; the guards refuse a polecat session (gt-ibt8)
-plugins/p/plugin.md:1: word-ceiling: 2102 words, ceiling 2000"
+plugins/p/plugin.md:1: word-ceiling: 2102 words, ceiling 1500"
 assert_eq "finding lines" "$expected" "$actual"
 assert_eq "exit 1 on findings" "1" "$rc"
 
@@ -73,6 +73,18 @@ printf '> Status: historical (2026-01). Abandoned: none. Not maintained.\n\n# Ol
 sed -i.bak -e '/missing.md/d' -e '/make nope/d' "$TMP/docs/guides/guide.md" && rm "$TMP/docs/guides/guide.md.bak"
 set +e; DOCS_LINT_ROOT="$TMP" bash "$LINT" >/dev/null 2>&1; rc=$?; set -e
 assert_eq "exit 0 when clean" "0" "$rc"
+
+echo "docs-lint: formulas are held to the ceiling unless exempt (gt-nj23.10)"
+# The clean tree above plus two formulas over 1,500 words: one on
+# CEILING_EXEMPT, one not. Only the second is a finding.
+cp "$FIXTURE/plugins/p/plugin.md" "$TMP/internal/formula/formulas/mol-big.formula.toml"
+cp "$FIXTURE/plugins/p/plugin.md" "$TMP/internal/formula/formulas/mol-polecat-work.formula.toml"
+set +e
+actual="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>&1)"; rc=$?
+set -e
+assert_eq "a formula over the ceiling is a finding; an exempt one is not" \
+  "internal/formula/formulas/mol-big.formula.toml:1: word-ceiling: 2102 words, ceiling 1500" "$actual"
+assert_eq "and exits 1" "1" "$rc"
 
 echo "docs-lint: an empty glob is an empty tier, not a failure (gt-et39)"
 # With the formula glob unmatched, the check pipeline's non-zero status used to

@@ -61,9 +61,10 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 		// Town-level agents (hq- prefix)
 		{"hq-mayor", "mayor/"},
 		{"hq-deacon", "deacon/"},
-		{"hq-dog-alpha", "deacon/dogs/alpha"},
-		{"hq-dog-my-dog", "deacon/dogs/my-dog"},
-		{"gt-dog-alpha", "deacon/dogs/alpha"},
+		// Retired dog agent beads have no mailbox (gt-29q6g)
+		{"hq-dog-alpha", ""},
+		{"hq-dog-my-dog", ""},
+		{"gt-dog-alpha", ""},
 
 		// Rig singletons
 		{"gt-gastown-witness", "gastown/witness"},
@@ -96,7 +97,7 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 	}
 }
 
-func TestResolverValidateAgentAddressDogGuards(t *testing.T) {
+func TestResolverValidateAgentAddressRetiredDogs(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon", "dogs", "fido"), 0755); err != nil {
@@ -109,7 +110,7 @@ func TestResolverValidateAgentAddressDogGuards(t *testing.T) {
 		address string
 		wantErr bool
 	}{
-		{"valid dog", "deacon/dogs/fido", false},
+		{"kennel dir exists but dogs are retired", "deacon/dogs/fido", true},
 		{"dog pool", "deacon/dogs", true},
 		{"empty dog name", "deacon/dogs/", true},
 		{"nested dog path", "deacon/dogs/fido/extra", true},

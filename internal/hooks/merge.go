@@ -42,9 +42,13 @@ func MergeHooks(base *HooksConfig, overrides map[string]*HooksConfig, target str
 
 // LoadAllOverrides loads all override files from the overrides directory.
 func LoadAllOverrides() (map[string]*HooksConfig, error) {
+	return envConfigHome().loadAllOverrides()
+}
+
+func (h configHome) loadAllOverrides() (map[string]*HooksConfig, error) {
 	overrides := make(map[string]*HooksConfig)
 
-	dir := OverridesDir()
+	dir := h.overridesDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

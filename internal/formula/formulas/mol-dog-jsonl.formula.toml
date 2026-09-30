@@ -37,11 +37,6 @@ the main codebase."""
 formula = "mol-dog-jsonl"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "export"
 title = "Export databases to JSONL"

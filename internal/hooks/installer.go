@@ -55,6 +55,10 @@ var templateFS embed.FS
 // error naming the file, rather than silently falling back to a template that
 // may be missing hooks a rig-scoped override added. See gt-8stz.
 func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
+	return envConfigHome().installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command, useSettingsDir)
+}
+
+func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
 	if provider == "" || hooksDir == "" || hooksFile == "" {
 		return nil
 	}
@@ -83,7 +87,7 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, c
 				key = rig + "/polecats"
 			}
 		}
-		if _, err := SyncManagedClaudeSettings(Target{
+		if _, err := h.syncManagedClaudeSettings(Target{
 			Path:     targetPath,
 			Key:      key,
 			Role:     role,

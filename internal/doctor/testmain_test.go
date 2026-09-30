@@ -6,7 +6,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -16,10 +15,6 @@ import (
 // harness scrubs GT_*/BD_* env, redirects HOME and the town root to a
 // sandbox, poisons the Dolt ports and fails the run if state leaks into a
 // live town.
-//
-// The session prefix registry is process state, so it is set here once, to
-// the prefixes every test's session names use, instead of swapped per test.
 func TestMain(m *testing.M) {
-	session.SetDefaultRegistry(testPrefixRegistry())
 	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
 }

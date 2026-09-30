@@ -23,3 +23,25 @@ func TestAssigneeSessionName_Shapes(t *testing.T) {
 		}
 	}
 }
+
+func TestPrefixRegistryAssigneeSessionName(t *testing.T) {
+	t.Parallel()
+	reg := NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	reg.Register("st", "schema_tools")
+	for _, tc := range []struct {
+		assignee       string
+		wantSession    string
+		wantPersistent bool
+	}{
+		{"schema_tools/nux", "st-nux", false},
+		{"schema_tools/crew/fiddler", "st-crew-fiddler", true},
+		{"schema_tools/polecats/nux", "st-nux", false},
+		{"schema_tools/refinery/rig", "", false},
+	} {
+		gotSession, gotPersistent := reg.AssigneeSessionName(tc.assignee)
+		if gotSession != tc.wantSession || gotPersistent != tc.wantPersistent {
+			t.Errorf("AssigneeSessionName(%q) = (%q, %v), want (%q, %v)", tc.assignee, gotSession, gotPersistent, tc.wantSession, tc.wantPersistent)
+		}
+	}
+}

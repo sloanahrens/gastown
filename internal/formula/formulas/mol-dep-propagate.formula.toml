@@ -31,11 +31,6 @@ formula must be able to reach each dependent's rig."""
 formula = "mol-dep-propagate"
 version = 1
 
-[squash]
-trigger = "on_complete"
-template_type = "work"
-include_metrics = true
-
 [[steps]]
 id = "load-resolved-issue"
 title = "Load resolved issue and find dependents"

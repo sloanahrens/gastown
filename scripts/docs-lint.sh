@@ -13,11 +13,11 @@
 #   docs-lint.sh --words         total words across the agent-facing tier
 #
 # Env: DOCS_LINT_ROOT (repo root; default: this script's parent),
-#      DOCS_LINT_CEILING (word ceiling for always-loaded files; default 2000).
+#      DOCS_LINT_CEILING (word ceiling for the agent-facing tier; default 1500).
 set -euo pipefail
 
 ROOT="${DOCS_LINT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-CEILING="${DOCS_LINT_CEILING:-2000}"
+CEILING="${DOCS_LINT_CEILING:-1500}"
 cd "$ROOT"
 
 # --- tiers -------------------------------------------------------------------
@@ -51,10 +51,25 @@ tier_agent_facing() {
   } | LC_ALL=C sort
 }
 
-# Always-loaded files the gate holds to the ceiling (formulas are audited, not gated).
+# Formulas over the ceiling for a recorded reason (gt-nj23.10). Each is a
+# multi-step workflow an agent receives one step at a time, so no single read
+# is the whole file. A new entry needs its reason on a bead; the list only
+# shrinks.
+CEILING_EXEMPT=(
+  internal/formula/formulas/mol-polecat-work.formula.toml          # the polecat work loop, 10 steps
+  internal/formula/formulas/mol-polecat-work-monorepo.formula.toml # the same loop for monorepos
+  internal/formula/formulas/mol-doc-audit.formula.toml             # mol-polecat-work's steps plus the audit; gt-g7yy6 dedupes
+  internal/formula/formulas/mol-idea-to-plan.formula.toml          # 3 review rounds of PRD and plan
+)
+
+# The agent-facing tier the gate holds to the ceiling, less CEILING_EXEMPT.
 # sed, not `grep -v`: grep exits 1 when it filters every line, so a root with an
 # empty agent-facing tier would take the same pipefail path the glob did (gt-et39).
-tier_ceiling() { tier_agent_facing | sed '/\.formula\.toml$/d'; }
+tier_ceiling() {
+  local drop="" f
+  for f in "${CEILING_EXEMPT[@]}"; do drop+="\\#^${f//./\\.}\$#d;"; done
+  tier_agent_facing | sed "$drop"
+}
 
 tier_historical() {
   find docs/plans docs/research docs/design -name '*.md' 2>/dev/null | sed 's#^\./##' | LC_ALL=C sort \

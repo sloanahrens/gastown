@@ -9,8 +9,9 @@ import (
 )
 
 func TestSyncPreservesNonHooksFields(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Create a town with one crew member
 	crewDir := filepath.Join(tmpDir, "town", "rig1", "crew", "alice")
@@ -47,12 +48,12 @@ func TestSyncPreservesNonHooksFields(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "new-prime"}}},
 		},
 	}
-	if err := SaveBase(base); err != nil {
+	if err := home.saveBase(base); err != nil {
 		t.Fatalf("SaveBase: %v", err)
 	}
 
 	// Simulate sync using new API
-	overrides, _ := LoadAllOverrides()
+	overrides, _ := home.loadAllOverrides()
 	merged := MergeHooks(base, overrides, "rig1/crew")
 
 	existingData, _ := os.ReadFile(settingsPath)
@@ -106,8 +107,9 @@ func TestSyncPreservesNonHooksFields(t *testing.T) {
 }
 
 func TestSyncCreatesNewSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Save base config
 	base := &HooksConfig{
@@ -115,10 +117,10 @@ func TestSyncCreatesNewSettings(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime"}}},
 		},
 	}
-	SaveBase(base)
+	home.saveBase(base)
 
 	// Simulate sync: create new file using MarshalSettings
-	overrides, _ := LoadAllOverrides()
+	overrides, _ := home.loadAllOverrides()
 	merged := MergeHooks(base, overrides, "rig1/crew")
 
 	settings := &SettingsJSON{
@@ -146,6 +148,7 @@ func TestSyncCreatesNewSettings(t *testing.T) {
 }
 
 func TestUnmarshalMarshalRoundtrip(t *testing.T) {
+	t.Parallel()
 	input := `{
   "editorMode": "vim",
   "enabledPlugins": {"beads@beads-marketplace": false},
@@ -191,6 +194,7 @@ func TestUnmarshalMarshalRoundtrip(t *testing.T) {
 }
 
 func TestLoadSettingsMissingReturnsZeroValue(t *testing.T) {
+	t.Parallel()
 	s, err := LoadSettings("/nonexistent/path/settings.json")
 	if err != nil {
 		t.Fatalf("LoadSettings should not error for missing file, got: %v", err)
@@ -201,6 +205,7 @@ func TestLoadSettingsMissingReturnsZeroValue(t *testing.T) {
 }
 
 func TestMarshalSettingsEmpty(t *testing.T) {
+	t.Parallel()
 	s := &SettingsJSON{}
 	data, err := MarshalSettings(s)
 	if err != nil {
@@ -220,6 +225,7 @@ func TestMarshalSettingsEmpty(t *testing.T) {
 }
 
 func TestMarshalSettingsDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
 	input := `{
   "editorMode": "vim",
   "hooks": {},
@@ -245,6 +251,7 @@ func TestMarshalSettingsDoesNotMutateInput(t *testing.T) {
 }
 
 func TestMarshalSettingsDeletesZeroEditorMode(t *testing.T) {
+	t.Parallel()
 	input := `{
   "editorMode": "vim",
   "hooks": {}
@@ -269,6 +276,7 @@ func TestMarshalSettingsDeletesZeroEditorMode(t *testing.T) {
 }
 
 func TestMarshalSettingsPreservesFieldOrder(t *testing.T) {
+	t.Parallel()
 	input := `{
   "editorMode": "vim",
   "hooks": {},

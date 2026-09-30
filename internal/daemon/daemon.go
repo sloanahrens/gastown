@@ -400,7 +400,6 @@ const (
 	massDeathThreshold = 3                // Number of deaths to trigger alert
 
 	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
-	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
 )
 
@@ -1368,6 +1367,9 @@ func (d *Daemon) heartbeatWork(state *State) {
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
 	d.rotateOversizedLogs()
+
+	// 16. Prune the raw event log (.events.jsonl) when due (gt-ori5j).
+	d.pruneEventsLog()
 
 	// Update state
 	state.LastHeartbeat = time.Now()
