@@ -2476,6 +2476,20 @@ func containsWorkspaceTrustDialog(content string) bool {
 		strings.Contains(content, "Do you trust the contents of this directory?")
 }
 
+// containsBypassPermissionsDialog reports whether the pane is showing the live
+// bypass permissions warning rather than its text left in the scrollback.
+//
+// The phrase also appears in the workspace-trust warning's prose, so a
+// dismissed trust dialog above a live prompt matches the text with no dialog on
+// screen — and its option list still parses, so the keys go out and no later
+// check notices (gt-g1f9s). A live dialog renders at the bottom of the pane, so
+// the stale check comes first, the rule selectTrustDialogOption applies to the
+// trust dialog (gt-sd1o).
+func containsBypassPermissionsDialog(content string) bool {
+	return strings.Contains(content, "Bypass Permissions mode") &&
+		!promptAppearsAfterStartupBlocker(content)
+}
+
 func containsBlockingStartupDialog(content string) (string, bool) {
 	if promptAppearsAfterStartupBlocker(content) {
 		return "", false
@@ -2486,7 +2500,7 @@ func containsBlockingStartupDialog(content string) (string, bool) {
 	if containsWorkspaceTrustDialog(content) {
 		return "workspace trust prompt", true
 	}
-	if strings.Contains(content, "Bypass Permissions mode") {
+	if containsBypassPermissionsDialog(content) {
 		return "bypass permissions prompt", true
 	}
 	return "", false
@@ -2592,8 +2606,9 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 			continue
 		}
 
-		// Look for the characteristic warning text
-		if strings.Contains(content, "Bypass Permissions mode") {
+		// Look for the characteristic warning text, live only: the trust
+		// dialog's prose carries the same phrase (gt-g1f9s).
+		if containsBypassPermissionsDialog(content) {
 			key, presses, navErr := trustNavigation(content)
 			if navErr != nil {
 				// Unlike the trust dialog, this one has no safe fallback keystroke:
