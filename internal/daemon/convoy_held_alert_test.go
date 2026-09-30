@@ -20,8 +20,9 @@ func newHeldTestManager() (*ConvoyManager, *heldAlerts) {
 	m.SetAlertHooks(func(key, source, message string) {
 		a.raised = append(a.raised, key)
 		a.msgs = append(a.msgs, message)
-	}, func(reason string, keys ...string) {
+	}, func(reason string, keys ...string) error {
 		a.cleared = append(a.cleared, keys...)
+		return nil
 	})
 	return m, a
 }
