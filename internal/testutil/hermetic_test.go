@@ -1,12 +1,11 @@
 package testutil
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,22 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
-
-// withSavedEnv snapshots the full process environment and restores it via
-// t.Cleanup. StartHermetic mutates process-wide env and does not restore it
-// itself (unlike HermeticTest), so any test calling it directly needs this.
-func withSavedEnv(t *testing.T) {
-	t.Helper()
-	saved := os.Environ()
-	t.Cleanup(func() {
-		os.Clearenv()
-		for _, kv := range saved {
-			if name, val, ok := strings.Cut(kv, "="); ok {
-				_ = os.Setenv(name, val)
-			}
-		}
-	})
-}
 
 // makeFakeTown builds a minimal "live town" fixture: marker file, rigs.json
 // with one known rig, watched subdirectories, and an events log.
@@ -59,6 +42,7 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 func TestTripwire_CleanTownReportsNoLeaks(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 	if leaks := snap.diff(); len(leaks) != 0 {
@@ -67,6 +51,7 @@ func TestTripwire_CleanTownReportsNoLeaks(t *testing.T) {
 }
 
 func TestTripwire_DetectsNewFilesAndDatabases(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -98,6 +83,7 @@ func TestTripwire_DetectsNewFilesAndDatabases(t *testing.T) {
 // snapshot cannot distinguish from test-leaked state. Once the rig is
 // registered in rigs.json, both entries must be tolerated.
 func TestTripwire_ToleratesConcurrentRigOnboarding(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -135,6 +121,7 @@ func TestTripwire_ToleratesConcurrentRigOnboarding(t *testing.T) {
 // explainedByRig only tolerates names present in the town's current
 // rigs.json.
 func TestTripwire_DoesNotTolerateUnregisteredDoltDataDir(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -152,6 +139,7 @@ func TestTripwire_DoesNotTolerateUnregisteredDoltDataDir(t *testing.T) {
 }
 
 func TestTripwire_ToleratesBdAtomicWriteTemp(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -175,6 +163,7 @@ func TestTripwire_ToleratesBdAtomicWriteTemp(t *testing.T) {
 }
 
 func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -203,6 +192,7 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 // atomic write under the suffix test, and the suffix alone forgives both. A
 // .tmp whose base is not a known atomic-write sibling must be reported.
 func TestTripwire_FailsClosedOnUnclaimedTmp(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -224,6 +214,7 @@ func TestTripwire_FailsClosedOnUnclaimedTmp(t *testing.T) {
 // surface, and a .routes-<random>.tmp left there is exactly the residue the
 // cross-check tolerates only because it names a real atomic-write target.
 func TestTripwire_ToleratesRoutesCreateTempSiblings(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -248,6 +239,7 @@ func TestTripwire_ToleratesRoutesCreateTempSiblings(t *testing.T) {
 // Same fails-open shape in a watched subdirectory: an abandoned .tmp under
 // .dolt-data must be reported, not forgiven by the suffix.
 func TestTripwire_FailsClosedOnUnclaimedTmpInWatchedSubdir(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -268,6 +260,7 @@ func TestTripwire_FailsClosedOnUnclaimedTmpInWatchedSubdir(t *testing.T) {
 // in the meantime, and its reporting pass is the intended signal that a crash
 // happened.
 func TestTripwire_ToleratesFeedCuratorTruncateResidue(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -289,6 +282,7 @@ func TestTripwire_ToleratesFeedCuratorTruncateResidue(t *testing.T) {
 }
 
 func TestTripwire_FlagsFixtureActorEvents(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -314,6 +308,7 @@ func TestTripwire_FlagsFixtureActorEvents(t *testing.T) {
 }
 
 func TestTripwire_ToleratesUnknownActor(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -338,6 +333,7 @@ func TestTripwire_ToleratesUnknownActor(t *testing.T) {
 // ("gt-opal") as the actor, a prefix the town does not know, so its own two
 // session_death lines red four packages whose tests all passed.
 func TestTripwire_ToleratesDaemonAuthoredSessionDeath(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -353,6 +349,7 @@ func TestTripwire_ToleratesDaemonAuthoredSessionDeath(t *testing.T) {
 // The daemon tolerance keys on the caller value, not on an event merely having
 // a payload, so the gt-x9o fixture-actor catch is not widened for free.
 func TestTripwire_FlagsFixtureActorWithNonDaemonCaller(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -369,6 +366,7 @@ func TestTripwire_FlagsFixtureActorWithNonDaemonCaller(t *testing.T) {
 }
 
 func TestTripwire_ToleratesDogActor(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -391,6 +389,7 @@ func TestTripwire_ToleratesDogActor(t *testing.T) {
 }
 
 func TestTripwire_ToleratesAllBuiltinActorPrefixes(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
@@ -446,6 +445,7 @@ func appendEvents(t *testing.T, town, content string) {
 // hit this on most gate cycles; zero tests failed, but both heavy packages
 // reported FAIL and the run's exit code could not answer "did the code pass?".
 func TestTripwire_ToleratesMidLineSnapshotOffset(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 	appendEvents(t, town, `{"ts":"2026-09-18T21:29:48Z","source":"gt","type":"session_start","actor":"gastown/polecats/garnet","visibility":"feed"}`+"\n")
@@ -460,6 +460,7 @@ func TestTripwire_ToleratesMidLineSnapshotOffset(t *testing.T) {
 }
 
 func TestTripwire_DetectsFixtureActorAfterMidLineSnapshotOffset(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 	// Concurrent legitimate traffic first (the line the offset lands in), then
@@ -480,6 +481,7 @@ func TestTripwire_DetectsFixtureActorAfterMidLineSnapshotOffset(t *testing.T) {
 // A writer mid-append when the scan runs leaves a last line with no trailing
 // newline; that fragment is truncated the same way, and must not be reported.
 func TestTripwire_ToleratesPartialTrailingLine(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 	appendEvents(t, town, `{"ts":"2026-09-18T22:29:19Z","source":"gt","type":"nudge","actor":"dog","payload":{"reason":"DOG_`)
@@ -492,6 +494,7 @@ func TestTripwire_ToleratesPartialTrailingLine(t *testing.T) {
 // Complete lines must still be judged: a malformed line that ends with a
 // newline is not a truncation, so the leak check stays honest.
 func TestTripwire_FlagsCompleteMalformedLine(t *testing.T) {
+	t.Parallel()
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 	appendEvents(t, town, "this is not json\n")
@@ -505,55 +508,77 @@ func TestTripwire_FlagsCompleteMalformedLine(t *testing.T) {
 	}
 }
 
-func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
-	t.Setenv("GT_ROLE", "gastown/polecats/flint")
-	t.Setenv("BD_ACTOR", "someone")
-	t.Setenv("BEADS_DB", "gt")
-	origHome := os.Getenv("HOME")
+// goEnvSet makes preserveGoEnv a no-op on a fake harness: everything it
+// would ask the go tool for is already set.
+var goEnvSet = []string{"GOENV=/dev/go/env", "GOPATH=/dev/go", "GOCACHE=/dev/cache", "GOMODCACHE=/dev/go/pkg/mod"}
 
-	town := HermeticTest(t)
+func TestHermeticTest_ScrubsAndRedirects(t *testing.T) {
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{"GT_ROLE=gastown/polecats/flint", "BD_ACTOR=someone", "BEADS_DB=gt", "HOME=/home/dev"}, goEnvSet...)...)
+
+	town := f.hermeticTest(t)
 
 	for _, v := range []string{"GT_ROLE", "BD_ACTOR", "BEADS_DB"} {
-		if got := os.Getenv(v); got != "" {
+		if got, ok := f.env.LookupEnv(v); ok {
 			t.Errorf("%s survived the scrub: %q", v, got)
 		}
 	}
-	if home := os.Getenv("HOME"); home == origHome || home == "" {
+	if home := f.env.get("HOME"); home == "/home/dev" || home == "" {
 		t.Errorf("HOME not redirected: %q", home)
 	}
-	if got := os.Getenv("GT_DOLT_PORT"); got != poisonDoltPort {
-		t.Errorf("GT_DOLT_PORT = %q, want poisoned %q", got, poisonDoltPort)
-	}
-	if got := os.Getenv(HermeticEnvVar); got != "1" {
-		t.Errorf("%s = %q, want 1", HermeticEnvVar, got)
-	}
-	if got := os.Getenv("GT_TOWN_ROOT"); got != town {
-		t.Errorf("GT_TOWN_ROOT = %q, want sandbox town %q", got, town)
+	for k, want := range map[string]string{
+		"GT_DOLT_PORT":          poisonDoltPort,
+		"BEADS_DOLT_PORT":       poisonDoltPort,
+		HermeticEnvVar:          "1",
+		"GT_TOWN_ROOT":          town,
+		"BEADS_DOLT_AUTO_START": "0",
+	} {
+		if got := f.env.get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
 	}
 	if ok, _ := workspace.IsWorkspace(town); !ok {
 		t.Errorf("sandbox town %q is not a valid workspace", town)
+	}
+	if _, ok := f.env.LookupEnv(workspace.EnvForbiddenTownRoot); ok {
+		t.Error("a forbidden root was set with no live town around")
+	}
+}
+
+// With an outer runner's Dolt (GT_TEST_EXTERNAL_DOLT=1) the per-test scrub
+// keeps its routing instead of poisoning it.
+func TestHermeticTest_KeepsExternalDolt(t *testing.T) {
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{"GT_TEST_EXTERNAL_DOLT=1", "GT_DOLT_PORT=4400", "BEADS_DOLT_PORT=4400"}, goEnvSet...)...)
+	f.hermeticTest(t)
+	if got := f.env.get("GT_DOLT_PORT"); got != "4400" {
+		t.Errorf("GT_DOLT_PORT = %q, want the external server's 4400", got)
 	}
 }
 
 // TestStartHermetic_IsolatesTmuxSocketByDefault guards the isolation half of
 // gt-yav3: without an explicit opt-out, StartHermetic must bind a throwaway
 // per-process tmux socket rather than leaving the default (town) socket in
-// force, so tests that construct tmux.Tmux land on a private server.
+// force, so tests that construct tmux.Tmux land on a private server. Finish
+// kills that server. With no tmux installed there is nothing to bind.
 func TestStartHermetic_IsolatesTmuxSocketByDefault(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	withSavedEnv(t)
-	_ = os.Unsetenv(AllowLiveTmuxEnv)
-
-	h, err := StartHermetic()
+	t.Parallel()
+	f := newFakeHarness(t, goEnvSet...)
+	h, err := f.startHermetic()
 	if err != nil {
 		t.Fatalf("StartHermetic: %v", err)
 	}
-	defer h.Finish(0)
+	if h.TmuxSocket != "gt-test-4242" || f.socket != "gt-test-4242" {
+		t.Errorf("TmuxSocket = %q, bound %q; want the per-process gt-test-4242", h.TmuxSocket, f.socket)
+	}
+	h.Finish(0)
+	if !slices.Contains(f.commands(), "tmux -L gt-test-4242 kill-server") {
+		t.Errorf("Finish did not kill the isolated server: %q", f.commands())
+	}
 
-	if h.TmuxSocket == "" {
-		t.Error("TmuxSocket = \"\", want a per-process isolated socket by default")
+	f = newFakeHarness(t, goEnvSet...).noTool("tmux")
+	if h, err := f.startHermetic(); err != nil || h.TmuxSocket != "" || f.socket != "" {
+		t.Errorf("without tmux: %v, socket %q, bound %q; want none", err, h.TmuxSocket, f.socket)
 	}
 }
 
@@ -565,37 +590,121 @@ func TestStartHermetic_IsolatesTmuxSocketByDefault(t *testing.T) {
 // StartHermetic must restore the caller's opt-out immediately after the scrub
 // so both call sites see it.
 func TestStartHermetic_AllowLiveTmuxSurvivesScrub(t *testing.T) {
-	withSavedEnv(t)
-	if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
-		t.Fatal(err)
-	}
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{AllowLiveTmuxEnv + "=1"}, goEnvSet...)...)
 
-	h, err := StartHermetic()
+	h, err := f.startHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	if got := f.env.get(AllowLiveTmuxEnv); got != "1" {
+		t.Errorf("%s = %q after StartHermetic, want \"1\" (the opt-out did not survive the scrub)", AllowLiveTmuxEnv, got)
+	}
+	if h.TmuxSocket != "" || f.socket != "" {
+		t.Errorf("TmuxSocket = %q, bound %q; want none — AllowLiveTmuxEnv=1 must bypass tmux socket isolation", h.TmuxSocket, f.socket)
+	}
+}
+
+// The scrub removes the invoking agent's GT_*/BD_*/BEADS_* context and its
+// tmux identity, poisons the Dolt ports, and redirects HOME and the config
+// dirs into the sandbox; the live tmux server it was launched from is
+// remembered for Finish's tripwire.
+func TestStartHermetic_ScrubsAndRedirects(t *testing.T) {
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{
+		"GT_ROLE=gastown/polecats/topaz", "BD_ACTOR=someone", "BEADS_DIR=/live/.beads",
+		"TMUX=/private/tmp/tmux-501/gt-town,123,0", "TMUX_PANE=%3", "HOME=/home/dev", "PATH=/usr/bin",
+	}, goEnvSet...)...)
+
+	h, err := f.startHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	for _, k := range []string{"GT_ROLE", "BD_ACTOR", "BEADS_DIR", "TMUX", "TMUX_PANE"} {
+		if v, ok := f.env.LookupEnv(k); ok {
+			t.Errorf("%s survived the scrub: %q", k, v)
+		}
+	}
+	if h.LiveTmuxSocket != "gt-town" {
+		t.Errorf("LiveTmuxSocket = %q, want gt-town from the inherited $TMUX", h.LiveTmuxSocket)
+	}
+	for k, want := range map[string]string{
+		"HOME":              h.HomeDir,
+		"CLAUDE_CONFIG_DIR": filepath.Join(h.SandboxDir, "claude"),
+		"XDG_CONFIG_HOME":   filepath.Join(h.HomeDir, ".config"),
+		"GT_TOWN_ROOT":      h.TownRoot,
+		"GT_DOLT_PORT":      poisonDoltPort,
+		"BEADS_DOLT_PORT":   poisonDoltPort,
+		HermeticEnvVar:      "1",
+		"PATH":              "/usr/bin",
+	} {
+		if got := f.env.get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(h.HomeDir, ".gitconfig")); err != nil || !strings.Contains(string(data), "name = Hermetic Test") {
+		t.Errorf("sandbox gitconfig: %v", err)
+	}
+	h.Finish(0)
+	if _, err := os.Stat(h.SandboxDir); !os.IsNotExist(err) {
+		t.Errorf("Finish left the sandbox: %v", err)
+	}
+}
+
+// WithoutGit puts a refusing git first on PATH.
+func TestStartHermetic_WithoutGitPutsRefusingGitFirst(t *testing.T) {
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{"PATH=/usr/bin"}, goEnvSet...)...)
+	h, err := f.startHermetic(WithoutGit())
 	if err != nil {
 		t.Fatalf("StartHermetic: %v", err)
 	}
 	defer h.Finish(0)
-
-	if got := os.Getenv(AllowLiveTmuxEnv); got != "1" {
-		t.Errorf("%s = %q after StartHermetic, want \"1\" (the opt-out did not survive scrubProcessEnv)", AllowLiveTmuxEnv, got)
+	dir := filepath.Join(h.SandboxDir, "nogit")
+	if got := f.env.get("PATH"); got != dir+string(os.PathListSeparator)+"/usr/bin" {
+		t.Errorf("PATH = %q, want the refusing git's dir first", got)
 	}
-	if h.TmuxSocket != "" {
-		t.Errorf("TmuxSocket = %q, want \"\" — AllowLiveTmuxEnv=1 must bypass tmux socket isolation", h.TmuxSocket)
+	if _, err := os.Stat(filepath.Join(dir, "git")); err != nil {
+		t.Errorf("no refusing git written: %v", err)
 	}
 }
 
-func TestScratchTown_CwdResolvesToScratch(t *testing.T) {
-	town := ScratchTown(t)
-
-	root, err := workspace.FindFromCwd()
-	if err != nil {
-		t.Fatalf("FindFromCwd: %v", err)
+// Started inside a live town, the harness forbids resolving it, snapshots it
+// for the tripwire, and refuses to start when an in-process resolver still
+// reaches it (gt-dr664).
+func TestStartHermetic_LiveTown(t *testing.T) {
+	t.Parallel()
+	town, inner := liveTownFixture(t)
+	under := func(root string) bool {
+		return root == town || strings.HasPrefix(root, town+string(filepath.Separator))
 	}
-	// Resolve symlinks on both sides (macOS /var -> /private/var).
-	wantReal, _ := filepath.EvalSymlinks(town)
-	gotReal, _ := filepath.EvalSymlinks(root)
-	if gotReal != wantReal {
-		t.Errorf("FindFromCwd = %q, want scratch town %q", root, town)
+
+	f := newFakeHarness(t, goEnvSet...)
+	f.findTown = func() (string, error) { return town, nil }
+	f.getwd = func() (string, error) { return inner, nil }
+	f.forbidden = under
+	f.resolvers = []liveTownResolver{{"loud", func(string) string { panic(workspace.ErrForbiddenTownRoot) }}}
+	h, err := f.startHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic inside a live town: %v", err)
+	}
+	if h.RealTownRoot != town || h.snap == nil {
+		t.Errorf("RealTownRoot = %q, snapshot %v; want the live town watched", h.RealTownRoot, h.snap != nil)
+	}
+	if got := f.env.get(workspace.EnvForbiddenTownRoot); got != town {
+		t.Errorf("%s = %q, want the live town", workspace.EnvForbiddenTownRoot, got)
+	}
+	writeFile(t, filepath.Join(town, ".dolt-data", "testdb_leak"), "")
+	if code := h.Finish(0); code != 1 || !strings.Contains(f.stderr.String(), "testdb_leak") {
+		t.Errorf("Finish after a leak = %d, stderr %q; want the tripwire to fail the run", code, f.stderr.String())
+	}
+
+	f = newFakeHarness(t, goEnvSet...)
+	f.findTown = func() (string, error) { return town, nil }
+	f.forbidden = under
+	f.resolvers = []liveTownResolver{{"leaky", func(string) string { return town }}}
+	if _, err := f.startHermetic(); err == nil || !strings.Contains(err.Error(), "leaky") {
+		t.Errorf("StartHermetic with a leaking resolver = %v, want a refusal naming it", err)
 	}
 }
 
@@ -604,55 +713,75 @@ func TestScratchTown_CwdResolvesToScratch(t *testing.T) {
 // RequireDoltContainer could see it. It must survive both the TestMain
 // harness and the per-test HermeticTest scrub.
 func TestStartHermetic_DockerOptInSurvivesScrub(t *testing.T) {
-	withSavedEnv(t)
-	if err := os.Setenv(DockerTestsEnv, "1"); err != nil {
-		t.Fatal(err)
-	}
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{DockerTestsEnv + "=1"}, goEnvSet...)...)
 
-	h, err := StartHermetic()
+	h, err := f.startHermetic()
 	if err != nil {
 		t.Fatalf("StartHermetic: %v", err)
 	}
 	defer h.Finish(0)
 
-	if !DockerTestsEnabled() {
+	if !dockerTestsEnabled(f.env) {
 		t.Errorf("%s did not survive StartHermetic's scrub", DockerTestsEnv)
 	}
-	HermeticTest(t)
-	if !DockerTestsEnabled() {
+	f.hermeticTest(t)
+	if !dockerTestsEnabled(f.env) {
 		t.Errorf("%s did not survive HermeticTest's scrub", DockerTestsEnv)
 	}
 	// And the scrub still removes ordinary GT_* context.
-	_ = os.Setenv("GT_ROLE", "gastown/polecats/topaz")
-	scrubProcessEnv(false)
-	if os.Getenv("GT_ROLE") != "" {
-		t.Error("scrubProcessEnv kept GT_ROLE")
+	_ = f.env.Setenv("GT_ROLE", "gastown/polecats/topaz")
+	scrubEnv(f.env, false)
+	if _, ok := f.env.LookupEnv("GT_ROLE"); ok {
+		t.Error("scrubEnv kept GT_ROLE")
 	}
-	if !DockerTestsEnabled() {
-		t.Errorf("scrubProcessEnv removed %s", DockerTestsEnv)
+	if !dockerTestsEnabled(f.env) {
+		t.Errorf("scrubEnv removed %s", DockerTestsEnv)
+	}
+}
+
+// With an outer runner's Dolt (GT_TEST_EXTERNAL_DOLT=1) the scrub keeps its
+// routing variables, and only then.
+func TestScrubEnv_KeepsDoltPassthroughOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+	entries := []string{"GT_DOLT_PORT=4400", "GT_DOLT_HOST=h", "BEADS_DOLT_PORT=4400", "BEADS_DOLT_SERVER_HOST=h", "GT_TEST_EXTERNAL_DOLT=1", "GT_ROLE=x"}
+	keep := newMapEnv(entries...)
+	scrubEnv(keep, true)
+	drop := newMapEnv(entries...)
+	scrubEnv(drop, false)
+	for _, k := range doltPassthroughVars {
+		if _, ok := keep.LookupEnv(k); !ok {
+			t.Errorf("keepDolt dropped %s", k)
+		}
+		if _, ok := drop.LookupEnv(k); ok {
+			t.Errorf("without keepDolt %s survived", k)
+		}
+	}
+	if _, ok := keep.LookupEnv("GT_ROLE"); ok {
+		t.Error("keepDolt kept GT_ROLE")
 	}
 }
 
 // TestStartHermetic_WithDoltWithoutOptIn: with the container opt-in unset,
 // a TestMain that asks for Dolt must still start (no error), with the port
-// left empty so container-dependent tests skip — the contract daemon's and
+// left poisoned so container-dependent tests skip — the contract daemon's and
 // convoy's TestMains rely on, and the reason a bare `go test` of those
 // packages passes in seconds without Docker.
 func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
-	withSavedEnv(t)
-	_ = os.Unsetenv(DockerTestsEnv)
+	t.Parallel()
+	f := newFakeHarness(t, goEnvSet...)
 
-	h, err := StartHermetic(WithDolt())
+	h, err := f.startHermetic(WithDolt())
 	if err != nil {
 		t.Fatalf("StartHermetic(WithDolt) without the opt-in must not fail: %v", err)
 	}
 	defer h.Finish(0)
 
-	if DoltContainerPort() != "" {
-		t.Errorf("DoltContainerPort = %q, want empty (no container may start without %s=1)", DoltContainerPort(), DockerTestsEnv)
-	}
-	if got := os.Getenv("GT_DOLT_PORT"); got != poisonDoltPort {
+	if got := f.env.get("GT_DOLT_PORT"); got != poisonDoltPort {
 		t.Errorf("GT_DOLT_PORT = %q, want the poison port %q", got, poisonDoltPort)
+	}
+	if !strings.Contains(f.stderr.String(), "Dolt-dependent tests will skip") {
+		t.Errorf("stderr = %q, want the skip warning", f.stderr.String())
 	}
 }
 
@@ -661,13 +790,11 @@ func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
 // instead of letting every container test skip on the empty port — an opt-in
 // run that loses its coverage must not read as green.
 func TestStartHermetic_WithDoltOptedInFailsWithoutContainer(t *testing.T) {
-	withSavedEnv(t)
-	_ = os.Setenv(DockerTestsEnv, "1")
-	orig := ensureDoltContainerForTestMain
-	ensureDoltContainerForTestMain = func() error { return errors.New("simulated: Docker not available") }
-	t.Cleanup(func() { ensureDoltContainerForTestMain = orig })
+	t.Parallel()
+	f := newFakeHarness(t, append([]string{DockerTestsEnv + "=1"}, goEnvSet...)...)
+	f.ensureDolt = func() error { return errors.New("simulated: Docker not available") }
 
-	h, err := StartHermetic(WithDolt())
+	h, err := f.startHermetic(WithDolt())
 	if err == nil {
 		h.Finish(0)
 		t.Fatal("StartHermetic(WithDolt) with the opt-in set and no container succeeded; want an error")
@@ -680,68 +807,54 @@ func TestStartHermetic_WithDoltOptedInFailsWithoutContainer(t *testing.T) {
 // TestFinish_DoltTerminationFailureFailsLoud pins the fix for gt-p98h/gt-n5g6:
 // a Dolt container that fails to terminate must fail the run, not vanish
 // silently and keep holding memory on the shared Docker VM until it's
-// noticed hours later. terminateDoltContainer is swapped for a fake so this
-// forces the failure branch without starting a real container.
+// noticed hours later.
 func TestFinish_DoltTerminationFailureFailsLoud(t *testing.T) {
-	orig := terminateDoltContainer
-	terminateDoltContainer = func() error {
-		return errors.New("simulated: container still running")
-	}
-	t.Cleanup(func() { terminateDoltContainer = orig })
+	t.Parallel()
+	f := newFakeHarness(t)
+	f.terminateDolt = func() error { return errors.New("simulated: container still running") }
 
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	origStderr := os.Stderr
-	os.Stderr = stderrW
-	h := &Hermetic{}
-	code := h.Finish(0)
-	os.Stderr = origStderr
-	stderrW.Close()
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(stderrR); err != nil {
-		t.Fatalf("reading captured stderr: %v", err)
-	}
-
-	if code != 1 {
+	if code := (&Hermetic{host: f.harnessHost}).Finish(0); code != 1 {
 		t.Errorf("Finish(0) with a termination error = %d, want 1 (forced failure)", code)
 	}
-	if !strings.Contains(buf.String(), "HERMETIC TRIPWIRE: shared Dolt container failed to terminate") {
-		t.Errorf("Finish stderr = %q, want it to name the termination tripwire", buf.String())
+	if !strings.Contains(f.stderr.String(), "HERMETIC TRIPWIRE: shared Dolt container failed to terminate") {
+		t.Errorf("Finish stderr = %q, want it to name the termination tripwire", f.stderr.String())
 	}
 }
 
 // A catalog-guard failure at teardown fails the run under its own banner,
 // which names the database, rather than the termination tripwire's.
 func TestFinish_DoltCatalogGuardFailsLoud(t *testing.T) {
-	orig := terminateDoltContainer
-	terminateDoltContainer = func() error {
+	t.Parallel()
+	f := newFakeHarness(t)
+	f.terminateDolt = func() error {
 		return catalogViolations([]string{"gt_test", "information_schema", "mysql", "beads"}, nil, nil)
 	}
-	t.Cleanup(func() { terminateDoltContainer = orig })
 
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	origStderr := os.Stderr
-	os.Stderr = stderrW
-	h := &Hermetic{}
-	code := h.Finish(0)
-	os.Stderr = origStderr
-	stderrW.Close()
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(stderrR); err != nil {
-		t.Fatalf("reading captured stderr: %v", err)
-	}
-
-	if code != 1 {
+	if code := (&Hermetic{host: f.harnessHost}).Finish(0); code != 1 {
 		t.Errorf("Finish(0) with a catalog-guard error = %d, want 1", code)
 	}
 	for _, want := range []string{"DOLT CATALOG GUARD", `database "beads" was created`} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("Finish stderr = %q, want it to contain %q", buf.String(), want)
+		if !strings.Contains(f.stderr.String(), want) {
+			t.Errorf("Finish stderr = %q, want it to contain %q", f.stderr.String(), want)
 		}
+	}
+}
+
+// Sessions the tests left on the live tmux server the process was launched
+// from fail the run (gt-2bj).
+func TestFinish_LiveTmuxSessionsFailTheRun(t *testing.T) {
+	t.Parallel()
+	f := newFakeHarness(t)
+	f.tmuxSessions = func(socket string) []string {
+		if socket == "gt-town" {
+			return []string{"gt-test-phantom (cwd=/tmp/x)"}
+		}
+		return nil
+	}
+	if code := (&Hermetic{host: f.harnessHost, LiveTmuxSocket: "gt-town"}).Finish(0); code != 1 {
+		t.Errorf("Finish(0) with a leaked live session = %d, want 1", code)
+	}
+	if !strings.Contains(f.stderr.String(), "gt-test-phantom") {
+		t.Errorf("Finish stderr = %q, want the session named", f.stderr.String())
 	}
 }

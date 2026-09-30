@@ -75,10 +75,6 @@ func doltPortLookup(ctr *dolt.DoltContainer) portLookup {
 	}
 }
 
-// portWaitSleep is time.Sleep behind a variable so the wait's tests do not
-// spend its budget in real time.
-var portWaitSleep = time.Sleep
-
 // waitForMappedPort polls lookup until Docker answers with a host port for the
 // container's Dolt port, returning the last lookup error once the polls run out.
 //
@@ -88,6 +84,12 @@ var portWaitSleep = time.Sleep
 // while a concurrent container-backed suite held the Docker VM (gt-jvve). The
 // wait turns that window into a delay instead of a failed suite.
 func waitForMappedPort(ctx context.Context, lookup portLookup) (string, error) {
+	return waitForMappedPortSleeping(ctx, lookup, time.Sleep)
+}
+
+// waitForMappedPortSleeping is waitForMappedPort sleeping through sleep, so
+// its tests do not spend the budget in real time.
+func waitForMappedPortSleeping(ctx context.Context, lookup portLookup, sleep func(time.Duration)) (string, error) {
 	var lastErr error
 	for poll := range mappedPortPolls {
 		port, err := lookup(ctx, doltContainerPort)
@@ -96,7 +98,7 @@ func waitForMappedPort(ctx context.Context, lookup portLookup) (string, error) {
 		}
 		lastErr = err
 		if poll < mappedPortPolls-1 {
-			portWaitSleep(mappedPortPollInterval)
+			sleep(mappedPortPollInterval)
 		}
 	}
 	return "", lastErr
@@ -159,6 +161,11 @@ const doltEntrypointDoneLog = "Dolt init process done. Ready for connections."
 // container a killed or failed run left behind from a live suite's by
 // ownership instead of by age, and remove it before the next gate waits on it.
 func doltContainerOpts() []testcontainers.ContainerCustomizer {
+	return doltContainerOptsIn(procEnv{})
+}
+
+// doltContainerOptsIn is doltContainerOpts reading DoltTmpfsEnv from env.
+func doltContainerOptsIn(env environment) []testcontainers.ContainerCustomizer {
 	opts := []testcontainers.ContainerCustomizer{
 		// WithEnv must precede dolt.WithDatabase: dolt.WithDatabase writes
 		// req.Env without a nil check, so it needs the map already set.
@@ -177,7 +184,7 @@ func doltContainerOpts() []testcontainers.ContainerCustomizer {
 	if labels := slot.TestContainerOwnerLabels(); labels != nil {
 		opts = append(opts, testcontainers.WithLabels(labels))
 	}
-	if os.Getenv(DoltTmpfsEnv) != "0" {
+	if getenv(env, DoltTmpfsEnv) != "0" {
 		opts = append(opts, testcontainers.WithTmpfs(map[string]string{doltDataDir: "rw,size=2g"}))
 	}
 	return opts
@@ -354,9 +361,12 @@ func startSharedDoltContainer() {
 
 	doltCtr = ctr
 	doltCtrPort = p
-	os.Setenv("GT_DOLT_PORT", doltCtrPort)    //nolint:tenv // intentional process-wide env
+	//testpolicy:allow prod-no-setenv — the shared container's routing must reach every test and subprocess in the binary
+	os.Setenv("GT_DOLT_PORT", doltCtrPort) //nolint:tenv // intentional process-wide env
+	//testpolicy:allow prod-no-setenv — the shared container's routing must reach every test and subprocess in the binary
 	os.Setenv("BEADS_DOLT_PORT", doltCtrPort) //nolint:tenv // intentional process-wide env
-	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1")   //nolint:tenv // integration tests reuse this container
+	//testpolicy:allow prod-no-setenv — the shared container's routing must reach every test and subprocess in the binary
+	os.Setenv("GT_TEST_EXTERNAL_DOLT", "1") //nolint:tenv // integration tests reuse this container
 	// This container is always ephemeral and test-only (never production), so
 	// declare it a dedicated test server. Without this, bd refuses to connect
 	// the testdb_* databases minted by isolated Init() calls (gt-uq28):
@@ -364,6 +374,7 @@ func startSharedDoltContainer() {
 	// because callers reaching this port through a non-isolated beads client
 	// (e.g. refinery's Manager, which inherits os.Environ() directly) need it
 	// too, not just testutil.RequireDoltContainer's direct callers.
+	//testpolicy:allow prod-no-setenv — the shared container's routing must reach every test and subprocess in the binary
 	os.Setenv("BEADS_TEST_SERVER", "1") //nolint:tenv // intentional process-wide env
 	// Isolated beads clients strip BEADS_*; they pass BEADS_TEST_SERVER to bd
 	// only for a registered port (gt-fcxe9.9).
@@ -422,8 +433,8 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 // with the opt-in the error fails the package
 // (TestStartHermetic_WithDoltOptedInFailsWithoutContainer).
 func EnsureDoltContainerForTestMain() error {
-	if !DockerTestsEnabled() {
-		return fmt.Errorf("%s", dockerTestsSkipMsg)
+	if err := containerOptIn(procEnv{}); err != nil {
+		return err
 	}
 	if !isDockerAvailable() {
 		return fmt.Errorf("Docker not available")
@@ -438,9 +449,7 @@ func EnsureDoltContainerForTestMain() error {
 // a container that will not start fails it.
 func RequireDoltContainer(t *testing.T) {
 	t.Helper()
-	if !DockerTestsEnabled() {
-		t.Skip(dockerTestsSkipMsg)
-	}
+	requireContainerOptIn(t, procEnv{})
 	if !isDockerAvailable() {
 		t.Fatal(dockerMissingMsg)
 	}
@@ -448,6 +457,23 @@ func RequireDoltContainer(t *testing.T) {
 	doltCtrOnce.Do(startSharedDoltContainer)
 	if doltCtrErr != nil {
 		t.Fatalf("Dolt container setup failed (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, doltCtrErr)
+	}
+}
+
+// containerOptIn is the error every container entry point returns, or skips
+// with, when env has not opted in (DockerTestsEnv).
+func containerOptIn(env environment) error {
+	if !dockerTestsEnabled(env) {
+		return fmt.Errorf("%s", dockerTestsSkipMsg)
+	}
+	return nil
+}
+
+// requireContainerOptIn skips t unless env opted in to container tests.
+func requireContainerOptIn(t *testing.T, env environment) {
+	t.Helper()
+	if err := containerOptIn(env); err != nil {
+		t.Skip(err.Error())
 	}
 }
 
