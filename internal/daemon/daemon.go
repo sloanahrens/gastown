@@ -79,18 +79,6 @@ type Daemon struct {
 	deathsMu     sync.Mutex
 	recentDeaths []sessionDeath
 
-	// Deacon startup tracking: prevents race condition where newly started
-	// sessions are immediately killed by the heartbeat check.
-	// See: https://github.com/steveyegge/gastown/issues/567
-	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
-	deaconLastStarted time.Time
-
-	// deaconCycle tracks the Deacon heartbeat cycle number and how long it has
-	// gone unchanged, so a heartbeat whose timestamp is being refreshed without
-	// any progress is still treated as stalled (gt-t3cw).
-	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
-	deaconCycle deaconCycleTracker
-
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
@@ -174,9 +162,6 @@ type Daemon struct {
 	// a script plugin's failure hand-off (a goroutine) both pick an idle dog
 	// and assign it, so they must not interleave.
 	dispatchMu sync.Mutex
-
-	// Restart tracking with exponential backoff to prevent crash loops
-	restartTracker *RestartTracker
 
 	// supervisor holds the only Kill and Restart the daemon uses (see
 	// sup()); tests may set it, otherwise it is built on first use.
@@ -601,17 +586,6 @@ func New(config *Config) (*Daemon, error) {
 		logger.Printf("Warning: bd not found in PATH, subprocess calls may fail")
 	}
 
-	// Initialize restart tracker with exponential backoff.
-	// Parameters are configurable via patrols.restart_tracker in daemon.json.
-	var rtCfg RestartTrackerConfig
-	if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.RestartTracker != nil {
-		rtCfg = *patrolConfig.Patrols.RestartTracker
-	}
-	restartTracker := NewRestartTracker(config.TownRoot, rtCfg)
-	if err := restartTracker.Load(); err != nil {
-		logger.Printf("Warning: failed to load restart state: %v", err)
-	}
-
 	// Initialize OpenTelemetry (best-effort — telemetry failure never blocks startup).
 	// Activate by setting GT_OTEL_METRICS_URL and/or GT_OTEL_LOGS_URL.
 	otelProvider, otelErr := telemetry.Init(ctx, "gastown-daemon", "")
@@ -650,7 +624,6 @@ func New(config *Config) (*Daemon, error) {
 		gtPath:          gtPath,
 		bdPath:          bdPath,
 		notifier:        newDaemonNotifier(gtPath, config.TownRoot),
-		restartTracker:  restartTracker,
 		otelProvider:    otelProvider,
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
@@ -1124,13 +1097,10 @@ func (d *Daemon) Run() (err error) {
 				// It is still caught so a stray one cannot end the daemon.
 				d.logger.Println("Received SIGUSR1: ignored (the lifecycle mail intake was removed)")
 			} else if isReloadRestartSignal(sig) {
-				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
-				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
-				if d.restartTracker != nil {
-					if err := d.restartTracker.Load(); err != nil {
-						d.logger.Printf("Warning: failed to reload restart tracker: %v", err)
-					}
-				}
+				// 'gt daemon clear-backoff' still sends SIGUSR2. The restart
+				// budget lives in each seat's intent record and is read on
+				// every restart, so there is nothing to reload.
+				d.logger.Println("Received reload-restart signal: restart budgets are read from the intent records, nothing to reload")
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
 				return d.shutdown(state)
@@ -2100,48 +2070,34 @@ func (d *Daemon) runDegradedBootTriage(b *boot.Boot) {
 	}
 }
 
-// ensureDeaconRunning ensures the Deacon is running.
-// Uses deacon.Manager for consistent startup behavior (WaitForShellReady, GUPP, etc.).
+// deaconSeat is the Deacon's seat.
+var deaconSeat = supervisor.SeatFor("", constants.RoleDeacon, "")
+
+// ensureDeaconRunning restarts the Deacon when the liveness function says it
+// is dead: no session, or a session whose agent process is gone. An Unknown
+// verdict is left alone (G1-09), and the restart goes through the
+// supervisor, which enforces pause, e-stop and the persisted restart budget
+// in place of the old in-memory backoff.
 func (d *Daemon) ensureDeaconRunning() {
-	const agentID = "deacon"
-
-	// Check restart tracker for backoff/crash loop
-	if d.restartTracker != nil {
-		if d.restartTracker.IsInCrashLoop(agentID) {
-			d.logger.Printf("Deacon is in crash loop, skipping restart (use 'gt daemon clear-backoff deacon' to reset)")
-			d.escalateCrashLoopSkip(agentID, "daemon boot loop cannot restart Deacon")
-			return
-		}
-		if !d.restartTracker.CanRestart(agentID) {
-			remaining := d.restartTracker.GetBackoffRemaining(agentID)
-			d.logger.Printf("Deacon restart in backoff, %s remaining", remaining.Round(time.Second))
-			return
-		}
-	}
-
-	if err := d.startDeacon(); err != nil {
-		if err == deacon.ErrAlreadyRunning {
-			// Deacon is running - record success to reset backoff
-			if d.restartTracker != nil {
-				d.restartTracker.RecordSuccess(agentID)
-			}
-			return
-		}
-		d.logger.Printf("Error starting Deacon: %v", err)
+	res := d.assessSeat(deaconSeat, liveness.Input{Session: d.getDeaconSessionName()})
+	switch res.Verdict {
+	case liveness.Unknown:
+		d.logger.Printf("Deacon liveness unknown (%v); not restarting this tick", res.Err)
+		return
+	case liveness.Alive, liveness.Stalled:
+		// Running. A stall is checkDeaconHeartbeat's to act on.
 		return
 	}
 
-	// Record this restart attempt for backoff tracking
-	if d.restartTracker != nil {
-		d.restartTracker.RecordRestart(agentID)
-		if err := d.restartTracker.Save(); err != nil {
-			d.logger.Printf("Warning: failed to save restart state: %v", err)
+	if err := d.sup().Restart(deaconSeat, "deacon "+res.Reason, "daemon/ensure-deacon"); err != nil {
+		if errors.Is(err, supervisor.ErrRefused) {
+			d.logger.Printf("Not starting Deacon: %v", err)
+		} else {
+			d.logger.Printf("Error starting Deacon: %v", err)
 		}
+		return
 	}
 
-	// Track when we started the Deacon to prevent race condition in checkDeaconHeartbeat.
-	// The heartbeat file will still be stale until the Deacon runs a full patrol cycle.
-	d.deaconLastStarted = time.Now()
 	d.metrics.recordRestart(d.ctx, "deacon")
 	telemetry.RecordDaemonRestart(d.ctx, "deacon")
 	d.logger.Println("Deacon started successfully")
@@ -2165,263 +2121,88 @@ func (d *Daemon) startDeacon() error {
 	return deacon.NewManager(d.config.TownRoot).Start("")
 }
 
-// deaconGracePeriod returns the config-driven deacon grace period.
-// The Deacon needs time to initialize Claude, run SessionStart hooks, execute gt prime,
-// run a patrol cycle, and write a fresh heartbeat. Default: 5 minutes.
-func (d *Daemon) deaconGracePeriod() time.Duration {
-	return d.loadOperationalConfig().GetDaemonConfig().DeaconGracePeriodD()
-}
-
-// checkDeaconHeartbeat checks if the Deacon is making progress.
-// This is a belt-and-suspenders fallback in case Boot doesn't detect stuck states.
-// Uses the heartbeat file that the Deacon updates on each patrol cycle.
+// checkDeaconHeartbeat judges whether a running Deacon is making progress.
+// It is a belt-and-suspenders fallback behind Boot.
 //
-// PATCH-005: Fixed grace period logic. Old logic skipped heartbeat check entirely
-// during grace period, allowing stuck Deacons to go undetected. New logic:
-// - Always read heartbeat first
-// - Grace period only applies if heartbeat is from BEFORE we started Deacon
-// - If heartbeat is from AFTER start but stale, Deacon is stuck
+// Progress is measured by change between two liveness samples persisted in
+// the Deacon's intent record: its heartbeat cycle number (never the file's
+// timestamp, which the heartbeat poller refreshes on a timer, gt-t3cw), its
+// pane's work region and its transcript. Because the previous sample lives on
+// disk, a daemon restarted every few minutes still accumulates stall evidence
+// (G1-04), and a first sample is always a baseline, never a verdict.
 //
-// Progress, not freshness: the freshness check is a check on the heartbeat
-// file's timestamp age, and the file is rewritten on a timer as well as by the
-// Deacon. Effective age is therefore the larger of the timestamp age and the
-// time since the heartbeat's cycle last changed (gt-t3cw).
+// Two tiers: quiet for HeartbeatStaleThreshold (5m) with work in flight earns
+// a nudge; Stalled at HeartbeatVeryStaleThreshold (20m, longer than the
+// patrol's await-signal backoff) earns a restart through the supervisor.
 func (d *Daemon) checkDeaconHeartbeat() {
-	// Always read heartbeat first (PATCH-005)
-	hb := deacon.ReadHeartbeat(d.config.TownRoot)
-
-	// A gap in observations that something other than a stall explains — no
-	// heartbeat file to read, or the crash-loop hold below — must drop the
-	// cycle baseline, or the gap itself reads as a stall on the next check
-	// (gt-t3cw).
-	if hb == nil || (d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon")) {
-		d.deaconCycle.reset()
-	}
-
-	// Respect crash-loop guard: if the restart tracker says Deacon is in a
-	// crash loop, do not kill the session — the guard is deliberately holding
-	// off restarts to break the cycle. (Fixes #2086)
-	//
-	// But don't just take the flag on faith: if the heartbeat has been
-	// continuously fresh with an advancing cycle count for the recovery
-	// window, the agent has clearly recovered on its own and the flag is
-	// stale (gt-ayx) — auto-clear it instead of waiting for a human to run
-	// 'gt daemon clear-backoff'.
-	if d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon") {
-		var cycle int64
-		if hb != nil {
-			cycle = hb.Cycle
-		}
-		if d.restartTracker.ObserveHeartbeat("deacon", cycle, hb.IsFresh()) {
-			if err := d.restartTracker.Save(); err != nil {
-				d.logger.Printf("Warning: failed to save restart state after crash-loop auto-clear: %v", err)
-			}
-			d.logger.Printf("Deacon crash-loop auto-cleared: heartbeat fresh with advancing cycles for recovery window")
-		} else {
-			d.logger.Printf("Deacon is in crash-loop state, skipping heartbeat kill check")
-		}
-		return
-	}
-
 	sessionName := d.getDeaconSessionName()
-
-	// Check if we recently started a Deacon
-	if !d.deaconLastStarted.IsZero() {
-		timeSinceStart := time.Since(d.deaconLastStarted)
-
-		if hb == nil {
-			// No heartbeat file exists
-			if timeSinceStart < d.deaconGracePeriod() {
-				d.logger.Printf("Deacon started %s ago, awaiting first heartbeat...",
-					timeSinceStart.Round(time.Second))
-				return
-			}
-			// Grace period expired without any heartbeat - Deacon failed to start
-			// Stuck-agent-dog: kill and restart
-			d.logger.Printf("STUCK DEACON: started %s ago but hasn't written heartbeat (session: %s)",
-				timeSinceStart.Round(time.Minute), sessionName)
-			d.restartStuckDeacon(sessionName, fmt.Sprintf("no heartbeat after %s", timeSinceStart.Round(time.Minute)))
-			return
-		}
-
-		// Heartbeat exists - check if it's from BEFORE we started this Deacon
-		if hb.Timestamp.Before(d.deaconLastStarted) {
-			// Heartbeat is stale (from before restart)
-			if timeSinceStart < d.deaconGracePeriod() {
-				d.logger.Printf("Deacon started %s ago, heartbeat is pre-restart, awaiting fresh heartbeat...",
-					timeSinceStart.Round(time.Second))
-				return
-			}
-			// Grace period expired but heartbeat still from before start
-			// Stuck-agent-dog: kill and restart
-			d.logger.Printf("STUCK DEACON: started %s ago but heartbeat still pre-restart (session: %s)",
-				timeSinceStart.Round(time.Minute), sessionName)
-			d.restartStuckDeacon(sessionName, fmt.Sprintf("heartbeat pre-restart after %s", timeSinceStart.Round(time.Minute)))
-			return
-		}
-
-		// Heartbeat is from AFTER we started - Deacon has written at least one heartbeat
-		// Fall through to normal staleness check
+	in := liveness.Input{Session: sessionName, StallAfter: deacon.HeartbeatVeryStaleThreshold}
+	if hb := deacon.ReadHeartbeat(d.config.TownRoot); hb != nil {
+		in.Heartbeat = &liveness.Heartbeat{Cycle: hb.Cycle}
 	}
+	res := d.assessSeat(deaconSeat, in)
 
-	// No recent start tracking or Deacon has written fresh heartbeat - check normally
-	if hb == nil {
-		// No heartbeat file - Deacon hasn't started a cycle yet
+	switch res.Verdict {
+	case liveness.Unknown:
+		d.logger.Printf("Deacon liveness unknown (%v); skipping the progress check", res.Err)
+		return
+	case liveness.Dead:
+		// ensureDeaconRunning, earlier in this heartbeat, owns a dead Deacon.
+		return
+	case liveness.Stalled:
+		d.restartStuckDeacon(sessionName, fmt.Sprintf("no progress for %s", res.QuietFor.Round(time.Minute)))
 		return
 	}
 
-	obs := d.deaconCycle.observe(hb.Cycle, deacon.HeartbeatStaleThreshold, time.Now())
-
-	age := hb.Age()
-
-	// Freshness alone is not progress: the heartbeat poller rewrites the
-	// timestamp on a timer whether or not the Deacon does anything. Date the
-	// heartbeat by the later of its timestamp age and the time its cycle has
-	// gone unchanged (gt-t3cw).
-	cycleStalled := obs.Stalled && obs.Age > age
-	if cycleStalled {
-		age = obs.Age
-	}
-
-	// If heartbeat is fresh (< 5 min) and moving, nothing to do
-	if age < deacon.HeartbeatStaleThreshold {
+	if res.QuietFor < deacon.HeartbeatStaleThreshold {
 		return
 	}
 
-	if cycleStalled {
-		d.logger.Printf("Deacon cycle stalled (%s at cycle %d), checking session...",
-			obs.Age.Round(time.Minute), hb.Cycle)
-	} else {
-		d.logger.Printf("Deacon heartbeat is stale (%s old), checking session...", age.Round(time.Minute))
-	}
-
-	// Check if session exists
-	hasSession, err := d.tmux.HasSession(sessionName)
-	if err != nil {
-		d.logger.Printf("Error checking Deacon session: %v", err)
+	// Quiet but not stalled - nudge to wake up (unless idle).
+	//
+	// Idle guard: skip the nudge if no beads are actively in flight. When the
+	// Deacon is sleeping in an await-signal backoff, a nudge interrupts the
+	// backoff for no reason; it will wake at its next timeout. Conservative:
+	// on store errors hasActiveWork returns true, so the nudge fires. See also
+	// runtime/runtime.go: the session-started nudge was removed for the same
+	// reason.
+	if !d.hasActiveWork() {
+		d.logger.Println("Deacon nudge skipped: no active work in flight, await-signal will fire naturally")
 		return
 	}
-
-	if !hasSession {
-		// Session doesn't exist - ensureDeaconRunning already ran earlier
-		// in heartbeat, so Deacon should be starting
-		return
-	}
-
-	// A stalled cycle needs a second consecutive sample before the daemon acts
-	// on it: one sample only shows that the cycle has not moved, which is also
-	// what a single missed tick looks like. The mayor-zombie check debounces on
-	// the same principle (gt-t3cw).
-	if cycleStalled && hb.IsFresh() && obs.StalledTicks < 2 {
-		d.logger.Printf("Deacon cycle stalled (%s at cycle %d) on its first sample, waiting for confirmation",
-			obs.Age.Round(time.Minute), hb.Cycle)
-		return
-	}
-
-	// Session exists but heartbeat is stale - Deacon may be stuck.
-	// Two-tier response: nudge for stale (5-20 min), kill and restart
-	// only for very stale (>= 20 min). Kill threshold must be > backoff-max
-	// to avoid false positive kills during legitimate await-signal sleep.
-	if age >= deacon.HeartbeatVeryStaleThreshold {
-		// Stuck-agent-dog: kill and restart
-		reason := fmt.Sprintf("heartbeat stale for %s", age.Round(time.Minute))
-		if cycleStalled {
-			reason = fmt.Sprintf("cycle stalled for %s at cycle %d", obs.Age.Round(time.Minute), hb.Cycle)
-		}
-		d.logger.Printf("STUCK DEACON: %s, session %s needs restart", reason, sessionName)
-		d.restartStuckDeacon(sessionName, reason)
-	} else {
-		// Stale but not very stale (5-20 min) - nudge to wake up (unless idle).
-		//
-		// Idle guard: skip nudge if no beads are actively in flight.
-		// This mirrors the Boot idle guard (ensureBootRunning). When the Deacon's
-		// heartbeat has gone stale during an await-signal backoff sleep, sending a
-		// nudge interrupts the exponential backoff for no reason — the Deacon will
-		// wake naturally at its next timeout. Only nudge if work is actually in
-		// flight (in_progress or hooked) that the Deacon may need to act on.
-		// Conservative: on store errors hasActiveWork returns true, so nudge fires.
-		// See also: runtime/runtime.go:99-101 — session-started nudge was removed
-		// for the same reason (it interrupted the deacon's await-signal backoff).
-		if !d.hasActiveWork() {
-			d.logger.Println("Deacon nudge skipped: no active work in flight, await-signal will fire naturally")
-			return
-		}
-
-		if cycleStalled {
-			d.logger.Printf("Deacon stuck for %s (cycle %d stalled) - nudging session",
-				obs.Age.Round(time.Minute), hb.Cycle)
-		} else {
-			d.logger.Printf("Deacon stuck for %s - nudging session", age.Round(time.Minute))
-		}
-		if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"); err != nil {
-			d.logger.Printf("Error nudging stuck Deacon: %v", err)
-		}
+	d.logger.Printf("Deacon quiet for %s (no progress evidence changed) - nudging session", res.QuietFor.Round(time.Minute))
+	if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"); err != nil {
+		d.logger.Printf("Error nudging stuck Deacon: %v", err)
 	}
 }
 
-// restartStuckDeacon kills a stuck Deacon session and respawns it.
-// Uses RestartTracker for exponential backoff and crash-loop prevention.
+// restartStuckDeacon restarts a stalled Deacon through the supervisor.
 // Notifies via gt-notify (zero token cost) if the notify script exists.
 func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
-	const agentID = "deacon"
-
-	// Check restart tracker before acting
-	if d.restartTracker != nil {
-		if d.restartTracker.IsInCrashLoop(agentID) {
-			d.logger.Printf("Stuck-agent-dog: Deacon in crash loop, not restarting (use 'gt daemon clear-backoff deacon')")
-			d.notifySlack("admin", "critical", fmt.Sprintf("Deacon crash loop detected — manual intervention required. Reason: %s", reason))
-			d.escalateCrashLoopSkip(agentID, reason)
-			return
-		}
-		if !d.restartTracker.CanRestart(agentID) {
-			remaining := d.restartTracker.GetBackoffRemaining(agentID)
-			d.logger.Printf("Stuck-agent-dog: Deacon restart in backoff, %s remaining", remaining.Round(time.Second))
-			return
-		}
-	}
-
-	// Distinguish a usage-limit pause from a true crash. If Claude is sitting
-	// at a rate-limit prompt the heartbeat will go stale, looking identical
-	// to a crash — but killing and respawning won't help (the new session
-	// hits the same limit) and the repeated kills burn the crash-loop budget.
-	// Detect the rate-limit signature in the pane and let quota_dog handle
-	// account rotation instead.
-	if d.tmux != nil {
-		if pane, err := d.tmux.CapturePane(sessionName, 30); err == nil && IsClaudeUsageLimit(pane) {
-			d.logger.Printf("Stuck-agent-dog: Deacon paused — Claude usage-limit detected, skipping kill (quota_dog will rotate accounts). Reason: %s", reason)
-			if d.restartTracker != nil {
-				d.restartTracker.RecordPause(agentID)
-				if err := d.restartTracker.Save(); err != nil {
-					d.logger.Printf("Warning: failed to save restart state: %v", err)
-				}
-			}
-			return
-		}
-	}
-
-	// Kill the stuck session
-	d.logger.Printf("Stuck-agent-dog: killing stuck Deacon session %s (reason: %s)", sessionName, reason)
-	if err := d.tmux.KillSession(sessionName); err != nil {
-		d.logger.Printf("Stuck-agent-dog: error killing session %s: %v", sessionName, err)
-		// Continue — session may already be dead
-	}
-
-	// Brief pause for tmux cleanup
-	d.clk().Sleep(2 * time.Second)
-
-	// Respawn via ensureDeaconRunning (which uses deacon.Manager)
-	d.ensureDeaconRunning()
-
-	// Verify it came back
-	hasSession, err := d.tmux.HasSession(sessionName)
-	if err != nil || !hasSession {
-		d.logger.Printf("Stuck-agent-dog: FAILED to respawn Deacon after kill")
-		d.notifySlack("admin", "critical", fmt.Sprintf("Deacon restart FAILED — session did not respawn. Reason: %s", reason))
+	// Distinguish a usage-limit pause from a true stall. If Claude is sitting
+	// at a rate-limit prompt its progress stops, looking identical to a
+	// stall, but a restart won't help (the new session hits the same limit)
+	// and would spend the restart budget. quota_dog rotates accounts.
+	if pane, err := d.tmux.CapturePane(sessionName, 30); err == nil && IsClaudeUsageLimit(pane) {
+		d.logger.Printf("Deacon paused — Claude usage-limit detected, not restarting (quota_dog will rotate accounts). Reason: %s", reason)
 		return
 	}
 
-	d.logger.Printf("Stuck-agent-dog: Deacon restarted successfully")
-	d.notifySlack("admin", "high", fmt.Sprintf("Deacon was stuck (%s) — auto-restarted successfully", reason))
+	d.logger.Printf("STUCK DEACON: %s, session %s needs restart", reason, sessionName)
+	if err := d.sup().Restart(deaconSeat, reason, "daemon/deacon-heartbeat"); err != nil {
+		if errors.Is(err, supervisor.ErrRefused) {
+			d.logger.Printf("Not restarting stuck Deacon: %v", err)
+			return
+		}
+		d.logger.Printf("Deacon restart FAILED: %v", err)
+		d.notifySlack("admin", "critical", fmt.Sprintf("Deacon restart FAILED: %v. Reason: %s", err, reason))
+		return
+	}
+
+	d.metrics.recordRestart(d.ctx, "deacon")
+	telemetry.RecordDaemonRestart(d.ctx, "deacon")
+	d.logger.Printf("Deacon restarted: %s", reason)
+	d.notifySlack("admin", "high", fmt.Sprintf("Deacon was stuck (%s) — auto-restarted", reason))
 }
 
 // notifySlack sends a notification via gt-notify (zero token cost).

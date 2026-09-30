@@ -137,7 +137,6 @@ type PatrolsConfig struct {
 	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
 	QuotaResume            *QuotaDogConfig                `json:"quota_resume,omitempty"`
 	MayorDispatch          *MayorDispatchConfig           `json:"mayor_dispatch,omitempty"`
-	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
 	// per run; the open bead is the double-dispatch guard (gt-nj23).

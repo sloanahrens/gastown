@@ -168,3 +168,15 @@ func (d *Daemon) logRefusal(what string, err error) {
 	}
 	d.logger.Printf("%s failed: %v", what, err)
 }
+
+// ClearAgentBackoff clears a supervisor freeze and empties the restart
+// budget for the seat agentID names ("deacon", "mayor", "<rig>/witness",
+// "<rig>/<polecat>", ...). It backs `gt daemon clear-backoff`; an operator
+// park is left alone (that is `gt agent resume`).
+func ClearAgentBackoff(townRoot, agentID string) error {
+	id, err := session.ParseAddress(agentID)
+	if err != nil {
+		return fmt.Errorf("unknown agent %q: %w", agentID, err)
+	}
+	return supervisor.ClearHold(townRoot, *id, "gt daemon clear-backoff")
+}
