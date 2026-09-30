@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 // mockSocketLister implements socketSessionLister for testing.
@@ -28,21 +26,10 @@ func (m *mockSocketLister) KillSessionWithProcesses(name string) error {
 	return m.killErr
 }
 
-// setupSocketTestRegistry registers the "ga" prefix so session.IsKnownSession
-// recognises "ga-*" names, and returns a cleanup function.
-func setupSocketTestRegistry(t *testing.T) {
-	t.Helper()
-	oldRegistry := session.DefaultRegistry()
-	t.Cleanup(func() { session.SetDefaultRegistry(oldRegistry) })
-	r := session.NewPrefixRegistry()
-	r.Register("ga", "gastown")
-	session.SetDefaultRegistry(r)
-}
-
 // --- Run() tests ---
 
 func TestSocketSplitBrainCheck_EmptySocket(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -60,7 +47,7 @@ func TestSocketSplitBrainCheck_EmptySocket(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_DefaultSocket(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -78,7 +65,7 @@ func TestSocketSplitBrainCheck_DefaultSocket(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -98,7 +85,7 @@ func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -118,7 +105,7 @@ func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoDuplicates(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -138,7 +125,7 @@ func TestSocketSplitBrainCheck_NoDuplicates(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_DetectsDuplicates(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -168,7 +155,7 @@ func TestSocketSplitBrainCheck_DetectsDuplicates(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_DetectsOrphans(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -195,7 +182,7 @@ func TestSocketSplitBrainCheck_DetectsOrphans(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true

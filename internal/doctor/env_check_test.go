@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 // mockEnvReader implements SessionEnvReader for testing.
@@ -55,21 +54,6 @@ func expectedEnv(role, rig, agentName string) map[string]string {
 // testCtx returns a CheckContext with the test town root.
 func testCtx() *CheckContext {
 	return &CheckContext{TownRoot: testTownRoot}
-}
-
-// setupEnvTestRegistry sets up a prefix registry for env check tests.
-// Maps: mr→myrig, r1→rig1, fb→foo-bar, plus standard prefixes.
-func setupEnvTestRegistry(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	reg.Register("mr", "myrig")
-	reg.Register("r1", "rig1")
-	reg.Register("fb", "foo-bar")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }
 
 func TestEnvVarsCheck_NoSessions(t *testing.T) {
@@ -159,7 +143,7 @@ func TestEnvVarsCheck_MayorMissing(t *testing.T) {
 }
 
 func TestEnvVarsCheck_WitnessCorrect(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	expected := expectedEnv("witness", "myrig", "")
 	reader := &mockEnvReader{
 		sessions: []string{"mr-witness"},
@@ -176,7 +160,7 @@ func TestEnvVarsCheck_WitnessCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_WitnessMismatch(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"mr-witness"},
 		sessionEnvs: map[string]map[string]string{
@@ -195,7 +179,7 @@ func TestEnvVarsCheck_WitnessMismatch(t *testing.T) {
 }
 
 func TestEnvVarsCheck_PolecatCorrect(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	expected := expectedEnv("polecat", "myrig", "Toast")
 	reader := &mockEnvReader{
 		sessions: []string{"mr-Toast"},
@@ -212,7 +196,7 @@ func TestEnvVarsCheck_PolecatCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_PolecatMissing(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"mr-Toast"},
 		sessionEnvs: map[string]map[string]string{
@@ -231,7 +215,7 @@ func TestEnvVarsCheck_PolecatMissing(t *testing.T) {
 }
 
 func TestEnvVarsCheck_CrewCorrect(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	expected := expectedEnv("crew", "myrig", "worker1")
 	reader := &mockEnvReader{
 		sessions: []string{"mr-crew-worker1"},
@@ -248,7 +232,7 @@ func TestEnvVarsCheck_CrewCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_MultipleSessions(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	mayorEnv := expectedEnv("mayor", "", "")
 	witnessEnv := expectedEnv("witness", "rig1", "")
 	polecatEnv := expectedEnv("polecat", "rig1", "Toast")
@@ -273,7 +257,7 @@ func TestEnvVarsCheck_MultipleSessions(t *testing.T) {
 }
 
 func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	mayorEnv := expectedEnv("mayor", "", "")
 
 	reader := &mockEnvReader{
@@ -328,7 +312,7 @@ func TestEnvVarsCheck_DeaconMissing(t *testing.T) {
 }
 
 func TestEnvVarsCheck_GetEnvError(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"mr-witness"},
 		envErrs: map[string]error{
@@ -344,7 +328,7 @@ func TestEnvVarsCheck_GetEnvError(t *testing.T) {
 }
 
 func TestEnvVarsCheck_HyphenatedRig(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// Test rig name with hyphens: "foo-bar" has prefix "fb"
 	expected := expectedEnv("witness", "foo-bar", "")
 	reader := &mockEnvReader{
@@ -381,7 +365,7 @@ func TestEnvVarsCheck_BootCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_MissingEmptyExpectedIsOK(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// When expected value is "" and the key is absent from tmux env,
 	// it should NOT be flagged as a mismatch. Absent == empty for
 	// clearing vars like CLAUDECODE.
@@ -413,7 +397,7 @@ func TestEnvVarsCheck_MissingEmptyExpectedIsOK(t *testing.T) {
 }
 
 func TestEnvVarsCheck_BeadsDirWarning(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// BEADS_DIR being set breaks prefix-based routing
 	expected := expectedEnv("witness", "myrig", "")
 	expected["BEADS_DIR"] = "/some/path/.beads" // This shouldn't be set!
@@ -438,7 +422,7 @@ func TestEnvVarsCheck_BeadsDirWarning(t *testing.T) {
 }
 
 func TestEnvVarsCheck_BeadsDirEmptyIsOK(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// Empty BEADS_DIR should not warn
 	expected := expectedEnv("witness", "myrig", "")
 	expected["BEADS_DIR"] = "" // Empty is fine
@@ -457,7 +441,7 @@ func TestEnvVarsCheck_BeadsDirEmptyIsOK(t *testing.T) {
 }
 
 func TestEnvVarsCheck_BeadsDirMultipleSessions(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// Multiple sessions, only one has BEADS_DIR
 	witnessEnv := expectedEnv("witness", "myrig", "")
 	polecatEnv := expectedEnv("polecat", "myrig", "Toast")
@@ -482,7 +466,7 @@ func TestEnvVarsCheck_BeadsDirMultipleSessions(t *testing.T) {
 }
 
 func TestEnvVarsCheck_BeadsDirWithOtherMismatches(t *testing.T) {
-	setupEnvTestRegistry(t)
+	t.Parallel()
 	// Session has BEADS_DIR AND other mismatches - both should be reported
 	reader := &mockEnvReader{
 		sessions: []string{"mr-witness"},

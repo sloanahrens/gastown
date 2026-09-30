@@ -1,28 +1,12 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/session"
 )
-
-// setupTestRegistry sets up a prefix registry for tests and returns a cleanup function.
-func setupTestRegistry(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	reg.Register("nif", "niflheim")
-	reg.Register("grc", "grctool")
-	reg.Register("7s", "7thsense")
-	reg.Register("pf", "pulseflow")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
 
 // mockSessionLister allows deterministic testing of orphan session detection.
 type mockSessionLister struct {
@@ -61,34 +45,63 @@ func TestNewOrphanProcessCheck(t *testing.T) {
 	}
 }
 
+// cannedProcesses is a process table: tmux's pids, ps -eo pid,ppid,args
+// output and each pid's parent.
+type cannedProcesses struct {
+	tmux    map[int]bool
+	table   string
+	parents map[int]int
+}
+
+func (p cannedProcesses) tmuxPIDs() (map[int]bool, error) { return p.tmux, nil }
+func (p cannedProcesses) processTable() ([]byte, error)   { return []byte(p.table), nil }
+func (p cannedProcesses) parentPID(pid int) (int, error) {
+	if ppid, ok := p.parents[pid]; ok {
+		return ppid, nil
+	}
+	return 0, errors.New("no such process")
+}
+
 func TestOrphanProcessCheck_Run(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("orphan process detection is not supported on Windows")
-	}
-
-	// This test verifies the check runs without error.
-	// Results depend on whether Claude processes exist in the test environment.
-	check := NewOrphanProcessCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-
-	// Should return OK (no processes or all inside tmux) or Warning (processes outside tmux)
-	// Both are valid depending on test environment
-	if result.Status != StatusOK && result.Status != StatusWarning {
-		t.Errorf("expected StatusOK or StatusWarning, got %v: %s", result.Status, result.Message)
-	}
-
-	// If warning, should have informational details
-	if result.Status == StatusWarning {
-		if len(result.Details) < 3 {
-			t.Errorf("expected at least 3 detail lines (2 info + 1 process), got %d", len(result.Details))
-		}
-		// Should NOT have a FixHint since this is informational only
-		if result.FixHint != "" {
-			t.Errorf("expected no FixHint for informational check, got %q", result.FixHint)
-		}
+	const table = `  PID  PPID ARGS
+  100     1 tmux new-session -d
+  200   100 /bin/zsh
+  300   200 claude --dangerously-skip-permissions
+  400   900 /usr/local/bin/claude --dangerously-skip-permissions --resume
+  500   900 claude
+  900     1 /bin/zsh -l
+`
+	parents := map[int]int{200: 100, 100: 1, 900: 1}
+	for _, tc := range []struct {
+		name    string
+		table   string
+		want    CheckStatus
+		message string
+	}{
+		{"no runtime processes", "  PID  PPID ARGS\n  500   900 claude\n", StatusOK, "No runtime processes found"},
+		{"all inside tmux", "  PID  PPID ARGS\n  300   200 claude --dangerously-skip-permissions\n", StatusOK, "All 1 runtime processes are inside tmux"},
+		{"one outside tmux", table, StatusWarning, "Found 1 runtime process(es) running outside tmux"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			check := NewOrphanProcessCheck()
+			check.procs = cannedProcesses{tmux: map[int]bool{100: true}, table: tc.table, parents: parents}
+			result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+			if result.Status != tc.want || result.Message != tc.message {
+				t.Fatalf("Run = %v %q, want %v %q", result.Status, result.Message, tc.want, tc.message)
+			}
+			if tc.want != StatusWarning {
+				return
+			}
+			// Informational: two explanation lines and the process, no fix.
+			if len(result.Details) != 3 || !strings.Contains(result.Details[2], "PID 400") {
+				t.Errorf("Details = %q", result.Details)
+			}
+			if result.FixHint != "" {
+				t.Errorf("expected no FixHint for informational check, got %q", result.FixHint)
+			}
+		})
 	}
 }
 
@@ -104,7 +117,7 @@ func TestOrphanProcessCheck_MessageContent(t *testing.T) {
 }
 
 func TestIsCrewSession(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 	tests := []struct {
 		session string
 		want    bool
@@ -132,7 +145,7 @@ func TestIsCrewSession(t *testing.T) {
 }
 
 func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "beads"}
 	mayorSession := "hq-mayor"
@@ -178,7 +191,7 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 // TestOrphanSessionCheck_IsValidSession_EdgeCases tests edge cases that have caused
 // false positives in production - sessions incorrectly detected as orphans.
 func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "niflheim", "grctool", "7thsense", "pulseflow"}
 	mayorSession := "hq-mayor"
@@ -319,7 +332,7 @@ func TestOrphanSessionCheck_GetValidRigs(t *testing.T) {
 
 // TestOrphanSessionCheck_FixProtectsCrewSessions verifies that Fix() never kills crew sessions.
 func TestOrphanSessionCheck_FixProtectsCrewSessions(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 	check := NewOrphanSessionCheck()
 
 	// Simulate cached orphan sessions including a crew session
@@ -345,7 +358,7 @@ func TestOrphanSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 
 // TestIsCrewSession_ComprehensivePatterns tests the crew session detection pattern thoroughly.
 func TestIsCrewSession_ComprehensivePatterns(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 
 	tests := []struct {
 		session string
@@ -414,7 +427,7 @@ func TestOrphanSessionCheck_HQSessions(t *testing.T) {
 // TestOrphanSessionCheck_Run_Deterministic tests the full Run path with a mock session
 // lister, ensuring deterministic behavior without depending on real tmux state.
 func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
-	setupTestRegistry(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
