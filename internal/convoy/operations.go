@@ -422,13 +422,14 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		return
 	}
 
-	// Extract base_branch and agent from convoy description fields
-	var baseBranch, convoyAgent string
+	// Extract base_branch, agent, and formula from convoy description fields
+	var baseBranch, convoyAgent, convoyFormula string
 	if convoy, err := store.GetIssue(ctx, convoyID); err == nil && convoy != nil {
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
 		}
 		convoyAgent = AgentFromConvoyDescription(convoy.Description)
+		convoyFormula = FormulaFromConvoyDescription(convoy.Description)
 	}
 
 	// Sort by priority (lower = higher) then by ID for deterministic tie-breaking.
@@ -493,7 +494,10 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 
 		agent, agentDesc := FeedDispatchAgent(convoyAgent, townRoot, rig)
 		logger("%s: convoy %s: feeding next ready issue %s to %s (%s)", caller, convoyID, issue.ID, rig, agentDesc)
-		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch, agent); err != nil {
+		if convoyFormula != "" {
+			logger("%s: convoy %s: feeding %s with formula %q recorded on convoy at sling time", caller, convoyID, issue.ID, convoyFormula)
+		}
+		if err := dispatchIssue(ctx, townRoot, issue.ID, rig, gtPath, baseBranch, agent, convoyFormula); err != nil {
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
 			continue // Try next issue on dispatch failure
 		}
@@ -780,6 +784,17 @@ func AgentFromConvoyDescription(description string) string {
 	return ""
 }
 
+// FormulaFromConvoyDescription returns the formula a convoy recorded at sling
+// time (--formula), empty when it recorded none. It is the single parse of the
+// 'formula:' convoy field, the counterpart of AgentFromConvoyDescription, so a
+// re-dispatch path cannot grow its own reading of it (gt-o9sbq).
+func FormulaFromConvoyDescription(description string) string {
+	if cf := beads.ParseConvoyFields(&beads.Issue{Description: description}); cf != nil {
+		return strings.TrimSpace(cf.Formula)
+	}
+	return ""
+}
+
 // RedispatchAgent returns the agent to re-dispatch one bead of a convoy with,
 // given the convoy's description, plus a description of that choice for logging.
 // It is AgentFromConvoyDescription plus FeedDispatchAgent, and is the entry point
@@ -816,13 +831,19 @@ func FeedDispatchAgent(convoyAgent, townRoot, rig string) (agent, description st
 // gtPath is the resolved path to the gt binary.
 // agent is the runtime agent to re-dispatch with; empty leaves the choice to
 // gt sling's own resolution.
-func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch, agent string) error {
+// formula is the formula the convoy recorded at sling time; empty leaves the
+// choice to gt sling's default. Re-dispatching without it runs the bead under
+// the default formula instead of the one originally asked for (gt-4lor, gt-o9sbq).
+func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch, agent, formula string) error {
 	args := []string{"sling", issueID, rig, "--no-boot"}
 	if baseBranch != "" {
 		args = append(args, "--base-branch="+baseBranch)
 	}
 	if agent != "" {
 		args = append(args, "--agent="+agent)
+	}
+	if formula != "" {
+		args = append(args, "--formula="+formula)
 	}
 	cmd := exec.CommandContext(ctx, gtPath, args...)
 	cmd.Dir = townRoot

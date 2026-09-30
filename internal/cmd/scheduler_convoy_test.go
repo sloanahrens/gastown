@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -138,5 +139,56 @@ func TestConvoyRecordByID_UnreadableConvoy(t *testing.T) {
 	}
 	if !strings.Contains(jobs[0].agentDesc, "could not be read") {
 		t.Errorf("description %q should name the failed convoy read", jobs[0].agentDesc)
+	}
+}
+
+// TestConvoyDispatchPathsCarryRecordedFormula is the gt-o9sbq counterpart of
+// the agent table above: the two manual 'gt sling <convoy>' schedulers must
+// re-dispatch with the formula the convoy recorded at sling time, not the
+// default formula resolveFormula fills in, unless the operator names one.
+// Each row runs its path's own SlingParams builder, because that is the step
+// that can drop the formula.
+func TestConvoyDispatchPathsCarryRecordedFormula(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	const recorded = "mol-custom"
+	const defaulted = "mol-polecat-work"
+	withFormula := convoyRecord{ID: "gt-abc", Description: "Auto-created convoy\n\nmerge: mr\nformula: " + recorded + "\n"}
+	noFormula := convoyRecord{ID: "gt-abc", Description: "Auto-created convoy\n\nmerge: mr\n"}
+	unreadable := convoyRecord{ID: "gt-abc", Err: errors.New("bd show failed")}
+
+	candidate := convoyCandidate{ID: "gt-abc", Title: "Work", RigName: "gastown"}
+	job := convoyDispatchJob{candidate: candidate}
+
+	rows := []struct {
+		name   string
+		opts   convoyScheduleOpts
+		record convoyRecord
+		want   string
+	}{
+		{"recorded formula beats the resolved default", convoyScheduleOpts{Formula: defaulted}, withFormula, recorded},
+		{"explicit --formula beats the record", convoyScheduleOpts{Formula: "mol-operator", FormulaExplicit: true}, withFormula, "mol-operator"},
+		{"--hook-raw-bead stays raw", convoyScheduleOpts{Formula: "", HookRawBead: true}, withFormula, ""},
+		{"nothing recorded keeps the resolved default", convoyScheduleOpts{Formula: defaulted}, noFormula, defaulted},
+		{"unreadable convoy keeps the resolved default", convoyScheduleOpts{Formula: defaulted}, unreadable, defaulted},
+	}
+
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, desc := convoyOptsWithRecordedFormula(tc.opts, tc.record)
+			if opts.Formula != tc.want {
+				t.Fatalf("opts.Formula = %q, want %q", opts.Formula, tc.want)
+			}
+			if applied := opts.Formula != tc.opts.Formula; applied != (desc != "") {
+				t.Errorf("description %q must be set exactly when the recorded formula was applied", desc)
+			}
+			if got := convoySlingParams(job, opts, townRoot).FormulaName; got != tc.want {
+				t.Errorf("immediate path FormulaName = %q, want %q", got, tc.want)
+			}
+			if got := convoyScheduleOptionsFor(opts, "").Formula; got != tc.want {
+				t.Errorf("deferred path Formula = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
