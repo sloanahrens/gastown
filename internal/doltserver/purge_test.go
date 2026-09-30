@@ -2,27 +2,16 @@ package doltserver
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-	"time"
-
-	beadspkg "github.com/steveyegge/gastown/internal/beads"
 )
 
-func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping subprocess test in short mode")
-	}
-	beadspkg.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
-	// The --allow-stale probe fails closed at 10s. On a loaded gate host the
-	// stub's probe took longer, was cached as unsupported, and purge ran
-	// without --allow-stale ("unexpected args: purge --json --force", 16s
-	// test). The stub always answers, so a long bound costs nothing here.
-	t.Cleanup(beadspkg.SetBdAllowStaleProbeTimeoutForTest(2 * time.Minute))
-
+// purgeTown makes a town whose gastown rig has an initialized beads
+// directory, and returns the town root and that directory.
+func purgeTown(t *testing.T) (string, string) {
+	t.Helper()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, "gastown", ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -32,64 +21,67 @@ func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
+	return townRoot, beadsDir
+}
 
-	stubDir := t.TempDir()
-	logPath := filepath.Join(stubDir, "bd.log")
-	stubPath := filepath.Join(stubDir, "bd")
-	script := `#!/bin/sh
-{
-  printf 'args=%s\n' "$*"
-  printf 'BEADS_DIR=%s\n' "${BEADS_DIR:-}"
-  printf 'BEADS_DB=%s\n' "${BEADS_DB:-}"
-  printf 'BD_DB=%s\n' "${BD_DB:-}"
-  printf 'BEADS_DOLT_SERVER_DATABASE=%s\n' "${BEADS_DOLT_SERVER_DATABASE:-}"
-  printf 'BEADS_DOLT_SERVER_HOST=%s\n' "${BEADS_DOLT_SERVER_HOST:-}"
-  printf 'BEADS_DOLT_SERVER_PORT=%s\n' "${BEADS_DOLT_SERVER_PORT:-}"
-  printf 'BEADS_DOLT_PORT=%s\n' "${BEADS_DOLT_PORT:-}"
-  printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT:-}"
-} >> "$MOCK_BD_LOG"
-if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
-  printf 'bd version\n'
-  exit 0
-fi
-if [ "$1" = "--allow-stale" ] && [ "$2" = "purge" ]; then
-  printf '{"purged_count":3}\n'
-  exit 0
-fi
-printf 'unexpected args: %s\n' "$*" >&2
-exit 2
-`
-	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
+// bdCall returns the one call whose argv starts with "bd purge".
+func bdPurgeCall(t *testing.T, f *fakeHost) []string {
+	t.Helper()
+	var found []string
+	for _, c := range f.calls {
+		if len(c) > 1 && c[0] == "bd" && c[1] == "purge" {
+			if found != nil {
+				t.Fatalf("more than one bd purge: %q", f.commands())
+			}
+			found = c
+		}
 	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MOCK_BD_LOG", logPath)
-	t.Setenv("GT_DOLT_HOST", "127.0.0.2")
-	t.Setenv("GT_DOLT_PORT", "5507")
-	t.Setenv("BEADS_DIR", "/wrong")
-	t.Setenv("BEADS_DB", "/wrong.db")
-	t.Setenv("BD_DB", "/wrong.bd")
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_PORT", "9999")
+	if found == nil {
+		t.Fatalf("no bd purge ran: %q", f.commands())
+	}
+	return found
+}
 
-	purged, err := PurgeClosedEphemerals(townRoot, "gastown", false)
+// bd purge runs pinned to the rig's .beads and its database, on the town's
+// configured endpoint, with the caller's stale bd selectors stripped.
+func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
+	t.Parallel()
+	townRoot, beadsDir := purgeTown(t)
+	f := newFakeHost().on("bd purge *", fakeReply{stdout: `{"purged_count":3}` + "\n"})
+	for k, v := range map[string]string{
+		"GT_DOLT_HOST":               "127.0.0.2",
+		"GT_DOLT_PORT":               "5507",
+		"BEADS_DIR":                  "/wrong",
+		"BEADS_DB":                   "/wrong.db",
+		"BD_DB":                      "/wrong.bd",
+		"BEADS_DOLT_SERVER_DATABASE": "wrong",
+		"BEADS_DOLT_SERVER_HOST":     "stale-host",
+		"BEADS_DOLT_SERVER_PORT":     "9999",
+		"BEADS_DOLT_PORT":            "9999",
+	} {
+		f.setenv(k, v)
+	}
+	var envSeen []string
+	h := f.host()
+	run := h.run
+	h.run = func(c hostCall) ([]byte, []byte, error) {
+		if len(c.Args) > 1 && c.Args[1] == "purge" {
+			envSeen = c.Env
+		}
+		return run(c)
+	}
+
+	purged, err := h.PurgeClosedEphemerals(townRoot, "gastown", false)
 	if err != nil {
 		t.Fatalf("PurgeClosedEphemerals: %v", err)
 	}
 	if purged != 3 {
 		t.Fatalf("purged = %d, want 3", purged)
 	}
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	if args := bdPurgeCall(t, f); !slices.Equal(args, []string{"bd", "purge", "--json", "--force"}) {
+		t.Errorf("argv = %q, want bd purge --json --force", args)
 	}
-	log := string(data)
 	for _, want := range []string{
-		"args=--allow-stale version",
-		"args=--allow-stale purge --json --force",
 		"BEADS_DIR=" + beadsDir,
 		"BEADS_DOLT_SERVER_DATABASE=gastown",
 		"BEADS_DOLT_SERVER_HOST=127.0.0.2",
@@ -97,13 +89,13 @@ exit 2
 		"BEADS_DOLT_PORT=5507",
 		"BD_DOLT_AUTO_COMMIT=on",
 	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("bd log missing %q:\n%s", want, log)
+		if !slices.Contains(envSeen, want) {
+			t.Errorf("bd env missing %q:\n%s", want, strings.Join(envSeen, "\n"))
 		}
 	}
 	for _, forbidden := range []string{"BEADS_DB=/wrong.db", "BD_DB=/wrong.bd", "BEADS_DOLT_SERVER_DATABASE=wrong", "BEADS_DOLT_SERVER_HOST=stale-host", "BEADS_DOLT_SERVER_PORT=9999", "BEADS_DOLT_PORT=9999"} {
-		if strings.Contains(log, forbidden) {
-			t.Fatalf("stale env leaked via %q:\n%s", forbidden, log)
+		if slices.Contains(envSeen, forbidden) {
+			t.Errorf("stale env leaked via %q", forbidden)
 		}
 	}
 }
@@ -112,93 +104,48 @@ exit 2
 // passes --dry-run (preview only) and never --force, so gt maintain's
 // preview paths can never delete data.
 func TestPurgeClosedEphemeralsDryRunOmitsForce(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping subprocess test in short mode")
-	}
-	beadspkg.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beadspkg.ResetBdAllowStaleCacheForTest)
-	// The --allow-stale probe fails closed at 10s. On a loaded gate host the
-	// stub's probe took longer, was cached as unsupported, and purge ran
-	// without --allow-stale ("unexpected args: purge --json --force", 16s
-	// test). The stub always answers, so a long bound costs nothing here.
-	t.Cleanup(beadspkg.SetBdAllowStaleProbeTimeoutForTest(2 * time.Minute))
+	t.Parallel()
+	townRoot, _ := purgeTown(t)
+	f := newFakeHost().on("bd purge *", fakeReply{stdout: "warning: preamble\n" + `{"purged_count":0}` + "\n"})
 
-	townRoot := t.TempDir()
-	beadsDir := filepath.Join(townRoot, "gastown", ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := []byte(`{"dolt_database":"gastown","dolt_server_host":"metadata-host","dolt_server_port":3307}`)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	stubDir := t.TempDir()
-	logPath := filepath.Join(stubDir, "bd.log")
-	stubPath := filepath.Join(stubDir, "bd")
-	script := `#!/bin/sh
-printf 'args=%s\n' "$*" >> "$MOCK_BD_LOG"
-if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
-  printf 'bd version\n'
-  exit 0
-fi
-if [ "$1" = "--allow-stale" ] && [ "$2" = "purge" ]; then
-  printf '{"purged_count":0}\n'
-  exit 0
-fi
-printf 'unexpected args: %s\n' "$*" >&2
-exit 2
-`
-	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MOCK_BD_LOG", logPath)
-
-	purged, err := PurgeClosedEphemerals(townRoot, "gastown", true)
+	purged, err := f.host().PurgeClosedEphemerals(townRoot, "gastown", true)
 	if err != nil {
 		t.Fatalf("PurgeClosedEphemerals: %v", err)
 	}
 	if purged != 0 {
 		t.Fatalf("purged = %d, want 0", purged)
 	}
+	if args := bdPurgeCall(t, f); !slices.Equal(args, []string{"bd", "purge", "--json", "--dry-run"}) {
+		t.Errorf("argv = %q, want bd purge --json --dry-run and never --force", args)
+	}
+}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
+// A rig with no beads directory, or one never initialized, has nothing to
+// purge and runs no bd; a failing bd is an error carrying its stderr.
+func TestPurgeClosedEphemeralsSkipsAndErrors(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
+	empty := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(empty, "gastown", ".beads"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	log := string(data)
-	if !strings.Contains(log, "args=--allow-stale purge --json --dry-run") {
-		t.Fatalf("bd log missing dry-run args:\n%s", log)
-	}
-	if strings.Contains(log, "--force") {
-		t.Fatalf("dry-run purge must never pass --force:\n%s", log)
-	}
-}
-
-// tempDirRetryCleanup creates a temp directory with cleanup that tolerates
-// brief file-lock delays on Windows (e.g., dolt subprocess handle release).
-func tempDirRetryCleanup(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "sync-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() {
-		for i := 0; i < 10; i++ {
-			if err := os.RemoveAll(dir); err == nil {
-				return
-			}
-			time.Sleep(100 * time.Millisecond)
+	for _, townRoot := range []string{t.TempDir(), empty} {
+		if n, err := h.PurgeClosedEphemerals(townRoot, "gastown", false); n != 0 || err != nil {
+			t.Errorf("PurgeClosedEphemerals(%s) = %d, %v; want 0, nil", townRoot, n, err)
 		}
-		t.Logf("warning: could not fully remove temp dir %s", dir)
-	})
-	return dir
-}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("bd ran for a rig with nothing to purge: %q", f.commands())
+	}
 
-// initDoltDB runs "dolt init" in a directory. Returns error if dolt isn't available.
-func initDoltDB(dir string) error {
-	cmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-	cmd.Dir = dir
-	return cmd.Run()
+	townRoot, _ := purgeTown(t)
+	f.on("bd purge *", fakeReply{stderr: "database locked", code: 1})
+	if _, err := h.PurgeClosedEphemerals(townRoot, "gastown", false); err == nil || !strings.Contains(err.Error(), "database locked") {
+		t.Errorf("failed purge = %v, want an error with bd's stderr", err)
+	}
+	f.on("bd purge *", fakeReply{stdout: "not json"})
+	if _, err := h.PurgeClosedEphemerals(townRoot, "gastown", false); err == nil || !strings.Contains(err.Error(), "unexpected output format") {
+		t.Errorf("garbled purge = %v, want an output-format error", err)
+	}
 }

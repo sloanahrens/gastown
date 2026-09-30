@@ -32,7 +32,7 @@ internal/daemon/pidfile.go:verifyPIDOwnership
 # deliberate: a diff that cannot be patch-id'd falls to the uncovered branch, which reports it as an error (see its comment)
 internal/doctor/editorial_coverage_check.go:*coverageNoteIndex.parked
 # not a guard: the flagged true is serverWasRunning returned beside a real error
-internal/doltserver/doltserver.go:InitRig
+internal/doltserver/doltserver.go:*host.InitRig
 # deliberate exit-status narrowing: git exits 1 for "no such branch"; every other failure is returned
 internal/git/git.go:*Git.BranchExists
 # deliberate narrowing: only "No such remote" is false; every other failure is returned

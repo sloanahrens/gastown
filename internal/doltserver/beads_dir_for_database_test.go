@@ -11,6 +11,7 @@ import (
 // database from a beads dir, so a database name the reaper discovered on the
 // server must map back to the beads dir whose metadata.json names it.
 func TestBeadsDirForDatabase(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	setupRigsJSON(t, townRoot, []string{"gastown", "myrig"})
 	setupRigMetadata(t, townRoot, "hq", "hq")
