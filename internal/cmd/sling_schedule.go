@@ -410,6 +410,9 @@ var schedulerTaskOnlyFlagNames = []string{
 
 // validateNoTaskOnlySchedulerFlags checks that no task-only flags were set.
 func validateNoTaskOnlySchedulerFlags(cmd *cobra.Command, mode string) error {
+	if cmd == nil {
+		return nil
+	}
 	var used []string
 	for _, name := range schedulerTaskOnlyFlagNames {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {

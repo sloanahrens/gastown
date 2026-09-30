@@ -180,6 +180,11 @@ func workflowStepTargetFromDescription(description, targetRig string) string {
 // burning molecules off a closed bead would mask completed work, and
 // burning off a blocked bead can mask a real dependency.
 func isOrphanMolecule(info *beadInfo) bool {
+	return isOrphanMoleculeWith(info, isHookedAgentDeadFn)
+}
+
+// isOrphanMoleculeWith is isOrphanMolecule judging the assignee with dead.
+func isOrphanMoleculeWith(info *beadInfo, dead func(assignee string) bool) bool {
 	if info == nil {
 		return false
 	}
@@ -190,7 +195,7 @@ func isOrphanMolecule(info *beadInfo) bool {
 		}
 		return false
 	}
-	return isHookedAgentDeadFn(info.Assignee)
+	return dead(info.Assignee)
 }
 
 // collectExistingMolecules returns all molecule wisp IDs attached to a bead.
@@ -1454,7 +1459,13 @@ func noRepoToProtect(err error) bool {
 // second polecat started from main over preserved work. It returns nil only
 // when there is verifiably nothing to protect. --force bypasses it (caller).
 func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
-	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+	return reslingSurvivingWorkGuardWith(survivingWorkForBeadFn, townRoot, beadID, holder)
+}
+
+// reslingSurvivingWorkGuardWith is reslingSurvivingWorkGuard asking
+// survivingWork for the bead's surviving branch.
+func reslingSurvivingWorkGuardWith(survivingWork func(townRoot, beadID string) (string, error), townRoot, beadID, holder string) error {
+	branch, err := survivingWork(townRoot, beadID)
 	switch {
 	case err != nil && !noRepoToProtect(err):
 		return &reslingRefusal{msg: fmt.Sprintf("%s %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",

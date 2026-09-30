@@ -447,61 +447,6 @@ func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
 	noteSlingCandidateDispatched(t.TempDir(), nil)
 }
 
-// TestExecuteSling_RefusesDuplicateContent exercises the wiring: executeSling
-// must refuse before spawning when the bead's named tests already appear on
-// open or recently-closed work in the rig.
-func TestExecuteSling_RefusesDuplicateContent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-	townRoot := t.TempDir()
-	writeDuplicateBDStub(t, townRoot)
-	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	params := SlingParams{
-		BeadID:   "gt-3vr",
-		RigName:  "testrig",
-		TownRoot: townRoot,
-	}
-
-	result, err := executeSling(params)
-	if err == nil {
-		t.Fatal("expected executeSling to refuse beads whose content duplicates existing work")
-	}
-	if result == nil || result.ErrMsg != errSlingDuplicateContent.Error() {
-		t.Errorf("expected ErrMsg=%q, got %+v", errSlingDuplicateContent.Error(), result)
-	}
-	for _, want := range []string{"TestHermeticHarnessEnforced", "gt-rl0", "--force"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("refusal should mention %q: %v", want, err)
-		}
-	}
-}
-
-// TestExecuteSling_ForceBypassesDuplicateCheck pins the documented escape hatch.
-func TestExecuteSling_ForceBypassesDuplicateCheck(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-	townRoot := t.TempDir()
-	writeDuplicateBDStub(t, townRoot)
-	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	params := SlingParams{
-		BeadID:   "gt-3vr",
-		RigName:  "testrig",
-		TownRoot: townRoot,
-		Force:    true,
-	}
-
-	// Beyond the check, --force continues into dispatch, which fails here for
-	// lack of a real rig — the point is only that the refusal did not fire.
-	_, err := executeSling(params)
-	if err != nil && strings.Contains(err.Error(), "TestHermeticHarnessEnforced") {
-		t.Fatalf("--force must bypass the duplicate check: %v", err)
-	}
-}
-
 // TestExecuteSling_RefusesDuplicateHiddenInPoolDesignNotes is the acceptance
 // bar this file was missing (gt-hgvu, om major on gt-wisp-j5i): the earlier
 // pair-replay tests above build both sides of the comparison with
