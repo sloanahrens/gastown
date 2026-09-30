@@ -112,10 +112,6 @@ gt seance                       # List discoverable predecessor sessions
 gt seance --talk <id> -p "What did you find?"  # One-shot question
 ```
 
-### Wasteland 🏜️
-
-Federated work coordination network linking Gas Towns through DoltHub. Rigs post wanted items, claim work from other towns, submit completion evidence, and earn portable reputation via multi-dimensional stamps. See [Wasteland](docs/WASTELAND.md).
-
 > **New to Gas Town?** See the [Glossary](docs/glossary.md) for a complete guide to terminology and concepts.
 
 ## Installation
@@ -549,15 +545,6 @@ bd mol pour <formula>       # Create trackable instance
 bd mol list                 # List active instances
 ```
 
-### Wasteland Federation
-
-```bash
-gt wl join <remote>            # Join a wasteland
-gt wl browse                   # View wanted board
-gt wl claim <id>               # Claim work
-gt wl done <id> --evidence <url>  # Submit completion
-```
-
 ## Cooking Formulas
 
 Gas Town includes built-in formulas for common workflows. See `internal/formula/formulas/` for available recipes.
@@ -685,20 +672,6 @@ gt seance --talk <id> -p "Question?"   # One-shot question to predecessor
 
 Seance discovers sessions via `.events.jsonl` logs, enabling agents to recover context and decisions from earlier work without re-reading entire codebases.
 
-## Wasteland Federation
-
-The Wasteland is a federated work coordination network linking multiple Gas Towns through DoltHub:
-
-```bash
-gt wl join hop/wl-commons              # Join a wasteland
-gt wl browse                           # View wanted board
-gt wl claim <id>                       # Claim a wanted item
-gt wl done <id> --evidence <url>       # Submit completion with evidence
-gt wl post --title "Need X"            # Post new wanted item
-```
-
-Completions earn portable reputation via multi-dimensional stamps (quality, speed, complexity). See [Wasteland guide](docs/WASTELAND.md).
-
 ## Telemetry (OpenTelemetry)
 
 Gas Town emits all agent operations as structured logs and metrics to any OTLP-compatible backend (VictoriaMetrics/VictoriaLogs by default):
@@ -798,7 +771,6 @@ For deeper technical details, see the design docs in `docs/`:
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |
 | Scheduler | [docs/design/scheduler.md](docs/design/scheduler.md) |
-| Wasteland | [docs/WASTELAND.md](docs/WASTELAND.md) |
 | OTEL data model | [docs/otel-data-model.md](docs/otel-data-model.md) |
 | Witness design | [docs/design/witness-at-team-lead.md](docs/design/witness-at-team-lead.md) |
 | Convoy lifecycle | [docs/design/convoy/](docs/design/convoy/) |

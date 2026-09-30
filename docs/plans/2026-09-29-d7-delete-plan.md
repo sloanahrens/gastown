@@ -1,3 +1,5 @@
+> Status: in progress (2026-09-29), gt-638go.6. Historical once merged; not maintained.
+
 # D7 dead-surface deletion (gt-638go.6) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

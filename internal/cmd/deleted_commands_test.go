@@ -10,6 +10,7 @@ import (
 // deliberate decision that also deletes its line here.
 var deletedCommands = [][]string{
 	{"proxy-subcmds"},
+	{"wl"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the
