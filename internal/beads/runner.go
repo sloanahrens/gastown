@@ -113,9 +113,22 @@ func NewWithBeadsDirAndRunner(workDir, beadsDir string, run BDRunner) *Beads {
 	if run == nil {
 		return NewWithBeadsDir(workDir, beadsDir)
 	}
-	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir, exec: func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir, exec: runnerExec(run)})
+}
+
+// NewRigLocalWithRunner is NewRigLocal whose bd calls go to run. A nil run
+// is the real bd, exactly NewRigLocal.
+func NewRigLocalWithRunner(workDir string, run BDRunner) *Beads {
+	if run == nil {
+		return NewRigLocal(workDir)
+	}
+	return newBeads(beadsFields{workDir: workDir, noRoute: true, exec: runnerExec(run)})
+}
+
+func runnerExec(run BDRunner) bdRunFunc {
+	return func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 		return run(ctx, BDCall{Dir: c.dir, Env: c.env, Args: c.args, Stdin: c.stdin})
-	}})
+	}
 }
 
 // NewPlain returns a Beads that runs bd in dir with exactly env (nil

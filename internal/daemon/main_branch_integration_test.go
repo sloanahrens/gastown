@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -78,37 +77,41 @@ func TestMainBranchIntegrationIntervalAndTimeout(t *testing.T) {
 	}
 }
 
-// integrationWorkDir is a worktree whose Makefile's test-integration recipe is
-// recipe.
-func integrationWorkDir(t *testing.T, recipe string) string {
+// integrationWorkDir is a worktree whose Makefile declares a test-integration
+// target.
+func integrationWorkDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	mk := "test-integration:\n\t" + recipe + "\n"
+	mk := "test-integration:\n\t@true\n"
 	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(mk), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-func requireMake(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("make"); err != nil {
-		t.Fatalf("make is required to run the integration command: %v", err)
-	}
+// integrationDaemon is newMainBranchTestDaemon with its gate commands
+// answered by gate.
+func integrationDaemon(townRoot string, logged *bytes.Buffer, cfg *MainBranchTestConfig, gate *gateShell) *Daemon {
+	d := newMainBranchTestDaemon(townRoot, logged, cfg)
+	d.execCmd = gate.run
+	return d
 }
 
 func TestRunRigIntegration_FailureEscalatesUnderItsOwnKey(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
 	townRoot := t.TempDir()
-	workDir := integrationWorkDir(t, "@echo '--- FAIL: TestIntegrationWidget (0.01s)'; exit 1")
+	workDir := integrationWorkDir(t)
 	rec := notifyfake.New()
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	gate := newGateShell(gateExit("--- FAIL: TestIntegrationWidget (0.01s)\n", 2))
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
 	d.notifier = rec
 
 	d.runRigIntegration(context.Background(), "gastown", "deadbeef", workDir)
 
+	if got := gate.ran(); !slices.Equal(got, []string{"make test-integration"}) || gate.dirs[0] != workDir {
+		t.Fatalf("ran %q in %q, want make test-integration in the worktree", got, gate.dirs)
+	}
 	esc := rec.Escalations()
 	if len(esc) != 1 {
 		t.Fatalf("want one escalation, got %+v\nlog:\n%s", rec.Calls(), logged.String())
@@ -129,12 +132,11 @@ func TestRunRigIntegration_FailureEscalatesUnderItsOwnKey(t *testing.T) {
 
 func TestRunRigIntegration_PassClearsItsAlertAndRecordsTheRun(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
 	townRoot := t.TempDir()
-	workDir := integrationWorkDir(t, "@true")
+	workDir := integrationWorkDir(t)
 	rec := notifyfake.New()
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, newGateShell(gateExit("", 0)))
 	d.notifier = rec
 
 	d.runRigIntegration(context.Background(), "gastown", "deadbeef", workDir)
@@ -153,20 +155,19 @@ func TestRunRigIntegration_PassClearsItsAlertAndRecordsTheRun(t *testing.T) {
 
 func TestRunRigIntegration_NotDueDoesNotRun(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
 	townRoot := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "ran")
-	workDir := integrationWorkDir(t, "@touch "+marker)
+	workDir := integrationWorkDir(t)
 	if err := savePatrolLastRun(townRoot, mainBranchIntegrationPatrolKey("gastown"), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	gate := newGateShell(gateExit("", 0))
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
 
 	d.runRigIntegration(context.Background(), "gastown", "deadbeef", workDir)
 
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the integration tier ran again inside its interval")
+	if got := gate.ran(); len(got) != 0 {
+		t.Fatalf("the integration tier ran again inside its interval: %q", got)
 	}
 	if !strings.Contains(logged.String(), "integration not due") {
 		t.Errorf("a skipped run must say why:\n%s", logged.String())
@@ -175,42 +176,43 @@ func TestRunRigIntegration_NotDueDoesNotRun(t *testing.T) {
 
 func TestRunRigIntegration_PerRigCadence(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
 	townRoot := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "ran")
-	workDir := integrationWorkDir(t, "@touch "+marker)
+	workDir := integrationWorkDir(t)
 	// Another rig ran just now; this one has never run.
 	if err := savePatrolLastRun(townRoot, mainBranchIntegrationPatrolKey("otherrig"), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	gate := newGateShell(gateExit("", 0))
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
 
 	d.runRigIntegration(context.Background(), "gastown", "deadbeef", workDir)
 
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("another rig's run must not make this rig's integration tier not due: %v\n%s", err, logged.String())
+	if got := gate.ran(); len(got) != 1 {
+		t.Fatalf("another rig's run must not make this rig's integration tier not due: ran %q\n%s", got, logged.String())
 	}
 }
 
 func TestRunRigIntegration_OffAndAbsentAreNoOps(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
-	marker := filepath.Join(t.TempDir(), "ran")
+	gate := newGateShell(gateExit("", 0))
 
 	// Turned off by config: the tree has a tier, but nothing runs.
 	townRoot := t.TempDir()
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true, IntegrationIntervalStr: "0s"})
-	d.runRigIntegration(context.Background(), "gastown", "deadbeef", integrationWorkDir(t, "@touch "+marker))
-	if _, err := os.Stat(marker); err == nil {
-		t.Error("integration_interval=0s must turn the run off")
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true, IntegrationIntervalStr: "0s"}, gate)
+	d.runRigIntegration(context.Background(), "gastown", "deadbeef", integrationWorkDir(t))
+	if got := gate.ran(); len(got) != 0 {
+		t.Errorf("integration_interval=0s must turn the run off, ran %q", got)
 	}
 
 	// A tree with no tier: nothing runs and nothing is recorded.
 	townRoot = t.TempDir()
-	d = newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	d = integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
 	d.runRigIntegration(context.Background(), "gastown", "deadbeef", t.TempDir())
+	if got := gate.ran(); len(got) != 0 {
+		t.Errorf("a tree with no integration tier ran %q", got)
+	}
 	if _, ok, _ := loadPatrolLastRun(townRoot, mainBranchIntegrationPatrolKey("gastown")); ok {
 		t.Error("a rig with no integration tier must not record a run")
 	}
@@ -218,15 +220,17 @@ func TestRunRigIntegration_OffAndAbsentAreNoOps(t *testing.T) {
 
 func TestRunRigIntegration_InterruptedIsNotAVerdict(t *testing.T) {
 	t.Parallel()
-	requireMake(t)
 	townRoot := t.TempDir()
-	workDir := integrationWorkDir(t, "@exit 1")
+	workDir := integrationWorkDir(t)
 	rec := notifyfake.New()
 	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
-	d.notifier = rec
 	parent, cancel := context.WithCancel(context.Background())
 	cancel() // the daemon is shutting down
+	// os/exec refuses to start a command whose context is done.
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, newGateShell(func(string) (string, error) {
+		return "", parent.Err()
+	}))
+	d.notifier = rec
 
 	d.runRigIntegration(parent, "gastown", "deadbeef", workDir)
 
@@ -245,17 +249,14 @@ func TestRunRigIntegration_InterruptedIsNotAVerdict(t *testing.T) {
 func TestTestRigMainBranch_RunsTheIntegrationTier(t *testing.T) {
 	stubNoContainers(t)
 	stubGatePool(t, poolHeldBy())
-	requireMake(t)
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", true)
 	rigPath := filepath.Join(townRoot, "gastown")
-	marker := filepath.Join(t.TempDir(), "integration-ran")
-	gateMarker := filepath.Join(t.TempDir(), "gate-ran")
 
 	// The rig's test command, and a main whose Makefile declares the tier.
 	cfg, err := json.Marshal(map[string]interface{}{
 		"type": "rig", "version": 1, "name": "gastown",
-		"merge_queue": map[string]interface{}{"test_command": "touch " + shellQuote(gateMarker)},
+		"merge_queue": map[string]interface{}{"test_command": "go test ./..."},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -263,36 +264,29 @@ func TestTestRigMainBranch_RunsTheIntegrationTier(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), cfg, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := t.TempDir()
-	git := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"}, args...)...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git(src, "init", "-q")
-	mk := "test-integration:\n\t@touch " + marker + "\n"
-	if err := os.WriteFile(filepath.Join(src, "Makefile"), []byte(mk), 0o644); err != nil {
+	var logged bytes.Buffer
+	gate := newGateShell(gateExit("", 0))
+	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
+	d.ctx = context.Background()
+
+	// The rig's bare repo, cloned from an origin whose main declares the tier.
+	f := useGitfake(t, d)
+	src := filepath.Join(t.TempDir(), "src.git")
+	f.InitBare(t, src)
+	f.Commit(t, src, "main", "tier", map[string]string{"Makefile": "test-integration:\n\t@true\n"})
+	if err := f.Open(townRoot).CloneBareWithBranch(src, filepath.Join(rigPath, ".repo.git"), "main"); err != nil {
 		t.Fatal(err)
 	}
-	git(src, "add", "Makefile")
-	git(src, "commit", "-q", "-m", "tier")
-	git(townRoot, "clone", "-q", "--bare", src, filepath.Join(rigPath, ".repo.git"))
-	git(filepath.Join(rigPath, ".repo.git"), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-
-	var logged bytes.Buffer
-	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
-	d.ctx = context.Background()
 
 	if err := d.testRigMainBranch("gastown", rigPath, time.Minute); err != nil {
 		t.Fatalf("testRigMainBranch: %v\n%s", err, logged.String())
 	}
-	if _, err := os.Stat(gateMarker); err != nil {
-		t.Fatalf("the rig's test command did not run: %v\n%s", err, logged.String())
+	if got := gate.ran(); !slices.Equal(got, []string{"go test ./...", "make test-integration"}) {
+		t.Fatalf("ran %q, want the rig's test command and then the integration tier of main\n%s", got, logged.String())
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("the integration tier of main did not run: %v\n%s", err, logged.String())
+	// Both run in the worktree of main: the Makefile the integration tier is
+	// read from is the one checked out there.
+	if gate.dirs[0] != gate.dirs[1] || gate.dirs[0] == rigPath {
+		t.Errorf("gate dirs = %q, want both in the one worktree of main", gate.dirs)
 	}
 }

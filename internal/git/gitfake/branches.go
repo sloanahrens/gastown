@@ -69,21 +69,6 @@ func (h *handle) ConfigSet(key, value string) error {
 	return nil
 }
 
-func (h *handle) RefExists(ref string) (bool, error) {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	r, wt, err := h.locate("rev-parse", "--verify", ref)
-	if err != nil {
-		return false, err
-	}
-	if strings.HasPrefix(ref, "refs/") {
-		_, ok := r.refs[ref]
-		return ok, nil
-	}
-	_, ok := h.resolve(r, wt, ref)
-	return ok, nil
-}
-
 func (h *handle) CurrentBranch() (string, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

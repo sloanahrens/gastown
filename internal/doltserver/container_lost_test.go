@@ -96,6 +96,7 @@ func failContainerErr(t *testing.T, err error, what string) {
 // refuse everything else, because every false positive is a regression this
 // suite stops catching.
 func TestIsLostContainerErr(t *testing.T) {
+	t.Parallel()
 	lost := []error{
 		mysql.ErrInvalidConn,
 		fmt.Errorf("create database dolt_remotes_check_div_17: %w", mysql.ErrInvalidConn),

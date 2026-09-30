@@ -217,7 +217,7 @@ func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
 	resumeBranch := "polecat/jasper/gt-bagu+mudcl5gv"
 	resumeSHA := w.branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
 	w.SetRef(t, mayorRig, "refs/remotes/origin/"+resumeBranch, resumeSHA)
-	if err := w.OpenWorktreeRepo(mayorRig).WorktreeAddDetached(deadPath, mainSHA); err != nil {
+	if err := w.OpenBranchRepo(mayorRig).WorktreeAddDetached(deadPath, mainSHA); err != nil {
 		t.Fatal(err)
 	}
 	w.switchTo(t, deadPath, resumeBranch)

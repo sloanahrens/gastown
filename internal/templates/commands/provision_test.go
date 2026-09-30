@@ -159,7 +159,7 @@ func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 		t.Fatalf("reading the embedded done body: %v", err)
 	}
 	text := string(body)
-	const calmWait = "`gt done` runs the local gate itself (lint, build and the unit tier of the tests; " +
+	const calmWait = "`gt done` runs the local gate itself (lint, build and the tests of the packages your branch changed; " +
 		"no container slot), which can take several minutes. That is normal. Do not interrupt it " +
 		"and do not close the bead."
 	if !strings.Contains(text, calmWait) {

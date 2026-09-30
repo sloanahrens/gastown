@@ -19,26 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
-
-// setupTestStore opens a real beads database for integration tests. It skips
-// only when container tests are not opted in (GT_TEST_DOCKER unset) or Docker
-// is absent; once opted in, any error fails the test — a skipped store test is
-// coverage lost without a red signal. The store is also closed when the test
-// ends; calling cleanup earlier is fine.
-//
-// BEADS_TEST_MODE is set once in TestMain, not here: t.Setenv would forbid
-// t.Parallel in every caller (gt-fx3c).
-func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
-	t.Helper()
-	ctx := context.Background()
-	store := testutil.OpenTestStore(t, ctx)
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
-	return store, func() { _ = store.Close() }
-}
 
 // scanTestOpts configures the mockGtForScanTest helper.
 type scanTestOpts struct {
@@ -47,77 +28,142 @@ type scanTestOpts struct {
 	routes        string // routes.jsonl content; empty = no routes file
 }
 
-// scanTestPaths holds paths created by mockGtForScanTest.
+// scanTestPaths is the town and the in-process gt mockGtForScanTest builds.
 type scanTestPaths struct {
-	binDir       string
-	townRoot     string
-	gtPath       string // absolute path to the mock gt binary
-	slingLogPath string // sling call log; absent if sling was never called
-	checkLogPath string // convoy check call log; absent if check was never called
+	townRoot string
+	gt       *fakeCLI // records every call; argvLog reads them back
 }
 
-// mockGtForScanTest creates a mock gt binary and directory layout for scan tests.
-// All mock scripts write call logs so tests can make both positive and negative assertions.
+// mockGtForScanTest builds a town and a fake gt for scan tests: `convoy
+// stranded` answers opts.strandedJSON, sling and `convoy check` succeed (the
+// first sling fails when opts.slingFailOnce is set), and every call is
+// recorded so tests can make both positive and negative assertions.
 func mockGtForScanTest(t *testing.T, opts scanTestOpts) scanTestPaths {
 	t.Helper()
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	if opts.routes != "" {
-		if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(opts.routes), 0644); err != nil {
-			t.Fatalf("write routes: %v", err)
-		}
-	}
 
 	strandedJSON := opts.strandedJSON
 	if strandedJSON == "" {
 		strandedJSON = "[]"
 	}
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	checkLogPath := filepath.Join(binDir, "check.log")
+	var slings atomic.Int32
+	gt := newFakeCLI(func(args []string) cliReply {
+		switch {
+		case len(args) >= 2 && args[0] == "convoy" && args[1] == "stranded":
+			return cliReply{stdout: strandedJSON + "\n"}
+		case len(args) >= 1 && args[0] == "sling":
+			if opts.slingFailOnce && slings.Add(1) == 1 {
+				return cliReply{code: 1}
+			}
+		}
+		return cliReply{}
+	})
 
-	slingFailClause := ""
-	if opts.slingFailOnce {
-		slingCountPath := filepath.Join(binDir, "sling_count")
-		slingFailClause = `
-  if [ ! -f "` + slingCountPath + `" ]; then
-    echo "1" > "` + slingCountPath + `"
-    exit 1
-  fi`
+	return scanTestPaths{townRoot: convoyTestTown(t, opts.routes), gt: gt}
+}
+
+// convoyTestTown returns a town root with a .beads directory, and routes as its
+// routes.jsonl when routes is not empty.
+func convoyTestTown(t *testing.T, routes string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
 	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '` + strings.ReplaceAll(strandedJSON, "'", "'\\''") + `'
-  exit 0
-fi
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"` + slingFailClause + `
-  exit 0
-fi
-if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
-  echo "$@" >> "` + checkLogPath + `"
-  exit 0
-fi
-exit 0
-`
-
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
+	if routes != "" {
+		if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+			t.Fatalf("write routes: %v", err)
+		}
 	}
+	return townRoot
+}
 
-	return scanTestPaths{
-		binDir:       binDir,
-		townRoot:     townRoot,
-		gtPath:       filepath.Join(binDir, "gt"),
-		slingLogPath: slingLogPath,
-		checkLogPath: checkLogPath,
+// newFakeGtManager is NewConvoyManager with its gt calls answered by gt.
+func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
+	m := NewConvoyManager(townRoot, logger, "gt", scanInterval, stores, openStores, isRigParked)
+	m.execCmd = gt.run
+	answerScanThrough(m, gt)
+	return m
+}
+
+// answerScanThrough routes m's stranded scan and completion check through gt,
+// as `gt convoy stranded --json` and `gt convoy check <id>` calls. The manager
+// runs both in process (gt-638go.4); this keeps these tests' fake gt, its
+// recorded calls and its replies driving them as they drove the subprocesses.
+func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
+	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "stranded", "--json")
+		cmd.Dir = m.townRoot
+		stdout, stderr, err := gt.run(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("convoy stranded: %s", strings.TrimSpace(string(stderr)))
+		}
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal(stdout, &stranded); err != nil {
+			return nil, fmt.Errorf("parsing stranded JSON: %w", err)
+		}
+		return stranded, nil
 	}
+	m.checkConvoyFn = func(ctx context.Context, convoyID string) error {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "check", convoyID)
+		cmd.Dir = m.townRoot
+		if _, stderr, err := gt.run(cmd); err != nil {
+			return fmt.Errorf("convoy check %s: %s", convoyID, strings.TrimSpace(string(stderr)))
+		}
+		return nil
+	}
+}
+
+// installScanFakes replaces m's stranded scan with one that returns
+// strandedJSON, and its completion check with one that appends
+// "convoy check <id>" to checkLogPath (or does nothing when it is empty).
+func (m *ConvoyManager) installScanFakes(strandedJSON, checkLogPath string) {
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal([]byte(strandedJSON), &stranded); err != nil {
+			return nil, err
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
+		if checkLogPath == "" {
+			return nil
+		}
+		f, err := os.OpenFile(checkLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = fmt.Fprintf(f, "convoy check %s\n", convoyID)
+		return err
+	}
+}
+
+// noStranded is a stranded scan that finds nothing, so a manager that runs
+// its scan loop touches no town.
+func noStranded(context.Context) ([]strandedConvoyInfo, error) { return nil, nil }
+
+// argvLog renders gt's recorded calls whose argv starts with prefix, one
+// space-joined argv per line — the call log the shell stubs these tests once
+// used wrote. It is empty when no such call was made.
+func argvLog(gt *fakeCLI, prefix ...string) []byte {
+	var b strings.Builder
+	for _, args := range gt.argvs(prefix...) {
+		b.WriteString(strings.Join(args, " "))
+		b.WriteString("\n")
+	}
+	return []byte(b.String())
+}
+
+// mustArgvLog is argvLog for a call the test requires: it fails the test when
+// gt saw no call starting with prefix.
+func mustArgvLog(t *testing.T, gt *fakeCLI, prefix ...string) []byte {
+	t.Helper()
+	data := argvLog(gt, prefix...)
+	if len(data) == 0 {
+		t.Fatalf("gt %s was never called", strings.Join(prefix, " "))
+	}
+	return data
 }
 
 func TestEventPoll_DetectsCloseEvents(t *testing.T) {
@@ -169,94 +215,18 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	}
 }
 
-func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-	store, cleanup := newMemStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	issue := &beadsdk.Issue{
-		ID:        "gt-open1",
-		Title:     "Stays Open",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-		t.Fatalf("CreateIssue: %v", err)
-	}
-	// No close - only create event exists
-
-	townRoot := t.TempDir()
-	var logged []string
-	logger := func(format string, args ...interface{}) {
-		logged = append(logged, fmt.Sprintf(format, args...))
-	}
-
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.pollStoresSnapshot(m.stores)
-
-	// Should NOT have logged any close detection
-	for _, s := range logged {
-		if strings.Contains(s, "close detected") {
-			t.Errorf("expected no close detection for open issue, got: %v", logged)
-		}
-	}
-}
-
-func TestManagerLifecycle_StartStop(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	bdScript := `#!/bin/sh
-echo '{"type":"status","issue_id":"gt-x","new_status":"closed"}'
-sleep 999
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
-	gtScript := `#!/bin/sh
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
-	if err := m.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	m.Stop()
-}
-
 func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: `[{"id":"hq-cv1","title":"Test","ready_count":1,"ready_issues":["gt-issue1"]}]`,
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, func(string, ...interface{}) {}, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
-	data, err := os.ReadFile(paths.slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, paths.gt, "sling")
 	logContent := string(data)
 	if !strings.Contains(logContent, "sling") || !strings.Contains(logContent, "gt-issue1") {
 		t.Errorf("expected gt sling to be invoked for gt-issue1, got: %q", logContent)
@@ -265,21 +235,15 @@ func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 
 func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: `[{"id":"hq-empty1","title":"Empty","ready_count":0,"ready_issues":[]}]`,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, func(string, ...interface{}) {}, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
-	data, err := os.ReadFile(paths.checkLogPath)
-	if err != nil {
-		t.Fatalf("read check log: %v", err)
-	}
+	data := mustArgvLog(t, paths.gt, "convoy", "check")
 	if !strings.Contains(string(data), "hq-empty1") {
 		t.Errorf("expected gt convoy check for hq-empty1, got: %q", data)
 	}
@@ -287,9 +251,6 @@ func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 
 func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// Convoy created 30 seconds ago — well within the 5-minute grace period.
 	recentTime := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
@@ -304,12 +265,11 @@ func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Convoy check must NOT have been called — grace period should protect it.
-	if _, err := os.Stat(paths.checkLogPath); err == nil {
-		data, _ := os.ReadFile(paths.checkLogPath)
+	if data := argvLog(paths.gt, "convoy", "check"); len(data) > 0 {
 		t.Errorf("convoy check was called for recent convoy (grace period should protect): %s", data)
 	}
 
@@ -328,9 +288,6 @@ func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 
 func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// Convoy created 10 minutes ago — past the 5-minute grace period.
 	oldTime := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
@@ -340,13 +297,10 @@ func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 		strandedJSON: strandedJSON,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, func(string, ...interface{}) {}, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
-	data, err := os.ReadFile(paths.checkLogPath)
-	if err != nil {
-		t.Fatalf("read check log: %v", err)
-	}
+	data := mustArgvLog(t, paths.gt, "convoy", "check")
 	if !strings.Contains(string(data), "hq-old1") {
 		t.Errorf("expected gt convoy check for hq-old1 (past grace period), got: %q", data)
 	}
@@ -354,9 +308,6 @@ func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 
 func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: "[]",
@@ -367,17 +318,15 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Negative: sling must not have been called
-	if _, err := os.Stat(paths.slingLogPath); err == nil {
-		data, _ := os.ReadFile(paths.slingLogPath)
+	if data := argvLog(paths.gt, "sling"); len(data) > 0 {
 		t.Errorf("sling was called unexpectedly: %s", data)
 	}
 	// Negative: convoy check must not have been called
-	if _, err := os.Stat(paths.checkLogPath); err == nil {
-		data, _ := os.ReadFile(paths.checkLogPath)
+	if data := argvLog(paths.gt, "convoy", "check"); len(data) > 0 {
 		t.Errorf("convoy check was called unexpectedly: %s", data)
 	}
 	// Negative: no feeding or check activity in logs
@@ -390,9 +339,6 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 
 func TestScanStranded_DispatchFailure(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON:  `[{"id":"hq-cv1","title":"Test","ready_count":1,"ready_issues":["gt-issue1"]},{"id":"hq-cv2","title":"Test2","ready_count":1,"ready_issues":["gt-issue2"]}]`,
@@ -408,7 +354,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	logMu.Lock()
@@ -427,10 +373,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 	}
 
 	// Verify scan continued: second convoy's issue was dispatched
-	data, err := os.ReadFile(paths.slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, paths.gt, "sling")
 	if !strings.Contains(string(data), "gt-issue2") {
 		t.Errorf("expected sling for gt-issue2 (scan should continue after failure), got: %q", data)
 	}
@@ -438,23 +381,10 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 
 func TestConvoyManager_DoubleStop_Idempotent(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-	binDir := t.TempDir()
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then echo '[]'; fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0"), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "[]\n"}}))
 
 	townRoot := t.TempDir()
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -464,29 +394,9 @@ exit 0
 
 func TestStart_DoubleCall_Guarded(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
 	townRoot := t.TempDir()
-
-	// Mock gt that returns empty stranded list and logs sling/check calls
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "[]\n"}}))
 
 	var logMu sync.Mutex
 	var logged []string
@@ -496,7 +406,7 @@ exit 0
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	// First Start should succeed
 	if err := m.Start(); err != nil {
@@ -928,64 +838,19 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	}
 }
 
-func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
-	t.Parallel()
-	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
-	var result []strandedConvoyInfo
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 convoy, got %d", len(result))
-	}
-	c := result[0]
-	if c.ID != "hq-cv1" || c.Title != "My Convoy" || c.ReadyCount != 2 {
-		t.Errorf("unexpected convoy: %+v", c)
-	}
-	if len(c.ReadyIssues) != 2 || c.ReadyIssues[0] != "gt-a" || c.ReadyIssues[1] != "gt-b" {
-		t.Errorf("unexpected ready_issues: %v", c.ReadyIssues)
-	}
-	// The agent recorded by `gt convoy stranded --json` must survive decoding:
-	// dropping it here is how the feeder lost the sling-time --agent (gt-yg24).
-	if c.Agent != "deepseek-flash" {
-		t.Errorf("Agent = %q, want %q", c.Agent, "deepseek-flash")
-	}
-}
-
 func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -995,10 +860,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if !strings.Contains(logContent, "gt-issue1") {
@@ -1034,37 +896,16 @@ exit 0
 // later; the guard re-reads the status as close to the sling as it can.
 func TestFeedFirstReady_SkipsConvoyClosedSinceScan(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	// The convoy the snapshot named is closed by the time the feed runs.
 	m.convoyStatus = func(string) (string, bool) { return "closed", true }
@@ -1075,7 +916,7 @@ exit 0
 		ReadyIssues: []string{"gt-issue1"},
 	})
 
-	if data, err := os.ReadFile(slingLogPath); err == nil && len(data) > 0 {
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("a closed convoy must not feed, but the feeder slung: %q", string(data))
 	}
 	closedLogged := false
@@ -1098,8 +939,8 @@ exit 0
 		ReadyCount:  1,
 		ReadyIssues: []string{"gt-issue1"},
 	})
-	if data, err := os.ReadFile(slingLogPath); err != nil || !strings.Contains(string(data), "gt-issue1") {
-		t.Errorf("an unreadable status must fail open and feed, got %q (err=%v)", string(data), err)
+	if data := argvLog(gtf, "sling"); !strings.Contains(string(data), "gt-issue1") {
+		t.Errorf("an unreadable status must fail open and feed, got %q", string(data))
 	}
 	failedOpenLogged := false
 	for _, s := range logged {
@@ -1115,47 +956,26 @@ exit 0
 
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// Convoy has 3 ready issues. First sling fails, second succeeds.
 	// Verifies feedFirstReady iterates past dispatch failure within a single convoy.
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	slingCountPath := filepath.Join(binDir, "sling_count")
 	// First sling call exits 1 (failure), subsequent succeed
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  if [ ! -f "` + slingCountPath + `" ]; then
-    echo "1" > "` + slingCountPath + `"
-    echo "dispatch failed" >&2
-    exit 1
-  fi
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	var slings atomic.Int32
+	gtf := newFakeCLI(func(args []string) cliReply {
+		if args[0] == "sling" && slings.Add(1) == 1 {
+			return cliReply{stderr: "dispatch failed\n", code: 1}
+		}
+		return cliReply{}
+	})
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1165,11 +985,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
-	logContent := string(data)
+	logContent := string(mustArgvLog(t, gtf, "sling"))
 
 	// First issue was attempted (and failed)
 	if !strings.Contains(logContent, "gt-fail1") {
@@ -1199,38 +1015,18 @@ exit 0
 
 func TestFeedFirstReady_AllIssuesFail_LogsNoneDispatchable(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// All sling calls fail. Verify the "no dispatchable issues" log message.
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "always fail" >&2
-  exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"sling": {stderr: "always fail\n", code: 1}}))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1254,38 +1050,17 @@ exit 0
 
 func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1295,8 +1070,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	if _, err := os.Stat(slingLogPath); err == nil {
-		data, _ := os.ReadFile(slingLogPath)
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("sling was called unexpectedly: %s", data)
 	}
 
@@ -1312,94 +1086,19 @@ exit 0
 	}
 }
 
-func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "something went wrong" >&2
-  exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("expected error to contain stderr message, got: %v", err)
-	}
-}
-
-func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "this is not valid JSON at all"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "parsing stranded JSON") {
-		t.Errorf("expected error to mention 'parsing stranded JSON', got: %v", err)
-	}
-}
-
 func TestScan_FindStrandedError_LogsAndContinues(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
 	townRoot := t.TempDir()
 
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "stranded command failed" >&2
-  exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stderr: "stranded command failed\n", code: 1}}))
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	// scan() should not panic even when findStranded fails
 	m.scan()
@@ -1668,39 +1367,18 @@ func mustCreateClosed(t *testing.T, store *memStore, id string) {
 
 func TestFeedFirstReady_UnknownRig_Skips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
 	// "hq-" prefix routes to town-level path "." which has no rig name
-	routes := `{"prefix":"hq-","path":"."}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"hq-","path":"."}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1710,8 +1388,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	if _, err := os.Stat(slingLogPath); err == nil {
-		data, _ := os.ReadFile(slingLogPath)
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("sling was called unexpectedly: %s", data)
 	}
 
@@ -1729,31 +1406,10 @@ exit 0
 
 func TestFeedFirstReady_ParkedRig_Skips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"sh-","path":"shippercrm/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"sh-","path":"shippercrm/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
@@ -1762,7 +1418,7 @@ exit 0
 
 	// isRigParked returns true for "shippercrm"
 	parked := func(rig string) bool { return rig == "shippercrm" }
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, parked)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, parked)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-park1",
@@ -1773,8 +1429,7 @@ exit 0
 	m.feedFirstReady(c)
 
 	// Sling should NOT have been called
-	if _, err := os.Stat(slingLogPath); err == nil {
-		data, _ := os.ReadFile(slingLogPath)
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("sling was called for parked rig: %s", data)
 	}
 
@@ -1793,31 +1448,16 @@ exit 0
 
 func TestFeedFirstReady_EmptyReadyIssues_NoOp(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	callLogPath := filepath.Join(binDir, "gt-calls.log")
-	gtScript := `#!/bin/sh
-echo "$@" >> "` + callLogPath + `"
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	townRoot := convoyTestTown(t, "")
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1827,8 +1467,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	if _, err := os.Stat(callLogPath); err == nil {
-		data, _ := os.ReadFile(callLogPath)
+	if data := argvLog(gtf); len(data) > 0 {
 		t.Errorf("gt was called unexpectedly: %s", data)
 	}
 
@@ -1841,33 +1480,12 @@ exit 0
 
 func TestFeedFirstReady_PassesDaemonActor(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-xprwe",
@@ -1877,10 +1495,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if !strings.Contains(logContent, "--actor=daemon/convoy:hq-cv-xprwe") {
@@ -1894,11 +1509,8 @@ exit 0
 // overriding every per-bead routing decision whenever a first sling failed.
 func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -1906,7 +1518,7 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
@@ -1918,10 +1530,7 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if !strings.Contains(logContent, "--agent=deepseek-flash") {
@@ -1946,11 +1555,8 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 // but it must name the rig default it expects instead of applying it silently.
 func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -1958,7 +1564,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
@@ -1969,10 +1575,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if strings.Contains(string(data), "--agent=") {
 		t.Errorf("expected no --agent when none was recorded, got: %q", string(data))
 	}
@@ -1997,11 +1600,8 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 // default formula instead of the one the original sling asked for.
 func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -2009,7 +1609,7 @@ func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
@@ -2021,10 +1621,7 @@ func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if !strings.Contains(logContent, "--formula=mol-doc-audit") {
@@ -2049,13 +1646,10 @@ func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 // resolution to gt sling's own default, rather than inventing one.
 func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, _ := feedTestRig(t)
+	townRoot, gtf, _ := feedTestRig(t)
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
@@ -2066,10 +1660,7 @@ func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if strings.Contains(string(data), "--formula=") {
 		t.Errorf("expected no --formula when none was recorded, got: %q", string(data))
 	}
@@ -2077,9 +1668,6 @@ func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
 
 func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -2112,34 +1700,16 @@ func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -2149,10 +1719,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if strings.Contains(logContent, "gt-rejected1") {
@@ -2176,41 +1743,20 @@ exit 0
 
 func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// No store is wired for the "gt" rig (only "hq" is present, as in most
 	// daemon deployments where a rig's store failed to open). Rejection-marker
 	// lookup must fail open rather than block dispatch of unrelated issues.
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -2220,10 +1766,7 @@ exit 0
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("expected sling to proceed when rig store is unavailable, but it was never called: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if !strings.Contains(string(data), "gt-issue1") {
 		t.Errorf("expected sling for gt-issue1, got: %q", string(data))
 	}
@@ -2271,21 +1814,18 @@ func TestFeedHold_Verdicts(t *testing.T) {
 // the same log it always had, and the fresh sibling feeds.
 func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store := &holdTestStorage{issues: map[string]*beadsdk.Issue{
 		"gt-rejected1": {Status: beadsdk.StatusOpen, Notes: "MERGE REJECTION (attempt 1): needs work - see review"},
 		"gt-fresh2":    {Status: beadsdk.StatusOpen},
 	}}
-	townRoot, gtPath, slingLogPath := holdTestTown(t)
+	townRoot, gtf := holdTestTown(t)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -2293,10 +1833,7 @@ func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 		ReadyIssues: []string{"gt-rejected1", "gt-fresh2"},
 	})
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("expected the fresh bead to be slung: %v; log: %v", err, logged)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if strings.Contains(string(data), "gt-rejected1") {
 		t.Errorf("rejected bead was slung: %q", data)
 	}
@@ -2315,22 +1852,19 @@ func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 // on a record nobody could read.
 func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
-	townRoot, gtPath, slingLogPath := holdTestTown(t)
+	townRoot, gtf := holdTestTown(t)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-u", ReadyCount: 1, ReadyIssues: []string{"gt-unreadable"}})
 
-	if data, err := os.ReadFile(slingLogPath); err == nil {
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("unreadable record was fed: %q", data)
 	}
 	assertLogged(t, logged, "gt-unreadable", "cannot rule out a merge rejection (fail-closed)")
@@ -2341,33 +1875,15 @@ func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T
 	}
 }
 
-// holdTestTown builds a town whose gt- prefix routes to rig "gt" and a gt stub
-// that records each sling, for the hermetic feedFirstReady tests.
-func holdTestTown(t *testing.T) (townRoot, gtPath, slingLogPath string) {
+// holdTestTown builds a town whose gt- prefix routes to rig "gt" and a fake
+// gt that records each sling, for the hermetic feedFirstReady tests.
+func holdTestTown(t *testing.T) (townRoot string, gt *fakeCLI) {
 	t.Helper()
-	binDir := t.TempDir()
-	townRoot = t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-	slingLogPath = filepath.Join(binDir, "sling.log")
-	gtScript := "#!/bin/sh\nif [ \"$1\" = \"sling\" ]; then\n  echo \"$@\" >> \"" + slingLogPath + "\"\nfi\nexit 0\n"
-	gtPath = filepath.Join(binDir, "gt")
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-	return townRoot, gtPath, slingLogPath
+	return convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n"), newFakeCLI(nil)
 }
 
 func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: `[{"id":"hq-cv1","title":"Owned Convoy","ready_count":1,"ready_issues":["gt-issue1"],"owned":true}]`,
@@ -2379,11 +1895,10 @@ func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
-	if _, err := os.Stat(paths.slingLogPath); err == nil {
-		data, _ := os.ReadFile(paths.slingLogPath)
+	if data := argvLog(paths.gt, "sling"); len(data) > 0 {
 		t.Errorf("owned convoy must not be auto-fed by the stranded scan, got sling call: %s", data)
 	}
 
@@ -2401,22 +1916,16 @@ func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 
 func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: `[{"id":"hq-cv1","title":"Regular Convoy","ready_count":1,"ready_issues":["gt-issue1"],"owned":false}]`,
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, func(string, ...interface{}) {}, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
-	data, err := os.ReadFile(paths.slingLogPath)
-	if err != nil {
-		t.Fatalf("expected non-owned convoy to still be auto-fed: %v", err)
-	}
+	data := mustArgvLog(t, paths.gt, "sling")
 	if !strings.Contains(string(data), "gt-issue1") {
 		t.Errorf("expected gt sling to be invoked for gt-issue1, got: %q", string(data))
 	}
@@ -2424,9 +1933,6 @@ func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
 
 func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	// Build a stranded list with 5 convoys, all with ready issues.
 	// The mock gt will block on sling calls so we can cancel mid-iteration.
@@ -2450,36 +1956,26 @@ func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 		t.Fatalf("marshal stranded JSON: %v", err)
 	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-
-	// Mock gt: stranded returns list; sling records itself, then blocks for
-	// longer than the test waits. Only the scan's cancellation ends it sooner,
-	// so a scan that did not kill its in-flight sling would fail the wait below.
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '` + strings.ReplaceAll(string(jsonBytes), "'", "'\\''") + `'
-  exit 0
-fi
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  sleep 120
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	// Fake gt: stranded returns the list; sling records itself, reports it is
+	// in flight, then blocks until the manager's context is cancelled — the
+	// way a real sling runs until the scan's cancellation kills it. A scan
+	// that ignored cancellation would never get it back.
+	var m *ConvoyManager
+	inFlight := make(chan struct{})
+	var once sync.Once
+	gtf := newFakeCLI(func(args []string) cliReply {
+		switch args[0] {
+		case "convoy":
+			return cliReply{stdout: string(jsonBytes) + "\n"}
+		case "sling":
+			once.Do(func() { close(inFlight) })
+			<-m.ctx.Done()
+			return cliReply{code: -1}
+		}
+		return cliReply{}
+	})
 
 	var logMu sync.Mutex
 	var logged []string
@@ -2489,9 +1985,9 @@ exit 0
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m = newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 
-	// Run scan in a goroutine and cancel context after a brief delay
+	// Run scan in a goroutine and cancel once a sling is in flight
 	done := make(chan struct{})
 	go func() {
 		m.scan()
@@ -2499,12 +1995,13 @@ exit 0
 	}()
 
 	// Cancel once the first sling is in flight: the scan is then mid-iteration
-	// by construction, with four convoys still to go. Waiting for that event,
-	// rather than sleeping a guessed 200ms and then allowing the whole cancel
-	// path 5s of wall time, is what keeps a loaded host (every exec here is a
-	// fresh script the OS scans) from failing a scan that cancelled correctly
-	// (gt-hvzy.10). The deadlines below only bound a hang.
-	waitForFileContent(t, slingLogPath, time.Minute)
+	// by construction, with four convoys still to go (gt-hvzy.10). The
+	// deadlines below only bound a hang.
+	select {
+	case <-inFlight:
+	case <-time.After(time.Minute):
+		t.Fatal("no sling started within a minute")
+	}
 	m.cancel()
 
 	select {
@@ -2513,10 +2010,7 @@ exit 0
 		t.Fatal("scan() did not return after context cancellation: the in-flight sling was not killed")
 	}
 
-	slings, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	slings := mustArgvLog(t, gtf, "sling")
 	if n := strings.Count(string(slings), "\n"); n != 1 {
 		t.Errorf("sling ran %d times, want 1: cancellation must stop the iteration at the convoy in flight\n%s", n, slings)
 	}
@@ -2534,27 +2028,8 @@ exit 0
 	}
 }
 
-// waitForFileContent polls path until it is non-empty, failing t after
-// deadline. The deadline only bounds a hang; the wait ends at the event.
-func waitForFileContent(t *testing.T, path string, deadline time.Duration) {
-	t.Helper()
-	end := time.Now().Add(deadline)
-	for {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			return
-		}
-		if time.Now().After(end) {
-			t.Fatalf("%s still empty after %s", path, deadline)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{
 		strandedJSON: `[
@@ -2574,14 +2049,11 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.scan()
 
 	// Verify ready convoys were dispatched via sling
-	slingData, err := os.ReadFile(paths.slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v (sling was never called)", err)
-	}
+	slingData := mustArgvLog(t, paths.gt, "sling")
 	slingContent := string(slingData)
 	if !strings.Contains(slingContent, "gt-issue1") {
 		t.Errorf("expected sling for gt-issue1 (ready convoy), got: %q", slingContent)
@@ -2591,10 +2063,7 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 	}
 
 	// Verify empty convoys were routed to convoy check
-	checkData, err := os.ReadFile(paths.checkLogPath)
-	if err != nil {
-		t.Fatalf("read check log: %v (convoy check was never called)", err)
-	}
+	checkData := mustArgvLog(t, paths.gt, "convoy", "check")
 	checkContent := string(checkData)
 	if !strings.Contains(checkContent, "hq-empty1") {
 		t.Errorf("expected convoy check for hq-empty1 (empty convoy), got: %q", checkContent)
@@ -3300,16 +2769,12 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 
 func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	now := time.Now().UTC()
-	// Use unique ID to avoid cross-test contamination from shared Dolt server
-	issueID := fmt.Sprintf("gt-open2-%d", time.Now().UnixNano())
+	issueID := "gt-open2"
 	issue := &beadsdk.Issue{
 		ID:        issueID,
 		Title:     "Stays Open",
@@ -3323,33 +2788,26 @@ func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 		t.Fatalf("CreateIssue: %v", err)
 	}
 
-	binDir := t.TempDir()
 	townRoot := t.TempDir()
 
-	callLogPath := filepath.Join(binDir, "gt-calls.log")
-	gtScript := `#!/bin/sh
-echo "$@" >> "` + callLogPath + `"
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
-	// Only check for close events involving OUR issue — other tests may have
-	// created close events in the shared Dolt server that leak into this store.
 	for _, s := range logged {
-		if strings.Contains(s, "close detected") && strings.Contains(s, issueID) {
+		if strings.Contains(s, "close detected") {
 			t.Errorf("expected no close detection for open issue %s, got: %s", issueID, s)
 		}
+	}
+	if calls := argvLog(gtf); len(calls) > 0 {
+		t.Errorf("an open issue must not run gt, got: %s", calls)
 	}
 }
 
@@ -3456,9 +2914,6 @@ func TestRecoveryMode_SetOnPollError(t *testing.T) {
 // scan() call clears recovery mode.
 func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: "[]"})
 	var logged []string
@@ -3466,7 +2921,7 @@ func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 
 	// Set recovery mode
 	m.recoveryMode.Store(true)
@@ -3483,12 +2938,10 @@ func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
 }
 
 // TestScanMu_PreventsConcurrentScans verifies that concurrent scan() calls
-// are serialized by scanMu (no duplicate convoy checks).
+// are serialized by scanMu: no two stranded scans are ever in flight at once,
+// and every call still runs its scan.
 func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	stranded := []strandedConvoyInfo{{
 		ID:          "convoy-race",
@@ -3497,16 +2950,24 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 	}}
 	data, _ := json.Marshal(stranded)
 
-	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: string(data)})
-	var logged []string
-	var mu sync.Mutex
-	logger := func(format string, args ...interface{}) {
-		mu.Lock()
-		logged = append(logged, fmt.Sprintf(format, args...))
-		mu.Unlock()
-	}
-
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	var inFlight, peak atomic.Int32
+	gtf := newFakeCLI(func(args []string) cliReply {
+		if args[0] != "convoy" || args[1] != "stranded" {
+			return cliReply{}
+		}
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		return cliReply{stdout: string(data) + "\n"}
+	})
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
+	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(string) ([]string, error) { return nil, nil }
 
 	// Launch multiple concurrent scans
 	var wg sync.WaitGroup
@@ -3519,9 +2980,11 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Verify sling was called (at least once) — the key is no panics or races
-	if _, err := os.Stat(paths.slingLogPath); err != nil {
-		t.Log("sling was never called (mock gt may not have been reached) — acceptable for race test")
+	if n := len(gtf.argvs("convoy", "stranded")); n != 5 {
+		t.Errorf("stranded scan ran %d times for 5 scan() calls, want 5", n)
+	}
+	if p := peak.Load(); p != 1 {
+		t.Errorf("%d stranded scans were in flight at once, want 1 (scanMu serializes them)", p)
 	}
 }
 
@@ -3529,9 +2992,6 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 // after the startup delay.
 func TestStartupSweep_RunsAfterDelay(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: "[]"})
 	var scanCount atomic.Int32
@@ -3542,25 +3002,18 @@ func TestStartupSweep_RunsAfterDelay(t *testing.T) {
 		}
 	}
 
-	// Use a short startup delay by testing the goroutine directly
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(paths.townRoot, logger, paths.gt, 10*time.Minute, nil, nil, nil)
 	m.ctx = ctx
 
-	// Run startup sweep directly (it waits 10s normally, but we can test the
-	// mechanism by verifying it logs the startup message)
-	// For a fast test, we cancel the context after a short delay
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
-
+	// A manager stopped before the sweep's 10s delay ends must not sweep.
+	cancel()
 	m.runStartupSweep()
-	// Context was cancelled before 10s timer — sweep should not have run
 	if scanCount.Load() > 0 {
 		t.Error("startup sweep should not run before timer expires")
+	}
+	if calls := argvLog(paths.gt); len(calls) > 0 {
+		t.Errorf("a cancelled startup sweep ran gt: %s", calls)
 	}
 }
 
@@ -3649,35 +3102,12 @@ func TestDoltRecoveryCallback_NilSafe(t *testing.T) {
 }
 
 // feedTestRig sets up the minimal town fixture feedFirstReady needs: a routes
-// file mapping the gt- prefix to a rig, and a mock `gt` that records sling
-// invocations. Returns the town root, the sling log path, and the log sink.
-func feedTestRig(t *testing.T) (townRoot, gtPath, slingLogPath string, logged *[]string) {
+// file mapping the gt- prefix to a rig, and a fake gt that records sling
+// invocations. Returns the town root, the fake and the log sink.
+func feedTestRig(t *testing.T) (townRoot string, gt *fakeCLI, logged *[]string) {
 	t.Helper()
-
-	binDir := t.TempDir()
-	townRoot = t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	slingLogPath = filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	logged = &[]string{}
-	return townRoot, filepath.Join(binDir, "gt"), slingLogPath, logged
+	townRoot, gt = holdTestTown(t)
+	return townRoot, gt, &[]string{}
 }
 
 // TestFeedFirstReady_SkipsIssueWithSurvivingBranch is the regression test for
@@ -3688,11 +3118,8 @@ exit 0
 // polecats and gt-da2x's three.
 func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -3700,7 +3127,7 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 		defer mu.Unlock()
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return []string{
 			"polecat/pearl/gt-stranded1+mu72g5cz",
@@ -3716,10 +3143,7 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
 	if strings.Contains(logContent, "gt-stranded1") {
@@ -3749,16 +3173,13 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 // which is the thing that keeps convoys moving.
 func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	logger := func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	}
@@ -3771,10 +3192,7 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if !strings.Contains(string(data), "gt-issue1") {
 		t.Errorf("expected sling for gt-issue1 despite branch-lookup failure, got: %q", string(data))
 	}
@@ -3786,11 +3204,11 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 // timeout.
 func TestOriginBranches_CachesPerScan(t *testing.T) {
 	t.Parallel()
-	townRoot, gtPath, _, _ := feedTestRig(t)
+	townRoot, gtf, _ := feedTestRig(t)
 
 	var calls int32
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		atomic.AddInt32(&calls, 1)
 		return []string{"polecat/pearl/gt-issue1+mu72g5cz"}, nil
@@ -3908,7 +3326,7 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue1+abc123"
 	worktreePath, originPath := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
 	localTip := runDeadHolderGit(t, worktreePath, "rev-parse", "HEAD")
@@ -3917,9 +3335,9 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	// nothing — the branch was never pushed, so it cannot appear there.
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -3931,10 +3349,7 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue1") {
 		t.Errorf("expected no sling for gt-issue1 (dead holder has unpushed work), got: %q", logContent)
@@ -3979,7 +3394,7 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue2+xyz789"
 	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
 	// Push the commit so UnpushedCommits is 0 — isolates the assertion to
@@ -3990,9 +3405,9 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 	}
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -4004,10 +3419,7 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue2") {
 		t.Errorf("expected no sling for gt-issue2 (dead holder has uncommitted work), got: %q", logContent)
@@ -4047,12 +3459,12 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("remote unreachable")
 	}
@@ -4066,10 +3478,7 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue3") {
 		t.Errorf("expected no sling for gt-issue3 (dead holder, branch state undetermined — must fail closed), got: %q", logContent)
@@ -4109,13 +3518,13 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue4+def456"
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return []string{branch}, nil
 	}
@@ -4129,10 +3538,7 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue4") {
 		t.Errorf("expected no sling for gt-issue4 (already preserved on origin), got: %q", logContent)
@@ -4180,12 +3586,12 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.deadHolderWorktreeStateFn = func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
 		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: exit status 128")
 	}
@@ -4200,10 +3606,7 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue5") {
 		t.Errorf("expected no sling for gt-issue5 (worktree state undetermined — must fail closed), got: %q", logContent)
@@ -4237,15 +3640,15 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 	// recorded but nothing on disk resolves to it (e.g. the seat was nuked
 	// after it was assigned). AssigneeWorktreePath then reports "", which
 	// must feed, not escalate.
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	if err := os.MkdirAll(filepath.Join(townRoot, "gt"), 0755); err != nil {
 		t.Fatalf("mkdir rig root: %v", err)
 	}
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -4257,10 +3660,7 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if !strings.Contains(string(data), "gt-issue6") {
 		t.Errorf("expected sling for gt-issue6 (no worktree to lose), got: %q", data)
 	}
@@ -4289,7 +3689,7 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	// The worktree at basalt's seat is checked out on a DIFFERENT issue's
 	// branch — the seat was reused for other work since gt-issue7's holder
 	// died. Nothing here is attributable to gt-issue7.
@@ -4297,9 +3697,9 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	newDeadHolderWorktree(t, townRoot, "gt", "basalt", otherBranch)
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -4311,10 +3711,7 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if !strings.Contains(string(data), "gt-issue7") {
 		t.Errorf("expected sling for gt-issue7 (seat's worktree belongs to a different issue), got: %q", data)
 	}
@@ -4343,7 +3740,7 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 		t.Fatalf("CreateIssue held: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue8+dirt111"
 	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
 	// Push the commit so UnpushedCommits is 0 — the only thing left in the
@@ -4358,9 +3755,9 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 	}
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -4372,10 +3769,7 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if !strings.Contains(string(data), "gt-issue8") {
 		t.Errorf("expected sling for gt-issue8 (only runtime dirt, nothing real to lose), got: %q", data)
 	}
@@ -4411,7 +3805,7 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 		t.Fatalf("CreateIssue fresh: %v", err)
 	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue9+push000"
 	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
 	// Point origin at a path with no repository, so both the primary push
@@ -4420,9 +3814,9 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 	runDeadHolderGit(t, worktreePath, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
 
 	var escalated []string
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -4434,10 +3828,7 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 	if strings.Contains(logContent, "gt-issue9") {
 		t.Errorf("expected no sling for gt-issue9 (preserve push failed), got: %q", logContent)
@@ -4648,34 +4039,16 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 		store.comments[u.id] = u.comments
 	}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	// One bead per convoy, so each case is decided on its own record: a convoy
 	// holding several would stop at its first dispatchable member.
@@ -4694,10 +4067,7 @@ exit 0
 		feed(u.id)
 	}
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	slingLog := string(data)
 
 	for _, h := range held {
@@ -4728,33 +4098,15 @@ func TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed(t *testing.T) {
 
 	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
 
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "` + slingLogPath + `"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
+	gtf := newFakeCLI(nil)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{
 		ID:          "hq-cv-unreadable",
@@ -4763,7 +4115,7 @@ exit 0
 		ReadyIssues: []string{"gt-unreadable"},
 	})
 
-	if data, err := os.ReadFile(slingLogPath); err == nil {
+	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("expected no dispatch when the record cannot be read, got sling: %q", string(data))
 	}
 	assertLogged(t, logged, "gt-unreadable", "not dispatched: record unreadable")
@@ -4847,14 +4199,11 @@ func TestResolveDeadHolderWork_ClearRunsOncePerAlertKey(t *testing.T) {
 // passes, and only that bead rests.
 func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
-	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+	townRoot, gtf, logged := feedTestRig(t)
+	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtPath, 10*time.Minute, nil, nil, nil)
+	}, gtf, 10*time.Minute, nil, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	if err := dispatch.RecordStartupFailure(townRoot, "gt-issue1", "startup blocked: trust dialog"); err != nil {
@@ -4868,10 +4217,7 @@ func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
+	data := mustArgvLog(t, gtf, "sling")
 	if strings.Contains(string(data), "sling gt-issue1 ") {
 		t.Errorf("gt-issue1 is resting after a startup failure but was re-slung: %q", data)
 	}
@@ -4890,7 +4236,7 @@ func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
 
 	dispatch.ClearStartupFailure(townRoot, "gt-issue1")
 	m.feedFirstReady(strandedConvoyInfo{ID: c.ID, ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
-	data, _ = os.ReadFile(slingLogPath)
+	data = argvLog(gtf, "sling")
 	if !strings.Contains(string(data), "sling gt-issue1 ") {
 		t.Errorf("once the record is cleared gt-issue1 should feed: %q", data)
 	}

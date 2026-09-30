@@ -1,274 +1,200 @@
 package doltserver
 
 import (
-	"bufio"
 	"errors"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // gt-p7zy0: a port holder or pid-file PID is only a candidate; nothing is
-// signaled until its argv shows a dolt sql-server. Every test here points the
-// code under test only at processes it spawned itself — this test binary
-// re-executed as a port-holding helper, or `sleep` — so even with the guard
-// removed a regression can only kill the test's own child, never the test
-// binary or a host process.
+// signaled until its argv shows a dolt sql-server. gt-l9s6f: a dolt serving
+// another town's directory is not this town's to signal. These run on a
+// fakeHost: the process table stands in for ps and lsof, and every signal the
+// adapter sends is recorded instead of delivered. Reading real processes'
+// argv, cwd and listening ports is TestIntegrationProcessIdentity's.
 
-// portHolderHelperEnv is shared with hermetic_main_test.go, whose TestMain
-// runs the helper body before the harness starts.
-const portHolderHelperEnv = "DOLTSERVER_TEST_PORT_HOLDER" // not GT_*: the hermetic harness scrubs those
+var dockerArgs = []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend", "services"}
 
-type child struct {
-	cmd  *exec.Cmd
-	done chan struct{}
-	err  error
-}
-
-func (c *child) pid() int { return c.cmd.Process.Pid }
-
-func (c *child) alive() bool {
-	select {
-	case <-c.done:
-		return false
-	default:
-		return true
-	}
-}
-
-func (c *child) exited(within time.Duration) bool {
-	select {
-	case <-c.done:
-		return true
-	case <-time.After(within):
-		return false
-	}
-}
-
-func watchChild(t *testing.T, cmd *exec.Cmd) *child {
+// writePIDFile points townRoot's dolt.pid at pid.
+func writePIDFile(t *testing.T, h *host, townRoot string, pid int) string {
 	t.Helper()
-	c := &child{cmd: cmd, done: make(chan struct{})}
-	var once sync.Once
-	go func() {
-		c.err = cmd.Wait()
-		once.Do(func() { close(c.done) })
-	}()
-	t.Cleanup(func() {
-		if c.alive() {
-			_ = cmd.Process.Kill() // our own child
-		}
-		<-c.done
-	})
-	return c
-}
-
-// startPortHolder re-executes this test binary as a non-dolt process that
-// listens on a loopback port, with its cwd at dir ("" = inherit). Returns the
-// child and the port it holds.
-func startPortHolder(t *testing.T, dir string) (*child, int) {
-	t.Helper()
-	self, err := os.Executable()
-	if err != nil {
+	cfg := h.DefaultConfig(townRoot)
+	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(self)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), portHolderHelperEnv+"=1")
-	cmd.Dir = dir
-	out, err := cmd.StdoutPipe()
-	if err != nil {
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(pid)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start port holder: %v", err)
-	}
-	c := watchChild(t, cmd)
-	portc := make(chan int, 1)
-	go func() {
-		sc := bufio.NewScanner(out)
-		for sc.Scan() {
-			if p, ok := strings.CutPrefix(sc.Text(), "PORT="); ok {
-				n, _ := strconv.Atoi(p)
-				portc <- n
-			}
-		}
-		close(portc)
-	}()
-	select {
-	case port, ok := <-portc:
-		if !ok || port == 0 {
-			<-c.done
-			t.Fatalf("port holder did not report a port: %v\n%s", c.err, stderr.String())
-		}
-		if findDoltServerOnPort(port) != c.pid() {
-			t.Skip("neither lsof nor ss names the port holder here")
-		}
-		return c, port
-	case <-time.After(30 * time.Second):
-		t.Fatal("port holder did not start")
-	}
-	return nil, 0
-}
-
-// startSleep starts `sleep 60` with cwd dir ("" inherits ours). A dolt's town
-// is read from its data-dir, config or cwd, so dir is what makes the sleep
-// stand in for that town's server.
-func startSleep(t *testing.T, dir string) *child {
-	t.Helper()
-	cmd := exec.Command("sleep", "60")
-	cmd.Dir = dir
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	return watchChild(t, cmd)
-}
-
-// resolvedTempDir is t.TempDir with symlinks resolved, so it compares equal
-// to the cwd lsof reports (/var -> /private/var on macOS).
-func resolvedTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-// closedPort returns a loopback port nothing listens on.
-func closedPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port
-}
-
-func skipOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("no argv check on Windows")
-	}
-}
-
-func stubArgs(t *testing.T, fn func(int) []string) {
-	t.Helper()
-	orig := processArgsForIdentity
-	t.Cleanup(func() { processArgsForIdentity = orig })
-	processArgsForIdentity = fn
+	return cfg.PidFile
 }
 
 func TestVerifyDoltSQLServerPID(t *testing.T) {
-	skipOnWindows(t)
-	stubArgs(t, func(int) []string {
-		return []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend", "services"}
-	})
-	if err := VerifyDoltSQLServerPID(4242); !errors.Is(err, ErrNotDoltSQLServer) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
+	docker := f.spawn(fakeProc{args: dockerArgs})
+	unreadable := f.spawn(fakeProc{})
+	dolt := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}})
+
+	if err := h.VerifyDoltSQLServerPID(docker); !errors.Is(err, ErrNotDoltSQLServer) {
 		t.Errorf("Docker's port forwarder: %v, want ErrNotDoltSQLServer", err)
 	}
-	stubArgs(t, func(int) []string { return nil })
-	if err := VerifyDoltSQLServerPID(4242); !errors.Is(err, ErrIdentityUnverified) {
+	if err := h.VerifyDoltSQLServerPID(unreadable); !errors.Is(err, ErrIdentityUnverified) {
 		t.Errorf("unreadable argv: %v, want ErrIdentityUnverified", err)
 	}
-	stubArgs(t, func(int) []string { return []string{"dolt", "sql-server"} })
-	if err := VerifyDoltSQLServerPID(4242); err != nil {
+	if err := h.VerifyDoltSQLServerPID(dolt); err != nil {
 		t.Errorf("dolt sql-server rejected: %v", err)
 	}
-	if err := VerifyDoltSQLServerPID(os.Getpid()); err == nil {
-		t.Error("this process accepted as dolt")
+	if err := h.VerifyDoltSQLServerPID(os.Getpid()); !errors.Is(err, ErrNotDoltSQLServer) {
+		t.Errorf("this process: %v, want ErrNotDoltSQLServer", err)
 	}
-	if err := VerifyDoltSQLServerPID(0); err == nil {
-		t.Error("PID 0 accepted")
+	if err := h.VerifyDoltSQLServerPID(0); !errors.Is(err, ErrIdentityUnverified) {
+		t.Errorf("PID 0: %v, want ErrIdentityUnverified", err)
 	}
 }
 
 // A non-dolt process holding the Dolt port (com.docker.backend in the gate)
 // is skipped with a warning: no signal, and no error for `gt down` to report.
 func TestKillImpostersSkipsNonDoltPortHolder(t *testing.T) {
-	skipOnWindows(t)
-	holder, port := startPortHolder(t, resolvedTempDir(t))
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
+	t.Parallel()
+	f := newFakeHost().townPort(4501)
+	holder := f.spawn(fakeProc{args: dockerArgs, cwd: testTown(t), port: 4501})
 
-	if err := KillImposters(resolvedTempDir(t)); err != nil {
+	if err := f.host().KillImposters(testTown(t)); err != nil {
 		t.Errorf("KillImposters = %v, want nil (skip with a warning)", err)
 	}
-	if holder.exited(700 * time.Millisecond) {
-		t.Fatalf("KillImposters signaled a non-dolt port holder: %v", holder.err)
+	if sigs := f.signalsTo(holder); len(sigs) != 0 {
+		t.Fatalf("KillImposters signaled a non-dolt port holder: %v", sigs)
 	}
 }
 
 // The town's own server is recognized before any identity check, so ps being
 // unable to read its argv is not an error either.
 func TestKillImpostersOwnServerWithUnreadableArgvIsNotAnError(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := resolvedTempDir(t)
-	holder, port := startPortHolder(t, townRoot) // cwd = town root: ours
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-	stubArgs(t, func(int) []string { return nil })
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4502)
+	holder := f.spawn(fakeProc{cwd: townRoot, port: 4502}) // cwd = town root: ours
 
-	if err := KillImposters(townRoot); err != nil {
+	if err := f.host().KillImposters(townRoot); err != nil {
 		t.Errorf("KillImposters = %v, want nil", err)
 	}
-	if holder.exited(300 * time.Millisecond) {
-		t.Fatalf("own server was signaled: %v", holder.err)
+	if sigs := f.signalsTo(holder); len(sigs) != 0 {
+		t.Fatalf("own server was signaled: %v", sigs)
+	}
+}
+
+// A verified dolt of another town on this town's port is the imposter the
+// check exists for: it gets SIGTERM, and a pid file naming it goes.
+func TestKillImpostersTerminatesForeignDolt(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4503)
+	h := f.host()
+	imposter := f.doltServer(testTown(t), 4503)
+	pidFile := writePIDFile(t, h, townRoot, imposter)
+
+	if err := h.KillImposters(townRoot); err != nil {
+		t.Fatalf("KillImposters = %v", err)
+	}
+	if sigs := f.signalsTo(imposter); !slices.Equal(sigs, []syscall.Signal{syscall.SIGTERM}) {
+		t.Errorf("signals to the imposter = %v, want one SIGTERM", sigs)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Errorf("pid file naming the imposter kept: %v", err)
 	}
 }
 
 // Stop refuses a pid-file PID that is not dolt, even when IsRunning claims
 // it for the town (here: cwd is the town root and it answers on the port).
 func TestStopRefusesNonDoltPID(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := resolvedTempDir(t)
-	holder, port := startPortHolder(t, townRoot)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-	cfg := DefaultConfig(townRoot)
-	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(holder.pid())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if running, pid, _ := IsRunning(townRoot); !running || pid != holder.pid() {
-		t.Skipf("IsRunning = %v/%d; setup did not reach the pid-file branch", running, pid)
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4504)
+	h := f.host()
+	holder := f.spawn(fakeProc{args: dockerArgs, cwd: townRoot, port: 4504})
+	writePIDFile(t, h, townRoot, holder)
+	if running, pid, _ := h.IsRunning(townRoot); !running || pid != holder {
+		t.Fatalf("IsRunning = %v/%d; setup did not reach the pid-file branch", running, pid)
 	}
 
-	err := Stop(townRoot)
-	if !errors.Is(err, ErrNotDoltSQLServer) {
+	if err := h.Stop(townRoot); !errors.Is(err, ErrNotDoltSQLServer) {
 		t.Errorf("Stop = %v, want a refusal wrapping ErrNotDoltSQLServer", err)
 	}
-	if holder.exited(700 * time.Millisecond) {
-		t.Fatalf("Stop signaled a non-dolt PID: %v", holder.err)
+	if sigs := f.signalsTo(holder); len(sigs) != 0 {
+		t.Fatalf("Stop signaled a non-dolt PID: %v", sigs)
 	}
 }
 
 // Stop refuses when the server is only reachable over TCP with no local
 // process it can name (a Docker port forward).
 func TestStopRefusesReachableServerWithoutLocalPID(t *testing.T) {
-	skipOnWindows(t)
-	holder, port := startPortHolder(t, resolvedTempDir(t)) // not the town's
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-	townRoot := resolvedTempDir(t)
-	if running, pid, _ := IsRunning(townRoot); !running || pid != 0 {
-		t.Skipf("IsRunning = %v/%d; setup did not reach the TCP-only branch", running, pid)
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4505)
+	f.reachable["127.0.0.1:4505"] = true
+	h := f.host()
+	if running, pid, _ := h.IsRunning(townRoot); !running || pid != 0 {
+		t.Fatalf("IsRunning = %v/%d; setup did not reach the TCP-only branch", running, pid)
 	}
 
-	err := Stop(townRoot)
+	err := h.Stop(townRoot)
 	if err == nil || !strings.Contains(err.Error(), "no verifiable local process") {
 		t.Errorf("Stop = %v, want a refusal", err)
 	}
-	if holder.exited(300 * time.Millisecond) {
-		t.Fatalf("Stop signaled the port holder: %v", holder.err)
+	if len(f.signals) != 0 {
+		t.Errorf("Stop sent signals: %v", f.signals)
+	}
+}
+
+// Stop of this town's own verified dolt: SIGTERM, the pid file removed, and
+// the state marked stopped.
+func TestStopTerminatesOwnServer(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4506)
+	h := f.host()
+	server := f.doltServer(townRoot, 4506)
+	pidFile := writePIDFile(t, h, townRoot, server)
+
+	if err := h.Stop(townRoot); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+	if sigs := f.signalsTo(server); !slices.Equal(sigs, []syscall.Signal{syscall.SIGTERM}) {
+		t.Errorf("signals = %v, want one SIGTERM", sigs)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Errorf("pid file kept: %v", err)
+	}
+	if state, err := LoadState(townRoot); err != nil || state.Running || state.PID != 0 {
+		t.Errorf("state after Stop = %+v, %v", state, err)
+	}
+}
+
+// A server that ignores SIGTERM for the whole wait is SIGKILLed, after
+// re-verifying it is still this town's dolt.
+func TestStopEscalatesToSIGKILL(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4507)
+	h := f.host()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	server := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, cwd: dataDir, port: 4507, ignoresTERM: true})
+	writePIDFile(t, h, townRoot, server)
+
+	if err := h.Stop(townRoot); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+	if sigs := f.signalsTo(server); !slices.Equal(sigs, []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Errorf("signals = %v, want SIGTERM then SIGKILL", sigs)
+	}
+	if f.slept < 5_000_000_000 {
+		t.Errorf("waited %v for the graceful stop, want the 5s window", f.slept)
 	}
 }
 
@@ -278,161 +204,158 @@ func TestStopRefusesReachableServerWithoutLocalPID(t *testing.T) {
 // without touching the pid file and IsRunning keeps it: the pid file removal
 // asserted below can only come from stopOrphanedServer itself.
 func TestStopOrphanedServerNeverKillsNonDolt(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := resolvedTempDir(t)
-	holder, port := startPortHolder(t, townRoot)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-	cfg := DefaultConfig(townRoot)
-	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(holder.pid())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if running, pid, _ := IsRunning(townRoot); !running || pid != holder.pid() {
-		t.Fatalf("IsRunning = %v/%d; setup did not reach the pid-file branch", running, pid)
-	}
-	if err := Stop(townRoot); !errors.Is(err, ErrNotDoltSQLServer) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4508)
+	h := f.host()
+	holder := f.spawn(fakeProc{args: dockerArgs, cwd: townRoot, port: 4508})
+	pidFile := writePIDFile(t, h, townRoot, holder)
+	if err := h.Stop(townRoot); !errors.Is(err, ErrNotDoltSQLServer) {
 		t.Fatalf("Stop = %v, want a refusal", err)
 	}
-	if _, err := os.Stat(cfg.PidFile); err != nil {
+	if _, err := os.Stat(pidFile); err != nil {
 		t.Fatalf("precondition: Stop's refusal must leave the pid file: %v", err)
 	}
 
-	stopOrphanedServer(townRoot, holder.pid())
+	h.stopOrphanedServer(townRoot, holder)
 
-	if holder.exited(500 * time.Millisecond) {
-		t.Fatalf("orphan fallback killed a non-dolt PID: %v", holder.err)
+	if sigs := f.signalsTo(holder); len(sigs) != 0 {
+		t.Fatalf("orphan fallback signaled a non-dolt PID: %v", sigs)
 	}
-	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Errorf("stopOrphanedServer kept a pid file naming a non-dolt process: %v", err)
 	}
 }
 
 func TestStopOrphanedServerKillsVerifiedDolt(t *testing.T) {
-	skipOnWindows(t)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(closedPort(t)))
-	townRoot := resolvedTempDir(t)
-	victim := startSleep(t, townRoot) // cwd = town root: this town's server
-	stubArgs(t, func(pid int) []string {
-		if pid == victim.pid() {
-			return []string{"dolt", "sql-server"}
-		}
-		return nil
-	})
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4509) // nothing listens: Stop finds no server
+	victim := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, cwd: townRoot})
 
-	stopOrphanedServer(townRoot, victim.pid())
+	f.host().stopOrphanedServer(townRoot, victim)
 
-	if !victim.exited(5 * time.Second) {
-		t.Fatal("verified orphaned dolt was not killed")
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(victim.err, &exitErr) || exitErr.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
-		t.Errorf("orphan ended by %v, want SIGKILL", victim.err)
+	if sigs := f.signalsTo(victim); !slices.Equal(sigs, []syscall.Signal{syscall.SIGKILL}) {
+		t.Errorf("signals to the orphan = %v, want one SIGKILL", sigs)
 	}
 }
 
 // gt-l9s6f: a dolt that answers to another town's directory passes the "is
 // dolt" check but is not this town's to kill; the pid file naming it is stale.
 func TestStopOrphanedServerNeverKillsOtherTownsDolt(t *testing.T) {
-	skipOnWindows(t)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(closedPort(t)))
-	townRoot := resolvedTempDir(t)
-	foreign := startSleep(t, resolvedTempDir(t)) // cwd = some other town
-	stubArgs(t, func(pid int) []string {
-		if pid == foreign.pid() {
-			return []string{"dolt", "sql-server"}
-		}
-		return nil
-	})
-	cfg := DefaultConfig(townRoot)
-	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(foreign.pid())), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4510)
+	h := f.host()
+	foreign := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, cwd: testTown(t)})
+	pidFile := writePIDFile(t, h, townRoot, foreign)
 
-	stopOrphanedServer(townRoot, foreign.pid())
+	h.stopOrphanedServer(townRoot, foreign)
 
-	if foreign.exited(500 * time.Millisecond) {
-		t.Fatalf("orphan fallback killed another town's dolt: %v", foreign.err)
+	if sigs := f.signalsTo(foreign); len(sigs) != 0 {
+		t.Fatalf("orphan fallback signaled another town's dolt: %v", sigs)
 	}
-	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Errorf("stopOrphanedServer kept a pid file naming another town's dolt: %v", err)
 	}
 }
 
 func TestVerifyTownDoltSQLServerPID(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := resolvedTempDir(t)
-	ours := startSleep(t, townRoot)
-	theirs := startSleep(t, resolvedTempDir(t))
-	stubArgs(t, func(int) []string { return []string{"dolt", "sql-server"} })
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost()
+	h := f.host()
+	dolt := []string{"dolt", "sql-server"}
+	ours := f.spawn(fakeProc{args: dolt, cwd: townRoot})
+	theirs := f.spawn(fakeProc{args: dolt, cwd: testTown(t)})
+	ownerless := f.spawn(fakeProc{args: dolt})
+	notDolt := f.spawn(fakeProc{args: []string{"sleep", "60"}, cwd: townRoot})
 
-	if err := VerifyTownDoltSQLServerPID(townRoot, ours.pid()); err != nil {
+	if err := h.VerifyTownDoltSQLServerPID(townRoot, ours); err != nil {
 		t.Errorf("this town's dolt rejected: %v", err)
 	}
-	err := VerifyTownDoltSQLServerPID(townRoot, theirs.pid())
+	err := h.VerifyTownDoltSQLServerPID(townRoot, theirs)
 	if !errors.Is(err, ErrOtherTownDolt) || !IsStalePIDFileErr(err) {
 		t.Errorf("another town's dolt: %v, want ErrOtherTownDolt", err)
 	}
-	// No such process: argv is stubbed as dolt but no data-dir, config or cwd
-	// can be read, so nothing shows whose server it is.
-	err = VerifyTownDoltSQLServerPID(townRoot, 1<<22+7)
+	// A dolt with no data-dir, config or cwd to read: nothing shows whose
+	// server it is.
+	err = h.VerifyTownDoltSQLServerPID(townRoot, ownerless)
 	if !errors.Is(err, ErrIdentityUnverified) || IsStalePIDFileErr(err) {
 		t.Errorf("ownerless dolt: %v, want ErrIdentityUnverified and no stale-pid-file verdict", err)
 	}
-	// Not dolt at all still reports the non-dolt error, ahead of the town check.
-	stubArgs(t, func(int) []string { return []string{"sleep", "60"} })
-	if err := VerifyTownDoltSQLServerPID(townRoot, ours.pid()); !errors.Is(err, ErrNotDoltSQLServer) {
+	// Not dolt at all reports the non-dolt error, ahead of the town check.
+	if err := h.VerifyTownDoltSQLServerPID(townRoot, notDolt); !errors.Is(err, ErrNotDoltSQLServer) {
 		t.Errorf("non-dolt: %v, want ErrNotDoltSQLServer", err)
+	}
+}
+
+// Ownership evidence comes in order: --data-dir, then --config, then cwd.
+func TestVerifyTownDoltSQLServerPIDReadsDataDirAndConfigFlags(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	other := testTown(t)
+	f := newFakeHost()
+	h := f.host()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	byDataDir := f.spawn(fakeProc{args: []string{"dolt", "sql-server", "--data-dir", dataDir}, cwd: other})
+	byConfig := f.spawn(fakeProc{args: []string{"dolt", "sql-server", "--config=" + filepath.Join(dataDir, "config.yaml")}, cwd: other})
+	relative := f.spawn(fakeProc{args: []string{"dolt", "sql-server", "--data-dir", ".dolt-data"}, cwd: townRoot})
+	wrongDataDir := f.spawn(fakeProc{args: []string{"dolt", "sql-server", "--data-dir", filepath.Join(other, ".dolt-data")}, cwd: townRoot})
+
+	for name, pid := range map[string]int{"--data-dir": byDataDir, "--config": byConfig, "relative --data-dir": relative} {
+		if err := h.VerifyTownDoltSQLServerPID(townRoot, pid); err != nil {
+			t.Errorf("%s: %v, want this town's", name, err)
+		}
+	}
+	if err := h.VerifyTownDoltSQLServerPID(townRoot, wrongDataDir); !errors.Is(err, ErrOtherTownDolt) {
+		t.Errorf("--data-dir of another town beats a matching cwd: %v, want ErrOtherTownDolt", err)
 	}
 }
 
 // killTownDolt is the force-kill for this town's own server: the same
 // verdicts, and a foreign town's dolt is never signaled.
 func TestKillTownDoltSparesOtherTownsDolt(t *testing.T) {
-	skipOnWindows(t)
-	townRoot := resolvedTempDir(t)
-	foreign := startSleep(t, resolvedTempDir(t))
-	stubArgs(t, func(int) []string { return []string{"dolt", "sql-server"} })
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost()
+	foreign := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, cwd: testTown(t)})
 
-	if err := killTownDolt(townRoot, foreign.pid()); !errors.Is(err, ErrOtherTownDolt) {
+	if err := f.host().killTownDolt(townRoot, foreign); !errors.Is(err, ErrOtherTownDolt) {
 		t.Errorf("killTownDolt = %v, want ErrOtherTownDolt", err)
 	}
-	if foreign.exited(300 * time.Millisecond) {
-		t.Fatalf("killTownDolt signaled another town's dolt: %v", foreign.err)
+	if sigs := f.signalsTo(foreign); len(sigs) != 0 {
+		t.Fatalf("killTownDolt signaled another town's dolt: %v", sigs)
 	}
 }
 
 // F9: Start's squatter eviction leaves a non-dolt port holder alone.
 func TestEvictPortSquatterLeavesNonDoltHolder(t *testing.T) {
-	skipOnWindows(t)
-	holder, port := startPortHolder(t, resolvedTempDir(t))
+	t.Parallel()
+	f := newFakeHost()
+	holder := f.spawn(fakeProc{args: dockerArgs, port: 4511})
 
-	if got := evictPortSquatter(port); got != 0 {
+	if got := f.host().evictPortSquatter(4511); got != 0 {
 		t.Errorf("evictPortSquatter acted on PID %d, want 0", got)
 	}
-	if holder.exited(500 * time.Millisecond) {
-		t.Fatalf("squatter eviction killed a non-dolt holder: %v", holder.err)
+	if sigs := f.signalsTo(holder); len(sigs) != 0 {
+		t.Fatalf("squatter eviction signaled a non-dolt holder: %v", sigs)
 	}
 }
 
 func TestEvictPortSquatterKillsVerifiedDolt(t *testing.T) {
-	skipOnWindows(t)
-	holder, port := startPortHolder(t, resolvedTempDir(t))
-	stubArgs(t, func(pid int) []string {
-		if pid == holder.pid() {
-			return []string{"dolt", "sql-server"}
-		}
-		return nil
-	})
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
+	squatter := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, port: 4512})
 
-	if got := evictPortSquatter(port); got != holder.pid() {
-		t.Errorf("evictPortSquatter = %d, want %d", got, holder.pid())
+	if got := h.evictPortSquatter(4512); got != squatter {
+		t.Errorf("evictPortSquatter = %d, want %d", got, squatter)
 	}
-	if !holder.exited(5 * time.Second) {
-		t.Fatal("verified dolt squatter was not killed")
+	if sigs := f.signalsTo(squatter); !slices.Equal(sigs, []syscall.Signal{syscall.SIGKILL}) {
+		t.Errorf("signals = %v, want one SIGKILL", sigs)
+	}
+	if err := h.portFree(4512); err != nil {
+		t.Errorf("port still held after eviction: %v", err)
 	}
 }

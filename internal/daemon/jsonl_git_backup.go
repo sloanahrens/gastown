@@ -784,7 +784,12 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 // opendirectoryd is no longer reachable. Forwarding these vars lets git use them
 // directly and skip the system passwd lookup. See gh#zt1w.
 func gitChildEnv() []string {
-	env := os.Environ()
+	return gitChildEnvFrom(os.Environ(), user.Current)
+}
+
+// gitChildEnvFrom is gitChildEnv over env, recovering missing identity from
+// current.
+func gitChildEnvFrom(env []string, current func() (*user.User, error)) []string {
 	have := make(map[string]bool, len(env))
 	for _, kv := range env {
 		if eq := strings.IndexByte(kv, '='); eq > 0 {
@@ -799,7 +804,7 @@ func gitChildEnv() []string {
 	// Recover identity vars from os/user. user.Current() consults $USER/$HOME
 	// before falling back to getpwuid; if all three are missing it may itself
 	// fail, in which case we return env unchanged and let git error normally.
-	u, err := user.Current()
+	u, err := current()
 	if err != nil {
 		return env
 	}

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -180,6 +179,8 @@ const (
 
 type execScheduledSlingRunner struct {
 	townRoot, bdPath, gtPath string
+	// execCmd runs the bd and gt subprocesses; nil runs them for real.
+	execCmd cmdRunFunc
 }
 
 func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args ...string) ([]byte, error) {
@@ -187,12 +188,11 @@ func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args .
 	// (never --repo: see the bd-create-repo memory).
 	rigDir := filepath.Join(r.townRoot, rig)
 	cmd := beads.CommandContextWithBin(ctx, r.bdPath, rigDir, filepath.Join(rigDir, ".beads"), beads.SubprocessModeForArgs(args), args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	stdout, stderr, err := bdRunWith(r.execCmd, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(stderr)))
 	}
-	return stdout.Bytes(), nil
+	return stdout, nil
 }
 
 // listArgs is the canonical `bd list --json` shape (--json --flat --no-pager).
@@ -258,17 +258,15 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e S
 	cmd.Dir = r.townRoot
 	cmd.Env = bdMutationRoutingEnv(r.townRoot)
 	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(stderr.String()))
+	if _, stderr, err := runWith(r.execCmd, cmd); err != nil {
+		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(string(stderr)))
 	}
 	return nil
 }
 
 func (d *Daemon) scheduledRunner() scheduledSlingRunner {
 	if d.scheduledSlingRunner == nil {
-		d.scheduledSlingRunner = &execScheduledSlingRunner{townRoot: d.config.TownRoot, bdPath: d.bdPath, gtPath: d.gtPath}
+		d.scheduledSlingRunner = &execScheduledSlingRunner{townRoot: d.config.TownRoot, bdPath: d.bdPath, gtPath: d.gtPath, execCmd: d.execCmd}
 	}
 	return d.scheduledSlingRunner
 }

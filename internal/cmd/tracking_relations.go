@@ -88,36 +88,9 @@ func validateTrackingTargets(issues []string) error {
 func isTrackingTargetID(issueID string) bool {
 	if rest, ok := strings.CutPrefix(issueID, "external:"); ok {
 		rig, id, ok := strings.Cut(rest, ":")
-		return ok && isBeadIDToken(rig) && isBeadIDToken(id)
+		return ok && beads.IsBeadIDToken(rig) && beads.IsBeadIDToken(id)
 	}
-	return isBeadIDToken(issueID)
-}
-
-// isBeadIDToken reports whether s is shaped like a bead ID: a leading
-// alphanumeric followed by letters, digits, hyphen, underscore, or dot.
-//
-// This is the check that keeps a convoy *title* out of the dependency table: a
-// name like "om-gate coverage: om" opens with a short lowercase word, so the
-// cross-rig resolver wrapped it as external:om:<name> and the convoy could
-// never resolve that edge — or auto-close — again (gt-gsky).
-func isBeadIDToken(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-' || r == '_' || r == '.':
-			// Allowed, but never first: a bead ID opens with its prefix
-			// (gt-, hq-, om-), not a separator.
-			if i == 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
+	return beads.IsBeadIDToken(issueID)
 }
 
 func trackingDependsOnID(townRoot, issueID string) string {

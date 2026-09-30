@@ -4,11 +4,12 @@ Before you write or convert a test in this repository, read this page. It covers
 
 ## The gate
 
-Three Makefile targets are the test tiers, and `make test` runs all three in order for a human. CI, `gt done`, the land path and a human at a shell all run them verbatim. The Makefile header states the same contract.
+Three Makefile targets are the test tiers, and `make test` runs all three in order for a human. CI, the land path and a human at a shell run them verbatim; `gt done` runs `make presubmit`, a scoped subset of the first tier. The Makefile header states the same contract.
 
 | target | runs | Docker | when |
 |---|---|---|---|
 | `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, warning about any package over `testpolicy.FastTierMaxWall` of wall time; prints its wall at the end | never | before every landing |
+| `make presubmit` | `make lint`, then `go build ./...`, then `go test` of only the packages the branch changed against `origin/main` (`internal/land/cmd/changedpkgs`); no drift guard, no budget runner | never | `gt done`, before it pushes: the cheap first look, not a substitute for `make gate`, which the landing worker runs on the merged tree (gt-ssyxd) |
 | `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` (`make test-makefile` runs those alone) | never | after each landing: the landing worker runs it as the rig's `merge_queue.post_land_command`; until that hook is enabled, the overseer runs it after landings |
 | `make test-integration` | `go test -tags integration -run '^TestIntegration' ./...`, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
 
@@ -301,7 +302,7 @@ Write the integration runner first. If a contract case fails against the real im
 
 An external tool such as git, bd or tmux gets one seam and one fake, whichever package calls it (gt-2wt0p):
 
-- The tool's adapter package owns its command lines. Only `internal/git` builds git argv, only `internal/beads` builds bd's and only `internal/tmux` builds tmux's. The adapter's own tests answer its exec runner with canned output (see [The exec runner](#the-exec-runner)); `internal/git` does this through `Git.exec` and `scripted` in `internal/git/helpers_test.go`.
+- The tool's adapter package owns its command lines. Only `internal/git` builds git argv, only `internal/beads` builds bd's and only `internal/tmux` builds tmux's. The adapter's own tests answer its exec runner with canned output (see [The exec runner](#the-exec-runner)); `internal/git` does this through `Git.exec` and `scripted` in `internal/git/helpers_test.go`. `internal/doltserver`, the Dolt adapter, does it through `host` (`internal/doltserver/host.go`): the environment, commands, process starts and signals, TCP probes, SQL connections and clock it uses, answered in its unit tests by `fakeHost`, a process table and scripted command output in memory.
 - A consumer depends on a narrow interface that it declares itself, made of the domain methods it calls on the adapter. `internal/land`'s `Repo` lists `Rev`, `IsAncestor`, `MergeNoFF` and the rest of what a landing needs. `*git.Git` satisfies it in production, and the consumer's tests pass the fake. A consumer never sees argv.
 - Each tool has one shared fake: `internal/beads/beadsfake`, `internal/tmux/tmuxfake` and `internal/git/gitfake`. A consumer does not write its own. `gitfake` is an in-memory model of repositories: commits with parents and trees, refs, remotes and worktrees. It grows only by the methods a converted consumer needs.
 - A contract suite pins the fake to the real tool, as in [Fakes and contracts](#fakes-and-contracts): the unit tier runs it against the fake and the integration tier against the real adapter. A behavior the fake has but no contract case pins is not trusted.
@@ -318,7 +319,7 @@ The per-package argv fakes that predate `gitfake` (`internal/version/fakegit_tes
 
 The `no-subprocess` rule lets a unit test run git, because most packages still do. A converted package gives up that exemption by adding its line to `internal/testpolicy/gitfree.txt`. `TestGitFree` then holds it to the `no-git` rule:
 - Its unit-tier tests may not call `exec.Command("git", ...)`, or build a real wrapper with `git.NewGit` or `git.NewGitWithDir` (unqualified `NewGit` inside `internal/git`).
-- Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, so git reached through production code fails the test that reached it. The static rule cannot see that path.
+- Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, for git reached through production code, which the static rule cannot see. The refusing git exits 1 and records the call, and `HermeticMain` fails the run when any call was recorded, listing each one's directory and arguments under `HERMETIC TRIPWIRE`. So a refused call fails the run even when the code under test tolerated the git error and every test passed (gt-et9zp).
 
 `go test -tags integration` compiles both tiers together, and the integration tier needs real git, so such a package has two TestMains, one per tier:
 

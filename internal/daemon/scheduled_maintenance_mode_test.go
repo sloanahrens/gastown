@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
+	"fmt"
+	"io"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +13,11 @@ import (
 // The two branches below differ only in mode, and the difference is the whole
 // point of the mode: monitor reports a database over threshold, flatten
 // rewrites its commit history. These tests drive runScheduledMaintenance
-// itself, against a real database over a real threshold, because the failure
-// they guard against — monitor mode reaching the destructive path — is a
-// wiring bug that a unit test of maintenanceMode cannot see.
+// itself, over a database whose commit count countCommitsFn reports, because
+// the failure they guard against — monitor mode reaching the destructive path
+// — is a wiring bug that a unit test of maintenanceMode cannot see.
+// TestIntegrationScheduledMaintenanceMonitorNeverFlattens runs the monitor
+// case against a real database on the Dolt container.
 
 // TestScheduledMaintenanceMonitorNeverFlattens is the load-bearing case: the
 // default mode must escalate with the counts and never run `gt maintain`.
@@ -100,28 +104,19 @@ func TestScheduledMaintenanceBelowThresholdIsQuiet(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// maintenanceTestDaemon returns a Daemon pointed at the package's ephemeral Dolt
-// container, plus the name of a database on it that carries at least one commit
-// (so a threshold of 1 is crossed deterministically).
+// maintenanceTestDaemon returns a Daemon whose one database, named after the
+// test, reports a single commit (so a threshold of 1 is crossed
+// deterministically), plus that database's name.
 func maintenanceTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
-
-	// testDoltServerDaemon is the shared constructor for a Daemon whose Dolt
-	// port resolves to the package's container rather than to the live town on
-	// :3307; it refuses to run if the port resolves anywhere else.
-	d := testDoltServerDaemon(t)
-	dbName := createTestDB(t)
-
-	conn, err := d.compactorOpenDB(dbName)
-	if err != nil {
-		t.Fatalf("open %s on the test container: %v", dbName, err)
+	dbName := "maint_" + strings.NewReplacer("/", "_", "-", "_").Replace(t.Name())
+	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
+	d.countCommitsFn = func(name string) (int, error) {
+		if name != dbName {
+			return 0, fmt.Errorf("count commits of %s: the test database is %s", name, dbName)
+		}
+		return 1, nil
 	}
-	defer conn.Close()
-
-	mustExec(t, conn, "CREATE TABLE probe (id INT PRIMARY KEY)")
-	mustExec(t, conn, "CALL DOLT_ADD('-A')")
-	mustExec(t, conn, "CALL DOLT_COMMIT('-m','probe','--author','gt-test <gt-test@localhost>')")
-
 	return d, dbName
 }
 
@@ -195,11 +190,4 @@ func withMaintenanceSeams(t *testing.T) (escalations *[]string, execs *int) {
 	})
 
 	return &esc, &n
-}
-
-func mustExec(t *testing.T, conn *sql.DB, query string) {
-	t.Helper()
-	if _, err := conn.Exec(query); err != nil {
-		t.Fatalf("exec %q: %v", query, err)
-	}
 }

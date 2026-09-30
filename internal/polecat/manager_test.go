@@ -46,7 +46,7 @@ func setupManagerSquashPreservedRepo(t *testing.T) (*world, string) {
 	w.InitBare(t, remote)
 	w.Commit(t, remote, "main", "base", map[string]string{"README.md": "base\n"})
 	w.Clone(t, remote, repo)
-	g := w.OpenWorktreeRepo(repo)
+	g := w.OpenBranchRepo(repo)
 	must := func(err error) {
 		t.Helper()
 		if err != nil {

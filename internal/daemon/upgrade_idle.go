@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -40,7 +39,7 @@ func (d *Daemon) daemonWorkIdle() bool {
 	}
 	if d.bootTriageInFlight.Load() || d.scheduledSlingsRunning.Load() ||
 		d.mayorDispatchRunning.Load() || d.patrolWatchdogRunning.Load() ||
-		d.specDispatchRunning.Load() {
+		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() {
 		return false
 	}
 	if d.mainBranchTestRunning.Load() && !d.mainBranchTestWaitingSlot.Load() {
@@ -87,20 +86,26 @@ func (d *Daemon) installLockHeld() bool {
 	return false
 }
 
-// buildCommitFn is the daemon's own build commit; a test seam.
-var buildCommitFn = version.BuildCommit
+// buildCommit is the daemon's own build commit: buildCommitFn's when a test
+// set one, else the version package's.
+func (d *Daemon) buildCommit() string {
+	if d.buildCommitFn != nil {
+		return d.buildCommitFn()
+	}
+	return version.BuildCommit()
+}
 
 // resolveOwnCommit returns the full SHA of this build when the gastown source
 // repo can resolve it, else the (short) build commit.
 func (d *Daemon) resolveOwnCommit() string {
-	own := buildCommitFn()
+	own := d.buildCommit()
 	if own == "" {
 		return ""
 	}
 	repo := filepath.Join(d.config.TownRoot, "gastown", "mayor", "rig")
-	out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", own+"^{commit}").Output()
+	full, err := d.gitAt(repo).Rev(own + "^{commit}")
 	if err != nil {
 		return own
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(full)
 }

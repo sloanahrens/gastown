@@ -23,8 +23,3 @@ func processIsAlive(pid int) bool {
 	}
 	return process.Signal(syscall.Signal(0)) == nil
 }
-
-// gracefulTerminate sends SIGTERM for graceful shutdown on Unix.
-func gracefulTerminate(p *os.Process) error {
-	return p.Signal(syscall.SIGTERM)
-}

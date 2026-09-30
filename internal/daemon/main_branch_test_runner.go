@@ -46,8 +46,8 @@ const (
 	// mirroring acquireBatchGateSlot's batchSlotTimeout (internal/cmd/mq_batch.go).
 	mainBranchTestSlotTimeout = 60 * time.Minute
 
-	// mainBranchTestSetupTimeout bounds the git fetch/worktree-add/rev-parse
-	// steps that run before the container-gate slot is acquired. Kept
+	// mainBranchTestSetupTimeout bounds the git fetch that runs before the
+	// container-gate slot is acquired. Kept
 	// separate from the per-rig test timeout so a long slot wait (up to
 	// mainBranchTestSlotTimeout) never eats into the budget the actual gate
 	// command gets to run (gt-uvxy).
@@ -1044,47 +1044,35 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return fmt.Errorf("bare repo not found at %s", bareRepoPath)
 	}
 
+	bare := d.gitAt(bareRepoPath)
+
 	// Clean up stale worktree if it exists
 	if _, err := os.Stat(worktreePath); err == nil {
-		cleanupCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-		cleanupCmd.Dir = bareRepoPath
-		util.SetDetachedProcessGroup(cleanupCmd)
-		_ = cleanupCmd.Run()
+		_ = bare.WorktreeRemove(worktreePath, true)
 	}
 
-	// Setup (fetch + worktree add + commit lookup) runs on its own bounded
-	// context, separate from the test-run timeout created below after the
-	// slot is held — see mainBranchTestSetupTimeout's comment.
-	setupCtx, setupCancel := context.WithTimeout(d.ctx, mainBranchTestSetupTimeout)
-	defer setupCancel()
-
-	// Fetch latest main
-	fetchCmd := exec.CommandContext(setupCtx, "git", "fetch", "origin", defaultBranch)
-	fetchCmd.Dir = bareRepoPath
-	util.SetDetachedProcessGroup(fetchCmd)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch failed: %v (%s)", err, strings.TrimSpace(string(output)))
+	// Fetch latest main into its remote-tracking ref, on its own bound,
+	// separate from the test-run timeout created below after the slot is
+	// held — see mainBranchTestSetupTimeout's comment. The worktree add and
+	// commit lookup that follow are local.
+	refspec := "+refs/heads/" + defaultBranch + ":refs/remotes/origin/" + defaultBranch
+	if err := bare.FetchRefspecWithTimeout("origin", refspec, mainBranchTestSetupTimeout); err != nil {
+		return fmt.Errorf("git fetch failed: %w", err)
 	}
 
 	// Create temporary worktree at origin/<default_branch>
-	addCmd := exec.CommandContext(setupCtx, "git", "worktree", "add", "--detach", worktreePath, "origin/"+defaultBranch)
-	addCmd.Dir = bareRepoPath
-	util.SetDetachedProcessGroup(addCmd)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree add failed: %v (%s)", err, strings.TrimSpace(string(output)))
+	if err := bare.WorktreeAddDetached(worktreePath, "origin/"+defaultBranch); err != nil {
+		return fmt.Errorf("git worktree add failed: %w", err)
 	}
 
 	// Always clean up the worktree
 	defer func() {
-		removeCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-		removeCmd.Dir = bareRepoPath
-		util.SetDetachedProcessGroup(removeCmd)
-		if err := removeCmd.Run(); err != nil {
+		if err := bare.WorktreeRemove(worktreePath, true); err != nil {
 			d.logger.Printf("main_branch_test: %s: warning: worktree cleanup failed: %v", rigName, err)
 		}
 	}()
 
-	commit := d.commitTested(setupCtx, rigName, worktreePath)
+	commit := d.commitTested(rigName, worktreePath)
 
 	// Acquire the container-gate slot before running gates/tests: this
 	// baseline run spins the same Docker-backed suites (Dolt, testcontainers)
@@ -1170,16 +1158,13 @@ func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
 // commitTested returns the commit SHA checked out in the worktree, or ""
 // if it can't be determined — the escalation body degrades gracefully
 // rather than failing the whole test run over this.
-func (d *Daemon) commitTested(ctx context.Context, rigName, worktreePath string) string {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	cmd.Dir = worktreePath
-	util.SetDetachedProcessGroup(cmd)
-	output, err := cmd.Output()
+func (d *Daemon) commitTested(rigName, worktreePath string) string {
+	commit, err := d.gitAt(worktreePath).Rev("HEAD")
 	if err != nil {
 		d.logger.Printf("main_branch_test: %s: warning: could not determine tested commit: %v", rigName, err)
 		return ""
 	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(commit)
 }
 
 // mainBranchTestGateFn runs one gate of a rig's main-branch check. A package
@@ -1265,7 +1250,7 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 
 	startHost := d.hostLoad()
 	start := time.Now()
-	output, err := cmd.CombinedOutput()
+	output, err := d.combinedOutput(cmd)
 	elapsed := time.Since(start)
 	endHost := d.hostLoad()
 	if err == nil {

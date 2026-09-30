@@ -1,17 +1,15 @@
 package doltserver
 
 import (
-	"errors"
+	"strings"
 	"testing"
 )
 
 // TestDefaultConfig_WaitTimeoutDefault verifies that the default config
 // applies the gh-3623 idle-session timeout.
 func TestDefaultConfig_WaitTimeoutDefault(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_WAIT_TIMEOUT", "")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "").host().DefaultConfig(t.TempDir())
 
 	if config.WaitTimeoutSec != DefaultWaitTimeoutSec {
 		t.Errorf("WaitTimeoutSec = %d, want %d", config.WaitTimeoutSec, DefaultWaitTimeoutSec)
@@ -21,10 +19,8 @@ func TestDefaultConfig_WaitTimeoutDefault(t *testing.T) {
 // TestDefaultConfig_WaitTimeoutEnvOverride verifies the GT_DOLT_WAIT_TIMEOUT
 // env var raises or lowers the configured timeout.
 func TestDefaultConfig_WaitTimeoutEnvOverride(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_WAIT_TIMEOUT", "120")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "120").host().DefaultConfig(t.TempDir())
 
 	if config.WaitTimeoutSec != 120 {
 		t.Errorf("WaitTimeoutSec = %d, want 120", config.WaitTimeoutSec)
@@ -34,10 +30,8 @@ func TestDefaultConfig_WaitTimeoutEnvOverride(t *testing.T) {
 // TestDefaultConfig_WaitTimeoutNegativeDisables verifies that a negative
 // value opts out of the override, leaving Dolt's default in place.
 func TestDefaultConfig_WaitTimeoutNegativeDisables(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_WAIT_TIMEOUT", "-1")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "-1").host().DefaultConfig(t.TempDir())
 
 	if config.WaitTimeoutSec != 0 {
 		t.Errorf("WaitTimeoutSec = %d, want 0 (disabled)", config.WaitTimeoutSec)
@@ -47,10 +41,8 @@ func TestDefaultConfig_WaitTimeoutNegativeDisables(t *testing.T) {
 // TestDefaultConfig_WaitTimeoutInvalidIgnored verifies that a non-numeric
 // env value falls back to the default rather than zeroing the timeout.
 func TestDefaultConfig_WaitTimeoutInvalidIgnored(t *testing.T) {
-	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_WAIT_TIMEOUT", "not-a-number")
-
-	config := DefaultConfig(townRoot)
+	t.Parallel()
+	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "not-a-number").host().DefaultConfig(t.TempDir())
 
 	if config.WaitTimeoutSec != DefaultWaitTimeoutSec {
 		t.Errorf("WaitTimeoutSec = %d, want default %d when env var is invalid", config.WaitTimeoutSec, DefaultWaitTimeoutSec)
@@ -59,6 +51,7 @@ func TestDefaultConfig_WaitTimeoutInvalidIgnored(t *testing.T) {
 
 // TestBuildWaitTimeoutQuery verifies the exact SQL emitted by applyWaitTimeout.
 func TestBuildWaitTimeoutQuery(t *testing.T) {
+	t.Parallel()
 	got := buildWaitTimeoutQuery(30)
 	want := "SET GLOBAL wait_timeout = 30"
 	if got != want {
@@ -66,62 +59,39 @@ func TestBuildWaitTimeoutQuery(t *testing.T) {
 	}
 }
 
-// TestApplyWaitTimeout_DisabledShortCircuits verifies that a non-positive
-// WaitTimeoutSec opts out of the SET GLOBAL — the SQL seam must never be
-// invoked.
+// TestApplyWaitTimeout_DisabledShortCircuits verifies that the override is opted out of: no SET
+// GLOBAL reaches dolt.
 func TestApplyWaitTimeout_DisabledShortCircuits(t *testing.T) {
-	prev := applyWaitTimeoutFn
-	t.Cleanup(func() { applyWaitTimeoutFn = prev })
-
-	called := false
-	applyWaitTimeoutFn = func(_, _ string) error {
-		called = true
-		return nil
+	t.Parallel()
+	f := newFakeHost()
+	for _, v := range []int{0, -1, -3600} {
+		f.host().applyWaitTimeout(t.TempDir(), &Config{WaitTimeoutSec: v})
 	}
-
-	for _, sec := range []int{0, -1, -3600} {
-		applyWaitTimeout("/some/town", &Config{WaitTimeoutSec: sec})
-	}
-
-	if called {
-		t.Errorf("applyWaitTimeoutFn called for non-positive WaitTimeoutSec")
+	if ran := f.ranMatching("SET GLOBAL"); len(ran) != 0 {
+		t.Errorf("SET GLOBAL sent for an opted-out value: %q", ran)
 	}
 }
 
-// TestApplyWaitTimeout_DispatchesQuery verifies that a positive timeout
-// dispatches the expected SET GLOBAL statement against the seam.
+// TestApplyWaitTimeout_DispatchesQuery verifies that a set value sends the expected
+// SET GLOBAL statement to the town's running server.
 func TestApplyWaitTimeout_DispatchesQuery(t *testing.T) {
-	prev := applyWaitTimeoutFn
-	t.Cleanup(func() { applyWaitTimeoutFn = prev })
+	t.Parallel()
+	f := newFakeHost().townPort(4520).on("dolt *", fakeReply{})
+	f.host().applyWaitTimeout(t.TempDir(), &Config{WaitTimeoutSec: 45})
 
-	var gotTownRoot, gotQuery string
-	applyWaitTimeoutFn = func(townRoot, query string) error {
-		gotTownRoot = townRoot
-		gotQuery = query
-		return nil
-	}
-
-	applyWaitTimeout("/town/root", &Config{WaitTimeoutSec: 45})
-
-	if gotTownRoot != "/town/root" {
-		t.Errorf("townRoot = %q, want /town/root", gotTownRoot)
-	}
-	if want := "SET GLOBAL wait_timeout = 45"; gotQuery != want {
-		t.Errorf("query = %q, want %q", gotQuery, want)
+	ran := f.ranMatching("SET GLOBAL")
+	if len(ran) != 1 || !strings.HasSuffix(ran[0], "sql -q SET GLOBAL wait_timeout = 45") || !strings.Contains(ran[0], "--port 4520") {
+		t.Errorf("dolt calls = %q, want one %q against port 4520", ran, "SET GLOBAL wait_timeout = 45")
 	}
 }
 
-// TestApplyWaitTimeout_ErrorIsBestEffort verifies that a SQL failure does
-// not panic or propagate. The Dolt server is already up by the time we
-// apply this; failing here would needlessly fail the start.
+// TestApplyWaitTimeout_ErrorIsBestEffort verifies that a SQL failure does not panic or
+// propagate: the server is already up, and failing here would fail the start.
 func TestApplyWaitTimeout_ErrorIsBestEffort(t *testing.T) {
-	prev := applyWaitTimeoutFn
-	t.Cleanup(func() { applyWaitTimeoutFn = prev })
-
-	applyWaitTimeoutFn = func(_, _ string) error {
-		return errors.New("simulated SQL failure")
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{stderr: "simulated SQL failure", code: 1})
+	f.host().applyWaitTimeout(t.TempDir(), &Config{WaitTimeoutSec: 45})
+	if len(f.ranMatching("SET GLOBAL")) != 1 {
+		t.Errorf("the statement was not attempted: %q", f.commands())
 	}
-
-	// Must not panic. No return value to check — best-effort by contract.
-	applyWaitTimeout("/town/root", &Config{WaitTimeoutSec: 30})
 }

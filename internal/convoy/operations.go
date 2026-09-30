@@ -25,7 +25,7 @@ import (
 // polling-based patrol cycles.
 //
 // The check is idempotent - running it multiple times for the same issue is safe.
-// The underlying `gt convoy check` handles already-closed convoys gracefully.
+// Town.CheckOne handles already-closed convoys gracefully.
 //
 // Parameters:
 //   - ctx: context for storage operations
@@ -34,16 +34,20 @@ import (
 //   - issueID: the issue ID that was just closed
 //   - caller: identifier for logging (e.g., "Convoy")
 //   - logger: optional logger function (can be nil)
-//   - gtPath: resolved path to the gt binary (e.g. from exec.LookPath or daemon config)
+//   - gtPath: resolved path to the gt binary, for the continuation feed's gt sling
+//   - check: runs the completion check on one convoy (see Town.Checker)
 //   - resolver: optional StoreResolver for cross-database issue resolution (nil falls back to subprocess)
 //
 // Returns the convoy IDs that were checked (may be empty if issue isn't tracked).
-func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), gtPath string, isRigParked func(string) bool, resolver ...*StoreResolver) []string {
+func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), gtPath string, check Checker, isRigParked func(string) bool, resolver ...*StoreResolver) []string {
 	if logger == nil {
 		logger = func(format string, args ...interface{}) {} // no-op
 	}
 	if isRigParked == nil {
 		isRigParked = func(string) bool { return false }
+	}
+	if check == nil {
+		check = Town{Root: townRoot}.Checker()
 	}
 	if store == nil {
 		return nil
@@ -64,7 +68,7 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 	logger("%s: %s tracked by %d convoy(s): %v", caller, issueID, len(convoyIDs), convoyIDs)
 
 	// Run convoy check for each tracking convoy
-	// Note: gt convoy check is idempotent and handles already-closed convoys
+	// Note: the check is idempotent and handles already-closed convoys
 	for _, convoyID := range convoyIDs {
 		if isConvoyClosed(ctx, store, convoyID) {
 			logger("%s: convoy %s already closed, skipping", caller, convoyID)
@@ -77,7 +81,7 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 		}
 
 		logger("%s: checking convoy %s", caller, convoyID)
-		if err := runConvoyCheck(ctx, townRoot, convoyID, gtPath); err != nil {
+		if err := check(ctx, convoyID); err != nil {
 			logger("%s: convoy %s check failed: %s", caller, convoyID, util.FirstLine(err.Error()))
 		}
 
@@ -132,22 +136,20 @@ func isConvoyStaged(ctx context.Context, store beadsdk.Storage, convoyID string)
 	return strings.HasPrefix(string(issue.Status), "staged_")
 }
 
-// runConvoyCheck runs `gt convoy check <convoy-id>` to check a specific convoy.
-// This is idempotent and handles already-closed convoys gracefully.
-// The context parameter enables cancellation on daemon shutdown.
-// gtPath is the resolved path to the gt binary.
-func runConvoyCheck(ctx context.Context, townRoot, convoyID, gtPath string) error {
-	cmd := exec.CommandContext(ctx, gtPath, "convoy", "check", convoyID)
-	cmd.Dir = townRoot
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+// Checker runs the completion check on one convoy: it closes the convoy when
+// every tracked issue is resolved. It is idempotent and handles an
+// already-closed convoy gracefully. The context enables cancellation on daemon
+// shutdown.
+type Checker func(ctx context.Context, convoyID string) error
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%v: %s", err, stderr.String())
+// Checker returns the Checker that runs CheckOne in this town.
+func (t Town) Checker() Checker {
+	return func(ctx context.Context, convoyID string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return t.CheckOne(convoyID, false)
 	}
-
-	return nil
 }
 
 // trackedIssue holds basic info about an issue tracked by a convoy.

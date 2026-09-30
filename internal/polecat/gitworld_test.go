@@ -20,13 +20,13 @@ func newWorld() *world { return &world{gitfake.New()} }
 // opener opens the world's repositories the way the manager opens real ones.
 func (w *world) opener() gitOpener {
 	return gitOpener{
-		open:    func(dir string) gitRepo { return w.OpenWorktreeRepo(dir) },
-		openDir: func(gitDir, workDir string) gitRepo { return w.OpenDir(gitDir, workDir) },
+		open:    func(dir string) gitRepo { return w.OpenBranchRepo(dir) },
+		openDir: func(gitDir, workDir string) gitRepo { return w.OpenWithDir(gitDir, workDir).(gitfake.BranchRepo) },
 	}
 }
 
 // repo opens dir in the world.
-func (w *world) repo(dir string) gitRepo { return w.OpenWorktreeRepo(dir) }
+func (w *world) repo(dir string) gitRepo { return w.OpenBranchRepo(dir) }
 
 // checkout writes the commit HEAD names in the checkout at dir to disk, as
 // git leaves a checkout after a commit it made itself.

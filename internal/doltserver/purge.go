@@ -18,7 +18,7 @@ import (
 // phase. Returns the number of beads purged and any error encountered.
 // Errors are non-fatal — the caller should log them and continue.
 // Must be called while the Dolt server is still running (bd purge needs SQL access).
-func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
+func (h *host) PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	// Resolve the beads directory for this rig (read-only — never create dirs during purge)
 	beadsDir := FindRigBeadsDir(townRoot, dbName)
 
@@ -48,9 +48,9 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	// Build bd purge command with safety-net timeout.
 	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
 	// generous timeout as a circuit breaker against future regressions.
-	env := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	env := beads.BuildMutationPinnedBDEnv(h.environ(), beadsDir)
 	// Probe --allow-stale support with the same hardened target env used by purge.
-	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
+	args := h.allowStaleArgs(env, []string{"purge", "--json"})
 	if dryRun {
 		args = append(args, "--dry-run")
 	} else {
@@ -68,7 +68,7 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := h.runBD(cmd)
 	if ctx.Err() == context.DeadlineExceeded {
 		return 0, fmt.Errorf("bd purge for %s: timed out after 60s", dbName)
 	}
@@ -99,6 +99,11 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	}
 
 	return *result.PurgedCount, nil
+}
+
+// PurgeClosedEphemerals is (*host).PurgeClosedEphemerals on the real machine.
+func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
+	return std.PurgeClosedEphemerals(townRoot, dbName, dryRun)
 }
 
 // extractJSON finds the first JSON object in raw output that may contain

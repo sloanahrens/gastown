@@ -2,7 +2,6 @@ package rig
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +11,7 @@ import (
 )
 
 func TestGetConfig_SystemDefaults(t *testing.T) {
+	t.Parallel()
 	// Create a temp rig with no wisp or bead config
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
@@ -20,8 +20,9 @@ func TestGetConfig_SystemDefaults(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// Should get system defaults
@@ -49,6 +50,7 @@ func TestGetConfig_SystemDefaults(t *testing.T) {
 }
 
 func TestGetConfig_WispOverride(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -56,8 +58,9 @@ func TestGetConfig_WispOverride(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// Create wisp config with override
@@ -77,6 +80,7 @@ func TestGetConfig_WispOverride(t *testing.T) {
 }
 
 func TestGetConfig_WispBlocked(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -84,8 +88,9 @@ func TestGetConfig_WispBlocked(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// Block auto_restart at wisp layer
@@ -110,6 +115,7 @@ func TestGetConfig_WispBlocked(t *testing.T) {
 }
 
 func TestGetIntConfig_Stacking(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -117,8 +123,9 @@ func TestGetIntConfig_Stacking(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// Set wisp adjustment
@@ -135,6 +142,7 @@ func TestGetIntConfig_Stacking(t *testing.T) {
 }
 
 func TestGetBoolConfig_StringConversion(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -142,8 +150,9 @@ func TestGetBoolConfig_StringConversion(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// Set string "true" in wisp
@@ -167,6 +176,7 @@ func TestGetBoolConfig_StringConversion(t *testing.T) {
 }
 
 func TestGetConfig_UnknownKey(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -174,8 +184,9 @@ func TestGetConfig_UnknownKey(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	result := rig.GetConfigWithSource("nonexistent_key")
@@ -188,6 +199,7 @@ func TestGetConfig_UnknownKey(t *testing.T) {
 }
 
 func TestGetStringConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -195,8 +207,9 @@ func TestGetStringConfig(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
+		Name:     "testrig",
+		Path:     rigPath,
+		BDRunner: noRigBead,
 	}
 
 	// System default for status
@@ -213,6 +226,7 @@ func TestGetStringConfig(t *testing.T) {
 }
 
 func TestCoerceInt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    interface{}
 		expected int
@@ -237,6 +251,7 @@ func TestCoerceInt(t *testing.T) {
 }
 
 func TestCoerceBool(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    interface{}
 		expected bool
@@ -272,13 +287,14 @@ func TestCoerceBool(t *testing.T) {
 // were typed by key). The cap must still read as the 1 the operator asked for,
 // not as 0 with a bool silently ignored.
 func TestGetIntConfig_LegacyBoolValue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	rig := &Rig{Name: "testrig", Path: rigPath}
+	rig := &Rig{Name: "testrig", Path: rigPath, BDRunner: noRigBead}
 
 	wispCfg := wisp.NewConfig(tmpDir, "testrig")
 	if err := wispCfg.Set("max_polecats", true); err != nil {
@@ -294,13 +310,14 @@ func TestGetIntConfig_LegacyBoolValue(t *testing.T) {
 // `val.(bool)` assertion (what the daemon used to do) ignores the value entirely,
 // so a stored 0 silently leaves auto-restart enabled.
 func TestGetBoolConfig_NumericValue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	rig := &Rig{Name: "testrig", Path: rigPath}
+	rig := &Rig{Name: "testrig", Path: rigPath, BDRunner: noRigBead}
 
 	wispCfg := wisp.NewConfig(tmpDir, "testrig")
 	if err := wispCfg.Set("auto_restart", float64(0)); err != nil {
@@ -309,51 +326,6 @@ func TestGetBoolConfig_NumericValue(t *testing.T) {
 
 	if rig.GetBoolConfig("auto_restart") {
 		t.Error("auto_restart=0 should read as false, not fall through to the default")
-	}
-}
-
-// TestGetConfig_BeadLabel tests reading config from rig bead labels.
-// This requires a more complex setup with a full beads database.
-func TestGetConfig_BeadLabel(t *testing.T) {
-	tmpDir := t.TempDir()
-	townDir := tmpDir
-	rigPath := filepath.Join(townDir, "testrig")
-	beadsDir := filepath.Join(rigPath, ".beads")
-
-	// Create directory structure
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a minimal issues.jsonl with a rig identity bead
-	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
-	rigBead := map[string]interface{}{
-		"id":     "gt-rig-testrig",
-		"type":   "rig",
-		"title":  "testrig",
-		"status": "open",
-		"labels": []string{"status:docked", "priority:high"},
-	}
-	data, _ := json.Marshal(rigBead)
-	if err := os.WriteFile(issuesPath, data, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Note: This test demonstrates the structure but bd Show requires
-	// a proper beads database. In production, use bd commands or mocks.
-	// For now, we test that getBeadLabel returns nil gracefully when
-	// beads is not fully set up.
-
-	rig := &Rig{
-		Name: "testrig",
-		Path: rigPath,
-	}
-
-	// Without full beads setup, should fall back to system defaults
-	result := rig.GetConfigWithSource("status")
-	// Either SourceBead (if beads is set up) or SourceSystem
-	if result.Source != SourceBead && result.Source != SourceSystem {
-		t.Logf("source is %s (expected SourceBead or SourceSystem)", result.Source)
 	}
 }
 
@@ -385,4 +357,13 @@ func TestGetConfig_BeadLabelThroughRunner(t *testing.T) {
 	if len(shown) != 1 || shown[0] != "gt-rig-testrig" {
 		t.Fatalf("bd show calls = %v, want one read of gt-rig-testrig", shown)
 	}
+}
+
+// noRigBead is a bd with no rig identity bead: the bead layer has nothing,
+// so lookups fall through to the system defaults.
+func noRigBead(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+	if bdVerb(c.Args) == "show" {
+		return []byte("[]"), nil, nil
+	}
+	return nil, nil, nil
 }

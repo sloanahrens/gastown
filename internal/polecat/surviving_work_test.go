@@ -76,7 +76,7 @@ func (f *survivalFixture) push(t *testing.T, refs ...string) {
 // mergeIntoMain merges branch into the seed's main with a merge commit.
 func (f *survivalFixture) mergeIntoMain(t *testing.T, branch string) {
 	t.Helper()
-	f.do(t, f.w.OpenWorktreeRepo(f.seed).MergeNoFF(branch, "merge"))
+	f.do(t, f.w.OpenBranchRepo(f.seed).MergeNoFF(branch, "merge"))
 }
 
 // survivingWork is SurvivingWorkForIssue over f's world.
@@ -170,7 +170,7 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		f.do(t, f.g().CheckoutNewBranch(older, "integration/epic-x"))
 		f.commit(t, "work.txt", "work\n", "work on the epic")
 		f.do(t, f.g().Checkout("integration/epic-x"))
-		f.do(t, f.w.OpenWorktreeRepo(f.seed).MergeNoFF(older, "merge into epic"))
+		f.do(t, f.w.OpenBranchRepo(f.seed).MergeNoFF(older, "merge into epic"))
 		f.do(t, f.g().Checkout("main"))
 		f.push(t, older, "integration/epic-x")
 		// The work (and the epic's own groundwork) is on the integration

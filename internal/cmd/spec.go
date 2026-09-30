@@ -673,7 +673,7 @@ func specReadyArgs() []string {
 // specReadyBoard runs the ready query in one rig. A var so tests can serve a
 // board without a live bd.
 var specReadyBoard = func(rigPath string) ([]*beads.Issue, error) {
-	out, err := runBdJSONAllowStale(rigPath, specReadyArgs()...)
+	out, err := beads.RunBdJSONAllowStale(rigPath, specReadyArgs()...)
 	if err != nil {
 		return nil, err
 	}

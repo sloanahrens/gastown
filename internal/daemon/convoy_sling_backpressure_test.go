@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -16,21 +16,19 @@ import (
 // internal/cmd's own test pins the unwrapped message; this one pins the parse.
 const refusalStderr = "Error: spawning polecat: sling refused: gastown has 13 ready MRs (> 12); pass --force or label the bead rework"
 
-// backpressureFeedRig extends the standard feed fixture with a mock `gt` that
-// refuses to sling while refuseFlag exists and succeeds once it is removed.
-// Every invocation is appended to the sling log verbatim, so a test can prove
-// the feeder called nothing else on a deferred bead.
-func backpressureFeedRig(t *testing.T, refuseFlag string) (townRoot, gtPath, slingLogPath string) {
+// backpressureFeedRig is the standard feed fixture with a `gt` that refuses
+// to sling while refuse is set and succeeds once it is cleared. Every call is
+// recorded, so a test can prove the feeder called nothing else on a deferred
+// bead.
+func backpressureFeedRig(t *testing.T) (townRoot string, gt *fakeCLI, refuse *atomic.Bool) {
 	t.Helper()
-	return refusingFeedRig(t, refuseFlag, refusalStderr)
+	return refusingFeedRig(t, refusalStderr)
 }
 
 // refusingFeedRig is backpressureFeedRig with the refusal's stderr chosen by
 // the caller.
-func refusingFeedRig(t *testing.T, refuseFlag, refusal string) (townRoot, gtPath, slingLogPath string) {
+func refusingFeedRig(t *testing.T, refusal string) (townRoot string, gt *fakeCLI, refuse *atomic.Bool) {
 	t.Helper()
-
-	binDir := t.TempDir()
 	townRoot = t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
@@ -39,24 +37,34 @@ func refusingFeedRig(t *testing.T, refuseFlag, refusal string) (townRoot, gtPath
 	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
+	refuse = &atomic.Bool{}
+	gt = newFakeCLI(func(args []string) cliReply {
+		if len(args) > 0 && args[0] == "sling" && refuse.Load() {
+			return cliReply{stderr: refusal + "\n", code: 1}
+		}
+		return cliReply{}
+	})
+	return townRoot, gt, refuse
+}
 
-	slingLogPath = filepath.Join(binDir, "sling.log")
-	gtScript := `#!/bin/sh
-echo "$@" >> "` + slingLogPath + `"
-if [ "$1" = "sling" ]; then
-  if [ -f "` + refuseFlag + `" ]; then
-    cat >&2 <<'REFUSAL'
-` + refusal + `
-REFUSAL
-    exit 1
-  fi
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
+// newFeedManager is NewConvoyManager over townRoot with its gt calls
+// answered by gt.
+func newFeedManager(townRoot string, logger func(string, ...interface{}), gt *fakeCLI) *ConvoyManager {
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m.execCmd = gt.run
+	answerScanThrough(m, gt)
+	return m
+}
+
+// assertOnlySlings fails the test if gt ran anything but a sling: a deferred
+// bead's state could only have changed through a second command.
+func assertOnlySlings(t *testing.T, gt *fakeCLI) {
+	t.Helper()
+	for _, args := range gt.argvs() {
+		if len(args) == 0 || args[0] != "sling" {
+			t.Errorf("deferral invoked a non-sling command, so bead state may have changed: %q", args)
+		}
 	}
-	return townRoot, filepath.Join(binDir, "gt"), slingLogPath
 }
 
 // newBackpressureLogger collects the feeder's log lines.
@@ -73,18 +81,11 @@ func newBackpressureLogger() (*[]string, func(string, ...interface{})) {
 // status write, no cleanup.
 func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	refuseFlag := filepath.Join(t.TempDir(), "refuse")
-	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
-		t.Fatalf("write refuse flag: %v", err)
-	}
-	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
+	townRoot, gt, refuse := backpressureFeedRig(t)
+	refuse.Store(true)
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	}
@@ -124,18 +125,10 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 	// bead could have been mutated is a second command. Every recorded
 	// invocation is a sling: no `bd`, no `mq`, nothing that could have changed
 	// the bead's status.
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
+	if n := len(gt.argvs("sling")); n != 2 {
+		t.Errorf("sling calls = %d, want 2 (one per ready issue)", n)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "sling ") {
-			t.Errorf("deferral invoked a non-sling command, so bead state may have changed: %q", line)
-		}
-	}
+	assertOnlySlings(t, gt)
 }
 
 // TestFeedFirstReady_ReoffersDeferredBeadNextTick is the other half of the
@@ -143,18 +136,11 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 // next scan feeds the same bead, so deferral costs a tick, not the work.
 func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	refuseFlag := filepath.Join(t.TempDir(), "refuse")
-	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
-		t.Fatalf("write refuse flag: %v", err)
-	}
-	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
+	townRoot, gt, refuse := backpressureFeedRig(t)
+	refuse.Store(true)
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	}
@@ -167,23 +153,11 @@ func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 	}
 	m.feedFirstReady(c)
 
-	if err := os.Remove(refuseFlag); err != nil {
-		t.Fatalf("drain the queue: %v", err)
-	}
+	refuse.Store(false) // the queue drained
 	m.feedFirstReady(c)
 
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
-	}
-	attempts := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, "sling gt-issue1 ") {
-			attempts++
-		}
-	}
-	if attempts != 2 {
-		t.Errorf("sling attempts for gt-issue1 = %d, want 2 (deferred once, then fed): %q", attempts, string(data))
+	if attempts := len(gt.argvs("sling", "gt-issue1")); attempts != 2 {
+		t.Errorf("sling attempts for gt-issue1 = %d, want 2 (deferred once, then fed): %q", attempts, gt.argvs())
 	}
 
 	fed := false
@@ -311,17 +285,11 @@ func TestSlingDeferralReason(t *testing.T) {
 // nothing but the sling ran against it.
 func TestFeedFirstReady_DefersOnSurvivingWorkRefusal(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-	refuseFlag := filepath.Join(t.TempDir(), "refuse")
-	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
-		t.Fatalf("write refuse flag: %v", err)
-	}
-	townRoot, gtPath, slingLogPath := refusingFeedRig(t, refuseFlag, survivingWorkRefusalStderr)
+	townRoot, gt, refuse := refusingFeedRig(t, survivingWorkRefusalStderr)
+	refuse.Store(true)
 
 	logged, logger := newBackpressureLogger()
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("no git repo under %s", rigRoot)
 	}
@@ -345,13 +313,8 @@ func TestFeedFirstReady_DefersOnSurvivingWorkRefusal(t *testing.T) {
 	if !found {
 		t.Errorf("expected deferral line %q, got: %v", want, *logged)
 	}
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Fatalf("read sling log: %v", err)
+	if n := len(gt.argvs("sling", "gt-issue1")); n != 1 {
+		t.Errorf("sling calls for gt-issue1 = %d, want 1", n)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line != "" && !strings.HasPrefix(line, "sling ") {
-			t.Errorf("deferral invoked a non-sling command: %q", line)
-		}
-	}
+	assertOnlySlings(t, gt)
 }

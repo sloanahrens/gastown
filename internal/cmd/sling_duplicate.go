@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -478,7 +479,7 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 		args = append(args, "--closed-after="+closedAfter.UTC().Format(time.RFC3339))
 	}
 
-	out, err := runBdJSONAllowStale(beadsDir, args...)
+	out, err := beads.RunBdJSONAllowStale(beadsDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s beads: %w", strings.Join(statuses, ","), err)
 	}
@@ -562,7 +563,7 @@ func fetchDuplicateFullText(beadsDir string, ids []string) (map[string]duplicate
 	args := append([]string{"show"}, ids...)
 	args = append(args, "--json")
 
-	out, err := runBdJSONAllowStale(beadsDir, args...)
+	out, err := beads.RunBdJSONAllowStale(beadsDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetching design/notes for %d bead(s): %w", len(ids), err)
 	}

@@ -9,9 +9,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +37,60 @@ import (
 // leak at its source rather than trying to keep the one Printf call this bead
 // was filed over flattened forever.
 var discardLogger = log.New(io.Discard, "", 0)
+
+// gateShell answers runCommandOnWorktree's `sh -c <command>` in process
+// through the daemon's execCmd seam: answer gets the command and returns its
+// combined output and the error the run ended with. Every command is recorded
+// with the directory it ran in, in order.
+type gateShell struct {
+	answer func(command string) (output string, err error)
+
+	mu       sync.Mutex
+	commands []string
+	dirs     []string
+	env      [][]string
+}
+
+func newGateShell(answer func(command string) (string, error)) *gateShell {
+	return &gateShell{answer: answer}
+}
+
+func (g *gateShell) run(cmd *exec.Cmd) ([]byte, []byte, error) {
+	command := cmd.Args[len(cmd.Args)-1]
+	g.mu.Lock()
+	g.commands = append(g.commands, command)
+	g.dirs = append(g.dirs, cmd.Dir)
+	g.env = append(g.env, slices.Clone(cmd.Env))
+	g.mu.Unlock()
+	out, err := g.answer(command)
+	if cmd.Stdout != nil {
+		_, _ = cmd.Stdout.Write([]byte(out))
+	}
+	return []byte(out), nil, err
+}
+
+// ran returns the commands run so far, in order.
+func (g *gateShell) ran() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.commands)
+}
+
+// gateExit answers every command with output and exit status code, the way a
+// command that printed output and exited with code does.
+func gateExit(output string, code int) func(string) (string, error) {
+	return func(string) (string, error) {
+		if code != 0 {
+			return output, &cliExitError{code: code}
+		}
+		return output, nil
+	}
+}
+
+// gateDaemon returns a Daemon over townRoot whose gate commands gate answers.
+func gateDaemon(townRoot string, logger *log.Logger, gate *gateShell) *Daemon {
+	return &Daemon{config: &Config{TownRoot: townRoot}, logger: logger, execCmd: gate.run}
+}
 
 func TestMainBranchTestInterval(t *testing.T) {
 	t.Parallel()
@@ -450,21 +504,23 @@ func TestWriteMainBranchTestLog_SameRigCommitAndSecondNeverCollide(t *testing.T)
 func TestRunCommandOnWorktree_ConcurrentRunsSeeOnlyTheirOwnOutput(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
-
 	const n = 8
+	outputs := map[string]string{}
+	for i := 0; i < n; i++ {
+		marker := fmt.Sprintf("internal/run%d", i)
+		outputs[fmt.Sprintf("go test ./run%d", i)] = fmt.Sprintf("--- FAIL: TestRun%d (0.00s)\n    run_test.go:1: boom\nFAIL\nFAIL\tgithub.com/steveyegge/gastown/%s\t0.01s\n", i, marker)
+	}
+	d := gateDaemon(townRoot, discardLogger, newGateShell(func(command string) (string, error) {
+		return outputs[command], &cliExitError{code: 1}
+	}))
+
 	logPaths := make([]string, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			marker := fmt.Sprintf("internal/run%d", i)
-			output := fmt.Sprintf("--- FAIL: TestRun%d (0.00s)\n    run_test.go:1: boom\nFAIL\nFAIL\tgithub.com/steveyegge/gastown/%s\t0.01s\n", i, marker)
-			cmd := "printf '%s' " + shellQuote(output) + "; exit 1"
+			cmd := fmt.Sprintf("go test ./run%d", i)
 
 			err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", cmd)
 			if err == nil {
@@ -805,16 +861,18 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
+	gate := newGateShell(gateExit(goTestFixtureOneFailingPackage, 1))
+	d := gateDaemon(townRoot, discardLogger, gate)
 
-	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
-
-	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", cmd)
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from failing command")
+	}
+	if got := gate.ran(); len(got) != 1 || got[0] != "go test ./..." || gate.dirs[0] != workDir {
+		t.Fatalf("gate ran %q in %q, want the command once in the worktree", got, gate.dirs)
+	}
+	if !slices.Contains(gate.env[0], "CI=true") {
+		t.Errorf("the gate must run with CI=true in its environment")
 	}
 
 	body := err.Error()
@@ -844,6 +902,9 @@ func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
 // "--- FAIL: ..." and "FAIL\t<pkg>\t<secs>s" lines landed at column 0 of the
 // run's log and the extractor reported them as the failing package (gt-f57o,
 // second defect).
+//
+// The runner itself is answered in process; only the command string, which
+// the runner logs, is this shape.
 func fixtureEchoCommand() string {
 	return "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
 }
@@ -884,10 +945,7 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
 	t.Parallel()
 	var logged bytes.Buffer
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logged, "", 0),
-	}
+	d := gateDaemon(t.TempDir(), log.New(&logged, "", 0), newGateShell(gateExit(goTestFixtureOneFailingPackage, 1)))
 
 	_ = d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), "test", fixtureEchoCommand())
 
@@ -909,13 +967,9 @@ func TestRunCommandOnWorktree_ReportsThePackageThatExists(t *testing.T) {
 		"internal/daemon/scan.go": "package daemon\n",
 	})
 	townRoot := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
+	d := gateDaemon(townRoot, discardLogger, newGateShell(gateExit(goTestFixtureNestedTranscript, 1)))
 
-	cmd := "printf '%s' " + shellQuote(goTestFixtureNestedTranscript) + "; exit 1"
-	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", cmd)
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "deadbeef", workDir, "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from failing command")
 	}
@@ -1192,12 +1246,9 @@ func TestOneLine(t *testing.T) {
 func TestRunCommandOnWorktree_LogLineNamesTheTestedHead(t *testing.T) {
 	t.Parallel()
 	var logged bytes.Buffer
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logged, "", 0),
-	}
+	d := gateDaemon(t.TempDir(), log.New(&logged, "", 0), newGateShell(gateExit("", 0)))
 
-	if err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6", t.TempDir(), "test", "exit 0"); err != nil {
+	if err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6", t.TempDir(), "test", "go test ./..."); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1213,15 +1264,10 @@ func TestRunCommandOnWorktree_LogLineNamesTheTestedHead(t *testing.T) {
 func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(gateExit(goTestFixtureOneFailingPackage, 1)))
 	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
 
-	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
-
-	err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6a7b8", t.TempDir(), "test", cmd)
+	err := d.runCommandOnWorktree(context.Background(), "gastown", "37ab61b2c4d1e5f6a7b8", t.TempDir(), "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from failing command")
 	}
@@ -1267,14 +1313,6 @@ func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
 const killedSuiteTranscript = "ok  \tgithub.com/steveyegge/gastown/internal/daemon\t463.9s\n" +
 	"ok  \tgithub.com/steveyegge/gastown/internal/tmux\t141.5s\n"
 
-// timedOutCommand reports the killed-suite transcript and then keeps running,
-// so only the deadline can end it. The exec replaces the shell with the sleep:
-// the context's kill then reaches the process holding the output pipes, and the
-// run returns at the deadline instead of waiting the sleep out.
-func timedOutCommand(printed string) string {
-	return "printf '%s' " + shellQuote(killedSuiteTranscript) + "; touch " + shellQuote(printed) + "; exec sleep 30"
-}
-
 // TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout is the gt-59yz
 // acceptance case. The suite outran its budget, exec.CommandContext killed it,
 // and the escalation the mayor reads must say that: before this, the body's
@@ -1282,12 +1320,10 @@ func timedOutCommand(printed string) string {
 // character-for-character what a crash reports, while the transcript under it
 // was green and the run had simply needed longer. The kill stays in the body,
 // named as the deadline's doing, so the underlying error is not lost to the
-// rewording.
-//
-// The signal that kill used is not pinned: SetProcessGroup escalates SIGTERM to
-// SIGKILL, so the cause is "terminated" unless the group had to be forced, and
-// the verdict is a timeout because the context's deadline expired, not because
-// of which signal the group-kill reached for (gt-6t43).
+// rewording. The gate here prints the killed-suite transcript, lets the
+// deadline pass and ends the way a killed shell does;
+// TestIntegrationRunCommandOnWorktree_TimeoutIsReportedAsTimeout runs the
+// real kill.
 func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 	t.Parallel()
 	workDir := t.TempDir()
@@ -1296,33 +1332,15 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 		"internal/daemon/scan.go": "package daemon\n",
 		"internal/tmux/scan.go":   "package tmux\n",
 	})
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
-	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
-
-	// The deadline passes once the suite has printed its transcript, not
-	// after a fixed 2s of wall clock: a loaded host can take longer than that
-	// to start sh at all, and the kill would then find no transcript to
-	// report. The context still carries a 2s deadline for the budget line.
-	printed := filepath.Join(t.TempDir(), "printed")
 	ctx := newGatedDeadline()
 	ctx.deadline = time.Now().Add(2 * time.Second)
-	go func() {
-		for {
-			if _, err := os.Stat(printed); err == nil {
-				ctx.expire()
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Millisecond):
-			}
-		}
-	}()
-	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", workDir, "test", timedOutCommand(printed))
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(func(string) (string, error) {
+		ctx.expire()
+		return killedSuiteTranscript, errors.New("signal: killed")
+	}))
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
+
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", workDir, "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from a command killed at its deadline")
 	}
@@ -1336,26 +1354,20 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 		t.Errorf("expected no failure wording on a deadline kill, got: %q", firstLine)
 	}
 	for _, want := range []string{
-		"of the run's budget",                          // not presented as a plain failure
-		"still running when its deadline fired",        // that it was alive, not crashed
-		"killed by: signal: ",                          // the raw cause, preserved
-		"this is the runner's timeout, not a crash",    // and classified
-		"run budget: patrols.main_branch_test.timeout", // so the fix (raise it) is visible
+		"of the run's budget",
+		"still running when its deadline fired",
+		"killed by: signal: killed",
+		"this is the runner's timeout, not a crash",
+		"run budget: patrols.main_branch_test.timeout",
 		"last package reported: ok  \t" + "github.com/steveyegge/gastown/internal/tmux",
-		"the killed run's transcript is green", // the all-green tail, labeled
+		"the killed run's transcript is green",
 		"commit: deadbeef",
-		"host at start: CPU idle 3.5%", // the contention context survives the refactor
+		"host at start: CPU idle 3.5%",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected body to contain %q, got:\n%s", want, body)
 		}
 	}
-
-	// The budget is the clock this command was given, measured at its start.
-	// Asserted as a range rather than an exact string: it is derived from a
-	// real deadline minus however long the run took to reach this command, so
-	// pinning "2s" would fail on a box slow enough to lose half a second
-	// between the context and the first instruction.
 	if got := parseBudgetSeconds(t, body); got < time.Second || got > 2*time.Second {
 		t.Errorf("expected the reported budget to be within [1s, 2s] of the 2s timeout, got %v:\n%s", got, body)
 	}
@@ -1389,14 +1401,11 @@ func parseBudgetSeconds(t *testing.T, body string) time.Duration {
 // hide the crashes this runner exists to report.
 func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(gateExit("", 3)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "exit 3")
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from a failing command")
 	}
@@ -1416,15 +1425,15 @@ func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
 // the cycle does not count as either a pass or a failure (gt-59yz).
 func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(500*time.Millisecond, cancel)
 	defer cancel()
-	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "exec sleep 30")
+	// The daemon stops mid-run: the context is canceled while the gate runs,
+	// and the shell dies of the kill the cancellation sends.
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(func(string) (string, error) {
+		cancel()
+		return "", errors.New("signal: killed")
+	}))
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "test", "go test ./...")
 	if err == nil {
 		t.Fatal("expected error from a command killed by its canceled context")
 	}
@@ -1446,17 +1455,15 @@ func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 // escalate a red main because the daemon restarted (gt-59yz).
 func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(500*time.Millisecond, cancel)
 	defer cancel()
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(func(string) (string, error) {
+		cancel()
+		return "", errors.New("signal: killed")
+	}))
 
 	err := d.runGatesOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), map[string]string{
-		"build-check": "exec sleep 30",
+		"build-check": "go build ./...",
 	})
 	if err == nil {
 		t.Fatal("expected error from a canceled gate")
@@ -1571,20 +1578,19 @@ func TestRunGatesOnWorktree_AllStoppedGatesKeepTheSentinel(t *testing.T) {
 // started (earlier gates ate a shared budget), so os/exec's Start hands back
 // ctx.Err() with nothing run and nothing printed. Calling that "still running
 // when its deadline fired" would describe a command that never executed, and
-// the empty output would draw the all-green reassurance on top of it.
+// the empty output would draw the all-green reassurance on top of it. The gate
+// answers the way os/exec does for a context already done: ctx.Err(), nothing
+// run.
 func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: discardLogger,
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 	<-ctx.Done()
 
-	marker := filepath.Join(t.TempDir(), "ran")
-	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "build-check", "touch "+shellQuote(marker))
+	d := gateDaemon(t.TempDir(), discardLogger, newGateShell(func(string) (string, error) {
+		return "", ctx.Err()
+	}))
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", t.TempDir(), "build-check", "go build ./...")
 	if err == nil {
 		t.Fatal("expected error from a command whose context was already expired")
 	}
@@ -1596,9 +1602,6 @@ func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("a command that never started must not contain %q, got:\n%s", unwanted, body)
 		}
-	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Errorf("expected the command not to have run, marker exists: %v", statErr)
 	}
 }
 
@@ -1674,24 +1677,19 @@ func TestLastPackageReported(t *testing.T) {
 // absence of a failure doesn't prove the right thing ran first).
 func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	workDir := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
+	gate := newGateShell(gateExit("", 0))
+	d := gateDaemon(t.TempDir(), discardLogger, gate)
 
-	marker := filepath.Join(workDir, "setup-ran")
 	gateCfg := &rigGateConfig{
-		SetupCommand: "touch " + shellQuote(marker),
-		TestCommand:  "test -f " + shellQuote(marker),
+		SetupCommand: "npm ci",
+		TestCommand:  "npm test",
 	}
 
-	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg); err != nil {
+	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", t.TempDir(), gateCfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("expected setup command to have run, marker file missing: %v", err)
+	if got := gate.ran(); !slices.Equal(got, []string{"npm ci", "npm test"}) {
+		t.Errorf("gates ran %q, want the setup command and then the test command", got)
 	}
 }
 
@@ -1702,28 +1700,28 @@ func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
 // must never run.
 func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	workDir := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
+	gate := newGateShell(func(command string) (string, error) {
+		if command == "jest-not-installed" {
+			return "sh: jest-not-installed: command not found\n", &cliExitError{code: 127}
+		}
+		return "", nil
+	})
+	d := gateDaemon(t.TempDir(), discardLogger, gate)
 
-	marker := filepath.Join(workDir, "test-ran")
 	gateCfg := &rigGateConfig{
 		SetupCommand: "jest-not-installed", // mimics "sh: jest: command not found" (exit 127)
-		TestCommand:  "touch " + shellQuote(marker),
+		TestCommand:  "npm test",
 	}
 
-	err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg)
+	err := d.runRigGates(context.Background(), "gastown", "deadbeef", t.TempDir(), gateCfg)
 	if err == nil {
 		t.Fatal("expected error from failing setup command")
 	}
 	if !strings.HasPrefix(err.Error(), "setup failed:") {
 		t.Errorf("expected error to be reported as a setup failure, got: %v", err)
 	}
-	if _, statErr := os.Stat(marker); statErr == nil {
-		t.Error("expected test command to be skipped after setup failure, but it ran")
+	if got := gate.ran(); !slices.Equal(got, []string{"jest-not-installed"}) {
+		t.Errorf("gates ran %q, want the test command skipped after the setup failure", got)
 	}
 }
 
@@ -1732,16 +1730,15 @@ func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
 // configures setup_command must behave exactly as before this change.
 func TestRunRigGates_MissingSetupCommandUnchanged(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	workDir := t.TempDir()
-	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
-	}
+	gate := newGateShell(gateExit("", 0))
+	d := gateDaemon(t.TempDir(), discardLogger, gate)
 
-	gateCfg := &rigGateConfig{TestCommand: "exit 0"}
-	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", workDir, gateCfg); err != nil {
+	gateCfg := &rigGateConfig{TestCommand: "npm test"}
+	if err := d.runRigGates(context.Background(), "gastown", "deadbeef", t.TempDir(), gateCfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gate.ran(); !slices.Equal(got, []string{"npm test"}) {
+		t.Errorf("gates ran %q, want only the test command", got)
 	}
 }
 
@@ -1808,81 +1805,6 @@ func TestAcquireMainBranchTestSlot_AcquiresAndReleases(t *testing.T) {
 	}
 	if rep.Held {
 		t.Fatalf("slot.Status still reports held after Release: %+v", rep)
-	}
-}
-
-// TestAcquireMainBranchTestSlot_TakesTheRealHold is the gt-off9 regression
-// test: the runner must acquire as a first-class holder — flock, owner file,
-// docker-ps check — even when the daemon's own environment carries a marker
-// naming this very role, which is what a marker inherited from a
-// predecessor daemon process looks like. The kernel drops that process's
-// flock when it dies, but the marker lives on in everything it spawned, so
-// riding it would let every cycle "acquire" a slot nobody holds and run with
-// no flock, no owner file and no docker-ps check: invisible to the refinery
-// gates and gt done verifies it is supposed to queue behind.
-func TestAcquireMainBranchTestSlot_TakesTheRealHold(t *testing.T) {
-	stubNoContainers(t)
-	townRoot := t.TempDir()
-
-	inherited := slot.SlotLockPath(townRoot, 0) + "|" + strconv.Itoa(os.Getpid()+100000) + "|gastown/main-branch-test"
-	t.Setenv(slot.ReentrantEnvVar, inherited)
-
-	h, err := acquireMainBranchTestSlot(townRoot, "gastown")
-	if err != nil {
-		t.Fatalf("acquireMainBranchTestSlot: %v", err)
-	}
-
-	rep, err := slot.Status(townRoot)
-	if err != nil {
-		t.Fatalf("slot.Status while held: %v", err)
-	}
-	if !rep.Held {
-		t.Fatalf("no flock taken — the daemon's suite is invisible to every other caller: %+v", rep)
-	}
-	if rep.Owner == nil || rep.Owner.Role != "gastown/main-branch-test" || rep.Owner.PID != os.Getpid() {
-		t.Fatalf("owner file should name the daemon's own hold: %+v", rep.Owner)
-	}
-
-	// The marker the hold arms for its descendants names this runner's role,
-	// overwriting the stale one — which is what keeps it harmless in the
-	// unrelated processes the daemon spawns while holding: only a caller
-	// doing the same role's work may ride it (gt-off9).
-	want := slot.SlotLockPath(townRoot, h.Index) + "|" + strconv.Itoa(os.Getpid()) + "|gastown/main-branch-test"
-	if got := os.Getenv(slot.ReentrantEnvVar); got != want {
-		t.Fatalf("marker armed by the daemon's hold = %q, want %q", got, want)
-	}
-
-	if err := h.Release(); err != nil {
-		t.Fatalf("Release: %v", err)
-	}
-	if rep, _ = slot.Status(townRoot); rep.Held {
-		t.Fatalf("the hold outlived Release: %+v", rep)
-	}
-}
-
-// TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI proves
-// stubNoContainers above is actually wired to the machinery
-// acquireMainBranchTestSlot uses (see the identical concern documented on
-// internal/cmd/mq_batch_slot_test.go's TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI):
-// without the stub, a real docker/testcontainers suite already up on a
-// shared host would make this poll the real `docker ps` for the full
-// mainBranchTestSlotTimeout (60m), hanging the package's test run.
-func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	restore := slot.SetContainerListerForTest(func() ([]string, error) {
-		return []string{"dolt/dolt-sql-server:2.2.0 someone-elses-suite"}, nil
-	})
-	defer restore()
-
-	townRoot := t.TempDir()
-	// One pass is enough: the acquire probes the lister before it checks its
-	// deadline, so a nanosecond budget fails on the stub's container at once
-	// instead of polling it for DefaultPollInterval. Were the real (docker-
-	// absent) lister consulted instead, the slot would be granted on the flock
-	// alone and the acquire would succeed.
-	timeout := time.Nanosecond
-	if _, err := slot.Acquire(townRoot, "gastown/main-branch-test", timeout); err == nil {
-		t.Fatalf("Acquire succeeded even though the stubbed lister reported a running container — the real (docker-absent) lister must have been consulted instead of the stub")
 	}
 }
 

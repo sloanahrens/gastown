@@ -1385,7 +1385,7 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 	// The calm-wait sentence, character-for-character: a polecat that reads
 	// the wait as a hang closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
-	const calmWait = "`gt done` runs the local gate itself (lint, build and the unit tier of the tests; " +
+	const calmWait = "`gt done` runs the local gate itself (lint, build and the tests of the packages your branch changed; " +
 		"no container slot), which can take several minutes. That is normal. Do not interrupt it " +
 		"and do not close the bead."
 

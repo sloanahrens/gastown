@@ -896,13 +896,6 @@ func setupMockBeads(t *testing.T, townRoot, rigName string) {
 			"issue_type": "agent",
 			"labels":     []string{"gt:agent"},
 		},
-		{
-			"id":         beads.RefineryBeadIDWithPrefix(prefix, rigName),
-			"title":      "Refinery for " + rigName,
-			"status":     "open",
-			"issue_type": "agent",
-			"labels":     []string{"gt:agent"},
-		},
 	}
 
 	f, err := os.Create(issuesFile)

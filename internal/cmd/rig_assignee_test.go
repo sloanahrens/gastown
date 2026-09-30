@@ -53,7 +53,7 @@ func TestAssigneeToSessionName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotSession, gotPersistent := assigneeToSessionName(tc.assignee)
+			gotSession, gotPersistent := session.AssigneeSessionName(tc.assignee)
 			if gotSession != tc.wantSession {
 				t.Fatalf("session = %q, want %q", gotSession, tc.wantSession)
 			}

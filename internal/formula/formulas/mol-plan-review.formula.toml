@@ -293,9 +293,9 @@ All leg reviews from: {{.output.directory}}/
 
 **After writing the file, mail the coordinator (whoever poured this formula):**
 ```bash
-SUBJECT=$(cat <<'EOF'
+SUBJECT=$(cat <<'GT_PROBLEM_EOF'
 Plan Review Complete: {{.problem}}
-EOF
+GT_PROBLEM_EOF
 )
 gt mail send --human -s "$SUBJECT" --stdin <<'BODY'
 Review is ready: {{.output.directory}}/plan-review.md

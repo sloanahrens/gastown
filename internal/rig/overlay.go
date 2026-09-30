@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -165,10 +164,22 @@ func gasTownLocalExcludePatterns() []string {
 // worktree-local git exclude file so the worktree stays clean without mutating a
 // tracked .gitignore.
 func EnsureLocalExcludePatterns(worktreePath string) error {
-	excludePath, err := gitLocalExcludePath(worktreePath)
+	return ensureLocalExcludePatterns(worktreePath, git.NewGit(worktreePath))
+}
+
+// ensureLocalExcludePatterns is EnsureLocalExcludePatterns through g, the git
+// of worktreePath.
+func ensureLocalExcludePatterns(worktreePath string, g interface{ CommonDir() (string, error) }) error {
+	// Use the common dir, not the git dir: for a linked worktree the git dir
+	// is worktree-private (.git/worktrees/<name>), whose info/exclude git
+	// never reads. info/exclude is only honored from the common dir shared by
+	// the main checkout and every linked worktree. CommonDir also refuses a
+	// worktreePath whose repository discovery walks up to the town root.
+	commonDir, err := g.CommonDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving git common dir of %s: %w", worktreePath, err)
 	}
+	excludePath := filepath.Join(commonDir, "info", "exclude")
 
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
 		return fmt.Errorf("creating local exclude dir: %w", err)
@@ -224,35 +235,6 @@ func EnsureLocalExcludePatterns(worktreePath string) error {
 	}
 
 	return nil
-}
-
-func gitLocalExcludePath(worktreePath string) (string, error) {
-	// Guard against git's repository discovery walking up past worktreePath
-	// (e.g. because worktreePath isn't actually a git working tree yet) and
-	// landing on an enclosing repository such as the Gas Town root. Reuses
-	// the same town-root check raw git mutations rely on elsewhere.
-	if err := git.EnsureSafeMutationWorkDir(worktreePath); err != nil {
-		return "", fmt.Errorf("refusing to resolve git exclude path: %w", err)
-	}
-
-	// Use --git-common-dir, not --git-dir: for a linked worktree, --git-dir
-	// returns the worktree-private directory (.git/worktrees/<name>), whose
-	// info/exclude git never reads. info/exclude is only honored from the
-	// common dir shared by the main checkout and every linked worktree.
-	cmd := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-common-dir")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("resolving git common dir: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-
-	gitCommonDir := strings.TrimSpace(string(out))
-	if gitCommonDir == "" {
-		return "", fmt.Errorf("empty git common dir for %s", worktreePath)
-	}
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(worktreePath, gitCommonDir)
-	}
-	return filepath.Join(gitCommonDir, "info", "exclude"), nil
 }
 
 // matchesGitignorePattern checks if a gitignore line covers the required pattern.

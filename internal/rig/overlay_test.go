@@ -2,13 +2,15 @@ package rig
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestCopyOverlay_NoOverlayDirectory(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -20,6 +22,7 @@ func TestCopyOverlay_NoOverlayDirectory(t *testing.T) {
 }
 
 func TestCopyOverlay_CopiesFiles(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -68,6 +71,7 @@ func TestCopyOverlay_CopiesFiles(t *testing.T) {
 }
 
 func TestCopyOverlay_PreservesPermissions(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -77,8 +81,9 @@ func TestCopyOverlay_PreservesPermissions(t *testing.T) {
 		t.Fatalf("Failed to create overlay dir: %v", err)
 	}
 
+	// A mode other than the 0644 a plain copy would give the file.
 	testFile := filepath.Join(overlayDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("content"), 0755); err != nil {
+	if err := os.WriteFile(testFile, []byte("content"), 0600); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
@@ -101,6 +106,7 @@ func TestCopyOverlay_PreservesPermissions(t *testing.T) {
 }
 
 func TestCopyOverlay_SkipsSubdirectories(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -149,6 +155,7 @@ func TestCopyOverlay_SkipsSubdirectories(t *testing.T) {
 }
 
 func TestCopyOverlay_EmptyOverlay(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -168,6 +175,7 @@ func TestCopyOverlay_EmptyOverlay(t *testing.T) {
 }
 
 func TestCopyOverlay_OverwritesExisting(t *testing.T) {
+	t.Parallel()
 	rigDir := t.TempDir()
 	destDir := t.TempDir()
 
@@ -205,6 +213,7 @@ func TestCopyOverlay_OverwritesExisting(t *testing.T) {
 }
 
 func TestCopyFilePreserveMode(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create source file
@@ -241,6 +250,7 @@ func TestCopyFilePreserveMode(t *testing.T) {
 }
 
 func TestCopyFilePreserveMode_NonexistentSource(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	srcFile := filepath.Join(tmpDir, "nonexistent.txt")
@@ -253,6 +263,7 @@ func TestCopyFilePreserveMode_NonexistentSource(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_CreatesNewFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	err := EnsureGitignorePatterns(tmpDir)
@@ -275,6 +286,7 @@ func TestEnsureGitignorePatterns_CreatesNewFile(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_AppendsToExisting(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create existing .gitignore with some content
@@ -313,6 +325,7 @@ func TestEnsureGitignorePatterns_AppendsToExisting(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_SkipsExistingPatterns(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create existing .gitignore with some Gas Town patterns already.
@@ -370,6 +383,7 @@ func TestEnsureGitignorePatterns_SkipsExistingPatterns(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_RecognizesVariants(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create existing .gitignore with variant patterns (without trailing slash).
@@ -406,6 +420,7 @@ func TestEnsureGitignorePatterns_RecognizesVariants(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_AllPatternsPresent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create existing .gitignore with all required patterns.
@@ -436,6 +451,7 @@ func TestEnsureGitignorePatterns_AllPatternsPresent(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_NarrowPatternPresent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .gitignore with the exact required patterns
@@ -461,6 +477,7 @@ func TestEnsureGitignorePatterns_NarrowPatternPresent(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_OldNarrowClaudeUpgraded(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Simulate old installation with narrow .claude/commands/ pattern.
@@ -493,6 +510,7 @@ func TestEnsureGitignorePatterns_OldNarrowClaudeUpgraded(t *testing.T) {
 }
 
 func TestEnsureGitignorePatterns_UpgradePreservesBroadPattern(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Simulate an existing installation that has .claude/ plus other Gas Town
@@ -531,6 +549,7 @@ func TestEnsureGitignorePatterns_UpgradePreservesBroadPattern(t *testing.T) {
 // patterns include .beads/ (defense-in-depth for gas-7vg) while the gitignore
 // patterns do NOT include .beads/ (regression guard).
 func TestGasTownLocalExcludePatterns_IncludesBeads(t *testing.T) {
+	t.Parallel()
 	localPatterns := gasTownLocalExcludePatterns()
 	found := false
 	for _, p := range localPatterns {
@@ -556,99 +575,58 @@ func TestGasTownLocalExcludePatterns_IncludesBeads(t *testing.T) {
 // guard for gt-cqy8: a linked worktree's --git-dir is the worktree-private
 // directory (.git/worktrees/<name>), and info/exclude written there is never
 // read by git. The patterns must land in the shared common dir's info/exclude
-// instead, where `git status` in the worktree actually honors them.
+// instead. What CommonDir answers for a linked worktree is pinned by
+// gitfake's contract; that git honors the file, by TestIntegrationAddRig.
 func TestEnsureLocalExcludePatterns_LinkedWorktreeUsesCommonDir(t *testing.T) {
-	mainRepo := t.TempDir()
-	runGit(t, mainRepo, "init")
-	runGit(t, mainRepo, "config", "user.email", "test@test.com")
-	runGit(t, mainRepo, "config", "user.name", "Test User")
-	if err := os.WriteFile(filepath.Join(mainRepo, "README.md"), []byte("hi"), 0644); err != nil {
-		t.Fatalf("write README: %v", err)
-	}
-	runGit(t, mainRepo, "add", ".")
-	runGit(t, mainRepo, "commit", "-m", "initial")
-
-	worktreePath := filepath.Join(t.TempDir(), "linked-worktree")
-	runGit(t, mainRepo, "worktree", "add", "-b", "feature", worktreePath, "HEAD")
-
-	if err := EnsureLocalExcludePatterns(worktreePath); err != nil {
-		t.Fatalf("EnsureLocalExcludePatterns() error = %v", err)
+	t.Parallel()
+	f := gitfake.New()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	f.InitBare(t, origin)
+	f.Commit(t, origin, "main", "initial", map[string]string{"README.md": "hi"})
+	mainRepo := filepath.Join(tmp, "main")
+	f.Clone(t, origin, mainRepo)
+	worktreePath := filepath.Join(tmp, "linked-worktree")
+	if err := f.Open(mainRepo).WorktreeAddDetached(worktreePath, "HEAD"); err != nil {
+		t.Fatal(err)
 	}
 
-	// The common dir's info/exclude (shared main-repo .git) must contain the
-	// patterns - this is what `git status` in the worktree actually reads.
-	commonExclude := filepath.Join(mainRepo, ".git", "info", "exclude")
-	content, err := os.ReadFile(commonExclude)
+	if err := ensureLocalExcludePatterns(worktreePath, f.Open(worktreePath)); err != nil {
+		t.Fatalf("ensureLocalExcludePatterns() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(mainRepo, ".git", "info", "exclude"))
 	if err != nil {
 		t.Fatalf("reading common-dir info/exclude: %v", err)
 	}
-	if !containsLine(string(content), ".claude/") {
-		t.Errorf("common-dir info/exclude missing .claude/, got:\n%s", content)
+	for _, p := range []string{".claude/", ".beads/"} {
+		if !containsLine(string(content), p) {
+			t.Errorf("common-dir info/exclude missing %s, got:\n%s", p, content)
+		}
 	}
-
-	// The worktree-private git dir (.git/worktrees/<name>/info/exclude) must
-	// NOT be where patterns were written - that file is invisible to git.
-	privateExclude := filepath.Join(mainRepo, ".git", "worktrees", "linked-worktree", "info", "exclude")
-	if _, err := os.Stat(privateExclude); err == nil {
-		t.Errorf("patterns must not be written to worktree-private exclude %s", privateExclude)
+	// A linked worktree's .git is a file naming its private git dir, so an
+	// exclude file under it would be a directory where git has none.
+	if _, err := os.Stat(filepath.Join(worktreePath, ".git", "info", "exclude")); err == nil {
+		t.Errorf("patterns were written under the worktree itself")
 	}
-
-	// Verify git itself now considers .claude/ ignored in the worktree.
-	// check-ignore exits non-zero (which runGit turns into a fatal error) if
-	// the path isn't actually ignored.
-	runGit(t, worktreePath, "check-ignore", "-q", ".claude/marker")
 }
 
-// TestEnsureLocalExcludePatterns_RefusesTownRootWalkUp is a regression guard
-// for gt-cqy8's rejected first fix: if worktreePath itself isn't a proper git
-// working tree, plain `git rev-parse` discovery walks up parent directories
-// and can land on an enclosing repository - in the real deployment, the Gas
-// Town root. Writing there would pollute a repo far outside the intended
-// target. EnsureLocalExcludePatterns must refuse instead of silently writing
-// to the wrong repo.
-func TestEnsureLocalExcludePatterns_RefusesTownRootWalkUp(t *testing.T) {
-	townRoot := t.TempDir()
-	runGit(t, townRoot, "init")
-	runGit(t, townRoot, "config", "user.email", "test@test.com")
-	runGit(t, townRoot, "config", "user.name", "Test User")
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
+// A path git will not resolve (not a repository, or one whose discovery
+// walks up to the town root: internal/git's TestCommonDirRefusesTownRootWalkUp)
+// is refused, and nothing is written.
+func TestEnsureLocalExcludePatterns_RefusesUnresolvedCommonDir(t *testing.T) {
+	t.Parallel()
+	notAWorktree := t.TempDir()
+	err := ensureLocalExcludePatterns(notAWorktree, gitfake.New().Open(notAWorktree))
+	if err == nil || !strings.Contains(err.Error(), "resolving git common dir") {
+		t.Fatalf("ensureLocalExcludePatterns() = %v, want a refusal", err)
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-	runGit(t, townRoot, "add", ".")
-	runGit(t, townRoot, "commit", "-m", "initial")
-
-	// A plain subdirectory with no .git of its own - discovery would walk up
-	// to townRoot's .git if not guarded.
-	notAWorktree := filepath.Join(townRoot, "gastown", "polecats", "ghost")
-	if err := os.MkdirAll(notAWorktree, 0755); err != nil {
-		t.Fatalf("mkdir target: %v", err)
-	}
-
-	err := EnsureLocalExcludePatterns(notAWorktree)
-	if err == nil {
-		t.Fatal("expected EnsureLocalExcludePatterns() to refuse writing into the town root, got nil error")
-	}
-
-	content, readErr := os.ReadFile(filepath.Join(townRoot, ".git", "info", "exclude"))
-	if readErr == nil && containsLine(string(content), ".claude/") {
-		t.Errorf("patterns leaked into town root's info/exclude:\n%s", content)
+	if entries, _ := os.ReadDir(notAWorktree); len(entries) != 0 {
+		t.Errorf("wrote %d entries into a directory it refused", len(entries))
 	}
 }
 
 // Helper functions
-
-func runGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
 
 func containsLine(content, pattern string) bool {
 	for _, line := range splitLines(content) {

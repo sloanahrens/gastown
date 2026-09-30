@@ -32,7 +32,7 @@ func TestFakeInspection(t *testing.T) {
 	}
 }
 
-func TestFakeWorktreeContract(t *testing.T) {
+func TestFakeBranchContract(t *testing.T) {
 	t.Parallel()
-	RunWorktreeContract(t, func(t *testing.T) WorktreeEnv { return New() })
+	RunBranchContract(t, func(t *testing.T) BranchEnv { return New() })
 }

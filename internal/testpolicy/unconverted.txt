@@ -9,7 +9,6 @@ internal/daemon
 internal/deacon
 internal/doctor
 internal/dog
-internal/doltserver
 internal/feed
 internal/formula
 internal/hooks
@@ -20,7 +19,6 @@ internal/plugin
 internal/polecat
 internal/protocol
 internal/reaper
-internal/rig
 internal/runtime
 internal/scheduler/capacity
 internal/session

@@ -7,6 +7,7 @@ import (
 )
 
 func TestRemoveRigPathIfOwned_MatchingStampRemovesPath(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rigPath, "some-file"), []byte("x"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -28,6 +29,7 @@ func TestRemoveRigPathIfOwned_MatchingStampRemovesPath(t *testing.T) {
 }
 
 func TestRemoveRigPathIfOwned_MismatchedStampKeepsPath(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	preserved := filepath.Join(rigPath, "preserve-me")
 	if err := os.WriteFile(preserved, []byte("important"), 0644); err != nil {
@@ -45,6 +47,7 @@ func TestRemoveRigPathIfOwned_MismatchedStampKeepsPath(t *testing.T) {
 }
 
 func TestRemoveRigPathIfOwned_MissingStampOnNonEmptyPathKeepsPath(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	preserved := filepath.Join(rigPath, "rig-content")
 	if err := os.WriteFile(preserved, []byte("important"), 0644); err != nil {
@@ -59,6 +62,7 @@ func TestRemoveRigPathIfOwned_MissingStampOnNonEmptyPathKeepsPath(t *testing.T) 
 }
 
 func TestRemoveRigPathIfOwned_MissingStampOnEmptyPathRemovesPath(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 
 	removeRigPathIfOwned(rigPath, "stale-stamp")
@@ -69,6 +73,7 @@ func TestRemoveRigPathIfOwned_MissingStampOnEmptyPathRemovesPath(t *testing.T) {
 }
 
 func TestRemoveRigPathIfOwned_NoExpectedStampRemovesPath(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rigPath, "x"), []byte("x"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)

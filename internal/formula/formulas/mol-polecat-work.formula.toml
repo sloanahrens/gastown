@@ -600,7 +600,7 @@ Submit your work and clean up. You cease to exist after this step.
 **Self-Cleaning Model:**
 Once `gt done` succeeds, you're gone. The command:
 1. Rebases your branch onto origin/{{base_branch}} and squashes auto-save commits
-2. Runs the local gate (lint, build, the unit tier of the tests)
+2. Runs the local gate (lint, build, the tests of the packages your branch changed)
 3. Pushes your branch and marks {{issue}} ready to land
 4. Exits your session
 
@@ -629,7 +629,7 @@ subject and the next reader's premise (gt-3t2).
 
 **While gt done runs — do not touch it (gt-7dxw):**
 
-gt done runs the local gate itself (lint, build and the unit tier of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.
+gt done runs the local gate itself (lint, build and the tests of the packages your branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.
 
 **Never script a retry around gt done** — no `for`/`while`/`until` loop, no
 watcher, no generated retry script; the dangerous-command guard refuses the

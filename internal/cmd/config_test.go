@@ -1,13 +1,14 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 )
@@ -51,21 +52,13 @@ func setupTestTownForConfig(t *testing.T) string {
 }
 
 func TestConfigAgentList(t *testing.T) {
+	t.Parallel()
 	t.Run("lists built-in agents", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// Change to town root so workspace.FindFromCwd works
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command
-		cmd := &cobra.Command{}
-		args := []string{}
-		err := runConfigAgentList(cmd, args)
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -96,18 +89,8 @@ func TestConfigAgentList(t *testing.T) {
 			t.Fatalf("save settings: %v", err)
 		}
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-
 		// Run the command
-		cmd := &cobra.Command{}
-		args := []string{}
-		err := runConfigAgentList(cmd, args)
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -116,19 +99,10 @@ func TestConfigAgentList(t *testing.T) {
 	t.Run("JSON output", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-
 		// Use a command with the --json flag registered
-		cmd := &cobra.Command{}
-		cmd.Flags().Bool("json", true, "")
-		args := []string{}
-		err := runConfigAgentList(cmd, args)
+		e := townConfigCmdEnv(townRoot, io.Discard)
+		e.agentListJSON = true
+		err := configAgentList(e)
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -136,21 +110,13 @@ func TestConfigAgentList(t *testing.T) {
 }
 
 func TestConfigAgentGet(t *testing.T) {
+	t.Parallel()
 	t.Run("gets built-in agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-
 		// Run the command
-		cmd := &cobra.Command{}
 		args := []string{"claude"}
-		err := runConfigAgentGet(cmd, args)
+		err := configAgentGet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentGet failed: %v", err)
 		}
@@ -176,18 +142,9 @@ func TestConfigAgentGet(t *testing.T) {
 			t.Fatalf("save settings: %v", err)
 		}
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-
 		// Run the command
-		cmd := &cobra.Command{}
 		args := []string{"my-custom"}
-		err := runConfigAgentGet(cmd, args)
+		err := configAgentGet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentGet failed: %v", err)
 		}
@@ -196,18 +153,9 @@ func TestConfigAgentGet(t *testing.T) {
 	t.Run("returns error for unknown agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-
 		// Run the command with unknown agent
-		cmd := &cobra.Command{}
 		args := []string{"unknown-agent"}
-		err := runConfigAgentGet(cmd, args)
+		err := configAgentGet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err == nil {
 			t.Fatal("expected error for unknown agent")
 		}
@@ -218,21 +166,14 @@ func TestConfigAgentGet(t *testing.T) {
 }
 
 func TestConfigAgentSet(t *testing.T) {
+	t.Parallel()
 	t.Run("sets custom agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command
-		cmd := &cobra.Command{}
 		args := []string{"my-agent", "my-agent --arg1 --arg2"}
-		err := runConfigAgentSet(cmd, args)
+		err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
@@ -262,17 +203,9 @@ func TestConfigAgentSet(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command
-		cmd := &cobra.Command{}
 		args := []string{"simple-agent", "simple-agent"}
-		err := runConfigAgentSet(cmd, args)
+		err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
@@ -312,17 +245,9 @@ func TestConfigAgentSet(t *testing.T) {
 			t.Fatalf("save initial settings: %v", err)
 		}
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command to override
-		cmd := &cobra.Command{}
 		args := []string{"my-agent", "new-command --new"}
-		err := runConfigAgentSet(cmd, args)
+		err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
@@ -341,21 +266,14 @@ func TestConfigAgentSet(t *testing.T) {
 }
 
 func TestConfigAgentSetProviderInference(t *testing.T) {
+	t.Parallel()
 	t.Run("infers provider from known command name", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// "gemini" is a known preset — provider should be inferred
-		configAgentSetProvider = ""
-		cmd := &cobra.Command{}
 		args := []string{"gemini-custom", "gemini --fast-mode"}
-		if err := runConfigAgentSet(cmd, args); err != nil {
+		if err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args); err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
 
@@ -380,17 +298,9 @@ func TestConfigAgentSetProviderInference(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// "my-custom-tool" is not a known preset — provider should remain empty
-		configAgentSetProvider = ""
-		cmd := &cobra.Command{}
 		args := []string{"my-bot", "my-custom-tool --flag"}
-		if err := runConfigAgentSet(cmd, args); err != nil {
+		if err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args); err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
 
@@ -412,19 +322,10 @@ func TestConfigAgentSetProviderInference(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Command name is unknown, but explicit provider is given
-		configAgentSetProvider = "claude"
-		defer func() { configAgentSetProvider = "" }()
-
-		cmd := &cobra.Command{}
-		args := []string{"my-claude-wrapper", "my-claude-wrapper --custom"}
-		if err := runConfigAgentSet(cmd, args); err != nil {
+		e := townConfigCmdEnv(townRoot, io.Discard)
+		e.agentSetProvider = "claude"
+		if err := configAgentSet(e, []string{"my-claude-wrapper", "my-claude-wrapper --custom"}); err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
 
@@ -444,6 +345,7 @@ func TestConfigAgentSetProviderInference(t *testing.T) {
 }
 
 func TestConfigAgentRemove(t *testing.T) {
+	t.Parallel()
 	t.Run("removes custom agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
@@ -464,17 +366,9 @@ func TestConfigAgentRemove(t *testing.T) {
 			t.Fatalf("save settings: %v", err)
 		}
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command
-		cmd := &cobra.Command{}
 		args := []string{"my-agent"}
-		err := runConfigAgentRemove(cmd, args)
+		err := configAgentRemove(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigAgentRemove failed: %v", err)
 		}
@@ -495,17 +389,9 @@ func TestConfigAgentRemove(t *testing.T) {
 	t.Run("rejects removing built-in agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Try to remove a built-in agent
-		cmd := &cobra.Command{}
 		args := []string{"claude"}
-		err := runConfigAgentRemove(cmd, args)
+		err := configAgentRemove(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err == nil {
 			t.Fatal("expected error when removing built-in agent")
 		}
@@ -517,17 +403,9 @@ func TestConfigAgentRemove(t *testing.T) {
 	t.Run("returns error for non-existent custom agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Try to remove a non-existent agent
-		cmd := &cobra.Command{}
 		args := []string{"non-existent"}
-		err := runConfigAgentRemove(cmd, args)
+		err := configAgentRemove(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err == nil {
 			t.Fatal("expected error for non-existent agent")
 		}
@@ -538,20 +416,13 @@ func TestConfigAgentRemove(t *testing.T) {
 }
 
 func TestConfigDefaultAgent(t *testing.T) {
+	t.Parallel()
 	t.Run("gets default agent (shows current)", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Run the command with no args (should show current default)
-		cmd := &cobra.Command{}
 		args := []string{}
-		err := runConfigDefaultAgent(cmd, args)
+		err := configDefaultAgent(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigDefaultAgent failed: %v", err)
 		}
@@ -561,17 +432,9 @@ func TestConfigDefaultAgent(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Set default to gemini
-		cmd := &cobra.Command{}
 		args := []string{"gemini"}
-		err := runConfigDefaultAgent(cmd, args)
+		err := configDefaultAgent(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigDefaultAgent failed: %v", err)
 		}
@@ -607,17 +470,9 @@ func TestConfigDefaultAgent(t *testing.T) {
 			t.Fatalf("save settings: %v", err)
 		}
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Set default to custom agent
-		cmd := &cobra.Command{}
 		args := []string{"my-custom"}
-		err := runConfigDefaultAgent(cmd, args)
+		err := configDefaultAgent(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigDefaultAgent failed: %v", err)
 		}
@@ -636,17 +491,9 @@ func TestConfigDefaultAgent(t *testing.T) {
 	t.Run("returns error for unknown agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		// Change to town root
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Try to set default to unknown agent
-		cmd := &cobra.Command{}
 		args := []string{"unknown-agent"}
-		err := runConfigDefaultAgent(cmd, args)
+		err := configDefaultAgent(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err == nil {
 			t.Fatal("expected error for unknown agent")
 		}
@@ -657,18 +504,12 @@ func TestConfigDefaultAgent(t *testing.T) {
 }
 
 func TestConfigDefaultAgentList(t *testing.T) {
+	t.Parallel()
 	t.Run("lists available agents via default-agent list", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// runConfigAgentList is reused by default-agent list
-		cmd := &cobra.Command{}
-		err := runConfigAgentList(cmd, []string{})
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList (via default-agent list) failed: %v", err)
 		}
@@ -677,15 +518,9 @@ func TestConfigDefaultAgentList(t *testing.T) {
 	t.Run("JSON output via default-agent list", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		cmd.Flags().Bool("json", true, "")
-		err := runConfigAgentList(cmd, []string{})
+		e := townConfigCmdEnv(townRoot, io.Discard)
+		e.agentListJSON = true
+		err := configAgentList(e)
 		if err != nil {
 			t.Fatalf("runConfigAgentList JSON (via default-agent list) failed: %v", err)
 		}
@@ -693,19 +528,13 @@ func TestConfigDefaultAgentList(t *testing.T) {
 }
 
 func TestConfigSetGet(t *testing.T) {
+	t.Parallel()
 	t.Run("set and get convoy.notify_on_complete", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
 		// Set convoy.notify_on_complete to true
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"convoy.notify_on_complete", "true"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"convoy.notify_on_complete", "true"})
 		if err != nil {
 			t.Fatalf("runConfigSet failed: %v", err)
 		}
@@ -723,13 +552,13 @@ func TestConfigSetGet(t *testing.T) {
 		}
 
 		// Get the value back
-		err = runConfigGet(cmd, []string{"convoy.notify_on_complete"})
+		err = configGet(townConfigCmdEnv(townRoot, io.Discard), []string{"convoy.notify_on_complete"})
 		if err != nil {
 			t.Fatalf("runConfigGet failed: %v", err)
 		}
 
 		// Set back to false
-		err = runConfigSet(cmd, []string{"convoy.notify_on_complete", "false"})
+		err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"convoy.notify_on_complete", "false"})
 		if err != nil {
 			t.Fatalf("runConfigSet(false) failed: %v", err)
 		}
@@ -747,14 +576,7 @@ func TestConfigSetGet(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"cli_theme", "dark"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"cli_theme", "dark"})
 		if err != nil {
 			t.Fatalf("runConfigSet failed: %v", err)
 		}
@@ -771,14 +593,7 @@ func TestConfigSetGet(t *testing.T) {
 	t.Run("set cli_theme rejects invalid value", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"cli_theme", "neon"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"cli_theme", "neon"})
 		if err == nil {
 			t.Fatal("expected error for invalid cli_theme")
 		}
@@ -790,14 +605,7 @@ func TestConfigSetGet(t *testing.T) {
 	t.Run("set rejects unknown key", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"nonexistent.key", "value"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"nonexistent.key", "value"})
 		if err == nil {
 			t.Fatal("expected error for unknown key")
 		}
@@ -809,14 +617,7 @@ func TestConfigSetGet(t *testing.T) {
 	t.Run("get rejects unknown key", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigGet(cmd, []string{"nonexistent.key"})
+		err := configGet(townConfigCmdEnv(townRoot, io.Discard), []string{"nonexistent.key"})
 		if err == nil {
 			t.Fatal("expected error for unknown key")
 		}
@@ -828,14 +629,7 @@ func TestConfigSetGet(t *testing.T) {
 	t.Run("convoy.notify_on_complete rejects non-boolean", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"convoy.notify_on_complete", "maybe"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"convoy.notify_on_complete", "maybe"})
 		if err == nil {
 			t.Fatal("expected error for non-boolean value")
 		}
@@ -846,17 +640,11 @@ func TestConfigSetGet(t *testing.T) {
 }
 
 func TestSchedulerConfigSetZero(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForConfig(t)
 	settingsPath := config.TownSettingsPath(townRoot)
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	cmd := &cobra.Command{}
-	if err := runConfigSet(cmd, []string{"scheduler.max_polecats", "0"}); err != nil {
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"scheduler.max_polecats", "0"}); err != nil {
 		t.Fatalf("runConfigSet failed: %v", err)
 	}
 
@@ -871,27 +659,19 @@ func TestSchedulerConfigSetZero(t *testing.T) {
 		t.Fatalf("persisted scheduler.max_polecats = %d, want 0", got)
 	}
 
-	var getErr error
-	out := captureStdout(t, func() {
-		getErr = runConfigGet(cmd, []string{"scheduler.max_polecats"})
-	})
-	if getErr != nil {
-		t.Fatalf("runConfigGet failed: %v", getErr)
+	var stdout bytes.Buffer
+	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"scheduler.max_polecats"}); err != nil {
+		t.Fatalf("configGet failed: %v", err)
 	}
-	if strings.TrimSpace(out) != "0" {
-		t.Fatalf("config get scheduler.max_polecats = %q, want 0", strings.TrimSpace(out))
+	if out := strings.TrimSpace(stdout.String()); out != "0" {
+		t.Fatalf("config get scheduler.max_polecats = %q, want 0", out)
 	}
 }
 
 func TestConfigMaintenanceSetGet(t *testing.T) {
+	t.Parallel()
 	t.Run("set and get maintenance.window", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
-
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
 
 		// Set maintenance window
 		err := setMaintenanceConfig(townRoot, "maintenance.window", "03:00")
@@ -900,7 +680,7 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		}
 
 		// Get it back
-		err = getMaintenanceConfig(townRoot, "maintenance.window")
+		err = getMaintenanceConfig(io.Discard, townRoot, "maintenance.window")
 		if err != nil {
 			t.Fatalf("getMaintenanceConfig failed: %v", err)
 		}
@@ -978,11 +758,11 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
 		read := func(key string) string {
-			return strings.TrimSpace(captureStdout(t, func() {
-				if err := getMaintenanceConfig(townRoot, key); err != nil {
-					t.Errorf("getMaintenanceConfig(%s) failed: %v", key, err)
-				}
-			}))
+			var out bytes.Buffer
+			if err := getMaintenanceConfig(&out, townRoot, key); err != nil {
+				t.Errorf("getMaintenanceConfig(%s) failed: %v", key, err)
+			}
+			return strings.TrimSpace(out.String())
 		}
 
 		// Unset keys read as the daemon's defaults.
@@ -1022,11 +802,11 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
 		readMode := func() string {
-			return strings.TrimSpace(captureStdout(t, func() {
-				if err := getMaintenanceConfig(townRoot, "maintenance.mode"); err != nil {
-					t.Errorf("getMaintenanceConfig(mode) failed: %v", err)
-				}
-			}))
+			var out bytes.Buffer
+			if err := getMaintenanceConfig(&out, townRoot, "maintenance.mode"); err != nil {
+				t.Errorf("getMaintenanceConfig(mode) failed: %v", err)
+			}
+			return strings.TrimSpace(out.String())
 		}
 
 		// Unset reads as the default the daemon will use.
@@ -1045,19 +825,12 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 	t.Run("maintenance config routes through runConfigSet", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
-		originalWd, _ := os.Getwd()
-		defer os.Chdir(originalWd)
-		if err := os.Chdir(townRoot); err != nil {
-			t.Fatalf("chdir: %v", err)
-		}
-
-		cmd := &cobra.Command{}
-		err := runConfigSet(cmd, []string{"maintenance.window", "04:00"})
+		err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"maintenance.window", "04:00"})
 		if err != nil {
 			t.Fatalf("runConfigSet(maintenance.window) failed: %v", err)
 		}
 
-		err = runConfigGet(cmd, []string{"maintenance.window"})
+		err = configGet(townConfigCmdEnv(townRoot, io.Discard), []string{"maintenance.window"})
 		if err != nil {
 			t.Fatalf("runConfigGet(maintenance.window) failed: %v", err)
 		}

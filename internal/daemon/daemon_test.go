@@ -3,18 +3,19 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -87,41 +88,6 @@ func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
 	}
 }
 
-func writeDaemonNoSafetyStopMockBD(t *testing.T, binDir, logPath string) {
-	t.Helper()
-	script := `#!/bin/sh
-printf 'bd %s\n' "$*" >> "` + logPath + `"
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  version)
-    echo "bd test"
-    ;;
-  show)
-    case "$*" in
-      *gt-rig-testrig*)
-        printf '%s\n' '[{"id":"gt-rig-testrig","title":"Rig","issue_type":"task","labels":[],"status":"open","description":""}]'
-        ;;
-      *)
-        printf '%s\n' '[{"id":"gt-testrig-refinery","title":"Refinery","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: refinery\nrig: testrig\nagent_state: idle"}]'
-        ;;
-    esac
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-}
-
 func writeDaemonTownFile(t *testing.T, root, rel, contents string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
@@ -130,51 +96,6 @@ func writeDaemonTownFile(t *testing.T, root, rel, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		t.Fatalf("write %s: %v", rel, err)
-	}
-}
-
-func daemonGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git %v: %v", args, err)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func snapshotDaemonTownFiles(t *testing.T, root string) map[string]string {
-	t.Helper()
-	files := make(map[string]string)
-	for _, rel := range []string{
-		"mayor/town.json",
-		"mayor/rigs.json",
-		".dolt-data/gastown/.dolt/noms/manifest",
-		".runtime/sentinel",
-		".beads/metadata.json",
-		"daemon/daemon.pid",
-		"user-work.txt",
-	} {
-		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		files[rel] = string(contents)
-	}
-	return files
-}
-
-func assertDaemonTownFilesPreserved(t *testing.T, root string, before map[string]string) {
-	t.Helper()
-	for rel, want := range before {
-		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read preserved %s: %v", rel, err)
-		}
-		if got := string(contents); got != want {
-			t.Fatalf("%s changed: got %q, want %q", rel, got, want)
-		}
 	}
 }
 
@@ -474,40 +395,17 @@ func TestIsShutdownInProgress_ActiveLock(t *testing.T) {
 	}
 }
 
-// TestDaemon_StartsManagerAndScanner verifies that the convoy manager (event-driven + stranded scan)
-// starts and stops correctly when used as the daemon does.
-func TestDaemon_StartsManagerAndScanner(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil)
-	if err := manager.Start(); err != nil {
-		t.Fatalf("manager Start: %v", err)
-	}
-	manager.Stop()
-}
-
 // TestDaemon_StopsManagerAndScanner verifies that stopping the convoy manager
 // completes without blocking (e.g. context cancellation works).
 func TestDaemon_StopsManagerAndScanner(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
 	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil)
+	manager.findStrandedFn = noStranded
 	if err := manager.Start(); err != nil {
 		t.Fatalf("manager Start: %v", err)
 	}
@@ -653,12 +551,17 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create daemon with no Dolt server running
+	// A Dolt server that is down: the rig bead read fails.
+	var asked []string
 	d := &Daemon{
 		config: &Config{
 			TownRoot: tmpDir,
 		},
 		logger: log.New(io.Discard, "", 0), // Suppress log output
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			asked = append(asked, id)
+			return nil, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+		},
 	}
 
 	// When Dolt is unavailable, isRigOperational should return false
@@ -672,6 +575,9 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(reason, "Dolt unavailable") && !strings.Contains(reason, "cannot verify") {
 		t.Errorf("reason should mention Dolt unavailable, got: %q", reason)
+	}
+	if len(asked) != 1 || asked[0] != "tr-rig-testrig" {
+		t.Errorf("rig bead reads = %v, want the one read of tr-rig-testrig (prefix from config.json)", asked)
 	}
 }
 
@@ -705,19 +611,37 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Without a rig bead, should fail-safe to not operational.
 	d := &Daemon{
 		config: &Config{
 			TownRoot: tmpDir,
 		},
 		logger: log.New(io.Discard, "", 0),
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			return nil, fmt.Errorf("no issue found matching %q", id)
+		},
 	}
-
-	// Without a rig bead, should fail-safe to not operational
-	operational, reason := d.isRigOperational(rigName)
-	if operational {
+	if operational, _ := d.isRigOperational(rigName); operational {
 		t.Error("isRigOperational should return false when rig bead is missing")
 	}
-	t.Logf("Docked rig check returned: operational=%v, reason=%q", operational, reason)
+
+	// A rig bead labeled status:docked is not operational, and says why.
+	d = &Daemon{
+		config: &Config{
+			TownRoot: tmpDir,
+		},
+		logger: log.New(io.Discard, "", 0),
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			if id != "dr-rig-dockedrig" {
+				return nil, fmt.Errorf("no issue found matching %q", id)
+			}
+			return &beads.Issue{ID: id, Status: "open", Labels: []string{"gt:rig", "status:docked"}}, nil
+		},
+	}
+	operational, reason := d.isRigOperational(rigName)
+	if operational || reason != "rig is docked (global)" {
+		t.Errorf("isRigOperational(docked rig) = %v, %q; want false, \"rig is docked (global)\"", operational, reason)
+	}
 }
 
 // TestIsRigOperational_MissingWispConfigLoggedOnce verifies that a missing
@@ -749,6 +673,9 @@ func TestIsRigOperational_MissingWispConfigLoggedOnce(t *testing.T) {
 			TownRoot: tmpDir,
 		},
 		logger: log.New(&logBuf, "", 0),
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			return &beads.Issue{ID: id, Status: "open"}, nil
+		},
 	}
 
 	// Call twice, simulating repeated patrol-candidate evaluations of the

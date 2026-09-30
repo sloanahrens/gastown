@@ -34,6 +34,28 @@ type Repo interface {
 	MergeSquash(branch, message string) error
 	GetConflictingFiles() ([]string, error)
 	AbortMerge() error
+
+	// Clones and remotes (clone.go).
+	CloneBareWithBranch(url, dest, branch string) error
+	CloneBareWithReferenceAndBranch(url, dest, reference, branch string) error
+	CloneBarePartialWithBranch(url, dest, filter, branch string) error
+	CloneBarePartialWithReferenceAndBranch(url, dest, filter, reference, branch string) error
+	CloneBranch(url, dest, branch string) error
+	CloneBranchWithReference(url, dest, branch, reference string) error
+	CloneBranchPartial(url, dest, branch, filter string) error
+	CloneBranchPartialWithReference(url, dest, branch, filter, reference string) error
+	RemoteHasRefs(remote string) (bool, error)
+	FetchBranchShallow(remote, branch string) error
+	RemoteURL(remote string) (string, error)
+	GetPushURL(remote string) (string, error)
+	ConfigurePushURL(remote, pushURL string) error
+	ClearPushURL(remote string) error
+	AddUpstreamRemote(upstreamURL string) error
+	IsRepo() bool
+	IsEmpty() (bool, error)
+	DefaultBranch() string
+	RefExists(ref string) (bool, error)
+	CommonDir() (string, error)
 }
 
 var _ Repo = (*git.Git)(nil)
@@ -49,13 +71,20 @@ var _ Repo = (*handle)(nil)
 // locate finds the repository and worktree at h.dir. wt is nil for a bare
 // repository. Callers hold f.mu.
 func (h *handle) locate(args ...string) (*repo, *worktree, error) {
-	// Like git, a directory inside a checkout resolves to that checkout.
-	for dir := h.dir; ; dir = filepath.Dir(dir) {
-		if r, wt := h.f.at(dir); r != nil && onDisk(r, wt) {
-			return r, wt, nil
-		}
-		if filepath.Dir(dir) == dir {
-			break
+	if r, wt := h.f.at(h.dir); r != nil && onDisk(r, wt) {
+		return r, wt, nil
+	}
+	// Like git, an existing directory inside a checkout resolves to that
+	// checkout; a directory that does not exist is no repository at all
+	// (git.Git refuses a missing working directory before running git).
+	if _, err := os.Stat(h.dir); err == nil {
+		for dir := filepath.Dir(h.dir); ; dir = filepath.Dir(dir) {
+			if r, wt := h.f.at(dir); r != nil && onDisk(r, wt) {
+				return r, wt, nil
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
 		}
 	}
 	return nil, nil, gitErr(128, "fatal: not a git repository (or any of the parent directories): .git", args...)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -376,5 +377,53 @@ func TestRigGateUsesMakeGateWhenPresent(t *testing.T) {
 	g, err = RigGate(writeMakefile(t, "test:\n\ttrue\n"), nil, true)
 	if err != nil || len(g.Steps) != 3 {
 		t.Fatalf("RigGate without a gate target = %+v, %v", g.Steps, err)
+	}
+}
+
+// gt-ssyxd: gt done's pre-submit prefers presubmit_command, then make
+// presubmit, then make gate; Land's gate is untouched by any of them.
+func TestRigGatePresubmitPrecedence(t *testing.T) {
+	t.Parallel()
+	both := writeMakefile(t, "presubmit:\n\ttrue\ngate:\n\ttrue\n")
+
+	g, err := RigGate(both, &config.MergeQueueConfig{PresubmitCommand: "make my-check"}, true)
+	if err != nil || len(g.Steps) != 1 || g.Steps[0].Command != "make my-check" || g.Steps[0].Name != "presubmit" {
+		t.Fatalf("explicit presubmit_command = %+v, %v", g.Steps, err)
+	}
+	if !reflect.DeepEqual(g.Steps[0].Env, []string{"GT_TEST_DOCKER=0"}) {
+		t.Errorf("explicit presubmit_command env = %v, want containers forced off", g.Steps[0].Env)
+	}
+
+	g, err = RigGate(both, &config.MergeQueueConfig{TestCommand: "make test"}, true)
+	if err != nil || len(g.Steps) != 1 || g.Steps[0].Command != "make presubmit" {
+		t.Fatalf("Makefile with presubmit = %+v, %v; want make presubmit", g.Steps, err)
+	}
+
+	g, err = RigGate(writeMakefile(t, "gate:\n\ttrue\n"), nil, true)
+	if err != nil || len(g.Steps) != 1 || g.Steps[0].Command != "make gate" {
+		t.Fatalf("Makefile without presubmit = %+v, %v; want make gate", g.Steps, err)
+	}
+
+	// A non-Go tree takes an explicit presubmit_command too.
+	g, err = RigGate(t.TempDir(), &config.MergeQueueConfig{PresubmitCommand: "pytest -x"}, true)
+	if err != nil || len(g.Steps) != 1 || g.Steps[0].Command != "pytest -x" {
+		t.Fatalf("non-Go presubmit_command = %+v, %v", g.Steps, err)
+	}
+
+	// The container opt-in is refused, as it is for test_command.
+	if _, err := RigGate(both, &config.MergeQueueConfig{PresubmitCommand: "GT_TEST_DOCKER=1 make x"}, true); err == nil {
+		t.Error("a presubmit_command that opts into containers was accepted")
+	}
+
+	// Only the unit tier reads it: the full tier keeps test_command.
+	g, err = RigGate(both, &config.MergeQueueConfig{PresubmitCommand: "make my-check"}, false)
+	if err != nil || len(g.Steps) != 3 {
+		t.Fatalf("full tier = %+v, %v; want lint, build, test", g.Steps, err)
+	}
+
+	// Land's gate is make gate, whatever presubmit says.
+	lg := LandGate(both, &config.MergeQueueConfig{PresubmitCommand: "make my-check"})
+	if len(lg.Steps) != 1 || lg.Steps[0].Command != "make gate" {
+		t.Fatalf("LandGate = %+v; want make gate", lg.Steps)
 	}
 }

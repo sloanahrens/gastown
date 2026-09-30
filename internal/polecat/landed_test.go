@@ -56,23 +56,23 @@ func (r landedRepo) startLandedBranch(t *testing.T, branch string) {
 }
 
 // landOnMain checks out main, lands branch on it with merge and pushes main.
-func (r landedRepo) landOnMain(t *testing.T, branch string, merge func(gitfake.WorktreeRepo) error) {
+func (r landedRepo) landOnMain(t *testing.T, branch string, merge func(gitfake.BranchRepo) error) {
 	t.Helper()
 	r.do(t, r.g().Checkout("main"))
-	r.do(t, merge(r.w.OpenWorktreeRepo(r.work)))
+	r.do(t, merge(r.w.OpenBranchRepo(r.work)))
 	r.do(t, r.g().Push("origin", "main", false))
 }
 
-func noFF(branch string) func(gitfake.WorktreeRepo) error {
-	return func(g gitfake.WorktreeRepo) error { return g.MergeNoFF(branch, "merge polecat work") }
+func noFF(branch string) func(gitfake.BranchRepo) error {
+	return func(g gitfake.BranchRepo) error { return g.MergeNoFF(branch, "merge polecat work") }
 }
 
-func squash(branch string) func(gitfake.WorktreeRepo) error {
-	return func(g gitfake.WorktreeRepo) error { return g.MergeSquash(branch, "squash polecat work") }
+func squash(branch string) func(gitfake.BranchRepo) error {
+	return func(g gitfake.BranchRepo) error { return g.MergeSquash(branch, "squash polecat work") }
 }
 
-func ffOnly(branch string) func(gitfake.WorktreeRepo) error {
-	return func(g gitfake.WorktreeRepo) error { return g.ResetHard(branch) }
+func ffOnly(branch string) func(gitfake.BranchRepo) error {
+	return func(g gitfake.BranchRepo) error { return g.ResetHard(branch) }
 }
 
 // TestProbeWorkLandedOnRef covers the evidence the dangling-active_mr gate

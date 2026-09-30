@@ -90,6 +90,10 @@ func (e *realEnv) Clone(t testing.TB, src, dest string) {
 
 func (e *realEnv) Open(dir string) gitfake.Repo { return git.NewGit(dir) }
 
+func (e *realEnv) OpenWithDir(gitDir, workDir string) gitfake.Repo {
+	return git.NewGitWithDir(gitDir, workDir)
+}
+
 func TestIntegrationGitfakeRepoContract(t *testing.T) {
 	gitfake.RunRepoContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }
@@ -109,12 +113,8 @@ func (e *realEnv) Stash(t testing.TB, dir, message string) {
 	e.git(t, dir, "", nil, "stash", "push", "-q", "-m", message)
 }
 
-func (e *realEnv) OpenWorktreeRepo(dir string) gitfake.WorktreeRepo { return git.NewGit(dir) }
+func (e *realEnv) OpenBranchRepo(dir string) gitfake.BranchRepo { return git.NewGit(dir) }
 
-func (e *realEnv) OpenDir(gitDir, workDir string) gitfake.WorktreeRepo {
-	return git.NewGitWithDir(gitDir, workDir)
-}
-
-func TestIntegrationGitfakeWorktreeContract(t *testing.T) {
-	gitfake.RunWorktreeContract(t, func(t *testing.T) gitfake.WorktreeEnv { return &realEnv{} })
+func TestIntegrationGitfakeBranchContract(t *testing.T) {
+	gitfake.RunBranchContract(t, func(t *testing.T) gitfake.BranchEnv { return &realEnv{} })
 }
