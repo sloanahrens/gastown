@@ -612,9 +612,12 @@ func TestStaleBeadsRedirectCheck_NestedPolecatWorkspace(t *testing.T) {
 	}
 }
 
-func TestStaleBeadsRedirectCheck_RefineryWorkspace(t *testing.T) {
+// TestStaleBeadsRedirectCheck_LeftoverRefineryIgnored verifies that a
+// leftover refinery/rig directory from the retired refinery role is not
+// treated as a worktree that needs a redirect.
+func TestStaleBeadsRedirectCheck_LeftoverRefineryIgnored(t *testing.T) {
 	t.Parallel()
-	// Create temp town with refinery workspace missing redirect
+	// Create temp town with a leftover refinery workspace missing redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
@@ -625,7 +628,7 @@ func TestStaleBeadsRedirectCheck_RefineryWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery workspace WITHOUT redirect
+	// Create leftover refinery workspace WITHOUT redirect
 	if err := os.MkdirAll(refineryDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +643,7 @@ func TestStaleBeadsRedirectCheck_RefineryWorkspace(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	if result.Status != StatusWarning {
-		t.Errorf("Expected StatusWarning for refinery missing redirect, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusOK {
+		t.Errorf("Expected StatusOK for leftover refinery workspace, got %v: %s\nDetails: %v", result.Status, result.Message, result.Details)
 	}
 }

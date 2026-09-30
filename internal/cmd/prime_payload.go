@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
@@ -296,9 +295,7 @@ func captureOutput(fn func()) string {
 // A nil part is skipped.
 type primeParts struct {
 	session     func() string
-	patrol      func() string
 	hookedWork  func() string
-	molecule    func() string
 	directives  func() string
 	handoff     func() string
 	checkpoint  func() string
@@ -322,15 +319,10 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 		return f()
 	}
 	p.add("session", 0, true, call(parts.session))
-	// The patrol line is kept, not budgeted: it is the only statement that
-	// survives a dropped molecule section to tell a patrol role which patrol it
-	// is on (gt-e1ie).
-	p.add("patrol", 0, true, call(parts.patrol))
 	p.add("hooked-work", 1, true, call(parts.hookedWork))
 	if includeStatic {
 		p.add("role", 1, true, staticText)
 	}
-	p.add("molecule", 2, false, call(parts.molecule))
 	p.add("directives", 3, false, call(parts.directives))
 	p.add("handoff", 4, false, call(parts.handoff))
 	p.add("checkpoint", 4, false, call(parts.checkpoint))
@@ -354,24 +346,18 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 var primeContinuationMode bool
 
 // primeStepVars returns the formula vars for `gt prime --step`: the hooked
-// bead's attachment vars when that is the formula being read, else the role's
-// patrol vars.
+// bead's attachment vars when that is the formula being read.
 func primeStepVars(ctx RoleContext, hookedBead *beads.Issue, formulaName string) []string {
 	if hookedBead != nil {
 		if att := beads.ParseAttachmentFields(hookedBead); att != nil && att.AttachedFormula == formulaName {
 			return attachmentFormulaVars(att)
 		}
 	}
-	switch ctx.Role {
-	case RoleWitness:
-		return buildWitnessPatrolVars(ctx)
-	}
 	return nil
 }
 
 // primeStepFormulaName resolves which formula `gt prime --step N` reads:
-// an explicit --formula, else the hooked bead's attached formula, else the
-// role's patrol formula.
+// an explicit --formula, else the hooked bead's attached formula.
 func primeStepFormulaName(ctx RoleContext, hookedBead *beads.Issue, explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -380,12 +366,6 @@ func primeStepFormulaName(ctx RoleContext, hookedBead *beads.Issue, explicit str
 		if att := beads.ParseAttachmentFields(hookedBead); att != nil && att.AttachedFormula != "" {
 			return att.AttachedFormula
 		}
-	}
-	switch ctx.Role {
-	case RoleWitness:
-		return constants.MolWitnessPatrol
-	case RoleDeacon:
-		return constants.MolDeaconPatrol
 	}
 	return ""
 }

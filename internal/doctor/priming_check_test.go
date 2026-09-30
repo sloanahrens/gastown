@@ -252,52 +252,6 @@ func TestPrimingCheck_AllowsClaudeMdInMayorRig(t *testing.T) {
 	}
 }
 
-// TestPrimingCheck_AllowsClaudeMdInRefineryRig verifies that CLAUDE.md
-// inside refinery/rig/ (the customer's source repo worktree) is NOT flagged.
-func TestPrimingCheck_AllowsClaudeMdInRefineryRig(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create town root CLAUDE.md identity anchor
-	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte("# Gas Town\nRun gt prime\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set up rig with .beads
-	rigBeadsDir := filepath.Join(tmpDir, rigName, ".beads")
-	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigBeadsDir, "PRIME.md"), []byte("# PRIME\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create refinery/rig/ structure (the source repo worktree)
-	refineryRigPath := filepath.Join(tmpDir, rigName, "refinery", "rig")
-	if err := os.MkdirAll(refineryRigPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create CLAUDE.md inside refinery/rig/ — customer's legitimate file
-	customerClaudeMd := filepath.Join(refineryRigPath, "CLAUDE.md")
-	if err := os.WriteFile(customerClaudeMd, []byte("# Customer CLAUDE.md\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run priming check
-	check := NewPrimingCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	// Should NOT flag CLAUDE.md inside worktrees
-	for _, detail := range result.Details {
-		if strings.Contains(detail, "refinery/rig") && strings.Contains(detail, "CLAUDE.md") {
-			t.Errorf("CLAUDE.md inside refinery/rig should NOT be flagged (customer file), got: %s", detail)
-		}
-	}
-}
-
 // TestPrimingCheck_AllowsClaudeMdInCrewWorktree verifies that CLAUDE.md
 // inside crew/<name>/ (the customer's worktree) is NOT flagged.
 func TestPrimingCheck_AllowsClaudeMdInCrewWorktree(t *testing.T) {
@@ -448,7 +402,7 @@ func TestPrimingCheck_FixPreservesCustomerClaudeMd(t *testing.T) {
 }
 
 // TestPrimingCheck_FlagsStaleAgentLevelFiles verifies that CLAUDE.md/AGENTS.md
-// at agent level (e.g., refinery/CLAUDE.md) ARE flagged as stale files.
+// at agent level (e.g., crew/CLAUDE.md) ARE flagged as stale files.
 // These are no longer created — only ~/gt/CLAUDE.md (town root) exists.
 func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
 	t.Parallel()
@@ -469,18 +423,17 @@ func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery/ directory structure with stale files
-	refineryPath := filepath.Join(tmpDir, rigName, "refinery")
-	refineryRigPath := filepath.Join(refineryPath, "rig")
-	if err := os.MkdirAll(refineryRigPath, 0755); err != nil {
+	// Create crew/ directory structure with stale files
+	crewPath := filepath.Join(tmpDir, rigName, "crew")
+	if err := os.MkdirAll(filepath.Join(crewPath, "max"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create stale CLAUDE.md and AGENTS.md at agent level
-	if err := os.WriteFile(filepath.Join(refineryPath, "CLAUDE.md"), []byte("# Stale CLAUDE.md\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(crewPath, "CLAUDE.md"), []byte("# Stale CLAUDE.md\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(refineryPath, "AGENTS.md"), []byte("# Stale AGENTS.md\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(crewPath, "AGENTS.md"), []byte("# Stale AGENTS.md\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -489,23 +442,23 @@ func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
-	// Should find stale file issues for refinery
+	// Should find stale file issues for crew
 	foundClaudeMdIssue := false
 	foundAgentsMdIssue := false
 	for _, detail := range result.Details {
-		if strings.Contains(detail, "refinery") && strings.Contains(detail, "Stale CLAUDE.md") {
+		if strings.Contains(detail, rigName+"/crew:") && strings.Contains(detail, "Stale CLAUDE.md") {
 			foundClaudeMdIssue = true
 		}
-		if strings.Contains(detail, "refinery") && strings.Contains(detail, "Stale AGENTS.md") {
+		if strings.Contains(detail, rigName+"/crew:") && strings.Contains(detail, "Stale AGENTS.md") {
 			foundAgentsMdIssue = true
 		}
 	}
 
 	if !foundClaudeMdIssue {
-		t.Errorf("expected stale CLAUDE.md issue for refinery, got details: %v", result.Details)
+		t.Errorf("expected stale CLAUDE.md issue for crew, got details: %v", result.Details)
 	}
 	if !foundAgentsMdIssue {
-		t.Errorf("expected stale AGENTS.md issue for refinery, got details: %v", result.Details)
+		t.Errorf("expected stale AGENTS.md issue for crew, got details: %v", result.Details)
 	}
 }
 
@@ -529,18 +482,6 @@ func TestPrimingCheck_NoIssuesWhenCorrectlyConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigBeadsDir, "PRIME.md"), []byte("# PRIME\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create refinery structure — NO CLAUDE.md or AGENTS.md
-	refineryRigPath := filepath.Join(tmpDir, rigName, "refinery", "rig")
-	if err := os.MkdirAll(refineryRigPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create witness structure — NO CLAUDE.md or AGENTS.md
-	witnessPath := filepath.Join(tmpDir, rigName, "witness")
-	if err := os.MkdirAll(witnessPath, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -614,7 +555,8 @@ func TestPrimingCheck_DetectsLargeClaudeMd(t *testing.T) {
 }
 
 // TestPrimingCheck_DetectsStaleIntermediateFiles verifies that stale CLAUDE.md/AGENTS.md
-// at intermediate directories (refinery/, witness/, crew/, polecats/, mayor/) are detected.
+// at intermediate directories (crew/, polecats/, mayor/) are detected, and that
+// leftover refinery/ and witness/ directories from retired roles are ignored.
 func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -634,7 +576,8 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create stale files at all four intermediate directories
+	// Create stale files at the live intermediate directories and at leftover
+	// retired-role directories
 	for _, role := range []string{"refinery", "witness", "crew", "polecats"} {
 		rolePath := filepath.Join(tmpDir, rigName, role)
 		if err := os.MkdirAll(rolePath, 0755); err != nil {
@@ -663,8 +606,15 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
-	// Should find stale issues for all roles + mayor
-	expectedLocations := []string{"refinery", "witness", "crew", "polecats", "mayor"}
+	// Leftover retired-role directories must not be reported
+	for _, detail := range result.Details {
+		if strings.Contains(detail, rigName+"/refinery") || strings.Contains(detail, rigName+"/witness") {
+			t.Errorf("leftover retired-role directory should be ignored, got: %s", detail)
+		}
+	}
+
+	// Should find stale issues for all live roles + mayor
+	expectedLocations := []string{"crew", "polecats", "mayor"}
 	for _, loc := range expectedLocations {
 		found := false
 		for _, detail := range result.Details {
@@ -702,7 +652,7 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 
 	// Create stale files at intermediate directories
 	staleFiles := []string{}
-	for _, role := range []string{"refinery", "witness", "crew", "polecats"} {
+	for _, role := range []string{"crew", "polecats"} {
 		rolePath := filepath.Join(tmpDir, rigName, role)
 		if err := os.MkdirAll(rolePath, 0755); err != nil {
 			t.Fatal(err)
@@ -714,6 +664,15 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 			}
 			staleFiles = append(staleFiles, filePath)
 		}
+	}
+
+	// A leftover retired-role directory's file must be left alone
+	leftoverPath := filepath.Join(tmpDir, rigName, "witness", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(leftoverPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leftoverPath, []byte("# Leftover\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
 
 	// Also create stale mayor files
@@ -745,6 +704,11 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 		}
 	}
 
+	// Verify the leftover retired-role file was NOT touched
+	if _, err := os.Stat(leftoverPath); err != nil {
+		t.Errorf("leftover retired-role file should not have been removed: %v", err)
+	}
+
 	// Verify town root CLAUDE.md was NOT removed (it's the identity anchor)
 	townRootClaude := filepath.Join(tmpDir, "CLAUDE.md")
 	if _, err := os.Stat(townRootClaude); os.IsNotExist(err) {
@@ -773,10 +737,9 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create witness directory with settings.json MISSING gt prime
-	witnessDir := filepath.Join(tmpDir, rigName, "witness")
-	witnessClaudeDir := filepath.Join(witnessDir, ".claude")
-	if err := os.MkdirAll(witnessClaudeDir, 0755); err != nil {
+	// Create mayor directory with settings.json MISSING gt prime
+	mayorClaudeDir := filepath.Join(tmpDir, "mayor", ".claude")
+	if err := os.MkdirAll(mayorClaudeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -797,7 +760,7 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 		},
 	}
 	data, _ := json.MarshalIndent(staleSettings, "", "  ")
-	if err := os.WriteFile(filepath.Join(witnessClaudeDir, "settings.json"), data, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(mayorClaudeDir, "settings.json"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -809,14 +772,14 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 	// Should detect the missing gt prime hook
 	foundIssue := false
 	for _, detail := range result.Details {
-		if strings.Contains(detail, "witness") && strings.Contains(detail, "gt prime") {
+		if strings.Contains(detail, "mayor") && strings.Contains(detail, "gt prime") {
 			foundIssue = true
 			break
 		}
 	}
 
 	if !foundIssue {
-		t.Errorf("expected no_prime_hook issue for witness, got details: %v", result.Details)
+		t.Errorf("expected no_prime_hook issue for mayor, got details: %v", result.Details)
 	}
 
 	// Issue should be fixable
@@ -825,11 +788,11 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 			if !issue.fixable {
 				t.Errorf("no_prime_hook issue should be fixable")
 			}
-			if issue.agentType != "witness" {
-				t.Errorf("expected agentType 'witness', got '%s'", issue.agentType)
+			if issue.agentType != "mayor" {
+				t.Errorf("expected agentType 'mayor', got '%s'", issue.agentType)
 			}
-			if issue.rigName != rigName {
-				t.Errorf("expected rigName '%s', got '%s'", rigName, issue.rigName)
+			if issue.rigName != "" {
+				t.Errorf("expected empty rigName for town-level mayor, got '%s'", issue.rigName)
 			}
 		}
 	}
@@ -856,10 +819,9 @@ func TestPrimingCheck_FixNoPrimeHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create witness directory with settings.json MISSING gt prime
-	witnessDir := filepath.Join(tmpDir, rigName, "witness")
-	witnessClaudeDir := filepath.Join(witnessDir, ".claude")
-	if err := os.MkdirAll(witnessClaudeDir, 0755); err != nil {
+	// Create mayor directory with settings.json MISSING gt prime
+	mayorClaudeDir := filepath.Join(tmpDir, "mayor", ".claude")
+	if err := os.MkdirAll(mayorClaudeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -879,7 +841,7 @@ func TestPrimingCheck_FixNoPrimeHook(t *testing.T) {
 		},
 	}
 	data, _ := json.MarshalIndent(staleSettings, "", "  ")
-	settingsPath := filepath.Join(witnessClaudeDir, "settings.json")
+	settingsPath := filepath.Join(mayorClaudeDir, "settings.json")
 	if err := os.WriteFile(settingsPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}

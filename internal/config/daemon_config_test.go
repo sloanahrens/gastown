@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 )
@@ -38,7 +37,7 @@ func TestDaemonPatrolConfigIsTheDaemonsSchema(t *testing.T) {
 func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{
-		`{"patrols":{"witness":{"enabled":false,"bogus":1}}}`,
+		`{"patrols":{"handler":{"enabled":false,"bogus":1}}}`,
 		`{"patrols":{"custom":{"enabled":true}}}`,
 		`{"heartbeet":{"enabled":true}}`,
 	} {
@@ -49,33 +48,30 @@ func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 	}
 }
 
-func TestDaemonPatrolRigEditorsRefuseAnUnparseableFile(t *testing.T) {
+// The witness, deacon and patrol_watchdog keys are retired (gt-4k3fj.6.1):
+// the live mayor/daemon.json still carries them, so they must decode under
+// strict decoding, whatever they hold, and survive a rewrite verbatim.
+func TestDaemonPatrolConfigDecodesRetiredRoleKeys(t *testing.T) {
 	t.Parallel()
-	const broken = `{"patrols": {"witness": {"enabled": true, "rigs": ["a"]}, "bogus": {}}}`
-	for name, edit := range map[string]func(string) error{
-		"add":    func(root string) error { return AddRigToDaemonPatrols(root, "b") },
-		"remove": func(root string) error { return RemoveRigFromDaemonPatrols(root, "a") },
-		"ensure": EnsureDaemonPatrolConfig,
-	} {
-		root := t.TempDir()
-		path := DaemonPatrolConfigPath(root)
-		writeFile(t, path, broken)
-		if err := edit(root); !errors.Is(err, ErrUnparseable) {
-			t.Errorf("%s over a broken daemon.json = %v, want ErrUnparseable", name, err)
-		}
-		if got, _ := os.ReadFile(path); string(got) != broken {
-			t.Errorf("%s rewrote the broken file: %q", name, got)
-		}
+	body := `{"patrols":{"witness":{"enabled":true,"agent":"witness","disabled_rigs":["gastown"]},` +
+		`"deacon":{"enabled":false,"agent":"deacon"},"patrol_watchdog":{"enabled":true,"cadence":"10m","nudge":false}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-}
-
-func TestDaemonPatrolRigEditorsLeaveAMissingFileMissing(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	if err := AddRigToDaemonPatrols(root, "b"); err != nil {
-		t.Fatal(err)
+	if cfg.Patrols.Count() != 0 {
+		t.Errorf("Count() = %d, want 0: retired keys are not patrols", cfg.Patrols.Count())
 	}
-	if _, err := os.Stat(DaemonPatrolConfigPath(root)); !os.IsNotExist(err) {
-		t.Fatalf("AddRigToDaemonPatrols created daemon.json: %v", err)
+	if cfg.Patrols.RolePatrol("witness") != nil || cfg.Patrols.RolePatrol("deacon") != nil {
+		t.Error("RolePatrol returned an entry for a retired role")
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"disabled_rigs":["gastown"]`, `"deacon":{"enabled":false,"agent":"deacon"}`, `"cadence":"10m"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("rewrite dropped %s: %s", want, out)
+		}
 	}
 }

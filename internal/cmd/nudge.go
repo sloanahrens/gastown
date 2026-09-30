@@ -559,10 +559,6 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			sender = fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
 		case RolePolecat:
 			sender = fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
-		case RoleWitness:
-			sender = fmt.Sprintf("%s/witness", roleInfo.Rig)
-		case RoleDeacon:
-			sender = constants.RoleDeacon
 		default:
 			sender = string(roleInfo.Role)
 		}

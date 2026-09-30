@@ -15,7 +15,6 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
@@ -1377,13 +1376,13 @@ func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID stri
 }
 
 // defaultDeadHolderWorktreeState inspects the assignee's worktree directly,
-// using the same path resolution the deacon's stale-hook scan uses. Returns a
+// resolving its worktree with assigneeToWorktreePath. Returns a
 // zero-value state (not an error) when there is simply nothing to check;
 // returns an error only when a worktree that should hold issueID's work could
 // not be read, which the caller must treat as "state undetermined" rather
 // than "clean" (gt-utt4).
 func defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
-	path := deacon.AssigneeWorktreePath(townRoot, assignee)
+	path := assigneeToWorktreePath(townRoot, assignee)
 	if path == "" {
 		return deadHolderWorktreeState{}, nil
 	}

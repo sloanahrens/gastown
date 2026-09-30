@@ -30,8 +30,8 @@ func NewMacOSSDKCheck() *MacOSSDKCheck {
 }
 
 // resolveSDK reports the SDK a build will link against and where it came from.
-// SDKROOT wins because the daemon passes it through to every polecat and
-// refinery build (config.DaemonEnvPath); xcrun is the fallback for a shell that
+// SDKROOT wins because the daemon passes it through to every polecat
+// build (config.DaemonEnvPath); xcrun is the fallback for a shell that
 // sets nothing.
 var resolveSDK = func() (path, source string, err error) {
 	if root := strings.TrimSpace(os.Getenv("SDKROOT")); root != "" {

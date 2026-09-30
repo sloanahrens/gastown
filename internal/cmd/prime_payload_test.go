@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
@@ -440,13 +439,13 @@ func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("ctx"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ctx := RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: town}
+	ctx := RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "max", TownRoot: town, WorkDir: town}
 	want, _, err := staticRoleText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := systemPromptPathFor(ctx)
-	if path != filepath.Join(town, "myrig", "witness", ".claude", "system-prompt.md") {
+	if path != filepath.Join(town, "myrig", "crew", ".claude", "system-prompt-max.md") {
 		t.Fatalf("unexpected path %s", path)
 	}
 	if _, err := writeSystemPromptFile(path, want); err != nil {
@@ -531,34 +530,6 @@ func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
 	}
 }
 
-func TestPrimeStepVars_FollowTheResolvedFormula(t *testing.T) {
-	t.Parallel()
-	// A witness whose hooked bead has no attached formula reads its patrol
-	// formula, so the vars must be the patrol vars, not the (empty) attachment vars.
-	ctx := RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: t.TempDir()}
-	bead := &beads.Issue{ID: "gt-x", Description: "no attachment here\n"}
-	name := primeStepFormulaName(ctx, bead, "")
-	if name != constants.MolWitnessPatrol {
-		t.Fatalf("name = %q", name)
-	}
-	vars := primeStepVars(ctx, bead, name)
-	found := false
-	for _, v := range vars {
-		if v == "rig=myrig" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected witness patrol vars (rig=myrig), got %v", vars)
-	}
-	// With an attached formula the attachment vars win.
-	bead2 := &beads.Issue{ID: "gt-y", Description: "attached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-y\"]\n"}
-	vars2 := primeStepVars(RoleContext{Role: RolePolecat}, bead2, "mol-polecat-work")
-	if len(vars2) == 0 || vars2[0] != "issue=gt-y" {
-		t.Fatalf("expected attachment vars, got %v", vars2)
-	}
-}
-
 func TestSystemPromptPathFor_PolecatIsPerAgent(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -609,8 +580,6 @@ func TestPrimeStepFormulaName(t *testing.T) {
 	}{
 		{"explicit wins", RoleContext{Role: RolePolecat}, hooked, "mol-custom", "mol-custom"},
 		{"hooked attachment", RoleContext{Role: RolePolecat}, hooked, "", "mol-polecat-work"},
-		{"witness patrol", RoleContext{Role: RoleWitness}, nil, "", constants.MolWitnessPatrol},
-		{"deacon patrol", RoleContext{Role: RoleDeacon}, nil, "", constants.MolDeaconPatrol},
 		{"nothing", RoleContext{Role: RolePolecat}, nil, "", ""},
 	}
 	for _, c := range cases {
@@ -639,9 +608,8 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	directive := strings.Repeat("Operator directive line that steers this role.\n", 50) // >2,000 chars, capped
 	memories := strings.Repeat("- some-memory-key: first sentence of the memory preview\n", 120)
 
-	patrol := map[Role]string{RoleWitness: constants.MolWitnessPatrol, RoleDeacon: constants.MolDeaconPatrol}
 	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work", RoleDog: "mol-dog-reaper"}
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleWitness, RoleDeacon, RoleMayor} {
+	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleMayor} {
 		role := role
 		t.Run(string(role), func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
@@ -663,12 +631,6 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },
 				hookedWork: func() string { return captureOutput(func() { _, _ = checkSlungWork(ctx, bead) }) },
-				molecule: func() string {
-					if f, ok := patrol[role]; ok {
-						return captureOutput(func() { showFormulaStepsFull(f, town, "myrig") })
-					}
-					return ""
-				},
 				directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, false) }) },
 				memories:   func() string { return memories },
 				startup:    func() string { return captureOutput(func() { outputStartupDirective(ctx) }) },
@@ -680,9 +642,6 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			preview := out[:min(len(out), 2000)]
 			if bead != nil && (!strings.Contains(preview, "gt-fix1") || !strings.Contains(preview, "Step 1:")) {
 				t.Fatalf("%s preview must show the hooked bead and step 1:\n%s", role, preview)
-			}
-			if f, ok := patrol[role]; ok && !strings.Contains(out, "steps from "+f) {
-				t.Fatalf("%s payload must include its patrol checklist:\n%s", role, out)
 			}
 		})
 	}

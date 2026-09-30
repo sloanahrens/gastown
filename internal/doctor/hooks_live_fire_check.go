@@ -426,11 +426,7 @@ var liveFireProbeEnvKeys = []string{
 	"GT_POLECAT",
 	"GT_POLECAT_PATH",
 	"GT_CREW",
-	"GT_WITNESS",
-	"GT_REFINERY",
-	"GT_REFINERY_WORKER",
 	"GT_MAYOR",
-	"GT_DEACON",
 	"GT_DOG_NAME",
 }
 
@@ -442,10 +438,9 @@ var liveFireProbeEnvKeys = []string{
 // even against broken wiring (finding 1, gt-wisp-db27).
 //
 // The probe asserts what a POLEcat session's settings do, so it must not
-// inherit who THIS process is. Inheriting GT_REFINERY/GT_ROLE from a
-// refinery session handed the child the pr-workflow guard's deliberate
-// refinery merge-rehearsal exemption (gt-r2xm), so the blocked shape's 'git
-// checkout -b' legitimately succeeded, and the probe read that as broken
+// inherit who THIS process is: an inherited role identity can hand the child
+// a guard exemption meant for that role, so the blocked shape's 'git
+// checkout -b' legitimately succeeds and the probe reads that as broken
 // matcher wiring (gt-xy4b). GT_POLECAT_PATH is stripped for the same reason:
 // it scopes the polecat-paths guard to the parent's worktree while the
 // probe's cwd is a disposable sandbox.

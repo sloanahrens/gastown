@@ -106,8 +106,9 @@ func TestCheckTownConfig(t *testing.T) {
 // TestNewRefusesAnUnparseableTownConfig: the daemon does not start on a
 // config it cannot read, and refuses before touching tmux or the file.
 //
-//testpolicy:allow parallel — New reaches os.Setenv on its success path, so
 // this test must not run beside a parallel test that reads the environment.
+//
+//testpolicy:allow parallel — New reaches os.Setenv on its success path, so
 func TestNewRefusesAnUnparseableTownConfig(t *testing.T) {
 	town := t.TempDir()
 	path := writeTownFile(t, town, "mayor/daemon.json", brokenDaemonJSON)

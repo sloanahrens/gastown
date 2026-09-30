@@ -19,7 +19,7 @@ func TestAgentBeadsExistCheck_NoRoutes(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	// With no routes, only global agents (deacon, mayor) are checked
+	// With no routes, only the global agent (mayor) is checked
 	// They won't exist without Dolt, so we expect error
 	t.Logf("Result: status=%v, message=%s", result.Status, result.Message)
 	if result.Status == StatusOK {
@@ -46,7 +46,7 @@ func TestAgentBeadsExistCheck_NoRigs(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	// With empty routes, only global agents (deacon, mayor) are checked
+	// With empty routes, only the global agent (mayor) is checked
 	// They won't exist without Dolt, so we expect error or warning
 	t.Logf("Result: status=%v, message=%s", result.Status, result.Message)
 }
@@ -72,6 +72,10 @@ func TestAgentBeadsExistCheck_ExpectedIDs(t *testing.T) {
 	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// A canonical crew worker (its .git is a directory) needs an agent bead.
+	if err := os.MkdirAll(filepath.Join(tmpDir, "sallaWork", "crew", "max", ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	check := NewAgentBeadsCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
@@ -89,7 +93,7 @@ func TestAgentBeadsExistCheck_ExpectedIDs(t *testing.T) {
 	}
 
 	// Verify the expected IDs are in the details
-	expectedIDs := []string{"sw-sallaWork-witness"}
+	expectedIDs := []string{"sw-sallaWork-crew-max"}
 	for _, expectedID := range expectedIDs {
 		found := false
 		for _, detail := range result.Details {
@@ -127,6 +131,8 @@ func TestAgentBeadsExistCheck_RespectsRigScope(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"),
 		filepath.Join(tmpDir, "coder_dotfiles", "mayor", "rig", ".beads"),
+		filepath.Join(tmpDir, "gastown", "crew", "alice", ".git"),
+		filepath.Join(tmpDir, "coder_dotfiles", "crew", "bella", ".git"),
 	} {
 		if err := os.MkdirAll(path, 0755); err != nil {
 			t.Fatal(err)
@@ -284,8 +290,8 @@ esac
 			t.Fatalf("expected scoped Fix() to avoid coder_dotfiles beads, got log line %q", line)
 		}
 	}
-	if !strings.Contains(log, "create gs-gastown-witness") {
-		t.Fatalf("expected scoped Fix() to create gastown witness bead, got log: %q", log)
+	if !strings.Contains(log, "create gs-gastown-crew-alice") {
+		t.Fatalf("expected scoped Fix() to create gastown crew bead, got log: %q", log)
 	}
 }
 
@@ -335,7 +341,7 @@ case "$cmd" in
     # Town DB (workdir is the town .beads dir) holds duplicates of the
     # rig-scoped agent beads; the rig DB has none.
     if [[ "$PWD" == */.beads ]]; then
-      printf '[{"id":"gs-gastown-witness","title":"Witness","status":"open","labels":["gt:agent"]},{"id":"gs-gastown-refinery","title":"Refinery","status":"open","labels":["gt:agent"]},{"id":"hq-deacon","title":"Deacon","status":"open","labels":["gt:agent"]},{"id":"hq-mayor","title":"Mayor","status":"open","labels":["gt:agent"]}]\n'
+      printf '[{"id":"gs-gastown-crew-alice","title":"Crew alice","status":"open","labels":["gt:agent"]},{"id":"hq-mayor","title":"Mayor","status":"open","labels":["gt:agent"]}]\n'
     else
       printf '[]\n'
     fi
@@ -403,6 +409,10 @@ func setupTownDuplicateFixture(t *testing.T) string {
 	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// One canonical crew worker gives the rig an agent bead to require.
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "crew", "alice", ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +424,7 @@ func setupTownDuplicateFixture(t *testing.T) string {
 
 // TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing verifies that Run reports
 // a rig-scoped agent bead as missing when it exists only in the town database.
-// Patrol commands (gt agents resolve --rig) require rig-local agent beads, so
+// Agent lookups (gt agents resolve --rig) require rig-local agent beads, so
 // a town-level duplicate must not satisfy the existence check. See gt-abj.
 func TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing(t *testing.T) {
 	tmpDir := setupTownDuplicateFixture(t)
@@ -429,7 +439,7 @@ func TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing(t *testing.T) {
 	if result.Status == StatusOK {
 		t.Fatalf("expected town-only rig agent beads to be reported missing, got OK: %s", result.Message)
 	}
-	for _, want := range []string{"gs-gastown-witness"} {
+	for _, want := range []string{"gs-gastown-crew-alice"} {
 		found := false
 		for _, detail := range result.Details {
 			if strings.HasPrefix(detail, want) {
@@ -447,7 +457,7 @@ func TestAgentBeadsExistCheck_TownOnlyRigBeadIsMissing(t *testing.T) {
 // that Fix creates the rig-local agent bead even when a town-level duplicate
 // exists. Before gt-abj, the merged town+rig map made fixAgentBead return
 // early on the town duplicate, so the rig-local bead was never created and
-// doctor --fix could not repair the patrol hard-block.
+// doctor --fix could not repair the missing rig-local bead.
 func TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate(t *testing.T) {
 	tmpDir := setupTownDuplicateFixture(t)
 	logFile := filepath.Join(tmpDir, "bd.log")
@@ -465,14 +475,14 @@ func TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate(t *test
 	}
 	log := string(data)
 	rigDir := resolvePath(t, filepath.Join(tmpDir, "gastown", "mayor", "rig"))
-	for _, id := range []string{"gs-gastown-witness"} {
+	for _, id := range []string{"gs-gastown-crew-alice"} {
 		want := "create " + id + " cwd=" + rigDir
 		if !strings.Contains(log, want) {
 			t.Errorf("expected Fix() to create %s IN THE RIG DATABASE (create running in %s) despite town duplicate, got log: %q", id, rigDir, log)
 		}
 	}
 	// Town agents exist in the town DB — Fix must NOT recreate them.
-	for _, unwanted := range []string{"create hq-deacon", "create hq-mayor"} {
+	for _, unwanted := range []string{"create hq-mayor"} {
 		if strings.Contains(log, unwanted) {
 			t.Errorf("Fix() should not recreate existing town agent bead (%s), got log: %q", unwanted, log)
 		}
@@ -594,7 +604,7 @@ func TestAgentBeadsExistCheck_FixLabelsLegacyOpenBeadInsteadOfCreating(t *testin
 		t.Errorf("Fix() must not create beads that already exist (label them instead), got log: %q", log)
 	}
 	rigDir := resolvePath(t, filepath.Join(tmpDir, "gastown", "mayor", "rig"))
-	for _, id := range []string{"gs-gastown-witness"} {
+	for _, id := range []string{"gs-gastown-crew-alice"} {
 		want := "update " + id + " cwd=" + rigDir
 		if !strings.Contains(log, want) {
 			t.Errorf("expected Fix() to add gt:agent label to legacy bead %s in the rig database, got log: %q", id, log)

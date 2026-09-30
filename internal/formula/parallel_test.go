@@ -4,16 +4,33 @@ import (
 	"testing"
 )
 
+// sequentialFormula is a small workflow of sequential steps: a -> b -> c.
+const sequentialFormula = `
+formula = "mol-parallel-fixture"
+version = 1
+
+[[steps]]
+id = "a"
+title = "A"
+
+[[steps]]
+id = "b"
+title = "B"
+needs = ["a"]
+
+[[steps]]
+id = "c"
+title = "C"
+needs = ["b"]
+`
+
 func TestParallelReadySteps(t *testing.T) {
-	// Parse the witness patrol formula
-	f, err := ParseFile("formulas/mol-witness-patrol.formula.toml")
+	f, err := Parse([]byte(sequentialFormula))
 	if err != nil {
-		t.Fatalf("Failed to parse patrol formula: %v", err)
+		t.Fatalf("Failed to parse formula: %v", err)
 	}
 
-	// Verify parallel flag is not set on sequential steps
-	sequentialSteps := []string{"survey-workers", "check-timer-gates", "check-swarm-completion"}
-	for _, id := range sequentialSteps {
+	for _, id := range []string{"a", "b", "c"} {
 		step := f.GetStep(id)
 		if step == nil {
 			t.Errorf("Step %s not found", id)
@@ -24,32 +41,16 @@ func TestParallelReadySteps(t *testing.T) {
 		}
 	}
 
-	// Test that after check-refinery, the next sequential step is ready
-	completed := map[string]bool{
-		"inbox-check":      true,
-		"process-cleanups": true,
-		"check-refinery":   true,
-	}
-
-	parallel, sequential := f.ParallelReadySteps(completed)
-
+	// After a, the next sequential step is ready and nothing runs in parallel.
+	parallel, sequential := f.ParallelReadySteps(map[string]bool{"a": true})
 	if len(parallel) != 0 {
 		t.Errorf("Expected 0 parallel steps, got %d: %v", len(parallel), parallel)
 	}
-
-	if sequential != "survey-workers" {
-		t.Errorf("Expected sequential step survey-workers, got %s", sequential)
+	if sequential != "b" {
+		t.Errorf("Expected sequential step b, got %s", sequential)
 	}
 
-	// Verify patrol-cleanup needs check-swarm-completion
-	patrolCleanup := f.GetStep("patrol-cleanup")
-	if patrolCleanup == nil {
-		t.Fatal("patrol-cleanup step not found")
-	}
-	if len(patrolCleanup.Needs) != 1 {
-		t.Errorf("patrol-cleanup should need 1 step, got %d: %v", len(patrolCleanup.Needs), patrolCleanup.Needs)
-	}
-	if len(patrolCleanup.Needs) == 1 && patrolCleanup.Needs[0] != "check-swarm-completion" {
-		t.Errorf("patrol-cleanup should need check-swarm-completion, got %v", patrolCleanup.Needs)
+	if c := f.GetStep("c"); c == nil || len(c.Needs) != 1 || c.Needs[0] != "b" {
+		t.Errorf("c should need exactly b, got %+v", c)
 	}
 }

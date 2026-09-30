@@ -125,7 +125,7 @@ func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree(t *test
 	if err == nil {
 		t.Fatal("Fix removed a corrupt .repo.git that a worktree still references")
 	}
-	if !strings.Contains(err.Error(), filepath.Join("refinery", "rig")) {
+	if !strings.Contains(err.Error(), filepath.Join("polecats", "nux")) {
 		t.Errorf("refusal %q does not name the referencing worktree", err)
 	}
 	if got := objectCount(t, bareRepo); got != before || before == 0 {

@@ -80,9 +80,7 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 	}{
 		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
 		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
-		{"witness", "", RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "witness")}},
 		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
-		{"deacon", "", RoleContext{Role: RoleDeacon, TownRoot: town, WorkDir: filepath.Join(town, "deacon")}},
 		// gt prime inside a dog session derives the dog from its kennel cwd
 		// (roleContextFromDir) and never sets Rig.
 		{"dog", "alpha", RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}},

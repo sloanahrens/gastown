@@ -57,14 +57,13 @@ Cleanup checks (fixable):
   - slot-debris              Detect stale container-gate containers and owner files (fixable)
   - stalled-polecats         Detect polecats with dead sessions and unpushed work (fixable)
   - orphan-processes         Detect orphaned Claude processes
-  - session-name-format      Detect sessions with outdated naming format (fixable)
+  - session-name-format      Detect crew sessions with outdated naming format
   - wisp-gc                  Report abandoned wisps (>1h) bd gc would collect (report only)
   - misclassified-wisps      Detect issues that should be wisps (purges to wisps table, fixable)
   - jsonl-bloat              Detect stale/bloated issues.jsonl vs live database
   - stale-beads-redirect     Detect stale files in .beads directories with redirects
 
 Clone divergence checks:
-  - persistent-role-branches Detect witness/refinery not on main (excludes crew)
   - clone-divergence         Detect clones significantly behind origin/main
   - default-branch-all-rigs  Verify default_branch exists on remote for all rigs
   - worktree-gitdir-valid    Verify worktree .git files reference existing paths (fixable)
@@ -80,8 +79,6 @@ Rig checks (with --rig flag):
   - rig-is-git-repo          Verify rig is a valid git repository
   - git-exclude-configured   Check .git/info/exclude has Gas Town dirs (fixable)
   - bare-repo-exists         Verify .repo.git exists when worktrees depend on it (fixable)
-  - witness-exists           Verify witness/ structure exists (fixable)
-  - refinery-exists          Verify refinery/ structure exists (fixable)
   - mayor-clone-exists       Verify mayor/rig/ clone exists (fixable)
   - polecat-clones-valid     Verify polecat directories are valid clones
   - beads-config-valid       Verify beads configuration (fixable)
@@ -264,7 +261,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewDaemonCheck())
 	d.Register(doctor.NewDaemonLivenessCheck()) // Verify daemon heartbeat is fresh AND advancing, not just fresh
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
-	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
@@ -295,7 +291,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleBeadsRedirectCheck())
 	d.Register(doctor.NewBeadsRedirectTargetCheck())
 	d.Register(doctor.NewStaleRuntimeFilesCheck())
-	d.Register(doctor.NewBranchCheck())
 	d.Register(doctor.NewCloneDivergenceCheck())
 	d.Register(doctor.NewDefaultBranchAllRigsCheck())
 	d.Register(doctor.NewIdentityCollisionCheck())
@@ -307,19 +302,15 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewEnvVarsCheck())
 
 	// Patrol system checks
-	d.Register(doctor.NewPatrolMoleculesExistCheck())
 	d.Register(doctor.NewPatrolHooksWiredCheck())
 	d.Register(doctor.NewPatrolNotStuckCheck())
 	d.Register(doctor.NewPatrolPluginsAccessibleCheck())
 	d.Register(doctor.NewPatrolPluginDriftCheck())
-	d.Register(doctor.NewDeaconSelfProbeCheck()) // Verify the deacon patrol acks an injected probe on the doctor-dog cadence (gt-jmy3)
 	d.Register(doctor.NewAgentBeadsCheck())
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())
 	d.Register(doctor.NewRigBeadsCheck())
 	d.Register(doctor.NewRoleBeadsCheck())
-
-	// NOTE: StaleAttachmentsCheck removed - staleness detection belongs in Deacon molecule
 
 	// Config architecture checks
 	d.Register(doctor.NewSettingsCheck())
@@ -346,8 +337,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewCrewWorktreeCheck())
 	d.Register(doctor.NewCommandsCheck())
 
-	// Lifecycle hygiene checks
-	d.Register(doctor.NewLifecycleHygieneCheck())
+	// Lifecycle config checks
 	d.Register(doctor.NewTownConfigParseCheck())
 	d.Register(doctor.NewLifecycleDefaultsCheck())
 

@@ -188,9 +188,6 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession()); r != "" {
 		return r, alt
 	}
-	if r, alt := matchesWitnessGitPush(lowerTokens, inWitnessSession()); r != "" {
-		return r, alt
-	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
 	}
@@ -1984,38 +1981,6 @@ func printIdleGateHold(load1 float64, command string) {
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintln(os.Stderr, "  "+idleGateAlternative)
 	fmt.Fprintln(os.Stderr, "")
-}
-
-// inWitnessSession reports whether the hook runs inside a witness session.
-// GT_ROLE is "<rig>/witness" for rig witnesses; the bare form covers a
-// witness started outside a rig context.
-func inWitnessSession() bool {
-	role, _, _ := parseRoleString(os.Getenv("GT_ROLE"))
-	return role == RoleWitness
-}
-
-const witnessGitPushReason = "git push from a witness session"
-const witnessGitPushAlternative = "Alternative: a witness observes and reports. Pushing a polecat's branch is the " +
-	"polecat's job (gt done) or the refinery's (with the mayor's authority); mail the mayor or the polecat " +
-	"with what you found instead."
-
-// matchesWitnessGitPush blocks every `git push` from a witness session,
-// whatever the refspec. A witness never owns a branch: on 2026-09-18 a
-// local-model witness, acting on a mail about a refinery fast-forward
-// repair, composed `git push origin <branch>:<sha> --force-with-lease` in a
-// polecat's worktree — a push to a branch named by a commit hash — and only
-// the branch-policy pre-push hook stopped it. The rule turns "witnesses do
-// not push" into a check the model cannot misread.
-func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, alternative string) {
-	if !witnessSession {
-		return "", ""
-	}
-	for i, f := range tokens {
-		if f == "git" && inCommandPosition(tokens, i) && gitSubcommand(tokens[i+1:]) == "push" {
-			return witnessGitPushReason, witnessGitPushAlternative
-		}
-	}
-	return "", ""
 }
 
 // inCommandPosition reports whether tokens[i] ("git") is being run rather

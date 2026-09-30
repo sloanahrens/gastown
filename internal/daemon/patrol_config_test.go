@@ -150,25 +150,25 @@ func TestIsPatrolActive(t *testing.T) {
 		patrolConfig:    nil, // nil config = all default-enabled patrols enabled
 		disabledPatrols: nil,
 	}
-	if !d.isPatrolActive("witness") {
-		t.Error("expected witness to be active with nil configs")
+	if !d.isPatrolActive("handler") {
+		t.Error("expected handler to be active with nil configs")
 	}
 
 	// Patrol enabled in daemon config, but in disabled list → inactive
-	d.disabledPatrols = map[string]bool{"witness": true}
-	if d.isPatrolActive("witness") {
-		t.Error("expected witness to be inactive when in disabled list")
+	d.disabledPatrols = map[string]bool{"handler": true}
+	if d.isPatrolActive("handler") {
+		t.Error("expected handler to be inactive when in disabled list")
 	}
 
 	// Patrol disabled in daemon config, not in disabled list → inactive
 	d.disabledPatrols = nil
 	d.patrolConfig = &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
-			Witness: &PatrolConfig{Enabled: false},
+			Handler: &PatrolConfig{Enabled: false},
 		},
 	}
-	if d.isPatrolActive("witness") {
-		t.Error("expected witness to be inactive when disabled in daemon config")
+	if d.isPatrolActive("handler") {
+		t.Error("expected handler to be inactive when disabled in daemon config")
 	}
 
 	// Opt-in patrol (doctor_dog) disabled by default, in disabled list → inactive

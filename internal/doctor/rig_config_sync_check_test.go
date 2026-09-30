@@ -586,81 +586,6 @@ func TestRigConfigSyncCheck_PrefixNamedDoltDBNoMismatch(t *testing.T) {
 	}
 }
 
-func TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	mayorDir := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	rigsJSON := `{
-		"version": 1,
-		"rigs": {
-			"deacon": {
-				"git_url": "https://github.com/test/deacon.git",
-				"beads": {"prefix": "dc"}
-			}
-		}
-	}`
-	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	townBeadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	writeTestDoltDatabase(t, tmpDir, "hq")
-
-	rigDir := filepath.Join(tmpDir, "deacon")
-	beadsDir := filepath.Join(rigDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	configJSON := `{"type":"rig","version":1,"name":"deacon","git_url":"https://github.com/test/deacon.git","beads":{"prefix":"dc"}}`
-	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(configJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: dc\nissue-prefix: dc\nexport.auto: \"false\"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq"}`
-	if err := os.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
-		t.Fatal(err)
-	}
-	bd := newFakeBD()
-	seedRigBead(bd, tmpDir, "deacon", "dc")
-	ctx := bd.ctx(tmpDir)
-	check := NewRigConfigSyncCheck()
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK: %s %#v", result.Status, result.Message, result.Details)
-	}
-	if len(check.dbNameMismatches) != 0 {
-		t.Fatalf("dbNameMismatches = %#v, want none for deacon town DB", check.dbNameMismatches)
-	}
-	if len(check.missingDoltDB) != 0 {
-		t.Fatalf("missingDoltDB = %#v, want none", check.missingDoltDB)
-	}
-
-	if err := check.Fix(ctx); err != nil {
-		t.Fatalf("Fix failed: %v", err)
-	}
-	after, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatalf("read metadata.json: %v", err)
-	}
-	if !strings.Contains(string(after), `"dolt_database":"hq"`) {
-		t.Fatalf("Fix rewrote deacon away from town DB: %s", string(after))
-	}
-}
-
 func TestRigConfigSyncCheck_OrdinaryRigTownDoltDBMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -763,12 +688,12 @@ func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {
 	if err := os.MkdirAll(pidsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(pidsDir, "pir-witness.pid"), []byte("12345"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pidsDir, "pir-crew-max.pid"), []byte("12345"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create valid PID file for town agent
-	if err := os.WriteFile(filepath.Join(pidsDir, "hq-deacon.pid"), []byte("12346"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pidsDir, "hq-mayor.pid"), []byte("12346"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -842,7 +767,7 @@ func TestStaleRuntimeFilesCheck_Fix(t *testing.T) {
 	if err := os.MkdirAll(pidsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	stalePID := filepath.Join(pidsDir, "pir-witness.pid")
+	stalePID := filepath.Join(pidsDir, "pir-crew-max.pid")
 	if err := os.WriteFile(stalePID, []byte("12345"), 0644); err != nil {
 		t.Fatal(err)
 	}

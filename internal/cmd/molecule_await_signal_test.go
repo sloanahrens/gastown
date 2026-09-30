@@ -708,7 +708,7 @@ func keepAppendingEvents(t *testing.T, townRoot string) {
 func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
 	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
 	t.Setenv("BD_SHOW_FAIL", " 1 ") // only the initial idle read fails
-	awaitSignalBackoffBase = "20s" // a missed wake fails in 20s, not minutes
+	awaitSignalBackoffBase = "20s"  // a missed wake fails in 20s, not minutes
 	awaitSignalBackoffMult = 2
 	awaitSignalBackoffMax = "20s"
 

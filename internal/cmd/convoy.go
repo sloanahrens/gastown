@@ -1581,9 +1581,10 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 // ready (gt-t08jn): anything else — blocked, deferred, pinned, a custom status
 // — is work the tracker says is not ready, assigned or not. An issue is ready
 // if it is not scheduled, and:
-// - status = "open" AND (no assignee OR assignee session is dead)
-// - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
-//   dead) — an orphaned molecule, whose recovery is a re-dispatch
+//   - status = "open" AND (no assignee OR assignee session is dead)
+//   - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
+//     dead) — an orphaned molecule, whose recovery is a re-dispatch
+//
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	status := beads.IssueStatus(strings.TrimSpace(t.Status))

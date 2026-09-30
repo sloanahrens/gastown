@@ -21,8 +21,8 @@ func TestGetEmbeddedFormulas(t *testing.T) {
 	}
 
 	// Verify at least one known formula exists
-	if _, ok := embedded["mol-deacon-patrol.formula.toml"]; !ok {
-		t.Error("should contain mol-deacon-patrol.formula.toml")
+	if _, ok := embedded["mol-polecat-work.formula.toml"]; !ok {
+		t.Error("should contain mol-polecat-work.formula.toml")
 	}
 
 	// Verify hashes are valid hex strings
@@ -77,8 +77,8 @@ func TestProvisionFormulas_SkipsExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	customContent := []byte("# Custom user formula\nformula = \"mol-deacon-patrol\"\n")
-	customPath := filepath.Join(formulasDir, "mol-deacon-patrol.formula.toml")
+	customContent := []byte("# Custom user formula\nformula = \"mol-polecat-work\"\n")
+	customPath := filepath.Join(formulasDir, "mol-polecat-work.formula.toml")
 	if err := os.WriteFile(customPath, customContent, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +141,8 @@ func TestCheckFormulaHealth_UserModified(t *testing.T) {
 
 	// Modify a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-deacon-patrol.formula.toml")
-	modifiedContent := []byte("# User modified this\nformula = \"mol-deacon-patrol\"\nversion = 999\n")
+	formulaPath := filepath.Join(formulasDir, "mol-polecat-work.formula.toml")
+	modifiedContent := []byte("# User modified this\nformula = \"mol-polecat-work\"\nversion = 999\n")
 	if err := os.WriteFile(formulaPath, modifiedContent, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -160,16 +160,16 @@ func TestCheckFormulaHealth_UserModified(t *testing.T) {
 	// Verify the specific formula is marked as modified
 	found := false
 	for _, f := range report.Formulas {
-		if f.Name == "mol-deacon-patrol.formula.toml" {
+		if f.Name == "mol-polecat-work.formula.toml" {
 			if f.Status != "modified" {
-				t.Errorf("mol-deacon-patrol status = %q, want %q", f.Status, "modified")
+				t.Errorf("mol-polecat-work status = %q, want %q", f.Status, "modified")
 			}
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("mol-deacon-patrol.formula.toml not found in report")
+		t.Error("mol-polecat-work.formula.toml not found in report")
 	}
 }
 
@@ -185,7 +185,7 @@ func TestCheckFormulaHealth_Missing(t *testing.T) {
 
 	// Delete a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-deacon-patrol.formula.toml")
+	formulaPath := filepath.Join(formulasDir, "mol-polecat-work.formula.toml")
 	if err := os.Remove(formulaPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1013,14 +1013,14 @@ func provisionTownWithHandEdit(t *testing.T, edited []byte) (townRoot, formulasD
 }
 
 // TestPlanFormulaSync_WritesNothing verifies the dry run classifies without
-// touching the town — the deacon refused to run sync against the live town for
+// touching the town — an agent refused to run sync against the live town for
 // want of exactly this (gt-dt7r).
 func TestPlanFormulaSync_WritesNothing(t *testing.T) {
 	townRoot, formulasDir, name := provisionTownWithHandEdit(t,
 		[]byte("# hand-edited by a human\n"))
 
 	// Give the plan real work to report: a second formula the town is missing.
-	deleted := "mol-witness-patrol.formula.toml"
+	deleted := "mol-gastown-boot.formula.toml"
 	if err := os.Remove(filepath.Join(formulasDir, deleted)); err != nil {
 		t.Fatal(err)
 	}

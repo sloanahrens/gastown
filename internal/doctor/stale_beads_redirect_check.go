@@ -17,7 +17,7 @@ import (
 // - SetupRedirect failed or was run before cleanup logic was added
 //
 // Additionally, this check verifies redirect topology:
-// - Worktrees (crew, polecats, refinery) should have redirects
+// - Worktrees (crew, polecats) should have redirects
 // - Redirects should point to the correct canonical location
 // - Redirect targets should exist
 //
@@ -253,12 +253,6 @@ func getBeadsDirsToCheck(rigDir string) []string {
 		}
 	}
 
-	// Refinery .beads: <rig>/refinery/rig/.beads
-	refineryBeads := filepath.Join(rigDir, "refinery", "rig", ".beads")
-	if _, err := os.Stat(refineryBeads); err == nil {
-		dirs = append(dirs, refineryBeads)
-	}
-
 	// Polecats .beads directories: <rig>/polecats/*/.beads
 	// Polecats may use nested structure: polecats/<name>/<rig_name>/.beads
 	polecatsDir := filepath.Join(rigDir, "polecats")
@@ -472,12 +466,6 @@ func getWorktreePaths(rigDir string) []string {
 				paths = append(paths, polecatClonePath(rigDir, name))
 			}
 		}
-	}
-
-	// Refinery: <rig>/refinery/rig
-	refineryPath := filepath.Join(rigDir, "refinery", "rig")
-	if dirExists(refineryPath) {
-		paths = append(paths, refineryPath)
 	}
 
 	return paths

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -25,7 +24,6 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -913,67 +911,17 @@ func updateAgentHookBead(agentID, beadID, workDir, townBeadsDir string) {
 	// Agent bead hook_bead slot is no longer maintained.
 }
 
-// wakeRigAgents wakes the witness for a rig after polecat dispatch.
-// This ensures the witness is ready to monitor. The refinery is nudged
-// separately when an MR is actually created (by nudgeRefinery).
+// wakeRigAgents runs after polecat dispatch. Nothing needs waking: the
+// daemon's patrol_scan tick watches the new polecat (gt-4k3fj.6). It warns
+// when the daemon is not running, since then nothing restarts a polecat whose
+// session dies (gt-9wv0).
 func wakeRigAgents(rigName string) {
-	// Boot the rig (idempotent - no-op if already running)
-	bootCmd := exec.Command("gt", "rig", "boot", rigName)
-	_ = bootCmd.Run() // Ignore errors - rig might already be running
-
-	// Verify daemon is running — polecat triggering depends on daemon
-	// processing deacon mail. Warn if not running (gt-9wv0).
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
 		if running, _, _ := daemon.IsRunning(townRoot); !running {
-			fmt.Fprintf(os.Stderr, "Warning: daemon is not running. Polecat may not auto-start.\n")
+			fmt.Fprintf(os.Stderr, "Warning: daemon is not running. Nothing restarts %s polecats that die.\n", rigName)
 			fmt.Fprintf(os.Stderr, "  Start with: gt daemon start\n")
 		}
-	}
-
-	// Immediate delivery to witness: send directly to tmux pane.
-	// No cooperative queue — idle agents never call Drain(), so queued
-	// nudges would be stuck forever. Direct delivery is safe: if the
-	// agent is busy, text buffers in tmux and is processed at next prompt.
-	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(witnessSession, "Polecat dispatched - check for work"); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to nudge witness %s: %v\n", witnessSession, err)
-	}
-}
-
-// nudgeWitness wakes the witness after polecat completion (gt-a6gp).
-// Replaces POLECAT_DONE mail — nudges are free (no Dolt commit).
-//
-// The nudge is the half that does the waking: the witness patrol waits on
-// await-signal, which tails the activity feed, so nothing reads the
-// POLECAT_DONE event file this also emits (gt-wpf0). Delivery failure is
-// reported and not fatal — gt done has already submitted the work, and the
-// witness rediscovers the completion by surveying agent beads.
-func nudgeWitness(rigName, message string) {
-	// Test hook: log nudge for test observability
-	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-		entry := fmt.Sprintf("nudge:%s:%s\n", witnessSession, message)
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			_, _ = f.WriteString(entry)
-			_ = f.Close()
-		}
-		return // Don't actually nudge tmux in tests
-	}
-
-	townRoot, _ := workspace.FindFromCwd()
-	var eventPath string
-	if townRoot != "" {
-		eventPath, _ = channelevents.EmitToTown(townRoot, "witness", rigName, "POLECAT_DONE", []string{
-			"source=polecat",
-			"message=" + message,
-		})
-	}
-
-	if err := wakeChannelSession(townRoot, "witness", rigName, message); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: POLECAT_DONE wake not delivered: %v (event: %s)\n", err, eventPath)
 	}
 }
 
@@ -1792,15 +1740,11 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 // clearReassignedPolecatState clears agent_state and hook_bead on a polecat's
 // agent bead after its work was force-reassigned to a different agent (gt-skwt).
 //
-// The LIFECYCLE:Shutdown mail sent alongside the reassignment has no Go-side
-// dispatcher — it is only ever acted on by an AI witness reading its inbox by
-// hand, on whatever cadence that happens. Relying on it alone leaves
-// agent_state=working and hook_bead=<old bead> on the outgoing polecat
-// indefinitely. Every later `gt patrol scan` then reads that stale state,
-// sees a dead session paired with an "active" agent state, and misclassifies
-// the polecat as a permanent session-dead-active zombie — one that never
-// self-clears because nothing else touches these fields. Clearing them here,
-// synchronously, on the one code path guaranteed to run, closes that gap.
+// Nothing else touches these fields, so without this the outgoing polecat
+// keeps agent_state=working and hook_bead=<old bead> indefinitely, and a dead
+// session paired with an "active" agent state reads as a permanent zombie.
+// Clearing them here, synchronously, on the one code path guaranteed to run,
+// closes that gap.
 func clearReassignedPolecatState(townRoot, assignee string) {
 	if townRoot == "" {
 		return

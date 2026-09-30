@@ -144,10 +144,10 @@ func TestRigWorkerPoolSlowRigDoesNotBlockOthers(t *testing.T) {
 // Run with: go test ./internal/daemon/ -bench=BenchmarkRigWorkerPool100RigsOneSlow -benchtime=5s
 func BenchmarkRigWorkerPool100RigsOneSlow(b *testing.B) {
 	const (
-		numRigs   = 100
-		slowIndex = 7
-		slowDelay = 100 * time.Millisecond
-		fastDelay = 1 * time.Millisecond
+		numRigs    = 100
+		slowIndex  = 7
+		slowDelay  = 100 * time.Millisecond
+		fastDelay  = 1 * time.Millisecond
 		rigTimeout = 5 * time.Second
 	)
 

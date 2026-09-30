@@ -99,7 +99,7 @@ func getRoleWithContextEnv(cwd, townRoot string, getenv func(string) string) (Ro
 
 		// If env is incomplete (missing rig/polecat for roles that need them),
 		// fill gaps from cwd detection and mark as incomplete
-		needsRig := parsedRole == RoleWitness || parsedRole == RolePolecat || parsedRole == RoleCrew
+		needsRig := parsedRole == RolePolecat || parsedRole == RoleCrew
 		needsPolecat := parsedRole == RolePolecat || parsedRole == RoleCrew || parsedRole == RoleDog
 
 		if needsRig && info.Rig == "" && cwdCtx.Rig != "" {
@@ -161,10 +161,9 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
-	// Check for boot role: deacon/dogs/boot/
-	// Must check before deacon since boot is under deacon directory
+	// deacon/dogs/boot/ was the retired Boot watchdog's home
+	// (gt-4k3fj.6.1): no role, and not a dog named "boot".
 	if len(parts) >= 3 && parts[0] == "deacon" && parts[1] == "dogs" && parts[2] == "boot" {
-		ctx.Role = RoleBoot
 		return ctx
 	}
 
@@ -176,9 +175,9 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
-	// Check for deacon role: deacon/
+	// deacon/ itself only hosts the dogs now: the deacon role was deleted
+	// (gt-4k3fj.6.1). It is not a rig.
 	if len(parts) >= 1 && parts[0] == "deacon" {
-		ctx.Role = RoleDeacon
 		return ctx
 	}
 
@@ -195,9 +194,8 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
-	// Check for witness: <rig>/witness/rig/
+	// <rig>/witness/ was the retired witness's home (gt-4k3fj.6.1): no role.
 	if len(parts) >= 2 && parts[1] == "witness" {
-		ctx.Role = RoleWitness
 		return ctx
 	}
 
@@ -219,7 +217,7 @@ func detectRole(cwd, townRoot string) RoleInfo {
 	return ctx
 }
 
-// parseRoleString parses a role string like "mayor", "gastown/witness", or "gastown/polecats/alpha".
+// parseRoleString parses a role string like "mayor", "gastown/crew/max", or "gastown/polecats/alpha".
 func parseRoleString(s string) (Role, string, string) {
 	s = strings.TrimSpace(s)
 
@@ -233,10 +231,6 @@ func parseRoleString(s string) (Role, string, string) {
 	switch s {
 	case constants.RoleMayor:
 		return RoleMayor, "", ""
-	case constants.RoleDeacon:
-		return RoleDeacon, "", ""
-	case "boot":
-		return RoleBoot, "", ""
 	case "dog":
 		return RoleDog, "", ""
 	}
@@ -251,18 +245,11 @@ func parseRoleString(s string) (Role, string, string) {
 	rig := parts[0]
 
 	switch parts[1] {
-	case "boot":
-		// Handle compound "deacon/boot" format from GT_ROLE env var
-		if rig == "deacon" && len(parts) == 2 {
-			return RoleBoot, "", ""
-		}
-		return Role(s), "", ""
-	case constants.RoleWitness:
-		return RoleWitness, rig, ""
-	case "refinery":
-		// The refinery role was deleted (gt-v4ssj.6). A stale GT_ROLE of
-		// <rig>/refinery is an unknown role, not a polecat named "refinery"
-		// (a name the pool already reserves).
+	case "boot", "witness", "refinery":
+		// The boot, witness (gt-4k3fj.6.1) and refinery (gt-v4ssj.6) roles
+		// were deleted. A stale GT_ROLE of deacon/boot, <rig>/witness or
+		// <rig>/refinery is an unknown role, not a polecat of that name (a
+		// name the pool already reserves).
 		return Role(s), "", ""
 	case "polecats":
 		if len(parts) >= 3 {
@@ -282,21 +269,12 @@ func parseRoleString(s string) (Role, string, string) {
 
 // ActorString returns the actor identity string for beads attribution.
 // Format matches beads created_by convention:
-//   - Simple roles: "mayor", "deacon"
-//   - Dog roles: "deacon-boot" (hyphenated, matching BD_ACTOR)
-//   - Rig-specific: "gastown/witness"
+//   - Simple roles: "mayor"
 //   - Workers: "gastown/crew/max", "gastown/polecats/Toast"
 func (info RoleInfo) ActorString() string {
 	switch info.Role {
 	case RoleMayor:
 		return "mayor"
-	case RoleDeacon:
-		return "deacon"
-	case RoleWitness:
-		if info.Rig != "" {
-			return fmt.Sprintf("%s/witness", info.Rig)
-		}
-		return "witness"
 	case RolePolecat:
 		if info.Rig != "" && info.Polecat != "" {
 			return fmt.Sprintf("%s/polecats/%s", info.Rig, info.Polecat)
@@ -307,8 +285,6 @@ func (info RoleInfo) ActorString() string {
 			return fmt.Sprintf("%s/crew/%s", info.Rig, info.Polecat)
 		}
 		return "crew"
-	case RoleBoot:
-		return "deacon-boot"
 	default:
 		return string(info.Role)
 	}
@@ -319,13 +295,6 @@ func getRoleHome(role Role, rig, polecat, townRoot string) string {
 	switch role {
 	case RoleMayor:
 		return filepath.Join(townRoot, "mayor")
-	case RoleDeacon:
-		return filepath.Join(townRoot, "deacon")
-	case RoleWitness:
-		if rig == "" {
-			return ""
-		}
-		return filepath.Join(townRoot, rig, "witness")
 	case RolePolecat:
 		if rig == "" || polecat == "" {
 			return ""
@@ -336,8 +305,6 @@ func getRoleHome(role Role, rig, polecat, townRoot string) string {
 			return ""
 		}
 		return filepath.Join(townRoot, rig, "crew", polecat)
-	case RoleBoot:
-		return filepath.Join(townRoot, "deacon", "dogs", "boot")
 	case RoleDog:
 		if polecat == "" {
 			return ""

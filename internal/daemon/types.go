@@ -127,7 +127,6 @@ type (
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
-	PatrolWatchdogConfig       = agentconfig.PatrolWatchdogConfig
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
 )
 
@@ -266,30 +265,11 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.PatrolScan.Enabled
 	}
-	// patrol_watchdog defaults ON for the same reason mayor_dispatch does: it
-	// exists to catch a role going silent while still looking alive (gt-4z3b7),
-	// and a detector that has to be switched on cannot prevent the state it
-	// was written for. An explicit config entry can still disable it.
-	if patrol == "patrol_watchdog" {
-		if config == nil || config.Patrols == nil || config.Patrols.PatrolWatchdog == nil {
-			return true
-		}
-		return config.Patrols.PatrolWatchdog.Enabled
-	}
-
 	if config == nil || config.Patrols == nil {
 		return true // Default: enabled
 	}
 
 	switch patrol {
-	case constants.RoleWitness:
-		if config.Patrols.Witness != nil {
-			return config.Patrols.Witness.Enabled
-		}
-	case constants.RoleDeacon:
-		if config.Patrols.Deacon != nil {
-			return config.Patrols.Deacon.Enabled
-		}
 	case "handler":
 		if config.Patrols.Handler != nil {
 			return config.Patrols.Handler.Enabled
@@ -305,37 +285,12 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 	}
 
 	switch patrol {
-	case constants.RoleWitness:
-		if config.Patrols.Witness != nil {
-			return config.Patrols.Witness.Rigs
-		}
 	case "patrol_scan":
 		if config.Patrols.PatrolScan != nil {
 			return config.Patrols.PatrolScan.Rigs
 		}
 	}
 	return nil // All rigs
-}
-
-// WitnessWantedInRig reports whether the town wants a witness LLM session in
-// rigName: the witness patrol is enabled and the rig is not in
-// patrols.witness.disabled_rigs. It is the per-rig off switch that lets the
-// patrol_scan tick replace the witness one rig at a time (ADR 0005). The
-// rigs allowlist is not consulted here: a rig outside it is not ensured, but
-// its session is not killed either, as before.
-func WitnessWantedInRig(config *DaemonPatrolConfig, rigName string) bool {
-	if !IsPatrolEnabled(config, constants.RoleWitness) {
-		return false
-	}
-	if config == nil || config.Patrols == nil || config.Patrols.Witness == nil {
-		return true
-	}
-	for _, r := range config.Patrols.Witness.DisabledRigs {
-		if r == rigName {
-			return false
-		}
-	}
-	return true
 }
 
 // loadDisabledPatrolsFromTownSettings loads the disabled_patrols list from

@@ -103,7 +103,6 @@ func TestConfigAgentList(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-
 		// Run the command
 		cmd := &cobra.Command{}
 		args := []string{}
@@ -122,7 +121,6 @@ func TestConfigAgentList(t *testing.T) {
 		if err := os.Chdir(townRoot); err != nil {
 			t.Fatalf("chdir: %v", err)
 		}
-
 
 		// Use a command with the --json flag registered
 		cmd := &cobra.Command{}
@@ -145,7 +143,6 @@ func TestConfigAgentGet(t *testing.T) {
 		if err := os.Chdir(townRoot); err != nil {
 			t.Fatalf("chdir: %v", err)
 		}
-
 
 		// Run the command
 		cmd := &cobra.Command{}
@@ -183,7 +180,6 @@ func TestConfigAgentGet(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-
 		// Run the command
 		cmd := &cobra.Command{}
 		args := []string{"my-custom"}
@@ -202,7 +198,6 @@ func TestConfigAgentGet(t *testing.T) {
 		if err := os.Chdir(townRoot); err != nil {
 			t.Fatalf("chdir: %v", err)
 		}
-
 
 		// Run the command with unknown agent
 		cmd := &cobra.Command{}

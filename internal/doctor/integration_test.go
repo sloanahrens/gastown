@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -81,20 +80,17 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 	}{
 		// Valid Gas Town sessions should NOT be detected as orphans
 		{"mayor_session", "hq-mayor", false},
-		{"deacon_session", "hq-deacon", false},
-		{"witness_session", "ga-witness", false},
-		{"refinery_session", "ga-refinery", false},
 		{"crew_session", "ga-crew-max", false},
 		{"polecat_session", "ga-abc123", false},
 
 		// Different rig names
-		{"niflheim_witness", "ni-witness", false},
+		{"niflheim_polecat", "ni-toast", false},
 		{"niflheim_crew", "ni-crew-codex1", false},
 
 		// Invalid sessions SHOULD be detected as orphans
-		{"unknown_prefix", "xx-witness", true},          // Unregistered prefix
-		{"unregistered_prefix", "gt-only-two", true},    // "gt" not in test registry
-		{"non_gt_prefix", "foo-gastown-witness", false}, // Not a GT session, ignored
+		{"unknown_prefix", "xx-crew-max", true},          // Unregistered prefix
+		{"unregistered_prefix", "gt-only-two", true},     // "gt" not in test registry
+		{"non_gt_prefix", "foo-gastown-crew-max", false}, // Not a GT session, ignored
 	}
 
 	check := NewOrphanSessionCheck()
@@ -104,9 +100,8 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			validRigs := check.getValidRigs(townRoot)
 			mayorSession := "hq-mayor"
-			deaconSession := "hq-deacon"
 
-			isValid := check.isValidSession(tt.sessionName, validRigs, mayorSession, deaconSession)
+			isValid := check.isValidSession(tt.sessionName, validRigs, mayorSession)
 
 			if tt.expectOrphan && isValid {
 				t.Errorf("session %q should be detected as orphan but was marked valid", tt.sessionName)
@@ -135,15 +130,13 @@ func TestIntegrationCrewSessionProtection(t *testing.T) {
 	session.SetDefaultRegistry(r)
 
 	tests := []struct {
-		name     string
-		session  string
-		isCrew   bool
+		name    string
+		session string
+		isCrew  bool
 	}{
 		{"simple_crew", "ga-crew-max", true},
 		{"crew_with_numbers", "ga-crew-worker1", true},
 		{"crew_different_rig", "ni-crew-codex1", true},
-		{"witness_not_crew", "ga-witness", false},
-		{"refinery_not_crew", "ga-refinery", false},
 		{"polecat_not_crew", "ga-abc", false},
 		{"mayor_not_crew", "hq-mayor", false},
 	}
@@ -174,9 +167,7 @@ func TestIntegrationEnvVarsConsistency(t *testing.T) {
 		wantActor string
 	}{
 		{"mayor", "", "mayor"},
-		{"deacon", "", "deacon"},
-		{"witness", "gastown", "gastown/witness"},
-		{"refinery", "gastown", "gastown/refinery"},
+		{"polecat", "gastown", "gastown/polecats/"},
 		{"crew", "gastown", "gastown/crew/"},
 	}
 
@@ -200,39 +191,27 @@ func TestIntegrationBeadsDirRigLevel(t *testing.T) {
 	createTestRig(t, townRoot, "niflheim")
 
 	tests := []struct {
-		name           string
-		role           string
-		rig            string
+		name            string
+		role            string
+		rig             string
 		wantBeadsSuffix string // Expected suffix in BEADS_DIR path
 	}{
 		{
-			name:           "mayor_uses_town_beads",
-			role:           "mayor",
-			rig:            "",
+			name:            "mayor_uses_town_beads",
+			role:            "mayor",
+			rig:             "",
 			wantBeadsSuffix: "/.beads",
 		},
 		{
-			name:           "deacon_uses_town_beads",
-			role:           "deacon",
-			rig:            "",
-			wantBeadsSuffix: "/.beads",
-		},
-		{
-			name:           "witness_uses_rig_beads",
-			role:           "witness",
-			rig:            "gastown",
-			wantBeadsSuffix: "/gastown/.beads",
-		},
-		{
-			name:           "refinery_uses_rig_beads",
-			role:           "refinery",
-			rig:            "niflheim",
+			name:            "polecat_uses_rig_beads",
+			role:            "polecat",
+			rig:             "niflheim",
 			wantBeadsSuffix: "/niflheim/.beads",
 		},
 		{
-			name:           "crew_uses_rig_beads",
-			role:           "crew",
-			rig:            "gastown",
+			name:            "crew_uses_rig_beads",
+			role:            "crew",
+			rig:             "gastown",
 			wantBeadsSuffix: "/gastown/.beads",
 		},
 	}
@@ -280,10 +259,10 @@ func TestIntegrationEnvVarsBeadsDirMismatch(t *testing.T) {
 
 	// Create mock reader with mismatched BEADS_DIR
 	reader := &mockEnvReaderIntegration{
-		sessions: []string{"ga-witness"},
+		sessions: []string{"ga-crew-max"},
 		sessionEnvs: map[string]map[string]string{
-			"ga-witness": {
-				"GT_ROLE":   "witness",
+			"ga-crew-max": {
+				"GT_ROLE":   "crew",
 				"GT_RIG":    "gastown",
 				"BEADS_DIR": townBeadsDir, // WRONG: Should be rigBeadsDir
 				"GT_ROOT":   townRoot,
@@ -573,11 +552,11 @@ func TestIntegrationSessionNaming(t *testing.T) {
 			wantName:    "",
 		},
 		{
-			name:        "witness",
-			sessionName: "ga-witness",
+			name:        "polecat",
+			sessionName: "ga-toast",
 			wantRig:     "gastown",
-			wantRole:    "witness",
-			wantName:    "",
+			wantRole:    "polecat",
+			wantName:    "toast",
 		},
 		{
 			name:        "crew",
@@ -660,27 +639,27 @@ func TestIntegrationMultiTownSocketIsolation(t *testing.T) {
 			tmB.KillServer()
 		})
 
-		if err := tmA.NewSessionWithCommand("ga-witness", ".", "sleep 300"); err != nil {
+		if err := tmA.NewSessionWithCommand("ga-crew-max", ".", "sleep 300"); err != nil {
 			t.Fatalf("create session on socketA: %v", err)
 		}
 
-		// socketB must NOT see ga-witness
+		// socketB must NOT see ga-crew-max
 		sessionsB, err := tmB.ListSessions()
 		if err == nil {
 			for _, s := range sessionsB {
-				if s == "ga-witness" {
-					t.Errorf("socketB sees ga-witness — isolation broken")
+				if s == "ga-crew-max" {
+					t.Errorf("socketB sees ga-crew-max — isolation broken")
 				}
 			}
 		}
 
 		// socketA must see it
-		has, err := tmA.HasSession("ga-witness")
+		has, err := tmA.HasSession("ga-crew-max")
 		if err != nil {
 			t.Errorf("HasSession on socketA: %v", err)
 		}
 		if !has {
-			t.Errorf("socketA does not see ga-witness")
+			t.Errorf("socketA does not see ga-crew-max")
 		}
 	}
 
@@ -717,7 +696,7 @@ func TestIntegrationMultiTownSocketIsolation(t *testing.T) {
 // used to isolate split-brain tests from the real "default" tmux socket.
 type emptySessionLister struct{}
 
-func (e *emptySessionLister) ListSessions() ([]string, error) { return nil, nil }
+func (e *emptySessionLister) ListSessions() ([]string, error)       { return nil, nil }
 func (e *emptySessionLister) KillSessionWithProcesses(string) error { return nil }
 
 // mockEnvReaderIntegration implements SessionEnvReader for integration tests.
@@ -812,8 +791,6 @@ func createTestRig(t *testing.T, townRoot, rigName string) {
 	dirs := []string{
 		"polecats",
 		"crew",
-		"witness",
-		"refinery",
 		"mayor/rig",
 		".beads",
 	}
@@ -889,13 +866,6 @@ func setupMockBeads(t *testing.T, townRoot, rigName string) {
 			"issue_type": "rig",
 			"labels":     []string{"gt:rig"},
 		},
-		{
-			"id":         beads.WitnessBeadIDWithPrefix(prefix, rigName),
-			"title":      "Witness for " + rigName,
-			"status":     "open",
-			"issue_type": "agent",
-			"labels":     []string{"gt:agent"},
-		},
 	}
 
 	f, err := os.Create(issuesFile)
@@ -914,20 +884,6 @@ func setupMockBeads(t *testing.T, townRoot, rigName string) {
 	townIssuesFile := filepath.Join(townRoot, ".beads", "issues.jsonl")
 	townIssues := []map[string]interface{}{
 		{
-			"id":         "hq-witness-role",
-			"title":      "Witness Role",
-			"status":     "open",
-			"issue_type": "role",
-			"labels":     []string{"gt:role"},
-		},
-		{
-			"id":         "hq-refinery-role",
-			"title":      "Refinery Role",
-			"status":     "open",
-			"issue_type": "role",
-			"labels":     []string{"gt:role"},
-		},
-		{
 			"id":         "hq-crew-role",
 			"title":      "Crew Role",
 			"status":     "open",
@@ -937,13 +893,6 @@ func setupMockBeads(t *testing.T, townRoot, rigName string) {
 		{
 			"id":         "hq-mayor-role",
 			"title":      "Mayor Role",
-			"status":     "open",
-			"issue_type": "role",
-			"labels":     []string{"gt:role"},
-		},
-		{
-			"id":         "hq-deacon-role",
-			"title":      "Deacon Role",
 			"status":     "open",
 			"issue_type": "role",
 			"labels":     []string{"gt:role"},

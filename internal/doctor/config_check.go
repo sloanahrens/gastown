@@ -513,32 +513,15 @@ func (c *SessionHookCheck) usesSessionStartScript(content, hookType string) bool
 func (c *SessionHookCheck) findSettingsFiles(townRoot string) []string {
 	var files []string
 
-	// Town-level agents: mayor and deacon (settings in their own dir)
+	// Town-level agent: mayor (settings in its own dir)
 	mayorSettings := filepath.Join(townRoot, "mayor", ".claude", "settings.json")
 	if _, err := os.Stat(mayorSettings); err == nil {
 		files = append(files, mayorSettings)
 	}
 
-	deaconSettings := filepath.Join(townRoot, "deacon", ".claude", "settings.json")
-	if _, err := os.Stat(deaconSettings); err == nil {
-		files = append(files, deaconSettings)
-	}
-
 	// Find all rigs
 	rigs := findAllRigs(townRoot)
 	for _, rig := range rigs {
-		// Witness - settings in parent directory (witness/)
-		witnessSettings := filepath.Join(rig, "witness", ".claude", "settings.json")
-		if _, err := os.Stat(witnessSettings); err == nil {
-			files = append(files, witnessSettings)
-		}
-
-		// Refinery - settings in parent directory (refinery/)
-		refinerySettings := filepath.Join(rig, "refinery", ".claude", "settings.json")
-		if _, err := os.Stat(refinerySettings); err == nil {
-			files = append(files, refinerySettings)
-		}
-
 		// Crew - shared settings in parent directory (crew/)
 		crewSettings := filepath.Join(rig, "crew", ".claude", "settings.json")
 		if _, err := os.Stat(crewSettings); err == nil {
@@ -576,8 +559,8 @@ func findAllRigs(townRoot string) []string {
 
 		rigPath := filepath.Join(townRoot, name)
 
-		// Check if this looks like a rig (has crew/, polecats/, witness/, or refinery/)
-		markers := []string{"crew", "polecats", "witness", "refinery"}
+		// Check if this looks like a rig (has crew/ or polecats/)
+		markers := []string{"crew", "polecats"}
 		for _, marker := range markers {
 			if _, err := os.Stat(filepath.Join(rigPath, marker)); err == nil {
 				rigs = append(rigs, rigPath)

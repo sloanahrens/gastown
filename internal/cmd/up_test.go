@@ -12,7 +12,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestAgentStartResult_Fields(t *testing.T) {
@@ -142,56 +141,6 @@ func TestSemaphoreLimitsConcurrency(t *testing.T) {
 	}
 }
 
-func TestStartRigAgentsWithPrefetch_EmptyRigs(t *testing.T) {
-	t.Parallel()
-	// Test with empty inputs
-	witnessResults := startRigAgentsWithPrefetch(
-		[]string{},
-		make(map[string]*rig.Rig),
-		make(map[string]error),
-	)
-
-	if len(witnessResults) != 0 {
-		t.Errorf("witnessResults should be empty, got %d entries", len(witnessResults))
-	}
-}
-
-func TestStartRigAgentsWithPrefetch_RecordsErrors(t *testing.T) {
-	t.Parallel()
-	// Test that rig errors are properly recorded
-	rigErrors := map[string]error{
-		"badrig": fmt.Errorf("rig not found"),
-	}
-
-	witnessResults := startRigAgentsWithPrefetch(
-		[]string{"badrig"},
-		make(map[string]*rig.Rig),
-		rigErrors,
-	)
-
-	if len(witnessResults) != 1 {
-		t.Errorf("witnessResults should have 1 entry, got %d", len(witnessResults))
-	}
-	if result, ok := witnessResults["badrig"]; !ok {
-		t.Error("witnessResults should have badrig entry")
-	} else if result.ok {
-		t.Error("badrig witness result should not be ok")
-	}
-}
-
-func TestPrefetchRigs_Empty(t *testing.T) {
-	t.Parallel()
-	// Test with empty rig list
-	rigs, errors := prefetchRigs([]string{})
-
-	if len(rigs) != 0 {
-		t.Errorf("rigs should be empty, got %d entries", len(rigs))
-	}
-	if len(errors) != 0 {
-		t.Errorf("errors should be empty, got %d entries", len(errors))
-	}
-}
-
 func TestWorkerPoolLimitsConcurrency(t *testing.T) {
 	t.Parallel()
 	// Test that a worker pool pattern properly limits concurrency
@@ -265,73 +214,6 @@ func TestWorkerPoolLimitsConcurrency(t *testing.T) {
 // recoverOrphanedBeads tests (gas-udp)
 // Verifies that gt up detects and recovers orphaned hooked beads after crash.
 // =============================================================================
-
-func TestRecoverOrphanedBeads_NoRigs(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	services := recoverOrphanedBeads(townRoot, []string{}, make(map[string]*rig.Rig))
-	if len(services) != 0 {
-		t.Errorf("expected no services, got %d", len(services))
-	}
-}
-
-func TestRecoverOrphanedBeads_SkipsUnloadedRigs(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	// Rig "badrig" is in the list but not in prefetchedRigs — should be skipped.
-	services := recoverOrphanedBeads(townRoot, []string{"badrig"}, make(map[string]*rig.Rig))
-	if len(services) != 0 {
-		t.Errorf("expected no services for unloaded rig, got %d", len(services))
-	}
-}
-
-func TestRecoverOrphanedBeads_NoOrphansCleanRig(t *testing.T) {
-	t.Parallel()
-	// Set up a rig directory with no beads — should produce no services.
-	// Note: Full recovery-path tests (hooked bead + dead polecat → reset to open)
-	// require a live Dolt server and are covered by DetectOrphanedBeads tests
-	// in internal/witness/handlers_test.go. These up_test.go tests verify the
-	// integration wiring: correct rig iteration, skip logic, and service reporting.
-	townRoot := t.TempDir()
-	rigName := "testrig"
-	rigPath := filepath.Join(townRoot, rigName)
-	if err := os.MkdirAll(filepath.Join(rigPath, "polecats"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	r := &rig.Rig{Path: rigPath}
-	prefetched := map[string]*rig.Rig{rigName: r}
-	services := recoverOrphanedBeads(townRoot, []string{rigName}, prefetched)
-	if len(services) != 0 {
-		t.Errorf("expected no services for clean rig, got %d", len(services))
-	}
-}
-
-func TestRecoverOrphanedBeads_MultipleRigsOnlyProcessesLoaded(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-
-	// Set up two rigs, but only prefetch one
-	for _, name := range []string{"rig-a", "rig-b"} {
-		rigPath := filepath.Join(townRoot, name)
-		if err := os.MkdirAll(filepath.Join(rigPath, "polecats"), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	prefetched := map[string]*rig.Rig{
-		"rig-a": {Path: filepath.Join(townRoot, "rig-a")},
-		// rig-b intentionally not prefetched
-	}
-	services := recoverOrphanedBeads(townRoot, []string{"rig-a", "rig-b"}, prefetched)
-	// Neither rig should have orphans (no Dolt server = no beads found),
-	// but the function should complete without error and not panic on rig-b.
-	for _, svc := range services {
-		if svc.Rig == "rig-b" {
-			t.Errorf("rig-b should have been skipped (not prefetched), but got service: %s", svc.Detail)
-		}
-	}
-}
 
 func TestWaitForDoltReady_NoServerMode(t *testing.T) {
 	t.Parallel()

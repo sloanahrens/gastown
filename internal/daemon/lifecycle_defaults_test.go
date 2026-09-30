@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -296,9 +297,9 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 		Type:    "daemon-patrol-config",
 		Version: 1,
 		Patrols: &PatrolsConfig{
-			Deacon:     &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
+			Deacon:     json.RawMessage(`{"enabled":true,"interval":"5m","agent":"deacon"}`),
 			Refinery:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
-			Witness:    &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
+			Witness:    json.RawMessage(`{"enabled":true,"interval":"5m","agent":"witness"}`),
 			DoltBackup: &DoltBackupConfig{Enabled: false},
 		},
 	}
@@ -319,14 +320,14 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 	json.Unmarshal(data, &config)
 
 	// Core patrols preserved
-	if config.Patrols.Deacon == nil || !config.Patrols.Deacon.Enabled {
-		t.Error("expected deacon to remain enabled")
+	if !strings.Contains(string(config.Patrols.Deacon), `"agent":"deacon"`) {
+		t.Errorf("retired deacon key not kept verbatim: %s", config.Patrols.Deacon)
 	}
 	if config.Patrols.Refinery == nil || !config.Patrols.Refinery.Enabled {
 		t.Error("expected refinery to remain enabled")
 	}
-	if config.Patrols.Witness == nil || !config.Patrols.Witness.Enabled {
-		t.Error("expected witness to remain enabled")
+	if !strings.Contains(string(config.Patrols.Witness), `"agent":"witness"`) {
+		t.Errorf("retired witness key not kept verbatim: %s", config.Patrols.Witness)
 	}
 
 	// Explicitly disabled dolt_backup preserved (user intent)

@@ -18,11 +18,10 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
-	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -204,7 +203,7 @@ func runSlingRespawnReset(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	if err := witness.ResetBeadRespawnCount(townRoot, beadID); err != nil {
+	if err := polecat.ResetBeadRespawnCount(townRoot, beadID); err != nil {
 		return fmt.Errorf("resetting respawn count for %s: %w", beadID, err)
 	}
 	fmt.Printf("Reset respawn counter for %s. It can be slung again.\n", beadID)
@@ -914,41 +913,12 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if (info.Status == "hooked" || info.Status == "in_progress") && force && info.Assignee != "" {
 		fmt.Printf("%s Bead already hooked to %s, forcing reassignment...\n", style.Warning.Render("⚠"), info.Assignee)
 		if slingDryRun {
-			fmt.Printf("Would send LIFECYCLE:Shutdown to previous assignee %s\n", info.Assignee)
 			fmt.Printf("Would unhook %s from previous assignee\n", beadID)
 		} else {
-
-			requester := reassignRequester()
-
-			// Extract rig name from assignee (e.g., "gastown/polecats/Toast" -> "gastown")
+			// gt-skwt: clear the outgoing polecat's agent-bead state now,
+			// synchronously (see clearReassignedPolecatState).
 			assigneeParts := strings.Split(info.Assignee, "/")
 			if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
-				oldRigName := assigneeParts[0]
-				oldPolecatName := assigneeParts[2]
-
-				// Send LIFECYCLE:Shutdown to witness - will auto-nuke if clean,
-				// otherwise create cleanup wisp for manual intervention
-				if townRoot != "" {
-					router := mail.NewRouter(townRoot)
-					defer router.WaitPendingNotifications()
-					shutdownMsg := &mail.Message{
-						From:     "gt-sling",
-						To:       fmt.Sprintf("%s/witness", oldRigName),
-						Subject:  fmt.Sprintf("LIFECYCLE:Shutdown %s", oldPolecatName),
-						Body:     fmt.Sprintf("Reason: work_reassigned\nRequestedBy: %s\nBead: %s\nNewAssignee: %s", requester, beadID, targetAgent),
-						Type:     mail.TypeTask,
-						Priority: mail.PriorityHigh,
-					}
-					if err := router.Send(shutdownMsg); err != nil {
-						fmt.Printf("%s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
-					} else {
-						fmt.Printf("%s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
-					}
-				}
-
-				// gt-skwt: clear the outgoing polecat's agent-bead state now,
-				// synchronously — don't rely on the shutdown mail alone (see
-				// clearReassignedPolecatState).
 				clearReassignedPolecatState(townRoot, info.Assignee)
 			}
 

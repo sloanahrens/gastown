@@ -27,7 +27,6 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
 )
@@ -40,10 +39,8 @@ var rigCmd = &cobra.Command{
 	Long: `Manage rigs (project containers) in the Gas Town workspace.
 
 A rig is a container for managing a project and its agents:
-  - refinery/rig/  Canonical main clone (Refinery's working copy)
   - mayor/rig/     Mayor's working clone for this rig
   - crew/<name>/   Human workspace(s)
-  - witness/       Witness agent (no clone)
   - polecats/      Worker directories
   - .beads/        Rig-level issue tracking`,
 }
@@ -57,14 +54,11 @@ This creates a rig container with:
   - config.json           Rig configuration
   - .beads/               Rig-level issue tracking (initialized)
   - plugins/              Rig-level plugin directory
-  - refinery/rig/         Canonical main clone
   - mayor/rig/            Mayor's working clone
   - crew/                 Empty crew directory (add members with 'gt crew add')
-  - witness/              Witness agent directory
   - polecats/             Worker directory (empty)
 
 The command also:
-  - Seeds patrol molecules (Deacon, Witness, Refinery)
   - Creates ~/gt/plugins/ (town-level) if it doesn't exist
   - Creates <rig>/plugins/ (rig-level)
 
@@ -94,8 +88,7 @@ var rigListCmd = &cobra.Command{
 
 For each rig, displays:
   - Rig name and operational state (OPERATIONAL, PARKED, DOCKED)
-  - Witness status (running/stopped)
-  - Refinery status (running/stopped)
+  - Number of live agent sessions
   - Number of polecats and crew members
 
 Examples:
@@ -112,7 +105,7 @@ var rigRemoveCmd = &cobra.Command{
 This only removes the rig entry from mayor/rigs.json and cleans up
 the beads route. The rig's files on disk are NOT deleted.
 
-If the rig has running tmux sessions (witness, refinery, polecats, crew),
+If the rig has running tmux sessions (polecats, crew),
 you must shut them down first with 'gt rig shutdown' or use --force to
 kill them automatically.
 
@@ -142,60 +135,6 @@ Examples:
 	RunE: runRigReset,
 }
 
-var rigBootCmd = &cobra.Command{
-	Use:   "boot <rig>",
-	Short: "Start witness and refinery for a rig",
-	Long: `Start the witness and refinery agents for a rig.
-
-This is the inverse of 'gt rig shutdown'. It starts:
-- The witness (if not already running)
-- The refinery (if not already running)
-
-Polecats are NOT started by this command - they are spawned
-on demand when work is assigned.
-
-Examples:
-  gt rig boot greenplace`,
-	Args: cobra.ExactArgs(1),
-	RunE: runRigBoot,
-}
-
-var rigStartCmd = &cobra.Command{
-	Use:   "start <rig>...",
-	Short: "Start witness and refinery on patrol for one or more rigs",
-	Long: `Start the witness and refinery agents on patrol for one or more rigs.
-
-This is similar to 'gt rig boot' but supports multiple rigs at once.
-For each rig, it starts:
-- The witness (if not already running)
-- The refinery (if not already running)
-
-Polecats are NOT started by this command - they are spawned
-on demand when work is assigned.
-
-Examples:
-  gt rig start gastown
-  gt rig start gastown beads
-  gt rig start gastown beads myproject`,
-	Args: cobra.MinimumNArgs(1),
-	RunE: runRigStart,
-}
-
-var rigRebootCmd = &cobra.Command{
-	Use:   "reboot <rig>",
-	Short: "Restart witness and refinery for a rig",
-	Long: `Restart the patrol agents (witness and refinery) for a rig.
-
-This is equivalent to 'gt rig shutdown' followed by 'gt rig boot'.
-Useful after polecats complete work and land their changes.
-
-Examples:
-  gt rig reboot greenplace
-  gt rig reboot beads --force`,
-	Args: cobra.ExactArgs(1),
-	RunE: runRigReboot,
-}
-
 var rigShutdownCmd = &cobra.Command{
 	Use:   "shutdown <rig>",
 	Short: "Gracefully stop all rig agents",
@@ -203,8 +142,6 @@ var rigShutdownCmd = &cobra.Command{
 
 This command gracefully shuts down:
 - All polecat sessions
-- The refinery (if running)
-- The witness (if running)
 
 Before shutdown, checks all polecats for uncommitted work:
 - Uncommitted changes (modified/untracked files)
@@ -232,8 +169,6 @@ If no rig is specified, infers the rig from the current directory.
 
 Displays:
 - Rig information (name, path, beads prefix)
-- Witness status (running/stopped, uptime)
-- Refinery status (running/stopped, uptime, queue size)
 - Polecats (name, state, assigned issue, session status)
 - Crew members (name, branch, session status, git status)
 
@@ -253,8 +188,6 @@ var rigStopCmd = &cobra.Command{
 This command is similar to 'gt rig shutdown' but supports multiple rigs.
 For each rig, it gracefully shuts down:
 - All polecat sessions
-- The refinery (if running)
-- The witness (if running)
 
 Before shutdown, checks all polecats for uncommitted work:
 - Uncommitted changes (modified/untracked files)
@@ -271,31 +204,6 @@ Examples:
   gt rig stop --nuclear gastown  # DANGER: loses uncommitted work`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runRigStop,
-}
-
-var rigRestartCmd = &cobra.Command{
-	Use:   "restart <rig>...",
-	Short: "Restart one or more rigs (stop then start)",
-	Long: `Restart the patrol agents (witness and refinery) for one or more rigs.
-
-This is equivalent to 'gt rig stop' followed by 'gt rig start' for each rig.
-Useful after polecats complete work and land their changes.
-
-Before shutdown, checks all polecats for uncommitted work:
-- Uncommitted changes (modified/untracked files)
-- Stashes
-- Unpushed commits
-
-Use --force to force immediate shutdown (prompts if uncommitted work).
-Use --nuclear to bypass ALL safety checks (will lose work!).
-
-Examples:
-  gt rig restart gastown
-  gt rig restart gastown beads
-  gt rig restart --force gastown beads
-  gt rig restart --nuclear gastown  # DANGER: loses uncommitted work`,
-	Args: cobra.MinimumNArgs(1),
-	RunE: runRigRestart,
 }
 
 // Flags
@@ -317,12 +225,8 @@ var (
 	rigResetRole         string
 	rigShutdownForce     bool
 	rigShutdownNuclear   bool
-	rigRebootForce       bool
-	rigRebootNuclear     bool
 	rigStopForce         bool
 	rigStopNuclear       bool
-	rigRestartForce      bool
-	rigRestartNuclear    bool
 	rigListJSON          bool
 	rigRemoveForce       bool
 )
@@ -347,14 +251,10 @@ var (
 func init() {
 	rootCmd.AddCommand(rigCmd)
 	rigCmd.AddCommand(rigAddCmd)
-	rigCmd.AddCommand(rigBootCmd)
 	rigCmd.AddCommand(rigListCmd)
-	rigCmd.AddCommand(rigRebootCmd)
 	rigCmd.AddCommand(rigRemoveCmd)
 	rigCmd.AddCommand(rigResetCmd)
-	rigCmd.AddCommand(rigRestartCmd)
 	rigCmd.AddCommand(rigShutdownCmd)
-	rigCmd.AddCommand(rigStartCmd)
 	rigCmd.AddCommand(rigMenuCmd)
 	rigCmd.AddCommand(rigStatusCmd)
 	rigCmd.AddCommand(rigStopCmd)
@@ -383,14 +283,9 @@ func init() {
 	rigShutdownCmd.Flags().BoolVarP(&rigShutdownForce, "force", "f", false, "Force immediate shutdown (prompts if uncommitted work)")
 	rigShutdownCmd.Flags().BoolVar(&rigShutdownNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks (loses uncommitted work!)")
 
-	rigRebootCmd.Flags().BoolVarP(&rigRebootForce, "force", "f", false, "Force immediate shutdown during reboot (prompts if uncommitted work)")
-	rigRebootCmd.Flags().BoolVar(&rigRebootNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks during reboot (loses uncommitted work!)")
-
 	rigStopCmd.Flags().BoolVarP(&rigStopForce, "force", "f", false, "Force immediate shutdown (prompts if uncommitted work)")
 	rigStopCmd.Flags().BoolVar(&rigStopNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks (loses uncommitted work!)")
 
-	rigRestartCmd.Flags().BoolVarP(&rigRestartForce, "force", "f", false, "Force immediate shutdown during restart (prompts if uncommitted work)")
-	rigRestartCmd.Flags().BoolVar(&rigRestartNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks (loses uncommitted work!)")
 }
 
 func confirmUnsafeProceed(force bool) bool {
@@ -580,12 +475,6 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	}
 	// rigs.json is saved atomically inside AddRig; no separate save needed here.
 
-	// Add new rig to daemon.json patrol config (witness + refinery rigs arrays)
-	if err := config.AddRigToDaemonPatrols(townRoot, name); err != nil {
-		// Non-fatal: daemon will still work, just won't auto-manage this rig
-		fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
-	}
-
 	// Route registration is now handled inside AddRig (before agent bead creation)
 	// to avoid "no route found" warnings (#1424). Determine beadsWorkDir for rig identity bead.
 	var beadsWorkDir string
@@ -612,19 +501,6 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		} else {
 			rigBeadID := beads.RigBeadIDWithPrefix(newRig.Config.Prefix, name)
 			fmt.Printf("  Created rig identity bead: %s\n", rigBeadID)
-		}
-
-		// Create agent beads for the rig (witness)
-		// This ensures they exist before the daemon tries to start them
-		prefix := newRig.Config.Prefix
-		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
-		if _, err := bd.CreateAgentBead(witnessID,
-			fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
-			&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
-		); err != nil {
-			fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
-		} else {
-			fmt.Printf("  Created agent bead: %s\n", witnessID)
 		}
 	}
 
@@ -661,13 +537,11 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nStructure:\n")
 	fmt.Printf("  %s/\n", name)
 	fmt.Printf("  ├── config.json\n")
-	fmt.Printf("  ├── .repo.git/        (shared bare repo for refinery+polecats)\n")
+	fmt.Printf("  ├── .repo.git/        (shared bare repo for polecats)\n")
 	fmt.Printf("  ├── .beads/           (prefix: %s)\n", newRig.Config.Prefix)
 	fmt.Printf("  ├── plugins/          (rig-level plugins)\n")
 	fmt.Printf("  ├── mayor/rig/        (clone: %s)\n", defaultBranch)
-	fmt.Printf("  ├── refinery/rig/     (worktree: %s, sees polecat branches)\n", defaultBranch)
 	fmt.Printf("  ├── crew/             (empty - add crew with 'gt crew add')\n")
-	fmt.Printf("  ├── witness/\n")
 	fmt.Printf("  └── polecats/         (.claude/ scaffolded for polecat sessions)\n")
 
 	fmt.Printf("\nNext steps:\n")
@@ -679,11 +553,11 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 
 // GetRigLED returns the LED indicator for a rig based on session and operational state.
 // Used by both rig list and statusline for consistent indicators:
-//   - 🟢 = witness running (active)
+//   - 🟢 = at least one agent session running in the rig (active)
 //   - ⚫ = nothing running (stopped)
 //   - 🅿️ = parked (intentionally paused)
 //   - 🛑 = docked (global shutdown)
-func GetRigLED(hasWitness bool, opState string) string {
+func GetRigLED(running bool, opState string) string {
 	// Check operational state FIRST — parked/docked overrides session state.
 	// Sessions may still be running during the race window after park/dock
 	// but before sessions are killed (GH#2555).
@@ -694,7 +568,7 @@ func GetRigLED(hasWitness bool, opState string) string {
 		return "🛑"
 	}
 
-	if hasWitness {
+	if running {
 		return "🟢"
 	}
 	return "⚫"
@@ -702,8 +576,8 @@ func GetRigLED(hasWitness bool, opState string) string {
 
 // rigStatePriority returns a sort priority for a rig's state.
 // Lower values sort first: active > stopped > parked > docked.
-func rigStatePriority(hasWitness bool, opState string) int {
-	if hasWitness {
+func rigStatePriority(running bool, opState string) int {
+	if running {
 		return 0
 	}
 	switch opState {
@@ -751,14 +625,16 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		// clone checked out. See rig.Rig.RepoPath.
 		RepoPath string `json:"repo_path"`
 		Status   string `json:"status"`
-		Witness  string `json:"witness"`
-		Polecats int    `json:"polecats"`
-		Crew     int    `json:"crew"`
+		// Sessions counts the rig's live tmux sessions (polecats, crew).
+		Sessions int `json:"sessions"`
+		Polecats int `json:"polecats"`
+		Crew     int `json:"crew"`
 		// sorting fields (not exported to JSON)
 		sortPrio int
 	}
 
 	var rigs []rigInfo
+	allSessions, _ := t.ListSessions()
 
 	for name := range rigsConfig.Rigs {
 		prefix := session.PrefixFor(name)
@@ -771,24 +647,17 @@ func runRigList(cmd *cobra.Command, args []string) error {
 
 		opState, _ := getRigOperationalState(townRoot, name)
 
-		witnessSession := session.WitnessSessionName(prefix)
-		witnessRunning, _ := t.HasSession(witnessSession)
-
-		witnessStatus := "stopped"
-		if witnessRunning {
-			witnessStatus = "running"
-		}
-
+		sessions := countRigSessions(allSessions, name)
 		summary := r.Summary()
 		rigs = append(rigs, rigInfo{
 			Name:        name,
 			BeadsPrefix: prefix,
 			RepoPath:    r.RepoPath(),
 			Status:      strings.ToLower(opState),
-			Witness:     witnessStatus,
+			Sessions:    sessions,
 			Polecats:    summary.PolecatCount,
 			Crew:        summary.CrewCount,
-			sortPrio:    rigStatePriority(witnessRunning, opState),
+			sortPrio:    rigStatePriority(sessions > 0, opState),
 		})
 	}
 
@@ -813,7 +682,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		led := GetRigLED(ri.Witness == "running", strings.ToUpper(ri.Status))
+		led := GetRigLED(ri.Sessions > 0, strings.ToUpper(ri.Status))
 		// 🅿️ needs extra space for alignment
 		space := " "
 		if led == "🅿️" {
@@ -822,12 +691,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("%s%s%s\n", led, space, style.Bold.Render(ri.Name))
 
-		witnessIcon := style.Dim.Render("○")
-		if ri.Witness == "running" {
-			witnessIcon = style.Success.Render("●")
-		}
-
-		fmt.Printf("   Witness: %s %s\n", witnessIcon, ri.Witness)
+		fmt.Printf("   Sessions: %d\n", ri.Sessions)
 		fmt.Printf("   Polecats: %d  Crew: %d\n", ri.Polecats, ri.Crew)
 		fmt.Println()
 	}
@@ -866,20 +730,18 @@ func runRigMenu(cmd *cobra.Command, args []string) error {
 	}
 
 	var rigs []menuRig
+	allSessions, _ := t.ListSessions()
 	for name := range rigsConfig.Rigs {
-		prefix := session.PrefixFor(name)
 		opState, _ := getRigOperationalState(townRoot, name)
 
-		witnessSession := session.WitnessSessionName(prefix)
-		hasWitness, _ := t.HasSession(witnessSession)
-
-		led := GetRigLED(hasWitness, opState)
+		running := countRigSessions(allSessions, name) > 0
+		led := GetRigLED(running, opState)
 		rigs = append(rigs, menuRig{
 			name:     name,
 			led:      led,
-			running:  hasWitness,
+			running:  running,
 			opState:  opState,
-			sortPrio: rigStatePriority(hasWitness, opState),
+			sortPrio: rigStatePriority(running, opState),
 		})
 	}
 
@@ -1048,12 +910,6 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving rigs config: %w", err)
 	}
 
-	// Remove rig from daemon.json patrol config (witness + refinery rigs arrays)
-	if err := config.RemoveRigFromDaemonPatrols(townRoot, name); err != nil {
-		// Non-fatal: daemon will stop spawning for this rig anyway since it's unregistered
-		fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
-	}
-
 	// Remove route from routes.jsonl (issue #899)
 	if beadsPrefix != "" {
 		if err := beads.RemoveRoute(townRoot, beadsPrefix+"-"); err != nil {
@@ -1143,11 +999,6 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	// Save updated config
 	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
 		return fmt.Errorf("saving rigs config: %w", err)
-	}
-
-	// Add adopted rig to daemon.json patrol config (witness + refinery rigs arrays)
-	if err := config.AddRigToDaemonPatrols(townRoot, name); err != nil {
-		fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
 	}
 
 	// Add route to town-level routes.jsonl for prefix-based routing
@@ -1312,21 +1163,6 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				fmt.Printf("  %s Could not create rig identity bead: %v\n", style.Warning.Render("!"), err)
 			} else {
 				fmt.Printf("  %s Created rig identity bead: %s\n", style.Success.Render("✓"), rigBeadID)
-			}
-		}
-
-		// Create agent beads for the rig (witness)
-		// This ensures they exist before the daemon tries to start them
-		prefix := result.BeadsPrefix
-		witnessID := beads.WitnessBeadIDWithPrefix(prefix, name)
-		if _, err := bd.Show(witnessID); err != nil {
-			if _, err := bd.CreateAgentBead(witnessID,
-				fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
-				&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
-			); err != nil {
-				fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
-			} else {
-				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), witnessID)
 			}
 		}
 	}
@@ -1558,148 +1394,6 @@ func isAgentSessionHealthy(t *tmux.Tmux, sessionName string) bool {
 	return t.CheckSessionHealth(sessionName, 0) == tmux.SessionHealthy
 }
 
-func runRigBoot(cmd *cobra.Command, args []string) error {
-	rigName := args[0]
-
-	// Find workspace
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	// Load rigs config and get rig
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
-
-	g := git.NewGit(townRoot)
-	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	r, err := rigMgr.GetRig(rigName)
-	if err != nil {
-		return fmt.Errorf("rig '%s' not found", rigName)
-	}
-
-	// Check if rig is parked or docked (uses bead labels + wisp state)
-	if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
-		return fmt.Errorf("rig '%s' is %s - use 'gt rig unpark' or 'gt rig undock' first", rigName, reason)
-	}
-
-	fmt.Printf("Booting rig %s...\n", style.Bold.Render(rigName))
-
-	var started []string
-	var skipped []string
-
-	// 1. Start the witness
-	// Start() treats healthy sessions as already running and recreates zombie
-	// sessions whose tmux pane remains after the agent exits.
-	witMgr := witness.NewManager(r)
-	if err := witMgr.Start(false, "", nil); err != nil {
-		if err == witness.ErrAlreadyRunning {
-			skipped = append(skipped, "witness (already running)")
-		} else {
-			return fmt.Errorf("starting witness: %w", err)
-		}
-	} else {
-		started = append(started, "witness")
-	}
-
-	// Report results
-	if len(started) > 0 {
-		fmt.Printf("%s Started: %s\n", style.Success.Render("✓"), strings.Join(started, ", "))
-	}
-	if len(skipped) > 0 {
-		fmt.Printf("%s Skipped: %s\n", style.Dim.Render("•"), strings.Join(skipped, ", "))
-	}
-
-	return nil
-}
-
-func runRigStart(cmd *cobra.Command, args []string) error {
-	// Find workspace once
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	// Load rigs config
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
-
-	g := git.NewGit(townRoot)
-	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-
-	var successRigs []string
-	var failedRigs []string
-
-	for _, rigName := range args {
-		r, err := rigMgr.GetRig(rigName)
-		if err != nil {
-			fmt.Printf("%s Rig '%s' not found\n", style.Warning.Render("⚠"), rigName)
-			failedRigs = append(failedRigs, rigName)
-			continue
-		}
-
-		// Check if rig is parked or docked (uses bead labels + wisp state)
-		if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
-			fmt.Printf("%s Rig '%s' is %s - skipping (use 'gt rig unpark' or 'gt rig undock' first)\n",
-				style.Warning.Render("⚠"), rigName, reason)
-			continue
-		}
-
-		fmt.Printf("Starting rig %s...\n", style.Bold.Render(rigName))
-
-		var started []string
-		var skipped []string
-		hasError := false
-
-		// 1. Start the witness
-		// Start() treats healthy sessions as already running and recreates zombie
-		// sessions whose tmux pane remains after the agent exits.
-		witMgr := witness.NewManager(r)
-		if err := witMgr.Start(false, "", nil); err != nil {
-			if err == witness.ErrAlreadyRunning {
-				skipped = append(skipped, "witness")
-			} else {
-				fmt.Printf("  %s Failed to start witness: %v\n", style.Warning.Render("⚠"), err)
-				hasError = true
-			}
-		} else {
-			started = append(started, "witness")
-		}
-
-		// Report results for this rig
-		if len(started) > 0 {
-			fmt.Printf("  %s Started: %s\n", style.Success.Render("✓"), strings.Join(started, ", "))
-		}
-		if len(skipped) > 0 {
-			fmt.Printf("  %s Skipped: %s\n", style.Dim.Render("•"), strings.Join(skipped, ", "))
-		}
-
-		if hasError {
-			failedRigs = append(failedRigs, rigName)
-		} else {
-			successRigs = append(successRigs, rigName)
-		}
-		fmt.Println()
-	}
-
-	// Summary
-	if len(successRigs) > 0 {
-		fmt.Printf("%s Started rigs: %s\n", style.Success.Render("✓"), strings.Join(successRigs, ", "))
-	}
-	if len(failedRigs) > 0 {
-		fmt.Printf("%s Failed rigs: %s\n", style.Warning.Render("⚠"), strings.Join(failedRigs, ", "))
-		return fmt.Errorf("some rigs failed to start")
-	}
-
-	return nil
-}
-
 func runRigShutdown(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
@@ -1743,15 +1437,6 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 3. Stop the witness
-	witMgr := witness.NewManager(r)
-	if running, _ := witMgr.IsRunning(); running {
-		fmt.Printf("  Stopping witness...\n")
-		if err := witMgr.Stop(); err != nil {
-			errors = append(errors, fmt.Sprintf("witness: %v", err))
-		}
-	}
-
 	if len(errors) > 0 {
 		fmt.Printf("\n%s Some agents failed to stop:\n", style.Warning.Render("⚠"))
 		for _, e := range errors {
@@ -1761,32 +1446,6 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Rig %s shut down successfully\n", style.Success.Render("✓"), rigName)
-	return nil
-}
-
-func runRigReboot(cmd *cobra.Command, args []string) error {
-	rigName := args[0]
-
-	fmt.Printf("Rebooting rig %s...\n\n", style.Bold.Render(rigName))
-
-	// Propagate reboot flags to shutdown globals
-	rigShutdownForce = rigRebootForce
-	rigShutdownNuclear = rigRebootNuclear
-
-	// Shutdown first
-	if err := runRigShutdown(cmd, args); err != nil {
-		// If shutdown fails due to uncommitted work, propagate the error
-		return err
-	}
-
-	fmt.Println() // Blank line between shutdown and boot
-
-	// Boot
-	if err := runRigBoot(cmd, args); err != nil {
-		return fmt.Errorf("boot failed: %w", err)
-	}
-
-	fmt.Printf("\n%s Rig %s rebooted successfully\n", style.Success.Render("✓"), rigName)
 	return nil
 }
 
@@ -1838,15 +1497,6 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 	// All expensive operations (tmux health checks, beads queries, git status)
 	// run concurrently. Display phase follows with pre-fetched data.
 	var dataWg sync.WaitGroup
-
-	// Witness status
-	witMgr := witness.NewManager(r)
-	var witnessRunning bool
-	dataWg.Add(1)
-	go func() {
-		defer dataWg.Done()
-		witnessRunning, _ = witMgr.IsRunning()
-	}()
 
 	// Polecats list (involves per-polecat beads + git queries)
 	polecatGit := git.NewGit(r.Path)
@@ -1925,15 +1575,6 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 
 	// --- Display phase (all data pre-fetched) ---
 
-	// Witness
-	fmt.Printf("%s\n", style.Bold.Render("Witness"))
-	if witnessRunning {
-		fmt.Printf("  %s running\n", style.Success.Render("●"))
-	} else {
-		fmt.Printf("  %s stopped\n", style.Dim.Render("○"))
-	}
-	fmt.Println()
-
 	// Polecats
 	fmt.Printf("%s", style.Bold.Render("Polecats"))
 	if polecatsErr != nil || len(polecats) == 0 {
@@ -1950,7 +1591,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 			// Per gt-zecmc design: tmux is ground truth for observable states.
 			// If session is running but beads says done, the polecat is still alive.
 			// If session is dead but beads says working, show "stalled" so the
-			// witness can detect unsubmitted work (gt-3071b). Previously this
+			// operator can see unsubmitted work (gt-3071b). Previously this
 			// showed "done" which masked failures where polecats died before
 			// running gt done, leaving work stranded in worktrees.
 			displayState := pi.state
@@ -2045,15 +1686,6 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// 3. Stop the witness
-		witMgr := witness.NewManager(r)
-		if running, _ := witMgr.IsRunning(); running {
-			fmt.Printf("  Stopping witness...\n")
-			if err := witMgr.Stop(); err != nil {
-				errors = append(errors, fmt.Sprintf("witness: %v", err))
-			}
-		}
-
 		if len(errors) > 0 {
 			fmt.Printf("%s Some agents in %s failed to stop:\n", style.Warning.Render("⚠"), rigName)
 			for _, e := range errors {
@@ -2078,136 +1710,6 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 		}
 	} else if len(failed) > 0 {
 		return fmt.Errorf("rig failed to stop")
-	}
-
-	return nil
-}
-
-func runRigRestart(cmd *cobra.Command, args []string) error {
-	// Find workspace
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	// Load rigs config
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
-
-	g := git.NewGit(townRoot)
-	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	t := tmux.NewTmux()
-
-	// Track results
-	var succeeded []string
-	var failed []string
-
-	// Process each rig
-	for _, rigName := range args {
-		r, err := rigMgr.GetRig(rigName)
-		if err != nil {
-			fmt.Printf("%s Rig '%s' not found\n", style.Warning.Render("⚠"), rigName)
-			failed = append(failed, rigName)
-			continue
-		}
-
-		// Check all polecats for uncommitted work (unless nuclear)
-		if !rigRestartNuclear && !checkUncommittedWork(r, rigName, "restart", rigRestartForce) {
-			failed = append(failed, rigName)
-			continue
-		}
-
-		fmt.Printf("Restarting rig %s...\n", style.Bold.Render(rigName))
-
-		var stopErrors []string
-		var startErrors []string
-
-		// === STOP PHASE ===
-		fmt.Printf("  Stopping...\n")
-
-		// 1. Stop all polecat sessions
-		polecatMgr := polecat.NewSessionManager(t, r)
-		infos, err := polecatMgr.ListPolecats()
-		if err == nil && len(infos) > 0 {
-			fmt.Printf("    Stopping %d polecat session(s)...\n", len(infos))
-			if err := polecatMgr.StopAll(rigRestartForce); err != nil {
-				stopErrors = append(stopErrors, fmt.Sprintf("polecat sessions: %v", err))
-			}
-		}
-
-		// 3. Stop the witness
-		witMgr := witness.NewManager(r)
-		if running, _ := witMgr.IsRunning(); running {
-			fmt.Printf("    Stopping witness...\n")
-			if err := witMgr.Stop(); err != nil {
-				stopErrors = append(stopErrors, fmt.Sprintf("witness: %v", err))
-			}
-		}
-
-		if len(stopErrors) > 0 {
-			fmt.Printf("  %s Stop errors:\n", style.Warning.Render("⚠"))
-			for _, e := range stopErrors {
-				fmt.Printf("    - %s\n", e)
-			}
-			failed = append(failed, rigName)
-			continue
-		}
-
-		// === START PHASE ===
-		fmt.Printf("  Starting...\n")
-
-		var started []string
-		var skipped []string
-
-		// 1. Start the witness
-		// Start() treats healthy sessions as already running and recreates zombie
-		// sessions whose tmux pane remains after the agent exits.
-		if err := witMgr.Start(false, "", nil); err != nil {
-			if err == witness.ErrAlreadyRunning {
-				skipped = append(skipped, "witness")
-			} else {
-				fmt.Printf("    %s Failed to start witness: %v\n", style.Warning.Render("⚠"), err)
-				startErrors = append(startErrors, fmt.Sprintf("witness: %v", err))
-			}
-		} else {
-			started = append(started, "witness")
-		}
-
-		// Report results for this rig
-		if len(started) > 0 {
-			fmt.Printf("  %s Started: %s\n", style.Success.Render("✓"), strings.Join(started, ", "))
-		}
-		if len(skipped) > 0 {
-			fmt.Printf("  %s Skipped: %s\n", style.Dim.Render("•"), strings.Join(skipped, ", "))
-		}
-
-		if len(startErrors) > 0 {
-			fmt.Printf("  %s Start errors:\n", style.Warning.Render("⚠"))
-			for _, e := range startErrors {
-				fmt.Printf("    - %s\n", e)
-			}
-			failed = append(failed, rigName)
-		} else {
-			fmt.Printf("%s Rig %s restarted\n", style.Success.Render("✓"), rigName)
-			succeeded = append(succeeded, rigName)
-		}
-		fmt.Println()
-	}
-
-	// Summary
-	if len(args) > 1 {
-		if len(succeeded) > 0 {
-			fmt.Printf("%s Restarted: %s\n", style.Success.Render("✓"), strings.Join(succeeded, ", "))
-		}
-		if len(failed) > 0 {
-			fmt.Printf("%s Failed: %s\n", style.Warning.Render("⚠"), strings.Join(failed, ", "))
-			return fmt.Errorf("some rigs failed to restart")
-		}
-	} else if len(failed) > 0 {
-		return fmt.Errorf("rig failed to restart")
 	}
 
 	return nil
@@ -2267,21 +1769,32 @@ func syncRigHooks(townRoot, rigName string) error {
 }
 
 // findRigSessions returns all tmux sessions belonging to the given rig.
-// All rig sessions share the "<rigPrefix>-" prefix, so this catches witness,
-// refinery, polecat, and crew sessions in one pass.
+// All rig sessions share the "<rigPrefix>-" prefix, so this catches polecat
+// and crew sessions in one pass.
 func findRigSessions(t *tmux.Tmux, rigName string) ([]string, error) {
-	prefix := session.PrefixFor(rigName) + "-"
 	all, err := t.ListSessions()
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions: %w", err)
 	}
+	return rigSessionsIn(all, rigName), nil
+}
+
+// rigSessionsIn returns the sessions in all that belong to rigName.
+func rigSessionsIn(all []string, rigName string) []string {
+	prefix := session.PrefixFor(rigName) + "-"
 	var matches []string
 	for _, name := range all {
 		if strings.HasPrefix(name, prefix) {
 			matches = append(matches, name)
 		}
 	}
-	return matches, nil
+	return matches
+}
+
+// countRigSessions counts the sessions in all that belong to rigName: the
+// rig reads as running while any of its agents has a session.
+func countRigSessions(all []string, rigName string) int {
+	return len(rigSessionsIn(all, rigName))
 }
 
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,

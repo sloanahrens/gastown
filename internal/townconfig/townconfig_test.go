@@ -67,8 +67,8 @@ func TestLoadAcceptsTheLiveTown(t *testing.T) {
 	if town.Identity().Name == "" {
 		t.Error("Identity().Name is empty")
 	}
-	if d := town.Daemon(); d == nil || d.Patrols.RolePatrol("witness") == nil {
-		t.Error("Daemon() lost the witness patrol")
+	if d := town.Daemon(); d == nil || d.Patrols.RolePatrol("handler") == nil {
+		t.Error("Daemon() lost the handler patrol")
 	}
 	if s := town.Settings(); s == nil || s.RoleAgents["mayor"] == "" {
 		t.Error("Settings() lost role_agents.mayor")
@@ -134,7 +134,7 @@ func TestCheckJudgesOnlyTheFilesPresent(t *testing.T) {
 	if err := Check(root); err != nil {
 		t.Fatalf("Check(empty dir) = %v, want nil", err)
 	}
-	write(t, root, FileDaemon, `{"patrols": {"witness": {"enabled": false, "rigz": []}}}`)
+	write(t, root, FileDaemon, `{"patrols": {"handler": {"enabled": false, "rigz": []}}}`)
 	err := Check(root)
 	if !errors.Is(err, config.ErrUnparseable) || errors.Is(err, ErrNotATown) {
 		t.Fatalf("Check(broken daemon.json, no town.json) = %v, want only the parse error", err)
@@ -176,7 +176,7 @@ func TestEachBrokenFileFailsClosedWithOneLine(t *testing.T) {
 		FileTown:      "{\"type\": \"town\",}",
 		FileRigs:      "{\"version\": 1, \"rigz\": {}}",
 		FileSettings:  "{\"type\": \"town-settings\", \"role_agent\": {}}",
-		FileDaemon:    "{\"patrols\": {\"witness\": {\"enabled\": false,}}}",
+		FileDaemon:    "{\"patrols\": {\"handler\": {\"enabled\": false,}}}",
 		FileDaemonEnv: "PATH=/bin\nnot a pair\n",
 		FileDolt:      "listener:\n  port: 3307\n  prot: 1\n",
 	}
@@ -223,7 +223,7 @@ func TestAccessorsReturnCopies(t *testing.T) {
 	s.RoleAgents["mayor"] = "mutated"
 	s.DefaultAgent = "mutated"
 	d := town.Daemon()
-	d.Patrols.Witness.Enabled = !d.Patrols.Witness.Enabled
+	d.Patrols.Handler.Enabled = !d.Patrols.Handler.Enabled
 	env := town.DaemonEnv()
 	env["PATH"] = "mutated"
 	names := town.RigNames()
@@ -232,7 +232,7 @@ func TestAccessorsReturnCopies(t *testing.T) {
 	if town.Settings().RoleAgents["mayor"] == "mutated" || town.Settings().DefaultAgent == "mutated" {
 		t.Error("Settings() shares state with the kernel")
 	}
-	if town.Daemon().Patrols.Witness.Enabled == d.Patrols.Witness.Enabled {
+	if town.Daemon().Patrols.Handler.Enabled == d.Patrols.Handler.Enabled {
 		t.Error("Daemon() shares state with the kernel")
 	}
 	if town.DaemonEnv()["PATH"] == "mutated" || town.RigNames()[0] == "mutated" {
