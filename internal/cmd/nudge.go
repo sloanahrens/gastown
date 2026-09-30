@@ -247,7 +247,13 @@ var immediateTurnProbeWindow = 3 * time.Second
 // nudge as an undelivered one. The warning is the signal; the recovery stays
 // the operator's or the patrol's, per tmux.SubmitPendingInput's contract.
 func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
-	verdict, err := t.WaitForInputConsumed(sessionName, immediateTurnProbeWindow)
+	return consumptionWarningFor(t.WaitForInputConsumed, immediateTurnProbeWindow, sessionName, mode)
+}
+
+// consumptionWarningFor is consumptionWarning over a given probe and window:
+// the message for the verdict the probe returns.
+func consumptionWarningFor(probe func(sessionName string, window time.Duration) (tmux.InputConsumption, error), window time.Duration, sessionName, mode string) string {
+	verdict, err := probe(sessionName, window)
 	if err != nil {
 		// Fail closed (gt-7xnv): an unobservable pane says nothing about the
 		// nudge, so it must not read as one that was consumed — but it must not
@@ -266,7 +272,7 @@ func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
 			"%s: %s still holds input and the pane was frozen for %s, but it has nothing above "+
 				"the input box to date it by — consumption is UNKNOWN (UNDATED), not a strand. "+
 				"Re-check with 'gt session health %s' before acting.\n",
-			mode, sessionName, immediateTurnProbeWindow, sessionName)
+			mode, sessionName, window, sessionName)
 	}
 	if verdict != tmux.InputConsumptionNotConsumed {
 		return ""
@@ -277,7 +283,7 @@ func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
 			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
 			"that session ('gt refinery restart <rig>' for a refinery, 'gt witness restart "+
 			"<rig>' for a witness).\n",
-		mode, sessionName, immediateTurnProbeWindow, sessionName)
+		mode, sessionName, window, sessionName)
 }
 
 // immediateConsumptionWarning is consumptionWarning labeled for immediate mode.
