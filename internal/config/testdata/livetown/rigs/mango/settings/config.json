@@ -1,0 +1,11 @@
+{
+  "type": "rig-settings",
+  "version": 1,
+  "namepool": {
+    "style": "wasteland"
+  },
+  "role_agents": {
+    "witness": "deepseek-flash-patrol",
+    "refinery": "deepseek-flash-patrol"
+  }
+}
