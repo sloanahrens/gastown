@@ -28,10 +28,9 @@ import (
 )
 
 var handoffCmd = &cobra.Command{
-	Use:         "handoff [bead-or-role]",
-	GroupID:     GroupWork,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Hand off to a fresh session, work continues from hook",
+	Use:     "handoff [bead-or-role]",
+	GroupID: GroupWork,
+	Short:   "Hand off to a fresh session, work continues from hook",
 	Long: `End watch. Hand off to a fresh agent session.
 
 This is the canonical way to end any agent session. It handles all roles:

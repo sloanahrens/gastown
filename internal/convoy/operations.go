@@ -221,7 +221,7 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 // alert reports (FeedHold makes the same call).
 //
 // store is the caller's town store. It answers for hq when the resolver holds
-// no hq store, which is how gt close builds its resolver.
+// no hq store.
 func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
 	storeFor := func(name string) (beadsdk.Storage, error) {
 		if resolver == nil {

@@ -178,7 +178,7 @@ func TestUnownedCandidates_ExistingFilters(t *testing.T) {
 		"  102     1 ttys004  claude   01:00:00", // has a TTY — interactive
 		"  103     1 ??       node     01:00:00", // not a tracked agent comm
 		"  104     1 ??       claude   00:00:30", // younger than minOrphanAge
-		"  105     1 ??       claude   01:00:00", // protected by a tmux/ACP session
+		"  105     1 ??       claude   01:00:00", // protected by a tmux session
 	))
 
 	got := candidatePIDs(unownedCandidates(entries, map[int]bool{105: true}))
@@ -190,7 +190,7 @@ func TestUnownedCandidates_ExistingFilters(t *testing.T) {
 		102: "has a controlling TTY",
 		103: "comm is not a tracked agent runtime",
 		104: "younger than the 60s floor",
-		105: "protected tmux/ACP pid",
+		105: "protected tmux pid",
 	} {
 		if _, ok := got[pid]; ok {
 			t.Errorf("PID %d: candidate, want not a candidate (%s)", pid, why)

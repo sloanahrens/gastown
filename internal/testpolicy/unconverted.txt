@@ -1,6 +1,5 @@
 # Packages not yet converted to the unit-test rules (docs/testing.md).
 # This list only shrinks: converting a package deletes its line.
-internal/acp
 internal/beads
 internal/checkpoint
 internal/cmd
@@ -22,7 +21,6 @@ internal/nudge
 internal/plugin
 internal/polecat
 internal/protocol
-internal/proxy
 internal/quota
 internal/reaper
 internal/refinery
@@ -37,6 +35,5 @@ internal/testutil
 internal/tui/feed
 internal/util
 internal/version
-internal/wasteland
 internal/web
 internal/witness

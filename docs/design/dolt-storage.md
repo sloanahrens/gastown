@@ -215,9 +215,7 @@ Beads data falls into three planes with different characteristics:
 The operational plane lives entirely in the local Dolt server. The ledger
 plane is currently served by the JSONL Dog, which exports scrubbed snapshots
 to a git-backed archive every 15 minutes — this is the durable record that
-survives disasters (proven in Clown Show #13). The design plane will
-federate via DoltHub as part of the Wasteland commons (planned, not yet
-in active development).
+survives disasters (proven in Clown Show #13).
 
 ## Data Lifecycle: Think Git, Not SQL (CRITICAL)
 
@@ -300,13 +298,13 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 
 **Who compacts.** Compaction rewrites the commit graph and force-pushes the
 result, so it is never unattended. The Compactor Dog patrol counts commits and
-escalates when a database crosses its threshold; an operator then runs one of
-two commands:
+escalates when a database crosses its threshold; an operator then compacts
+it one of two ways:
 
 | Command | Algorithm | Keeps recent history? |
 |---------|-----------|----------------------|
 | `plugins/compactor-dog/run.sh --compact` | Flatten — squash all history into 1 commit, then force-push | No |
-| `gt dolt rebase <database>` | Surgical — interactive rebase squash, preserve recent N | Yes |
+| Offline procedure ([dolt-history-offline.md](../dolt-history-offline.md)) | Surgical — interactive rebase squash, preserve recent N | Yes |
 
 The daemon patrol used to run the flatten path itself. It no longer does
 (gt-nfu7): an unattended path that rewrites history and force-pushes to the
@@ -450,14 +448,13 @@ so the merge succeeds.
 
 Unlike flatten (which squashes everything), interactive rebase lets you
 keep recent individual commits while squashing old history. Runs on a
-live server. Based on Jason Fulghum's rebase implementation. Operator-invoked
-via `gt dolt rebase <database>` (internal/cmd/dolt_rebase.go); the plugin's
-`--compact` flag and the daemon patrol do not implement it.
+live server. Based on Jason Fulghum's rebase implementation. It is an
+operator procedure with no CLI (see [dolt-history-offline.md](../dolt-history-offline.md));
+the plugin's `--compact` flag and the daemon patrol do not implement it.
 
 **Concurrent write hazard**: DOLT_REBASE is NOT safe with concurrent writes
 (Tim Sehn, 2026-02-28). If agents commit to the database during rebase, Dolt
-detects the graph change and errors. `gt dolt rebase` retries once on such
-errors. Flatten mode (DOLT_RESET --soft) is unaffected — concurrent writes
+detects the graph change and errors; park the writers first. Flatten mode (DOLT_RESET --soft) is unaffected — concurrent writes
 are safe there because the merge base shifts but the diff is just the txn.
 
 ```sql
@@ -726,12 +723,6 @@ Dolt server stays up throughout.
        printf '%s ' "$DB"; dq --use-db "$DB" sql -r csv -q "SELECT COUNT(*) FROM dolt_remotes" </dev/null | tail -1
      done   # expect every count to be 0
    ```
-
-### DoltHub (Wasteland)
-
-The wasteland commands (`gt wl`) still fork and push the `wl-commons`
-database on DoltHub. That is the commons product, not beads sync, and it is
-unaffected by the above: it never touches the town's beads databases.
 
 ## File Layout
 

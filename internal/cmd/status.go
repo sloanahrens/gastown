@@ -24,7 +24,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -40,11 +39,10 @@ var statusInterval int
 var statusVerbose bool
 
 var statusCmd = &cobra.Command{
-	Use:         "status",
-	Aliases:     []string{"stat"},
-	GroupID:     GroupDiag,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Show overall town status",
+	Use:     "status",
+	Aliases: []string{"stat"},
+	GroupID: GroupDiag,
+	Short:   "Show overall town status",
 	Long: `Display the current status of the Gas Town workspace.
 
 Shows town name, registered rigs, polecats, and witness status.
@@ -72,7 +70,6 @@ type TownStatus struct {
 	Daemon   *ServiceInfo   `json:"daemon,omitempty"`   // Daemon status
 	Dolt     *DoltInfo      `json:"dolt,omitempty"`     // Dolt server status
 	Tmux     *TmuxInfo      `json:"tmux,omitempty"`     // Tmux server status
-	ACP      *ServiceInfo   `json:"acp,omitempty"`      // ACP mayor status
 	Agents   []AgentRuntime `json:"agents"`             // Global agents (Mayor, Deacon)
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
@@ -141,7 +138,6 @@ type AgentRuntime struct {
 	Session           string `json:"session"`                      // tmux session name
 	Role              string `json:"role"`                         // Role type
 	Running           bool   `json:"running"`                      // Is tmux session running?
-	ACP               bool   `json:"acp"`                          // Is ACP session active?
 	HasWork           bool   `json:"has_work"`                     // Has pinned work?
 	WorkTitle         string `json:"work_title,omitempty"`         // Title of pinned work
 	HookBead          string `json:"hook_bead,omitempty"`          // Pinned bead ID from agent bead
@@ -200,7 +196,7 @@ type StatusSum struct {
 // resolveAgentDisplay inspects the actual running process in the tmux session
 // to determine what runtime and model are being used. Falls back to config
 // when the session isn't running.
-func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
+func resolveAgentDisplay(townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
 	// Map legacy role names to config role names
 	configRole := role
 	switch role {
@@ -215,13 +211,6 @@ func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, rol
 		alias = townSettings.RoleAgents[configRole]
 		if alias == "" {
 			alias = townSettings.DefaultAgent
-		}
-	}
-
-	// If mayor is in ACP mode, use the ACP agent name instead
-	if configRole == constants.RoleMayor && mayor.IsACPActive(townRoot) {
-		if acpAgent, err := mayor.GetACPAgent(townRoot); err == nil && acpAgent != "" {
-			alias = acpAgent
 		}
 	}
 
@@ -892,12 +881,6 @@ func gatherStatus() (TownStatus, error) {
 	sort.Strings(livenessUnknown)
 	status.LivenessUnknown = livenessUnknown
 
-	// ACP status
-	if mayor.IsACPActive(townRoot) {
-		acpPid, _ := mayor.GetACPPid(townRoot)
-		status.ACP = &ServiceInfo{Running: true, PID: acpPid}
-	}
-
 	var wg sync.WaitGroup
 
 	// Fetch global agents in parallel with rig discovery
@@ -985,14 +968,14 @@ func gatherStatus() (TownStatus, error) {
 	// Enrich agents with runtime info — inspect actual running processes
 	for i := range status.Agents {
 		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+		alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
 		a.AgentAlias = alias
 		a.AgentInfo = info
 	}
 	for i := range status.Rigs {
 		for j := range status.Rigs[i].Agents {
 			a := &status.Rigs[i].Agents[j]
-			alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+			alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
 			a.AgentAlias = alias
 			a.AgentInfo = info
 		}
@@ -1095,13 +1078,6 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 				parts = append(parts, fmt.Sprintf("tmux %s", style.Dim.Render(fmt.Sprintf("(-L %s, PID %d, %d sessions, %s)", status.Tmux.Socket, status.Tmux.PID, status.Tmux.SessionCount, status.Tmux.SocketPath))))
 			} else {
 				parts = append(parts, fmt.Sprintf("tmux %s", style.Dim.Render(fmt.Sprintf("(-L %s, no server)", status.Tmux.Socket))))
-			}
-		}
-		if status.ACP != nil {
-			if status.ACP.Running {
-				parts = append(parts, fmt.Sprintf("acp %s", style.Dim.Render(fmt.Sprintf("(PID %d)", status.ACP.PID))))
-			} else {
-				parts = append(parts, fmt.Sprintf("acp %s", style.Dim.Render("(stopped)")))
 			}
 		}
 		fmt.Fprintf(w, "%s\n", strings.Join(parts, "  "))
@@ -1542,17 +1518,12 @@ func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []
 func buildStatusIndicator(agent AgentRuntime) string {
 	sessionExists := agent.Running
 
-	// Base indicator from tmux state or ACP state
+	// Base indicator from tmux state
 	var indicator string
 	if sessionExists {
 		indicator = style.Success.Render("●")
 	} else {
 		indicator = style.Error.Render("○")
-	}
-
-	// Add mode info if ACP
-	if agent.ACP {
-		indicator += style.Dim.Render(" acp")
 	}
 
 	// Add non-observable state suffix if present
@@ -1742,14 +1713,6 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
-
-			// Check for ACP session (for Mayor)
-			if d.name == "mayor" {
-				if mayor.IsACPActive(townRoot) {
-					agent.ACP = true
-					agent.Running = true
-				}
-			}
 
 			// Look up agent bead from preloaded map (O(1))
 			if issue, ok := allAgentBeads[d.beadID]; ok {

@@ -1,15 +1,12 @@
 package mayor
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -192,144 +189,6 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 	return nil
 }
 
-// StartACP starts the mayor session in ACP mode.
-// This handles the transition from TMUX to ACP mode.
-func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) error {
-	// Check if an ACP session is already running - only one ACP session is allowed
-	// because they share the same PID file. Starting a second one would overwrite
-	// the PID file, causing the first session's proxy to detect "PID file removed"
-	// and shut down unexpectedly.
-	if IsACPActive(m.townRoot) {
-		return fmt.Errorf("ACP Mayor is already running. Only one ACP session is allowed at a time")
-	}
-
-	rc, agentName, err := config.ResolveAgentConfigWithOverride(m.townRoot, "", agentOverride)
-	if err != nil {
-		return fmt.Errorf("resolving agent config: %w", err)
-	}
-
-	if !config.AgentRegistryFor(m.townRoot, "").RuntimeConfigSupportsACP(rc) {
-		return fmt.Errorf("agent '%s' does not support ACP. Use an ACP-compatible agent like 'opencode'.", agentName)
-	}
-
-	// Prepare environment
-	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:     "mayor",
-		Rig:      rigName,
-		TownRoot: m.townRoot,
-	})
-	for k, v := range envVars {
-		os.Setenv(k, v)
-	}
-	os.Setenv("GT_TOWN_ROOT", m.townRoot)
-
-	// Apply agent-specific environment variables from RuntimeConfig
-	// This ensures variables like ANTHROPIC_API_KEY reach the agent process
-	if rc.Env != nil {
-		for k, v := range rc.Env {
-			os.Setenv(k, v)
-		}
-	}
-
-	mayorDir := m.mayorDir()
-	if err := os.Chdir(mayorDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not cd to mayor directory: %v\n", err)
-	}
-
-	// Initialize ACP components
-	proxy := acp.NewProxy()
-
-	startupPrompt, err := m.buildACPStartupPrompt()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not render mayor prime context for ACP startup: %v\n", err)
-	}
-	proxy.SetStartupPrompt(startupPrompt)
-	proxy.SetPIDFilePath(ACPPidFilePath(m.townRoot))
-	proxy.SetTownRoot(m.townRoot)
-
-	propeller := acp.NewPropeller(proxy, m.townRoot, m.SessionName())
-
-	// Transition Point: Stop TMUX mayor if running, but only after ACP setup is ready.
-	if running, _ := m.IsRunning(); running {
-		fmt.Fprintf(os.Stderr, "Stopping tmux mayor to switch to ACP mode...\n")
-		if err := m.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not stop tmux mayor: %v\n", err)
-		}
-	}
-
-	// Write ACP PID and agent name after successful transition/stop
-	if err := WriteACPPid(m.townRoot); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not write ACP PID file: %v\n", err)
-	}
-	if err := WriteACPAgent(m.townRoot, agentName); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not write ACP agent file: %v\n", err)
-	}
-	defer func() {
-		if err := RemoveACPPid(m.townRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not remove ACP PID file: %v\n", err)
-		}
-		if err := RemoveACPAgent(m.townRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not remove ACP agent file: %v\n", err)
-		}
-	}()
-
-	acpConfig := config.AgentRegistryFor(m.townRoot, "").ACPConfigFromRuntime(rc)
-	var agentArgs []string
-	if acpConfig != nil {
-		// ACP mode: build args from ACP config
-		// Handle different ACP invocation modes:
-		//
-		// 1. Native mode: Binary is already an ACP adapter (e.g., "claude-agent-acp")
-		//    Config: { "mode": "native" } or { "mode": "native", "args": [...] }
-		//    Result: claude-agent-acp [args...]
-		//
-		// 2. Subcommand mode: Agent has ACP as a subcommand (e.g., "opencode acp")
-		//    Config: { "command": "acp", "args": ["--debug"] }
-		//    Result: opencode acp --debug
-		//
-		// 3. Flag mode: Agent uses a flag to enable ACP (e.g., "gemini --experimental-acp")
-		//    Config: { "args": ["--experimental-acp"] }
-		//    Result: gemini --experimental-acp
-		switch acpConfig.Mode {
-		case config.ACPModeNative:
-			// Native mode: the binary IS the ACP adapter
-			// Just pass any additional args
-			if len(acpConfig.Args) > 0 {
-				agentArgs = append(agentArgs, acpConfig.Args...)
-			}
-		default:
-			// Default (subcommand/flag) mode:
-			// - If Command is set, it's a subcommand (prepend to args)
-			// - If only Args is set, it's flag mode (use args directly)
-			if acpConfig.Command != "" {
-				agentArgs = []string{acpConfig.Command}
-			}
-			if len(acpConfig.Args) > 0 {
-				agentArgs = append(agentArgs, acpConfig.Args...)
-			}
-		}
-	}
-
-	// Use rc.Command instead of agentName (alias) to ensure we run the correct binary.
-	// If agentArgs is empty (no ACP config), we fall back to rc.Args for regular mode.
-	execCmd := rc.Command
-	if len(agentArgs) == 0 {
-		agentArgs = rc.Args
-	}
-
-	if err := proxy.Start(ctx, execCmd, agentArgs, mayorDir); err != nil {
-		return fmt.Errorf("starting agent: %w", err)
-	}
-
-	// Start background polling only after the agent process has successfully started.
-	// The Propeller will wait for the ACP handshake to establish a SessionID
-	// and verify the agent is not busy before attempting any prompt injections.
-	propeller.Start(ctx)
-	defer propeller.Stop()
-
-	return proxy.Forward()
-}
-
 // Stop stops the mayor session.
 func (m *Manager) Stop() error {
 	t := tmux.NewTmux()
@@ -376,27 +235,6 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 	}
 
 	return t.GetSessionInfo(sessionID)
-}
-
-// buildACPStartupPrompt composes the startup prompt used for ACP mayor sessions.
-// It always includes the startup beacon and appends rendered mayor prime context
-// when available.
-func (m *Manager) buildACPStartupPrompt() (string, error) {
-	beacon := session.FormatStartupBeacon(session.BeaconConfig{
-		Recipient: "mayor",
-		Sender:    "human",
-		Topic:     "acp",
-	})
-
-	prime, err := GetMayorPrime(m.townRoot)
-	if err != nil {
-		return beacon, err
-	}
-	if strings.TrimSpace(prime) == "" {
-		return beacon, nil
-	}
-
-	return beacon + "\n\n" + prime, nil
 }
 
 // GetMayorPrime returns the rendered mayor prime context as a raw string.

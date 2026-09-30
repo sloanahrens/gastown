@@ -1,11 +1,8 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -90,48 +87,18 @@ Stops the current session (if running) and starts a fresh one.`,
 	RunE: runMayorRestart,
 }
 
-var mayorAcpCmd = &cobra.Command{
-	Use:   "acp",
-	Short: "Run Mayor in headless mode (Agent Control Protocol)",
-	Long: `Run the Mayor in headless mode with stdin/stdout connected.
-
-This command initializes a headless session without tmux, designed for
-IDE integration via the Agent Control Protocol. It bypasses all tmux
-logic and runs directly in the current terminal.
-
-Environment variable overrides:
-  GT_RIG          - Override rig name
-  GT_TOWN_ROOT    - Override town root directory
-  GT_ROLE         - Override role (default: mayor)
-
-The agent reads prompts from stdin and outputs to stdout. This enables
-programmatic control by IDEs or other tools that need direct agent access.
-
-While an ACP session is active, automatic cleanup of polecat workspaces
-is vetoed to allow the Mayor to review worker diffs before they vanish.`,
-	RunE: runMayorAcp,
-}
-
-var acpRigOverride string
-var acpTownRootOverride string
-
 func init() {
 	mayorCmd.AddCommand(mayorStartCmd)
 	mayorCmd.AddCommand(mayorStopCmd)
 	mayorCmd.AddCommand(mayorAttachCmd)
 	mayorCmd.AddCommand(mayorStatusCmd)
 	mayorCmd.AddCommand(mayorRestartCmd)
-	mayorCmd.AddCommand(mayorAcpCmd)
 
 	mayorStatusCmd.Flags().BoolVar(&mayorStatusRunning, "running", false, "Output only true/false for running status")
 
 	mayorStartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
 	mayorAttachCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
 	mayorRestartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
-
-	mayorAcpCmd.Flags().StringVar(&acpRigOverride, "rig", "", "Rig name (overrides GT_RIG env)")
-	mayorAcpCmd.Flags().StringVar(&acpTownRootOverride, "town", "", "Town root directory (overrides GT_TOWN_ROOT env)")
-	mayorAcpCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run (overrides town default)")
 
 	rootCmd.AddCommand(mayorCmd)
 }
@@ -198,15 +165,6 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("finding workspace: %w", err)
-	}
-
-	// Check if ACP is active and gracefully shut it down before switching to tmux.
-	// Only 'gt mayor attach' is allowed to transition from ACP to tmux mode.
-	if mayor.IsACPActive(townRoot) {
-		fmt.Fprintf(os.Stderr, "ACP Mayor is active. Switching to tmux mode...\n")
-		if err := gracefullyShutdownACP(townRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not gracefully shutdown ACP: %v\n", err)
-		}
 	}
 
 	// Ensure daemon and dolt are running before attaching.
@@ -319,47 +277,6 @@ func restartMayorRuntimeIfDead(t mayorRuntimeTmux, sessionID, townRoot string) e
 	return nil
 }
 
-// gracefullyShutdownACP removes the PID file to signal the ACP proxy to exit,
-// then waits for the process to terminate.
-func gracefullyShutdownACP(townRoot string) error {
-	// Get the PID before removing the file
-	pid, err := mayor.GetACPPid(townRoot)
-	if err != nil {
-		// PID file doesn't exist or is invalid, nothing to shut down
-		return nil
-	}
-
-	// Remove the PID file - this signals the ACP proxy to shut down gracefully
-	if err := mayor.RemoveACPPid(townRoot); err != nil {
-		return fmt.Errorf("removing ACP PID file: %w", err)
-	}
-
-	// Find the process
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return nil // Process doesn't exist
-	}
-
-	// Wait for the process to exit (with timeout)
-	fmt.Fprintf(os.Stderr, "Waiting for ACP session to shut down")
-	for i := 0; i < 30; i++ {
-		fmt.Fprintf(os.Stderr, ".")
-		// Check if process is still alive
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			// Process has exited
-			fmt.Fprintf(os.Stderr, " done\n")
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Process didn't exit gracefully, force kill
-	fmt.Fprintf(os.Stderr, " forcing shutdown\n")
-	_ = process.Kill()
-	time.Sleep(100 * time.Millisecond)
-	return nil
-}
-
 func runMayorStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -397,17 +314,8 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Created: %s\n", status.Tmux.Created)
 	}
 
-	if status.ACPPid != 0 {
-		fmt.Printf("%s Mayor (ACP) is %s\n",
-			style.Bold.Render("●"),
-			style.Bold.Render("running (headless)"))
-		fmt.Printf("  PID: %d\n", status.ACPPid)
-	}
-
 	if status.Tmux != nil {
 		fmt.Printf("\nAttach with: %s\n", style.Dim.Render("gt mayor attach"))
-	} else if status.ACPPid != 0 {
-		fmt.Printf("\nAttach with: %s\n", style.Dim.Render("gt mayor acp"))
 	}
 
 	return nil
@@ -481,36 +389,4 @@ func ensureMayorInfra(townRoot string) error {
 		}
 	}
 	return nil
-}
-
-// runMayorAcp runs the Mayor in headless mode for IDE integration.
-// It bypasses tmux and execs the agent directly with stdin/stdout connected.
-// A PID file is created to signal that automatic cleanup should be vetoed,
-// allowing the Mayor to review worker diffs before cleanup.
-func runMayorAcp(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
-
-	townRoot := acpTownRootOverride
-	if townRoot == "" {
-		townRoot = os.Getenv("GT_TOWN_ROOT")
-	}
-	if townRoot == "" {
-		var err error
-		townRoot, err = workspace.FindFromCwdOrError()
-		if err != nil {
-			return fmt.Errorf("not in a Gas Town workspace: %w", err)
-		}
-	}
-
-	if err := ensureMayorInfra(townRoot); err != nil {
-		return err
-	}
-
-	rigName := acpRigOverride
-	if rigName == "" {
-		rigName = os.Getenv("GT_RIG")
-	}
-
-	mgr := mayor.NewManager(townRoot)
-	return mgr.StartACP(ctx, mayorAgentOverride, rigName)
 }

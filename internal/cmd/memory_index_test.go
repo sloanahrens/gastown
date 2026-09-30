@@ -3,13 +3,13 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 func TestMemorySummary(t *testing.T) {
@@ -209,8 +209,8 @@ func omittedCount(t *testing.T, out string) int {
 }
 
 // TestCollectMemories_ReadsBothNamespaces is the regression guard for gt-o51s:
-// memories are split across two kv namespaces, gt.* for `gt remember` and
-// memory.* for `bd remember`, so a store holding both must surface both. The
+// memories are split across two kv namespaces, gt.* from the retired gt
+// remember and memory.* for `bd remember`, so a store holding both must surface both. The
 // type is part of the key in each namespace, which is what makes this the test
 // for the legacy prefix coming off before the type is read.
 func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
@@ -233,7 +233,8 @@ func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
 	for memType, wantKeys := range want {
 		var gotKeys []string
 		for _, m := range grouped[memType] {
-			gotKeys = append(gotKeys, m.shortKey)
+			_, short := parseMemoryKey(m.key)
+			gotKeys = append(gotKeys, short)
 		}
 		if fmt.Sprint(gotKeys) != fmt.Sprint(wantKeys) {
 			t.Errorf("group %q = %v, want %v", memType, gotKeys, wantKeys)
@@ -244,7 +245,7 @@ func TestCollectMemories_ReadsBothNamespaces(t *testing.T) {
 	// cannot preview.
 	var found bool
 	for _, m := range grouped["project"] {
-		if m.shortKey == "merge-freeze" {
+		if _, short := parseMemoryKey(m.key); short == "merge-freeze" {
 			found = true
 			if m.value != "written by bd remember, typed" {
 				t.Errorf("memory.* entry's value = %q, want the stored value", m.value)
@@ -302,8 +303,8 @@ func TestRenderMemoryIndex_RendersOrCountsEveryMemory(t *testing.T) {
 			if omitted == 0 {
 				for _, mems := range grouped {
 					for _, m := range mems {
-						if !strings.Contains(out, "- **"+m.shortKey+"**") && !strings.Contains(out, "- "+m.shortKey+"\n") {
-							t.Fatalf("no omission count, but memory %q is missing", m.shortKey)
+						if !strings.Contains(out, "- **"+m.key+"**") && !strings.Contains(out, "- "+m.key+"\n") {
+							t.Fatalf("no omission count, but memory %q is missing", m.key)
 						}
 					}
 				}
@@ -358,7 +359,9 @@ func TestRenderMemoryIndex_DropsEntriesOnlyWhenKeysCannotFit(t *testing.T) {
 	kvs := syntheticMemories(n, 1200)
 	grouped := collectMemories(kvs)
 
-	const budget = 4000
+	// 4100 leaves room for key-only lines after the last preview; at 4000 the
+	// leftover falls just short of one full kv key.
+	const budget = 4100
 	out := renderMemoryIndex(grouped, budget)
 
 	omitted := omittedCount(t, out)
@@ -374,8 +377,8 @@ func TestRenderMemoryIndex_DropsEntriesOnlyWhenKeysCannotFit(t *testing.T) {
 		t.Errorf("rendered %d + omitted %d = %d, want %d", previews+keyOnly, omitted, previews+keyOnly+omitted, n)
 	}
 	// The omission line is the reader's only pointer to what it cannot see.
-	if !strings.Contains(out, "— see `gt memories`") {
-		t.Error("the omission line must still point at `gt memories`")
+	if !strings.Contains(out, "— see `bd kv list`") {
+		t.Error("the omission line must point at `bd kv list`")
 	}
 
 	if len(out) > budget+memoryIndexFooterSlack {
@@ -418,9 +421,9 @@ func TestRenderMemoryIndex_OrdersKeysWithinAType(t *testing.T) {
 	}
 	out := renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars)
 
-	alpha := strings.Index(out, "**alpha**")
-	mango := strings.Index(out, "**mango**")
-	zebra := strings.Index(out, "**zebra**")
+	alpha := strings.Index(out, "**gt.alpha**")
+	mango := strings.Index(out, "**gt.mango**")
+	zebra := strings.Index(out, "**gt.zebra**")
 	if alpha < 0 || mango < 0 || zebra < 0 {
 		t.Fatalf("index is missing a key (alpha=%d mango=%d zebra=%d):\n%s", alpha, mango, zebra, out)
 	}
@@ -430,8 +433,8 @@ func TestRenderMemoryIndex_OrdersKeysWithinAType(t *testing.T) {
 }
 
 // TestRenderMemoryIndex_BoundsAPathologicalKey covers the one input that could
-// otherwise grow the fixed trailer past the budget: `gt remember --key` does
-// not length-limit keys, and the footer echoes the first key as the retrieval
+// otherwise grow the fixed trailer past the budget: nothing length-limits
+// keys, and the footer echoes the first key as the retrieval
 // example. Before the example was capped, this test failed.
 func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
 	t.Parallel()
@@ -447,7 +450,7 @@ func TestRenderMemoryIndex_BoundsAPathologicalKey(t *testing.T) {
 	if len(out) > budget+memoryIndexFooterSlack {
 		t.Errorf("index = %d chars, want <= %d — the footer echoed an unbounded key", len(out), budget+memoryIndexFooterSlack)
 	}
-	if !strings.Contains(out, "gt memories <key>") {
+	if !strings.Contains(out, "bd kv get <key>") {
 		t.Error("footer must still name the retrieval command")
 	}
 	if !strings.Contains(out, "a short gist sentence.") {
@@ -499,8 +502,8 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 
 // TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable is the end-to-end
 // half of the acceptance criterion "memories remain discoverable, no memory
-// content lost": prime carries the preview, and `gt memories <key>` still
-// returns the value in full.
+// content lost": prime carries the preview and the full kv key, which
+// `bd kv get <key>` resolves to the value in full.
 func TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable(t *testing.T) {
 	const key = "live-verification-escalation-chain"
 	tail := "TAIL-MARKER only present in the full text."
@@ -511,34 +514,15 @@ func TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal kv: %v", err)
 	}
-	// Prime's half runs on a fake runner; `gt memories` still shells out to bd,
-	// so a bd stub on PATH answers that half from the same JSON.
 	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: string(kvJSON)}}
 	p, _, buf := newFakePrimeTools(f)
 	p.memoryIndex(t.TempDir())
 	out := buf.String()
 
-	jsonPath := filepath.Join(t.TempDir(), "kv.json")
-	if err := os.WriteFile(jsonPath, kvJSON, 0600); err != nil {
-		t.Fatalf("write kv json: %v", err)
-	}
-	binDir := t.TempDir()
-	stub := "#!/bin/sh\n" +
-		"case \"$*\" in\n" +
-		"  \"kv list --json\") cat \"$KV_JSON_FILE\"; exit 0 ;;\n" +
-		"esac\n" +
-		"echo \"unexpected args: $*\" >&2\n" +
-		"exit 99\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0700); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("KV_JSON_FILE", jsonPath)
-
 	if !strings.Contains(out, "# Agent Memories (1)") {
 		t.Errorf("missing memory header:\n%s", out)
 	}
-	if !strings.Contains(out, key) {
+	if !strings.Contains(out, memoryKeyPrefix+key) {
 		t.Errorf("memory key missing from index:\n%s", out)
 	}
 	if !strings.Contains(out, "LIVE VERIFICATION PROTOCOL, run twice against destruction-gate fixes.") {
@@ -547,17 +531,191 @@ func TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable(t *testing.T) {
 	if strings.Contains(out, tail) {
 		t.Errorf("index carried the full value instead of a preview:\n%s", out)
 	}
-	if !strings.Contains(out, "gt memories <key>") {
+	if !strings.Contains(out, "bd kv get <key>") {
 		t.Errorf("index does not tell the reader how to get full text:\n%s", out)
 	}
+}
 
-	// The elided text is still retrievable through the path the index points at.
-	retrieved := captureStdout(t, func() {
-		if err := runMemories(memoriesCmd, []string{key}); err != nil {
-			t.Fatalf("runMemories(%q): %v", key, err)
+func TestParseMemoryKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		kvKey    string
+		wantType string
+		wantKey  string
+	}{
+		{
+			name:     "typed feedback key",
+			kvKey:    "gt.feedback.dont-mock-db",
+			wantType: "feedback",
+			wantKey:  "dont-mock-db",
+		},
+		{
+			name:     "typed project key",
+			kvKey:    "gt.project.merge-freeze",
+			wantType: "project",
+			wantKey:  "merge-freeze",
+		},
+		{
+			name:     "typed user key",
+			kvKey:    "gt.user.senior-go-dev",
+			wantType: "user",
+			wantKey:  "senior-go-dev",
+		},
+		{
+			name:     "typed reference key",
+			kvKey:    "gt.reference.grafana-dashboard",
+			wantType: "reference",
+			wantKey:  "grafana-dashboard",
+		},
+		{
+			name:     "typed general key",
+			kvKey:    "gt.general.some-insight",
+			wantType: "general",
+			wantKey:  "some-insight",
+		},
+		{
+			name:     "legacy untyped key",
+			kvKey:    "gt.refinery-worktree",
+			wantType: "general",
+			wantKey:  "refinery-worktree",
+		},
+		{
+			name:     "legacy key with dots in slug",
+			kvKey:    "gt.hooks-package-structure",
+			wantType: "general",
+			wantKey:  "hooks-package-structure",
+		},
+		{
+			name:     "unknown type treated as legacy",
+			kvKey:    "gt.banana.split",
+			wantType: "general",
+			wantKey:  "banana.split",
+		},
+		{
+			name:     "typed key with hyphens in value",
+			kvKey:    "gt.feedback.always-use-race-flag",
+			wantType: "feedback",
+			wantKey:  "always-use-race-flag",
+		},
+		{
+			name:     "memory. typed feedback key",
+			kvKey:    "memory.feedback.always-use-race-flag",
+			wantType: "feedback",
+			wantKey:  "always-use-race-flag",
+		},
+		{
+			name:     "memory. typed project key",
+			kvKey:    "memory.project.merge-freeze",
+			wantType: "project",
+			wantKey:  "merge-freeze",
+		},
+		{
+			name:     "memory. legacy untyped key",
+			kvKey:    "memory.refinery-worktree",
+			wantType: "general",
+			wantKey:  "refinery-worktree",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotType, gotKey := parseMemoryKey(tt.kvKey)
+			if gotType != tt.wantType {
+				t.Errorf("parseMemoryKey(%q) type = %q, want %q", tt.kvKey, gotType, tt.wantType)
+			}
+			if gotKey != tt.wantKey {
+				t.Errorf("parseMemoryKey(%q) key = %q, want %q", tt.kvKey, gotKey, tt.wantKey)
+			}
+		})
+	}
+}
+
+func TestParseBdKvListJSON(t *testing.T) {
+	t.Parallel()
+	got, err := parseBdKvListJSON([]byte(`{
+		"gt.project.note":"keep me",
+		"gt.project.empty":"",
+		"gt.project.count":12,
+		"gt.project.enabled":true,
+		"gt.project.tags":["one"],
+		"gt.project.config":{"nested":"value"},
+		"schema_version":1,
+		"other":"keep string kvs",
+		"enabled":true,
+		"tags":["one"],
+		"config":{"nested":"value"},
+		"gt.project.null":null
+	}`))
+	if err != nil {
+		t.Fatalf("parseBdKvListJSON() error = %v", err)
+	}
+
+	want := map[string]string{
+		"gt.project.note":    "keep me",
+		"gt.project.empty":   "",
+		"gt.project.count":   "12",
+		"gt.project.enabled": "true",
+		"gt.project.tags":    `["one"]`,
+		"gt.project.config":  `{"nested":"value"}`,
+		"other":              "keep string kvs",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseBdKvListJSON() returned %d entries, want %d: %#v", len(got), len(want), got)
+	}
+	for k, wantValue := range want {
+		if got[k] != wantValue {
+			t.Errorf("parseBdKvListJSON()[%q] = %q, want %q", k, got[k], wantValue)
 		}
-	})
-	if !strings.Contains(retrieved, tail) {
-		t.Errorf("gt memories %s did not return the full value:\n%s", key, retrieved)
+	}
+	if _, ok := got["gt.project.null"]; ok {
+		t.Error("parseBdKvListJSON() kept null memory value")
+	}
+	for _, k := range []string{"schema_version", "enabled", "tags", "config"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("parseBdKvListJSON() kept non-memory non-string value for %q", k)
+		}
+	}
+}
+
+func TestParseBdKvListJSONMalformed(t *testing.T) {
+	t.Parallel()
+	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
+		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
+	}
+}
+
+// TestRenderMemoryIndex_KeysAreBdKvGetArguments pins the retrieval path the
+// index advertises. Every rendered entry must be a kv key exactly as stored,
+// in both namespaces, so `bd kv get <key>` takes it verbatim; and `bd kv get`
+// must exist in the bd command surface this repo is linted against.
+func TestRenderMemoryIndex_KeysAreBdKvGetArguments(t *testing.T) {
+	t.Parallel()
+	kvs := map[string]string{
+		memoryKeyPrefix + "feedback.always-race":       "Run tests with -race.",
+		memoryKeyPrefix + "legacy-untyped":             "An untyped gt.* memory.",
+		memoryLegacyKeyPrefix + "project.merge-freeze": "Freeze merges on Fridays.",
+		memoryLegacyKeyPrefix + "dolt-phantoms":        "Phantom DBs hide in three places.",
+	}
+	out := renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars)
+
+	entry := regexp.MustCompile(`(?m)^- \*\*(.+?)\*\*: `)
+	var rendered []string
+	for _, m := range entry.FindAllStringSubmatch(out, -1) {
+		rendered = append(rendered, m[1])
+		if _, ok := kvs[m[1]]; !ok {
+			t.Errorf("index entry %q is not a stored kv key, so bd kv get cannot fetch it:\n%s", m[1], out)
+		}
+	}
+	if len(rendered) != len(kvs) {
+		t.Errorf("rendered %d entries %v, want %d:\n%s", len(rendered), rendered, len(kvs), out)
+	}
+
+	bdTree, _, err := cmdtree.LoadBdTree()
+	if err != nil {
+		t.Fatalf("LoadBdTree: %v", err)
+	}
+	if r := bdTree.Resolve([]string{"kv", "get"}); !r.OK {
+		t.Errorf("bd kv get does not resolve in the bd command tree: %+v", r)
 	}
 }

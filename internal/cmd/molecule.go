@@ -16,7 +16,6 @@ var moleculeCmd = &cobra.Command{
 	Use:         "mol",
 	Aliases:     []string{"molecule"},
 	GroupID:     GroupWork,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
 	Short:       "Agent molecule workflow commands",
 	RunE:        requireSubcommand,
 	Long: `Agent-specific molecule workflow operations.
