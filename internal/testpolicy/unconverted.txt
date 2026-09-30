@@ -34,6 +34,5 @@ internal/templates
 internal/testutil
 internal/tui/feed
 internal/util
-internal/version
 internal/web
 internal/witness

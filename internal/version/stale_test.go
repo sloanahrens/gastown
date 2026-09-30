@@ -3,116 +3,29 @@ package version
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// --- git-backed test helpers ---
+// The staleness tests run against fakeGit (fakegit_test.go): an in-memory
+// repository per test, so they spawn no git and run in parallel. The same
+// behaviour against real git is pinned in stale_integration_test.go.
 
-func gitRun(t *testing.T, dir string, args ...string) string {
+const repoDir = "/fake/gastown"
+
+// newRepo returns a fake git holding one empty repository at repoDir on the
+// unborn branch main.
+func newRepo(t *testing.T) (*fakeGit, *fakeRepo) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// gitCommit writes file and creates a commit, returning its full hash.
-func gitCommit(t *testing.T, dir, file, content string) string {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, dir, "add", "-A")
-	gitRun(t, dir, "commit", "-q", "--no-gpg-sign", "-m", "c-"+file)
-	return gitRun(t, dir, "rev-parse", "HEAD")
-}
-
-func newGitRepo(t *testing.T) string {
-	t.Helper()
-	// These tests create tiny temp-dir repos and shell out to git a handful
-	// of times — fast and deterministic, so they run even under -short. CI
-	// runs `-short`; skipping here left stale.go's staleness logic at 0%
-	// patch coverage (GH#4034 follow-up). Only skip if git is unavailable.
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	dir := t.TempDir()
-	gitRun(t, dir, "init", "-q")
-	gitRun(t, dir, "config", "commit.gpgsign", "false")
-	return dir
-}
-
-// setBinaryCommit overrides the build-time commit for the duration of the test.
-func setBinaryCommit(t *testing.T, c string) {
-	t.Helper()
-	orig := Commit
-	t.Cleanup(func() { Commit = orig })
-	Commit = c
-}
-
-func TestShortCommit(t *testing.T) {
-	tests := []struct {
-		name   string
-		hash   string
-		expect string
-	}{
-		{"full SHA", "abcdef1234567890abcdef1234567890abcdef12", "abcdef123456"},
-		{"exactly 12", "abcdef123456", "abcdef123456"},
-		{"short hash", "abcdef", "abcdef"},
-		{"empty", "", ""},
-		{"13 chars", "abcdef1234567", "abcdef123456"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ShortCommit(tt.hash)
-			if got != tt.expect {
-				t.Errorf("ShortCommit(%q) = %q, want %q", tt.hash, got, tt.expect)
-			}
-		})
-	}
-}
-
-func TestCommitsMatch(t *testing.T) {
-	tests := []struct {
-		name   string
-		a, b   string
-		expect bool
-	}{
-		{"identical full", "abcdef1234567890", "abcdef1234567890", true},
-		{"prefix match short-long", "abcdef1234567", "abcdef1234567890abcd", true},
-		{"prefix match long-short", "abcdef1234567890abcd", "abcdef1234567", true},
-		{"no match", "abcdef1234567", "1234567abcdef", false},
-		{"too short a", "abc", "abcdef1234567", false},
-		{"too short b", "abcdef1234567", "abc", false},
-		{"both too short", "abc", "abc", false},
-		{"exactly 7 chars match", "abcdefg", "abcdefg", true},
-		{"exactly 7 chars no match", "abcdefg", "abcdefh", false},
-		{"6 chars too short", "abcdef", "abcdef", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := commitsMatch(tt.a, tt.b)
-			if got != tt.expect {
-				t.Errorf("commitsMatch(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.expect)
-			}
-		})
-	}
+	g := newFakeGit(t)
+	return g, g.repo(repoDir)
 }
 
 func TestSetCommit(t *testing.T) {
+	t.Parallel()
 	original := Commit
-	defer func() { Commit = original }()
+	t.Cleanup(func() { SetCommit(original) })
 
 	SetCommit("abc123def456")
 	if Commit != "abc123def456" {
@@ -120,46 +33,27 @@ func TestSetCommit(t *testing.T) {
 	}
 }
 
-func TestIsBuildBranch(t *testing.T) {
-	tests := []struct {
-		branch string
-		want   bool
-	}{
-		{"main", true},
-		{"master", true},
-		{"carry/operational", true},
-		{"carry/staging", true},
-		{"carry/", true},
-		{"fix/something", false},
-		{"feat/new-thing", false},
-		{"develop", false},
-		{"", false},
+func TestCheckStaleBinary_NoCommit(t *testing.T) {
+	t.Parallel()
+	g, _ := newRepo(t)
+
+	info := g.checker("").checkStale(repoDir)
+	if info.Error == nil || !strings.Contains(info.Error.Error(), "dev build") {
+		t.Fatalf("Error = %v, want the unstamped-build error", info.Error)
 	}
-	for _, tt := range tests {
-		t.Run(tt.branch, func(t *testing.T) {
-			if got := isBuildBranch(tt.branch); got != tt.want {
-				t.Errorf("isBuildBranch(%q) = %v, want %v", tt.branch, got, tt.want)
-			}
-		})
+	if info.IsStale || info.Skipped {
+		t.Errorf("IsStale=%v Skipped=%v, want neither without a binary commit", info.IsStale, info.Skipped)
 	}
 }
 
-func TestCheckStaleBinary_NoCommit(t *testing.T) {
-	original := Commit
-	defer func() { Commit = original }()
+func TestCheckStaleBinary_NotAGitRepo(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	c1 := r.commit("a.go", "1")
 
-	Commit = ""
-	// Force resolveCommitHash to return empty by clearing Commit
-	// (vcs.revision from build info may still be set, so this test
-	// verifies the error path when no commit is available)
-	info := CheckStaleBinary(t.TempDir())
-	if info == nil {
-		t.Fatal("CheckStaleBinary returned nil")
-	}
-	// Either we get an error (no commit) or we get a valid result from build info
-	// Both are acceptable outcomes
-	if info.BinaryCommit == "" && info.Error == nil {
-		t.Error("expected error when binary commit is empty")
+	info := g.checker(c1).checkStale("/fake/not-a-repo")
+	if info.Error == nil || !strings.Contains(info.Error.Error(), "not a git worktree") {
+		t.Fatalf("Error = %v, want not a git worktree", info.Error)
 	}
 }
 
@@ -168,15 +62,14 @@ func TestCheckStaleBinary_NoCommit(t *testing.T) {
 // tip. Before the fix this falsely reported "N commits behind"; now it must be
 // reported as not stale (compared against main, not the feature HEAD).
 func TestCheckStaleBinary_FeatureBranchBinaryAtMainTip(t *testing.T) {
-	dir := newGitRepo(t)
-	gitCommit(t, dir, "a.go", "1")
-	mainTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
-	gitCommit(t, dir, "c.go", "unmerged feature work")
-	setBinaryCommit(t, mainTip)
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit("a.go", "1")
+	mainTip := r.commit("b.go", "2")
+	r.checkoutNew("feat/x")
+	r.commit("c.go", "unmerged feature work")
 
-	info := CheckStaleBinary(dir)
+	info := g.checker(mainTip).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -201,16 +94,15 @@ func TestCheckStaleBinary_FeatureBranchBinaryAtMainTip(t *testing.T) {
 // a binary genuinely behind main — must still be reported stale, counted
 // against main (not the feature HEAD).
 func TestCheckStaleBinary_FeatureBranchBinaryBehindMain(t *testing.T) {
-	dir := newGitRepo(t)
-	old := gitCommit(t, dir, "a.go", "1")
-	gitCommit(t, dir, "b.go", "2")
-	mainTip := gitCommit(t, dir, "c.go", "3")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
-	gitCommit(t, dir, "d.go", "feature work")
-	setBinaryCommit(t, old)
+	t.Parallel()
+	g, r := newRepo(t)
+	old := r.commit("a.go", "1")
+	r.commit("b.go", "2")
+	mainTip := r.commit("c.go", "3")
+	r.checkoutNew("feat/x")
+	r.commit("d.go", "feature work")
 
-	info := CheckStaleBinary(dir)
+	info := g.checker(old).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -237,13 +129,12 @@ func TestCheckStaleBinary_FeatureBranchBinaryBehindMain(t *testing.T) {
 // TestCheckStaleBinary_OnMainBehind: on a build branch, behind HEAD — the
 // pre-existing behavior must be unchanged (compare against HEAD/the branch).
 func TestCheckStaleBinary_OnMainBehind(t *testing.T) {
-	dir := newGitRepo(t)
-	old := gitCommit(t, dir, "a.go", "1")
-	tip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	setBinaryCommit(t, old)
+	t.Parallel()
+	g, r := newRepo(t)
+	old := r.commit("a.go", "1")
+	tip := r.commit("b.go", "2")
 
-	info := CheckStaleBinary(dir)
+	info := g.checker(old).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -264,37 +155,85 @@ func TestCheckStaleBinary_OnMainBehind(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinary_ShortBinaryCommitMatchesFullTip: the Makefile stamps a
+// short hash, and a short hash at the tip is current, not stale.
+func TestCheckStaleBinary_ShortBinaryCommitMatchesFullTip(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit("a.go", "1")
+	tip := r.commit("b.go", "2")
+
+	info := g.checker(tip[:9]).checkStale(repoDir)
+	if info.Error != nil || info.Skipped {
+		t.Fatalf("Error=%v Skipped=%v (%s), want a verdict", info.Error, info.Skipped, info.SkipReason)
+	}
+	if info.IsStale {
+		t.Errorf("short hash of the tip must not be stale")
+	}
+}
+
+// TestCheckStaleBinary_BeadsOnlyAdvanceIsNotStale is GH#2596: bd backup
+// commits touch only .beads/ and do not change the binary.
+func TestCheckStaleBinary_BeadsOnlyAdvanceIsNotStale(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("a.go", "1")
+	r.commit(".beads/issues.jsonl", "backup 1")
+	r.commit(".beads/issues.jsonl", "backup 2")
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.Error != nil || info.Skipped {
+		t.Fatalf("Error=%v Skipped=%v, want a verdict", info.Error, info.Skipped)
+	}
+	if info.IsStale {
+		t.Errorf("a build ref advanced only by .beads/ commits must not be stale")
+	}
+
+	r.commit("b.go", "real change")
+	if info := g.checker(built).checkStale(repoDir); !info.IsStale {
+		t.Errorf("a source change on top of the backups must be stale")
+	}
+}
+
+// TestCheckStaleBinary_BinaryAheadOfMainIsNotForward: a binary built from a
+// commit the build ref does not contain is stale but must not be rebuilt
+// "forward" onto the older ref.
+func TestCheckStaleBinary_BinaryAheadOfMainIsNotForward(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit("a.go", "1")
+	r.checkoutNew("side")
+	ahead := r.commit("b.go", "2")
+	r.checkout("main")
+
+	info := g.checker(ahead).checkStale(repoDir)
+	if !info.IsStale {
+		t.Fatalf("binary off the build ref must be stale, got %+v", info)
+	}
+	if info.IsForward {
+		t.Errorf("IsForward = true, want false: main does not contain the binary commit")
+	}
+}
+
 // TestCheckStaleBinary_OnMainBranchLocalTipMatchesStaleBinary is the gt-h8s8
 // regression: RIG_ROOT's local main hasn't been pulled in a while, and the
 // binary was itself built from that same stale local tip — so binary and
-// local HEAD match exactly. The pre-fix gt-ugo fallback only triggered when
-// the binary was NOT an ancestor of local HEAD, which doesn't cover this
-// case (they're equal), so the old code reported "fresh" and mayor/rig's
-// run.sh never pulled or rebuilt. Comparing against origin/main (already
-// fetched ahead) must catch it.
+// local HEAD match exactly. Comparing against origin/main (already fetched
+// ahead) must catch it.
 func TestCheckStaleBinary_OnMainBranchLocalTipMatchesStaleBinary(t *testing.T) {
-	remoteDir := newBareRemote(t)
+	t.Parallel()
+	g, r := newRepo(t)
+	g.repo("/fake/origin")
+	r.addRemote("origin", "/fake/origin")
+	localTip := r.commit("a.go", "1")
+	r.push("origin", "main", "main")
+	// origin/main advances further without this worktree's local main
+	// following it.
+	remoteTip := r.commit("b.go", "2")
+	r.push("origin", "main", "main")
+	r.setRef("refs/heads/main", localTip)
 
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", remoteDir)
-	localTip := gitCommit(t, dir, "a.go", "1")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "push", "-q", "origin", "main")
-	// origin/main advances further (e.g. the refinery merging other work)
-	// without this worktree ever fetching again.
-	remoteTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "push", "-q", "origin", "main")
-	// Roll this worktree's local main back to its last-fetched tip so it no
-	// longer matches origin — but the binary was built from that same tip.
-	gitRun(t, dir, "reset", "-q", "--hard", localTip)
-	setBinaryCommit(t, localTip)
-
-	// Refresh the cached origin/main ref, as CheckStaleBinaryFresh would
-	// before calling CheckStaleBinary — simulating a rig that fetched but
-	// never fast-forwarded its local main pointer.
-	gitRun(t, dir, "fetch", "-q", "origin")
-
-	info := CheckStaleBinary(dir)
+	info := g.checker(localTip).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -312,25 +251,36 @@ func TestCheckStaleBinary_OnMainBranchLocalTipMatchesStaleBinary(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinary_OnMainBranchPrefersUpstreamTracking: with both remotes
+// tracking the branch, upstream is the reference.
+func TestCheckStaleBinary_OnMainBranchPrefersUpstreamTracking(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("a.go", "1")
+	upstreamTip := r.commit("b.go", "2")
+	r.setRef("refs/remotes/origin/main", built)
+	r.setRef("refs/remotes/upstream/main", upstreamTip)
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.CompareRef != "upstream/main" || info.RepoCommit != upstreamTip {
+		t.Errorf("CompareRef=%q RepoCommit=%q, want upstream/main at %s", info.CompareRef, info.RepoCommit, upstreamTip)
+	}
+	if !info.IsStale {
+		t.Errorf("binary behind upstream/main must be stale")
+	}
+}
+
 // TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin: on main, but
 // the local branch pointer was never fast-forwarded past a commit that
-// predates the binary (e.g. refinery merged to origin without updating this
-// checkout). The stale local ref must not be treated as ground truth when a
-// fresher build-branch ref (origin/main) already contains the binary commit
-// (gt-ugo).
+// predates the binary. The stale local ref must not be treated as ground
+// truth when a fresher build-branch ref (origin/main) already contains the
+// binary commit (gt-ugo).
 func TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin(t *testing.T) {
-	dir := newGitRepo(t)
-	staleTip := gitCommit(t, dir, "a.go", "1")
-	freshTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	// Simulate a local main pointer that lags its remote: the branch ref
-	// points at staleTip even though HEAD's history already produced
-	// freshTip, which is now only reachable via origin/main.
-	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
-	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
-	setBinaryCommit(t, freshTip)
+	t.Parallel()
+	g, r := staleLocalMainFixture(t)
+	freshTip := r.refs["refs/remotes/origin/main"]
 
-	info := CheckStaleBinary(dir)
+	info := g.checker(freshTip).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -348,15 +298,35 @@ func TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin(t *testing.T) {
 	}
 }
 
+// TestCheckStaleBinary_OnMainNoRemoteLocalLagsFallsBackToBuildRef: on main
+// with no remote-tracking ref, a local main that predates the binary is
+// replaced by the freshest build-branch ref containing it (gt-ugo).
+func TestCheckStaleBinary_OnMainNoRemoteLocalLagsFallsBackToBuildRef(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	old := r.commit("a.go", "1")
+	fresh := r.commit("b.go", "2")
+	r.branch("carry/ops")
+	r.setRef("refs/heads/main", old)
+
+	info := g.checker(fresh).checkStale(repoDir)
+	if info.CompareRef != "carry/ops" || info.RepoCommit != fresh {
+		t.Errorf("CompareRef=%q RepoCommit=%q, want carry/ops at %s", info.CompareRef, info.RepoCommit, fresh)
+	}
+	if info.IsStale {
+		t.Errorf("binary at the carry tip must not be stale")
+	}
+}
+
 // TestCheckStaleBinary_NoBuildBranchSkips: feature branch, no main/master/
 // carry/remote — the check must skip rather than diff against feature HEAD.
 func TestCheckStaleBinary_NoBuildBranchSkips(t *testing.T) {
-	dir := newGitRepo(t)
-	c1 := gitCommit(t, dir, "a.go", "1")
-	gitRun(t, dir, "branch", "-M", "feature/only")
-	setBinaryCommit(t, c1)
+	t.Parallel()
+	g, r := newRepo(t)
+	c1 := r.commit("a.go", "1")
+	r.renameBranch("feature/only")
 
-	info := CheckStaleBinary(dir)
+	info := g.checker(c1).checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -375,12 +345,11 @@ func TestCheckStaleBinary_NoBuildBranchSkips(t *testing.T) {
 }
 
 func TestCheckStaleBinary_BinaryCommitMissingSkips(t *testing.T) {
-	dir := newGitRepo(t)
-	gitCommit(t, dir, "a.go", "1")
-	gitRun(t, dir, "branch", "-M", "main")
-	setBinaryCommit(t, "ffffffffffffffffffffffffffffffffffffffff")
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit("a.go", "1")
 
-	info := CheckStaleBinary(dir)
+	info := g.checker("ffffffffffffffffffffffffffffffffffffffff").checkStale(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -395,69 +364,52 @@ func TestCheckStaleBinary_BinaryCommitMissingSkips(t *testing.T) {
 	}
 }
 
-// newBareRemote creates an empty bare repo to stand in for a real "origin"
-// remote (a local filesystem path, so pushes/fetches need no network).
-func newBareRemote(t *testing.T) string {
+// staleLocalMainFixture is a repo on main whose local branch pointer lags a
+// cached refs/remotes/origin/main one commit ahead of it. No origin remote is
+// configured; callers add one when they need it.
+func staleLocalMainFixture(t *testing.T) (*fakeGit, *fakeRepo) {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	dir := t.TempDir()
-	gitRun(t, dir, "init", "-q", "--bare")
-	return dir
+	g, r := newRepo(t)
+	staleTip := r.commit("a.go", "1")
+	freshTip := r.commit("b.go", "2")
+	r.setRef("refs/heads/main", staleTip)
+	r.setRef("refs/remotes/origin/main", freshTip)
+	return g, r
 }
 
 // TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain is the gt-cq0
 // regression. CheckStaleBinary trusts repoDir's cached refs/remotes/origin/main
-// exactly as of its last "git fetch" — in the reported incident that was
-// mayor/rig, a checkout nobody guarantees to keep fetched. If the binary
-// happens to match that stale cache, the check reports "fresh" even though
-// the real origin/main has since moved on. CheckStaleBinaryFresh must
-// refresh the ref first and catch the discrepancy.
+// exactly as of its last fetch. If the binary happens to match that stale
+// cache, the check reports "fresh" even though the real origin/main has since
+// moved on. CheckStaleBinaryFresh must refresh the ref first and catch it.
 func TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain(t *testing.T) {
-	remoteDir := newBareRemote(t)
+	t.Parallel()
+	g, r := newRepo(t)
+	origin := g.repo("/fake/origin")
+	r.addRemote("origin", "/fake/origin")
+	r.commit("a.go", "1")
+	r.push("origin", "main", "main")
 
-	// cloneA is the "mayor/rig"-style worktree under test: on main, but its
-	// local branch pointer lags behind the commit the binary was built from.
-	cloneA := newGitRepo(t)
-	gitRun(t, cloneA, "remote", "add", "origin", remoteDir)
-	gitCommit(t, cloneA, "a.go", "1")
-	gitRun(t, cloneA, "branch", "-M", "main")
-	gitRun(t, cloneA, "push", "-q", "origin", "main")
+	// Another checkout lands a commit, and this one fetches it into its
+	// cached origin/main without moving local main. The binary is built from
+	// that commit.
+	midTip := origin.commit("b.go", "2")
+	if err := r.fetch("origin", "+refs/heads/main:refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	// A further commit lands after this checkout's last fetch.
+	newTip := origin.commit("c.go", "3")
 
-	// cloneB simulates a different checkout landing more commits on the
-	// remote — the routine way origin/main moves in this town.
-	cloneB := t.TempDir()
-	gitRun(t, cloneB, "init", "-q")
-	gitRun(t, cloneB, "remote", "add", "origin", remoteDir)
-	gitRun(t, cloneB, "fetch", "-q", "origin", "main")
-	gitRun(t, cloneB, "checkout", "-q", "-b", "main", "origin/main")
-	midTip := gitCommit(t, cloneB, "b.go", "2")
-	gitRun(t, cloneB, "push", "-q", "origin", "main")
-
-	// cloneA fetches once, catching its cached origin/main up to midTip —
-	// its own local "main" branch pointer stays at oldTip (fetch never
-	// moves it). The binary was built from midTip.
-	gitRun(t, cloneA, "fetch", "-q", "origin")
-	setBinaryCommit(t, midTip)
-
-	// A further commit lands on the remote after cloneA's last fetch —
-	// nobody re-fetched mayor/rig, exactly the gt-cq0 scenario.
-	newTip := gitCommit(t, cloneB, "c.go", "3")
-	gitRun(t, cloneB, "push", "-q", "origin", "main")
-
-	// Sanity check on the bug itself: without a refresh, the cached
-	// origin/main (midTip) still matches the binary, so the unrefreshed
-	// check reports the dangerous false "fresh".
-	stale := CheckStaleBinary(cloneA)
+	c := g.checker(midTip)
+	stale := c.checkStale(repoDir)
 	if stale.Error != nil {
 		t.Fatalf("unexpected error: %v", stale.Error)
 	}
 	if stale.IsStale {
-		t.Fatalf("setup invariant broken: expected CheckStaleBinary to (wrongly) report fresh against the stale cache")
+		t.Fatalf("setup invariant broken: expected checkStale to (wrongly) report fresh against the stale cache")
 	}
 
-	fresh := CheckStaleBinaryFresh(cloneA)
+	fresh := c.checkStaleFresh(repoDir)
 	if fresh.Error != nil {
 		t.Fatalf("unexpected error: %v", fresh.Error)
 	}
@@ -465,7 +417,7 @@ func TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain(t *testing.T) {
 		t.Fatalf("expected a definite stale verdict, not a skip: %s", fresh.SkipReason)
 	}
 	if !fresh.IsStale {
-		t.Fatalf("CheckStaleBinaryFresh must detect staleness after refreshing origin/main to %s (binary built from %s)",
+		t.Fatalf("checkStaleFresh must detect staleness after refreshing origin/main to %s (binary built from %s)",
 			ShortCommit(newTip), ShortCommit(midTip))
 	}
 	if fresh.CompareRef != "origin/main" {
@@ -476,23 +428,16 @@ func TestCheckStaleBinaryFresh_RefreshesLaggingOriginMain(t *testing.T) {
 	}
 }
 
-// TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh reuses the
-// TestCheckStaleBinary_OnMainBranchStaleLocalRefPrefersOrigin fixture (a
-// fabricated refs/remotes/origin/main with no real "origin" remote
-// configured to verify it against). CheckStaleBinary trusts the cache and
-// reports fresh; CheckStaleBinaryFresh has no remote to confirm that ref
-// against, so per gt-cq0 it must fail closed to Skipped instead of repeating
-// an unverified "fresh" claim.
+// TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh: a cached
+// refs/remotes/origin/main with no "origin" remote configured to verify it
+// against. checkStale trusts the cache and reports fresh; checkStaleFresh has
+// nothing to confirm that ref with, so per gt-cq0 it must fail closed to
+// Skipped instead of repeating an unverified "fresh" claim.
 func TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh(t *testing.T) {
-	dir := newGitRepo(t)
-	staleTip := gitCommit(t, dir, "a.go", "1")
-	freshTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
-	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
-	setBinaryCommit(t, freshTip)
+	t.Parallel()
+	g, r := staleLocalMainFixture(t)
 
-	info := CheckStaleBinaryFresh(dir)
+	info := g.checker(r.refs["refs/remotes/origin/main"]).checkStaleFresh(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -505,29 +450,24 @@ func TestCheckStaleBinaryFresh_NoRemoteFailsClosedInsteadOfFresh(t *testing.T) {
 	if !strings.Contains(info.SkipReason, "origin/main") {
 		t.Errorf("SkipReason = %q, want it to name origin/main", info.SkipReason)
 	}
+	if got := r.fetches(); len(got) != 0 {
+		t.Errorf("fetches = %v, want none: no remote is configured", got)
+	}
 }
 
 // TestCheckStaleBinaryFresh_ConfirmedFreshIsNotSkipped proves the fail-closed
-// path added for gt-cq0 doesn't over-block: when a real, reachable remote
-// confirms the binary is genuinely at the tip, the result must be a clean
-// "not stale" — not a skip.
+// path added for gt-cq0 doesn't over-block: when a reachable remote confirms
+// the binary is genuinely at the tip, the result must be a clean "not stale"
+// — not a skip.
 func TestCheckStaleBinaryFresh_ConfirmedFreshIsNotSkipped(t *testing.T) {
-	remoteDir := newBareRemote(t)
+	t.Parallel()
+	g, r := staleLocalMainFixture(t)
+	freshTip := r.refs["refs/remotes/origin/main"]
+	g.repo("/fake/origin")
+	r.addRemote("origin", "/fake/origin")
+	r.push("origin", freshTip, "main")
 
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", remoteDir)
-	staleTip := gitCommit(t, dir, "a.go", "1")
-	freshTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	// Local main pointer lags (same shape as the "stale local ref" fixture
-	// above), but here origin is a real, reachable remote genuinely at
-	// freshTip — dir has not fetched it yet, so CheckStaleBinaryFresh must
-	// fetch it to find that out.
-	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
-	gitRun(t, dir, "push", "-q", "origin", freshTip+":refs/heads/main")
-	setBinaryCommit(t, freshTip)
-
-	info := CheckStaleBinaryFresh(dir)
+	info := g.checker(freshTip).checkStaleFresh(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -540,22 +480,25 @@ func TestCheckStaleBinaryFresh_ConfirmedFreshIsNotSkipped(t *testing.T) {
 	if info.CompareRef != "origin/main" {
 		t.Errorf("CompareRef = %q, want \"origin/main\"", info.CompareRef)
 	}
+	want := []string{"fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"}
+	fetched := false
+	for _, f := range r.fetches() {
+		fetched = fetched || eq(f, want...)
+	}
+	if !fetched {
+		t.Errorf("fetches = %v, want %v among them", r.fetches(), want)
+	}
 }
 
 // TestCheckStaleBinaryFresh_UnreachableRemoteFailsClosed: origin is
-// configured but unreachable (bad path, nothing to fetch from). The stale
-// local cache says "fresh"; CheckStaleBinaryFresh must not trust it.
+// configured but unreachable. The stale local cache says "fresh";
+// checkStaleFresh must not trust it.
 func TestCheckStaleBinaryFresh_UnreachableRemoteFailsClosed(t *testing.T) {
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
-	staleTip := gitCommit(t, dir, "a.go", "1")
-	freshTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
-	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
-	setBinaryCommit(t, freshTip)
+	t.Parallel()
+	g, r := staleLocalMainFixture(t)
+	r.addRemote("origin", "/fake/does-not-exist")
 
-	info := CheckStaleBinaryFresh(dir)
+	info := g.checker(r.refs["refs/remotes/origin/main"]).checkStaleFresh(repoDir)
 	if info.Error != nil {
 		t.Fatalf("unexpected error: %v", info.Error)
 	}
@@ -567,121 +510,267 @@ func TestCheckStaleBinaryFresh_UnreachableRemoteFailsClosed(t *testing.T) {
 	}
 }
 
-func TestResolveBuildBranchRef(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+// TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch: drift the cached ref
+// already proves needs no network (gt-vxjz).
+func TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	origin := g.repo("/fake/origin")
+	r.addRemote("origin", "/fake/origin")
+	builtFrom := r.commit("a.go", "1")
+	r.push("origin", "main", "main")
+
+	fetchedTip := origin.commit("b.go", "2")
+	if err := r.fetch("origin", "+refs/heads/main:refs/remotes/origin/main"); err != nil {
+		t.Fatal(err)
 	}
+	// A later tip that only a live fetch would learn about.
+	origin.commit("c.go", "3")
+
+	info := g.checker(builtFrom).checkStaleFresh(repoDir)
+	if !info.IsStale {
+		t.Fatalf("cached origin/main is %s and the binary is %s; want stale",
+			ShortCommit(fetchedTip), ShortCommit(builtFrom))
+	}
+	if info.Skipped {
+		t.Errorf("Skipped = true (%s), want the verdict the cached ref already supports", info.SkipReason)
+	}
+	if info.RepoCommit != fetchedTip {
+		t.Errorf("RepoCommit = %s, want the cached %s", ShortCommit(info.RepoCommit), ShortCommit(fetchedTip))
+	}
+	if got := r.fetches(); len(got) != 0 {
+		t.Errorf("fetches = %v, want none: a stale-from-cache verdict must not fetch", got)
+	}
+}
+
+// TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch: a build with no
+// commit has no verdict to make fresh, so it must not reach the network. This
+// is the path that made gt formula sync non-hermetic (gt-vxjz).
+func TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	g.repo("/fake/origin")
+	r.addRemote("origin", "/fake/origin")
+	r.commit("a.go", "1")
+	r.push("origin", "main", "main")
+
+	info := g.checker("").checkStaleFresh(repoDir)
+	if info.Error == nil {
+		t.Fatalf("want the unstamped-build error, got IsStale=%v Skipped=%v", info.IsStale, info.Skipped)
+	}
+	if got := r.fetches(); len(got) != 0 {
+		t.Errorf("fetches = %v, want none: an unstamped build must not fetch", got)
+	}
+}
+
+func TestResolveBuildBranchRef(t *testing.T) {
+	t.Parallel()
 
 	t.Run("prefers carry when same commit is on carry and main", func(t *testing.T) {
-		dir := newGitRepo(t)
-		c1 := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "main")
-		gitRun(t, dir, "branch", "carry/operational")
-		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
-		ref, ok := resolveBuildBranchRef(dir, c1)
+		t.Parallel()
+		g, r := newRepo(t)
+		c1 := r.commit("a.go", "1")
+		r.branch("carry/operational")
+		r.checkoutNew("feat/x")
+		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
 		if !ok || ref.display != "carry/operational" || ref.ref != "refs/heads/carry/operational" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, c1)
 		}
 	})
 
 	t.Run("routes to carry when binary not on main", func(t *testing.T) {
-		dir := newGitRepo(t)
-		gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "main")
-		gitRun(t, dir, "checkout", "-q", "-b", "carry/operational")
-		carryOnly := gitCommit(t, dir, "b.go", "fork work")
-		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
-		ref, ok := resolveBuildBranchRef(dir, carryOnly)
+		t.Parallel()
+		g, r := newRepo(t)
+		r.commit("a.go", "1")
+		r.checkoutNew("carry/operational")
+		carryOnly := r.commit("b.go", "fork work")
+		r.checkoutNew("feat/x")
+		ref, ok := g.checker(carryOnly).resolveBuildBranchRef(repoDir, carryOnly)
 		if !ok || ref.display != "carry/operational" || ref.commit != carryOnly {
 			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, carryOnly)
 		}
 	})
 
 	t.Run("ambiguous carry is skipped", func(t *testing.T) {
-		dir := newGitRepo(t)
-		c1 := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "feature/only")
-		gitRun(t, dir, "branch", "carry/a")
-		gitRun(t, dir, "branch", "carry/b")
-		if ref, ok := resolveBuildBranchRef(dir, c1); ok {
+		t.Parallel()
+		g, r := newRepo(t)
+		c1 := r.commit("a.go", "1")
+		r.renameBranch("feature/only")
+		r.branch("carry/a")
+		r.branch("carry/b")
+		if ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1); ok {
 			t.Errorf("got (%+v,%v), want no ref for ambiguous carry/*", ref, ok)
 		}
 	})
 
 	t.Run("falls back to origin/main", func(t *testing.T) {
-		dir := newGitRepo(t)
-		c1 := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "feature/only")
-		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", c1)
-		ref, ok := resolveBuildBranchRef(dir, c1)
+		t.Parallel()
+		g, r := newRepo(t)
+		c1 := r.commit("a.go", "1")
+		r.renameBranch("feature/only")
+		r.setRef("refs/remotes/origin/main", c1)
+		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
 		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want origin/main at %s", ref, ok, c1)
 		}
 	})
 
 	t.Run("fresher remote beats stale local main", func(t *testing.T) {
-		dir := newGitRepo(t)
-		old := gitCommit(t, dir, "a.go", "1")
-		fresh := gitCommit(t, dir, "b.go", "2")
-		gitRun(t, dir, "branch", "-M", "main")
-		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", fresh)
-		gitRun(t, dir, "reset", "--hard", old)
-		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
+		t.Parallel()
+		g, r := newRepo(t)
+		old := r.commit("a.go", "1")
+		fresh := r.commit("b.go", "2")
+		r.setRef("refs/remotes/origin/main", fresh)
+		r.setRef("refs/heads/main", old)
+		r.checkoutNew("feat/x")
 
-		ref, ok := resolveBuildBranchRef(dir, old)
+		ref, ok := g.checker(old).resolveBuildBranchRef(repoDir, old)
 		if !ok || ref.display != "origin/main" || ref.commit != fresh {
 			t.Errorf("got (%+v,%v), want fresher origin/main at %s", ref, ok, fresh)
 		}
 	})
 
 	t.Run("prefers upstream over divergent origin", func(t *testing.T) {
-		dir := newGitRepo(t)
-		base := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "main")
-		gitRun(t, dir, "checkout", "-q", "-b", "origin-line")
-		originTip := gitCommit(t, dir, "origin.go", "origin")
-		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", originTip)
-		gitRun(t, dir, "checkout", "-q", "main")
-		gitRun(t, dir, "checkout", "-q", "-b", "upstream-line")
-		upstreamTip := gitCommit(t, dir, "upstream.go", "upstream")
-		gitRun(t, dir, "update-ref", "refs/remotes/upstream/main", upstreamTip)
-		gitRun(t, dir, "checkout", "-q", "main")
-		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
+		t.Parallel()
+		g, r := newRepo(t)
+		base := r.commit("a.go", "1")
+		r.checkoutNew("origin-line")
+		originTip := r.commit("origin.go", "origin")
+		r.setRef("refs/remotes/origin/main", originTip)
+		r.checkout("main")
+		r.checkoutNew("upstream-line")
+		upstreamTip := r.commit("upstream.go", "upstream")
+		r.setRef("refs/remotes/upstream/main", upstreamTip)
+		r.checkout("main")
+		r.checkoutNew("feat/x")
 
-		ref, ok := resolveBuildBranchRef(dir, base)
+		ref, ok := g.checker(base).resolveBuildBranchRef(repoDir, base)
 		if !ok || ref.display != "upstream/main" || ref.commit != upstreamTip {
 			t.Errorf("got (%+v,%v), want upstream/main at %s", ref, ok, upstreamTip)
 		}
 	})
 
 	t.Run("uses remote carry when local carry absent", func(t *testing.T) {
-		dir := newGitRepo(t)
-		c1 := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "feature/only")
-		gitRun(t, dir, "update-ref", "refs/remotes/origin/carry/operational", c1)
+		t.Parallel()
+		g, r := newRepo(t)
+		c1 := r.commit("a.go", "1")
+		r.renameBranch("feature/only")
+		r.setRef("refs/remotes/origin/carry/operational", c1)
 
-		ref, ok := resolveBuildBranchRef(dir, c1)
+		ref, ok := g.checker(c1).resolveBuildBranchRef(repoDir, c1)
 		if !ok || ref.display != "origin/carry/operational" || ref.ref != "refs/remotes/origin/carry/operational" || ref.commit != c1 {
 			t.Errorf("got (%+v,%v), want origin/carry/operational at %s", ref, ok, c1)
 		}
 	})
 
 	t.Run("fully qualified remote ref resists local branch shadow", func(t *testing.T) {
-		dir := newGitRepo(t)
-		old := gitCommit(t, dir, "a.go", "1")
-		gitRun(t, dir, "branch", "-M", "feature/only")
-		fresh := gitCommit(t, dir, "b.go", "2")
-		gitRun(t, dir, "update-ref", "refs/heads/origin/main", old)
-		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", fresh)
+		t.Parallel()
+		g, r := newRepo(t)
+		old := r.commit("a.go", "1")
+		r.renameBranch("feature/only")
+		fresh := r.commit("b.go", "2")
+		r.setRef("refs/heads/origin/main", old)
+		r.setRef("refs/remotes/origin/main", fresh)
 
-		ref, ok := resolveBuildBranchRef(dir, old)
+		ref, ok := g.checker(old).resolveBuildBranchRef(repoDir, old)
 		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != fresh {
 			t.Errorf("got (%+v,%v), want remote origin/main at %s", ref, ok, fresh)
 		}
 	})
+
+	t.Run("binary on no candidate finds nothing", func(t *testing.T) {
+		t.Parallel()
+		g, r := newRepo(t)
+		r.commit("a.go", "1")
+		r.checkoutNew("feat/x")
+		orphan := r.commit("b.go", "2")
+		if ref, ok := g.checker(orphan).resolveBuildBranchRef(repoDir, orphan); ok {
+			t.Errorf("got (%+v,%v), want no ref when no build branch contains the binary", ref, ok)
+		}
+	})
+}
+
+func TestShortCommit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		hash   string
+		expect string
+	}{
+		{"full SHA", "abcdef1234567890abcdef1234567890abcdef12", "abcdef123456"},
+		{"exactly 12", "abcdef123456", "abcdef123456"},
+		{"short hash", "abcdef", "abcdef"},
+		{"empty", "", ""},
+		{"13 chars", "abcdef1234567", "abcdef123456"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ShortCommit(tt.hash)
+			if got != tt.expect {
+				t.Errorf("ShortCommit(%q) = %q, want %q", tt.hash, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestCommitsMatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		a, b   string
+		expect bool
+	}{
+		{"identical full", "abcdef1234567890", "abcdef1234567890", true},
+		{"prefix match short-long", "abcdef1234567", "abcdef1234567890abcd", true},
+		{"prefix match long-short", "abcdef1234567890abcd", "abcdef1234567", true},
+		{"no match", "abcdef1234567", "1234567abcdef", false},
+		{"too short a", "abc", "abcdef1234567", false},
+		{"too short b", "abcdef1234567", "abc", false},
+		{"both too short", "abc", "abc", false},
+		{"exactly 7 chars match", "abcdefg", "abcdefg", true},
+		{"exactly 7 chars no match", "abcdefg", "abcdefh", false},
+		{"6 chars too short", "abcdef", "abcdef", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := commitsMatch(tt.a, tt.b)
+			if got != tt.expect {
+				t.Errorf("commitsMatch(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestIsBuildBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		branch string
+		want   bool
+	}{
+		{"main", true},
+		{"master", true},
+		{"carry/operational", true},
+		{"carry/staging", true},
+		{"carry/", true},
+		{"fix/something", false},
+		{"feat/new-thing", false},
+		{"develop", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.branch, func(t *testing.T) {
+			t.Parallel()
+			if got := isBuildBranch(tt.branch); got != tt.want {
+				t.Errorf("isBuildBranch(%q) = %v, want %v", tt.branch, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestStaleBinaryInfo_Describe(t *testing.T) {
+	t.Parallel()
 	const (
 		bin  = "abc1234567890def"
 		repo = "fed0987654321cba"
@@ -713,6 +802,7 @@ func TestStaleBinaryInfo_Describe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := tt.info.Describe(tt.subject); got != tt.want {
 				t.Errorf("Describe(%q) = %q, want %q", tt.subject, got, tt.want)
 			}
@@ -729,6 +819,7 @@ var errNotBuilt = errors.New("cannot determine binary commit (dev build?)")
 // routine caller does not rewrite the shared checkout's refs for nothing
 // (gt-vxjz).
 func TestLiveRefVerdict(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		info *StaleBinaryInfo
@@ -743,6 +834,7 @@ func TestLiveRefVerdict(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := liveRefVerdict(tt.info); got != tt.want {
 				t.Errorf("liveRefVerdict(%+v) = %v, want %v", tt.info, got, tt.want)
 			}
@@ -750,92 +842,13 @@ func TestLiveRefVerdict(t *testing.T) {
 	}
 }
 
-// TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch: drift the cached ref
-// already proves needs no network. Observable through refs/remotes/origin/main
-// itself, because a fetch would be what moved it to the newer tip (gt-vxjz).
-func TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch(t *testing.T) {
-	remoteDir := newBareRemote(t)
-
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", remoteDir)
-	builtFrom := gitCommit(t, dir, "a.go", "1")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "push", "-q", "origin", "main")
-
-	// A separate checkout lands the tie the cache will hold. Pushing from dir
-	// would update dir's own remote-tracking ref, leaving nothing to prove.
-	other := t.TempDir()
-	gitRun(t, other, "init", "-q")
-	gitRun(t, other, "remote", "add", "origin", remoteDir)
-	gitRun(t, other, "fetch", "-q", "origin", "main")
-	gitRun(t, other, "checkout", "-q", "-b", "main", "origin/main")
-	fetchedTip := gitCommit(t, other, "b.go", "2")
-	gitRun(t, other, "push", "-q", "origin", "main")
-
-	// dir fetches that tie; the binary predates it, so the cached ref alone
-	// proves the drift.
-	gitRun(t, dir, "fetch", "-q", "origin")
-	setBinaryCommit(t, builtFrom)
-
-	// A later tip that only a live fetch would learn about.
-	gitCommit(t, other, "c.go", "3")
-	gitRun(t, other, "push", "-q", "origin", "main")
-
-	info := CheckStaleBinaryFresh(dir)
-
-	if !info.IsStale {
-		t.Fatalf("cached origin/main is %s and the binary is %s; want stale",
-			ShortCommit(fetchedTip), ShortCommit(builtFrom))
-	}
-	if info.Skipped {
-		t.Errorf("Skipped = true (%s), want the verdict the cached ref already supports", info.SkipReason)
-	}
-	if info.RepoCommit != fetchedTip {
-		t.Errorf("RepoCommit = %s, want the cached %s: a stale-from-cache verdict must not fetch",
-			ShortCommit(info.RepoCommit), ShortCommit(fetchedTip))
-	}
-}
-
-// TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch: a build with no commit
-// has no verdict to make fresh, so it must not reach the network. This is the
-// path that made gt formula sync non-hermetic (gt-vxjz).
-func TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch(t *testing.T) {
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", newBareRemote(t))
-	remoteTip := gitCommit(t, dir, "a.go", "1")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "push", "-q", "origin", "main")
-
-	// Park the cached ref somewhere the remote is not, so any fetch would
-	// visibly rewrite it.
-	cachedTip := gitCommit(t, dir, "b.go", "2")
-	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", cachedTip)
-	gitRun(t, dir, "reset", "-q", "--hard", remoteTip)
-	setBinaryCommit(t, "")
-
-	if got := resolveCommitHash(); got != "" {
-		t.Skipf("test binary carries commit %s; the unstamped path needs none", got)
-	}
-
-	info := CheckStaleBinaryFresh(dir)
-	if info.Error == nil {
-		t.Fatalf("want the unstamped-build error, got IsStale=%v Skipped=%v", info.IsStale, info.Skipped)
-	}
-
-	if got := gitRun(t, dir, "rev-parse", "refs/remotes/origin/main"); got != cachedTip {
-		t.Errorf("refs/remotes/origin/main = %s, want the untouched cache %s: an unstamped build must not fetch",
-			ShortCommit(got), ShortCommit(cachedTip))
-	}
-}
-
 // TestGetRepoRootForTown_ReadsOnlyTheTown keeps a caller reporting one town's
 // build drift from resolving — and, to report freshness, fetching — whichever
 // checkout the process happens to sit near (gt-vxjz).
 func TestGetRepoRootForTown_ReadsOnlyTheTown(t *testing.T) {
-	// Both GT_ROOT and the working directory name a real checkout here, so a
-	// fallback would resolve one. The town root must be the only input.
-	t.Setenv("GT_ROOT", string(filepath.Separator))
-
+	t.Parallel()
+	// GetRepoRootForTown reads no environment and no working directory; the
+	// town root is its only input.
 	empty := t.TempDir()
 	if _, err := GetRepoRootForTown(empty); err == nil {
 		t.Error("resolved a checkout for a town with no gastown/ below it")
@@ -850,6 +863,7 @@ func TestGetRepoRootForTown_ReadsOnlyTheTown(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			town := t.TempDir()
 			source := filepath.Join(town, tt.rel)
 			main := filepath.Join(source, "cmd", "gt", "main.go")
