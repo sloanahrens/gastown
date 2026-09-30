@@ -183,13 +183,18 @@ var newPolecatWorkReleaserFn = func(townRoot, hookWorkDir string) polecatWorkRel
 // (guarded on this polecat still holding it) instead of being released to a
 // fresh re-dispatch from main. Reports whether the bead was handled here.
 func restoreOriginalHoldIfWorkSurvives(r polecatWorkReleaser, townRoot, agentID, beadID string, orig *beadHold) bool {
+	return restoreOriginalHoldIfWorkSurvivesWith(r, survivingWorkForBeadFn, townRoot, agentID, beadID, orig)
+}
+
+// restoreOriginalHoldIfWorkSurvivesWith takes the surviving-work lookup.
+func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork func(townRoot, beadID string) (string, error), townRoot, agentID, beadID string, orig *beadHold) bool {
 	if beadID == "" || orig == nil {
 		return false
 	}
 	if held, _ := heldBy(r, agentID, beadID); !held {
 		return false
 	}
-	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+	branch, err := survivingWork(townRoot, beadID)
 	reason := ""
 	switch {
 	case err != nil && !noRepoToProtect(err):

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -341,22 +342,32 @@ func printSchedulerDryRunPlan(dispatchPlan *schedulerDispatchPlan) {
 }
 
 func printDispatchNoOp(report capacity.DispatchReport, snapshot polecatCapacitySnapshot) {
+	printDispatchNoOpTo(os.Stdout, report, snapshot)
+}
+
+// printDispatchNoOpTo is printDispatchNoOp writing to w.
+func printDispatchNoOpTo(w io.Writer, report capacity.DispatchReport, snapshot polecatCapacitySnapshot) {
 	switch report.Reason {
 	case "none":
-		fmt.Println("No ready beads scheduled for dispatch")
+		fmt.Fprintln(w, "No ready beads scheduled for dispatch")
 	case "capacity":
-		fmt.Printf("\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d parked: %d pending_mr: %d)\n",
+		fmt.Fprintf(w, "\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d parked: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.Parked, snapshot.PendingMR)
 	default:
-		fmt.Printf("\n%s No dispatchable beads (reason: %s, skipped: %d)\n",
+		fmt.Fprintf(w, "\n%s No dispatchable beads (reason: %s, skipped: %d)\n",
 			style.Dim.Render("○"), report.Reason, report.Skipped)
 	}
 }
 
 // printDryRunPlan displays a dry-run dispatch plan.
 func printDryRunPlan(plan capacity.DispatchPlan, snapshot polecatCapacitySnapshot, batchSize int) {
+	printDryRunPlanTo(os.Stdout, plan, snapshot, batchSize)
+}
+
+// printDryRunPlanTo is printDryRunPlan writing to w.
+func printDryRunPlanTo(w io.Writer, plan capacity.DispatchPlan, snapshot polecatCapacitySnapshot, batchSize int) {
 	if plan.Reason == "none" {
-		fmt.Println("No ready beads scheduled for dispatch")
+		fmt.Fprintln(w, "No ready beads scheduled for dispatch")
 		return
 	}
 
@@ -370,19 +381,19 @@ func printDryRunPlan(plan capacity.DispatchPlan, snapshot polecatCapacitySnapsho
 	if len(plan.ToDispatch) == 0 {
 		switch plan.Reason {
 		case "capacity":
-			fmt.Printf("No capacity: %s, %d ready bead(s) waiting\n", capStr, totalReady)
+			fmt.Fprintf(w, "No capacity: %s, %d ready bead(s) waiting\n", capStr, totalReady)
 		case "validation":
-			fmt.Printf("No dispatchable beads: validation failed for %d candidate(s)\n", totalReady)
+			fmt.Fprintf(w, "No dispatchable beads: validation failed for %d candidate(s)\n", totalReady)
 		default:
-			fmt.Printf("No dispatchable beads: reason=%s, %d candidate(s) skipped\n", plan.Reason, totalReady)
+			fmt.Fprintf(w, "No dispatchable beads: reason=%s, %d candidate(s) skipped\n", plan.Reason, totalReady)
 		}
 		return
 	}
 
-	fmt.Printf("%s Would dispatch %d bead(s) (capacity: %s, batch: %d, ready: %d, reason: %s)\n",
+	fmt.Fprintf(w, "%s Would dispatch %d bead(s) (capacity: %s, batch: %d, ready: %d, reason: %s)\n",
 		style.Bold.Render("📋"), len(plan.ToDispatch), capStr, batchSize, totalReady, plan.Reason)
 	for _, b := range plan.ToDispatch {
-		fmt.Printf("  Would dispatch: %s → %s\n", b.WorkBeadID, b.TargetRig)
+		fmt.Fprintf(w, "  Would dispatch: %s → %s\n", b.WorkBeadID, b.TargetRig)
 	}
 }
 

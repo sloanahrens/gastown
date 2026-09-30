@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,9 +12,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/channelevents"
+	"github.com/steveyegge/gastown/internal/nudge"
 )
 
 func TestCalculateEventTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		timeout     string
@@ -112,16 +115,13 @@ func TestCalculateEventTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set package-level variables
-			awaitEventTimeout = tt.timeout
-			awaitEventBackoffBase = tt.backoffBase
-			awaitEventBackoffMult = tt.backoffMult
+			t.Parallel()
+			bo := awaitSignalBackoff{timeout: tt.timeout, base: tt.backoffBase, mult: tt.backoffMult, max: tt.backoffMax}
 			if tt.backoffMult == 0 {
-				awaitEventBackoffMult = 2 // default
+				bo.mult = 2 // default
 			}
-			awaitEventBackoffMax = tt.backoffMax
 
-			got, err := calculateEventTimeout(tt.idleCycles)
+			got, err := bo.eventTimeout(tt.idleCycles)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("calculateEventTimeout() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -542,6 +542,7 @@ func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
 }
 
 func TestAwaitEventContextYieldPreservesBackoffWindow(t *testing.T) {
+	t.Parallel()
 	// Window (2s) fits inside the 5s timeout, so the run resumes the existing
 	// window instead of arming a fresh one.
 	log := runAwaitEventBackoffTest(t, 2*time.Second, "5s", "50ms")
@@ -563,6 +564,7 @@ func TestAwaitEventContextYieldPreservesBackoffWindow(t *testing.T) {
 }
 
 func TestAwaitEventTimeoutClearsBackoffWindow(t *testing.T) {
+	t.Parallel()
 	// Window (2s) outlives the 80ms timeout, so the clear is the timeout's.
 	log := runAwaitEventBackoffTest(t, 2*time.Second, "80ms", "")
 
@@ -576,99 +578,47 @@ func TestAwaitEventTimeoutClearsBackoffWindow(t *testing.T) {
 	}
 }
 
-// runAwaitEventBackoffTest runs the await-event command against a stub bd
-// reporting the agent bead as gt:agent, idle:1, with a backoff window of
+// runAwaitEventBackoffTest runs await-event against an in-process bd that
+// reports the agent bead as gt:agent, idle:1, with a backoff window of
 // backoffWindow (whole seconds), and returns the bd call log.
 //
-// The stub computes the window's deadline when bd reads the labels, not when
-// the test starts: a deadline fixed before the harness setup is consumed by
-// that setup under load, and a window whose remaining time is down to the
+// The fake computes the window's deadline when bd reads the labels, not when
+// the test starts: a deadline fixed before the setup is consumed by that
+// setup under load, and a window whose remaining time is down to the
 // context-check interval sends the wait down its timeout path instead, which
 // clears the label both callers assert on (gt-ixtg).
 func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout, contextCheck string) string {
 	t.Helper()
 
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
 	beadsDir := filepath.Join(root, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
-	t.Setenv("BEADS_DIR", beadsDir)
-	t.Chdir(root)
-
-	binDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "show" {
+			until := time.Now().Add(backoffWindow).Unix()
+			return bdOut(fmt.Sprintf(`[{"labels":["gt:agent","idle:1","backoff-until:%d"]}]`, until))
+		}
+		return bdOut("")
+	}}
+	r := awaitEventRun{
+		channel:      "test",
+		agentBead:    "gt-agent",
+		contextCheck: contextCheck,
+		quiet:        true,
+		backoff:      awaitSignalBackoff{timeout: timeout, mult: 2},
+		bd:           bd.run,
+		out:          io.Discard,
+		beadsDir:     func() (string, error) { return beadsDir, nil },
+		eventRig:     resolveEventRig,
+		drainNudges:  func(string) []nudge.QueuedNudge { return nil },
 	}
-	logPath := filepath.Join(root, "bd.log")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> %q
-case "$1" in
-show)
-printf '[{"labels":["gt:agent","idle:1","backoff-until:%%s"]}]\n' "$(( $(date +%%s) + %d ))"
-;;
-update)
-exit 0
-;;
-*)
-exit 0
-;;
-esac
-`, logPath, int(backoffWindow/time.Second))
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
+	if err := r.run(root); err != nil {
+		t.Fatalf("await-event: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	oldChannel := awaitEventChannel
-	oldTimeout := awaitEventTimeout
-	oldBackoffBase := awaitEventBackoffBase
-	oldBackoffMult := awaitEventBackoffMult
-	oldBackoffMax := awaitEventBackoffMax
-	oldQuiet := awaitEventQuiet
-	oldAgentBead := awaitEventAgentBead
-	oldCleanup := awaitEventCleanup
-	oldContextCheck := awaitEventContextCheckInterval
-	oldJSON := moleculeJSON
-	t.Cleanup(func() {
-		awaitEventChannel = oldChannel
-		awaitEventTimeout = oldTimeout
-		awaitEventBackoffBase = oldBackoffBase
-		awaitEventBackoffMult = oldBackoffMult
-		awaitEventBackoffMax = oldBackoffMax
-		awaitEventQuiet = oldQuiet
-		awaitEventAgentBead = oldAgentBead
-		awaitEventCleanup = oldCleanup
-		awaitEventContextCheckInterval = oldContextCheck
-		moleculeJSON = oldJSON
-	})
-
-	awaitEventChannel = "test"
-	awaitEventTimeout = timeout
-	awaitEventBackoffBase = ""
-	awaitEventBackoffMult = 2
-	awaitEventBackoffMax = ""
-	awaitEventQuiet = true
-	awaitEventAgentBead = "gt-agent"
-	awaitEventCleanup = false
-	awaitEventContextCheckInterval = contextCheck
-	moleculeJSON = false
-
-	if err := runMoleculeAwaitEvent(nil, nil); err != nil {
-		t.Fatalf("runMoleculeAwaitEvent: %v", err)
-	}
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-	return string(data)
+	return bd.log()
 }
 
 func updateLines(log string) []string {

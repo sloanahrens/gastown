@@ -519,13 +519,19 @@ func runWeeklyRollup() error {
 
 // queryCompactionReports queries compaction report event beads in a date range.
 func queryCompactionReports(startDate, endDate string) ([]*compactReport, error) {
+	return queryCompactionReportsVia(nil, startDate, endDate)
+}
+
+// queryCompactionReportsVia is queryCompactionReports with bd answered by
+// run (nil: bd on PATH).
+func queryCompactionReportsVia(run beads.BDRunner, startDate, endDate string) ([]*compactReport, error) {
 	listCmd := beads.CommandWithEnv("", nil, "list",
 		"--type=event",
 		"--status=all",
 		"--json",
 		"--limit=0",
 	)
-	listOutput, err := listCmd.Output()
+	listOutput, err := bdCommandOutput(run, listCmd)
 	if err != nil {
 		return nil, fmt.Errorf("listing event beads: %w", err)
 	}
@@ -700,6 +706,12 @@ var weeklyRollupTitle = regexp.MustCompile(`^Weekly Compaction Rollup (\d{4}-\d{
 // one as already covering it — dates are "YYYY-MM-DD" so lexicographic and
 // chronological comparison agree.
 func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
+	return findExistingWeeklyRollupVia(nil, weekStart, weekEnd)
+}
+
+// findExistingWeeklyRollupVia is findExistingWeeklyRollup with bd answered
+// by run (nil: bd on PATH).
+func findExistingWeeklyRollupVia(run beads.BDRunner, weekStart, weekEnd string) (string, error) {
 	// The rollup audit bead is auto-closed at creation, and bd list defaults
 	// to open issues only — without --status=closed the prior rollup is
 	// invisible and a duplicate gets sent (gt-9t9).
@@ -709,7 +721,7 @@ func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
 		"--json",
 		"--limit=50",
 	)
-	listOutput, err := listCmd.Output()
+	listOutput, err := bdCommandOutput(run, listCmd)
 	if err != nil {
 		return "", err
 	}

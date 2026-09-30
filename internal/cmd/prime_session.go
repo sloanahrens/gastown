@@ -53,44 +53,86 @@ type hookInput struct {
 //	SessionStart: "export GT_SESSION_ID=$(uuidgen) GT_HOOK_SOURCE=startup && gt prime --hook"
 //	PreCompress:  "export GT_HOOK_SOURCE=compact && gt prime --hook"
 func readHookSessionID() (sessionID, source string) {
-	primeStructuredSessionStartOutput = false
-	primeHookEventName = ""
-	primeHookInputSeen = false
+	r := realPrimeHookEnv().readHookSession()
+	primeStructuredSessionStartOutput = r.structuredSessionStart
+	primeHookEventName = r.eventName
+	primeHookInputSeen = r.inputSeen
+	return r.sessionID, r.source
+}
+
+// primeHookEnv is what the hook-mode session helpers read from the process:
+// the environment, the runtime's stdin payload, the working directory, the
+// town, and a fresh session ID. realPrimeHookEnv is the running gt's; tests
+// give their own, so they need no Setenv or chdir.
+type primeHookEnv struct {
+	getenv   func(string) string
+	stdin    func() *hookInput
+	getwd    func() (string, error)
+	findTown func() (string, error)
+	newID    func() string
+}
+
+func realPrimeHookEnv() primeHookEnv {
+	return primeHookEnv{
+		getenv:   os.Getenv,
+		stdin:    readStdinJSON,
+		getwd:    os.Getwd,
+		findTown: workspace.FindFromCwd,
+		newID:    func() string { return uuid.New().String() },
+	}
+}
+
+// primeHookRead is what one hook-mode run learned about its invocation.
+type primeHookRead struct {
+	sessionID, source      string
+	eventName              string // the runtime's hook_event_name, if it sent a payload
+	inputSeen              bool   // the runtime piped a hook payload on stdin
+	structuredSessionStart bool   // the payload was a SessionStart
+}
+
+// readHookSession is readHookSessionID in e, returning the hook state
+// instead of setting the package's prime globals.
+func (e primeHookEnv) readHookSession() primeHookRead {
 	// Source can come from env (any runtime) or stdin JSON (Claude only).
 	// Check env first so it's available even when stdin provides the session ID.
-	source = os.Getenv("GT_HOOK_SOURCE")
+	r := primeHookRead{source: e.getenv("GT_HOOK_SOURCE")}
 
 	// 1. Environment variables (fast path — skips stdin read entirely)
-	if id := os.Getenv("GT_SESSION_ID"); id != "" {
-		return id, source
+	if id := e.getenv("GT_SESSION_ID"); id != "" {
+		r.sessionID = id
+		return r
 	}
-	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		return id, source
+	if id := e.getenv("CLAUDE_SESSION_ID"); id != "" {
+		r.sessionID = id
+		return r
 	}
 	// 2. Try reading stdin JSON (Claude Code format).
 	//    Checked before persisted file so a fresh Claude session always wins
 	//    over a potentially stale .runtime/session_id from a previous session.
-	if input := readStdinJSON(); input != nil {
-		primeHookInputSeen = true
-		primeStructuredSessionStartOutput = input.HookEventName == "SessionStart"
-		primeHookEventName = input.HookEventName
+	if input := e.stdin(); input != nil {
+		r.inputSeen = true
+		r.structuredSessionStart = input.HookEventName == "SessionStart"
+		r.eventName = input.HookEventName
 		if input.SessionID != "" {
 			// Stdin source overrides env source when both are present
 			if input.Source != "" {
-				source = input.Source
+				r.source = input.Source
 			}
-			return input.SessionID, source
+			r.sessionID = input.SessionID
+			return r
 		}
 	}
 
 	// 3. Persisted session ID from a prior hook invocation (e.g., PreCompress
 	//    reusing the session ID that SessionStart wrote to .runtime/session_id)
-	if id := ReadPersistedSessionID(); id != "" {
-		return id, source
+	if id := e.runtimeStateSearched(constants.FileSessionID); id != "" {
+		r.sessionID = id
+		return r
 	}
 
 	// 4. Auto-generate
-	return uuid.New().String(), source
+	r.sessionID = e.newID()
+	return r
 }
 
 // stdinReadTimeout is how long readStdinJSON waits for data before giving up.
@@ -203,8 +245,13 @@ func readRuntimeStateFile(dir, name string) string {
 // town root — the two places a hook invocation writes its session state, so
 // that a prime run from a nested directory still finds what its session wrote.
 func readRuntimeStateFileSearched(name string) string {
+	return realPrimeHookEnv().runtimeStateSearched(name)
+}
+
+// runtimeStateSearched is readRuntimeStateFileSearched in e.
+func (e primeHookEnv) runtimeStateSearched(name string) string {
 	// Try cwd first
-	cwd, err := os.Getwd()
+	cwd, err := e.getwd()
 	if err == nil {
 		if value := readRuntimeStateFile(cwd, name); value != "" {
 			return value
@@ -212,7 +259,7 @@ func readRuntimeStateFileSearched(name string) string {
 	}
 
 	// Try town root
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err == nil && townRoot != "" {
 		if value := readRuntimeStateFile(townRoot, name); value != "" {
 			return value
@@ -248,13 +295,19 @@ func resolveSessionIDForPrime(actor string) string {
 // them, because a spawner's GT_SESSION_START_REASON lives on the *session* env:
 // the agent's own re-prime inherits it and reports it too.
 func isRuntimeHookInvocation() bool {
-	return primeHookInputSeen || primeHookSource != ""
+	return isRuntimeHookInvocationFrom(primeHookInputSeen, primeHookSource)
+}
+
+// isRuntimeHookInvocationFrom is isRuntimeHookInvocation for a given payload
+// signal and hook source.
+func isRuntimeHookInvocationFrom(inputSeen bool, source string) bool {
+	return inputSeen || source != ""
 }
 
 // sessionStartAlreadyEmitted reports whether sessionID's session_start is
 // already on the record for this session.
 func sessionStartAlreadyEmitted(sessionID string) bool {
-	return readRuntimeStateFileSearched(constants.FileSessionStartEmitted) == sessionID
+	return realPrimeHookEnv().runtimeStateSearched(constants.FileSessionStartEmitted) == sessionID
 }
 
 // recordSessionStartEmitted notes that sessionID's session_start is on the
@@ -280,10 +333,16 @@ func recordSessionStartEmitted(workDir, townRoot, sessionID string) {
 // to tell them apart). A first run records even unattributed, so a runtime whose
 // hook names no source is not silenced.
 func shouldEmitSessionStart(sessionID string) bool {
-	if !sessionStartAlreadyEmitted(sessionID) {
+	return realPrimeHookEnv().shouldEmitSessionStart(sessionID, isRuntimeHookInvocation())
+}
+
+// shouldEmitSessionStart is the package function in e, given whether the
+// runtime invoked this run as a hook.
+func (e primeHookEnv) shouldEmitSessionStart(sessionID string, runtimeHook bool) bool {
+	if e.runtimeStateSearched(constants.FileSessionStartEmitted) != sessionID {
 		return true
 	}
-	return isRuntimeHookInvocation()
+	return runtimeHook
 }
 
 // emitSessionEvent emits a session_start event. The event is written to
@@ -346,14 +405,20 @@ func emitSessionEvent(ctx RoleContext) {
 // it is no longer the label the agent's own re-prime gets, because that run is
 // not a session start and does not emit (shouldEmitSessionStart).
 func sessionStartReason() string {
-	if r := os.Getenv(constants.EnvSessionStartReason); r != "" {
+	return sessionStartReasonFrom(os.Getenv, primeHookSource, primeHookEventName)
+}
+
+// sessionStartReasonFrom is sessionStartReason for a given environment and
+// hook state.
+func sessionStartReasonFrom(getenv func(string) string, hookSource, hookEventName string) string {
+	if r := getenv(constants.EnvSessionStartReason); r != "" {
 		return r
 	}
-	if primeHookSource != "" {
-		return primeHookSource
+	if hookSource != "" {
+		return hookSource
 	}
-	if primeHookEventName != "" {
-		return primeHookEventName
+	if hookEventName != "" {
+		return hookEventName
 	}
 	return "unknown"
 }
@@ -362,7 +427,12 @@ func sessionStartReason() string {
 // when the start did not come through an instrumented spawner. Callers are
 // expected to also set Reason; this identifies the actor, that one the intent.
 func sessionStartCaller() string {
-	if c := os.Getenv(constants.EnvSessionStartCaller); c != "" {
+	return sessionStartCallerFrom(os.Getenv)
+}
+
+// sessionStartCallerFrom is sessionStartCaller for a given environment.
+func sessionStartCallerFrom(getenv func(string) string) string {
+	if c := getenv(constants.EnvSessionStartCaller); c != "" {
 		return c
 	}
 	return "unknown"
