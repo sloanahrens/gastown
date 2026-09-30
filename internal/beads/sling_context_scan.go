@@ -52,6 +52,12 @@ func SlingContextSearchDirs(townRoot string) ([]string, error) {
 // It deduplicates by store and context ID: two search dirs can resolve to
 // one database (a rig's top-level .beads redirecting to mayor/rig/.beads).
 func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) {
+	return listOpenSlingContextRecords(townRoot, nil)
+}
+
+// listOpenSlingContextRecords is ListOpenSlingContextRecords with its bd
+// calls sent to run (nil runs the bd on PATH).
+func listOpenSlingContextRecords(townRoot string, run BDRunner) ([]SlingContextRecord, error) {
 	var records []SlingContextRecord
 	seen := make(map[string]bool)
 	dirs, err := SlingContextSearchDirs(townRoot)
@@ -60,7 +66,7 @@ func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) 
 	}
 	for _, dir := range dirs {
 		beadsDir := ResolveBeadsDir(dir)
-		b := NewWithBeadsDir(dir, beadsDir)
+		b := NewWithBeadsDirAndRunner(dir, beadsDir, run)
 		contexts, err := b.ListOpenSlingContexts()
 		if err != nil {
 			return nil, fmt.Errorf("listing sling contexts in %s: %w", beadsDir, err)
@@ -81,12 +87,18 @@ func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) 
 // townRoot. It fails closed: when the contexts cannot be listed, every ID is
 // reported scheduled, so no caller dispatches on a guess.
 func AreScheduled(townRoot string, beadIDs []string) map[string]bool {
+	return AreScheduledWith(townRoot, beadIDs, nil)
+}
+
+// AreScheduledWith is AreScheduled with its bd calls sent to run; nil runs
+// the bd on PATH, exactly AreScheduled.
+func AreScheduledWith(townRoot string, beadIDs []string, run BDRunner) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
 		return result
 	}
 
-	contexts, err := ListOpenSlingContextRecords(townRoot)
+	contexts, err := listOpenSlingContextRecords(townRoot, run)
 	if err != nil {
 		for _, id := range beadIDs {
 			result[id] = true

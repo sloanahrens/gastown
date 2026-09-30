@@ -5,6 +5,7 @@ import (
 )
 
 func TestMayorSessionName(t *testing.T) {
+	t.Parallel()
 	// Mayor session name is now fixed (one per machine), uses HQ prefix
 	want := "hq-mayor"
 	got := MayorSessionName()
@@ -14,6 +15,7 @@ func TestMayorSessionName(t *testing.T) {
 }
 
 func TestOverseerSessionName(t *testing.T) {
+	t.Parallel()
 	want := "hq-overseer"
 	got := OverseerSessionName()
 	if got != want {
@@ -22,6 +24,7 @@ func TestOverseerSessionName(t *testing.T) {
 }
 
 func TestCrewSessionName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		rigPrefix string
 		name      string
@@ -42,6 +45,7 @@ func TestCrewSessionName(t *testing.T) {
 }
 
 func TestPolecatSessionName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		rigPrefix string
 		name      string
@@ -63,6 +67,7 @@ func TestPolecatSessionName(t *testing.T) {
 }
 
 func TestDefaultPrefix(t *testing.T) {
+	t.Parallel()
 	want := "gt"
 	if DefaultPrefix != want {
 		t.Errorf("DefaultPrefix = %q, want %q", DefaultPrefix, want)

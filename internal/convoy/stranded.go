@@ -169,7 +169,7 @@ func (t Town) findStrandedWith(ctx context.Context, openCheck func(townRoot stri
 		for _, tr := range tracked {
 			trackedIDs = append(trackedIDs, tr.ID)
 		}
-		scheduledSet := beads.AreScheduled(t.Root, trackedIDs)
+		scheduledSet := beads.AreScheduledWith(t.Root, trackedIDs, t.bdRun)
 
 		var readyIssues []string
 		var held []StrandedHold

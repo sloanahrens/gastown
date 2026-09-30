@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -21,6 +22,23 @@ type Town struct {
 	Out io.Writer
 	// Warn receives warnings; nil discards them.
 	Warn io.Writer
+
+	// bdRun answers the town's bd calls in process; nil runs the bd on PATH.
+	bdRun beads.BDRunner
+	// gtRun runs the town's gt notice children; nil runs the gt on PATH.
+	gtRun gtRunner
+}
+
+// gtRunner runs gt with args from dir with exactly env (nil inherits the
+// process environment).
+type gtRunner func(dir string, env []string, args ...string) error
+
+// runGT runs the gt on PATH.
+func runGT(dir string, env []string, args ...string) error {
+	cmd := exec.Command("gt", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd.Run()
 }
 
 // StdTown is a Town whose output goes to the terminal: what the CLI uses.
@@ -30,15 +48,15 @@ func StdTown(root string) Town {
 
 // bdJSON runs bd in dir with the town's environment.
 func (t Town) bdJSON(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, Run: t.bdRun}, dir, args...)
 }
 
 func (t Town) bdJSONAllowStale(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AllowStale: true}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AllowStale: true, Run: t.bdRun}, dir, args...)
 }
 
 func (t Town) bdJSONAutoCommit(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AutoCommit: true}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AutoCommit: true, Run: t.bdRun}, dir, args...)
 }
 
 // bd builds a bd command that starts from the town's environment.
@@ -47,7 +65,7 @@ func (t Town) bd(args ...string) *beads.BdCmd {
 	if t.Env != nil {
 		c.WithEnv(t.Env)
 	}
-	return c.Stderr(t.warnWriter())
+	return c.Via(t.bdRun).Stderr(t.warnWriter())
 }
 
 func (t Town) outWriter() io.Writer {

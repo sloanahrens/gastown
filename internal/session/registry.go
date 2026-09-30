@@ -120,21 +120,25 @@ func SetDefaultRegistry(r *PrefixRegistry) {
 // Should be called early in the process lifecycle.
 // Safe to call multiple times; later calls replace earlier data.
 func InitRegistry(townRoot string) error {
-	// Determine the tmux socket name from GT_TMUX_SOCKET env var:
-	//   unset / "default" / "auto" → per-town socket derived from town directory path
-	//   any other value            → use that name as-is
-	socket := os.Getenv("GT_TMUX_SOCKET")
-	switch socket {
-	case "", "default", "auto":
-		socket = townSocketName(townRoot)
-	}
-	tmux.SetDefaultSocket(socket)
+	tmux.SetDefaultSocket(socketName(townRoot, os.Getenv("GT_TMUX_SOCKET")))
 
 	r, err := LoadRegistry(townRoot)
 	if r != nil {
 		SetDefaultRegistry(r)
 	}
 	return err
+}
+
+// socketName picks the tmux socket name from the GT_TMUX_SOCKET value:
+//
+//	unset / "default" / "auto" → per-town socket derived from town directory path
+//	any other value            → use that name as-is
+func socketName(townRoot, gtTmuxSocket string) string {
+	switch gtTmuxSocket {
+	case "", "default", "auto":
+		return townSocketName(townRoot)
+	}
+	return gtTmuxSocket
 }
 
 // LoadRegistry builds the town's prefix registry from rigs.json and checks

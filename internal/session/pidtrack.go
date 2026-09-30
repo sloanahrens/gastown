@@ -13,9 +13,20 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// pidStartTimeFunc is overridden in tests. This package's tests must NOT use
-// t.Parallel() because they mutate this package-level variable without synchronization.
-var pidStartTimeFunc = processStartTime
+// pidTracker holds the process operations PID tracking depends on, so tests
+// can script process start times and liveness instead of probing real PIDs.
+type pidTracker struct {
+	startTime func(pid int) (string, error)
+	alive     func(pid int) bool
+	terminate func(pid int) error
+}
+
+// osPIDTracker probes and signals real processes.
+var osPIDTracker = pidTracker{
+	startTime: processStartTime,
+	alive:     processAlive,
+	terminate: terminateProcess,
+}
 
 type trackedPID struct {
 	PID       int
@@ -58,6 +69,10 @@ func TrackSessionPID(townRoot, sessionID string, t *tmux.Tmux) error {
 
 // TrackPID writes a PID to a tracking file for later cleanup.
 func TrackPID(townRoot, sessionID string, pid int) error {
+	return osPIDTracker.track(townRoot, sessionID, pid)
+}
+
+func (pt pidTracker) track(townRoot, sessionID string, pid int) error {
 	dir := pidsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating pids directory: %w", err)
@@ -65,7 +80,7 @@ func TrackPID(townRoot, sessionID string, pid int) error {
 
 	path := pidFile(townRoot, sessionID)
 	record := strconv.Itoa(pid)
-	if start, err := pidStartTimeFunc(pid); err == nil && start != "" {
+	if start, err := pt.startTime(pid); err == nil && start != "" {
 		record = fmt.Sprintf("%d|%s", pid, start)
 	}
 	return os.WriteFile(path, []byte(record+"\n"), 0644)
@@ -84,6 +99,10 @@ func UntrackPID(townRoot, sessionID string) {
 // sessions have been killed through normal means, this catches any
 // processes that survived (e.g., reparented to init after SIGHUP).
 func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
+	return osPIDTracker.killTracked(townRoot)
+}
+
+func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []string) {
 	dir := pidsDir(townRoot)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -115,15 +134,7 @@ func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
 		}
 		pid := record.PID
 
-		// Check if process is still alive
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			_ = os.Remove(path)
-			continue
-		}
-
-		// Signal 0 checks existence without killing
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
+		if !pt.alive(pid) {
 			// Process is already dead — clean up PID file
 			_ = os.Remove(path)
 			continue
@@ -132,7 +143,7 @@ func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
 		// If we have process birth info, verify this is still the same process.
 		// If PID was reused, skip killing to avoid terminating an active unrelated process.
 		if record.StartTime != "" {
-			currentStart, startErr := pidStartTimeFunc(pid)
+			currentStart, startErr := pt.startTime(pid)
 			if startErr != nil {
 				// Cannot verify process identity — leave the PID file so a
 				// future cleanup attempt can retry once ps is available again.
@@ -147,7 +158,7 @@ func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
 		}
 
 		// Process is alive — kill it
-		if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if err := pt.terminate(pid); err != nil {
 			errSessions = append(errSessions, fmt.Sprintf("%s (PID %d): SIGTERM failed: %v", sessionID, pid, err))
 		} else {
 			killed++
@@ -188,4 +199,23 @@ func processStartTime(pid int) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// processAlive reports whether pid names a running process. Signal 0 checks
+// existence without killing.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// terminateProcess sends SIGTERM to pid.
+func terminateProcess(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGTERM)
 }

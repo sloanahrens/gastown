@@ -7,6 +7,7 @@ import (
 )
 
 func TestStartSession_RequiresSessionID(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		WorkDir: "/tmp",
 		Role:    "polecat",
@@ -20,6 +21,7 @@ func TestStartSession_RequiresSessionID(t *testing.T) {
 }
 
 func TestStartSession_RequiresWorkDir(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		SessionID: "gt-test",
 		Role:      "polecat",
@@ -33,6 +35,7 @@ func TestStartSession_RequiresWorkDir(t *testing.T) {
 }
 
 func TestStartSession_RequiresRole(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		SessionID: "gt-test",
 		WorkDir:   "/tmp",
@@ -46,6 +49,7 @@ func TestStartSession_RequiresRole(t *testing.T) {
 }
 
 func TestBuildPrompt_BeaconOnly(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
 			Recipient: "boot",
@@ -63,6 +67,7 @@ func TestBuildPrompt_BeaconOnly(t *testing.T) {
 }
 
 func TestBuildPrompt_WithInstructions(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
 			Recipient: "boot",
@@ -81,6 +86,7 @@ func TestBuildPrompt_WithInstructions(t *testing.T) {
 }
 
 func TestBuildCommand_DefaultAgent(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Role:     "boot",
 		TownRoot: "/tmp/town",
@@ -95,6 +101,7 @@ func TestBuildCommand_DefaultAgent(t *testing.T) {
 }
 
 func TestBuildCommand_WithAgentOverride(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Role:          "boot",
 		TownRoot:      "/tmp/town",
@@ -109,14 +116,8 @@ func TestBuildCommand_WithAgentOverride(t *testing.T) {
 	}
 }
 
-func TestKillExistingSession_NoSession(t *testing.T) {
-	// KillExistingSession with nil tmux would panic, but we test the logic
-	// by verifying it's callable. Full integration tests need a real tmux.
-	// This test verifies the function signature and basic flow.
-	t.Skip("requires tmux for integration testing")
-}
-
 func TestMapKeysSorted(t *testing.T) {
+	t.Parallel()
 	got := mapKeysSorted(map[string]string{
 		"GT_SESSION": "1",
 		"GT_ROLE":    "polecat",
@@ -135,6 +136,7 @@ func TestMapKeysSorted(t *testing.T) {
 }
 
 func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{
 		"GT_ROLE": "polecat",
 	}
@@ -154,6 +156,7 @@ func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) 
 }
 
 func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{
 		"GT_AGENT":         "explicit-agent",
 		"GT_PROCESS_NAMES": "custom-bin,custom-agent",
@@ -174,6 +177,7 @@ func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
 }
 
 func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T) {
+	t.Parallel()
 	// When AgentOverride sets GT_AGENT to a different agent than
 	// runtimeConfig.ResolvedAgent, process names must be resolved from
 	// the effective agent (GT_AGENT), not the workspace-default resolved agent.

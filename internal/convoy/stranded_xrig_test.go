@@ -3,13 +3,11 @@ package convoy
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // xrigStrandedStore is one rig's beads store for the stranded scan's blocker
@@ -48,55 +46,25 @@ func (s *xrigStrandedStore) GetDependencyRecords(_ context.Context, issueID stri
 // bd show answers both the way bd does for a bead whose blocker is in another
 // rig: open, a dependency_count, and no blockers or dependencies listed
 // (gt-db8y's shape), so bd alone reads gt-work as unblocked.
-func strandedXrigTown(t *testing.T) string {
+func strandedXrigTown(t *testing.T) Town {
 	t.Helper()
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
 	routes := `{"prefix":"hq-","path":"."}` + "\n" +
 		`{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n" +
 		`{"prefix":"oag-","path":"oag/mayor/rig"}` + "\n"
-	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-	script := `#!/bin/sh
-i=0
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
-  esac
-done
-case "$pos0" in
-  list)
-    echo '[{"id":"hq-xr","title":"Cross-rig convoy"}]'
-    ;;
-  sql)
-    case "$*" in
-      *"issue_id = 'hq-xr'"*) echo '[{"depends_on_id":"external:gt:gt-work"},{"depends_on_id":"external:gt:gt-sib"}]' ;;
-      *) echo '[]' ;;
-    esac
-    ;;
-  show)
-    echo '[{"id":"gt-work","title":"Work","status":"open","priority":1,"issue_type":"task","assignee":"","dependency_count":1},{"id":"gt-sib","title":"Sibling","status":"open","priority":2,"issue_type":"task","assignee":""}]'
-    ;;
-  *)
-    echo '[]'
-    ;;
-esac
-exit 0
-`
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping convoy test on Windows")
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return townRoot
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		switch positional(c.Args)[0] {
+		case "list":
+			return `[{"id":"hq-xr","title":"Cross-rig convoy"}]`, "", 0
+		case "sql":
+			if strings.Contains(strings.Join(c.Args, " "), "issue_id = 'hq-xr'") {
+				return `[{"depends_on_id":"external:gt:gt-work"},{"depends_on_id":"external:gt:gt-sib"}]`, "", 0
+			}
+		case "show":
+			return `[{"id":"gt-work","title":"Work","status":"open","priority":1,"issue_type":"task","assignee":"","dependency_count":1},{"id":"gt-sib","title":"Sibling","status":"open","priority":2,"issue_type":"task","assignee":""}]`, "", 0
+		}
+		return "[]", "", 0
+	}}
+	return testTown(townWithBeads(t, routes), bd, nil)
 }
 
 // storeBlockCheck opens the stranded scan's blocker check over the given
@@ -121,6 +89,7 @@ func noBlockers(string) (blockCheck, func(), error) {
 // rig, and bd show drops that blocker. The scan must not offer gt-work as
 // ready; when oag-x closes it must.
 func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		blocker   beadsdk.Status
 		wantReady []string
@@ -129,7 +98,7 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 		{beadsdk.StatusClosed, []string{"gt-work", "gt-sib"}},
 	} {
 		t.Run(string(tc.blocker), func(t *testing.T) {
-			townRoot := strandedXrigTown(t)
+			town := strandedXrigTown(t)
 			gastown := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
 				"gt-work": {ID: "gt-work", Status: beadsdk.StatusOpen},
 				"gt-sib":  {ID: "gt-sib", Status: beadsdk.StatusOpen},
@@ -142,7 +111,7 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 			hq := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{}}
 			check := storeBlockCheck(map[string]beadsdk.Storage{"hq": hq, "gastown": gastown, "oag": oag})
 
-			stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), check)
+			stranded, err := town.findStrandedWith(context.Background(), check)
 			if err != nil {
 				t.Fatalf("findStrandedConvoysWith: %v", err)
 			}
@@ -161,6 +130,7 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 // named in the scan's JSON so the daemon can escalate it. A bead held by an
 // open blocker is not: that hold is the tracker working, not a fault.
 func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		setup     func(oag *xrigStrandedStore)
@@ -172,7 +142,7 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 		{"blocker rig unreachable", func(*xrigStrandedStore) {}, false, "unreadable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			townRoot := strandedXrigTown(t)
+			town := strandedXrigTown(t)
 			gastown := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
 				"gt-work": {ID: "gt-work", Status: beadsdk.StatusOpen},
 				"gt-sib":  {ID: "gt-sib", Status: beadsdk.StatusOpen},
@@ -188,7 +158,7 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 				stores["oag"] = oag
 			}
 
-			stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), storeBlockCheck(stores))
+			stranded, err := town.findStrandedWith(context.Background(), storeBlockCheck(stores))
 			if err != nil {
 				t.Fatalf("findStrandedConvoysWith: %v", err)
 			}
@@ -212,13 +182,14 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 // TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates: a scan with no
 // otherwise-ready bead opens no store.
 func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
-	_, townBeads, _ := mockBdForConvoyTest(t, "hq-empty-open", "Empty convoy")
+	t.Parallel()
+	town := testTown(townWithBeads(t, ""), emptyConvoyBd("hq-empty-open", "Empty convoy"), nil)
 	opened := 0
 	open := func(string) (blockCheck, func(), error) {
 		opened++
 		return func(string) Block { return Block{} }, func() {}, nil
 	}
-	if _, err := StdTown(townBeads).findStrandedWith(context.Background(), open); err != nil {
+	if _, err := town.findStrandedWith(context.Background(), open); err != nil {
 		t.Fatalf("findStrandedConvoysWith: %v", err)
 	}
 	if opened != 0 {
@@ -232,14 +203,15 @@ func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 // as "N tracked, 0 ready" every scan with no cause; an error makes gt exit
 // non-zero and the daemon log "stranded scan failed".
 func TestFindStrandedConvoys_TownStoreDownFailsTheScan(t *testing.T) {
-	townRoot := strandedXrigTown(t)
+	t.Parallel()
+	town := strandedXrigTown(t)
 	down := func(townRoot string) (blockCheck, func(), error) {
 		return openStrandedBlockCheckWith(context.Background(), townRoot, func(string) (beadsdk.Storage, error) {
 			return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
 		})
 	}
 
-	stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), down)
+	stranded, err := town.findStrandedWith(context.Background(), down)
 	if err == nil {
 		t.Fatalf("want an error when the town store will not open, got stranded %+v", stranded)
 	}

@@ -5,6 +5,7 @@ import (
 )
 
 func TestTownSessions(t *testing.T) {
+	t.Parallel()
 	sessions := TownSessions()
 
 	if len(sessions) != 1 || sessions[0].Name != "Mayor" {
@@ -16,6 +17,7 @@ func TestTownSessions(t *testing.T) {
 }
 
 func TestTownSessions_SessionIDFormats(t *testing.T) {
+	t.Parallel()
 	sessions := TownSessions()
 
 	for _, s := range sessions {
@@ -30,6 +32,7 @@ func TestTownSessions_SessionIDFormats(t *testing.T) {
 }
 
 func TestTownSession_StructFields(t *testing.T) {
+	t.Parallel()
 	ts := TownSession{
 		Name:      "Test",
 		SessionID: "test-session",
@@ -44,6 +47,7 @@ func TestTownSession_StructFields(t *testing.T) {
 }
 
 func TestTownSession_CanBeCreated(t *testing.T) {
+	t.Parallel()
 	// Test that TownSession can be created with any values
 	tests := []struct {
 		name      string

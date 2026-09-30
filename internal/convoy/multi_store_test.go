@@ -9,29 +9,11 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	beadsRouting "github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// setupTestStoreWithPrefix opens a test store and sets a specific prefix.
-func setupTestStoreWithPrefix(t *testing.T, prefix string) (beadsdk.Storage, func()) {
-	t.Helper()
-	t.Setenv("BEADS_TEST_MODE", "1")
-
-	ctx := context.Background()
-	// Fails, never skips, on an open error: a skipped store test is lost
-	// coverage with no red signal.
-	store := testutil.OpenTestStore(t, ctx)
-
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		t.Fatalf("SetConfig issue_prefix: %v", err)
-	}
-
-	cleanup := func() { _ = store.Close() }
-	return store, cleanup
-}
-
 func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
-	store, cleanup := setupTestStoreWithPrefix(t, "hq")
+	t.Parallel()
+	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -75,9 +57,10 @@ func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
 }
 
 func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
-	hqStore, hqCleanup := setupTestStoreWithPrefix(t, "hq")
+	t.Parallel()
+	hqStore, hqCleanup := setupTestStore(t)
 	defer hqCleanup()
-	dsStore, dsCleanup := setupTestStoreWithPrefix(t, "ds")
+	dsStore, dsCleanup := setupTestStore(t)
 	defer dsCleanup()
 
 	ctx := context.Background()
@@ -145,6 +128,7 @@ func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
 }
 
 func TestStoreResolver_NilStores(t *testing.T) {
+	t.Parallel()
 	resolver := NewStoreResolver("/nonexistent", nil)
 	result := resolver.ResolveIssues(context.Background(), []string{"ds-abc"})
 	if len(result) != 0 {
@@ -153,6 +137,7 @@ func TestStoreResolver_NilStores(t *testing.T) {
 }
 
 func TestStoreResolver_EmptyIDs(t *testing.T) {
+	t.Parallel()
 	resolver := NewStoreResolver("/nonexistent", map[string]beadsdk.Storage{})
 	result := resolver.ResolveIssues(context.Background(), nil)
 	if len(result) != 0 {
@@ -161,6 +146,7 @@ func TestStoreResolver_EmptyIDs(t *testing.T) {
 }
 
 func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	os.MkdirAll(beadsDir, 0755)
@@ -181,6 +167,7 @@ func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
 // unroutable id, and a resolver held by nobody are not, so the caller reads
 // its own store as it always has.
 func TestStoreResolver_OwningStoreOrGap(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownRoot(t)
 	townStore := &fakeHoldStorage{}
 	rigStore := &fakeHoldStorage{}

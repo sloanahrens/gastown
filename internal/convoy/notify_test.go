@@ -1,193 +1,138 @@
 package convoy
 
 import (
-	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
+// opLog is the order a notice test's bd and gt calls happened in: "close",
+// "update", "export:<args>" and "mail".
+type opLog struct {
+	ops []string
+}
+
+// bd is a bdScript that logs close, update and export, answers show with
+// showJSON, and fails export with exportErr(n) for the n-th export (from 1).
+func (l *opLog) bd(showJSON string, exportErr func(n int) bool) *bdScript {
+	exports := 0
+	return &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		pos := positional(c.Args)
+		switch pos[0] {
+		case "version":
+			return "", "", 0
+		case "close", "update":
+			l.ops = append(l.ops, pos[0])
+			return "", "", 0
+		case "export":
+			exports++
+			l.ops = append(l.ops, "export:"+strings.Join(c.Args, " "))
+			if exportErr != nil && exportErr(exports) {
+				return "", "export failed", 1
+			}
+			return "", "", 0
+		case "show":
+			return showJSON, "", 0
+		case "sql":
+			return "[]", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+}
+
+// gt is a gtRunner that logs each mail send as "mail".
+func (l *opLog) gt() gtRunner {
+	return func(_ string, _ []string, args ...string) error {
+		if len(args) > 1 && args[0] == "mail" && args[1] == "send" {
+			l.ops = append(l.ops, "mail")
+		}
+		return nil
+	}
+}
+
+func (l *opLog) String() string { return strings.Join(l.ops, "\n") }
+
 func TestNotifyConvoyCompletion_StampsAndSkipsDuplicate(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
+	t.Parallel()
+	townRoot := townWithBeads(t, "")
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	statePath := filepath.Join(binDir, "notified.state")
-	mailLogPath := filepath.Join(binDir, "mail.log")
-	exportLogPath := filepath.Join(binDir, "export.log")
-	nudgeLogPath := filepath.Join(binDir, "nudge.log")
-	bdPath := filepath.Join(binDir, "bd")
-	gtPath := filepath.Join(binDir, "gt")
-
-	bdScript := `#!/bin/sh
-STATE="` + statePath + `"
-EXPORT_LOG="` + exportLogPath + `"
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-case "$1" in
-  version)
-    exit 0
-    ;;
-  show)
-    if [ -f "$STATE" ]; then
-      printf '%s\n' '[{"id":"hq-cv-dup","description":"Owner: gastown/crew/alice\nnudge_watchers: gastown/crew/bob\ncompletion_notified_at: 2026-05-25T02:30:00Z","created_at":"2026-05-25T02:00:00Z"}]'
-    else
-      printf '%s\n' '[{"id":"hq-cv-dup","description":"Owner: gastown/crew/alice\nnudge_watchers: gastown/crew/bob","created_at":"2026-05-25T02:00:00Z"}]'
-    fi
-    exit 0
-    ;;
-  update)
-    touch "$STATE"
-    exit 0
-    ;;
-  export)
-    echo "$@" >> "$EXPORT_LOG"
-    exit 0
-    ;;
-  sql)
-    printf '%s\n' '[]'
-    exit 0
-    ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
-  echo "$@" >> "` + mailLogPath + `"
-fi
-if [ "$1" = "nudge" ]; then
-  printf '%s GT_ROLE=%s\n' "$*" "$GT_ROLE" >> "` + nudgeLogPath + `"
-fi
-exit 0
-`
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_ROLE", "overseer")
+	// show reports the completion stamp once bd update has written it.
+	stamped := false
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		switch positional(c.Args)[0] {
+		case "show":
+			if stamped {
+				return `[{"id":"hq-cv-dup","description":"Owner: gastown/crew/alice\nnudge_watchers: gastown/crew/bob\ncompletion_notified_at: 2026-05-25T02:30:00Z","created_at":"2026-05-25T02:00:00Z"}]`, "", 0
+			}
+			return `[{"id":"hq-cv-dup","description":"Owner: gastown/crew/alice\nnudge_watchers: gastown/crew/bob","created_at":"2026-05-25T02:00:00Z"}]`, "", 0
+		case "update":
+			stamped = true
+		case "sql":
+			return "[]", "", 0
+		}
+		return "", "", 0
+	}}
+	gt := &gtScript{}
 	settings := config.NewTownSettings()
 	settings.Convoy = &config.ConvoyConfig{NotifyOnComplete: true}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), settings); err != nil {
 		t.Fatalf("save town settings: %v", err)
 	}
 
-	StdTown(townRoot).NotifyCompletion("hq-cv-dup", "Duplicate Guard")
-	StdTown(townRoot).NotifyCompletion("hq-cv-dup", "Duplicate Guard")
+	town := testTown(townRoot, bd, gt)
+	town.Env = []string{"GT_ROLE=overseer"}
+	town.NotifyCompletion("hq-cv-dup", "Duplicate Guard")
+	town.NotifyCompletion("hq-cv-dup", "Duplicate Guard")
 
-	data, err := os.ReadFile(mailLogPath)
-	if err != nil {
-		t.Fatalf("read mail log: %v", err)
+	var mails, nudges []gtCall
+	for _, c := range gt.recorded() {
+		switch c.Args[0] {
+		case "mail":
+			mails = append(mails, c)
+		case "nudge":
+			nudges = append(nudges, c)
+		}
 	}
-	log := string(data)
-	if got := strings.Count(log, "mail send"); got != 2 {
-		t.Fatalf("mail sends = %d, want 2; log:\n%s", got, string(data))
+	if len(mails) != 2 {
+		t.Fatalf("mail sends = %d, want 2: %+v", len(mails), mails)
 	}
-	if got := strings.Count(log, "--from convoy/hq-cv-dup"); got != 2 {
-		t.Fatalf("mail sends with convoy sender = %d, want 2; log:\n%s", got, log)
+	for _, m := range mails {
+		line := strings.Join(m.Args, " ")
+		if !strings.Contains(line, "--from convoy/hq-cv-dup") || !strings.Contains(line, "--no-notify") {
+			t.Errorf("mail send %q lacks the convoy sender or --no-notify", line)
+		}
 	}
-	if got := strings.Count(log, "--no-notify"); got != 2 {
-		t.Fatalf("mail sends with --no-notify = %d, want 2; log:\n%s", got, log)
+	if len(nudges) != 2 {
+		t.Fatalf("nudges = %d, want 2: %+v", len(nudges), nudges)
 	}
-	nudgeData, err := os.ReadFile(nudgeLogPath)
-	if err != nil {
-		t.Fatalf("read nudge log: %v", err)
+	for _, n := range nudges {
+		if got := envValue(n.Env, "GT_ROLE"); got != "convoy/hq-cv-dup" {
+			t.Errorf("nudge GT_ROLE = %q, want convoy/hq-cv-dup", got)
+		}
 	}
-	nudgeLog := string(nudgeData)
-	if got := strings.Count(nudgeLog, "GT_ROLE=convoy/hq-cv-dup"); got != 2 {
-		t.Fatalf("nudges with convoy sender env = %d, want 2; log:\n%s", got, nudgeLog)
+	if !stamped {
+		t.Fatal("completion notification state was not recorded")
 	}
-	if _, err := os.Stat(statePath); err != nil {
-		t.Fatalf("completion notification state was not recorded: %v", err)
+	exports := bd.ran("export")
+	if len(exports) != 1 {
+		t.Fatalf("bd export calls = %d, want 1: %q", len(exports), bd.argvs())
 	}
-	exportData, err := os.ReadFile(exportLogPath)
-	if err != nil {
-		t.Fatalf("read export log: %v", err)
-	}
-	if got := strings.Count(string(exportData), "export -o"); got != 1 {
-		t.Fatalf("bd export calls = %d, want 1; log:\n%s", got, string(exportData))
-	}
-	if !strings.Contains(string(exportData), filepath.Join(townRoot, ".beads", "issues.jsonl")) {
-		t.Fatalf("bd export did not target town issues.jsonl; log:\n%s", string(exportData))
+	if !strings.Contains(strings.Join(exports[0].Args, " "), filepath.Join(townRoot, ".beads", "issues.jsonl")) {
+		t.Fatalf("bd export did not target town issues.jsonl: %q", exports[0].Args)
 	}
 }
 
 func TestCloseConvoyIfComplete_ExportsJSONLBeforeNotification(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
+	t.Parallel()
+	townRoot := townWithBeads(t, "")
+	var log opLog
+	town := testTown(townRoot, log.bd(`[{"id":"hq-cv-done","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]`, nil), nil)
+	town.gtRun = log.gt()
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	orderPath := filepath.Join(binDir, "order.log")
-	bdPath := filepath.Join(binDir, "bd")
-	gtPath := filepath.Join(binDir, "gt")
-
-	bdScript := `#!/bin/sh
-ORDER="` + orderPath + `"
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-case "$1" in
-  version)
-    exit 0
-    ;;
-  close)
-    echo close >> "$ORDER"
-    exit 0
-    ;;
-  export)
-    echo export:"$@" >> "$ORDER"
-    exit 0
-    ;;
-  show)
-    printf '%s\n' '[{"id":"hq-cv-done","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]'
-    exit 0
-    ;;
-  update)
-    echo update >> "$ORDER"
-    exit 0
-    ;;
-  sql)
-    printf '%s\n' '[]'
-    exit 0
-    ;;
-esac
-exit 1
-`
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
-  echo mail >> "` + orderPath + `"
-fi
-exit 0
-`
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	closed, err := StdTown(townRoot).closeIfComplete("hq-cv-done", "Done Convoy", []TrackedIssue{
+	closed, err := town.closeIfComplete("hq-cv-done", "Done Convoy", []TrackedIssue{
 		{ID: "gt-done", Status: "closed"},
 	}, false)
 	if err != nil {
@@ -197,167 +142,39 @@ exit 0
 		t.Fatal("closeConvoyIfComplete returned closed=false, want true")
 	}
 
-	data, err := os.ReadFile(orderPath)
-	if err != nil {
-		t.Fatalf("read order log: %v", err)
-	}
-	got := strings.TrimSpace(string(data))
-	want := strings.Join([]string{
-		"close",
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
-		"update",
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-	}, "\n")
-	if got != want {
+	export := "export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl")
+	want := strings.Join([]string{"close", export, "mail", "update", export}, "\n")
+	if got := log.String(); got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
 func TestNotifyConvoyCompletion_ExportFailureDoesNotPreventMail(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
+	t.Parallel()
+	townRoot := townWithBeads(t, "")
+	var log opLog
+	failAll := func(int) bool { return true }
+	town := testTown(townRoot, log.bd(`[{"id":"hq-cv-export-fail","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]`, failAll), nil)
+	town.gtRun = log.gt()
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
+	town.NotifyCompletion("hq-cv-export-fail", "Export Failure")
 
-	orderPath := filepath.Join(binDir, "order.log")
-	bdPath := filepath.Join(binDir, "bd")
-	gtPath := filepath.Join(binDir, "gt")
-
-	bdScript := `#!/bin/sh
-ORDER="` + orderPath + `"
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-case "$1" in
-  version)
-    exit 0
-    ;;
-  show)
-    printf '%s\n' '[{"id":"hq-cv-export-fail","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]'
-    exit 0
-    ;;
-  sql)
-    printf '%s\n' '[]'
-    exit 0
-    ;;
-  update)
-    echo update >> "$ORDER"
-    exit 0
-    ;;
-  export)
-    echo export:"$@" >> "$ORDER"
-    exit 1
-    ;;
-esac
-exit 1
-`
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
-  echo mail >> "` + orderPath + `"
-fi
-exit 0
-`
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	StdTown(townRoot).NotifyCompletion("hq-cv-export-fail", "Export Failure")
-
-	data, err := os.ReadFile(orderPath)
-	if err != nil {
-		t.Fatalf("read order log: %v", err)
-	}
-	got := strings.TrimSpace(string(data))
-	want := strings.Join([]string{
-		"mail",
-		"update",
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-	}, "\n")
-	if got != want {
+	export := "export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl")
+	want := strings.Join([]string{"mail", "update", export}, "\n")
+	if got := log.String(); got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
 func TestCloseConvoyIfComplete_CloseExportFailureRequiresDurableRetryBeforeNotification(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
+	t.Parallel()
+	townRoot := townWithBeads(t, "")
+	var log opLog
+	failFirst := func(n int) bool { return n == 1 }
+	town := testTown(townRoot, log.bd(`[{"id":"hq-cv-close-export-fail","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]`, failFirst), nil)
+	town.gtRun = log.gt()
 
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	exportFailedPath := filepath.Join(binDir, "export.failed")
-	orderPath := filepath.Join(binDir, "order.log")
-	bdPath := filepath.Join(binDir, "bd")
-	gtPath := filepath.Join(binDir, "gt")
-
-	bdScript := `#!/bin/sh
-EXPORT_FAILED="` + exportFailedPath + `"
-ORDER="` + orderPath + `"
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-case "$1" in
-  version)
-    exit 0
-    ;;
-  close)
-    echo close >> "$ORDER"
-    exit 0
-    ;;
-  export)
-    echo export:"$@" >> "$ORDER"
-    if [ ! -f "$EXPORT_FAILED" ]; then
-      touch "$EXPORT_FAILED"
-      exit 1
-    fi
-    exit 0
-    ;;
-  show)
-    printf '%s\n' '[{"id":"hq-cv-close-export-fail","description":"Owner: mayor/","created_at":"2026-05-25T02:00:00Z"}]'
-    exit 0
-    ;;
-  update)
-    echo update >> "$ORDER"
-    exit 0
-    ;;
-  sql)
-    printf '%s\n' '[]'
-    exit 0
-    ;;
-esac
-exit 1
-`
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
-  echo mail >> "` + orderPath + `"
-fi
-exit 0
-`
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	closed, err := StdTown(townRoot).closeIfComplete("hq-cv-close-export-fail", "Close Export Failure", []TrackedIssue{
+	closed, err := town.closeIfComplete("hq-cv-close-export-fail", "Close Export Failure", []TrackedIssue{
 		{ID: "gt-done", Status: "closed"},
 	}, false)
 	if err == nil {
@@ -366,58 +183,35 @@ exit 0
 	if closed {
 		t.Fatal("closeConvoyIfComplete returned closed=true after close JSONL export failure")
 	}
-	if err := StdTown(townRoot).PersistAndNotify("hq-cv-close-export-fail", "Close Export Failure"); err != nil {
+	if err := town.PersistAndNotify("hq-cv-close-export-fail", "Close Export Failure"); err != nil {
 		t.Fatalf("persistAndNotifyConvoyCompletion returned error: %v", err)
 	}
 
-	data, err := os.ReadFile(orderPath)
-	if err != nil {
-		t.Fatalf("read order log: %v", err)
-	}
-	got := strings.TrimSpace(string(data))
-	want := strings.Join([]string{
-		"close",
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-		"mail",
-		"update",
-		"export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl"),
-	}, "\n")
-	if got != want {
+	export := "export:export -o " + filepath.Join(townRoot, ".beads", "issues.jsonl")
+	want := strings.Join([]string{"close", export, export, "mail", "update", export}, "\n")
+	if got := log.String(); got != want {
 		t.Fatalf("operation order mismatch:\n got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
 func TestSendCloseNotification_MailUsesConvoyFromAndNoNotify(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
+	t.Parallel()
+	gt := &gtScript{}
 
-	binDir := t.TempDir()
-	mailLogPath := filepath.Join(binDir, "mail.log")
-	gtPath := filepath.Join(binDir, "gt")
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
-  echo "$@" >> "` + mailLogPath + `"
-fi
-exit 0
-`
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	testTown(t.TempDir(), nil, gt).NotifyClosed("gastown/crew/alice", "hq-cv-close", "Close Guard", "done")
 
-	Town{Root: t.TempDir()}.NotifyClosed("gastown/crew/alice", "hq-cv-close", "Close Guard", "done")
-
-	data, err := os.ReadFile(mailLogPath)
-	if err != nil {
-		t.Fatalf("read mail log: %v", err)
+	calls := gt.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("gt calls = %+v, want one mail send", calls)
 	}
-	log := string(data)
-	if !strings.Contains(log, "--from convoy/hq-cv-close") {
-		t.Fatalf("mail send missing convoy sender; log:\n%s", log)
+	line := strings.Join(calls[0].Args, " ")
+	if !strings.HasPrefix(line, "mail send ") {
+		t.Fatalf("gt call %q is not a mail send", line)
 	}
-	if !strings.Contains(log, "--no-notify") {
-		t.Fatalf("mail send missing --no-notify; log:\n%s", log)
+	if !strings.Contains(line, "--from convoy/hq-cv-close") {
+		t.Fatalf("mail send missing convoy sender: %s", line)
+	}
+	if !strings.Contains(line, "--no-notify") {
+		t.Fatalf("mail send missing --no-notify: %s", line)
 	}
 }

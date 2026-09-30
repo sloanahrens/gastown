@@ -3,7 +3,6 @@ package convoy
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +36,7 @@ const rejectedNotes = "MERGE REJECTION (attempt 1): tests fail - see review\nBra
 // TestFeedHold_MergeRejection pins gt-ghyfx: a bead the refinery rejected and
 // reopened is the deacon's to redispatch, so the convoy feeders' hold names it.
 func TestFeedHold_MergeRejection(t *testing.T) {
+	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
 	}}
@@ -53,6 +53,7 @@ func TestFeedHold_MergeRejection(t *testing.T) {
 // gt-ghyfx: the deacon's RECOVERED_BEAD redispatch gates on DispatchHoldReason
 // and exists to redispatch rejected beads, so the marker must not hold there.
 func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
+	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
 	}}
@@ -62,6 +63,7 @@ func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 }
 
 func TestFeedHold_Verdicts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-clean":    {ID: "gt-clean", Status: beadsdk.StatusOpen, Notes: "ordinary notes"},
@@ -96,6 +98,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 // for on the event-driven feed: a sibling close event must not re-sling a bead
 // the refinery rejected, while a fresh sibling still feeds.
 func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -119,12 +122,12 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
-	data, err := os.ReadFile(logPath)
+	data, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (no log file): %v; log: %v", err, *logMsgs)
 	}
@@ -152,6 +155,7 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 // and holds no beadsdk.Storage), and a divergence would mean a polecat
 // restarted against work a convoy feeder would have held (gt-n38c6).
 func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		issue beadsdk.Issue
@@ -221,6 +225,7 @@ func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
 // re-sling a bead the human operator owns, whether the operator marked it with
 // the label or took it by assigning it to themselves.
 func TestFeedHold_OperatorReservation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-op":         {ID: "gt-op", Status: beadsdk.StatusOpen, Labels: []string{"operator"}, Assignee: "sloan"},
@@ -261,6 +266,7 @@ func TestFeedHold_OperatorReservation(t *testing.T) {
 // RECOVERED_BEAD redispatch gates on DispatchHoldReason, and operator work is
 // not the deacon's to redispatch either.
 func TestDispatchHoldReason_OperatorReservation(t *testing.T) {
+	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-op": {ID: "gt-op", Status: beadsdk.StatusOpen, Assignee: "sloan"},
 	}}
@@ -276,6 +282,7 @@ func TestDispatchHoldReason_OperatorReservation(t *testing.T) {
 // store answers "no record" about a bead that has one — the reading that made
 // the event-driven feed hold beads the stranded scan fed.
 func TestHold_RigStoreNotOpen_ReportsNoHold(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	townRoot := setupTownRoot(t)
 	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}
@@ -304,6 +311,7 @@ func TestHold_RigStoreNotOpen_ReportsNoHold(t *testing.T) {
 // answer for holds the bead. Failing open on the gap must not fail open on a
 // store that opened and then could not read.
 func TestHold_RigStoreReadable_StillHoldsUnreadableRecord(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	townRoot := setupTownRoot(t)
 	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}

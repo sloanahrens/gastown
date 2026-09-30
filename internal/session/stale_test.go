@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseTmuxSessionCreated(t *testing.T) {
+	t.Parallel()
 	input := "2026-01-24 01:02:03"
 	expected, err := time.ParseInLocation("2006-01-02 15:04:05", input, time.Local)
 	if err != nil {
@@ -23,6 +24,7 @@ func TestParseTmuxSessionCreated(t *testing.T) {
 }
 
 func TestStaleReasonForTimes(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 1, 24, 2, 0, 0, 0, time.UTC)
 	newer := now.Add(2 * time.Minute)
 	older := now.Add(-2 * time.Minute)

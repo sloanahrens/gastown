@@ -3,11 +3,9 @@
 internal/beads
 internal/cmd
 internal/config
-internal/convoy
 internal/feed
 internal/hooks
 internal/mayor
 internal/nudge
 internal/plugin
-internal/session
 internal/telemetry
