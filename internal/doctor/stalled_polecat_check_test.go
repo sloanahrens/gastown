@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -546,66 +547,67 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// stalledFixture is a bare origin, a "seed" clone that plays other actors
-// (landing content on main), and the polecat's own clone under the layout
-// resolveClonePath expects, holding one commit that exists on no remote.
+// stalledFixture is a bare origin, which other actors land content on, and
+// the polecat's own clone under the layout resolveClonePath expects, holding
+// one commit that exists on no remote.
 type stalledFixture struct {
+	gf          *gitfake.Fake
 	townRoot    string
 	rigName     string
 	polecatName string
 	issue       string
 	branch      string
 	bare        string
-	seed        string
 	clonePath   string
 }
 
 func newStalledFixture(t *testing.T, rigName, polecatName, issue string) *stalledFixture {
 	t.Helper()
 	tmp := t.TempDir()
-
-	bare := filepath.Join(tmp, "origin.git")
-	runGit(t, tmp, "init", "--bare", "-q", bare)
-	runGit(t, bare, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	seed := filepath.Join(tmp, "seed")
-	runGit(t, tmp, "clone", "-q", bare, seed)
-	runGit(t, seed, "checkout", "-q", "-b", "main")
-	writeFile(t, filepath.Join(seed, "README.md"), "seed\n")
-	runGit(t, seed, "add", "README.md")
-	runGit(t, seed, "commit", "-q", "-m", "init")
-	runGit(t, seed, "push", "-q", "-u", "origin", "main")
+	gf := gitfake.New()
+	bare := fakeRemote(t, gf, filepath.Join(tmp, "origin.git"), map[string]string{"README.md": "seed\n"})
 
 	townRoot := filepath.Join(tmp, "town")
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
 		t.Fatalf("mkdir polecat dir: %v", err)
 	}
-	runGit(t, filepath.Dir(clonePath), "clone", "-q", bare, clonePath)
+	gf.Clone(t, bare, clonePath)
 
 	branch := polecat.FormatGeneratedBranchName(polecatName, issue, "abc123")
-	runGit(t, clonePath, "checkout", "-q", "-b", branch)
+	if err := gf.OpenBranchRepo(clonePath).CheckoutNewBranch(branch, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
 	writeFile(t, filepath.Join(clonePath, "work.txt"), "polecat work\n")
-	runGit(t, clonePath, "add", "work.txt")
-	runGit(t, clonePath, "commit", "-q", "-m", "do the work ("+issue+")")
+	gf.CommitWorktree(t, clonePath, "do the work ("+issue+")")
 
 	return &stalledFixture{
-		townRoot: townRoot, rigName: rigName, polecatName: polecatName,
-		issue: issue, branch: branch, bare: bare, seed: seed, clonePath: clonePath,
+		gf: gf, townRoot: townRoot, rigName: rigName, polecatName: polecatName,
+		issue: issue, branch: branch, bare: bare, clonePath: clonePath,
 	}
 }
 
-// reimplementOnMain lands the same fix on main as a NEW commit, from the seed
-// clone. That is the gt-4vbn shape: the work is in main, the branch's own SHA
-// never will be, and the polecat's clone stops fetching at the moment it dies —
-// so the clone's origin/main is stale too.
+// reimplementOnMain lands the same fix on main as a NEW commit, as another
+// actor would. That is the gt-4vbn shape: the work is in main, the branch's
+// own SHA never will be, and the polecat's clone stops fetching at the moment
+// it dies — so the clone's origin/main is stale too.
 func (f *stalledFixture) reimplementOnMain(t *testing.T) {
 	t.Helper()
-	runGit(t, f.seed, "checkout", "-q", "main")
-	writeFile(t, filepath.Join(f.seed, "work.txt"), "polecat work\n")
-	runGit(t, f.seed, "add", "work.txt")
-	runGit(t, f.seed, "commit", "-q", "-m", "reimplement on main under a new SHA")
-	runGit(t, f.seed, "push", "-q", "origin", "main")
+	f.gf.Commit(t, f.bare, "main", "reimplement on main under a new SHA", map[string]string{"work.txt": "polecat work\n"})
+}
+
+func (f *stalledFixture) ctx() *CheckContext {
+	return withGit(&CheckContext{TownRoot: f.townRoot, RigName: f.rigName}, f.gf)
+}
+
+// onOrigin reports whether origin has branch.
+func (f *stalledFixture) onOrigin(t *testing.T, branch string) bool {
+	t.Helper()
+	ok, err := bareGit(f.gf, f.bare).RefExists("refs/heads/" + branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ok
 }
 
 func (f *stalledFixture) run(t *testing.T, beadStatus func(string, string) (string, bool)) (*StalledPolecatCheck, *CheckResult) {
@@ -615,16 +617,16 @@ func (f *stalledFixture) run(t *testing.T, beadStatus func(string, string) (stri
 	// that need a bead answer inject it.
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.beadStatus = beadStatus
-	return check, check.Run(&CheckContext{TownRoot: f.townRoot, RigName: f.rigName})
+	return check, check.Run(f.ctx())
 }
 
-// TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession is the gt-4vbn
+// TestStalledPolecatCheck_FlagsThenClearsOnSupersession is the gt-4vbn
 // incident end to end. The first Run reproduces the alert that fired for hours:
 // a dead polecat with a commit on no remote. The second Run, after the same fix
 // lands on main under a different SHA, must clear — and only because the check
 // refreshed a default branch its clone would never fetch again. Without that
 // refresh the warning is permanent, which is the whole complaint.
-func TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession(t *testing.T) {
+func TestStalledPolecatCheck_FlagsThenClearsOnSupersession(t *testing.T) {
 	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-agate", "gt-4vbn1")
 
@@ -640,10 +642,10 @@ func TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession(t *testing.T)
 
 	// Guard the premise: the clone's own view of main is stale, so an
 	// unrefreshed comparison could not possibly see the landed fix.
-	cloneMain := strings.TrimSpace(runGit(t, f.clonePath, "rev-parse", "origin/main"))
-	seedMain := strings.TrimSpace(runGit(t, f.seed, "rev-parse", "main"))
-	if cloneMain == seedMain {
-		t.Fatalf("fixture is not exercising the refresh: clone origin/main == seed main (%s)", cloneMain)
+	cloneMain, _ := f.gf.OpenBranchRepo(f.clonePath).Rev("origin/main")
+	originMain := f.gf.Ref(f.bare, "refs/heads/main")
+	if cloneMain == originMain {
+		t.Fatalf("fixture is not exercising the refresh: clone origin/main == origin main (%s)", cloneMain)
 	}
 
 	check, result = f.run(t, openBeads)
@@ -655,11 +657,11 @@ func TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession(t *testing.T)
 	}
 }
 
-// TestStalledPolecatCheck_RealGit_KeepsWarningWhenWorkIsGenuinelyAbsent is the
+// TestStalledPolecatCheck_KeepsWarningWhenWorkIsGenuinelyAbsent is the
 // true positive the check was built for (gt-zzd, gt-7kr shapes): dead session,
 // commit on no remote, content on no default branch. The content check must not
 // clear it.
-func TestStalledPolecatCheck_RealGit_KeepsWarningWhenWorkIsGenuinelyAbsent(t *testing.T) {
+func TestStalledPolecatCheck_KeepsWarningWhenWorkIsGenuinelyAbsent(t *testing.T) {
 	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-obsidian", "gt-orphan1")
 
@@ -673,19 +675,19 @@ func TestStalledPolecatCheck_RealGit_KeepsWarningWhenWorkIsGenuinelyAbsent(t *te
 
 	// Fix must still push it: re-verification narrows the population, it does
 	// not disable the remedy.
-	if err := check.Fix(&CheckContext{TownRoot: f.townRoot, RigName: f.rigName}); err != nil {
+	if err := check.Fix(f.ctx()); err != nil {
 		t.Fatalf("Fix() error = %v, want nil", err)
 	}
-	if out := runGit(t, f.seed, "ls-remote", "--heads", "origin", f.branch); out == "" {
+	if !f.onOrigin(t, f.branch) {
 		t.Error("Fix() did not push genuinely at-risk work to origin")
 	}
 }
 
-// TestStalledPolecatCheck_RealGit_FixDoesNotResurrectSupersededBranch covers the
+// TestStalledPolecatCheck_FixDoesNotResurrectSupersededBranch covers the
 // second half of gt-4vbn — "the suggested fix is actively harmful". The branch
 // is flagged while genuinely unpreserved, then the fix lands on main in the gap
 // between Run and Fix. Fix must re-verify rather than push on Run's snapshot.
-func TestStalledPolecatCheck_RealGit_FixDoesNotResurrectSupersededBranch(t *testing.T) {
+func TestStalledPolecatCheck_FixDoesNotResurrectSupersededBranch(t *testing.T) {
 	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-agate2", "gt-race1")
 
@@ -696,11 +698,11 @@ func TestStalledPolecatCheck_RealGit_FixDoesNotResurrectSupersededBranch(t *test
 
 	f.reimplementOnMain(t)
 
-	if err := check.Fix(&CheckContext{TownRoot: f.townRoot, RigName: f.rigName}); err != nil {
+	if err := check.Fix(f.ctx()); err != nil {
 		t.Fatalf("Fix() error = %v, want nil — a superseded branch has nothing to push", err)
 	}
-	if out := runGit(t, f.seed, "ls-remote", "--heads", "origin", f.branch); out != "" {
-		t.Errorf("Fix() pushed a superseded branch back to origin: %q", out)
+	if f.onOrigin(t, f.branch) {
+		t.Errorf("Fix() pushed a superseded branch back to origin")
 	}
 }
 

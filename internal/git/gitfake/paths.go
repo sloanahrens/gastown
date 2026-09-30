@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // The remote, path-state and repair calls internal/doctor's checks make.
@@ -266,4 +267,12 @@ func (h *handle) DisableSparseCheckout() error {
 	}
 	r.configMap()["core.sparseCheckout"] = "false"
 	return nil
+}
+
+// FetchDefaultBranchWithTimeout fetches the remote's default branch into its
+// remote-tracking ref, as git fetch <remote> <branch> does under the refspec
+// a clone configures.
+func (h *handle) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
+	branch := h.RemoteDefaultBranch()
+	return h.FetchRefspecWithTimeout(remote, branch+":refs/remotes/"+remote+"/"+branch, timeout)
 }

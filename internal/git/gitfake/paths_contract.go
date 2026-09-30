@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -30,6 +31,7 @@ type PathRepo interface {
 	UntrackedPaths(pathspec string) ([]string, error)
 	DisableSparseCheckout() error
 	CloneBareWithBranch(url, dest, branch string) error
+	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
 }
 
 var (
@@ -116,6 +118,22 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if err := g.PullRebase(); err == nil {
 			t.Error("PullRebase with no upstream succeeded")
+		}
+	})
+
+	t.Run("FetchDefaultBranchWithTimeout refreshes the default branch's tracking ref", func(t *testing.T) {
+		env := newEnv(t)
+		fx := newFixture(t, env)
+		g := openPathRepo(env, fx.clone)
+		later := env.Commit(t, fx.origin, "main", "later", map[string]string{"c.txt": "c\n"})
+		if err := g.FetchDefaultBranchWithTimeout("origin", time.Minute); err != nil {
+			t.Fatalf("FetchDefaultBranchWithTimeout: %v", err)
+		}
+		if got, _ := g.Rev("origin/main"); got != later {
+			t.Errorf("origin/main = %s, want %s", got, later)
+		}
+		if head, _ := g.Rev("HEAD"); head == later {
+			t.Error("the fetch moved HEAD")
 		}
 	})
 

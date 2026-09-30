@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"time"
+
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -29,6 +31,12 @@ type Repo interface {
 	ConfigurePushURL(remote, pushURL string) error
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
+
+	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
+	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
+	RemoteDefaultBranch() string
+	Push(remote, branch string, force bool) error
 
 	Checkout(ref string) error
 	CheckoutDetach(ref string) error
