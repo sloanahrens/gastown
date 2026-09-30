@@ -319,9 +319,9 @@ All leg analyses from: {{.output.directory}}/
 
 **After writing the file, mail the human overseer:**
 ```bash
-SUBJECT=$(cat <<'EOF'
+SUBJECT=$(cat <<'GT_PROBLEM_EOF'
 PRD Review Complete: {{.problem}}
-EOF
+GT_PROBLEM_EOF
 )
 gt mail send --human -s "$SUBJECT" --stdin <<'BODY'
 Review is ready: {{.output.directory}}/prd-review.md

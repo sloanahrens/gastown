@@ -118,6 +118,29 @@ func patrolWatchdogTargets(townRoot string, rigs []string) []patrolWatchdogTarge
 	return targets
 }
 
+// filterPatrolWatchdogTargets drops the roles the town has switched off: the
+// deacon when its patrol is disabled, and the witness of a rig where
+// WitnessWantedInRig is false. A role deliberately removed is not "awake but
+// not patrolling", and alarming on it every cycle would bury real findings
+// (ADR 0005).
+func filterPatrolWatchdogTargets(targets []patrolWatchdogTarget, cfg *DaemonPatrolConfig, active func(string) bool) []patrolWatchdogTarget {
+	out := targets[:0:0]
+	for _, t := range targets {
+		switch t.Role {
+		case constants.RoleDeacon:
+			if !active(constants.RoleDeacon) {
+				continue
+			}
+		case constants.RoleWitness:
+			if !active(constants.RoleWitness) || !WitnessWantedInRig(cfg, t.Rig) {
+				continue
+			}
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
 // pausedRig is a known rig the watchdog will not check, together with the
 // operational state that put it out of reach.
 type pausedRig struct {
@@ -408,7 +431,7 @@ func (d *Daemon) runPatrolWatchdog() {
 	})
 	d.reportPausedRigs(rigs, paused)
 
-	targets := patrolWatchdogTargets(d.config.TownRoot, rigs)
+	targets := filterPatrolWatchdogTargets(patrolWatchdogTargets(d.config.TownRoot, rigs), d.patrolConfig, d.isPatrolActive)
 	cadence := patrolWatchdogCadence(d.patrolConfig)
 	multiplier := patrolWatchdogMultiplier(d.patrolConfig)
 	nudgeEnabled := patrolWatchdogNudgeEnabled(d.patrolConfig)
