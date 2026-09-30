@@ -45,7 +45,7 @@ func (c *LinkedPaneCheck) Run(ctx *CheckContext) *CheckResult {
 	// Filter to Gas Town sessions only
 	var gtSessions []string
 	for _, s := range sessions {
-		if session.IsKnownSession(s) {
+		if ctx.prefixes().IsKnownSession(s) {
 			gtSessions = append(gtSessions, s)
 		}
 	}
@@ -123,7 +123,7 @@ func (c *LinkedPaneCheck) Fix(ctx *CheckContext) error {
 
 	for _, session := range c.linkedSessions {
 		// Through the supervisor, so a parked seat or an e-stop refuses.
-		if err := killSessionForFix(ctx.TownRoot, t, session, "linked pane crosstalk"); err != nil {
+		if err := killSessionForFix(ctx, t, session, "linked pane crosstalk"); err != nil {
 			lastErr = err
 		}
 	}

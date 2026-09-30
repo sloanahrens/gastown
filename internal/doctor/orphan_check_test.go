@@ -87,7 +87,7 @@ func TestOrphanProcessCheck_Run(t *testing.T) {
 			t.Parallel()
 			check := NewOrphanProcessCheck()
 			check.procs = cannedProcesses{tmux: map[int]bool{100: true}, table: tc.table, parents: parents}
-			result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+			result := check.Run(&CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()})
 			if result.Status != tc.want || result.Message != tc.message {
 				t.Fatalf("Run = %v %q, want %v %q", result.Status, result.Message, tc.want, tc.message)
 			}
@@ -133,7 +133,7 @@ func TestIsCrewSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := isCrewSession(tt.session)
+			got := isCrewSession(testPrefixRegistry(), tt.session)
 			if got != tt.want {
 				t.Errorf("isCrewSession(%q) = %v, want %v", tt.session, got, tt.want)
 			}
@@ -170,7 +170,7 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := check.isValidSession(tt.session, validRigs, mayorSession)
+			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs, mayorSession)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v", tt.session, got, tt.want)
 			}
@@ -259,7 +259,7 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := check.isValidSession(tt.session, validRigs, mayorSession)
+			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs, mayorSession)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v: %s", tt.session, got, tt.want, tt.reason)
 			}
@@ -334,11 +334,11 @@ func TestOrphanSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	// Verify isCrewSession correctly identifies crew sessions
 	for _, sess := range check.orphanSessions {
 		if sess == "gt-crew-max" || sess == "nif-crew-codex1" {
-			if !isCrewSession(sess) {
+			if !isCrewSession(testPrefixRegistry(), sess) {
 				t.Errorf("isCrewSession(%q) should return true for crew session", sess)
 			}
 		} else {
-			if isCrewSession(sess) {
+			if isCrewSession(testPrefixRegistry(), sess) {
 				t.Errorf("isCrewSession(%q) should return false for non-crew session", sess)
 			}
 		}
@@ -370,7 +370,7 @@ func TestIsCrewSession_ComprehensivePatterns(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := isCrewSession(tt.session)
+			got := isCrewSession(testPrefixRegistry(), tt.session)
 			if got != tt.want {
 				t.Errorf("isCrewSession(%q) = %v, want %v: %s", tt.session, got, tt.want, tt.reason)
 			}
@@ -396,7 +396,7 @@ func TestOrphanSessionCheck_HQSessions(t *testing.T) {
 		},
 	}
 	check := NewOrphanSessionCheckWithSessionLister(lister)
-	result := check.Run(&CheckContext{TownRoot: townRoot})
+	result := check.Run(&CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()})
 
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK for valid hq sessions, got %v: %s", result.Status, result.Message)
@@ -443,7 +443,7 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 		},
 	}
 	check := NewOrphanSessionCheckWithSessionLister(lister)
-	result := check.Run(&CheckContext{TownRoot: townRoot})
+	result := check.Run(&CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()})
 
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK, got %v: %s", result.Status, result.Message)

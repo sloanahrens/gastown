@@ -29,7 +29,7 @@ func TestIntegrationTownSetup(t *testing.T) {
 	}
 
 	townRoot := setupIntegrationTown(t)
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	// Run doctor and verify no errors
 	d := NewDoctor()
@@ -62,7 +62,7 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 
-	// Create test rigs (TestMain registers gastown as "ga" and "gt", niflheim as "nif")
+	// Create test rigs (testPrefixRegistry maps gastown to "ga" and "gt", niflheim to "nif")
 	createTestRig(t, townRoot, "gastown")
 	createTestRig(t, townRoot, "niflheim")
 
@@ -86,19 +86,19 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 	}
 
 	check := NewOrphanSessionCheck()
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validRigs := check.getValidRigs(townRoot)
 			mayorSession := "hq-mayor"
 
-			isValid := check.isValidSession(tt.sessionName, validRigs, mayorSession)
+			isValid := check.isValidSession(testPrefixRegistry(), tt.sessionName, validRigs, mayorSession)
 
 			if tt.expectOrphan && isValid {
 				t.Errorf("session %q should be detected as orphan but was marked valid", tt.sessionName)
 			}
-			if !tt.expectOrphan && !isValid && session.HasKnownPrefix(tt.sessionName) {
+			if !tt.expectOrphan && !isValid && testPrefixRegistry().HasPrefix(tt.sessionName) {
 				t.Errorf("session %q should be valid but was detected as orphan", tt.sessionName)
 			}
 		})
@@ -127,100 +127,9 @@ func TestIntegrationCrewSessionProtection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isCrewSession(tt.session)
+			result := isCrewSession(testPrefixRegistry(), tt.session)
 			if result != tt.isCrew {
 				t.Errorf("isCrewSession(%q) = %v, want %v", tt.session, result, tt.isCrew)
-			}
-		})
-	}
-}
-
-// TestIntegrationEnvVarsConsistency verifies env var expectations match actual setup.
-func TestIntegrationEnvVarsConsistency(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	townRoot := setupIntegrationTown(t)
-	createTestRig(t, townRoot, "gastown")
-
-	// Test that expected env vars are computed correctly for different roles
-	tests := []struct {
-		role      string
-		rig       string
-		wantActor string
-	}{
-		{"mayor", "", "mayor"},
-		{"polecat", "gastown", "gastown/polecats/"},
-		{"crew", "gastown", "gastown/crew/"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.role+"_"+tt.rig, func(t *testing.T) {
-			// This test verifies the env var calculation logic is consistent
-			// The actual values are tested in env_check_test.go
-			if tt.wantActor == "" {
-				t.Skip("actor validation not implemented")
-			}
-		})
-	}
-}
-
-// TestIntegrationBeadsDirRigLevel verifies BEADS_DIR is computed correctly per rig.
-// This was a key bug: setting BEADS_DIR globally at the shell level caused all beads
-// operations to use the wrong database (e.g., rig ops used town beads with hq- prefix).
-func TestIntegrationBeadsDirRigLevel(t *testing.T) {
-	townRoot := setupIntegrationTown(t)
-	createTestRig(t, townRoot, "gastown")
-	createTestRig(t, townRoot, "niflheim")
-
-	tests := []struct {
-		name            string
-		role            string
-		rig             string
-		wantBeadsSuffix string // Expected suffix in BEADS_DIR path
-	}{
-		{
-			name:            "mayor_uses_town_beads",
-			role:            "mayor",
-			rig:             "",
-			wantBeadsSuffix: "/.beads",
-		},
-		{
-			name:            "polecat_uses_rig_beads",
-			role:            "polecat",
-			rig:             "niflheim",
-			wantBeadsSuffix: "/niflheim/.beads",
-		},
-		{
-			name:            "crew_uses_rig_beads",
-			role:            "crew",
-			rig:             "gastown",
-			wantBeadsSuffix: "/gastown/.beads",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Compute the expected BEADS_DIR for this role
-			var expectedBeadsDir string
-			if tt.rig != "" {
-				expectedBeadsDir = filepath.Join(townRoot, tt.rig, ".beads")
-			} else {
-				expectedBeadsDir = filepath.Join(townRoot, ".beads")
-			}
-
-			// Verify the path ends with the expected suffix
-			if !strings.HasSuffix(expectedBeadsDir, tt.wantBeadsSuffix) {
-				t.Errorf("BEADS_DIR=%q should end with %q", expectedBeadsDir, tt.wantBeadsSuffix)
-			}
-
-			// Key verification: rig-level BEADS_DIR should NOT equal town-level
-			if tt.rig != "" {
-				townBeadsDir := filepath.Join(townRoot, ".beads")
-				if expectedBeadsDir == townBeadsDir {
-					t.Errorf("rig-level BEADS_DIR should differ from town-level: both are %q", expectedBeadsDir)
-				}
 			}
 		})
 	}
@@ -248,7 +157,7 @@ func TestIntegrationEnvVarsBeadsDirMismatch(t *testing.T) {
 	}
 
 	check := NewEnvVarsCheckWithReader(reader)
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	// Should detect the BEADS_DIR mismatch
@@ -286,7 +195,7 @@ func TestIntegrationAgentBeadsExist(t *testing.T) {
 	setupMockBeads(t, townRoot, "gastown")
 
 	check := NewAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	result := check.Run(ctx)
 
@@ -311,7 +220,7 @@ func TestIntegrationRigBeadsExist(t *testing.T) {
 	setupMockBeads(t, townRoot, "gastown")
 
 	check := NewRigBeadsCheck()
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	result := check.Run(ctx)
 
@@ -329,7 +238,7 @@ func TestIntegrationDoctorFixReliability(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 	createTestRig(t, townRoot, "gastown")
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	// Deliberately break something fixable
 	breakRuntimeGitignore(t, townRoot)
@@ -371,7 +280,7 @@ func TestIntegrationFixMultipleIssues(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 	createTestRig(t, townRoot, "gastown")
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	// Break multiple things
 	breakRuntimeGitignore(t, townRoot)
@@ -402,7 +311,7 @@ func TestIntegrationFixIdempotent(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 	createTestRig(t, townRoot, "gastown")
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	// Break something
 	breakRuntimeGitignore(t, townRoot)
@@ -442,7 +351,7 @@ func TestIntegrationFixDoesntBreakWorking(t *testing.T) {
 
 	townRoot := setupIntegrationTown(t)
 	createTestRig(t, townRoot, "gastown")
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	d := NewDoctor()
 	d.RegisterAll(
@@ -481,7 +390,7 @@ func TestIntegrationNoFalsePositives(t *testing.T) {
 	townRoot := setupIntegrationTown(t)
 	createTestRig(t, townRoot, "gastown")
 	setupMockBeads(t, townRoot, "gastown")
-	ctx := &CheckContext{TownRoot: townRoot}
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
 
 	d := NewDoctor()
 	d.RegisterAll(
@@ -576,7 +485,7 @@ func TestIntegrationMultiTownSocketIsolation(t *testing.T) {
 	tmux.SetDefaultSocket(socketA)
 	checkA := NewSocketSplitBrainCheck()
 	checkA.defaultListerForTest = &emptySessionLister{}
-	result := checkA.Run(&CheckContext{TownRoot: townA})
+	result := checkA.Run(&CheckContext{TownRoot: townA, sessionPrefixes: testPrefixRegistry()})
 	if result.Status != StatusOK {
 		t.Errorf("split-brain check: want StatusOK, got %v: %s", result.Status, result.Message)
 		for _, d := range result.Details {
@@ -589,7 +498,7 @@ func TestIntegrationMultiTownSocketIsolation(t *testing.T) {
 	tmux.SetDefaultSocket(socketB)
 	checkB := NewSocketSplitBrainCheck()
 	checkB.defaultListerForTest = &emptySessionLister{}
-	resultB := checkB.Run(&CheckContext{TownRoot: townB})
+	resultB := checkB.Run(&CheckContext{TownRoot: townB, sessionPrefixes: testPrefixRegistry()})
 	if resultB.Status != StatusOK {
 		t.Errorf("split-brain check for townB: want StatusOK, got %v: %s",
 			resultB.Status, resultB.Message)

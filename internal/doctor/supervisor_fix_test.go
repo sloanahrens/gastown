@@ -7,17 +7,18 @@ import (
 
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 // parkSession parks the seat behind a session name in town.
 func parkSession(t *testing.T, town, sess string) {
 	t.Helper()
-	seat, err := supervisor.SeatForSession(sess)
+	seat, err := session.ParseSessionNameWithRegistry(sess, testPrefixRegistry())
 	if err != nil {
-		t.Fatalf("SeatForSession(%q): %v", sess, err)
+		t.Fatalf("ParseSessionNameWithRegistry(%q): %v", sess, err)
 	}
-	if _, err := intent.Update(town, supervisor.IntentSeat(seat), func(r *intent.Record) error {
+	if _, err := intent.Update(town, supervisor.IntentSeat(*seat), func(r *intent.Record) error {
 		r.Desired = intent.DesiredPark
 		r.Reason = "operator hold"
 		return nil
@@ -85,7 +86,7 @@ func TestOrphanSessionCheck_FixHonorsTheTownEstop(t *testing.T) {
 func TestKillSessionForFix_RefusesAnUnparsableName(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{}
-	if err := killSessionForFix(t.TempDir(), lister, "not-a-town-session-", "zombie cleanup"); err == nil {
+	if err := killSessionForFix(&CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}, lister, "not-a-town-session-", "zombie cleanup"); err == nil {
 		t.Fatal("an unparsable session name was not refused")
 	}
 	if len(lister.killed) != 0 {

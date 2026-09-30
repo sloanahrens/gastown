@@ -70,7 +70,7 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 	var hasStaleFiles bool
 
 	// Find all settings files (stale and missing)
-	settingsFiles := c.findSettingsFiles(ctx.TownRoot)
+	settingsFiles := c.findSettingsFiles(ctx.TownRoot, ctx.prefixes())
 
 	for _, sf := range settingsFiles {
 		// Missing settings.local.json files need agent restart to create
@@ -172,7 +172,7 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 // Settings are now installed in gastown-managed parent directories (crew/, polecats/)
 // and passed via --settings flag. Old settings.local.json files
 // in working directories are detected as stale.
-func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettingsInfo {
+func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.PrefixRegistry) []staleSettingsInfo {
 	var files []staleSettingsInfo
 
 	// Check for STALE settings at town root (~/gt/.claude/settings.json)
@@ -312,7 +312,7 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 								path:          stalePath,
 								agentType:     "crew",
 								rigName:       rigName,
-								sessionName:   session.CrewSessionName(session.PrefixFor(rigName), crewEntry.Name()),
+								sessionName:   session.CrewSessionName(reg.PrefixForRig(rigName), crewEntry.Name()),
 								wrongLocation: true,
 								missing:       []string{"stale settings in workdir (settings now in crew/.claude/settings.json)"},
 							})
@@ -366,7 +366,7 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 							path:          stalePath,
 							agentType:     "polecat",
 							rigName:       rigName,
-							sessionName:   session.PolecatSessionName(session.PrefixFor(rigName), pcEntry.Name()),
+							sessionName:   session.PolecatSessionName(reg.PrefixForRig(rigName), pcEntry.Name()),
 							wrongLocation: true,
 							missing:       []string{"stale settings in intermediate dir (settings now in polecats/.claude/settings.json)"},
 						})
@@ -382,7 +382,7 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 								path:          stalePath,
 								agentType:     "polecat",
 								rigName:       rigName,
-								sessionName:   session.PolecatSessionName(session.PrefixFor(rigName), pcEntry.Name()),
+								sessionName:   session.PolecatSessionName(reg.PrefixForRig(rigName), pcEntry.Name()),
 								wrongLocation: true,
 								missing:       []string{"stale settings in workdir (settings now in polecats/.claude/settings.json)"},
 							})
@@ -663,7 +663,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 					// Cycle the agent by killing it through the supervisor and
 					// letting the daemon restart it. A refusal (parked seat,
 					// e-stop) is reported rather than dropped.
-					if err := killSessionForFix(ctx.TownRoot, t, sf.sessionName, "restart to apply recreated settings"); err != nil {
+					if err := killSessionForFix(ctx, t, sf.sessionName, "restart to apply recreated settings"); err != nil {
 						errors = append(errors, fmt.Sprintf("not restarting %s: %v", sf.sessionName, err))
 					}
 				}

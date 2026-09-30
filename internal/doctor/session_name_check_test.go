@@ -42,9 +42,8 @@ func TestMalformedSessionNameCheck_Run_NoSessions(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{}}
-	check.registryForTest = testRegistryForNameCheck()
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -59,7 +58,6 @@ func TestMalformedSessionNameCheck_Run_AllCorrect(t *testing.T) {
 	t.Parallel()
 	reg := testRegistryForNameCheck()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = reg
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"hq-mayor",
 		"gt-crew-max",
@@ -67,7 +65,7 @@ func TestMalformedSessionNameCheck_Run_AllCorrect(t *testing.T) {
 		"wa-crew-batista",
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: reg}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -79,14 +77,13 @@ func TestMalformedSessionNameCheck_Run_AllCorrect(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_NonGasTownSessions(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"my-personal-session",
 		"vim",
 		"jupyter",
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -100,14 +97,13 @@ func TestMalformedSessionNameCheck_Run_NonGasTownSessions(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_NonGasTownWithRigSubstring(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"my-niflheim-crew-max",              // "my" is not a known Gastown prefix
 		"foo-gastown-crew-max",              // "foo" is not a known Gastown prefix
 		"test-whatsapp_automation-crew-max", // "test" is not a known Gastown prefix
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -123,13 +119,12 @@ func TestMalformedSessionNameCheck_Run_NonGasTownWithRigSubstring(t *testing.T) 
 func TestMalformedSessionNameCheck_Run_PolecatWithRigSubstring(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"gt-fix-gastown-crew-max",     // polecat "fix-gastown-crew-max", prefix "gt-fix" is not known
 		"nif-debug-niflheim-crew-max", // prefix "nif-debug" is not a known prefix
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -144,7 +139,6 @@ func TestMalformedSessionNameCheck_Run_PolecatWithRigSubstring(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_DetectsMismatch(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"hq-mayor",
 		"gt-niflheim-crew-wolf", // legacy: should be nif-crew-wolf
@@ -152,7 +146,7 @@ func TestMalformedSessionNameCheck_Run_DetectsMismatch(t *testing.T) {
 		"nif-crew-bear",         // already canonical — should not be flagged
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusWarning {
@@ -184,12 +178,11 @@ func TestMalformedSessionNameCheck_Run_DetectsMismatch(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_LegacyWACrew(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"gt-whatsapp_automation-crew-max",
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusWarning {
@@ -210,12 +203,11 @@ func TestMalformedSessionNameCheck_Run_LegacyWACrew(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_CrewSession(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"gt-niflheim-crew-wolf",
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusWarning {
@@ -239,13 +231,12 @@ func TestMalformedSessionNameCheck_Run_CrewSession(t *testing.T) {
 func TestMalformedSessionNameCheck_Run_RetiredRoleSuffixIgnored(t *testing.T) {
 	t.Parallel()
 	check := NewMalformedSessionNameCheck()
-	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
 		"gt-niflheim-witness",
 		"gt-niflheim-refinery",
 	}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testRegistryForNameCheck()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
