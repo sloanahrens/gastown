@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/lintlock"
 )
 
 // scriptedRun answers each step by its command string.
@@ -183,5 +185,55 @@ func TestRigGatePicksGoOrRigCommandsOrRefuses(t *testing.T) {
 	}
 	if _, err := RigGate(plain, nil, true); err == nil {
 		t.Fatal("nil config must refuse")
+	}
+}
+
+// A contended golangci-lint linted nothing; the lint step waits it out on the
+// shared lintlock schedule instead of reporting findings that do not exist.
+func TestCommandGateRetriesAContendedLint(t *testing.T) {
+	t.Parallel()
+	attempts := 0
+	g := GoGate(true)
+	g.lockDelays = []time.Duration{0, 0}
+	g.run = func(_ context.Context, _ string, _, argv []string, out io.Writer) (int, error) {
+		if argv[len(argv)-1] == "make lint" {
+			attempts++
+			if attempts == 1 {
+				_, _ = io.WriteString(out, "level=error msg=\""+lintlock.Marker+"\"\n")
+				return 3, nil
+			}
+		}
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	res := g.Run(ctx, "/w")
+	if !res.Passed || attempts != 2 {
+		t.Fatalf("gate = %+v after %d lint attempts, want a pass on the second", res, attempts)
+	}
+
+	// A lint still contended after every retry linted nothing: an
+	// infrastructure error, never a red verdict on the tree.
+	g3 := GoGate(true)
+	g3.lockDelays = []time.Duration{0}
+	g3.run = func(_ context.Context, _ string, _, _ []string, out io.Writer) (int, error) {
+		_, _ = io.WriteString(out, lintlock.Marker+"\n")
+		return 3, nil
+	}
+	if res := g3.Run(ctx, "/w"); res.Passed || res.Err == nil {
+		t.Fatalf("a lint that never ran = %+v, want an infrastructure error", res)
+	}
+
+	// A lint that found something is not retried.
+	found := 0
+	g2 := GoGate(true)
+	g2.lockDelays = []time.Duration{0, 0}
+	g2.run = func(_ context.Context, _ string, _, argv []string, out io.Writer) (int, error) {
+		found++
+		_, _ = io.WriteString(out, "a.go:1: unused variable\n")
+		return 1, nil
+	}
+	if res := g2.Run(ctx, "/w"); res.Passed || found != 1 {
+		t.Fatalf("a lint with findings ran %d times, passed=%v", found, res.Passed)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/lintlock"
 )
 
 // Gate runs the checks a tree must pass. It is the one seam both sides of a
@@ -93,6 +94,11 @@ type Step struct {
 	Command string
 	// Env is added to the inherited environment.
 	Env []string
+	// LockRetry re-runs the step while its output says golangci-lint never
+	// ran because another instance held the module lock (the lintlock policy
+	// gt done and the refinery already share). Retries need ctx to carry a
+	// deadline; without one the first attempt is final.
+	LockRetry bool
 	// Wrap, when set, rewrites the argv before it runs. Land's caller uses
 	// it to hold the container slot around the test step
 	// (`gt slot run --role <r> --`) until the suite is Docker-free.
@@ -112,7 +118,8 @@ type CommandGate struct {
 	// Out, when set, streams every step's output as it runs.
 	Out io.Writer
 
-	run runFunc // nil means realRun
+	run        runFunc         // nil means realRun
+	lockDelays []time.Duration // nil means lintlock.RetryDelay
 }
 
 // GoGate is the Go rigs' gate: `make lint`, `go build ./...`, `make test`.
@@ -124,7 +131,7 @@ func GoGate(unitOnly bool) CommandGate {
 		test.Env = []string{"GT_TEST_DOCKER=0"}
 	}
 	return CommandGate{Steps: []Step{
-		{Name: "lint", Command: "make lint"},
+		{Name: "lint", Command: "make lint", LockRetry: true},
 		{Name: "build", Command: "go build ./..."},
 		test,
 	}}
@@ -180,24 +187,42 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 			argv = s.Wrap(argv)
 		}
 		var buf bytes.Buffer
-		writers := []io.Writer{&buf}
-		if g.Out != nil {
-			writers = append(writers, g.Out)
-		}
-		var logFile *os.File
-		if g.LogDir != "" {
-			f, err := os.OpenFile(filepath.Join(g.LogDir, s.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-			if err != nil {
-				res.Err = fmt.Errorf("opening %s log: %w", s.Name, err)
-				return res
-			}
-			logFile = f
-			writers = append(writers, f)
-		}
 		start := time.Now()
-		code, err := run(ctx, dir, s.Env, argv, io.MultiWriter(writers...))
-		if logFile != nil {
-			_ = logFile.Close()
+		attempt := func() (int, error) {
+			buf.Reset()
+			writers := []io.Writer{&buf}
+			if g.Out != nil {
+				writers = append(writers, g.Out)
+			}
+			if g.LogDir != "" {
+				f, err := os.OpenFile(filepath.Join(g.LogDir, s.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+				if err != nil {
+					return -1, fmt.Errorf("opening %s log: %w", s.Name, err)
+				}
+				defer func() { _ = f.Close() }()
+				writers = append(writers, f)
+			}
+			return run(ctx, dir, s.Env, argv, io.MultiWriter(writers...))
+		}
+		var code int
+		var err error
+		if s.LockRetry {
+			lintlock.RetryWithDelays(ctx, g.lockDelays, func() lintlock.Attempt {
+				code, err = attempt()
+				switch {
+				case err != nil:
+					return lintlock.Attempt{Err: err, Output: buf.String()}
+				case code != 0:
+					return lintlock.Attempt{Err: fmt.Errorf("exit %d", code), Output: buf.String()}
+				}
+				return lintlock.Attempt{Output: buf.String()}
+			}, func(n, of int, wait time.Duration) {
+				if g.Out != nil {
+					_, _ = fmt.Fprintf(g.Out, "%s: golangci-lint held by another run; retry %d/%d in %s\n", s.Name, n, of, wait)
+				}
+			})
+		} else {
+			code, err = attempt()
 		}
 		out := buf.String()
 		res.Steps = append(res.Steps, StepResult{
@@ -210,6 +235,12 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 		})
 		if err != nil {
 			res.Err = fmt.Errorf("gate step %s (%s) did not run: %w", s.Name, s.Command, err)
+			return res
+		}
+		if code != 0 && s.LockRetry && lintlock.Unfinished(out) {
+			// Still contended (or stopped at its own timeout) after every
+			// retry: nothing was linted, so this is not a verdict on the tree.
+			res.Err = fmt.Errorf("gate step %s never finished: golangci-lint's module lock stayed held or it hit its own timeout; nothing was linted", s.Name)
 			return res
 		}
 		if code != 0 {
