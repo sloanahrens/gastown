@@ -1,0 +1,31 @@
+# The slow tier (gt-z862q, internal/testpolicy/tier.go): Go packages that
+# `make gate` skips and `make test-slow` runs after landing. One per line:
+# "<package> <measured wall> # <why it is slow>". The walls are from `make gate`
+# on main 2026-09-30 09:08 (89 packages, 699 s wall, load average ~100); these
+# 22 packages took >= 30 s each and ~2000 s of the 2139 s package-wall sum.
+# They spawn git, bd, tmux or dolt subprocesses (system CPU 10-20x user):
+# integration tests in the unit tier. The gate fails any other package that
+# takes over 15 s; fix that test, or list the package here with its measured
+# wall and why. Leaving this list: make the package fast, then delete its line.
+internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
+internal/refinery 212s # real git repos and a Dolt container port; D2 replaces the package
+internal/refinery/editorial 167s # tests exec git (29 sites) over real repos; D2 replaces the package
+internal/witness 95s # real tmux (13 tmux.New) and git, hermetic harness
+internal/checkpoint 88s # tests exec git over real repos
+internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
+internal/rig 88s # tests exec git (12 sites) over real clones
+internal/version 87s # cause not yet diagnosed (git exec); moved on measured wall alone
+internal/web 83s # hermetic harness; cause not yet diagnosed, moved on measured wall alone
+internal/dog 82s # tests exec git (16 sites), hermetic harness
+internal/daemon 81s # real git repos (26 initGitRepo), tmux and Dolt
+internal/polecat 77s # tests exec git (44 sites), 21 tmux.New, Dolt container
+internal/doltserver 74s # starts real dolt processes
+internal/testutil 71s # the harnesses themselves: git, tmux, hermetic town
+internal/formula 67s # tests exec bash and git
+internal/crew 66s # tests exec git over real clones
+internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
+internal/util 45s # real tmux and process helpers
+internal/git 43s # about 1900 git execs (overbudget.txt, gt-22hdp.35)
+internal/land 41s # land path over real git repos, hermetic harness
+internal/mail 32s # mail through bd and a Dolt container
+internal/deacon 32s # hermetic harness; cause not yet diagnosed, moved on measured wall alone

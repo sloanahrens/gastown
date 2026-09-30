@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/testpolicy"
 )
 
 // TestWithoutReentrantMarker_StripsReentrantMarker covers gt-22hdp.55: `gt
@@ -50,5 +51,36 @@ func TestWithoutReentrantMarker_KeepsOtherVars(t *testing.T) {
 
 	if strings.Join(env, "\x00") != strings.Join(in, "\x00") {
 		t.Fatalf("withoutReentrantMarker(%v) = %v, want it unchanged when no marker is present", in, env)
+	}
+}
+
+// TestSummaryLines_KeepsOnlyPackageSummaries feeds summaryLines go test text
+// in pieces that split lines, as a pipe delivers it, and checks that only the
+// "ok" and "FAIL\t<pkg>" lines the wall check reads come out.
+func TestSummaryLines_KeepsOnlyPackageSummaries(t *testing.T) {
+	t.Parallel()
+	var got strings.Builder
+	s := &summaryLines{w: &got}
+	text := "--- FAIL: TestX (1.00s)\n    x_test.go:1: ok then\nFAIL\nFAIL\tgithub.com/steveyegge/gastown/internal/a\t2.1s\nok  \tgithub.com/steveyegge/gastown/internal/b\t16.0s\n?   \tgithub.com/steveyegge/gastown/internal/c\t[no test files]\n"
+	for i := 0; i < len(text); i += 7 {
+		end := min(i+7, len(text))
+		if _, err := s.Write([]byte(text[i:end])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "FAIL\tgithub.com/steveyegge/gastown/internal/a\t2.1s\nok  \tgithub.com/steveyegge/gastown/internal/b\t16.0s\n"
+	if got.String() != want {
+		t.Fatalf("summaryLines kept %q, want %q", got.String(), want)
+	}
+}
+
+// TestWithoutSlow drops exactly the listed packages, not their subpackages.
+func TestWithoutSlow(t *testing.T) {
+	t.Parallel()
+	pkgs := []string{module + "/internal/refinery", module + "/internal/refinery/editorial", module + "/internal/slot"}
+	got := withoutSlow(pkgs, []testpolicy.SlowEntry{{Package: "internal/refinery"}})
+	want := []string{module + "/internal/refinery/editorial", module + "/internal/slot"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("withoutSlow = %v, want %v", got, want)
 	}
 }

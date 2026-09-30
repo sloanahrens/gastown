@@ -4,18 +4,21 @@ Before you write or convert a test in this repository, read this page. It covers
 
 ## The gate
 
-Two Makefile targets are the only test entry points. CI, `gt done`, the land path and a human at a shell all run them verbatim. The Makefile header states the same contract.
+Three Makefile targets are the test tiers, and `make test` runs all three in order for a human. CI, `gt done`, the land path and a human at a shell all run them verbatim. The Makefile header states the same contract.
 
 | target | runs | Docker | when |
 |---|---|---|---|
-| `make gate` | `make lint`, then `go build ./...`, then the unit tier: the budget runner over `./...` beside the shell tests in `scripts/test-makefile.sh` | never | before every landing |
+| `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, failing any package over 15 s of wall time; prints its wall at the end | never | before every landing |
+| `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` | never | after landing |
 | `make test-integration` | `go test -tags integration -run '^TestIntegration' ./...`, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
 
-Exit codes, for both targets:
+Exit codes, for every target:
 - 0 means green.
 - Anything else means red. make exits 2 when a recipe fails and 130 when it is interrupted.
 
 Decide on the exit code only, never on the output. For a human reading the log, a lint failure ends with make's error line for the `lint` target, and a later stage ends with a `gate: FAILED at <stage>` line on stderr.
+
+A package in the fast tier that takes more than 15 s of wall time fails `make gate` with a `TIER:` line naming it: make its tests faster, or add it to `internal/testpolicy/slow.txt` as `<package> <measured wall> # <why>` (gt-z862q).
 
 `make gate` never starts a container and never takes the container-gate slot. Its recipe writes `GT_TEST_DOCKER=0` itself, so an inherited value cannot turn containers on. Do not wrap it in `gt slot run`. `make test-integration` writes `GT_TEST_DOCKER=1` and does start containers, so it runs under `gt slot run`.
 

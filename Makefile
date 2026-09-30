@@ -1,22 +1,30 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate
 
-# The gate (docs/testing.md, "The gate"). Two targets are the only test entry
-# points, and every caller runs them verbatim: CI, gt done, the land path and
-# a human at a shell.
+# The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
+# every caller runs them verbatim: CI, gt done, the land path and a human at a
+# shell.
 #
-#   make gate              lint, then `go build ./...`, then the unit tier: the
-#                          budget runner over ./... beside the shell tests
-#                          (scripts/test-makefile.sh). Never starts a container
-#                          and never takes the container-gate slot: the recipe
-#                          writes GT_TEST_DOCKER=0 itself, so an inherited value
-#                          cannot turn containers on. Do not wrap it in
-#                          `gt slot run`.
+#   make gate              the landing gate: lint, then `go build ./...`, then
+#                          the fast tier: the budget runner over every package
+#                          NOT in internal/testpolicy/slow.txt, failing any
+#                          package that takes over $(FAST_TIER_MAX_WALL) of wall
+#                          time (gt-z862q). Prints its wall time at the end.
+#                          Never starts a container and never takes the
+#                          container-gate slot: the recipe writes
+#                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
+#                          turn containers on. Do not wrap it in `gt slot run`.
+#   make test-slow         the slow tier, after landing: the packages in
+#                          internal/testpolicy/slow.txt, then the shell tests
+#                          (scripts/test-makefile.sh), with GT_TEST_DOCKER=0.
+#                          No containers, no slot.
 #   make test-integration  the integration tier: -tags integration over ./...,
 #                          then every package in internal/testpolicy/docker.txt
 #                          whole, with GT_TEST_DOCKER=1. It starts containers,
 #                          so run it under `gt slot run`.
+#   make test              all three, in that order, for a human. It starts
+#                          containers, so run it under `gt slot run`.
 #
-# Exit codes, for both: 0 means green. Anything else means red: make exits 2
+# Exit codes, for all: 0 means green. Anything else means red: make exits 2
 # when a recipe fails, and 130 when interrupted. Decide on the exit code only,
 # never on the output. For a human reading the log: a lint failure ends with
 # make's own error line for the lint target, and a later stage ends with a
@@ -241,9 +249,16 @@ clean:
 # directory.
 NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -path '*/testdata/*' 2>/dev/null | LC_ALL=C sort))
 
-# The shell half of the unit tier. A make variable only so
-# scripts/makefile-gate_test.sh can drive the gate's failure paths with a stub.
-GATE_SHELL_TESTS ?= scripts/test-makefile.sh
+# The shell tests, run by the slow tier. A make variable only so
+# scripts/makefile-gate_test.sh can drive the failure paths with a stub.
+SHELL_TESTS ?= scripts/test-makefile.sh
+
+# The tier boundary (gt-z862q). slow.txt names the packages the gate skips and
+# test-slow runs; the gate fails any other package that runs longer than
+# FAST_TIER_MAX_WALL (keep it equal to testpolicy.FastTierMaxWall).
+SLOW_LIST := internal/testpolicy/slow.txt
+SLOW_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' $(SLOW_LIST) | awk 'NF{print $$1}'))
+FAST_TIER_MAX_WALL := 15s
 
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
@@ -251,43 +266,46 @@ GATE_SHELL_TESTS ?= scripts/test-makefile.sh
 # done's and the refinery's retry policy reads (internal/lintlock, gt-kqwu).
 # A target-specific variable, so it reaches the lint prerequisite.
 gate: LINT_RUNNER_FLAGS := --allow-serial-runners
+# The gate's start, read when make parses the Makefile, so the wall it prints
+# includes lint.
+gate: GATE_START := $(shell date +%s)
 gate: lint
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
-	@# The unit tier. The shell tests run beside the Go suite (gt-22hdp.60);
-	@# their output is held and printed after it, and either failing fails the
-	@# gate. Both halves run in the background so the trap fires at once on
-	@# INT or TERM (bash defers traps until a foreground child exits): it stops
-	@# both, with their children, and removes the log. The shell suites use
-	@# only stub tmux/dolt/gt in mktemp dirs, so they share no state with the
-	@# Go suite. The budget runner measures converted packages through its
-	@# CPU-measuring -exec wrapper, which bypasses the test result cache, and
-	@# runs the packages in unconverted.txt afterwards with the cache
-	@# (gt-22hdp.53). -timeout 20m is the per-package hang detector: go's
-	@# 10m default is below what internal/cmd, internal/refinery and
-	@# internal/refinery/editorial take on a loaded host (measured on this
-	@# branch: 320-607 s each across three runs; a run at the 10m default
-	@# timed all three out with no test older than 11 s). It drops to the
-	@# default once D2 deletes refinery and D7 shrinks cmd.
-	@echo "gate: unit tier (budget runner beside $(GATE_SHELL_TESTS))" >&2
-	@# The trap finds the halves as this shell's children (pgrep -P) rather
-	@# than through $$! variables, so a signal that lands before a variable
-	@# is assigned still stops that half. Each half is stopped before its
-	@# children: a script whose running child dies first goes on to its next
-	@# line.
-	@log=$$(mktemp -t gt-test-makefile); \
-	trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; rm -f "$$log"; exit 130' INT TERM; \
-	bash $(GATE_SHELL_TESTS) >"$$log" 2>&1 & mk=$$!; \
-	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
+	@# The fast tier: every package not in $(SLOW_LIST). -max-wall fails a
+	@# package that ran longer than the fast tier allows, naming it, so the
+	@# boundary cannot drift (gt-z862q). The budget runner measures converted
+	@# packages through its CPU-measuring -exec wrapper, which bypasses the
+	@# test result cache, and runs the packages in unconverted.txt afterwards
+	@# with the cache (gt-22hdp.53). -timeout 20m is the per-package hang
+	@# detector, kept from the one gate definition (gt-ik4a1.1).
+	@echo "gate: unit tier (fast tier: every package not in $(SLOW_LIST); make test-slow runs those)" >&2
+	@# The suite runs in the background so the trap fires at once on INT or
+	@# TERM (bash defers traps until a foreground child exits); the trap finds
+	@# it as this shell's child (pgrep -P) and stops it before its children.
+	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -skip $(SLOW_LIST) -max-wall $(FAST_TIER_MAX_WALL) -- -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
-	wait $$mk; mk_rc=$$?; \
-	echo "=== shell tests (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
-	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc)" >&2; fi; \
-	if [ $$mk_rc -ne 0 ]; then echo "gate: FAILED at unit tier (shell tests, exit $$mk_rc)" >&2; fi; \
-	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ] && echo "gate: PASSED" >&2
+	wall=$$(( $$(date +%s) - $(GATE_START) )); \
+	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
+	echo "gate: PASSED in $${wall}s wall" >&2
+
+# test-slow is the slow tier: the packages the gate skips, then the shell
+# tests. Both run even when the first fails; either failing fails the target.
+test-slow:
+	@test -n "$(strip $(SLOW_PKGS))" || { echo "test-slow: $(SLOW_LIST) lists no package; refusing to run go test over nothing" >&2; exit 1; }
+	@start=$$(date +%s); rc=0; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m $(SLOW_PKGS) || { rc=1; echo "test-slow: FAILED at Go suite" >&2; }; \
+	GT_TEST_DOCKER=0 bash $(SHELL_TESTS) || { rc=1; echo "test-slow: FAILED at shell tests" >&2; }; \
+	echo "test-slow: $$([ $$rc -eq 0 ] && echo PASSED || echo FAILED) in $$(( $$(date +%s) - start ))s wall" >&2; \
+	exit $$rc
+
+# test runs every tier for a human: gate, then test-slow, then
+# test-integration. It starts containers, so run it under `gt slot run`.
+test: gate test-slow test-integration
 
 # The Docker-backed packages (internal/testpolicy/docker.txt, kept exact by
 # TestDockerTier). Their container tests skip in the gate and run here.
