@@ -1202,7 +1202,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 		return sub, fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
 	}
 	if aheadCount == 0 {
-		return sub, completeWithoutCode(r, sub, baseRef, isNoMergeTask)
+		return sub, completeWithoutCode(r, sub, target, baseRef, isNoMergeTask)
 	}
 	if reviewOnlySource {
 		return sub, fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", r.issueID, baseRef)
@@ -1306,10 +1306,13 @@ func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
 // completeWithoutCode finishes a run whose branch has nothing ahead of the
 // target: report-only, no_merge and review_only work, or a fix that already
 // landed. It closes the bead because no landing will; it pushes nothing.
+// target is the resolved landing branch (--target, the bead's base_branch or
+// the rig default): the already-landed check and the close record use it, so
+// work bound for a non-default branch is verified there, not on the default.
 // Polecats must have at least one commit unless the work is non-code
 // (gastown#1484). The error text must not mention --cleanup-status=clean:
 // agents read errors and self-bypass.
-func completeWithoutCode(r *doneRun, sub doneSubmission, baseRef string, isNoMergeTask bool) error {
+func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string, isNoMergeTask bool) error {
 	if os.Getenv("GT_POLECAT") != "" && doneCleanupStatus != "clean" && !isNoMergeTask {
 		// A branch already pushed with its work whose target has since moved
 		// on is not empty-handed (GH#wd7).
@@ -1348,12 +1351,12 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, baseRef string, isNoMer
 			return fmt.Errorf("cannot close no-code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", r.branch, baseRef)
 		}
 		headSHA, _ := r.g.Rev("HEAD")
-		if verifyErr := r.g.VerifyPushedCommitReachableFromPushTarget("origin", r.defaultBranch, headSHA); verifyErr != nil {
-			noteVerifiedPushFailure(bd, r.cwd, r.issueID, r.defaultBranch, headSHA, verifyErr)
+		if verifyErr := r.g.VerifyPushedCommitReachableFromPushTarget("origin", target, headSHA); verifyErr != nil {
+			noteVerifiedPushFailure(bd, r.cwd, r.issueID, target, headSHA, verifyErr)
 			return fmt.Errorf("cannot close no-code bead: %w", verifyErr)
 		}
 		if headSHA != "" {
-			closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, r.defaultBranch, headSHA)
+			closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, target, headSHA)
 		}
 	}
 	// Force-close bypasses molecule dependency checks; the retry absorbs

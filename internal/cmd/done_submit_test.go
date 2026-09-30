@@ -50,6 +50,13 @@ type doneSubmitRun struct {
 
 func runDoneSubmit(t *testing.T, gate land.Gate, branchSetup func(t *testing.T, workDir string)) doneSubmitRun {
 	t.Helper()
+	return runDoneSubmitWithFlags(t, gate, nil, branchSetup)
+}
+
+// runDoneSubmitWithFlags is runDoneSubmit with setFlags run after the done
+// flags are reset, for a test that needs a flag such as --target set.
+func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branchSetup func(t *testing.T, workDir string)) doneSubmitRun {
+	t.Helper()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
 	branchSetup(t, workDir)
@@ -68,6 +75,9 @@ func runDoneSubmit(t *testing.T, gate land.Gate, branchSetup func(t *testing.T, 
 	t.Chdir(workDir)
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
+	if setFlags != nil {
+		setFlags()
+	}
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	err := runDone(nil, nil)
 	bdLog, _ := os.ReadFile(logPath)
@@ -301,5 +311,29 @@ func TestRunDoneGateThatCouldNotRunExits16(t *testing.T) {
 	assertDoneExitCode(t, r.err, doneExitGateUnavailable, "not a verdict on your change")
 	if got := gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch); got != "" {
 		t.Errorf("a gate that did not run pushed the branch: %s", got)
+	}
+}
+
+// TestRunDoneNoCodeChecksTheResolvedTarget: a branch with nothing ahead of a
+// non-default target is verified as landed on THAT target and closed with it
+// recorded. Checking the rig default instead would refuse work that is on the
+// target it was aimed at, and record the wrong landing branch.
+func TestRunDoneNoCodeChecksTheResolvedTarget(t *testing.T) {
+	r := runDoneSubmitWithFlags(t, passingDoneGate(), func() { doneTarget = "release" }, func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, true)
+		// The feature commit is on origin/release but not on origin/main.
+		runGitForMQSubmitTest(t, workDir, "push", "origin", "HEAD:refs/heads/release")
+	})
+	if r.err != nil {
+		t.Fatalf("runDone: %v", r.err)
+	}
+	head := gitOut(t, r.workDir, "rev-parse", "HEAD")
+	for _, want := range []string{"target_branch: release", "commit_sha: " + head} {
+		if !strings.Contains(r.bdLog, want) {
+			t.Errorf("bd log lacks %q:\n%s", want, r.bdLog)
+		}
+	}
+	if strings.Contains(r.bdLog, "target_branch: main") {
+		t.Errorf("close recorded the rig default as the target:\n%s", r.bdLog)
 	}
 }
