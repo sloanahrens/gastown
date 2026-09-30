@@ -1,4 +1,4 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -6,9 +6,17 @@
 #
 #   make gate              the landing gate: lint, then `go build ./...`, then
 #                          the fast tier: the budget runner over every package
-#                          NOT in internal/testpolicy/slow.txt, failing any
-#                          package over testpolicy.FastTierMaxWall of wall
-#                          time (gt-z862q). Prints its wall time at the end.
+#                          NOT in internal/testpolicy/slow.txt. A package over
+#                          testpolicy.FastTierMaxWall of wall time is only
+#                          warned about (a TIER: line): wall time depends on
+#                          host load, and a landing is never refused for
+#                          contention (gt-z7qtk). Prints its wall time at the
+#                          end.
+#   make tier-check        the fast tier again, with a wall overrun failing
+#                          (-strict-wall), so the drift the gate only warns
+#                          about is still caught (gt-z862q). Run it on a quiet
+#                          host from the post-landing job or a daily one, never
+#                          as a landing gate. No lint or build stage.
 #                          Never starts a container and never takes the
 #                          container-gate slot: the recipe writes
 #                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
@@ -258,8 +266,9 @@ NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -
 SHELL_TESTS ?= scripts/test-makefile.sh
 
 # The tier boundary (gt-z862q). slow.txt names the packages the gate skips and
-# test-slow runs; the gate fails any other package that runs longer than
-# testpolicy.FastTierMaxWall, the one definition of the limit.
+# test-slow runs; tier-check fails any other package that runs longer than
+# testpolicy.FastTierMaxWall, the one definition of the limit. The gate only
+# warns (gt-z7qtk).
 SLOW_LIST := internal/testpolicy/slow.txt
 SLOW_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' $(SLOW_LIST) | awk 'NF{print $$1}'))
 
@@ -279,8 +288,10 @@ gate: lint
 	@# package writes that binary into the module's directory.
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
 	@# The fast tier: every package not in $(SLOW_LIST). -fast-tier fails a
-	@# package that ran longer than the fast tier allows, naming it, so the
-	@# boundary cannot drift (gt-z862q). The budget runner measures converted
+	@# package that ran longer than the fast tier allows, naming it, but only
+	@# as a warning: wall time depends on host load (gt-z7qtk). The user-CPU
+	@# budget is the failing check; make tier-check fails on wall (gt-z862q).
+	@# The budget runner measures converted
 	@# packages through its CPU-measuring -exec wrapper, which bypasses the
 	@# test result cache, and runs the packages in unconverted.txt afterwards
 	@# with the cache (gt-22hdp.53). -timeout 20m is the per-package hang
@@ -295,6 +306,14 @@ gate: lint
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	echo "gate: PASSED in $${wall}s wall" >&2
+
+# tier-check is the fast tier with the wall check failing. It is the drift
+# guard that the gate is not: it reruns every fast-tier package, so it belongs
+# after a landing or in a daily job, where a loaded host costs a retry and not
+# a refused landing.
+tier-check:
+	@echo "tier-check: fast tier, failing any package over the wall limit (every package not in $(SLOW_LIST))" >&2
+	@GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -fast-tier -strict-wall -slow $(SLOW_LIST) -- -timeout 20m ./...
 
 # test-slow is the slow tier: the packages the gate skips, then the shell
 # tests. Both run even when the first fails; either failing fails the target.

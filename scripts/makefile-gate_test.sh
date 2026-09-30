@@ -55,9 +55,14 @@ else
   fail "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier" "$out"
 fi
 if grep -q -F 'cmd/budget -fast-tier -slow internal/testpolicy/slow.txt --' <<<"$out"; then
-  pass "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall"
+  pass "gate runs the fast tier: skips slow.txt, warns on a package over testpolicy.FastTierMaxWall"
 else
-  fail "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall" "$out"
+  fail "gate runs the fast tier: skips slow.txt, warns on a package over testpolicy.FastTierMaxWall" "$out"
+fi
+if ! grep -q -F -- '-strict-wall' <<<"$out" && tout=$(dry tier-check) && grep -q -F 'cmd/budget -fast-tier -strict-wall -slow internal/testpolicy/slow.txt --' <<<"$tout" && ! grep -q -E 'golangci-lint|go build|slot +run' <<<"$tout"; then
+  pass "gate only warns on wall time; make tier-check runs the fast tier with -strict-wall and no lint or build (gt-z7qtk)"
+else
+  fail "gate only warns on wall time; make tier-check runs the fast tier with -strict-wall and no lint or build (gt-z7qtk)" "${tout:-}"
 fi
 if grep -q -E 'gate: PASSED in \$\{wall\}s wall' <<<"$out"; then
   pass "gate prints its wall time"
