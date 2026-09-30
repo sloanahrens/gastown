@@ -8,10 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-var (
-	addTrackingRelationFn    = addTrackingRelation
-	removeTrackingRelationFn = removeTrackingRelation
-)
+var addTrackingRelationFn = addTrackingRelation
 
 // trackingDeps is the part of beads.Client that writes tracks edges.
 type trackingDeps interface {
@@ -56,17 +53,6 @@ func addTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID str
 		return fmt.Errorf("recording %s tracks %s: %w", trackerID, targetID, err)
 	}
 	return nil
-}
-
-// removeTrackingRelation is not gated by isTrackingTargetID, unlike
-// addTrackingRelation: edges recorded before that gate existed point at targets
-// that are not bead IDs, and removal is the only way to clean one up (gt-gsky).
-func removeTrackingRelation(townRoot, trackerID, issueID string) error {
-	deps, err := townTrackingDeps(townRoot)
-	if err != nil {
-		return err
-	}
-	return removeTrackingRelationWith(deps, townRoot, trackerID, issueID)
 }
 
 // removeTrackingRelationWith removes the edge through bd dep remove, which
