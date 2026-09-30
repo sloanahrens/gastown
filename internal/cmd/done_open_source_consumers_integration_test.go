@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -22,7 +24,7 @@ import (
 // the bead, the intent record, or both, as submitted. Their own tests build
 // those inputs by hand; this one feeds them what a real gt done wrote, so a
 // change to the writer that a reader would not recognise fails here.
-func TestRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *testing.T) {
+func TestIntegrationRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *testing.T) {
 	gate := passingDoneGate()
 	r := runDoneSubmit(t, gate, func(t *testing.T, workDir string) {
 		setupRoutedSubmitGitRepo(t, workDir, false)

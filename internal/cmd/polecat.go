@@ -3321,21 +3321,28 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 			return remoteErr
 		}
 
-		if remoteResult.Pruned > 0 {
-			verb := "Pruned"
-			if polecatPruneDryRun {
-				verb = "Would prune"
-			}
-			fmt.Printf("\n%s %d remote branch(es).\n", verb, remoteResult.Pruned)
-		} else if remoteResult.OpenPR == 0 {
-			fmt.Println("No stale remote polecat branches found.")
-		}
-		if remoteResult.OpenPR > 0 {
-			fmt.Printf("\n%s %d remote branch(es) left in place: open PR exists (gas-fk4).\n", style.Dim.Render("○"), remoteResult.OpenPR)
-		}
+		reportRemotePolecatPrune(os.Stdout, remoteResult, polecatPruneDryRun)
 	}
 
 	return nil
+}
+
+// reportRemotePolecatPrune prints the summary of a --remote prune. A run
+// that pruned nothing because branches are PR-protected must not say no
+// stale branches were found: that says the opposite of what happened.
+func reportRemotePolecatPrune(out io.Writer, res remotePolecatPruneResult, dryRun bool) {
+	if res.Pruned > 0 {
+		verb := "Pruned"
+		if dryRun {
+			verb = "Would prune"
+		}
+		fmt.Fprintf(out, "\n%s %d remote branch(es).\n", verb, res.Pruned)
+	} else if res.OpenPR == 0 {
+		fmt.Fprintln(out, "No stale remote polecat branches found.")
+	}
+	if res.OpenPR > 0 {
+		fmt.Fprintf(out, "\n%s %d remote branch(es) left in place: open PR exists (gas-fk4).\n", style.Dim.Render("○"), res.OpenPR)
+	}
 }
 
 // minRemoteBranchPruneAge is the minimum time a generated polecat branch must

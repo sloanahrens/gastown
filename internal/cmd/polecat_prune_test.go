@@ -95,31 +95,6 @@ func TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch(t *testin
 	assertRemotePruneDryRunKeptBranch(t, repoGit, out, branch)
 }
 
-func TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
-	townRoot, rigName := setupTestRigForSettings(t)
-	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
-	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
-	repoGit := git.NewGit(localDir)
-	branch := polecat.FormatGeneratedBranchName("prunecmdpatch", "", oldEnoughSuffix())
-	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
-
-	oldRemote, oldDryRun := polecatPruneRemote, polecatPruneDryRun
-	polecatPruneRemote = true
-	polecatPruneDryRun = true
-	t.Cleanup(func() {
-		polecatPruneRemote = oldRemote
-		polecatPruneDryRun = oldDryRun
-	})
-
-	out := captureStdout(t, func() {
-		if err := runPolecatPrune(nil, []string{rigName}); err != nil {
-			t.Fatalf("runPolecatPrune: %v", err)
-		}
-	})
-	assertRemotePruneDryRunKeptBranch(t, repoGit, out, branch)
-}
-
 func TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork(t *testing.T) {
 	t.Parallel()
 	hasOpenPR, _ := fakeOpenPRLookup()
@@ -325,41 +300,6 @@ func TestPruneRemotePolecatBranchesLeavesBranchWithOpenPR(t *testing.T) {
 	}
 }
 
-// TestRunPolecatPruneReportsRemoteBranchKeptForOpenPR pins the command-level
-// reporting for the same case: a run that pruned nothing because a branch is
-// PR-protected must not report "No stale remote polecat branches found", which
-// would say the opposite of what happened.
-func TestRunPolecatPruneReportsRemoteBranchKeptForOpenPR(t *testing.T) {
-	townRoot, rigName := setupTestRigForSettings(t)
-	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
-	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
-	repoGit := git.NewGit(localDir)
-	branch := polecat.FormatGeneratedBranchName("prcmdcat", "", oldEnoughSuffix())
-	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
-	stubRemotePolecatBranchOpenPR(t, branch)
-
-	oldRemote, oldDryRun := polecatPruneRemote, polecatPruneDryRun
-	polecatPruneRemote = true
-	polecatPruneDryRun = false
-	t.Cleanup(func() {
-		polecatPruneRemote = oldRemote
-		polecatPruneDryRun = oldDryRun
-	})
-
-	out := captureStdout(t, func() {
-		if err := runPolecatPrune(nil, []string{rigName}); err != nil {
-			t.Fatalf("runPolecatPrune: %v", err)
-		}
-	})
-	if strings.Contains(out, "No stale remote polecat branches found") {
-		t.Fatalf("output %q must not claim no stale branches were found", out)
-	}
-	if !strings.Contains(out, "left in place: open PR exists (gas-fk4)") {
-		t.Fatalf("output %q should report the branch kept for an open PR", out)
-	}
-	assertRemoteBranchStillExists(t, repoGit, branch)
-}
-
 func pushNoCommitPolecatBranch(t *testing.T, localDir, mainBranch, branch string) {
 	t.Helper()
 	runGit(t, localDir, "checkout", "-b", branch, mainBranch)
@@ -470,5 +410,40 @@ func writePolecatPruneTestFile(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestReportRemotePolecatPruneSummary pins the command's --remote summary:
+// a run that kept PR-protected branches and pruned nothing must not report
+// "No stale remote polecat branches found" (gas-fk4).
+func TestReportRemotePolecatPruneSummary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		res     remotePolecatPruneResult
+		dryRun  bool
+		want    []string
+		notWant []string
+	}{
+		{name: "nothing", want: []string{"No stale remote polecat branches found."}},
+		{name: "kept for open PR", res: remotePolecatPruneResult{OpenPR: 1}, want: []string{"1 remote branch(es) left in place: open PR exists (gas-fk4)"}, notWant: []string{"No stale remote"}},
+		{name: "pruned", res: remotePolecatPruneResult{Pruned: 2}, want: []string{"Pruned 2 remote branch(es)."}, notWant: []string{"No stale remote", "open PR"}},
+		{name: "dry run with a kept branch", res: remotePolecatPruneResult{Pruned: 1, OpenPR: 1}, dryRun: true, want: []string{"Would prune 1 remote branch(es).", "left in place: open PR exists"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			reportRemotePolecatPrune(&out, tc.res, tc.dryRun)
+			for _, w := range tc.want {
+				if !strings.Contains(out.String(), w) {
+					t.Errorf("summary %q lacks %q", out.String(), w)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out.String(), w) {
+					t.Errorf("summary %q says %q", out.String(), w)
+				}
+			}
+		})
 	}
 }
