@@ -265,7 +265,13 @@ func buildAgentStateLabels(allLabels []string, stateLabels map[string]string, no
 
 // getAgentLabels retrieves an agent bead's state labels.
 func getAgentLabels(agentBead, beadsDir string) (map[string]string, error) {
-	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
+	return getAgentLabelsVia(nil, agentBead, beadsDir)
+}
+
+// getAgentLabelsVia is getAgentLabels with bd answered by run (nil: bd on
+// PATH).
+func getAgentLabelsVia(run beads.BDRunner, agentBead, beadsDir string) (map[string]string, error) {
+	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -281,19 +287,21 @@ const bdCallTimeout = 30 * time.Second
 
 // getAllAgentLabels retrieves all labels (including non-state) from an agent bead.
 func getAllAgentLabels(agentBead, beadsDir string) ([]string, error) {
+	return getAllAgentLabelsVia(nil, agentBead, beadsDir)
+}
+
+// getAllAgentLabelsVia is getAllAgentLabels with bd answered by run (nil:
+// bd on PATH).
+func getAllAgentLabelsVia(run beads.BDRunner, agentBead, beadsDir string) ([]string, error) {
 	args := []string{"show", agentBead, "--json"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
 	defer cancel()
 
 	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.ReadOnlyPinned, args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
+	stdout, stderr, err := runPinnedBD(ctx, run, cmd)
+	if err != nil {
+		errMsg := strings.TrimSpace(string(stderr))
 		if strings.Contains(errMsg, "not found") {
 			return nil, fmt.Errorf("agent bead not found: %s", agentBead)
 		}
@@ -303,7 +311,7 @@ func getAllAgentLabels(agentBead, beadsDir string) ([]string, error) {
 		return nil, fmt.Errorf("querying agent bead: %w", err)
 	}
 
-	return parseAgentBeadLabels(stdout.Bytes(), stderr.Bytes(), agentBead)
+	return parseAgentBeadLabels(stdout, stderr, agentBead)
 }
 
 // parseAgentBeadLabels parses the JSON output from bd show --json and extracts labels.
@@ -333,4 +341,33 @@ func parseAgentBeadLabels(stdout, stderr []byte, agentBead string) ([]string, er
 	}
 
 	return issues[0].Labels, nil
+}
+
+// runPinnedBD runs a bd command built by beads.CommandContext and returns
+// its stdout and stderr. With a runner the call is answered in process with
+// the command's own directory, environment and arguments, and stdout is
+// unwrapped from the machine envelope as beads.Cmd unwraps it.
+func runPinnedBD(ctx context.Context, run beads.BDRunner, cmd *beads.Cmd) (stdout, stderr []byte, err error) {
+	if run == nil {
+		var out, errOut bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &errOut
+		err = cmd.Run()
+		return out.Bytes(), errOut.Bytes(), err
+	}
+	args := cmd.Args[1:]
+	stdout, stderr, err = run(ctx, beads.BDCall{Dir: cmd.Dir, Env: cmd.Env, Args: args})
+	if err == nil {
+		stdout = beads.LegacyPayload(args, stdout)
+	}
+	return stdout, stderr, err
+}
+
+// bdCommandOutput is cmd.Output(), or with a runner the call answered in
+// process (see runPinnedBD).
+func bdCommandOutput(run beads.BDRunner, cmd *beads.Cmd) ([]byte, error) {
+	if run == nil {
+		return cmd.Output()
+	}
+	out, _, err := runPinnedBD(context.Background(), run, cmd)
+	return out, err
 }
