@@ -39,7 +39,7 @@ func TestUnusedDirectiveCheck_NoUnusedFiles(t *testing.T) {
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 	writeDirectiveFile(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
-	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "refinery.md"), "rig policy")
+	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "witness.md"), "rig policy")
 
 	result := NewUnusedDirectiveCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
 
@@ -52,7 +52,7 @@ func TestUnusedDirectiveCheck_WarnsOnMisnamedFile(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
-	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "refinery.md"), "rig policy")
+	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "witness.md"), "rig policy")
 	unusedPath := filepath.Join(townRoot, "myrig", "directives", "host-hygiene.md")
 	writeDirectiveFile(t, unusedPath, "host rules")
 
