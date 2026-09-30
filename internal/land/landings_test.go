@@ -53,6 +53,7 @@ func TestLandingsFileRefusesUnsafeDirAndNames(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-exec-files — the target is a directory, not a file: the test needs a world-writable landings dir
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
