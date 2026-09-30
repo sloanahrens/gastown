@@ -58,8 +58,7 @@ func TestConfigAgentList(t *testing.T) {
 		settingsPath := config.TownSettingsPath(townRoot)
 
 		// Run the command
-		args := []string{}
-		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard), args)
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -91,8 +90,7 @@ func TestConfigAgentList(t *testing.T) {
 		}
 
 		// Run the command
-		args := []string{}
-		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard), args)
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -104,7 +102,7 @@ func TestConfigAgentList(t *testing.T) {
 		// Use a command with the --json flag registered
 		e := townConfigCmdEnv(townRoot, io.Discard)
 		e.agentListJSON = true
-		err := configAgentList(e, nil)
+		err := configAgentList(e)
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
 		}
@@ -511,7 +509,7 @@ func TestConfigDefaultAgentList(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
 		// runConfigAgentList is reused by default-agent list
-		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard), []string{})
+		err := configAgentList(townConfigCmdEnv(townRoot, io.Discard))
 		if err != nil {
 			t.Fatalf("runConfigAgentList (via default-agent list) failed: %v", err)
 		}
@@ -522,7 +520,7 @@ func TestConfigDefaultAgentList(t *testing.T) {
 
 		e := townConfigCmdEnv(townRoot, io.Discard)
 		e.agentListJSON = true
-		err := configAgentList(e, []string{})
+		err := configAgentList(e)
 		if err != nil {
 			t.Fatalf("runConfigAgentList JSON (via default-agent list) failed: %v", err)
 		}

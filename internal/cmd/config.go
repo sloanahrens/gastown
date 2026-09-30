@@ -249,10 +249,10 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 	if cmd != nil {
 		e.agentListJSON, _ = cmd.Flags().GetBool("json")
 	}
-	return configAgentList(e, args)
+	return configAgentList(e)
 }
 
-func configAgentList(e configCmdEnv, args []string) error {
+func configAgentList(e configCmdEnv) error {
 	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
