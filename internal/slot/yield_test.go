@@ -248,6 +248,8 @@ func TestYield_TimeoutWhileYieldingIsAttributed(t *testing.T) {
 		return tg.AcquirePool(town, "gastown/crew/sloan", 3*tg.pollInterval, pool)
 	}); err == nil {
 		t.Fatal("crew acquire succeeded inside its timeout while the gate ran")
+	} else if !strings.Contains(err.Error(), "gate running: gastown/refinery") {
+		t.Errorf("timeout error = %q, want the gate it yielded to named (gt-18zj)", err)
 	}
 	hist, err := History(town)
 	if err != nil {

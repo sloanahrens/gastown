@@ -2,6 +2,7 @@ package slot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -268,12 +269,9 @@ func (g *Gate) AcquirePoolReal(townRoot, role string, timeout time.Duration, poo
 //
 // Acquire polls while it waits, so an unverifiable probe would otherwise
 // re-announce itself every DefaultPollInterval. But silence is worse here than
-// for debris: the error this branch eventually returns is
-// "timed out after %s waiting for container-gate slot", which names no cause,
-// and for runMQBatchRun that timeout is 60 minutes — long enough that a
-// wedged daemon was indistinguishable from a busy town (gt-a8kx). One line
-// carrying the underlying error is the difference between a diagnosable wait
-// and a mystery hang.
+// for debris: for runMQBatchRun the timeout runs to 60 minutes (gt-a8kx), so
+// the underlying error has to reach the pane when the probe first fails rather
+// than wait for the timeout error to name it an hour later (gt-18zj).
 func inconclusiveLogger(w io.Writer) func(error) {
 	logged := false
 	return func(err error) {
@@ -290,12 +288,13 @@ func inconclusiveLogger(w io.Writer) func(error) {
 //
 // Acquire polls while it waits, so a cause announced on every pass would
 // re-announce itself every DefaultPollInterval. Silence is the worse failure:
-// the timeout the caller finally returns names no cause, and for
-// runMQBatchRun that is up to batchSlotTimeout — an hour with nothing on the
-// pane for the ordinary case of a pool whose slots are all held (gt-78b8). A
-// wedged docker probe already names itself (inconclusiveLogger, gt-a8kx), so
-// this reports the two remaining ways to be held up: every candidate slot
-// held by a live process, and an unwrapped suite.
+// for runMQBatchRun the wait runs up to batchSlotTimeout — an hour with
+// nothing on the pane for the ordinary case of a pool whose slots are all held
+// (gt-78b8) — so the cause is named when it starts blocking, not only by the
+// timeout error at the end (gt-18zj). A wedged docker probe already names
+// itself (inconclusiveLogger, gt-a8kx), so this reports the two remaining ways
+// to be held up: every candidate slot held by a live process, and an unwrapped
+// suite.
 func waitLogger(w io.Writer, role string, timeout time.Duration) func(waitInfo) {
 	logged := false
 	return func(info waitInfo) {
@@ -496,7 +495,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				fmt.Fprintf(g.probeOut, "gt slot: recording slot timeout in history: %v\n", err)
 			}
 			emitWaitEvent(g.probeOut, townRoot, role, candidates[0], info)
-			return nil, fmt.Errorf("timed out after %s waiting for container-gate slot", timeout)
+			return nil, timeoutError(timeout, info)
 		}
 		g.clock.Sleep(g.pollInterval)
 		// Credited after the sleep so a blocked pass carries the poll interval
@@ -512,6 +511,20 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 			}
 		}
 	}
+}
+
+// timeoutError is the error a caller that exhausted its cap returns. It carries
+// the wait's cause — the one the ring file and the slot_wait event already
+// record (gt-dc81) — because a reader of the failure alone has to tell a held
+// pool from an unwrapped suite, a wedged docker probe and a running gate: four
+// different fixes, and for runMQBatchRun a wait of up to an hour before the
+// error surfaces at all (gt-18zj).
+func timeoutError(timeout time.Duration, info waitInfo) error {
+	msg := fmt.Sprintf("timed out after %s waiting for container-gate slot", timeout)
+	if cause := info.describe(); cause != "" {
+		msg += " — " + cause
+	}
+	return errors.New(msg)
 }
 
 // underGateHold reports whether this process runs under a gate hold that is
