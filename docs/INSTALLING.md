@@ -186,7 +186,6 @@ gt rig add myproject https://github.com/you/repo.git
 ```bash
 cd ~/gt
 
-gt enable              # enable Gas Town system-wide
 gt up                  # Start all services. Use gt down or gt shutdown for stopping. 
 
 gt doctor --fix        # Run health checks and fix post-install warnings
@@ -212,7 +211,7 @@ gt config default-agent codex-low
 You can also override the agent per command without changing defaults:
 
 ```bash
-gt start --agent codex-low
+gt mayor start --agent codex-low
 gt sling gt-abc12 myproject --agent claude-haiku
 ```
 
@@ -433,4 +432,3 @@ After installation:
 2. **Try a simple workflow** - `bd create "Test task"` then `gt convoy create "Test" <bead-id>`
 3. **Explore docs** - `docs/reference.md` for command reference
 4. **Run doctor regularly** - `gt doctor` catches problems early
-5. **Join the Wasteland** - `gt wl join hop/wl-commons` to browse and claim federated work (see [WASTELAND.md](WASTELAND.md))

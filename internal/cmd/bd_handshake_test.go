@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // stubBDHandshake replaces the handshake for one test and resets the
@@ -71,7 +72,7 @@ func TestBDHandshakeGatedCommandsExist(t *testing.T) {
 	for path := range bdHandshakeGatedCommands {
 		findCommand(t, path)
 	}
-	for _, want := range []string{"gt up", "gt start", "gt daemon start", "gt daemon run", "gt sling", "gt witness start", "gt refinery start", "gt crew start", "gt mayor start", "gt deacon start", "gt session start"} {
+	for _, want := range []string{"gt up", "gt daemon start", "gt daemon run", "gt sling", "gt witness start", "gt refinery start", "gt crew start", "gt mayor start", "gt deacon start", "gt session start"} {
 		if !bdHandshakeGatedCommands[want] {
 			t.Errorf("%q must be gated by the bd handshake", want)
 		}
@@ -304,5 +305,24 @@ func TestDefaultTownConfigCheckPassesFromInsideATown(t *testing.T) {
 	t.Setenv("GT_ROOT", "")
 	if err := defaultTownConfigCheck(); err != nil {
 		t.Fatalf("defaultTownConfigCheck from a polecat worktree = %v", err)
+	}
+}
+
+// TestDefaultTownConfigCheckRefusesARootWithoutTownJSON: a root found by its
+// mayor/ directory alone is not a town the gate lets run (gt-y3pgh.1).
+func TestDefaultTownConfigCheckRefusesARootWithoutTownJSON(t *testing.T) {
+	town := t.TempDir()
+	p := filepath.Join(town, "mayor", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"type":"daemon-patrol-config","version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(town)
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+	if err := defaultTownConfigCheck(); !errors.Is(err, townconfig.ErrNotATown) {
+		t.Fatalf("defaultTownConfigCheck without town.json = %v, want ErrNotATown", err)
 	}
 }

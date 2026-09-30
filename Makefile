@@ -1,7 +1,6 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
 
 BINARY := gt
-BINARY_DESKTOP := gt-desktop
 BUILD_DIR := .
 INSTALL_DIR := $(HOME)/.local/bin
 E2E_IMAGE ?= gastown-test
@@ -45,8 +44,6 @@ ifeq ($(shell uname),Darwin)
 endif
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-server ./cmd/gt-proxy-server
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
 
 # golangci-lint must be built with a Go >= go.mod's version and understand .golangci.yml version 2;
@@ -61,6 +58,8 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	@echo "lint: repo guards (replace directives, tracked issues.jsonl; carried over from upstream CI)"
+	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
@@ -74,12 +73,6 @@ docs-lint:
 # checkout; BEADS_REF defaults to origin/main. Builds bd in a temp dir only.
 bd-command-tree:
 	scripts/refresh-bd-command-tree.sh
-
-desktop-build:
-	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop
-
-desktop-run:
-	go run ./cmd/gt-desktop
 
 check-up-to-date:
 	@# Deploy merged code only (gt-o848l): HEAD must be in origin/main with no
@@ -278,14 +271,10 @@ test-changed: test-makefile
 
 # test-integration runs only the //go:build integration tier (real tmux, bd,
 # Dolt, gt binary; tests named TestIntegration*). The daemon's
-# main_branch_test patrol runs it on the gastown rig once a day, and the CI
-# integration job runs it on every push. Docker-backed suites still need
-# `gt slot run` around the call. INTEGRATION_GO_TEST swaps the runner so CI can
-# collect JUnit output from this one definition of the tier, e.g.
-#   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
-INTEGRATION_GO_TEST ?= go test
+# main_branch_test patrol runs it on the gastown rig once a day.
+# Docker-backed suites still need `gt slot run` around the call.
 test-integration:
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -tags integration -run '^TestIntegration' -timeout 20m ./...
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the
@@ -333,6 +322,8 @@ test-makefile:
 	bash plugins/seat-refill/run_test.sh
 	bash -n scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
+	bash -n scripts/repo-guards.sh
+	bash scripts/repo-guards_test.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

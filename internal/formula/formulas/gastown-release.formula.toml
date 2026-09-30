@@ -3,7 +3,7 @@ Gas Town release workflow - from version bump to verified release.
 
 This formula orchestrates a release cycle for Gas Town:
 1. Preflight checks (workspace cleanliness, clean git, up to date)
-2. Documentation updates (CHANGELOG.md, info.go)
+2. Documentation updates (CHANGELOG.md)
 3. Version bump (all components)
 4. Git operations (commit, tag, push)
 5. Local installation update
@@ -179,40 +179,9 @@ The bump script will automatically create the version header with today's date.
 """
 
 [[steps]]
-id = "update-info-go"
-title = "Update info.go versionChanges"
-needs = ["update-changelog"]
-description = """
-Add entry to versionChanges in internal/cmd/info.go.
-
-This powers `gt info --whats-new` for agents.
-
-Add a new entry at the TOP of the versionChanges slice:
-
-```go
-{
-    Version: "{{version}}",
-    Date:    "YYYY-MM-DD",  // Today's date
-    Changes: []string{
-        "NEW: Key feature 1",
-        "NEW: Key feature 2",
-        "CHANGED: Modified behavior",
-        "FIX: Bug that was fixed",
-    },
-},
-```
-
-Focus on agent-relevant and workflow-impacting changes.
-Prefix with NEW:, CHANGED:, FIX:, or DEPRECATED: for clarity.
-
-This is similar to CHANGELOG.md but focused on what agents need to know -
-new commands, changed behaviors, workflow impacts.
-"""
-
-[[steps]]
 id = "run-bump-script"
 title = "Run bump-version.sh"
-needs = ["update-info-go"]
+needs = ["update-changelog"]
 description = """
 Update all component versions atomically.
 
@@ -267,7 +236,6 @@ git commit -m "chore: Bump version to {{version}}"
 
 Review the commit to ensure all expected files are included:
 - internal/cmd/version.go
-- internal/cmd/info.go
 - npm-package/package.json
 - CHANGELOG.md
 """
@@ -386,7 +354,6 @@ Summary:
 - All workspaces verified clean before release
 - Version files updated (version.go, package.json)
 - CHANGELOG.md updated with release date
-- info.go versionChanges updated for `gt info --whats-new`
 - Git tag v{{version}} pushed
 - GitHub Actions triggered for artifact builds
 - Local gt binary rebuilt and installed

@@ -618,6 +618,12 @@ func (r *AgentRegistry) overlayFile(path string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 
+	// Validate the whole file strictly first so a ParseError names the full
+	// key path (agents.<name>.<key>); the merge below then decodes each entry
+	// onto the preset it overrides.
+	if err := DecodeJSONFile(path, data, &AgentRegistry{}); err != nil {
+		return err
+	}
 	var userRegistry rawAgentRegistry
 	if err := json.Unmarshal(data, &userRegistry); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -1094,16 +1100,7 @@ func IsKnownPreset(name string) bool {
 
 // SaveAgentRegistry writes the agent registry to a file.
 func SaveAgentRegistry(path string, registry *AgentRegistry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(registry, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644) //nolint:gosec // G306: config file
+	return WriteConfigJSON(path, registry, 0644)
 }
 
 // NewExampleAgentRegistry creates an example registry with comments.

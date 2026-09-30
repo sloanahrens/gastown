@@ -32,10 +32,9 @@ import (
 )
 
 var doneCmd = &cobra.Command{
-	Use:         "done",
-	GroupID:     GroupWork,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Submit your branch for landing and end the polecat session",
+	Use:     "done",
+	GroupID: GroupWork,
+	Short:   "Submit your branch for landing and end the polecat session",
 	Long: `Submit your finished branch for landing, notify the Witness, and end the
 polecat session. gt done never lands anything on the target branch: the
 daemon's landing worker does that (ADR 0004).

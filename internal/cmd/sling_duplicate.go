@@ -598,3 +598,20 @@ func sortedKeys(set map[string]bool) []string {
 // errSlingDuplicateContent is the sentinel for a refused sling, so callers that
 // need to distinguish the refusal from a bd failure can.
 var errSlingDuplicateContent = errors.New("duplicate content")
+
+// formatAge returns a human-readable age string
+func formatAge(t time.Time) string {
+	d := time.Since(t)
+
+	if d < time.Hour {
+		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%d hours ago", int(d.Hours()))
+	}
+	days := int(d.Hours() / 24)
+	if days == 1 {
+		return "1 day ago"
+	}
+	return fmt.Sprintf("%d days ago", days)
+}

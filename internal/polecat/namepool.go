@@ -401,7 +401,7 @@ func (p *NamePool) SetTheme(theme string) error {
 		}
 		newNames = resolved
 	} else {
-		return fmt.Errorf("unknown theme: %s (use 'gt namepool themes' to list available themes)", theme)
+		return fmt.Errorf("unknown theme: %s (built-in themes: %s)", theme, strings.Join(ListThemes(), ", "))
 	}
 
 	// Preserve names that exist in both themes

@@ -162,3 +162,17 @@ func TestRestartSessionRefusesWhenTheStartupGateRefuses(t *testing.T) {
 		t.Fatalf("restartSession with a refusing gate = %v, want the refusal naming the identity", err)
 	}
 }
+
+// TestNewRefusesAnUnknownDaemonJSONKey: a misspelled patrol key is a
+// refusal naming the key, not a patrol silently left at its default
+// (gt-y3pgh.1, G3-17).
+func TestNewRefusesAnUnknownDaemonJSONKey(t *testing.T) {
+	town := t.TempDir()
+	const misspelled = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"witness": {"enabeld": false}}}`
+	path := writeTownFile(t, town, "mayor/daemon.json", misspelled)
+	d, err := New(&Config{TownRoot: town, LogFile: filepath.Join(town, "daemon", "daemon.log"), PidFile: filepath.Join(town, "daemon", "daemon.pid")})
+	if d != nil || !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "patrols.witness.enabeld") {
+		t.Fatalf("New = %v, %v; want a refusal naming patrols.witness.enabeld", d, err)
+	}
+	requireUnchanged(t, path, misspelled)
+}

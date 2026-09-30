@@ -10,20 +10,19 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/bdgate"
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // bdHandshakeGatedCommands are the commands that run the town: they start
 // the daemon, start agent sessions, or spawn polecats. Each refuses to run
-// unless the town config files parse (daemon.CheckTownConfig, gt-fcxe9.10)
+// unless the town config files parse (townconfig.Check, gt-fcxe9.10, gt-y3pgh.1)
 // and the bd on PATH passes the startup handshake (deps.CheckBDHandshake).
 // Every other command, including every read-only one, runs against whatever
 // bd is installed. TestBDHandshakeGatedCommandsExist pins that each path
 // exists, so a rename cannot drop a command out of the gate.
 var bdHandshakeGatedCommands = map[string]bool{
 	"gt up":               true,
-	"gt start":            true,
 	"gt daemon start":     true,
 	"gt daemon run":       true,
 	"gt daemon restart":   true,
@@ -46,7 +45,6 @@ var bdHandshakeGatedCommands = map[string]bool{
 	"gt session restart":  true,
 	"gt scheduler run":    true,
 	"gt formula run":      true,
-	"gt synthesis start":  true,
 }
 
 // bdHandshakeTownVerbs are the command names that start or dispatch things.
@@ -62,7 +60,6 @@ var bdHandshakeTownVerbs = map[string]bool{
 // session, daemon or polecat, with the reason each is exempt.
 var bdHandshakeNotTownRunning = map[string]string{
 	"gt boot":             "command group; its spawn verb is gated",
-	"gt resume":           "reads the inbox for handoff messages",
 	"gt agent resume":     "clears a pause flag; starts no session",
 	"gt deacon resume":    "clears a pause flag; starts no session",
 	"gt mountain resume":  "re-enables wave dispatch, which goes through gt sling (gated)",
@@ -137,7 +134,10 @@ func defaultTownConfigCheck() error {
 	if dir == "" {
 		return errors.New("not in a Gas Town workspace, so the town config files cannot be checked")
 	}
-	return daemon.CheckTownConfig(dir)
+	// Load, not Check: a town-running command needs a whole town, so a root
+	// found by its mayor/ directory alone (no mayor/town.json) is refused.
+	_, err := townconfig.Load(dir)
+	return err
 }
 
 // requireTownStart is the startup gate for town-running commands and agent

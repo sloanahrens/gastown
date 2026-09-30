@@ -155,7 +155,7 @@ git worktree prune
 ```
 
 **CAUTION:** Don't remove worktrees for active cross-rig work.
-Check with `gt worktree list` if available.
+Check with `git worktree list`.
 
 **Exit criteria:** Stale worktrees removed."""
 

@@ -1,0 +1,292 @@
+{
+  "type": "town-settings",
+  "version": 1,
+  "default_agent": "claude",
+  "agents": {
+    "claude-fable": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "fable"
+      ],
+      "env": {
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0"
+      }
+    },
+    "claude-haiku": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "haiku"
+      ],
+      "env": {
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0"
+      }
+    },
+    "claude-opus": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus"
+      ],
+      "env": {
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0"
+      }
+    },
+    "claude-sonnet": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "sonnet"
+      ],
+      "env": {
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0"
+      }
+    },
+    "local-coder": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "mtplx-qwen38-27b-optimized-speed"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8099",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "CLAUDE_CODE_TOTAL_TOKENS_REMINDER": "off",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192",
+        "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "1800000",
+        "API_TIMEOUT_MS": "1800000",
+        "ANTHROPIC_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "65536",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town"
+      }
+    },
+    "deepseek-flash": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "deepseek-flash[1m]"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town",
+        "GOFLAGS": "-p=4"
+      }
+    },
+    "deepseek-pro": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "deepseek-v4-pro"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town"
+      }
+    },
+    "deepseek-flash-dog": {
+      "provider": "deepseek",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "deepseek-flash[1m]"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town"
+      }
+    },
+    "claude-opus-cycle": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "opus"
+      ],
+      "env": {
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "160000"
+      }
+    },
+    "local-coder-polecat": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "mtplx-qwen38-27b-optimized-speed",
+        "--disallowedTools",
+        "Agent"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8099",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "CLAUDE_CODE_TOTAL_TOKENS_REMINDER": "off",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192",
+        "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "1800000",
+        "API_TIMEOUT_MS": "1800000",
+        "ANTHROPIC_MODEL": "mtplx-qwen38-27b-optimized-speed",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "65536",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town"
+      }
+    },
+    "deepseek-flash-refinery": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "deepseek-flash[1m]"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town",
+        "GOFLAGS": "-p=4",
+        "BASH_DEFAULT_TIMEOUT_MS": "2700000",
+        "BASH_MAX_TIMEOUT_MS": "3600000"
+      }
+    },
+    "deepseek-flash-patrol": {
+      "provider": "claude",
+      "command": "claude",
+      "args": [
+        "--dangerously-skip-permissions",
+        "--model",
+        "deepseek-flash[1m]"
+      ],
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "REDACTED",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CONFIG_DIR": "/Users/operator/gt/.claude-town",
+        "GOFLAGS": "-p=4"
+      }
+    }
+  },
+  "role_agents": {
+    "boot": "deepseek-flash",
+    "crew": "claude-opus",
+    "deacon": "deepseek-flash",
+    "dog": "deepseek-flash",
+    "polecat": "deepseek-flash",
+    "refinery": "deepseek-flash-refinery",
+    "witness": "deepseek-flash-patrol",
+    "mayor": "claude-sonnet"
+  },
+  "role_effort": {
+    "deacon": "medium",
+    "mayor": "medium",
+    "witness": "medium"
+  },
+  "operational": {
+    "witness": {
+      "done_intent_stuck_timeout": "90m",
+      "done_intent_recent_grace": "2m"
+    },
+    "daemon": {
+      "boot_spawn_cooldown": "6m"
+    },
+    "container_gate": {
+      "slots": 4,
+      "reserved_for_gate": 2
+    }
+  },
+  "polecat_pool": {
+    "local_agent": "local-coder-polecat",
+    "max_local": 0,
+    "idle_fill": true,
+    "min_spawn_gap": "4m",
+    "overflow_agent": "deepseek-flash",
+    "max_overflow": 1
+  }
+}

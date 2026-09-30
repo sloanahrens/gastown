@@ -1,0 +1,30 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/operator/gastown.git",
+  "default_branch": "main",
+  "created_at": "2026-09-07T20:47:19.414004-05:00",
+  "beads": {
+    "prefix": "gt"
+  },
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "GOFLAGS=-p=8 make test",
+    "lint_command": "make lint",
+    "editorial": {
+      "required": true
+    },
+    "batch_enabled": true,
+    "batch_min_count": 3,
+    "batch_min_age": "5m",
+    "batch_max": 10,
+    "test_verify_command": "make test-changed PKGS='{packages}'",
+    "post_merge_command": "bash scripts/install-after-merge.sh",
+    "post_merge_timeout": "20m",
+    "cycle_session_after_merge": true
+  },
+  "witness": {
+    "cycle_session_at_idle_cap": true
+  }
+}

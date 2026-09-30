@@ -461,3 +461,18 @@ func printHealthReport(r *HealthReport) {
 
 	fmt.Println()
 }
+
+// findNewestFile walks a directory and returns the most recent file mtime.
+func findNewestFile(dir string) time.Time {
+	var newest time.Time
+	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		return nil
+	})
+	return newest
+}

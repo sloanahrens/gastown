@@ -815,8 +815,9 @@ That does not compact — compaction rewrites the commit graph and force-pushes,
 so it is operator-only. To actually compact:
 ```bash
 bash plugins/compactor-dog/run.sh --compact   # flatten
-gt dolt rebase <db_name>                      # surgical (keep recent commits)
 ```
+A surgical rewrite that keeps recent commits is an offline procedure
+(docs/dolt-history-offline.md), not a patrol action.
 If no idle dogs, log for next cycle.
 
 **Stale backups:**

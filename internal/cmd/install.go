@@ -481,7 +481,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println("Next steps:")
 	step := 1
 	if !installGit && installGitHub == "" {
-		fmt.Printf("  %d. Initialize git: %s\n", step, style.Dim.Render("gt git-init"))
+		fmt.Printf("  %d. Initialize git: %s\n", step, style.Dim.Render("gt install . --force --git"))
 		step++
 	}
 	fmt.Printf("  %d. Add a rig: %s\n", step, style.Dim.Render("gt rig add <name> <git-url>"))

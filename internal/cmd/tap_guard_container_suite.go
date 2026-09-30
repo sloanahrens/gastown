@@ -88,7 +88,6 @@ var containerSuitePackages = []string{
 	"internal/plugin",
 	"internal/polecat",
 	"internal/protocol",
-	"internal/proxy",
 	"internal/refinery",
 	"internal/refinery/editorial",
 	"internal/rig",

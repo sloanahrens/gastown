@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -23,19 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
-
-func hasACPSessionByName(townRoot, sessionName string) bool {
-	if townRoot == "" {
-		return false
-	}
-
-	// Currently only the Mayor supports ACP.
-	if sessionName == session.MayorSessionName() {
-		return mayor.IsACPActive(townRoot)
-	}
-
-	return false
-}
 
 var (
 	nudgeMessageFlag  string
@@ -70,10 +56,9 @@ func init() {
 }
 
 var nudgeCmd = &cobra.Command{
-	Use:         "nudge <target> [message]",
-	GroupID:     GroupComm,
-	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Send a synchronous message to any Gas Town worker",
+	Use:     "nudge <target> [message]",
+	GroupID: GroupComm,
+	Short:   "Send a synchronous message to any Gas Town worker",
 	Long: `Universal messaging API for Gas Town worker-to-worker communication.
 
 Delivers a message to any worker's Claude Code session: polecats, crew,
@@ -114,7 +99,7 @@ Channel syntax:
                   Patterns like "gastown/polecats/*" are expanded.
 
 DND (Do Not Disturb):
-  If the target has DND enabled (gt dnd on), the nudge is skipped.
+  If the target has DND enabled, the nudge is skipped.
   Use --force to override DND and send anyway.
 
 Examples:
@@ -176,12 +161,7 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 
 	townRoot, _ := workspace.FindFromCwd()
 
-	// Use the requested mode, but force queue mode for ACP sessions.
-	// ACP agents don't have tmux panes to send-keys to.
 	mode := nudgeModeFlag
-	if hasACPSessionByName(townRoot, sessionName) {
-		mode = NudgeModeQueue
-	}
 
 	// For direct tmux delivery, prefix with sender attribution.
 	// Queue-based delivery stores Sender as a separate field and
@@ -642,14 +622,8 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	// Special case: "deacon" target maps to the Deacon session
 	if target == constants.RoleDeacon {
 		deaconSession := session.DeaconSessionName()
-		// Check if Deacon session exists (tmux or ACP)
-		hasACP := hasACPSessionByName(townRoot, deaconSession)
-		exists := false
-		if !hasACP {
-			exists, _ = t.HasSession(deaconSession)
-		}
-
-		if !hasACP && !exists {
+		exists, _ := t.HasSession(deaconSession)
+		if !exists {
 			// Deacon not running - this is not an error, just log and return
 			fmt.Printf("%s Deacon not running, nudge skipped\n", style.Dim.Render("○"))
 			return nil
@@ -670,7 +644,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	if dogName, ok := mail.DogAddressName(target); ok {
 		sessionName := session.DogSessionName(dogName)
-		if nudgeModeFlag != NudgeModeImmediate && !hasACPSessionByName(townRoot, sessionName) {
+		if nudgeModeFlag != NudgeModeImmediate {
 			exists, err := t.HasSession(sessionName)
 			if err != nil {
 				return fmt.Errorf("checking dog session: %w", err)
@@ -738,8 +712,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// For queue/wait-idle modes, verify session exists before enqueuing.
 		// Without this, queue mode silently succeeds for nonexistent sessions —
 		// the file is written but never drained.
-		// ACP sessions are always allowed as they use queue mode.
-		if nudgeModeFlag != NudgeModeImmediate && !hasACPSessionByName(townRoot, sessionName) {
+		if nudgeModeFlag != NudgeModeImmediate {
 			exists, err := t.HasSession(sessionName)
 			if err != nil {
 				return fmt.Errorf("checking session: %w", err)
@@ -763,17 +736,12 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
 	} else {
 		// Raw session name (legacy)
-		// Check for ACP session - ACP agents don't have tmux sessions but can receive nudges via queue
-		hasACP := hasACPSessionByName(townRoot, target)
-
-		if !hasACP {
-			exists, err := t.HasSession(target)
-			if err != nil {
-				return fmt.Errorf("checking session: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("session %q not found", target)
-			}
+		exists, err := t.HasSession(target)
+		if err != nil {
+			return fmt.Errorf("checking session: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("session %q not found", target)
 		}
 
 		if err := deliverNudge(t, target, message, sender); err != nil {

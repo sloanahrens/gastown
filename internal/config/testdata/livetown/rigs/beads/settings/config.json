@@ -1,0 +1,18 @@
+{
+  "type": "rig-settings",
+  "version": 1,
+  "namepool": {
+    "style": "wasteland"
+  },
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "make test",
+    "editorial": {
+      "required": true
+    }
+  },
+  "role_agents": {
+    "witness": "deepseek-flash-patrol",
+    "refinery": "deepseek-flash-patrol"
+  }
+}
