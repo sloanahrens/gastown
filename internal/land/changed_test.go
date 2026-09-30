@@ -8,6 +8,7 @@ import (
 )
 
 func TestChangedPackages(t *testing.T) {
+	t.Parallel()
 	// The tree after the change: these directories hold Go files.
 	live := map[string]bool{
 		"internal/land":       true,
@@ -82,6 +83,7 @@ func TestChangedPackages(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := ChangedPackages(tt.diff, hasGo)
 			if len(got) == 0 && len(tt.want) == 0 {
 				return
@@ -94,6 +96,7 @@ func TestChangedPackages(t *testing.T) {
 }
 
 func TestPackageDirHasGo(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeFile(t, root, "pkg/a.go", "package pkg\n")
 	writeFile(t, root, "docs/readme.md", "x\n")
