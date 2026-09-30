@@ -362,15 +362,18 @@ test: gate test-slow test-integration
 DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/docker.txt))
 
 # test-integration runs the //go:build integration tier (real tmux, bd, Dolt,
-# the gt binary; tests named TestIntegration*) and then the Docker-backed
-# packages whole. The daemon's main_branch_test patrol runs it on the gastown
-# rig once a day. INTEGRATION_GO_TEST swaps the runner so CI can collect JUnit
-# output from this one definition of the tier, e.g.
-#   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
+# the gt binary) and then the Docker-backed packages whole. It passes no -run
+# filter, so every test in an integration-tagged file runs whatever its name —
+# a filter is what left ~120 of them running nowhere (gt-ik4a1.2). The tag also
+# compiles the unit tests in beside them, and those run too.
+#
+# Before changing this target, read the gate section of docs/testing.md: it
+# holds when each tier runs, and INTEGRATION_GO_TEST, the runner swap CI uses
+# to collect JUnit output from this one definition of the tier.
 INTEGRATION_GO_TEST ?= go test
 test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
-	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
 	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which

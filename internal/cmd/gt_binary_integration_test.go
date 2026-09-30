@@ -276,40 +276,9 @@ func TestPRWorkflowGuard_Integration(t *testing.T) {
 		}
 	})
 
-	t.Run("refinery role: feature-branch checkout exempted, unrelated command still self-filtered", func(t *testing.T) {
-		// Pins the composition of the refinery exemption (gt-r2xm) with the
-		// command self-filter (gt-pjeh) at the compiled-binary level: the
-		// exemption fires for the exact rehearsal shape, while an unrelated
-		// command still passes through the ordinary self-filter rather than
-		// the exemption.
-		env := append(testutil.CleanGTEnv(), "GT_REFINERY=1")
-
-		run := func(command string) (exitCode int) {
-			cmd := exec.Command(bin, "tap", "guard", "pr-workflow")
-			cmd.Dir = workDir
-			cmd.Env = env
-			cmd.Stdin = bytes.NewBufferString(`{"tool_name":"Bash","tool_input":{"command":"` + command + `"}}`)
-			err := cmd.Run()
-			if err == nil {
-				return 0
-			}
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				return exitErr.ExitCode()
-			}
-			t.Fatalf("running guard: %v", err)
-			return -1
-		}
-
-		if code := run("git checkout -b temp origin/polecat/topaz+abc123"); code != 0 {
-			t.Errorf("refinery rehearsal checkout: exit code = %d, want 0", code)
-		}
-		if code := run("gh pr create --title foo"); code != 2 {
-			t.Errorf("refinery gh pr create: exit code = %d, want 2 (stays blocked)", code)
-		}
-		if code := run("ls -la"); code != 0 {
-			t.Errorf("refinery unrelated command: exit code = %d, want 0", code)
-		}
-	})
+	// The refinery subtest is gone with the refinery (gt-v4ssj.6): the
+	// merge-rehearsal exemption it pinned (gt-r2xm, gt-mo53) was removed from
+	// the guard with the role and the mol-refinery-patrol formula that ran it.
 
 	blockedShapes := []string{
 		"gh pr create --title foo",

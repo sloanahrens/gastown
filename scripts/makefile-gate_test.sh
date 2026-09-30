@@ -164,6 +164,23 @@ if grep -q -F -- '-tags integration' <<<"$iout" && grep -q -F 'GT_TEST_DOCKER=1'
 else
   fail "test-integration runs the integration tag with containers on" "$iout"
 fi
+# The tier is every integration-tagged test, not the ones whose name a filter
+# admits (gt-ik4a1.2): a name filter is how ~120 tests ran nowhere.
+no_run_filter() { ! grep -q -E -- '(^|[[:space:]])-(test\.)?run[ =]' <<<"$1"; }
+if no_run_filter "$iout"; then
+  pass "test-integration passes no -run name filter"
+else
+  fail "test-integration passes no -run name filter" "$iout"
+fi
+# The check itself is exercised on the shape it exists to catch: the recipe
+# this target carried before gt-ik4a1.2, whose -run ^TestIntegration admitted
+# only the tests named TestIntegration* and left every other integration-tagged
+# test running nowhere.
+if no_run_filter "GT_TEST_DOCKER=1 go test -tags integration -run '^TestIntegration' -timeout 20m ./..."; then
+  fail "the no-filter check rejects the pre-gt-ik4a1.2 recipe that passed -run"
+else
+  pass "the no-filter check rejects the pre-gt-ik4a1.2 recipe that passed -run"
+fi
 missing=""
 while IFS= read -r pkg; do
   pkg="${pkg%%#*}"
