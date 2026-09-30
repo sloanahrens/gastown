@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -167,5 +169,27 @@ func TestCrewBeadFromBranch(t *testing.T) {
 		if got := crewBeadFromBranch(branch, routed); got != want {
 			t.Errorf("crewBeadFromBranch(%q) = %q, want %q", branch, got, want)
 		}
+	}
+}
+
+// TestDoneNeedsPolecatWorktree: the pre-run worktree guard applies to a
+// polecat's gt done only; a crew gt done reaches runDoneCrew.
+func TestDoneNeedsPolecatWorktree(t *testing.T) {
+	t.Parallel()
+	root := &cobra.Command{Use: "gt"}
+	done := &cobra.Command{Use: "done"}
+	root.AddCommand(done)
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	if doneNeedsPolecatWorktree(done, env(map[string]string{"BD_ACTOR": "gastown/crew/sloan"})) {
+		t.Error("crew gt done hit the polecat worktree guard")
+	}
+	if doneNeedsPolecatWorktree(done, env(map[string]string{})) {
+		t.Error("gt done with no identity hit the polecat worktree guard")
+	}
+	if !doneNeedsPolecatWorktree(done, env(map[string]string{"BD_ACTOR": "gastown/polecats/refuge", "GT_POLECAT": "refuge"})) {
+		t.Error("polecat gt done skipped the worktree guard")
+	}
+	if doneNeedsPolecatWorktree(root, env(map[string]string{"GT_POLECAT": "refuge"})) {
+		t.Error("a command other than gt done hit the worktree guard")
 	}
 }
