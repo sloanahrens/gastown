@@ -164,7 +164,7 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 // already be on origin at HEAD: crew push their own work, so gt done reads
 // the tip back rather than pushing. It writes, in order, the submission
 // comment, the READY TO LAND block and the gt:ready-to-land label, so a
-// labelled bead always says what to land. It never lands anything.
+// labeled bead always says what to land. It never lands anything.
 func submitCrewForLanding(r *doneRun) error {
 	if r.branch == r.defaultBranch || r.branch == "master" {
 		return fmt.Errorf("cannot submit the %s/master branch for landing; commit on a crew branch and push it", r.defaultBranch)
