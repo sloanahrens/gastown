@@ -125,6 +125,7 @@ type (
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
+	EventsPruneConfig          = agentconfig.EventsPruneConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
@@ -256,6 +257,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.SpecDispatch.Enabled
+	}
+	// events_prune defaults ON: .events.jsonl has no other bound, and a
+	// pruner that must be switched on leaves the file growing (gt-ori5j).
+	if patrol == "events_prune" {
+		if config == nil || config.Patrols == nil || config.Patrols.EventsPrune == nil {
+			return true
+		}
+		return config.Patrols.EventsPrune.Enabled
 	}
 	// patrol_scan defaults OFF: it restarts polecats on its own, so the
 	// operator opts in (gt-4k3fj.6, ADR 0005).

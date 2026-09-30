@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	gtevents "github.com/steveyegge/gastown/internal/events"
 )
 
 // PrintOptions controls filtering and behavior for PrintGtEvents.
@@ -53,8 +55,23 @@ func PrintGtEvents(townRoot string, opts PrintOptions) error {
 		sinceTime = time.Now().Add(-dur)
 	}
 
+	// In follow mode the tail is opened first and the initial batch stops
+	// where it starts, so no line is both printed and polled. The tail
+	// follows the path across the daemon's events_prune rename (gt-ori5j);
+	// a raw descriptor would go deaf on the old file (claude-9jq).
+	var history io.Reader = file
+	var tail *gtevents.Tail
+	if opts.Follow {
+		tail, err = gtevents.OpenTail(eventsPath)
+		if err != nil {
+			return fmt.Errorf("following events file: %w", err)
+		}
+		defer tail.Close() //nolint:errcheck // read-only
+		history = io.LimitReader(file, tail.Offset())
+	}
+
 	var events []Event
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(history)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for scanner.Scan() {
@@ -98,10 +115,6 @@ func PrintGtEvents(townRoot string, opts PrintOptions) error {
 		return nil
 	}
 
-	// Tail mode: poll for new lines using a fresh scanner each tick.
-	// bufio.Scanner sets an internal 'done' flag after EOF and won't retry,
-	// so we must create a new scanner each poll cycle while preserving the
-	// file offset (os.File tracks position across scanner instances).
 	ctx := opts.Ctx
 	if ctx == nil {
 		var stop context.CancelFunc
@@ -121,10 +134,9 @@ func PrintGtEvents(townRoot string, opts PrintOptions) error {
 		case <-ctx.Done():
 			return nil
 		case <-tick:
-			s := bufio.NewScanner(file)
-			s.Buffer(make([]byte, 1024*1024), 1024*1024)
-			for s.Scan() {
-				line := s.Text()
+			// A read error ends this poll only; the next tick retries.
+			lines, _ := tail.Poll()
+			for _, line := range lines {
 				if event := parseGtEventLine(line); event != nil {
 					if matchesFilters(event, sinceTime, opts.Mol, opts.Type, opts.Rig) {
 						printEvent(out, *event)

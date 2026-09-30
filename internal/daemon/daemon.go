@@ -1369,6 +1369,9 @@ func (d *Daemon) heartbeatWork(state *State) {
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
 	d.rotateOversizedLogs()
 
+	// 16. Prune the raw event log (.events.jsonl) when due (gt-ori5j).
+	d.pruneEventsLog()
+
 	// Update state
 	state.LastHeartbeat = time.Now()
 	state.HeartbeatCount++

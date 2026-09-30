@@ -75,3 +75,26 @@ func TestDaemonPatrolConfigDecodesRetiredRoleKeys(t *testing.T) {
 		}
 	}
 }
+
+// events_prune (gt-ori5j) decodes strictly with its own fields, and a
+// daemon.json without it still decodes (the daemon then runs it on defaults).
+func TestDaemonPatrolConfigDecodesEventsPrune(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"events_prune":{"enabled":true,"interval":"1h","max_age":"168h","max_bytes":16777216}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := EventsPruneConfig{Enabled: true, IntervalStr: "1h", MaxAgeStr: "168h", MaxBytes: 16777216}
+	if cfg.Patrols.EventsPrune == nil || *cfg.Patrols.EventsPrune != want {
+		t.Errorf("events_prune = %+v, want %+v", cfg.Patrols.EventsPrune, want)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without events_prune: %v", err)
+	}
+	if absent.Patrols.EventsPrune != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.EventsPrune)
+	}
+}

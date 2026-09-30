@@ -615,7 +615,7 @@ func watchEvents(host, port, routesFile string, cleanup bool) error {
 	if err != nil {
 		return fmt.Errorf("opening events file: %w", err)
 	}
-	defer file.Close()
+	defer func() { file.Close() }()
 
 	// Seek to end — only process new events from this point forward
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
@@ -683,6 +683,44 @@ func watchEvents(host, port, routesFile string, cleanup bool) error {
 				db.Close()
 			}
 		}
+
+		// The daemon's events_prune replaces the file (tmp + rename). The old
+		// descriptor would never see another event, so reopen the path once
+		// the old file is drained. Resume at the end: the new file starts
+		// with retained history that must not re-trigger snapshots, and the
+		// deacon patrol catches anything appended in the gap.
+		if reopened, err := reopenIfReplaced(file, eventsPath); err != nil {
+			log.Printf("ERROR reopening %s: %v", eventsPath, err)
+		} else if reopened != nil {
+			file.Close()
+			file = reopened
+			reader = bufio.NewReader(file)
+		}
 	}
 	return nil
+}
+
+// reopenIfReplaced returns path opened at its end when it no longer names the
+// same file as f, or nil when it still does (or is momentarily missing).
+func reopenIfReplaced(f *os.File, path string) (*os.File, error) {
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, nil
+	}
+	fdInfo, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if os.SameFile(pathInfo, fdInfo) {
+		return nil, nil
+	}
+	nf, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := nf.Seek(0, io.SeekEnd); err != nil {
+		nf.Close()
+		return nil, err
+	}
+	return nf, nil
 }
