@@ -189,7 +189,7 @@ func TestVerifyPushLandedBareFallbackStillQueriesRemote(t *testing.T) {
 	})
 }
 
-// TestLandBranchPushStaysBoundedAndFailsClosed.
+// noSleep stands in for time.Sleep so the landing-retry tests never wait.
 func noSleep(time.Duration) {}
 
 // TestLandBranchPushProceedsWhenOriginAlreadyHasTheCommit is the

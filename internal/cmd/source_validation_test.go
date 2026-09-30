@@ -398,6 +398,10 @@ if [ "$1" = "update" ]; then
   case "$*" in *--add-label=gt:ready-to-land*) : > %q.ready ;; esac
   exit 0
 fi
+if [ "$1" = "show" ] && [ "$2" = "gt-gastown-polecat-refuge" ]; then
+  echo '[{"id":"gt-gastown-polecat-refuge","title":"Polecat refuge","status":"open","issue_type":"agent","labels":["gt:agent","done-intent:COMPLETED:1738972800"]}]'
+  exit 0
+fi
 labels='[]'
 if [ -e %q.ready ]; then labels='["gt:ready-to-land"]'; fi
 if [ "$1" = "show" ] && [ "$2" = "bd-source" ]; then

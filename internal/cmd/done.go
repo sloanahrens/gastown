@@ -987,7 +987,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// tell a polecat that died inside gt done from one still working. A run
 	// that fails does not report done and keeps its session to fix the
 	// failure, so the label must not outlive it: a stale done-intent label
-	// gets a working polecat restarted (gt-wmpy).
+	// gets a working polecat restarted (gt-wmpy). Every error return is such a
+	// run: reportDone's only error comes before the Witness nudge. A run that
+	// succeeds leaves the label to updateAgentStateOnDone, which clears it last.
 	if r.agentBeadID != "" {
 		agentBd := beads.New(r.cwd).ForAgentBead()
 		setDoneIntentLabel(agentBd, r.agentBeadID, exitType)
@@ -1250,7 +1252,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 	// Push submodule commits first, so the parent's pointer never names a
 	// commit the submodule's remote lacks (gt-dzs).
 	pushSubmoduleChanges(r.g, baseRef)
-	if err := pushBranchForLanding(r, sub.sourceBD, head); err != nil {
+	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
 		return sub, err
 	}
 	doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
@@ -1431,11 +1433,11 @@ func runDoneLocalGate(r *doneRun, head string) error {
 // or squashed branch replaces an earlier attempt's tip; a concurrent push to
 // the branch makes the lease fail instead of being clobbered. One retry
 // absorbs a push that errored while origin took the objects (gt-0opm).
-func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head string) error {
+func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head, baseRef string) error {
 	fmt.Printf("Pushing branch to origin...\n")
 	var lastPushErr error
 	attempt := func() error {
-		lastPushErr = pushBranchToOrigin(r.g, r.townRoot, r.rigName, r.branch, head)
+		lastPushErr = pushBranchToOrigin(r.g, r.townRoot, r.rigName, r.branch, head, baseRef)
 		return lastPushErr
 	}
 	firstErr := attempt()
@@ -1713,7 +1715,13 @@ func describePushVerificationFailure(g *git.Git, branch, commit string, cause er
 // rig's bare repo when the worktree's git context cannot reach the remote
 // (GH #1348). A tip already at head is not re-sent. The retry in
 // landBranchPush calls this again, and it re-reads the tip each time.
-func pushBranchToOrigin(g *git.Git, townRoot, rigName, branch, head string) error {
+//
+// A lease alone would let gt done replace any tip it had just read, including
+// another session's rework of the same branch. So when origin's tip is not an
+// ancestor of head, the change-sets are compared first (recoverDivergedPush):
+// a rebase or a rework on top of origin's commits is pushed over under the
+// lease, and real divergence is refused (gt-bf5x, gt-i0z3).
+func pushBranchToOrigin(g *git.Git, townRoot, rigName, branch, head, baseRef string) error {
 	expected, err := g.PushRemoteBranchTip("origin", branch)
 	if err != nil {
 		return fmt.Errorf("reading origin/%s before the push: %w", branch, err)
@@ -1722,6 +1730,20 @@ func pushBranchToOrigin(g *git.Git, townRoot, rigName, branch, head string) erro
 		return nil
 	}
 	refspec := "refs/heads/" + branch + ":refs/heads/" + branch
+	if expected != "" {
+		if contained, ancErr := g.IsAncestor(expected, head); ancErr != nil || !contained {
+			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
+			switch {
+			case recovered:
+				fmt.Printf("%s Replaced origin/%s: %s\n", style.Bold.Render("✓"), branch, diagnosis)
+				return nil
+			case recoverErr != nil:
+				return fmt.Errorf("origin/%s has diverged from this branch (%s): %w", branch, diagnosis, recoverErr)
+			default:
+				return fmt.Errorf("refusing to push over origin/%s: %s", branch, diagnosis)
+			}
+		}
+	}
 	err = g.PushForceWithLease("origin", refspec, "refs/heads/"+branch, expected)
 	if err == nil {
 		return nil

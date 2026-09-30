@@ -17,14 +17,14 @@ type divergedPushGit interface {
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 }
 
-// recoverDivergedPush runs after a plain (non-force) push of branch to remote
-// fails as non-fast-forward. That happens whenever local history was rebased
-// after an earlier dispatch already pushed this same branch to origin — the
-// branch-reuse formula step rebases onto origin/target unconditionally, and
-// gt done's own contamination-triggered auto-rebase can miss a prior push
-// from a different session/checkpoint. Either way, origin's tip and the new
-// local tip usually carry the same work, just rebased onto a newer base — not
-// real work loss (gt-bf5x).
+// recoverDivergedPush runs when origin's tip for branch is not an ancestor of
+// the local head: gt done's pushBranchToOrigin calls it before pushing, and
+// the tap guard uses it for pushes a plain push refused. That happens whenever
+// local history was rebased after an earlier dispatch already pushed this same
+// branch to origin — gt done always rebases onto the target, and so does the
+// branch-reuse formula step. Usually origin's tip and the new local tip carry
+// the same work, just rebased onto a newer base — not real work loss
+// (gt-bf5x).
 //
 // Two shapes of "same work" are safe to lease-over:
 //

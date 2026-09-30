@@ -220,3 +220,52 @@ func TestDoneLandingFlagsAreGone(t *testing.T) {
 		}
 	}
 }
+
+// TestRunDoneRefusesToPushOverSomeoneElsesWork: origin's branch holds a
+// commit this worktree does not have (another session reworked the branch).
+// The lease would let gt done replace it, so it compares change-sets first and
+// refuses real divergence (gt-bf5x, gt-i0z3): exit 10, origin untouched.
+func TestRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
+	var theirs string
+	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, true)
+		other := filepath.Join(t.TempDir(), "other")
+		gitOut(t, filepath.Dir(other), "clone", "-q", "-b", doneTestBranch, originURL(t, workDir), other)
+		gitOut(t, other, "config", "user.email", "o@example.com")
+		gitOut(t, other, "config", "user.name", "Other")
+		writeMQSubmitTestFile(t, other, "theirs.txt", "their rework\n")
+		gitOut(t, other, "add", "theirs.txt")
+		gitOut(t, other, "commit", "-q", "-m", "their rework")
+		gitOut(t, other, "push", "-q", "origin", doneTestBranch)
+		theirs = gitOut(t, other, "rev-parse", "HEAD")
+		// Local moves on without their commit.
+		writeMQSubmitTestFile(t, workDir, "mine.txt", "mine\n")
+		runGitForMQSubmitTest(t, workDir, "add", "mine.txt")
+		runGitForMQSubmitTest(t, workDir, "commit", "-m", "mine")
+	})
+	assertDoneExitCode(t, r.err, doneExitPushFailed, "real divergence")
+	if got := strings.Fields(gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch)); len(got) == 0 || got[0] != theirs {
+		t.Fatalf("origin branch = %v, want their commit %s kept", got, theirs)
+	}
+}
+
+// TestRunDoneFailureClearsTheDoneIntentLabel: the label written before the
+// long stages must not outlive a run that failed and reported nothing, or the
+// witness restarts a polecat that is fixing its branch (gt-wmpy). A run that
+// succeeded leaves it to updateAgentStateOnDone, which clears it last.
+func TestRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
+	red := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 1}}}}
+	r := runDoneSubmit(t, red, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
+	assertDoneExitCode(t, r.err, doneExitGateFailed, "local gate failed")
+	if !strings.Contains(r.bdLog, "--remove-label=done-intent:COMPLETED:") {
+		t.Errorf("a failed run left its done-intent label:\n%s", r.bdLog)
+	}
+
+	ok := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
+	if ok.err != nil {
+		t.Fatalf("runDone: %v", ok.err)
+	}
+	if strings.Contains(ok.bdLog, "--remove-label=done-intent:") {
+		t.Errorf("a reported run cleared the label before updateAgentStateOnDone:\n%s", ok.bdLog)
+	}
+}
