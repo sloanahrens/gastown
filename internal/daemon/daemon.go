@@ -67,7 +67,6 @@ type Daemon struct {
 	convoyManager *ConvoyManager
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
-	krcPruner     *KRCPruner
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
@@ -837,19 +836,6 @@ func (d *Daemon) Run() (err error) {
 			d.logger.Printf("Dolt recovery detected: triggering convoy recovery sweep")
 			cm.scan()
 		})
-	}
-
-	// Start KRC pruner for automatic ephemeral data cleanup
-	krcPruner, err := NewKRCPruner(d.config.TownRoot, d.logger.Printf)
-	if err != nil {
-		d.logger.Printf("Warning: failed to create KRC pruner: %v", err)
-	} else {
-		d.krcPruner = krcPruner
-		if err := d.krcPruner.Start(); err != nil {
-			d.logger.Printf("Warning: failed to start KRC pruner: %v", err)
-		} else {
-			d.logger.Println("KRC pruner started")
-		}
 	}
 
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
@@ -2785,12 +2771,6 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("Convoy manager stopped")
 	}
 	d.beadsStores = nil
-
-	// Stop KRC pruner
-	if d.krcPruner != nil {
-		d.krcPruner.Stop()
-		d.logger.Println("KRC pruner stopped")
-	}
 
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via

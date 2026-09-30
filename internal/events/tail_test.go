@@ -33,8 +33,8 @@ func appendLines(t *testing.T, path string, lines ...string) {
 	}
 }
 
-// rotate replaces path the way the KRC pruner does: write the retained lines
-// to a temp file, then rename it over the original (new inode).
+// rotate replaces path the way a pruning rotator does: write the retained
+// lines to a temp file, then rename it over the original (new inode).
 func rotate(t *testing.T, path string, retained ...string) {
 	t.Helper()
 	tmp := path + ".tmp"

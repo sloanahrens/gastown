@@ -11,9 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
-	"github.com/steveyegge/gastown/internal/krc"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -180,9 +178,10 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
-	// krc's prune rewrite of the raw events log (gt-hotx): write-temp-then-
-	// rename via <path>.tmp, same class as bd's .~ prefix and .lock churn.
-	writeFile(t, filepath.Join(town, ".events.jsonl.tmp"), "")
+	// A write-temp-then-rename sibling of a live target (the feed curator's
+	// .feed.jsonl truncate rotation, gt-hotx): same class as bd's .~ prefix
+	// and .lock churn.
+	writeFile(t, filepath.Join(town, feed.FeedFile+feed.TruncateTempSuffix), "")
 	// A real leak at the town root must still be caught.
 	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
 
@@ -194,7 +193,7 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 		t.Errorf("real leak not detected: %v", leaks)
 	}
 	joined := strings.Join(leaks, "\n")
-	if strings.Contains(joined, ".events.jsonl.tmp") {
+	if strings.Contains(joined, ".truncate.tmp") {
 		t.Errorf("atomic-write temp flagged as leak: %v", leaks)
 	}
 }
@@ -263,42 +262,11 @@ func TestTripwire_FailsClosedOnUnclaimedTmpInWatchedSubdir(t *testing.T) {
 	}
 }
 
-// A hard crash (SIGKILL) mid-prune leaves <path>.tmp in the watched town
-// surface — the expected state for krc's own writers (events prune, feed
-// prune, and its auto-prune state save), which all go through
-// replaceWithLines/SaveAutoPruneState and share krc.ReplaceTempSuffix. The
-// next prune removes the residue; the tripwire tolerates it in the meantime,
-// and its reporting pass is the intended signal that a crash happened.
-func TestTripwire_ToleratesCrashResidueTmp(t *testing.T) {
-	town := makeFakeTown(t)
-	snap := snapshotTown(town)
-
-	writeFile(t, filepath.Join(town, events.EventsFile+krc.ReplaceTempSuffix), "")
-	writeFile(t, filepath.Join(town, feed.FeedFile+krc.ReplaceTempSuffix), "")
-	writeFile(t, filepath.Join(town, krc.AutoPruneStateFile+krc.ReplaceTempSuffix), "")
-	// A real leak must still be caught alongside the crash residue.
-	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
-
-	leaks := snap.diff()
-	if len(leaks) != 1 {
-		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
-	}
-	if !strings.Contains(leaks[0], "scratch.txt") {
-		t.Errorf("real leak not detected: %v", leaks)
-	}
-	joined := strings.Join(leaks, "\n")
-	if strings.Contains(joined, ".tmp") {
-		t.Errorf("crash-residue .tmp flagged as leak: %v", leaks)
-	}
-}
-
-// The feed curator's separate truncate rotation writes a different suffix
-// than krc's own prune (feed.TruncateTempSuffix, ".truncate.tmp", not
-// krc.ReplaceTempSuffix's plain ".tmp") for the same target file,
-// .feed.jsonl. A prior version of this allowlist assumed .feed.jsonl had
-// only one writer's suffix and reported this one's crash residue as a leak;
-// this test pins the real producer filename so that regression cannot
-// recur silently.
+// A hard crash (SIGKILL) mid-rotation leaves the producer's temp file in the
+// watched town surface, the expected state for the feed curator's truncate
+// rotation. The next rotation removes the residue; the tripwire tolerates it
+// in the meantime, and its reporting pass is the intended signal that a crash
+// happened.
 func TestTripwire_ToleratesFeedCuratorTruncateResidue(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
