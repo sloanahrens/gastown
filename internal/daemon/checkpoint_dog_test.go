@@ -646,6 +646,49 @@ func TestCheckpointWorktreeSkipsThrowawayOnlyChanges(t *testing.T) {
 	}
 }
 
+// TestCheckpointWorktreeExcludesThrowawayThatLooksLikeARename reproduces the
+// fail-open in the throwaway filter: `git add -A` stages a tracked file that was
+// renamed to a throwaway name as a delete plus an add, and git's rename
+// detection reports that pair as a single R entry, which --diff-filter=A does
+// not list. The scratch name reached the checkpoint commit and, through gt
+// done's tree squash, the target.
+func TestCheckpointWorktreeExcludesThrowawayThatLooksLikeARename(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.WriteFile(filepath.Join(workDir, "helper.go"), []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "client.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+
+	// Real work, plus a tracked file moved to a scratch name.
+	if err := os.WriteFile(filepath.Join(workDir, "client.go"), []byte("package main\n\n// real work\n"), 0o644); err != nil {
+		t.Fatalf("modify source: %v", err)
+	}
+	if err := os.Rename(filepath.Join(workDir, "helper.go"), filepath.Join(workDir, "helper_tmp.go")); err != nil {
+		t.Fatalf("rename to throwaway: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "client.go" {
+		t.Fatalf("checkpoint commit changed %q, want only client.go", got)
+	}
+	if tracked := strings.TrimSpace(mustRunGit(t, workDir, "ls-files", "--", "helper_tmp.go")); tracked != "" {
+		t.Fatalf("throwaway file reached the branch: %q", tracked)
+	}
+}
+
 // TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule is the
 // false-positive control for the throwaway rule. The rule governs what a
 // checkpoint ADDS: a repository that already tracks such a name keeps being

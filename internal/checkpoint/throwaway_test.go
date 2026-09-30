@@ -215,6 +215,28 @@ func addCommitInDir(t *testing.T, dir, filename, content, msg string) {
 	addCommit(t, dir, filename, content, msg)
 }
 
+// TestAddedThrowawayPaths_SeesAdditionGitCallsARename pins the fail-open in the
+// gate: a scratch copy of a file the branch also deletes is, to git's rename
+// detection, a rename (status R), and --diff-filter=A does not list renames. The
+// blob still lands in HEAD's tree, so the answer must stay positive.
+func TestAddedThrowawayPaths_SeesAdditionGitCallsARename(t *testing.T) {
+	dir := initTestRepo(t)
+	addCommit(t, dir, "helper.go", "package main\n\nfunc helper() {}\n", "tracked helper")
+	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
+
+	createBranch(t, dir, "polecat/garnet/gt-trpzw")
+	mustGit(t, dir, "mv", "helper.go", "helper_tmp.go")
+	mustGit(t, dir, "commit", "-m", "WIP: checkpoint (auto)")
+
+	found, err := AddedThrowawayPaths(dir, base, "HEAD")
+	if err != nil {
+		t.Fatalf("AddedThrowawayPaths: %v", err)
+	}
+	if len(found) != 1 || found[0] != "helper_tmp.go" {
+		t.Fatalf("AddedThrowawayPaths() = %#v, want [helper_tmp.go]", found)
+	}
+}
+
 // mustGitOutput runs a git command and returns trimmed stdout.
 func mustGitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()

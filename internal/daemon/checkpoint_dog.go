@@ -210,7 +210,11 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// are left untracked where the polecat left them and named in the log: a
 	// polecat that meant to keep one now has no checkpoint for it, and only the
 	// log says why.
-	addedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "--diff-filter=A", "-z")
+	//
+	// --no-renames: `add -A` stages a tracked file moved to a scratch name as a
+	// delete plus an add, and rename detection folds that pair into one R entry
+	// that --diff-filter=A does not list.
+	addedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=A", "-z")
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached --diff-filter=A failed in %s/%s: %v", rigName, polecatName, err)
 		return false

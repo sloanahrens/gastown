@@ -112,9 +112,14 @@ func AddedThrowawayPaths(workDir, baseRef, headRef string) ([]string, error) {
 		return nil, fmt.Errorf("finding merge-base of %s and %s: %w", baseRef, headRef, err)
 	}
 
+	// --no-renames: a throwaway that reuses a deleted file's content is reported
+	// as a rename (R) or copy (C), which --diff-filter=A does not list, yet its
+	// blob still lands in HEAD's tree. Without rename detection every new path
+	// is an A.
+	//
 	// -z keeps a path with a newline in it from being split into two, so the
 	// listing must be read verbatim.
-	added, err := gitOutputRaw(workDir, "diff", "--name-only", "--diff-filter=A", "-z", mergeBase, headRef)
+	added, err := gitOutputRaw(workDir, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", mergeBase, headRef)
 	if err != nil {
 		return nil, fmt.Errorf("listing paths added by %s: %w", headRef, err)
 	}
