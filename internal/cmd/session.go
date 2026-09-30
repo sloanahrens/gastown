@@ -315,7 +315,7 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 type sessionSeat struct {
 	Rig  string
 	Name string
-	// Role is constants.RolePolecat, RoleWitness or RoleRefinery — what <name>
+	// Role is constants.RolePolecat or RoleWitness — what <name>
 	// is in that rig.
 	Role string
 	Mgr  *polecat.SessionManager

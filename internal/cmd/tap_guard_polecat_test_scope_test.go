@@ -22,7 +22,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"whole internal/daemon counted", "go test ./internal/daemon/ -count=1", true},
 		{"two heavy packages", "go test ./internal/polecat/ ./internal/cmd/ -count=1", true},
 		{"heavy package wrapped in slot run", "gt slot run --role gastown/flint -- go test ./internal/polecat/ -count=1", true},
-		{"heavy package after another segment", "gofmt -l . && go test ./internal/refinery/", true},
+		{"heavy package after another segment", "gofmt -l . && go test ./internal/daemon/", true},
 		{"subpackage of a heavy package", "go test ./internal/cmd/sub/", true},
 		{"ancestor wildcard covering heavy packages", "go test ./internal/...", true},
 		{"bare ancestor wildcard", "go test internal/...", true},

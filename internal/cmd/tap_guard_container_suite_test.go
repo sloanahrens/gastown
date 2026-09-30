@@ -29,7 +29,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test module-prefixed whole repo wildcard", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
 		{"go test container package with a trailing slash", "GT_TEST_DOCKER=1 go test ./internal/beads/", true},
 		{"go test module-prefixed container package", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/internal/beads/...", true},
-		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/refinery/...", true},
+		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/mail/...", true},
 		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
 		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
 		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
@@ -292,7 +292,7 @@ func TestCwdHeavyPackages(t *testing.T) {
 		{"module root", ".", nil},
 		{"heavy package", "internal/cmd", []string{"internal/cmd"}},
 		{"subpackage of a heavy package", "internal/cmd/sub", []string{"internal/cmd"}},
-		{"ancestor of every heavy package", "internal", []string{"internal/cmd", "internal/daemon", "internal/polecat", "internal/refinery"}},
+		{"ancestor of every heavy package", "internal", []string{"internal/cmd", "internal/daemon", "internal/polecat"}},
 		{"light package", "internal/style", nil},
 		{"container package that is not heavy", "internal/beads", nil},
 	}
