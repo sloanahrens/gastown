@@ -49,8 +49,8 @@ func LoadTownConfig(path string) (*TownConfig, error) {
 	}
 
 	var config TownConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateTownConfig(&config); err != nil {
@@ -69,38 +69,28 @@ func SaveTownConfig(path string, config *TownConfig) error {
 	return WriteConfigJSON(path, config, 0600)
 }
 
-// LoadRigsConfig loads and validates a rigs registry file.
-// Retries once on read/parse errors to tolerate the brief window during which a
-// concurrent non-atomic writer could leave the file truncated. With
-// SaveRigsConfig now using atomic write-then-rename this is belt-and-suspenders
-// against older versions that may still be writing the file.
+// LoadRigsConfig loads and validates a rigs registry file. Every writer is
+// atomic (WriteConfigJSON), so a file that does not parse is damage and is
+// reported, not retried.
 func LoadRigsConfig(path string) (*RigsConfig, error) {
-	readAndParse := func() (*RigsConfig, error) {
-		data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
-			}
-			return nil, fmt.Errorf("reading config: %w", err)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
 		}
-
-		var config RigsConfig
-		if err := json.Unmarshal(data, &config); err != nil {
-			return nil, fmt.Errorf("parsing config: %w", err)
-		}
-
-		if err := validateRigsConfig(&config); err != nil {
-			return nil, err
-		}
-
-		return &config, nil
+		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
-	cfg, err := readAndParse()
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		cfg, err = readAndParse()
+	var config RigsConfig
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
-	return cfg, err
+
+	if err := validateRigsConfig(&config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 // SaveRigsConfig saves a rigs registry to a file atomically.
@@ -151,8 +141,8 @@ func LoadRigConfig(path string) (*RigConfig, error) {
 	}
 
 	var config RigConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateRigConfig(&config); err != nil {
@@ -450,41 +440,23 @@ func LoadRigSettings(path string) (*RigSettings, error) {
 	}
 
 	var settings RigSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, fmt.Errorf("parsing settings: %w", err)
+	if err := DecodeJSONFile(path, data, &settings); err != nil {
+		return nil, err
 	}
 
 	if err := validateRigSettings(&settings); err != nil {
 		return nil, err
 	}
 
-	// Check for deprecated merge_queue keys that were removed.
-	// These are silently ignored by json.Unmarshal but may indicate stale config.
-	warnDeprecatedMergeQueueKeys(data, path)
-
 	return &settings, nil
 }
 
-// DeprecatedMergeQueueKeys lists merge_queue config keys that have been removed.
+// DeprecatedMergeQueueKeys lists merge_queue config keys that have been
+// removed. Strict decoding rejects them in a rig settings file; gt doctor
+// names them.
 // target_branch and integration_branches were replaced by rig default_branch
 // and per-epic integration branch metadata.
 var DeprecatedMergeQueueKeys = []string{"target_branch", "integration_branches"}
-
-// warnDeprecatedMergeQueueKeys checks raw settings JSON for removed merge_queue keys
-// and prints a stderr warning. This is advisory only — not a validation error.
-func warnDeprecatedMergeQueueKeys(data []byte, path string) {
-	var raw struct {
-		MergeQueue map[string]json.RawMessage `json:"merge_queue"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil || raw.MergeQueue == nil {
-		return
-	}
-	for _, key := range DeprecatedMergeQueueKeys {
-		if _, ok := raw.MergeQueue[key]; ok {
-			fmt.Fprintf(os.Stderr, "warning: %s: merge_queue.%s is deprecated and ignored (use rig default_branch instead)\n", path, key)
-		}
-	}
-}
 
 // SaveRigSettings saves rig settings to a file.
 func SaveRigSettings(path string, settings *RigSettings) error {
@@ -507,8 +479,8 @@ func LoadMayorConfig(path string) (*MayorConfig, error) {
 	}
 
 	var config MayorConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateMayorConfig(&config); err != nil {
@@ -562,8 +534,8 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 	}
 
 	var config DaemonPatrolConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing daemon patrol config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateDaemonPatrolConfig(&config); err != nil {
@@ -680,8 +652,8 @@ func LoadAccountsConfig(path string) (*AccountsConfig, error) {
 	}
 
 	var config AccountsConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing accounts config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateAccountsConfig(&config); err != nil {
@@ -814,8 +786,8 @@ func LoadMessagingConfig(path string) (*MessagingConfig, error) {
 	}
 
 	var config MessagingConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing messaging config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateMessagingConfig(&config); err != nil {
@@ -2788,8 +2760,8 @@ func LoadEscalationConfig(path string) (*EscalationConfig, error) {
 	}
 
 	var config EscalationConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing escalation config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateEscalationConfig(&config); err != nil {

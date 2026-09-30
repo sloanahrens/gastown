@@ -618,6 +618,12 @@ func (r *AgentRegistry) overlayFile(path string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 
+	// Validate the whole file strictly first so a ParseError names the full
+	// key path (agents.<name>.<key>); the merge below then decodes each entry
+	// onto the preset it overrides.
+	if err := DecodeJSONFile(path, data, &AgentRegistry{}); err != nil {
+		return err
+	}
 	var userRegistry rawAgentRegistry
 	if err := json.Unmarshal(data, &userRegistry); err != nil {
 		return fmt.Errorf("%s: %w", path, err)

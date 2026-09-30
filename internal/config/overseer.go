@@ -1,13 +1,11 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
 )
 
 // OverseerConfig represents the human operator's identity (mayor/overseer.json).
@@ -40,8 +38,8 @@ func LoadOverseerConfig(path string) (*OverseerConfig, error) {
 	}
 
 	var config OverseerConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parsing overseer config: %w", err)
+	if err := DecodeJSONFile(path, data, &config); err != nil {
+		return nil, err
 	}
 
 	if err := validateOverseerConfig(&config); err != nil {
@@ -189,7 +187,7 @@ func detectFromEnvironment() *OverseerConfig {
 	if username == "" {
 		// Try whoami as last resort
 		cmd := exec.Command("whoami")
-	
+
 		if out, err := cmd.Output(); err == nil {
 			username = strings.TrimSpace(string(out))
 		}

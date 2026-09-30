@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,11 +41,11 @@ func LoadDaemonEnv(townRoot string) (map[string]string, error) {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return nil, fmt.Errorf("daemon env file %s line %d: missing '=' in %q", path, i+1, rawLine)
+			return nil, &ParseError{Path: path, Line: i + 1, Err: fmt.Errorf("missing '=' in %q", rawLine)}
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return nil, fmt.Errorf("daemon env file %s line %d: empty key", path, i+1)
+			return nil, &ParseError{Path: path, Line: i + 1, Err: errors.New("empty key")}
 		}
 		env[key] = strings.TrimSpace(value)
 	}
