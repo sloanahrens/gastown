@@ -153,3 +153,103 @@ func TestReviewPRFormulaValidatesPRURL(t *testing.T) {
 		t.Errorf("gh reads an unquoted $PR_URL: %s", bare)
 	}
 }
+
+// The -s/-m test above only sees double-quoted mail arguments. The same
+// injection exists on any command line in a shell block: `gh pr view {{pr_url}}`
+// splits on whitespace, `--set problem="{{problem}}"` breaks on a quote. A
+// template var may appear in a shell block only when it is machine-shaped, or
+// on the body line of a quoted heredoc (<<'EOF'), which the shell never expands.
+var (
+	shellFenceOpen = regexp.MustCompile("^\\s*```(bash|sh|shell)\\s*$")
+	fenceMarker    = regexp.MustCompile("^\\s*```")
+	quotedHeredoc  = regexp.MustCompile(`<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'`)
+)
+
+// Allowed beyond systemGeneratedVar: review_id is a slug the agent picks
+// (lowercase letters, digits, hyphens; mol-idea-to-plan says so).
+var shellLineAllowedVar = regexp.MustCompile(systemGeneratedVar.String() + `|\{\{review_id\}\}`)
+
+// shellLineViolations returns "line: text" for each line inside a shell fence
+// that carries a template var outside the allowlist and outside a quoted
+// heredoc body. Unquoted heredoc bodies are not exempt: the shell expands them.
+func shellLineViolations(content string) []string {
+	var out []string
+	inShell, quotedEnd := false, ""
+	for _, line := range strings.Split(content, "\n") {
+		if quotedEnd != "" {
+			if line == quotedEnd {
+				quotedEnd = ""
+			}
+			continue
+		}
+		if fenceMarker.MatchString(line) {
+			inShell = !inShell && shellFenceOpen.MatchString(line)
+			continue
+		}
+		if !inShell {
+			continue
+		}
+		if m := quotedHeredoc.FindStringSubmatch(line); m != nil {
+			quotedEnd = m[1]
+		}
+		for _, v := range anyVar.FindAllString(line, -1) {
+			if !shellLineAllowedVar.MatchString(v) {
+				out = append(out, strings.TrimSpace(line))
+				break
+			}
+		}
+	}
+	return out
+}
+
+// Formulas already swept for this rule. The rest of the shipped formulas still
+// carry unquoted vars on shell lines (convoy, dog, patrol and digest formulas);
+// add each one here as it is fixed.
+var sweptShellLineFormulas = []string{
+	"mol-idea-to-plan",
+	"mol-polecat-code-review",
+	"mol-polecat-review-pr",
+}
+
+func TestSweptFormulasBindFreeTextVarsOnlyInQuotedHeredocs(t *testing.T) {
+	for _, f := range sweptShellLineFormulas {
+		data, err := formulasFS.ReadFile("formulas/" + f + ".formula.toml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range shellLineViolations(string(data)) {
+			t.Errorf("%s: template var on a shell line outside a quoted heredoc: %s", f, l)
+		}
+	}
+}
+
+func TestShellLineViolationsCatchesUnquotedVars(t *testing.T) {
+	fence := func(body string) string { return "prose\n```bash\n" + body + "\n```\n" }
+	bad := []string{
+		`gt formula run mol-prd-review --set problem="{{problem}}"`,
+		`ls -la {{scope}}`,
+		`gh pr view {{pr_url}}`,
+		`bd update {{issue}} --notes "{{focus}}"`,
+		"cat <<EOF\n{{problem}}\nEOF",
+		"X=$(cat <<'EOF'\nok\nEOF\n)\necho {{problem}}",
+	}
+	for _, b := range bad {
+		if len(shellLineViolations(fence(b))) == 0 {
+			t.Errorf("not flagged: %q", b)
+		}
+	}
+	good := []string{
+		`bd show {{issue}}`,
+		`cat .prd-reviews/{{review_id}}/prd-draft.md`,
+		"P=$(cat <<'EOF'\n{{problem}}\nEOF\n)\ngh pr view \"$P\"",
+	}
+	for _, g := range good {
+		if v := shellLineViolations(fence(g)); len(v) != 0 {
+			t.Errorf("flagged %q: %v", g, v)
+		}
+	}
+	// Text outside a shell fence is prose or output for a human, not a command.
+	if v := shellLineViolations("```\nTitle: {{problem}}\n```\nUse {{problem}}"); len(v) != 0 {
+		t.Errorf("flagged prose: %v", v)
+	}
+}

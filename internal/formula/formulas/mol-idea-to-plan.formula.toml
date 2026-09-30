@@ -71,6 +71,7 @@ Read the conversation context and produce a structured PRD draft.
 **Your task:**
 Pick a short slug for this review (e.g., "notification-levels", "merge-queue-v2") and use it
 as `{{review_id}}` in all paths below. This ID is reused by downstream steps.
+Use only lowercase letters, digits and hyphens: it lands unquoted in shell paths.
 
 Write a structured PRD draft to `.prd-reviews/{{review_id}}/prd-draft.md`
 
@@ -120,10 +121,21 @@ description = """
 Pour the mol-prd-review convoy to run 6 parallel PRD reviewers.
 
 **1. Pour the convoy:**
+Bind the problem and context first. Both are free text, so they go through
+quoted heredocs and the command reads the quoted shell variables (each step
+runs in a fresh shell):
 ```bash
+PROBLEM=$(cat <<'GT_PROBLEM_EOF'
+{{problem}}
+GT_PROBLEM_EOF
+)
+CONTEXT=$(cat <<'GT_CONTEXT_EOF'
+{{context}}
+GT_CONTEXT_EOF
+)
 gt formula run mol-prd-review \\
-  --set problem="{{problem}}" \\
-  --set context="See .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
+  --set problem="$PROBLEM" \\
+  --set context="See .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT"
 ```
 
 This spawns 6 polecats in parallel:
@@ -213,10 +225,19 @@ description = """
 Pour the design convoy to generate an implementation plan from the refined PRD.
 
 **1. Pour the design convoy:**
+Bind the problem and context first, as in the PRD review step:
 ```bash
+PROBLEM=$(cat <<'GT_PROBLEM_EOF'
+{{problem}}
+GT_PROBLEM_EOF
+)
+CONTEXT=$(cat <<'GT_CONTEXT_EOF'
+{{context}}
+GT_CONTEXT_EOF
+)
 gt formula run design \\
-  --set problem="{{problem}}" \\
-  --set context="PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
+  --set problem="$PROBLEM" \\
+  --set context="PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT"
 ```
 
 This spawns 6 polecats in parallel, each exploring a different dimension:
@@ -699,11 +720,20 @@ cat .designs/<design-review-id>/design-doc.md
 
 **2. Identify work items from the Implementation Plan section:**
 
+Bind the problem first. It is free text, so it goes through a quoted heredoc and
+the commands read the quoted shell variable (re-bind it in any later shell):
+```bash
+PROBLEM=$(cat <<'GT_PROBLEM_EOF'
+{{problem}}
+GT_PROBLEM_EOF
+)
+```
+
 For each task/phase in the plan, create a bead:
 ```bash
 bd create "Task title" --type=task --description="
 ## Context
-From: {{problem}} implementation plan
+From: $PROBLEM implementation plan
 
 ## What
 <task description>
@@ -728,8 +758,8 @@ bd dep add <task-x-id> <task-y-id>  # x depends on y (y blocks x)
 
 **4. Create a tracking epic:**
 ```bash
-bd create "{{problem}}" --type=epic --description="
-Implementation of: {{problem}}
+bd create "$PROBLEM" --type=epic --description="
+Implementation of: $PROBLEM
 
 ## Planning Artifacts
 - PRD: .prd-reviews/<review-id>/prd-draft.md
