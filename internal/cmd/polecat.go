@@ -635,6 +635,14 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 		fmt.Fprintf(os.Stderr, "warning: failed to preload wisp labels in %s: %v\n", r.Name, err)
 	}
 
+	// The issues-table counterpart, one more bd sql round trip: it answers the
+	// issues half of ListAgentBeads() and of the MR query below, and the
+	// active-work listing, which would otherwise each spawn their own bd
+	// subprocess (gt-0hmt2). Same fallback on failure.
+	if err := bd.PreloadIssues([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload issues in %s: %v\n", r.Name, err)
+	}
+
 	// ONE merge-request query per rig, joined per polecat below — never a
 	// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path is
 	// the blindness this replaces).
