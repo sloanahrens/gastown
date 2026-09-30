@@ -1091,7 +1091,7 @@ func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testin
 		if len(cfg.PermissionRequest) == 0 {
 			t.Fatalf("%s: generated settings carry no PermissionRequest entries at all", target)
 		}
-		for _, matcher := range []string{"Bash", "Edit|Write|MultiEdit|NotebookEdit"} {
+		for _, matcher := range []string{shellExecutingToolMatcher, "Edit|Write|MultiEdit|NotebookEdit"} {
 			var entry HookEntry
 			found := false
 			for _, e := range cfg.PermissionRequest {
