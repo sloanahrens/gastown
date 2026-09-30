@@ -22,7 +22,6 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 		session.RoleMayor,
 		session.RoleDeacon,
 		session.RoleWitness,
-		session.RoleRefinery,
 		session.RoleCrew,
 	} {
 		t.Run(string(role), func(t *testing.T) {

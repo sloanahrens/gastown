@@ -74,13 +74,6 @@ func TestParsePolecatSessionName(t *testing.T) {
 			wantOk:      false,
 		},
 		{
-			name:        "refinery session",
-			sessionName: "gp-refinery",
-			wantRig:     "",
-			wantPolecat: "",
-			wantOk:      false,
-		},
-		{
 			name:        "mayor session",
 			sessionName: "hq-mayor",
 			wantRig:     "",

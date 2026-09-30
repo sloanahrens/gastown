@@ -1287,30 +1287,21 @@ func (h *APIHandler) handleIssueShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try structured JSON output first (preferred — no text parsing needed)
-	output, err := h.runBdCommand(r.Context(), 10*time.Second, []string{"show", showID, "--json"})
-	if err == nil {
-		if resp, ok := parseIssueShowJSON(output); ok {
-			// Preserve the original request ID in the response (may be external:prefix:id).
-			// Callers may store/compare the full prefixed form.
-			resp.ID = issueID
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
-			return
-		}
-	}
-
-	// Fall back to text parsing
-	output, err = h.runBdCommand(r.Context(), 10*time.Second, []string{"show", showID})
+	// bd prints show as JSON only: machine mode has no text form to fall back to.
+	output, _, err := h.runBdCommandSplit(r.Context(), 10*time.Second, []string{"show", showID, "--json"})
 	if err != nil {
 		h.sendError(w, "Failed to fetch issue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	resp, ok := parseIssueShowJSON(output)
+	if !ok {
+		h.sendError(w, "Failed to fetch issue: unexpected bd show output", http.StatusInternalServerError)
+		return
+	}
 
-	// Pass issueID (not showID) to preserve the original ID in the API response.
-	// Callers may store/compare the full external:prefix:id form.
-	resp := parseIssueShowOutput(output, issueID)
-
+	// Preserve the original request ID in the response (may be external:prefix:id).
+	// Callers may store/compare the full prefixed form.
+	resp.ID = issueID
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1382,35 +1373,28 @@ func (h *APIHandler) handleIssueCreate(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--body", req.Description)
 	}
 
-	args = append(args, "--", req.Title)
+	// --silent prints the created id alone; bd's prose has no stable form to parse.
+	args = append(args, "--silent", "--", req.Title)
 
 	// Run bd create
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	output, err := h.runBdCommand(ctx, 12*time.Second, args)
+	stdout, stderr, err := h.runBdCommandSplit(ctx, 12*time.Second, args)
 
 	resp := IssueCreateResponse{}
 	if err != nil {
 		resp.Success = false
 		resp.Error = "Failed to create issue: " + err.Error()
-		if output != "" {
-			resp.Message = output
-		}
+		resp.Message = strings.TrimSpace(stderr)
+	} else if id := strings.TrimSpace(stdout); id == "" {
+		resp.Success = false
+		resp.Error = "Failed to create issue: bd printed no issue id"
+		resp.Message = strings.TrimSpace(stderr)
 	} else {
 		resp.Success = true
-		resp.Message = output
-
-		// Try to extract issue ID from output (e.g., "Created issue: abc123")
-		if strings.Contains(output, "Created") {
-			parts := strings.Fields(output)
-			for i, p := range parts {
-				if strings.HasSuffix(p, ":") && i+1 < len(parts) {
-					resp.ID = strings.TrimSpace(parts[i+1])
-					break
-				}
-			}
-		}
+		resp.ID = id
+		resp.Message = "Created issue " + id
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1535,11 +1519,28 @@ func (h *APIHandler) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// runBdCommand executes a bd command with the given args.
+// runBdCommand executes a bd command with the given args and returns what it
+// printed, stdout then stderr, for display.
 func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
+	stdout, stderr, err := h.runBdCommandSplit(ctx, timeout, args)
+	output := stdout
+	if stderr != "" {
+		if output != "" {
+			output += "\n"
+		}
+		output += stderr
+	}
+	return output, err
+}
+
+// runBdCommandSplit is runBdCommand for a caller that parses stdout: bd's
+// warnings on stderr stay out of the payload. A failed bd's stdout is its
+// error envelope, which repeats stderr's prose, so a failure returns stderr
+// alone when there is any.
+func (h *APIHandler) runBdCommandSplit(ctx context.Context, timeout time.Duration, args []string) (string, string, error) {
 	err := acquireCmdSlotWithin(ctx, h.clock, h.cmdSem, h.waitBudget(timeout))
 	if err != nil {
-		return "", fmt.Errorf("command slot unavailable: %w", err)
+		return "", "", fmt.Errorf("command slot unavailable: %w", err)
 	}
 	defer releaseCmdSlot(h.cmdSem)
 
@@ -1553,25 +1554,23 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = runProc(h.runProc, ctx, cmd)
+	err = runProc(h.runProc, ctx, cmd.Cmd)
 
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		if output != "" {
-			output += "\n"
-		}
-		output += stderr.String()
+	// runProc runs the embedded exec.Cmd, so stdout is the machine envelope.
+	out := string(beads.LegacyPayload(args, stdout.Bytes()))
+	if err != nil && stderr.Len() > 0 {
+		out = ""
 	}
 
 	if deadlineExceeded(ctx) {
-		return output, fmt.Errorf("command timed out after %v", timeout)
+		return out, stderr.String(), fmt.Errorf("command timed out after %v", timeout)
 	}
 
 	if err != nil {
-		return output, fmt.Errorf("command failed: %v", err)
+		return out, stderr.String(), fmt.Errorf("command failed: %v", err)
 	}
 
-	return output, nil
+	return out, stderr.String(), nil
 }
 
 // parseIssueShowJSON parses the JSON output from "bd show <id> --json".
@@ -1614,115 +1613,6 @@ func parseIssueShowJSON(output string) (IssueShowResponse, bool) {
 		Blocks:      item.Blocks,
 		RawOutput:   output,
 	}, true
-}
-
-// parseIssueShowOutput parses the text output from "bd show <id>".
-// This is the fallback path when --json is unavailable.
-func parseIssueShowOutput(output string, issueID string) IssueShowResponse {
-	resp := IssueShowResponse{
-		ID:        issueID,
-		RawOutput: output,
-	}
-
-	lines := strings.Split(output, "\n")
-	inDescription := false
-	parsedFirstLine := false
-	var descLines []string
-	var dependsOn []string
-	var blocks []string
-
-	for _, line := range lines {
-		// First non-empty line usually has the format: "○ id · title   [● P2 · OPEN]"
-		if !parsedFirstLine && (strings.HasPrefix(line, "○") || strings.HasPrefix(line, "●")) {
-			parsedFirstLine = true
-			// Parse the first line for title and status
-			// Format: "○ id · title   [● P2 · OPEN]"
-			// Find the bracket first to isolate the status
-			if bracketIdx := strings.Index(line, "["); bracketIdx > 0 {
-				beforeBracket := line[:bracketIdx]
-				statusPart := line[bracketIdx:]
-
-				// Extract priority and status from [● P2 · OPEN]
-				statusPart = strings.Trim(statusPart, "[]●○ ")
-				statusParts := strings.Split(statusPart, "·")
-				if len(statusParts) >= 1 {
-					resp.Priority = strings.TrimSpace(statusParts[0])
-				}
-				if len(statusParts) >= 2 {
-					resp.Status = strings.TrimSpace(statusParts[1])
-				}
-
-				// Now parse the title from before the bracket
-				// Format: "○ id · title"
-				// Use strings.Cut for safe splitting on multi-byte "·" separator
-				if _, afterFirst, ok := strings.Cut(beforeBracket, "·"); ok {
-					if _, afterSecond, ok := strings.Cut(afterFirst, "·"); ok {
-						resp.Title = strings.TrimSpace(afterSecond)
-					} else {
-						// Only one dot - id is embedded in icon part
-						resp.Title = strings.TrimSpace(afterFirst)
-					}
-				}
-			}
-			continue
-		}
-
-		if strings.HasPrefix(line, "Owner:") {
-			// Format: "Owner: mayor · Type: task"
-			ownerLine := strings.TrimPrefix(line, "Owner:")
-			ownerParts := strings.Split(ownerLine, "·")
-			resp.Owner = strings.TrimSpace(ownerParts[0])
-			if len(ownerParts) >= 2 {
-				typePart := strings.TrimSpace(ownerParts[1])
-				resp.Type = strings.TrimSpace(strings.TrimPrefix(typePart, "Type:"))
-			}
-		} else if strings.HasPrefix(line, "Type:") {
-			resp.Type = strings.TrimSpace(strings.TrimPrefix(line, "Type:"))
-		} else if strings.HasPrefix(line, "Created:") {
-			// Split always returns >= 1 element; parts[0] is safe unconditionally
-			parts := strings.Split(line, "·")
-			resp.Created = strings.TrimSpace(strings.TrimPrefix(parts[0], "Created:"))
-			if len(parts) >= 2 {
-				resp.Updated = strings.TrimSpace(strings.TrimPrefix(parts[1], "Updated:"))
-			}
-		} else if line == "DESCRIPTION" {
-			inDescription = true
-		} else if line == "DEPENDS ON" || line == "BLOCKS" {
-			inDescription = false
-		} else if inDescription && strings.TrimSpace(line) != "" {
-			descLines = append(descLines, line)
-		} else if strings.HasPrefix(strings.TrimSpace(line), "→") {
-			// Dependency line
-			depLine := strings.TrimSpace(line)
-			depLine = strings.TrimPrefix(depLine, "→")
-			depLine = strings.TrimSpace(depLine)
-			// Extract just the bead ID
-			if colonIdx := strings.Index(depLine, ":"); colonIdx > 0 {
-				parts := strings.Fields(depLine[:colonIdx])
-				if len(parts) >= 2 {
-					dependsOn = append(dependsOn, parts[1])
-				}
-			}
-		} else if strings.HasPrefix(strings.TrimSpace(line), "←") {
-			// Blocks line
-			blockLine := strings.TrimSpace(line)
-			blockLine = strings.TrimPrefix(blockLine, "←")
-			blockLine = strings.TrimSpace(blockLine)
-			// Extract just the bead ID
-			if colonIdx := strings.Index(blockLine, ":"); colonIdx > 0 {
-				parts := strings.Fields(blockLine[:colonIdx])
-				if len(parts) >= 2 {
-					blocks = append(blocks, parts[1])
-				}
-			}
-		}
-	}
-
-	resp.Description = strings.TrimSpace(strings.Join(descLines, "\n"))
-	resp.DependsOn = dependsOn
-	resp.Blocks = blocks
-
-	return resp
 }
 
 // PRShowResponse is the response for /api/pr/show.

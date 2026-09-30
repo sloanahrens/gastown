@@ -212,7 +212,7 @@ func parseGtEventLine(line string) *Event {
 			role = parts[len(parts)-1]
 			// Check for known roles
 			switch parts[len(parts)-1] {
-			case constants.RoleWitness, constants.RoleRefinery:
+			case constants.RoleWitness:
 				role = parts[len(parts)-1]
 			default:
 				// Could be polecat name - check second-to-last part

@@ -17,10 +17,9 @@ import (
 // put ~81 of 185 agent-minutes into the test loop in one afternoon
 // (gt-pxlg), and the formula text asking them not to was not enough.
 var heavyTestPackages = map[string]bool{
-	"internal/cmd":      true,
-	"internal/daemon":   true,
-	"internal/polecat":  true,
-	"internal/refinery": true,
+	"internal/cmd":     true,
+	"internal/daemon":  true,
+	"internal/polecat": true,
 }
 
 // isPolecatContext reports whether the current process runs as a polecat —

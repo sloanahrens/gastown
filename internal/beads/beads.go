@@ -1405,8 +1405,17 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	// resolve from working directory.
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
+	if machineExempt(args) {
+		runEnv = WithoutMachineEnv(runEnv)
+	}
 
-	return b.runBdWithRetry(stdinData, runEnv, args)
+	out, err := b.runBdWithRetry(stdinData, runEnv, args)
+	if err != nil {
+		return out, err
+	}
+	// buildRunEnv carries BD_MACHINE=1, so bd answered in the envelope; every
+	// caller of run parses the payload it printed before machine mode.
+	return LegacyPayload(args, out), nil
 }
 
 // runMachine runs one bd call in machine mode (BD_MACHINE=1): a failure exits
@@ -1503,7 +1512,15 @@ func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
 	// Inject before the --allow-stale prepend, which changes args[0].
 	args = InjectFlatForListJSON(args)
 
-	return b.runBdWithRetry(nil, b.buildRoutingEnv(), args)
+	env := b.buildRoutingEnv()
+	if machineExempt(args) {
+		env = WithoutMachineEnv(env)
+	}
+	out, err := b.runBdWithRetry(nil, env, args)
+	if err != nil {
+		return out, err
+	}
+	return LegacyPayload(args, out), nil
 }
 
 // Run executes a bd command and returns stdout.

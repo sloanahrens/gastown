@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -27,12 +28,16 @@ func IsAutoSaveSubject(subject string) bool {
 // changes HEAD — so it is safe to call against a ref other than the current
 // branch, e.g. from a merge process staged on a different target (gt-rswr).
 func HasAutoSaveCommits(workDir, baseRef, headRef string) (bool, error) {
-	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, headRef)
+	return hasAutoSaveCommits(realGit, workDir, baseRef, headRef)
+}
+
+func hasAutoSaveCommits(git gitRunner, workDir, baseRef, headRef string) (bool, error) {
+	mergeBase, err := gitOutput(git, workDir, "merge-base", baseRef, headRef)
 	if err != nil {
 		return false, fmt.Errorf("finding merge-base: %w", err)
 	}
 
-	logOut, err := gitOutput(workDir, "log", "--format=%s", mergeBase+".."+headRef)
+	logOut, err := gitOutput(git, workDir, "log", "--format=%s", mergeBase+".."+headRef)
 	if err != nil {
 		return false, fmt.Errorf("listing commits: %w", err)
 	}
@@ -65,7 +70,11 @@ type AutoSaveTip struct {
 // InspectAutoSaveTip reports the machine-generated shape of headRef's tip. It
 // is read-only, so it is safe against a ref other than the current branch.
 func InspectAutoSaveTip(workDir, baseRef, headRef string) (AutoSaveTip, error) {
-	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, headRef)
+	return inspectAutoSaveTip(realGit, workDir, baseRef, headRef)
+}
+
+func inspectAutoSaveTip(git gitRunner, workDir, baseRef, headRef string) (AutoSaveTip, error) {
+	mergeBase, err := gitOutput(git, workDir, "merge-base", baseRef, headRef)
 	if err != nil {
 		return AutoSaveTip{}, fmt.Errorf("finding merge-base: %w", err)
 	}
@@ -74,7 +83,7 @@ func InspectAutoSaveTip(workDir, baseRef, headRef string) (AutoSaveTip, error) {
 	// gitOutput trims the trailing one and an empty tip subject (git commit
 	// --allow-empty-message) would then be swallowed, shifting every index by
 	// one and naming the commit below the tip.
-	logOut, err := gitOutput(workDir, "log", "--format=%s%x1e", mergeBase+".."+headRef)
+	logOut, err := gitOutput(git, workDir, "log", "--format=%s%x1e", mergeBase+".."+headRef)
 	if err != nil {
 		return AutoSaveTip{}, fmt.Errorf("listing commits: %w", err)
 	}
@@ -100,7 +109,7 @@ func InspectAutoSaveTip(workDir, baseRef, headRef string) (AutoSaveTip, error) {
 	}
 
 	if tip.Trailing < tip.Ahead {
-		if parents, parentsErr := gitOutput(workDir, "log", "-1", "--format=%p", fmt.Sprintf("%s~%d", headRef, tip.Trailing)); parentsErr == nil {
+		if parents, parentsErr := gitOutput(git, workDir, "log", "-1", "--format=%p", fmt.Sprintf("%s~%d", headRef, tip.Trailing)); parentsErr == nil {
 			tip.BeneathIsMerge = len(strings.Fields(parents)) > 1
 		}
 	}
@@ -127,13 +136,17 @@ func parseSubjectRecords(logOut string) []string {
 // CountWIPCommits returns the number of WIP checkpoint commits between
 // the merge-base of baseRef and HEAD.
 func CountWIPCommits(workDir, baseRef string) (int, error) {
-	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, "HEAD")
+	return countWIPCommits(realGit, workDir, baseRef)
+}
+
+func countWIPCommits(git gitRunner, workDir, baseRef string) (int, error) {
+	mergeBase, err := gitOutput(git, workDir, "merge-base", baseRef, "HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("finding merge-base: %w", err)
 	}
 
 	// List commit subjects from merge-base..HEAD
-	logOut, err := gitOutput(workDir, "log", "--format=%s", mergeBase+"..HEAD")
+	logOut, err := gitOutput(git, workDir, "log", "--format=%s", mergeBase+"..HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("listing commits: %w", err)
 	}
@@ -158,8 +171,12 @@ func CountWIPCommits(workDir, baseRef string) (int, error) {
 // This is safe because Refinery squash-merges polecat branches anyway —
 // individual commit history on polecat branches is not preserved.
 func SquashWIPCommits(workDir, baseRef string) (int, error) {
+	return squashWIPCommits(realGit, workDir, baseRef)
+}
+
+func squashWIPCommits(git gitRunner, workDir, baseRef string) (int, error) {
 	isWIP := func(subject string) bool { return strings.HasPrefix(subject, WIPCommitPrefix) }
-	return squashMatchingCommits(workDir, baseRef, isWIP, "squashed WIP checkpoint commits")
+	return squashMatchingCommits(git, workDir, baseRef, isWIP, "squashed WIP checkpoint commits")
 }
 
 // SquashAutoSaveCommits collapses the branch into a single commit when any
@@ -170,23 +187,27 @@ func SquashWIPCommits(workDir, baseRef string) (int, error) {
 // title) becomes the subject so merge history stays descriptive. Returns the
 // number of machine-generated commits that were squashed.
 func SquashAutoSaveCommits(workDir, baseRef, fallbackTitle string) (int, error) {
+	return squashAutoSaveCommits(realGit, workDir, baseRef, fallbackTitle)
+}
+
+func squashAutoSaveCommits(git gitRunner, workDir, baseRef, fallbackTitle string) (int, error) {
 	if strings.TrimSpace(fallbackTitle) == "" {
 		fallbackTitle = "squashed auto-save checkpoint commits"
 	}
-	return squashMatchingCommits(workDir, baseRef, IsAutoSaveSubject, fallbackTitle)
+	return squashMatchingCommits(git, workDir, baseRef, IsAutoSaveSubject, fallbackTitle)
 }
 
 // squashMatchingCommits soft-resets merge-base..HEAD into one commit when any
 // subject matches. Non-matching subjects are kept: first as title, rest as
 // body bullets. allMatchedTitle is used when every commit matched.
-func squashMatchingCommits(workDir, baseRef string, matches func(string) bool, allMatchedTitle string) (int, error) {
-	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, "HEAD")
+func squashMatchingCommits(git gitRunner, workDir, baseRef string, matches func(string) bool, allMatchedTitle string) (int, error) {
+	mergeBase, err := gitOutput(git, workDir, "merge-base", baseRef, "HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("finding merge-base: %w", err)
 	}
 
 	// List commit subjects from merge-base..HEAD
-	logOut, err := gitOutput(workDir, "log", "--format=%s", mergeBase+"..HEAD")
+	logOut, err := gitOutput(git, workDir, "log", "--format=%s", mergeBase+"..HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("listing commits: %w", err)
 	}
@@ -212,7 +233,7 @@ func squashMatchingCommits(workDir, baseRef string, matches func(string) bool, a
 	}
 
 	// Soft-reset to merge-base (preserves all changes as staged)
-	if _, err := gitOutput(workDir, "reset", "--soft", mergeBase); err != nil {
+	if _, err := gitOutput(git, workDir, "reset", "--soft", mergeBase); err != nil {
 		return 0, fmt.Errorf("soft reset: %w", err)
 	}
 
@@ -234,34 +255,41 @@ func squashMatchingCommits(workDir, baseRef string, matches func(string) bool, a
 	}
 
 	// Commit with combined message
-	if _, err := gitOutput(workDir, "commit", "-m", msg.String()); err != nil {
+	if _, err := gitOutput(git, workDir, "commit", "-m", msg.String()); err != nil {
 		return 0, fmt.Errorf("squash commit: %w", err)
 	}
 
 	return wipCount, nil
 }
 
+// gitRunner runs git with args in workDir and returns stdout verbatim. An
+// error means git could not run or exited non-zero. The exported functions
+// use realGit; tests pass a fake so they start no process.
+type gitRunner func(workDir string, args ...string) (string, error)
+
 // gitOutput runs a git command and returns trimmed stdout. Callers that parse
-// a -z listing must use gitOutputRaw instead: trimming the blob strips
-// whitespace that is part of the last path, which would change how that path
-// classifies.
-func gitOutput(workDir string, args ...string) (string, error) {
-	out, err := gitOutputRaw(workDir, args...)
+// a -z listing must call the runner directly instead: trimming the blob
+// strips whitespace that is part of the last path, which would change how
+// that path classifies.
+func gitOutput(git gitRunner, workDir string, args ...string) (string, error) {
+	out, err := git(workDir, args...)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
 }
 
-// gitOutputRaw runs a git command and returns stdout verbatim.
-func gitOutputRaw(workDir string, args ...string) (string, error) {
+// realGit runs the git binary and returns stdout verbatim, folding git's
+// stderr into the error.
+func realGit(workDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
 
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			stderr := strings.TrimSpace(string(exitErr.Stderr))
 			if stderr != "" {
 				return "", fmt.Errorf("%s: %s", err, stderr)

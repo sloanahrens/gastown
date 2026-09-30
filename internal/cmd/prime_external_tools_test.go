@@ -153,7 +153,6 @@ func TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly(t *testing.T) {
 		{RoleCrew, true},
 		{RolePolecat, false},
 		{RoleWitness, false},
-		{RoleRefinery, false},
 		{RoleDeacon, false},
 		{RoleBoot, false},
 	} {
@@ -302,7 +301,7 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 // (gt-o51s) — these roles have no other reason to shell out at all.
 func TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles(t *testing.T) {
 	t.Parallel()
-	for _, role := range []Role{RoleWitness, RoleRefinery, RoleDeacon, RoleBoot} {
+	for _, role := range []Role{RoleWitness, RoleDeacon, RoleBoot} {
 		t.Run(string(role), func(t *testing.T) {
 			t.Parallel()
 			f := &fakePrimeRunner{answers: map[string]string{

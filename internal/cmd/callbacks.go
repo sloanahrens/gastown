@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
-	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -358,7 +358,7 @@ func handleMergeCompletedWith(bd beads.Client, townRoot string, msg *mail.Messag
 			return fmt.Sprintf("logged merge for %s, not closing %s (could not read it: %v)",
 				branch, sourceIssue, err), nil
 		}
-		if block := refinery.MergedWorkBeadCloseBlockReason(issue); block != "" {
+		if block := land.CloseBlockReason(issue); block != "" {
 			return fmt.Sprintf("logged merge for %s, not closing %s (%s)", branch, sourceIssue, block), nil
 		}
 		reason := fmt.Sprintf("Merged in %s", mergeCommit)

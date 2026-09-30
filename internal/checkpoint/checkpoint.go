@@ -7,13 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Filename is the checkpoint file name within the polecat directory.
@@ -117,17 +115,22 @@ func Remove(polecatDir string) error {
 
 // Capture creates a checkpoint by capturing current git and work state.
 func Capture(polecatDir string) (*Checkpoint, error) {
+	return capture(realGit, polecatDir, time.Now())
+}
+
+// capture is Capture with the git runner and the checkpoint time supplied.
+// A git command that fails leaves its field empty.
+func capture(git gitRunner, polecatDir string, now time.Time) (*Checkpoint, error) {
 	cp := &Checkpoint{
-		Timestamp: time.Now(),
+		Timestamp: now,
 	}
 
 	// Get modified files from git status
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = polecatDir
-	util.SetDetachedProcessGroup(cmd)
-	output, err := cmd.Output()
+	// Trim only the trailing newline: the first line's leading space is its
+	// index-status column (" M file"), and trimming it shifts the path.
+	output, err := git(polecatDir, "status", "--porcelain")
 	if err == nil {
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 		for _, line := range lines {
 			if len(line) > 3 {
 				// Format: XY filename
@@ -140,21 +143,13 @@ func Capture(polecatDir string) (*Checkpoint, error) {
 	}
 
 	// Get last commit SHA
-	cmd = exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = polecatDir
-	util.SetDetachedProcessGroup(cmd)
-	output, err = cmd.Output()
-	if err == nil {
-		cp.LastCommit = strings.TrimSpace(string(output))
+	if output, err := gitOutput(git, polecatDir, "rev-parse", "HEAD"); err == nil {
+		cp.LastCommit = output
 	}
 
 	// Get current branch
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = polecatDir
-	util.SetDetachedProcessGroup(cmd)
-	output, err = cmd.Output()
-	if err == nil {
-		cp.Branch = strings.TrimSpace(string(output))
+	if output, err := gitOutput(git, polecatDir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		cp.Branch = output
 	}
 
 	return cp, nil

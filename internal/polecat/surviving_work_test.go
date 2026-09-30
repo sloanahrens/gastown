@@ -372,3 +372,26 @@ func TestNewWorkSurvivalUsesTheRemoteQueryTimeout(t *testing.T) {
 		t.Fatalf("fetchTimeout = %v, want git.RemoteQueryTimeout (%v)", w.fetchTimeout, git.RemoteQueryTimeout)
 	}
 }
+
+// Polecat removal never gives back work submitted for landing: the landing
+// worker owns it, even when the branch already reads as merged (gt-v4ssj.2).
+func TestUnassignWorkBeadsKeepsSubmittedWork(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
+	f := newSurvivalFixture(t)
+	f.branchWithWork(t, branch, "work.txt")
+	f.push(t, branch)
+	runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge", branch)
+	f.push(t, "main")
+	bd := &fakeBd{answer: func(cmd string, _ []string) string {
+		if cmd == "list" {
+			return `[{"id":"gt-elvf4","title":"work","status":"hooked","assignee":"gastown/polecats/basalt","issue_type":"task","labels":["gt:ready-to-land"]}]`
+		}
+		return ""
+	}}
+	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
+	mgr.unassignWorkBeads("basalt", nil)
+	if releases := guardedReleases(bd); len(releases) != 0 {
+		t.Fatalf("submitted work was released: %v", releases)
+	}
+}

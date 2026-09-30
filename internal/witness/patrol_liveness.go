@@ -24,8 +24,6 @@ func PatrolAssignee(role, rig string) string {
 		return "deacon/"
 	case "witness":
 		return rig + "/witness"
-	case "refinery":
-		return rig + "/refinery"
 	default:
 		return role
 	}

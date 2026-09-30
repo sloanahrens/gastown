@@ -4,22 +4,32 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Verdict values om writes.
 const (
 	VerdictApprove        = "approve"
 	VerdictRequestChanges = "request_changes"
+	// VerdictSkipped is recorded when review is disabled for the landing
+	// worker (patrols.landing_worker.review=false). Land treats it as a pass.
+	VerdictSkipped = "skipped"
+	// VerdictErrorPrefix opens the recorded verdict of a landing whose om
+	// review could not run and that landed anyway (Lander.ReviewErrorLands).
+	VerdictErrorPrefix = "error:"
 )
 
 // Verdict is om's decision on one range.
 type Verdict struct {
 	Verdict  string    `json:"verdict"`
 	Score    float64   `json:"score"`
+	Summary  string    `json:"summary,omitempty"`
 	Findings []Finding `json:"findings"`
 }
 
@@ -41,6 +51,46 @@ type Reviewer interface {
 	Review(ctx context.Context, dir, base, head string) (Verdict, error)
 }
 
+// SkipReviewer reviews nothing and records VerdictSkipped.
+type SkipReviewer struct{}
+
+// Review returns the skipped verdict.
+func (SkipReviewer) Review(context.Context, string, string, string) (Verdict, error) {
+	return Verdict{Verdict: VerdictSkipped}, nil
+}
+
+// DefaultOMTimeout bounds one om review when OMReviewer.Timeout is zero. om's
+// own .om.json timeout (900s for gastown) is per backend call; this bounds
+// the whole run so a hung om never holds a landing.
+const DefaultOMTimeout = 20 * time.Minute
+
+// omUnsetEnv is removed from om's environment. om drops CLAUDE_CONFIG_DIR
+// itself, and a value inherited from the caller makes its backend probe
+// report a false "Not logged in".
+var omUnsetEnv = []string{"CLAUDE_CONFIG_DIR"}
+
+// OMThreshold reads "threshold" from the .om.json in dir (the tree under
+// review). It returns 0 when the file or the key is absent.
+func OMThreshold(dir string) (float64, error) {
+	data, err := os.ReadFile(filepath.Join(dir, ".om.json")) //nolint:gosec // G304: the reviewed tree's own config
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading .om.json: %w", err)
+	}
+	var cfg struct {
+		Threshold *float64 `json:"threshold"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("parsing .om.json: %w", err)
+	}
+	if cfg.Threshold == nil {
+		return 0, nil
+	}
+	return *cfg.Threshold, nil
+}
+
 // OMReviewer runs `om review -C <dir> --base <base> --head <head> --out <file>`.
 // om exits 0 for approve, 1 for request_changes and 2 for an execution error.
 // The exit code decides; the verdict file must agree with it and supplies the
@@ -52,6 +102,8 @@ type OMReviewer struct {
 	OutDir string
 	// Out, when set, receives om's own output.
 	Out io.Writer
+	// Timeout bounds the run; 0 means DefaultOMTimeout.
+	Timeout time.Duration
 
 	run runFunc // nil means realRun
 }
@@ -85,8 +137,14 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 	if r.Out != nil {
 		w = io.MultiWriter(&buf, r.Out)
 	}
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = DefaultOMTimeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	argv := []string{path, "review", "-C", dir, "--base", base, "--head", head, "--out", outPath}
-	code, runErr := run(ctx, dir, nil, argv, w)
+	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil {
 		return Verdict{}, fmt.Errorf("om review did not run: %w", runErr)
 	}
@@ -107,6 +165,16 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 	}
 	if v.Verdict != want {
 		return Verdict{}, fmt.Errorf("om review exited %d but its verdict file says %q", code, v.Verdict)
+	}
+	// The rig's own threshold decides too: an approve scored below it is a
+	// request for changes, whatever om's exit code said.
+	threshold, err := OMThreshold(dir)
+	if err != nil {
+		return Verdict{}, fmt.Errorf("om review: %w", err)
+	}
+	if v.Verdict == VerdictApprove && v.Score < threshold {
+		v.Verdict = VerdictRequestChanges
+		v.Summary = strings.TrimSpace(fmt.Sprintf("score %.2f is below the rig's .om.json threshold %.2f. %s", v.Score, threshold, v.Summary))
 	}
 	return v, nil
 }

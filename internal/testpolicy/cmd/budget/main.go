@@ -24,6 +24,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -57,6 +58,8 @@ func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
+	fastTier := flag.Bool("fast-tier", false, "run the fast tier (make gate): leave out the packages in -slow, and fail any package that ran longer than testpolicy.FastTierMaxWall of wall time")
+	slowList := flag.String("slow", "internal/testpolicy/slow.txt", "the slow tier's packages, which -fast-tier leaves out; `make test-slow` runs them")
 	flag.Parse()
 
 	exempt, err := testpolicy.ReadList(*list)
@@ -81,6 +84,13 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
+	if *fastTier {
+		slow, err := testpolicy.ReadSlowList(*slowList)
+		if err != nil {
+			return fail(err)
+		}
+		pkgs = withoutSlow(pkgs, slow)
+	}
 	judged, cached := testpolicy.PartitionPackages(pkgs, module, exempt)
 	if len(pkgs) == 0 {
 		// Nothing matched: let go test say so, in one budgeted run over
@@ -91,12 +101,21 @@ func run() int {
 		return append(append(append([]string{}, before...), p...), after...)
 	}
 
+	// Both halves print plain go test text; a copy of its package summary
+	// lines feeds the fast tier's wall check after the run.
+	var summary bytes.Buffer
+	probe := &summaryLines{w: &summary}
+	out := io.Writer(os.Stdout)
+	if *fastTier {
+		out = io.MultiWriter(os.Stdout, probe)
+	}
+
 	var res testpolicy.BudgetResult
 	var judgedErr error
 	code := 0
 	if len(judged) > 0 {
 		start := time.Now()
-		res, code, judgedErr = runJudged(withPkgs(judged), root, *budget, exempt, tracked)
+		res, code, judgedErr = runJudged(withPkgs(judged), root, *budget, exempt, tracked, out)
 		fmt.Fprintf(os.Stderr, "budget: %d converted packages took %s\n", len(judged), time.Since(start).Round(time.Second))
 		if judgedErr != nil {
 			return fail(judgedErr)
@@ -104,7 +123,7 @@ func run() int {
 	}
 	if len(cached) > 0 && !interrupted(code) {
 		start := time.Now()
-		c, err := runCached(withPkgs(cached))
+		c, err := runCached(withPkgs(cached), out)
 		fmt.Fprintf(os.Stderr, "budget: %d unconverted packages took %s\n", len(cached), time.Since(start).Round(time.Second))
 		if err != nil {
 			return fail(err)
@@ -138,9 +157,123 @@ func run() int {
 		fmt.Fprintln(os.Stderr)
 	}
 	if code == 0 && len(res.Over) > 0 {
-		return 1
+		code = 1
+	}
+	if *fastTier && !interrupted(code) {
+		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *slowList); code == 0 {
+			code = c
+		}
 	}
 	return code
+}
+
+// checkFastTier reads the package summary lines the probe kept and returns 1
+// when a package ran longer than testpolicy.FastTierMaxWall, naming it. It
+// fails closed: a run whose output yields no wall time and no cached
+// package, or a summary line it cannot read, fails too, because silence
+// there would read as every package being fast.
+func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList string) int {
+	if err := probe.Flush(); err != nil {
+		fmt.Fprintln(os.Stderr, "TIER: reading package summaries:", err)
+		return 1
+	}
+	sum, err := testpolicy.ParsePackageWalls(summary, module)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TIER: reading package wall times:", err)
+		return 1
+	}
+	code := 0
+	for _, line := range sum.Unparsed {
+		fmt.Fprintf(os.Stderr, "TIER: cannot read the wall time in go test's summary line %q; the fast-tier check fails closed\n", line)
+		code = 1
+	}
+	if ran > 0 && len(sum.Walls) == 0 && sum.Cached == 0 {
+		fmt.Fprintf(os.Stderr, "TIER: %d packages ran but the wall-time probe parsed no package summary line (ok/FAIL <package> <time>); has go test's output format changed? The fast-tier check fails closed\n", ran)
+		code = 1
+	}
+	for _, o := range testpolicy.WallOverruns(sum.Walls, testpolicy.FastTierMaxWall) {
+		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s: make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
+			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, o.Package, slowList)
+		code = 1
+	}
+	return code
+}
+
+// withoutSlow is pkgs (import paths) minus the slow-tier packages, which are
+// named relative to module. A slow package's subpackages stay: the list names
+// packages, not trees.
+func withoutSlow(pkgs []string, slow []testpolicy.SlowEntry) []string {
+	skip := make(map[string]bool, len(slow))
+	for _, e := range slow {
+		skip[module+"/"+e.Package] = true
+	}
+	var kept []string
+	for _, p := range pkgs {
+		if !skip[p] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// maxSummaryLine bounds the partial line summaryLines holds. A package
+// summary line is an import path and a time, far shorter; a longer line is
+// test output and is dropped unread.
+const maxSummaryLine = 64 * 1024
+
+// summaryLines keeps only the package summary lines ("ok", "FAIL") of the go
+// test text written to it, so a failing package's full output is not held
+// twice in memory. Flush passes on a last line that had no newline.
+type summaryLines struct {
+	w       io.Writer
+	partial []byte
+	// skipping is set while the rest of an over-long line is dropped.
+	skipping bool
+}
+
+func (s *summaryLines) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			if !s.skipping {
+				s.partial = append(s.partial, p...)
+				if len(s.partial) > maxSummaryLine {
+					s.partial, s.skipping = s.partial[:0], true
+				}
+			}
+			break
+		}
+		if s.skipping || len(s.partial)+i+1 > maxSummaryLine {
+			s.skipping = false
+		} else {
+			s.partial = append(s.partial, p[:i+1]...)
+			if err := s.emit(); err != nil {
+				return 0, err
+			}
+		}
+		s.partial = s.partial[:0]
+		p = p[i+1:]
+	}
+	return n, nil
+}
+
+// Flush passes on a final line that ended without a newline.
+func (s *summaryLines) Flush() error {
+	defer func() { s.partial, s.skipping = s.partial[:0], false }()
+	if s.skipping || len(s.partial) == 0 {
+		return nil
+	}
+	s.partial = append(s.partial, '\n')
+	return s.emit()
+}
+
+func (s *summaryLines) emit() error {
+	if bytes.HasPrefix(s.partial, []byte("ok ")) || bytes.HasPrefix(s.partial, []byte("FAIL\t")) {
+		_, err := s.w.Write(s.partial)
+		return err
+	}
+	return nil
 }
 
 // module is the main module's path; package names in unconverted.txt and
@@ -169,10 +302,10 @@ func listPackages(tags, patterns []string) ([]string, error) {
 // runCached runs plain go test (no -json, no -exec, so its result cache
 // applies) with its output passed straight through, and returns its exit
 // code.
-func runCached(args []string) (int, error) {
+func runCached(args []string, out io.Writer) (int, error) {
 	cmd := exec.Command("go", append([]string{"test"}, args...)...)
 	cmd.Env = withoutReentrantMarker(os.Environ())
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.Stdout, cmd.Stderr = out, os.Stderr
 	return exitCode(cmd.Run())
 }
 
@@ -217,7 +350,7 @@ func exitCode(err error) (int, error) {
 // binary under this command's exec wrapper, copies plain go test text to
 // stdout, and returns what the budget found and go test's exit code. The
 // error is for the runner's own failures.
-func runJudged(goTestArgs []string, root string, budget time.Duration, exempt map[string]bool, tracked map[string]string) (testpolicy.BudgetResult, int, error) {
+func runJudged(goTestArgs []string, root string, budget time.Duration, exempt map[string]bool, tracked map[string]string, out io.Writer) (testpolicy.BudgetResult, int, error) {
 	var res testpolicy.BudgetResult
 	self, err := os.Executable()
 	if err != nil {
@@ -256,7 +389,7 @@ func runJudged(goTestArgs []string, root string, budget time.Duration, exempt ma
 		}
 		return c, ok
 	}
-	res, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, budget, exempt, tracked, module, cpu)
+	res, scanErr := testpolicy.WatchBudgetTracked(stdout, out, budget, exempt, tracked, module, cpu)
 	if scanErr != nil {
 		// WatchBudget stopped reading before the child was done writing (for
 		// example a single line over its 16 MB scan buffer); drain the pipe

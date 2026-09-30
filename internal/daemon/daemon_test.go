@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -88,104 +87,6 @@ func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
 	}
 }
 
-func TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("mock bd/tmux scripts use POSIX shell")
-	}
-	townRoot := t.TempDir()
-	writeDaemonTownFile(t, townRoot, "mayor/town.json", `{"name":"test"}`)
-	writeDaemonTownFile(t, townRoot, ".beads/metadata.json", `{"prefix":"hq"}`)
-	writeDaemonTownFile(t, townRoot, "events/refinery/testrig/pending.event", "{}")
-	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
-		t.Fatalf("mkdir rig: %v", err)
-	}
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "commands.log")
-	writeDaemonSafetyStopMockBD(t, binDir, logPath)
-	writeDaemonSafetyStopMockTmux(t, binDir, logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	d := &Daemon{
-		config: DefaultConfig(townRoot),
-		logger: log.New(io.Discard, "", 0),
-		tmux:   tmux.NewTmux(),
-	}
-	d.ensureRefineryRunning("testrig")
-
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read command log: %v", err)
-	}
-	if strings.Contains(string(logData), "new-session") {
-		t.Fatalf("daemon spawned refinery despite safety stop; log:\n%s", logData)
-	}
-}
-
-func TestEnsureRefineryRunningForkRigDoesNotSpawn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("mock tmux script uses POSIX shell")
-	}
-	townRoot := t.TempDir()
-	// Refinery events are per-rig (events/<channel>/<rig>/) since gt-dsj; the
-	// event gate must see a pending event to reach the fork-rig check.
-	writeDaemonTownFile(t, townRoot, "events/refinery/testrig/pending.event", "{}")
-	writeDaemonTownFile(t, townRoot, "testrig/config.json", `{"upstream_url":"https://github.com/upstream/repo","beads":{"prefix":"gt"}}`)
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "commands.log")
-	writeDaemonNoSafetyStopMockBD(t, binDir, logPath)
-	writeDaemonSafetyStopMockTmux(t, binDir, logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	var logBuf bytes.Buffer
-	d := &Daemon{
-		config: DefaultConfig(townRoot),
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-	}
-	d.ensureRefineryRunning("testrig")
-
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read command log: %v", err)
-	}
-	if strings.Contains(string(logData), "new-session") {
-		t.Fatalf("daemon spawned refinery for fork rig; log:\n%s", logData)
-	}
-	if !strings.Contains(logBuf.String(), "fork-backed rig") {
-		t.Fatalf("daemon log = %q, want fork-backed skip", logBuf.String())
-	}
-}
-
-func writeDaemonSafetyStopMockBD(t *testing.T, binDir, logPath string) {
-	t.Helper()
-	script := `#!/bin/sh
-printf 'bd %s\n' "$*" >> "` + logPath + `"
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  version)
-    echo "bd test"
-    ;;
-  show)
-    printf '%s\n' '[{"id":"gt-testrig-refinery","title":"Refinery","issue_type":"task","labels":["gt:agent","safety_stop:hq-vmrwr"],"status":"open","description":"role_type: refinery\nrig: testrig\nagent_state: idle"}]'
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-}
-
 func writeDaemonNoSafetyStopMockBD(t *testing.T, binDir, logPath string) {
 	t.Helper()
 	script := `#!/bin/sh
@@ -218,28 +119,6 @@ esac
 `
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
-	}
-}
-
-func writeDaemonSafetyStopMockTmux(t *testing.T, binDir, logPath string) {
-	t.Helper()
-	script := `#!/bin/sh
-printf 'tmux %s\n' "$*" >> "` + logPath + `"
-# tmux.run prepends -u and -L <socket>, so match anywhere in the argv. A
-# missing session answers the way tmux does, so it reads as absent rather
-# than as a failed query.
-case "$*" in
-  *has-session*)
-    echo "can't find session" >&2
-    exit 1
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
 	}
 }
 

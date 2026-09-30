@@ -185,8 +185,6 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 			switch identity.Role {
 			case session.RoleWitness:
 				worker = constants.RoleWitness
-			case session.RoleRefinery:
-				worker = constants.RoleRefinery
 			case session.RoleCrew:
 				worker = identity.Name
 				crewMember = identity.Name

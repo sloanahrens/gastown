@@ -9,7 +9,7 @@ Each step has action + verification - steps stay open until outcome is confirmed
 1. **Verification-gated steps** - Not \"command ran\" but \"outcome confirmed\"
 2. **gt peek for verification** - Capture session output to detect stalls
 3. **gt nudge for recovery** - Reliable message delivery to unstick agents
-4. **Parallel where possible** - Witnesses and refineries can start in parallel
+4. **Parallel where possible** - Witnesses can start in parallel
 5. **Ephemeral execution** - Boot is a wisp, squashed to digest after completion
 
 ## Execution
@@ -106,48 +106,6 @@ title = "Ensure beads witness"
 
 [[steps]]
 description = """
-Parallel container: Start all rig refineries.
-
-Children execute in parallel. Container completes when all children complete."""
-id = "ensure-refineries"
-needs = ["ensure-deacon"]
-title = "Ensure refineries"
-type = "parallel"
-
-[[steps.children]]
-description = """
-Start the gastown rig Refinery.
-
-## Action
-```bash
-gt refinery start gastown
-```
-
-## Verify
-1. Session exists: `tmux has-session -t gastown-refinery 2>/dev/null`
-2. Not stalled: `gt peek gastown/refinery` does NOT show \"> Try\" prompt
-3. Queue processing: Refinery can receive merge requests"""
-id = "ensure-gastown-refinery"
-title = "Ensure gastown refinery"
-
-[[steps.children]]
-description = """
-Start the beads rig Refinery.
-
-## Action
-```bash
-gt refinery start beads
-```
-
-## Verify
-1. Session exists: `tmux has-session -t beads-refinery 2>/dev/null`
-2. Not stalled: `gt peek beads/refinery` does NOT show \"> Try\" prompt
-3. Queue processing: Refinery can receive merge requests"""
-id = "ensure-beads-refinery"
-title = "Ensure beads refinery"
-
-[[steps]]
-description = """
 Final verification that Gas Town is healthy.
 
 ## Action
@@ -159,11 +117,10 @@ gt status
 1. Daemon running: Shows daemon status OK
 2. Deacon active: Shows deacon in patrol mode
 3. All witnesses: Each rig witness shows active
-4. All refineries: Each rig refinery shows active
 
 ## OnFail
 Log degraded state but consider boot complete. Some agents may need manual recovery.
 Run `gt doctor` for detailed diagnostics."""
 id = "verify-town-health"
-needs = ["ensure-witnesses", "ensure-refineries"]
+needs = ["ensure-witnesses"]
 title = "Verify town health"

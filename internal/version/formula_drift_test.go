@@ -1,58 +1,46 @@
 package version
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// seedFormulaSource writes a file under the embedded-formula source dir and
-// returns the commit that carries it.
-func seedFormulaSource(t *testing.T, dir, file, content string) string {
-	t.Helper()
-	full := filepath.Join(dir, formulaSourceDir, file)
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return gitCommit(t, dir, filepath.Join(formulaSourceDir, file), content)
+// formulaFile is the repository-relative path of a formula source file.
+func formulaFile(name string) string {
+	return filepath.Join(formulaSourceDir, name)
 }
 
-// commitSourceChange commits a change outside the formula source dir, so tests
-// can move the build branch forward without touching formula content.
-func commitSourceChange(t *testing.T, dir, content string) string {
-	t.Helper()
-	full := filepath.Join(dir, "internal", "cmd", "formula.go")
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return gitCommit(t, dir, filepath.Join("internal", "cmd", "formula.go"), content)
-}
+// sourceFile is a path outside the formula source dir, so tests can move the
+// build branch forward without touching formula content.
+const sourceFile = "internal/cmd/formula.go"
 
 // TestCheckEmbeddedFormulaDrift_NamesFormulaFilesChangedSinceBuild verifies the
 // check names exactly the formula files a build is missing, which is what tells
 // an operator a "synced" line is not "current" (gt-dt7r).
 func TestCheckEmbeddedFormulaDrift_NamesFormulaFilesChangedSinceBuild(t *testing.T) {
-	dir := newGitRepo(t)
-	binaryCommit := seedFormulaSource(t, dir, "mol-polecat-work.formula.toml", "v1")
-	gitRun(t, dir, "branch", "-M", "main")
-	setBinaryCommit(t, binaryCommit)
+	t.Parallel()
+	g, r := newRepo(t)
+	binaryCommit := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
 
 	// A formula fix and an unrelated source change both land after the build.
-	seedFormulaSource(t, dir, "mol-refinery-patrol.formula.toml", "v2")
-	commitSourceChange(t, dir, "// unrelated")
+	r.commit(formulaFile("mol-refinery-patrol.formula.toml"), "v2")
+	r.commit(sourceFile, "// unrelated")
 
-	drift := CheckEmbeddedFormulaDrift(dir)
+	drift := g.checker(binaryCommit).checkFormulaDrift(repoDir)
 
 	if !drift.Checked {
 		t.Fatalf("Checked = false (%s), want a determined result", drift.Reason)
 	}
-	want := filepath.Join(formulaSourceDir, "mol-refinery-patrol.formula.toml")
+	want := formulaFile("mol-refinery-patrol.formula.toml")
 	if len(drift.Files) != 1 || drift.Files[0] != want {
 		t.Errorf("Files = %v, want [%s]", drift.Files, want)
 	}
-	if drift.CommitsBehind == 0 {
-		t.Error("CommitsBehind = 0, want the commits added after the build")
+	if drift.CommitsBehind != 2 {
+		t.Errorf("CommitsBehind = %d, want the 2 commits added after the build", drift.CommitsBehind)
+	}
+	if drift.CompareRef != "main" || drift.BinaryCommit != binaryCommit {
+		t.Errorf("CompareRef=%q BinaryCommit=%q, want main and the build commit", drift.CompareRef, drift.BinaryCommit)
 	}
 }
 
@@ -60,15 +48,14 @@ func TestCheckEmbeddedFormulaDrift_NamesFormulaFilesChangedSinceBuild(t *testing
 // build whose formula sources are current reports a determined empty result,
 // distinct from an undetermined one.
 func TestCheckEmbeddedFormulaDrift_NoFormulaChangesIsCheckedAndEmpty(t *testing.T) {
-	dir := newGitRepo(t)
-	seedFormulaSource(t, dir, "mol-polecat-work.formula.toml", "v1")
-	gitRun(t, dir, "branch", "-M", "main")
-	setBinaryCommit(t, gitRun(t, dir, "rev-parse", "HEAD"))
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
 
 	// A change outside the formula source dir must not register as drift.
-	commitSourceChange(t, dir, "// unrelated")
+	r.commit(sourceFile, "// unrelated")
 
-	drift := CheckEmbeddedFormulaDrift(dir)
+	drift := g.checker(built).checkFormulaDrift(repoDir)
 
 	if !drift.Checked {
 		t.Fatalf("Checked = false (%s), want a determined result", drift.Reason)
@@ -78,25 +65,29 @@ func TestCheckEmbeddedFormulaDrift_NoFormulaChangesIsCheckedAndEmpty(t *testing.
 	}
 }
 
+// TestCheckEmbeddedFormulaDrift_CurrentBuildIsChecked: a binary at the build
+// ref tip has nothing pending and says so without diffing.
+func TestCheckEmbeddedFormulaDrift_CurrentBuildIsChecked(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	tip := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+
+	drift := g.checker(tip).checkFormulaDrift(repoDir)
+
+	if !drift.Checked || len(drift.Files) != 0 {
+		t.Errorf("drift = %+v, want checked with no files", drift)
+	}
+}
+
 // TestCheckEmbeddedFormulaDrift_DevBuildIsUnchecked verifies an unstamped build
 // reports unknown rather than fresh — sync must not imply currency it cannot
 // establish.
 func TestCheckEmbeddedFormulaDrift_DevBuildIsUnchecked(t *testing.T) {
-	dir := newGitRepo(t)
-	seedFormulaSource(t, dir, "mol-polecat-work.formula.toml", "v1")
-	gitRun(t, dir, "branch", "-M", "main")
-	setBinaryCommit(t, "")
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
 
-	// The branch this test is about needs an empty commit. Go stamps
-	// vcs.revision into some test binaries, and no environment variable reaches
-	// that (an earlier version of this test cleared GIT_DIR, which cannot
-	// affect build info); skip where it is present rather than pass through
-	// the throwaway "binary commit not found" path and assert nothing.
-	if got := resolveCommitHash(); got != "" {
-		t.Skipf("test binary carries commit %s; the dev-build path needs none", got)
-	}
-
-	drift := CheckEmbeddedFormulaDrift(dir)
+	drift := g.checker("").checkFormulaDrift(repoDir)
 
 	if drift.Checked {
 		t.Error("Checked = true, want false for a build with no commit")
@@ -106,21 +97,37 @@ func TestCheckEmbeddedFormulaDrift_DevBuildIsUnchecked(t *testing.T) {
 	}
 }
 
+// TestCheckEmbeddedFormulaDrift_SkippedCheckIsUnchecked: a binary commit the
+// checkout does not hold leaves the question open.
+func TestCheckEmbeddedFormulaDrift_SkippedCheckIsUnchecked(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+
+	drift := g.checker("ffffffffffffffffffffffffffffffffffffffff").checkFormulaDrift(repoDir)
+
+	if drift.Checked {
+		t.Error("Checked = true, want false when the binary commit is not in the checkout")
+	}
+	if !strings.Contains(drift.Reason, "binary commit not found") {
+		t.Errorf("Reason = %q, want the skip reason", drift.Reason)
+	}
+}
+
 // TestCheckEmbeddedFormulaDrift_UnverifiableRefFailsClosed: an unreachable
 // origin whose cached ref matches the binary looks perfectly current. Trusting
 // it is the false reassurance gt-dt7r is about, so the check must report
 // unknown instead.
 func TestCheckEmbeddedFormulaDrift_UnverifiableRefFailsClosed(t *testing.T) {
-	dir := newGitRepo(t)
-	gitRun(t, dir, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
-	staleTip := seedFormulaSource(t, dir, "mol-polecat-work.formula.toml", "v1")
-	freshTip := seedFormulaSource(t, dir, "mol-polecat-work.formula.toml", "v2")
-	gitRun(t, dir, "branch", "-M", "main")
-	gitRun(t, dir, "update-ref", "refs/heads/main", staleTip)
-	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", freshTip)
-	setBinaryCommit(t, freshTip)
+	t.Parallel()
+	g, r := newRepo(t)
+	r.addRemote("origin", "/fake/does-not-exist")
+	staleTip := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v1")
+	freshTip := r.commit(formulaFile("mol-polecat-work.formula.toml"), "v2")
+	r.setRef("refs/heads/main", staleTip)
+	r.setRef("refs/remotes/origin/main", freshTip)
 
-	drift := CheckEmbeddedFormulaDrift(dir)
+	drift := g.checker(freshTip).checkFormulaDrift(repoDir)
 
 	if drift.Checked {
 		t.Errorf("Checked = true, want false: origin/main was never confirmed (files=%v)", drift.Files)

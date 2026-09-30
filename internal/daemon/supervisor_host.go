@@ -10,7 +10,6 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/mayor"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -73,10 +72,6 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 	case session.RoleWitness:
 		mgr := witness.NewManager(&rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)})
 		return declineIf(mgr.Start(false, "", nil), witness.ErrAlreadyRunning)
-	case session.RoleRefinery:
-		mgr := refinery.NewManager(&rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)})
-		mgr.SetStartAttribution("daemon-heartbeat", "daemon")
-		return declineIf(mgr.Start(false, ""), refinery.ErrAlreadyRunning, refinery.ErrSafetyStopped, refinery.ErrForkRig)
 	case session.RoleMayor:
 		mgr := mayor.NewManager(d.config.TownRoot)
 		if err := mgr.Stop(); err != nil && !errors.Is(err, mayor.ErrNotRunning) {

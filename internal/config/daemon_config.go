@@ -25,6 +25,10 @@ type DaemonPatrolConfig struct {
 
 // PatrolsConfig holds configuration for all patrols.
 type PatrolsConfig struct {
+	// Refinery is ignored: the refinery was deleted (gt-v4ssj.6) and the
+	// landing worker replaced it. It stays in the schema only so existing
+	// daemon.json files, which the kernel decodes strictly, still load.
+	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
 	Refinery             *PatrolConfig               `json:"refinery,omitempty"`
 	Witness              *PatrolConfig               `json:"witness,omitempty"`
 	Deacon               *PatrolConfig               `json:"deacon,omitempty"`
@@ -52,6 +56,10 @@ type PatrolsConfig struct {
 	// session is alive but whose last COMPLETED patrol cycle is older than
 	// N x its cadence — awake but not patrolling (gt-4z3b7).
 	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
+
+	// LandingWorker lands work beads labeled gt:ready-to-land, one worker per
+	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
+	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
 
 	// DoltRemotes is retired: the dolt_remotes push patrol was removed
 	// (ADR 0002) and nothing reads this key. It is declared so a daemon.json
@@ -497,6 +505,48 @@ type PatrolWatchdogConfig struct {
 	Nudge *bool `json:"nudge,omitempty"`
 }
 
+// LandingWorkerConfig holds configuration for the landing_worker patrol.
+type LandingWorkerConfig struct {
+	// Enabled turns the workers on. Defaults to false: the overseer enables
+	// it, because it is the one automated path that pushes main.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the wait between passes of one rig's worker, as a
+	// string (e.g. "60s"). Default 60s.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// LandTimeoutStr bounds one landing, gate and review included (e.g.
+	// "90m"). Default 90m.
+	LandTimeoutStr string `json:"land_timeout,omitempty"`
+
+	// Rigs limits the workers to these rigs. Empty means every known rig.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// Review runs the om editorial review on every landing. Nil or true
+	// means on; only an explicit false turns it off (the landing then records
+	// om_verdict "skipped").
+	Review *bool `json:"review,omitempty"`
+
+	// OMPath is the om binary. Empty means "om" on the daemon's PATH, else
+	// $HOME/go/bin/om.
+	OMPath string `json:"om_path,omitempty"`
+
+	// OMTimeoutStr bounds one om review (e.g. "20m"). Default 20m. An om
+	// that times out does not block the landing: it lands with
+	// om_verdict "error:<reason>".
+	OMTimeoutStr string `json:"om_timeout,omitempty"`
+
+	// WorkRoot is where throwaway landing and post-landing worktrees are
+	// created (a <rig> directory under it, 0700). It must not be under the
+	// town root: the git guard refuses worktrees there. Empty means
+	// $TMPDIR/gt-landing-<uid>.
+	WorkRoot string `json:"work_root,omitempty"`
+
+	// PostLandTimeoutStr bounds one run of the rig's
+	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
+	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
+}
+
 // RolePatrol returns the patrol entry for a role-shaped patrol ("witness",
 // "refinery", "deacon", "handler"), or nil when the entry or the name is absent.
 func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
@@ -506,8 +556,6 @@ func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 	switch name {
 	case "witness":
 		return p.Witness
-	case "refinery":
-		return p.Refinery
 	case "deacon":
 		return p.Deacon
 	case "handler":

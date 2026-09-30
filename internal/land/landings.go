@@ -70,6 +70,31 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 // Find returns the latest record for beadID landing head, if the file has one.
 // Land uses it to finish a landing whose bead record was left incomplete.
 func (f *LandingsFile) Find(beadID, head string) (LandingRecord, bool, error) {
+	return f.latest(func(rec LandingRecord) bool { return rec.BeadID == beadID && rec.Head == head })
+}
+
+// LatestForBead returns the latest record for beadID whatever head it
+// landed. The landing worker reads it before a landing, so a bead whose
+// record was left incomplete is repaired rather than landed twice even when
+// its branch has moved since.
+func (f *LandingsFile) LatestForBead(beadID string) (LandingRecord, bool, error) {
+	return f.latest(func(rec LandingRecord) bool { return rec.BeadID == beadID })
+}
+
+// Recent returns up to n of the file's last records, oldest first.
+func (f *LandingsFile) Recent(n int) ([]LandingRecord, error) {
+	var recs []LandingRecord
+	_, _, err := f.latest(func(rec LandingRecord) bool {
+		recs = append(recs, rec)
+		if len(recs) > n {
+			recs = recs[1:]
+		}
+		return false
+	})
+	return recs, err
+}
+
+func (f *LandingsFile) latest(match func(LandingRecord) bool) (LandingRecord, bool, error) {
 	fh, err := os.Open(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return LandingRecord{}, false, nil
@@ -87,7 +112,7 @@ func (f *LandingsFile) Find(beadID, head string) (LandingRecord, bool, error) {
 		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
 			return LandingRecord{}, false, fmt.Errorf("reading landings file %s: %w", f.Path, err)
 		}
-		if rec.BeadID == beadID && rec.Head == head {
+		if match(rec) {
 			found, ok = rec, true
 		}
 	}

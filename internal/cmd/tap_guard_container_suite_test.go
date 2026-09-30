@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +29,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test module-prefixed whole repo wildcard", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
 		{"go test container package with a trailing slash", "GT_TEST_DOCKER=1 go test ./internal/beads/", true},
 		{"go test module-prefixed container package", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/internal/beads/...", true},
-		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/refinery/...", true},
+		{"GOFLAGS prefixed go test on container package", "GT_TEST_DOCKER=1 GOFLAGS=-p=6 go test ./internal/mail/...", true},
 		{"go test with -run flag on container package", "GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo -v", true},
 		{"switch via export in an earlier segment", "export GT_TEST_DOCKER=1; go test ./internal/beads/...", true},
 		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
@@ -294,7 +292,7 @@ func TestCwdHeavyPackages(t *testing.T) {
 		{"module root", ".", nil},
 		{"heavy package", "internal/cmd", []string{"internal/cmd"}},
 		{"subpackage of a heavy package", "internal/cmd/sub", []string{"internal/cmd"}},
-		{"ancestor of every heavy package", "internal", []string{"internal/cmd", "internal/daemon", "internal/polecat", "internal/refinery"}},
+		{"ancestor of every heavy package", "internal", []string{"internal/cmd", "internal/daemon", "internal/polecat"}},
 		{"light package", "internal/style", nil},
 		{"container package that is not heavy", "internal/beads", nil},
 	}
@@ -403,37 +401,6 @@ func TestCwdAndArgumentFormsAgree(t *testing.T) {
 	}
 }
 
-func TestIsPolecatOrRefineryContext(t *testing.T) {
-	tests := []struct {
-		name       string
-		gtPolecat  string
-		gtRefinery string
-		gtRole     string
-		want       bool
-	}{
-		{"GT_POLECAT set", "topaz", "", "", true},
-		{"GT_REFINERY set", "", "1", "", true},
-		{"GT_ROLE refinery", "", "", "gastown/refinery", true},
-		{"neither set", "", "", "", false},
-		{"GT_ROLE polecat compound without GT_POLECAT", "", "", "gastown/polecats/topaz", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Chdir to a neutral tmp dir so the cwd-path fallback (which
-			// matches any path containing "/polecats/", same as
-			// isGasTownAgentContext) can't be tripped by running this test
-			// from inside a polecat worktree.
-			t.Chdir(t.TempDir())
-			t.Setenv("GT_POLECAT", tt.gtPolecat)
-			t.Setenv("GT_REFINERY", tt.gtRefinery)
-			t.Setenv("GT_ROLE", tt.gtRole)
-			if got := isPolecatOrRefineryContext(); got != tt.want {
-				t.Errorf("isPolecatOrRefineryContext() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestIsPolecatOrRefineryContext_CwdFallback pins the cwd-path fallback
 // itself (same shape as isGasTownAgentContext's "/polecats/" check): a
 // polecat worktree cwd is enough even with no env vars set, since a hook's
@@ -525,26 +492,6 @@ func TestRunTapGuardContainerSuite_WrappedAllowed(t *testing.T) {
 	}
 }
 
-// TestRunTapGuardContainerSuite_RefineryBlocked pins the refinery leg of the
-// guard, not just polecat.
-func TestRunTapGuardContainerSuite_RefineryBlocked(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-
-	hookInput := `{"tool_name":"Bash","tool_input":{"command":"GOFLAGS=-p=6 make test"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
-	})
-	if err == nil {
-		t.Error("expected bare make test to be blocked for the refinery role, got nil error")
-	}
-}
-
 // TestRunTapGuardContainerSuite_NonContainerPackageAllowed is the "novel/
 // unaffected input still passes" leg: a polecat running tests scoped to a
 // package with no Docker footprint must not be blocked.
@@ -619,117 +566,6 @@ func stubRecorder(t *testing.T, dir string) (envAssign, logPath string) {
 		}
 	}
 	return "GT_OTVB_STUB_LOG=" + logPath, logPath
-}
-
-// TestContainerSuiteBlockPrintedCommandRoundTrips is gt-otvb: the guard's
-// "Run it wrapped instead:" line is handed to an operator to paste into a
-// shell, so what a shell executes after the paste has to be the wrap of the
-// command that was blocked — the whole command, and nothing outside the wrap.
-// The test takes the printed line, runs it through a real shell against a
-// stub 'gt', and compares the argv the stub received.
-//
-// The cases are the three shapes that used to break the promise: a leading
-// VAR=value token (exec'd as the program before gt-18nx), a compound command
-// (the wrap bound to the first segment only, so the rest ran bare), and a
-// command whose own arguments are quoted (the wrap has to survive re-parsing
-// unchanged).
-func TestContainerSuiteBlockPrintedCommandRoundTrips(t *testing.T) {
-	// The guard reads the container opt-in from its own environment.
-	t.Setenv(dockerTestsEnv, "")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-	// Chdir off this worktree: a cwd under /polecats/ is a polecat context,
-	// and the polecat test-scope rule answers before this one.
-	t.Chdir(t.TempDir())
-
-	stubDir := t.TempDir()
-	envAssign, logPath := stubRecorder(t, stubDir)
-
-	for _, tt := range []struct {
-		name    string
-		command string
-		want    []string
-	}{
-		{
-			name:    "leading env assignment",
-			command: "GOFLAGS=-p=6 make test",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "env", "GOFLAGS=-p=6", "make", "test"},
-		},
-		{
-			name:    "plain make test",
-			command: "make test",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "make", "test"},
-		},
-		{
-			name:    "container package with the opt-in prefix",
-			command: "GT_TEST_DOCKER=1 go test ./internal/beads/...",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "env", "GT_TEST_DOCKER=1", "go", "test", "./internal/beads/..."},
-		},
-		{
-			// The wrap binds to a command, and 'export' is a shell builtin:
-			// wrapping the line's first segment asked exec to run 'export'
-			// and left the suite itself running bare outside the slot.
-			name:    "compound with a leading export",
-			command: "export GT_TEST_DOCKER=1; go test ./internal/beads/...",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "sh", "-c", "export GT_TEST_DOCKER=1; go test ./internal/beads/..."},
-		},
-		{
-			// A wrap that bound to the first segment ran the suite inside the
-			// slot and the later 'make test' outside it — the collision the
-			// guard exists to prevent.
-			name:    "compound with an unrelated first segment",
-			command: "ls && GOFLAGS=-p=6 make test",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "sh", "-c", "ls && GOFLAGS=-p=6 make test"},
-		},
-		{
-			// The command's own quoting must survive the round trip intact.
-			name:    "compound with a quoted argument",
-			command: "go test ./internal/beads/... -run 'TestFoo' && make test",
-			want:    []string{"gt", "slot", "run", "--role", "gastown/refinery", "--", "sh", "-c", "go test ./internal/beads/... -run 'TestFoo' && make test"},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			hook := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(tt.command) + `}}`
-			var block string
-			withStdin(t, hook, func() {
-				block = captureStderr(t, func() {
-					if err := runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil); err == nil {
-						t.Errorf("command %q was not blocked at all", tt.command)
-					}
-				})
-			})
-			printed := containerSuiteBlockCommand(t, block)
-			if printed == "" {
-				t.Fatal("guard printed an empty remediation")
-			}
-
-			// Run the printed line the way an operator would: through a shell,
-			// with a stub 'gt' (and go/make) first on PATH.
-			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
-				t.Fatalf("truncate stub log: %v", err)
-			}
-			shCmd := exec.Command("sh", "-c", printed) //nolint:gosec // G204: the printed line is the value under test
-			shCmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"), envAssign)
-			if out, err := shCmd.CombinedOutput(); err != nil {
-				t.Fatalf("running printed command %q: %v\n%s", printed, err, out)
-			}
-
-			raw, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatalf("read stub log: %v", err)
-			}
-			var got []string
-			for _, field := range strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00") {
-				if field != "" {
-					got = append(got, field)
-				}
-			}
-			if !slices.Equal(got, tt.want) {
-				t.Errorf("printed command %q\nran as  %q\nwant    %q", printed, got, tt.want)
-			}
-		})
-	}
 }
 
 // TestContainerSuiteWrapRole pins the two readings of the --role argument: the

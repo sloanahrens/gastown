@@ -17,7 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -925,7 +925,7 @@ func attemptNumberFromCloseReason(closeReason string) int {
 // rejection that names it was recorded as (0, false when none does).
 //
 // The record is the refinery's merge-rejection note
-// (refinery.MergeRejectionNoteMarker), whose header carries the attempt
+// (dispatch.MergeRejectionNoteMarker), whose header carries the attempt
 // ("MERGE REJECTION (attempt N):") and whose "Branch:" line names the
 // rejected branch. The polecat work formula's resume path already greps for
 // that marker, so the field is an existing contract rather than one this
@@ -933,13 +933,13 @@ func attemptNumberFromCloseReason(closeReason string) int {
 // unrelated prose in the notes cannot suppress a finding.
 func rejectedBranchAttemptFromNotes(notes, branch string) (int, bool) {
 	want := normalizeBranchRef(branch)
-	if want == "" || !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
+	if want == "" || !strings.Contains(notes, dispatch.MergeRejectionNoteMarker) {
 		return 0, false
 	}
 	best := 0
 	// Notes accumulate one record per attempt, so only the text following a
 	// marker can belong to a rejection.
-	for _, block := range strings.Split(notes, refinery.MergeRejectionNoteMarker)[1:] {
+	for _, block := range strings.Split(notes, dispatch.MergeRejectionNoteMarker)[1:] {
 		attempt := attemptFromRejectionBlock(block)
 		for _, line := range strings.Split(block, "\n") {
 			key, value, found := strings.Cut(line, ":")

@@ -344,58 +344,6 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 			}
 		}
 
-		// Check for refinery settings
-		refineryDir := filepath.Join(rigPath, "refinery")
-		if dirExists(refineryDir) {
-			// CORRECT: refinery/.claude/settings.json (parent directory)
-			refineryCorrectSettings := filepath.Join(refineryDir, ".claude", "settings.json")
-			if fileExists(refineryCorrectSettings) {
-				files = append(files, staleSettingsInfo{
-					path:        refineryCorrectSettings,
-					agentType:   "refinery",
-					rigName:     rigName,
-					sessionName: session.RefinerySessionName(session.PrefixFor(rigName)),
-				})
-			} else {
-				files = append(files, staleSettingsInfo{
-					path:        refineryCorrectSettings,
-					agentType:   "refinery",
-					rigName:     rigName,
-					sessionName: session.RefinerySessionName(session.PrefixFor(rigName)),
-					missingFile: true,
-				})
-			}
-			// STALE: old settings.local.json in parent directory (not a customer repo)
-			refineryParentStaleLocal := filepath.Join(refineryDir, ".claude", "settings.local.json")
-			if fileExists(refineryParentStaleLocal) {
-				files = append(files, staleSettingsInfo{
-					path:          refineryParentStaleLocal,
-					agentType:     "refinery",
-					rigName:       rigName,
-					sessionName:   session.RefinerySessionName(session.PrefixFor(rigName)),
-					wrongLocation: true,
-					missing:       []string{"stale settings.local.json (settings now in refinery/.claude/settings.json)"},
-				})
-			}
-			// STALE: old settings in workdir (rig/) — skip if tracked in customer repo
-			for _, staleFile := range []string{"settings.json", "settings.local.json"} {
-				stalePath := filepath.Join(refineryDir, "rig", ".claude", staleFile)
-				if fileExists(stalePath) {
-					gs := c.getGitFileStatus(stalePath)
-					if gs != gitStatusTrackedClean && gs != gitStatusTrackedModified {
-						files = append(files, staleSettingsInfo{
-							path:          stalePath,
-							agentType:     "refinery",
-							rigName:       rigName,
-							sessionName:   session.RefinerySessionName(session.PrefixFor(rigName)),
-							wrongLocation: true,
-							missing:       []string{"stale settings in workdir (settings now in refinery/.claude/settings.json)"},
-						})
-					}
-				}
-			}
-		}
-
 		// Check for crew settings
 		crewDir := filepath.Join(rigPath, "crew")
 		if dirExists(crewDir) {

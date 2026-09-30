@@ -3596,46 +3596,6 @@ func TestProcessDiscoveredCompletion_StrandedPendingWispRetriesStateUpdate(t *te
 	}
 }
 
-func TestProcessDiscoveredCompletion_NudgeFailureDoesNotBlockMetadataClear(t *testing.T) {
-	t.Parallel()
-	// gt-mf5q review, issue (2): the original regression test for this used
-	// installFakeTmuxNoServer, but nudgeRefinery's HasSession check treats
-	// ErrNoServer as (false, nil) and short-circuits to a nil return before
-	// ever attempting the nudge — so that test could never observe a real
-	// nudge failure, before or after the fix. Fake this test's own nudge to
-	// produce a genuine failure instead. The fake lives on h, not in a
-	// package variable: swapping a global here raced every parallel test that
-	// nudges the refinery.
-	h := newTestHandlers()
-	h.nudgeRefineryFn = func(townRoot, rigName string) error {
-		return errors.New("refinery session busy")
-	}
-
-	bd, _ := mockBd(
-		completionMRQueryHandler("feature-x", "[]", "gt-wisp-new", nil),
-		func(args []string) error { return nil },
-	)
-
-	payload := &PolecatDonePayload{
-		PolecatName: "nux",
-		Exit:        "COMPLETED",
-		IssueID:     "gt-abc",
-		Branch:      "feature-x",
-	}
-	discovery := &CompletionDiscovery{}
-	h.processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
-
-	if discovery.Error != nil {
-		t.Errorf("Error = %v, want nil — a nudge failure must not gate the metadata clear", discovery.Error)
-	}
-	if discovery.WispCreated != "gt-wisp-new" {
-		t.Errorf("WispCreated = %q, want %q", discovery.WispCreated, "gt-wisp-new")
-	}
-	if !strings.Contains(discovery.Action, "nudge") {
-		t.Errorf("Action = %q, want it to record the nudge failure for operator visibility", discovery.Action)
-	}
-}
-
 func TestFindCleanupWispsForCompletion_MatchesExactIssueAndBranch(t *testing.T) {
 	t.Parallel()
 	bd, mock := mockBd(
@@ -4189,72 +4149,6 @@ func TestZombieSubmittedStillRunning_Classification(t *testing.T) {
 	}
 }
 
-func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
-	// Create a fake town root with the workspace marker so workspace.Find recognizes it
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set GT_TEST_NUDGE_LOG to prevent actual tmux operations in nudgeRefinery
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
-
-	result := &HandlerResult{}
-	// notifyRefineryMergeReady takes workDir and calls workspace.Find(workDir) internally
-	newHandlers().notifyRefineryMergeReady(townRoot, "dashboard", result)
-
-	// Verify that a MERGE_READY event file was created in the rig-scoped
-	// refinery channel directory (per-rig channels, gt-dsj)
-	eventDir := filepath.Join(townRoot, "events", "refinery", "dashboard")
-	entries, err := os.ReadDir(eventDir)
-	if err != nil {
-		t.Fatalf("reading event dir: %v", err)
-	}
-
-	var eventFiles []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".event") {
-			eventFiles = append(eventFiles, e.Name())
-		}
-	}
-
-	if len(eventFiles) == 0 {
-		t.Fatal("expected at least one .event file in ~/gt/events/refinery/, got none")
-	}
-
-	// Read and verify the event content
-	data, err := os.ReadFile(filepath.Join(eventDir, eventFiles[0]))
-	if err != nil {
-		t.Fatalf("reading event file: %v", err)
-	}
-
-	var event map[string]interface{}
-	if err := json.Unmarshal(data, &event); err != nil {
-		t.Fatalf("parsing event JSON: %v", err)
-	}
-
-	if event["type"] != "MERGE_READY" {
-		t.Errorf("event type = %v, want MERGE_READY", event["type"])
-	}
-	if event["channel"] != "refinery" {
-		t.Errorf("event channel = %v, want refinery", event["channel"])
-	}
-
-	payload, ok := event["payload"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("payload is not a map: %T", event["payload"])
-	}
-	if payload["source"] != "witness" {
-		t.Errorf("payload.source = %v, want witness", payload["source"])
-	}
-	if payload["rig"] != "dashboard" {
-		t.Errorf("payload.rig = %v, want dashboard", payload["rig"])
-	}
-}
-
 // stubNukePolecat fakes h's whole nuke so archive-path tests never shell out
 // to the real `gt polecat nuke` (gt-evdg): a nuke kills a real tmux session
 // and deletes a real worktree, so a test that reaches the archive path with
@@ -4578,5 +4472,29 @@ func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
 				t.Fatalf("reset is not guarded on the dead polecat: %s", resets[0])
 			}
 		})
+	}
+}
+
+func TestResetAbandonedBead_LeavesSubmittedWork(t *testing.T) {
+	h := newTestHandlers()
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) guard.Result {
+		return guard.Pass() // would close it as "already on main" without the guard
+	}
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked","labels":["gt:ready-to-land"]}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+	if h.resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil) {
+		t.Error("resetAbandonedBead reset work submitted for landing")
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") || strings.Contains(call, "update") {
+			t.Errorf("wrote to submitted work: %q", call)
+		}
 	}
 }

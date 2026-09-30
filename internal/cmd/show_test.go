@@ -69,6 +69,7 @@ func TestBdShowInvocationPinsRoutedMetadataDatabase(t *testing.T) {
 		"BEADS_DOLT_PORT=9999",
 		"BEADS_DOLT_DATA_DIR=/wrong/data",
 		"BD_EXPORT_AUTO=true",
+		"BD_MACHINE=1",
 	}
 
 	tests := []struct {
@@ -134,6 +135,9 @@ func TestBdShowInvocationPinsRoutedMetadataDatabase(t *testing.T) {
 			}
 			if envMap["BD_EXPORT_AUTO"] != "false" {
 				t.Fatalf("BD_EXPORT_AUTO = %q, want false in %v", envMap["BD_EXPORT_AUTO"], invocation.Env)
+			}
+			if countEnvKey(invocation.Env, "BD_MACHINE") != 0 {
+				t.Fatalf("bd show prints to the terminal, BD_MACHINE must be absent: %v", invocation.Env)
 			}
 		})
 	}

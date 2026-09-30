@@ -12,7 +12,7 @@ func TestIsAgentSession(t *testing.T) {
 	}{
 		{"hq-mayor", true},
 		{"rig-witness", true},
-		{"rig-refinery", true},
+		{"rig-refinery", false}, // refinery role removed (gt-v4ssj.6)
 		{"rig-polecat-abc", true},
 		{"hq-deacon", true},
 		{"hq-boot", true},

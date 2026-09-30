@@ -50,25 +50,6 @@ func TestWitnessSessionName(t *testing.T) {
 	}
 }
 
-func TestRefinerySessionName(t *testing.T) {
-	tests := []struct {
-		rigPrefix string
-		want      string
-	}{
-		{"gt", "gt-refinery"},
-		{"bd", "bd-refinery"},
-		{"hop", "hop-refinery"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.rigPrefix, func(t *testing.T) {
-			got := RefinerySessionName(tt.rigPrefix)
-			if got != tt.want {
-				t.Errorf("RefinerySessionName(%q) = %q, want %q", tt.rigPrefix, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCrewSessionName(t *testing.T) {
 	tests := []struct {
 		rigPrefix string

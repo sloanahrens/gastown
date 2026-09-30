@@ -645,8 +645,6 @@ func parseSessionName(sess string) (role, rig, worker string) {
 		return constants.RoleDeacon, "", "deacon"
 	case session.RoleWitness:
 		return constants.RoleWitness, identity.Rig, ""
-	case session.RoleRefinery:
-		return constants.RoleRefinery, identity.Rig, ""
 	case session.RoleCrew:
 		return constants.RoleCrew, identity.Rig, identity.Name
 	case session.RolePolecat:
@@ -1080,8 +1078,6 @@ func deriveSessionName() string {
 		switch parsedRole {
 		case RoleWitness:
 			return session.WitnessSessionName(prefix)
-		case RoleRefinery:
-			return session.RefinerySessionName(prefix)
 		}
 	}
 

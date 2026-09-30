@@ -301,32 +301,6 @@ func TestDetermineColorClass(t *testing.T) {
 	}
 }
 
-func TestGetRefineryStatusHint(t *testing.T) {
-	// Create a minimal fetcher for testing
-	f := &LiveConvoyFetcher{}
-
-	tests := []struct {
-		name            string
-		mergeQueueCount int
-		want            string
-	}{
-		{"idle when no PRs", 0, "Idle - Waiting for PRs"},
-		{"singular PR", 1, "Processing 1 PR"},
-		{"multiple PRs", 2, "Processing 2 PRs"},
-		{"many PRs", 10, "Processing 10 PRs"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := f.getRefineryStatusHint(tt.mergeQueueCount)
-			if got != tt.want {
-				t.Errorf("getRefineryStatusHint(%d) = %q, want %q",
-					tt.mergeQueueCount, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseActivityTimestamp(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -580,6 +554,38 @@ func TestRunBdCmd_ReturnsStdoutOnNonZeroAndTimeout(t *testing.T) {
 		}
 		if _, err := f.runBdCmd(t.TempDir(), "fail"); err == nil || err.Error() != "exit status 1" {
 			t.Fatalf("runBdCmd fail = %v, want the child's exit error", err)
+		}
+	})
+
+	t.Run("non-zero exit with a bd error envelope returns the error", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc: func(_ context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"no db"}}`)
+				return errors.New("exit status 25")
+			},
+		}
+		if _, err := f.runBdCmd(t.TempDir(), "list", "--json"); err == nil || err.Error() != "exit status 25" {
+			t.Fatalf("runBdCmd = %v, want the child's exit error, not the envelope as output", err)
+		}
+	})
+
+	t.Run("a machine envelope is unwrapped to bd's payload", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc: func(_ context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, `{"schema_version":1,"contract_version":1,"data":[{"id":"gt-1"}],"pagination":null,"error":null}`)
+				return nil
+			},
+		}
+		stdout, err := f.runBdCmd(t.TempDir(), "list", "--json")
+		if err != nil {
+			t.Fatalf("runBdCmd: %v", err)
+		}
+		if got := strings.TrimSpace(stdout.String()); got != `[{"id":"gt-1"}]` {
+			t.Fatalf("runBdCmd payload = %q, want the envelope's data", got)
 		}
 	})
 

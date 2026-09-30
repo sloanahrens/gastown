@@ -2157,7 +2157,6 @@ func RigChecks() []Check {
 		NewBeadsConfigValidCheck(),
 		NewBeadsRedirectCheck(),
 		NewTestutilSymlinkCheck(),
-		NewEditorialCoverageCheck(),
 		NewHarnessDriftCheck(),
 		NewEditorialRequiredCheck(),
 	}

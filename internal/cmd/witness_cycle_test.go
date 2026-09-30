@@ -465,10 +465,6 @@ func TestWitnessPrimeEffortTextReadsTheRespawnFiles(t *testing.T) {
 	if got := witnessPrimeEffortText(ctx, ""); got != "" {
 		t.Fatalf("non-respawn prime = %q, want none", got)
 	}
-	ctx.Role = RoleRefinery
-	if got := witnessPrimeEffortText(ctx, "unit-cycle"); got != "" {
-		t.Fatalf("refinery prime = %q, want none", got)
-	}
 }
 
 // TestWitnessCycle_NudgesSurviveARespawn is fix round 1: with cycling on,

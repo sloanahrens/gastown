@@ -194,23 +194,6 @@ func TestEnvVarsCheck_WitnessMismatch(t *testing.T) {
 	}
 }
 
-func TestEnvVarsCheck_RefineryCorrect(t *testing.T) {
-	setupEnvTestRegistry(t)
-	expected := expectedEnv("refinery", "myrig", "")
-	reader := &mockEnvReader{
-		sessions: []string{"mr-refinery"},
-		sessionEnvs: map[string]map[string]string{
-			"mr-refinery": expected,
-		},
-	}
-	check := NewEnvVarsCheckWithReader(reader)
-	result := check.Run(testCtx())
-
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want StatusOK", result.Status)
-	}
-}
-
 func TestEnvVarsCheck_PolecatCorrect(t *testing.T) {
 	setupEnvTestRegistry(t)
 	expected := expectedEnv("polecat", "myrig", "Toast")

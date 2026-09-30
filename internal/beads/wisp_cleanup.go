@@ -38,13 +38,13 @@ const SubprocessKillGrace = bdKillGrace
 // is what makes a caller's timeout real: with only Setpgid and no Cancel hook,
 // cancellation kills the immediate child but Wait stays blocked on the stdout
 // pipe until every descendant holding it exits.
-func wispCmd(ctx context.Context, dir string, env []string, args ...string) *exec.Cmd {
+func wispCmd(ctx context.Context, dir string, env []string, args ...string) *Cmd {
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = machineEnvForCall(dir, env, args)
 	cmd.WaitDelay = bdKillGrace
 	util.SetProcessGroup(cmd)
-	return cmd
+	return &Cmd{Cmd: cmd}
 }
 
 // FormulaWispIDs returns the IDs of beads carrying attached_formula metadata

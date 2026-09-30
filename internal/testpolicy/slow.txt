@@ -1,0 +1,22 @@
+# The slow tier, which make gate skips and make test-slow runs (gt-z862q; internal/testpolicy/tier.go).
+# "<package> <measured wall> # <why>"; a package's wall must be at least testpolicy.FastTierMaxWall.
+internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
+internal/witness 95s # real tmux (13 tmux.New) and git, hermetic harness
+internal/checkpoint 88s # tests exec git over real repos
+internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
+internal/rig 88s # tests exec git (12 sites) over real clones
+internal/version 87s # cause not yet diagnosed (git exec); moved on measured wall alone
+internal/web 83s # hermetic harness; cause not yet diagnosed, moved on measured wall alone
+internal/dog 82s # tests exec git (16 sites), hermetic harness
+internal/daemon 81s # real git repos (26 initGitRepo), tmux and Dolt
+internal/polecat 77s # tests exec git (44 sites), 21 tmux.New, Dolt container
+internal/doltserver 74s # starts real dolt processes
+internal/testutil 71s # the harnesses themselves: git, tmux, hermetic town
+internal/formula 67s # tests exec bash and git
+internal/crew 66s # tests exec git over real clones
+internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
+internal/util 45s # real tmux and process helpers
+internal/git 43s # about 1900 git execs (overbudget.txt, gt-22hdp.35)
+internal/land 41s # land path over real git repos, hermetic harness
+internal/mail 32s # mail through bd and a Dolt container
+internal/deacon 32s # hermetic harness; cause not yet diagnosed, moved on measured wall alone

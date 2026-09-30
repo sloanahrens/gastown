@@ -22,7 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -884,9 +883,6 @@ type doneRun struct {
 type doneSubmission struct {
 	sourceIssue *beads.Issue
 	sourceBD    beads.Client
-	// head and target are set when a branch was submitted for landing.
-	head   string
-	target string
 }
 
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
@@ -1016,11 +1012,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		r.defaultBranch = rigCfg.DefaultBranch
 	}
 
-	var sub doneSubmission
 	if exitType == ExitCompleted {
 		r.cleanupStatus = doneCleanupStatus
 		r.useRealSubmitDeps(os.Getenv)
-		sub, err = submitForLanding(r)
+		err = submitForLanding(r)
 		doneCleanupStatus = r.cleanupStatus
 		if err != nil {
 			// Nothing is reported done, but the worktree's git state is still
@@ -1036,7 +1031,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		fmt.Printf("  Branch: %s\n", r.branch)
 	}
-	return reportDone(r, exitType, sub)
+	return reportDone(r, exitType)
 }
 
 // popBranchStashes pops this branch's stashes oldest first so the auto-save
@@ -1138,23 +1133,10 @@ func autoSaveUncommittedWork(g *git.Git, cwd, branch string) error {
 // submitForLanding is the COMPLETED path: rebase, squash, gate, push and mark the
 // work bead ready to land. It never lands anything. Every failure returns
 // before the Witness is told anything.
-func submitForLanding(r *doneRun) (doneSubmission, error) {
+func submitForLanding(r *doneRun) error {
 	var sub doneSubmission
 	if r.branch == r.defaultBranch || r.branch == "master" {
-		// A conflict-resolution pass ends on the base branch by design: its
-		// work is a rewritten head already pushed to the branch of an existing
-		// MR (mol-polecat-conflict-resolve). It submits nothing of its own
-		// (gt-rv8h, gt-tne1). Deleted with the merge queue (gt-v4ssj.6).
-		if task := conflictResolutionCompletionTask(r.cwd, r.agentBeadID, r.issueID); task != nil {
-			if !beads.IssueStatus(task.Status).IsTerminal() {
-				return sub, fmt.Errorf("cannot complete %s: conflict-resolution task %s is still open, and its MR stays blocked until it closes\nClose it first: bd close %s --reason=\"resolved conflicts\"",
-					r.defaultBranch, task.ID, task.ID)
-			}
-			fmt.Printf("%s Conflict-resolution completion on %s — no branch of its own to submit\n", style.Bold.Render("→"), r.defaultBranch)
-			fmt.Printf("  %s is closed; the refinery wake below names the MR it released.\n", task.ID)
-			return sub, nil
-		}
-		return sub, fmt.Errorf("cannot submit the %s/master branch for landing", r.defaultBranch)
+		return fmt.Errorf("cannot submit the %s/master branch for landing", r.defaultBranch)
 	}
 
 	// Refuse uncommitted changes (hq-xthqf): they would be lost. Runtime
@@ -1162,10 +1144,10 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 	// excluded.
 	workStatus, err := r.deps.repo.CheckUncommittedWork()
 	if err != nil {
-		return sub, fmt.Errorf("checking git status: %w", err)
+		return fmt.Errorf("checking git status: %w", err)
 	}
 	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
-		return sub, fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
+		return fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
 	}
 
 	// no_merge / review_only are non-code tasks where zero commits is
@@ -1175,7 +1157,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 	if r.issueID != "" {
 		issue, issueBD, sourceErr := r.deps.source(r.issueID)
 		if sourceErr != nil {
-			return sub, fmt.Errorf("source issue validation failed: %w", sourceErr)
+			return fmt.Errorf("source issue validation failed: %w", sourceErr)
 		}
 		sub.sourceIssue = issue
 		sub.sourceBD = issueBD
@@ -1187,7 +1169,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 
 	target, err := resolveDoneTarget(r, sub.sourceIssue)
 	if err != nil {
-		return sub, err
+		return err
 	}
 	// In fork-backed rigs the clean base is upstream/<target>, never the
 	// fork's origin/<target>.
@@ -1198,57 +1180,56 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 		fetchRemote = "origin"
 	}
 	if err := repo.Fetch(fetchRemote); err != nil {
-		return sub, fmt.Errorf("fetching %s before rebasing onto %s: %w", fetchRemote, baseRef, err)
+		return fmt.Errorf("fetching %s before rebasing onto %s: %w", fetchRemote, baseRef, err)
 	}
 
 	aheadCount, err := repo.CommitsAhead(baseRef, "HEAD")
 	if err != nil {
-		return sub, fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
+		return fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
 	}
 	if aheadCount == 0 {
-		return sub, completeWithoutCode(r, sub, target, baseRef, isNoMergeTask)
+		return completeWithoutCode(r, sub, target, baseRef, isNoMergeTask)
 	}
 	if reviewOnlySource {
-		return sub, fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", r.issueID, baseRef)
+		return fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", r.issueID, baseRef)
 	}
 	if r.issueID == "" {
-		return sub, fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", r.branch)
+		return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", r.branch)
 	}
 
 	if err := rebaseOntoTarget(repo, baseRef); err != nil {
-		return sub, err
+		return err
 	}
 
 	// After the rebase: a rebase replays the same diff, so the checks must
 	// see the branch as it will be pushed.
 	if err := r.deps.checkBranch(baseRef, sub); err != nil {
-		return sub, err
+		return err
 	}
 	if err := r.deps.rewriteBranch(baseRef, sub); err != nil {
-		return sub, err
+		return err
 	}
 
 	head, err := repo.Rev("HEAD")
 	if err != nil {
-		return sub, fmt.Errorf("resolving HEAD: %w", err)
+		return fmt.Errorf("resolving HEAD: %w", err)
 	}
 	if err := runDoneLocalGate(r, head); err != nil {
-		return sub, err
+		return err
 	}
 
 	// Push submodule commits first, so the parent's pointer never names a
 	// commit the submodule's remote lacks (gt-dzs).
 	r.deps.pushSubmodules(baseRef)
 	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
-		return sub, err
+		return err
 	}
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
 
 	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName}
 	if err := markReadyToLand(sub.sourceBD, work); err != nil {
-		return sub, doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, shortSHA(head)), err)
+		return doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, shortSHA(head)), err)
 	}
-	sub.head, sub.target = head, target
 	recordSubmittedIntent(r)
 
 	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
@@ -1257,7 +1238,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 	fmt.Printf("  Issue:  %s\n", r.issueID)
 	fmt.Printf("  Worker: %s\n\n", r.polecatName)
 	fmt.Printf("%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
-	return sub, nil
+	return nil
 }
 
 // checkBranchForSubmit refuses a rebased branch that reverts work already
@@ -1536,21 +1517,7 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 
 // reportDone tells the Witness and the agent bead how the run ended, then
 // retires the session. Only runs that succeeded reach it.
-func reportDone(r *doneRun, exitType string, sub doneSubmission) error {
-	// A conflict-resolution completion releases an MR that already exists,
-	// and nothing else emits a wake for its blocked->ready transition
-	// (gt-rv8h). The candidates are read before updateAgentStateOnDoneFn
-	// clears hook_bead, and checked after it closes the hooked task (gt-ue2h).
-	var wakeConflictCandidates []string
-	var wakeConflictBD beads.Client
-	if sub.head == "" {
-		wakeConflictBD = sub.sourceBD
-		if wakeConflictBD == nil {
-			wakeConflictBD = beads.New(r.cwd)
-		}
-		wakeConflictCandidates = conflictResolutionCandidates(r.cwd, r.agentBeadID, r.issueID)
-	}
-
+func reportDone(r *doneRun, exitType string) error {
 	// Completion metadata on the agent bead is the audit trail the witness
 	// patrol reads for anomalies and crash recovery (gt-1qlg).
 	fmt.Printf("\nNotifying Witness...\n")
@@ -1581,9 +1548,6 @@ func reportDone(r *doneRun, exitType string, sub doneSubmission) error {
 	// Update agent bead state (ZFC: self-report completion).
 	if err := updateAgentStateOnDoneFn(r.cwd, r.townRoot, exitType, r.issueID); err != nil {
 		return err
-	}
-	if wakeConflictCandidates != nil {
-		wakeRefineryForReadyConflict(wakeConflictBD.Show, r.rigName, wakeConflictCandidates...)
 	}
 
 	// Nudge the witness only after hook/cleanup state is updated, or it
@@ -2206,7 +2170,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				// it already treats a still-open, still-assigned source bead
 				// as one of its cases, gated on tmux session liveness rather
 				// than on close-reason vocabulary.
-				attempt := 1 + strings.Count(hookedBead.Notes, refinery.MergeRejectionNoteMarker+" (attempt")
+				attempt := 1 + strings.Count(hookedBead.Notes, land.MergeRejectionNoteMarker+" (attempt")
 				note := fmt.Sprintf("Submitted to merge queue: %s (attempt %d)", pendingMRID, attempt)
 				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
 					// Non-fatal: warn but continue
@@ -2283,9 +2247,6 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	case RoleWitness:
 		fields.RoleType = "witness"
 		title = fmt.Sprintf("Witness for %s - monitors polecat health and progress.", ctx.Rig)
-	case RoleRefinery:
-		fields.RoleType = "refinery"
-		title = fmt.Sprintf("Refinery for %s - processes merge queue.", ctx.Rig)
 	default:
 		return
 	}

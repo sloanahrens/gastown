@@ -9,60 +9,53 @@ import (
 
 func TestLoadBuiltinRoleDefinition(t *testing.T) {
 	tests := []struct {
-		name          string
-		role          string
-		wantScope     string
-		wantPattern   string
-		wantPreSync   bool
+		name        string
+		role        string
+		wantScope   string
+		wantPattern string
+		wantPreSync bool
 	}{
 		{
-			name:          "mayor",
-			role:          "mayor",
-			wantScope:     "town",
-			wantPattern:   "hq-mayor",
-			wantPreSync:   false,
+			name:        "mayor",
+			role:        "mayor",
+			wantScope:   "town",
+			wantPattern: "hq-mayor",
+			wantPreSync: false,
 		},
 		{
-			name:          "deacon",
-			role:          "deacon",
-			wantScope:     "town",
-			wantPattern:   "hq-deacon",
-			wantPreSync:   false,
+			name:        "deacon",
+			role:        "deacon",
+			wantScope:   "town",
+			wantPattern: "hq-deacon",
+			wantPreSync: false,
 		},
 		{
-			name:          "witness",
-			role:          "witness",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-witness",
-			wantPreSync:   false,
+			name:        "witness",
+			role:        "witness",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-witness",
+			wantPreSync: false,
 		},
 		{
-			name:          "refinery",
-			role:          "refinery",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-refinery",
-			wantPreSync:   true,
+			name:        "polecat",
+			role:        "polecat",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-{name}",
+			wantPreSync: false,
 		},
 		{
-			name:          "polecat",
-			role:          "polecat",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-{name}",
-			wantPreSync:   false,
+			name:        "crew",
+			role:        "crew",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-crew-{name}",
+			wantPreSync: true,
 		},
 		{
-			name:          "crew",
-			role:          "crew",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-crew-{name}",
-			wantPreSync:   true,
-		},
-		{
-			name:          "dog",
-			role:          "dog",
-			wantScope:     "town",
-			wantPattern:   "gt-dog-{name}",
-			wantPreSync:   false,
+			name:        "dog",
+			role:        "dog",
+			wantScope:   "town",
+			wantPattern: "gt-dog-{name}",
+			wantPreSync: false,
 		},
 	}
 
@@ -117,18 +110,17 @@ func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
 
 func TestAllRoles(t *testing.T) {
 	roles := AllRoles()
-	if len(roles) != 7 {
-		t.Errorf("AllRoles() returned %d roles, want 7", len(roles))
+	if len(roles) != 6 {
+		t.Errorf("AllRoles() returned %d roles, want 6", len(roles))
 	}
 
 	expected := map[string]bool{
-		"mayor":    true,
-		"deacon":   true,
-		"dog":      true,
-		"witness":  true,
-		"refinery": true,
-		"polecat":  true,
-		"crew":     true,
+		"mayor":   true,
+		"deacon":  true,
+		"dog":     true,
+		"witness": true,
+		"polecat": true,
+		"crew":    true,
 	}
 
 	for _, r := range roles {
@@ -157,8 +149,8 @@ func TestTownRoles(t *testing.T) {
 
 func TestRigRoles(t *testing.T) {
 	roles := RigRoles()
-	if len(roles) != 4 {
-		t.Errorf("RigRoles() returned %d roles, want 4", len(roles))
+	if len(roles) != 3 {
+		t.Errorf("RigRoles() returned %d roles, want 3", len(roles))
 	}
 
 	for _, r := range roles {
@@ -322,4 +314,3 @@ func TestLoadRoleDefinition_NoOverrideFiles(t *testing.T) {
 		t.Errorf("Role = %q, want %q", def.Role, "polecat")
 	}
 }
-

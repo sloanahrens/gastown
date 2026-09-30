@@ -13,11 +13,10 @@ import (
 // causing a tight loop when the rig was idle.
 //
 // See: PR #1052 (original fix), gt-tjm9q (regression report)
-// See: gt-0hzeo (refinery stall bug — missing await-signal)
 func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
 	// Patrol formulas that must have backoff logic.
 	// The loopStepID is the step that contains the await-signal logic;
-	// witness/deacon use "loop-or-exit", refinery uses "burn-or-loop".
+	// witness/deacon use "loop-or-exit".
 	type patrolFormula struct {
 		name       string
 		loopStepID string
@@ -27,7 +26,6 @@ func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
 	patrolFormulas := []patrolFormula{
 		{"mol-witness-patrol.formula.toml", "loop-or-exit", "await-signal"},
 		{"mol-deacon-patrol.formula.toml", "loop-or-exit", "await-signal"},
-		{"mol-refinery-patrol.formula.toml", "burn-or-loop", "await-event"},
 	}
 
 	for _, pf := range patrolFormulas {
@@ -49,8 +47,7 @@ func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
 			}
 
 			// Verify the formula contains the required backoff patterns.
-			// Witness/deacon use await-signal; refinery uses await-event
-			// (file-based event channel system). Both provide backoff logic.
+			// Witness/deacon use await-signal, which provides the backoff.
 			requiredPatterns := []string{
 				pf.awaitCmd,
 				"backoff",
@@ -86,7 +83,6 @@ func TestPatrolFormulasHaveReportCycle(t *testing.T) {
 	patrolFormulas := []patrolFormula{
 		{"mol-witness-patrol.formula.toml", "loop-or-exit"},
 		{"mol-deacon-patrol.formula.toml", "loop-or-exit"},
-		{"mol-refinery-patrol.formula.toml", "burn-or-loop"},
 	}
 
 	for _, pf := range patrolFormulas {
@@ -133,7 +129,6 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
-		"mol-refinery-patrol.formula.toml",
 	}
 
 	for _, name := range patrolFormulas {
@@ -185,7 +180,6 @@ func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
-		"mol-refinery-patrol.formula.toml",
 	}
 
 	for _, name := range patrolFormulas {
@@ -293,64 +287,20 @@ func TestWitnessPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
 	}
 }
 
-// TestRefineryPatrolDoesNotRunAgeBasedWispGC verifies that the Refinery
-// patrol does not reap other agents' active work wisps via unscoped
-// age-based wisp GC.
-//
-// Regression test for gt-xciy: gt-0ok fixed the closed-wisp pass
-// (--exclude-type chore) but left the age-based pass
-// (`bd mol wisp gc --age 1h --force`) untouched in the same inbox-check
-// step. That pass has no hook-awareness — a dry run found 403 wisps at
-// risk, 100% foreign `mol-polecat-work` step wisps and 0%
-// refinery-owned, including wisps only 1h old. mol-refinery-patrol was
-// the last patrol formula still carrying it after mol-deacon-patrol
-// (hq-3pp) and mol-witness-patrol (gt-5bg) were fixed.
-func TestRefineryPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
-	content, err := formulasFS.ReadFile("formulas/mol-refinery-patrol.formula.toml")
-	if err != nil {
-		t.Fatalf("reading refinery patrol formula: %v", err)
-	}
-
-	f, err := Parse(content)
-	if err != nil {
-		t.Fatalf("parsing refinery patrol formula: %v", err)
-	}
-
-	var inboxDesc string
-	for _, step := range f.Steps {
-		if step.ID == "inbox-check" {
-			inboxDesc = step.Description
-			break
-		}
-	}
-	if inboxDesc == "" {
-		t.Fatal("refinery patrol formula: inbox-check step not found or has empty description")
-	}
-
-	if !strings.Contains(inboxDesc, "bd mol wisp gc --closed --force") {
-		t.Fatal("refinery inbox-check must keep closed-wisp cleanup")
-	}
-	if strings.Contains(inboxDesc, "bd mol wisp gc --age") {
-		t.Fatal("refinery inbox-check must not run age-based wisp GC inside the active patrol")
-	}
-}
-
 // TestPatrolFormulasUseDynamicBeadResolution verifies that patrol formulas
 // resolve their agent bead ID dynamically at runtime via `gt agents resolve`,
-// rather than hardcoding a prefix like `gt-<rig>-refinery`.
+// rather than hardcoding a prefix like `gt-<rig>-witness`.
 //
 // Hardcoded IDs break when AgentBeadIDWithPrefix collapses the rig component
-// (prefix == rig), producing e.g. "cp-refinery" instead of "gt-cp-refinery".
+// (prefix == rig), producing e.g. "cp-witness" instead of "gt-cp-witness".
 //
 // Regression test for hq-9xs.
 func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
-		"mol-refinery-patrol.formula.toml",
 	}
 	expectedResolver := map[string]string{
-		"mol-witness-patrol.formula.toml":  "YOUR_AGENT_BEAD=$(gt agents resolve --role witness --rig {{rig}})",
-		"mol-refinery-patrol.formula.toml": "YOUR_AGENT_BEAD=$(gt agents resolve --role refinery --rig {{rig}})",
+		"mol-witness-patrol.formula.toml": "YOUR_AGENT_BEAD=$(gt agents resolve --role witness --rig {{rig}})",
 	}
 
 	for _, name := range patrolFormulas {

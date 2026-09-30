@@ -132,7 +132,7 @@ type TownSettings struct {
 	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
 	// "dolt_backup", "jsonl_git_backup", "scheduled_maintenance",
-	// "main_branch_test", "handler").
+	// "main_branch_test", "landing_worker", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
 }
@@ -645,9 +645,8 @@ func NewDaemonPatrolConfig() *DaemonPatrolConfig {
 			Interval: "3m",
 		},
 		Patrols: &PatrolsConfig{
-			Deacon:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
-			Witness:  &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
-			Refinery: &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
+			Deacon:  &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
+			Witness: &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
 		},
 	}
 }
@@ -1627,6 +1626,15 @@ type MergeQueueConfig struct {
 	// PostMergeTimeout bounds PostMergeCommand (e.g. "20m"). Empty defaults to
 	// DefaultPostMergeTimeout. Rig-root tier only, like PostMergeCommand.
 	PostMergeTimeout string `json:"post_merge_timeout,omitempty"`
+
+	// PostLandCommand runs once per landing, after the push and the record,
+	// in a throwaway worktree at the landed commit (the slow test tier, e.g.
+	// "make test-slow"). The landing worker runs it asynchronously, one at a
+	// time per rig, coalescing landings that finish while one runs; a red
+	// run comments on the landed bead and never reverts the landing
+	// (gt-v4ssj.2). Empty disables it. Read only from the rig's own
+	// settings/config.json, so merged repo content cannot choose it.
+	PostLandCommand string `json:"post_land_command,omitempty"`
 }
 
 // EditorialConfig controls the om editorial gate for a rig's merge queue:

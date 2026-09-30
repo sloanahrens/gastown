@@ -159,25 +159,14 @@ type RigStatus struct {
 	Crews        []string        `json:"crews"`
 	CrewCount    int             `json:"crew_count"`
 	HasWitness   bool            `json:"has_witness"`
-	HasRefinery  bool            `json:"has_refinery"`
 	Hooks        []AgentHookInfo `json:"hooks,omitempty"`
 	Agents       []AgentRuntime  `json:"agents,omitempty"` // Runtime state of all agents in rig
-	MQ           *MQSummary      `json:"mq,omitempty"`     // Merge queue summary
-}
-
-// MQSummary represents the merge queue status for a rig.
-type MQSummary struct {
-	Pending  int    `json:"pending"`   // Open MRs ready to merge (no blockers)
-	InFlight int    `json:"in_flight"` // MRs currently being processed
-	Blocked  int    `json:"blocked"`   // MRs waiting on dependencies
-	State    string `json:"state"`     // idle, processing, or blocked
-	Health   string `json:"health"`    // healthy, stale, or empty
 }
 
 // AgentHookInfo represents an agent's hook (pinned work) status.
 type AgentHookInfo struct {
 	Agent    string `json:"agent"`              // Agent address (e.g., "greenplace/toast", "greenplace/witness")
-	Role     string `json:"role"`               // Role type (polecat, crew, witness, refinery)
+	Role     string `json:"role"`               // Role type (polecat, crew, witness)
 	HasWork  bool   `json:"has_work"`           // Whether agent has pinned work
 	Molecule string `json:"molecule,omitempty"` // Attached molecule ID
 	Title    string `json:"title,omitempty"`    // Pinned bead title
@@ -185,12 +174,11 @@ type AgentHookInfo struct {
 
 // StatusSum provides summary counts.
 type StatusSum struct {
-	RigCount      int `json:"rig_count"`
-	PolecatCount  int `json:"polecat_count"`
-	CrewCount     int `json:"crew_count"`
-	WitnessCount  int `json:"witness_count"`
-	RefineryCount int `json:"refinery_count"`
-	ActiveHooks   int `json:"active_hooks"`
+	RigCount     int `json:"rig_count"`
+	PolecatCount int `json:"polecat_count"`
+	CrewCount    int `json:"crew_count"`
+	WitnessCount int `json:"witness_count"`
+	ActiveHooks  int `json:"active_hooks"`
 }
 
 // resolveAgentDisplay inspects the actual running process in the tmux session
@@ -902,7 +890,6 @@ func gatherStatus() (TownStatus, error) {
 				Polecats:     r.Polecats,
 				PolecatCount: len(r.Polecats),
 				HasWitness:   r.HasWitness,
-				HasRefinery:  r.HasRefinery,
 			}
 
 			// Count crew workers
@@ -915,7 +902,7 @@ func gatherStatus() (TownStatus, error) {
 				rs.CrewCount = len(workers)
 			}
 
-			// Run hooks, agents, and MQ discovery concurrently within this rig.
+			// Run hooks and agents discovery concurrently within this rig.
 			// Each was previously sequential; now they overlap since they use
 			// independent bd/beads calls.
 			var rigWg sync.WaitGroup
@@ -931,18 +918,8 @@ func gatherStatus() (TownStatus, error) {
 				}()
 			}
 
-			// Get MQ summary if rig has a refinery
-			// Skip in --fast mode to avoid expensive bd queries
-			if !fast {
-				rigWg.Add(1)
-				go func() {
-					defer rigWg.Done()
-					rs.MQ = getMQSummary(r)
-				}()
-			}
-
 			// Discover runtime state for all agents in this rig
-			// (uses preloaded maps, so it's fast — but run concurrently with hooks/MQ)
+			// (uses preloaded maps, so it's fast — but run concurrently with hooks)
 			rigWg.Add(1)
 			go func() {
 				defer rigWg.Done()
@@ -988,9 +965,6 @@ func gatherStatus() (TownStatus, error) {
 		status.Summary.ActiveHooks += rigActiveHooks[i]
 		if rs.HasWitness {
 			status.Summary.WitnessCount++
-		}
-		if rs.HasRefinery {
-			status.Summary.RefineryCount++
 		}
 	}
 	status.Summary.RigCount = len(rigs)
@@ -1101,12 +1075,11 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 
 	// Role icons - uses centralized emojis from constants package
 	roleIcons := map[string]string{
-		constants.RoleMayor:    constants.EmojiMayor,
-		constants.RoleDeacon:   constants.EmojiDeacon,
-		constants.RoleWitness:  constants.EmojiWitness,
-		constants.RoleRefinery: constants.EmojiRefinery,
-		constants.RoleCrew:     constants.EmojiCrew,
-		constants.RolePolecat:  constants.EmojiPolecat,
+		constants.RoleMayor:   constants.EmojiMayor,
+		constants.RoleDeacon:  constants.EmojiDeacon,
+		constants.RoleWitness: constants.EmojiWitness,
+		constants.RoleCrew:    constants.EmojiCrew,
+		constants.RolePolecat: constants.EmojiPolecat,
 		// Legacy names for backwards compatibility
 		"coordinator":  constants.EmojiMayor,
 		"health-check": constants.EmojiDeacon,
@@ -1142,13 +1115,11 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		fmt.Fprintf(w, "─── %s ───────────────────────────────────────────\n\n", style.Bold.Render(r.Name+"/"))
 
 		// Group agents by role
-		var witnesses, refineries, crews, polecats []AgentRuntime
+		var witnesses, crews, polecats []AgentRuntime
 		for _, agent := range r.Agents {
 			switch agent.Role {
 			case constants.RoleWitness:
 				witnesses = append(witnesses, agent)
-			case constants.RoleRefinery:
-				refineries = append(refineries, agent)
 			case constants.RoleCrew:
 				crews = append(crews, agent)
 			case constants.RolePolecat:
@@ -1167,36 +1138,6 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 			} else {
 				for _, agent := range witnesses {
 					renderAgentCompact(w, agent, roleIcons[constants.RoleWitness]+" ", r.Hooks, status.Location)
-				}
-			}
-		}
-
-		// Refinery
-		if len(refineries) > 0 {
-			if statusVerbose {
-				fmt.Fprintf(w, "%s %s\n", roleIcons[constants.RoleRefinery], style.Bold.Render("Refinery"))
-				for _, agent := range refineries {
-					renderAgentDetails(w, agent, "   ", r.Hooks, status.Location)
-				}
-				// MQ summary (shown under refinery)
-				if r.MQ != nil {
-					mqStr := formatMQSummary(r.MQ)
-					if mqStr != "" {
-						fmt.Fprintf(w, "   MQ: %s\n", mqStr)
-					}
-				}
-				fmt.Fprintln(w)
-			} else {
-				for _, agent := range refineries {
-					// Compact: include MQ on same line if present
-					mqSuffix := ""
-					if r.MQ != nil {
-						mqStr := formatMQSummaryCompact(r.MQ)
-						if mqStr != "" {
-							mqSuffix = "  " + mqStr
-						}
-					}
-					renderAgentCompactWithSuffix(w, agent, roleIcons[constants.RoleRefinery]+" ", r.Hooks, status.Location, mqSuffix)
 				}
 			}
 		}
@@ -1234,7 +1175,7 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		}
 
 		// No agents
-		if len(witnesses) == 0 && len(refineries) == 0 && len(crews) == 0 && len(polecats) == 0 {
+		if len(witnesses) == 0 && len(crews) == 0 && len(polecats) == 0 {
 			fmt.Fprintf(w, "   %s\n", style.Dim.Render("(no agents)"))
 		}
 		fmt.Fprintln(w)
@@ -1309,8 +1250,6 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 				agentBeadID = beads.CrewBeadIDWithPrefix(prefix, rig, parts[2])
 			} else if parts[1] == constants.RoleWitness {
 				agentBeadID = beads.WitnessBeadIDWithPrefix(prefix, rig)
-			} else if parts[1] == constants.RoleRefinery {
-				agentBeadID = beads.RefineryBeadIDWithPrefix(prefix, rig)
 			} else if len(parts) == 2 {
 				// polecat: rig/name
 				agentBeadID = beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1])
@@ -1367,57 +1306,6 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 		}
 		fmt.Fprintf(w, "%s  mail: %s\n", indent, mailStr)
 	}
-}
-
-// formatMQSummary formats the MQ status for verbose display
-func formatMQSummary(mq *MQSummary) string {
-	if mq == nil {
-		return ""
-	}
-	mqParts := []string{}
-	if mq.Pending > 0 {
-		mqParts = append(mqParts, fmt.Sprintf("%d pending", mq.Pending))
-	}
-	if mq.InFlight > 0 {
-		mqParts = append(mqParts, style.Warning.Render(fmt.Sprintf("%d in-flight", mq.InFlight)))
-	}
-	if mq.Blocked > 0 {
-		mqParts = append(mqParts, style.Dim.Render(fmt.Sprintf("%d blocked", mq.Blocked)))
-	}
-	if len(mqParts) == 0 {
-		return ""
-	}
-	// Add state indicator
-	stateIcon := "○" // idle
-	switch mq.State {
-	case "processing":
-		stateIcon = style.Success.Render("●")
-	case "blocked":
-		stateIcon = style.Error.Render("○")
-	}
-	// Add health warning if stale
-	healthSuffix := ""
-	if mq.Health == "stale" {
-		healthSuffix = style.Error.Render(" [stale]")
-	}
-	return fmt.Sprintf("%s %s%s", stateIcon, strings.Join(mqParts, ", "), healthSuffix)
-}
-
-// formatMQSummaryCompact formats MQ status for compact single-line display
-func formatMQSummaryCompact(mq *MQSummary) string {
-	if mq == nil {
-		return ""
-	}
-	// Very compact: "MQ:12" or "MQ:12 [stale]"
-	total := mq.Pending + mq.InFlight + mq.Blocked
-	if total == 0 {
-		return ""
-	}
-	healthSuffix := ""
-	if mq.Health == "stale" {
-		healthSuffix = style.Error.Render("[stale]")
-	}
-	return fmt.Sprintf("MQ:%d%s", total, healthSuffix)
 }
 
 // renderAgentCompactWithSuffix renders a single-line agent status with an extra suffix
@@ -1622,11 +1510,6 @@ func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
 		hooks = append(hooks, resolveHookFromMap(allHandoffs, constants.RoleWitness, r.Name+"/witness", constants.RoleWitness))
 	}
 
-	// Check refinery
-	if r.HasRefinery {
-		hooks = append(hooks, resolveHookFromMap(allHandoffs, constants.RoleRefinery, r.Name+"/refinery", constants.RoleRefinery))
-	}
-
 	return hooks
 }
 
@@ -1769,7 +1652,7 @@ func applyPauseMarker(agent *AgentRuntime, townRoot string) {
 // It goes through session.ParseAddress rather than splitting the string, so
 // every address form the rest of the system uses resolves to the same marker
 // the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
-// "rig/witness", "rig/refinery", "rig/crew/name" — and the town-level
+// "rig/witness", "rig/crew/name" — and the town-level
 // "mayor/" and "deacon/", whose marker lives at .runtime/agents/<role>.json,
 // so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
 func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
@@ -1854,17 +1737,6 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 			session: witnessSessionName(r.Name),
 			role:    constants.RoleWitness,
 			beadID:  beads.WitnessBeadIDWithPrefix(prefix, r.Name),
-		})
-	}
-
-	// Refinery
-	if r.HasRefinery {
-		defs = append(defs, agentDef{
-			name:    constants.RoleRefinery,
-			address: r.Name + "/refinery",
-			session: session.RefinerySessionName(session.PrefixFor(r.Name)),
-			role:    constants.RoleRefinery,
-			beadID:  beads.RefineryBeadIDWithPrefix(prefix, r.Name),
 		})
 	}
 
@@ -1956,84 +1828,6 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 
 	wg.Wait()
 	return agents
-}
-
-// getMQSummary queries beads for merge-request issues and returns a summary.
-// Uses a single bd call to fetch all non-closed merge-requests, then splits
-// open vs in_progress in memory. Previously used two separate bd calls.
-// Returns nil if the rig has no refinery or no MQ issues.
-func getMQSummary(r *rig.Rig) *MQSummary {
-	if !r.HasRefinery {
-		return nil
-	}
-
-	// Create beads instance for the rig
-	b := beads.New(r.BeadsPath())
-
-	// Single query for all non-closed merge-request issues.
-	// Status "all" fetches everything; we filter open/in_progress in memory.
-	opts := beads.ListOptions{
-		Label:    "gt:merge-request",
-		Status:   "all",
-		Priority: -1, // No priority filter
-	}
-	allMRs, err := b.List(opts)
-	if err != nil {
-		return nil
-	}
-
-	// Split by status in memory
-	pending := 0
-	blocked := 0
-	inProgress := 0
-	for _, mr := range allMRs {
-		switch mr.Status {
-		case "open":
-			if len(mr.BlockedBy) > 0 || mr.BlockedByCount > 0 {
-				blocked++
-			} else {
-				pending++
-			}
-		case "in_progress":
-			inProgress++
-		}
-		// closed/other statuses are ignored
-	}
-
-	// Determine queue state
-	state := "idle"
-	if inProgress > 0 {
-		state = "processing"
-	} else if pending > 0 {
-		state = "idle" // Has work but not processing yet
-	} else if blocked > 0 {
-		state = "blocked" // Only blocked items, nothing processable
-	}
-
-	// Determine queue health
-	health := "empty"
-	total := pending + inProgress + blocked
-	if total > 0 {
-		health = "healthy"
-		// Check for potential issues
-		if pending > 10 && inProgress == 0 {
-			// Large queue but nothing processing - may be stuck
-			health = "stale"
-		}
-	}
-
-	// Only return summary if there's something to show
-	if pending == 0 && inProgress == 0 && blocked == 0 {
-		return nil
-	}
-
-	return &MQSummary{
-		Pending:  pending,
-		InFlight: inProgress,
-		Blocked:  blocked,
-		State:    state,
-		Health:   health,
-	}
 }
 
 // getAgentHook retrieves hook status for a specific agent.

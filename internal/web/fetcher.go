@@ -202,18 +202,33 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	err := runProc(f.runProc, ctx, cmd)
+	err := runProc(f.runProc, ctx, cmd.Cmd)
+	// runProc runs the embedded exec.Cmd, so stdout is the machine envelope.
+	payload := bytes.NewBuffer(beads.LegacyPayload(args, stdout.Bytes()))
 	if err != nil {
 		if deadlineExceeded(ctx) {
 			return nil, fmt.Errorf("bd timed out after %v", timeout)
 		}
-		// If we got some output, return it anyway (bd may exit non-zero with warnings)
-		if stdout.Len() > 0 {
-			return &stdout, nil
+		// If we got some output, return it anyway (bd may exit non-zero with warnings).
+		// A typed failure's envelope is the failure, not output: handing it to a
+		// caller that parses a list would read the failure as an empty panel.
+		if stdout.Len() > 0 && !isBDErrorEnvelope(stdout.Bytes()) {
+			return payload, nil
 		}
 		return nil, err
 	}
-	return &stdout, nil
+	return payload, nil
+}
+
+// isBDErrorEnvelope reports whether out is the machine-mode envelope of a
+// failed bd call (error.kind set).
+func isBDErrorEnvelope(out []byte) bool {
+	var env struct {
+		Error *struct {
+			Kind string `json:"kind"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(bytes.TrimSpace(out), &env) == nil && env.Error != nil && env.Error.Kind != ""
 }
 
 // fetchCircuitBreaker tracks consecutive failures for a fetch operation
@@ -1864,9 +1879,6 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		return nil, nil
 	}
 
-	// Pre-fetch merge queue count to determine refinery idle status
-	mergeQueueCount := f.getMergeQueueCount()
-
 	var workers []WorkerRow
 	// rendered records the rig/name pairs the tmux pass already covers, so the
 	// inventory pass below adds a row only for a polecat with no session.
@@ -1912,16 +1924,6 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		// Determine agent type and worker name
 		workerName := identity.Name
 		agentType := constants.RolePolecat // Default for ephemeral sessions (polecats, crew)
-		if identity.Role == session.RoleRefinery {
-			agentType = constants.RoleRefinery
-			// Refinery identities carry no per-agent Name (there's one
-			// refinery per rig, so AgentIdentity.Name is always empty for
-			// this role) - without this the Polecats panel rendered an
-			// unlabeled "refinery" row, and the workerName == "refinery"
-			// check below (for status hints) could never match.
-			workerName = "refinery"
-		}
-
 		// Parse activity timestamp
 		var activityUnix int64
 		if _, err := fmt.Sscanf(parts[1], "%d", &activityUnix); err != nil || activityUnix == 0 {
@@ -1930,13 +1932,7 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		activityTime := time.Unix(activityUnix, 0)
 		activityAge := time.Since(activityTime)
 
-		// Get status hint - special handling for refinery
-		var statusHint string
-		if workerName == "refinery" {
-			statusHint = f.getRefineryStatusHint(mergeQueueCount)
-		} else {
-			statusHint = f.getWorkerStatusHint(sessionName)
-		}
+		statusHint := f.getWorkerStatusHint(sessionName)
 
 		// Look up assigned issue for this worker
 		// Assignee format: "rigname/polecats/workername"
@@ -2140,17 +2136,6 @@ func (f *LiveConvoyFetcher) getMergeQueueCount() int {
 		return 0
 	}
 	return len(mergeQueue)
-}
-
-// getRefineryStatusHint returns appropriate status for refinery based on merge queue.
-func (f *LiveConvoyFetcher) getRefineryStatusHint(mergeQueueCount int) string {
-	if mergeQueueCount == 0 {
-		return "Idle - Waiting for PRs"
-	}
-	if mergeQueueCount == 1 {
-		return "Processing 1 PR"
-	}
-	return fmt.Sprintf("Processing %d PRs", mergeQueueCount)
 }
 
 // parseActivityTimestamp parses a Unix timestamp string from tmux.

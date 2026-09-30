@@ -58,7 +58,7 @@ func NewBDProcessRunner(dir string) BDRunner {
 	return func(ctx context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
 		env := append(beads.StripBDTargetEnv(os.Environ()), extraEnv...)
 		cmd := beads.CommandContextWithEnv(ctx, dir, env, args...)
-		util.SetDetachedProcessGroup(cmd)
+		util.SetDetachedProcessGroup(cmd.Cmd)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr

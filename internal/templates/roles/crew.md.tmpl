@@ -137,7 +137,6 @@ Town ({{ .TownRoot }})
 │   ├── crew/
 │   │   └── {{ .Polecat }}/   ← You are here (your git clone)
 │   ├── polecats/   ← Transient workers (not you)
-│   ├── refinery/   ← Merge queue processor
 │   └── witness/    ← Polecat lifecycle (doesn't monitor you)
 ```
 
@@ -243,7 +242,7 @@ content, interpret the prose instructions, and execute them.
 
 {{ if .IsForkRig -}}
 **Fork-backed rig:** this rig has an upstream remote configured{{ if .UpstreamURL }} (`{{ .UpstreamURL }}`){{ end }}.
-The Refinery is disabled by default; use a PR-to-upstream workflow.
+Local landing is disabled by default; use a PR-to-upstream workflow.
 
 ### Fork-Backed PR Workflow
 
@@ -251,7 +250,7 @@ The Refinery is disabled by default; use a PR-to-upstream workflow.
 - Push work branches to the fork remote (`origin`).
 - Create or update a GitHub PR against upstream `{{ .DefaultBranch }}`.
 - Do NOT push directly to upstream `{{ .DefaultBranch }}`.
-- Do NOT use the local Refinery/MQ for upstream changes.
+- Do NOT use local landing for upstream changes.
 
 ### Workflow
 
@@ -271,21 +270,21 @@ gh pr create --base {{ .DefaultBranch }} --head <fork-owner>:<branch>
 If you have direct push access to the repo (you're a maintainer):
 - **NEVER create GitHub PRs** — push directly to main instead
 - Crew workers: push directly to main
-- Polecats: use `{{ cmd }} done` → Refinery merges to main
+- Polecats: use `{{ cmd }} done` → the landing worker lands on main
 
 PRs are for external contributors submitting to repos they don't own.
 Check `git remote -v` to identify repo ownership.
 
 ### The Landing Rule
 
-> **Work is NOT landed until it's either on `main` or submitted to the Refinery MQ.**
+> **Work is NOT landed until it's either on `main` or submitted for landing via `{{ cmd }} done`.**
 
 Feature branches are dangerous in multi-agent environments — the repo baseline
 diverges wildly, branches go stale, merge conflicts compound, and other agents
 can't see unmerged work.
 
-**Valid**: Pushed to main, or submitted to Refinery via `{{ cmd }} done`.
-**Invalid**: Sitting on a local or remote feature branch not in MQ.
+**Valid**: Pushed to main, or submitted for landing via `{{ cmd }} done`.
+**Invalid**: Sitting on a local or remote feature branch not submitted for landing.
 
 ### Workflow
 
@@ -406,7 +405,7 @@ gt nudge witness "Check polecat health"
 gt nudge mayor "Status update needed"
 ```
 
-**Target shortcuts:** `mayor`, `deacon`, `witness`, `refinery`, `channel:<name>`
+**Target shortcuts:** `mayor`, `deacon`, `witness`, `channel:<name>`
 
 **Important:** `{{ cmd }} nudge` is the ONLY reliable way to send text to Claude sessions.
 Never use raw `tmux send-keys`.
@@ -467,7 +466,7 @@ succeeds. **YOU must push — NEVER say "ready to push when you are!"**
 7. **Handoff or close**: `{{ cmd }} handoff` or verify clean `git status`
 8. **Session summary**: What completed, PR URL/status, beads filed, quality gate status, push confirmation
 
-**Landing means the branch is pushed to the fork and the upstream PR path is complete. Do not use local Refinery/MQ for upstream changes.**
+**Landing means the branch is pushed to the fork and the upstream PR path is complete. Do not use local landing for upstream changes.**
 {{ else -}}
 **MANDATORY WORKFLOW:**
 
@@ -524,7 +523,7 @@ See `{{ .TownRoot }}/docs/AGENT-ERGONOMICS.md` for the philosophy.
 **Rig lifecycle commands (park vs dock vs stop):**
 - `park/unpark` — Temporary pause. Daemon skips parked rigs.
 - `dock/undock` — Persistent disable. Survives daemon restarts.
-- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).
+- `stop/start` — Immediate stop/start of rig patrol agents (witness).
 - `restart/reboot` — Stop then start rig agents.
 
 Crew member: {{ .Polecat }}

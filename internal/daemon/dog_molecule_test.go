@@ -57,6 +57,21 @@ func TestParseWispID(t *testing.T) {
 			input:  "Created gt-wisp-def456",
 			wantID: "gt-wisp-def456",
 		},
+		{
+			name:   "json new_epic_id",
+			input:  `{"new_epic_id":"gt-wisp-json01","created":7}`,
+			wantID: "gt-wisp-json01",
+		},
+		{
+			name:   "json root_id",
+			input:  `{"root_id":"gt-wisp-json02"}`,
+			wantID: "gt-wisp-json02",
+		},
+		{
+			name:   "json without an id is not scanned as text",
+			input:  `{"created":7,"at":"2026-09-30T10:00:00Z"}`,
+			wantID: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -532,7 +547,7 @@ func TestPourDogMolecule_RetriesATransientFailureWithinOneCycle(t *testing.T) {
 	}
 	// The retry repeats the same command, so a second failure is a second real
 	// attempt rather than a malformed argv failing the same way twice.
-	wantArgs := []string{"mol", "wisp", pourTestFormula}
+	wantArgs := []string{"mol", "wisp", pourTestFormula, "--json"}
 	if len(rig.fake.pourArgs) != 2 || !reflect.DeepEqual(rig.fake.pourArgs[0], wantArgs) || !reflect.DeepEqual(rig.fake.pourArgs[1], wantArgs) {
 		t.Errorf("pour argv = %v, want two identical %v", rig.fake.pourArgs, wantArgs)
 	}

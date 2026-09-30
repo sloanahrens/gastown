@@ -291,7 +291,7 @@ func newSubmitHarness(t *testing.T) *submitHarness {
 	return h
 }
 
-func (h *submitHarness) submit() (doneSubmission, error) { return submitForLanding(h.r) }
+func (h *submitHarness) submit() error { return submitForLanding(h.r) }
 
 func (h *submitHarness) source(t *testing.T) *beads.Issue {
 	t.Helper()
@@ -334,8 +334,7 @@ func TestSubmitRebasesGatesPushesAndMarksReady(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.behind = 1
-	sub, err := h.submit()
-	if err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	head := "feature1-rebased"
@@ -350,9 +349,6 @@ func TestSubmitRebasesGatesPushesAndMarksReady(t *testing.T) {
 	}
 	if h.repo.origin["main"] != "main1" {
 		t.Errorf("origin/main moved to %s", h.repo.origin["main"])
-	}
-	if sub.head != head || sub.target != "main" {
-		t.Errorf("submission = head %q target %q", sub.head, sub.target)
 	}
 	issue := h.source(t)
 	if !beads.HasLabel(issue, land.LabelReadyToLand) {
@@ -379,7 +375,7 @@ func TestSubmitRebasesGatesPushesAndMarksReady(t *testing.T) {
 func TestSubmitLeavesWorkItsConsumersReadAsSubmitted(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
-	if _, err := h.submit(); err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	issue := h.source(t)
@@ -410,7 +406,7 @@ func TestSubmitRecordsTheActualWorkerNotTheBranchName(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.r.branch = "polecat/malachite/bd-source+mudreworkab"
-	if _, err := h.submit(); err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	w, _ := land.ParseReadyNote(h.source(t).Notes)
@@ -430,7 +426,7 @@ func TestSubmitReplacesAnOlderBranchTipUnderLease(t *testing.T) {
 	// The rebase rewrote feature1; both ranges carry the same change.
 	h.repo.patchIDs["feature1"] = []string{"p1"}
 	h.repo.patchIDs["feature1-rebased"] = []string{"p1"}
-	if _, err := h.submit(); err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if got := h.repo.origin[doneTestBranch]; got != "feature1-rebased" {
@@ -451,7 +447,7 @@ func TestSubmitRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 	h.repo.origin[doneTestBranch] = "theirs"
 	h.repo.patchIDs["theirs"] = []string{"p1", "their-rework"}
 	h.repo.patchIDs["feature1"] = []string{"p1", "mine"}
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitPushFailed, "real divergence")
 	if got := h.repo.origin[doneTestBranch]; got != "theirs" {
 		t.Errorf("origin branch = %q, want their commit kept", got)
@@ -467,7 +463,7 @@ func TestSubmitRedGateExits15(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.gate.result = land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 2, Tail: "FAIL\tpkg/x\n"}}}
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitGateFailed, "FAIL\tpkg/x")
 	if len(h.repo.pushes) != 0 {
 		t.Errorf("a red gate pushed: %v", h.repo.pushes)
@@ -491,7 +487,7 @@ func TestSubmitGateThatCouldNotRunExits16(t *testing.T) {
 			t.Parallel()
 			h := newSubmitHarness(t)
 			broken(h)
-			_, err := h.submit()
+			err := h.submit()
 			wantDoneExit(t, err, doneExitGateUnavailable, "not a verdict on your change")
 			if len(h.repo.pushes) != 0 {
 				t.Errorf("pushed without a gate verdict: %v", h.repo.pushes)
@@ -507,7 +503,7 @@ func TestSubmitRebaseConflictExits14(t *testing.T) {
 	h := newSubmitHarness(t)
 	h.repo.behind = 1
 	h.repo.conflicts = []string{"file.txt"}
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitRebaseConflict, "file.txt")
 	if h.repo.rebasing {
 		t.Error("worktree left mid-rebase")
@@ -525,7 +521,7 @@ func TestSubmitBranchCheckRefusalStopsBeforeTheGate(t *testing.T) {
 	h := newSubmitHarness(t)
 	refusal := errors.New("branch reverts merged work")
 	h.r.deps.checkBranch = func(string, doneSubmission) error { return refusal }
-	if _, err := h.submit(); !errors.Is(err, refusal) {
+	if err := h.submit(); !errors.Is(err, refusal) {
 		t.Fatalf("submit = %v, want the check's refusal", err)
 	}
 	if len(h.stages) != 0 || len(h.gate.heads) != 0 || len(h.repo.pushes) != 0 {
@@ -539,7 +535,7 @@ func TestSubmitReadyRecordFailedExits12(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.client = &failingBD{Client: h.bd, updateErr: errors.New("database not found: gastown")}
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitReadyFailed, "ready to land")
 	if h.repo.origin[doneTestBranch] != "feature1" {
 		t.Errorf("origin branch = %q, want the pushed head", h.repo.origin[doneTestBranch])
@@ -555,7 +551,7 @@ func TestSubmitPushFailedWhenOriginRejects(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.pushErrs = []error{errors.New("rejected by hook"), errors.New("rejected by hook")}
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitPushFailed, doneTestBranch)
 	if len(h.repo.pushes) != 2 || len(h.sleeps) != 1 {
 		t.Errorf("pushes %v sleeps %v, want one push and one retry", h.repo.pushes, h.sleeps)
@@ -571,7 +567,7 @@ func TestSubmitPushUnverifiedWhenOriginDropsTheBranch(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.dropPushed = true
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitPushUnverified, doneTestBranch)
 }
 
@@ -583,7 +579,7 @@ func TestSubmitClassifiesOnTheLastPushAttempt(t *testing.T) {
 	h := newSubmitHarness(t)
 	h.repo.pushErrs = []error{errors.New("transient rejection")}
 	h.repo.dropPushed = true
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitPushUnverified, doneTestBranch)
 }
 
@@ -596,7 +592,7 @@ func TestSubmitRecoversAPushThatErroredButLanded(t *testing.T) {
 	first := true
 	inner := h.repo
 	h.r.deps.repo = &erroringFirstPush{fakeDoneRepo: inner, first: &first}
-	if _, err := h.submit(); err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if !beads.HasLabel(h.source(t), land.LabelReadyToLand) {
@@ -631,7 +627,7 @@ func TestSubmitNoCodeChecksTheResolvedTarget(t *testing.T) {
 	h.repo.origin[doneTestBranch] = "feature1"
 	h.repo.origin["release"] = "feature1"
 	h.repo.reachable["release"] = map[string]bool{"feature1": true}
-	if _, err := h.submit(); err != nil {
+	if err := h.submit(); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if strings.Join(h.repo.verified, ",") != "release" {
@@ -658,7 +654,7 @@ func TestSubmitNoCodeCloseFailedExits13(t *testing.T) {
 	h.repo.reachable["main"] = map[string]bool{"feature1": true}
 	failing := &failingBD{Client: h.bd, closeErr: errors.New("database not found: gastown")}
 	h.client = failing
-	_, err := h.submit()
+	err := h.submit()
 	wantDoneExit(t, err, doneExitCloseFailed, "could not close issue bd-source")
 	if failing.closes != 3 || len(h.sleeps) != 2 {
 		t.Errorf("closes %d sleeps %v, want 3 attempts with 2 waits", failing.closes, h.sleeps)
@@ -672,7 +668,7 @@ func TestSubmitNoCommitsRefusesAnUnpushedPolecatBranch(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.ahead = 0
-	_, err := h.submit()
+	err := h.submit()
 	if err == nil || !strings.Contains(err.Error(), "no commits on branch ahead of origin/main") {
 		t.Fatalf("submit = %v, want the no-commits refusal", err)
 	}
@@ -687,7 +683,7 @@ func TestSubmitRefusesUncommittedWork(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.dirty = &git.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{"main.go"}}
-	_, err := h.submit()
+	err := h.submit()
 	if err == nil || !strings.Contains(err.Error(), "uncommitted changes would be lost") {
 		t.Fatalf("submit = %v, want the uncommitted-work refusal", err)
 	}

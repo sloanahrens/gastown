@@ -24,10 +24,7 @@ func TestParseRoleStringBoot(t *testing.T) {
 		// Extra path segments should NOT match RoleBoot
 		{"deacon/boot/extra", Role("deacon/boot/extra"), "", ""},
 		// Double-slash normalization
-		{"gamestore//refinery", RoleRefinery, "gamestore", ""},
 		{"gamestore//witness", RoleWitness, "gamestore", ""},
-		{"gamestore///refinery", RoleRefinery, "gamestore", ""},
-		{"gamestore/refinery/", RoleRefinery, "gamestore", ""},
 		{"gamestore//polecats//alpha", RolePolecat, "gamestore", "alpha"},
 	}
 

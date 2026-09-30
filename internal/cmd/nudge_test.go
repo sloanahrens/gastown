@@ -62,7 +62,6 @@ func TestResolveNudgePattern(t *testing.T) {
 		{Name: "hq-mayor", Type: AgentMayor},
 		{Name: "hq-deacon", Type: AgentDeacon},
 		{Name: "gt-witness", Type: AgentWitness, Rig: "gastown"},
-		{Name: "gt-refinery", Type: AgentRefinery, Rig: "gastown"},
 		{Name: "gt-crew-max", Type: AgentCrew, Rig: "gastown", AgentName: "max"},
 		{Name: "gt-crew-jack", Type: AgentCrew, Rig: "gastown", AgentName: "jack"},
 		{Name: "gt-alpha", Type: AgentPolecat, Rig: "gastown", AgentName: "alpha"},
@@ -95,11 +94,6 @@ func TestResolveNudgePattern(t *testing.T) {
 			name:     "all witnesses",
 			pattern:  "*/witness",
 			expected: []string{"gt-witness", "bd-witness"},
-		},
-		{
-			name:     "specific refinery",
-			pattern:  "gastown/refinery",
-			expected: []string{"gt-refinery"},
 		},
 		{
 			name:     "all polecats in rig",
@@ -184,11 +178,6 @@ func TestSessionNameToAddress(t *testing.T) {
 			name:        "witness",
 			sessionName: "gt-witness",
 			expected:    "gastown/witness",
-		},
-		{
-			name:        "refinery",
-			sessionName: "gt-refinery",
-			expected:    "gastown/refinery",
 		},
 		{
 			name:        "crew member",
