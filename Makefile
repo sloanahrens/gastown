@@ -1,4 +1,26 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean gate test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
+
+# The gate (docs/testing.md, "The gate"). Two targets are the only test entry
+# points, and every caller runs them verbatim: CI, gt done, the land path and
+# a human at a shell.
+#
+#   make gate              lint, then `go build ./...`, then the unit tier: the
+#                          budget runner over ./... beside the shell tests
+#                          (scripts/test-makefile.sh). Never starts a container
+#                          and never takes the container-gate slot: the recipe
+#                          writes GT_TEST_DOCKER=0 itself, so an inherited value
+#                          cannot turn containers on. Do not wrap it in
+#                          `gt slot run`.
+#   make test-integration  the integration tier: -tags integration over ./...,
+#                          then every package in internal/testpolicy/docker.txt
+#                          whole, with GT_TEST_DOCKER=1. It starts containers,
+#                          so run it under `gt slot run`.
+#
+# Exit codes, for both: 0 means green. Anything else means red: make exits 2
+# when a recipe fails, and 130 when interrupted. Decide on the exit code only,
+# never on the output. For a human reading the log: a lint failure ends with
+# make's own error line for the lint target, and a later stage ends with a
+# `gate: FAILED at <stage>` line on stderr.
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -222,70 +244,46 @@ check-version-tag:
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
-test:
-	# -timeout 20m: the 10m default is a per-package budget and internal/cmd
-	# and internal/refinery legitimately run 500-600s under contention, so
-	# every gate against them flapped on the budget rather than a hung test
-	# (gt-g8kr). gt-fo3h shrank those packages instead of leaning on the
-	# budget: both ran their tests serially, so their wall clock was the sum
-	# of their tests' runtimes; they now parallelize (651s -> 264s and
-	# 429s -> 126s, back to back at matched load). The budget stays where
-	# gt-g8kr put it — it still has to absorb a loaded host, and a budget
-	# tightened against an idle host is not a hang detector.
-	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
-	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
-	# Defaulted rather than hardcoded, so an inherited GT_TEST_DOCKER=0 wins:
-	# gt done's default gate runs this same recipe with the opt-in off
-	# and therefore needs no container-gate slot (gt-wx53), while the refinery
-	# gate and the daemon's main-branch patrol pass no value and still get the
-	# container suite. A hardcoded =1 here is invisible to every caller that
-	# tries to turn containers off (a recipe assignment beats the child env),
-	# so the gate stayed welded to the town-wide slot.
-	# The budget runner measures converted packages through its CPU-measuring
-	# -exec wrapper, which bypasses the test result cache, and runs the
-	# packages in unconverted.txt afterwards without the wrapper, so those
-	# stay "(cached)" on an unchanged tree (gt-22hdp.53).
-	# The shell-script tests (test-makefile, ~130s one after another) run
-	# beside the Go suite instead of before it; their output is held and
-	# printed after it, and either failing fails the target (gt-22hdp.60).
-	# Both halves run in the background so the trap fires at once on INT or
-	# TERM (bash defers traps until a foreground child exits): it stops both,
-	# with their children, and removes the log. The shell suites use only stub
-	# tmux/dolt/gt in mktemp dirs, so they share no state with the Go suite.
+gate: lint
+	@echo "gate: build (go build ./...)" >&2
+	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
+	@# The unit tier. The shell tests run beside the Go suite (gt-22hdp.60);
+	@# their output is held and printed after it, and either failing fails the
+	@# gate. Both halves run in the background so the trap fires at once on
+	@# INT or TERM (bash defers traps until a foreground child exits): it stops
+	@# both, with their children, and removes the log. The shell suites use
+	@# only stub tmux/dolt/gt in mktemp dirs, so they share no state with the
+	@# Go suite. The budget runner measures converted packages through its
+	@# CPU-measuring -exec wrapper, which bypasses the test result cache, and
+	@# runs the packages in unconverted.txt afterwards with the cache
+	@# (gt-22hdp.53). go test's per-package -timeout default (10m) is the hang
+	@# detector.
+	@echo "gate: unit tier (budget runner beside scripts/test-makefile.sh)" >&2
 	@log=$$(mktemp -t gt-test-makefile); \
-	$(MAKE) --no-print-directory test-makefile >"$$log" 2>&1 & mk=$$!; \
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
+	bash scripts/test-makefile.sh >"$$log" 2>&1 & mk=$$!; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- ./... & gt=$$!; \
 	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
 	wait $$gt; go_rc=$$?; \
 	wait $$mk; mk_rc=$$?; \
-	echo "=== test-makefile (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
-	if [ $$mk_rc -ne 0 ]; then echo "test-makefile failed (exit $$mk_rc)" >&2; fi; \
-	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ]
+	echo "=== shell tests (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
+	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc)" >&2; fi; \
+	if [ $$mk_rc -ne 0 ]; then echo "gate: FAILED at unit tier (shell tests, exit $$mk_rc)" >&2; fi; \
+	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ] && echo "gate: PASSED" >&2
 
-# test-changed runs the same hermetic suite as `test` over a caller-supplied
-# package list, for `gt done`'s pre-verify gate (merge_queue.test_verify_command
-# with the {packages} token). The refinery's gate still runs `test` over the
-# whole module, so nothing reaches main without a full run; this exists so four
-# polecats do not each run the entire suite beside that gate. Measured
-# 2026-09-22: one suite alone is 244s, four concurrently are 683s each — the
-# contention, not the suite, is what made gates slow.
-#
-# PKGS defaults to the whole module so a bare `make test-changed` is never
-# narrower than `make test` by accident.
-PKGS ?= ./...
-test-changed: test-makefile
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m $(PKGS)
+# The Docker-backed packages (internal/testpolicy/docker.txt, kept exact by
+# TestDockerTier). Their container tests skip in the gate and run here.
+DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/docker.txt))
 
-# test-integration runs only the //go:build integration tier (real tmux, bd,
-# Dolt, gt binary; tests named TestIntegration*). The daemon's
-# main_branch_test patrol runs it on the gastown rig once a day, and the CI
-# integration job runs it on every push. Docker-backed suites still need
-# `gt slot run` around the call. INTEGRATION_GO_TEST swaps the runner so CI can
-# collect JUnit output from this one definition of the tier, e.g.
+# test-integration runs the //go:build integration tier (real tmux, bd, Dolt,
+# the gt binary; tests named TestIntegration*) and then the Docker-backed
+# packages whole. The daemon's main_branch_test patrol runs it on the gastown
+# rig once a day. INTEGRATION_GO_TEST swaps the runner so CI can collect JUnit
+# output from this one definition of the tier, e.g.
 #   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
 INTEGRATION_GO_TEST ?= go test
 test-integration:
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' ./...
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) $(DOCKER_PKGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the
@@ -295,44 +293,7 @@ test-timing:
 	bash scripts/test-timing.sh $(PKGS)
 
 test-makefile:
-	bash scripts/check-install-path_test.sh
-	bash scripts/install-binary_test.sh
-	bash scripts/check-deploy-source_test.sh
-	bash -n scripts/install-gt.sh
-	bash -n scripts/lib/install-gt-lib.sh
-	bash scripts/install-gt_test.sh
-	bash -n scripts/install-after-merge.sh
-	bash scripts/install-after-merge_test.sh
-	bash -n plugins/dolt-log-rotate/run.sh
-	bash -n plugins/dolt-log-rotate/run_test.sh
-	bash plugins/dolt-log-rotate/run_test.sh
-	bash -n plugins/stuck-agent-dog/run.sh
-	bash -n plugins/stuck-agent-dog/run_test.sh
-	bash plugins/stuck-agent-dog/run_test.sh
-	bash -n plugins/compactor-dog/run.sh
-	bash -n plugins/compactor-dog/run_test.sh
-	bash plugins/compactor-dog/run_test.sh
-	bash -n plugins/stuck-work-dog/run.sh
-	bash -n plugins/stuck-work-dog/run_test.sh
-	bash plugins/stuck-work-dog/run_test.sh
-	bash -n plugins/rebuild-gt/run.sh
-	bash -n plugins/rebuild-gt/run_test.sh
-	bash plugins/rebuild-gt/run_test.sh
-	bash -n plugins/gitignore-reconcile/run.sh
-	bash -n plugins/git-hygiene/run.sh
-	bash -n plugins/submodule-commit/run.sh
-	bash -n plugins/submodule-commit/run_test.sh
-	bash plugins/submodule-commit/run_test.sh
-	bash -n plugins/rig-list-consumers/run_test.sh
-	bash plugins/rig-list-consumers/run_test.sh
-	bash -n plugins/quality-review/run.sh
-	bash -n plugins/quality-review/run_test.sh
-	bash plugins/quality-review/run_test.sh
-	bash -n plugins/seat-refill/run.sh
-	bash -n plugins/seat-refill/run_test.sh
-	bash plugins/seat-refill/run_test.sh
-	bash -n scripts/docs-lint.sh
-	bash scripts/docs-lint_test.sh
+	bash scripts/test-makefile.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:
