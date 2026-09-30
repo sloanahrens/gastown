@@ -69,24 +69,6 @@ func (h *handle) ConfigSet(key, value string) error {
 	return nil
 }
 
-func (h *handle) CurrentBranch() (string, error) {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	r, wt, err := h.locate(args...)
-	if err != nil {
-		return "", err
-	}
-	head := headOf(r, wt)
-	if !strings.HasPrefix(head, "refs/") {
-		return "HEAD", nil
-	}
-	if _, ok := r.refs[head]; !ok {
-		return "", unknownRevision("HEAD", args...)
-	}
-	return strings.TrimPrefix(head, "refs/heads/"), nil
-}
-
 // globRE turns a git branch --list pattern into a regexp: * and ? match any
 // characters, / included, as git's wildmatch does without pathname mode.
 func globRE(pattern string) *regexp.Regexp {
@@ -228,45 +210,6 @@ func (h *handle) FetchBranch(remote, branch string) error {
 		return err
 	}
 	return h.fetchInto(r, rr, remote, strings.TrimPrefix(branch, "refs/heads/"))
-}
-
-func (h *handle) Push(remote, branch string, force bool) error {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	args := []string{"push", remote, branch}
-	if force {
-		args = append(args, "--force")
-	}
-	r, wt, err := h.locate(args...)
-	if err != nil {
-		return err
-	}
-	rr, err := h.remoteRepo(r, remote, args...)
-	if err != nil {
-		return err
-	}
-	src, dst, hasDst := strings.Cut(branch, ":")
-	if !hasDst {
-		dst = src
-	}
-	id, ok := h.resolve(r, wt, src)
-	if !ok {
-		return gitErr(1, "error: src refspec "+src+" does not match any\nerror: failed to push some refs to '"+rr.path+"'", args...)
-	}
-	short := strings.TrimPrefix(dst, "refs/heads/")
-	dstRef := "refs/heads/" + short
-	if cur, ok := rr.refs[dstRef]; ok && cur != id && !force && !h.f.isAncestor(cur, id) {
-		return gitErr(1, fmt.Sprintf("To %s\n ! [rejected]        %s -> %s (non-fast-forward)\nerror: failed to push some refs to '%s'", rr.path, src, short, rr.path), args...)
-	}
-	if !rr.bare && checkedOutAt(rr, short) != "" && rr.refs[dstRef] != id {
-		return gitErr(1, fmt.Sprintf("To %s\n ! [remote rejected] %s -> %s (branch is currently checked out)\nerror: failed to push some refs to '%s'", rr.path, src, short, rr.path), args...)
-	}
-	h.f.copyObjects(rr, id)
-	rr.refs[dstRef] = id
-	if _, isRemote := r.remotes[remote]; isRemote {
-		r.refs["refs/remotes/"+remote+"/"+short] = id
-	}
-	return nil
 }
 
 func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {

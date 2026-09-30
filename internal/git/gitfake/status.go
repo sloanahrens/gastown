@@ -65,30 +65,6 @@ func (f *Fake) Stash(t testing.TB, dir, message string) {
 // so no path is ever staged-only.
 func (h *handle) ClassifyIndexSkew([]string) []string { return nil }
 
-// worktreeStatus is git.Git's Status for wt: tracked files changed or
-// deleted, and every untracked file (it asks git for all of them, not
-// collapsed into their directories).
-func (h *handle) worktreeStatus(r *repo, wt *worktree) (modified, untracked []string, err error) {
-	tracked := h.f.treeOf(headCommit(r, wt))
-	disk, err := readWorktree(wt.path)
-	if err != nil {
-		return nil, nil, err
-	}
-	for p, content := range tracked {
-		if got, ok := disk[p]; !ok || got != content {
-			modified = append(modified, p)
-		}
-	}
-	for p := range disk {
-		if _, ok := tracked[p]; !ok {
-			untracked = append(untracked, p)
-		}
-	}
-	sort.Strings(modified)
-	sort.Strings(untracked)
-	return modified, untracked, nil
-}
-
 // stashCount is git.Git's StashCount: the entries made on wt's branch.
 func stashCount(r *repo, wt *worktree) int {
 	label := detachedLabel
@@ -113,20 +89,22 @@ func (h *handle) CheckUncommittedWorkLocal() (*git.UncommittedWorkStatus, error)
 }
 
 func (h *handle) checkUncommittedWork(local bool) (*git.UncommittedWorkStatus, error) {
+	st, err := h.Status()
+	if err != nil {
+		return nil, fmt.Errorf("checking git status: %w", err)
+	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	r, wt, err := h.workTree("status", "--porcelain")
+	r, wt, err := h.workTree("rev-parse", "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("checking git status: %w", err)
-	}
-	modified, untracked, err := h.worktreeStatus(r, wt)
-	if err != nil {
-		return nil, fmt.Errorf("checking git status: %w", err)
+		return nil, err
 	}
 	status := &git.UncommittedWorkStatus{
-		HasUncommittedChanges: len(modified)+len(untracked) > 0,
-		ModifiedFiles:         modified,
-		UntrackedFiles:        untracked,
+		HasUncommittedChanges: !st.Clean,
+		ModifiedFiles:         append(append(append([]string(nil), st.Modified...), st.Added...), st.Deleted...),
+		UntrackedFiles:        st.Untracked,
+		UnmergedFiles:         st.Unmerged,
+		StagedOnly:            st.StagedOnly,
 		StashCount:            stashCount(r, wt),
 	}
 	branch := ""

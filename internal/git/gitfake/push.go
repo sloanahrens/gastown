@@ -61,15 +61,16 @@ func (h *handle) Push(remote, refspec string, force bool) error {
 	return nil
 }
 
-// StashCount is the number of stash entries; the fake models no stash, so a
-// checkout always has none.
+// StashCount is the number of stash entries made on the checkout's branch
+// (Fake.Stash records them), as git.Git's StashCount filters them.
 func (h *handle) StashCount() (int, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	if _, _, err := h.workTree("stash", "list"); err != nil {
+	r, wt, err := h.workTree("stash", "list")
+	if err != nil {
 		return 0, err
 	}
-	return 0, nil
+	return stashCount(r, wt), nil
 }
 
 // CheckUncommittedWorkLocalFailClosed reports the checkout's uncommitted
@@ -99,6 +100,7 @@ func (h *handle) CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStat
 		UntrackedFiles:        st.Untracked,
 		UnmergedFiles:         st.Unmerged,
 		StagedOnly:            st.StagedOnly,
+		StashCount:            stashCount(r, wt),
 	}
 	head := headCommit(r, wt)
 	var candidates []string

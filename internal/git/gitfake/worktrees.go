@@ -140,50 +140,32 @@ func (f *Fake) CommitWorktree(t testing.TB, dir, message string) string {
 }
 
 // readWorktree reads the files of the checkout at dir that git would track:
-// everything but .git and what the checkout's .gitignore ignores.
+// everything but .git and what its ignore rules (checkoutRules) ignore.
 func readWorktree(dir string) (map[string]string, error) {
-	ignore := readIgnore(dir)
-	tree := map[string]string{}
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	files, err := readWorkTree(dir)
+	if err != nil {
+		return nil, err
+	}
+	rules := checkoutRules(dir, files)
+	for p := range files {
+		if isIgnored(rules, p) {
+			delete(files, p)
 		}
-		rel, _ := filepath.Rel(dir, path)
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		if d.Name() == ".git" || ignore.matches(rel, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		data, err := os.ReadFile(path) //nolint:gosec // G122: a test fixture reading its own temp checkout
-		if err != nil {
-			return err
-		}
-		tree[rel] = string(data)
-		return nil
-	})
-	return tree, err
+	}
+	return files, nil
 }
 
-// ignoreRules is the checkout's top-level .gitignore plus its repository's
-// info/exclude: plain names or globs, matched against a path's name or whole
-// path, a trailing / for directories only. Negation and nested .gitignore
-// files are not modeled.
-type ignoreRules []string
-
-func readIgnore(dir string) ignoreRules {
-	rules := parseIgnore(filepath.Join(dir, ".gitignore"))
+// checkoutRules are the ignore rules for the checkout at dir with files on
+// disk: its repository's info/exclude, then its .gitignore files, which
+// take precedence as git's do.
+func checkoutRules(dir string, files map[string]string) []ignoreRule {
+	var rules []ignoreRule
 	if common := commonDirOf(dir); common != "" {
-		rules = append(rules, parseIgnore(filepath.Join(common, "info", "exclude"))...)
+		if data, err := os.ReadFile(filepath.Join(common, "info", "exclude")); err == nil {
+			rules = ignoreRules(map[string]string{".gitignore": string(data)})
+		}
 	}
-	return rules
+	return append(rules, ignoreRules(files)...)
 }
 
 // commonDirOf finds the git directory the checkout at dir shares with its
@@ -214,42 +196,6 @@ func (f *Fake) ExcludePath(dir string) (string, error) {
 		return "", fmt.Errorf("gitfake: no checkout at %s", dir)
 	}
 	return filepath.Join(common, "info", "exclude"), nil
-}
-
-func parseIgnore(path string) ignoreRules {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var rules ignoreRules
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		rules = append(rules, line)
-	}
-	return rules
-}
-
-func (rules ignoreRules) matches(rel string, isDir bool) bool {
-	for _, rule := range rules {
-		pattern, dirOnly := strings.CutSuffix(rule, "/")
-		if dirOnly && !isDir {
-			continue
-		}
-		anchored := strings.HasPrefix(pattern, "/")
-		pattern = strings.TrimPrefix(pattern, "/")
-		if ok, _ := filepath.Match(pattern, rel); ok {
-			return true
-		}
-		if !anchored && !strings.Contains(pattern, "/") {
-			if ok, _ := filepath.Match(pattern, filepath.Base(rel)); ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (h *handle) TopLevel() (string, error) {
