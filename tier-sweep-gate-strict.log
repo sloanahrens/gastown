@@ -1,0 +1,178 @@
+bash scripts/docs-lint.sh
+lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)
+golangci-lint run --timeout=5m --allow-serial-runners || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+0 issues.
+bash scripts/repo-guards.sh
+lint: guardlint (fail-open guard check, gt-udrrw)
+go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
+=== RUN   TestNoNewFailOpenGuards
+=== PAUSE TestNoNewFailOpenGuards
+=== CONT  TestNoNewFailOpenGuards
+--- PASS: TestNoNewFailOpenGuards (0.17s)
+PASS
+ok  	github.com/steveyegge/gastown/internal/guardlint	0.173s
+gate: build (go build ./... and the nested modules: plugins/dolt-snapshots)
+gate: unit tier (fast tier: every package not in internal/testpolicy/slow.txt; make test-slow runs those)
+budget: user-CPU budget enforced (GATE_STRICT_BUDGET=1)
+?   	github.com/steveyegge/gastown/cmd/gt	[no test files]
+PASS
+ok  	github.com/steveyegge/gastown/internal/agentlog	0.092s
+PASS
+ok  	github.com/steveyegge/gastown/internal/bdgate	0.045s
+PASS
+ok  	github.com/steveyegge/gastown/internal/bitbucket	0.055s
+PASS
+ok  	github.com/steveyegge/gastown/internal/cli	0.038s
+?   	github.com/steveyegge/gastown/internal/cmdtree/gen-bd-tree	[no test files]
+PASS
+ok  	github.com/steveyegge/gastown/internal/cmdtree/bdsnapshot	0.031s
+PASS
+ok  	github.com/steveyegge/gastown/internal/checkpoint	0.098s
+PASS
+ok  	github.com/steveyegge/gastown/internal/constants	0.029s
+PASS
+ok  	github.com/steveyegge/gastown/internal/atomicfile	0.157s
+PASS
+ok  	github.com/steveyegge/gastown/internal/channelevents	0.146s
+PASS
+ok  	github.com/steveyegge/gastown/internal/beads/beadsfake	0.318s
+PASS
+ok  	github.com/steveyegge/gastown/internal/cmdtree	0.354s
+PASS
+ok  	github.com/steveyegge/gastown/internal/agentpause	0.507s
+PASS
+ok  	github.com/steveyegge/gastown/internal/estop	0.089s
+PASS
+ok  	github.com/steveyegge/gastown/internal/events	0.116s
+?   	github.com/steveyegge/gastown/internal/land/cmd/changedpkgs	[no test files]
+PASS
+ok  	github.com/steveyegge/gastown/internal/dispatch	0.138s
+PASS
+ok  	github.com/steveyegge/gastown/internal/guard	0.072s
+PASS
+ok  	github.com/steveyegge/gastown/internal/hookutil	0.036s
+PASS
+ok  	github.com/steveyegge/gastown/internal/crew	0.422s
+PASS
+ok  	github.com/steveyegge/gastown/internal/landings	0.055s
+PASS
+ok  	github.com/steveyegge/gastown/internal/lintlock	0.082s
+PASS
+ok  	github.com/steveyegge/gastown/internal/deps	0.421s
+PASS
+ok  	github.com/steveyegge/gastown/internal/lock	0.613s
+PASS
+ok  	github.com/steveyegge/gastown/internal/health	0.817s
+PASS
+ok  	github.com/steveyegge/gastown/internal/notify/notifyfake	0.490s
+PASS
+ok  	github.com/steveyegge/gastown/internal/notify	1.391s
+PASS
+ok  	github.com/steveyegge/gastown/internal/guardlint	1.554s
+PASS
+ok  	github.com/steveyegge/gastown/internal/git	2.115s
+PASS
+ok  	github.com/steveyegge/gastown/internal/landworker	2.339s
+PASS
+ok  	github.com/steveyegge/gastown/internal/patrolstate	1.925s
+PASS
+ok  	github.com/steveyegge/gastown/internal/liveness	2.765s
+PASS
+ok  	github.com/steveyegge/gastown/internal/protocol	2.065s
+PASS
+ok  	github.com/steveyegge/gastown/internal/intent	3.571s
+PASS
+ok  	github.com/steveyegge/gastown/internal/reaper	2.720s
+PASS
+ok  	github.com/steveyegge/gastown/internal/patrolscan	3.921s
+PASS
+ok  	github.com/steveyegge/gastown/internal/land	6.179s
+PASS
+ok  	github.com/steveyegge/gastown/internal/doltserver	7.127s
+PASS
+ok  	github.com/steveyegge/gastown/internal/formula	7.798s
+PASS
+ok  	github.com/steveyegge/gastown/internal/mail	8.816s
+PASS
+ok  	github.com/steveyegge/gastown/internal/rig	8.433s
+PASS
+ok  	github.com/steveyegge/gastown/internal/daemon	11.425s
+PASS
+ok  	github.com/steveyegge/gastown/internal/git/gitfake	12.855s
+PASS
+ok  	github.com/steveyegge/gastown/internal/doctor	12.991s
+PASS
+ok  	github.com/steveyegge/gastown/internal/polecat	12.296s
+PASS
+ok  	github.com/steveyegge/gastown/internal/runtime	0.175s
+PASS
+ok  	github.com/steveyegge/gastown/internal/townlog	0.029s
+PASS
+ok  	github.com/steveyegge/gastown/internal/shell	0.045s
+PASS
+ok  	github.com/steveyegge/gastown/internal/testpolicy/cmd/budget	0.046s
+PASS
+ok  	github.com/steveyegge/gastown/internal/suggest	0.047s
+PASS
+ok  	github.com/steveyegge/gastown/internal/state	0.059s
+PASS
+ok  	github.com/steveyegge/gastown/internal/templates/commands	0.091s
+PASS
+ok  	github.com/steveyegge/gastown/internal/style	0.145s
+PASS
+ok  	github.com/steveyegge/gastown/internal/ui	0.152s
+PASS
+ok  	github.com/steveyegge/gastown/internal/specdispatch	0.202s
+PASS
+ok  	github.com/steveyegge/gastown/internal/wrappers	0.542s
+PASS
+ok  	github.com/steveyegge/gastown/internal/wisp	0.601s
+PASS
+ok  	github.com/steveyegge/gastown/internal/worktree	0.601s
+PASS
+ok  	github.com/steveyegge/gastown/internal/workspace	0.619s
+PASS
+ok  	github.com/steveyegge/gastown/internal/version	0.978s
+PASS
+ok  	github.com/steveyegge/gastown/internal/tmux/tmuxfake	1.081s
+PASS
+ok  	github.com/steveyegge/gastown/internal/tmux	1.333s
+PASS
+ok  	github.com/steveyegge/gastown/internal/templates	1.388s
+PASS
+ok  	github.com/steveyegge/gastown/internal/scheduler/capacity	1.439s
+PASS
+ok  	github.com/steveyegge/gastown/internal/util	1.452s
+PASS
+ok  	github.com/steveyegge/gastown/internal/townconfig	1.634s
+PASS
+ok  	github.com/steveyegge/gastown/internal/testdb	1.694s
+PASS
+ok  	github.com/steveyegge/gastown/internal/supervisor	1.717s
+PASS
+ok  	github.com/steveyegge/gastown/internal/slot	1.754s
+PASS
+ok  	github.com/steveyegge/gastown/internal/testpolicy	2.401s
+PASS
+ok  	github.com/steveyegge/gastown/internal/testutil	2.500s
+budget: 72 converted packages took 33s
+ok  	github.com/steveyegge/gastown/internal/config	6.287s
+ok  	github.com/steveyegge/gastown/internal/convoy	6.113s
+ok  	github.com/steveyegge/gastown/internal/feed	4.542s
+ok  	github.com/steveyegge/gastown/internal/hooks	1.418s
+ok  	github.com/steveyegge/gastown/internal/mayor	0.453s
+ok  	github.com/steveyegge/gastown/internal/nudge	4.457s
+ok  	github.com/steveyegge/gastown/internal/plugin	5.131s
+ok  	github.com/steveyegge/gastown/internal/session	1.079s
+ok  	github.com/steveyegge/gastown/internal/telemetry	0.080s
+budget: 9 unconverted packages took 16s
+over 10s of wall time (reported only; the budget is on user CPU):
+  internal/daemon used 520ms user CPU (sys 25.971s, wall 11.425s)
+  internal/git/gitfake used 112ms user CPU (sys 4.98s, wall 12.865s)
+  internal/doctor used 461ms user CPU (sys 40.374s, wall 12.991s)
+  internal/polecat used 913ms user CPU (sys 29.972s, wall 12.297s)
+gate: PASSED in 91s wall
+
+real	1m30.604s
+user	3m38.298s
+sys	9m30.941s
