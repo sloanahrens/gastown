@@ -12,6 +12,7 @@ package beadsfake
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,11 @@ type Fake struct {
 	sqlLog   []string
 	inits    []beads.InitOptions
 	failures map[string]error
+
+	// journal is the events journal (bd events tail): one record per
+	// create, update, close and comment, as gastown's bd calls journal with
+	// BD_EVENTS_JOURNAL=1.
+	journal []beads.EventRecord
 }
 
 // Option configures a Fake.
@@ -119,6 +125,9 @@ func (f *Fake) snapshot(r *record) *beads.Issue {
 	is.Labels = append([]string(nil), r.issue.Labels...)
 	is.Dependencies = nil
 	for _, e := range r.deps {
+		if isExternalRef(e.to) {
+			continue // bd's show omits external targets
+		}
 		dep := beads.IssueDep{ID: e.to, DependencyType: e.typ}
 		if t, ok := f.issues[e.to]; ok {
 			dep.Title, dep.Status, dep.Priority, dep.Type = t.issue.Title, t.issue.Status, t.issue.Priority, t.issue.Type
@@ -129,7 +138,7 @@ func (f *Fake) snapshot(r *record) *beads.Issue {
 			is.Parent = e.to
 		}
 	}
-	is.DependencyCount = len(r.deps)
+	is.DependencyCount = len(is.Dependencies)
 	is.Comments = nil
 	is.Metadata = append([]byte(nil), r.issue.Metadata...)
 	return &is
@@ -327,6 +336,9 @@ func (f *Fake) Ready() ([]*beads.Issue, error) {
 	return out, nil
 }
 
+// ReadyAll is Ready: the fake has no page cap to lift.
+func (f *Fake) ReadyAll() ([]*beads.Issue, error) { return f.Ready() }
+
 // Children returns the issues and wisps whose parent is parentID.
 func (f *Fake) Children(parentID string) ([]*beads.Issue, error) {
 	f.mu.Lock()
@@ -416,6 +428,7 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 		},
 	}
 	f.issues[id] = r
+	f.journalWrite("create", id)
 	return f.snapshot(r), nil
 }
 
@@ -579,6 +592,7 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 		is.Labels = sortedSet(kept)
 	}
 	is.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -615,6 +629,7 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 		f.setStatus(r, string(beads.StatusClosed), reason)
 		r.issue.UpdatedAt = f.now()
 		closed = append(closed, id)
+		f.journalWrite("close", id)
 	}
 	switch {
 	case len(refused) == 0:
@@ -659,6 +674,7 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 		r.issue.Notes = "Released: " + reason
 	}
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -681,6 +697,7 @@ func (f *Fake) AppendNotes(id, note string) error {
 	}
 	r.issue.Notes += note
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -714,6 +731,7 @@ func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, 
 	f.setStatus(r, status, "")
 	r.issue.Assignee = assignee
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return true, nil
 }
 
@@ -733,6 +751,7 @@ func (f *Fake) AddComment(id, text string) error {
 		Text:      text,
 		CreatedAt: f.now(),
 	})
+	f.journalWrite("comment", id)
 	return nil
 }
 
@@ -756,6 +775,33 @@ func (f *Fake) AddDependency(issue, dependsOn string) error {
 	r.deps = append(r.deps, edge{to: dependsOn, typ: depBlocks})
 	return nil
 }
+
+// AddTypedDependency makes issue depend on dependsOn with relation depType.
+// issue must exist; dependsOn must too unless it is an external:<rig>:<id>
+// reference, which bd records without resolving. Adding the same edge again
+// is a no-op.
+func (f *Fake) AddTypedDependency(issue, dependsOn, depType string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.issues[issue]
+	if !ok {
+		return notFound(issue)
+	}
+	if _, ok := f.issues[dependsOn]; !ok && !isExternalRef(dependsOn) {
+		return notFound(dependsOn)
+	}
+	for _, e := range r.deps {
+		if e.to == dependsOn && e.typ == depType {
+			return nil
+		}
+	}
+	r.deps = append(r.deps, edge{to: dependsOn, typ: depType})
+	return nil
+}
+
+// isExternalRef reports whether id is a cross-database reference
+// (external:<rig>:<id>), which bd stores but show does not list.
+func isExternalRef(id string) bool { return strings.HasPrefix(id, "external:") }
 
 // RemoveDependency removes the dependency of issue on dependsOn.
 func (f *Fake) RemoveDependency(issue, dependsOn string) error {

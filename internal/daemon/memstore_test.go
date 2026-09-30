@@ -14,6 +14,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // memStore is an in-memory beadsdk.Storage for the convoy manager's unit
@@ -46,7 +47,21 @@ type memStore struct {
 	nextID   int
 	closed   bool
 
-	eventsErr error // returned by GetAllEventsSince when set
+	eventsErr error // returned by GetAllEventsSince and EventsTail when set
+
+	// journal is the store's events journal (bd events tail), one record
+	// per recorded event. journalFloor, when set, is the oldest seq still
+	// retained: a read from below floor-1 is refused as pruned past.
+	journal      []beads.EventRecord
+	journalFloor int64
+	tails        int
+	// truncateAlways, while truncateOnce is set, is returned by the next
+	// EventsTail, which then clears truncateOnce.
+	truncateAlways *beads.EventsTruncatedError
+	truncateOnce   bool
+	// failAfterTruncate is returned by every EventsTail after the scripted
+	// truncation has been served.
+	failAfterTruncate error
 }
 
 var _ beadsdk.Storage = (*memStore)(nil)
@@ -88,6 +103,72 @@ func (s *memStore) record(issueID string, typ beadsdk.EventType, actor, oldValue
 		e.NewValue = &newValue
 	}
 	s.events = append(s.events, e)
+
+	op := "update"
+	switch typ {
+	case beadsdk.EventCreated:
+		op = "create"
+	case beadsdk.EventClosed:
+		op = "close"
+	}
+	rec := beads.EventRecord{Seq: int64(len(s.journal) + 1), Op: op, IssueID: issueID, Actor: actor}
+	if i, ok := s.issues[issueID]; ok {
+		rec.Status = string(i.Status)
+	}
+	s.journal = append(s.journal, rec)
+}
+
+// EventsTail serves the journal as bd events tail does: records after since,
+// at most limit, and a pruned-past since refused with the retained window.
+func (s *memStore) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tails++
+	if s.eventsErr != nil {
+		return nil, s.eventsErr
+	}
+	if !s.truncateOnce && s.truncateAlways != nil && s.failAfterTruncate != nil {
+		return nil, s.failAfterTruncate
+	}
+	if s.truncateOnce && s.truncateAlways != nil {
+		s.truncateOnce = false
+		t := *s.truncateAlways
+		t.Since = since
+		return nil, &t
+	}
+	if s.journalFloor > 0 && since < s.journalFloor-1 {
+		return nil, &beads.EventsTruncatedError{Since: since, Floor: s.journalFloor, Head: int64(len(s.journal))}
+	}
+	page := &beads.EventsPage{NextSince: since}
+	for _, r := range s.journal {
+		if r.Seq <= since {
+			continue
+		}
+		if limit > 0 && len(page.Records) == limit {
+			page.More = true
+			break
+		}
+		page.Records = append(page.Records, r)
+		page.NextSince = r.Seq
+	}
+	return page, nil
+}
+
+func (s *memStore) tailCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tails
+}
+
+// The convoy manager reads a store's journal through bd; in this package's
+// tests the stores are memStores, which carry their own journal.
+func init() {
+	newEventJournal = func(townRoot, name string, store beadsdk.Storage) (eventJournal, error) {
+		if j, ok := store.(eventJournal); ok {
+			return j, nil
+		}
+		return nil, fmt.Errorf("test store %s (%T) has no events journal", name, store)
+	}
 }
 
 func (s *memStore) CreateIssue(_ context.Context, issue *beadsdk.Issue, actor string) error {

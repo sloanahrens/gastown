@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -114,11 +113,28 @@ func TestAddTrackingRelation_RejectsNonBeadIDTarget(t *testing.T) {
 	}
 }
 
-func TestFallbackTrackingRelationUsesExternalTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
+// recordedTrackingDeps records the tracks-edge writes it is asked for.
+type recordedTrackingDeps struct {
+	calls []string
+	err   error
+}
 
+func (r *recordedTrackingDeps) AddTypedDependency(issue, dependsOn, depType string) error {
+	r.calls = append(r.calls, "add "+issue+" "+dependsOn+" "+depType)
+	return r.err
+}
+
+func (r *recordedTrackingDeps) RemoveDependency(issue, dependsOn string) error {
+	r.calls = append(r.calls, "remove "+issue+" "+dependsOn)
+	return r.err
+}
+
+// Tracks edges are written through the bd client, with a cross-rig target
+// wrapped as external:<rig>:<id>, and nothing else is tried (gt-7iwy0.2):
+// the old in-process store path is gone, and so is the fallback whose
+// "dep remove --type" bd rejects as an unknown flag.
+func TestTrackingRelationWritesThroughClient(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
@@ -127,39 +143,24 @@ func TestFallbackTrackingRelationUsesExternalTarget(t *testing.T) {
 		t.Fatalf("write routes.jsonl: %v", err)
 	}
 
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	writeBDStub(t, binDir, `#!/usr/bin/env sh
-{
-	printf 'args:'
-	for arg in "$@"; do
-		printf '[%s]' "$arg"
-	done
-	printf '\n'
-} >> "$BD_STUB_LOG"
-`, "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_STUB_LOG", logPath)
-
-	storeErr := errors.New("store unavailable")
-	if err := fallbackTrackingRelation(townRoot, "hq-cv-test", "ag-95s.1", true, storeErr); err != nil {
-		t.Fatalf("fallback add: %v", err)
+	rec := &recordedTrackingDeps{}
+	if err := addTrackingRelationWith(rec, townRoot, "hq-cv-test", "ag-95s.1"); err != nil {
+		t.Fatalf("add: %v", err)
 	}
-	if err := fallbackTrackingRelation(townRoot, "hq-cv-test", "ag-95s.1", false, storeErr); err != nil {
-		t.Fatalf("fallback remove: %v", err)
+	if err := removeTrackingRelationWith(rec, townRoot, "hq-cv-test", "ag-95s.1"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	want := []string{"add hq-cv-test external:ag:ag-95s.1 tracks", "remove hq-cv-test external:ag:ag-95s.1"}
+	if strings.Join(rec.calls, "|") != strings.Join(want, "|") {
+		t.Errorf("calls = %q, want %q", rec.calls, want)
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	failing := &recordedTrackingDeps{err: errors.New("bd dep add: store unavailable")}
+	err := addTrackingRelationWith(failing, townRoot, "hq-cv-test", "ag-95s.1")
+	if err == nil || !strings.Contains(err.Error(), "store unavailable") {
+		t.Errorf("add with a failing client = %v, want the bd error", err)
 	}
-	log := string(logBytes)
-	for _, want := range []string{
-		"args:[dep][add][hq-cv-test][external:ag:ag-95s.1][--type=tracks]",
-		"args:[dep][remove][hq-cv-test][external:ag:ag-95s.1][--type=tracks]",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("bd stub log missing %q:\n%s", want, log)
-		}
+	if len(failing.calls) != 1 {
+		t.Errorf("a failed write was retried or followed by another path: %q", failing.calls)
 	}
 }

@@ -287,3 +287,37 @@ func (f *Fake) FailWith(op string, err error) {
 func (f *Fake) failure(op string) error {
 	return f.failures[op]
 }
+
+// journalWrite appends a journal record for id's state now. Callers hold
+// f.mu.
+func (f *Fake) journalWrite(op, id string) {
+	rec := beads.EventRecord{Seq: int64(len(f.journal) + 1), TS: f.now(), Op: op, IssueID: id, Actor: f.actor}
+	if r, ok := f.issues[id]; ok {
+		rec.Status = r.issue.Status
+	}
+	f.journal = append(f.journal, rec)
+}
+
+// EventsTail returns the journal records after since, at most limit of them
+// (0 = all). Dependency edits are not journaled here, though bd journals
+// them. The fake keeps every record, so it never reports truncation.
+func (f *Fake) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("events tail"); err != nil {
+		return nil, err
+	}
+	page := &beads.EventsPage{NextSince: since}
+	for _, r := range f.journal {
+		if r.Seq <= since {
+			continue
+		}
+		if limit > 0 && len(page.Records) == limit {
+			page.More = true
+			break
+		}
+		page.Records = append(page.Records, r)
+		page.NextSince = r.Seq
+	}
+	return page, nil
+}

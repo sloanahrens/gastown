@@ -2509,6 +2509,34 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return parseReadyOutput(out)
 }
 
+// ReadyAll returns every ready issue Ready would, uncapped, and errors on a
+// page bd reports as truncated (gt-59o9).
+func (b *Beads) ReadyAll() ([]*Issue, error) {
+	// One machine-mode bd ready --limit 0: bd's default page of 100 does not
+	// apply, and the envelope's pagination says whether bd cut it anyway.
+	args := append(readyCliArgs(), "--limit", "0")
+	out, err := b.runMachine(args...)
+	if err != nil {
+		return nil, err
+	}
+	env, isEnvelope, err := decodeMachineEnvelope(out, "bd ready")
+	if err != nil {
+		return nil, err
+	}
+	data := bytes.TrimSpace(out)
+	if isEnvelope {
+		if env.Pagination != nil && env.Pagination.Truncated {
+			return nil, fmt.Errorf("bd ready --limit 0 returned a truncated page (%d issues); refusing to read it as the whole board", env.Pagination.Returned)
+		}
+		data = env.Data
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(data, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
+	}
+	return issues, nil
+}
+
 // ReadyDispatchable returns ready issues with the town's bookkeeping
 // families (mail, escalations, identity, merge queue, event records)
 // excluded server-side by the same filter Ready sends (gt-0q80): the
@@ -3490,6 +3518,14 @@ func (b *Beads) AddDependency(issue, dependsOn string) error {
 	}
 
 	_, err := b.run("dep", "add", issue, dependsOn)
+	return err
+}
+
+// AddTypedDependency records that issue depends on dependsOn with relation
+// depType, through bd dep add --type. It has no in-process store branch: it
+// is one of the writes moved off the library (gt-7iwy0.2).
+func (b *Beads) AddTypedDependency(issue, dependsOn, depType string) error {
+	_, err := b.run("dep", "add", issue, dependsOn, "--type="+depType)
 	return err
 }
 
