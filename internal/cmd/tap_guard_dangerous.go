@@ -1011,7 +1011,7 @@ func commandArgs(tokens []string, i int) []string {
 // townRoot is the Gas Town root the guard resolved for this run, or "" when
 // not inside a town; it is the only caller-supplied state here, so the
 // host-root rule behaves identically whether or not a town exists.
-func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative string) {
+func matchesUnboundedScan(tokens []string, townRoot string) (string, string) {
 	fields := tokens
 	vars := shellVarAssignments(tokens)
 	for i, f := range fields {
@@ -1040,54 +1040,231 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 
 		// The pattern argument is not the directory that shares its spelling
 		// (gt-yts7), but only where another argument names the path the walk
-		// starts from. With no path argument the walker runs over cwd
-		// (gt-3e6wa) and the pattern keeps its old reading, so this only ever
-		// un-blocks a scan that names its root elsewhere.
-		patternSkip := -1
-		if gram, isPatternTool := scanGrammars[base]; isPatternTool {
-			if pattern, hasRoot := scanPatternSlot(gram, rest); pattern >= 0 && hasRoot {
-				patternSkip = pattern
+		// starts from. With no path argument the walker runs over cwd and the
+		// pattern keeps its old reading — nothing positional is a root there,
+		// which is the case the implied root below covers.
+		patternSkip, hasRoot := scanRootSlot(base, rest)
+		if !hasRoot {
+			// A walker that names no path of its own starts at cwd, which no
+			// token in the invocation shows: grep -rn TODO in the town root
+			// walks the same tree as grep -rn TODO ~/gt, and the argument
+			// rules below see nothing to judge (gt-3e6wa). Resolve that
+			// implied root and put it through the same rules, so what makes a
+			// scan dangerous is the tree it walks, not whether the root was
+			// spelled.
+			if root, ok := scanWalkRoot(fields, i, vars); ok {
+				if label, suggestion := scanRootHazard(root, root, townRoot); label != "" {
+					return fmt.Sprintf("Unbounded scan (%s, cwd is %s)", base, label),
+						scanNoPathAlternative(root, suggestion)
+				}
 			}
 		}
 		for j, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
-			if isUnboundedScanRoot(resolved) {
-				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
-				alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
-					"or a search rooted inside the repo/rig instead of the whole filesystem."
-				return reason, alternative
-			}
 			root := scanRootPath(resolved)
 			if j == patternSkip {
 				root = scanPatternPath(resolved)
 			}
-			// The expanded home directory names the same root as ~ / $HOME.
-			if isHomeDirScanRoot(root) {
-				reason = fmt.Sprintf("Unbounded scan (%s rooted at the home directory %s)", base, arg)
-				alternative = "Alternative: search inside the repo/rig you are working in; the home " +
-					"directory holds every checkout plus Documents/Desktop/Music and walking it " +
-					"pegs the host and trips macOS privacy prompts."
-				return reason, alternative
-			}
-			// The same walkers rooted at the town tree: the town root, a rig
-			// root, a rig's worktree directory, or a .repo.git (gt-6e2l).
-			if hazard := townScanHazard(root, townRoot); hazard != "" {
-				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, hazard)
-				alternative = townScanAlternative
-				return reason, alternative
+			label, suggestion := scanRootHazard(resolved, root, townRoot)
+			if label != "" {
+				return fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, label), "Alternative: " + suggestion
 			}
 		}
 	}
 	return "", ""
 }
 
-// townScanAlternative is the allow-path suggestion printed under a town-tree
-// block: the same shape as the host-root rule's (narrow the root until it
-// names something bounded), specialised to the town's layout so the caller
-// knows which part of the tree is safe to walk.
-const townScanAlternative = "Alternative: scan one repo or worktree instead of the town tree — " +
-	"cd into the rig or worktree you need (~/gt/<rig>/polecats/<name>/<repo>) and grep there, " +
-	"or name the specific subdirectory. The town root, rig roots, rig worktree dirs, and .repo.git are off limits."
+// scanRootHazard names the rule a resolved scan root trips and the suggestion
+// printed under the block, or ("", "") when the root is bounded. token is the
+// root as the caller spelled it — or the working directory, when the root was
+// implied — which the filesystem and home labels print; the town label names
+// the shape of the tree instead (townScanHazard).
+func scanRootHazard(token, root, townRoot string) (label, suggestion string) {
+	// A spelling broad enough to walk the whole filesystem. Judged on the
+	// spelling because that is what the denylist is keyed on (~, $HOME), and
+	// because a spelling like /opt names the root whatever is under it.
+	if isUnboundedScanRoot(token) {
+		return token, filesystemScanSuggestion
+	}
+	// The expanded home directory names the same root as the spellings the
+	// denylist carries: an agent that writes /Users/me spells the home
+	// directory in full and lands here.
+	if isHomeDirScanRoot(root) {
+		return "the home directory " + token, homeScanSuggestion
+	}
+	// The same walkers rooted at the town tree: the town root, a rig root, a
+	// rig's worktree directory, or a .repo.git (gt-6e2l).
+	if hazard := townScanHazard(root, townRoot); hazard != "" {
+		return hazard, townScanSuggestion
+	}
+	return "", ""
+}
+
+// The allow-path suggestion printed under each block: the same shape for all
+// three rules (narrow the root until it names something bounded), specialised
+// to what the agent should reach for instead.
+const (
+	filesystemScanSuggestion = "brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
+		"or a search rooted inside the repo/rig instead of the whole filesystem."
+	homeScanSuggestion = "search inside the repo/rig you are working in; the home " +
+		"directory holds every checkout plus Documents/Desktop/Music and walking it " +
+		"pegs the host and trips macOS privacy prompts."
+	townScanSuggestion = "scan one repo or worktree instead of the town tree — " +
+		"cd into the rig or worktree you need (~/gt/<rig>/polecats/<name>/<repo>) and grep there, " +
+		"or name the specific subdirectory. The town root, rig roots, rig worktree dirs, and .repo.git are off limits."
+)
+
+// scanNoPathAlternative renders the alternative under a block whose root was
+// the walker's working directory. The reason names only the tree the walk
+// hits, so the text has to say where the walk started: the command spells no
+// path at all, and without that the agent has nothing to correct.
+func scanNoPathAlternative(cwd, suggestion string) string {
+	return fmt.Sprintf("Alternative: %s (This command named no path, so the walk started at its working directory %s.)",
+		suggestion, cwd)
+}
+
+// scanRootSlot locates the walk root among a scan invocation's arguments: the
+// index of the argument the tool reads as its search pattern, and whether the
+// invocation names a path for the walk to start from. pattern is -1 whenever
+// no argument is exempt from being read as a path — for the tools that take no
+// pattern at all (find, bfs, du, ls), and for a pattern tool whose invocation
+// names no path, where the walker runs over cwd instead (gt-3e6wa).
+//
+// A tool with a pattern grammar (grep, rg, ag, fd) answers through it: the
+// positional arguments after the pattern are its paths. find and bfs name
+// theirs before the expression, which begins at the first option. du and ls
+// take any non-flag argument as a file operand, so an option's separate value
+// (du -d 1) reads as one and spares the implied-root check — a miss on a
+// shape that carries no operand of its own (ls -R, du -sh), never a block.
+func scanRootSlot(base string, args []string) (pattern int, hasRoot bool) {
+	if gram, isPatternTool := scanGrammars[base]; isPatternTool {
+		pattern, hasRoot = scanPatternSlot(gram, args)
+		if !hasRoot {
+			return -1, false
+		}
+		return pattern, true
+	}
+	if base == "find" || base == "bfs" {
+		return -1, findNamesPath(args)
+	}
+	return -1, hasFileOperand(args)
+}
+
+// findNamesPath reports whether a find/bfs invocation names a path to walk at
+// all: the words between the command's own options and its expression, which
+// starts at the first dash-led argument or at the "(", "!" or "," that can
+// begin it. So `find -name x` names no path and walks cwd, while
+// `find /var/log -name x` names one.
+func findNamesPath(args []string) bool {
+	i := 0
+	for i < len(args) && (args[i] == "-H" || args[i] == "-L" || args[i] == "-P") {
+		i++
+	}
+	return i < len(args) && !isFlagToken(args[i]) && args[i] != "(" && args[i] != "!" && args[i] != ","
+}
+
+// hasFileOperand reports whether args carry a file operand: a non-flag
+// argument, in the tools whose every operand names a file or directory to
+// walk (du, ls).
+func hasFileOperand(args []string) bool {
+	for _, arg := range args {
+		if !isFlagToken(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanWalkRoot resolves the directory a scan invocation walks when it names
+// no path of its own: the guard's working directory — the session's cwd —
+// moved by any cd the invocation runs before the scan (gt-3e6wa).
+//
+// tokens and scanIdx locate the scan in the invocation, so the cds read here
+// are the ones in earlier segments of the same shell line: `cd /tmp && grep
+// -rn TODO` walks /tmp, and reading the session's cwd instead would block a
+// bounded scan run from a rig root.
+//
+// ok is false when the walk root cannot be known — a cd this process cannot
+// resolve, or an unreadable working directory. An unknown root is not a
+// hazard, so the caller blocks nothing on it.
+func scanWalkRoot(tokens []string, scanIdx int, vars map[string]string) (string, bool) {
+	root, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for i := 0; i < scanIdx; i++ {
+		if tokens[i] != "cd" || !shellCommandStart(tokens, i) {
+			continue
+		}
+		args := commandArgs(tokens, i)
+		target, ok := cdTarget(args, root, vars)
+		if !ok {
+			return "", false
+		}
+		// Only "&&" and ";" carry the change to the command that follows: a
+		// cd in a pipeline or a background job runs in a subshell of its own,
+		// and one before "||" runs only when it failed — in all three the
+		// scan keeps the working directory the shell already had.
+		if sep := i + 1 + len(args); sep < len(tokens) && tokens[sep] != "&&" && tokens[sep] != ";" {
+			continue
+		}
+		root = target
+	}
+	return root, true
+}
+
+// shellCommandStart reports whether the token at i begins a shell command
+// rather than continuing an argument list: the line's first word, the word
+// after a separator, or the word after the "(" that opens a subshell.
+func shellCommandStart(tokens []string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	return shellCommandSeparators[tokens[i-1]] || tokens[i-1] == "("
+}
+
+// cdTarget resolves the directory a cd segment changes to, relative to base —
+// the directory the shell was in when it ran — for the walk root scanWalkRoot
+// tracks. ok is false for every spelling whose result this guard cannot know:
+// `cd -`'s previous directory, a target that is not an existing directory
+// (the cd fails, and what the shell does next depends on the separator), an
+// argument this process cannot expand, or more than one operand, which the
+// shell refuses. A bare `cd` goes to the home directory.
+func cdTarget(args []string, base string, vars map[string]string) (string, bool) {
+	var operands []string
+	for _, arg := range args {
+		switch arg {
+		case "-L", "-P", "--":
+			continue
+		}
+		if isFlagToken(arg) {
+			return "", false
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) > 1 {
+		return "", false
+	}
+	if len(operands) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		return home, true
+	}
+	path, ok := expandHomePath(resolveShellVar(operands[0], vars))
+	if !ok || path == "" || strings.Contains(path, "$") {
+		return "", false
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	path = filepath.Clean(path)
+	if st, err := os.Stat(path); err != nil || !st.IsDir() {
+		return "", false
+	}
+	return path, true
+}
 
 // hasExactArg reports whether any of args exactly matches one of the wanted
 // values.
