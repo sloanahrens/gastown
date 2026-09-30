@@ -89,9 +89,9 @@ func IntentSeat(seat Seat) intent.Seat {
 	return intent.Seat{Rig: seat.Rig, Role: string(seat.Role), Name: seat.Name}
 }
 
-// Killer is the tmux surface Kill uses.
+// Killer is the tmux surface Kill and KillStray use. Killing a session that
+// does not exist must succeed.
 type Killer interface {
-	HasSession(name string) (bool, error)
 	KillSessionWithProcesses(name string) error
 }
 
