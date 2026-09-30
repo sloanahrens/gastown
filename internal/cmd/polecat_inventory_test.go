@@ -151,6 +151,39 @@ func TestBuildPolecatInventoryItemSpawnGrace(t *testing.T) {
 	}
 }
 
+// TestBuildPolecatInventoryItemSubmittedIsNotStalled pins gt-obbx2: a polecat
+// whose hooked bead is gt:ready-to-land has no session because gt done ended
+// it, so list must say submitted — stalled reads as "dead polecat with work"
+// and got the witness to raise a second session on finished work. A live
+// session still reads working, and the state survives list reconciliation.
+func TestBuildPolecatInventoryItemSubmittedIsNotStalled(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	hooked := &beads.Issue{
+		ID: "gt-hook", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/topaz",
+		Labels: []string{"gt:ready-to-land"},
+	}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateWorking), CleanupStatus: string(polecat.CleanupClean)}
+
+	item := buildPolecatInventoryItem("gastown", "topaz", fields, hooked, polecatSessionSet{}, polecatInventoryEnv{})
+	if item.State != polecat.StateSubmitted {
+		t.Fatalf("state = %q, want %q (item %+v)", item.State, polecat.StateSubmitted, item)
+	}
+	if item.Issue != "gt-hook" {
+		t.Errorf("Issue = %q, want the submitted bead", item.Issue)
+	}
+
+	listItem := PolecatListItem{State: item.State, Issue: item.Issue, CountsTowardCapacity: true}
+	if got := effectivePolecatState(listItem, false); got != polecat.StateSubmitted {
+		t.Errorf("effectivePolecatState = %q, want %q", got, polecat.StateSubmitted)
+	}
+
+	live := buildPolecatInventoryItem("gastown", "topaz", fields, hooked,
+		newPolecatSessionSet([]string{"gt-topaz"}), polecatInventoryEnv{})
+	if !live.SessionRunning || live.State != polecat.StateWorking {
+		t.Errorf("live session: running=%v state=%q, want running and %q", live.SessionRunning, live.State, polecat.StateWorking)
+	}
+}
+
 func TestBuildPolecatInventoryItem(t *testing.T) {
 	setupPolecatTestRegistry(t)
 	sessions := newPolecatSessionSet([]string{"gt-running"})

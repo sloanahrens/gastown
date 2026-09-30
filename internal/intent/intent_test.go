@@ -252,3 +252,74 @@ func assertNoStoreImports(t *testing.T, file string) {
 		}
 	}
 }
+
+// gt-obbx2: submitted is a desired state, not a hold. Nothing may restart the
+// seat, but Kill still works, so it must not read as parked or frozen (the
+// shell dog reads the paused field, and gt agent resume owns parks).
+func TestMarkSubmittedIsNotAHold(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+	if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", now); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Submitted() || rec.WorkBead != "gt-abc" || rec.Desired != DesiredSubmitted {
+		t.Fatalf("record = %+v, want submitted for gt-abc", rec)
+	}
+	if rec.Held() || rec.Paused {
+		t.Fatalf("a submitted seat reads as held: %+v", rec)
+	}
+
+	if err := ClearSubmitted(town, polecat, "gt sling", now); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = Read(town, polecat)
+	if rec.Submitted() || rec.WorkBead != "" || rec.EffectiveDesired() != DesiredRun {
+		t.Fatalf("record after ClearSubmitted = %+v, want run with no work bead", rec)
+	}
+}
+
+// A park or freeze outranks a submission, and ClearSubmitted never lifts one.
+func TestSubmittedNeverOverridesAHold(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Desired, r.Reason = DesiredPark, "operator inspecting"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", now); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := Read(town, polecat)
+	if rec.Desired != DesiredPark || rec.Submitted() {
+		t.Fatalf("MarkSubmitted overrode a park: %+v", rec)
+	}
+
+	if err := ClearSubmitted(town, polecat, "gt sling", now); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ = Read(town, polecat); rec.Desired != DesiredPark {
+		t.Fatalf("ClearSubmitted lifted a park: %+v", rec)
+	}
+}
+
+// ClearSubmitted on a seat with no record must not create one.
+func TestClearSubmittedWithoutRecordWritesNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := ClearSubmitted(town, polecat, "gt sling", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(polecat.Path(town)); !os.IsNotExist(err) {
+		t.Fatalf("ClearSubmitted created a record (stat err %v)", err)
+	}
+}

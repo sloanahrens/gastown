@@ -863,6 +863,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		case polecat.StateSpawning:
 			// Starting up, not broken: informational, like working.
 			stateStr = style.Info.Render(stateStr)
+		case polecat.StateSubmitted:
+			// Finished and waiting for the landing worker: not broken either.
+			stateStr = style.Info.Render(stateStr)
 		case polecat.StateStuck:
 			stateStr = style.Warning.Render(stateStr)
 		case polecat.StateStalled:
@@ -1128,7 +1131,7 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 	// State with color
 	stateStr := string(p.State)
 	switch p.State {
-	case polecat.StateWorking:
+	case polecat.StateWorking, polecat.StateSubmitted:
 		stateStr = style.Info.Render(stateStr)
 	case polecat.StateStuck:
 		stateStr = style.Warning.Render(stateStr)

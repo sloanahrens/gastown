@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -25,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1269,6 +1271,7 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 		return sub, doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, shortSHA(head)), err)
 	}
 	sub.head, sub.target = head, target
+	recordSubmittedIntent(r)
 
 	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
 	fmt.Printf("  Branch: %s @ %s\n", r.branch, shortSHA(head))
@@ -1469,6 +1472,19 @@ func pushBranchForLanding(r *doneRun, sourceBD *beads.Beads, head, baseRef strin
 		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
 	}
 	return nil
+}
+
+// recordSubmittedIntent writes desired=submitted into the polecat's intent
+// record once its bead carries gt:ready-to-land. Between here and the landing
+// the seat has no session and its hook still holds the bead, which every
+// crash detector reads as a dead polecat with work; the record is the answer
+// they read before Dolt (gt-obbx2). The label stays authoritative, so a failed
+// write is a warning: the detectors that read the bead still see the label.
+func recordSubmittedIntent(r *doneRun) {
+	seat := supervisor.IntentSeat(supervisor.SeatFor(r.rigName, constants.RolePolecat, r.polecatName))
+	if err := intent.MarkSubmitted(r.townRoot, seat, r.issueID, "gt done", time.Now()); err != nil {
+		style.PrintWarning("couldn't record %s as submitted in its intent record: %v", seat, err)
+	}
 }
 
 // markReadyToLand writes the READY TO LAND block, then the label the landing

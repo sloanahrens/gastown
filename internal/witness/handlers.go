@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -3260,7 +3262,18 @@ func holdBeadReason(bd *BdCli, workDir, beadID string) (string, error) {
 	if len(issues) == 0 {
 		return "", nil // valid response, no results — reaped/deleted
 	}
-	return convoy.DispatchHoldFields(issues[0].Status, issues[0].Labels, issues[0].Assignee, issues[0].Design, issues[0].Notes), nil
+	if reason := convoy.DispatchHoldFields(issues[0].Status, issues[0].Labels, issues[0].Assignee, issues[0].Design, issues[0].Notes); reason != "" {
+		return reason, nil
+	}
+	// Submitted work (gt-obbx2): gt done pushed the branch and labeled the bead
+	// for the landing worker, and the hook stays on the bead until it lands.
+	// The polecat's session is gone on purpose, and the landing worker is the
+	// only actor that touches the bead now. A restart would raise a session on
+	// finished work and re-run the gate on it.
+	if slices.Contains(issues[0].Labels, land.LabelReadyToLand) {
+		return "submitted for landing (" + land.LabelReadyToLand + ")", nil
+	}
+	return "", nil
 }
 
 // hookBeadHeld reports whether the work a hook bead carries is held, and the

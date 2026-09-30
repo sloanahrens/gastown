@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // SpawnGrace reports whether a polecat whose work is assigned but whose session
@@ -37,16 +38,28 @@ func SpawnGrace(agentState string, updatedAt, now time.Time, grace time.Duration
 	return now.Sub(updatedAt) < grace
 }
 
-// sessionDownState is the state for assigned work with no live session: still
-// spawning inside the grace window, stalled after it. Every "session dead, work
-// assigned" site must build its state through this — a grace applied at one
-// site and hard-coded away at another reads the same polecat two ways
-// (gt-2540, gt-yteq).
-func sessionDownState(spawning bool) State {
+// sessionDownState is the state for assigned work with no live session:
+// submitted when the work bead is labeled gt:ready-to-land (its session ended
+// because gt done finished, gt-obbx2), still spawning inside the grace window,
+// stalled after it. work may be nil when the site has no bead to read. Every
+// "session dead, work assigned" site must build its state through this — a
+// grace applied at one site and hard-coded away at another reads the same
+// polecat two ways (gt-2540, gt-yteq).
+func sessionDownState(spawning bool, work *beads.Issue) State {
+	if IsSubmittedWork(work) {
+		return StateSubmitted
+	}
 	if spawning {
 		return StateSpawning
 	}
 	return StateStalled
+}
+
+// IsSubmittedWork reports whether a work bead is submitted for landing: it
+// carries gt:ready-to-land and is not yet terminal.
+func IsSubmittedWork(issue *beads.Issue) bool {
+	return issue != nil && beads.HasLabel(issue, land.LabelReadyToLand) &&
+		!beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal()
 }
 
 // AgentBeadUpdatedAt returns an agent bead's last write, or the zero time when

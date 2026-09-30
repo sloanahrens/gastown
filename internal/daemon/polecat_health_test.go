@@ -622,3 +622,50 @@ func TestPatrolWatchdogSessionAlive_UnknownReadsAliveAndLogs(t *testing.T) {
 		t.Fatal("a bare shell read as a live agent")
 	}
 }
+
+// gt-obbx2: gt done submits the branch, the session exits, and the hook still
+// holds the bead until the landing worker lands it. Dead session + open hook is
+// the crash signature, but here it is a polecat that finished: the witness
+// raised a second session on it twice on 2026-09-30. Both halves are pinned —
+// the intent record gt done writes (read before Dolt), and the bead's
+// gt:ready-to-land label for a seat whose record was never written.
+func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
+	t.Run("intent record", func(t *testing.T) {
+		bd := newWorkBD(t)
+		old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+		bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
+		bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked"}]`)
+		d, logBuf := reaperDaemon(t, bd.path)
+		d.tmux = newFakeTmux(newFixedClock())
+		seat := intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}
+		if err := intent.MarkSubmitted(d.config.TownRoot, seat, "gt-work1", "gt done", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+
+		d.checkPolecatHealth("myr", "mycat")
+
+		got := logBuf.String()
+		if strings.Contains(got, "CRASH DETECTED") || !strings.Contains(got, "submitted for landing") {
+			t.Fatalf("a submitted polecat was called crashed: %s", got)
+		}
+		if calls := bd.calls(t); strings.Contains(calls, "show") || strings.Contains(calls, "list") {
+			t.Fatalf("the intent record decides before any bd read, got calls:\n%s", calls)
+		}
+	})
+
+	t.Run("bead label", func(t *testing.T) {
+		bd := newWorkBD(t)
+		old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+		bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
+		bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked","labels":["gt:ready-to-land"]}]`)
+		d, logBuf := reaperDaemon(t, bd.path)
+		d.tmux = newFakeTmux(newFixedClock())
+
+		d.checkPolecatHealth("myr", "mycat")
+
+		got := logBuf.String()
+		if strings.Contains(got, "CRASH DETECTED") || !strings.Contains(got, "submitted for landing") {
+			t.Fatalf("a bead labeled gt:ready-to-land was called crashed: %s", got)
+		}
+	})
+}

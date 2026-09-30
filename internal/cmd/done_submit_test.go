@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -151,6 +152,23 @@ func TestRunDoneRebasesGatesPushesAndMarksReady(t *testing.T) {
 	if !r.reportedDone() {
 		t.Error("a landed submission did not report POLECAT_DONE")
 	}
+	// gt-obbx2: the seat has no session from here to the landing, and its hook
+	// still holds the bead. The intent record is what tells the crash detectors
+	// (and the supervisor's Restart) that this is a finished polecat.
+	if rec := submittedIntentFor(t, r); !rec.Submitted() || rec.WorkBead != "bd-source" {
+		t.Errorf("intent record = %+v, want desired=submitted for bd-source", rec)
+	}
+}
+
+// submittedIntentFor reads the intent record of the polecat runDoneSubmit ran as.
+func submittedIntentFor(t *testing.T, r doneSubmitRun) intent.Record {
+	t.Helper()
+	seat := intent.Seat{Rig: "gastown", Role: "polecat", Name: "refuge"}
+	rec, err := intent.Read(routedSourceTestTownRoot(r.workDir), seat)
+	if err != nil {
+		t.Fatalf("reading the intent record: %v", err)
+	}
+	return rec
 }
 
 // TestRunDoneReplacesAnOlderBranchTipUnderLease: the branch was pushed by an
@@ -208,6 +226,9 @@ func TestRunDoneExitsReadyRecordFailed(t *testing.T) {
 	assertDoneExitCode(t, r.err, doneExitReadyFailed, "ready to land")
 	if r.reportedDone() {
 		t.Error("an unmarked submission reported done")
+	}
+	if rec := submittedIntentFor(t, r); rec.Submitted() {
+		t.Errorf("a bead that never got gt:ready-to-land was recorded as submitted: %+v", rec)
 	}
 }
 

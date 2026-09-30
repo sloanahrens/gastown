@@ -14,9 +14,11 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -694,6 +696,13 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	claudeConfigDir, _, err := config.ResolveAccountConfigDir(accountsPath, s.account)
 	if err != nil {
 		return "", fmt.Errorf("resolving account: %w", err)
+	}
+
+	// New work for the seat ends a submitted state left by its last gt done
+	// (gt-obbx2); a stale one would make the supervisor refuse every restart
+	// of this dispatch. Warn-only: the label on the bead is authoritative.
+	if err := intent.ClearSubmitted(townRoot, supervisor.IntentSeat(supervisor.SeatFor(s.RigName, constants.RolePolecat, s.PolecatName)), "gt sling", time.Now()); err != nil {
+		style.PrintWarning("could not clear the submitted intent for %s/%s: %v", s.RigName, s.PolecatName, err)
 	}
 
 	// Start session
