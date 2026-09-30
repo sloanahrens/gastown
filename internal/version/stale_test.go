@@ -22,8 +22,8 @@ func newRepo(t *testing.T) (*fakeGit, *fakeRepo) {
 	return g, g.repo(repoDir)
 }
 
-// TestSetCommit writes the package variable Commit, so it is not parallel.
 func TestSetCommit(t *testing.T) {
+	t.Parallel()
 	original := Commit
 	t.Cleanup(func() { SetCommit(original) })
 
