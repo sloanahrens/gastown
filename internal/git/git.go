@@ -3869,16 +3869,27 @@ func (g *Git) refContainsHead(ref string) (bool, error) {
 	return g.IsAncestor("HEAD", ref)
 }
 
-// detachedHeadCustodyLocal names a remote-tracking branch that holds head:
-// the polecat branch it was pushed to, or any branch the work was merged into.
-// Free, and blind to branches this clone never fetched — the same one-sided
-// error the rest of the local level has.
+// detachedHeadCustodyLocal names a remote-tracking branch of remote that holds
+// head: the polecat branch it was pushed to, or any branch the work was merged
+// into. Free, and blind to branches this clone never fetched — the same
+// one-sided error the rest of the local level has.
+//
+// Only refs under remote count. RemoteRefsContaining lists every remote this
+// clone tracks, and the exact-branch arm and the live custody probe both judge
+// the named remote alone; work held only by another remote (a fork, a backup)
+// is not on the remote the caller asked about.
 func (g *Git) detachedHeadCustodyLocal(remote, head string) (string, bool) {
 	refs, err := g.RemoteRefsContaining(head)
-	if err != nil || len(refs) == 0 {
+	if err != nil {
 		return "", false
 	}
-	return refs[0], true
+	prefix := remote + "/"
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, prefix) {
+			return ref, true
+		}
+	}
+	return "", false
 }
 
 // detachedHeadCustodyRemote is detachedHeadCustodyLocal plus a match against

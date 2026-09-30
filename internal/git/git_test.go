@@ -4556,6 +4556,56 @@ func TestUnpushedCommitsDetachedHeadOnRemoteBranch(t *testing.T) {
 	}
 }
 
+// TestDetachedHeadCustodyLocalHonoursRemote pins gt-jg2e8: the custody lookup
+// judges the remote it was asked about. A detached tip that only a second
+// remote (a fork, a backup) holds is not on origin, so the origin verdict must
+// not treat that ref as custody.
+func TestDetachedHeadCustodyLocalHonoursRemote(t *testing.T) {
+	t.Parallel()
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/jade/gt-jg2e8+munuz8c4"
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "work.go"), []byte("package work\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("work.go"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("polecat work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	runGit(t, "", "init", "--bare", fork)
+	runGit(t, localDir, "remote", "add", "fork", fork)
+	if err := g.Push("fork", branch, false); err != nil {
+		t.Fatalf("Push fork: %v", err)
+	}
+	tip, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev(HEAD): %v", err)
+	}
+	tip = strings.TrimSpace(tip)
+	runGit(t, localDir, "checkout", "--detach", tip)
+
+	if ref, ok := g.detachedHeadCustodyLocal("origin", tip); ok {
+		t.Fatalf("detachedHeadCustodyLocal(origin) = %q, want none: only fork holds %s", ref, tip)
+	}
+	if ref, ok := g.detachedHeadCustodyLocal("fork", tip); !ok || ref != "fork/"+branch {
+		t.Fatalf("detachedHeadCustodyLocal(fork) = %q, %v, want fork/%s", ref, ok, branch)
+	}
+
+	preservation, err := g.BranchPreservationStatusLocal("HEAD", "origin", nil)
+	if err == nil && preservation.Evidence == "detached_head_on_remote_branch" {
+		t.Fatalf("BranchPreservationStatusLocal(origin) = %+v, want no detached-custody evidence from fork", preservation)
+	}
+}
+
 // TestUnpushedCommitsDetachedHeadUnfetchedRemoteBranch pins the live level's
 // extra reach: by the time a seat is left detached, its local branch and the
 // tracking ref the push created are usually gone too, so only the remote can
