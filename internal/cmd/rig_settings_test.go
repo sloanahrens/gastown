@@ -129,7 +129,7 @@ func TestRigSettingsShow(t *testing.T) {
 			settings.MergeQueue = config.DefaultMergeQueueConfig()
 		}
 		if settings.MergeQueue != nil {
-			settings.MergeQueue.MaxConcurrent = 5
+			settings.MergeQueue.MaxReadyForDispatch = 5
 		}
 		if err := config.SaveRigSettings(settingsPath, settings); err != nil {
 			t.Fatalf("save settings: %v", err)
@@ -206,8 +206,8 @@ func TestRigSettingsSet(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
 
-		// Set merge_queue.max_concurrent
-		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "5"})
+		// Set merge_queue.max_ready_for_dispatch
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_ready_for_dispatch", "5"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -221,8 +221,8 @@ func TestRigSettingsSet(t *testing.T) {
 		if settings.MergeQueue == nil {
 			t.Fatal("MergeQueue is nil")
 		}
-		if settings.MergeQueue.MaxConcurrent != 5 {
-			t.Errorf("MergeQueue.MaxConcurrent = %d, want 5", settings.MergeQueue.MaxConcurrent)
+		if settings.MergeQueue.MaxReadyForDispatch != 5 {
+			t.Errorf("MergeQueue.MaxReadyForDispatch = %d, want 5", settings.MergeQueue.MaxReadyForDispatch)
 		}
 	})
 
@@ -251,8 +251,8 @@ func TestRigSettingsSet(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)
 		rigPath := filepath.Join(townRoot, rigName)
 
-		// Set merge_queue.max_concurrent as number
-		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "10"})
+		// Set merge_queue.max_ready_for_dispatch as number
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_ready_for_dispatch", "10"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -263,8 +263,8 @@ func TestRigSettingsSet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load settings: %v", err)
 		}
-		if settings.MergeQueue.MaxConcurrent != 10 {
-			t.Errorf("MergeQueue.MaxConcurrent = %d, want 10", settings.MergeQueue.MaxConcurrent)
+		if settings.MergeQueue.MaxReadyForDispatch != 10 {
+			t.Errorf("MergeQueue.MaxReadyForDispatch = %d, want 10", settings.MergeQueue.MaxReadyForDispatch)
 		}
 	})
 
@@ -378,7 +378,7 @@ func TestRigSettingsSet(t *testing.T) {
 		}
 
 		// Set a nested value (should merge, not replace)
-		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_concurrent", "7"})
+		err := rigSettingsSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, "merge_queue.max_ready_for_dispatch", "7"})
 		if err != nil {
 			t.Fatalf("runRigSettingsSet error: %v", err)
 		}
@@ -391,8 +391,8 @@ func TestRigSettingsSet(t *testing.T) {
 		if loaded.MergeQueue == nil {
 			t.Fatal("MergeQueue should still exist")
 		}
-		if loaded.MergeQueue.MaxConcurrent != 7 {
-			t.Errorf("MergeQueue.MaxConcurrent = %d, want 7", loaded.MergeQueue.MaxConcurrent)
+		if loaded.MergeQueue.MaxReadyForDispatch != 7 {
+			t.Errorf("MergeQueue.MaxReadyForDispatch = %d, want 7", loaded.MergeQueue.MaxReadyForDispatch)
 		}
 	})
 

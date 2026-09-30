@@ -6,12 +6,10 @@
   },
   "merge_queue": {
     "build_command": "make build",
-    "test_command": "GOFLAGS=-p=8 make test",
-    "lint_command": "make lint",
-    "batch_enabled": true,
-    "batch_min_age": "5m",
-    "batch_min_count": 2,
-    "batch_max": 12
+    "test_command": "make gate",
+    "lint_command": "",
+    "gate": "make gate",
+    "post_land_command": "make test-slow"
   },
   "role_agents": {
     "witness": "deepseek-flash-patrol",

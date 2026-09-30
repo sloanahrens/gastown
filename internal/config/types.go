@@ -1210,53 +1210,20 @@ func BuiltinRoleThemes() map[string]string {
 
 // MergeQueueConfig represents merge queue settings for a rig.
 type MergeQueueConfig struct {
-	// Enabled controls whether the merge queue is active.
-	Enabled bool `json:"enabled"`
-
 	// IntegrationBranchPolecatEnabled controls whether polecats auto-source
 	// their worktrees from integration branches when the parent epic has one.
 	// Nil defaults to true.
 	IntegrationBranchPolecatEnabled *bool `json:"integration_branch_polecat_enabled,omitempty"`
-
-	// IntegrationBranchRefineryEnabled controls whether mq submit and gt done
-	// auto-detect integration branches as MR targets.
-	// Nil defaults to true.
-	IntegrationBranchRefineryEnabled *bool `json:"integration_branch_refinery_enabled,omitempty"`
-
-	// IntegrationBranchTemplate is the pattern for integration branch names.
-	// Supports variables: {epic}, {prefix}, {user}
-	// - {epic}: Full epic ID (e.g., "RA-123")
-	// - {prefix}: Epic prefix before first hyphen (e.g., "RA")
-	// - {user}: Git user.name (e.g., "klauern")
-	// Default: "integration/{epic}"
-	IntegrationBranchTemplate string `json:"integration_branch_template,omitempty"`
-
-	// IntegrationBranchAutoLand has no effect: gt does not land integration
-	// branches since gt mq integration land was removed (gt-fcxe9.4). Kept so
-	// existing rig settings still parse; the landing path (gt-v4ssj) decides
-	// its fate.
-	IntegrationBranchAutoLand *bool `json:"integration_branch_auto_land,omitempty"`
 
 	// MergeStrategy controls how the refinery lands approved work: "direct" (default)
 	// merges directly to the base branch, "pr" uses the VCS provider's merge API
 	// which respects branch protection/restriction rules.
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
-	// VCSProvider selects the VCS platform for PR operations when
-	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
-	VCSProvider string `json:"vcs_provider,omitempty"`
-
 	// RequireReview controls whether the refinery requires at least one approving
 	// review before merging a PR. Only meaningful when merge_strategy="pr".
 	// Nil defaults to false (no review required).
 	RequireReview *bool `json:"require_review,omitempty"`
-
-	// OnConflict specifies conflict resolution strategy: "assign_back" or "auto_rebase".
-	OnConflict string `json:"on_conflict"`
-
-	// RunTests controls whether to run tests before merging.
-	// Nil defaults to true (tests are run).
-	RunTests *bool `json:"run_tests,omitempty"`
 
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
@@ -1276,31 +1243,6 @@ type MergeQueueConfig struct {
 	// "gt slot run --role hm/crew/sloan -- make test".
 	Gate string `json:"gate,omitempty"`
 
-	// TestVerifyRunTimeout overrides the wall-clock run budget for gt done's
-	// default test-verify gate, once the container-gate slot is held (gt-pnkd).
-	// A Go duration string, e.g. "40m". Empty uses the 30m floor: the gate
-	// runs the rig's full hermetic test_command (gt-btw1), so there is no
-	// changed-package count to scale by. The slot wait is never counted
-	// against it.
-	TestVerifyRunTimeout string `json:"test_verify_run_timeout,omitempty"`
-
-	// TestVerifySlotTimeout overrides how long gt done's default test-verify
-	// gate waits to acquire the container-gate slot (gt-pnkd). A Go duration
-	// string, e.g. "90m". Empty waits 60m, matching the container-gate slot's
-	// own `gt slot run --timeout` default. This is a queue-wait bound, not a
-	// test bound: exceeding it is reported as slot contention, never as a
-	// test failure.
-	TestVerifySlotTimeout string `json:"test_verify_slot_timeout,omitempty"`
-
-	// TestVerifyCommand overrides the command gt done's default test-verify
-	// gate runs, replacing the rig's full hermetic test_command (gt-btw1).
-	// The literal token {packages} is replaced with the space-joined
-	// changed-package list, e.g. "make test-changed PKGS='{packages}'" —
-	// the route to scoped verification for rigs that want the gate to test
-	// only the changed packages rather than the full suite. On a non-Go rig
-	// this field is ignored and test_command runs in full.
-	TestVerifyCommand string `json:"test_verify_command,omitempty"`
-
 	// LintCommand is the command to run for linting (used by formulas).
 	LintCommand string `json:"lint_command,omitempty"`
 
@@ -1312,59 +1254,6 @@ type MergeQueueConfig struct {
 
 	// TypecheckCommand is the command to run for type checking (e.g., tsc --noEmit).
 	TypecheckCommand string `json:"typecheck_command,omitempty"`
-
-	// DeleteMergedBranches controls whether to delete branches after merging.
-	// Nil defaults to true (merged branches are deleted).
-	DeleteMergedBranches *bool `json:"delete_merged_branches,omitempty"`
-
-	// RetryFlakyTests is the number of times to retry flaky tests.
-	RetryFlakyTests int `json:"retry_flaky_tests"`
-
-	// PollInterval is how often to poll for new merge requests (e.g., "30s").
-	PollInterval string `json:"poll_interval"`
-
-	// MaxConcurrent is the maximum number of concurrent merges.
-	MaxConcurrent int `json:"max_concurrent"`
-
-	// StaleClaimTimeout is how long a claimed MR can go without updates before
-	// being considered abandoned and eligible for re-claim (e.g., "30m").
-	StaleClaimTimeout string `json:"stale_claim_timeout,omitempty"`
-
-	// JudgmentEnabled controls whether the refinery performs quality review
-	// before merging. When true, the refinery patrol's quality-review step
-	// evaluates the diff for correctness, security, and code quality.
-	// Nil defaults to false (no quality review).
-	JudgmentEnabled *bool `json:"judgment_enabled,omitempty"`
-
-	// ReviewDepth controls the thoroughness of quality review when judgment
-	// is enabled. Valid values: "quick", "standard", "deep".
-	// Nil defaults to "standard".
-	ReviewDepth string `json:"review_depth,omitempty"`
-
-	// BatchEnabled controls whether the refinery batches multiple ready MRs
-	// into a single rebase-stack + one full-suite gate + bisect-on-red cycle
-	// instead of processing them one at a time. Nil defaults to false.
-	BatchEnabled *bool `json:"batch_enabled,omitempty"`
-
-	// BatchMinAge is how long a ready MR must sit in the queue before it's
-	// eligible for batching (e.g. "1h"). Prevents batching MRs that would
-	// merge fast on their own. Empty defaults to "1h".
-	BatchMinAge string `json:"batch_min_age,omitempty"`
-
-	// BatchMax is the maximum number of MRs to include in a single batch.
-	// Zero or unset defaults to 12.
-	BatchMax int `json:"batch_max,omitempty"`
-
-	// BatchMinCount is the minimum number of batch-eligible ready MRs
-	// required before the refinery batches instead of processing them one
-	// at a time. Zero or unset defaults to 4.
-	BatchMinCount int `json:"batch_min_count,omitempty"`
-
-	// CycleSessionAfterMerge makes `gt mq post-merge` / `gt mq batch run`
-	// respawn the rig's refinery session in place after each landed unit
-	// (one MR or one batch), so every unit starts in a fresh context.
-	// Off by default; opt in per rig.
-	CycleSessionAfterMerge bool `json:"cycle_session_after_merge,omitempty"`
 
 	// MaxReadyForDispatch is the ready-MR ceiling above which a new dispatch
 	// is refused: the merge queue, not the pool, is the real limit on how
@@ -1390,61 +1279,14 @@ type MergeQueueConfig struct {
 	PostLandCommand string `json:"post_land_command,omitempty"`
 }
 
-// EditorialConfig controls the om editorial gate for a rig's merge queue:
-// whether `gt mq review` must approve an MR before it can push, and the
-// parameters of that review (which script to invoke, the minimum om
-// version, how many times to retry a non-converging resubmit, and how many
-// reviews may run concurrently in a batch).
+// EditorialConfig is the merge_queue.editorial block. Only Required is
+// read: the editorial-required doctor check warns when a rig carries an
+// .om.json rubric without it.
 type EditorialConfig struct {
-	// Required controls whether the push precondition refuses to land an MR
-	// without a matching approve note. Defaults to false: upstream behavior
-	// is unchanged for rigs that never set this.
+	// Required marks the rig as expecting om editorial review. Defaults to
+	// false.
 	Required bool `json:"required"`
-
-	// Command is the gate script to invoke, relative to the rig root.
-	// Empty defaults to "scripts/om-gate.sh" (see WithDefaults).
-	Command string `json:"command,omitempty"`
-
-	// MinVersion is the minimum om semver the harness will accept.
-	// Empty means no floor.
-	MinVersion string `json:"min_version,omitempty"`
-
-	// MaxAttempts is the hard cap on resubmit attempts before the deacon
-	// stops redispatching and escalates to a human. Zero or unset defaults
-	// to 5 (see WithDefaults).
-	MaxAttempts int `json:"max_attempts,omitempty"`
-
-	// ReviewParallelism bounds how many `gt mq review` invocations may run
-	// concurrently when reviewing a batch. Zero or unset defaults to 3
-	// (see WithDefaults).
-	ReviewParallelism int `json:"review_parallelism,omitempty"`
 }
-
-// WithDefaults returns a copy of the editorial config with its zero-value
-// fields filled with the documented defaults. Safe to call on a nil
-// receiver (yields an all-defaults, Required=false config).
-func (c *EditorialConfig) WithDefaults() EditorialConfig {
-	var result EditorialConfig
-	if c != nil {
-		result = *c
-	}
-	if result.Command == "" {
-		result.Command = "scripts/om-gate.sh"
-	}
-	if result.MaxAttempts <= 0 {
-		result.MaxAttempts = 5
-	}
-	if result.ReviewParallelism <= 0 {
-		result.ReviewParallelism = 3
-	}
-	return result
-}
-
-// OnConflict strategy constants.
-const (
-	OnConflictAssignBack = "assign_back"
-	OnConflictAutoRebase = "auto_rebase"
-)
 
 // IsPolecatIntegrationEnabled returns whether polecat integration branch
 // sourcing is enabled. Nil-safe, defaults to true.
@@ -1455,51 +1297,6 @@ func (c *MergeQueueConfig) IsPolecatIntegrationEnabled() bool {
 	return *c.IntegrationBranchPolecatEnabled
 }
 
-// IsRefineryIntegrationEnabled returns whether refinery/submit integration
-// branch auto-detection is enabled. Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsRefineryIntegrationEnabled() bool {
-	if c.IntegrationBranchRefineryEnabled == nil {
-		return true
-	}
-	return *c.IntegrationBranchRefineryEnabled
-}
-
-// IsIntegrationBranchAutoLandEnabled reports the (no-effect) auto-land
-// setting passed to the refinery formula. Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsIntegrationBranchAutoLandEnabled() bool {
-	if c.IntegrationBranchAutoLand == nil {
-		return false
-	}
-	return *c.IntegrationBranchAutoLand
-}
-
-// IsRunTestsEnabled returns whether tests should run before merging.
-// Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsRunTestsEnabled() bool {
-	if c.RunTests == nil {
-		return true
-	}
-	return *c.RunTests
-}
-
-// IsDeleteMergedBranchesEnabled returns whether merged branches should be deleted.
-// Nil-safe, defaults to true.
-func (c *MergeQueueConfig) IsDeleteMergedBranchesEnabled() bool {
-	if c.DeleteMergedBranches == nil {
-		return true
-	}
-	return *c.DeleteMergedBranches
-}
-
-// IsJudgmentEnabled returns whether quality review is enabled for merges.
-// Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsJudgmentEnabled() bool {
-	if c.JudgmentEnabled == nil {
-		return false
-	}
-	return *c.JudgmentEnabled
-}
-
 // IsRequireReviewEnabled returns whether PR reviews are required before merging.
 // Nil-safe, defaults to false.
 func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
@@ -1507,51 +1304,6 @@ func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
 		return false
 	}
 	return *c.RequireReview
-}
-
-// GetReviewDepth returns the configured review depth.
-// Nil-safe, defaults to "standard".
-func (c *MergeQueueConfig) GetReviewDepth() string {
-	if c.ReviewDepth == "" {
-		return "standard"
-	}
-	return c.ReviewDepth
-}
-
-// IsBatchEnabled returns whether batch-then-bisect merge queue processing
-// is enabled. Nil-safe, defaults to false.
-func (c *MergeQueueConfig) IsBatchEnabled() bool {
-	if c.BatchEnabled == nil {
-		return false
-	}
-	return *c.BatchEnabled
-}
-
-// GetBatchMinAge returns the configured minimum queue age before an MR is
-// eligible for batching. Nil-safe, defaults to "1h".
-func (c *MergeQueueConfig) GetBatchMinAge() string {
-	if c.BatchMinAge == "" {
-		return "1h"
-	}
-	return c.BatchMinAge
-}
-
-// GetBatchMax returns the configured maximum batch size.
-// Nil-safe, defaults to 12.
-func (c *MergeQueueConfig) GetBatchMax() int {
-	if c.BatchMax <= 0 {
-		return 12
-	}
-	return c.BatchMax
-}
-
-// GetBatchMinCount returns the configured minimum number of batch-eligible
-// ready MRs required before batching kicks in. Nil-safe, defaults to 4.
-func (c *MergeQueueConfig) GetBatchMinCount() int {
-	if c.BatchMinCount <= 0 {
-		return 4
-	}
-	return c.BatchMinCount
 }
 
 // GetMaxReadyForDispatch returns the ready-MR ceiling above which a new
@@ -1643,20 +1395,7 @@ func boolPtr(b bool) *bool {
 // DefaultMergeQueueConfig returns a MergeQueueConfig with sensible defaults.
 func DefaultMergeQueueConfig() *MergeQueueConfig {
 	return &MergeQueueConfig{
-		Enabled:                          true,
-		IntegrationBranchPolecatEnabled:  boolPtr(true),
-		IntegrationBranchRefineryEnabled: boolPtr(true),
-		OnConflict:                       OnConflictAssignBack,
-		RunTests:                         boolPtr(true),
-		TestCommand:                      "",
-		DeleteMergedBranches:             boolPtr(true),
-		RetryFlakyTests:                  1,
-		PollInterval:                     "30s",
-		MaxConcurrent:                    1,
-		StaleClaimTimeout:                "30m",
-		BatchEnabled:                     boolPtr(false),
-		BatchMinAge:                      "1h",
-		BatchMax:                         12,
+		IntegrationBranchPolecatEnabled: boolPtr(true),
 	}
 }
 

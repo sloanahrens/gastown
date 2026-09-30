@@ -178,8 +178,8 @@ func TestRigSettingsRoundTrip(t *testing.T) {
 	if loaded.MergeQueue == nil {
 		t.Fatal("MergeQueue is nil")
 	}
-	if !loaded.MergeQueue.Enabled {
-		t.Error("MergeQueue.Enabled = false, want true")
+	if !loaded.MergeQueue.IsPolecatIntegrationEnabled() {
+		t.Error("MergeQueue.IsPolecatIntegrationEnabled() = false, want true")
 	}
 }
 
@@ -192,16 +192,9 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 		Type:    "rig-settings",
 		Version: 1,
 		MergeQueue: &MergeQueueConfig{
-			Enabled:                          true,
-			IntegrationBranchPolecatEnabled:  boolPtr(false),
-			IntegrationBranchRefineryEnabled: boolPtr(false),
-			OnConflict:                       OnConflictAutoRebase,
-			RunTests:                         boolPtr(true),
-			TestCommand:                      "make test",
-			DeleteMergedBranches:             boolPtr(false),
-			RetryFlakyTests:                  3,
-			PollInterval:                     "1m",
-			MaxConcurrent:                    2,
+			IntegrationBranchPolecatEnabled: boolPtr(false),
+			TestCommand:                     "make test",
+			MaxReadyForDispatch:             3,
 		},
 	}
 
@@ -215,14 +208,14 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 	}
 
 	mq := loaded.MergeQueue
-	if mq.OnConflict != OnConflictAutoRebase {
-		t.Errorf("OnConflict = %q, want %q", mq.OnConflict, OnConflictAutoRebase)
+	if mq.IsPolecatIntegrationEnabled() {
+		t.Error("IsPolecatIntegrationEnabled() = true, want false")
 	}
 	if mq.TestCommand != "make test" {
 		t.Errorf("TestCommand = %q, want 'make test'", mq.TestCommand)
 	}
-	if mq.RetryFlakyTests != 3 {
-		t.Errorf("RetryFlakyTests = %d, want 3", mq.RetryFlakyTests)
+	if mq.MaxReadyForDispatch != 3 {
+		t.Errorf("MaxReadyForDispatch = %d, want 3", mq.MaxReadyForDispatch)
 	}
 }
 
@@ -304,56 +297,12 @@ func TestRigSettingsValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid on_conflict",
+			name: "negative max_ready_for_dispatch",
 			settings: &RigSettings{
 				Type:    "rig-settings",
 				Version: 1,
 				MergeQueue: &MergeQueueConfig{
-					OnConflict: "invalid",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid poll_interval",
-			settings: &RigSettings{
-				Type:    "rig-settings",
-				Version: 1,
-				MergeQueue: &MergeQueueConfig{
-					PollInterval: "not-a-duration",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid stale_claim_timeout",
-			settings: &RigSettings{
-				Type:    "rig-settings",
-				Version: 1,
-				MergeQueue: &MergeQueueConfig{
-					StaleClaimTimeout: "not-a-duration",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "zero stale_claim_timeout",
-			settings: &RigSettings{
-				Type:    "rig-settings",
-				Version: 1,
-				MergeQueue: &MergeQueueConfig{
-					StaleClaimTimeout: "0s",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "negative stale_claim_timeout",
-			settings: &RigSettings{
-				Type:    "rig-settings",
-				Version: 1,
-				MergeQueue: &MergeQueueConfig{
-					StaleClaimTimeout: "-5m",
+					MaxReadyForDispatch: -1,
 				},
 			},
 			wantErr: true,
@@ -374,72 +323,24 @@ func TestDefaultMergeQueueConfig(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultMergeQueueConfig()
 
-	if !cfg.Enabled {
-		t.Error("Enabled should be true by default")
-	}
 	if !cfg.IsPolecatIntegrationEnabled() {
 		t.Error("IsPolecatIntegrationEnabled should be true by default")
-	}
-	if !cfg.IsRefineryIntegrationEnabled() {
-		t.Error("IsRefineryIntegrationEnabled should be true by default")
-	}
-	if cfg.OnConflict != OnConflictAssignBack {
-		t.Errorf("OnConflict = %q, want %q", cfg.OnConflict, OnConflictAssignBack)
-	}
-	if !cfg.IsRunTestsEnabled() {
-		t.Error("IsRunTestsEnabled should be true by default")
 	}
 	if cfg.TestCommand != "" {
 		t.Errorf("TestCommand = %q, want empty (language-agnostic default)", cfg.TestCommand)
 	}
-	if !cfg.IsDeleteMergedBranchesEnabled() {
-		t.Error("IsDeleteMergedBranchesEnabled should be true by default")
-	}
-	if cfg.RetryFlakyTests != 1 {
-		t.Errorf("RetryFlakyTests = %d, want 1", cfg.RetryFlakyTests)
-	}
-	if cfg.PollInterval != "30s" {
-		t.Errorf("PollInterval = %q, want '30s'", cfg.PollInterval)
-	}
-	if cfg.MaxConcurrent != 1 {
-		t.Errorf("MaxConcurrent = %d, want 1", cfg.MaxConcurrent)
-	}
-	if cfg.StaleClaimTimeout != "30m" {
-		t.Errorf("StaleClaimTimeout = %q, want '30m'", cfg.StaleClaimTimeout)
-	}
-	if cfg.IsBatchEnabled() {
-		t.Error("IsBatchEnabled should be false by default")
-	}
-	if cfg.GetBatchMinAge() != "1h" {
-		t.Errorf("GetBatchMinAge() = %q, want '1h'", cfg.GetBatchMinAge())
-	}
-	if cfg.GetBatchMax() != 12 {
-		t.Errorf("GetBatchMax() = %d, want 12", cfg.GetBatchMax())
-	}
-	if cfg.GetBatchMinCount() != 4 {
-		t.Errorf("GetBatchMinCount() = %d, want 4", cfg.GetBatchMinCount())
-	}
 }
 
-func TestBatchAccessors_NilSafeDefaults(t *testing.T) {
+// TestDeprecatedMergeQueueKeysFailStrictDecode: every key gt doctor calls
+// deprecated must be gone from the schema, so a file carrying one is refused
+// rather than silently read (gt-5nlvq).
+func TestDeprecatedMergeQueueKeysFailStrictDecode(t *testing.T) {
 	t.Parallel()
-	var cfg MergeQueueConfig // zero value, as if unmarshaled from JSON with no batch_* keys
-
-	if cfg.IsBatchEnabled() {
-		t.Error("IsBatchEnabled should default to false on zero value")
-	}
-	if got := cfg.GetBatchMinAge(); got != "1h" {
-		t.Errorf("GetBatchMinAge() = %q, want '1h'", got)
-	}
-	if got := cfg.GetBatchMax(); got != 12 {
-		t.Errorf("GetBatchMax() = %d, want 12", got)
-	}
-	if got := cfg.GetBatchMinCount(); got != 4 {
-		t.Errorf("GetBatchMinCount() = %d, want 4", got)
-	}
-	cfg.BatchMinCount = 8
-	if got := cfg.GetBatchMinCount(); got != 8 {
-		t.Errorf("GetBatchMinCount() = %d, want 8 (explicit override)", got)
+	for _, key := range DeprecatedMergeQueueKeys {
+		data := []byte(`{"type":"rig-settings","version":1,"merge_queue":{"` + key + `":null}}`)
+		if err := DecodeJSONFile("settings/config.json", data, &RigSettings{}); err == nil {
+			t.Errorf("merge_queue.%s decoded; a deprecated key must not be a schema field", key)
+		}
 	}
 }
 
@@ -459,39 +360,6 @@ func TestMaxReadyForDispatchAccessor(t *testing.T) {
 	}
 	if got := (&MergeQueueConfig{MaxReadyForDispatch: 12}).GetMaxReadyForDispatch(); got != 12 {
 		t.Errorf("GetMaxReadyForDispatch() = %d, want 12", got)
-	}
-}
-
-func TestValidateMergeQueueConfig_Batch(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		cfg     *MergeQueueConfig
-		wantErr bool
-	}{
-		{name: "valid batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "90m"}, wantErr: false},
-		{name: "empty batch_min_age is valid (uses default)", cfg: &MergeQueueConfig{}, wantErr: false},
-		{name: "unparseable batch_min_age", cfg: &MergeQueueConfig{BatchMinAge: "not-a-duration"}, wantErr: true},
-		{name: "zero batch_min_age is invalid", cfg: &MergeQueueConfig{BatchMinAge: "0s"}, wantErr: true},
-		{name: "negative batch_max is invalid", cfg: &MergeQueueConfig{BatchMax: -1}, wantErr: true},
-		{name: "positive batch_max is valid", cfg: &MergeQueueConfig{BatchMax: 20}, wantErr: false},
-		{name: "negative batch_min_count is invalid", cfg: &MergeQueueConfig{BatchMinCount: -1}, wantErr: true},
-		{name: "positive batch_min_count is valid", cfg: &MergeQueueConfig{BatchMinCount: 8}, wantErr: false},
-		{name: "zero batch_min_count is valid (uses default)", cfg: &MergeQueueConfig{BatchMinCount: 0}, wantErr: false},
-		{name: "negative max_ready_for_dispatch is invalid", cfg: &MergeQueueConfig{MaxReadyForDispatch: -1}, wantErr: true},
-		{name: "positive max_ready_for_dispatch is valid", cfg: &MergeQueueConfig{MaxReadyForDispatch: 12}, wantErr: false},
-		{name: "zero max_ready_for_dispatch is valid (guard off)", cfg: &MergeQueueConfig{MaxReadyForDispatch: 0}, wantErr: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateMergeQueueConfig(tt.cfg)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateMergeQueueConfig() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
 	}
 }
 
@@ -569,66 +437,10 @@ func TestGateSetSHA(t *testing.T) {
 	}
 }
 
-// TestEditorialConfig_WithDefaults guards the om editorial gate's default
-// values (gt-wsg7): a rig that sets only required=true must still get
-// scripts/om-gate.sh, max_attempts=5, and review_parallelism=3 filled in.
-func TestEditorialConfig_WithDefaults(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil receiver yields all-defaults, Required false", func(t *testing.T) {
-		t.Parallel()
-		var nilCfg *EditorialConfig
-		got := nilCfg.WithDefaults()
-		want := EditorialConfig{Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
-		if got != want {
-			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
-		}
-	})
-
-	t.Run("zero-value fills in defaults", func(t *testing.T) {
-		t.Parallel()
-		got := (&EditorialConfig{}).WithDefaults()
-		want := EditorialConfig{Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
-		if got != want {
-			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
-		}
-	})
-
-	t.Run("only required set: other fields still default", func(t *testing.T) {
-		t.Parallel()
-		got := (&EditorialConfig{Required: true}).WithDefaults()
-		want := EditorialConfig{Required: true, Command: "scripts/om-gate.sh", MaxAttempts: 5, ReviewParallelism: 3}
-		if got != want {
-			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
-		}
-	})
-
-	t.Run("explicit values are preserved, not overridden", func(t *testing.T) {
-		t.Parallel()
-		got := (&EditorialConfig{
-			Required:          true,
-			Command:           "scripts/custom-gate.sh",
-			MinVersion:        "1.4.0",
-			MaxAttempts:       3,
-			ReviewParallelism: 8,
-		}).WithDefaults()
-		want := EditorialConfig{
-			Required:          true,
-			Command:           "scripts/custom-gate.sh",
-			MinVersion:        "1.4.0",
-			MaxAttempts:       3,
-			ReviewParallelism: 8,
-		}
-		if got != want {
-			t.Errorf("WithDefaults() = %+v, want %+v", got, want)
-		}
-	})
-}
-
 // TestMergeSettingsCommand_Editorial guards the whole-block override
 // semantics for Editorial: a more specific tier that sets any editorial
 // field replaces the entire block rather than deep-merging individual
-// fields, matching the pointer-field pattern used by RequireReview/BatchEnabled.
+// fields, matching the pointer-field pattern used by RequireReview.
 func TestMergeSettingsCommand_Editorial(t *testing.T) {
 	t.Parallel()
 
@@ -643,7 +455,7 @@ func TestMergeSettingsCommand_Editorial(t *testing.T) {
 
 	t.Run("local editorial block replaces repo's wholesale", func(t *testing.T) {
 		t.Parallel()
-		repo := &MergeQueueConfig{Editorial: &EditorialConfig{Required: true, MaxAttempts: 9}}
+		repo := &MergeQueueConfig{Editorial: &EditorialConfig{Required: true}}
 		local := &MergeQueueConfig{Editorial: &EditorialConfig{Required: false}}
 		result := MergeSettingsCommand(repo, local)
 		if result.Editorial == nil {
@@ -651,9 +463,6 @@ func TestMergeSettingsCommand_Editorial(t *testing.T) {
 		}
 		if result.Editorial.Required {
 			t.Error("Editorial.Required = true, want false (local wins wholesale)")
-		}
-		if result.Editorial.MaxAttempts != 0 {
-			t.Errorf("Editorial.MaxAttempts = %d, want 0 (repo's field not merged in — whole-block override)", result.Editorial.MaxAttempts)
 		}
 	})
 
@@ -780,29 +589,6 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 	})
 
-	// gt-pnkd: the default test-verify gate's budgets and command override
-	// must survive the rig-root -> repo -> settings/config.json merge chain,
-	// or a rig that sets them would silently gate under the defaults.
-	t.Run("test-verify settings override", func(t *testing.T) {
-		t.Parallel()
-		repo := &MergeQueueConfig{
-			TestVerifyRunTimeout:  "45m",
-			TestVerifySlotTimeout: "90m",
-			TestVerifyCommand:     "make test-changed PKGS='{packages}'",
-		}
-		local := &MergeQueueConfig{TestVerifyRunTimeout: "10m"}
-		result := MergeSettingsCommand(repo, local)
-		if result.TestVerifyRunTimeout != "10m" {
-			t.Errorf("test_verify_run_timeout = %q, want the local override", result.TestVerifyRunTimeout)
-		}
-		if result.TestVerifySlotTimeout != "90m" {
-			t.Errorf("test_verify_slot_timeout = %q, want the repo value (not overridden)", result.TestVerifySlotTimeout)
-		}
-		if result.TestVerifyCommand != "make test-changed PKGS='{packages}'" {
-			t.Errorf("test_verify_command = %q, want the repo value (not overridden)", result.TestVerifyCommand)
-		}
-	})
-
 	// gt-ssyxd: presubmit_command follows the same non-empty-wins rule.
 	t.Run("presubmit_command survives the merge", func(t *testing.T) {
 		t.Parallel()
@@ -815,63 +601,26 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("local overrides batch settings", func(t *testing.T) {
-		t.Parallel()
-		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5, BatchMinCount: 3}
-		local := &MergeQueueConfig{BatchEnabled: boolPtr(true), BatchMax: 20}
-		result := MergeSettingsCommand(repo, local)
-		if !result.IsBatchEnabled() {
-			t.Error("expected batch_enabled=true from local override")
-		}
-		if result.BatchMinAge != "2h" {
-			t.Errorf("expected batch_min_age='2h' (not overridden by local), got %q", result.BatchMinAge)
-		}
-		if result.BatchMax != 20 {
-			t.Errorf("expected batch_max=20 from local override, got %d", result.BatchMax)
-		}
-		if result.BatchMinCount != 3 {
-			t.Errorf("expected batch_min_count=3 (not overridden by local), got %d", result.BatchMinCount)
-		}
-	})
-
-	// TestBuildRefineryPatrolVars_BoolFormat (gt-egiv) caught this: routing a
-	// single-layer MergeQueueConfig through MergeSettingsCommand(nil, local)
-	// silently dropped IntegrationBranchAutoLand/IntegrationBranchRefineryEnabled
-	// because they weren't in the overlay's field list, even though a direct
-	// struct read (the pre-gt-egiv code path) preserved them.
-	t.Run("local only preserves integration-branch and judgment fields", func(t *testing.T) {
+	// gt-egiv: routing a single-layer MergeQueueConfig through
+	// MergeSettingsCommand(nil, local) must keep every field, not only the
+	// ones in the overlay's field list.
+	t.Run("local only preserves pointer and review fields", func(t *testing.T) {
 		t.Parallel()
 		trueVal := true
 		local := &MergeQueueConfig{
-			IntegrationBranchPolecatEnabled:  &trueVal,
-			IntegrationBranchRefineryEnabled: &trueVal,
-			IntegrationBranchAutoLand:        &trueVal,
-			IntegrationBranchTemplate:        "integration/{epic}",
-			VCSProvider:                      "github",
-			JudgmentEnabled:                  &trueVal,
-			ReviewDepth:                      "deep",
+			IntegrationBranchPolecatEnabled: &trueVal,
+			RequireReview:                   &trueVal,
+			MergeStrategy:                   "pr",
 		}
 		result := MergeSettingsCommand(nil, local)
 		if result.IntegrationBranchPolecatEnabled == nil || !*result.IntegrationBranchPolecatEnabled {
 			t.Error("IntegrationBranchPolecatEnabled not preserved from local-only source")
 		}
-		if result.IntegrationBranchRefineryEnabled == nil || !*result.IntegrationBranchRefineryEnabled {
-			t.Error("IntegrationBranchRefineryEnabled not preserved from local-only source")
+		if !result.IsRequireReviewEnabled() {
+			t.Error("RequireReview not preserved from local-only source")
 		}
-		if result.IntegrationBranchAutoLand == nil || !*result.IntegrationBranchAutoLand {
-			t.Error("IntegrationBranchAutoLand not preserved from local-only source")
-		}
-		if result.IntegrationBranchTemplate != "integration/{epic}" {
-			t.Errorf("IntegrationBranchTemplate = %q, want %q", result.IntegrationBranchTemplate, "integration/{epic}")
-		}
-		if result.VCSProvider != "github" {
-			t.Errorf("VCSProvider = %q, want %q", result.VCSProvider, "github")
-		}
-		if result.JudgmentEnabled == nil || !*result.JudgmentEnabled {
-			t.Error("JudgmentEnabled not preserved from local-only source")
-		}
-		if result.ReviewDepth != "deep" {
-			t.Errorf("ReviewDepth = %q, want %q", result.ReviewDepth, "deep")
+		if result.MergeStrategy != "pr" {
+			t.Errorf("MergeStrategy = %q, want %q", result.MergeStrategy, "pr")
 		}
 	})
 }
@@ -5172,124 +4921,38 @@ func TestBuildStartupCommandWithAgentOverride_UsesGTRootFromEnvVars(t *testing.T
 	}
 }
 
-// TestMergeQueueConfig_PartialJSON_BoolDefaults verifies that omitted *bool fields
-// in a partial merge_queue JSON config deserialize to nil (not false), and that the
-// nil-safe accessor methods return the correct defaults.
-//
-// This is a regression test for: "Partial merge_queue config silently disables
-// refinery tests — omitted booleans deserialize to Go zero values (false)".
-// The *bool pointer approach prevents this, and this test locks in that guarantee.
+// TestMergeQueueConfig_PartialJSON_BoolDefaults verifies that an omitted
+// *bool field in a partial merge_queue JSON config deserializes to nil (not
+// false), so the nil-safe accessor returns its default instead of silently
+// turning the setting off.
 func TestMergeQueueConfig_PartialJSON_BoolDefaults(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		json string
-		// Expected accessor results when *bool fields are omitted (nil)
-		wantRunTests            bool
-		wantDeleteMerged        bool
-		wantPolecatIntegration  bool
-		wantRefineryIntegration bool
-		wantAutoLand            bool
+		name                   string
+		json                   string
+		wantPolecatIntegration bool
+		wantRequireReview      bool
 	}{
-		{
-			name: "minimal config — all *bool fields omitted",
-			json: `{"enabled": true, "on_conflict": "assign_back"}`,
-			// nil *bool → accessor defaults
-			wantRunTests:            true,
-			wantDeleteMerged:        true,
-			wantPolecatIntegration:  true,
-			wantRefineryIntegration: true,
-			wantAutoLand:            false,
-		},
-		{
-			name: "explicit false — should be respected",
-			json: `{
-				"enabled": true,
-				"on_conflict": "assign_back",
-				"run_tests": false,
-				"delete_merged_branches": false,
-				"integration_branch_polecat_enabled": false,
-				"integration_branch_refinery_enabled": false,
-				"integration_branch_auto_land": false
-			}`,
-			wantRunTests:            false,
-			wantDeleteMerged:        false,
-			wantPolecatIntegration:  false,
-			wantRefineryIntegration: false,
-			wantAutoLand:            false,
-		},
-		{
-			name: "explicit true — should be respected",
-			json: `{
-				"enabled": true,
-				"on_conflict": "assign_back",
-				"run_tests": true,
-				"delete_merged_branches": true,
-				"integration_branch_polecat_enabled": true,
-				"integration_branch_refinery_enabled": true,
-				"integration_branch_auto_land": true
-			}`,
-			wantRunTests:            true,
-			wantDeleteMerged:        true,
-			wantPolecatIntegration:  true,
-			wantRefineryIntegration: true,
-			wantAutoLand:            true,
-		},
+		{name: "omitted", json: `{"test_command": "make test"}`, wantPolecatIntegration: true, wantRequireReview: false},
+		{name: "explicit false", json: `{"integration_branch_polecat_enabled": false, "require_review": false}`, wantPolecatIntegration: false, wantRequireReview: false},
+		{name: "explicit true", json: `{"integration_branch_polecat_enabled": true, "require_review": true}`, wantPolecatIntegration: true, wantRequireReview: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var cfg MergeQueueConfig
 			if err := json.Unmarshal([]byte(tt.json), &cfg); err != nil {
 				t.Fatalf("json.Unmarshal: %v", err)
 			}
-
-			if got := cfg.IsRunTestsEnabled(); got != tt.wantRunTests {
-				t.Errorf("IsRunTestsEnabled() = %v, want %v", got, tt.wantRunTests)
-			}
-			if got := cfg.IsDeleteMergedBranchesEnabled(); got != tt.wantDeleteMerged {
-				t.Errorf("IsDeleteMergedBranchesEnabled() = %v, want %v", got, tt.wantDeleteMerged)
-			}
 			if got := cfg.IsPolecatIntegrationEnabled(); got != tt.wantPolecatIntegration {
 				t.Errorf("IsPolecatIntegrationEnabled() = %v, want %v", got, tt.wantPolecatIntegration)
 			}
-			if got := cfg.IsRefineryIntegrationEnabled(); got != tt.wantRefineryIntegration {
-				t.Errorf("IsRefineryIntegrationEnabled() = %v, want %v", got, tt.wantRefineryIntegration)
-			}
-			if got := cfg.IsIntegrationBranchAutoLandEnabled(); got != tt.wantAutoLand {
-				t.Errorf("IsIntegrationBranchAutoLandEnabled() = %v, want %v", got, tt.wantAutoLand)
+			if got := cfg.IsRequireReviewEnabled(); got != tt.wantRequireReview {
+				t.Errorf("IsRequireReviewEnabled() = %v, want %v", got, tt.wantRequireReview)
 			}
 		})
-	}
-}
-
-// TestMergeQueueConfig_PartialJSON_NilPointers verifies that omitted *bool fields
-// deserialize to nil, not to a pointer to false. This is the underlying mechanism
-// that makes the accessor defaults work.
-func TestMergeQueueConfig_PartialJSON_NilPointers(t *testing.T) {
-	t.Parallel()
-
-	partialJSON := `{"enabled": true, "on_conflict": "assign_back"}`
-	var cfg MergeQueueConfig
-	if err := json.Unmarshal([]byte(partialJSON), &cfg); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-
-	if cfg.RunTests != nil {
-		t.Errorf("RunTests should be nil when omitted, got %v", *cfg.RunTests)
-	}
-	if cfg.DeleteMergedBranches != nil {
-		t.Errorf("DeleteMergedBranches should be nil when omitted, got %v", *cfg.DeleteMergedBranches)
-	}
-	if cfg.IntegrationBranchPolecatEnabled != nil {
-		t.Errorf("IntegrationBranchPolecatEnabled should be nil when omitted, got %v", *cfg.IntegrationBranchPolecatEnabled)
-	}
-	if cfg.IntegrationBranchRefineryEnabled != nil {
-		t.Errorf("IntegrationBranchRefineryEnabled should be nil when omitted, got %v", *cfg.IntegrationBranchRefineryEnabled)
-	}
-	if cfg.IntegrationBranchAutoLand != nil {
-		t.Errorf("IntegrationBranchAutoLand should be nil when omitted, got %v", *cfg.IntegrationBranchAutoLand)
 	}
 }
 
