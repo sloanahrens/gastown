@@ -361,3 +361,13 @@ func runPinnedBD(ctx context.Context, run beads.BDRunner, cmd *beads.Cmd) (stdou
 	}
 	return stdout, stderr, err
 }
+
+// bdCommandOutput is cmd.Output(), or with a runner the call answered in
+// process (see runPinnedBD).
+func bdCommandOutput(run beads.BDRunner, cmd *beads.Cmd) ([]byte, error) {
+	if run == nil {
+		return cmd.Output()
+	}
+	out, _, err := runPinnedBD(context.Background(), run, cmd)
+	return out, err
+}
