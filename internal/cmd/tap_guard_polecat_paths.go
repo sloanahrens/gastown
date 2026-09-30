@@ -425,9 +425,65 @@ type lnArgs struct {
 	dest      string   // the LINK_NAME or DIRECTORY operand, when not -t
 }
 
+// lnValueKind is how a GNU ln long option takes its value.
+type lnValueKind int
+
+const (
+	lnNoValue       lnValueKind = iota
+	lnRequiredValue             // attached with "=" or the next word
+	lnOptionalValue             // attached with "=" only
+)
+
+// lnLongOption is one of GNU ln's long options.
+type lnLongOption struct {
+	name  string
+	value lnValueKind
+}
+
+// lnLongOptions is GNU ln's long-option table. getopt_long accepts any
+// unambiguous prefix of these names, so "--sym" is --symbolic and
+// "--target-dir=X" is --target-directory=X; matching only the full spellings
+// would let an abbreviated form skip the link-text check.
+var lnLongOptions = []lnLongOption{
+	{"backup", lnOptionalValue},
+	{"directory", lnNoValue},
+	{"force", lnNoValue},
+	{"help", lnNoValue},
+	{"interactive", lnNoValue},
+	{"logical", lnNoValue},
+	{"no-dereference", lnNoValue},
+	{"no-target-directory", lnNoValue},
+	{"physical", lnNoValue},
+	{"relative", lnNoValue},
+	{"suffix", lnRequiredValue},
+	{"symbolic", lnNoValue},
+	{"target-directory", lnRequiredValue},
+	{"verbose", lnNoValue},
+	{"version", lnNoValue},
+}
+
+// resolveLnLongOption resolves a long option's spelling (without "--" or any
+// "=value") the way getopt_long does: an exact name wins, otherwise a prefix
+// that names exactly one option. An ambiguous or unknown spelling makes ln
+// exit with an error before creating anything, so it resolves to ok=false.
+func resolveLnLongOption(name string) (lnLongOption, bool) {
+	var match lnLongOption
+	matches := 0
+	for _, opt := range lnLongOptions {
+		if opt.name == name {
+			return opt, true
+		}
+		if name != "" && strings.HasPrefix(opt.name, name) {
+			match = opt
+			matches++
+		}
+	}
+	return match, matches == 1
+}
+
 // parseLnArgs reads GNU and BSD ln's option syntax: clustered short flags
-// (-sfn), -t/-S taking a value (attached or as the next word), the long forms,
-// and "--" ending options.
+// (-sfn), -t/-S taking a value (attached or as the next word), the long forms
+// including their unambiguous abbreviations, and "--" ending options.
 func parseLnArgs(args []string) lnArgs {
 	var (
 		ln       lnArgs
@@ -439,21 +495,24 @@ func parseLnArgs(args []string) lnArgs {
 		case arg == "--":
 			operands = append(operands, args[i+1:]...)
 			i = len(args)
-		case arg == "--symbolic":
-			ln.symbolic = true
-		case arg == "--relative":
-			ln.relative = true
-		case strings.HasPrefix(arg, "--target-directory="):
-			ln.targetDir = strings.TrimPrefix(arg, "--target-directory=")
-		case arg == "--target-directory" || arg == "--suffix":
-			if i+1 < len(args) {
-				if arg == "--target-directory" {
-					ln.targetDir = args[i+1]
-				}
-				i++
-			}
 		case strings.HasPrefix(arg, "--"):
-			// --force, --no-dereference, --suffix=X, ...: no path.
+			name, value, attached := strings.Cut(arg[2:], "=")
+			opt, ok := resolveLnLongOption(name)
+			if !ok {
+				continue
+			}
+			if opt.value == lnRequiredValue && !attached && i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+			switch opt.name {
+			case "symbolic":
+				ln.symbolic = true
+			case "relative":
+				ln.relative = true
+			case "target-directory":
+				ln.targetDir = value
+			}
 		case strings.HasPrefix(arg, "-") && len(arg) > 1:
 		cluster:
 			for j := 1; j < len(arg); j++ {
