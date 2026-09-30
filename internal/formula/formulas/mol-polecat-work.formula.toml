@@ -286,10 +286,21 @@ summary: <brief findings>"
 ```bash
 # After each logical unit of work:
 git add <files>
-git commit -m "<type>: <description> ({{issue}})"
+git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
 Commit types: feat, fix, refactor, test, docs, chore
+
+**The subject describes what the commit DOES, and ends with `({{issue}})`.**
+
+A bead title states the PROBLEM; pasting it as the subject makes the commit
+read as if it introduced that problem. Bead title "Witness git-push guard
+removed with no replacement" ships as subject
+`fix: reinstate the Witness git-push guard (gt-8ki9)`, not
+`feat: Witness git-push guard removed with no replacement (gt-8ki9)`.
+
+The bead id goes at the END of the subject, not in the body: readers scan
+`git log --oneline` subjects, and the subject is what the landed commit keeps.
 
 A commit message is the description and the bead id, nothing more: NO
 Co-Authored-By trailer, no AI attribution anywhere.
@@ -337,10 +348,23 @@ git status
 
 **2. If there are ANY uncommitted changes, commit them now:**
 ```bash
-git add -A && git commit -m "<type>: <descriptive message> ({{issue}})"
+git add -A && git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
 **3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
+
+**3b. Read your subjects back before going further:**
+```bash
+git log --format=%s origin/{{base_branch}}..HEAD
+```
+Every subject must (a) say what the change does, not restate the bead title's
+problem, and (b) end with `({{issue}})`. Fix a failing subject now, while it
+costs one reword; the landed commit keeps it forever. The subject that lands is
+your branch tip's — or, when `gt done` squashes auto-save checkpoints into the
+branch, the first subject that is not machine-generated. Either way, a branch
+whose ONLY commits are auto-save checkpoints never reaches this gate: `gt done`
+synthesizes the subject from the bead title, which states the problem rather
+than the fix.
 
 **4. VERIFY commits exist (HARD GATE — do NOT close this step without passing):**
 ```bash
@@ -370,7 +394,9 @@ If the bead is `review_only: true`, also verify a fresh assignee-authored
 If findings/evidence are persisted, proceed to review. Report-only tasks with
 findings persisted can skip commit verification.
 
-**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
+**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of
+origin/{{base_branch}}, whose every subject describes the change and ends with
+`({{issue}})`, or (b) report-only task with findings persisted to bead."""
 
 [[steps]]
 id = "self-review"
