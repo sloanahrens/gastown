@@ -400,10 +400,11 @@ const (
 // consecutive-failure streak. `show` reports the poured root with no children,
 // which is what discoverSteps and the close() drain read back.
 type fakePourBd struct {
-	failFor  int  // pour calls that fail; negative means every call fails
-	timeout  bool // the failure is a deadline kill, whose outcome is unknown
-	noID     bool // succeed but print no bead id, so the root cannot be addressed
-	failShow bool // the pour succeeds but the step listing fails
+	failFor  int   // pour calls that fail; negative means every call fails
+	timeout  bool  // the failure is a deadline kill, whose outcome is unknown
+	noID     bool  // succeed but print no bead id, so the root cannot be addressed
+	failShow bool  // the pour succeeds but the step listing fails
+	failErr  error // the failure to return instead of an open circuit breaker
 
 	pours    int
 	pourArgs [][]string
@@ -421,6 +422,9 @@ func (f *fakePourBd) run(args ...string) (string, error) {
 		if f.failFor < 0 || f.pours <= f.failFor {
 			if f.timeout {
 				return "", fmt.Errorf("timed out after 15s: %w", context.DeadlineExceeded)
+			}
+			if f.failErr != nil {
+				return "", f.failErr
 			}
 			return "", fmt.Errorf("dolt circuit breaker is open")
 		}
@@ -553,6 +557,59 @@ func TestPourDogMolecule_RetriesATransientFailureWithinOneCycle(t *testing.T) {
 	}
 	if calls := rig.notes.Calls(); len(calls) != 0 {
 		t.Errorf("a pour that recovered must not escalate, got: %+v", calls)
+	}
+}
+
+// errPourSerialization is the failure daemon.log shows when two dogs pour in the
+// same second: Dolt aborts the loser's commit and rolls it back (gt-dvad1).
+var errPourSerialization = errors.New("exit status 1: Error: creating wisp: sql commit (regular): Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction.")
+
+// TestPourDogMolecule_RetriesASerializationFailure: a pour that lost a commit
+// race to another dog was rolled back, so repeating it cannot strand a second
+// wisp, and the cycle must run instead of being skipped (gt-dvad1).
+func TestPourDogMolecule_RetriesASerializationFailure(t *testing.T) {
+	t.Parallel()
+	rig := newDogPourTestRig(t, t.TempDir())
+	rig.fake.failFor = 1
+	rig.fake.failErr = errPourSerialization
+
+	mol := rig.daemon.pourDogMolecule(pourTestFormula, nil)
+	mol.close()
+
+	if mol.rootID != pourTestWispID || mol.outcome != dogCycleRan {
+		t.Fatalf("rootID = %q outcome = %q, want %q ran — a lost commit race must recover inside the cycle", mol.rootID, mol.outcome, pourTestWispID)
+	}
+	if rig.fake.pours != 2 {
+		t.Errorf("pour attempts = %d, want 2", rig.fake.pours)
+	}
+	if want := []time.Duration{dogPourRetryDelay}; !reflect.DeepEqual(rig.waits, want) {
+		t.Errorf("retry backoff waits = %v, want %v", rig.waits, want)
+	}
+}
+
+// TestPourDogMolecule_PersistentSerializationFailureSkipsTheCycle: the retry is
+// bounded. A pour that keeps losing is tried dogPourMaxAttempts times, then the
+// cycle is skipped with the cause in the reason, as before gt-dvad1.
+func TestPourDogMolecule_PersistentSerializationFailureSkipsTheCycle(t *testing.T) {
+	t.Parallel()
+	rig := newDogPourTestRig(t, t.TempDir())
+	rig.fake.failFor = -1
+	rig.fake.failErr = errPourSerialization
+
+	mol := rig.daemon.pourDogMolecule(pourTestFormula, nil)
+	mol.close()
+
+	if rig.fake.pours != dogPourMaxAttempts {
+		t.Errorf("pour attempts = %d, want %d", rig.fake.pours, dogPourMaxAttempts)
+	}
+	if want := []time.Duration{dogPourRetryDelay, 2 * dogPourRetryDelay}; !reflect.DeepEqual(rig.waits, want) {
+		t.Errorf("retry backoff waits = %v, want %v", rig.waits, want)
+	}
+	if mol.outcome != dogCycleSkipped {
+		t.Errorf("outcome = %q, want %q", mol.outcome, dogCycleSkipped)
+	}
+	if want := fmt.Sprintf("pour failed after %d attempt(s)", dogPourMaxAttempts); !strings.Contains(mol.outcomeReason, want) || !strings.Contains(mol.outcomeReason, "Error 1213") {
+		t.Errorf("reason = %q, want %q and the 1213 cause", mol.outcomeReason, want)
 	}
 }
 

@@ -30,9 +30,10 @@ const (
 	dogCloseRetryDelay  = 500 * time.Millisecond
 
 	// dogPourMaxAttempts bounds the retry of a single molecule pour. Only a pour
-	// that never reached Dolt is retried (pourRetryable): the Dolt circuit
-	// breaker being open or the server being briefly unreachable are the
-	// transient states that clear within seconds (gt-i3rpw).
+	// that provably wrote nothing is retried (pourRetryable): the Dolt circuit
+	// breaker being open, the server being briefly unreachable, and a commit
+	// Dolt aborted for a concurrent writer are the transient states that clear
+	// within seconds (gt-i3rpw, gt-dvad1).
 	dogPourMaxAttempts = 3
 
 	// dogPourRetryDelay is the base backoff before retrying a pour, multiplied by
@@ -219,7 +220,13 @@ func (dm *dogMol) pourWithRetry(args []string) (string, int, error) {
 
 // pourRetryable reports whether a failed pour is safe to repeat.
 //
-// Only failures that provably never reached Dolt are retried. A pour killed by
+// Only failures that provably wrote nothing are retried: ones that never reached
+// Dolt, and a serialization failure (Error 1213, SQLSTATE 40001), which Dolt
+// reports only after rolling the conflicting transaction back. The dogs pour on
+// independent tickers, so two of them regularly commit in the same second
+// (mol-dog-jsonl against mol-dog-backup or mol-dog-checkpoint) and the loser
+// used to skip its whole cycle (gt-dvad1). By the backoff the winner has
+// committed, so the repeat does not collide again. A pour killed by
 // its own deadline is excluded even though timeouts are the most common failure
 // in the log: the client cannot tell "never committed" from "committed, and the
 // answer was lost", and re-pouring the second case strands a root wisp plus its
@@ -236,6 +243,9 @@ func pourRetryable(err error) bool {
 		"unreachable",
 		"connection refused",
 		"connection reset",
+		"Error 1213",                 // Dolt aborted the commit for a concurrent writer
+		"serialization failure",      // the SQLSTATE 40001 text for the same abort
+		"try restarting transaction", // Dolt's own advice for the same class
 	} {
 		if strings.Contains(msg, marker) {
 			return true
