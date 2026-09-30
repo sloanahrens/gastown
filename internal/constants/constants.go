@@ -373,26 +373,6 @@ func PatrolFormulas() []string {
 	return []string{MolDeaconPatrol, MolWitnessPatrol}
 }
 
-// RoleEmoji returns the emoji for a given role name.
-func RoleEmoji(role string) string {
-	switch role {
-	case RoleMayor:
-		return EmojiMayor
-	case RoleDeacon:
-		return EmojiDeacon
-	case RoleWitness:
-		return EmojiWitness
-	case RoleCrew:
-		return EmojiCrew
-	case RolePolecat:
-		return EmojiPolecat
-	case RoleBoot:
-		return EmojiBoot
-	default:
-		return "❓"
-	}
-}
-
 // SupportedShells lists shell binaries that Gas Town can detect and work with.
 // Used to identify if a tmux pane is at a shell prompt vs running a command.
 var SupportedShells = []string{"bash", "zsh", "sh", "fish", "tcsh", "ksh", "pwsh", "powershell"}
