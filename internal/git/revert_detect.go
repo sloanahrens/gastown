@@ -150,10 +150,35 @@ func changeIsInvertedBy(g *Git, preImage, postImage, base, head string) (bool, e
 	if err != nil {
 		return false, fmt.Errorf("diffing %s..%s: %w", preImage, postImage, err)
 	}
+	// Net each diff before comparing. A line that a diff both removes and adds
+	// was moved, not removed; counting the removal alone makes a move look like
+	// deletion, and for a commit that only added lines (nothing to restore, so
+	// the second containment below is vacuously true) that made any relocation
+	// of the added lines read as a revert (gt-tlw9u).
+	branchAdded, branchRemoved = netLines(branchAdded, branchRemoved)
+	changeAdded, changeRemoved = netLines(changeAdded, changeRemoved)
 	if len(changeAdded)+len(changeRemoved) == 0 {
 		return false, nil
 	}
 	return multisetContains(branchRemoved, changeAdded) && multisetContains(branchAdded, changeRemoved), nil
+}
+
+// netLines cancels lines a diff both adds and removes, returning what each side
+// has left over. A line moved within a file appears once on each side and nets
+// to nothing.
+func netLines(added, removed map[string]int) (netAdded, netRemoved map[string]int) {
+	netAdded, netRemoved = make(map[string]int), make(map[string]int)
+	for line, n := range added {
+		if d := n - removed[line]; d > 0 {
+			netAdded[line] = d
+		}
+	}
+	for line, n := range removed {
+		if d := n - added[line]; d > 0 {
+			netRemoved[line] = d
+		}
+	}
+	return netAdded, netRemoved
 }
 
 // multisetContains reports whether every line counted in want appears in have
