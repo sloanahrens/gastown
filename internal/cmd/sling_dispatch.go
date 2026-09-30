@@ -48,10 +48,9 @@ type SlingParams struct {
 	BeadsDir         string
 
 	// SkipDuplicateCheck disables the pre-dispatch content duplicate check
-	// (gt-mcq) for a caller re-dispatching beads its own queue already accepted.
-	// The capacity scheduler's dispatchSingleBead is the only such caller:
-	// convoy and epic dispatch are a bead's first dispatch, and run the check
-	// (gt-skk7).
+	// (gt-mcq). No production dispatcher sets it: convoy, epic and capacity-queue
+	// dispatch are each a bead's first dispatch and run the check (gt-skk7,
+	// gt-eisp2). Tests that target a later guard set it to reach that guard.
 	SkipDuplicateCheck bool
 }
 
