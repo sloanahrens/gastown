@@ -137,7 +137,10 @@ func defaultTownConfigCheck() error {
 	if dir == "" {
 		return errors.New("not in a Gas Town workspace, so the town config files cannot be checked")
 	}
-	return townconfig.Check(dir)
+	// Load, not Check: a town-running command needs a whole town, so a root
+	// found by its mayor/ directory alone (no mayor/town.json) is refused.
+	_, err := townconfig.Load(dir)
+	return err
 }
 
 // requireTownStart is the startup gate for town-running commands and agent
