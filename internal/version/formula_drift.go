@@ -1,10 +1,7 @@
 package version
 
 import (
-	"os/exec"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // formulaSourceDir is where the formulas embedded into the binary live in the
@@ -39,8 +36,12 @@ type FormulaDrift struct {
 // on, which is the exact false reassurance gt-dt7r was filed about. Reporting
 // unknown costs a few seconds; reporting fresh costs weeks.
 func CheckEmbeddedFormulaDrift(repoDir string) FormulaDrift {
+	return newChecker().checkFormulaDrift(repoDir)
+}
+
+func (c checker) checkFormulaDrift(repoDir string) FormulaDrift {
 	drift := FormulaDrift{}
-	info := CheckStaleBinaryFresh(repoDir)
+	info := c.checkStaleFresh(repoDir)
 	drift.CompareRef = info.CompareRef
 	drift.BinaryCommit = info.BinaryCommit
 	drift.RepoCommit = info.RepoCommit
@@ -60,7 +61,7 @@ func CheckEmbeddedFormulaDrift(repoDir string) FormulaDrift {
 		return drift
 	}
 
-	files, err := formulaSourceDiff(repoDir, info.BinaryCommit, info.RepoCommit)
+	files, err := c.formulaSourceDiff(repoDir, info.BinaryCommit, info.RepoCommit)
 	if err != nil {
 		drift.Reason = err.Error()
 		return drift
@@ -72,11 +73,8 @@ func CheckEmbeddedFormulaDrift(repoDir string) FormulaDrift {
 
 // formulaSourceDiff lists the files under the formula source dir that differ
 // between two commits. Names come back repository-root-relative.
-func formulaSourceDiff(repoDir, from, to string) ([]string, error) {
-	cmd := exec.Command("git", "diff", "--name-only", from+".."+to, "--", formulaSourceDir)
-	cmd.Dir = repoDir
-	util.SetDetachedProcessGroup(cmd)
-	out, err := cmd.Output()
+func (c checker) formulaSourceDiff(repoDir, from, to string) ([]string, error) {
+	out, err := c.output(repoDir, "diff", "--name-only", from+".."+to, "--", formulaSourceDir)
 	if err != nil {
 		return nil, err
 	}

@@ -1,13 +1,12 @@
 package checkpoint
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestIsThrowawayPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		path string
@@ -55,6 +54,7 @@ func TestIsThrowawayPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := IsThrowawayPath(tt.path); got != tt.want {
 				t.Errorf("IsThrowawayPath(%q) = %v, want %v", tt.path, got, tt.want)
 			}
@@ -63,6 +63,7 @@ func TestIsThrowawayPath(t *testing.T) {
 }
 
 func TestThrowawayPaths(t *testing.T) {
+	t.Parallel()
 	got := ThrowawayPaths([]string{
 		"internal/util/client.go",
 		"internal/util/zz_probe_test.go",
@@ -86,96 +87,92 @@ func TestThrowawayPaths(t *testing.T) {
 // modification is real work and only an addition is something the branch brings
 // to the target.
 func TestAddedThrowawayPaths_ReportsOnlyAdditions(t *testing.T) {
-	dir := initTestRepo(t)
+	t.Parallel()
+	r := newFakeRepo(t)
 	// Tracked on the base branch, name notwithstanding.
-	addCommit(t, dir, "zz_fixture_test.go", "package main\n", "tracked fixture")
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
+	base := r.commit("tracked fixture", "zz_fixture_test.go", "package main\n")
 
-	createBranch(t, dir, "polecat/garnet/gt-ozo4")
+	r.checkoutNew("polecat/garnet/gt-ozo4")
 	// Modify the tracked file: not an addition, so not reported.
-	writeRepoFile(t, dir, "zz_fixture_test.go", "package main\n\n// real work\n")
-	mustGit(t, dir, "add", "zz_fixture_test.go")
-	mustGit(t, dir, "commit", "-m", "real work on the tracked fixture")
-	addCommitInDir(t, dir, "internal/util/client.go", "package util\n", "real work")
-	addCommitInDir(t, dir, "internal/util/zz_livecheck_test.go", "package util\n", "WIP: checkpoint (auto)")
-	addCommit(t, dir, "notes.tmp", "scratch\n", "WIP: checkpoint (auto)")
+	r.commit("real work on the tracked fixture", "zz_fixture_test.go", "package main\n\n// real work\n")
+	r.commit("real work", "internal/util/client.go", "package util\n")
+	r.commit(WIPCommitPrefix, "internal/util/zz_livecheck_test.go", "package util\n")
+	r.commit(WIPCommitPrefix, "notes.tmp", "scratch\n")
 
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
+	found, err := addedThrowawayPaths(r.run, fakeDir, base, "HEAD")
 	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
+		t.Fatalf("addedThrowawayPaths: %v", err)
 	}
 	want := []string{"internal/util/zz_livecheck_test.go", "notes.tmp"}
-	if len(found) != len(want) {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want %#v", found, want)
+	if strings.Join(found, "|") != strings.Join(want, "|") {
+		t.Fatalf("addedThrowawayPaths() = %#v, want %#v", found, want)
 	}
-	for i := range want {
-		if found[i] != want[i] {
-			t.Fatalf("AddedThrowawayPaths()[%d] = %q, want %q (all: %#v)", i, found[i], want[i], found)
-		}
+}
+
+// The listing must ask git for additions only, with rename detection off and
+// NUL-terminated paths; the integration tier pins what git does with them.
+func TestAddedThrowawayPaths_AsksForAdditionsWithoutRenames(t *testing.T) {
+	t.Parallel()
+	r := newFakeRepo(t)
+	base := r.headCommit()
+	r.checkoutNew("polecat/garnet/gt-ozo4")
+	r.commit(WIPCommitPrefix, "notes.tmp", "scratch\n")
+
+	if _, err := addedThrowawayPaths(r.run, fakeDir, base, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	want := "diff --name-only --no-renames --diff-filter=A -z " + base + " HEAD"
+	var got []string
+	for _, c := range r.calls {
+		got = append(got, strings.Join(c, " "))
+	}
+	if len(got) != 2 || got[1] != want {
+		t.Errorf("calls = %q, want merge-base then %q", got, want)
 	}
 }
 
 func TestAddedThrowawayPaths_CleanBranch(t *testing.T) {
-	dir := initTestRepo(t)
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
-	createBranch(t, dir, "polecat/garnet/gt-ozo4")
-	addCommitInDir(t, dir, "internal/util/client.go", "package util\n", "real work (gt-ozo4)")
+	t.Parallel()
+	r := newFakeRepo(t)
+	base := r.headCommit()
+	r.checkoutNew("polecat/garnet/gt-ozo4")
+	r.commit("real work (gt-ozo4)", "internal/util/client.go", "package util\n")
 
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
+	found, err := addedThrowawayPaths(r.run, fakeDir, base, "HEAD")
 	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
+		t.Fatalf("addedThrowawayPaths: %v", err)
 	}
 	if len(found) != 0 {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want none", found)
-	}
-}
-
-// TestAddedThrowawayPaths_UncommittedDeletionStillReports covers the shape
-// gt-ozo4 was filed under: the checkpoint committed the file and the polecat
-// deleted it while cleaning up. The blob is still in HEAD's tree, and HEAD's
-// tree is what the squash submits, so the answer must stay positive — this is
-// the report's "deleting it afterwards does not help on its own".
-func TestAddedThrowawayPaths_UncommittedDeletionStillReports(t *testing.T) {
-	dir := initTestRepo(t)
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
-	createBranch(t, dir, "polecat/garnet/gt-ozo4")
-	addCommitInDir(t, dir, "internal/util/zz_livecheck_test.go", "package util\n", "WIP: checkpoint (auto)")
-
-	if err := os.Remove(filepath.Join(dir, "internal/util/zz_livecheck_test.go")); err != nil {
-		t.Fatal(err)
-	}
-
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
-	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
-	}
-	if len(found) != 1 || found[0] != "internal/util/zz_livecheck_test.go" {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want the scratch file still reported", found)
+		t.Fatalf("addedThrowawayPaths() = %#v, want none", found)
 	}
 }
 
 // TestAddedThrowawayPaths_CommittedDeletionClears pins the remediation the
-// refusal prescribes: the file is staged out of the branch, not out of the
-// working tree, and the answer goes quiet. If this stops holding, the refusal
-// is telling polecats to run a command that does not clear it.
+// refusal prescribes: once the deletion is committed the file is gone from
+// HEAD's tree and the answer goes quiet. An uncommitted deletion changes
+// nothing, because the answer reads HEAD's tree, never the working tree.
 func TestAddedThrowawayPaths_CommittedDeletionClears(t *testing.T) {
-	dir := initTestRepo(t)
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
-	createBranch(t, dir, "polecat/garnet/gt-ozo4")
-	addCommitInDir(t, dir, "internal/util/zz_livecheck_test.go", "package util\n", "WIP: checkpoint (auto)")
-	if err := os.Remove(filepath.Join(dir, "internal/util/zz_livecheck_test.go")); err != nil {
+	t.Parallel()
+	r := newFakeRepo(t)
+	base := r.headCommit()
+	r.checkoutNew("polecat/garnet/gt-ozo4")
+	r.commit(WIPCommitPrefix, "internal/util/zz_livecheck_test.go", "package util\n")
+
+	found, err := addedThrowawayPaths(r.run, fakeDir, base, "HEAD")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if len(found) != 1 || found[0] != "internal/util/zz_livecheck_test.go" {
+		t.Fatalf("before the deletion: %#v, want the scratch file reported", found)
+	}
 
-	mustGit(t, dir, "rm", "--cached", "--", "internal/util/zz_livecheck_test.go")
-	mustGit(t, dir, "commit", "-m", "remove throwaway files")
-
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
+	r.remove("remove throwaway files", "internal/util/zz_livecheck_test.go")
+	found, err = addedThrowawayPaths(r.run, fakeDir, base, "HEAD")
 	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
+		t.Fatal(err)
 	}
 	if len(found) != 0 {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want none after the deletion was committed", found)
+		t.Fatalf("addedThrowawayPaths() = %#v, want none after the deletion was committed", found)
 	}
 }
 
@@ -183,66 +180,47 @@ func TestAddedThrowawayPaths_CommittedDeletionClears(t *testing.T) {
 // contract: an answer the caller cannot get is not the empty answer. The
 // submit gate refuses on this error rather than landing the branch unchecked.
 func TestAddedThrowawayPaths_UnresolvableBaseFailsClosed(t *testing.T) {
-	dir := initTestRepo(t)
+	t.Parallel()
+	r := newFakeRepo(t)
 
-	if _, err := AddedThrowawayPaths(dir, "origin/main", "HEAD"); err == nil {
-		t.Fatal("AddedThrowawayPaths with an unresolvable baseRef returned nil error, want failure")
+	if _, err := addedThrowawayPaths(r.run, fakeDir, "origin/main", "HEAD"); err == nil {
+		t.Fatal("addedThrowawayPaths with an unresolvable baseRef returned nil error, want failure")
 	}
 }
 
-func TestAddedThrowawayPaths_FindsPathWithSpaces(t *testing.T) {
-	dir := initTestRepo(t)
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
-	createBranch(t, dir, "polecat/garnet/gt-ozo4")
-	addCommitInDir(t, dir, "scratch/notes copy.md", "scratch\n", "WIP: checkpoint (auto)")
+func TestAddedThrowawayPaths_KeepsWhitespaceAndNewlinesInPaths(t *testing.T) {
+	t.Parallel()
+	r := newFakeRepo(t)
+	base := r.headCommit()
+	r.checkoutNew("polecat/garnet/gt-ozo4")
+	r.commit(WIPCommitPrefix, "scratch/notes copy.md", "scratch\n")
+	r.commit(WIPCommitPrefix, "scratch/two\nlines.md", "scratch\n")
+	r.commit(WIPCommitPrefix, "zz_trailing ", "scratch\n")
 
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
+	found, err := addedThrowawayPaths(r.run, fakeDir, base, "HEAD")
 	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
+		t.Fatalf("addedThrowawayPaths: %v", err)
 	}
-	if len(found) != 1 || found[0] != "scratch/notes copy.md" {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want [scratch/notes copy.md]", found)
-	}
-}
-
-// addCommitInDir is addCommit for paths whose parent directory does not exist
-// yet (initTestRepo's repo has none).
-func addCommitInDir(t *testing.T, dir, filename, content, msg string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filename)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	addCommit(t, dir, filename, content, msg)
-}
-
-// TestAddedThrowawayPaths_SeesAdditionGitCallsARename pins the fail-open in the
-// gate: a scratch copy of a file the branch also deletes is, to git's rename
-// detection, a rename (status R), and --diff-filter=A does not list renames. The
-// blob still lands in HEAD's tree, so the answer must stay positive.
-func TestAddedThrowawayPaths_SeesAdditionGitCallsARename(t *testing.T) {
-	dir := initTestRepo(t)
-	addCommit(t, dir, "helper.go", "package main\n\nfunc helper() {}\n", "tracked helper")
-	base := mustGitOutput(t, dir, "rev-parse", "HEAD")
-
-	createBranch(t, dir, "polecat/garnet/gt-trpzw")
-	mustGit(t, dir, "mv", "helper.go", "helper_tmp.go")
-	mustGit(t, dir, "commit", "-m", "WIP: checkpoint (auto)")
-
-	found, err := AddedThrowawayPaths(dir, base, "HEAD")
-	if err != nil {
-		t.Fatalf("AddedThrowawayPaths: %v", err)
-	}
-	if len(found) != 1 || found[0] != "helper_tmp.go" {
-		t.Fatalf("AddedThrowawayPaths() = %#v, want [helper_tmp.go]", found)
+	want := []string{"scratch/notes copy.md", "scratch/two\nlines.md", "zz_trailing "}
+	if strings.Join(found, "|") != strings.Join(want, "|") {
+		t.Fatalf("addedThrowawayPaths() = %#v, want %#v", found, want)
 	}
 }
 
-// mustGitOutput runs a git command and returns trimmed stdout.
-func mustGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	out, err := gitOutput(dir, args...)
-	if err != nil {
-		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+func TestSplitNullSeparated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"a\x00", []string{"a"}},
+		{"a b\x00c\nd\x00", []string{"a b", "c\nd"}},
 	}
-	return out
+	for _, tt := range tests {
+		got := splitNullSeparated(tt.in)
+		if strings.Join(got, "|") != strings.Join(tt.want, "|") || len(got) != len(tt.want) {
+			t.Errorf("splitNullSeparated(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
 }

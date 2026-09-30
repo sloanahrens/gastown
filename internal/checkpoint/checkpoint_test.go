@@ -9,6 +9,7 @@ import (
 )
 
 func TestPath(t *testing.T) {
+	t.Parallel()
 	dir := "/some/polecat/dir"
 	got := Path(dir)
 	want := filepath.Join(dir, Filename)
@@ -18,6 +19,7 @@ func TestPath(t *testing.T) {
 }
 
 func TestReadWrite(t *testing.T) {
+	t.Parallel()
 	// Create temp directory
 	tmpDir := t.TempDir()
 
@@ -96,6 +98,7 @@ func TestReadWrite(t *testing.T) {
 }
 
 func TestWritePreservesTimestamp(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create checkpoint with explicit timestamp
@@ -120,6 +123,7 @@ func TestWritePreservesTimestamp(t *testing.T) {
 }
 
 func TestReadCorruptedJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	path := Path(tmpDir)
 
@@ -135,6 +139,7 @@ func TestReadCorruptedJSON(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Write a checkpoint
@@ -166,47 +171,70 @@ func TestRemove(t *testing.T) {
 }
 
 func TestCapture(t *testing.T) {
-	// Use current directory (should be a git repo)
-	cwd, err := os.Getwd()
+	t.Parallel()
+	r := newFakeRepo(t)
+	r.checkoutNew("polecat/garnet/gt-1")
+	tip := r.commit("work", "a.go", "package a")
+	r.status = " M a.go\n?? notes.md\nR  old.go -> new.go\n"
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+	cp, err := capture(r.run, fakeDir, now)
 	if err != nil {
-		t.Fatalf("Getwd: %v", err)
+		t.Fatalf("capture: %v", err)
 	}
-
-	// Find git root
-	gitRoot := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
-			break
-		}
-		parent := filepath.Dir(gitRoot)
-		if parent == gitRoot {
-			t.Skip("not in a git repository")
-		}
-		gitRoot = parent
+	if !cp.Timestamp.Equal(now) {
+		t.Errorf("Timestamp = %v, want %v", cp.Timestamp, now)
 	}
+	if cp.LastCommit != tip {
+		t.Errorf("LastCommit = %q, want %q", cp.LastCommit, tip)
+	}
+	if cp.Branch != "polecat/garnet/gt-1" {
+		t.Errorf("Branch = %q, want polecat/garnet/gt-1", cp.Branch)
+	}
+	want := []string{"a.go", "notes.md", "old.go -> new.go"}
+	if len(cp.ModifiedFiles) != len(want) {
+		t.Fatalf("ModifiedFiles = %q, want %q", cp.ModifiedFiles, want)
+	}
+	for i := range want {
+		if cp.ModifiedFiles[i] != want[i] {
+			t.Errorf("ModifiedFiles[%d] = %q, want %q", i, cp.ModifiedFiles[i], want[i])
+		}
+	}
+}
 
-	cp, err := Capture(gitRoot)
+// A clean tree records no modified files.
+func TestCapture_CleanTree(t *testing.T) {
+	t.Parallel()
+	r := newFakeRepo(t)
+
+	cp, err := capture(r.run, fakeDir, time.Unix(0, 0))
 	if err != nil {
-		t.Fatalf("Capture: %v", err)
+		t.Fatal(err)
 	}
-
-	// Should have timestamp
-	if cp.Timestamp.IsZero() {
-		t.Error("Timestamp should be set")
+	if len(cp.ModifiedFiles) != 0 {
+		t.Errorf("ModifiedFiles = %q, want none", cp.ModifiedFiles)
 	}
-
-	// Should have branch (we're in a git repo)
-	if cp.Branch == "" {
-		t.Error("Branch should be set in git repo")
+	if cp.Branch != "main" {
+		t.Errorf("Branch = %q, want main", cp.Branch)
 	}
+}
 
-	// Should have last commit
-	if cp.LastCommit == "" {
-		t.Error("LastCommit should be set in git repo")
+// Capture never fails: a git command that errors leaves its field empty.
+func TestCapture_GitFailureLeavesFieldsEmpty(t *testing.T) {
+	t.Parallel()
+	failing := func(string, ...string) (string, error) { return "", errFatal }
+
+	cp, err := capture(failing, fakeDir, time.Unix(0, 0))
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if cp.LastCommit != "" || cp.Branch != "" || len(cp.ModifiedFiles) != 0 {
+		t.Errorf("checkpoint = %+v, want the git-derived fields empty", cp)
 	}
 }
 
 func TestWithMolecule(t *testing.T) {
+	t.Parallel()
 	cp := &Checkpoint{}
 	result := cp.WithMolecule("mol-abc", "step-1", "Do the thing")
 
@@ -225,6 +253,7 @@ func TestWithMolecule(t *testing.T) {
 }
 
 func TestWithHookedBead(t *testing.T) {
+	t.Parallel()
 	cp := &Checkpoint{}
 	result := cp.WithHookedBead("gt-123")
 
@@ -237,6 +266,7 @@ func TestWithHookedBead(t *testing.T) {
 }
 
 func TestWithNotes(t *testing.T) {
+	t.Parallel()
 	cp := &Checkpoint{}
 	result := cp.WithNotes("important context")
 
@@ -249,6 +279,7 @@ func TestWithNotes(t *testing.T) {
 }
 
 func TestAge(t *testing.T) {
+	t.Parallel()
 	cp := &Checkpoint{
 		Timestamp: time.Now().Add(-5 * time.Minute),
 	}
@@ -260,6 +291,7 @@ func TestAge(t *testing.T) {
 }
 
 func TestIsStale(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		age       time.Duration
@@ -274,6 +306,7 @@ func TestIsStale(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			cp := &Checkpoint{
 				Timestamp: time.Now().Add(-tt.age),
 			}
@@ -286,6 +319,7 @@ func TestIsStale(t *testing.T) {
 }
 
 func TestSummary(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		cp   *Checkpoint
@@ -336,6 +370,7 @@ func TestSummary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := tt.cp.Summary()
 			if got != tt.want {
 				t.Errorf("Summary() = %q, want %q", got, tt.want)
@@ -345,6 +380,7 @@ func TestSummary(t *testing.T) {
 }
 
 func TestCheckpointJSONRoundtrip(t *testing.T) {
+	t.Parallel()
 	original := &Checkpoint{
 		MoleculeID:    "mol-test",
 		CurrentStep:   "step-2",
