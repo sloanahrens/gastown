@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -140,17 +141,22 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 
 			// Unassign any beads assigned to this crew member
 			agentAddr := fmt.Sprintf("%s/crew/%s", r.Name, name)
-			unassignArgs := []string{"list", "--assignee=" + agentAddr, "--format=id"}
+			// Machine mode ignores --format=id and prints full issues, so read ids from --json.
+			unassignArgs := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + agentAddr, "--json"})
 			unassignCmd := beads.CommandWithEnv(r.Path, nil, unassignArgs...)
-			if output, err := unassignCmd.CombinedOutput(); err == nil {
-				ids := strings.Fields(strings.TrimSpace(string(output)))
-				for _, id := range ids {
-					if id == "" {
-						continue
-					}
-					updateCmd := beads.CommandWithEnv(r.Path, nil, "update", id, "--unassign")
-					if _, err := updateCmd.CombinedOutput(); err == nil {
-						fmt.Printf("Unassigned: %s\n", id)
+			if output, err := unassignCmd.Output(); err == nil {
+				var assigned []struct {
+					ID string `json:"id"`
+				}
+				if json.Unmarshal(output, &assigned) == nil {
+					for _, issue := range assigned {
+						if issue.ID == "" {
+							continue
+						}
+						updateCmd := beads.CommandWithEnv(r.Path, nil, "update", issue.ID, "--unassign")
+						if _, err := updateCmd.CombinedOutput(); err == nil {
+							fmt.Printf("Unassigned: %s\n", issue.ID)
+						}
 					}
 				}
 			}

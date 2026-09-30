@@ -1196,14 +1196,24 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 	return "", lastErr
 }
 
-// bdJSONErrorMessage returns the "error" field of a bd --json failure payload,
-// the trimmed raw output when it has another shape, or "" when bd printed nothing.
+// bdJSONErrorMessage returns the message of a bd failure payload (the machine
+// envelope's error.message, or the legacy {"error": "..."} string), the trimmed
+// raw output when it has another shape, or "" when bd printed nothing.
 func bdJSONErrorMessage(out []byte) string {
 	var payload struct {
-		Error string `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(out, &payload) == nil && payload.Error != "" {
-		return payload.Error
+	if json.Unmarshal(out, &payload) == nil && len(payload.Error) > 0 {
+		var typed struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(payload.Error, &typed) == nil && typed.Message != "" {
+			return typed.Message
+		}
+		var legacy string
+		if json.Unmarshal(payload.Error, &legacy) == nil && legacy != "" {
+			return legacy
+		}
 	}
 	return trimJSONForError(out)
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -141,11 +142,12 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 		waitFn:   d.dogPourWaitFn,
 	}
 
-	// Build args: bd mol wisp <formula> --var k=v ...
+	// Build args: bd mol wisp <formula> --var k=v ... --json
 	args := []string{"mol", "wisp", formulaName}
 	for k, v := range vars {
 		args = append(args, "--var", fmt.Sprintf("%s=%s", k, v))
 	}
+	args = append(args, "--json")
 
 	out, attempts, err := dm.pourWithRetry(args)
 	if err != nil {
@@ -155,8 +157,8 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 		return dm
 	}
 
-	// Parse root ID from output. bd mol wisp prints the root ID on the first line.
-	// Example output: "✓ Spawned wisp: gt-wisp-abc123 — Reap stale wisps..."
+	// Parse root ID from output: the JSON bd mol wisp prints names it in
+	// new_epic_id (root_id or result_id on other bd builds).
 	dm.rootID = parseWispID(out)
 	if dm.rootID == "" {
 		// The wisp exists but cannot be addressed, so every closeStep and close
@@ -700,9 +702,23 @@ func (dm *dogMol) runBd(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// parseWispID extracts a wisp ID from bd mol wisp output.
-// Looks for patterns like "gt-wisp-abc123" or any ID containing "-wisp-".
+// parseWispID extracts a wisp ID from bd mol wisp output: the JSON object
+// `--json` prints, or the text of a bd that predates it, where it looks for
+// patterns like "gt-wisp-abc123" or any ID containing "-wisp-".
 func parseWispID(output string) string {
+	if trimmed := strings.TrimSpace(output); strings.HasPrefix(trimmed, "{") {
+		// JSON without an id is no id: scanning its text would pick up a
+		// timestamp or slug as the root.
+		var created struct {
+			NewEpicID string `json:"new_epic_id"`
+			RootID    string `json:"root_id"`
+			ResultID  string `json:"result_id"`
+		}
+		if json.Unmarshal([]byte(trimmed), &created) != nil {
+			return ""
+		}
+		return cmp.Or(created.NewEpicID, created.RootID, created.ResultID)
+	}
 	for _, word := range strings.Fields(output) {
 		// Strip ANSI codes and punctuation.
 		cleaned := stripANSI(word)

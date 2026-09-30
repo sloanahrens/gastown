@@ -963,7 +963,7 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
 	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "show", issueID, "--json")
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
@@ -1075,7 +1075,7 @@ func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
 	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "update", issueID, "--status=hooked", "--assignee="+agentID)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bd update failed: %w", err)

@@ -36,7 +36,10 @@ knows. gastown never installs `bd`.
 
 - The fork's `bd` grows a machine mode (`BD_MACHINE=1`: no TTY, UI, metrics, plugins, prose or
   stdin), a default JSON envelope with a contract version and typed error kinds, and
-  `bd capabilities --json`. gastown sets machine mode on every call.
+  `bd capabilities --json`. gastown sets machine mode on every call: the environment policy
+  (`SuppressBDSideEffects`) adds `BD_MACHINE=1`, and callers read the payload through
+  `beads.LegacyPayload`. The calls that run outside it (`bd sql`, whose machine output loses column
+  order, and the two terminal passthroughs) are listed in `internal/beads/machine_policy_test.go`.
 - Every `beads.Client` method lands with its in-memory fake and a contract-suite case in the same
   change, enforced by a test that diffs the interface against the fake.
 - Agents may call only a read-only `bd` allowlist from formulas and templates; every mutation goes

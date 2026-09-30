@@ -45,7 +45,7 @@ func CheckBeads() (BeadsStatus, string) {
 	// to prevent stale shell state from leaking into version checks.
 	baseEnv := beads.StripBDTargetEnv(os.Environ())
 	cmd := beads.CommandContextWithEnv(ctx, "", baseEnv, "version")
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	output, err := cmd.Output()
 	return beadsStatusFromOutput(output, err)
 }
@@ -83,11 +83,20 @@ func beadsErrorForStatus(status BeadsStatus) error {
 	}
 }
 
-// parseBeadsVersion extracts version from "bd version X.Y.Z ..." output.
+var (
+	beadsVersionTextRE = regexp.MustCompile(`bd version (\d+\.\d+\.\d+)`)
+	beadsSemverRE      = regexp.MustCompile(`^\d+\.\d+\.\d+`)
+)
+
+// parseBeadsVersion extracts the version from `bd version`: the JSON object
+// machine mode prints ({"version":"1.2.2",...}) or the text of a bd from
+// before it ("bd version X.Y.Z ...").
 func parseBeadsVersion(output string) string {
+	if info, err := ParseBDVersionJSON([]byte(output)); err == nil {
+		return beadsSemverRE.FindString(info.Version)
+	}
 	// Match patterns like "bd version 0.52.0" or "bd version 0.52.0 (dev: ...)"
-	re := regexp.MustCompile(`bd version (\d+\.\d+\.\d+)`)
-	matches := re.FindStringSubmatch(output)
+	matches := beadsVersionTextRE.FindStringSubmatch(output)
 	if len(matches) >= 2 {
 		return matches[1]
 	}

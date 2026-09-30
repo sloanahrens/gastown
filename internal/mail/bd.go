@@ -69,7 +69,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	args = beads.InjectFlatForListJSON(args)
 
 	cmd := beads.CommandContextWithEnv(ctx, workDir, nil, args...)
-	util.SetDetachedProcessGroup(cmd)
+	util.SetDetachedProcessGroup(cmd.Cmd)
 	// cmd.Environ() carries PWD=workDir, which bd's own file discovery reads.
 	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
@@ -91,7 +91,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 		stdout.Reset()
 		stderr.Reset()
 		retryCmd := beads.CommandContextWithEnv(ctx, workDir, cmd.Env, retryArgs...)
-		util.SetDetachedProcessGroup(retryCmd)
+		util.SetDetachedProcessGroup(retryCmd.Cmd)
 		retryCmd.Stdout = &stdout
 		retryCmd.Stderr = &stderr
 		runErr = retryCmd.Run()

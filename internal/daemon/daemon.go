@@ -3394,7 +3394,7 @@ func (d *Daemon) emitMassDeathEvent() {
 // silently suppressing alerts.
 func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
-	setSysProcAttr(cmd)
+	setSysProcAttr(cmd.Cmd)
 
 	output, err := cmd.Output()
 	if err != nil {

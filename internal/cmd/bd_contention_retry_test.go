@@ -159,3 +159,25 @@ func TestBdContentionRetryable(t *testing.T) {
 		})
 	}
 }
+
+// A failed bond's cause is read from the machine envelope's typed error as well
+// as the legacy {"error": "..."} string.
+func TestBdJSONErrorMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"machine envelope", `{"schema_version":1,"contract_version":1,"data":null,"error":{"kind":"internal","message":"Error 1213 (40001): serialization failure"}}`, "Error 1213 (40001): serialization failure"},
+		{"legacy string", `{"error":"creating wisp: boom"}`, "creating wisp: boom"},
+		{"other shape", "not json\n", "not json"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdJSONErrorMessage([]byte(tt.out)); got != tt.want {
+				t.Fatalf("bdJSONErrorMessage = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

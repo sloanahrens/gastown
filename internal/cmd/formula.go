@@ -236,10 +236,7 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
-	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
-	bdCmd.Stdout = os.Stdout
-	bdCmd.Stderr = os.Stderr
-	return bdCmd.Run()
+	return passBdFormulaOutput(bdArgs, formulaListJSON)
 }
 
 // runFormulaShow delegates to bd formula show
@@ -250,10 +247,30 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 		bdArgs = append(bdArgs, "--json")
 	}
 
+	return passBdFormulaOutput(bdArgs, formulaShowJSON)
+}
+
+// passBdFormulaOutput prints bd's answer for the operator. With asJSON the
+// caller gets the --json payload (the envelope's data); without it bd's own
+// prose, which machine mode replaces with the envelope, so that run opts out.
+func passBdFormulaOutput(bdArgs []string, asJSON bool) error {
 	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
-	bdCmd.Stdout = os.Stdout
 	bdCmd.Stderr = os.Stderr
-	return bdCmd.Run()
+	if !asJSON {
+		bdCmd.Env = beads.WithoutMachineEnv(bdCmd.Env)
+		bdCmd.Stdout = os.Stdout
+		return bdCmd.Run()
+	}
+
+	// A buffer, not os.Stdout, so beads.Cmd unwraps the envelope. A failure
+	// leaves its envelope in the buffer; bd's message is already on stderr.
+	var stdout bytes.Buffer
+	bdCmd.Stdout = &stdout
+	if err := bdCmd.Run(); err != nil {
+		return err
+	}
+	_, err := os.Stdout.Write(stdout.Bytes())
+	return err
 }
 
 // runFormulaRun executes a formula by spawning a convoy of polecats.

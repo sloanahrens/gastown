@@ -2379,6 +2379,26 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 		}
 	})
 
+	t.Run("machine mode value round-trips", func(t *testing.T) {
+		// Machine mode prints the value inside an envelope, with bd's
+		// diagnostics on stderr; neither may reach the prefix comparison.
+		script := "#!/bin/sh\n" +
+			"if [ \"$1\" = \"config\" ] && [ \"$2\" = \"get\" ] && [ \"$3\" = \"issue_prefix\" ]; then\n" +
+			"  echo 'Note: using routed database' >&2\n" +
+			"  echo '{\"schema_version\":1,\"contract_version\":1,\"data\":{\"key\":\"issue_prefix\",\"value\":\"gt\"},\"pagination\":null,\"error\":null}'\n" +
+			"  exit 0\n" +
+			"fi\n" +
+			"exit 0\n"
+		windowsScript := "@echo off\r\nif \"%1 %2 %3\"==\"config get issue_prefix\" (\r\n  echo {\"schema_version\":1,\"contract_version\":1,\"data\":{\"key\":\"issue_prefix\",\"value\":\"gt\"},\"pagination\":null,\"error\":null}\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
+		binDir := writeFakeBD(t, script, windowsScript)
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		manager, rigPath := setupIdentityRig(t, rigName)
+		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
+			t.Errorf("verifyRigIdentity = %v, want nil", err)
+		}
+	})
+
 	t.Run("uninitialized database fails round-trip", func(t *testing.T) {
 		script := "#!/bin/sh\n" +
 			"echo \"Error: database not initialized: issue_prefix missing\" >&2\n" +

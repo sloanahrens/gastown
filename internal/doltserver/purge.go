@@ -62,7 +62,7 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	defer cancel()
 
 	cmd := beads.CommandContextWithEnv(ctx, filepath.Dir(beadsDir), env, args...) // run from parent of .beads
-	setProcessGroup(cmd)
+	setProcessGroup(cmd.Cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

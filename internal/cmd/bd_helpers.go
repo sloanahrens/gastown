@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -167,9 +166,10 @@ func (b *bdCmd) buildEnv() []string {
 	return beads.EnvForSubprocessMode(env, beadsDir, mode)
 }
 
-// Build returns the configured exec.Cmd.
-// This allows callers to further customize the command before execution.
-func (b *bdCmd) Build() *exec.Cmd {
+// Build returns the configured command, in machine mode. The embedded
+// exec.Cmd can be customized before execution; beads.Cmd documents which
+// ways of collecting stdout hand back the unwrapped payload.
+func (b *bdCmd) Build() *beads.Cmd {
 	args := b.resolvedArgs()
 	cmd := beads.CommandWithEnv(b.dir, b.buildEnv(), args...)
 	cmd.Stdin = b.stdin
@@ -194,10 +194,10 @@ func (b *bdCmd) deadline() time.Duration {
 	return resolveBdCmdTimeout()
 }
 
-func (b *bdCmd) buildContextCommand(ctx context.Context) *exec.Cmd {
+func (b *bdCmd) buildContextCommand(ctx context.Context) *beads.Cmd {
 	args := b.resolvedArgs()
 	cmd := beads.CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
-	util.SetProcessGroup(cmd)
+	util.SetProcessGroup(cmd.Cmd)
 	cmd.Stdin = b.stdin
 	cmd.Stderr = b.stderr
 	return cmd
@@ -291,7 +291,7 @@ func (b *bdCmd) CombinedOutput() ([]byte, error) {
 	defer cancel()
 	args := b.resolvedArgs()
 	cmd := beads.CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
-	util.SetProcessGroup(cmd)
+	util.SetProcessGroup(cmd.Cmd)
 	cmd.Stdin = b.stdin
 	out, err := cmd.CombinedOutput()
 	return out, b.wrapCommandError(ctx, err, deadline)
