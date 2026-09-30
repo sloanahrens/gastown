@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/witness"
 )
 
@@ -226,9 +228,21 @@ type patrolWatchdogFinding struct {
 // patrolWatchdogSessionAlive is the watchdog's liveness reader. A failed
 // query is unknown, not dead: a dead session passes the watchdog outright, so
 // unknown reads as alive and the patrol is judged by its receipts (gt-fcxe9.1).
+//
+// A session that does not exist is a different answer from a query that
+// failed. The one question this reader answers is whether an agent is alive
+// in the session, and "there is no session" answers it; treating that as
+// unknown read a gone role as awake-but-silent and then nudged the session it
+// had just called alive, which `gt nudge` refused as nonexistent (gt-jv0k3).
+// tmux reports the missing case as ErrSessionNotFound (internal/tmux
+// wrapError), so there is nothing here to judge by receipts.
 func (d *Daemon) patrolWatchdogSessionAlive(target patrolWatchdogTarget) bool {
 	alive, err := d.tmux.IsAgentAliveChecked(target.Session)
 	if err != nil {
+		if errors.Is(err, tmux.ErrSessionNotFound) {
+			d.logger.Printf("patrol_watchdog: %s has no session (%v); nothing to judge", target.Session, err)
+			return false
+		}
 		d.logger.Printf("patrol_watchdog: %s liveness unknown (%v); judging by receipts", target.Session, err)
 		return true
 	}

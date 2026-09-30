@@ -137,6 +137,11 @@ func TestWrapError(t *testing.T) {
 		{"duplicate session: test", ErrSessionExists},
 		{"session not found: test", ErrSessionNotFound},
 		{"can't find session: test", ErrSessionNotFound},
+		// tmux 3.7c's wording for the session-environment commands
+		// (show-environment, set-environment), which has-session and
+		// kill-session do not use. Without it a missing session reached
+		// callers as an unclassified error (gt-jv0k3).
+		{"no such session: test", ErrSessionNotFound},
 	}
 
 	for _, tt := range tests {

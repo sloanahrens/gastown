@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -66,5 +67,25 @@ func TestZombieStatus_CountsAsRunning(t *testing.T) {
 		if got := status.CountsAsRunning(); got != want {
 			t.Errorf("%v.CountsAsRunning() = %v, want %v", status, got, want)
 		}
+	}
+}
+
+// TestIsAgentAliveChecked_MissingSessionIsNotFound pins the other half of
+// gt-fcxe9.1 (gt-jv0k3): the rule above covers a query that could not be
+// answered, not a session that is gone. A reader has to be able to tell the
+// two apart, so the missing case reaches it as ErrSessionNotFound. The fake
+// server here answers with tmux 3.7c's own wording — show-environment says
+// "no such session" — and TestIntegrationFakeServerMatchesTmux replays it
+// against real tmux.
+func TestIsAgentAliveChecked_MissingSessionIsNotFound(t *testing.T) {
+	t.Parallel()
+	tm, _ := newFakeServer().tmux(nil)
+
+	alive, err := tm.IsAgentAliveChecked("gt-gone")
+	if alive {
+		t.Fatal("a session that does not exist reported a live agent")
+	}
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("IsAgentAliveChecked on a missing session = %v, want ErrSessionNotFound", err)
 	}
 }
