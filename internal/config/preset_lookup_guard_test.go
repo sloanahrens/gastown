@@ -17,9 +17,9 @@ import (
 // (relative to internal/) + "#" + enclosing function. Anything else must use
 // ResolveAgentPreset (claude-9a8).
 var allowedPresetLookups = map[string]bool{
-	"cmd/config.go#runConfigAgentList": true,
-	// runConfigAgentGet checks town custom agents before this built-in lookup.
-	"cmd/config.go#runConfigAgentGet":          true,
+	"cmd/config.go#configAgentList": true,
+	// configAgentGet checks town custom agents before this built-in lookup.
+	"cmd/config.go#configAgentGet":             true,
 	"runtime/runtime.go#EnsureSettingsForRole": true,
 	"crew/manager.go#buildResumeArgs":          true,
 	"crew/manager.go#Start":                    true,

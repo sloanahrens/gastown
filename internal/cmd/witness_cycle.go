@@ -185,7 +185,12 @@ func runtimeSessionID(dir string) string {
 // caller's patrol role, so `gt patrol report` can tell a quiet cycle from a
 // busy one without trusting the agent's memory. Best-effort.
 func recordAwaitSignalOutcome(townRoot string, result *AwaitSignalResult, fullTimeout, backoffMax time.Duration) {
-	dir := patrolCycleDir(townRoot, os.Getenv("GT_ROLE"))
+	recordAwaitSignalOutcomeFor(townRoot, os.Getenv("GT_ROLE"), result, fullTimeout, backoffMax)
+}
+
+// recordAwaitSignalOutcomeFor is recordAwaitSignalOutcome for a given role.
+func recordAwaitSignalOutcomeFor(townRoot, role string, result *AwaitSignalResult, fullTimeout, backoffMax time.Duration) {
+	dir := patrolCycleDir(townRoot, role)
 	if dir == "" {
 		return
 	}

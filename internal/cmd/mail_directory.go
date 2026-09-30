@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -47,15 +48,28 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return writeMailDirectory(os.Stdout, os.Stderr, beads.New(townRoot), mailDirJSON)
+}
 
-	b := beads.New(townRoot)
+// mailDirectorySource lists the addressable beads of a town.
+type mailDirectorySource interface {
+	ListAgentBeads() (map[string]*beads.Issue, error)
+	ListGroupBeads() (map[string]*beads.GroupFields, error)
+	ListQueueBeads() (map[string]*beads.Issue, error)
+	ListChannelBeads() (map[string]*beads.ChannelFields, error)
+}
+
+// writeMailDirectory writes the address directory of b to out, as JSON or a
+// table; listing failures are warnings on errOut.
+func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON bool) error {
+	var err error
 	var entries []DirectoryEntry
 	var warnings int
 
 	// 1. Agent addresses
 	agents, err := b.ListAgentBeads()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not list agents: %v\n", err)
+		fmt.Fprintf(errOut, "warning: could not list agents: %v\n", err)
 		warnings++
 	} else {
 		for id := range agents {
@@ -69,7 +83,7 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	// 2. Group addresses
 	groups, err := b.ListGroupBeads()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not list groups: %v\n", err)
+		fmt.Fprintf(errOut, "warning: could not list groups: %v\n", err)
 		warnings++
 	} else {
 		for name := range groups {
@@ -80,7 +94,7 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	// 3. Queue addresses
 	queues, err := b.ListQueueBeads()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not list queues: %v\n", err)
+		fmt.Fprintf(errOut, "warning: could not list queues: %v\n", err)
 		warnings++
 	} else {
 		for id, issue := range queues {
@@ -89,7 +103,7 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 			}
 			fields := beads.ParseQueueFields(issue.Description)
 			if fields.Name == "" {
-				fmt.Fprintf(os.Stderr, "warning: queue %s has no name field, skipping\n", id)
+				fmt.Fprintf(errOut, "warning: queue %s has no name field, skipping\n", id)
 				continue
 			}
 			entries = append(entries, DirectoryEntry{Address: "queue:" + fields.Name, Type: "queue"})
@@ -99,7 +113,7 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	// 4. Channel addresses
 	channels, err := b.ListChannelBeads()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not list channels: %v\n", err)
+		fmt.Fprintf(errOut, "warning: could not list channels: %v\n", err)
 		warnings++
 	} else {
 		for name := range channels {
@@ -138,14 +152,14 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 		return entries[i].Address < entries[j].Address
 	})
 
-	if mailDirJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if asJSON {
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(entries)
 	}
 
 	// Text output grouped by type
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ADDRESS\tTYPE")
 	for _, e := range entries {
 		fmt.Fprintf(w, "%s\t%s\n", e.Address, e.Type)
@@ -154,9 +168,9 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if warnings > 0 {
-		fmt.Fprintf(os.Stdout, "\nListed %d addresses (%d warnings)\n", len(entries), warnings)
+		fmt.Fprintf(out, "\nListed %d addresses (%d warnings)\n", len(entries), warnings)
 	} else {
-		fmt.Fprintf(os.Stdout, "\nListed %d addresses\n", len(entries))
+		fmt.Fprintf(out, "\nListed %d addresses\n", len(entries))
 	}
 	return nil
 }
