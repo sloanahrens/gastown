@@ -411,6 +411,45 @@ func TestRun_RequestChangesNoReviewedHeadChange(t *testing.T) {
 	}
 }
 
+// The gate's per-finding `detail` must reach the note, not just the title:
+// verdictJSON and Note share Finding, so the field is only useful if the
+// parse keeps it (gt-1ps62).
+func TestRun_NoteCarriesFindingDetail(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{
+				Score: 0.4, Verdict: "request_changes",
+				Findings: []Finding{
+					{Title: "leaky abstraction", Severity: "major", Detail: "refunds read the ledger directly"},
+					{Title: "nit", Severity: "minor"},
+				},
+			})
+			return "", 1, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Note == nil {
+		t.Fatal("expected a note")
+	}
+	if len(result.Note.Findings) != 2 {
+		t.Fatalf("note findings = %d, want 2", len(result.Note.Findings))
+	}
+	if got := result.Note.Findings[0].Detail; got != "refunds read the ledger directly" {
+		t.Errorf("findings[0].Detail = %q, want the verdict's detail carried through", got)
+	}
+	if got := result.Note.Findings[1].Detail; got != "" {
+		t.Errorf("findings[1].Detail = %q, want empty", got)
+	}
+}
+
 // TestRun_TimeoutOverrideReachesGateArgsAndNote pins both halves of the
 // ReviewRequest.TimeoutSeconds contract: a set override is appended to the
 // gate-script args (which the gate script forwards to `om review

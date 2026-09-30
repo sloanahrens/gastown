@@ -80,6 +80,54 @@ func TestWriteNoteReadNote_RoundTrip(t *testing.T) {
 	}
 }
 
+// A finding's Detail reaches the note, so the proof carries the argument
+// behind a title rather than the headline alone (gt-1ps62).
+func TestWriteNoteReadNote_FindingDetailRoundTrips(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := git.NewGit(dir)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+
+	n := recordedNote(diffLookedFor, rubricDeployed, VerdictRequestChanges, "1.4.0", time.Now().UTC())
+	n.HeadSHA = head
+	n.FindingsCount = 2
+	n.Findings = []Finding{
+		{ID: "f1", Severity: "major", Path: "a.go", Line: 3, Title: "leaky abstraction", Detail: "refunds read the ledger directly"},
+		{ID: "f2", Severity: "minor", Title: "nit"},
+	}
+	if err := WriteNote(g, n); err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	got, err := ReadNote(g, head)
+	if err != nil {
+		t.Fatalf("ReadNote: %v", err)
+	}
+	if len(got.Findings) != 2 {
+		t.Fatalf("ReadNote findings = %d, want 2", len(got.Findings))
+	}
+	if got.Findings[0].Detail != n.Findings[0].Detail {
+		t.Errorf("findings[0].Detail = %q, want %q", got.Findings[0].Detail, n.Findings[0].Detail)
+	}
+
+	// The key is present only when there is detail: a finding without one
+	// leaves the note byte-identical to a note written before the field
+	// existed.
+	raw, err := g.NotesShow(NotesRef, head)
+	if err != nil {
+		t.Fatalf("NotesShow: %v", err)
+	}
+	if strings.Count(raw, `"detail"`) != 1 {
+		t.Errorf("note JSON has %d \"detail\" keys, want 1 — the detail-bearing finding only, got: %s", strings.Count(raw, `"detail"`), raw)
+	}
+	if !strings.Contains(raw, `"detail":"refunds read the ledger directly"`) {
+		t.Errorf("note JSON missing the carried detail, got: %s", raw)
+	}
+}
+
 func TestReadNote_NoNoteReturnsErrNoNote(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
