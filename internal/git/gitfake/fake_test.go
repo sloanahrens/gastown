@@ -36,3 +36,8 @@ func TestFakeBranchContract(t *testing.T) {
 	t.Parallel()
 	RunBranchContract(t, func(t *testing.T) BranchEnv { return New() })
 }
+
+func TestFakePathContract(t *testing.T) {
+	t.Parallel()
+	RunPathContract(t, func(t *testing.T) BranchEnv { return New() })
+}
