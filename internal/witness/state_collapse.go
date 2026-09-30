@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -341,9 +342,14 @@ type BranchRefSource struct {
 	// remote (e.g. "polecat/pyrite/gt-hsg+mttuo7sf", without the
 	// "refs/heads/" prefix).
 	ListPolecatBranches func() ([]string, error)
-	// TargetHasCommitReferencing reports whether any commit reachable from
-	// the target branch's remote-tracking ref mentions issueID in its
-	// message.
+	// TargetHasCommitReferencing reports whether any commit on the target
+	// branch mentions issueID in its message.
+	//
+	// It answers about the remote's branch as it stands now, never a cached
+	// copy: the scan turns a false answer into a stranded-branch finding, so
+	// a stale view fabricates one (gt-sichu). An implementation that cannot
+	// reach current state returns an error, and the scan declines that
+	// candidate rather than judging it.
 	TargetHasCommitReferencing func(target, issueID string) (bool, error)
 	// ListOpenMRs returns the merge-request beads currently open in the
 	// rig's queue, used to suppress the false strand (gt-akap): a polecat
@@ -477,11 +483,46 @@ func pendingMRFromCloseReason(closeReason string) string {
 // in prose from being read as the suffix.
 var closureAttemptSuffixRe = regexp.MustCompile(`\(attempt\s+(\d+)\)\s*$`)
 
+// branchRefFetchTimeout bounds the refresh of origin/<target> that the strand
+// grep depends on. The generic remote-query bound, not the lander's
+// two-minute fetchTimeout: a patrol scan reports a remote that has not
+// answered as unknown instead of waiting on it.
+const branchRefFetchTimeout = git.RemoteQueryTimeout
+
 // DefaultBranchRefSource returns a BranchRefSource backed by a real git
 // remote, rooted at repoPath (the rig's canonical clone, e.g.
 // "<rig>/mayor/rig").
+//
+// It refreshes origin/<target> before the strand grep reads it: a landing
+// pushed straight to the remote never touches that clone, so the unfetched
+// ref reports the branch that just landed as a strand (gt-sichu).
 func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 	g := git.NewGit(repoPath)
+
+	// One refresh per target per process: every candidate in a scan is
+	// judged against the same fetched ref, and a remote that is unreachable
+	// answers the same way for each of them.
+	//
+	// An error is memoized as an error, never as "grep the stale ref anyway"
+	// — "could not look" must not read as "not there", which is the false
+	// strand itself (gt-sichu).
+	var (
+		refreshMu sync.Mutex
+		refreshed = map[string]error{}
+	)
+	refreshTarget := func(target string) error {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		if err, done := refreshed[target]; done {
+			return err
+		}
+		err := g.FetchRefspecWithTimeout("origin",
+			fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", target, target),
+			branchRefFetchTimeout)
+		refreshed[target] = err
+		return err
+	}
+
 	return &BranchRefSource{
 		ListPolecatBranches: func() ([]string, error) {
 			refs, err := g.ListRemoteRefsWithHashes("origin", "refs/heads/polecat/")
@@ -495,6 +536,9 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 			return names, nil
 		},
 		TargetHasCommitReferencing: func(target, issueID string) (bool, error) {
+			if err := refreshTarget(target); err != nil {
+				return false, fmt.Errorf("fetching origin/%s: %w", target, err)
+			}
 			return g.LogGrep("origin/"+target, issueID)
 		},
 	}
@@ -537,6 +581,12 @@ func DefaultBranchRefSource(repoPath string) *BranchRefSource {
 //     commit carries no issue token) and the landing MR is purged, so git
 //     state cannot tell it from a strand; the issue's own record can, and
 //     those candidates are returned in Superseded rather than dropped.
+//
+// One further class is not a filter but a freshness requirement on the ref
+// this scan reads: a landing that went straight to the remote is invisible to
+// a canonical clone that has not fetched since, so an unrefreshed
+// origin/<target> reports the branch that just landed as a strand (gt-sichu).
+// The obligation sits with TargetHasCommitReferencing — see its field comment.
 //
 // Because the finding asserts the absence of an MR, an unavailable MR
 // lookup cannot produce a finding at all: refs.ListOpenMRs is required, and
