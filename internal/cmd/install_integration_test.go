@@ -76,10 +76,6 @@ func TestInstallCreatesCorrectStructure(t *testing.T) {
 	// Mayor settings go here to avoid polluting child workspaces via directory traversal
 	mayorSettingsPath := filepath.Join(hqPath, "mayor", ".claude", "settings.json")
 	assertFileExists(t, mayorSettingsPath, "mayor/.claude/settings.json")
-
-	// Verify deacon settings exist in deacon/.claude/
-	deaconSettingsPath := filepath.Join(hqPath, "deacon", ".claude", "settings.json")
-	assertFileExists(t, deaconSettingsPath, "deacon/.claude/settings.json")
 }
 
 // TestInstallBeadsHasCorrectPrefix validates that beads is initialized
@@ -375,8 +371,7 @@ func TestInstallFormulasProvisioned(t *testing.T) {
 
 	// Verify at least some expected formulas exist
 	expectedFormulas := []string{
-		"mol-deacon-patrol.formula.toml",
-		"mol-refinery-patrol.formula.toml",
+		"mol-polecat-work.formula.toml",
 		"code-review.formula.toml",
 	}
 	for _, f := range expectedFormulas {
@@ -597,7 +592,7 @@ func TestInstallDoctorClean(t *testing.T) {
 	// 2. Verify core structure exists
 	t.Run("verify-structure", func(t *testing.T) {
 		assertDirExists(t, filepath.Join(hqPath, "mayor"), "mayor/")
-		assertDirExists(t, filepath.Join(hqPath, "deacon"), "deacon/")
+		assertDirExists(t, filepath.Join(hqPath, "deacon", "dogs"), "deacon/dogs/ (dog kennel)")
 		assertDirExists(t, filepath.Join(hqPath, ".beads"), ".beads/")
 		assertFileExists(t, filepath.Join(hqPath, "mayor", "town.json"), "mayor/town.json")
 		assertFileExists(t, filepath.Join(hqPath, "mayor", "rigs.json"), "mayor/rigs.json")
@@ -655,8 +650,6 @@ func TestInstallDoctorClean(t *testing.T) {
 	t.Run("verify-rig-structure", func(t *testing.T) {
 		rigPath := filepath.Join(hqPath, "testrig")
 		assertDirExists(t, rigPath, "testrig/")
-		assertDirExists(t, filepath.Join(rigPath, "witness"), "testrig/witness/")
-		assertDirExists(t, filepath.Join(rigPath, "refinery"), "testrig/refinery/")
 		assertDirExists(t, filepath.Join(rigPath, ".repo.git"), "testrig/.repo.git/")
 	})
 
