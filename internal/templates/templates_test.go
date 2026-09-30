@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestNew(t *testing.T) {
@@ -35,7 +33,6 @@ func TestRenderRole_Mayor(t *testing.T) {
 		WorkDir:       "/test/town",
 		DefaultBranch: "main",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("mayor", data)
@@ -70,7 +67,6 @@ func TestRenderRole_Polecat(t *testing.T) {
 		DefaultBranch: "main",
 		Polecat:       "TestCat",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -107,7 +103,6 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "TestCat",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -142,7 +137,6 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "alex",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -156,107 +150,6 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 	for _, forbidden := range []string{"Crew workers push directly to main", "git push                    # Direct to main", "Refinery immediately", "origin/main", "commit directly to main"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("fork crew output contains stale direct-main guidance %q:\n%s", forbidden, output)
-		}
-	}
-}
-
-func TestRenderRole_Deacon(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "deacon",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("deacon", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "Deacon Context") {
-		t.Error("output missing 'Deacon Context'")
-	}
-	if !strings.Contains(output, "/test/town") {
-		t.Error("output missing town root")
-	}
-	if !strings.Contains(output, "Patrol Executor") {
-		t.Error("output missing role description")
-	}
-	if !strings.Contains(output, "Startup Protocol: Propulsion") {
-		t.Error("output missing startup protocol section")
-	}
-	if !strings.Contains(output, constants.MolDeaconPatrol) {
-		t.Error("output missing patrol molecule reference")
-	}
-}
-
-// TestRenderRole_Witness_NoCycleBasedStop pins the fix for gt-oabl: the witness
-// patrol loop must have exactly one exit (context HIGH from context-check). The
-// template used to tell the witness to hand off after 15 patrol loops or after
-// any "extraordinary action", which is read on every cycle from a
-// hand-maintained state.json counter that no code ever bounded — the om witness
-// obeyed it at patrol_count 610 and sat at the prompt, abandoning the rig.
-//
-// The formula (mol-witness-patrol, step loop-or-exit) says the opposite — loop
-// unless context is HIGH — so a reintroduced stop rule here is a real
-// regression, not a style question. The deacon template deliberately keeps its
-// own counter block (it hands off every cycle by design); this guard is
-// witness-only.
-func TestRenderRole_Witness_NoCycleBasedStop(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "witness",
-		RigName:       "testrig",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/testrig/witness",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("witness", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, "Witness Context") {
-		t.Error("output missing 'Witness Context'")
-	}
-
-	// No cycle-count stop, and no "extraordinary action" stop.
-	for _, banned := range []string{
-		"15 patrol loops",
-		"patrol_count >= 15",
-		"extraordinary_action",
-		"Extraordinary actions",
-	} {
-		if strings.Contains(output, banned) {
-			t.Errorf("witness template still carries a stop trigger: %q", banned)
-		}
-	}
-
-	// The loop must be stated as mandatory, and the single exit named.
-	for _, required := range []string{
-		"Never end your turn",
-		"exactly one exit",
-		constants.MolWitnessPatrol,
-	} {
-		if !strings.Contains(output, required) {
-			t.Errorf("witness template missing loop mandate %q", required)
 		}
 	}
 }
@@ -334,7 +227,6 @@ func TestRenderRole_Dog(t *testing.T) {
 		WorkDir:       "/test/town/deacon/dogs/Fido",
 		DefaultBranch: "main",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("dog", data)
@@ -401,7 +293,6 @@ func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {
 		WorkDir:       customTownRoot + "/deacon/dogs/Rover",
 		DefaultBranch: "main",
 		MayorSession:  "gt-instance-mayor",
-		DeaconSession: "gt-instance-deacon",
 	}
 
 	output, err := tmpl.RenderRole("dog", data)
@@ -448,7 +339,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -457,18 +348,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				Role: "mayor", TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2,
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "witness",
-			data: RoleData{
-				Role: "witness", RigName: "myrig",
-				TownRoot: customTownRoot2, TownName: "instance",
-				WorkDir:       customTownRoot2 + "/myrig/witness",
-				DefaultBranch: "main",
-				Polecats:      []string{"Cat1", "Cat2"},
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -478,16 +358,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customTownRoot2, TownName: "instance",
-				WorkDir:       customTownRoot2,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		// dog tested separately in TestRenderRole_Dog_NoHardcodedGtPath
@@ -537,7 +408,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -546,7 +417,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				Role: "mayor", TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3,
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -556,16 +427,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customTownRoot3, TownName: "instance",
-				WorkDir:       customTownRoot3,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -575,7 +437,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/deacon/dogs/Rover",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 	}
@@ -620,7 +482,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "polecat", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/polecats/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 		{
@@ -628,16 +490,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 			data: RoleData{
 				Role: "mayor", TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot, DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
-			},
-		},
-		{
-			role: "witness",
-			data: RoleData{
-				Role: "witness", RigName: "myrig",
-				TownRoot: customRoot, TownName: "my-instance",
-				WorkDir: customRoot + "/myrig/witness", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 		{
@@ -646,15 +499,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "crew", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/crew/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customRoot, TownName: "my-instance",
-				WorkDir: customRoot, DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 	}
@@ -687,7 +532,7 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 		Role: "polecat", RigName: "rig1", Polecat: "Worker",
 		TownRoot: customRoot, TownName: "gastown-ci",
 		WorkDir: customRoot + "/rig1/polecats/Worker", DefaultBranch: "main",
-		MayorSession: "gt-gastown-ci-mayor", DeaconSession: "gt-gastown-ci-deacon",
+		MayorSession: "gt-gastown-ci-mayor",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -1038,7 +883,7 @@ func TestRoleNames(t *testing.T) {
 	}
 
 	names := tmpl.RoleNames()
-	expected := []string{"mayor", "witness", "polecat", "crew", "deacon", "boot"}
+	expected := []string{"mayor", "polecat", "crew", "dog"}
 
 	if len(names) != len(expected) {
 		t.Errorf("RoleNames() = %v, want %v", names, expected)
@@ -1047,38 +892,6 @@ func TestRoleNames(t *testing.T) {
 	for i, name := range names {
 		if name != expected[i] {
 			t.Errorf("RoleNames()[%d] = %q, want %q", i, name, expected[i])
-		}
-	}
-}
-
-func TestRenderRole_BootUsesNudgeNotRawTmux(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	output, err := tmpl.RenderRole("boot", RoleData{
-		Role:          "boot",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/deacon/dogs/boot",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	})
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, `gt nudge --mode=immediate deacon "Boot wake: check your inbox"`) {
-		t.Fatalf("boot template missing immediate nudge wake guidance:\n%s", output)
-	}
-	if !strings.Contains(output, "Boot hooks block it") {
-		t.Fatalf("boot template missing raw tmux block rationale:\n%s", output)
-	}
-	for _, forbidden := range []string{"Escape +", "tmux send-keys -t"} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("boot template contains forbidden raw tmux guidance %q:\n%s", forbidden, output)
 		}
 	}
 }
@@ -1420,7 +1233,7 @@ func renderPolecatForTest(t *testing.T) string {
 		Role: "polecat", RigName: "myrig", Polecat: "TestCat",
 		TownRoot: "/test/town", TownName: "town",
 		WorkDir:      "/test/town/myrig/polecats/TestCat",
-		MayorSession: "gt-town-mayor", DeaconSession: "gt-town-deacon",
+		MayorSession: "gt-town-mayor",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -1439,8 +1252,8 @@ func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
 	}
 	const marker = "An interrupt is a delivery artifact"
 	for role, want := range map[string]bool{
-		"witness": true, "deacon": true, "polecat": true,
-		"mayor": false, "crew": false,
+		"polecat": true,
+		"mayor":   false, "crew": false,
 	} {
 		data := RoleData{Role: role, RigName: "gastown", TownRoot: "/t", TownName: "t", Polecat: "p", DefaultBranch: "main"}
 		out, err := tmpl.RenderRole(role, data)

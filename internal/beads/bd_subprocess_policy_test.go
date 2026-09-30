@@ -16,9 +16,7 @@ import (
 // hardenedPackages route their bd subprocesses through the policy constructors
 // because their reads drive gate decisions. (gt-sz0s)
 var hardenedPackages = []string{
-	"internal/deacon",
 	"internal/plugin",
-	"internal/witness",
 }
 
 // policyConstructors apply ConfigureCommand: env targeting, read-only routing

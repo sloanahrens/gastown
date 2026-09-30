@@ -48,14 +48,13 @@ func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "beads",
-		Path:       filepath.Join(townRoot, "beads"),
-		HasWitness: true,
+		Name: "beads",
+		Path: filepath.Join(townRoot, "beads"),
 	}
 
 	allAgentBeads := map[string]*beads.Issue{
-		"bd-beads-witness": {
-			ID:         "bd-beads-witness",
+		"bd-beads-crew-max": {
+			ID:         "bd-beads-crew-max",
 			AgentState: "running",
 			HookBead:   "bd-hook",
 		},
@@ -64,7 +63,7 @@ func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 		"bd-hook": {ID: "bd-hook", Title: "Pinned"},
 	}
 
-	agents := discoverRigAgents(map[string]bool{}, r, nil, allAgentBeads, allHookBeads, nil, true)
+	agents := discoverRigAgents(map[string]bool{}, r, []string{"max"}, allAgentBeads, allHookBeads, nil, true)
 	if len(agents) != 1 {
 		t.Fatalf("discoverRigAgents() returned %d agents, want 1", len(agents))
 	}
@@ -88,9 +87,9 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 	})
 
 	agent := AgentRuntime{
-		Name:    "witness",
-		Address: "beads/witness",
-		Role:    "witness",
+		Name:    "max",
+		Address: "beads/crew/max",
+		Role:    "crew",
 		Running: true,
 	}
 
@@ -98,7 +97,7 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 	renderAgentDetails(&buf, agent, "", nil, townRoot)
 	output := buf.String()
 
-	if !strings.Contains(output, "bd-beads-witness") {
+	if !strings.Contains(output, "bd-beads-crew-max") {
 		t.Fatalf("output %q does not contain rig-prefixed bead ID", output)
 	}
 }
@@ -113,27 +112,26 @@ func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "gastown",
-		Path:       filepath.Join(townRoot, "gastown"),
-		HasWitness: true,
+		Name: "gastown",
+		Path: filepath.Join(townRoot, "gastown"),
 	}
 
-	// allSessions has the witness session but marked as zombie (false).
+	// allSessions has the crew session but marked as zombie (false).
 	// This simulates a tmux session that exists but whose agent process has died.
 	allSessions := map[string]bool{
-		"gt-gastown-witness": false, // zombie: tmux exists, agent dead
+		crewSessionName("gastown", "max"): false, // zombie: tmux exists, agent dead
 	}
 
-	agents := discoverRigAgents(allSessions, r, nil, nil, nil, nil, true)
+	agents := discoverRigAgents(allSessions, r, []string{"max"}, nil, nil, nil, true)
 	for _, a := range agents {
-		if a.Role == "witness" {
+		if a.Role == "crew" {
 			if a.Running {
-				t.Fatal("zombie witness session (allSessions=false) should show as not running")
+				t.Fatal("zombie crew session (allSessions=false) should show as not running")
 			}
 			return
 		}
 	}
-	t.Fatal("witness agent not found in results")
+	t.Fatal("crew agent not found in results")
 }
 
 func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
@@ -145,24 +143,23 @@ func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "gastown",
-		Path:       filepath.Join(townRoot, "gastown"),
-		HasWitness: true,
+		Name: "gastown",
+		Path: filepath.Join(townRoot, "gastown"),
 	}
 
 	// Empty sessions map - no tmux sessions exist at all
 	allSessions := map[string]bool{}
 
-	agents := discoverRigAgents(allSessions, r, nil, nil, nil, nil, true)
+	agents := discoverRigAgents(allSessions, r, []string{"max"}, nil, nil, nil, true)
 	for _, a := range agents {
-		if a.Role == "witness" {
+		if a.Role == "crew" {
 			if a.Running {
-				t.Fatal("witness with no tmux session should show as not running")
+				t.Fatal("crew with no tmux session should show as not running")
 			}
 			return
 		}
 	}
-	t.Fatal("witness agent not found in results")
+	t.Fatal("crew agent not found in results")
 }
 
 func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {

@@ -41,7 +41,7 @@ func TestWorktreeGitdirCheck_ValidWorktree(t *testing.T) {
 
 	// Create rig structure with config.json
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -54,8 +54,8 @@ func TestWorktreeGitdirCheck_ValidWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a .git file in refinery/rig that points to the worktree entry
-	gitFile := filepath.Join(rigDir, "refinery", "rig", ".git")
+	// Create a .git file in the polecat worktree that points to the worktree entry
+	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+worktreeEntry+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingBareRepo(t *testing.T) {
 
 	// Create rig structure
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -85,7 +85,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingBareRepo(t *testing.T) {
 	}
 
 	// Create .git file pointing to non-existent .repo.git
-	gitFile := filepath.Join(rigDir, "refinery", "rig", ".git")
+	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
 	brokenPath := filepath.Join(rigDir, ".repo.git", "worktrees", "rig")
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingWorktreeEntry(t *testing.T) {
 
 	// Create rig structure
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -130,7 +130,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingWorktreeEntry(t *testing.T) {
 	}
 
 	// Create .git file pointing to missing worktree entry
-	gitFile := filepath.Join(rigDir, "refinery", "rig", ".git")
+	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
 	brokenPath := filepath.Join(rigDir, ".repo.git", "worktrees", "rig")
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -157,9 +157,9 @@ func TestWorktreeGitdirCheck_CloneNotWorktree(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
-	// Create rig with refinery/rig as a regular clone (directory .git, not file)
+	// Create rig with a polecat as a regular clone (directory .git, not file)
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig", ".git"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName, ".git"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -183,7 +183,7 @@ func TestWorktreeGitdirCheck_MalformedGitFile(t *testing.T) {
 	rigName := "testrig"
 
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -191,7 +191,7 @@ func TestWorktreeGitdirCheck_MalformedGitFile(t *testing.T) {
 	}
 
 	// Create a malformed .git file
-	gitFile := filepath.Join(rigDir, "refinery", "rig", ".git")
+	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
 	if err := os.WriteFile(gitFile, []byte("not a valid gitdir reference\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 	// Create two rigs, one with broken worktree
 	for _, rigName := range []string{"goodrig", "badrig"} {
 		rigDir := filepath.Join(tmpDir, rigName)
-		if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -260,7 +260,7 @@ func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 	}
 
 	// Create broken .git file only in badrig
-	gitFile := filepath.Join(tmpDir, "badrig", "refinery", "rig", ".git")
+	gitFile := filepath.Join(tmpDir, "badrig", "polecats", "nux", "badrig", ".git")
 	brokenPath := filepath.Join(tmpDir, "badrig", ".repo.git", "worktrees", "rig")
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -284,7 +284,7 @@ func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 	}
 }
 
-// ── New tests for hq-c6u: relocation and deacon dogs ──────────────────── //
+// ── New tests for hq-c6u: relocation and the dog kennel (deacon/dogs) ─── //
 
 func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 	t.Parallel()
@@ -296,7 +296,7 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 
 	// Create rig with .repo.git at the new (correct) location
 	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, "refinery", "rig"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, "polecats", "nux", rigName), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
@@ -307,7 +307,7 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 	}
 
 	// Create .git file with OLD prefix path (simulating rsync from another machine)
-	gitFile := filepath.Join(rigDir, "refinery", "rig", ".git")
+	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
 	oldPath := "/Users/olduser/gt/" + rigName + "/.repo.git/worktrees/rig"
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+oldPath+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -340,7 +340,7 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 	}
 }
 
-func TestWorktreeGitdirCheck_DeaconDogs(t *testing.T) {
+func TestWorktreeGitdirCheck_DogKennel(t *testing.T) {
 	t.Parallel()
 	// Simulate deacon/dogs/<dogname>/<rigname>/.git pointing to stale paths.
 	tmpDir := t.TempDir()
@@ -373,10 +373,10 @@ func TestWorktreeGitdirCheck_DeaconDogs(t *testing.T) {
 	result := check.Run(ctx)
 
 	if result.Status != StatusError {
-		t.Errorf("expected StatusError for broken deacon dog worktree, got %v", result.Status)
+		t.Errorf("expected StatusError for broken dog worktree, got %v", result.Status)
 	}
 	if len(result.Details) == 0 {
-		t.Fatal("expected details about broken deacon dog worktree")
+		t.Fatal("expected details about broken dog worktree")
 	}
 	// Should mention deacon/dogs path (normalize separators for Windows compatibility)
 	normalizedDetail := filepath.ToSlash(result.Details[0])
@@ -389,7 +389,7 @@ func TestWorktreeGitdirCheck_DeaconDogs(t *testing.T) {
 	}
 }
 
-func TestWorktreeGitdirCheck_DeaconDogs_MultipleDogs(t *testing.T) {
+func TestWorktreeGitdirCheck_DogKennel_MultipleDogs(t *testing.T) {
 	t.Parallel()
 	// Multiple dogs with broken worktrees for the same rig.
 	tmpDir := t.TempDir()
@@ -430,7 +430,7 @@ func TestWorktreeGitdirCheck_DeaconDogs_MultipleDogs(t *testing.T) {
 	}
 }
 
-func TestWorktreeGitdirCheck_NoDeaconDogs(t *testing.T) {
+func TestWorktreeGitdirCheck_NoDogKennel(t *testing.T) {
 	t.Parallel()
 	// Town with no deacon/dogs should still pass.
 	tmpDir := t.TempDir()
@@ -442,5 +442,31 @@ func TestWorktreeGitdirCheck_NoDeaconDogs(t *testing.T) {
 
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK for town with no deacon/dogs, got %v", result.Status)
+	}
+}
+
+// TestWorktreeGitdirCheck_LeftoverRefineryIgnored verifies that a leftover
+// refinery/rig worktree from the retired refinery role is not checked, even
+// when its gitdir reference is broken.
+func TestWorktreeGitdirCheck_LeftoverRefineryIgnored(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigDir := filepath.Join(tmpDir, "testrig")
+	refineryRig := filepath.Join(rigDir, "refinery", "rig")
+	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	brokenPath := filepath.Join(rigDir, ".repo.git", "worktrees", "rig")
+	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte("gitdir: "+brokenPath+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewWorktreeGitdirCheck().Run(&CheckContext{TownRoot: tmpDir})
+
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for leftover refinery worktree, got %v: %s %v", result.Status, result.Message, result.Details)
 	}
 }

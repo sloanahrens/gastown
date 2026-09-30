@@ -112,10 +112,7 @@ func TestIsCrewSession(t *testing.T) {
 		{"gt-crew-joe", true},  // gastown crew (prefix: gt)
 		{"bd-crew-max", true},  // beads crew (prefix: bd)
 		{"nif-crew-a", true},   // niflheim crew (prefix: nif)
-		{"gt-witness", false},  // witness, not crew
-		{"gt-refinery", false}, // refinery, not crew
 		{"gt-polecat1", false}, // polecat, not crew
-		{"hq-deacon", false},
 		{"hq-mayor", false},
 		{"other-session", false},
 		{"gt-crew", false}, // "crew" is a polecat name, not crew role (no name after crew-)
@@ -136,7 +133,6 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "beads"}
 	mayorSession := "hq-mayor"
-	deaconSession := "hq-deacon"
 
 	tests := []struct {
 		session string
@@ -144,22 +140,16 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 	}{
 		// Town-level sessions
 		{"hq-mayor", true},
-		{"hq-deacon", true},
-
-		// Boot watchdog session
-		{"hq-boot", true},
 
 		// Valid rig sessions (using rig prefixes)
-		{"gt-witness", true},  // gastown witness (prefix: gt)
-		{"gt-refinery", true}, // gastown refinery
-		{"gt-polecat1", true}, // gastown polecat
-		{"bd-witness", true},  // beads witness (prefix: bd)
-		{"bd-refinery", true}, // beads refinery
+		{"gt-polecat1", true}, // gastown polecat (prefix: gt)
+		{"gt-crew-joe", true}, // gastown crew
+		{"bd-polecat2", true}, // beads polecat (prefix: bd)
 		{"bd-crew-max", true}, // beads crew
 
 		// Invalid rig sessions (unknown prefix/rig)
-		{"zz-witness", false},  // unknown prefix
-		{"xx-refinery", false}, // unknown prefix
+		{"zz-crew-max", false}, // unknown prefix
+		{"xx-polecat1", false}, // unknown prefix
 
 		// Non-GT sessions fail format validation
 		{"other-session", false},
@@ -167,7 +157,7 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := check.isValidSession(tt.session, validRigs, mayorSession, deaconSession)
+			got := check.isValidSession(tt.session, validRigs, mayorSession)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v", tt.session, got, tt.want)
 			}
@@ -182,7 +172,6 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "niflheim", "grctool", "7thsense", "pulseflow"}
 	mayorSession := "hq-mayor"
-	deaconSession := "hq-deacon"
 
 	tests := []struct {
 		name    string
@@ -238,8 +227,8 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 
 		// Sessions that should be detected as orphans
 		{
-			name:    "unknown_prefix_witness",
-			session: "zz-witness",
+			name:    "unknown_prefix_crew",
+			session: "zz-crew-max",
 			want:    false,
 			reason:  "unknown prefix/rig should be orphan",
 		},
@@ -252,12 +241,12 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 
 		// Edge case: hyphenated rig names are no longer ambiguous because
 		// each rig has a distinct prefix. E.g., rig "foo-bar" uses prefix "fb",
-		// so its witness session is simply "fb-witness".
+		// so its crew session is simply "fb-crew-<name>".
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := check.isValidSession(tt.session, validRigs, mayorSession, deaconSession)
+			got := check.isValidSession(tt.session, validRigs, mayorSession)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v: %s", tt.session, got, tt.want, tt.reason)
 			}
@@ -325,7 +314,7 @@ func TestOrphanSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	// Simulate cached orphan sessions including a crew session
 	check.orphanSessions = []string{
 		"gt-crew-max",     // Crew - should be protected
-		"zz-witness",      // Not crew - would be killed
+		"gt-polecat1",     // Not crew - would be killed
 		"nif-crew-codex1", // Crew - should be protected
 	}
 
@@ -360,10 +349,7 @@ func TestIsCrewSession_ComprehensivePatterns(t *testing.T) {
 		{"7s-crew-ss1", true, "rig starting with number"},
 
 		// Invalid crew patterns
-		{"gt-witness", false, "witness is not crew"},
-		{"gt-refinery", false, "refinery is not crew"},
 		{"gt-polecat-abc", false, "polecat name, not crew"},
-		{"hq-deacon", false, "deacon is not crew"},
 		{"hq-mayor", false, "mayor is not crew"},
 		{"", false, "empty string"},
 		{"gt-morsov", false, "polecat, not crew"},
@@ -393,8 +379,7 @@ func TestOrphanSessionCheck_HQSessions(t *testing.T) {
 
 	lister := &mockSessionLister{
 		sessions: []string{
-			"hq-mayor",  // valid: headquarters mayor session
-			"hq-deacon", // valid: headquarters deacon session
+			"hq-mayor", // valid: headquarters mayor session
 		},
 	}
 	check := NewOrphanSessionCheckWithSessionLister(lister)
@@ -403,7 +388,7 @@ func TestOrphanSessionCheck_HQSessions(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK for valid hq sessions, got %v: %s", result.Status, result.Message)
 	}
-	if result.Message != "All 2 Gas Town sessions are valid" {
+	if result.Message != "All 1 Gas Town sessions are valid" {
 		t.Fatalf("unexpected message: %q", result.Message)
 	}
 	if len(check.orphanSessions) != 0 {
@@ -435,12 +420,11 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 
 	lister := &mockSessionLister{
 		sessions: []string{
-			"gt-witness",     // valid: gastown rig exists (prefix "gt")
-			"gt-polecat1",    // valid: gastown rig exists
-			"bd-refinery",    // valid: beads rig exists (prefix "bd")
+			"gt-polecat1",    // valid: gastown rig exists (prefix "gt")
+			"gt-crew-max",    // valid: gastown rig exists
+			"bd-crew-joe",    // valid: beads rig exists (prefix "bd")
 			"hq-mayor",       // valid: hq-mayor is recognized
-			"hq-deacon",      // valid: hq-deacon is recognized
-			"zz-witness",     // ignored: unknown prefix, not a gastown session
+			"zz-polecat1",    // ignored: unknown prefix, not a gastown session
 			"xx-crew-joe",    // ignored: unknown prefix, not a gastown session
 			"random-session", // ignored: unknown prefix, not a gastown session
 		},

@@ -97,7 +97,7 @@ func TestCheckTownConfig(t *testing.T) {
 
 	// A field of the wrong type is as unparseable as a syntax error.
 	writeTownFile(t, town, "settings/config.json", `{"type":"town-settings","version":1}`)
-	writeTownFile(t, town, "mayor/daemon.json", `{"patrols": {"witness": {"enabled": "no"}}}`)
+	writeTownFile(t, town, "mayor/daemon.json", `{"patrols": {"mayor": {"enabled": "no"}}}`)
 	if err := CheckTownConfig(town); !errors.Is(err, config.ErrUnparseable) {
 		t.Fatalf("wrong field type = %v, want ErrUnparseable", err)
 	}
@@ -140,7 +140,7 @@ func TestCheckTownConfigRefusesAnUnreadableFile(t *testing.T) {
 func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	const typeBroken = `{"patrols": {"witness": {"enabled": "no"}}}`
+	const typeBroken = `{"patrols": {"mayor": {"enabled": "no"}}}`
 	path := writeTownFile(t, town, "mayor/daemon.json", typeBroken)
 	if err := config.SaveDaemonPatrolConfig(path, config.NewDaemonPatrolConfig()); !errors.Is(err, config.ErrUnparseable) {
 		t.Fatalf("config.SaveDaemonPatrolConfig over a type-broken daemon.json = %v, want ErrUnparseable", err)
@@ -155,11 +155,11 @@ func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T
 //testpolicy:allow parallel — New can write the process environment
 func TestNewRefusesAnUnknownDaemonJSONKey(t *testing.T) {
 	town := t.TempDir()
-	const misspelled = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"witness": {"enabeld": false}}}`
+	const misspelled = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"mayor": {"enabeld": false}}}`
 	path := writeTownFile(t, town, "mayor/daemon.json", misspelled)
 	d, err := New(&Config{TownRoot: town, LogFile: filepath.Join(town, "daemon", "daemon.log"), PidFile: filepath.Join(town, "daemon", "daemon.pid")})
-	if d != nil || !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "patrols.witness.enabeld") {
-		t.Fatalf("New = %v, %v; want a refusal naming patrols.witness.enabeld", d, err)
+	if d != nil || !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "patrols.mayor.enabeld") {
+		t.Fatalf("New = %v, %v; want a refusal naming patrols.mayor.enabeld", d, err)
 	}
 	requireUnchanged(t, path, misspelled)
 }

@@ -217,10 +217,10 @@ func TestStaleArchivePattern(t *testing.T) {
 		{"daemon-2026-02-18T21-26-55.log.gz", true},
 		{"dolt-server-2026-02-22T10-48-08.log.gz", true},
 		{"dolt-test-server-2026-02-28T23-21-02.log.gz", true},
-		{"daemon.log.1.gz", false},    // lumberjack rotation
-		{"dolt.log.2.gz", false},      // copytruncate rotation
-		{"dolt.log", false},           // active log
-		{"daemon.log", false},         // active log
+		{"daemon.log.1.gz", false}, // lumberjack rotation
+		{"dolt.log.2.gz", false},   // copytruncate rotation
+		{"dolt.log", false},        // active log
+		{"daemon.log", false},      // active log
 	}
 
 	for _, tt := range tests {

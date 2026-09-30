@@ -35,7 +35,7 @@ type ClaudeSettingsCheck struct {
 
 type staleSettingsInfo struct {
 	path           string        // Full path to settings file
-	agentType      string        // e.g., "witness", "refinery", "deacon", "mayor"
+	agentType      string        // e.g., "mayor", "crew", "polecat"
 	rigName        string        // Rig name (empty for town-level agents)
 	sessionName    string        // tmux session name for cycling
 	missing        []string      // What's missing from the settings
@@ -166,8 +166,8 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // findSettingsFiles locates all .claude/settings.json files and identifies their agent type.
-// Settings are now installed in gastown-managed parent directories (crew/, polecats/,
-// witness/, refinery/) and passed via --settings flag. Old settings.local.json files
+// Settings are now installed in gastown-managed parent directories (crew/, polecats/)
+// and passed via --settings flag. Old settings.local.json files
 // in working directories are detected as stale.
 func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettingsInfo {
 	var files []staleSettingsInfo
@@ -243,35 +243,6 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 		})
 	}
 
-	// Town-level: deacon - check for stale settings.local.json (should be settings.json)
-	deaconStaleLocal := filepath.Join(townRoot, "deacon", ".claude", "settings.local.json")
-	if fileExists(deaconStaleLocal) {
-		files = append(files, staleSettingsInfo{
-			path:          deaconStaleLocal,
-			agentType:     "deacon",
-			sessionName:   "hq-deacon",
-			wrongLocation: true,
-			missing:       []string{"stale settings.local.json (should be settings.json)"},
-		})
-	}
-	// Check for correct settings.json
-	deaconSettings := filepath.Join(townRoot, "deacon", ".claude", "settings.json")
-	deaconWorkDir := filepath.Join(townRoot, "deacon")
-	if fileExists(deaconSettings) {
-		files = append(files, staleSettingsInfo{
-			path:        deaconSettings,
-			agentType:   "deacon",
-			sessionName: "hq-deacon",
-		})
-	} else if dirExists(deaconWorkDir) {
-		files = append(files, staleSettingsInfo{
-			path:        deaconSettings,
-			agentType:   "deacon",
-			sessionName: "hq-deacon",
-			missingFile: true,
-		})
-	}
-
 	// Find rig directories
 	entries, err := os.ReadDir(townRoot)
 	if err != nil {
@@ -286,62 +257,10 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 		rigName := entry.Name()
 		rigPath := filepath.Join(townRoot, rigName)
 
-		// Skip known non-rig directories
+		// Skip known non-rig directories (deacon/ holds only the dog kennel)
 		if rigName == "mayor" || rigName == "deacon" || rigName == "daemon" ||
 			rigName == ".git" || rigName == "docs" || rigName[0] == '.' {
 			continue
-		}
-
-		// Check for witness settings
-		witnessDir := filepath.Join(rigPath, "witness")
-		if dirExists(witnessDir) {
-			// CORRECT: witness/.claude/settings.json (parent directory)
-			witnessCorrectSettings := filepath.Join(witnessDir, ".claude", "settings.json")
-			if fileExists(witnessCorrectSettings) {
-				files = append(files, staleSettingsInfo{
-					path:        witnessCorrectSettings,
-					agentType:   "witness",
-					rigName:     rigName,
-					sessionName: session.WitnessSessionName(session.PrefixFor(rigName)),
-				})
-			} else {
-				files = append(files, staleSettingsInfo{
-					path:        witnessCorrectSettings,
-					agentType:   "witness",
-					rigName:     rigName,
-					sessionName: session.WitnessSessionName(session.PrefixFor(rigName)),
-					missingFile: true,
-				})
-			}
-			// STALE: old settings.local.json in parent directory (not a customer repo)
-			witnessParentStaleLocal := filepath.Join(witnessDir, ".claude", "settings.local.json")
-			if fileExists(witnessParentStaleLocal) {
-				files = append(files, staleSettingsInfo{
-					path:          witnessParentStaleLocal,
-					agentType:     "witness",
-					rigName:       rigName,
-					sessionName:   session.WitnessSessionName(session.PrefixFor(rigName)),
-					wrongLocation: true,
-					missing:       []string{"stale settings.local.json (settings now in witness/.claude/settings.json)"},
-				})
-			}
-			// STALE: old settings in workdir (rig/) — skip if tracked in customer repo
-			for _, staleFile := range []string{"settings.json", "settings.local.json"} {
-				stalePath := filepath.Join(witnessDir, "rig", ".claude", staleFile)
-				if fileExists(stalePath) {
-					gs := c.getGitFileStatus(stalePath)
-					if gs != gitStatusTrackedClean && gs != gitStatusTrackedModified {
-						files = append(files, staleSettingsInfo{
-							path:          stalePath,
-							agentType:     "witness",
-							rigName:       rigName,
-							sessionName:   session.WitnessSessionName(session.PrefixFor(rigName)),
-							wrongLocation: true,
-							missing:       []string{"stale settings in workdir (settings now in witness/.claude/settings.json)"},
-						})
-					}
-				}
-			}
 		}
 
 		// Check for crew settings
@@ -472,7 +391,7 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 
 		// Check for STALE rig-root settings (<rig>/.claude/settings.json).
 		// Legacy pattern predating the per-role architecture. Superseded by
-		// per-role files (witness/.claude/, polecats/.claude/, etc.).
+		// per-role files (crew/.claude/, polecats/.claude/).
 		// Skip if tracked in a customer repo — could be intentional.
 		for _, staleFile := range []string{"settings.json", "settings.local.json"} {
 			rigRootSettings := filepath.Join(rigPath, ".claude", staleFile)
@@ -690,7 +609,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 		// Rig-root settings: just delete. Per-role files are authoritative.
 		// There is no correct "rig-root" settings location to recreate at.
 		if sf.agentType == "rig-root" {
-			fmt.Printf("\n  %s Rig-root settings removed. Per-role settings in %s/{witness,polecats,...}/.claude/ are authoritative.\n", style.Warning.Render("⚠"), sf.rigName)
+			fmt.Printf("\n  %s Rig-root settings removed. Per-role settings in %s/{crew,polecats}/.claude/ are authoritative.\n", style.Warning.Render("⚠"), sf.rigName)
 			continue
 		}
 
@@ -709,8 +628,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 			}
 
 			// Town-root files were inherited by ALL agents via directory traversal.
-			// Warn user to restart agents - don't auto-kill sessions as that's too disruptive,
-			// especially since deacon runs gt doctor automatically which would create a loop.
+			// Warn user to restart agents - don't auto-kill sessions as that's too disruptive.
 			fmt.Printf("\n  %s Town-root settings were moved. Restart agents to pick up new config:\n", style.Warning.Render("⚠"))
 			fmt.Printf("      gt up --restore\n\n")
 			continue
@@ -718,7 +636,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 
 		// Recreate settings at the correct location using EnsureSettingsForRole.
 		// For rig roles, compute settingsDir from role+rig path.
-		// For town-level roles (mayor/deacon), settingsDir == workDir.
+		// For town-level roles (mayor), settingsDir == workDir.
 		settingsDir := filepath.Dir(claudeDir)
 		workDir := settingsDir
 		rigPath := ""
@@ -739,12 +657,11 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
-		// Only cycle patrol roles if --restart-sessions was explicitly passed.
+		// Only cycle the mayor if --restart-sessions was explicitly passed.
 		// This prevents unexpected session restarts during routine --fix operations.
 		// Crew and polecats are spawned on-demand and won't auto-restart anyway.
 		if ctx.RestartSessions {
-			if sf.agentType == "witness" || sf.agentType == "refinery" ||
-				sf.agentType == "deacon" || sf.agentType == "mayor" {
+			if sf.agentType == "mayor" {
 				running, _ := t.HasSession(sf.sessionName)
 				if running {
 					// Cycle the agent by killing it through the supervisor and

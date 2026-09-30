@@ -1579,11 +1579,6 @@ func reportDone(r *doneRun, exitType string) error {
 		return err
 	}
 
-	// Nudge the witness only after hook/cleanup state is updated, or it
-	// evaluates slot availability against stale state.
-	nudgeWitness(r.rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", r.polecatName, exitType))
-	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
-
 	fromHandoff := os.Getenv(envDoneFromHandoff) == "1"
 	isPolecat := false
 	if roleInfo, err := GetRoleWithContext(r.cwd, r.townRoot); err == nil && roleInfo.Role == RolePolecat {
@@ -1667,16 +1662,16 @@ func notifyDoneCloseSkipped(townRoot, rigName, sender, issueID, reason string) {
 	router := mail.NewRouter(townRoot)
 	defer router.WaitPendingNotifications()
 	msg := &mail.Message{
-		To:      fmt.Sprintf("%s/witness", rigName),
+		To:      "mayor/",
 		From:    sender,
 		Subject: fmt.Sprintf("DONE_CLOSE_SKIPPED: %s", issueID),
-		Body: fmt.Sprintf("gt done skipped closing %s.\n\nReason: %s\n\nThe bead remains open for witness/mayor review.",
+		Body: fmt.Sprintf("gt done skipped closing %s.\n\nReason: %s\n\nThe bead remains open for mayor review.",
 			issueID, reason),
 	}
 	if err := router.Send(msg); err != nil {
-		style.PrintWarning("could not notify witness about skipped close: %v", err)
+		style.PrintWarning("could not notify the mayor about skipped close: %v", err)
 	} else {
-		fmt.Printf("%s Witness notified: DONE_CLOSE_SKIPPED\n", style.Bold.Render("✓"))
+		fmt.Printf("%s Mayor notified: DONE_CLOSE_SKIPPED\n", style.Bold.Render("✓"))
 	}
 }
 
@@ -2050,7 +2045,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// work even if the polecat worktree is deleted.
 	var beadsPath string
 	switch ctx.Role {
-	case RoleMayor, RoleDeacon:
+	case RoleMayor:
 		beadsPath = townRoot
 	default:
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
@@ -2236,9 +2231,6 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	case RolePolecat:
 		fields.RoleType = "polecat"
 		title = fmt.Sprintf("Polecat worker %s in %s - autonomous worker with persistent identity.", ctx.Polecat, ctx.Rig)
-	case RoleWitness:
-		fields.RoleType = "witness"
-		title = fmt.Sprintf("Witness for %s - monitors polecat health and progress.", ctx.Rig)
 	default:
 		return
 	}

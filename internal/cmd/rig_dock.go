@@ -9,13 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/witness"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // RigDockedLabel is the label set on rig identity beads when docked.
@@ -27,7 +23,6 @@ var rigDockCmd = &cobra.Command{
 	Long: `Dock a rig to persistently disable it across all clones.
 
 Docking a rig:
-  - Stops the witness if running
   - Stops the refinery if running
   - Stops all polecat sessions if running
   - Sets status:docked label on the rig identity bead
@@ -122,19 +117,6 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 
 	t := tmux.NewTmux()
 
-	// Stop witness if running
-	witnessSession := session.WitnessSessionName(session.PrefixFor(rigName))
-	witnessRunning, _ := t.HasSession(witnessSession)
-	if witnessRunning {
-		fmt.Printf("  Stopping witness...\n")
-		witMgr := witness.NewManager(r)
-		if err := witMgr.Stop(); err != nil {
-			fmt.Printf("  %s Failed to stop witness: %v\n", style.Warning.Render("!"), err)
-		} else {
-			stoppedAgents = append(stoppedAgents, "Witness stopped")
-		}
-	}
-
 	// Stop polecat sessions if any
 	polecatMgr := polecat.NewSessionManager(t, r)
 	polecatInfos, err := polecatMgr.List()
@@ -152,15 +134,6 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 		AddLabels: []string{RigDockedLabel},
 	}); err != nil {
 		return fmt.Errorf("setting docked label: %w", err)
-	}
-
-	// Remove rig from daemon.json patrol config so daemon stops spawning
-	// witness/refinery sessions for this rig on every heartbeat cycle.
-	townRoot, twErr := workspace.FindFromCwdOrError()
-	if twErr == nil {
-		if err := config.RemoveRigFromDaemonPatrols(townRoot, rigName); err != nil {
-			fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
-		}
 	}
 
 	// Output
@@ -230,15 +203,6 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 		RemoveLabels: []string{RigDockedLabel},
 	}); err != nil {
 		return fmt.Errorf("removing docked label: %w", err)
-	}
-
-	// Re-add rig to daemon.json patrol config so daemon resumes spawning
-	// witness/refinery sessions for this rig.
-	townRoot, twErr := workspace.FindFromCwdOrError()
-	if twErr == nil {
-		if err := config.AddRigToDaemonPatrols(townRoot, rigName); err != nil {
-			fmt.Printf("  %s Could not update daemon.json patrols: %v\n", style.Warning.Render("!"), err)
-		}
 	}
 
 	fmt.Printf("%s Rig %s undocked\n", style.Success.Render("✓"), rigName)

@@ -151,7 +151,7 @@ func TestCheckHookedPathDupes(t *testing.T) {
 	})
 
 	t.Run("non-polecat is skipped", func(t *testing.T) {
-		out := hookedPathDupesOutput(RoleContext{Role: RoleWitness, WorkDir: t.TempDir()},
+		out := hookedPathDupesOutput(RoleContext{Role: RoleCrew, WorkDir: t.TempDir()},
 			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("non-polecat must skip the check, got:\n%s", out)

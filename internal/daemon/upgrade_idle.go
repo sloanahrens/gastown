@@ -37,8 +37,7 @@ func (d *Daemon) daemonWorkIdle() bool {
 	if compactor {
 		return false
 	}
-	if d.bootTriageInFlight.Load() || d.scheduledSlingsRunning.Load() ||
-		d.mayorDispatchRunning.Load() || d.patrolWatchdogRunning.Load() ||
+	if d.scheduledSlingsRunning.Load() || d.mayorDispatchRunning.Load() ||
 		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() {
 		return false
 	}

@@ -17,13 +17,11 @@ type TownSession struct {
 }
 
 // TownSessions returns the list of town-level sessions in shutdown order.
-// Order matters: Boot (Deacon's watchdog) must be stopped before Deacon,
-// otherwise Boot will try to restart Deacon.
+// The Mayor is the only one: the Boot and Deacon sessions were deleted with
+// their roles (gt-4k3fj.6.1).
 func TownSessions() []TownSession {
 	return []TownSession{
 		{"Mayor", MayorSessionName()},
-		{"Boot", BootSessionName()},
-		{"Deacon", DeaconSessionName()},
 	}
 }
 

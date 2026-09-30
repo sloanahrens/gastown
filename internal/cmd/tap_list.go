@@ -62,15 +62,6 @@ func runTapList(cmd *cobra.Command, args []string) error {
 			implemented: true,
 		},
 		{
-			name:        "boot-sendkeys",
-			kind:        "guard",
-			description: "Block raw tmux send-keys in the boot watchdog",
-			event:       "PreToolUse",
-			// Self-filters on tool_input.command directly — no "if" needed.
-			conditions:  nil,
-			implemented: true,
-		},
-		{
 			name:        "dangerous-command",
 			kind:        "guard",
 			description: "Block sudo, package installs, rm -rf, force push, hard reset, etc.",

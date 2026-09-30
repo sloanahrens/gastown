@@ -86,42 +86,6 @@ func TestBdIssueWorkParsesMoleculeAndTime(t *testing.T) {
 	}
 }
 
-func TestWitnessWantedInRig(t *testing.T) {
-	t.Parallel()
-	if !WitnessWantedInRig(nil, "gastown") {
-		t.Error("no config: witness wanted (default on)")
-	}
-	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{Witness: &PatrolConfig{Enabled: true, DisabledRigs: []string{"gastown"}}}}
-	if WitnessWantedInRig(cfg, "gastown") {
-		t.Error("disabled_rigs must switch the witness off in that rig")
-	}
-	if !WitnessWantedInRig(cfg, "beads") {
-		t.Error("a rig not listed keeps its witness")
-	}
-	cfg.Patrols.Witness.Enabled = false
-	if WitnessWantedInRig(cfg, "beads") {
-		t.Error("witness enabled:false switches every rig off")
-	}
-}
-
-func TestPatrolWatchdogSkipsSwitchedOffRoles(t *testing.T) {
-	t.Parallel()
-	targets := []patrolWatchdogTarget{
-		{Role: constants.RoleDeacon},
-		{Role: constants.RoleWitness, Rig: "gastown"},
-		{Role: constants.RoleWitness, Rig: "beads"},
-	}
-	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		Deacon:  &PatrolConfig{Enabled: false},
-		Witness: &PatrolConfig{Enabled: true, DisabledRigs: []string{"gastown"}},
-	}}
-	active := func(p string) bool { return IsPatrolEnabled(cfg, p) }
-	got := filterPatrolWatchdogTargets(targets, cfg, active)
-	if len(got) != 1 || got[0].Rig != "beads" {
-		t.Fatalf("targets = %+v, want only the beads witness", got)
-	}
-}
-
 // A polecat restart in a rig patrol_scan does not cover is declined, so it
 // spends no budget and the witness keeps that rig.
 func TestRestartPolecatDeclinedOutsidePatrolScan(t *testing.T) {

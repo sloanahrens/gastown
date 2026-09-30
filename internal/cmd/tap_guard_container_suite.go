@@ -77,7 +77,6 @@ var containerSuitePackages = []string{
 	"internal/convoy",
 	"internal/crew",
 	"internal/daemon",
-	"internal/deacon",
 	"internal/deps",
 	"internal/doctor",
 	"internal/dog",
@@ -90,7 +89,6 @@ var containerSuitePackages = []string{
 	"internal/protocol",
 	"internal/rig",
 	"internal/testutil",
-	"internal/witness",
 }
 
 func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {

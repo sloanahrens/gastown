@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -577,71 +576,6 @@ func EnsureDaemonPatrolConfig(townRoot string) error {
 		}
 		return nil
 	})
-}
-
-// AddRigToDaemonPatrols adds a rig to the witness patrol rigs
-// arrays in daemon.json. A missing daemon.json, patrols section or patrol
-// entry is left missing. It goes through the locked writer, so a daemon.json
-// that does not parse is refused rather than rewritten.
-func AddRigToDaemonPatrols(townRoot string, rigName string) error {
-	return editDaemonPatrolRigs(townRoot, func(rigs []string) []string {
-		for _, r := range rigs {
-			if r == rigName {
-				return rigs
-			}
-		}
-		return append(rigs, rigName)
-	})
-}
-
-// RemoveRigFromDaemonPatrols removes a rig from the witness
-// patrol rigs arrays in daemon.json, under the same rules as
-// AddRigToDaemonPatrols.
-func RemoveRigFromDaemonPatrols(townRoot string, rigName string) error {
-	return editDaemonPatrolRigs(townRoot, func(rigs []string) []string {
-		var kept []string
-		for _, r := range rigs {
-			if r != rigName {
-				kept = append(kept, r)
-			}
-		}
-		return kept
-	})
-}
-
-// errNoDaemonPatrolEdit stops UpdateConfigJSON without writing.
-var errNoDaemonPatrolEdit = errors.New("daemon.json: nothing to change")
-
-func editDaemonPatrolRigs(townRoot string, edit func([]string) []string) error {
-	path := DaemonPatrolConfigPath(townRoot)
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil // no daemon.json yet, nothing to update
-	}
-	err := UpdateConfigJSON(path, 0o644, func(cfg *DaemonPatrolConfig, exists bool) error {
-		if !exists || cfg.Patrols == nil {
-			return errNoDaemonPatrolEdit
-		}
-		changed := false
-		for _, name := range []string{"witness"} {
-			p := cfg.Patrols.RolePatrol(name)
-			if p == nil {
-				continue
-			}
-			next := edit(append([]string(nil), p.Rigs...))
-			if !slices.Equal(next, p.Rigs) {
-				p.Rigs = next
-				changed = true
-			}
-		}
-		if !changed {
-			return errNoDaemonPatrolEdit
-		}
-		return nil
-	})
-	if errors.Is(err, errNoDaemonPatrolEdit) {
-		return nil
-	}
-	return err
 }
 
 // LoadAccountsConfig loads and validates an accounts configuration file.

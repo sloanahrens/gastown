@@ -248,27 +248,31 @@ func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 // stays, an unpaused one goes, and the kill is logged with its actor.
 //
 //testpolicy:allow parallel — kills through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
-func TestKillWitnessSessions_HonorsPauseAndLogsActor(t *testing.T) {
+func TestKillRetiredPatrolSessions_HonorsPauseAndLogsActor(t *testing.T) {
 	registerRigs(t, "aa", "bb")
 	tm := newFakeTmux(newFixedClock())
 	tm.addSession("aa-witness", "claude", time.Now())
 	tm.addSession("bb-witness", "claude", time.Now())
+	tm.addSession("hq-deacon", "claude", time.Now())
+	tm.addSession("hq-boot", "claude", time.Now())
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm, rigPool: newRigWorkerPool(1, 10*time.Second, nil), ctx: context.Background()}
 	writeKnownRigs(t, d.config.TownRoot, "aa", "bb")
 	if err := agentpause.Pause(d.config.TownRoot, "aa", "witness", "", "debugging", "human", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	d.killWitnessSessions()
+	d.killRetiredPatrolSessions()
 
 	if has, _ := tm.HasSession("aa-witness"); !has {
-		t.Error("a paused witness was killed by the patrol-disabled sweep")
+		t.Error("a paused witness was killed by the retired-role sweep")
 	}
-	if has, _ := tm.HasSession("bb-witness"); has {
-		t.Error("an unpaused witness survived the patrol-disabled sweep")
+	for _, name := range []string{"bb-witness", "hq-deacon", "hq-boot"} {
+		if has, _ := tm.HasSession(name); has {
+			t.Errorf("%s survived the retired-role sweep", name)
+		}
 	}
 	lines, _ := os.ReadFile(supervisor.ActionLogPath(d.config.TownRoot))
-	if !strings.Contains(string(lines), `"actor":"daemon/patrol-disabled"`) {
+	if !strings.Contains(string(lines), `"actor":"daemon/retired-role"`) {
 		t.Errorf("sweep kills missing from the action log: %s", lines)
 	}
 }
@@ -424,73 +428,6 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 		},
 	}
 	return d, &buf, &restarts
-}
-
-// Unknown is never acted on (G1-09): a tmux that cannot answer starts no
-// witness or mayor.
-func TestEnsurePaths_UnknownStartsNothing(t *testing.T) {
-	t.Parallel()
-	for name, ensure := range map[string]func(*Daemon){
-		"witness": func(d *Daemon) { d.ensureWitnessRunning("testrig") },
-		"mayor":   func(d *Daemon) { d.ensureMayorRunning() },
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			d, buf, restarts := unknownTmuxDaemon(t)
-			ensure(d)
-			if len(*restarts) != 0 {
-				t.Fatalf("restarted %v on an unknown liveness answer\nlog:\n%s", *restarts, buf)
-			}
-			if !strings.Contains(buf.String(), "liveness unknown") {
-				t.Fatalf("the unknown answer was not logged\nlog:\n%s", buf)
-			}
-		})
-	}
-}
-
-// An unreadable intent record is an Unknown liveness answer: the Deacon is
-// not started over it.
-func TestEnsureDeaconRunning_UnreadableIntentStartsNothing(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	path := supervisor.IntentSeat(deaconSeat).Path(town)
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	if err := os.WriteFile(path, []byte("{broken"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var buf strings.Builder
-	started := false
-	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&buf, "", 0), tmux: newFakeTmux(newFixedClock()),
-		startDeaconFn: func() error { started = true; return nil }}
-
-	d.ensureDeaconRunning()
-
-	if started || !strings.Contains(buf.String(), "liveness unknown") {
-		t.Fatalf("started=%v with an unreadable intent record\nlog:\n%s", started, buf.String())
-	}
-}
-
-// Witnesses are never restarted for a stall (serial killer bug): an idle
-// witness produces no output while it waits for work.
-func TestEnsureWitnessRunning_StalledIsNotRestarted(t *testing.T) {
-	t.Parallel()
-	d, buf, restarts := unknownTmuxDaemon(t)
-	tm := d.tmux.(*fakeTmux)
-	tm.mu.Lock()
-	tm.hasErr = nil
-	tm.mu.Unlock()
-	seat := supervisor.SeatFor("testrig", "witness", "")
-	tm.addSession(seat.SessionName(), "claude", time.Now().Add(-3*time.Hour))
-	seedStalledSample(t, d, seat, tm, 3*time.Hour)
-
-	d.ensureWitnessRunning("testrig")
-
-	if len(*restarts) != 0 {
-		t.Fatalf("a stalled witness was restarted: %v\nlog:\n%s", *restarts, buf)
-	}
-	if !strings.Contains(buf.String(), "already running") {
-		t.Fatalf("stalled witness not treated as running\nlog:\n%s", buf)
-	}
 }
 
 // seedStalledSample records a sample for seat whose evidence has not changed

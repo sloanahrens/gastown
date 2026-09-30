@@ -425,48 +425,6 @@ func TestParsePluginMD_GitHubSheriff(t *testing.T) {
 	}
 }
 
-func TestParsePluginMD_StuckAgentDogUsesCanonicalHeartbeatPath(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "stuck-agent-dog", "plugin.md"))
-	if err != nil {
-		t.Skipf("stuck-agent-dog plugin not found (expected in plugins/): %v", err)
-	}
-
-	plugin, err := parsePluginMD(content, "/test/stuck-agent-dog", LocationRig, "gastown")
-	if err != nil {
-		t.Fatalf("parsePluginMD failed: %v", err)
-	}
-
-	if plugin.Name != "stuck-agent-dog" {
-		t.Fatalf("expected name 'stuck-agent-dog', got %q", plugin.Name)
-	}
-	if !strings.Contains(plugin.Instructions, "deacon/heartbeat.json") {
-		t.Fatalf("expected canonical heartbeat path in instructions, got:\n%s", plugin.Instructions)
-	}
-	if strings.Contains(plugin.Instructions, ".deacon-heartbeat") {
-		t.Fatalf("did not expect legacy heartbeat path in instructions, got:\n%s", plugin.Instructions)
-	}
-	if !strings.Contains(plugin.Instructions, "gt rig list --json unavailable; cannot verify operational rig state") {
-		t.Fatalf("expected fail-closed rig-list guidance in instructions, got:\n%s", plugin.Instructions)
-	}
-	if !strings.Contains(plugin.Instructions, "gt rig list --json not parseable; cannot verify operational rig state") {
-		t.Fatalf("expected fail-closed rig-list parse guidance in instructions, got:\n%s", plugin.Instructions)
-	}
-	for _, legacy := range []string{"RIGS_JSON_PATH", "$TOWN_ROOT/mayor/rigs.json", "could not parse rigs.json"} {
-		if strings.Contains(plugin.Instructions, legacy) {
-			t.Fatalf("did not expect legacy rigs.json guidance %q in instructions, got:\n%s", legacy, plugin.Instructions)
-		}
-	}
-	if !strings.Contains(plugin.Instructions, "Filter out any malformed/blank rows") {
-		t.Fatalf("expected fail-safe blank/malformed rigs row handling in instructions, got:\n%s", plugin.Instructions)
-	}
-	if !strings.Contains(plugin.Instructions, "GT_STUCK_AGENT_DOG_DEACON_STALE_SECONDS") {
-		t.Fatalf("expected configurable deacon stale threshold in instructions, got:\n%s", plugin.Instructions)
-	}
-	if !strings.Contains(plugin.Instructions, "heartbeat_write_divergence") {
-		t.Fatalf("expected heartbeat write-divergence handling in instructions, got:\n%s", plugin.Instructions)
-	}
-}
-
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	// Use a temp dir with a fixture plugin.md and run.sh so the test
 	// doesn't depend on the local filesystem layout (fails in CI).

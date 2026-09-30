@@ -367,11 +367,7 @@ func emitSessionEvent(ctx RoleContext) {
 		return
 	}
 
-	// Determine topic from hook state or default
 	topic := ""
-	if ctx.Role == RoleWitness || ctx.Role == RoleDeacon {
-		topic = "patrol"
-	}
 
 	// Emit the event, attributed with why and at whose request (gt-uj9k).
 	payload := events.SessionPayload(events.SessionStartInfo{

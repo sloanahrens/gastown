@@ -14,9 +14,8 @@ import (
 // manifest at <rig>/.gastown-harness-manifest.json (written by
 // contrib/gastown/deploy.sh in the om repo): a map of file path, relative to
 // the rig root, to its expected sha256 hex digest. Doctor reads the manifest
-// directly rather than depending on the om-invoker package's own manifest
-// loader (internal/refinery/editorial), which governs `gt mq review`'s
-// version assertion and is versioned independently of this drift check.
+// directly so the drift check is versioned independently of any other
+// manifest consumer.
 type harnessManifest struct {
 	Files map[string]string `json:"files"`
 }

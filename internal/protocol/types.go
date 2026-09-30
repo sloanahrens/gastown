@@ -1,14 +1,16 @@
-// Package protocol provides inter-agent protocol message handling.
+// Package protocol parses the legacy inter-agent protocol message formats.
 //
-// This package defines protocol message types for Witness-Refinery communication
-// and provides handlers for processing these messages.
+// The witness and refinery that exchanged these messages were deleted
+// (gt-v4ssj.6, gt-4k3fj.6.1); nothing sends them now. The types and parsers
+// remain so mail threading can still recognize a protocol payload in old mail
+// (LooksLikeProtocolPayload).
 //
 // Protocol Message Types:
-//   - MERGE_READY: Witness → Refinery (branch ready for merge)
-//   - MERGED: Refinery → Witness (merge succeeded, cleanup ok)
-//   - MERGE_FAILED: Refinery → Witness (merge failed, needs rework) [LEGACY]
-//   - FIX_NEEDED: Refinery → Polecat (merge failed, fix and resubmit)
-//   - REWORK_REQUEST: Refinery → Witness (rebase needed)
+//   - MERGE_READY: branch ready for merge
+//   - MERGED: merge succeeded, cleanup ok
+//   - MERGE_FAILED: merge failed, needs rework [LEGACY]
+//   - FIX_NEEDED: merge failed, fix and resubmit
+//   - REWORK_REQUEST: rebase needed
 package protocol
 
 import (

@@ -45,7 +45,7 @@ var statusCmd = &cobra.Command{
 	Short:   "Show overall town status",
 	Long: `Display the current status of the Gas Town workspace.
 
-Shows town name, registered rigs, polecats, and witness status.
+Shows town name, registered rigs, polecats, and crew.
 
 Use --fast to skip mail lookups for faster execution.
 Use --watch to continuously refresh status at regular intervals.`,
@@ -70,7 +70,7 @@ type TownStatus struct {
 	Daemon   *ServiceInfo   `json:"daemon,omitempty"`   // Daemon status
 	Dolt     *DoltInfo      `json:"dolt,omitempty"`     // Dolt server status
 	Tmux     *TmuxInfo      `json:"tmux,omitempty"`     // Tmux server status
-	Agents   []AgentRuntime `json:"agents"`             // Global agents (Mayor, Deacon)
+	Agents   []AgentRuntime `json:"agents"`             // Global agents (the Mayor)
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
 	Slot     *SlotInfo      `json:"container_slot,omitempty"` // Container-suite gate slot (gt-bcsq)
@@ -133,8 +133,8 @@ type DNDInfo struct {
 
 // AgentRuntime represents the runtime state of an agent.
 type AgentRuntime struct {
-	Name              string `json:"name"`                         // Display name (e.g., "mayor", "witness")
-	Address           string `json:"address"`                      // Full address (e.g., "greenplace/witness")
+	Name              string `json:"name"`                         // Display name (e.g., "mayor", "nux")
+	Address           string `json:"address"`                      // Full address (e.g., "greenplace/nux")
 	Session           string `json:"session"`                      // tmux session name
 	Role              string `json:"role"`                         // Role type
 	Running           bool   `json:"running"`                      // Is tmux session running?
@@ -158,15 +158,14 @@ type RigStatus struct {
 	PolecatCount int             `json:"polecat_count"`
 	Crews        []string        `json:"crews"`
 	CrewCount    int             `json:"crew_count"`
-	HasWitness   bool            `json:"has_witness"`
 	Hooks        []AgentHookInfo `json:"hooks,omitempty"`
 	Agents       []AgentRuntime  `json:"agents,omitempty"` // Runtime state of all agents in rig
 }
 
 // AgentHookInfo represents an agent's hook (pinned work) status.
 type AgentHookInfo struct {
-	Agent    string `json:"agent"`              // Agent address (e.g., "greenplace/toast", "greenplace/witness")
-	Role     string `json:"role"`               // Role type (polecat, crew, witness)
+	Agent    string `json:"agent"`              // Agent address (e.g., "greenplace/toast", "greenplace/crew/max")
+	Role     string `json:"role"`               // Role type (polecat, crew)
 	HasWork  bool   `json:"has_work"`           // Whether agent has pinned work
 	Molecule string `json:"molecule,omitempty"` // Attached molecule ID
 	Title    string `json:"title,omitempty"`    // Pinned bead title
@@ -177,7 +176,6 @@ type StatusSum struct {
 	RigCount     int `json:"rig_count"`
 	PolecatCount int `json:"polecat_count"`
 	CrewCount    int `json:"crew_count"`
-	WitnessCount int `json:"witness_count"`
 	ActiveHooks  int `json:"active_hooks"`
 }
 
@@ -190,8 +188,6 @@ func resolveAgentDisplay(townSettings *config.TownSettings, role string, session
 	switch role {
 	case "coordinator":
 		configRole = constants.RoleMayor
-	case "health-check":
-		configRole = constants.RoleDeacon
 	}
 
 	// Get alias from config
@@ -708,7 +704,7 @@ func gatherStatus() (TownStatus, error) {
 	if !skipBeadsPrefetch {
 		var beadsWg sync.WaitGroup
 
-		// Fetch town-level agent beads (Mayor, Deacon) from town beads
+		// Fetch town-level agent beads (the Mayor) from town beads
 		townBeadsPath := beads.GetTownBeadsPath(townRoot)
 		beadsWg.Add(1)
 		go func() {
@@ -889,7 +885,6 @@ func gatherStatus() (TownStatus, error) {
 				Name:         r.Name,
 				Polecats:     r.Polecats,
 				PolecatCount: len(r.Polecats),
-				HasWitness:   r.HasWitness,
 			}
 
 			// Count crew workers
@@ -963,9 +958,6 @@ func gatherStatus() (TownStatus, error) {
 		status.Summary.PolecatCount += rs.PolecatCount
 		status.Summary.CrewCount += rs.CrewCount
 		status.Summary.ActiveHooks += rigActiveHooks[i]
-		if rs.HasWitness {
-			status.Summary.WitnessCount++
-		}
 	}
 	status.Summary.RigCount = len(rigs)
 
@@ -1076,16 +1068,13 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	// Role icons - uses centralized emojis from constants package
 	roleIcons := map[string]string{
 		constants.RoleMayor:   constants.EmojiMayor,
-		constants.RoleDeacon:  constants.EmojiDeacon,
-		constants.RoleWitness: constants.EmojiWitness,
 		constants.RoleCrew:    constants.EmojiCrew,
 		constants.RolePolecat: constants.EmojiPolecat,
 		// Legacy names for backwards compatibility
-		"coordinator":  constants.EmojiMayor,
-		"health-check": constants.EmojiDeacon,
+		"coordinator": constants.EmojiMayor,
 	}
 
-	// Global Agents (Mayor, Deacon)
+	// Global Agents (the Mayor)
 	for _, agent := range status.Agents {
 		icon := roleIcons[agent.Role]
 		if icon == "" {
@@ -1115,30 +1104,13 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		fmt.Fprintf(w, "─── %s ───────────────────────────────────────────\n\n", style.Bold.Render(r.Name+"/"))
 
 		// Group agents by role
-		var witnesses, crews, polecats []AgentRuntime
+		var crews, polecats []AgentRuntime
 		for _, agent := range r.Agents {
 			switch agent.Role {
-			case constants.RoleWitness:
-				witnesses = append(witnesses, agent)
 			case constants.RoleCrew:
 				crews = append(crews, agent)
 			case constants.RolePolecat:
 				polecats = append(polecats, agent)
-			}
-		}
-
-		// Witness
-		if len(witnesses) > 0 {
-			if statusVerbose {
-				fmt.Fprintf(w, "%s %s\n", roleIcons[constants.RoleWitness], style.Bold.Render("Witness"))
-				for _, agent := range witnesses {
-					renderAgentDetails(w, agent, "   ", r.Hooks, status.Location)
-				}
-				fmt.Fprintln(w)
-			} else {
-				for _, agent := range witnesses {
-					renderAgentCompact(w, agent, roleIcons[constants.RoleWitness]+" ", r.Hooks, status.Location)
-				}
 			}
 		}
 
@@ -1175,7 +1147,7 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		}
 
 		// No agents
-		if len(witnesses) == 0 && len(crews) == 0 && len(polecats) == 0 {
+		if len(crews) == 0 && len(polecats) == 0 {
 			fmt.Fprintf(w, "   %s\n", style.Dim.Render("(no agents)"))
 		}
 		fmt.Fprintln(w)
@@ -1211,10 +1183,8 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 		// Agent waiting for external trigger (phase gate)
 		stateInfo = style.Dim.Render(" [awaiting-gate]")
 	case "paused":
-		// gt deacon pause (a separate, existing feature from gt-ahik's
-		// agentpause marker) writes agent_state=paused straight to the
-		// deacon bead with no marker file, so agent.Paused below never
-		// picks it up. Overridden by that block when a marker also exists.
+		// A paused bead state with no agentpause marker behind it (a
+		// stale mirror). Overridden by the block below when a marker exists.
 		stateInfo = style.Dim.Render(" [paused]")
 	case "muted", "degraded":
 		// Other intentional non-observable states
@@ -1241,15 +1211,13 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 		addr := strings.TrimSuffix(agent.Address, "/") // Remove trailing slash for global agents
 		parts := strings.Split(addr, "/")
 		if len(parts) == 1 {
-			// Global agent: mayor/, deacon/ → hq-mayor, hq-deacon
+			// Global agent: mayor/ → hq-mayor
 			agentBeadID = beads.AgentBeadIDWithPrefix(beads.TownBeadsPrefix, "", parts[0], "")
 		} else if len(parts) >= 2 {
 			rig := parts[0]
 			prefix := beads.GetPrefixForRig(townRoot, rig)
 			if parts[1] == constants.RoleCrew && len(parts) >= 3 {
 				agentBeadID = beads.CrewBeadIDWithPrefix(prefix, rig, parts[2])
-			} else if parts[1] == constants.RoleWitness {
-				agentBeadID = beads.WitnessBeadIDWithPrefix(prefix, rig)
 			} else if len(parts) == 2 {
 				// polecat: rig/name
 				agentBeadID = beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1])
@@ -1376,8 +1344,7 @@ func buildStatusIndicator(agent AgentRuntime) string {
 	case "awaiting-gate":
 		indicator += style.Dim.Render(" gate")
 	case "paused":
-		// gt deacon pause writes this straight to the bead with no marker
-		// file — see the identical comment in renderAgentDetails.
+		// A bead mirror with no marker — see renderAgentDetails.
 		indicator += style.Dim.Render(" paused")
 	case "muted", "degraded":
 		indicator += style.Dim.Render(" " + beadState)
@@ -1459,11 +1426,6 @@ func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
 		hooks = append(hooks, resolveHookFromMap(allHandoffs, name, r.Name+"/crew/"+name, constants.RoleCrew))
 	}
 
-	// Check witness
-	if r.HasWitness {
-		hooks = append(hooks, resolveHookFromMap(allHandoffs, constants.RoleWitness, r.Name+"/witness", constants.RoleWitness))
-	}
-
 	return hooks
 }
 
@@ -1493,7 +1455,7 @@ func resolveHookFromMap(allHandoffs map[string]*beads.Issue, role, agentAddress,
 	return hook
 }
 
-// discoverGlobalAgents checks runtime state for town-level agents (Mayor, Deacon).
+// discoverGlobalAgents checks runtime state for town-level agents (the Mayor).
 // Uses parallel fetching for performance. If skipMail is true, mail lookups are skipped.
 // allSessions is a preloaded map of tmux sessions for O(1) lookup.
 // allAgentBeads is a preloaded map of agent beads for O(1) lookup.
@@ -1501,10 +1463,9 @@ func resolveHookFromMap(allHandoffs map[string]*beads.Issue, role, agentAddress,
 func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
 	// Get session names dynamically
 	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
 
 	// Define agents to discover
-	// Note: Mayor and Deacon are town-level agents with hq- prefix bead IDs
+	// Note: the Mayor is a town-level agent with an hq- prefix bead ID
 	agentDefs := []struct {
 		name    string
 		address string
@@ -1513,7 +1474,6 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 		beadID  string
 	}{
 		{constants.RoleMayor, constants.RoleMayor + "/", mayorSession, "coordinator", beads.MayorBeadIDTown()},
-		{constants.RoleDeacon, constants.RoleDeacon + "/", deaconSession, "health-check", beads.DeaconBeadIDTown()},
 	}
 
 	// Batch-fetch mail summaries for all agents in one pair of bd calls
@@ -1606,8 +1566,8 @@ func applyPauseMarker(agent *AgentRuntime, townRoot string) {
 // It goes through session.ParseAddress rather than splitting the string, so
 // every address form the rest of the system uses resolves to the same marker
 // the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
-// "rig/witness", "rig/crew/name" — and the town-level
-// "mayor/" and "deacon/", whose marker lives at .runtime/agents/<role>.json,
+// "rig/crew/name" — and the town-level "mayor/", whose marker lives at
+// .runtime/agents/<role>.json,
 // so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
 func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
 	id, err := session.ParseAddress(address)
@@ -1682,17 +1642,6 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 	var defs []agentDef
 	townRoot := filepath.Dir(r.Path)
 	prefix := beads.GetPrefixForRig(townRoot, r.Name)
-
-	// Witness
-	if r.HasWitness {
-		defs = append(defs, agentDef{
-			name:    constants.RoleWitness,
-			address: r.Name + "/witness",
-			session: witnessSessionName(r.Name),
-			role:    constants.RoleWitness,
-			beadID:  beads.WitnessBeadIDWithPrefix(prefix, r.Name),
-		})
-	}
 
 	// Polecats
 	for _, name := range r.Polecats {

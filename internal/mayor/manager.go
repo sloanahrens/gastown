@@ -252,12 +252,11 @@ func GetMayorPrime(townRoot string) (string, error) {
 	}
 
 	data := templates.RoleData{
-		Role:          "mayor",
-		TownRoot:      townRoot,
-		TownName:      townName,
-		WorkDir:       townRoot,
-		MayorSession:  session.MayorSessionName(),
-		DeaconSession: session.DeaconSessionName(),
+		Role:         "mayor",
+		TownRoot:     townRoot,
+		TownName:     townName,
+		WorkDir:      townRoot,
+		MayorSession: session.MayorSessionName(),
 	}
 
 	content, err := tmpl.RenderRole("mayor", data)

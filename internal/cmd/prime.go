@@ -18,7 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
@@ -56,9 +55,6 @@ type Role string
 
 const (
 	RoleMayor   Role = "mayor"
-	RoleDeacon  Role = "deacon"
-	RoleBoot    Role = "boot"
-	RoleWitness Role = "witness"
 	RolePolecat Role = "polecat"
 	RoleCrew    Role = "crew"
 	RoleDog     Role = "dog"
@@ -73,7 +69,7 @@ const (
 // hand-maintained list that has to be kept in sync by hand (gt-9pn).
 func AllRoles() []Role {
 	return []Role{
-		RoleMayor, RoleDeacon, RoleBoot, RoleWitness,
+		RoleMayor,
 		RolePolecat, RoleCrew, RoleDog, RoleUnknown,
 	}
 }
@@ -129,9 +125,9 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeExplain, "explain", false,
 		"Show why each section was included")
 	primeCmd.Flags().IntVar(&primeStep, "step", 0,
-		"Print the title and full body of formula step N (1-based) and exit; use with --formula, else the hooked or patrol formula")
+		"Print the title and full body of formula step N (1-based) and exit; use with --formula, else the hooked formula")
 	primeCmd.Flags().StringVar(&primeFormula, "formula", "",
-		"Formula name for --step (default: the hooked bead's attached formula, or the role's patrol formula)")
+		"Formula name for --step (default: the hooked bead's attached formula)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -213,42 +209,8 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
 
-	// A fresh deacon session must not inherit its predecessor's patrol_count
-	// (gt-wdv9, the deacon's counterpart to gt-oabl's witness fix). This runs
-	// in the SessionStart hook path, the only funnel every deacon session
-	// passes through — a handoff respawns the pane, and the daemon restarts
-	// sessions, without going through any other single entry point. It runs
-	// before session setup so a failure later in this prime still leaves the
-	// counter cleared for the session it starts.
-	if msg := resetDeaconPatrolState(ctx); msg != "" {
-		fmt.Println(msg)
-	}
-
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
-	}
-
-	// A patrol role must have a live patrol wisp before the payload is assembled:
-	// starting one is a side effect, and the only section that would otherwise do
-	// it is droppable under the hook budget (gt-e1ie). Running it first also puts
-	// the wisp on the hook, so the never-dropped hooked-work section below
-	// renders the patrol instead of an empty hook.
-	//
-	// captureOutput wraps the call because autoSpawnPatrol can print (e.g.
-	// "Burned N previous patrol wisp(s)"): printed directly, that text would
-	// leak ahead of the whole structured payload, uncounted by the hook budget
-	// this section is otherwise built to respect. Folding it into patrolSetupText
-	// keeps it inside the never-dropped patrol section instead.
-	var patrolStatus primePatrolStatus
-	var patrolSetupText string
-	if !primeDryRun {
-		var patrolErr error
-		patrolSetupText = captureOutput(func() {
-			patrolStatus, patrolErr = ensurePrimePatrol(ctx)
-		})
-		if patrolErr != nil {
-			return reportPrimeMissingPatrol(ctx, patrolErr)
-		}
 	}
 
 	// P0: Fetch work context once — used for both OTel attribution and output.
@@ -317,18 +279,12 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 			explain(true, "Session metadata: always included")
 			return captureOutput(func() { outputSessionMetadata(ctx) })
 		},
-		patrol: func() string {
-			// The respawn EFFORT hint rides the kept, early patrol section so
-			// hook-output truncation cannot drop it (claude-8w7).
-			return patrolSetupText + primePatrolSection(patrolStatus) + witnessPrimeEffortText(ctx, primeHandoffReason)
-		},
 		hookedWork: func() string { return hookedWorkText },
-		molecule:   func() string { return captureOutput(func() { outputMoleculeContext(ctx, patrolStatus) }) },
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
 		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
 		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
 		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(ctx, cwd) }) },
-		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
+		mail:       func() string { return captureOutput(func() { runPrimeMailInject(cwd) }) },
 		startup: func() string {
 			if primeContinuationMode {
 				return "\n---\n\n**Continue your current task.** Context was compacted; your role text is in the system prompt and the sections above are current.\n"
@@ -357,11 +313,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 // performs none of the session side effects of a normal prime.
 func runPrimeStep(ctx RoleContext) error {
 	hookedBead, _ := findAgentWorkWithAttempts(ctx, 1)
-	name := primeStepFormulaName(ctx, hookedBead, primeFormula)
+	name := primeStepFormulaName(hookedBead, primeFormula)
 	if name == "" {
 		return fmt.Errorf("no formula to read: pass --formula <name>")
 	}
-	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(ctx, hookedBead, name))
+	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(hookedBead, name))
 	if err != nil {
 		return err
 	}
@@ -385,7 +341,7 @@ func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
 
 func roleRequiresWorktreeIntegrity(role Role) bool {
 	switch role {
-	case RolePolecat, RoleCrew, RoleWitness, RoleDog, RoleBoot:
+	case RolePolecat, RoleCrew, RoleDog:
 		return true
 	default:
 		return false
@@ -397,10 +353,6 @@ func roleRequiresWorktreeIntegrity(role Role) bool {
 // restores identity and injects any new mail. It deliberately skips
 // setupPrimeSession and findAgentWork (which hit Dolt) to stay fast
 // enough for non-Claude runtimes with short hook timeouts.
-//
-// Patrol roles are the exception: a resumed witness, refinery or deacon whose
-// patrol wisp is gone has no step to run, and this path renders none of the
-// sections that would tell it so (gt-e1ie).
 //
 // Unlike the full prime path, this outputs a brief recovery line instead of
 // the full AUTONOMOUS WORK MODE block. This prevents agents from re-announcing
@@ -414,18 +366,6 @@ func runPrimeCompactResume(ctx RoleContext) error {
 	}
 	fmt.Printf("\n> **Recovery**: Context %s complete. You are **%s** (%s).\n",
 		source, actor, ctx.Role)
-
-	// --dry-run promises no side effects; skip the seed step for the same
-	// reason the full prime path guards it (gt-e1ie).
-	var status primePatrolStatus
-	if !primeDryRun {
-		var err error
-		status, err = ensurePrimePatrol(ctx)
-		if err != nil {
-			return reportPrimeMissingPatrol(ctx, err)
-		}
-	}
-	fmt.Print(primePatrolSection(status))
 
 	// Session identity line
 	outputSessionMetadata(ctx)
@@ -558,61 +498,6 @@ func signalAgentReady() {
 // causing the agent to re-initialize instead of continuing. (GH#1965)
 func isCompactResume() bool {
 	return primeHookSource == "compact" || primeHookSource == "resume" || primeHandoffReason == "compaction"
-}
-
-// primeResetsDeaconPatrolState reports whether this prime is the SessionStart
-// hook of a fresh deacon session.
-//
-// The deacon's loop-or-exit step hands off once its patrol_count reaches the
-// ceiling in the rendered role prompt (deacon.md.tmpl: 20 loops), and nothing
-// else ever resets that counter, so a value inherited from a predecessor
-// makes every new session hand off after a single cycle without ever running
-// `gt patrol report` — eight deacon handoff+session_start pairs landed in 26
-// minutes on 2026-09-24 with no incident behind any of them (gt-wdv9).
-// Session start is the one moment where "patrols this session" is well
-// defined, so it is where the reset belongs — mirroring the witness's
-// original fresh-session reset (primeResetsWitnessPatrolState, since
-// superseded: the witness's own counter is now purely informational and
-// bounded at patrol-report time instead, because its role template dropped
-// the loop-count handoff trigger entirely (gt-oabl); the deacon keeps a real
-// ceiling, so it still needs this).
-//
-// Only a fresh session qualifies. Compaction and resume continue the session
-// that owns the counter, and a bare `gt prime` (no --hook) is a context read,
-// not a session start. handoffReason == "compaction" is checked separately
-// from source: isCompactResume/primeContinuationMode treat it as
-// continuation even when source == "startup" (a compaction-triggered handoff
-// cycle can report source=startup with the marker's reason carrying
-// "compaction" — GH#1965), and useCompactResumePath's fast path only catches
-// that combination when staticDelivered is false, so a plain source check
-// here would reset the counter on some compaction restarts.
-func primeResetsDeaconPatrolState(role Role, hookMode bool, source, handoffReason string) bool {
-	if !hookMode || role != RoleDeacon || handoffReason == "compaction" {
-		return false
-	}
-	return source == "startup" || source == "clear"
-}
-
-// resetDeaconPatrolState clears a fresh deacon session's inherited patrol
-// counter and returns a status line for the agent's context, or "" when it
-// did nothing. Failures are reported, never fatal: a state file we cannot
-// read must not stop a deacon from starting.
-func resetDeaconPatrolState(ctx RoleContext) string {
-	if primeDryRun || !primeResetsDeaconPatrolState(ctx.Role, primeHookMode, primeHookSource, primeHandoffReason) {
-		return ""
-	}
-	if ctx.TownRoot == "" {
-		return ""
-	}
-
-	changed, err := deacon.ResetPatrolCount(ctx.TownRoot)
-	if err != nil {
-		return formatPrimeStatusLine(fmt.Sprintf("deacon patrol state not reset: %v", err))
-	}
-	if !changed {
-		return ""
-	}
-	return formatPrimeStatusLine("deacon patrol_count reset to 0 for this session")
 }
 
 // warnRoleMismatch outputs a prominent warning if GT_ROLE disagrees with cwd detection.
@@ -786,7 +671,7 @@ func runPrimeExternalTools(ctx RoleContext, cwd string) {
 
 func (p primeTools) externalTools(ctx RoleContext, cwd string) {
 	p.memoryInject(ctx, cwd)
-	p.mailInject(ctx, cwd)
+	p.mailInject(cwd)
 }
 
 // runPrimeMemoryInject renders the memory index section (skipped in dry-run and
@@ -807,30 +692,17 @@ func (p primeTools) memoryInject(ctx RoleContext, cwd string) {
 	p.memoryIndex(cwd)
 }
 
-// runPrimeMailInject renders pending mail (skipped in dry-run and for patrol roles).
-func runPrimeMailInject(ctx RoleContext, cwd string) {
-	primeTools{}.mailInject(ctx, cwd)
+// runPrimeMailInject renders pending mail (skipped in dry-run).
+func runPrimeMailInject(cwd string) {
+	primeTools{}.mailInject(cwd)
 }
 
-func (p primeTools) mailInject(ctx RoleContext, cwd string) {
+func (p primeTools) mailInject(cwd string) {
 	if primeDryRun {
 		explain(true, "gt mail check --inject: skipped in dry-run mode")
 		return
 	}
-	if shouldSkipStartupMailInject(string(ctx.Role)) {
-		explain(true, fmt.Sprintf("gt mail check --inject: skipped for patrol role %s", ctx.Role))
-		return
-	}
 	p.mailCheck(cwd)
-}
-
-func shouldSkipStartupMailInject(role string) bool {
-	switch strings.ToLower(role) {
-	case string(RoleWitness), string(RoleDeacon), string(RoleBoot):
-		return true
-	default:
-		return false
-	}
 }
 
 // shouldRenderMemories reports whether a role's prime payload carries the
@@ -1473,12 +1345,6 @@ func buildRoleAnnouncement(ctx RoleContext) string {
 	switch ctx.Role {
 	case RoleMayor:
 		return "Mayor, checking in."
-	case RoleDeacon:
-		return "Deacon, checking in."
-	case RoleBoot:
-		return "Boot, checking in."
-	case RoleWitness:
-		return fmt.Sprintf("%s Witness, checking in.", ctx.Rig)
 	case RolePolecat:
 		return fmt.Sprintf("%s Polecat %s, checking in.", ctx.Rig, ctx.Polecat)
 	case RoleCrew:
@@ -1507,12 +1373,6 @@ func getAgentIdentity(ctx RoleContext) string {
 		return fmt.Sprintf("%s/polecats/%s", ctx.Rig, ctx.Polecat)
 	case RoleMayor:
 		return "mayor"
-	case RoleDeacon:
-		return "deacon"
-	case RoleBoot:
-		return "boot"
-	case RoleWitness:
-		return fmt.Sprintf("%s/witness", ctx.Rig)
 	default:
 		return ""
 	}
@@ -1576,17 +1436,6 @@ func getAgentBeadID(ctx RoleContext) string {
 	switch ctx.Role {
 	case RoleMayor:
 		return beads.MayorBeadIDTown()
-	case RoleDeacon:
-		return beads.DeaconBeadIDTown()
-	case RoleBoot:
-		// Boot uses deacon's bead since it's a deacon subprocess
-		return beads.DeaconBeadIDTown()
-	case RoleWitness:
-		if ctx.Rig != "" {
-			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
-			return beads.WitnessBeadIDWithPrefix(prefix, ctx.Rig)
-		}
-		return ""
 	case RolePolecat:
 		if ctx.Rig != "" && ctx.Polecat != "" {
 			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
@@ -1609,7 +1458,7 @@ func getAgentBeadID(ctx RoleContext) string {
 // Uses the shared SetupRedirect helper which handles both tracked and local beads.
 func ensureBeadsRedirect(ctx RoleContext) {
 	// Only applies to worktree-based roles that use shared beads
-	if ctx.Role != RoleCrew && ctx.Role != RolePolecat && ctx.Role != RoleWitness {
+	if ctx.Role != RoleCrew && ctx.Role != RolePolecat {
 		return
 	}
 
