@@ -1,4 +1,4 @@
-package protocol
+package runtime_test
 
 import (
 	"os"

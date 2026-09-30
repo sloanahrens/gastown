@@ -1,4 +1,4 @@
-package protocol
+package capacity_test
 
 import (
 	"os"

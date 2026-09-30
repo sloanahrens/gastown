@@ -26,6 +26,7 @@ import (
 // every fake-driver test kept passing because it never executed the text
 // (gt-apam rejection). This test executes the text.
 func TestMRProtectedJoinAgainstRealEngine(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	maxProtection := 24 * time.Hour
 	cutoff := now.Add(-maxProtection)

@@ -106,6 +106,7 @@ func idsOf(calls []writerCall) []string {
 // holds no DML, DDL or Dolt commit. The fake driver (which fails any Exec)
 // is the behavioral half.
 func TestReaperSourceIssuesNoWrites(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("reaper.go")
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +125,7 @@ func TestReaperSourceIssuesNoWrites(t *testing.T) {
 // TestLiveReaperRunsRefuseWithoutAWriter: with no bd writer a live run must
 // refuse before touching anything, never fall back to SQL.
 func TestLiveReaperRunsRefuseWithoutAWriter(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -152,6 +154,7 @@ func TestLiveReaperRunsRefuseWithoutAWriter(t *testing.T) {
 // --force (the reaper always closed regardless of children) and a reason, so
 // bd records who closed them and why.
 func TestReapForceClosesThroughBdWithAReason(t *testing.T) {
+	t.Parallel()
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	state := &fakeReaperState{
 		wisps: map[string]*fakeWisp{
@@ -189,6 +192,7 @@ func TestReapForceClosesThroughBdWithAReason(t *testing.T) {
 // TestReapCountsOnlyWhatBdClosed: a partial close counts the ids bd closed
 // and returns bd's refusal instead of reporting the whole batch closed.
 func TestReapCountsOnlyWhatBdClosed(t *testing.T) {
+	t.Parallel()
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	state := &fakeReaperState{
 		wisps: map[string]*fakeWisp{
@@ -214,6 +218,7 @@ func TestReapCountsOnlyWhatBdClosed(t *testing.T) {
 // TestPurgeDeletesThroughBd: closed wisps past purge age are deleted with
 // bd delete, and a wisp a live agent still references is not in the batch.
 func TestPurgeDeletesThroughBd(t *testing.T) {
+	t.Parallel()
 	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	state := &fakeReaperState{
 		wisps: map[string]*fakeWisp{
@@ -243,6 +248,7 @@ func TestPurgeDeletesThroughBd(t *testing.T) {
 // TestAutoCloseClosesThroughBdWithoutForce: durable issues close with plain
 // bd close and the stale reason; bd's fences are not overridden.
 func TestAutoCloseClosesThroughBdWithoutForce(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -272,6 +278,7 @@ func TestAutoCloseClosesThroughBdWithoutForce(t *testing.T) {
 // TestCloseInChunksSplitsBatches: a large candidate set reaches bd in
 // DefaultBatchSize batches, so one bd argv never carries thousands of ids.
 func TestCloseInChunksSplitsBatches(t *testing.T) {
+	t.Parallel()
 	ids := make([]string, DefaultBatchSize*2+1)
 	for i := range ids {
 		ids[i] = "w-" + strings.Repeat("x", i%3) + string(rune('a'+i%26))
@@ -293,6 +300,7 @@ func TestCloseInChunksSplitsBatches(t *testing.T) {
 // the run before the absent-parent and stale phases select, so no id is
 // re-selected under another reason and the counts cover only what closed.
 func TestReapStopsAtTheFirstFailedPhase(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	state := &fakeReaperState{
@@ -332,6 +340,7 @@ func TestReapStopsAtTheFirstFailedPhase(t *testing.T) {
 // issue_type='agent', including the absent-parent one, so bd close --force
 // is never handed an agent bead.
 func TestReapNeverClosesAnAgentWispInAnyPhase(t *testing.T) {
+	t.Parallel()
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	state := &fakeReaperState{
 		wisps: map[string]*fakeWisp{
@@ -365,6 +374,7 @@ func TestReapNeverClosesAnAgentWispInAnyPhase(t *testing.T) {
 // an issue the old UPDATE would have closed. The refusal is returned, and
 // Closed counts only what bd closed.
 func TestAutoCloseReportsBdRefusalWithAnAccurateCount(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b", "hq-c")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })

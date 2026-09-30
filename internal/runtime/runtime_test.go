@@ -30,89 +30,33 @@ func (f *fakeStartupPromptSession) WaitForRuntimeReady(_ string, rc *config.Runt
 	return f.waitErr
 }
 
-func TestSessionIDFromEnv_Default(t *testing.T) {
-	// Clear all environment variables
-	oldGSEnv := os.Getenv("GT_SESSION_ID_ENV")
-	oldClaudeID := os.Getenv("CLAUDE_SESSION_ID")
-	defer func() {
-		if oldGSEnv != "" {
-			os.Setenv("GT_SESSION_ID_ENV", oldGSEnv)
-		} else {
-			os.Unsetenv("GT_SESSION_ID_ENV")
-		}
-		if oldClaudeID != "" {
-			os.Setenv("CLAUDE_SESSION_ID", oldClaudeID)
-		} else {
-			os.Unsetenv("CLAUDE_SESSION_ID")
-		}
-	}()
-	os.Unsetenv("GT_SESSION_ID_ENV")
-	os.Unsetenv("CLAUDE_SESSION_ID")
-
-	result := SessionIDFromEnv()
-	if result != "" {
-		t.Errorf("SessionIDFromEnv() with no env vars should return empty, got %q", result)
+func TestSessionIDFromEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"no env vars", nil, ""},
+		{"CLAUDE_SESSION_ID fallback", map[string]string{"CLAUDE_SESSION_ID": "test-session-123"}, "test-session-123"},
+		{"GT_SESSION_ID_ENV names the variable", map[string]string{
+			"GT_SESSION_ID_ENV": "CUSTOM_SESSION_ID",
+			"CUSTOM_SESSION_ID": "custom-session-456",
+			"CLAUDE_SESSION_ID": "claude-session-789",
+		}, "custom-session-456"},
 	}
-}
-
-func TestSessionIDFromEnv_ClaudeSessionID(t *testing.T) {
-	oldGSEnv := os.Getenv("GT_SESSION_ID_ENV")
-	oldClaudeID := os.Getenv("CLAUDE_SESSION_ID")
-	defer func() {
-		if oldGSEnv != "" {
-			os.Setenv("GT_SESSION_ID_ENV", oldGSEnv)
-		} else {
-			os.Unsetenv("GT_SESSION_ID_ENV")
-		}
-		if oldClaudeID != "" {
-			os.Setenv("CLAUDE_SESSION_ID", oldClaudeID)
-		} else {
-			os.Unsetenv("CLAUDE_SESSION_ID")
-		}
-	}()
-
-	os.Unsetenv("GT_SESSION_ID_ENV")
-	os.Setenv("CLAUDE_SESSION_ID", "test-session-123")
-
-	result := SessionIDFromEnv()
-	if result != "test-session-123" {
-		t.Errorf("SessionIDFromEnv() = %q, want %q", result, "test-session-123")
-	}
-}
-
-func TestSessionIDFromEnv_CustomEnvVar(t *testing.T) {
-	oldGSEnv := os.Getenv("GT_SESSION_ID_ENV")
-	oldCustomID := os.Getenv("CUSTOM_SESSION_ID")
-	oldClaudeID := os.Getenv("CLAUDE_SESSION_ID")
-	defer func() {
-		if oldGSEnv != "" {
-			os.Setenv("GT_SESSION_ID_ENV", oldGSEnv)
-		} else {
-			os.Unsetenv("GT_SESSION_ID_ENV")
-		}
-		if oldCustomID != "" {
-			os.Setenv("CUSTOM_SESSION_ID", oldCustomID)
-		} else {
-			os.Unsetenv("CUSTOM_SESSION_ID")
-		}
-		if oldClaudeID != "" {
-			os.Setenv("CLAUDE_SESSION_ID", oldClaudeID)
-		} else {
-			os.Unsetenv("CLAUDE_SESSION_ID")
-		}
-	}()
-
-	os.Setenv("GT_SESSION_ID_ENV", "CUSTOM_SESSION_ID")
-	os.Setenv("CUSTOM_SESSION_ID", "custom-session-456")
-	os.Setenv("CLAUDE_SESSION_ID", "claude-session-789")
-
-	result := SessionIDFromEnv()
-	if result != "custom-session-456" {
-		t.Errorf("SessionIDFromEnv() with custom env = %q, want %q", result, "custom-session-456")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionIDFrom(func(k string) string { return tt.env[k] })
+			if got != tt.want {
+				t.Errorf("sessionIDFrom(%v) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestStartupFallbackCommands_NoHooks(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "none",
@@ -129,6 +73,7 @@ func TestStartupFallbackCommands_NoHooks(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_WithHooks(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "claude",
@@ -142,6 +87,7 @@ func TestStartupFallbackCommands_WithHooks(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_NilConfig(t *testing.T) {
+	t.Parallel()
 	// Nil config defaults to claude provider, which has hooks
 	// So it returns nil (no fallback commands needed)
 	commands := StartupFallbackCommands("polecat", nil)
@@ -151,6 +97,7 @@ func TestStartupFallbackCommands_NilConfig(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "none",
@@ -174,6 +121,7 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_PatrolRolesSkipMailInject(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "none",
@@ -196,6 +144,7 @@ func TestStartupFallbackCommands_PatrolRolesSkipMailInject(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "none",
@@ -220,6 +169,7 @@ func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "none",
@@ -234,6 +184,7 @@ func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_NilConfig(t *testing.T) {
+	t.Parallel()
 	// Should not panic with nil config
 	err := EnsureSettingsForRole("/tmp/test", "/tmp/test", "polecat", nil)
 	if err != nil {
@@ -242,6 +193,7 @@ func TestEnsureSettingsForRole_NilConfig(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_NilHooks(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: nil,
 	}
@@ -253,6 +205,7 @@ func TestEnsureSettingsForRole_NilHooks(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_UnknownProvider(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
 			Provider: "unknown",
@@ -266,6 +219,7 @@ func TestEnsureSettingsForRole_UnknownProvider(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_OpenCodeUsesWorkDir(t *testing.T) {
+	t.Parallel()
 	// OpenCode plugins must be installed in workDir (not settingsDir) because
 	// OpenCode has no --settings equivalent for path redirection.
 	settingsDir := t.TempDir()
@@ -294,6 +248,7 @@ func TestEnsureSettingsForRole_OpenCodeUsesWorkDir(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_ClaudeUsesSettingsDir(t *testing.T) {
+	t.Parallel()
 	// Claude settings must be installed in settingsDir (passed via --settings flag).
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
@@ -321,6 +276,7 @@ func TestEnsureSettingsForRole_ClaudeUsesSettingsDir(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_HooksWithPrompt(t *testing.T) {
+	t.Parallel()
 	// Claude: hooks enabled, prompt mode "arg"
 	rc := &config.RuntimeConfig{
 		PromptMode: "arg",
@@ -339,6 +295,7 @@ func TestGetStartupFallbackInfo_HooksWithPrompt(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_HooksNoPrompt(t *testing.T) {
+	t.Parallel()
 	// Hypothetical agent: hooks enabled but no prompt support
 	rc := &config.RuntimeConfig{
 		PromptMode: "none",
@@ -360,6 +317,7 @@ func TestGetStartupFallbackInfo_HooksNoPrompt(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_NoHooksWithPrompt(t *testing.T) {
+	t.Parallel()
 	// Codex: no hooks, but has prompt support
 	rc := &config.RuntimeConfig{
 		PromptMode: "arg",
@@ -381,6 +339,7 @@ func TestGetStartupFallbackInfo_NoHooksWithPrompt(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_NoHooksNoPrompt(t *testing.T) {
+	t.Parallel()
 	// Auggie/AMP: no hooks, no prompt support
 	rc := &config.RuntimeConfig{
 		PromptMode: "none",
@@ -405,6 +364,7 @@ func TestGetStartupFallbackInfo_NoHooksNoPrompt(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_NilConfig(t *testing.T) {
+	t.Parallel()
 	// Nil config defaults to Claude (hooks enabled, prompt "arg")
 	info := GetStartupFallbackInfo(nil)
 	if info.IncludePrimeInBeacon {
@@ -416,6 +376,7 @@ func TestGetStartupFallbackInfo_NilConfig(t *testing.T) {
 }
 
 func TestStartupNudgeContent(t *testing.T) {
+	t.Parallel()
 	content := StartupNudgeContent()
 	if content == "" {
 		t.Error("StartupNudgeContent should return non-empty string")
@@ -426,6 +387,7 @@ func TestStartupNudgeContent(t *testing.T) {
 }
 
 func TestGetStartupPromptFallback_NoHooksNoPrompt(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		PromptMode: "none",
 		Hooks: &config.RuntimeHooksConfig{
@@ -443,6 +405,7 @@ func TestGetStartupPromptFallback_NoHooksNoPrompt(t *testing.T) {
 }
 
 func TestGetStartupPromptFallback_WithPrompt(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		PromptMode: "arg",
 		Hooks: &config.RuntimeHooksConfig{
@@ -460,6 +423,7 @@ func TestGetStartupPromptFallback_WithPrompt(t *testing.T) {
 }
 
 func TestDeliverStartupPromptFallback_NoPromptWaitsAndNudges(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		PromptMode: "none",
 		Hooks: &config.RuntimeHooksConfig{
@@ -494,6 +458,7 @@ func TestDeliverStartupPromptFallback_NoPromptWaitsAndNudges(t *testing.T) {
 }
 
 func TestDeliverStartupPromptFallback_WithPromptNoOp(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		PromptMode: "arg",
 		Hooks: &config.RuntimeHooksConfig{
@@ -515,6 +480,7 @@ func TestDeliverStartupPromptFallback_WithPromptNoOp(t *testing.T) {
 }
 
 func TestDeliverStartupPromptFallback_WaitError(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		PromptMode: "none",
 		Hooks: &config.RuntimeHooksConfig{
@@ -533,6 +499,7 @@ func TestDeliverStartupPromptFallback_WaitError(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_CopilotUsesWorkDir(t *testing.T) {
+	t.Parallel()
 	// Copilot instructions must be installed in workDir (not settingsDir) because
 	// Copilot has no --settings equivalent for path redirection.
 	settingsDir := t.TempDir()
@@ -561,6 +528,7 @@ func TestEnsureSettingsForRole_CopilotUsesWorkDir(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_CursorUsesWorkDir(t *testing.T) {
+	t.Parallel()
 	// Cursor hooks.json is installed under workDir (HooksUseSettingsDir false for cursor preset).
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
@@ -587,6 +555,7 @@ func TestEnsureSettingsForRole_CursorUsesWorkDir(t *testing.T) {
 }
 
 func TestGetStartupFallbackInfo_InformationalHooks(t *testing.T) {
+	t.Parallel()
 	// Copilot: hooks provider set but informational (instructions file, not executable).
 	// Should be treated as having NO hooks for startup fallback purposes.
 	rc := &config.RuntimeConfig{
@@ -610,6 +579,7 @@ func TestGetStartupFallbackInfo_InformationalHooks(t *testing.T) {
 }
 
 func TestStartupFallbackCommands_InformationalHooks(t *testing.T) {
+	t.Parallel()
 	// Copilot has hooks provider set but informational — should still get fallback commands.
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
@@ -625,6 +595,7 @@ func TestStartupFallbackCommands_InformationalHooks(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_GeminiUsesWorkDir(t *testing.T) {
+	t.Parallel()
 	// Gemini CLI has no --settings flag; settings must go to workDir (like OpenCode).
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
@@ -662,13 +633,14 @@ func TestEnsureSettingsForRole_GeminiUsesWorkDir(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_GeminiRepairsBrokenContextSymlink(t *testing.T) {
+	t.Parallel()
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
 	if err := os.WriteFile(workDir+"/AGENTS.md", []byte("# Agents\n"), 0644); err != nil {
 		t.Fatalf("write AGENTS.md: %v", err)
 	}
 	if err := os.Symlink("./rig/worktree/AGENTS.md", workDir+"/GEMINI.md"); err != nil {
-		t.Skipf("symlink not supported: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 
 	rc := &config.RuntimeConfig{
@@ -693,6 +665,7 @@ func TestEnsureSettingsForRole_GeminiRepairsBrokenContextSymlink(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_GeminiRepairsResolvableAgentsSymlink(t *testing.T) {
+	t.Parallel()
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
 	if err := os.WriteFile(workDir+"/AGENTS.md", []byte("# Agents\n"), 0644); err != nil {
@@ -704,7 +677,7 @@ func TestEnsureSettingsForRole_GeminiRepairsResolvableAgentsSymlink(t *testing.T
 		t.Fatalf("write other AGENTS.md: %v", err)
 	}
 	if err := os.Symlink(otherAgents, workDir+"/GEMINI.md"); err != nil {
-		t.Skipf("symlink not supported: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 
 	rc := &config.RuntimeConfig{
@@ -729,6 +702,7 @@ func TestEnsureSettingsForRole_GeminiRepairsResolvableAgentsSymlink(t *testing.T
 }
 
 func TestEnsureSettingsForRole_GeminiPreservesGeminiOverlay(t *testing.T) {
+	t.Parallel()
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
 	geminiContent := []byte("# Gemini overlay\n")
@@ -761,6 +735,7 @@ func TestEnsureSettingsForRole_GeminiPreservesGeminiOverlay(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_GeminiNoAgentsMDNoops(t *testing.T) {
+	t.Parallel()
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -802,6 +777,7 @@ func findSubstring(s, substr string) bool {
 }
 
 func TestRuntimeConfigWithMinDelay_NilConfig(t *testing.T) {
+	t.Parallel()
 	result := RuntimeConfigWithMinDelay(nil, 3000)
 	if result == nil {
 		t.Fatal("RuntimeConfigWithMinDelay(nil) should return non-nil config")
@@ -815,6 +791,7 @@ func TestRuntimeConfigWithMinDelay_NilConfig(t *testing.T) {
 }
 
 func TestRuntimeConfigWithMinDelay_NilTmux(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{PromptMode: "arg"}
 	result := RuntimeConfigWithMinDelay(rc, 2000)
 	if result.Tmux == nil {
@@ -830,6 +807,7 @@ func TestRuntimeConfigWithMinDelay_NilTmux(t *testing.T) {
 }
 
 func TestRuntimeConfigWithMinDelay_BelowMin(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Tmux: &config.RuntimeTmuxConfig{
 			ReadyDelayMs:      500,
@@ -854,6 +832,7 @@ func TestRuntimeConfigWithMinDelay_BelowMin(t *testing.T) {
 }
 
 func TestRuntimeConfigWithMinDelay_AboveMin(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Tmux: &config.RuntimeTmuxConfig{
 			ReadyDelayMs: 5000,
@@ -866,6 +845,7 @@ func TestRuntimeConfigWithMinDelay_AboveMin(t *testing.T) {
 }
 
 func TestRuntimeConfigWithMinDelay_ZeroMin(t *testing.T) {
+	t.Parallel()
 	rc := &config.RuntimeConfig{
 		Tmux: &config.RuntimeTmuxConfig{
 			ReadyDelayMs: 0,
@@ -899,6 +879,7 @@ func makeTownRootWithGit(t *testing.T) string {
 }
 
 func TestCommandsInherited_WorkDirIsNestedInTownRoot(t *testing.T) {
+	t.Parallel()
 	// workDir is a subdirectory of the town root (same git repo) → inherited
 	root := makeTownRootWithGit(t)
 	mayorDir := root + "/mayor"
@@ -909,6 +890,7 @@ func TestCommandsInherited_WorkDirIsNestedInTownRoot(t *testing.T) {
 }
 
 func TestCommandsInherited_WorkDirIsTownRoot(t *testing.T) {
+	t.Parallel()
 	// workDir == git root → not inherited (we're provisioning at the root itself)
 	root := makeTownRootWithGit(t)
 
@@ -918,6 +900,7 @@ func TestCommandsInherited_WorkDirIsTownRoot(t *testing.T) {
 }
 
 func TestCommandsInherited_WorkDirNestedInTownRootBeforeGitInit(t *testing.T) {
+	t.Parallel()
 	// gt install creates mayor/deacon settings before it initializes town .git.
 	// Those role dirs still inherit town-level commands once install provisions them.
 	root := makeTownRoot(t)
@@ -929,6 +912,7 @@ func TestCommandsInherited_WorkDirNestedInTownRootBeforeGitInit(t *testing.T) {
 }
 
 func TestCommandsInherited_NestedGitRepoInsideTownRoot(t *testing.T) {
+	t.Parallel()
 	// Crew/polecat workdirs live in nested git repos under the town root. Claude
 	// Code stops at that repo boundary, so they need explicit command provisioning.
 	root := makeTownRootWithGit(t)
@@ -943,6 +927,7 @@ func TestCommandsInherited_NestedGitRepoInsideTownRoot(t *testing.T) {
 }
 
 func TestCommandsInherited_WorkDirIsOutsideTownRoot(t *testing.T) {
+	t.Parallel()
 	// workDir in a standalone git repo that is NOT a Gas Town workspace → not inherited
 	dir := t.TempDir()
 	if err := os.MkdirAll(dir+"/.git", 0755); err != nil {
@@ -959,6 +944,7 @@ func TestCommandsInherited_WorkDirIsOutsideTownRoot(t *testing.T) {
 }
 
 func TestCommandsInherited_NoGitRoot(t *testing.T) {
+	t.Parallel()
 	// workDir has no .git ancestor → not inherited
 	dir := t.TempDir()
 	// Don't create .git
@@ -969,6 +955,7 @@ func TestCommandsInherited_NoGitRoot(t *testing.T) {
 }
 
 func TestEnsureSettingsForRole_SkipsCommandsWhenInheritedFromTownRoot(t *testing.T) {
+	t.Parallel()
 	// Mayor/deacon run inside the town root git repo. Commands provisioned at the
 	// town root are inherited by Claude Code's path-hierarchy traversal, so
 	// EnsureSettingsForRole must NOT provision a duplicate copy in the role dir.
@@ -1000,6 +987,7 @@ func TestEnsureSettingsForRole_SkipsCommandsWhenInheritedFromTownRoot(t *testing
 }
 
 func TestEnsureSettingsForRole_ProvisionCommandsOutsideTownRoot(t *testing.T) {
+	t.Parallel()
 	// Crew/polecat workDirs are outside the town root git repo.
 	// EnsureSettingsForRole must provision commands normally.
 	workDir := t.TempDir()

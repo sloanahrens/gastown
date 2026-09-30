@@ -2,11 +2,13 @@ package capacity
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
 
 func TestDispatchCycle_Plan(t *testing.T) {
+	t.Parallel()
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 5, nil },
 		QueryPending: func() ([]PendingBead, error) {
@@ -32,6 +34,7 @@ func TestDispatchCycle_Plan(t *testing.T) {
 }
 
 func TestDispatchCycle_Plan_CapacityError(t *testing.T) {
+	t.Parallel()
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 0, errors.New("tmux gone") },
 		QueryPending:      func() ([]PendingBead, error) { return nil, nil },
@@ -45,6 +48,7 @@ func TestDispatchCycle_Plan_CapacityError(t *testing.T) {
 }
 
 func TestDispatchCycle_Plan_QueryError(t *testing.T) {
+	t.Parallel()
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 5, nil },
 		QueryPending:      func() ([]PendingBead, error) { return nil, errors.New("bd failed") },
@@ -58,6 +62,7 @@ func TestDispatchCycle_Plan_QueryError(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_AllSuccess(t *testing.T) {
+	t.Parallel()
 	dispatched := []string{}
 	successCalled := []string{}
 
@@ -102,6 +107,7 @@ func TestDispatchCycle_Run_AllSuccess(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_WithFailures(t *testing.T) {
+	t.Parallel()
 	failuresCalled := []string{}
 
 	cycle := &DispatchCycle{
@@ -142,6 +148,7 @@ func TestDispatchCycle_Run_WithFailures(t *testing.T) {
 }
 
 func TestDispatchCycle_RunPlan_DoesNotRequery(t *testing.T) {
+	t.Parallel()
 	queried := false
 	checkedCapacity := false
 	dispatched := []string{}
@@ -195,6 +202,7 @@ func TestDispatchCycle_RunPlan_DoesNotRequery(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_NoBeads(t *testing.T) {
+	t.Parallel()
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 5, nil },
 		QueryPending:      func() ([]PendingBead, error) { return nil, nil },
@@ -215,6 +223,7 @@ func TestDispatchCycle_Run_NoBeads(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_ZeroCapacity(t *testing.T) {
+	t.Parallel()
 	beads := []PendingBead{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 0, nil },
@@ -242,11 +251,13 @@ func TestDispatchCycle_Run_ZeroCapacity(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_OnSuccessError(t *testing.T) {
+	t.Parallel()
 	// When Execute succeeds but OnSuccess fails (even after retries),
 	// the item should NOT be counted as dispatched — it should be failed.
 	// This prevents double-dispatch when context close fails.
 	failureCalled := []string{}
 	var failureErrors []error
+	var waits []time.Duration
 
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 100, nil },
@@ -270,6 +281,7 @@ func TestDispatchCycle_Run_OnSuccessError(t *testing.T) {
 			failureErrors = append(failureErrors, err)
 		},
 		BatchSize: 10,
+		sleep:     func(d time.Duration) { waits = append(waits, d) },
 	}
 
 	report, err := cycle.Run()
@@ -287,6 +299,10 @@ func TestDispatchCycle_Run_OnSuccessError(t *testing.T) {
 	if len(failureCalled) != 1 || failureCalled[0] != "a" {
 		t.Errorf("failureCalled = %v, want [a]", failureCalled)
 	}
+	// Two retries back off 500ms then 1s; no wait after the last attempt.
+	if want := []time.Duration{500 * time.Millisecond, time.Second}; !reflect.DeepEqual(waits, want) {
+		t.Errorf("retry waits = %v, want %v", waits, want)
+	}
 
 	// Verify the error is an ErrOnSuccessFailed sentinel (not a string-based protocol)
 	if len(failureErrors) == 1 {
@@ -298,6 +314,7 @@ func TestDispatchCycle_Run_OnSuccessError(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_OnSuccessRetry(t *testing.T) {
+	t.Parallel()
 	// OnSuccess fails once then succeeds on retry — should count as dispatched.
 	attempts := map[string]int{}
 
@@ -318,6 +335,7 @@ func TestDispatchCycle_Run_OnSuccessRetry(t *testing.T) {
 			t.Errorf("OnFailure should not be called, called for %s: %v", b.ID, err)
 		},
 		BatchSize: 10,
+		sleep:     func(time.Duration) {},
 	}
 
 	report, err := cycle.Run()
@@ -333,6 +351,7 @@ func TestDispatchCycle_Run_OnSuccessRetry(t *testing.T) {
 }
 
 func TestBeadIDPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in, want string
 	}{
@@ -351,6 +370,7 @@ func TestBeadIDPrefix(t *testing.T) {
 }
 
 func TestAcceptsPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, rigPrefix, beadID string
 		want                    bool
@@ -372,6 +392,7 @@ func TestAcceptsPrefix(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_ValidateRefusesCrossRigPrefix(t *testing.T) {
+	t.Parallel()
 	// Validate returns ErrCrossRigPrefix for `hq-` beads on a `gt`-prefix rig;
 	// Execute must not be called for the refused bead.
 	rigPrefix := "gt"
@@ -420,29 +441,30 @@ func TestDispatchCycle_Run_ValidateRefusesCrossRigPrefix(t *testing.T) {
 }
 
 func TestDispatchCycle_Run_SpawnDelay(t *testing.T) {
-	start := time.Now()
+	t.Parallel()
+	var waits []time.Duration
 	cycle := &DispatchCycle{
 		AvailableCapacity: func() (int, error) { return 100, nil },
 		QueryPending: func() ([]PendingBead, error) {
 			return []PendingBead{{ID: "a"}, {ID: "b"}, {ID: "c"}}, nil
 		},
-		Execute:   func(b PendingBead) error { return nil },
-		OnSuccess: func(b PendingBead) error { return nil },
-		BatchSize: 10,
-		// Use a very small delay so the test isn't slow, but verifiable
+		Execute:    func(b PendingBead) error { return nil },
+		OnSuccess:  func(b PendingBead) error { return nil },
+		BatchSize:  10,
 		SpawnDelay: 10 * time.Millisecond,
+		sleep:      func(d time.Duration) { waits = append(waits, d) },
 	}
 
 	report, err := cycle.Run()
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	elapsed := time.Since(start)
 	if report.Dispatched != 3 {
 		t.Errorf("Dispatched = %d, want 3", report.Dispatched)
 	}
-	// 2 delays between 3 items = at least 20ms
-	if elapsed < 15*time.Millisecond {
-		t.Errorf("elapsed = %v, expected at least ~20ms for 2 delays", elapsed)
+	// 2 delays between 3 items, none after the last.
+	want := []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	if !reflect.DeepEqual(waits, want) {
+		t.Errorf("waits = %v, want %v", waits, want)
 	}
 }

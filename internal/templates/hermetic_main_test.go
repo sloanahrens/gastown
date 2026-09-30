@@ -1,4 +1,4 @@
-package protocol
+package templates_test
 
 import (
 	"os"

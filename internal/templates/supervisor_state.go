@@ -35,17 +35,34 @@ type SupervisorState struct {
 	Err      error  // the job's state could not be read; not the same as not loaded
 }
 
+// supervisorHost is what the supervisor readings take from the host: its OS,
+// the environment and home directory the per-user supervisor file is found
+// through, and the service manager's answer to a probe. The exported
+// functions read the real host; tests pass their own.
+type supervisorHost struct {
+	goos    string
+	getenv  func(string) string
+	homeDir func() (string, error)
+	probe   func(argv []string) (string, error)
+}
+
+var realHost = supervisorHost{goos: runtime.GOOS, getenv: os.Getenv, homeDir: os.UserHomeDir, probe: runSupervisorProbe}
+
 // SupervisorFilePath returns the path of the supervisor file this host would
 // use and the kind it belongs to ("launchd" / "systemd"), or ("", "") on a
 // host with no supported supervisor. The file need not exist.
 func SupervisorFilePath() (path, kind string) {
-	switch runtime.GOOS {
+	return realHost.filePath()
+}
+
+func (h supervisorHost) filePath() (path, kind string) {
+	switch h.goos {
 	case "darwin":
-		if p, err := LaunchdPlistPath(); err == nil {
+		if p, err := h.launchdPlistPath(); err == nil {
 			return p, "launchd"
 		}
 	case "linux":
-		if p, err := SystemdUnitPath(); err == nil {
+		if p, err := h.systemdUnitPath(); err == nil {
 			return p, "systemd"
 		}
 	}
@@ -58,14 +75,18 @@ func SupervisorFilePath() (path, kind string) {
 // installed without being bootstrapped — while a probe that failed for any
 // other reason comes back as Err, because status renders the two differently.
 func SupervisorJobState(kind string) SupervisorState {
+	return realHost.jobState(kind)
+}
+
+func (h supervisorHost) jobState(kind string) SupervisorState {
 	switch kind {
 	case "launchd":
 		argv := []string{"launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), LaunchdLabel)}
-		return probeSupervisorJob(kind, argv, parseLaunchdPrint, launchdJobIsMissing)
+		return probeSupervisorJob(h.probe, kind, argv, parseLaunchdPrint, launchdJobIsMissing)
 	case "systemd":
 		argv := []string{"systemctl", "--user", "show",
 			"-p", "LoadState", "-p", "MainPID", "-p", "NRestarts", "-p", "ExecMainStatus", SystemdUnit}
-		return probeSupervisorJob(kind, argv, parseSystemctlShow, systemdJobIsMissing)
+		return probeSupervisorJob(h.probe, kind, argv, parseSystemctlShow, systemdJobIsMissing)
 	}
 	return SupervisorState{Kind: kind, LastExit: -1}
 }
@@ -78,7 +99,11 @@ func SupervisorJobState(kind string) SupervisorState {
 // true. A job whose state could not be read is not reported missing: an
 // unreadable probe is not evidence either way. read may be nil.
 func SupervisorJobMissing(townRoot string, read SupervisorReader) (kind string, missing bool) {
-	path, kind := SupervisorFilePath()
+	return realHost.jobMissing(townRoot, read)
+}
+
+func (h supervisorHost) jobMissing(townRoot string, read SupervisorReader) (kind string, missing bool) {
+	path, kind := h.filePath()
 	if kind == "" {
 		return "", false
 	}
@@ -86,7 +111,7 @@ func SupervisorJobMissing(townRoot string, read SupervisorReader) (kind string, 
 		return "", false
 	}
 	if read == nil {
-		read = SupervisorJobState
+		read = h.jobState
 	}
 	if st := read(kind); st.Err == nil && !st.Loaded {
 		return kind, true
@@ -100,14 +125,18 @@ func SupervisorJobMissing(townRoot string, read SupervisorReader) (kind string, 
 // whenever the supervisor is not the process holding that lock. read may be
 // nil.
 func SupervisorStatusLine(townRoot string, lockPID int, read SupervisorReader) string {
-	kind := SupervisorStatus()
+	return realHost.statusLine(townRoot, lockPID, read)
+}
+
+func (h supervisorHost) statusLine(townRoot string, lockPID int, read SupervisorReader) string {
+	kind := h.status()
 	if kind == "none" {
 		return "none"
 	}
 	if read == nil {
-		read = SupervisorJobState
+		read = h.jobState
 	}
-	path, _ := SupervisorFilePath()
+	path, _ := h.filePath()
 	isFor, err := SupervisorFileIsFor(path, townRoot)
 	switch {
 	case err != nil:
@@ -169,10 +198,11 @@ func (s SupervisorState) evidence() string {
 	return b.String()
 }
 
-// probeSupervisorJob runs argv and parses its output. missing decides whether
-// a failed run means the manager does not know the job, which is not an error.
-func probeSupervisorJob(kind string, argv []string, parse func(string) (bool, int, int, int), missing func(string, error) bool) SupervisorState {
-	out, err := supervisorProbeRun(argv)
+// probeSupervisorJob runs argv through run and parses its output. missing
+// decides whether a failed run means the manager does not know the job, which
+// is not an error.
+func probeSupervisorJob(run func([]string) (string, error), kind string, argv []string, parse func(string) (bool, int, int, int), missing func(string, error) bool) SupervisorState {
+	out, err := run(argv)
 	if err != nil {
 		if missing(out, err) {
 			return SupervisorState{Kind: kind, LastExit: -1}
@@ -184,9 +214,8 @@ func probeSupervisorJob(kind string, argv []string, parse func(string) (bool, in
 	return SupervisorState{Kind: kind, Loaded: loaded, PID: pid, Runs: runs, LastExit: lastExit}
 }
 
-// supervisorProbeRun is the seam tests replace to answer a probe without
-// running the host's service manager.
-var supervisorProbeRun = func(argv []string) (string, error) {
+// runSupervisorProbe runs the host's service manager for a probe.
+func runSupervisorProbe(argv []string) (string, error) {
 	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from SupervisorJobState
 	return string(out), err
 }

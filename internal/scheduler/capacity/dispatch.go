@@ -77,6 +77,10 @@ type DispatchCycle struct {
 
 	// SpawnDelay between dispatches.
 	SpawnDelay time.Duration
+
+	// sleep waits between OnSuccess retries and between spawns; nil means
+	// time.Sleep. Tests record the waits instead.
+	sleep func(time.Duration)
 }
 
 // DispatchReport summarizes the result of one dispatch cycle.
@@ -104,6 +108,14 @@ func (c *DispatchCycle) Plan() (DispatchPlan, error) {
 
 // onSuccessRetries is the number of times to retry OnSuccess before giving up.
 const onSuccessRetries = 2
+
+func (c *DispatchCycle) wait(d time.Duration) {
+	if c.sleep != nil {
+		c.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
 
 // Run executes one dispatch cycle: query → plan → execute → report.
 func (c *DispatchCycle) Run() (DispatchReport, error) {
@@ -151,7 +163,7 @@ func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 					break
 				}
 				if attempt < onSuccessRetries {
-					time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+					c.wait(time.Duration(attempt+1) * 500 * time.Millisecond)
 				}
 			}
 			if successErr != nil {
@@ -170,7 +182,7 @@ func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 
 		// Inter-spawn delay (skip after last item)
 		if c.SpawnDelay > 0 && i < len(plan.ToDispatch)-1 {
-			time.Sleep(c.SpawnDelay)
+			c.wait(c.SpawnDelay)
 		}
 	}
 

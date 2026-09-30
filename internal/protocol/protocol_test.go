@@ -6,6 +6,7 @@ import (
 )
 
 func TestParseMessageType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected MessageType
@@ -35,6 +36,7 @@ func TestParseMessageType(t *testing.T) {
 }
 
 func TestExtractPolecat(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected string
@@ -59,6 +61,7 @@ func TestExtractPolecat(t *testing.T) {
 }
 
 func TestIsProtocolMessage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected bool
@@ -84,6 +87,7 @@ func TestIsProtocolMessage(t *testing.T) {
 }
 
 func TestParseMergeReadyPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -110,6 +114,7 @@ Verified: clean git state`
 }
 
 func TestParseMessageType_ConvoyNeedsFeeding(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected MessageType
@@ -130,6 +135,7 @@ func TestParseMessageType_ConvoyNeedsFeeding(t *testing.T) {
 }
 
 func TestParseConvoyNeedsFeedingPayload(t *testing.T) {
+	t.Parallel()
 	ts := time.Now().Format(time.RFC3339)
 	body := "ConvoyID: hq-cv123\nSourceIssue: gt-abc\nRig: gastown\nMerged-At: " + ts
 
@@ -150,6 +156,7 @@ func TestParseConvoyNeedsFeedingPayload(t *testing.T) {
 }
 
 func TestParseConvoyNeedsFeedingPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -173,6 +180,7 @@ func TestParseConvoyNeedsFeedingPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergeReadyPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -198,6 +206,7 @@ func TestParseMergeReadyPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergedPayload(t *testing.T) {
+	t.Parallel()
 	ts := time.Now().Format(time.RFC3339)
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
@@ -224,6 +233,7 @@ Merge-Commit: abc123`
 }
 
 func TestParseMergedPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -247,6 +257,7 @@ func TestParseMergedPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergeFailedPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -272,6 +283,7 @@ Error: Test failed`
 }
 
 func TestParseMergeFailedPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	payload, err := ParseMergeFailedPayload("")
 	if err == nil {
 		t.Errorf("expected error for empty body, got payload: %+v", payload)
@@ -282,6 +294,7 @@ func TestParseMergeFailedPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseReworkRequestPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -306,6 +319,7 @@ Conflict-Files: file1.go, file2.go`
 }
 
 func TestParseReworkRequestPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	payload, err := ParseReworkRequestPayload("")
 	if err == nil {
 		t.Errorf("expected error for empty body, got payload: %+v", payload)

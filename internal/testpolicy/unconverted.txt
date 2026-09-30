@@ -10,10 +10,5 @@ internal/hooks
 internal/mayor
 internal/nudge
 internal/plugin
-internal/protocol
-internal/reaper
-internal/runtime
-internal/scheduler/capacity
 internal/session
 internal/telemetry
-internal/templates

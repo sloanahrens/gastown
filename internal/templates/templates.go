@@ -490,7 +490,11 @@ func renderSystemdUnit(data SupervisorData) (string, error) {
 // LaunchdPlistPath returns the path where the launchd plist is (or would be)
 // installed on macOS.
 func LaunchdPlistPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	return realHost.launchdPlistPath()
+}
+
+func (h supervisorHost) launchdPlistPath() (string, error) {
+	homeDir, err := h.homeDir()
 	if err != nil {
 		return "", fmt.Errorf("finding home directory: %w", err)
 	}
@@ -500,9 +504,13 @@ func LaunchdPlistPath() (string, error) {
 // SystemdUnitPath returns the path where the systemd user unit is (or would
 // be) installed on Linux.
 func SystemdUnitPath() (string, error) {
-	dataHome := os.Getenv("XDG_DATA_HOME")
+	return realHost.systemdUnitPath()
+}
+
+func (h supervisorHost) systemdUnitPath() (string, error) {
+	dataHome := h.getenv("XDG_DATA_HOME")
 	if dataHome == "" {
-		homeDir, err := os.UserHomeDir()
+		homeDir, err := h.homeDir()
 		if err != nil {
 			return "", fmt.Errorf("finding home directory: %w", err)
 		}
@@ -518,7 +526,11 @@ func SystemdUnitPath() (string, error) {
 // This is the file-presence reading; SupervisorStatusLine is the one that
 // says what the job is doing (gt-sq9e).
 func SupervisorStatus() string {
-	path, kind := SupervisorFilePath()
+	return realHost.status()
+}
+
+func (h supervisorHost) status() string {
+	path, kind := h.filePath()
 	if path == "" || kind == "" {
 		return "none"
 	}
