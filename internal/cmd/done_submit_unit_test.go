@@ -54,6 +54,9 @@ type fakeDoneRepo struct {
 	// patchIDs are FirstParentPatchIDs answers keyed by the range's tip.
 	patchIDs map[string][]string
 
+	// verifyErr makes the worktree's own origin query fail to run.
+	verifyErr error
+
 	pushes   []string // "<branch> <sha> lease=<expected>"
 	verified []string // targets VerifyPushedCommitReachableFromPushTarget ran against
 }
@@ -137,6 +140,9 @@ func (f *fakeDoneRepo) VerifyPushedCommitReachableFromPushTarget(remote, branch,
 func (f *fakeDoneRepo) VerifyPushedCommit(remote, branch, commit string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.verifyErr != nil {
+		return f.verifyErr
+	}
 	if got := f.origin[branch]; got != commit {
 		return fmt.Errorf("%s/%s is %q, not %s", remote, branch, got, commit)
 	}

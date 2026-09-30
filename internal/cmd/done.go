@@ -1706,6 +1706,22 @@ func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit
 // origin does not have would make the landing worker merge a tree that lacks
 // the fix.
 func verifyPushLanded(g doneRepo, townRoot, rigName, branch, commit string) error {
+	var bare pushVerifier
+	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+		bare = git.NewGitWithDir(bareRepoPath, "")
+	}
+	return verifyPushLandedVia(g, bare, branch, commit)
+}
+
+// pushVerifier asks a remote whether it holds commit on branch.
+type pushVerifier interface {
+	VerifyPushedCommit(remote, branch, commit string) error
+}
+
+// verifyPushLandedVia is verifyPushLanded with the rig's bare repo given
+// (nil when the rig has none).
+func verifyPushLandedVia(g doneRepo, bare pushVerifier, branch, commit string) error {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		head, headErr := g.Rev("HEAD")
@@ -1730,10 +1746,8 @@ func verifyPushLanded(g doneRepo, townRoot, rigName, branch, commit string) erro
 	// exactly the unpushed-commit case the guard exists to catch, and gt done
 	// reported a verified push that never happened. A local ref is never
 	// evidence of a remote push; only a query of the remote is.
-	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
-	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
-		bareGit := git.NewGitWithDir(bareRepoPath, "")
-		if bareErr := bareGit.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
+	if bare != nil {
+		if bareErr := bare.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
 			return nil
 		}
 	}
