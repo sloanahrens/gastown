@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -288,7 +287,7 @@ func (c *WorktreeGitdirCheck) buildReason(gitdirTarget, bareRepoPath, correctedB
 
 	// Stale .repo.git path doesn't exist — is this a relocation?
 	if correctedBareRepo != "" {
-		oldPrefix := filepath.Dir(filepath.Dir(bareRepoPath))     // e.g., /Users/bob/gt
+		oldPrefix := filepath.Dir(filepath.Dir(bareRepoPath))      // e.g., /Users/bob/gt
 		newPrefix := filepath.Dir(filepath.Dir(correctedBareRepo)) // e.g., /home/bob/gt
 		return fmt.Sprintf("relocated (%s -> %s), needs worktree re-creation", oldPrefix, newPrefix)
 	}
@@ -327,7 +326,7 @@ func (c *WorktreeGitdirCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
-		if err := c.fixOneWorktree(bw, repoPath); err != nil {
+		if err := c.fixOneWorktree(ctx, bw, repoPath); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -339,7 +338,7 @@ func (c *WorktreeGitdirCheck) Fix(ctx *CheckContext) error {
 }
 
 // fixOneWorktree repairs a single broken worktree.
-func (c *WorktreeGitdirCheck) fixOneWorktree(bw brokenWorktree, repoPath string) error {
+func (c *WorktreeGitdirCheck) fixOneWorktree(ctx *CheckContext, bw brokenWorktree, repoPath string) error {
 	// Remove the broken .git file
 	gitFile := filepath.Join(bw.worktreePath, ".git")
 	if _, err := os.Stat(gitFile); err == nil {
@@ -349,25 +348,18 @@ func (c *WorktreeGitdirCheck) fixOneWorktree(bw brokenWorktree, repoPath string)
 	}
 
 	// Prune stale worktree entries
-	pruneCmd := exec.Command("git", "-C", repoPath, "worktree", "prune")
-	_ = pruneCmd.Run()
+	g := ctx.git(repoPath)
+	_ = g.WorktreePrune()
 
-	// Determine default branch
-	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD")
-	out, err := cmd.Output()
-	branch := "main"
-	if err == nil {
-		ref := strings.TrimSpace(string(out))
-		branch = strings.TrimPrefix(ref, "refs/heads/")
-	}
+	// Determine default branch (what HEAD names, else main)
+	branch := g.DefaultBranch()
 
 	// Try git worktree add first (works for empty/non-existent directories)
-	cmd = exec.Command("git", "-C", repoPath, "worktree", "add", "--force", bw.worktreePath, branch)
-	if output, err := cmd.CombinedOutput(); err == nil {
+	if err := g.WorktreeAddExistingForce(bw.worktreePath, branch); err == nil {
 		return nil // Success
-	} else if !strings.Contains(string(output), "already exists") {
+	} else if output := gitOutput(err); !strings.Contains(output, "already exists") {
 		return fmt.Errorf("%s: failed to re-create worktree: %v (%s)",
-			bw.worktreePath, err, strings.TrimSpace(string(output)))
+			bw.worktreePath, err, output)
 	}
 
 	// Directory already exists with content (common for deacon dogs after rsync).
