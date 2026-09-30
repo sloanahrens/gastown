@@ -3,6 +3,7 @@ package witness
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1874,5 +1875,91 @@ func TestStateCollapseSummary_ReadableRecordsStillAllClear(t *testing.T) {
 	}
 	if !strings.Contains(summary, "No state collapse found") {
 		t.Errorf("summary = %q, want the all-clear wording", summary)
+	}
+}
+
+// gt-sichuFixture builds the three repos the stale-ref regression needs: a
+// bare remote, a seed clone that pushes to it, and a canonical clone that
+// fetched it once and is then left behind. It returns all three paths.
+func gtSichuFixture(t *testing.T) (remote, seed, canonical string) {
+	t.Helper()
+	remote = t.TempDir()
+	gitIn(t, remote, "init", "--bare", "--initial-branch", "main", ".")
+
+	seed = t.TempDir()
+	gitIn(t, seed, "init", "--initial-branch", "main", ".")
+	gitIn(t, seed, "commit", "--allow-empty", "-m", "chore: seed")
+	gitIn(t, seed, "remote", "add", "origin", remote)
+	gitIn(t, seed, "push", "origin", "main")
+
+	canonical = t.TempDir()
+	gitIn(t, canonical, "init", "--initial-branch", "main", ".")
+	gitIn(t, canonical, "remote", "add", "origin", remote)
+	gitIn(t, canonical, "fetch", "origin")
+	return remote, seed, canonical
+}
+
+// TestDefaultBranchRefSource_RefreshesTargetBeforeGrepping is the gt-sichu
+// regression: a branch that just landed straight on the remote must not be
+// reported as never merged, which is what the strand grep did while it read
+// the canonical clone's unfetched origin/main.
+func TestDefaultBranchRefSource_RefreshesTargetBeforeGrepping(t *testing.T) {
+	t.Parallel()
+
+	_, seed, canonical := gtSichuFixture(t)
+
+	// The landing: pushed to the remote, not fetched into the canonical clone.
+	gitIn(t, seed, "commit", "--allow-empty", "-m", "fix(compactor-dog): keep the suite off the live daemon.json (gt-sichu)")
+	gitIn(t, seed, "push", "origin", "main")
+
+	// Fixture guard: if the clone already had the landing there would be no
+	// staleness to fix and the assertions below would pass vacuously.
+	if out := gitIn(t, canonical, "log", "origin/main", "--grep=gt-sichu", "--oneline", "-F"); out != "" {
+		t.Fatalf("fixture: canonical clone already sees gt-sichu on origin/main (%q); the lag is not set up", out)
+	}
+
+	refs := DefaultBranchRefSource(canonical)
+	landed, err := refs.TargetHasCommitReferencing("main", "gt-sichu")
+	if err != nil {
+		t.Fatalf("TargetHasCommitReferencing: %v", err)
+	}
+	if !landed {
+		t.Error("TargetHasCommitReferencing = false for an issue whose commit is on the remote's main; want true — this is the false strand gt-sichu reports")
+	}
+
+	// The answer reflects the remote, so the clone's ref moved to it.
+	if got, want := gitIn(t, canonical, "rev-parse", "origin/main"), gitIn(t, seed, "rev-parse", "main"); got != want {
+		t.Errorf("canonical origin/main = %s, want the remote's %s", got, want)
+	}
+
+	// Second call on the same source: the refresh is memoized, and an issue
+	// that never landed still resolves as absent rather than erroring.
+	landed, err = refs.TargetHasCommitReferencing("main", "gt-never-landed")
+	if err != nil {
+		t.Fatalf("second TargetHasCommitReferencing: %v", err)
+	}
+	if landed {
+		t.Error("TargetHasCommitReferencing = true for an issue with no commit on the target; want false")
+	}
+}
+
+// TestDefaultBranchRefSource_UnreachableRemoteIsUnknownNotAbsent pins the
+// other half of the contract: a refresh that cannot complete surfaces as an
+// error for the scan to decline on, rather than falling back to the stale ref
+// the scan is fixing (gt-sichu).
+func TestDefaultBranchRefSource_UnreachableRemoteIsUnknownNotAbsent(t *testing.T) {
+	t.Parallel()
+
+	canonical := t.TempDir()
+	gitIn(t, canonical, "init", "--initial-branch", "main", ".")
+	gitIn(t, canonical, "remote", "add", "origin", filepath.Join(t.TempDir(), "no-such-remote"))
+
+	refs := DefaultBranchRefSource(canonical)
+	landed, err := refs.TargetHasCommitReferencing("main", "gt-sichu")
+	if err == nil {
+		t.Fatalf("unreachable remote: want an error, got landed=%v", landed)
+	}
+	if landed {
+		t.Error("unreachable remote: want false alongside the error, got true")
 	}
 }
