@@ -443,3 +443,81 @@ func TestLandRunsGateAndReviewConcurrently(t *testing.T) {
 		t.Fatalf("Land: %v", err)
 	}
 }
+
+// flakyCloseBeads fails the first close, as a Dolt blip after the push would.
+type flakyCloseBeads struct {
+	*beadsfake.Fake
+	failed bool
+}
+
+func (b *flakyCloseBeads) ForceCloseWithReason(reason string, ids ...string) error {
+	if !b.failed {
+		b.failed = true
+		return errors.New("database is locked")
+	}
+	return b.Fake.ForceCloseWithReason(reason, ids...)
+}
+
+// TestLandRepairsAnIncompleteRecord: the work landed but the close failed. The
+// next Land of the same bead finds its own line in the landings file and
+// finishes the record instead of landing twice or rejecting landed work.
+func TestLandRepairsAnIncompleteRecord(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Beads = &flakyCloseBeads{Fake: f.bd}
+	res, err := l.Land(context.Background(), f.work)
+	var rec *RecordError
+	if !errors.As(err, &rec) || rec.Result.LandedCommit != f.originMain() {
+		t.Fatalf("first Land = %v, want a RecordError for the landed %s", err, f.originMain())
+	}
+	if f.bead().Status == "closed" {
+		t.Fatal("the failed close closed the bead")
+	}
+	res2, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("repair Land: %v", err)
+	}
+	if res2.LandedCommit != res.LandedCommit || res2.PatchID != res.PatchID || f.originMain() != res.LandedCommit {
+		t.Fatalf("repair landed again: %+v vs %+v, origin %s", res2, res, f.originMain())
+	}
+	b := f.bead()
+	if b.Status != "closed" || strings.Count(b.Notes, LandingNoteMarker) != 1 || CountRejections(b.Notes) != 0 {
+		t.Errorf("after repair: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if n := len(f.landingLines()); n != 1 {
+		t.Errorf("landings lines = %d, want 1", n)
+	}
+	if len(f.gate.dirs) != 1 {
+		t.Errorf("the repair gated again: %d gate runs", len(f.gate.dirs))
+	}
+}
+
+// TestLandHeadAlreadyOnTargetNeedsAHuman: the head reached the target by some
+// route that left no landing record (an operator push). That is not the
+// author's fault, so it is not rework.
+func TestLandHeadAlreadyOnTargetNeedsAHuman(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	gitT(t, f.seed, "push", "-q", "origin", f.work.Head+":refs/heads/main")
+	f.base = f.work.Head
+	_, err := f.lander().Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectEmpty, LabelNeedsHuman)
+	if rej.Rework || !strings.Contains(rej.Reason, "already reachable") {
+		t.Errorf("rejection = %+v", rej)
+	}
+}
+
+// TestLandUnknownVerdictIsInfra: a reviewer that returns no recognizable
+// verdict and no error produced no verdict; it is never read as a rejection.
+func TestLandUnknownVerdictIsInfra(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) { return Verdict{Verdict: "maybe"}, nil }
+	_, err := f.lander().Land(context.Background(), f.work)
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "review" {
+		t.Fatalf("Land error = %T %v, want *InfraError at review", err, err)
+	}
+	f.assertUntouched(t)
+}

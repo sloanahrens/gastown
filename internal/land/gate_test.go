@@ -171,9 +171,16 @@ func TestRigGatePicksGoOrRigCommandsOrRefuses(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(goDir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	g, err := RigGate(goDir, &config.MergeQueueConfig{TestCommand: "pytest"}, true)
-	if err != nil || g.Steps[0].Command != "make lint" {
-		t.Fatalf("go rig gate = %+v, %v", g.Steps, err)
+	g, err := RigGate(goDir, &config.MergeQueueConfig{}, true)
+	if err != nil || g.Steps[0].Command != "make lint" || g.Steps[1].Command != "go build ./..." || g.Steps[2].Command != "make test" {
+		t.Fatalf("go rig default gate = %+v, %v", g.Steps, err)
+	}
+	g, err = RigGate(goDir, &config.MergeQueueConfig{LintCommand: "golangci-lint run", BuildCommand: "make build", TestCommand: "GOFLAGS=-p=8 make test"}, true)
+	if err != nil || g.Steps[0].Command != "golangci-lint run" || g.Steps[1].Command != "go build ./..." || g.Steps[2].Command != "GOFLAGS=-p=8 make test" {
+		t.Fatalf("go rig gate must use the rig's lint and test commands and always go build ./...: %+v, %v", g.Steps, err)
+	}
+	if !g.Steps[0].LockRetry || len(g.Steps[2].Env) != 1 || g.Steps[2].Env[0] != "GT_TEST_DOCKER=0" {
+		t.Fatalf("go rig gate lost the lint lock retry or the unit-tier switch: %+v", g.Steps)
 	}
 	plain := t.TempDir()
 	g, err = RigGate(plain, &config.MergeQueueConfig{LintCommand: "ruff .", TestCommand: "pytest"}, true)
@@ -235,5 +242,49 @@ func TestCommandGateRetriesAContendedLint(t *testing.T) {
 	}
 	if res := g2.Run(ctx, "/w"); res.Passed || found != 1 {
 		t.Fatalf("a lint with findings ran %d times, passed=%v", found, res.Passed)
+	}
+}
+
+func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
+	t.Parallel()
+	got := mergeEnv([]string{"A=1", "GT_TEST_DOCKER=1", "B=2"}, []string{"GT_TEST_DOCKER=0"})
+	if strings.Join(got, " ") != "A=1 B=2 GT_TEST_DOCKER=0" {
+		t.Fatalf("mergeEnv = %q, want the inherited GT_TEST_DOCKER dropped", got)
+	}
+}
+
+func TestWithSlotWrapsOnlyTheTestStep(t *testing.T) {
+	t.Parallel()
+	s := &scriptedRun{answers: map[string]scriptedAnswer{}}
+	g := WithSlot(GoGate(false), "/bin/gt", "gastown/landing")
+	g.run = s.run
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if res := g.Run(ctx, "/w"); !res.Passed {
+		t.Fatalf("gate = %+v", res)
+	}
+	if got := strings.Join(s.calls[2].argv, " "); got != "/bin/gt slot run --role gastown/landing -- sh -c make test" {
+		t.Errorf("test argv = %q", got)
+	}
+	if got := strings.Join(s.calls[0].argv, " "); got != "sh -c make lint" {
+		t.Errorf("lint argv = %q, want it unwrapped", got)
+	}
+	if GoGate(false).Steps[2].Wrap != nil {
+		t.Error("WithSlot mutated the gate it was given")
+	}
+}
+
+// Without a deadline the lint lock is not waited on: a contended first
+// attempt is an infrastructure error, never a red verdict.
+func TestCommandGateContendedLintWithoutDeadlineIsInfra(t *testing.T) {
+	t.Parallel()
+	g := GoGate(true)
+	g.lockDelays = []time.Duration{0}
+	g.run = func(_ context.Context, _ string, _, _ []string, out io.Writer) (int, error) {
+		_, _ = io.WriteString(out, lintlock.Marker+"\n")
+		return 3, nil
+	}
+	if res := g.Run(context.Background(), "/w"); res.Passed || res.Err == nil {
+		t.Fatalf("gate = %+v, want an infrastructure error", res)
 	}
 }

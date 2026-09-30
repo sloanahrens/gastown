@@ -122,28 +122,43 @@ type CommandGate struct {
 	lockDelays []time.Duration // nil means lintlock.RetryDelay
 }
 
-// GoGate is the Go rigs' gate: `make lint`, `go build ./...`, `make test`.
-// unitOnly runs the unit tier (GT_TEST_DOCKER=0), which needs no container
-// slot; gt done uses it. Land runs the full tier on the merged tree.
+// GoGate is the Go rigs' default gate: `make lint`, `go build ./...`,
+// `make test`. unitOnly runs the unit tier (GT_TEST_DOCKER=0), which needs no
+// container slot; gt done uses it. Land runs the full tier on the merged tree
+// and must hold the container slot for it (WithSlot).
 func GoGate(unitOnly bool) CommandGate {
-	test := Step{Name: "test", Command: "make test"}
+	return goGate("make lint", "make test", unitOnly)
+}
+
+func goGate(lint, test string, unitOnly bool) CommandGate {
+	testStep := Step{Name: "test", Command: test}
 	if unitOnly {
-		test.Env = []string{"GT_TEST_DOCKER=0"}
+		testStep.Env = []string{"GT_TEST_DOCKER=0"}
 	}
 	return CommandGate{Steps: []Step{
-		{Name: "lint", Command: "make lint", LockRetry: true},
+		{Name: "lint", Command: lint, LockRetry: true},
 		{Name: "build", Command: "go build ./..."},
-		test,
+		testStep,
 	}}
 }
 
-// RigGate is the gate for the tree in dir: GoGate when it is a Go module,
-// otherwise the rig's merge_queue lint, build and test commands. A rig with
-// none of them is refused: "no gate configured" must stop a landing, never
-// wave it through (G2-11).
+// RigGate is the gate for the tree in dir. A Go module always builds with
+// `go build ./...` and lints and tests with the rig's lint_command and
+// test_command, defaulting to `make lint` and `make test`. Any other tree runs
+// the rig's lint, build and test commands. A rig with none of them is refused:
+// "no gate configured" must stop a landing, never wave it through (G2-11).
 func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGate, error) {
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-		return GoGate(unitOnly), nil
+		lint, test := "make lint", "make test"
+		if mq != nil {
+			if c := strings.TrimSpace(mq.LintCommand); c != "" {
+				lint = c
+			}
+			if c := strings.TrimSpace(mq.TestCommand); c != "" {
+				test = c
+			}
+		}
+		return goGate(lint, test, unitOnly), nil
 	}
 	var steps []Step
 	if mq != nil {
@@ -161,6 +176,24 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 		return CommandGate{}, fmt.Errorf("no gate configured for %s: it is not a Go module and the rig sets no lint_command, build_command or test_command", dir)
 	}
 	return CommandGate{Steps: steps}, nil
+}
+
+// WithSlot returns g with its test step run under the town's container-gate
+// slot (`gt slot run --role <role> -- ...`). Land's caller must use it for the
+// full tier until the suite is Docker-free: the container tests start only
+// under a held slot.
+func WithSlot(g CommandGate, gtPath, role string) CommandGate {
+	steps := make([]Step, len(g.Steps))
+	copy(steps, g.Steps)
+	for i := range steps {
+		if steps[i].Name == "test" {
+			steps[i].Wrap = func(argv []string) []string {
+				return append([]string{gtPath, "slot", "run", "--role", role, "--"}, argv...)
+			}
+		}
+	}
+	g.Steps = steps
+	return g
 }
 
 // Run runs each step in dir and stops at the first that does not exit zero.
@@ -283,7 +316,7 @@ func lastLines(s string, n int) string {
 func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer) (int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: gate commands come from the rig's own config
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = mergeEnv(os.Environ(), env)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	cmd.WaitDelay = 10 * time.Second
@@ -299,4 +332,24 @@ func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer)
 		return exitErr.ExitCode(), nil
 	}
 	return -1, err
+}
+
+// mergeEnv is base with every key in extra replaced, never duplicated.
+// Readers resolve duplicate keys differently (Go takes the last, some libc
+// getenv the first), so a gate's GT_TEST_DOCKER=0 beside an inherited =1 could
+// start containers with no slot held (gt-0hbm).
+func mergeEnv(base, extra []string) []string {
+	override := make(map[string]bool, len(extra))
+	for _, kv := range extra {
+		k, _, _ := strings.Cut(kv, "=")
+		override[k] = true
+	}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if !override[k] {
+			out = append(out, kv)
+		}
+	}
+	return append(out, extra...)
 }

@@ -1,12 +1,13 @@
 package land
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -43,15 +44,15 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 	if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("refusing landings dir %s: mode %v is not a private directory", dir, info.Mode())
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("refusing landings dir %s: owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+	if err := checkOwner(dir, info); err != nil {
+		return err
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding landing record: %w", err)
 	}
 	line = append(line, '\n')
-	fh, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	fh, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|oNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening landings file: %w", err)
 	}
@@ -64,4 +65,34 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 		return fmt.Errorf("syncing landings file: %w", err)
 	}
 	return fh.Close()
+}
+
+// Find returns the latest record for beadID landing head, if the file has one.
+// Land uses it to finish a landing whose bead record was left incomplete.
+func (f *LandingsFile) Find(beadID, head string) (LandingRecord, bool, error) {
+	fh, err := os.Open(f.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return LandingRecord{}, false, nil
+	}
+	if err != nil {
+		return LandingRecord{}, false, fmt.Errorf("opening landings file: %w", err)
+	}
+	defer func() { _ = fh.Close() }()
+	var found LandingRecord
+	ok := false
+	sc := bufio.NewScanner(fh)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var rec LandingRecord
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			return LandingRecord{}, false, fmt.Errorf("reading landings file %s: %w", f.Path, err)
+		}
+		if rec.BeadID == beadID && rec.Head == head {
+			found, ok = rec, true
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return LandingRecord{}, false, fmt.Errorf("reading landings file %s: %w", f.Path, err)
+	}
+	return found, ok, nil
 }

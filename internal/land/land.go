@@ -170,6 +170,20 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if err != nil {
 		return Result{}, &InfraError{Stage: "read bead", Err: err}
 	}
+	remote := l.remote()
+	g := git.NewGit(l.Repo)
+	// A landing whose bead record was left incomplete (RecordError) is
+	// finished from the landings file, never landed twice. This runs before
+	// the readiness checks, because the partial record may already have
+	// taken the ready label off.
+	if repaired, err := l.repairRecord(g, w); err != nil {
+		if repaired != nil {
+			return *repaired, err
+		}
+		return Result{}, err
+	} else if repaired != nil {
+		return *repaired, nil
+	}
 	if beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
 		return Result{}, fmt.Errorf("%w: %s is %s", ErrNotReady, w.BeadID, issue.Status)
 	}
@@ -180,9 +194,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 
-	remote := l.remote()
-	g := git.NewGit(l.Repo)
-	if err := g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", w.Target, remote, w.Target), fetchTimeout); err != nil {
+	if err := l.fetchTarget(g, w.Target); err != nil {
 		return Result{}, &InfraError{Stage: "fetch target", Err: err}
 	}
 	base, err := g.Rev(remote + "/" + w.Target)
@@ -198,8 +210,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if already, err := g.IsAncestor(w.Head, base); err != nil {
 		return Result{}, &InfraError{Stage: "ancestry", Err: err}
 	} else if already {
-		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true,
-			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s); nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
+		// It reached the target by a route that left no landing record (an
+		// operator push): not the author's to rework.
+		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
+			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
@@ -247,6 +261,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "gate failed on the merged tree: " + gateRes.Summary(), GateTail: gateRes.FailureTail()}
 		return Result{}, l.reject(issue, w, rej, reviewFindings(verdict, reviewErr))
 	}
+	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges {
+		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
+	}
 	if reviewErr != nil {
 		return Result{}, &InfraError{Stage: "review", Err: reviewErr}
 	}
@@ -281,6 +298,43 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 
 const fetchTimeout = 2 * time.Minute
 
+func (l *Lander) fetchTarget(g *git.Git, target string) error {
+	remote := l.remote()
+	return g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, remote, target), fetchTimeout)
+}
+
+// repairRecord finishes the record of a landing the landings file holds for
+// w when its commit is on the target. It returns nil, nil when there is
+// nothing to repair. An error reading the file or the target stops Land: a
+// landing it cannot rule out must not be landed a second time.
+func (l *Lander) repairRecord(g *git.Git, w Work) (*Result, error) {
+	rec, found, err := l.Landings.Find(w.BeadID, w.Head)
+	if err != nil {
+		return nil, &InfraError{Stage: "read landings file", Err: err}
+	}
+	if !found {
+		return nil, nil
+	}
+	if err := l.fetchTarget(g, w.Target); err != nil {
+		return nil, &InfraError{Stage: "fetch target", Err: err}
+	}
+	landed, err := g.IsAncestor(rec.LandedCommit, l.remote()+"/"+w.Target)
+	if err != nil {
+		return nil, &InfraError{Stage: "ancestry of recorded landing", Err: err}
+	}
+	if !landed {
+		// A record whose commit is not on the target (the target was rewound)
+		// is history, not proof: land normally.
+		return nil, nil
+	}
+	l.logf("%s: already landed as %s; finishing its record", w.BeadID, shortSHA(rec.LandedCommit))
+	res := &Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID, Base: rec.Base, Verdict: Verdict{Verdict: rec.OMVerdict, Score: rec.OMScore}}
+	if err := l.recordBead(w, rec); err != nil {
+		return res, &RecordError{Result: *res, Err: err}
+	}
+	return res, nil
+}
+
 func (l *Lander) validate(w Work) error {
 	switch {
 	case l.Repo == "" || l.WorkRoot == "":
@@ -300,10 +354,10 @@ func (l *Lander) validate(w Work) error {
 // land.
 func policyRejection(issue *beads.Issue) *Rejection {
 	if reason := beads.ConcreteWorkIssueRejectReason(issue); reason != "" {
-		return &Rejection{Kind: RejectPolicy, Reason: "not a concrete work bead: " + reason}
+		return &Rejection{Kind: RejectPolicy, Rework: false, Reason: "not a concrete work bead: " + reason}
 	}
 	if reason := CloseBlockReason(issue); reason != "" {
-		return &Rejection{Kind: RejectPolicy, Reason: reason + " work never lands on the target; a human decides what happens to the branch"}
+		return &Rejection{Kind: RejectPolicy, Rework: false, Reason: reason + " work never lands on the target; a human decides what happens to the branch"}
 	}
 	if n := beads.HasUncheckedCriteria(issue); n > 0 {
 		return &Rejection{Kind: RejectPolicy, Rework: true, Reason: fmt.Sprintf("%d unchecked acceptance criteria", n)}
@@ -481,14 +535,31 @@ func (l *Lander) record(w Work, res Result) error {
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)
 	}
-	if err := l.Beads.AppendNotes(w.BeadID, rec.NoteBlock()); err != nil {
-		return fmt.Errorf("landing record note on %s: %w", w.BeadID, err)
+	return l.recordBead(w, rec)
+}
+
+// recordBead writes the landing onto the work bead: the LANDING RECORD block,
+// the ready label off, and the close carrying landed_commit and patch_id. It
+// is idempotent, so a repair after a partial write finishes the same record.
+func (l *Lander) recordBead(w Work, rec LandingRecord) error {
+	issue, err := l.Beads.Show(w.BeadID)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", w.BeadID, err)
 	}
-	if err := l.Beads.Update(w.BeadID, beads.UpdateOptions{RemoveLabels: []string{LabelReadyToLand}}); err != nil {
-		return fmt.Errorf("removing %s from %s: %w", LabelReadyToLand, w.BeadID, err)
+	if !strings.Contains(issue.Notes, LandingNoteMarker+"\nlanded_commit: "+rec.LandedCommit) {
+		if err := l.Beads.AppendNotes(w.BeadID, rec.NoteBlock()); err != nil {
+			return fmt.Errorf("landing record note on %s: %w", w.BeadID, err)
+		}
 	}
-	if err := l.Beads.ForceCloseWithReason(rec.CloseReason(), w.BeadID); err != nil {
-		return fmt.Errorf("closing %s: %w", w.BeadID, err)
+	if beads.HasLabel(issue, LabelReadyToLand) {
+		if err := l.Beads.Update(w.BeadID, beads.UpdateOptions{RemoveLabels: []string{LabelReadyToLand}}); err != nil {
+			return fmt.Errorf("removing %s from %s: %w", LabelReadyToLand, w.BeadID, err)
+		}
+	}
+	if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+		if err := l.Beads.ForceCloseWithReason(rec.CloseReason(), w.BeadID); err != nil {
+			return fmt.Errorf("closing %s: %w", w.BeadID, err)
+		}
 	}
 	return nil
 }

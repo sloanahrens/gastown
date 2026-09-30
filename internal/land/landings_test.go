@@ -77,3 +77,20 @@ func TestLandingsFileRefusesUnsafeDirAndNames(t *testing.T) {
 		t.Error("symlinked landings file accepted")
 	}
 }
+
+func TestLandingsFileFind(t *testing.T) {
+	t.Parallel()
+	f, _ := RigLandingsFile(t.TempDir(), "gastown")
+	if _, ok, err := f.Find("gt-a", "h1"); ok || err != nil {
+		t.Fatalf("Find on a missing file = %v, %v", ok, err)
+	}
+	for _, r := range []LandingRecord{{BeadID: "gt-a", Head: "h0", LandedCommit: "c0"}, {BeadID: "gt-a", Head: "h1", LandedCommit: "c1"}, {BeadID: "gt-b", Head: "h1", LandedCommit: "c2"}} {
+		if err := f.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok, err := f.Find("gt-a", "h1")
+	if err != nil || !ok || got.LandedCommit != "c1" {
+		t.Fatalf("Find = %+v, %v, %v", got, ok, err)
+	}
+}
