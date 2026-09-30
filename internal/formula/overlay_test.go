@@ -10,6 +10,7 @@ import (
 )
 
 func TestLoadFormulaOverlay_NoFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir, "gastown")
 	require.NoError(t, err)
@@ -17,6 +18,7 @@ func TestLoadFormulaOverlay_NoFiles(t *testing.T) {
 }
 
 func TestLoadFormulaOverlay_TownLevel(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
@@ -39,6 +41,7 @@ description = "Custom submission instructions"
 }
 
 func TestLoadFormulaOverlay_RigLevel(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "gastown", "formula-overlays")
 	require.NoError(t, os.MkdirAll(rigDir, 0o755))
@@ -60,6 +63,7 @@ description = "Also run integration tests"
 }
 
 func TestLoadFormulaOverlay_RigPrecedence(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create town-level overlay.
@@ -93,6 +97,7 @@ mode = "skip"
 }
 
 func TestLoadFormulaOverlay_InvalidMode(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
@@ -112,6 +117,7 @@ description = "Bad mode"
 }
 
 func TestLoadFormulaOverlay_MissingStepID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
@@ -130,6 +136,7 @@ description = "No step_id"
 }
 
 func TestLoadFormulaOverlay_InvalidTOML(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
@@ -142,6 +149,7 @@ func TestLoadFormulaOverlay_InvalidTOML(t *testing.T) {
 }
 
 func TestApplyOverlays_Nil(t *testing.T) {
+	t.Parallel()
 	f := &Formula{Steps: []Step{{ID: "a", Description: "original"}}}
 	warnings := ApplyOverlays(f, nil)
 	assert.Nil(t, warnings)
@@ -149,6 +157,7 @@ func TestApplyOverlays_Nil(t *testing.T) {
 }
 
 func TestApplyOverlays_EmptyOverrides(t *testing.T) {
+	t.Parallel()
 	f := &Formula{Steps: []Step{{ID: "a", Description: "original"}}}
 	warnings := ApplyOverlays(f, &FormulaOverlay{})
 	assert.Nil(t, warnings)
@@ -156,6 +165,7 @@ func TestApplyOverlays_EmptyOverrides(t *testing.T) {
 }
 
 func TestApplyOverlays_Replace(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "Original description"},
@@ -175,6 +185,7 @@ func TestApplyOverlays_Replace(t *testing.T) {
 }
 
 func TestApplyOverlays_Append(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "build", Description: "Run the build"},
@@ -192,6 +203,7 @@ func TestApplyOverlays_Append(t *testing.T) {
 }
 
 func TestApplyOverlays_Skip(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "First"},
@@ -216,6 +228,7 @@ func TestApplyOverlays_Skip(t *testing.T) {
 }
 
 func TestApplyOverlays_SkipFirstStep(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "First"},
@@ -237,6 +250,7 @@ func TestApplyOverlays_SkipFirstStep(t *testing.T) {
 }
 
 func TestApplyOverlays_StaleOverride(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "First"},
@@ -257,6 +271,7 @@ func TestApplyOverlays_StaleOverride(t *testing.T) {
 }
 
 func TestApplyOverlays_MultipleOverrides(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "First"},
@@ -279,6 +294,7 @@ func TestApplyOverlays_MultipleOverrides(t *testing.T) {
 }
 
 func TestApplyOverlays_MixedStaleAndValid(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Steps: []Step{
 			{ID: "step-1", Description: "First"},

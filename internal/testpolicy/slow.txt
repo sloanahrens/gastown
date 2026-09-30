@@ -5,7 +5,6 @@ internal/witness 95s # real tmux (13 tmux.New) and git, hermetic harness
 internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
 internal/dog 82s # tests exec git (16 sites), hermetic harness
 internal/testutil 71s # the harnesses themselves: git, tmux, hermetic town
-internal/formula 67s # tests exec bash and git
 internal/crew 66s # tests exec git over real clones
 internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
 internal/util 45s # real tmux and process helpers

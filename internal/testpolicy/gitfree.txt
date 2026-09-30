@@ -6,6 +6,7 @@
 # gitfree_test.go.
 internal/daemon
 internal/doltserver
+internal/formula
 internal/git
 internal/git/gitfake
 internal/land

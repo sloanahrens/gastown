@@ -11,6 +11,7 @@ import (
 
 // TestExtractTemplateVariables verifies we can find all {{variable}} patterns.
 func TestExtractTemplateVariables(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		text     string
@@ -66,6 +67,7 @@ func TestExtractTemplateVariables(t *testing.T) {
 
 // TestValidateTemplateVariables verifies that undefined variables are caught.
 func TestValidateTemplateVariables(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		formula   string
@@ -172,6 +174,7 @@ required = true
 // TestUsedTemplateVariables pins what counts as a placeholder: only {{name}}, so
 // a var can be declared required and still not be demanded of a materializer.
 func TestUsedTemplateVariables(t *testing.T) {
+	t.Parallel()
 	f := &Formula{
 		Description: "uses {{alpha}}",
 		Steps: []Step{
@@ -198,11 +201,12 @@ func TestUsedTemplateVariables(t *testing.T) {
 // The mol-convoy-feed formula uses template variables like {{ready_count}} that
 // aren't defined in [vars], causing wisp creation to fail.
 func TestMolConvoyFeedFormula_VariableValidation(t *testing.T) {
+	t.Parallel()
 	// Find the formula file
 	formulaPath := filepath.Join("formulas", constants.MolConvoyFeed+".formula.toml")
 	data, err := os.ReadFile(formulaPath)
 	if err != nil {
-		t.Skipf("Formula file not found: %v", err)
+		t.Fatalf("Formula file not found: %v", err)
 	}
 
 	f, err := Parse(data)
@@ -221,10 +225,11 @@ func TestMolConvoyFeedFormula_VariableValidation(t *testing.T) {
 // TestAllEmbeddedFormulas_VariableValidation ensures no embedded formula
 // has undefined template variables. This prevents future regressions.
 func TestAllEmbeddedFormulas_VariableValidation(t *testing.T) {
+	t.Parallel()
 	formulasDir := "formulas"
 	entries, err := os.ReadDir(formulasDir)
 	if err != nil {
-		t.Skipf("Formulas directory not found: %v", err)
+		t.Fatalf("Formulas directory not found: %v", err)
 	}
 
 	var failures []string
@@ -257,10 +262,11 @@ func TestAllEmbeddedFormulas_VariableValidation(t *testing.T) {
 }
 
 func TestDogFormulasDoNotForceDoltPort(t *testing.T) {
+	t.Parallel()
 	formulasDir := "formulas"
 	entries, err := os.ReadDir(formulasDir)
 	if err != nil {
-		t.Skipf("Formulas directory not found: %v", err)
+		t.Fatalf("Formulas directory not found: %v", err)
 	}
 
 	for _, entry := range entries {

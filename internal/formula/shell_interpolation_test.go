@@ -40,6 +40,7 @@ func offendingVars(line string) bool {
 }
 
 func TestShippedFormulasDoNotInterpolateVarsIntoShellStrings(t *testing.T) {
+	t.Parallel()
 	entries, err := fs.ReadDir(formulasFS, "formulas")
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +84,7 @@ var untrustedReviewVar = regexp.MustCompile(`\{\{(scope|pr_url|focus)\}\}`)
 var quotedHeredocOpen = regexp.MustCompile(`<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*$`)
 
 func TestReviewFormulasBindUntrustedVarsThroughQuotedHeredoc(t *testing.T) {
+	t.Parallel()
 	for _, f := range []string{"mol-polecat-code-review", "mol-polecat-review-pr"} {
 		name := "formulas/" + f + ".formula.toml"
 		data, err := formulasFS.ReadFile(name)
@@ -122,6 +124,7 @@ func TestReviewFormulasBindUntrustedVarsThroughQuotedHeredoc(t *testing.T) {
 // Path commands must take the validated, quoted variable, never a bare
 // expansion that a leading dash could turn into a flag.
 func TestCodeReviewFormulaValidatesScopeBeforePathCommands(t *testing.T) {
+	t.Parallel()
 	data, err := formulasFS.ReadFile("formulas/mol-polecat-code-review.formula.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +144,7 @@ func TestCodeReviewFormulaValidatesScopeBeforePathCommands(t *testing.T) {
 }
 
 func TestReviewPRFormulaValidatesPRURL(t *testing.T) {
+	t.Parallel()
 	data, err := formulasFS.ReadFile("formulas/mol-polecat-review-pr.formula.toml")
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +216,7 @@ var sweptShellLineFormulas = []string{
 }
 
 func TestSweptFormulasBindFreeTextVarsOnlyInQuotedHeredocs(t *testing.T) {
+	t.Parallel()
 	for _, f := range sweptShellLineFormulas {
 		data, err := formulasFS.ReadFile("formulas/" + f + ".formula.toml")
 		if err != nil {
@@ -224,6 +229,7 @@ func TestSweptFormulasBindFreeTextVarsOnlyInQuotedHeredocs(t *testing.T) {
 }
 
 func TestShellLineViolationsCatchesUnquotedVars(t *testing.T) {
+	t.Parallel()
 	fence := func(body string) string { return "prose\n```bash\n" + body + "\n```\n" }
 	bad := []string{
 		`gt formula run mol-prd-review --set problem="{{problem}}"`,
