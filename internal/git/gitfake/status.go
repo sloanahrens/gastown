@@ -56,7 +56,7 @@ func (f *Fake) Stash(t testing.TB, dir, message string) {
 	}
 	r.stashes = append([]stash{{label: label, message: message}}, r.stashes...)
 	head := f.treeOf(headCommit(r, wt))
-	if err := checkoutTree(wt.path, head, head); err != nil {
+	if err := checkoutTree(wt.path, head, head, true); err != nil {
 		t.Fatalf("gitfake: Stash: %v", err)
 	}
 }

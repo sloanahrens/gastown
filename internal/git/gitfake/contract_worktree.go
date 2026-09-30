@@ -323,6 +323,9 @@ func RunWorktreeContract(t *testing.T, newEnv func(t *testing.T) WorktreeEnv) {
 		fx, g := newWtFixture(t, newEnv(t))
 		writeFile(t, filepath.Join(fx.clone, ".gitignore"), "ignored.txt\n")
 		fx.env.(WorktreeEnv).CommitWorktree(t, fx.clone, "ignore")
+		// info/exclude in the common git dir ignores like .gitignore does.
+		writeFile(t, filepath.Join(fx.clone, ".git", "info", "exclude"), ".runtime/\n")
+		writeFile(t, filepath.Join(fx.clone, ".runtime", "state"), "x\n")
 		writeFile(t, filepath.Join(fx.clone, "a.txt"), "edited\n")
 		writeFile(t, filepath.Join(fx.clone, "untracked.txt"), "u\n")
 		writeFile(t, filepath.Join(fx.clone, "newdir", "n.txt"), "n\n")
@@ -354,6 +357,33 @@ func RunWorktreeContract(t *testing.T, newEnv func(t *testing.T) WorktreeEnv) {
 		}
 		if st, _ := g.CheckUncommittedWork(); st.HasUncommittedChanges {
 			t.Errorf("status after reset and clean = %+v", st)
+		}
+		// A switch that would overwrite a local edit is refused, and leaves
+		// the checkout where it was.
+		writeFile(t, filepath.Join(fx.clone, "b.txt"), "local edit\n")
+		if err := g.CheckoutNewBranch("from-head", fx.head); err == nil {
+			t.Error("checkout over an untracked file the target tracks succeeded")
+		}
+		if b, _ := g.CurrentBranch(); b != "main" {
+			t.Errorf("refused checkout moved HEAD to %q", b)
+		}
+		if err := os.Remove(filepath.Join(fx.clone, "b.txt")); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(fx.clone, "a.txt"), "dirty\n")
+		env := fx.env.(WorktreeEnv)
+		env.Commit(t, fx.origin, "main", "change a", map[string]string{"a.txt": "changed upstream\n"})
+		if err := g.Fetch("origin"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.CheckoutNewBranch("upstream-a", "origin/main"); err == nil {
+			t.Error("checkout over a locally edited file the switch changes succeeded")
+		}
+		if err := g.CheckoutNewBranch("keeps-edit", "HEAD"); err != nil {
+			t.Errorf("a switch that leaves the edited file alone was refused: %v", err)
+		}
+		if got := readFile(t, filepath.Join(fx.clone, "a.txt")); got != "dirty\n" {
+			t.Errorf("the local edit did not survive the switch: %q", got)
 		}
 		if err := g.CheckoutDetachForce(fx.head); err != nil {
 			t.Fatal(err)

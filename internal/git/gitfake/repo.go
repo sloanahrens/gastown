@@ -51,7 +51,7 @@ var _ Repo = (*handle)(nil)
 func (h *handle) locate(args ...string) (*repo, *worktree, error) {
 	// Like git, a directory inside a checkout resolves to that checkout.
 	for dir := h.dir; ; dir = filepath.Dir(dir) {
-		if r, wt := h.f.at(dir); r != nil {
+		if r, wt := h.f.at(dir); r != nil && onDisk(r, wt) {
 			return r, wt, nil
 		}
 		if filepath.Dir(dir) == dir {

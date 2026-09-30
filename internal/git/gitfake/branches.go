@@ -389,9 +389,10 @@ func (h *handle) CountCommitsBehind(ref string) (int, error) {
 }
 
 // checkoutTree moves the checkout at dir from tree old to tree new the way
-// git does: files old tracked and new lacks are removed, new's files are
-// written, and untracked files are left alone.
-func checkoutTree(dir string, old, new map[string]string) error {
+// git does: files old tracked and new lacks are removed, files new changes
+// are written (with force, every file of new, discarding local edits), and
+// untracked files are left alone.
+func checkoutTree(dir string, old, new map[string]string, force bool) error {
 	for p := range old {
 		if _, keep := new[p]; !keep {
 			path := filepath.Join(dir, filepath.FromSlash(p))
@@ -402,6 +403,9 @@ func checkoutTree(dir string, old, new map[string]string) error {
 		}
 	}
 	for p, content := range new {
+		if base, tracked := old[p]; tracked && base == content && !force {
+			continue
+		}
 		path := filepath.Join(dir, filepath.FromSlash(p))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
@@ -422,16 +426,63 @@ func removeEmptyParents(root, dir string) {
 	}
 }
 
+// wouldOverwrite is git's refusal to switch a checkout from tree old to tree
+// new when that would overwrite a local change: a tracked file edited on disk
+// that the switch changes, or an untracked file new would write over.
+func wouldOverwrite(dir string, old, new map[string]string, args ...string) error {
+	disk, err := readWorktree(dir)
+	if err != nil {
+		return gitErr(128, "fatal: "+err.Error(), args...)
+	}
+	var tracked, untracked []string
+	for p, content := range disk {
+		base, isTracked := old[p]
+		switch {
+		case isTracked && content != base && new[p] != base:
+			tracked = append(tracked, p)
+		case !isTracked && hasKey(new, p) && new[p] != content:
+			untracked = append(untracked, p)
+		}
+	}
+	for p := range old {
+		if _, onDisk := disk[p]; !onDisk && hasKey(new, p) && new[p] != old[p] {
+			tracked = append(tracked, p)
+		}
+	}
+	sort.Strings(tracked)
+	sort.Strings(untracked)
+	switch {
+	case len(tracked) > 0:
+		return gitErr(1, "error: Your local changes to the following files would be overwritten by checkout:\n\t"+strings.Join(tracked, "\n\t")+"\nPlease commit your changes or stash them before you switch branches.\nAborting", args...)
+	case len(untracked) > 0:
+		return gitErr(1, "error: The following untracked working tree files would be overwritten by checkout:\n\t"+strings.Join(untracked, "\n\t")+"\nPlease move or remove them before you switch branches.\nAborting", args...)
+	}
+	return nil
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
 // moveHead points wt's HEAD at head (a branch ref or a commit id) and updates
-// the checkout from the old HEAD's tree to the new one.
-func (h *handle) moveHead(r *repo, wt *worktree, head string) error {
+// the checkout from the old HEAD's tree to the new one, refusing as git does
+// when that would overwrite a local change.
+func (h *handle) moveHead(r *repo, wt *worktree, head string, args ...string) error {
 	old := h.f.treeOf(headCommit(r, wt))
+	next := head
+	if strings.HasPrefix(head, "refs/") {
+		next = r.refs[head]
+	}
+	if err := wouldOverwrite(wt.path, old, h.f.treeOf(next), args...); err != nil {
+		return err
+	}
 	if wt == r.main {
 		r.head = head
 	} else {
 		wt.head = head
 	}
-	return checkoutTree(wt.path, old, h.f.treeOf(headCommit(r, wt)))
+	return checkoutTree(wt.path, old, h.f.treeOf(headCommit(r, wt)), false)
 }
 
 func alreadyUsed(branch, at string, args ...string) error {
@@ -450,19 +501,22 @@ func (h *handle) Checkout(ref string) error {
 		if at := checkedOutAt(r, ref); at != "" && at != wt.path {
 			return alreadyUsed(ref, at, args...)
 		}
-		return h.moveHead(r, wt, "refs/heads/"+ref)
+		return h.moveHead(r, wt, "refs/heads/"+ref, args...)
 	}
 	// git's DWIM: a name only a remote has becomes a local tracking branch.
 	if id, ok := r.refs["refs/remotes/origin/"+ref]; ok {
+		if err := wouldOverwrite(wt.path, h.f.treeOf(headCommit(r, wt)), h.f.treeOf(id), args...); err != nil {
+			return err
+		}
 		r.refs["refs/heads/"+ref] = id
 		setUpstream(r, ref, "origin/"+ref)
-		return h.moveHead(r, wt, "refs/heads/"+ref)
+		return h.moveHead(r, wt, "refs/heads/"+ref, args...)
 	}
 	id, ok := h.resolve(r, wt, ref)
 	if !ok {
 		return gitErr(1, fmt.Sprintf("error: pathspec '%s' did not match any file(s) known to git", ref), args...)
 	}
-	return h.moveHead(r, wt, id)
+	return h.moveHead(r, wt, id, args...)
 }
 
 func (h *handle) checkoutBranch(branch, startPoint string, reset bool, args ...string) error {
@@ -483,6 +537,9 @@ func (h *handle) checkoutBranch(branch, startPoint string, reset bool, args ...s
 		}
 	}
 	old := h.f.treeOf(headCommit(r, wt))
+	if err := wouldOverwrite(wt.path, old, h.f.treeOf(id), args...); err != nil {
+		return err
+	}
 	r.refs["refs/heads/"+branch] = id
 	setUpstream(r, branch, startPoint)
 	if wt == r.main {
@@ -490,7 +547,7 @@ func (h *handle) checkoutBranch(branch, startPoint string, reset bool, args ...s
 	} else {
 		wt.head = "refs/heads/" + branch
 	}
-	return checkoutTree(wt.path, old, h.f.treeOf(id))
+	return checkoutTree(wt.path, old, h.f.treeOf(id), false)
 }
 
 func (h *handle) CheckoutNewBranch(branch, startPoint string) error {
@@ -517,7 +574,14 @@ func (h *handle) CheckoutDetachForce(ref string) error {
 	if !ok {
 		return unknownRevision(ref, args...)
 	}
-	return h.moveHead(r, wt, id)
+	old := h.f.treeOf(headCommit(r, wt))
+	wt.merge = nil
+	if wt != r.main {
+		wt.head = id
+	} else {
+		r.head = id
+	}
+	return checkoutTree(wt.path, old, h.f.treeOf(id), true)
 }
 
 func (h *handle) ResetHard(ref string) error {
@@ -535,7 +599,7 @@ func (h *handle) ResetHard(ref string) error {
 	old := h.f.treeOf(headCommit(r, wt))
 	wt.merge = nil
 	setHead(r, wt, id)
-	return checkoutTree(wt.path, old, h.f.treeOf(id))
+	return checkoutTree(wt.path, old, h.f.treeOf(id), true)
 }
 
 // CleanForce is git clean -fd --exclude=.runtime: untracked files and

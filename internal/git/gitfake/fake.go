@@ -105,7 +105,7 @@ func (f *Fake) Commit(t testing.TB, dir, branch, message string, files map[strin
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.repos[clean(dir)]
+	r := f.repoAt(dir)
 	if r == nil {
 		t.Fatalf("gitfake: no repository at %s", dir)
 	}
@@ -132,7 +132,7 @@ func (f *Fake) SetRef(t testing.TB, dir, ref, id string) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.repos[clean(dir)]
+	r := f.repoAt(dir)
 	if r == nil || f.objects[id] == nil {
 		t.Fatalf("gitfake: SetRef %s %s in %s: no such repository or commit", ref, id, dir)
 	}
@@ -207,7 +207,7 @@ func (f *Fake) Tree(id string) map[string]string {
 func (f *Fake) Ref(dir, ref string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r := f.repos[clean(dir)]; r != nil {
+	if r := f.repoAt(dir); r != nil {
 		return r.refs[ref]
 	}
 	return ""

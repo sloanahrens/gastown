@@ -56,6 +56,31 @@ func (f *Fake) at(dir string) (*repo, *worktree) {
 	return nil, nil
 }
 
+// repoAt is the repository dir is, or is a worktree or subdirectory of.
+// Callers hold f.mu.
+func (f *Fake) repoAt(dir string) *repo {
+	for d := clean(dir); ; d = filepath.Dir(d) {
+		if r, _ := f.at(d); r != nil {
+			return r
+		}
+		if filepath.Dir(d) == d {
+			return nil
+		}
+	}
+}
+
+// onDisk reports whether git would find the repository or checkout: a bare
+// repository's directory, or a checkout's .git (git discovers a repository
+// through it, so a checkout whose .git is gone is no repository at all).
+func onDisk(r *repo, wt *worktree) bool {
+	path := r.path
+	if wt != nil {
+		path = filepath.Join(wt.path, ".git")
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // InitRepo makes an empty non-bare repository at dir with HEAD on main.
 func (f *Fake) InitRepo(t testing.TB, dir string) {
 	t.Helper()
@@ -77,7 +102,7 @@ func (f *Fake) AddRemote(t testing.TB, dir, name, url string) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.repos[clean(dir)]
+	r := f.repoAt(dir)
 	if r == nil {
 		t.Fatalf("gitfake: AddRemote: no repository at %s", dir)
 	}
@@ -157,13 +182,52 @@ func readWorktree(dir string) (map[string]string, error) {
 	return tree, err
 }
 
-// ignoreRules is the checkout's top-level .gitignore: plain names or globs,
-// matched against a path's name or whole path, a trailing / for directories
-// only. Negation and nested .gitignore files are not modeled.
+// ignoreRules is the checkout's top-level .gitignore plus its repository's
+// info/exclude: plain names or globs, matched against a path's name or whole
+// path, a trailing / for directories only. Negation and nested .gitignore
+// files are not modeled.
 type ignoreRules []string
 
 func readIgnore(dir string) ignoreRules {
-	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	rules := parseIgnore(filepath.Join(dir, ".gitignore"))
+	if common := commonDirOf(dir); common != "" {
+		rules = append(rules, parseIgnore(filepath.Join(common, "info", "exclude"))...)
+	}
+	return rules
+}
+
+// commonDirOf finds the git directory the checkout at dir shares with its
+// repository's other worktrees, the way git does: a .git directory, or the
+// directory a linked worktree's .git file names, less its worktrees/<name>.
+func commonDirOf(dir string) string {
+	dotGit := filepath.Join(dir, ".git")
+	info, err := os.Stat(dotGit)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return dotGit
+	}
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		return ""
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	return filepath.Dir(filepath.Dir(gitdir))
+}
+
+// ExcludePath is the info/exclude file git reads for the checkout at dir,
+// in its repository's common git directory.
+func (f *Fake) ExcludePath(dir string) (string, error) {
+	common := commonDirOf(dir)
+	if common == "" {
+		return "", fmt.Errorf("gitfake: no checkout at %s", dir)
+	}
+	return filepath.Join(common, "info", "exclude"), nil
+}
+
+func parseIgnore(path string) ignoreRules {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -359,4 +423,49 @@ func (h *handle) WorktreeList() ([]git.Worktree, error) {
 		list = append(list, entry(p, r.worktrees[p].head))
 	}
 	return list, nil
+}
+
+// DeleteRef removes ref (a full ref name) from the repository at dir, as git
+// push origin --delete or git update-ref -d does.
+func (f *Fake) DeleteRef(t testing.TB, dir, ref string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.repoAt(dir)
+	if r == nil {
+		t.Fatalf("gitfake: DeleteRef: no repository at %s", dir)
+	}
+	delete(r.refs, ref)
+}
+
+// RemoveRepo takes the repository at dir out of the world and off disk, so
+// every remote call to it fails the way git fails on a missing repository.
+func (f *Fake) RemoveRepo(t testing.TB, dir string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	dir = clean(dir)
+	delete(f.repos, dir)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("gitfake: RemoveRepo: %v", err)
+	}
+}
+
+// RemoveRemote drops remote name from the repository at dir, as git remote
+// remove does; its remote-tracking refs go with it.
+func (f *Fake) RemoveRemote(t testing.TB, dir, name string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.repoAt(dir)
+	if r == nil {
+		t.Fatalf("gitfake: RemoveRemote: no repository at %s", dir)
+	}
+	delete(r.remotes, name)
+	for ref := range r.refs {
+		if strings.HasPrefix(ref, "refs/remotes/"+name+"/") {
+			delete(r.refs, ref)
+		}
+	}
+	delete(r.configMap(), remoteHeadKey(name))
 }
