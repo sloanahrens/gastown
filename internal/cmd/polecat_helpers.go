@@ -173,8 +173,21 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
 			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
-			activeMRSafe := !activeMRAssessment.Pending
-			if polecat.CanIgnoreStaleCleanupStatus(result.CleanupStatus, beadTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
+			facts := polecat.WorkstateFacts{
+				CleanupStatus:          result.CleanupStatus,
+				HookBead:               hookBead,
+				HookBeadSafe:           hookSafe,
+				HookBeadTerminal:       hookTerminal,
+				AssignedBeadTerminal:   beadTerminal,
+				ActiveMRSourceTerminal: activeMRAssessment.SourceTerminal,
+			}
+			if activeMRAssessment.Pending {
+				facts.ActiveMRBlocker = activeMRAssessment.Reason
+				if facts.ActiveMRBlocker == "" {
+					facts.ActiveMRBlocker = fmt.Sprintf("active_mr=%s pending", activeMRAssessment.ActiveMR)
+				}
+			}
+			if facts.CanIgnoreStaleCleanupStatusForNuke(gitSafe) {
 				// OK: stale self-report after terminal source and direct clean git.
 			} else {
 				result.Reasons = append(result.Reasons, cleanupStatusBlocker(result.CleanupStatus))

@@ -100,3 +100,52 @@ func isWorkstateInputType(expr ast.Expr) bool {
 		return false
 	}
 }
+
+// TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat keeps the nuke preflight
+// (gt-ef9) and any later caller on WorkstateFacts: production code outside
+// internal/polecat may not hand-compute the predicates for
+// polecat.CanIgnoreStaleCleanupStatus.
+func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
+	t.Parallel()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+
+	var violations []string
+	err := filepath.WalkDir(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path == filepath.Join(repoRoot, "internal", "polecat") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if ok && sel.Sel != nil && sel.Sel.Name == "CanIgnoreStaleCleanupStatus" {
+				rel, _ := filepath.Rel(repoRoot, path)
+				violations = append(violations, "  "+rel+":"+itoa(fset.Position(sel.Pos()).Line))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk internal: %v", err)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("do not call CanIgnoreStaleCleanupStatus outside internal/polecat; gather a polecat.WorkstateFacts and use its CanIgnoreStaleCleanupStatusForNuke or polecat.NewWorkstateInput:\n%s", strings.Join(violations, "\n"))
+	}
+}

@@ -376,7 +376,8 @@ func liveGitRiskBlockers(in WorkstateInput) []string {
 // path — RecordedCleanupBlocks supersedes a git-derived recorded status on
 // live-git evidence alone, without requiring a terminal work ref. What remains
 // here is the *stricter* destructive-op gate (internal/cmd/polecat_helpers.go
-// checkPolecatSafety, which sits in front of nuke), where demanding terminal
+// checkPolecatSafety, which sits in front of nuke, via
+// WorkstateFacts.CanIgnoreStaleCleanupStatusForNuke), where demanding terminal
 // work and a safe hook/active-MR before proceeding is exactly right.
 func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
@@ -515,14 +516,35 @@ func (f WorkstateFacts) WorkTerminal() bool {
 	return f.AssignedBeadTerminal || f.ActiveMRSourceTerminal || f.HookBeadTerminal
 }
 
+// GitSafe reports whether the git probe succeeded and found nothing at risk.
+func (f WorkstateFacts) GitSafe() bool {
+	return !f.GitCheckFailed && !f.GitDirty && f.StashCount == 0 && f.UnpushedCommits == 0
+}
+
+// ActiveMRSafe reports whether no active MR is pending.
+func (f WorkstateFacts) ActiveMRSafe() bool {
+	return f.ActiveMRBlocker == ""
+}
+
+// CanIgnoreStaleCleanupStatusForNuke reports whether the nuke preflight may
+// waive a dirty recorded cleanup_status, deriving the work-terminal, hook, and
+// active-MR predicates from the same facts NewWorkstateInput reads (gt-ef9).
+//
+// gitSafe is passed in because the nuke gate also requires the branch pushed to
+// origin, which GitSafe does not measure. It skips ResolveIgnoreCleanupStatus
+// on purpose: that gate's missing-status hatches would loosen a destructive op.
+func (f WorkstateFacts) CanIgnoreStaleCleanupStatusForNuke(gitSafe bool) bool {
+	return CanIgnoreStaleCleanupStatus(f.CleanupStatus, f.WorkTerminal(), f.HookBeadSafe, f.ActiveMRSafe(), gitSafe)
+}
+
 // NewWorkstateInput is the single production constructor for WorkstateInput.
 // It derives gitSafe/activeMRSafe/workTerminal from the supplied facts and
 // resolves IgnoreCleanupStatus through ResolveIgnoreCleanupStatus, so the
 // fail-closed policy lives in exactly one place regardless of which caller
 // (Manager, CLI check-recovery, list/inventory) is building the input.
 func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
-	gitSafe := !f.GitCheckFailed && !f.GitDirty && f.StashCount == 0 && f.UnpushedCommits == 0
-	activeMRSafe := f.ActiveMRBlocker == ""
+	gitSafe := f.GitSafe()
+	activeMRSafe := f.ActiveMRSafe()
 	workTerminal := f.WorkTerminal()
 
 	input := WorkstateInput{
