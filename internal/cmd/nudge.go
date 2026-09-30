@@ -275,8 +275,7 @@ func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
 		"%s: %s accepted the nudge but started no turn within %s — its input is "+
 			"still stranded in the composer/queue, which is how a wedged session presents "+
 			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
-			"that session ('gt refinery restart <rig>' for a refinery, 'gt witness restart "+
-			"<rig>' for a witness).\n",
+			"that session ('gt witness restart <rig>' for a witness).\n",
 		mode, sessionName, immediateTurnProbeWindow, sessionName)
 }
 

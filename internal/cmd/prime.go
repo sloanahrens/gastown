@@ -55,14 +55,14 @@ var primeHandoffReason string
 type Role string
 
 const (
-	RoleMayor    Role = "mayor"
-	RoleDeacon   Role = "deacon"
-	RoleBoot     Role = "boot"
-	RoleWitness  Role = "witness"
-	RolePolecat  Role = "polecat"
-	RoleCrew     Role = "crew"
-	RoleDog      Role = "dog"
-	RoleUnknown  Role = "unknown"
+	RoleMayor   Role = "mayor"
+	RoleDeacon  Role = "deacon"
+	RoleBoot    Role = "boot"
+	RoleWitness Role = "witness"
+	RolePolecat Role = "polecat"
+	RoleCrew    Role = "crew"
+	RoleDog     Role = "dog"
+	RoleUnknown Role = "unknown"
 )
 
 // AllRoles returns every Role value GetRole can produce. It is the

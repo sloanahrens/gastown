@@ -8,7 +8,7 @@ log="${1:?usage: dolt-gate-metrics.sh <log.json> [label]}"
 label="${2:-$(basename "$log" .json)}"
 mod="github.com/steveyegge/gastown"
 pkgs=(internal/beads internal/cmd internal/convoy internal/daemon internal/doltserver
-      internal/mail internal/polecat internal/refinery internal/testutil)
+      internal/mail internal/polecat internal/testutil)
 markers=(
   'bd call against the test Dolt container failed on attempt'  # gastown retry notice
   'refusing to auto-apply'                                     # bd remote-migrate gate

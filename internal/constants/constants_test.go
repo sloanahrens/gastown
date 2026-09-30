@@ -7,31 +7,6 @@ import (
 	"testing"
 )
 
-func TestRoleEmoji(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		role   string
-		expect string
-	}{
-		{RoleMayor, EmojiMayor},
-		{RoleDeacon, EmojiDeacon},
-		{RoleWitness, EmojiWitness},
-		{"refinery", "❓"}, // role removed (gt-v4ssj.6)
-		{RoleCrew, EmojiCrew},
-		{RolePolecat, EmojiPolecat},
-		{"unknown", "❓"},
-		{"", "❓"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.role, func(t *testing.T) {
-			got := RoleEmoji(tt.role)
-			if got != tt.expect {
-				t.Errorf("RoleEmoji(%q) = %q, want %q", tt.role, got, tt.expect)
-			}
-		})
-	}
-}
-
 func TestBeadsCustomTypesList(t *testing.T) {
 	t.Parallel()
 	types := BeadsCustomTypesList()

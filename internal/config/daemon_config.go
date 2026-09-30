@@ -65,6 +65,14 @@ type PatrolsConfig struct {
 	// verbatim so a rewrite does not drop operator data. Delete the key from
 	// daemon.json by hand.
 	DoltRemotes json.RawMessage `json:"dolt_remotes,omitempty"`
+
+	// QuotaDog and QuotaResume are retired: the quota patrols were deleted
+	// with gt quota (gt-638go.2) and nothing reads these keys. They are
+	// declared so a daemon.json that still carries them decodes under strict
+	// decoding, and kept verbatim so a rewrite does not drop operator data.
+	// Delete the keys from daemon.json by hand.
+	QuotaDog    json.RawMessage `json:"quota_dog,omitempty"`
+	QuotaResume json.RawMessage `json:"quota_resume,omitempty"`
 }
 
 // DoltServerConfig holds configuration for the Dolt SQL server.
@@ -536,7 +544,7 @@ type LandingWorkerConfig struct {
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("witness",
-// "refinery", "deacon", "handler"), or nil when the entry or the name is absent.
+// "deacon", "handler"), or nil when the entry or the name is absent.
 func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 	if p == nil {
 		return nil
@@ -553,7 +561,7 @@ func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 }
 
 // Count returns how many patrol entries daemon.json declares, not counting
-// the retired dolt_remotes key.
+// the retired keys (dolt_remotes, quota_dog, quota_resume).
 func (p *PatrolsConfig) Count() int {
 	if p == nil {
 		return 0

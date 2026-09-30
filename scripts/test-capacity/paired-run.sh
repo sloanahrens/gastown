@@ -13,14 +13,14 @@ preconditions() {
   local st load
   st="$(gt slot status 2>&1)" || refuse "gt slot status failed: $st"
   # Wording from internal/cmd/slot.go: "held by <role> (pid ...)".
-  grep -q 'held by gastown/refinery' <<<"$st" && refuse "refinery holds a slot"
   grep -q 'unwrapped container suite' <<<"$st" && refuse "unwrapped containers present"
   grep -q 'Docker daemon unreachable' <<<"$st" && refuse "Docker state unknown"
   load=$(sysctl -n vm.loadavg | awk '{print int($2)}')
   (( load < 20 )) || refuse "load1=$load >= 20"
-  # Queue rows start with the MR id (gt-wisp-...); statuses read "ready" etc.
-  local mq; mq="$(cd ~/gt/gastown/crew/sloan && gt mq list gastown 2>&1)" || refuse "gt mq list failed: $mq"
-  grep -qE '^[[:space:]]+gt-' <<<"$mq" && refuse "gastown merge queue not empty"
+  # The landing queue is the rig's open gt:ready-to-land beads; the landing
+  # worker gates each one, so a run started under it competes for the host.
+  local q; q="$(cd ~/gt/gastown && bd list --label gt:ready-to-land --status open --json 2>&1)" || refuse "bd list failed: $q"
+  grep -q '"id"' <<<"$q" && refuse "gastown landing queue not empty"
   echo "paired-run: preconditions OK (load1=$load)"
 }
 preconditions
