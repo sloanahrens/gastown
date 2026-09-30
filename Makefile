@@ -1,4 +1,4 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate test-integration lint-tools
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate
 
 # The gate (docs/testing.md, "The gate"). Two targets are the only test entry
 # points, and every caller runs them verbatim: CI, gt done, the land path and
@@ -273,10 +273,15 @@ gate: lint
 	@# timed all three out with no test older than 11 s). It drops to the
 	@# default once D2 deletes refinery and D7 shrinks cmd.
 	@echo "gate: unit tier (budget runner beside $(GATE_SHELL_TESTS))" >&2
+	@# The trap finds the halves as this shell's children (pgrep -P) rather
+	@# than through $$! variables, so a signal that lands before a variable
+	@# is assigned still stops that half. Each half is stopped before its
+	@# children: a script whose running child dies first goes on to its next
+	@# line.
 	@log=$$(mktemp -t gt-test-makefile); \
+	trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; rm -f "$$log"; exit 130' INT TERM; \
 	bash $(GATE_SHELL_TESTS) >"$$log" 2>&1 & mk=$$!; \
 	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
-	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
 	wait $$gt; go_rc=$$?; \
 	wait $$mk; mk_rc=$$?; \
 	echo "=== shell tests (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \

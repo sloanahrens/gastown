@@ -148,7 +148,7 @@ Town-level role defaults live in `mayor/config.json` under:
 | `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and writes the container opt-in off for the run unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
 | `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty uses the 30m floor (the gate runs the rig's full hermetic `test_command`, so there is no changed-package count to scale by). Slot wait is never counted against it. |
 | `test_verify_slot_timeout` | `string` | `"60m"` | How long `gt done`'s default test-verify gate waits for the container-gate slot. Exceeding it is reported as slot contention, not a test failure. Only applies when the gate takes a slot at all (see below). |
-| `test_verify_command` | `string` | `""` | Overrides the gate's command, replacing the rig's full hermetic `test_command`; `{packages}` is replaced with the changed-package list — the route to scoped verification. |
+| `test_verify_command` | `string` | `""` | Not read: the land path runs `merge_queue.gate`, else `make gate` (see [Testing](testing.md), "The gate"). No gate scopes itself to changed packages. |
 | `build_command` | `string` | `""` | Build command (e.g., `go build ./...`) |
 | `on_conflict` | `string` | `"assign_back"` | Conflict strategy: `assign_back` or `auto_rebase` |
 | `delete_merged_branches` | `bool` | `true` | Delete source branches after merging |

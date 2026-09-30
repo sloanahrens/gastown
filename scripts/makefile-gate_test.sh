@@ -216,6 +216,23 @@ else
   fail "shell tests fail: non-zero, names the shell half (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
+# An interrupted gate stops both halves and exits red. The stub shell half
+# signals the recipe shell (its parent) and then waits to be killed; a trap
+# that did not fire would let it finish and the gate would pass.
+cat >"$TMP/interrupt.sh" <<'STUB'
+kill -TERM "$PPID"
+sleep 20
+echo "shell-tests survived the interrupt" >>"$STUB_LOG"
+STUB
+rc=0
+env STUB_LOG="$TMP/calls" PATH="$TMP/bin:$PATH" make -C "$ROOT" --no-print-directory -o lint gate GATE_SHELL_TESTS="$TMP/interrupt.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+sleep 1
+if [[ "$rc" != 0 ]] && ! grep -q -F 'gate: PASSED' "$TMP/err" && ! grep -q -F 'survived' "$TMP/calls"; then
+  pass "interrupted gate: non-zero, and the trap stopped the running half"
+else
+  fail "interrupted gate: non-zero, and the trap stopped the running half (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
 rc=0
 env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" make -C "$ROOT" --no-print-directory test-integration DOCKER_PKGS= >"$TMP/out" 2>"$TMP/err" || rc=$?
 if [[ "$rc" != 0 ]] && grep -q -F 'lists no package' "$TMP/err"; then
