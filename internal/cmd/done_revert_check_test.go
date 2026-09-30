@@ -227,6 +227,34 @@ func assertNoRevertedMerges(t *testing.T, repo string) {
 	}
 }
 
+// TestDetectRevertedMerges_MovingAPureAdditionIsNoRevert is the gt-tlw9u false
+// positive. Main merged a commit that only ADDED lines (its numstat is "N 0"),
+// and the polecat's branch relocates those lines within the file. Every line the
+// commit added shows up as removed in the branch's diff — and re-added, since it
+// was moved, not deleted — so a check that counts removals without netting them
+// against additions calls the move a revert. Nothing is undone: the file still
+// carries every line main merged.
+func TestDetectRevertedMerges_MovingAPureAdditionIsNoRevert(t *testing.T) {
+	t.Parallel()
+	s := newRevertScenario(t)
+
+	// The moved block (A, B) is shorter than the block it moves past (x, y, z),
+	// so git's diff keeps x/y/z in place and reports A/B as removed and re-added.
+	writeTestFile(t, filepath.Join(s.seed, "shared.txt"), "base\nx\ny\nz\n")
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", "add x y z")
+	writeTestFile(t, filepath.Join(s.seed, "shared.txt"), "A\nB\nbase\nx\ny\nz\n")
+	runGitCmd(t, s.seed, "add", "-A")
+	runGitCmd(t, s.seed, "commit", "-m", "add A B (pure addition)")
+	runGitCmd(t, s.seed, "push", "origin", "main")
+
+	runGitCmd(t, s.polecat, "fetch", "origin")
+	runGitCmd(t, s.polecat, "merge", "--ff-only", "origin/main")
+	commitPolecat(t, s.polecat, map[string]string{"shared.txt": "base\nx\ny\nz\nA\nB\n"}, "refactor: move A B (gt-test)")
+
+	assertNoRevertedMerges(t, s.polecat)
+}
+
 // newShallowBoundaryScenario builds the gt-zeuip shape: origin/main holds
 // victim.txt unchanged since its first commit, and the polecat's clone is cut
 // at a shallow boundary, so git has no parent tree for the boundary commit and
