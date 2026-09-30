@@ -28,6 +28,7 @@ import (
 // site is a second, independently-drifting resolver — the exact class of
 // bug gt-egiv exists to close.
 func TestNoMergeSettingsCommandCallsOutsideResolver(t *testing.T) {
+	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
