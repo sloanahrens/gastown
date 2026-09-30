@@ -64,7 +64,9 @@ func (b *Beads) EventsTail(since int64, limit int) (*EventsPage, error) {
 		return nil, err
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
-		// Legacy bd prints nothing when no record follows since.
+		// Legacy bd prints nothing when no record follows since. A machine-
+		// mode bd always writes an envelope, even for an empty page, so this
+		// branch is only ever the pre-machine-mode build.
 		return &EventsPage{NextSince: since}, nil
 	}
 	env, isEnvelope, err := decodeMachineEnvelope(out, "bd events tail")
@@ -74,12 +76,17 @@ func (b *Beads) EventsTail(since int64, limit int) (*EventsPage, error) {
 	if isEnvelope {
 		var data struct {
 			Records   []journalRecord `json:"records"`
-			NextSince int64           `json:"next_since"`
+			NextSince *int64          `json:"next_since"`
 		}
 		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return nil, fmt.Errorf("parsing bd events tail data: %w", err)
 		}
-		page := &EventsPage{NextSince: data.NextSince, More: env.Pagination != nil && env.Pagination.NextCursor != ""}
+		if data.NextSince == nil {
+			// Every envelope bd writes for tail carries the cursor; one
+			// without it is not a page to advance on.
+			return nil, fmt.Errorf("bd events tail: envelope has no next_since")
+		}
+		page := &EventsPage{NextSince: *data.NextSince, More: env.Pagination != nil && env.Pagination.NextCursor != ""}
 		for _, r := range data.Records {
 			page.Records = append(page.Records, r.record())
 		}

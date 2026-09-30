@@ -84,6 +84,7 @@ func TestEventsTail_RefusesUnreadableOutput(t *testing.T) {
 	t.Parallel()
 	for name, rep := range map[string]reply{
 		"prose":          {stdout: "Warning: journal disabled\n"},
+		"no cursor":      {stdout: `{"schema_version":1,"contract_version":1,"data":{"records":[]},"pagination":{"returned":0,"truncated":false},"error":null}`},
 		"envelope error": {stdout: `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"x"}}`, err: exitError{code: 25}},
 		"store failure":  {stderr: "Error: database not found: gastown", err: exitError{code: 1}},
 	} {
