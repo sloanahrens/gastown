@@ -12,7 +12,6 @@ internal/beads/test_container.go GT_TEST_DOLT_INIT_CONCURRENCY 1
 internal/cli/name.go GT_COMMAND 1
 internal/cmd/agents.go GT_TOWN_SOCKET 1
 internal/cmd/capacity_dispatch.go GT_DAEMON 1
-internal/cmd/crew_at.go GT_DEBUG 1
 internal/cmd/done.go GT_DONE_FROM_HANDOFF 1
 internal/cmd/down.go GT_NUKE_ACKNOWLEDGED 1
 internal/cmd/handoff.go GT_AGENT_OVERRIDE 2
@@ -48,7 +47,6 @@ internal/doltserver/doltserver.go GT_DOLT_USER 1
 internal/doltserver/doltserver.go GT_DOLT_WAIT_TIMEOUT 1
 internal/events/events.go GT_TEST_HERMETIC 1
 internal/hooks/config.go GT_HOME 1
-internal/polecat/session_manager.go GT_DEBUG_SESSION 1
 internal/runtime/runtime.go GT_SESSION_ID_ENV 1
 internal/session/registry.go GT_TMUX_SOCKET 1
 internal/specdispatch/lint.go GT_SPEC_TEMPLATE 1

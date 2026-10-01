@@ -23,8 +23,7 @@ var crewAtRetried bool
 func runCrewAt(cmd *cobra.Command, args []string) error {
 	var name string
 
-	// Debug mode: --debug flag or GT_DEBUG env var
-	debug := crewDebug || os.Getenv("GT_DEBUG") != ""
+	debug := crewDebug
 	if debug {
 		cwd, _ := os.Getwd()
 		fmt.Printf("[DEBUG] runCrewAt: args=%v, crewRig=%q, cwd=%q\n", args, crewRig, cwd)
