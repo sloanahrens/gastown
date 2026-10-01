@@ -140,11 +140,20 @@ func (d *Daemon) runSteward() {
 		d.logger.Printf("steward: reading the ledger: %v", err)
 		return
 	}
+	cfg := stewardConfig(d.patrolConfig)
+	mode, modeErr := StewardMode(d.patrolConfig)
+	if modeErr != nil {
+		d.logger.Printf("steward: %v", modeErr)
+	}
+	// Only jobs of this mode spend an event: shadow runs on a head must not
+	// stop live from acting on it once the operator switches, and a live run
+	// already acted, so shadow need not repeat it.
 	history := map[string][]steward.Job{}
 	for _, j := range jobs {
-		history[j.Key()] = append(history[j.Key()], j)
+		if j.Mode.Shadow() == mode.Shadow() {
+			history[j.Key()] = append(history[j.Key()], j)
+		}
 	}
-	cfg := stewardConfig(d.patrolConfig)
 	// An event is spent once its history allows no further job: a failed
 	// routine job still earns its one retry on the hard preset.
 	seen := func(key string) bool {
@@ -164,6 +173,7 @@ func (d *Daemon) runSteward() {
 			if runner.RunningBead(ev.Bead) {
 				continue
 			}
+			ev.Mode = mode
 			model, run := steward.StartedModel(ev, history[ev.Key()], stewardRoutineAgent(cfg), stewardHardAgent(cfg))
 			if !run {
 				continue
@@ -309,6 +319,17 @@ func stewardWorkRoot(configured, townRoot string) (string, error) {
 		return "", fmt.Errorf("patrols.steward.work_root %q is under the town root %s; git refuses worktrees there, so set it outside the town (or leave it empty for $TMPDIR/gt-steward-<uid>)", base, townRoot)
 	}
 	return base, nil
+}
+
+// StewardMode is the mode the patrol config selects: shadow unless
+// patrols.steward.mode says live. A value that is neither returns shadow with
+// the error, never live.
+func StewardMode(config *DaemonPatrolConfig) (steward.Mode, error) {
+	c := stewardConfig(config)
+	if c == nil {
+		return steward.ModeShadow, nil
+	}
+	return steward.ParseMode(c.Mode)
 }
 
 func stewardRoutineAgent(c *StewardConfig) string {

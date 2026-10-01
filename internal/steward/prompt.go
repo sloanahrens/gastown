@@ -20,7 +20,7 @@ func PromptFor(ev Event, final bool) (string, error) {
 		Kind: string(ev.Kind), Rig: ev.Rig, Bead: ev.Bead, Branch: ev.Branch,
 		Head: ev.Head, Target: ev.Target, Worker: ev.Worker,
 		Attempt: ev.Attempt, RejectionDetail: ev.RejectionDetail,
-		ResultFile: ResultFile, Final: final,
+		ResultFile: ResultFile, Final: final, Shadow: ev.Mode.Shadow(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("rendering the %s job's instructions for %s: %w", ev.Kind, ev.Bead, err)

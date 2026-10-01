@@ -373,3 +373,86 @@ func TestStewardScanNeedsItsPatrol(t *testing.T) {
 	}
 	d.stewardCycles.Wait()
 }
+
+// TestStewardModeDefaultsToShadow: enabling the steward does not let it act,
+// and a mode that is not one of the two never reads as live (gt-9bioi.4).
+func TestStewardModeDefaultsToShadow(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		cfg     *DaemonPatrolConfig
+		want    steward.Mode
+		wantErr bool
+	}{
+		"no config":   {nil, steward.ModeShadow, false},
+		"unset":       {stewardPatrolConfig(&StewardConfig{Enabled: true}), steward.ModeShadow, false},
+		"shadow":      {stewardPatrolConfig(&StewardConfig{Mode: "shadow"}), steward.ModeShadow, false},
+		"live":        {stewardPatrolConfig(&StewardConfig{Mode: "live"}), steward.ModeLive, false},
+		"typo":        {stewardPatrolConfig(&StewardConfig{Mode: "Live"}), steward.ModeShadow, true},
+		"unsupported": {stewardPatrolConfig(&StewardConfig{Mode: "dry-run"}), steward.ModeShadow, true},
+	} {
+		got, err := StewardMode(tc.cfg)
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Errorf("%s: StewardMode = %q, %v; want %q, error=%v", name, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
+
+// TestStewardShadowRunsDoNotSpendLiveEvents: a head the shadow steward
+// reviewed is still an event once the operator switches to live, and each
+// job's ledger row says which mode it ran in (gt-9bioi.4).
+func TestStewardShadowRunsDoNotSpendLiveEvents(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := &countingSpawner{result: steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass, Summary: "ok"}}}
+	ids := 0
+	runner := &steward.Runner{
+		Ledger:  steward.NewLedger(steward.LedgerPath(townRoot)),
+		Spawn:   sp,
+		WorkDir: t.TempDir(),
+		MaxJobs: steward.DefaultMaxJobs,
+		Timeout: time.Minute,
+		Logf:    func(string, ...any) {},
+		NewID:   func() string { ids++; return strconv.Itoa(ids) },
+	}
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        discardLogger,
+		ctx:           t.Context(),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		stewardRunner: runner,
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
+			if o.Label == land.LabelReadyToLand {
+				return []*beads.Issue{readyBead("gt-x", "c0ffee")}, nil
+			}
+			return nil, nil
+		},
+	}
+	scan := func() {
+		d.runSteward()
+		runner.Wait()
+	}
+	scan()
+	scan()
+	if got := sp.events(); len(got) != 1 || got[0].Mode != steward.ModeShadow {
+		t.Fatalf("two shadow scans started %+v, want one shadow job", got)
+	}
+	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", WorkRoot: t.TempDir()})
+	scan()
+	scan()
+	got := sp.events()
+	if len(got) != 2 || got[1].Mode != steward.ModeLive {
+		t.Fatalf("after the switch the scans started %+v, want one more job, live", got)
+	}
+	jobs, err := runner.Ledger.Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 || !jobs[0].Mode.Shadow() || jobs[1].Mode != steward.ModeLive {
+		t.Fatalf("ledger rows = %+v, want a shadow job then a live one", jobs)
+	}
+}

@@ -54,6 +54,7 @@ func TestStewardStatusText(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"steward off: 2026-10-01 11:00 to 12:00 (job timeout 45m0s, hard preset deepseek-pro)",
+		"mode        shadow",
 		"jobs        4 (3 finished, 1 running)",
 		"outcomes    error 1, escalated 1, pass 1",
 		"broke       1 of 3 attempted ended in error or timeout (33%)",

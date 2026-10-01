@@ -116,6 +116,7 @@ type StewardData struct {
 	RejectionDetail string
 	ResultFile      string // the verdict file the job writes
 	Final           bool   // true when no further job runs for this event
+	Shadow          bool   // true when the job decides and comments but changes nothing (gt-9bioi.4)
 }
 
 // RenderSteward renders the instructions of the steward job d.Kind names.

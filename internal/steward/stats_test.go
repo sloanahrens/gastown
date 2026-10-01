@@ -121,3 +121,18 @@ func TestAlertsRecordOnceKeyed(t *testing.T) {
 		t.Errorf("count since = %v", c)
 	}
 }
+
+// TestSummarizeCountsShadowJobs: the shadow count is the jobs whose verdicts
+// were comments only; a row from before modes existed was a live job.
+func TestSummarizeCountsShadowJobs(t *testing.T) {
+	t.Parallel()
+	shadow := ended("a", DefaultRoutineAgent, OutcomePass, 0, time.Minute)
+	shadow.Mode = ModeShadow
+	live := ended("b", DefaultRoutineAgent, OutcomePass, time.Minute, time.Minute)
+	live.Mode = ModeLive
+	legacy := ended("c", DefaultRoutineAgent, OutcomePass, 2*time.Minute, time.Minute)
+	s := Summarize([]Job{shadow, live, legacy}, StatsOptions{Since: testEpoch.Add(-time.Hour), Now: testEpoch.Add(time.Hour)})
+	if s.Jobs != 3 || s.Shadow != 1 {
+		t.Errorf("jobs/shadow = %d/%d, want 3/1", s.Jobs, s.Shadow)
+	}
+}

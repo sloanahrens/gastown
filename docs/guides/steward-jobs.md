@@ -23,15 +23,52 @@ crew member, or labeled `gt:needs-human`, is left alone.
 `patrols.steward` in `mayor/daemon.json`, off unless `enabled` is true:
 
 ```json
-{"enabled": true, "interval": "60s", "max_jobs": 2, "job_timeout": "45m",
+{"enabled": true, "mode": "shadow", "interval": "60s", "max_jobs": 2, "job_timeout": "45m",
  "routine_agent": "deepseek-flash", "hard_agent": "deepseek-pro",
  "rigs": ["gastown"], "work_root": "/tmp/gt-steward"}
 ```
+
+`mode` is `shadow` (the default) or `live`; see Rollout.
 
 The concurrency cap and the one-job-per-bead rule hold across scans for the
 lifetime of the daemon. `routine_agent` runs the first attempt; a job retries
 once on `hard_agent` after a failure, and a conflict rejection starts there.
 `work_root` must be outside the town: git refuses a worktree inside it.
+
+## Rollout: shadow, then live
+
+Turn the steward on in shadow, compare it with the overseer for a day, then
+set `"mode": "live"` and restart the daemon. Run in shadow until its verdicts
+match the overseer's on every event of a full day; a disagreement is a prompt
+bug to fix before live.
+
+| | shadow (default) | live |
+|---|---|---|
+| Review job | runs the five checks, comments `STEWARD (shadow) REVIEW PASS` or `FAIL` | comments `STEWARD REVIEW PASS` or `FAIL` |
+| Rejection job | merges, repairs, lints and gates in its worktree, then comments `STEWARD (shadow) FIX`, `RESLING` or `REQUEUE` naming what it would have done | pushes the branch, requeues, re-slings |
+| Cannot decide | comments `STEWARD (shadow) ESCALATE` | files the hq escalation |
+| Labels, notes, remote branches | untouched | changed by the steps above |
+
+A shadow job reports the outcome the live action would have had, so
+`gt steward status` and the ledger count shadow and live verdicts in the same
+words. The ledger's `mode` field tells them apart and `gt steward status` shows
+the current mode and how many jobs in the window were shadow runs. A
+`patrols.steward.mode` that is neither word runs as shadow and logs why.
+
+The runner's own alerts do not depend on the mode: a hard-preset job, a stuck
+job and a high error rate raise their escalations in shadow too.
+
+**Comparing.** For each bead with a `STEWARD (shadow)` comment, set it beside
+the overseer's own review or rejection handling of the same head: PASS against
+pass, FAIL against fail, and for a rejection the kind of action (fix, re-sling,
+requeue). The agreement rate is matching events over events both sides saw,
+and the overseer's hourly report quotes it beside the `gt steward status
+--json` counts.
+
+**Switching.** Only jobs of the current mode spend an event. A head a shadow
+job reviewed is reviewed again by a live job after the switch, and a rejection
+still waiting then gets its live fix. A restart is needed because the daemon
+reads the patrol config at startup.
 
 ## The job ledger
 

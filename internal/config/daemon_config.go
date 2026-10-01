@@ -523,6 +523,12 @@ type StewardConfig struct {
 	// the one a conflict job starts on (default "deepseek-pro": the town runs fully on DeepSeek, Claude is only the human-run overseer).
 	HardAgent string `json:"hard_agent,omitempty"`
 
+	// Mode is "shadow" or "live" (default shadow). In shadow a job reviews
+	// and decides but posts only "STEWARD (shadow)" comments: it pushes,
+	// requeues, re-slings and escalates nothing, so the overseer can compare
+	// its verdicts with its own before live lets it act (gt-9bioi.4).
+	Mode string `json:"mode,omitempty"`
+
 	// Rigs limits the scans to these rigs. Empty means every known rig.
 	Rigs []string `json:"rigs,omitempty"`
 

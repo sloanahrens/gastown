@@ -171,3 +171,57 @@ func TestPromptRejectsAnUnknownKind(t *testing.T) {
 		t.Errorf("PromptFor accepted kind %q: %q", "other", p)
 	}
 }
+
+// TestShadowPromptsChangeNothing: a shadow job keeps the procedure and the
+// outcome words but is told no step that writes outside its worktree and the
+// bead's comments, and its verdict says it is a shadow (gt-9bioi.4).
+func TestShadowPromptsChangeNothing(t *testing.T) {
+	t.Parallel()
+	review := reviewEvent("gt-x", testHead)
+	review.Mode = ModeShadow
+	rejection := rejectionEvent("kind=gate reason=gofmt")
+	rejection.Mode = ModeShadow
+	for _, ev := range []Event{review, rejection} {
+		for _, final := range []bool{false, true} {
+			p := mustPrompt(t, ev, final)
+			requireAll(t, string(ev.Kind)+" shadow prompt", p, "## Shadow run", "STEWARD (shadow)", "gt bead comment gt-x")
+			for _, banned := range []string{"git push", "gt sling", "--add-label", "--remove-label", "gt bead note", "gt escalate", "STEWARD REVIEW", "STEWARD FIX"} {
+				if strings.Contains(p, banned) {
+					t.Errorf("%s shadow prompt (final=%v) contains %q:\n%s", ev.Kind, final, banned, p)
+				}
+			}
+		}
+	}
+	requireAll(t, "review shadow prompt", mustPrompt(t, review, false), "STEWARD (shadow) REVIEW PASS", "STEWARD (shadow) REVIEW FAIL")
+	requireAll(t, "rejection shadow prompt", mustPrompt(t, rejection, false), "STEWARD (shadow) FIX", "STEWARD (shadow) RESLING", "STEWARD (shadow) REQUEUE")
+	requireAll(t, "final shadow prompt", mustPrompt(t, rejection, true), "STEWARD (shadow) ESCALATE", "outcome `escalated`")
+}
+
+// TestLivePromptsAreNotShadow: the live prompt carries none of the shadow
+// wording, so a live verdict is never mistaken for one the overseer is only
+// comparing (gt-9bioi.4).
+func TestLivePromptsAreNotShadow(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []Mode{"", ModeLive} {
+		for _, ev := range []Event{reviewEvent("gt-x", testHead), rejectionEvent("kind=gate reason=x")} {
+			ev.Mode = mode
+			if p := mustPrompt(t, ev, true); strings.Contains(p, "shadow") {
+				t.Errorf("%s prompt in mode %q mentions shadow:\n%s", ev.Kind, mode, p)
+			}
+		}
+	}
+}
+
+func TestParseMode(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]Mode{"": ModeShadow, "shadow": ModeShadow, "live": ModeLive} {
+		if got, err := ParseMode(in); got != want || err != nil {
+			t.Errorf("ParseMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"Live", "dry-run", " live"} {
+		if got, err := ParseMode(in); got != ModeShadow || err == nil {
+			t.Errorf("ParseMode(%q) = %q, %v; want shadow and an error", in, got, err)
+		}
+	}
+}

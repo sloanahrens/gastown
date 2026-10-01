@@ -42,6 +42,9 @@ type Stats struct {
 	Now   time.Time `json:"now"`
 	// Jobs is every job in the window, running or finished.
 	Jobs int `json:"jobs"`
+	// Shadow is the jobs among them that ran in shadow mode, whose verdicts
+	// were comments only (gt-9bioi.4).
+	Shadow int `json:"shadow"`
 	// Finished is the jobs that ended in the window, Attempted the ones
 	// among them that got to try: an interrupted job says nothing about the
 	// work, so it is in neither the failure count nor the rate.
@@ -104,6 +107,9 @@ func Summarize(rows []Job, o StatsOptions) Stats {
 		window = append(window, j)
 		s.Jobs++
 		s.Models[j.Model]++
+		if j.Mode.Shadow() {
+			s.Shadow++
+		}
 		if j.Model == o.HardAgent {
 			s.Pro++
 		}
