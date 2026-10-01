@@ -255,11 +255,36 @@ func (r *Report) PrintSummaryOnly(w io.Writer, verbose bool, slowThreshold time.
 	// "Fix failed:" details are ALWAYS shown — a failed fix that only surfaces
 	// under --verbose looks like a silent no-op and hides the real error
 	// (gt-8po: agent-bead creation failures were invisible in default output).
+	if verbose {
+		printDetailsByCheck(w, warnings)
+		return
+	}
 	for _, check := range warnings {
 		for _, detail := range check.Details {
-			if !verbose && !strings.HasPrefix(detail, "Fix failed:") {
+			if !strings.HasPrefix(detail, "Fix failed:") {
 				continue
 			}
+			_, _ = fmt.Fprintf(w, "     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(detail))
+		}
+	}
+}
+
+// printDetailsByCheck prints a DETAILS section with each check's details
+// under that check's name, so a long verbose run shows which lines belong to
+// which check (gt-l2alj: they used to print as one unlabeled block).
+func printDetailsByCheck(w io.Writer, checks []*CheckResult) {
+	header := false
+	for _, check := range checks {
+		if len(check.Details) == 0 {
+			continue
+		}
+		if !header {
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, ui.RenderMuted("DETAILS"))
+			header = true
+		}
+		_, _ = fmt.Fprintf(w, "  %s\n", check.Name)
+		for _, detail := range check.Details {
 			_, _ = fmt.Fprintf(w, "     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(detail))
 		}
 	}
