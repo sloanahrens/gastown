@@ -1,13 +1,13 @@
 package daemon
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
@@ -246,6 +246,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
+			if errors.Is(err, beadsql.ErrNotBeads) {
+				continue
+			}
 			d.logger.Printf("wisp_reaper: %s: connect error: %v", dbName, err)
 			reapErrors++
 			continue
@@ -294,6 +297,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 		db, err := reaper.OpenDB(host, port, dbName, 30*time.Second, 30*time.Second)
 		if err != nil {
+			if errors.Is(err, beadsql.ErrNotBeads) {
+				continue
+			}
 			purgeErrors++
 			continue
 		}
@@ -336,6 +342,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
+			if errors.Is(err, beadsql.ErrNotBeads) {
+				continue
+			}
 			continue
 		}
 		if ok, _ := reaper.HasReaperSchema(db); !ok {
@@ -370,6 +379,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
+			if errors.Is(err, beadsql.ErrNotBeads) {
+				continue
+			}
 			continue
 		}
 		if ok, _ := reaper.HasReaperSchema(db); !ok {
@@ -410,6 +422,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			}
 			db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				autoCloseErrors++
 				continue
 			}
@@ -459,7 +474,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 // so this logs the notice and reports zero closed. Failing the step instead
 // would stop a patrol over a config value, which is the stop the soft refusal
 // exists to remove.
-func (d *Daemon) autoCloseDB(db *sql.DB, dbName string, staleIssueAge time.Duration, dryRun bool) (int, error) {
+func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.Duration, dryRun bool) (int, error) {
 	preview, err := reaper.AutoClose(db, nil, dbName, reaper.AutoCloseOptions{
 		StaleAge: staleIssueAge,
 		DryRun:   true,

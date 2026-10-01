@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/health"
@@ -56,6 +55,9 @@ type DatabaseHealth struct {
 	Wisps      int    `json:"wisps"`
 	OpenWisps  int    `json:"open_wisps"`
 	Commits    int    `json:"commits"`
+	// Error is why the database was not read (unreachable, or refused by
+	// beadsql for a bd schema level gastown's reads were not written for).
+	Error string `json:"error,omitempty"`
 }
 
 type PollutionRecord struct {
@@ -221,13 +223,14 @@ func checkDatabaseHealth(townRoot string, port int) []DatabaseHealth {
 			Timeout:     "5s",
 			ReadTimeout: "10s",
 		})
-		db, err := sql.Open("mysql", dsn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		db, err := beadsql.Open(ctx, dsn, dbName)
 		if err != nil {
+			cancel()
+			dh.Error = err.Error()
 			results = append(results, dh)
 			continue
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		// Issue counts
 		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&dh.Issues)
@@ -273,12 +276,12 @@ func checkPollution(townRoot string, port int) []PollutionRecord {
 			Timeout:     "5s",
 			ReadTimeout: "10s",
 		})
-		db, err := sql.Open("mysql", dsn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		db, err := beadsql.Open(ctx, dsn, dbName)
 		if err != nil {
+			cancel()
 			continue
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		for _, c := range checks {
 			query := fmt.Sprintf("SELECT id, COALESCE(title,'') FROM issues WHERE (%s) AND status != 'closed' LIMIT 10", c.where)
@@ -397,6 +400,10 @@ func printHealthReport(r *HealthReport) {
 	if len(r.Databases) > 0 {
 		fmt.Printf("\n%s Databases\n", style.Bold.Render("●"))
 		for _, db := range r.Databases {
+			if db.Error != "" {
+				fmt.Printf("  %s: not read: %s\n", style.Bold.Render(db.Name), db.Error)
+				continue
+			}
 			fmt.Printf("  %s: %d issues (%d open), %d wisps (%d open), %d commits\n",
 				style.Bold.Render(db.Name), db.Issues, db.OpenIssues,
 				db.Wisps, db.OpenWisps, db.Commits)

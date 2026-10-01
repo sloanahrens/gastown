@@ -25,6 +25,7 @@ linters:
     errcheck:
       exclude-functions:
         - (*database/sql.DB).Close
+        - (*github.com/steveyegge/gastown/internal/beadsql.DB).Close
         - (*database/sql.Rows).Close
         - (*database/sql.Tx).Rollback
         - (*database/sql.Stmt).Close

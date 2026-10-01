@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/reaper"
@@ -273,6 +274,9 @@ Use this to understand the state before deciding what to reap.`,
 
 			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
 				continue
 			}
@@ -374,6 +378,9 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 
 			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
 				continue
 			}
@@ -480,6 +487,9 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 
 			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
 				continue
 			}
@@ -596,6 +606,9 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 
 			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
 				continue
 			}
@@ -724,6 +737,9 @@ it by hand.`,
 
 			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
 			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
 				fmt.Printf("%s: connect error: %v\n", dbName, err)
 				continue
 			}
