@@ -172,6 +172,11 @@ func (e *RaceError) Error() string {
 	return fmt.Sprintf("landing lost the race: %s moved from %s to %s during the gate; nothing pushed", e.Target, shortSHA(e.Expected), shortSHA(e.Actual))
 }
 
+// ErrLintTimeout is the cause of an *InfraError whose lint stage outlived its
+// timeout. The landing worker counts a run of them per bead and escalates
+// (gt-j8ade); it is never a rejection.
+var ErrLintTimeout = errors.New("lint stage timed out")
+
 // InfraError is a failure of the landing machinery (git, bd, the gate's
 // tooling, om) that says nothing about the work. Nothing was written to the
 // work bead.
@@ -348,7 +353,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			// A slow lint is almost always one waiting on golangci-lint's
 			// module lock behind another run: not a verdict on the tree. The
 			// next pass retries it (gt-b5ugw review).
-			return Result{}, &InfraError{Stage: "gate", Err: fmt.Errorf("lint stage (%s) did not finish within its %s timeout; nothing was judged", step.Command, step.Timeout)}
+			return Result{}, &InfraError{Stage: "gate", Err: fmt.Errorf("%w: %s did not finish within its %s timeout; nothing was judged", ErrLintTimeout, step.Command, step.Timeout)}
 		}
 		// A test stage over its bound may be a hang in the work or a loaded
 		// host; the author cannot tell which by editing, so it goes to a

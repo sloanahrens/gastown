@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,7 +222,7 @@ func TestPassHumanRejectionLeavesNoReworkComment(t *testing.T) {
 }
 
 // TestPassHumanRejectionEscalates: a rejection left for a human is raised to
-// the operator once, naming the bead and the reason (Sloan 2026-10-01).
+// the operator once, naming the bead and the reason (gt-is0ep).
 func TestPassHumanRejectionEscalates(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -233,6 +236,144 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	// Bounded by the test binary's timeout: a missing escalation hangs here.
 	if msg := <-got; !strings.HasPrefix(msg, "gt-abc: ") || !strings.Contains(msg, "no verdict") || !strings.Contains(msg, "review") {
 		t.Fatalf("escalation %q; want the bead, the kind and the reason", msg)
+	}
+}
+
+// TestPassReworkRejectionDoesNotEscalate: rework goes back to the polecat,
+// so the operator is not alerted (gt-j8ade).
+func TestPassReworkRejectionDoesNotEscalate(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectGate, Reason: "gate failed", Rework: true}
+	}
+	if rep := h.w.Pass(context.Background()); rep.Rejected != 1 {
+		t.Fatalf("report %v; want one rejection", rep)
+	}
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 0 {
+		t.Fatalf("escalated %d times for a rework rejection", n)
+	}
+}
+
+// TestPassHumanRejectionWithRecordErrorEscalates: a rejection left for a
+// human is escalated even when writing it to the bead failed; the operator
+// hears at once, and the retry after rejectRecordBackoff re-raises it under
+// the daemon's per-bead alert key (gt-j8ade).
+func TestPassHumanRejectionWithRecordErrorEscalates(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Rework: false, RecordErr: errors.New("bd down")}
+	}
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 1 {
+		t.Fatalf("escalated %d times; want 1", n)
+	}
+	if len(h.cleared) != 0 {
+		t.Fatalf("intent cleared %v while the rejection is unrecorded", h.cleared)
+	}
+}
+
+// TestPassEscalatePanicIsRecoveredAndLogged: a broken alert path must not
+// take the daemon down (gt-j8ade).
+func TestPassEscalatePanicIsRecoveredAndLogged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var mu sync.Mutex
+	var logs []string
+	h.w.Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	h.w.Escalate = func(string, string) { panic("alert path broke") }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
+	}
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(logs, func(l string) bool { return strings.Contains(l, "panicked") && strings.Contains(l, "alert path broke") }) {
+		t.Fatalf("logs %q; want the recovered panic", logs)
+	}
+}
+
+func lintTimeoutErr() error {
+	return &land.InfraError{Stage: "gate", Err: fmt.Errorf("%w: make gate-lint did not finish within its 2m0s timeout; nothing was judged", land.ErrLintTimeout)}
+}
+
+// TestPassRepeatedLintTimeoutsEscalateOnce: DefaultLintTimeoutEscalateAfter
+// lint-stage timeouts in a row raise one escalation naming the bead and the
+// stage, and further timeouts stay quiet (gt-j8ade).
+func TestPassRepeatedLintTimeoutsEscalateOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var mu sync.Mutex
+	var got []string
+	h.w.Escalate = func(beadID, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, beadID+": "+message)
+	}
+	h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, lintTimeoutErr() }
+	attempts := DefaultLintTimeoutEscalateAfter + 3
+	for i := 0; i < attempts; i++ {
+		h.w.Pass(context.Background())
+		h.w.escWG.Wait()
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		want := 0
+		if i+1 >= DefaultLintTimeoutEscalateAfter {
+			want = 1
+		}
+		if n != want {
+			t.Fatalf("after %d timeouts: %d escalations, want %d", i+1, n, want)
+		}
+		h.now = h.now.Add(infraBackoffMax)
+	}
+	if len(h.lander.calls) != attempts {
+		t.Fatalf("landed %d times; want %d", len(h.lander.calls), attempts)
+	}
+	if !strings.HasPrefix(got[0], "gt-abc: ") || !strings.Contains(got[0], "lint") {
+		t.Fatalf("escalation %q; want the bead and the lint stage", got[0])
+	}
+}
+
+// TestPassLintTimeoutRunIsBrokenByAnotherOutcome: the count is of
+// consecutive lint timeouts, so a pass that fails another way restarts it.
+func TestPassLintTimeoutRunIsBrokenByAnotherOutcome(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.LintTimeoutEscalateAfter = 2
+	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
+		if n == 2 {
+			return land.Result{}, &land.InfraError{Stage: "gate", Err: errors.New("make: not found")}
+		}
+		return land.Result{}, lintTimeoutErr()
+	}
+	// timeout, other failure, timeout: never two in a row.
+	for i := 0; i < 3; i++ {
+		h.w.Pass(context.Background())
+		h.now = h.now.Add(infraBackoffMax)
+	}
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 0 {
+		t.Fatalf("escalated %d times without %d lint timeouts in a row", n, h.w.LintTimeoutEscalateAfter)
 	}
 }
 
