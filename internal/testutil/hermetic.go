@@ -26,9 +26,13 @@
 //     "connection refused" instead of silently mutating production :3307;
 //   - sets GT_TEST_HERMETIC=1, which gt subprocesses honor by suppressing
 //     cwd-resolved event writes (see internal/events);
-//   - snapshots the real town (if any) at startup and diffs it at Finish —
-//     the tripwire: new files, databases, or unattributable events in the
-//     live town fail the run even when every test passed.
+//   - forbids workspace resolution from reaching the live town the binary
+//     runs inside, and refuses to start when an in-process resolver still
+//     reaches it (gt-dr664).
+//
+// The harness never reads the live town's state: whether tests leaked into it
+// is `gt doctor`'s test-leaks check, so a run's verdict never depends on what
+// the town is doing while it runs (gt-ik4a1.3).
 package testutil
 
 import (
@@ -39,12 +43,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -143,7 +145,7 @@ type Hermetic struct {
 	// subprocess cwds and *To-style calls here when a town is needed.
 	TownRoot string
 	// RealTownRoot is the live town the test process is running inside, or
-	// "" when not inside one. The tripwire watches it.
+	// "" when not inside one. Workspace resolution refuses it.
 	RealTownRoot string
 	// StartDir is the working directory when the harness started, which is
 	// inside RealTownRoot when a test binary runs from a worktree in it.
@@ -152,14 +154,9 @@ type Hermetic struct {
 	// harness bound via tmux.SetDefaultSocket, or "" when tmux isn't
 	// installed or isolation was bypassed via AllowLiveTmuxEnv.
 	TmuxSocket string
-	// LiveTmuxSocket is the socket of the tmux server this test process was
-	// launched inside (from the ambient $TMUX), or "" when it was not started
-	// from a tmux pane. Finish tripwires on test sessions found there.
-	LiveTmuxSocket string
 
 	host *harnessHost // nil is processHost
 	cfg  hermeticConfig
-	snap *townSnapshot
 	// refusedGitLog is where WithoutGit's refusing git records calls; ""
 	// without WithoutGit.
 	refusedGitLog string
@@ -292,7 +289,7 @@ func HermeticMain(m *testing.M, opts ...HermeticOption) int {
 }
 
 // StartHermetic sandboxes the test process as described in the package
-// comment and snapshots the surrounding live town for the tripwire. It
+// comment and forbids resolving the surrounding live town. It
 // mutates process-wide state (env, temp dirs) and is meant to be called once,
 // from TestMain, before m.Run().
 func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
@@ -309,7 +306,7 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 	// Identify the live town BEFORE scrubbing env or redirecting anything.
 	// An outer harness (nested `go test` runs) may have set the forbidden
 	// root already, which blinds FindFromCwd to it — inherit it in that case
-	// so the guard and tripwire survive nesting.
+	// so the guard survives nesting.
 	h.StartDir, _ = host.getwd() //nolint:errcheck // "" just disables the startup probe
 	if root, err := host.findTown(); err == nil && root != "" {
 		h.RealTownRoot = root
@@ -319,9 +316,6 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 		if ok, _ := host.isWorkspace(root); ok {
 			h.RealTownRoot = root
 		}
-	}
-	if h.RealTownRoot != "" {
-		h.snap = snapshotTown(h.RealTownRoot)
 	}
 
 	// An outer harness (e.g. a test that runs `go test` as a subprocess) may
@@ -337,11 +331,6 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 	// before anything checked it. Without this, BEADS_TEST_ALLOW_LIVE_TMUX=1
 	// was a documented but dead opt-out (gt-yav3 MR1 bounce).
 	allowLiveTmux := getenv(host.env, AllowLiveTmuxEnv) == "1"
-
-	// Same reason as allowLiveTmux: scrubInheritedTmuxVars removes this, and
-	// the tripwire in Finish compares against the server the test process was
-	// itself launched inside. Captured here, before the scrub.
-	h.LiveTmuxSocket = socketFromTMUX(getenv(host.env, "TMUX"))
 
 	scrubEnv(host.env, externalDolt)
 	scrubTmuxVars(host.env)
@@ -471,12 +460,11 @@ func (h *harnessHost) isolateTmuxSocket() string {
 	return socket
 }
 
-// Finish tears down the sandbox and runs the tripwire against the live town
-// snapshot. It returns the exit code for os.Exit: the m.Run() code, forced to
-// 1 when the tripwire detects that tests leaked state into the live town, when
-// the shared Dolt container's catalog guard finds a database created or dropped
-// while tests ran (ErrDoltCatalogChanged), or when the container fails to
-// terminate.
+// Finish tears down the sandbox. It returns the exit code for os.Exit: the
+// m.Run() code, forced to 1 when the shared Dolt container's catalog guard
+// finds a database created or dropped while tests ran (ErrDoltCatalogChanged),
+// when the container fails to terminate, or when WithoutGit's refusing git was
+// started.
 func (h *Hermetic) Finish(code int) int {
 	host := h.host
 	if host == nil {
@@ -512,39 +500,6 @@ func (h *Hermetic) Finish(code int) int {
 		_ = os.Remove(filepath.Join(host.tmuxSocketDir(), h.TmuxSocket))
 	}
 
-	if h.LiveTmuxSocket != "" {
-		if leaks := host.tmuxSessions(h.LiveTmuxSocket); len(leaks) > 0 {
-			fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
-			fmt.Fprintf(host.stderr, "HERMETIC TRIPWIRE: tests created %d session(s) on the live tmux server %q\n",
-				len(leaks), h.LiveTmuxSocket)
-			for _, l := range leaks {
-				fmt.Fprintf(host.stderr, "  - %s\n", l)
-			}
-			fmt.Fprintf(host.stderr, "A session named gt-test-* on the live server reads as a phantom polecat\n")
-			fmt.Fprintf(host.stderr, "in the roster and is a target for auto-nuke (gt-2bj). Name a session\n")
-			fmt.Fprintf(host.stderr, "socket (tmux -L gt-test-<something>) instead of using the inherited one.\n")
-			fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-
-	if h.snap != nil {
-		if leaks := h.snap.diff(); len(leaks) > 0 {
-			fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
-			fmt.Fprintf(host.stderr, "HERMETIC TRIPWIRE: tests leaked state into the live town at %s\n", h.snap.root)
-			for _, l := range leaks {
-				fmt.Fprintf(host.stderr, "  - %s\n", l)
-			}
-			fmt.Fprintf(host.stderr, "Tests must never write to a real town. Route writes through the\n")
-			fmt.Fprintf(host.stderr, "sandbox (testutil.Hermetic.TownRoot / ScratchTown) instead.\n")
-			fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
 	return code
 }
 
@@ -629,38 +584,6 @@ func scrubTmuxVars(env environment) {
 	for _, v := range liveTmuxVars {
 		_ = env.Unsetenv(v)
 	}
-}
-
-// liveTmuxTestSessions returns the gt-test-* sessions running on the given
-// socket, each with the pane pid and cwd that identify what left it behind.
-// Phantoms live under two minutes, so a name alone is not evidence (gt-2bj).
-func liveTmuxTestSessions(socket string) []string {
-	tm := tmux.NewTmuxWithSocket(socket)
-	names, err := tm.ListSessions()
-	if err != nil {
-		return nil
-	}
-	var leaks []string
-	for _, name := range names {
-		if !strings.HasPrefix(name, "gt-test-") {
-			continue
-		}
-		var evidence []string
-		if pid, err := tm.GetPanePID(name); err == nil && pid != "" {
-			evidence = append(evidence, "pane_pid="+pid)
-		}
-		if cwd, err := tm.PaneCurrentPath(name); err == nil && cwd != "" {
-			evidence = append(evidence, "cwd="+cwd)
-		}
-		sort.Strings(evidence)
-		if len(evidence) == 0 {
-			leaks = append(leaks, name)
-			continue
-		}
-		leaks = append(leaks, fmt.Sprintf("%s (%s)", name, strings.Join(evidence, " ")))
-	}
-	sort.Strings(leaks)
-	return leaks
 }
 
 // writeSandboxGitConfig gives the sandbox HOME a deterministic git identity,
@@ -914,405 +837,4 @@ func ScratchTown(t *testing.T) string {
 	}
 	t.Chdir(root)
 	return root
-}
-
-// townSnapshot records the observable state of a live town so the tripwire
-// can detect test pollution. It intentionally tracks only additions:
-// concurrent legitimate agents in a busy town create lock files and append
-// events, so removals and lock-file churn are ignored.
-type townSnapshot struct {
-	root    string
-	entries map[string]bool // relative paths, e.g. ".dolt-data/testdb_x"
-
-	// events follows .events.jsonl by path from snapshot time (gt-yirj6).
-	// The daemon's events_prune replaces the file (tmp + rename) with its
-	// newest lines, so a saved byte offset can point past the new end or into
-	// the middle of retained history; the tail re-syncs after the last line
-	// it had passed. Nil when the file did not exist at snapshot time.
-	events *events.Tail
-	// eventsMidLine is set when the snapshot ended inside a line an agent was
-	// still appending (gt-5few): the first line the tail returns is its end.
-	eventsMidLine bool
-}
-
-// watchedSubdirs are town-root subdirectories whose direct children are
-// snapshotted. .dolt-data catches orphan test databases (each database is a
-// directory); .beads catches stray tracker files.
-var watchedSubdirs = []string{".beads", ".dolt-data"}
-
-func snapshotTown(root string) *townSnapshot {
-	s := &townSnapshot{root: root, entries: townEntries(root)}
-	path := filepath.Join(root, ".events.jsonl")
-	if _, err := os.Stat(path); err == nil {
-		// OpenTail creates a missing file, hence the Stat: the snapshot must
-		// not write to the town it watches.
-		if tail, err := events.OpenTail(path); err == nil {
-			s.events = tail
-			s.eventsMidLine = !endsAtLineStart(path, tail.Offset())
-		}
-	}
-	return s
-}
-
-// townEntries lists the town root's entries and those of its watched
-// subdirectories.
-func townEntries(root string) map[string]bool {
-	entries := map[string]bool{}
-	for name := range listDir(root) {
-		entries[name] = true
-	}
-	for _, sub := range watchedSubdirs {
-		for name := range listDir(filepath.Join(root, sub)) {
-			entries[filepath.ToSlash(filepath.Join(sub, name))] = true
-		}
-	}
-	return entries
-}
-
-// diff re-snapshots the town and returns a description of every leak: new
-// non-lock, non-atomic-write-temp, non-rig-explained entries, and appended
-// events not attributable to the town's known actors (concurrent legitimate
-// agents keep writing events while tests run, so growth alone is not a
-// failure).
-//
-// The atomic-temp exemption is fails-open by construction (gt-lqri): a
-// .tmp-suffix match cannot distinguish a temp written to a watched directory
-// from one abandoned there, and the suffix alone forgives both. diff()
-// tolerates a new .tmp entry only when its base matches a known atomic-write
-// sibling (atomicTempLeak) — the transients the exemption was added for — and
-// reports any other .tmp as a leak.
-func (s *townSnapshot) diff() []string {
-	var leaks []string
-
-	after := townEntries(s.root)
-	rigs := rigNames(s.root)
-	var added []string
-	for name := range after {
-		if s.entries[name] || strings.HasSuffix(name, ".lock") || explainedByRig(name, rigs) {
-			continue
-		}
-		if isAtomicWriteTemp(name) {
-			// .~ names are unforgeable — the temp pattern is
-			// .~<file>.<random> — and stay tolerated as-is (gt-wdr). A
-			// .tmp suffix, by contrast, is a fails-open match: it is
-			// tolerated only when the base is a known atomic-write
-			// sibling, so an abandoned or leaked .tmp is reported (gt-lqri).
-			base := filepath.Base(name)
-			if strings.HasPrefix(base, ".~") || atomicTempLeak(base) {
-				continue
-			}
-		}
-		added = append(added, name)
-	}
-	sort.Strings(added)
-	for _, name := range added {
-		leaks = append(leaks, fmt.Sprintf("new entry: %s", name))
-	}
-
-	leaks = append(leaks, s.suspiciousAppendedEvents()...)
-
-	return leaks
-}
-
-// explainedByRig reports whether an added town entry is the rig worktree or
-// Dolt data directory for a rig now registered in mayor/rigs.json —
-// legitimate concurrent operator onboarding (gt-bd79: `gt-lwi`'s
-// before/after snapshot cannot otherwise distinguish a new rig directory
-// like `hm` or `.dolt-data/hm` from test-leaked state in the same window),
-// not test leakage. A rig's worktree and Dolt data both live under the rig's
-// name — at the town root and under .dolt-data/ respectively — so matching
-// the entry's base name against the registered rig set covers both.
-func explainedByRig(name string, rigs map[string]bool) bool {
-	if len(rigs) == 0 {
-		return false
-	}
-	return rigs[filepath.Base(name)]
-}
-
-// isAtomicWriteTemp reports whether name is a transient atomic-write temp
-// file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
-// write-temp-then-rename sibling like the daemon's
-// .events.jsonl.prune.tmp. Town tooling
-// routinely writes via create-tmp-then-rename, so any concurrent invocation
-// by any agent during a test window creates and then removes one of these —
-// indistinguishable from the .lock churn already tolerated below (gt-wdr,
-// the file-entry analog of gt-ro0's event-actor exemption).
-//
-// gt-lqri: the .tmp suffix alone is a fails-open exemption — a test that
-// abandons a .tmp file, or tooling that hard-crashes before renaming, looks
-// identical to a live atomic write, and the suffix match forgives both. The
-// .~ prefix does not have this ambiguity (the OS temp pattern
-// .~<file>.<random> is unforgeable by accident), so diff() keeps it
-// unconditional; .tmp entries pass diff() only when atomicTempLeak()
-// cross-checks them against the live target set, and fails closed otherwise.
-func isAtomicWriteTemp(name string) bool {
-	base := filepath.Base(name)
-	return strings.HasPrefix(base, ".~") || strings.HasSuffix(base, ".tmp")
-}
-
-// atomicWriteTemps maps each live target file on the snapshot's watched
-// surface to the exact suffixes its atomic writers append while building a
-// replacement, before renaming it over the target. Every writer must be
-// listed: an unlisted one gets its crash residue reported as a leak (exactly
-// the bug this map replaced: hardcoding a single ".tmp" sibling per file
-// missed a second writer's suffix). Suffixes are the producers' own
-// exported constants rather than re-typed literals, so a renamed suffix
-// breaks the build here instead of silently going stale.
-var atomicWriteTemps = map[string][]string{
-	events.EventsFile: {events.PruneTempSuffix},
-}
-
-// atomicTempPrefixes are CreateTemp patterns that produce temps on the
-// watched surface: beads.WriteRoutes uses os.CreateTemp(beadsDir,
-// beads.RoutesTempPrefix+"*.tmp") in .beads, and os.CreateTemp splices its
-// random suffix at the "*" in the pattern — so the temp's name
-// (.routes-<random>.tmp) is not derivable from routes.jsonl, which is why
-// the match is a prefix, not a sibling of a target name.
-var atomicTempPrefixes = []string{
-	beads.RoutesTempPrefix,
-}
-
-// atomicTempLeak reports whether a new .tmp-suffix entry is a known atomic-
-// write temp rather than a leaked file. The exemption is fails-open by
-// construction — a suffix match cannot tell a .tmp written to a watched
-// directory from a .tmp abandoned there — so diff() tolerates a .tmp entry
-// only when its base names a known temp (a target file plus one of its
-// producers' exact suffixes, or a known CreateTemp prefix); a .tmp with no
-// live target (a test that wrote a temp and never renamed it) is reported
-// as a leak instead of being silently forgiven.
-func atomicTempLeak(base string) bool {
-	for file, suffixes := range atomicWriteTemps {
-		for _, suffix := range suffixes {
-			if base == file+suffix { // e.g. .events.jsonl.prune.tmp
-				return true
-			}
-		}
-	}
-	if strings.HasSuffix(base, ".tmp") {
-		for _, prefix := range atomicTempPrefixes {
-			if strings.HasPrefix(base, prefix) { // e.g. .routes-12345.tmp
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// suspiciousAppendedEvents reads the events appended to .events.jsonl since
-// the snapshot and flags those whose actor does not belong to the town (first
-// path segment neither a rig from mayor/rigs.json nor a built-in town-level
-// actor). Fixture actors like "myr/mycat" (the gt-x9o incident) are caught;
-// concurrent legitimate agents pass. Events the daemon authored are tolerated
-// (gt-d9423). It closes the snapshot's tail, so it runs once.
-//
-// gt-5few: the town's agents append to the live file whenever they like, so a
-// line can be partially present at either end of the window being scanned:
-//
-//   - head — the snapshot ran mid-append, so the window starts with that
-//     line's tail. This is what the refinery kept hitting: the "unparseable
-//     event" fragments in the gt-5few comments are real live-town lines
-//     missing their leading `{"ts":` (7 bytes).
-//   - tail — a writer is mid-append at scan time, leaving a last line with no
-//     trailing newline. The tail returns complete lines only.
-//
-// Both fragments fail to parse and were reported as leaked state, though the
-// writer was a concurrent legitimate agent. A truncation says nothing about
-// the actor that produced the line, so partial lines are skipped at both
-// ends; every complete appended line is still checked in full.
-func (s *townSnapshot) suspiciousAppendedEvents() []string {
-	var lines []string
-	if s.events != nil {
-		lines, _ = s.events.Poll() //nolint:errcheck // a read failure mid-way still returns the lines read
-		_ = s.events.Close()
-		s.events = nil
-		if s.eventsMidLine && len(lines) > 0 {
-			lines = lines[1:]
-		}
-	} else {
-		lines = completeLines(filepath.Join(s.root, ".events.jsonl"))
-	}
-
-	known := knownActorPrefixes(s.root)
-	var leaks []string
-	for _, line := range lines {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			leaks = append(leaks, appendedEventLeaks(trimmed, known)...)
-		}
-	}
-	return leaks
-}
-
-// completeLines returns the newline-terminated lines of the file at path: all
-// of an events file created after the snapshot.
-func completeLines(path string) []string {
-	data, err := os.ReadFile(path) //nolint:gosec // path derives from detected town root
-	if err != nil {
-		return nil
-	}
-	lines := strings.Split(string(data), "\n")
-	return lines[:len(lines)-1] // the last element followed no newline
-}
-
-// endsAtLineStart reports whether offset is a line boundary of the file at
-// path: the start of the file, or immediately after a newline. Unknown
-// positions are treated as boundaries.
-func endsAtLineStart(path string, offset int64) bool {
-	if offset <= 0 {
-		return true
-	}
-	f, err := os.Open(path) //nolint:gosec // path derives from detected town root
-	if err != nil {
-		return true
-	}
-	defer f.Close() //nolint:errcheck // read-only
-	var prev [1]byte
-	if _, err := f.ReadAt(prev[:], offset-1); err != nil {
-		return true
-	}
-	return prev[0] == '\n'
-}
-
-// appendedEventLeaks classifies one complete appended line: malformed JSON, an
-// event the town's own daemon authored (tolerated), or an event whose actor
-// prefix the town does not know.
-//
-// A line stamped with the daemon's caller is tolerated because a test run
-// cannot make the daemon session_death another agent (gt-d9423): the daemon
-// writes the tmux session name as the actor, which is not an actor prefix the
-// town knows, and the events package refuses in-process test writes to the live
-// town (gt-x9o), including test-spawned subprocesses (gt-lwi). The tolerance is
-// fails-open for a test that drives the daemon's crash-detection path against
-// the live town root — the leak this tripwire exists to catch; the check leaves
-// the unit tier in gt-ik4a1.3.
-func appendedEventLeaks(line string, known map[string]bool) []string {
-	var ev struct {
-		Actor   string `json:"actor"`
-		Type    string `json:"type"`
-		Payload struct {
-			Caller string `json:"caller"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal([]byte(line), &ev); err != nil {
-		return []string{fmt.Sprintf("unparseable event appended to .events.jsonl: %.120s", line)}
-	}
-	if ev.Payload.Caller == events.CallerDaemon {
-		return nil
-	}
-	prefix, _, _ := strings.Cut(strings.TrimSuffix(ev.Actor, "/"), "/")
-	if !known[prefix] {
-		return []string{fmt.Sprintf("event with unknown actor %q (type %s) appended to .events.jsonl", ev.Actor, ev.Type)}
-	}
-	return nil
-}
-
-// builtinActorPrefixes are town-level actors that are always legitimate.
-//
-// gt-9pn: this list was previously enumerated entirely by hand and was
-// missing a legitimate actor twice (gt-ro0 "unknown", gt-kvc "dog") — each
-// time a false positive that could have blocked a real merge. Most of these
-// entries are no longer maintained by hand alone: internal/cmd's
-// TestDetectActorOutputsToleratedByTripwire iterates every internal/cmd.Role
-// (the enum backing detectActor(), the function that actually writes most
-// agent-originated actor values) and fails if RoleInfo.ActorString() ever
-// produces a value not in this list — so the two sides can no longer
-// silently drift apart the way they did before.
-//
-// "mayor", "deacon", "witness", "refinery", "polecat", "crew", "dog",
-// "unknown" are the bare (no-rig) actor strings for their respective Roles.
-//
-// gt-jna (CRITICAL regression in gt-9pn): RoleBoot has TWO independent,
-// both-legitimate actor-construction paths that gt-9pn wrongly assumed were
-// one and the same:
-//   - RoleInfo.ActorString() (internal/cmd/role.go) returns "deacon-boot" —
-//     the beads-attribution form, matches BD_ACTOR for Boot's `bd` calls.
-//   - getAgentIdentity() (internal/cmd/prime.go), used by emitSessionEvent
-//     to set the actor on every session_start event Boot's `gt prime` emits,
-//     returns bare "boot" — the hook/agent-identity form, matches GT_ROLE's
-//     compound "deacon/boot" root and Boot's session/hook identity elsewhere.
-//   - gt-9pn's TestDetectActorOutputsToleratedByTripwire only cross-checks
-//     ActorString(), so it never saw getAgentIdentity()'s "boot" and the fix
-//     dropped a live, high-volume (~90s cadence) actor value — reproducing
-//     exactly the kind of false positive it was built to eliminate. Both
-//     "boot" and "deacon-boot" must stay tolerated; see
-//     TestGetAgentIdentityOutputsToleratedByTripwire (role_actor_tripwire_test.go)
-//     for the cross-check covering this second construction path.
-//
-// The remaining four are not derivable from internal/cmd.Role because they
-// come from other construction paths, verified directly against source:
-//   - "overseer": the fallback in detectSender() (internal/cmd/mail_identity.go)
-//     used as the mail actor when no agent identity resolves.
-//   - "gt": literal actor for town-infrastructure events with no owning
-//     agent (internal/cmd/up.go, polecat_spawn.go, down.go).
-//   - "daemon": literal actor for daemon-originated events, e.g. mass-death
-//     detection (internal/daemon/daemon.go).
-//   - "convoy": convoyNotifyFrom() (internal/cmd/convoy.go, also inlined at
-//     internal/refinery/engineer.go) builds "convoy/<convoy-id>" as the
-//     --from actor for a convoy's completion-notification mail — confirmed
-//     live in ~/gt/.events.jsonl while verifying this change (gt-9pn), which
-//     is exactly the kind of dynamically-built actor a plain string search
-//     for "convoy" as a whole value misses.
-//
-// "town" and "human" remain removed (gt-9pn, re-verified gt-jna): neither a
-// repo-wide search for them as a literal actor value nor for a "<prefix>/"+
-// id-style builder (the pattern that caught "convoy" above) found a code
-// path that ever writes them as an event actor. If one is ever needed, the
-// tripwire's leak report will name the exact actor to add back — that is the
-// point of deriving this list instead of guessing at it.
-var builtinActorPrefixes = []string{
-	"mayor", "deacon", "boot", "deacon-boot", "witness", "refinery", "polecat",
-	"crew", "dog", "unknown", "overseer", "gt", "daemon", "convoy",
-}
-
-// BuiltinActorPrefixes returns a copy of the always-legitimate town-level
-// actor prefixes. It exists so other packages (e.g. internal/cmd's
-// TestDetectActorOutputsToleratedByTripwire) can cross-check their own
-// actor-construction logic against the tripwire's tolerances without
-// duplicating this list.
-func BuiltinActorPrefixes() []string {
-	return append([]string(nil), builtinActorPrefixes...)
-}
-
-func knownActorPrefixes(root string) map[string]bool {
-	known := map[string]bool{}
-	for _, p := range builtinActorPrefixes {
-		known[p] = true
-	}
-	for name := range rigNames(root) {
-		known[name] = true
-	}
-	return known
-}
-
-// rigNames returns the set of rig names registered in the town's
-// mayor/rigs.json, or an empty set when the file is missing or unparseable.
-func rigNames(root string) map[string]bool {
-	names := map[string]bool{}
-	data, err := os.ReadFile(filepath.Join(root, "mayor", "rigs.json")) //nolint:gosec // path derives from detected town root
-	if err != nil {
-		return names
-	}
-	var rigs struct {
-		Rigs map[string]json.RawMessage `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &rigs); err != nil {
-		return names
-	}
-	for name := range rigs.Rigs {
-		names[name] = true
-	}
-	return names
-}
-
-// listDir returns the names of dir's direct children, or an empty map when
-// the directory cannot be read.
-func listDir(dir string) map[string]bool {
-	names := map[string]bool{}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return names
-	}
-	for _, e := range entries {
-		names[e.Name()] = true
-	}
-	return names
 }

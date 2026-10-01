@@ -9,7 +9,7 @@ import (
 
 // TestMain runs the fake's tests under the hermetic harness (gt-lwi), like
 // every package whose tests could reach bd: nothing here should, and the
-// tripwire proves it.
+// poisoned Dolt ports would refuse it.
 func TestMain(m *testing.M) {
 	os.Exit(testutil.HermeticMain(m))
 }

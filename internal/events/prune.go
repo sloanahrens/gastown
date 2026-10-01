@@ -14,8 +14,8 @@ import (
 )
 
 // PruneTempSuffix is the suffix Prune appends to the events path while it
-// builds the replacement, before renaming it into place. Exported so the
-// hermetic tripwire can recognize the temp by the producer's own constant.
+// builds the replacement, before renaming it into place. Exported so gt
+// doctor's test-leaks check can recognize the temp by the producer's own constant.
 const PruneTempSuffix = ".prune.tmp"
 
 // ErrPruneLockBusy means Prune gave up waiting for the writers' lock. Nothing

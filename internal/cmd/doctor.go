@@ -61,6 +61,7 @@ Cleanup checks (fixable):
   - misclassified-wisps      Detect issues that should be wisps (purges to wisps table, fixable)
   - jsonl-bloat              Detect stale/bloated issues.jsonl vs live database
   - stale-beads-redirect     Detect stale files in .beads directories with redirects
+  - test-leaks               Detect test fixture state leaked into the live town (report only)
 
 Clone divergence checks:
   - clone-divergence         Detect clones significantly behind origin/main
@@ -296,6 +297,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewLinkedPaneCheck())
 	d.Register(doctor.NewSocketSplitBrainCheck())
 	d.Register(doctor.NewTmuxTestSocketCheck())
+	d.Register(doctor.NewTestLeakCheck())
 	d.Register(doctor.NewThemeCheck())
 	d.Register(doctor.NewCrashReportCheck())
 	d.Register(doctor.NewEnvVarsCheck())

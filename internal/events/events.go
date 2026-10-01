@@ -112,8 +112,8 @@ const EventsFile = ".events.jsonl"
 // Infrastructure actors: literal actor values for events with no owning
 // agent role (internal/cmd.Role covers agent-originated actors instead —
 // see internal/cmd.AllRoles and detectActor). Named here, rather than
-// inlined at each call site, so the hermetic test tripwire's tolerance list
-// (internal/testutil.BuiltinActorPrefixes) can be verified against the same
+// inlined at each call site, so gt doctor's test-leaks tolerance list
+// (internal/doctor.BuiltinActorPrefixes) can be verified against the same
 // values that actually get logged (gt-9pn).
 const (
 	ActorGt     = "gt"     // town-infrastructure events: boot, halt, spawn
@@ -121,7 +121,7 @@ const (
 )
 
 // CallerDaemon is the payload "caller" value on the session events the daemon
-// authors (crash detection, idle reap); internal/testutil's hermetic tripwire
+// authors (crash detection, idle reap); gt doctor's test-leaks check
 // matches it so daemon activity is not read as test leakage (gt-d9423).
 const CallerDaemon = "daemon"
 
