@@ -2743,6 +2743,57 @@ func nonDispatchableIssueTypesSDK() []beadsdk.IssueType {
 	return types
 }
 
+// readyMolEnvelope is the shape bd ready --mol --json prints: one molecule's
+// ready steps, each step object wrapping its issue beside the parallel-group
+// metadata callers ignore (gt-e2d9d). Steps stays raw so a steps key that is
+// absent (some other object shape) is distinguishable from one that is empty
+// (a molecule with nothing ready).
+type readyMolEnvelope struct {
+	Steps json.RawMessage `json:"steps"`
+}
+
+// readyMolStep is one entry of that steps array.
+type readyMolStep struct {
+	Issue *Issue `json:"issue"`
+}
+
+// parseReadyMolOutput unmarshals bd ready --mol --json stdout into the ready
+// step issues. A bd that predates the envelope answered with the bare issue
+// array and still does; the first byte routes between the two. Every shape
+// this parser does not understand — no steps key, a step with no issue — is
+// an error, never a short or empty list: a molecule whose steps silently
+// vanish stalls the checklist walk with no trace of why.
+func parseReadyMolOutput(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		var issues []*Issue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+		}
+		return issues, nil
+	}
+
+	var env readyMolEnvelope
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --mol envelope: %w", err)
+	}
+	if env.Steps == nil {
+		return nil, fmt.Errorf("parsing bd ready --mol envelope: no steps array")
+	}
+	var steps []readyMolStep
+	if err := json.Unmarshal(env.Steps, &steps); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --mol envelope steps: %w", err)
+	}
+	issues := make([]*Issue, 0, len(steps))
+	for i, step := range steps {
+		if step.Issue == nil {
+			return nil, fmt.Errorf("parsing bd ready --mol envelope: step %d carries no issue", i+1)
+		}
+		issues = append(issues, step.Issue)
+	}
+	return issues, nil
+}
+
 // ReadyForMol returns ready steps within a specific molecule.
 // Delegates to bd ready --mol which uses beads' canonical blocking semantics
 // (blocked_issues_cache), handling all blocking types, transitive propagation,
@@ -2760,12 +2811,7 @@ func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
 		return nil, err
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
-	}
-
-	return issues, nil
+	return parseReadyMolOutput(out)
 }
 
 // ReadyWithType returns ready issues filtered by label.
