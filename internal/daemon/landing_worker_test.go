@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,5 +291,84 @@ func TestLandingLogDirIsPerLanding(t *testing.T) {
 	}
 	if got := landingLogDir(context.Background(), "/logs", filepath.Join("/work", "gastown", "land-9", "wt")); got != filepath.Join("/logs", "land-9") {
 		t.Fatalf("log dir without a LandingID = %q, want /logs/land-9", got)
+	}
+}
+
+// landingWorkerDaemon is a daemon whose landing worker runs without a rig on
+// disk: the identity-bead read is answered in process for the fixture's
+// "testrig" (rig_status_test.go).
+func landingWorkerDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f.daemon.ctx = ctx
+	f.daemon.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		LandingWorker: &LandingWorkerConfig{Enabled: true},
+	}}
+	if ok, why := f.daemon.isRigOperational(f.rigName); !ok {
+		t.Fatalf("fixture rig is not operational (%s); the worker would skip its pass", why)
+	}
+	return f.daemon
+}
+
+// gt-fzwcd: the worker passes at once instead of waiting out an interval, so
+// a daemon restarted for an upgrade resumes landing the moment it is up.
+func TestLandingWorkerPassesAtStart(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	passed := make(chan struct{})
+	pass := func(context.Context) landworker.Report { close(passed); return landworker.Report{} }
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	// The interval is an hour: a worker that waited it out would never pass,
+	// and the test binary's timeout reports that with every stack.
+	<-passed
+}
+
+// gt-fzwcd: the pass that was in flight when the restart went pending is the
+// last thing it waits for, so its end wakes the run loop to restart now
+// rather than at the next heartbeat (up to 3 min).
+func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	pass := func(context.Context) landworker.Report {
+		close(started)
+		<-release
+		return landworker.Report{Landed: 1}
+	}
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	<-started
+	// The heartbeat drains the workers while this pass is in flight.
+	d.upgradeRestartPending.Store(true)
+	close(release)
+	// Never woken = the run loop restarts only at the next heartbeat; the
+	// test binary's timeout reports that.
+	<-d.landingDrained()
+}
+
+// A pass ending with no restart pending must stay silent: a wake per pass
+// would run the run loop's restart check over and over.
+func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	// The loop handles one pass's end before it starts the next, so once the
+	// second pass has started, a wake for the first would already be sent.
+	second, hold := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	var calls atomic.Int32
+	pass := func(context.Context) landworker.Report {
+		if calls.Add(1) == 2 {
+			close(second)
+			<-hold
+		}
+		return landworker.Report{}
+	}
+	go d.landingWorkerLoop("testrig", time.Nanosecond, pass)
+	<-second
+	select {
+	case <-d.landingDrained():
+		t.Fatal("woke the run loop with no restart pending")
+	default:
 	}
 }

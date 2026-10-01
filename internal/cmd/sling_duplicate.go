@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -50,12 +50,12 @@ const (
 	// round-trips, so a short TTL collapses a burst into one fetch. The window
 	// is short enough that a bead closed seconds ago is seen by the next burst.
 	duplicatePoolTTL = 60 * time.Second
-
-	// duplicateMatchLimit caps how many overlapping beads a report lists before
-	// summarizing the remainder. A bead whose description enumerates a whole
-	// failing suite can overlap many others at once.
-	duplicateMatchLimit = 5
 )
+
+// duplicateMatchLimit caps how many overlapping beads a report lists before
+// summarizing the remainder. The report is written by internal/sling, which
+// owns the limit.
+const duplicateMatchLimit = sling.MatchLimit
 
 var (
 	// testNameRe matches a Go test identifier as it appears in bead prose.
@@ -83,52 +83,24 @@ var (
 )
 
 // contentRefs is the set of test names and file paths a bead's text names.
-type contentRefs struct {
-	Tests []string
-	Files []string
-}
-
-func (r contentRefs) empty() bool { return len(r.Tests) == 0 && len(r.Files) == 0 }
+type contentRefs = sling.ContentRefs
 
 // duplicateCandidate is one bead reduced to the fields the dedupe compares.
-type duplicateCandidate struct {
-	ID       string
-	Title    string
-	Status   string
-	ClosedAt string
-	Refs     contentRefs
-}
+type duplicateCandidate = sling.Duplicate
 
 // duplicateMatch records one existing bead whose content overlaps the
-// candidate's, and on what.
-type duplicateMatch struct {
-	Bead        duplicateCandidate
-	SharedTests []string
-	SharedFiles []string
-}
-
-// Blocking reports whether the overlap is strong enough to refuse the sling.
-// Shared test names mean two beads very probably describe one defect; a shared
-// file alone is common between beads that are genuinely distinct work.
-//
-// Only live work blocks: an open, in-progress or hooked bead. A closed bead
-// (and a pinned, blocked or deferred one, which nobody is working) is reported
-// as a warning and never refuses the sling — gt-bivxl was refused over two
-// CLOSED beads, one closed 43m earlier by an audit, and needed --force by hand
-// (gt-4k3fj.5).
-func (m duplicateMatch) Blocking() bool {
-	return len(m.SharedTests) > 0 && duplicateBlockingStatuses[m.Bead.Status]
-}
-
-// duplicateBlockingStatuses are the statuses whose overlap refuses a sling.
-var duplicateBlockingStatuses = map[string]bool{"open": true, "in_progress": true, "hooked": true}
+// candidate's, and on what. Which overlaps refuse a sling is sling.Blocking's
+// decision, so the dispatch engine and this check cannot disagree.
+type duplicateMatch = sling.DuplicateMatch
 
 // slingDuplicateDecision is the outcome of a pre-sling dedupe check: whether to
-// refuse, and the report to print either way. Message is empty when nothing
-// overlapped.
-type slingDuplicateDecision struct {
-	Blocked bool
-	Message string
+// refuse, and the report to print either way.
+type slingDuplicateDecision = sling.DuplicateDecision
+
+// decideSlingDuplicates turns the overlaps found against a bead into the
+// decision the sling acts on, plus the report it prints.
+func decideSlingDuplicates(beadID string, matches []duplicateMatch) slingDuplicateDecision {
+	return sling.DecideDuplicates(beadID, matches)
 }
 
 // extractContentRefs pulls test names and file paths out of free-form bead
@@ -223,7 +195,7 @@ func testNamesOverlap(a, b string) bool {
 func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidate) []duplicateMatch {
 	var matches []duplicateMatch
 	for _, other := range pool {
-		if other.ID == candidate.ID || other.Refs.empty() {
+		if other.ID == candidate.ID || other.Refs.Empty() {
 			continue
 		}
 		sharedTests := intersectTests(candidate.Refs.Tests, other.Refs.Tests)
@@ -246,73 +218,6 @@ func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidat
 	return matches
 }
 
-// decideSlingDuplicates renders the matches into a verdict and a report.
-func decideSlingDuplicates(beadID string, matches []duplicateMatch) slingDuplicateDecision {
-	if len(matches) == 0 {
-		return slingDuplicateDecision{}
-	}
-
-	blocking := make([]duplicateMatch, 0, len(matches))
-	warning := make([]duplicateMatch, 0, len(matches))
-	for _, m := range matches {
-		if m.Blocking() {
-			blocking = append(blocking, m)
-		} else {
-			warning = append(warning, m)
-		}
-	}
-
-	var b strings.Builder
-	if len(blocking) > 0 {
-		fmt.Fprintf(&b, "%s Refusing to sling %s: its content overlaps %d existing bead(s).\n",
-			style.Error.Render("✗"), beadID, len(blocking))
-		b.WriteString("  Two beads describing one defect from different vantage points share no\n")
-		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n\n")
-		writeMatchList(&b, blocking)
-		fmt.Fprintf(&b, "\nIf this is genuinely distinct work, re-sling with:\n  gt sling %s <target> --force\n", beadID)
-	} else {
-		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them live work sharing a test.\n",
-			style.Warning.Render("⚠"), beadID, len(warning))
-		b.WriteString("  Shared files alone, or overlap with closed/parked work, does not block; this sling proceeds.\n\n")
-		writeMatchList(&b, warning)
-	}
-
-	return slingDuplicateDecision{Blocked: len(blocking) > 0, Message: b.String()}
-}
-
-func writeMatchList(b *strings.Builder, matches []duplicateMatch) {
-	shown := matches
-	if len(shown) > duplicateMatchLimit {
-		shown = shown[:duplicateMatchLimit]
-	}
-	for _, m := range shown {
-		fmt.Fprintf(b, "  %s  %s\n", m.Bead.ID, statusPhrase(m.Bead))
-		if len(m.SharedTests) > 0 {
-			fmt.Fprintf(b, "      shared test: %s\n", strings.Join(m.SharedTests, ", "))
-		}
-		if len(m.SharedFiles) > 0 {
-			fmt.Fprintf(b, "      shared file: %s\n", strings.Join(m.SharedFiles, ", "))
-		}
-	}
-	if remaining := len(matches) - len(shown); remaining > 0 {
-		fmt.Fprintf(b, "  ... and %d more\n", remaining)
-	}
-}
-
-// statusPhrase renders a match's state for the report, including how recently a
-// closed bead was closed — the age is what tells the operator whether this is
-// work that landed an hour ago or a week ago.
-func statusPhrase(c duplicateCandidate) string {
-	if c.Status != "closed" {
-		return c.Status
-	}
-	closedAt, err := time.Parse(time.RFC3339, c.ClosedAt)
-	if err != nil {
-		return "closed"
-	}
-	return "closed " + formatAge(closedAt)
-}
-
 // checkSlingDuplicates compares a bead's own content against its rig's open and
 // recently-closed beads.
 //
@@ -332,7 +237,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 		return nil, nil, nil
 	}
 	refs := extractContentRefs(info.Title, info.Description, info.Design, info.Notes)
-	if refs.empty() {
+	if refs.Empty() {
 		return nil, nil, nil
 	}
 
@@ -607,21 +512,4 @@ func sortedKeys(set map[string]bool) []string {
 
 // errSlingDuplicateContent is the sentinel for a refused sling, so callers that
 // need to distinguish the refusal from a bd failure can.
-var errSlingDuplicateContent = errors.New("duplicate content")
-
-// formatAge returns a human-readable age string
-func formatAge(t time.Time) string {
-	d := time.Since(t)
-
-	if d < time.Hour {
-		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%d hours ago", int(d.Hours()))
-	}
-	days := int(d.Hours() / 24)
-	if days == 1 {
-		return "1 day ago"
-	}
-	return fmt.Sprintf("%d days ago", days)
-}
+var errSlingDuplicateContent = sling.ErrDuplicateContent

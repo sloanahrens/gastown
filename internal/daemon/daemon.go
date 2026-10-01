@@ -327,6 +327,12 @@ type Daemon struct {
 	// (gt-nxvpe). Cleared when the marker is gone or covered.
 	upgradeRestartPending atomic.Bool
 
+	// landingDrainedCh carries one wake per drained landing pass, so the run
+	// loop restarts at the pass's end instead of at the next heartbeat
+	// (gt-fzwcd). See landingDrained.
+	landingDrainedOnce sync.Once
+	landingDrainedCh   chan struct{}
+
 	// landingBeads maps rig -> the bead its landing pass is working on, for
 	// the restart's wait line.
 	landingBeads sync.Map
@@ -751,7 +757,7 @@ func (d *Daemon) Run() (err error) {
 			return stores
 		}
 	}
-	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
+	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.config.SlingEngine, 0, d.beadsStores, storeOpener, isRigParked)
 	d.convoyManager.prefixes = d.prefixRegistry()
 	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlertsErr)
 	if err := d.convoyManager.Start(); err != nil {
@@ -960,6 +966,10 @@ func (d *Daemon) Run() (err error) {
 		return err
 	}
 
+	// The landing workers wake the loop here when a drained pass ends, so a
+	// pending upgrade restart fires at that moment (gt-fzwcd).
+	landingDrainedChan := d.landingDrained()
+
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -1069,6 +1079,14 @@ func (d *Daemon) Run() (err error) {
 			// work, per rig, on its own goroutine (gt-4k3fj.6).
 			if !d.isShutdownInProgress() {
 				d.triggerPatrolScan()
+			}
+
+		case <-landingDrainedChan:
+			// A drained landing pass ended while an upgrade restart was
+			// pending: that is the idle moment it waited for, so check now
+			// rather than at the next heartbeat, up to 3 min away (gt-fzwcd).
+			if err := d.restartOnDrainedLanding(state); err != nil {
+				return err
 			}
 
 		case <-timer.C:

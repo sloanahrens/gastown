@@ -763,6 +763,127 @@ func TestSlingSeatSpawnReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
 	}
 }
 
+// The daemon dispatches concurrently inside one process: the convoy feeder and
+// the convoy continuation feed both run in it, and each feeds one bead at a
+// time. A claim that lived in one process-wide store would not survive that —
+// the second spawn's claim would overwrite the first's, and whichever dispatch
+// returned first would remove the survivor's file, leaving a seat reserved for
+// a polecat that is still spawning unreserved (gt-t8q5).
+func TestSeatClaimsOfConcurrentSpawnsDoNotClobberEachOther(t *testing.T) {
+	t.Parallel()
+	fsys := newFakeSeatFS()
+	dir := poolSeatClaimDir("/town")
+
+	// Two dispatches in flight in one process, each with the store its own
+	// spawn created.
+	first, second := newPoolSeatClaimStore(), newPoolSeatClaimStore()
+	if first == second {
+		t.Fatal("two spawns must not share a claim store")
+	}
+	claimIn := func(store *poolSeatClaimStore, pid int, beadID string) string {
+		ledger := &poolSeatLedger{
+			townRoot: "/town",
+			fs:       fsys,
+			store:    store,
+			alive:    func(int) bool { return true },
+			pid:      pid,
+			now:      func() time.Time { return poolTestNow },
+		}
+		claim, err := ledger.write(claimAgent, beadID)
+		if err != nil {
+			t.Fatalf("writing the claim for %s: %v", beadID, err)
+		}
+		store.hold(fsys, dir, claim.ID)
+		return claim.ID
+	}
+	firstID := claimIn(first, 4001, "gt-a")
+	secondID := claimIn(second, 4002, "gt-b")
+	if files := fsys.claimFiles(); len(files) != 2 {
+		t.Fatalf("setup: both spawns must have a claim in hand, got %v", files)
+	}
+
+	// The first dispatch reaches its session start first and drops its claim.
+	first.release()
+	if files := fsys.claimFiles(); len(files) != 1 || !strings.Contains(files[0], secondID) {
+		t.Fatalf("releasing one spawn's claim left %v, want the other spawn's seat (%s) still reserved", files, secondID)
+	}
+	if firstID == secondID {
+		t.Fatalf("setup: the two claims must be distinct, both are %s", firstID)
+	}
+
+	// It is idempotent, and the second dispatch's own release is what frees the
+	// second seat.
+	first.release()
+	if files := fsys.claimFiles(); len(files) != 1 {
+		t.Fatalf("a second release of the same claim changed the claim set: %v", files)
+	}
+	second.release()
+	if files := fsys.claimFiles(); len(files) != 0 {
+		t.Fatalf("both dispatches finished with a seat still claimed: %v", files)
+	}
+}
+
+// TestEachSpawnGetsItsOwnSeatClaimStore is the wiring half of the same
+// invariant: realSlingSeatSpawn is called once per spawn, and the store it
+// builds is what that spawn's pool decision claims in and its release drops
+// from.
+func TestEachSpawnGetsItsOwnSeatClaimStore(t *testing.T) {
+	t.Parallel()
+	a, b := realSlingSeatSpawn(), realSlingSeatSpawn()
+	if a.seatClaims == nil || b.seatClaims == nil {
+		t.Fatal("a spawn must carry the store its seat claim lives in")
+	}
+	if a.seatClaims == b.seatClaims {
+		t.Fatal("two spawns share one seat claim store: one dispatch's release would drop the other's seat")
+	}
+	if a.seatClaims.ownID() != "" || b.seatClaims.ownID() != "" {
+		t.Errorf("a spawn starts holding no claim: %q, %q", a.seatClaims.ownID(), b.seatClaims.ownID())
+	}
+}
+
+// The claim a spawn makes travels on the spawn record, because that is what
+// both ends of the claim's life hold: StartSession, once the tmux session
+// exists and is the record of the seat, and the rollback, when no session ever
+// will. A spawn that reached the pool decision and came back without its store
+// would hold a seat nothing could release.
+func TestSpawnHandsItsSeatClaimToTheSpawnRecord(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(cappedPool(3))
+	seatFS := newFakeSeatFS()
+	w.fs = seatFS
+	router := w.process()
+	s := slingSeatSpawn{
+		backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+		resolvePool:  func(_, requested string) (string, string, error) { return router.route(requested, true) },
+		releaseSeat:  router.seats.store.release,
+		prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+		},
+		seatClaims: router.seats.store,
+	}
+
+	info, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-a"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if info.seatClaim != router.seats.store {
+		t.Fatalf("the spawn record carries %p, want the store its claim was made in (%p)", info.seatClaim, router.seats.store)
+	}
+	if files := seatFS.claimFiles(); len(files) != 1 {
+		t.Fatalf("setup: the successful spawn must hold one claim, got %v", files)
+	}
+	info.releaseSeatClaim()
+	if files := seatFS.claimFiles(); len(files) != 0 {
+		t.Errorf("releasing through the spawn record left %v, want the seat free", files)
+	}
+	// Idempotent: StartSession and the rollback can both run, and run's own
+	// boundary after them.
+	info.releaseSeatClaim()
+	if own := router.seats.store.ownID(); own != "" {
+		t.Errorf("the store still thinks it holds a claim: %q", own)
+	}
+}
+
 // A dry run prints the refusal a live sling would raise — that is the route it
 // would take — and still claims nothing.
 func TestPeekPolecatPoolAgentReportsTheOverflowRefusal(t *testing.T) {

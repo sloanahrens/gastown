@@ -39,7 +39,7 @@ func TestIntegrationListOriginBranchesReadsTheRigOrigin(t *testing.T) {
 	wireGit(t, clone, "commit", "--allow-empty", "-m", "work")
 	wireGit(t, clone, "push", "origin", branch)
 
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, nil, 10*time.Minute, nil, nil, nil)
 	got, err := m.listOriginBranches(filepath.Join(townRoot, "gt"))
 	if err != nil {
 		t.Fatalf("listOriginBranches: %v", err)

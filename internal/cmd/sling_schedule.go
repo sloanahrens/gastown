@@ -224,11 +224,11 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 
 	// Auto-convoy (unless --no-convoy)
 	if !opts.NoConvoy {
-		existingConvoy := d.trackedByConvoy(beadID)
+		existingConvoy := d.trackedByConvoy(townRoot, beadID)
 		if existingConvoy == "" {
 			// Persist the requested agent and formula so a convoy re-feed
 			// keeps them (gt-yg24, gt-4lor).
-			convoyID, err := d.createConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
+			convoyID, err := d.createConvoy(townRoot, beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
 			if err != nil {
 				fmt.Fprintf(d.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {

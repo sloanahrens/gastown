@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -238,15 +239,21 @@ type ConvoyManager struct {
 	findStrandedFn func(ctx context.Context) ([]strandedConvoyInfo, error)
 	checkConvoyFn  convoy.Checker
 
-	// gtPath is the gt binary the feeder runs for gt sling.
-	gtPath string
+	// slingDeps is the dispatch engine's collaborators, built by the command
+	// that started the daemon and handed over at construction. The feeder
+	// dispatches through them in process: the daemon cannot import
+	// internal/cmd, and exec'ing `gt sling` put an untyped process boundary —
+	// and the daemon's own cwd and environment — between the feeder and the
+	// dispatch it was making.
+	slingDeps *sling.Deps
+
+	// slingFn replaces the in-process dispatch in tests; nil runs the real one
+	// over slingDeps. The daemon's other subprocess seams (findStrandedFn,
+	// checkConvoyFn) work the same way.
+	slingFn func(convoyID string, opts sling.Options) (*sling.Result, error)
 
 	// clock times Pause's wait for in-flight ticks; nil is the real clock.
 	clock clockwork.Clock
-
-	// execCmd runs the manager's gt sling subprocess; nil runs it for real.
-	// Tests set it to answer it in process.
-	execCmd cmdRunFunc
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
 	started atomic.Bool
@@ -320,8 +327,10 @@ func newEventJournal(townRoot, name string, store beadsdk.Storage) (eventJournal
 // store a previous attempt missed. It must be non-nil whenever stores may be
 // short, or the store that is missing is never retried (gt-i36h).
 // isRigParked reports whether a rig should be skipped during polling (nil = never parked).
-// gtPath is the resolved path to the gt binary for subprocess calls.
-func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), gtPath string, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
+// slingDeps is the dispatch engine's collaborators, for the feeder's in-process
+// dispatch (nil refuses to feed, which is what a daemon with no engine wired
+// should do rather than spawn nothing quietly).
+func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), slingDeps *sling.Deps, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	if scanInterval <= 0 {
 		scanInterval = defaultStrandedScanInterval
 	}
@@ -338,7 +347,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		stores:       copyStores(stores),
 		openStores:   openStores,
 		isRigParked:  isRigParked,
-		gtPath:       gtPath,
+		slingDeps:    slingDeps,
 	}
 }
 
@@ -906,7 +915,7 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
-		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.checkConvoy, m.isRigParked, resolver)
+		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.slingSlinger(), m.checkConvoy, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
 	}
 	return true
@@ -1205,45 +1214,50 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		m.logger("Convoy %s: feeding %s to %s (%s)", c.ID, issueID, rig, agentDesc)
 
-		slingArgs := []string{"sling", issueID, rig, "--no-boot", "--actor=daemon/convoy:" + c.ID}
+		opts := sling.Options{
+			BeadID:        issueID,
+			RigName:       rig,
+			NoBoot:        true,
+			Actor:         "daemon/convoy:" + c.ID,
+			TownRoot:      m.townRoot,
+			CallerContext: "daemon/convoy:" + c.ID,
+		}
 		if c.BaseBranch != "" {
-			slingArgs = append(slingArgs, "--base-branch="+c.BaseBranch)
+			opts.BaseBranch = c.BaseBranch
 		}
 		if agent != "" {
-			slingArgs = append(slingArgs, "--agent="+agent)
+			opts.Agent = agent
 		}
-		// Re-dispatch with the formula the bead was slung with, never gt
-		// sling's own default: a formula bond that fails and rolls back
-		// leaves the convoy open, and re-feeding it without --formula ran
-		// the bead under mol-polecat-work instead of the formula the
-		// original sling asked for (gt-4lor).
+		// Re-dispatch with the formula the bead was slung with, never the
+		// engine's default: a formula bond that fails and rolls back leaves the
+		// convoy open, and re-feeding it with no formula ran the bead under
+		// mol-polecat-work instead of the formula the original sling asked for
+		// (gt-4lor).
 		if formula := strings.TrimSpace(c.Formula); formula != "" {
-			slingArgs = append(slingArgs, "--formula="+formula)
+			opts.FormulaName = formula
 			m.logger("Convoy %s: feeding %s with formula %q recorded on convoy at sling time", c.ID, issueID, formula)
 		}
-		_, stderrBytes, runErr := m.runGt(bdMutationRoutingEnv(m.townRoot), slingArgs...)
-		stderr := string(stderrBytes)
-		// Timing lines ride on stderr in both outcomes (gt-llg8): a failed sling
-		// is the one most worth attributing.
-		for _, l := range slingTimingLines(stderr) {
-			m.logger("Convoy %s: sling %s: %s", c.ID, issueID, l)
-		}
+		_, runErr := m.slingInProcess(c.ID, opts)
 		if runErr != nil {
 			// A refusal is not a failure (gt-xidg, A3): the rig's merge queue
-			// is over its configured ceiling, so the sling declined to add
+			// is over its configured ceiling, so the dispatch declined to add
 			// more work to it. The bead keeps the readiness the convoy scan
 			// gave it and nothing here touches its status, so the next tick
 			// offers it again — once the queue drains, the same bead feeds.
 			// Logging it as a deferral keeps "the town is at capacity"
-			// distinguishable from "the sling broke" in daemon.log.
+			// distinguishable from "the dispatch broke" in daemon.log.
 			// A surviving-work refusal (the dead holder's work is on a
 			// branch, or cannot be verified; gt-vm5g4) is deferred the same
 			// way: it waits for an operator, it is not a failure.
-			if reason, ok := slingDeferralReason(stderr); ok {
+			//
+			// The refusal text is the engine's error: an in-process dispatch
+			// returns the refusal it made rather than printing it to a stderr
+			// the feeder has to parse.
+			if reason, ok := slingDeferralReason(runErr.Error()); ok {
 				m.logger("Convoy %s: deferring %s: %s", c.ID, issueID, reason)
 				continue
 			}
-			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(stderr))
+			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(runErr.Error()))
 			continue
 		}
 		return // Successfully dispatched one issue
@@ -1708,14 +1722,47 @@ func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	}
 }
 
-// runGt runs gt with args in the town root, in its own process group under
-// the manager's context, through execCmd.
-func (m *ConvoyManager) runGt(env []string, args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init, args built internally
-	cmd.Dir = m.townRoot
-	cmd.Env = daemonGTEnv(env)
-	util.SetProcessGroup(cmd)
-	return runWith(m.execCmd, cmd)
+// slingSlinger is the convoy continuation feed's dispatch: the same in-process
+// engine the feeder uses, adapted to the seam internal/convoy calls. The town
+// root is the one the convoy was read from, not the daemon's cwd.
+func (m *ConvoyManager) slingSlinger() convoy.Slinger {
+	return func(ctx context.Context, townRoot string, opts sling.Options) error {
+		if m.slingDeps == nil {
+			return fmt.Errorf("no dispatch engine wired into the daemon")
+		}
+		opts.TownRoot = townRoot
+		_, err := sling.Run(ctx, m.slingDeps, opts)
+		return err
+	}
+}
+
+// slingInProcess dispatches one bead through the in-process engine, timing the
+// spawn's stages into a buffer the feeder logs against the convoy it was
+// feeding (gt-llg8). The exec boundary this replaces captured the same lines
+// from the child's stderr.
+//
+// The engine's own progress output goes to Deps.Out, discarded here — the
+// treatment the feeder gave the child's stdout. The spawn and rollback
+// mechanisms the engine calls are still internal/cmd code that prints with
+// fmt.Printf, so THOSE lines reach this process's stdout instead of Deps.Out;
+// moving them out of cmd is what routes them (gt-638go.7 follow-up).
+func (m *ConvoyManager) slingInProcess(convoyID string, opts sling.Options) (*sling.Result, error) {
+	if m.slingFn != nil {
+		return m.slingFn(convoyID, opts)
+	}
+	if m.slingDeps == nil {
+		return nil, fmt.Errorf("no dispatch engine wired into the daemon")
+	}
+	deps := *m.slingDeps // a copy: the timer is per dispatch
+	deps.Out = io.Discard
+	var steps strings.Builder
+	opts.Steps = sling.NewTimer(&steps).Step
+	opts.CallerContext = opts.Actor
+	res, err := sling.Run(m.ctx, &deps, opts)
+	for _, l := range slingTimingLines(steps.String()) {
+		m.logger("Convoy %s: sling %s: %s", convoyID, opts.BeadID, l)
+	}
+	return res, err
 }
 
 // runStartupSweep runs one convoy check pass after a brief delay to catch

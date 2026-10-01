@@ -42,7 +42,7 @@ func newRollbackFixture(t *testing.T, bead *beads.Issue, rel *fakeWorkReleaser) 
 		getBeadInfo:      func(id string) (*beadInfo, error) { return stores.beadInfo(townRoot, id) },
 		collectMolecules: collectExistingMolecules,
 		burnMolecules:    stores.burnMolecules,
-		releaseSeat:      func() { f.seats++ },
+		releaseSeat:      func(*SpawnedPolecatInfo) { f.seats++ },
 		newReleaser:      func(string, string) polecatWorkReleaser { return f.rel },
 		survivingWork:    func(string, string) (string, error) { return "", nil },
 		openSandbox:      func(string, string) (spawnedPolecatSandbox, error) { return f.sb, nil },
@@ -178,13 +178,15 @@ func TestSlingRollbackClosesOnlyAGivenConvoy(t *testing.T) {
 	}
 }
 
-// TestSlingRollbackWithoutASpawnReleasesTheSeatOnly: a failure before any
-// polecat was spawned gives back the seat claim and touches no sandbox.
-func TestSlingRollbackWithoutASpawnReleasesTheSeatOnly(t *testing.T) {
+// TestSlingRollbackWithoutASpawnTouchesNothing: a failure before any polecat
+// was spawned has no sandbox and no seat claim to undo. A seat claim belongs to
+// a spawn — the store travels on the spawn record — so there is nothing for a
+// spawnless rollback to give back (gt-t8q5).
+func TestSlingRollbackWithoutASpawnTouchesNothing(t *testing.T) {
 	t.Parallel()
 	f := newRollbackFixture(t, nil, nil)
 	f.r.rollback(nil, "", "", "")
-	if f.seats != 1 || len(f.sb.removed)+len(f.sb.branches)+len(f.rel.resets) != 0 {
+	if f.seats != 0 || len(f.sb.removed)+len(f.sb.branches)+len(f.rel.resets) != 0 {
 		t.Fatalf("seats %d, removed %v, branches %v, resets %v", f.seats, f.sb.removed, f.sb.branches, f.rel.resets)
 	}
 }
