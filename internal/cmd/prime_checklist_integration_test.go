@@ -49,6 +49,7 @@ description = "EDITED BODY"
 // and the Ralph prompt. The cook of the edited file is the control: bd does
 // see the edit, prime just never reads it for a poured molecule.
 func TestIntegrationPrimeChecklist_FormulaEditedAfterPour(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	dir, b := setupPatrolTestDB(t)
 	path := filepath.Join(dir, ".beads", "formulas", "mol-itest.formula.toml")
