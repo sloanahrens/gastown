@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/crew"
@@ -29,12 +30,13 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Kill any running session for the old name.
-	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+	// Kill any running session for the old name, through the supervisor (an
+	// operator stop: logged, not refused by an e-stop; gt-4k3fj.4.1).
 	t := tmux.NewTmux()
 	oldSessionID := crewSessionName(townRegistry(), r.Name, oldName)
 	if hasSession, _ := t.HasSession(oldSessionID); hasSession {
-		if err := t.KillSessionWithProcesses(oldSessionID); err != nil {
+		sup := operatorSupervisor(filepath.Dir(r.Path))
+		if err := sup.StopSession(oldSessionID, "crew rename to "+newName, operatorActor("gt crew rename")); err != nil {
 			return fmt.Errorf("killing old session: %w", err)
 		}
 		fmt.Printf("Killed session %s\n", oldSessionID)

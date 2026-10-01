@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -267,77 +268,92 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("could not verify agent in %s is running (not restarting): %w", sessionID, aliveErr)
 		}
 		if !alive {
-			// Runtime has exited, restart it using respawn-pane
-			fmt.Printf("Runtime exited, restarting...\n")
+			// Reviving an exited runtime is a restart: it goes through the
+			// supervisor, which an e-stop or a parked seat refuses
+			// (gt-4k3fj.4.1). The stale-pane kill below is part of it.
+			var retry bool
+			seat := supervisor.SeatIn(townRegistry(), r.Name, string(session.RoleCrew), name)
+			err := operatorSupervisor(townRoot).Respawn(seat, "crew at: runtime exited", operatorActor("gt crew at"), func() error {
+				// Runtime has exited, restart it using respawn-pane
+				fmt.Printf("Runtime exited, restarting...\n")
 
-			// Refresh liveness env vars before restart so the next IsAgentAliveChecked
-			// check can detect non-Claude runtimes.
-			restartEnv := config.AgentEnv(config.AgentEnvConfig{
-				Role:             "crew",
-				Rig:              r.Name,
-				AgentName:        name,
-				TownRoot:         townRoot,
-				RuntimeConfigDir: claudeConfigDir,
-				Agent:            crewAgentOverride,
-				SessionName:      sessionID,
-			})
-			restartEnv = session.MergeRuntimeLivenessEnv(restartEnv, runtimeConfig)
-			for k, v := range restartEnv {
-				_ = t.SetEnvironment(sessionID, k, v)
-			}
-
-			// Get pane ID for respawn
-			paneID, err := t.GetPaneID(sessionID)
-			if err != nil {
-				return fmt.Errorf("getting pane ID: %w", err)
-			}
-
-			// Build startup beacon for predecessor discovery via /resume
-			// Use FormatStartupBeacon instead of bare "gt prime" which confuses agents
-			address := session.BeaconRecipient("crew", name, r.Name)
-			beacon := session.FormatStartupBeacon(session.BeaconConfig{
-				Recipient: address,
-				Sender:    "human",
-				Topic:     "restart",
-			})
-
-			// Use respawn-pane to replace shell with runtime directly
-			// Export GT_ROLE and BD_ACTOR since tmux SetEnvironment only affects new panes
-			startupCmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
-				Role:        "crew",
-				Rig:         r.Name,
-				AgentName:   name,
-				TownRoot:    townRoot,
-				SessionName: sessionID,
-			}, r.Path, beacon, crewAgentOverride)
-			if err != nil {
-				return fmt.Errorf("building startup command: %w", err)
-			}
-			// Prepend config dir env if available
-			if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && claudeConfigDir != "" {
-				startupCmd = config.PrependEnv(startupCmd, map[string]string{runtimeConfig.Session.ConfigDirEnv: claudeConfigDir})
-			}
-			// Kill all processes in the pane before respawning to prevent orphan leaks
-			// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-			if err := t.KillPaneProcesses(paneID); err != nil {
-				// Non-fatal but log the warning
-				style.PrintWarning("could not kill pane processes: %v", err)
-			}
-			if err := t.RespawnPane(paneID, startupCmd); err != nil {
-				// If pane is stale (session exists but pane doesn't), recreate the session
-				if strings.Contains(err.Error(), "can't find pane") {
-					if crewAtRetried {
-						return fmt.Errorf("stale session persists after cleanup: %w", err)
-					}
-					fmt.Printf("Stale session detected, recreating...\n")
-					if killErr := t.KillSession(sessionID); killErr != nil && killErr != tmux.ErrSessionNotFound {
-						return fmt.Errorf("failed to kill stale session: %w", killErr)
-					}
-					crewAtRetried = true
-					defer func() { crewAtRetried = false }()
-					return runCrewAt(cmd, args) // Retry with fresh session
+				// Refresh liveness env vars before restart so the next IsAgentAliveChecked
+				// check can detect non-Claude runtimes.
+				restartEnv := config.AgentEnv(config.AgentEnvConfig{
+					Role:             "crew",
+					Rig:              r.Name,
+					AgentName:        name,
+					TownRoot:         townRoot,
+					RuntimeConfigDir: claudeConfigDir,
+					Agent:            crewAgentOverride,
+					SessionName:      sessionID,
+				})
+				restartEnv = session.MergeRuntimeLivenessEnv(restartEnv, runtimeConfig)
+				for k, v := range restartEnv {
+					_ = t.SetEnvironment(sessionID, k, v)
 				}
-				return fmt.Errorf("restarting runtime: %w", err)
+
+				// Get pane ID for respawn
+				paneID, err := t.GetPaneID(sessionID)
+				if err != nil {
+					return fmt.Errorf("getting pane ID: %w", err)
+				}
+
+				// Build startup beacon for predecessor discovery via /resume
+				// Use FormatStartupBeacon instead of bare "gt prime" which confuses agents
+				address := session.BeaconRecipient("crew", name, r.Name)
+				beacon := session.FormatStartupBeacon(session.BeaconConfig{
+					Recipient: address,
+					Sender:    "human",
+					Topic:     "restart",
+				})
+
+				// Use respawn-pane to replace shell with runtime directly
+				// Export GT_ROLE and BD_ACTOR since tmux SetEnvironment only affects new panes
+				startupCmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
+					Role:        "crew",
+					Rig:         r.Name,
+					AgentName:   name,
+					TownRoot:    townRoot,
+					SessionName: sessionID,
+				}, r.Path, beacon, crewAgentOverride)
+				if err != nil {
+					return fmt.Errorf("building startup command: %w", err)
+				}
+				// Prepend config dir env if available
+				if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && claudeConfigDir != "" {
+					startupCmd = config.PrependEnv(startupCmd, map[string]string{runtimeConfig.Session.ConfigDirEnv: claudeConfigDir})
+				}
+				// Kill all processes in the pane before respawning to prevent orphan leaks
+				// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
+				if err := t.KillPaneProcesses(paneID); err != nil {
+					// Non-fatal but log the warning
+					style.PrintWarning("could not kill pane processes: %v", err)
+				}
+				if err := t.RespawnPane(paneID, startupCmd); err != nil {
+					// If pane is stale (session exists but pane doesn't), recreate the session
+					if strings.Contains(err.Error(), "can't find pane") {
+						if crewAtRetried {
+							return fmt.Errorf("stale session persists after cleanup: %w", err)
+						}
+						fmt.Printf("Stale session detected, recreating...\n")
+						if killErr := t.KillSession(sessionID); killErr != nil && killErr != tmux.ErrSessionNotFound {
+							return fmt.Errorf("failed to kill stale session: %w", killErr)
+						}
+						retry = true
+						return nil
+					}
+					return fmt.Errorf("restarting runtime: %w", err)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			if retry {
+				crewAtRetried = true
+				defer func() { crewAtRetried = false }()
+				return runCrewAt(cmd, args) // Retry with fresh session
 			}
 		}
 	}

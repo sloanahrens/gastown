@@ -213,6 +213,29 @@ func TestStopNotFound(t *testing.T) {
 	}
 }
 
+// gt down routes Stop's kill through the supervisor (gt-4k3fj.4.1): with a
+// stop hook set, Stop kills only through it.
+func TestStopKillsThroughTheStopHook(t *testing.T) {
+	t.Parallel()
+	tm := newFakeSessionTmux()
+	m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Polecats: []string{"Toast"}}, gits: newWorld().opener()}
+	sess := m.SessionName("Toast")
+	if err := tm.NewSession(sess, ""); err != nil {
+		t.Fatal(err)
+	}
+	var routed []string
+	m.SetStopKill(func(id string) error { routed = append(routed, id); return nil })
+	if err := m.Stop("Toast", true); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+	if len(routed) != 1 || routed[0] != sess {
+		t.Fatalf("hook kills = %v, want [%s]", routed, sess)
+	}
+	if ok, _ := tm.HasSession(sess); !ok {
+		t.Fatal("Stop killed through tmux as well as the hook")
+	}
+}
+
 func TestCaptureNotFound(t *testing.T) {
 	t.Parallel()
 

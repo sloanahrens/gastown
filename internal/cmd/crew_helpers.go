@@ -55,6 +55,9 @@ func getCrewManager(rigName string) (*crew.Manager, *rig.Rig, error) {
 
 	crewGit := git.NewGit(r.Path)
 	crewMgr := crew.NewManager(r, crewGit, townRegistry())
+	// Restarts and replacements of a running crew session go through the
+	// supervisor, which an e-stop or a parked seat refuses (gt-4k3fj.4.1).
+	superviseCrewRespawns(crewMgr, operatorSupervisor(filepath.Dir(r.Path)), townRegistry(), r.Name, operatorActor("gt crew"))
 
 	return crewMgr, r, nil
 }

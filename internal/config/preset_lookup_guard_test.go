@@ -22,7 +22,7 @@ var allowedPresetLookups = map[string]bool{
 	"cmd/config.go#configAgentGet":             true,
 	"runtime/runtime.go#EnsureSettingsForRole": true,
 	"crew/manager.go#buildResumeArgs":          true,
-	"crew/manager.go#Start":                    true,
+	"crew/manager.go#launchSession":            true,
 	// ensureAgentReady wants the readiness settings of a registry preset; an
 	// agent defined only in settings/config.json deliberately falls back to a
 	// fixed delay.

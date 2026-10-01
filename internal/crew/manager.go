@@ -181,6 +181,12 @@ type Manager struct {
 	// prefixes maps the rig to its session prefix; nil gives
 	// session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
+
+	// Respawn, when set, runs the replacement of a crew member's existing
+	// session (a restart, or a start over a session whose agent exited) so
+	// the supervisor can refuse and log it (gt-4k3fj.4.1). nil runs it
+	// directly.
+	Respawn func(name, reason string, run func() error) error
 }
 
 // NewManager creates a new crew manager. prefixes names its sessions.
@@ -871,32 +877,63 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
-	if running {
-		if opts.KillExisting {
-			// Restart/resume mode - kill existing session.
-			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing existing session: %w", err)
-			}
-		} else {
-			// Normal start - session exists, check if agent is actually running.
-			// A failed liveness query is UNKNOWN: refuse instead of killing a
-			// session that may be working (gt-fcxe9.1).
-			alive, aliveErr := t.IsAgentAliveChecked(sessionID)
-			if aliveErr != nil {
-				return fmt.Errorf("checking agent liveness in %s (not killing): %w", sessionID, aliveErr)
-			}
-			if alive {
-				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
-			}
-			// Zombie session - kill and recreate.
-			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing zombie session: %w", err)
-			}
-		}
+	replace, err := replaceReason(running, opts, func() (bool, error) { return t.IsAgentAliveChecked(sessionID) })
+	if err != nil {
+		return fmt.Errorf("%s: %w", sessionID, err)
 	}
+	launch := func() error {
+		return m.launchSession(t, name, sessionID, worker, claudeCmd, envVars, townRoot, opts)
+	}
+	if replace == "" {
+		return launch()
+	}
+	return m.respawn(name, replace, func() error {
+		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+		if err := t.KillSessionWithProcesses(sessionID); err != nil {
+			return fmt.Errorf("killing existing session: %w", err)
+		}
+		return launch()
+	})
+}
 
+// replaceReason decides whether a start replaces an existing session, and
+// why: a restart (KillExisting) replaces whatever runs, a plain start only
+// a session whose agent has exited. "" means there is nothing to replace. A
+// failed liveness query is UNKNOWN: refuse instead of killing a session that
+// may be working (gt-fcxe9.1).
+func replaceReason(running bool, opts StartOptions, alive func() (bool, error)) (string, error) {
+	if !running {
+		return "", nil
+	}
+	topic := opts.Topic
+	if topic == "" {
+		topic = "start"
+	}
+	if opts.KillExisting {
+		return "crew " + topic + ": replace the running session", nil
+	}
+	ok, err := alive()
+	if err != nil {
+		return "", fmt.Errorf("checking agent liveness (not killing): %w", err)
+	}
+	if ok {
+		return "", ErrSessionRunning
+	}
+	return "crew " + topic + ": replace a session whose agent exited", nil
+}
+
+// respawn runs a replacement of the crew member's session through the
+// Respawn hook, so the supervisor can refuse it (an e-stop, a park) and log
+// it (gt-4k3fj.4.1); without a hook it runs directly.
+func (m *Manager) respawn(name, reason string, run func() error) error {
+	if m.Respawn == nil {
+		return run()
+	}
+	return m.Respawn(name, reason, run)
+}
+
+// launchSession creates the crew member's session and starts its agent.
+func (m *Manager) launchSession(t *tmux.Tmux, name, sessionID string, worker *CrewWorker, claudeCmd string, envVars map[string]string, townRoot string, opts StartOptions) error {
 	// For interactive/refresh mode, remove --dangerously-skip-permissions
 	if opts.Interactive {
 		claudeCmd = strings.Replace(claudeCmd, " --dangerously-skip-permissions", "", 1)
@@ -961,41 +998,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 			// Non-fatal — nudges may be delayed but the agent still works.
 			style.PrintWarning("could not start nudge poller for %s: %v", name, pollerErr)
 		}
-	}
-
-	return nil
-}
-
-// Stop terminates a crew member's tmux session.
-func (m *Manager) Stop(name string) error {
-	if err := validateCrewName(name); err != nil {
-		return err
-	}
-
-	t := tmux.NewTmux()
-	sessionID := m.SessionName(name)
-
-	// Check if session exists
-	running, err := t.HasSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
-	}
-	if !running {
-		return ErrSessionNotFound
-	}
-
-	// Stop the background nudge poller before killing the session.
-	// Non-fatal — the poller will exit on its own when the session dies.
-	townRoot := filepath.Dir(m.rig.Path)
-	if pollerErr := nudge.StopPoller(townRoot, sessionID); pollerErr != nil {
-		style.PrintWarning("could not stop nudge poller for %s: %v", name, pollerErr)
-	}
-
-	// Kill the session.
-	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
-	if err := t.KillSessionWithProcesses(sessionID); err != nil {
-		return fmt.Errorf("killing session: %w", err)
 	}
 
 	return nil

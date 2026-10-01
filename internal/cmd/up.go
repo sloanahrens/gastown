@@ -586,7 +586,7 @@ func discoverRigs(townRoot string) []string {
 // Returns list of started crew names and map of errors.
 func startCrewFromSettings(townRoot, rigName string) ([]string, map[string]error) {
 	started := []string{}
-	errors := map[string]error{}
+	failed := map[string]error{}
 
 	rigPath := filepath.Join(townRoot, rigName)
 
@@ -595,27 +595,27 @@ func startCrewFromSettings(townRoot, rigName string) ([]string, map[string]error
 	settings, err := config.LoadRigSettings(settingsPath)
 	if err != nil {
 		// No settings file or error - skip crew startup
-		return started, errors
+		return started, failed
 	}
 
 	if settings.Crew == nil || settings.Crew.Startup == "" {
 		// No crew startup preference
-		return started, errors
+		return started, failed
 	}
 
 	// Get available crew members using helper
 	crewMgr, _, err := getCrewManager(rigName)
 	if err != nil {
-		return started, errors
+		return started, failed
 	}
 
 	crewWorkers, err := crewMgr.List()
 	if err != nil {
-		return started, errors
+		return started, failed
 	}
 
 	if len(crewWorkers) == 0 {
-		return started, errors
+		return started, failed
 	}
 
 	// Extract crew names
@@ -630,17 +630,17 @@ func startCrewFromSettings(townRoot, rigName string) ([]string, map[string]error
 	// Start each crew member using Manager
 	for _, crewName := range toStart {
 		if err := crewMgr.Start(crewName, crew.StartOptions{}); err != nil {
-			if err == crew.ErrSessionRunning {
+			if errors.Is(err, crew.ErrSessionRunning) {
 				started = append(started, crewName)
 			} else {
-				errors[crewName] = err
+				failed[crewName] = err
 			}
 		} else {
 			started = append(started, crewName)
 		}
 	}
 
-	return started, errors
+	return started, failed
 }
 
 // parseCrewStartupPreference parses the natural language crew startup preference.
@@ -736,7 +736,7 @@ func polecatHasPinnedWork(polecatPath, agentID string) bool {
 // check and the session start passed in.
 func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) bool, start func(polecatName string) error) ([]string, map[string]error) {
 	started := []string{}
-	errors := map[string]error{}
+	failed := map[string]error{}
 
 	rigPath := filepath.Join(townRoot, rigName)
 	polecatsDir := filepath.Join(rigPath, "polecats")
@@ -745,7 +745,7 @@ func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPa
 	entries, err := os.ReadDir(polecatsDir)
 	if err != nil {
 		// No polecats directory
-		return started, errors
+		return started, failed
 	}
 
 	for _, entry := range entries {
@@ -777,17 +777,17 @@ func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPa
 
 		// This polecat has work - start it using SessionManager
 		if err := start(polecatName); err != nil {
-			if err == polecat.ErrSessionRunning {
+			if errors.Is(err, polecat.ErrSessionRunning) {
 				started = append(started, polecatName)
 			} else {
-				errors[polecatName] = err
+				failed[polecatName] = err
 			}
 		} else {
 			started = append(started, polecatName)
 		}
 	}
 
-	return started, errors
+	return started, failed
 }
 
 // doltReadyTimeout is how long gt up waits for the Dolt SQL server to accept

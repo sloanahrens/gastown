@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,6 +90,30 @@ type SlotInfo struct {
 	AcquiredAt time.Time `json:"acquired_at"`
 }
 
+// readDoltCommitMeter fills the commits-per-day meter into info. A meter
+// that cannot be read leaves it empty: the status line then shows no marker,
+// and gt doctor's dolt-commit-rate check reports the failure.
+func readDoltCommitMeter(info *DoltInfo, townRoot string, measure func(context.Context, string) ([]doltserver.DBCommits, error)) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	counts, err := measure(ctx, townRoot)
+	if err != nil {
+		return
+	}
+	info.CommitsLastDay = counts
+	info.CommitsPerDayWarn = config.LoadOperationalConfig(townRoot).GetDoltConfig().CommitsPerDayWarnV()
+}
+
+// doltCommitMarker is the Services-line marker for databases over the
+// commits-per-day limit, "" when none is.
+func doltCommitMarker(info *DoltInfo) string {
+	over := doltserver.OverCommitBudget(info.CommitsLastDay, info.CommitsPerDayWarn)
+	if len(over) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("⚠ commits/24h %s > %d", doltserver.FormatCommitCounts(over), info.CommitsPerDayWarn)
+}
+
 // ServiceInfo represents a background service status.
 type ServiceInfo struct {
 	Running bool `json:"running"`
@@ -104,6 +129,12 @@ type DoltInfo struct {
 	DataDir       string `json:"data_dir,omitempty"`
 	PortConflict  bool   `json:"port_conflict,omitempty"`  // Port taken by another town's Dolt
 	ConflictOwner string `json:"conflict_owner,omitempty"` // --data-dir of the process holding the port
+	// CommitsLastDay is the commits-per-day meter (gt-8z769.4): each
+	// database's Dolt commits in the last 24h. Not read under --fast.
+	CommitsLastDay []doltserver.DBCommits `json:"commits_last_day,omitempty"`
+	// CommitsPerDayWarn is the per-database limit the meter is held to
+	// (operational.dolt.commits_per_day_warn).
+	CommitsPerDayWarn int `json:"commits_per_day_warn,omitempty"`
 }
 
 // TmuxInfo represents the tmux server status.
@@ -846,6 +877,9 @@ func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 		}
 		status.Dolt = doltInfo
 	}
+	if !fast && (status.Dolt.Remote || status.Dolt.Running) {
+		readDoltCommitMeter(status.Dolt, townRoot, doltserver.CommitsLastDay)
+	}
 
 	// Tmux status
 	socket := tmux.GetDefaultSocket()
@@ -1046,6 +1080,9 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 				parts = append(parts, fmt.Sprintf("dolt %s", style.Bold.Render(fmt.Sprintf("(stopped, :%d ⚠ port used by %s)", status.Dolt.Port, status.Dolt.ConflictOwner))))
 			} else {
 				parts = append(parts, fmt.Sprintf("dolt %s", style.Dim.Render(fmt.Sprintf("(stopped, :%d)", status.Dolt.Port))))
+			}
+			if marker := doltCommitMarker(status.Dolt); marker != "" {
+				parts[len(parts)-1] += " " + style.Bold.Render(marker)
 			}
 		}
 		if status.Tmux != nil {

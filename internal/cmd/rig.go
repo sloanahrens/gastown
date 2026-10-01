@@ -885,11 +885,15 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("refusing to remove rig with running sessions")
 		}
 
-		// --force: kill all rig sessions (WARNING: may lose uncommitted work)
+		// --force: kill all rig sessions (WARNING: may lose uncommitted work),
+		// through the supervisor: an operator stop, logged and not refused by
+		// an e-stop (gt-4k3fj.4.1).
 		fmt.Printf("Killing %d tmux session(s) for rig %s...\n", len(sessions), name)
+		sup := operatorSupervisor(townRoot)
+		actor := operatorActor("gt rig remove")
 		var killErrors []string
 		for _, s := range sessions {
-			if err := t.KillSessionWithProcesses(s); err != nil {
+			if err := sup.StopSession(s, "rig remove --force "+name, actor); err != nil {
 				fmt.Printf("  %s Failed to kill session %s: %v\n", style.Warning.Render("!"), s, err)
 				killErrors = append(killErrors, s)
 			} else {

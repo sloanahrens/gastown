@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -139,6 +140,12 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 	rigs := discoverRigs(townRoot)
 
+	// Every session gt down ends goes through the supervisor's operator
+	// stop: logged with the actor, and not refused by an e-stop, since an
+	// operator shutting the town down is what an e-stop asks for
+	// (gt-4k3fj.4.1).
+	stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
+
 	// Phase 0.5: Stop polecats if --polecats
 	if downPolecats {
 		if downDryRun {
@@ -146,7 +153,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Stopping polecats...")
 		}
-		polecatsStopped := stopAllPolecats(t, townRoot, rigs, downForce, downDryRun)
+		polecatsStopped := stopAllPolecats(t, stop, townRoot, rigs, downForce, downDryRun)
 		if downDryRun {
 			if polecatsStopped > 0 {
 				printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
@@ -165,7 +172,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 	// Phase 0.6: Stop crew member sessions.
 	// Crew sessions consume tokens and must be stopped during any shutdown.
-	crewStopped := stopAllCrew(t, townRoot, rigs, downDryRun)
+	crewStopped := stopAllCrew(t, stop, townRoot, rigs, downDryRun)
 	if downDryRun {
 		if crewStopped > 0 {
 			printDownStatus("Crew", true, fmt.Sprintf("%d would stop", crewStopped))
@@ -184,7 +191,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 			}
 			continue
 		}
-		stopped, err := session.StopTownSession(t, ts, downForce)
+		stopped, err := stop.townSession(ts)
 		if err != nil {
 			printDownStatus(ts.Name, false, err.Error())
 			allOK = false
@@ -428,7 +435,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 // stopAllPolecats stops all polecat sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of polecats stopped (or would be stopped in dry-run).
-func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force bool, dryRun bool) int {
+func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigNames []string, force bool, dryRun bool) int {
 	stopped := 0
 
 	// Load rigs config
@@ -478,6 +485,7 @@ func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force boo
 		}
 
 		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
+		polecatMgr.SetStopKill(stop.kill)
 		infos, err := polecatMgr.ListPolecats()
 		if err != nil {
 			continue
@@ -511,7 +519,7 @@ func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force boo
 // stopAllCrew stops all crew member sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of crew sessions stopped (or would be stopped in dry-run).
-func stopAllCrew(t *tmux.Tmux, townRoot string, rigNames []string, dryRun bool) int {
+func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigNames []string, dryRun bool) int {
 	stopped := 0
 
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -576,7 +584,7 @@ func stopAllCrew(t *tmux.Tmux, townRoot string, rigNames []string, dryRun bool) 
 		wg.Add(1)
 		go func(i int, tgt crewTarget) {
 			defer wg.Done()
-			_, err := stopSession(t, tgt.sessionID)
+			err := stop.session(tgt.sessionID)
 			results[i] = crewResult{rigName: tgt.rigName, name: tgt.name, err: err}
 		}(i, tgt)
 	}
@@ -605,27 +613,64 @@ func printDownStatus(name string, ok bool, detail string) {
 	}
 }
 
-// stopSession gracefully stops a tmux session.
-// Returns (wasRunning, error) - wasRunning is true if session existed and was stopped.
-func stopSession(t *tmux.Tmux, sessionName string) (bool, error) {
-	running, err := t.HasSession(sessionName)
-	if err != nil {
-		return false, err
-	}
-	if !running {
-		return false, nil // Already stopped
+// downTmux is the tmux surface gt down's session stops use.
+type downTmux interface {
+	HasSession(name string) (bool, error)
+	SendKeysRaw(session, keys string) error
+}
+
+// downStop ends sessions for gt down through the supervisor's operator stop.
+type downStop struct {
+	tmux     downTmux
+	sup      *supervisor.Supervisor
+	townRoot string
+	actor    string
+	force    bool // skip the graceful Ctrl-C
+}
+
+// kill ends one session through the supervisor, logged as gt down.
+func (d downStop) kill(sessionName string) error {
+	return d.sup.StopSession(sessionName, "gt down", d.actor)
+}
+
+// session gracefully stops a tmux session: Ctrl-C and a wait unless forced,
+// then the supervisor's stop. A session that is not running is left alone.
+func (d downStop) session(sessionName string) error {
+	running, err := d.tmux.HasSession(sessionName)
+	if err != nil || !running {
+		return err
 	}
 
 	// Try graceful shutdown first (Ctrl-C, best-effort interrupt)
-	if !downForce {
-		_ = t.SendKeysRaw(sessionName, "C-c")
-		if session.WaitForSessionExit(t, sessionName, constants.GracefulShutdownTimeout) {
-			return true, nil // Process exited gracefully
+	if !d.force {
+		_ = d.tmux.SendKeysRaw(sessionName, "C-c")
+		if real, ok := d.tmux.(*tmux.Tmux); ok && session.WaitForSessionExit(real, sessionName, constants.GracefulShutdownTimeout) {
+			return nil // Process exited gracefully
 		}
 	}
 
-	// Kill the session (with explicit process termination to prevent orphans)
-	return true, t.KillSessionWithProcesses(sessionName)
+	// Kill the session (the supervisor's tmux kills its processes too, so
+	// none are orphaned).
+	return d.kill(sessionName)
+}
+
+// townSession stops a town-level session (the Mayor), logging its death to
+// the feed first for crash investigation.
+func (d downStop) townSession(ts session.TownSession) (bool, error) {
+	running, err := d.tmux.HasSession(ts.SessionID)
+	if err != nil || !running {
+		return false, err
+	}
+	reason := "user shutdown"
+	if d.force {
+		reason = "forced shutdown"
+	}
+	_ = events.LogFeedTo(d.townRoot, events.TypeSessionDeath, ts.SessionID,
+		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, "gt down"))
+	if err := d.session(ts.SessionID); err != nil {
+		return false, fmt.Errorf("killing %s session: %w", ts.Name, err)
+	}
+	return true, nil
 }
 
 // acquireShutdownLock prevents concurrent shutdowns.
