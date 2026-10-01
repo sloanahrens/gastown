@@ -99,7 +99,7 @@ func TestPauseDisplayAddressIsCanonical(t *testing.T) {
 
 			// Copy-pasteable: the printed address resolves back to the same
 			// agent and the same marker coordinates.
-			back, err := session.ParseAddress(display)
+			back, err := session.ParseAddressWithRegistry(display, cmdTestRegistry())
 			if err != nil {
 				t.Fatalf("printed address %q does not parse: %v", display, err)
 			}

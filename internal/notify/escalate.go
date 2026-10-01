@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -23,6 +24,9 @@ type EscalationRequest struct {
 	Fingerprint string // explicit alert key; empty derives it (AlertKey)
 	RelatedBead string
 	EscalatedBy string // sender address
+	// Prefixes names the mail recipients' sessions for their notifications;
+	// nil gives every rig session.DefaultPrefix.
+	Prefixes *session.PrefixRegistry
 }
 
 // DeliveryStatus is the outcome of one delivery channel for one firing.
@@ -146,7 +150,7 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	actions := cfg.GetRouteForSeverity(severity)
 	targets := MailTargets(actions)
 
-	router := mail.NewRouter(townRoot)
+	router := mail.NewRouter(townRoot, req.Prefixes)
 	defer router.WaitPendingNotifications()
 	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: severity}}
 	for _, target := range targets {

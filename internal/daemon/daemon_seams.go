@@ -5,6 +5,7 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -48,12 +49,13 @@ func (s daemonSeams) escalateUpgrade(d *Daemon, key, msg string) {
 }
 
 // cleanupLegacySocketsFor removes the legacy tmux sockets a town may still
-// hold, returning how many sessions each cleanup removed.
-func (s daemonSeams) cleanupLegacySocketsFor(townRoot string) (int, int) {
+// hold, returning how many sessions each cleanup removed. reg marks which
+// sessions are Gas Town's.
+func (s daemonSeams) cleanupLegacySocketsFor(reg *session.PrefixRegistry, townRoot string) (int, int) {
 	if s.cleanupLegacySockets != nil {
 		return s.cleanupLegacySockets(townRoot)
 	}
-	return cleanupLegacySockets(townRoot)
+	return cleanupLegacySockets(reg, townRoot)
 }
 
 // mainBranchGatePoolStatus reads the container-gate pool's held/owner picture

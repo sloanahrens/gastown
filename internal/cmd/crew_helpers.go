@@ -54,7 +54,7 @@ func getCrewManager(rigName string) (*crew.Manager, *rig.Rig, error) {
 	}
 
 	crewGit := git.NewGit(r.Path)
-	crewMgr := crew.NewManager(r, crewGit)
+	crewMgr := crew.NewManager(r, crewGit, townRegistry())
 
 	return crewMgr, r, nil
 }

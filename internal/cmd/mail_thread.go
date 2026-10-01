@@ -25,7 +25,7 @@ func runMailThread(cmd *cobra.Command, args []string) error {
 	address := detectSender()
 
 	// Get mailbox and thread messages
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(address)
 	if err != nil {
 		return fmt.Errorf("getting mailbox: %w", err)
@@ -104,7 +104,7 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 	from := detectSender()
 
 	// Get the original message
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(from)
 	if err != nil {
 		return fmt.Errorf("getting mailbox: %w", err)

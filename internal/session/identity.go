@@ -24,8 +24,13 @@ type AgentIdentity struct {
 	Prefix string // beads prefix for rig-level agents (e.g., "gt", "bd", "hop")
 }
 
-// ParseAddress parses a mail-style address into an AgentIdentity.
-func ParseAddress(address string) (*AgentIdentity, error) {
+// ParseAddressWithRegistry parses a mail-style address into an AgentIdentity,
+// reading the rig's prefix from registry. A nil registry is an empty one, so
+// every rig gets DefaultPrefix.
+func ParseAddressWithRegistry(address string, registry *PrefixRegistry) (*AgentIdentity, error) {
+	if registry == nil {
+		registry = NewPrefixRegistry()
+	}
 	address = strings.TrimSpace(address)
 	if address == "" {
 		return nil, fmt.Errorf("empty address")
@@ -45,7 +50,7 @@ func ParseAddress(address string) (*AgentIdentity, error) {
 	}
 
 	rig := parts[0]
-	prefix := PrefixFor(rig)
+	prefix := registry.PrefixForRig(rig)
 	switch len(parts) {
 	case 2:
 		name := parts[1]
@@ -71,8 +76,9 @@ func ParseAddress(address string) (*AgentIdentity, error) {
 	}
 }
 
-// ParseSessionName parses a tmux session name into an AgentIdentity.
-// Uses the default PrefixRegistry to resolve rig-level prefixes to rig names.
+// ParseSessionNameWithRegistry parses a tmux session name into an
+// AgentIdentity, resolving rig-level prefixes to rig names through registry.
+// If registry is nil, an empty registry is used (prefix will not resolve to rig name).
 //
 // Session name formats:
 //   - hq-mayor → Role: mayor (town-level, one per machine)
@@ -81,14 +87,8 @@ func ParseAddress(address string) (*AgentIdentity, error) {
 //   - <prefix>-<name> → Role: polecat (e.g., gt-furiosa for gastown)
 //
 // The prefix is the rig's beads prefix (e.g., "gt" for gastown, "dolt" for beads).
-// The rig name is resolved from the default PrefixRegistry. If the prefix is
-// not in the registry, the prefix itself is used as the rig name.
-func ParseSessionName(session string) (*AgentIdentity, error) {
-	return ParseSessionNameWithRegistry(session, DefaultRegistry())
-}
-
-// ParseSessionNameWithRegistry parses a tmux session name using a specific registry.
-// If registry is nil, an empty registry is used (prefix will not resolve to rig name).
+// If the prefix is not in the registry, the prefix itself is used as the rig
+// name.
 func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*AgentIdentity, error) {
 	if registry == nil {
 		registry = NewPrefixRegistry()
@@ -153,13 +153,11 @@ func (a *AgentIdentity) SessionName() string {
 	}
 }
 
-// prefix returns the rig prefix, falling back to registry lookup or DefaultPrefix.
+// prefix returns the rig prefix, or DefaultPrefix when the identity carries
+// none (the parsers always set it).
 func (a *AgentIdentity) prefix() string {
 	if a.Prefix != "" {
 		return a.Prefix
-	}
-	if a.Rig != "" {
-		return PrefixFor(a.Rig)
 	}
 	return DefaultPrefix
 }

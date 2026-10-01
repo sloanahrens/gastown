@@ -132,6 +132,7 @@ func (r escalateRun) escalate(args []string) error {
 		Fingerprint: r.fingerprint,
 		RelatedBead: r.relatedBead,
 		EscalatedBy: agentID,
+		Prefixes:    townRegistry(),
 	}, escalationConfig)
 	if err != nil {
 		return err
@@ -582,7 +583,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 
 	// Perform re-escalation
 	var results []*beads.ReescalationResult
-	router := mail.NewRouter(townRoot)
+	router := mail.NewRouter(townRoot, townRegistry())
 	defer router.WaitPendingNotifications()
 
 	for _, issue := range stale {

@@ -29,6 +29,7 @@ func (d *Daemon) sup() *supervisor.Supervisor {
 			TownRoot: d.config.TownRoot,
 			Tmux:     d.tmux,
 			Restart:  d.restartSeat,
+			Prefixes: d.prefixRegistry(),
 			Escalate: func(seat supervisor.Seat, line string) {
 				d.escalateAlert("restart-budget:"+supervisor.IntentSeat(seat).String(), "restart-budget", line)
 			},
@@ -156,9 +157,10 @@ func (d *Daemon) logRefusal(what string, err error) {
 // ClearAgentBackoff clears a supervisor freeze and empties the restart
 // budget for the seat agentID names ("deacon", "mayor", "<rig>/witness",
 // "<rig>/<polecat>", ...). It backs `gt daemon clear-backoff`; an operator
-// park is left alone (that is `gt agent resume`).
-func ClearAgentBackoff(townRoot, agentID string) error {
-	id, err := session.ParseAddress(agentID)
+// park is left alone (that is `gt agent resume`). reg resolves the seat's rig
+// prefix.
+func ClearAgentBackoff(reg *session.PrefixRegistry, townRoot, agentID string) error {
+	id, err := session.ParseAddressWithRegistry(agentID, reg)
 	if err != nil {
 		return fmt.Errorf("unknown agent %q: %w", agentID, err)
 	}

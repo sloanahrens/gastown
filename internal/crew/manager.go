@@ -177,13 +177,18 @@ type Manager struct {
 	// openGit opens the repository at a directory (a crew clone, mayor/rig);
 	// nil opens a *git.Git. Tests hand it a gitfake world.
 	openGit func(dir string) crewRepo
+
+	// prefixes maps the rig to its session prefix; nil gives
+	// session.DefaultPrefix.
+	prefixes *session.PrefixRegistry
 }
 
-// NewManager creates a new crew manager.
-func NewManager(r *rig.Rig, g *git.Git) *Manager {
+// NewManager creates a new crew manager. prefixes names its sessions.
+func NewManager(r *rig.Rig, g *git.Git, prefixes *session.PrefixRegistry) *Manager {
 	return &Manager{
-		rig: r,
-		git: g,
+		rig:      r,
+		git:      g,
+		prefixes: prefixes,
 	}
 }
 
@@ -732,7 +737,7 @@ func (m *Manager) setupSharedBeads(crewPath string) error {
 
 // SessionName returns the tmux session name for a crew member.
 func (m *Manager) SessionName(name string) string {
-	return session.CrewSessionName(session.PrefixFor(m.rig.Name), name)
+	return session.CrewSessionName(m.prefixes.PrefixForRig(m.rig.Name), name)
 }
 
 // Start creates and starts a tmux session for a crew member.

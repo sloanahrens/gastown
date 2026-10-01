@@ -131,7 +131,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		// Look up original message in current user's mailbox to get thread ID.
 		// The message we're replying to lives in our inbox (we received it),
 		// so we look it up via our own identity (from), not the recipient (to).
-		router := mail.NewRouter(workDir)
+		router := mail.NewRouter(workDir, townRegistry())
 		mailbox, err := router.GetMailbox(from)
 		if err != nil {
 			style.PrintWarning("could not open mailbox for thread lookup: %v", err)
@@ -164,7 +164,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		// Fall back to legacy routing for infrastructure errors (beads down, etc.)
-		router := mail.NewRouter(workDir)
+		router := mail.NewRouter(workDir, townRegistry())
 		defer router.WaitPendingNotifications()
 		if err := router.Send(msg); err != nil {
 			return fmt.Errorf("sending message: %w", err)
@@ -176,7 +176,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	// Route based on recipient type, collecting errors instead of failing early
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	defer router.WaitPendingNotifications()
 	var recipientAddrs []string
 	var sendErrs []string
@@ -288,7 +288,7 @@ func normalizeAddress(addr string) string {
 // no-match, ambiguity, or any error. Best-effort — used only as a convenience
 // to make `gt mail send <to> -s "Re: ..."` clear queued reply-reminders.
 func inferReplyTo(workDir, from, to, subject string) string {
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(from)
 	if err != nil {
 		return ""

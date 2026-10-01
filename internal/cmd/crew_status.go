@@ -148,7 +148,7 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 }
 
 func listCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, t *tmux.Tmux) ([]CrewStatusItem, error) {
-	crewMgr := crew.NewManager(r, git.NewGit(r.Path))
+	crewMgr := crew.NewManager(r, git.NewGit(r.Path), reg)
 	workers, err := crewMgr.List()
 	if err != nil {
 		return nil, fmt.Errorf("listing crew workers: %w", err)

@@ -17,6 +17,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // fakeTmux records kills over a set of live sessions.
@@ -421,12 +422,35 @@ func TestKillStrayKillsAndLogs(t *testing.T) {
 
 func TestSeatForSession(t *testing.T) {
 	t.Parallel()
-	seat, err := SeatForSession("hq-mayor")
+	seat, err := SeatForSession(nil, "hq-mayor")
 	if err != nil || seat.Role != "mayor" || seat.SessionName() != "hq-mayor" {
 		t.Fatalf("SeatForSession(hq-mayor) = %+v, %v", seat, err)
 	}
+	reg := session.NewPrefixRegistry()
+	reg.Register("ga", "gastown")
+	seat, err = SeatForSession(reg, "ga-crew-max")
+	if err != nil || seat.Rig != "gastown" || seat.SessionName() != "ga-crew-max" {
+		t.Fatalf("SeatForSession(ga-crew-max) = %+v, %v", seat, err)
+	}
 	if IntentSeat(SeatFor("", "crew", "max")).Path("/t") != "/t/.runtime/agents/crew.max.json" {
 		t.Fatalf("named seat path = %s", IntentSeat(SeatFor("", "crew", "max")).Path("/t"))
+	}
+}
+
+// TestKillStrayHonorsRigEstop: a stray whose prefix the registry maps to a
+// rig is refused while that rig is e-stopped.
+func TestKillStrayHonorsRigEstop(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	_ = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+	reg := session.NewPrefixRegistry()
+	reg.Register("ga", "gastown")
+	s := New(Options{TownRoot: h.town, Tmux: h.tmux, Prefixes: reg, Now: func() time.Time { return h.now }})
+	if err := s.KillStray("ga-ghost", "ghost", "daemon"); !errors.Is(err, ErrEstop) {
+		t.Fatalf("KillStray = %v, want ErrEstop", err)
+	}
+	if len(h.tmux.kills()) != 0 {
+		t.Fatalf("kills = %v, want none", h.tmux.kills())
 	}
 }
 

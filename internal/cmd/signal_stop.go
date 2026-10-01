@@ -109,7 +109,7 @@ func runSignalStop(cmd *cobra.Command, args []string) error {
 
 // checkUnreadMail checks for unread mail and returns a block reason if found.
 func checkUnreadMail(townRoot, address string) string {
-	router := mail.NewRouterWithTownRoot(townRoot, townRoot)
+	router := mail.NewRouterWithTownRoot(townRoot, townRoot, townRegistry())
 	mailbox, err := router.GetMailbox(address)
 	if err != nil {
 		return ""

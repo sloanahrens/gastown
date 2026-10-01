@@ -120,7 +120,7 @@ func cycleToSession(direction int, sessionOverride, clientOverride string) error
 	}
 
 	// Check if it's a crew session (format: <prefix>-crew-<name>)
-	if identity, err := sessionpkg.ParseSessionName(session); err == nil && identity.Role == sessionpkg.RoleCrew {
+	if identity, err := sessionpkg.ParseSessionNameWithRegistry(session, townRegistry()); err == nil && identity.Role == sessionpkg.RoleCrew {
 		return cycleCrewSession(direction, session)
 	}
 
@@ -137,7 +137,7 @@ func cycleToSession(direction int, sessionOverride, clientOverride string) error
 // parseRigOpsSession extracts the rig name if this is a polecat session.
 // Returns empty string if not a rig ops session.
 func parseRigOpsSession(sess string) string {
-	identity, err := sessionpkg.ParseSessionName(sess)
+	identity, err := sessionpkg.ParseSessionNameWithRegistry(sess, townRegistry())
 	if err != nil {
 		return ""
 	}

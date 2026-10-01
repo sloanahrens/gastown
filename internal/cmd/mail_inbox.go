@@ -24,7 +24,7 @@ func getMailbox(address string) (*mail.Mailbox, error) {
 	}
 
 	// Get mailbox
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(address)
 	if err != nil {
 		return nil, fmt.Errorf("getting mailbox: %w", err)
@@ -412,7 +412,7 @@ type staleMessage struct {
 }
 
 func runMailArchiveStale(mailbox *mail.Mailbox, address string) error {
-	identity, err := session.ParseAddress(address)
+	identity, err := session.ParseAddressWithRegistry(address, townRegistry())
 	if err != nil {
 		return fmt.Errorf("determining session for %s: %w", address, err)
 	}

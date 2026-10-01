@@ -325,7 +325,7 @@ where:
 
 ### Active Polecat Counting
 
-Active polecats are counted by scanning tmux sessions and matching role via `session.ParseSessionName()`. This counts **all** polecats (both scheduler-dispatched and directly-slung) because API rate limits, memory, and CPU are shared resources.
+Active polecats are counted by scanning tmux sessions and matching role via `session.ParseSessionNameWithRegistry()`. This counts **all** polecats (both scheduler-dispatched and directly-slung) because API rate limits, memory, and CPU are shared resources.
 
 ---
 

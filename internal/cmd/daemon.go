@@ -549,7 +549,7 @@ func runDaemonClearBackoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Clear the crash loop state on disk
-	if err := daemon.ClearAgentBackoff(townRoot, agentID); err != nil {
+	if err := daemon.ClearAgentBackoff(townRegistry(), townRoot, agentID); err != nil {
 		return fmt.Errorf("clearing backoff for %s: %w", agentID, err)
 	}
 

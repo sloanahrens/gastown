@@ -149,7 +149,7 @@ func (c *SocketSplitBrainCheck) Fix(ctx *CheckContext) error {
 
 	// Duplicates on the wrong socket belong to no seat: KillStray, which a
 	// town e-stop refuses and which logs the actor (gt-4k3fj.3).
-	sup := fixSupervisor(ctx.TownRoot, defaultLister)
+	sup := fixSupervisor(ctx, defaultLister)
 	for _, s := range c.staleSessions {
 		if err := sup.KillStray(s, "duplicate on the default tmux socket", doctorActor); err != nil {
 			lastErr = err

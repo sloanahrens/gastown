@@ -91,7 +91,7 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 		t.Fatalf("creating dog dir: %v", err)
 	}
 
-	r := NewRouterWithTownRoot(townRoot, townRoot)
+	r := NewRouterWithTownRoot(townRoot, townRoot, testPrefixRegistry())
 
 	tests := []struct {
 		name     string

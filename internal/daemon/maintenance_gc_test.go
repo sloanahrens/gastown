@@ -698,7 +698,7 @@ func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sess := func(p string) string { return session.PolecatSessionName(session.PrefixFor(rig), p) }
+	sess := func(p string) string { return session.PolecatSessionName(session.DefaultPrefix, p) }
 	polecat.TouchSessionHeartbeatWithState(town, sess("fresh"), polecat.HeartbeatWorking, "", "")
 	polecat.TouchSessionHeartbeatWithState(town, sess("idle"), polecat.HeartbeatIdle, "", "")
 	stale := polecat.SessionHeartbeat{Timestamp: time.Now().Add(-2 * maintenancePolecatFreshness), State: polecat.HeartbeatWorking}
