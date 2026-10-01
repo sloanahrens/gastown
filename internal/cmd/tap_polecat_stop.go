@@ -487,7 +487,7 @@ func polecatStopGateInvocations(townRoot, rigName string) []stopCheckGate {
 // the target is the first argument that is not a flag, since only the target
 // decides what runs ("make -j4 test" is still make test).
 func stopCheckGateFromCommand(command string) (stopCheckGate, bool) {
-	_, args := splitEnvPrefix(stopCheckTokens(strings.TrimSpace(command)))
+	_, args := slot.SplitEnvPrefix(stopCheckTokens(strings.TrimSpace(command)))
 	if len(args) == 0 {
 		return stopCheckGate{}, false
 	}

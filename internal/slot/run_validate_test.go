@@ -1,4 +1,4 @@
-package cmd
+package slot
 
 import (
 	"bytes"
@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // writePlainFile drops a non-executable file named name into dir.
@@ -20,11 +18,11 @@ func writePlainFile(t *testing.T, dir, name string) string {
 	return path
 }
 
-// TestResolveSlotCommand covers the rule gt-f4xe adds: the command has to be
+// TestResolveCommand covers the rule gt-f4xe adds: the command has to be
 // resolvable before gt slot run takes the gate, so a mistyped binary or a bare
 // list of assignments is refused rather than holding a slot to fail in. A case
 // with wantProgram set also pins which file the resolution names.
-func TestResolveSlotCommand(t *testing.T) {
+func TestResolveCommand(t *testing.T) {
 	t.Parallel()
 
 	emptyDir := t.TempDir()
@@ -88,31 +86,31 @@ func TestResolveSlotCommand(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			program, err := resolveSlotCommand(c.envAssigns, c.cmdArgs, ambient)
+			program, err := resolveCommand(c.envAssigns, c.cmdArgs, ambient)
 			if c.wantErr != "" {
 				if err == nil {
-					t.Fatalf("resolveSlotCommand(%v, %v) = nil, want error containing %q", c.envAssigns, c.cmdArgs, c.wantErr)
+					t.Fatalf("resolveCommand(%v, %v) = nil, want error containing %q", c.envAssigns, c.cmdArgs, c.wantErr)
 				}
 				if !strings.Contains(err.Error(), c.wantErr) {
-					t.Fatalf("resolveSlotCommand(%v, %v) = %q, want it to contain %q", c.envAssigns, c.cmdArgs, err, c.wantErr)
+					t.Fatalf("resolveCommand(%v, %v) = %q, want it to contain %q", c.envAssigns, c.cmdArgs, err, c.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("resolveSlotCommand(%v, %v) = %v, want nil", c.envAssigns, c.cmdArgs, err)
+				t.Fatalf("resolveCommand(%v, %v) = %v, want nil", c.envAssigns, c.cmdArgs, err)
 			}
 			if c.wantProgram != "" && program != c.wantProgram {
-				t.Errorf("resolveSlotCommand(%v, %v) resolved %q, want %q", c.envAssigns, c.cmdArgs, program, c.wantProgram)
+				t.Errorf("resolveCommand(%v, %v) resolved %q, want %q", c.envAssigns, c.cmdArgs, program, c.wantProgram)
 			}
 		})
 	}
 }
 
-// TestSlotChildPath pins the precedence the child will see: an explicit PATH=
+// TestChildPath pins the precedence the child will see: an explicit PATH=
 // among the assignments wins, and the last one wins, because os/exec keeps the
 // last value of a duplicate key and the assignments are appended after
 // os.Environ().
-func TestSlotChildPath(t *testing.T) {
+func TestChildPath(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -128,28 +126,29 @@ func TestSlotChildPath(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := slotChildPath(c.envAssigns, "/ambient"); got != c.want {
-				t.Errorf("slotChildPath(%v) = %q, want %q", c.envAssigns, got, c.want)
+			if got := childPath(c.envAssigns, "/ambient"); got != c.want {
+				t.Errorf("childPath(%v) = %q, want %q", c.envAssigns, got, c.want)
 			}
 		})
 	}
 }
 
-// TestRunSlotRun_RejectsBadCommandWithoutAcquiringSlot is the ordering guard for
-// gt-f4xe. Asserting only that the bad command errors would still pass with the
-// validation back below AcquirePool, so the assertions are on what the acquire
-// would have left behind: the banner in the output, and a held slot in the pool.
+// TestRun_RejectsBadCommandWithoutAcquiringSlot is the ordering guard for
+// gt-f4xe. Asserting only that the bad command errors would still pass with
+// the validation back below AcquirePool, so the assertions are on what the
+// acquire would have left behind: the banner in the output, and a held slot in
+// the pool.
 //
 // The town is a temp directory with just the secondary marker, so nothing here
 // can touch the operator's live gate.
-func TestRunSlotRun_RejectsBadCommandWithoutAcquiringSlot(t *testing.T) {
+func TestRun_RejectsBadCommandWithoutAcquiringSlot(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.Mkdir(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
 		t.Fatalf("creating temp town marker: %v", err)
 	}
 
-	pool := containerGatePool(townRoot)
+	pool := PoolForTown(townRoot)
 
 	cases := []struct {
 		name    string
@@ -163,18 +162,25 @@ func TestRunSlotRun_RejectsBadCommandWithoutAcquiringSlot(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := &bytes.Buffer{}
-			err := slotRun(out, townRoot, c.args, t.TempDir(), nil)
+			_, err := Run(townRoot, RunOptions{
+				Role:   "gastown/landing",
+				Args:   c.args,
+				Path:   t.TempDir(),
+				Env:    func() []string { return nil },
+				Stdout: out,
+				Stderr: out,
+			})
 			if err == nil {
-				t.Fatalf("runSlotRun(%v) = nil, want error containing %q", c.args, c.wantErr)
+				t.Fatalf("Run(%v) = nil, want error containing %q", c.args, c.wantErr)
 			}
 			if !strings.Contains(err.Error(), c.wantErr) {
-				t.Fatalf("runSlotRun(%v) = %q, want it to contain %q", c.args, err, c.wantErr)
+				t.Fatalf("Run(%v) = %q, want it to contain %q", c.args, err, c.wantErr)
 			}
 			if strings.Contains(out.String(), "Container-gate slot acquired") {
 				t.Errorf("the gate was taken before the command was validated; stdout was:\n%s", out.String())
 			}
 
-			rep, err := slot.StatusPoolLocksOnly(townRoot, pool)
+			rep, err := StatusPoolLocksOnly(townRoot, pool)
 			if err != nil {
 				t.Fatalf("checking the pool: %v", err)
 			}

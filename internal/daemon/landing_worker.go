@@ -280,10 +280,6 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if cfg == nil {
 		cfg = &LandingWorkerConfig{}
 	}
-	gtPath := d.gtPath
-	if gtPath == "" {
-		gtPath = "gt"
-	}
 	workRoot, err := landingWorkRoot(cfg.WorkRoot, townRoot, rigName)
 	if err != nil {
 		return nil, err
@@ -312,9 +308,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		WorkRoot: workRoot,
 		Route:    "daemon",
 		Gate: rigLandGate{
-			townRoot: townRoot, rig: rigName, gtPath: gtPath, logRoot: d.landingLogRoot(rigName),
+			townRoot: townRoot, rig: rigName, logRoot: d.landingLogRoot(rigName),
 		},
-		Rerun:            landRerun(townRoot, rigName, gtPath, d.landingLogRoot(rigName)),
+		Rerun:            landRerun(townRoot, rigName, d.landingLogRoot(rigName)),
 		GateBeads:        landworker.GateBeads{Rig: rigName, Beads: bd},
 		Reviewer:         reviewer,
 		Beads:            bd,
@@ -323,7 +319,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		RangeChecks:      []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorLands: true,
 	}
-	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:   rigName,
@@ -388,12 +384,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 // `make gate`), else `make gate`, else `make test` under the container slot.
 // The verdict is the exit code; nothing reads the output for it.
 type rigLandGate struct {
-	townRoot, rig, gtPath, logRoot string
+	townRoot, rig, logRoot string
 }
 
 func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	mq := rig.ResolveMergeQueueConfig(g.townRoot, g.rig)
-	cg := land.WithSlot(land.LandGate(dir, mq), g.gtPath, g.rig+"/landing")
+	cg := land.WithSlot(land.LandGate(dir, mq), g.townRoot, g.rig+"/landing")
 	// dir is <work root>/land-XXXX/wt: one log directory per landing.
 	cg.LogDir = filepath.Join(g.logRoot, filepath.Base(filepath.Dir(dir)))
 	return cg.Run(ctx, dir)
@@ -404,7 +400,7 @@ func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 // (containers off, no slot). Any other gate may have run containers, so its
 // packages rerun in the full tier under the container slot: a superset of
 // what the gate ran, never less.
-func landRerun(townRoot, rigName, gtPath, logRoot string) func(context.Context, string, []string) land.GateResult {
+func landRerun(townRoot, rigName, logRoot string) func(context.Context, string, []string) land.GateResult {
 	return func(ctx context.Context, dir string, pkgs []string) land.GateResult {
 		mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
 		gate := land.LandGate(dir, mq)
@@ -416,7 +412,7 @@ func landRerun(townRoot, rigName, gtPath, logRoot string) func(context.Context, 
 		// unit tier needs none.
 		cg := land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}
 		if strings.Contains(cmd, "GT_TEST_DOCKER=1") {
-			cg = land.WithSlot(cg, gtPath, rigName+"/landing")
+			cg = land.WithSlot(cg, townRoot, rigName+"/landing")
 		}
 		// Beside the gate's own log for this landing, as test.log.
 		cg.LogDir = filepath.Join(logRoot, filepath.Base(filepath.Dir(dir)), "rerun")
@@ -437,7 +433,7 @@ func rigPostLandCommand(rigPath string) string {
 
 // postLandRun runs the post-landing command in a throwaway worktree of repo
 // at the landed commit, under the container slot, bounded by timeout.
-func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
+func postLandRun(repo, workRoot, logRoot, townRoot, rigName string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
 	return func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult {
 		if err := os.MkdirAll(workRoot, 0o700); err != nil {
 			return landworker.PostLandResult{ExitCode: -1, Err: err}
@@ -462,7 +458,7 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 		// Named "test" so WithSlot holds the container slot around it. The
 		// role is gate-class (slot.IsGateRole): this run is the red-main
 		// detector, so it takes reserved slots and crew yield to it.
-		cg := land.WithSlot(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, gtPath, rigName+"/post-land")
+		cg := land.WithSlot(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, townRoot, rigName+"/post-land")
 		cg.LogDir = filepath.Join(logRoot, filepath.Base(parent))
 		rctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
