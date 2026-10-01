@@ -18,7 +18,7 @@ internal/cmd/formula_show_test.go BDRunner 1
 internal/cmd/formula.go argv 1
 internal/cmd/handoff.go argv 3
 internal/cmd/handoff.go BdCmd 2
-internal/cmd/hook.go BdCmd 2
+internal/cmd/hook.go BdCmd 1
 internal/cmd/hook.go BDRunner 1
 internal/cmd/install_integration_test.go argv 4
 internal/cmd/molecule_lifecycle.go BDRunner 1
@@ -26,7 +26,6 @@ internal/cmd/polecat_identity_reconcile.go BDRunner 1
 internal/cmd/polecat_identity.go argv 1
 internal/cmd/prime_molecule.go argv 1
 internal/cmd/prime.go argv 1
-internal/cmd/ready.go BdCmd 1
 internal/cmd/role.go BDRunner 1
 internal/cmd/scheduler_epic.go BdCmd 1
 internal/cmd/scheduler_integration_test.go argv 9
@@ -39,12 +38,10 @@ internal/cmd/sling_duplicate.go BDRunner 3
 internal/cmd/sling_formula.go BdCmd 4
 internal/cmd/sling_helpers.go BdCmd 9
 internal/cmd/sling_helpers.go BDRunner 9
-internal/cmd/sling_pool.go BdCmd 1
 internal/cmd/sling_rollback.go BdCmd 1
 internal/cmd/sling_rollback.go BDRunner 1
 internal/cmd/sling_routing_integration_test.go BdCmd 1
-internal/cmd/sling_run.go BdCmd 1
-internal/cmd/sling.go BdCmd 2
+internal/cmd/sling.go BdCmd 1
 internal/cmd/sling.go BDRunner 1
 internal/cmd/source_validation.go BDRunner 2
 internal/cmd/tracking_relations.go BDRunner 2

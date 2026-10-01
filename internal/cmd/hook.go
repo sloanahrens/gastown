@@ -367,11 +367,8 @@ func runHook(_ *cobra.Command, args []string) error {
 	const hookBackoffMax = 10 * time.Second
 	var lastHookErr error
 	for attempt := 1; attempt <= hookMaxRetries; attempt++ {
-		if err := BdCmd("update", beadID, "--status=hooked", "--assignee="+agentID).
-			Dir(resolveBeadDir(beadID)).
-			StripBeadsDir().
-			WithAutoCommit().
-			Run(); err != nil {
+		hooked := beads.StatusHooked
+		if err := pinnedBd(resolveBeadDir(beadID)).Update(beadID, beads.UpdateOptions{Status: &hooked, Assignee: &agentID}); err != nil {
 			lastHookErr = err
 			if attempt < hookMaxRetries {
 				backoff := slingBackoff(attempt, hookBaseBackoff, hookBackoffMax)
