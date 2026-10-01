@@ -130,7 +130,8 @@ seat-refill, a shell running `gt scheduler run`), so set it the same way
 everywhere or not at all: a process without it still watches
 `<town-root>/seat-refill.hold`. A rig's
 `ESTOP.<rig>` holds only that rig's dispatch. An explicit `gt sling` typed by
-the operator or the mayor still works.
+the operator or the mayor still works through the hold file, but not through
+an E-stop: `gt sling` refuses a rig the town or its own ESTOP covers.
 
 **Disabling the gate.** gt plugin has no pause command; a plugin whose gate is a
 cooldown runs whenever that cooldown has elapsed. To stop it for longer than a

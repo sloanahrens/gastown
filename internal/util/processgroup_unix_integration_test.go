@@ -107,7 +107,7 @@ func TestIntegrationSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 
 // TestSetProcessGroup_CancelSendsSIGTERMFirst guards the half of gt-6t43's
 // shared change that a group dying on either signal does not distinguish: the
-// group is signalled politely before anything is forced on it. The trap writes
+// group is signaled politely before anything is forced on it. The trap writes
 // a marker, so a Cancel that reached for SIGKILL — what every caller had
 // before gt-6t43 — leaves the marker unwritten and fails here.
 //

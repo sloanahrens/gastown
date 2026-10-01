@@ -8,7 +8,8 @@
 //     done handed its branch to the landing worker) refuses Restart, since a
 //     new session would only find finished work; Kill still works;
 //   - e-stop: the town sentinel or the seat's rig sentinel refuses both
-//     (running sessions finish; only an explicit kill-all may bypass it);
+//     (running sessions finish; only the operator's explicit KillAll, from
+//     `gt kill-all`, bypasses it and the seat's hold);
 //   - shutdown: a `gt down` in progress refuses Restart;
 //   - the restart budget: Budget restarts per seat per Window (3 per hour),
 //     persisted in the intent record; the next one freezes the seat, writes it
@@ -300,17 +301,36 @@ func refusal(kind error, detail string) error {
 // takes the same lock) cannot land between the check and the kill. Killing a
 // seat with no session succeeds.
 func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
+	return s.kill(seat, "kill", reason, actor)
+}
+
+// KillAll is Kill for the operator's explicit `gt kill-all` (gt-4k3fj.4):
+// the one verb an e-stop and a seat's hold do not refuse, since they exist
+// to keep automatic paths away and kill-all is the operator overriding them.
+// It is logged as verb kill-all with the actor and records desired=stop,
+// except on a held seat, whose park or freeze it leaves in place.
+func (s *Supervisor) KillAll(seat Seat, reason, actor string) error {
+	return s.kill(seat, verbKillAll, reason, actor)
+}
+
+const verbKillAll = "kill-all"
+
+// kill is Kill and KillAll; only verb kill-all skips the hold and e-stop.
+func (s *Supervisor) kill(seat Seat, verb, reason, actor string) error {
 	name := seat.SessionName()
-	l := ActionLine{Verb: "kill", Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
-	if err := s.guard(seat, l); err != nil {
-		return err
+	force := verb == verbKillAll
+	l := ActionLine{Verb: verb, Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
+	if !force {
+		if err := s.guard(seat, l); err != nil {
+			return err
+		}
 	}
 	now := s.o.Now().UTC()
 	var held string
 	var killed bool
 	var killErr error
 	rec, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
-		if r.Held() {
+		if r.Held() && !force {
 			held = r.HoldReason()
 			return errHeld
 		}
@@ -318,10 +338,13 @@ func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 			return killErr
 		}
 		killed = true
-		r.Desired = intent.DesiredStop
+		if !r.Held() {
+			// A park outlives a kill-all: it is the stronger stop.
+			r.Desired = intent.DesiredStop
+		}
 		r.Progress = nil
 		r.Actor, r.UpdatedAt = actor, now
-		r.LastAction = &intent.Action{Verb: "kill", Reason: reason, Actor: actor, Outcome: outcomeDone, At: now}
+		r.LastAction = &intent.Action{Verb: verb, Reason: reason, Actor: actor, Outcome: outcomeDone, At: now}
 		return nil
 	})
 	switch {

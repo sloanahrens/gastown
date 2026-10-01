@@ -52,7 +52,7 @@ func TestIntegrationRunSetupCommand_TimeoutTakesTheGroupAndItsGrace(t *testing.T
 		t.Fatalf("runSetupCommand = %v, want a timeout error", err)
 	}
 	if min := timeout + grace; elapsed < min {
-		t.Errorf("runSetupCommand returned after %s, want at least %s (the deadline plus its grace): the group was killed without being signalled first",
+		t.Errorf("runSetupCommand returned after %s, want at least %s (the deadline plus its grace): the group was killed without being signaled first",
 			elapsed.Round(time.Millisecond), min)
 	}
 	if elapsed > 30*time.Second {

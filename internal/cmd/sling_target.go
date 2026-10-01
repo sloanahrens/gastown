@@ -158,18 +158,15 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 
 	// Rig target (auto-spawn polecat)
 	if rigName, isRig := d.isRigName(target); isRig {
-		// Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
+		// Refuse an e-stopped, parked or docked rig before dispatching
+		// (gt-4k3fj.4, gt-4owfd.1, gt-11y).
 		townRoot := opts.TownRoot
 		if townRoot == "" {
 			townRoot = d.cwdTown()
 		}
 		if townRoot != "" {
-			if blocked, reason := d.rigParked(townRoot, rigName); blocked {
-				undoCmd := "gt rig unpark"
-				if reason == "docked" {
-					undoCmd = "gt rig undock"
-				}
-				return nil, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
+			if _, err := slingBlocked(townRoot, rigName, d.estopOn, d.rigParked); err != nil {
+				return nil, err
 			}
 		}
 

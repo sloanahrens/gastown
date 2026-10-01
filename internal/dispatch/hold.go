@@ -42,14 +42,18 @@ func holdFilePath(townRoot string, getenv func(string) string) string {
 
 // OperatorHold reports why automatic dispatch must not run in this town right
 // now, or "" when it may. It answers for the operator's hold file and for a
-// town-wide ESTOP, the same two hand brakes seat-refill checks.
+// town-wide ESTOP, the same two hand brakes seat-refill checks. It is the one
+// dispatch choke point for e-stop (gt-4k3fj.4); restarts and kills have
+// theirs in internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
-// operator or the mayor is the decision the hold defers to, and stays open.
+// operator or the mayor is the decision the hold file defers to; an e-stop
+// refuses it too, in the sling path itself.
 //
-// A hold path that cannot be stat'ed for any reason other than not existing
-// fails closed: the hold cannot be ruled out, and dispatching through a hold
-// is the outcome it exists to prevent (gt-ifijm).
+// A hold path or ESTOP sentinel that cannot be stat'ed for any reason other
+// than not existing fails closed: the hold cannot be ruled out, and
+// dispatching through a hold is the outcome it exists to prevent (gt-ifijm,
+// gt-e7lqk).
 func OperatorHold(townRoot string) string {
 	return operatorHold(townRoot, os.Getenv)
 }
@@ -65,10 +69,23 @@ func operatorHold(townRoot string, getenv func(string) string) string {
 	} else if !os.IsNotExist(err) {
 		return fmt.Sprintf("operator dispatch hold unreadable (%v); treating as held", err)
 	}
-	if estop.IsActive(townRoot) {
+	return estopHold(townRoot, "")
+}
+
+// estopHold reports the e-stop that covers rig ("" for the town sentinel
+// alone), failing closed like the supervisor's check.
+func estopHold(townRoot, rig string) string {
+	on, err := estop.ActiveFor(townRoot, rig)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("ESTOP unreadable (%v); treating as held", err)
+	case !on:
+		return ""
+	case estop.IsActive(townRoot):
 		return fmt.Sprintf("town ESTOP active (%s)", estop.FilePath(townRoot))
+	default:
+		return fmt.Sprintf("rig ESTOP active (%s)", estop.RigFilePath(townRoot, rig))
 	}
-	return ""
 }
 
 // RigHold is OperatorHold plus the per-rig ESTOP (<town>/ESTOP.<rig>), for a
@@ -83,10 +100,10 @@ func rigHold(townRoot, rig string, getenv func(string) string) string {
 	if reason := operatorHold(townRoot, getenv); reason != "" {
 		return reason
 	}
-	if townRoot != "" && rig != "" && estop.IsRigActive(townRoot, rig) {
-		return fmt.Sprintf("rig ESTOP active (%s)", estop.RigFilePath(townRoot, rig))
+	if townRoot == "" || rig == "" {
+		return ""
 	}
-	return ""
+	return estopHold(townRoot, rig)
 }
 
 // HoldLatch remembers the last hold reason a polling dispatcher saw, so it can
