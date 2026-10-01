@@ -132,6 +132,10 @@ type TownSettings struct {
 	// All values are optional — omitted values use compiled-in defaults.
 	Operational *OperationalConfig `json:"operational,omitempty"`
 
+	// Secrets sets how the town treats a literal token in an agent's env
+	// (secrets.go, gt-y3pgh.5).
+	Secrets *SecretsConfig `json:"secrets,omitempty"`
+
 	// DisabledPatrols lists patrol names to disable at the town level.
 	// This provides a simple way to turn off individual daemon patrol dogs
 	// without editing mayor/daemon.json. Patrol names match the keys used

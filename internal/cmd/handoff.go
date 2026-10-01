@@ -956,6 +956,8 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 	// Unix, $env: on Windows).
 	envMap := make(map[string]string)
 	var agentEnv map[string]string // agent config Env (rc.toml [agents.X.env])
+	var secretKeys map[string]string
+	var secretPrefix string
 	if gtRole != "" {
 		// When GT_AGENT is set, resolve config with the override so we pick up
 		// the active agent's env (e.g., NODE_OPTIONS from [agents.X.env]).
@@ -985,7 +987,19 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		}
 		// Resolve ${VAR} references the same way the first-spawn path does, so
 		// a handoff re-exports the key rather than the reference (gt-yih1).
-		agentEnv = config.ExpandEnvRefs(runtimeConfig.Env)
+		// A reference to a settings/daemon.env entry is read by the
+		// command when it runs, so the secret stays out of argv (G3-18).
+		spawnEnv, err := config.ResolveSpawnEnv(townRoot, runtimeConfig.Env)
+		if err != nil {
+			return restartPlan{}, err
+		}
+		if runtime.GOOS == "windows" {
+			agentEnv = spawnEnv.Values()
+		} else {
+			agentEnv = spawnEnv.Inline
+			secretKeys = spawnEnv.FromFile
+			secretPrefix = spawnEnv.ShellPrefix()
+		}
 		envMap["GT_ROLE"] = gtRole
 		envMap["BD_ACTOR"] = gtRole
 		envMap["GIT_AUTHOR_NAME"] = gtRole
@@ -1056,6 +1070,9 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		envMap["NODE_OPTIONS"] = ""
 	}
 	config.SanitizeAgentEnv(envMap, agentEnv)
+	for k := range secretKeys {
+		delete(envMap, k)
+	}
 
 	// Build the full command with OS-appropriate env prefix
 	var cdPrefix string
@@ -1070,7 +1087,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		execPrefix = "exec "
 	}
 
-	envCmd := config.PrependEnv(execPrefix+runtimeCmd, envMap)
+	envCmd := secretPrefix + config.PrependEnv(execPrefix+runtimeCmd, envMap)
 	plan := restartPlan{Command: cdPrefix + envCmd}
 	if syncHooks {
 		settingsDir := config.RoleSettingsDir(simpleRole, rigPath)

@@ -1099,3 +1099,27 @@ func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
 		}
 	}
 }
+
+// A token in settings/daemon.env stays out of the supervisor file: spawn
+// reads it from daemon.env, and the plist is not a secret store (gt-y3pgh.5).
+func TestSupervisorData_LeavesDaemonEnvTokensOut(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "SDKROOT=/fake/sdk\nDS_TOKEN=sk-fake0000000000000000000000000000\n"
+	if err := os.WriteFile(filepath.Join(town, "settings", "daemon.env"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := supervisorData(town, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.Env["SDKROOT"] != "/fake/sdk" {
+		t.Errorf("SDKROOT dropped: %v", data.Env)
+	}
+	if _, ok := data.Env["DS_TOKEN"]; ok {
+		t.Error("supervisor env carries the daemon.env token")
+	}
+}

@@ -229,6 +229,50 @@ present) and renders each pair into the launchd plist's
 overridden here. Changes only take effect on the next `gt daemon
 enable-supervisor` run (re-run it after editing the file).
 
+#### Secrets by reference
+
+Agent tokens live in this file, at mode 0600, and an agent's `env` block in
+`settings/config.json` references them by name with the braced form:
+
+```json
+"agents": {
+  "deepseek-flash": {
+    "env": {"ANTHROPIC_AUTH_TOKEN": "${DEEPSEEK_FLASH_ANTHROPIC_AUTH_TOKEN}"}
+  }
+}
+```
+
+```
+DEEPSEEK_FLASH_ANTHROPIC_AUTH_TOKEN=sk-...
+```
+
+A session's startup command does not carry the value: it reads the named
+entry from `settings/daemon.env` when it runs, so the token appears in no
+process's argv and in no tmux pane start command. A reference that
+`settings/daemon.env` does not define is expanded from the spawning process's
+environment, as before; one that neither defines stops the spawn. A token in
+this file is not rendered into the launchd plist or systemd unit (a value
+that looks like a token is left out), so the daemon's own environment never
+hands one provider's token to every agent. Name entries after the agent, not
+after the variable the agent reads.
+
+A literal token in an agent's env (a value with a known token prefix such as
+`sk-`, or a 16+ character value for a key naming a credential) draws a
+warning: `gt doctor` (`town-config-secrets`) lists its key path, and the
+town-running commands and the daemon print one line at start. Values are
+never printed. To move them:
+
+```
+gt config secrets migrate --dry-run     # key paths and variable names only
+gt config secrets migrate               # writes daemon.env (0600), rewrites config to ${...}
+gt doctor                               # town-config-secrets is OK
+gt config set secrets.refuse_literals true
+```
+
+With `secrets.refuse_literals` set, a literal token is a load error: the
+daemon, `gt up` and every session start refuse, naming the key path. `gt
+config set` refuses to turn it on while a literal remains.
+
 ### Runtime (`.runtime/` - gitignored)
 
 Process state, PIDs, ephemeral data.
