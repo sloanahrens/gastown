@@ -6,6 +6,37 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 )
 
+// TestMailSendPriority pins the flag precedence: --urgent wins outright, and
+// --notify raises only a normal message (the notification is automatic either
+// way; --no-notify is what suppresses it).
+func TestMailSendPriority(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		urgent   bool
+		priority int
+		notify   bool
+		want     mail.Priority
+	}{
+		{"default is normal", false, 2, false, mail.PriorityNormal},
+		{"--priority 0 is urgent", false, 0, false, mail.PriorityUrgent},
+		{"--priority 3 is low", false, 3, false, mail.PriorityLow},
+		{"--notify raises normal to high", false, 2, true, mail.PriorityHigh},
+		{"--notify leaves a set priority alone", false, 3, true, mail.PriorityLow},
+		{"--urgent beats a set priority", true, 4, false, mail.PriorityUrgent},
+		{"--urgent beats --notify", true, 2, true, mail.PriorityUrgent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mailSendPriority(tc.urgent, tc.priority, tc.notify); got != tc.want {
+				t.Errorf("mailSendPriority(%v, %d, %v) = %v, want %v",
+					tc.urgent, tc.priority, tc.notify, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHasReplyPrefix(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

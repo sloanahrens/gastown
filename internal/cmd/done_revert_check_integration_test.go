@@ -730,6 +730,211 @@ func TestIntegrationDetectRevertedMerges_CommentOnlyChangeIsARevert(t *testing.T
 	}
 }
 
+// The constants below build the gt-mdyds shapes: a package that predates the
+// polecat's checkout, and a later commit on main that ADDS a file to it. The
+// addition is pure — the file is new, the package is not — so the deletion the
+// polecat makes restores the state of the path before that commit, which is
+// what a stale checkout holds too. Nothing but the candidate's own tree
+// separates the two.
+const (
+	pkgTestMainSubject = "testpolicy: run the unit tier through unittier.Main"
+
+	// pkgTestMain is main's purely additive commit, and the file the polecat
+	// then retires or carries to another package.
+	pkgTestMain = `package pkg
+
+import (
+	"os"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
+`
+
+	// pkgTestMainMoved is the same file one package over: the package clause
+	// follows the file, which is the edit that makes this a move to git's
+	// rename detection rather than an identical copy.
+	pkgTestMainMoved = `package slot
+
+import (
+	"os"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
+`
+
+	// pkgUnrelatedFile shares no code line with pkgTestMain, so a deletion it
+	// accompanies is a deletion the candidate's tree does not answer for.
+	pkgUnrelatedFile = `package slot
+
+// Retire records the package a slot run left behind.
+type Retire struct {
+	Dir  string
+	When string
+}
+`
+)
+
+// newMergedTestMainScenario builds the gt-mdyds repositories: origin/main holds
+// one file in the package, and a second commit adds pkgTestMain to it.
+func newMergedTestMainScenario(t *testing.T) scenarioPaths {
+	t.Helper()
+	p := cachedGitFixtureStrings(t, "mergedTestMain", func(dir string) []string {
+		sp := buildMergedTestMainScenario(t, dir)
+		return []string{sp.seed, sp.polecat}
+	})
+	return scenarioPaths{seed: p[0], polecat: p[1]}
+}
+
+func buildMergedTestMainScenario(t *testing.T, dir string) scenarioPaths {
+	t.Helper()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	polecat := filepath.Join(dir, "polecat")
+
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCmd(t, "", "clone", remote, seed)
+	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
+	runGitCmd(t, seed, "config", "user.name", "Seed")
+	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/foo.go"), pkgFooBase)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", "base")
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	// main's additive commit, and the point the polecat's checkout is cut at:
+	// the branch under test descends from it, so nothing about it is stale.
+	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/main_test.go"), pkgTestMain)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", pkgTestMainSubject)
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	runGitCmd(t, "", "clone", remote, polecat)
+	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
+	runGitCmd(t, polecat, "config", "user.name", "Polecat")
+	runGitCmd(t, polecat, "switch", "-c", "polecat/zircon/gt-test")
+	return scenarioPaths{seed: seed, polecat: polecat}
+}
+
+// TestDetectRevertedMerges_RetiringAPackageIsNoRevert is the gt-mdyds incident:
+// a polecat retires a package whole, so every file in it leaves the tree —
+// including a file main added there after the checkout was cut. Read as an
+// inversion of that commit, the retirement is refused and the polecat has to
+// ask for an override to do what its bead says.
+func TestIntegrationDetectRevertedMerges_RetiringAPackageIsNoRevert(t *testing.T) {
+	t.Parallel()
+	s := newMergedTestMainScenario(t)
+
+	if err := os.RemoveAll(filepath.Join(s.polecat, "internal/pkg")); err != nil {
+		t.Fatalf("removing internal/pkg: %v", err)
+	}
+	runGitCmd(t, s.polecat, "add", "-A")
+	runGitCmd(t, s.polecat, "commit", "-m", "feat: retire internal/pkg (gt-test)")
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges refused the retirement of a whole package: %+v", report)
+	}
+}
+
+// TestDetectRevertedMerges_DeletingAMergedFileInASurvivingPackageRefuses is the
+// fail-closed control for that reading: the same file, deleted from a package
+// the polecat keeps. What main added to the path is then gone from a tree that
+// still holds its neighbors — the state a stale checkout leaves behind — so the
+// deletion is reported as the inversion it is.
+func TestIntegrationDetectRevertedMerges_DeletingAMergedFileInASurvivingPackageRefuses(t *testing.T) {
+	t.Parallel()
+	s := newMergedTestMainScenario(t)
+
+	runGitCmd(t, s.polecat, "rm", "internal/pkg/main_test.go")
+	runGitCmd(t, s.polecat, "commit", "-m", "feat: drop the package's TestMain (gt-test)")
+
+	g := git.NewGit(s.polecat)
+	wantCommit, err := g.Rev("origin/main")
+	if err != nil {
+		t.Fatalf("rev origin/main: %v", err)
+	}
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want the one that added internal/pkg/main_test.go: %+v", len(report.Reverted), report)
+	}
+	if report.Reverted[0].Commit != wantCommit {
+		t.Errorf("reverted commit = %s, want %s (the commit that added the file)", report.Reverted[0].Commit, wantCommit)
+	}
+	if !containsString(report.Reverted[0].Paths, "internal/pkg/main_test.go") {
+		t.Errorf("reverted paths %v missing internal/pkg/main_test.go", report.Reverted[0].Paths)
+	}
+}
+
+// TestDetectRevertedMerges_MovingAFileToAnotherPackageIsNoRevert is the
+// gt-638go.12 incident: the polecat's work carries a file main added out of its
+// package and into another one (internal/cmd -> internal/slot there), rewriting
+// the package clause and the references around it. The path the commit wrote is
+// gone, but its content is not — it is at a new path in the candidate's own
+// tree, which is what git's rename detection calls a move.
+func TestIntegrationDetectRevertedMerges_MovingAFileToAnotherPackageIsNoRevert(t *testing.T) {
+	t.Parallel()
+	s := newMergedTestMainScenario(t)
+
+	runGitCmd(t, s.polecat, "rm", "internal/pkg/main_test.go")
+	writeTestFileAt(t, filepath.Join(s.polecat, "internal/slot/main_test.go"), pkgTestMainMoved)
+	runGitCmd(t, s.polecat, "add", "-A")
+	runGitCmd(t, s.polecat, "commit", "-m", "refactor: move the TestMain into internal/slot (gt-test)")
+
+	g := git.NewGit(s.polecat)
+	wantCommit, err := g.Rev("origin/main")
+	if err != nil {
+		t.Fatalf("rev origin/main: %v", err)
+	}
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Reverted) != 0 {
+		t.Fatalf("detectRevertedMerges refused a file moved to another package: %+v", report.Reverted)
+	}
+	if len(report.Relocated) != 1 {
+		t.Fatalf("detectRevertedMerges reported %d relocations, want 1: %+v", len(report.Relocated), report.Relocated)
+	}
+	if report.Relocated[0].Commit != wantCommit {
+		t.Errorf("relocated commit = %s, want %s (the commit that added the file)", report.Relocated[0].Commit, wantCommit)
+	}
+	if !containsString(report.Relocated[0].Paths, "internal/pkg/main_test.go") {
+		t.Errorf("relocated paths %v missing internal/pkg/main_test.go", report.Relocated[0].Paths)
+	}
+}
+
+// TestDetectRevertedMerges_DeletingAFileForAnUnrelatedNewFileRefuses is the
+// fail-closed control for the move reading: the polecat adds a file too, but
+// nothing of the deleted file's content survives in it, so the deletion is not
+// a move and the commit that main added the file with is still undone.
+func TestIntegrationDetectRevertedMerges_DeletingAFileForAnUnrelatedNewFileRefuses(t *testing.T) {
+	t.Parallel()
+	s := newMergedTestMainScenario(t)
+
+	runGitCmd(t, s.polecat, "rm", "internal/pkg/main_test.go")
+	writeTestFileAt(t, filepath.Join(s.polecat, "internal/slot/retire.go"), pkgUnrelatedFile)
+	runGitCmd(t, s.polecat, "add", "-A")
+	runGitCmd(t, s.polecat, "commit", "-m", "feat: retire the TestMain, add Retire (gt-test)")
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges called an unrelated addition a relocation: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
+	}
+	if !containsString(report.Reverted[0].Paths, "internal/pkg/main_test.go") {
+		t.Errorf("reverted paths %v missing internal/pkg/main_test.go", report.Reverted[0].Paths)
+	}
+}
+
 // TestReportRevertedMerges_ReportsRelocationAndContinues checks the
 // operator-facing half: the guard states what it accepted — the commit and the
 // path the content left — and lets the submission through.

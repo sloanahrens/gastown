@@ -496,6 +496,11 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating daemon: %w", err)
 	}
 
+	// The heartbeat's dispatch tick runs the scheduler in process (gt-638go.9).
+	// The sling and the polecat-capacity probe it needs live in this package,
+	// so the one construction site hands them over.
+	d.SetSchedulerDeps(schedulerDeps())
+
 	return daemonRunExit(d.Run(), os.Exit)
 }
 

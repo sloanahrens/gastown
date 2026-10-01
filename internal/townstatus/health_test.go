@@ -1,4 +1,4 @@
-package cmd
+package townstatus
 
 import (
 	"strings"
@@ -8,12 +8,12 @@ import (
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
-func TestTownHealthView(t *testing.T) {
+func TestHealthView(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	town := t.TempDir()
 
-	lines, v, rep := townHealthView(town, now)
+	lines, v, rep := HealthView(town, now)
 	if v != townhealth.VerdictUnknown || rep != nil || !strings.HasPrefix(lines[0], "UNKNOWN no health report") {
 		t.Fatalf("no report: %v %s %v, want UNKNOWN", lines, v, rep)
 	}
@@ -26,7 +26,7 @@ func TestTownHealthView(t *testing.T) {
 	if err := townhealth.Write(town, r); err != nil {
 		t.Fatal(err)
 	}
-	lines, v, rep = townHealthView(town, now)
+	lines, v, rep = HealthView(town, now)
 	if v != townhealth.Red || v.ExitCode() != 2 || rep == nil {
 		t.Errorf("verdict %s exit %d, want red 2", v, v.ExitCode())
 	}
@@ -37,7 +37,7 @@ func TestTownHealthView(t *testing.T) {
 		t.Errorf("every field: %q", lines)
 	}
 
-	lines, v, _ = townHealthView(town, now.Add(time.Hour))
+	lines, v, _ = HealthView(town, now.Add(time.Hour))
 	if v != townhealth.VerdictUnknown || !strings.Contains(lines[0], "stale; last red") {
 		t.Errorf("an hour later: %q %s, want stale UNKNOWN", lines[0], v)
 	}

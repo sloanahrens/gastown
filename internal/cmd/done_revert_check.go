@@ -100,7 +100,7 @@ func relocatedMergesNote(g revertReportGit, relocated []git.RevertedMerge) strin
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("  Relocated — moved within its package, not undone, so the code they carry survives:\n")
+	b.WriteString("  Relocated — moved, not undone, so the code they carry survives:\n")
 	for _, f := range relocated {
 		fmt.Fprintf(&b, "    %s %s\n", shortSHA(f.Commit), commitSubjectOrUnavailable(g, f.Commit))
 		for _, path := range f.Paths {

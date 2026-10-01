@@ -469,7 +469,9 @@ func getWispIDs(beadsPath string) map[string]bool {
 
 // wispIDsFrom is the set of live wisp IDs bd lists; nil when it cannot list
 // them (the wisp table may not exist or Dolt may be unavailable).
-func wispIDsFrom(bd interface{ MolWispList() ([]*beads.Issue, error) }) map[string]bool {
+func wispIDsFrom(bd interface {
+	MolWispList() ([]*beads.Issue, error)
+}) map[string]bool {
 	wisps, err := bd.MolWispList()
 	if err != nil {
 		return nil

@@ -460,6 +460,10 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		// Fail closed when a checked target cannot be resolved.
 		{"unresolvable variable in a write", "cp a.go $POLECAT_PATHS_UNSET/x.go", true},
 		{"unresolvable variable as a redirect target", "echo hi > $POLECAT_PATHS_UNSET/x.go", true},
+		// A control keyword in front of the command must not hide it: the
+		// segment `do rm ...` named no write-capable command at all.
+		{"rm behind a for-loop's do", "for f in a b; do rm -rf " + filepath.Join(p.sibling, "internal.go") + "; done", true},
+		{"cp behind a then", "if true; then cp a.go " + sib + "; fi", true},
 
 		// --- allowed ---
 		{"read-only command in a sibling worktree", "grep -rn TODO " + p.sibling, false},
@@ -547,6 +551,200 @@ func TestPolecatPathGuardBashUnresolvableReadIsAllowed(t *testing.T) {
 	p := newPolecatTestTown(t)
 	if err := p.run(t, "Bash", commandInput("grep -rn TODO $POLECAT_PATHS_UNSET/dir")); err != nil {
 		t.Errorf("expected an unresolvable read target to be allowed, got block: %v", err)
+	}
+}
+
+// TestPolecatPathGuardBashVariableIndirection is the gt-tt8sg leg: the
+// guard expands a target's variable from its own environment, and a command
+// line that assigns the name itself has already replaced that value for the
+// shell that will run it. The session here carries `path`, exactly as the
+// incident's zsh session did — a PATH-shaped value that is not a town path, so
+// the guard read `rm "$path"` as an ordinary delete outside the town and let
+// it through. The fixtures are the three shapes the bead names, plus the FIX
+// probes: the incident command verbatim, `rm $(which bd)`, and
+// `mv -f "$T" ~/.local/bin/bd`.
+func TestPolecatPathGuardBashVariableIndirection(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t).withEnv("path", "/usr/local/bin:/usr/bin:/bin")
+	bin := filepath.Join(p.root, ".local", "bin", "bd")
+
+	cases := []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{
+			"the incident: rm a path resolved by command -v inside a for loop",
+			"export PATH=\"/tmp/gt-uninst-probe/bin:$PATH\"\n" +
+				"for bin in gt bd; do path=$(command -v \"$bin\") || continue; chflags nouchg \"$path\"; rm \"$path\"; done",
+			true,
+		},
+		{"the incident without the loop", `path=$(command -v bd); rm "$path"`, true},
+		{"chflags on a path resolved by command -v", `path=$(command -v bd); chflags nouchg "$path"`, true},
+		{"rm through which directly", "rm $(which bd)", true},
+		{"rm through command -v directly", "rm $(command -v bd)", true},
+		{"rm through type directly", "rm $(type -p bd)", true},
+		{"mv a variable assigned earlier in the line", `T=$(mktemp); mv -f "$T" ` + bin, true},
+		{"cp onto a variable-assigned destination", `out=$(mktemp -d); cp a.go "$out"`, true},
+		{"rm a for-loop variable that shadows the environment", `for path in a b; do rm "$path"; done`, true},
+		{"rm a variable set by read", `read p; rm "$p"`, true},
+		{"redirect onto a variable-assigned target", `T=out; echo hi > "$T"`, true},
+		{"rm a braced variable assigned in the line", `path=$(command -v bd); rm "${path}"`, true},
+		// An interpreter's payload is code, and code writes: the first cut of
+		// this rule judged the payload as a read, so this exact shape still
+		// reached the production bd.
+		{"python3 payload writing a variable resolved by command -v", `path=$(command -v bd); python3 -c "open('$path','w').write('stub')"`, true},
+		{"node payload writing a variable set by which", "p=`which bd`; node -e \"require('fs').writeFileSync('$p','x')\"", true},
+		{"sh payload removing a for-loop variable", `for path in a b; do sh -c "rm \"$path\""; done`, true},
+
+		// Indirection is the trigger, not variables: a name the guard really can
+		// look up in the session environment still resolves as it always did.
+		{"rm under $TMPDIR", "rm -rf $TMPDIR/polecat-paths-probe", false},
+		{"cp to $TMPDIR", "cp a.go $TMPDIR/polecat-paths-probe/x.go", false},
+		{"read through an assigned variable", `p=$(command -v bd); cat "$p"`, false},
+		{"read through which", "grep -rn STUB $(which bd)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathGuardBashGroupingConstructs is the other half of the gt-tt8sg
+// review: a construct that OPENS a segment — a subshell, a brace group, a
+// `case` body — reported its own punctuation as the command word, so the rm
+// inside it was never looked at. The fixtures are the shapes the review named,
+// the glued spellings a tokenizer leaves together, and the reads and
+// own-worktree writes that must stay allowed.
+func TestPolecatPathGuardBashGroupingConstructs(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	sib := filepath.Join(p.sibling, "internal.go")
+
+	cases := []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"subshell around an rm", `( rm -rf ` + sib + ` )`, true},
+		{"brace group around an rm", `{ rm -rf ` + sib + `; }`, true},
+		{"subshell glued to its command", `(rm -rf ` + sib + `)`, true},
+		{"brace group glued to its command", `{rm -rf ` + sib + `; }`, true},
+		{"if-then body", `if [ -e ` + sib + ` ]; then rm -rf ` + sib + `; fi`, true},
+		{"case body", `case x in a) rm -rf ` + sib + `;; esac`, true},
+		{"case body, second branch", `case x in a) echo hi ;; b) cp a.go ` + sib + ` ;; esac`, true},
+		{"subshell around a variable write", `( T=x; echo hi > "$T" )`, true},
+		{"subshell behind time", `time ( rm -rf ` + sib + ` )`, true},
+		{"brace group behind a negation", `! { rm -rf ` + sib + `; }`, true},
+		{"subshell behind env", `env ( rm -rf ` + sib + ` )`, true},
+		{"rm behind exec", `exec rm -rf ` + sib, true},
+		{"rm behind builtin", `builtin rm -rf ` + sib, true},
+
+		{"subshell around a read", `( cat ` + sib + ` )`, false},
+		{"case body reading", `case x in a) cat ` + sib + ` ;; esac`, false},
+		{"case body echoing", `case x in a) echo hi ;; esac`, false},
+		{"subshell writing to /tmp", `( echo hi > $TMPDIR/x )`, false},
+		{"subshell writing to the worktree", `( cp a.go ` + filepath.Join(p.worktree, "b.go") + ` )`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
+			}
+		})
+	}
+}
+
+// TestScanCommandVars pins what the assignment scanner sees, since a name it
+// misses is a name the guard resolves from a stale environment, and a name it
+// invents would refuse a legitimate literal target.
+func TestScanCommandVars(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		command  string
+		assigned []string
+		lookup   []string
+	}{
+		{name: "plain assignment", command: "p=/tmp/x; rm a", assigned: []string{"p"}},
+		{name: "command -v assignment", command: `p=$(command -v bd); rm a`, assigned: []string{"p"}, lookup: []string{"p"}},
+		{name: "which assignment in backticks", command: "p=`which bd`; rm a", assigned: []string{"p"}, lookup: []string{"p"}},
+		{name: "for variable", command: `for f in a b; do rm "$f"; done`, assigned: []string{"f"}},
+		{name: "read variable", command: "read -r p; rm a", assigned: []string{"p"}},
+		{name: "read with a flag that takes a value", command: `read -p 'prompt: ' ans; rm "$ans"`, assigned: []string{"ans"}},
+		{name: "printf -v setter", command: `printf -v p '%s' /tmp/x; rm "$p"`, assigned: []string{"p"}},
+		{name: "read behind sudo", command: "sudo read p", assigned: []string{"p"}},
+		// The setters are read at command position only: a word that merely
+		// reads as one names nothing, and treating it as a setter would deny a
+		// target the line really does spell out.
+		{name: "for in argument position", command: "echo for x", assigned: nil},
+		{name: "read in argument position", command: "grep -n read p", assigned: nil},
+		// A NAME= value that is merely data must not read as an assignment.
+		{name: "assignment inside a commit message", command: `git commit -m "fix: a=b"`, assigned: nil},
+		{name: "no assignments at all", command: "cp a.go b.go", assigned: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vars := scanCommandVars(tc.command)
+			for _, name := range tc.assigned {
+				if !vars.assigned[name] {
+					t.Errorf("scanCommandVars(%q): %s not seen as assigned", tc.command, name)
+				}
+			}
+			for _, name := range tc.lookup {
+				if !vars.lookup[name] {
+					t.Errorf("scanCommandVars(%q): %s not seen as a command lookup", tc.command, name)
+				}
+			}
+			if len(vars.assigned) != len(tc.assigned) {
+				t.Errorf("scanCommandVars(%q).assigned = %v, want %v", tc.command, vars.assigned, tc.assigned)
+			}
+			// A name read as a command lookup is the stricter of the two and
+			// must be pinned too: an extra entry here denies a legitimate
+			// literal target through a name the line never set that way.
+			if len(vars.lookup) != len(tc.lookup) {
+				t.Errorf("scanCommandVars(%q).lookup = %v, want %v", tc.command, vars.lookup, tc.lookup)
+			}
+		})
+	}
+}
+
+// TestShellVarNames pins the name extraction: braced and bare forms both count,
+// and `$1` / `$?` / `$$` are not names.
+func TestShellVarNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		word string
+		want []string
+	}{
+		{"$path", []string{"path"}},
+		{"$path/x", []string{"path"}},
+		{"${path}/x", []string{"path"}},
+		{"$HOME/.local/bin/bd", []string{"HOME"}},
+		{"$a$b", []string{"a", "b"}},
+		{"/tmp/literal", nil},
+		{`"$path"`, []string{"path"}},
+		{"$1", nil},
+		{"$?", nil},
+		{"$", nil},
+		{"${}", nil},
+	}
+	for _, tc := range cases {
+		got := shellVarNames(tc.word)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("shellVarNames(%q) = %v, want %v", tc.word, got, tc.want)
+		}
 	}
 }
 

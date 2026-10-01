@@ -336,24 +336,6 @@ func outputCrewContext(w io.Writer, ctx RoleContext) {
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
 
-func outputBootContext(w io.Writer, ctx RoleContext) {
-	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("# Boot Watchdog Context"))
-	fmt.Fprintln(w, "You are the **Boot Watchdog** - the daemon's entry point for Deacon triage.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Responsibilities")
-	fmt.Fprintln(w, "- Observe Deacon session health")
-	fmt.Fprintln(w, "- Decide whether to wake, nudge, or restart the Deacon")
-	fmt.Fprintln(w, "- Run triage and exit (ephemeral - fresh each spawn)")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Key Commands")
-	fmt.Fprintln(w, "- `"+cli.Name()+" boot triage` - Run triage directly")
-	fmt.Fprintln(w, "- `"+cli.Name()+" boot status` - Show Boot status")
-	fmt.Fprintln(w, "- `"+cli.Name()+" deacon status` - Check Deacon health")
-	fmt.Fprintln(w)
-	outputCommandQuickReference(os.Stdout, ctx)
-	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
-}
-
 func outputUnknownContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("# Gas Town Context"))
 	fmt.Fprintln(w, "Could not determine specific role from current directory.")
