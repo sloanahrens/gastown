@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -57,6 +58,7 @@ type harnessHost struct {
 	tmuxSocketDir func() string
 	ensureDolt    func() error
 	terminateDolt func() error
+	startUnitTier func(...unittier.Option) (*unittier.Run, error)
 	resolvers     []liveTownResolver
 	forbidden     func(dir string) bool
 	stderr        io.Writer
@@ -80,6 +82,7 @@ func processHost() *harnessHost {
 		tmuxSocketDir: tmux.SocketDir,
 		ensureDolt:    EnsureDoltContainerForTestMain,
 		terminateDolt: TerminateDoltContainer,
+		startUnitTier: unittier.Start,
 		resolvers:     liveTownResolvers,
 		forbidden:     workspace.IsForbiddenRoot,
 		stderr:        os.Stderr,

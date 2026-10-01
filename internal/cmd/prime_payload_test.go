@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -541,14 +543,35 @@ func TestOutputRoleDirectives_UncappedOutsideHookMode(t *testing.T) {
 	}
 }
 
+// sleepRecorder is a clock whose Sleep returns at once and records how
+// long it was asked to sleep.
+type sleepRecorder struct {
+	clockwork.Clock
+	slept []time.Duration
+}
+
+func (c *sleepRecorder) Sleep(d time.Duration) { c.slept = append(c.slept, d) }
+
+// A single attempt never sleeps; more attempts back off 500ms, then 1s.
+// Asserted on the clock seam: a wall-clock bound over a real bd lookup
+// failed under host load (14.3s at 98d33fe4, gt-cx3rt).
 func TestFindAgentWorkWithAttempts_SingleAttemptDoesNotBackOff(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
-	start := time.Now()
-	_, _ = findAgentWorkWithAttempts(ctx, 1)
-	if d := time.Since(start); d > 6*time.Second {
-		t.Fatalf("single attempt took %v; the retry backoff must not apply", d)
+	for _, tc := range []struct {
+		attempts int
+		want     string
+	}{
+		{attempts: 1, want: "[]"},
+		{attempts: 3, want: "[500ms 1s]"},
+	} {
+		clock := &sleepRecorder{Clock: clockwork.NewFakeClockAt(time.Unix(0, 0))}
+		calls := 0
+		none := func(RoleContext, string) (*beads.Issue, error) { calls++; return nil, nil }
+		if _, err := retryAgentWork(ctx, tc.attempts, clock, none); err != nil || calls != tc.attempts || fmt.Sprint(clock.slept) != tc.want {
+			t.Fatalf("%d attempts: err %v, %d lookups, slept %v; want %s", tc.attempts, err, calls, clock.slept, tc.want)
+		}
 	}
 }
 

@@ -90,7 +90,8 @@ func TestHermeticTest_KeepsExternalDolt(t *testing.T) {
 // gt-yav3: without an explicit opt-out, StartHermetic must bind a throwaway
 // per-process tmux socket rather than leaving the default (town) socket in
 // force, so tests that construct tmux.Tmux land on a private server. Finish
-// kills that server. With no tmux installed there is nothing to bind.
+// kills that server, with the tmux it found at start, when one was started:
+// otherwise it runs no tmux. With no tmux installed there is nothing to bind.
 func TestStartHermetic_IsolatesTmuxSocketByDefault(t *testing.T) {
 	t.Parallel()
 	f := newFakeHarness(t, goEnvSet...)
@@ -101,9 +102,28 @@ func TestStartHermetic_IsolatesTmuxSocketByDefault(t *testing.T) {
 	if h.TmuxSocket != "gt-test-4242" || f.socket != "gt-test-4242" {
 		t.Errorf("TmuxSocket = %q, bound %q; want the per-process gt-test-4242", h.TmuxSocket, f.socket)
 	}
+	socket := filepath.Join(f.tmuxSocketDir(), "gt-test-4242")
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h.Finish(0)
-	if !slices.Contains(f.commands(), "tmux -L gt-test-4242 kill-server") {
+	if !slices.Contains(f.commands(), "/fake/bin/tmux -L gt-test-4242 kill-server") {
 		t.Errorf("Finish did not kill the isolated server: %q", f.commands())
+	}
+	if _, err := os.Lstat(socket); err == nil {
+		t.Errorf("Finish left the isolated server's socket %s", socket)
+	}
+
+	f = newFakeHarness(t, goEnvSet...)
+	h, err = f.startHermetic()
+	if err != nil {
+		t.Fatalf("StartHermetic: %v", err)
+	}
+	h.Finish(0)
+	for _, c := range f.commands() {
+		if strings.Contains(c, "tmux") {
+			t.Errorf("Finish ran %q with no server started, want no tmux", c)
+		}
 	}
 
 	f = newFakeHarness(t, goEnvSet...).noTool("tmux")
