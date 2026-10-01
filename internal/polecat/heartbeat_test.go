@@ -448,14 +448,16 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 
 	// 2. The stage outlives one write: every tick advances it. Stop is a
 	// barrier, so once it returns the last tick's write has landed.
+	// Each tick is awaited before the next Advance: the ticker registers as a
+	// clock waiter whether or not the goroutine is ready, so BlockUntil alone
+	// let three Advances coalesce into one buffered tick, and stop could then
+	// win the select over it (gt-h2chb).
 	for i := 1; i <= 3; i++ {
 		if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
 			t.Fatal(err)
 		}
 		clk.Advance(interval)
-	}
-	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
-		t.Fatal(err)
+		waitHeartbeatAt(t, townRoot, sessionName, clk.Now())
 	}
 	stop()
 	stop() // idempotent — a second call must not panic or re-arm anything
@@ -667,5 +669,22 @@ func TestTouchSessionHeartbeat_ReaderNeverSeesTornWrite(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("heartbeats dir has %d entries after writes, want just the heartbeat (no leftover temp files)", len(entries))
+	}
+}
+
+// waitHeartbeatAt yields until the session heartbeat reads want, failing when
+// the test's context ends first.
+func waitHeartbeatAt(t *testing.T, townRoot, sessionName string, want time.Time) {
+	t.Helper()
+	for {
+		if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil && hb.Timestamp.Equal(want) {
+			return
+		}
+		select {
+		case <-t.Context().Done():
+			t.Fatalf("heartbeat never reached %v", want)
+		default:
+			runtime.Gosched()
+		}
 	}
 }
