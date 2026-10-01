@@ -24,7 +24,7 @@ const RoutesFileName = "routes.jsonl"
 
 // RoutesTempPrefix is the os.CreateTemp prefix WriteRoutes uses to build its
 // atomic-write temp in beadsDir, before renaming it over RoutesFileName.
-// Exported so the hermetic tripwire (gt-lqri) can recognize this temp's
+// Exported so gt doctor's test-leaks check (gt-lqri) can recognize this temp's
 // exact shape instead of duplicating ".routes-" as a second, driftable
 // source of truth.
 const RoutesTempPrefix = ".routes-"

@@ -4,8 +4,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -57,7 +55,6 @@ type harnessHost struct {
 	pid           int
 	setTmuxSocket func(socket string)
 	tmuxSocketDir func() string
-	tmuxSessions  func(socket string) []string
 	ensureDolt    func() error
 	terminateDolt func() error
 	resolvers     []liveTownResolver
@@ -81,21 +78,10 @@ func processHost() *harnessHost {
 		pid:           os.Getpid(),
 		setTmuxSocket: tmux.SetDefaultSocket,
 		tmuxSocketDir: tmux.SocketDir,
-		tmuxSessions:  liveTmuxTestSessions,
 		ensureDolt:    EnsureDoltContainerForTestMain,
 		terminateDolt: TerminateDoltContainer,
 		resolvers:     liveTownResolvers,
 		forbidden:     workspace.IsForbiddenRoot,
 		stderr:        os.Stderr,
 	}
-}
-
-// socketFromTMUX is the tmux socket name in a $TMUX value
-// ("/path/to/socket,pid,session"), as tmux.SocketFromEnv reads it.
-func socketFromTMUX(value string) string {
-	path, _, _ := strings.Cut(value, ",")
-	if path == "" {
-		return ""
-	}
-	return filepath.Base(path)
 }

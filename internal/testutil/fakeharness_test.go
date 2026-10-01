@@ -97,7 +97,6 @@ func newFakeHarness(t *testing.T, env ...string) *fakeHarness {
 		pid:           4242,
 		setTmuxSocket: func(s string) { f.mu.Lock(); f.socket = s; f.mu.Unlock() },
 		tmuxSocketDir: func() string { return cwd },
-		tmuxSessions:  func(string) []string { return nil },
 		ensureDolt:    func() error { return errors.New("fake: no Docker") },
 		terminateDolt: func() error { return nil },
 		forbidden:     func(string) bool { return false },

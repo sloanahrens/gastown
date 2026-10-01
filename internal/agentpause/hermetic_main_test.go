@@ -9,8 +9,8 @@ import (
 
 // TestMain runs this package's tests under the hermetic harness (gt-lwi):
 // GT_*/BD_* env scrubbed, HOME and town root redirected to a sandbox, Dolt
-// ports poisoned so nothing reaches the production server, and a tripwire
-// that fails the run if any state leaks into a live town.
+// ports poisoned so nothing reaches the production server, and workspace
+// resolution refusing the live town.
 //
 // The package writes to <townRoot>/.runtime — plain os.TempDir() sandboxing
 // isn't enough to keep that off a live town, so it opts into the harness
