@@ -336,6 +336,8 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 		r := &rig.Rig{
 			Name: rigName,
 			Path: filepath.Join(townRoot, rigName),
+
+			BDRunner: townBDRunner(townRoot),
 		}
 		if df := r.GetStringConfig("default_formula"); df != "" {
 			return df

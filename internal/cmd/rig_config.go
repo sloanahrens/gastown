@@ -279,7 +279,7 @@ func getConfigKeys(townRoot string, r *rig.Rig) []string {
 	}
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, r.Name)
 	beadsDir := beads.ResolveBeadsDir(r.Path)
-	bd := beads.NewWithBeadsDir(townRoot, beadsDir)
+	bd := beads.NewWithBeadsDirAndRunner(townRoot, beadsDir, r.BDRunner)
 	if issue, err := bd.Show(rigBeadID); err == nil {
 		for _, label := range issue.Labels {
 			// Labels are in format "key:value"

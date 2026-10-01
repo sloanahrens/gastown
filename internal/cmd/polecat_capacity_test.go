@@ -12,17 +12,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
+
+// useFakeTownTmux answers townRoot's capacity accounting from an empty
+// in-memory tmux server, and its rig-bead reads from a bd with no rig beads,
+// instead of the real tmux and bd.
+func useFakeTownTmux(t *testing.T, townRoot string) *tmuxfake.Server {
+	t.Helper()
+	srv := tmuxfake.New(clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)))
+	townSessionListers.Store(townRoot, srv.ListSessions)
+	useFailingTownBD(t, townRoot)
+	t.Cleanup(func() { townSessionListers.Delete(townRoot) })
+	return srv
+}
 
 func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
 	t.Helper()
 	townRoot := t.TempDir()
 	configureScheduler(t, townRoot, maxPolecats, 1)
+	useFakeTownTmux(t, townRoot)
 	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{Version: config.CurrentRigsVersion}); err != nil {
 		t.Fatalf("SaveRigsConfig: %v", err)
 	}
@@ -205,6 +220,7 @@ func TestAcquirePolecatAdmissionDisabledWhenSchedulerCapNonPositive(t *testing.T
 		t.Run("max", func(t *testing.T) {
 			townRoot := t.TempDir()
 			configureScheduler(t, townRoot, maxPolecats, 1)
+			useFakeTownTmux(t, townRoot)
 
 			handle, snapshot, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
 			if err != nil {
@@ -501,6 +517,7 @@ func setupPolecatCapacityTown(t *testing.T, rigNames ...string) string {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 	configureScheduler(t, townRoot, -1, 1)
+	useFakeTownTmux(t, townRoot)
 	rigs := make(map[string]config.RigEntry, len(rigNames))
 	for _, name := range rigNames {
 		if err := os.MkdirAll(filepath.Join(townRoot, name, "polecats"), 0755); err != nil {
