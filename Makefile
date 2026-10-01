@@ -260,8 +260,9 @@ gate: lint
 	@# reported otherwise (gt-3vbfn); make tier-check fails on wall (gt-z862q).
 	@# The budget runner measures converted
 	@# packages through its CPU-measuring -exec wrapper, which bypasses the
-	@# test result cache, and runs the packages in unconverted.txt afterwards
-	@# with the cache (gt-22hdp.53). -timeout 20m is the per-package hang
+	@# test result cache, and at the same time runs the packages in
+	@# unconverted.txt with the cache (gt-22hdp.53), the two halves sharing
+	@# go test's -p cap (gt-qe4b0). -timeout 20m is the per-package hang
 	@# detector, kept from the one gate definition (gt-ik4a1.1).
 	@echo "gate: unit tier (every package)" >&2
 	@# The suite runs in the background so the trap fires at once on INT or
