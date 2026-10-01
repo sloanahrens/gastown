@@ -83,6 +83,12 @@ type Lander struct {
 	// as "error:<reason>", so om infrastructure never blocks the queue. When
 	// false, such a landing stops with an *InfraError instead.
 	ReviewErrorLands bool
+	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
+	// flake policy's rerun (flake.go). nil means a red gate is final.
+	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
+	// GateBeads files the flake policy's beads: one per flaky test, one per
+	// package over the test budget. nil logs them only.
+	GateBeads GateBeads
 
 	afterPush func()                // test seam: runs between the push and the read-back
 	openRepo  func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
@@ -96,6 +102,10 @@ type Result struct {
 	Base    string
 	Gate    GateResult
 	Verdict Verdict
+	// Rerun and Flaky are set when the gate was red and the flake policy's
+	// rerun of the failed packages passed.
+	Rerun *GateResult
+	Flaky []Flake
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -209,6 +219,9 @@ func (l *Lander) now() time.Time {
 // --force-with-lease push against the tip the merge was built on, a read-back
 // of that tip, then the landings file, the LANDING RECORD block and the close.
 //
+// A red gate goes through the flake policy (flake.go) before it is a
+// rejection.
+//
 // Errors: *Rejection (written to the bead), *RaceError, *InfraError (nothing
 // written), ErrNotReady, *RecordError (landed, record incomplete).
 func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
@@ -316,8 +329,21 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
 	if !gateRes.Passed {
-		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "gate failed on the merged tree: " + gateRes.Summary(), GateTail: gateRes.FailureTail()}
-		return Result{}, l.reject(issue, w, rej, reviewFindings(verdict, reviewErr))
+		fv, err := l.applyFlakePolicy(ctx, dir, w, merged, gateRes)
+		if err != nil {
+			return Result{}, err
+		}
+		if len(fv.flakes) == 0 {
+			reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
+			if fv.rerun != nil {
+				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
+				tail = fv.rerun.FailureTail()
+			}
+			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
+			return Result{}, l.reject(issue, w, rej, reviewFindings(verdict, reviewErr))
+		}
+		res.Rerun, res.Flaky = fv.rerun, fv.flakes
+		l.logf("%s: the failed package(s) passed their rerun; landing with %d flake(s) filed", w.BeadID, len(fv.flakes))
 	}
 	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped {
 		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
@@ -632,7 +658,7 @@ func (l *Lander) record(w Work, res Result) error {
 	rec := LandingRecord{
 		BeadID: w.BeadID, Rig: w.Rig, Branch: w.Branch, Head: w.Head, Target: w.Target, Base: res.Base,
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
-		GateResult: res.Gate.Summary(), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
+		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
 		Route: route, LandedAt: l.now().UTC(),
 	}
 	if err := l.Landings.Append(rec); err != nil {

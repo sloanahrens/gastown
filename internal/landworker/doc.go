@@ -9,8 +9,6 @@
 // a rejection, the polecat's intent record, backoff after infrastructure
 // failures, and the annotations a human needs when only a human can proceed.
 //
-// The flake policy (gt-v4ssj.5) is not implemented here. Its seam is the
-// gate: the daemon builds each rig's land.Gate through a GatePolicy, and a
-// rerun policy wraps the gate there, where per-package results are visible
-// before Land writes a rejection.
+// The flake policy (gt-v4ssj.5) lives in Land, the one gate path; this
+// package only files its beads (GateBeads).
 package landworker

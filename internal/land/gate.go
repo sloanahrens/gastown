@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 // the target. D9 replaces the step list with `make gate`; callers do not
 // change.
 //
-// A Gate never retries. The flake policy (gt-v4ssj.5) reads per-package
+// A Gate never retries. Land's flake policy (flake.go) reads per-package
 // results from GateResult and decides reruns itself.
 type Gate interface {
 	Run(ctx context.Context, dir string) GateResult
@@ -48,6 +49,25 @@ type StepResult struct {
 	Tail string
 	// Packages are the Go packages the step reported as ok or FAIL, in order.
 	Packages []PackageResult
+	// FailedTests are the top-level tests go test reported as --- FAIL, each
+	// under the package whose FAIL line followed it.
+	FailedTests []FailedTest
+	// BudgetOverruns are the packages the testpolicy budget runner failed on
+	// a "BUDGET:" line (over the user-CPU budget, or CPU time unrecorded).
+	// A "BUDGET (reported only ...)" line fails nothing and is not one.
+	BudgetOverruns []BudgetOverrun
+}
+
+// FailedTest is one failing top-level test in `go test` output.
+type FailedTest struct {
+	Package string
+	Test    string
+}
+
+// BudgetOverrun is one failing "BUDGET:" line of the budget runner.
+type BudgetOverrun struct {
+	Package string
+	Line    string
 }
 
 // PackageResult is one package's line in `go test` output.
@@ -319,13 +339,16 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 			code, err = attempt()
 		}
 		out := buf.String()
+		pkgs, tests := parseGoTestOutput(out)
 		res.Steps = append(res.Steps, StepResult{
-			Name:     s.Name,
-			Command:  s.Command,
-			ExitCode: code,
-			Elapsed:  time.Since(start),
-			Tail:     lastLines(out, gateTailLines),
-			Packages: parsePackageResults(out),
+			Name:           s.Name,
+			Command:        s.Command,
+			ExitCode:       code,
+			Elapsed:        time.Since(start),
+			Tail:           lastLines(out, gateTailLines),
+			Packages:       pkgs,
+			FailedTests:    tests,
+			BudgetOverruns: parseBudgetOverruns(out),
 		})
 		if err != nil {
 			res.Err = fmt.Errorf("gate step %s (%s) did not run: %w", s.Name, s.Command, err)
@@ -350,16 +373,56 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 // package and is skipped.
 var packageLineRE = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(\s|$)`)
 
-func parsePackageResults(out string) []PackageResult {
-	var pkgs []PackageResult
+// failedTestRE matches a "--- FAIL: TestName (0.01s)" line, subtests
+// (indented, "TestName/sub") included.
+var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)`)
+
+// parseGoTestOutput reads go test's text output: each package's summary line
+// and the top-level tests that failed in it. go test (and the budget runner)
+// print a package's output in one block ending in its summary line, so a
+// --- FAIL line belongs to the next FAIL line's package.
+func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
+	var (
+		pkgs    []PackageResult
+		tests   []FailedTest
+		pending []string
+	)
 	for _, line := range strings.Split(out, "\n") {
+		if m := failedTestRE.FindStringSubmatch(line); m != nil {
+			name, _, _ := strings.Cut(m[1], "/")
+			if !slices.Contains(pending, name) {
+				pending = append(pending, name)
+			}
+			continue
+		}
 		m := packageLineRE.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: m[1] == "ok"})
+		passed := m[1] == "ok"
+		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: passed})
+		if !passed {
+			for _, name := range pending {
+				tests = append(tests, FailedTest{Package: m[2], Test: name})
+			}
+		}
+		pending = nil
 	}
-	return pkgs
+	return pkgs, tests
+}
+
+// budgetLineRE matches the budget runner's failing lines, "BUDGET: <pkg>
+// used ..." and "BUDGET: <pkg> passed but its CPU time was not recorded".
+var budgetLineRE = regexp.MustCompile(`^BUDGET: (\S+) `)
+
+func parseBudgetOverruns(out string) []BudgetOverrun {
+	var over []BudgetOverrun
+	for _, line := range strings.Split(out, "\n") {
+		if m := budgetLineRE.FindStringSubmatch(line); m != nil {
+			over = append(over, BudgetOverrun{Package: m[1], Line: strings.TrimSpace(line)})
+		}
+	}
+	return over
 }
 
 func lastLines(s string, n int) string {
