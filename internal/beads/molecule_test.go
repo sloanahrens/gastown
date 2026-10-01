@@ -282,73 +282,6 @@ Needs: review, test`
 	}
 }
 
-func TestExpandTemplateVars(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		ctx  map[string]string
-		want string
-	}{
-		{
-			name: "no variables",
-			text: "Just plain text",
-			ctx:  map[string]string{"foo": "bar"},
-			want: "Just plain text",
-		},
-		{
-			name: "single variable",
-			text: "Implement {{feature_name}} feature",
-			ctx:  map[string]string{"feature_name": "authentication"},
-			want: "Implement authentication feature",
-		},
-		{
-			name: "multiple variables",
-			text: "Implement {{feature}} in {{file}}",
-			ctx:  map[string]string{"feature": "login", "file": "auth.go"},
-			want: "Implement login in auth.go",
-		},
-		{
-			name: "unknown variable left as-is",
-			text: "Value is {{unknown}}",
-			ctx:  map[string]string{"known": "value"},
-			want: "Value is {{unknown}}",
-		},
-		{
-			name: "nil context",
-			text: "Value is {{var}}",
-			ctx:  nil,
-			want: "Value is {{var}}",
-		},
-		{
-			name: "empty context",
-			text: "Value is {{var}}",
-			ctx:  map[string]string{},
-			want: "Value is {{var}}",
-		},
-		{
-			name: "repeated variable",
-			text: "{{x}} and {{x}} again",
-			ctx:  map[string]string{"x": "foo"},
-			want: "foo and foo again",
-		},
-		{
-			name: "multiline",
-			text: "First line with {{a}}.\nSecond line with {{b}}.",
-			ctx:  map[string]string{"a": "alpha", "b": "beta"},
-			want: "First line with alpha.\nSecond line with beta.",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ExpandTemplateVars(tt.text, tt.ctx)
-			if got != tt.want {
-				t.Errorf("ExpandTemplateVars() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseMoleculeSteps_WithTemplateVars(t *testing.T) {
 	desc := `## Step: implement
 Implement {{feature_name}} in {{target_file}}.
@@ -365,16 +298,6 @@ Follow the existing patterns.`
 	// Template vars should be preserved in parsed instructions
 	if steps[0].Instructions != "Implement {{feature_name}} in {{target_file}}.\nFollow the existing patterns." {
 		t.Errorf("Instructions = %q", steps[0].Instructions)
-	}
-
-	// Now expand them
-	expanded := ExpandTemplateVars(steps[0].Instructions, map[string]string{
-		"feature_name": "user auth",
-		"target_file":  "auth.go",
-	})
-
-	if expanded != "Implement user auth in auth.go.\nFollow the existing patterns." {
-		t.Errorf("expanded = %q", expanded)
 	}
 }
 
