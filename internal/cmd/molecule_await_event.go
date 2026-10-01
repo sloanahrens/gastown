@@ -175,11 +175,12 @@ type awaitEventRun struct {
 	channel, rig, agentBead, contextCheck string
 	quiet, json, cleanup                  bool
 	backoff                               awaitSignalBackoff
-	bd                                    beads.BDRunner
-	out                                   io.Writer
-	beadsDir                              func() (string, error)
-	eventRig                              func(townRoot, explicit string) string
-	drainNudges                           func(townRoot string) []nudge.QueuedNudge
+	// db opens the agent bead's database; nil pins bd to it (agentBeadsDB).
+	db          func(beadsDir string) beads.Client
+	out         io.Writer
+	beadsDir    func() (string, error)
+	eventRig    func(townRoot, explicit string) string
+	drainNudges func(townRoot string) []nudge.QueuedNudge
 }
 
 func awaitEventFromFlags() awaitEventRun {
@@ -230,7 +231,7 @@ func (r awaitEventRun) run(townRoot string) error {
 		var wdErr error
 		beadsDir, wdErr = r.beadsDir()
 		if wdErr == nil {
-			labels, labErr := getAgentLabelsVia(r.bd, r.agentBead, beadsDir)
+			labels, labErr := getAgentLabels(agentBeadsDB(r.db, beadsDir), r.agentBead)
 			if labErr != nil {
 				if !r.quiet {
 					fmt.Fprintf(r.out, "%s Could not read agent bead (starting at idle=0): %v\n",
@@ -286,7 +287,7 @@ func (r awaitEventRun) run(townRoot string) error {
 	// When resuming an existing window, keep the original deadline stable across
 	// context-yield re-entry instead of rewriting it on every invocation.
 	if r.agentBead != "" && beadsDir != "" && !resumed {
-		_ = setAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir, now.Add(timeout))
+		_ = setAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead, now.Add(timeout))
 	}
 
 	if !r.quiet && !r.json {
@@ -310,11 +311,11 @@ func (r awaitEventRun) run(townRoot string) error {
 	if r.agentBead != "" && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
 		// think we're dead during long idle periods.
-		_ = updateAgentHeartbeatVia(r.bd, r.agentBead, beadsDir)
+		_ = updateAgentHeartbeat(agentBeadsDB(r.db, beadsDir), r.agentBead)
 
 		if result.Reason == "timeout" {
 			newIdle := idleCycles + 1
-			if setErr := setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, newIdle); setErr != nil {
+			if setErr := setAgentIdleCycles(agentBeadsDB(r.db, beadsDir), r.agentBead, newIdle); setErr != nil {
 				if !r.quiet {
 					fmt.Fprintf(r.out, "%s Failed to update idle count: %v\n",
 						style.Dim.Render("⚠"), setErr)
@@ -325,7 +326,7 @@ func (r awaitEventRun) run(townRoot string) error {
 		} else if result.Reason == "event" {
 			// Reset idle on event received
 			if idleCycles > 0 {
-				_ = setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, 0)
+				_ = setAgentIdleCycles(agentBeadsDB(r.db, beadsDir), r.agentBead, 0)
 			}
 			result.IdleCycles = 0
 		}
@@ -335,7 +336,7 @@ func (r awaitEventRun) run(townRoot string) error {
 		// Keep the backoff window across context-yield so the next invocation
 		// resumes the remaining wait instead of restarting the same idle tier.
 		if result.Reason == "event" || result.Reason == "timeout" {
-			_ = clearAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir)
+			_ = clearAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead)
 		}
 	}
 

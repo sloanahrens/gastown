@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -195,7 +196,8 @@ type awaitSignalRun struct {
 	rig         string
 	quiet, json bool
 	role        string // GT_ROLE: a patrol role that cycles its session records its outcome
-	bd          beads.BDRunner
+	// db opens the agent bead's database; nil pins bd to it (agentBeadsDB).
+	db          func(beadsDir string) beads.Client
 	out, errOut io.Writer
 	eventRig    func(townRoot, explicit string) string
 	drainNudges func(townRoot string) []nudge.QueuedNudge
@@ -228,7 +230,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 	idleKnown := false         // false when the agent bead could not be read
 	var backoffUntil time.Time // zero value means no active window
 	if r.agentBead != "" {
-		labels, err := getAgentLabelsVia(r.bd, r.agentBead, beadsDir)
+		labels, err := getAgentLabels(agentBeadsDB(r.db, beadsDir), r.agentBead)
 		if err != nil {
 			// Agent bead might not exist yet - that's OK, start at 0
 			if !r.quiet {
@@ -276,7 +278,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 	// Persist the backoff window end time so interrupted invocations can resume.
 	if r.agentBead != "" && !resumed {
 		windowEnd := now.Add(timeout)
-		if err := setAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir, windowEnd); err != nil {
+		if err := setAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead, windowEnd); err != nil {
 			if !r.quiet {
 				fmt.Fprintf(r.out, "%s Failed to persist backoff window: %v\n",
 					style.Dim.Render("⚠"), err)
@@ -329,7 +331,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 	// On timeout, increment idle cycles and clear backoff window
 	if result.Reason == "timeout" && r.agentBead != "" {
 		newIdleCycles := idleCycles + 1
-		if err := setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, newIdleCycles); err != nil {
+		if err := setAgentIdleCycles(agentBeadsDB(r.db, beadsDir), r.agentBead, newIdleCycles); err != nil {
 			if !r.quiet {
 				fmt.Fprintf(r.out, "%s Failed to update agent bead idle count: %v\n",
 					style.Dim.Render("⚠"), err)
@@ -338,17 +340,17 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 			result.IdleCycles = newIdleCycles
 		}
 		// Update last_activity so watchers know agent is still alive
-		if err := updateAgentHeartbeatVia(r.bd, r.agentBead, beadsDir); err != nil {
+		if err := updateAgentHeartbeat(agentBeadsDB(r.db, beadsDir), r.agentBead); err != nil {
 			if !r.quiet {
 				fmt.Fprintf(r.out, "%s Failed to update agent heartbeat: %v\n",
 					style.Dim.Render("⚠"), err)
 			}
 		}
 		// Clear the backoff window — timeout completed normally
-		_ = clearAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir)
+		_ = clearAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead)
 	} else if result.Reason == "signal" && r.agentBead != "" {
 		// On signal, update last_activity to prove agent is alive
-		if err := updateAgentHeartbeatVia(r.bd, r.agentBead, beadsDir); err != nil {
+		if err := updateAgentHeartbeat(agentBeadsDB(r.db, beadsDir), r.agentBead); err != nil {
 			if !r.quiet {
 				fmt.Fprintf(r.out, "%s Failed to update agent heartbeat: %v\n",
 					style.Dim.Render("⚠"), err)
@@ -365,7 +367,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 		// agent to reset by hand only when it sees this warning.
 		result.IdleCycles = idleCycles
 		if idleCycles > 0 || !idleKnown {
-			if err := setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, 0); err != nil {
+			if err := setAgentIdleCycles(agentBeadsDB(r.db, beadsDir), r.agentBead, 0); err != nil {
 				fmt.Fprintf(r.errOut, "%s Failed to reset agent bead idle count: %v\n",
 					style.Dim.Render("⚠"), err)
 			} else {
@@ -373,7 +375,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 			}
 		}
 		// Clear the backoff window — woken by real activity
-		_ = clearAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir)
+		_ = clearAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead)
 	}
 
 	// Set effort level based on idle cycles.
@@ -677,117 +679,23 @@ func parseIntSimple(s string) (int, error) {
 //
 // bd agent heartbeat was never shipped (steveyegge/beads#2828). We use the same
 // read-modify-write label pattern as setAgentIdleCycles instead.
-func updateAgentHeartbeat(agentBead, beadsDir string) error {
-	return updateAgentHeartbeatVia(nil, agentBead, beadsDir)
-}
-
-// updateAgentHeartbeatVia is updateAgentHeartbeat with bd answered by run (nil: bd on PATH).
-func updateAgentHeartbeatVia(run beads.BDRunner, agentBead, beadsDir string) error {
-	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
-	if err != nil {
-		return err
-	}
-
-	var newLabels []string
-	for _, label := range allLabels {
-		if len(label) > 10 && label[:10] == "heartbeat:" {
-			continue // Replace existing heartbeat label
-		}
-		newLabels = append(newLabels, label)
-	}
-	newLabels = append(newLabels, fmt.Sprintf("heartbeat:%d", time.Now().Unix()))
-
-	args := []string{"update", agentBead}
-	for _, label := range newLabels {
-		args = append(args, "--set-labels="+label)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-	_, _, err = runPinnedBD(ctx, run, cmd)
-	return err
+func updateAgentHeartbeat(db beads.Client, agentBead string) error {
+	return replaceAgentLabel(db, agentBead, "heartbeat:", fmt.Sprintf("heartbeat:%d", time.Now().Unix()))
 }
 
 // setAgentIdleCycles sets the idle:N label on an agent bead.
-// Uses read-modify-write pattern to update only the idle label.
-func setAgentIdleCycles(agentBead, beadsDir string, cycles int) error {
-	return setAgentIdleCyclesVia(nil, agentBead, beadsDir, cycles)
-}
-
-// setAgentIdleCyclesVia is setAgentIdleCycles with bd answered by run (nil: bd on PATH).
-func setAgentIdleCyclesVia(run beads.BDRunner, agentBead, beadsDir string, cycles int) error {
-	// Read all current labels
-	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
-	if err != nil {
-		return err
-	}
-
-	// Build new label list: keep non-idle labels, add new idle value
-	var newLabels []string
-	for _, label := range allLabels {
-		// Skip any existing idle:* label
-		if len(label) > 5 && label[:5] == "idle:" {
-			continue
-		}
-		newLabels = append(newLabels, label)
-	}
-
-	// Add new idle value
-	newLabels = append(newLabels, fmt.Sprintf("idle:%d", cycles))
-
-	// Use bd update with --set-labels to replace all labels
-	args := []string{"update", agentBead}
-	for _, label := range newLabels {
-		args = append(args, "--set-labels="+label)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-
-	if _, _, err := runPinnedBD(ctx, run, cmd); err != nil {
+func setAgentIdleCycles(db beads.Client, agentBead string, cycles int) error {
+	if err := replaceAgentLabel(db, agentBead, "idle:", fmt.Sprintf("idle:%d", cycles)); err != nil {
 		return fmt.Errorf("setting idle label: %w", err)
 	}
-
 	return nil
 }
 
 // setAgentBackoffUntil persists a backoff-until:TIMESTAMP label on the agent bead.
 // This allows interrupted await-signal invocations to resume with remaining time
 // instead of restarting the full backoff period.
-func setAgentBackoffUntil(agentBead, beadsDir string, until time.Time) error {
-	return setAgentBackoffUntilVia(nil, agentBead, beadsDir, until)
-}
-
-// setAgentBackoffUntilVia is setAgentBackoffUntil with bd answered by run (nil: bd on PATH).
-func setAgentBackoffUntilVia(run beads.BDRunner, agentBead, beadsDir string, until time.Time) error {
-	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
-	if err != nil {
-		return err
-	}
-
-	var newLabels []string
-	for _, label := range allLabels {
-		if len(label) > 14 && label[:14] == "backoff-until:" {
-			continue // Strip existing backoff-until
-		}
-		newLabels = append(newLabels, label)
-	}
-	newLabels = append(newLabels, fmt.Sprintf("backoff-until:%d", until.Unix()))
-
-	args := []string{"update", agentBead}
-	for _, label := range newLabels {
-		args = append(args, "--set-labels="+label)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-	if _, _, err := runPinnedBD(ctx, run, cmd); err != nil {
+func setAgentBackoffUntil(db beads.Client, agentBead string, until time.Time) error {
+	if err := replaceAgentLabel(db, agentBead, "backoff-until:", fmt.Sprintf("backoff-until:%d", until.Unix())); err != nil {
 		return fmt.Errorf("setting backoff-until label: %w", err)
 	}
 	return nil
@@ -795,46 +703,33 @@ func setAgentBackoffUntilVia(run beads.BDRunner, agentBead, beadsDir string, unt
 
 // clearAgentBackoffUntil removes the backoff-until label from the agent bead.
 // Called when await-signal completes normally (timeout or signal received).
-func clearAgentBackoffUntil(agentBead, beadsDir string) error {
-	return clearAgentBackoffUntilVia(nil, agentBead, beadsDir)
-}
-
-// clearAgentBackoffUntilVia is clearAgentBackoffUntil with bd answered by run (nil: bd on PATH).
-func clearAgentBackoffUntilVia(run beads.BDRunner, agentBead, beadsDir string) error {
-	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
-	if err != nil {
-		return err
-	}
-
-	var newLabels []string
-	found := false
-	for _, label := range allLabels {
-		if len(label) > 14 && label[:14] == "backoff-until:" {
-			found = true
-			continue // Strip backoff-until
-		}
-		newLabels = append(newLabels, label)
-	}
-
-	if !found {
-		return nil // Nothing to clear
-	}
-
-	args := []string{"update", agentBead}
-	if len(newLabels) == 0 {
-		args = append(args, "--set-labels=")
-	} else {
-		for _, label := range newLabels {
-			args = append(args, "--set-labels="+label)
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-	if _, _, err := runPinnedBD(ctx, run, cmd); err != nil {
+func clearAgentBackoffUntil(db beads.Client, agentBead string) error {
+	if err := replaceAgentLabel(db, agentBead, "backoff-until:", ""); err != nil {
 		return fmt.Errorf("clearing backoff-until label: %w", err)
 	}
 	return nil
+}
+
+// replaceAgentLabel reads the agent bead's labels and swaps every label
+// starting with prefix for label ("" removes them only). Nothing is written
+// when that changes nothing.
+func replaceAgentLabel(db beads.Client, agentBead, prefix, label string) error {
+	allLabels, err := getAllAgentLabels(db, agentBead)
+	if err != nil {
+		return err
+	}
+	var remove []string
+	for _, l := range allLabels {
+		if strings.HasPrefix(l, prefix) && len(l) > len(prefix) && l != label {
+			remove = append(remove, l)
+		}
+	}
+	var add []string
+	if label != "" && !slices.Contains(allLabels, label) {
+		add = []string{label}
+	}
+	if len(add) == 0 && len(remove) == 0 {
+		return nil
+	}
+	return db.Update(agentBead, beads.UpdateOptions{AddLabels: add, RemoveLabels: remove})
 }

@@ -71,7 +71,7 @@ func (s *issueSnapshot) list(opts ListOptions) ([]*Issue, bool) {
 	if s == nil || opts.Label == "" || !s.labels[opts.Label] {
 		return nil, false
 	}
-	if opts.Priority >= 0 || opts.Parent != "" || opts.Assignee != "" || opts.NoAssignee || opts.Limit != 0 || opts.Ephemeral {
+	if opts.Priority >= 0 || opts.Parent != "" || opts.Assignee != "" || opts.NoAssignee || opts.Limit != 0 || opts.Ephemeral || opts.IssueType != "" {
 		return nil, false
 	}
 	switch opts.Status {

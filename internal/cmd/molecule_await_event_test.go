@@ -7,11 +7,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
@@ -555,49 +559,54 @@ func TestAwaitEventContextYieldPreservesBackoffWindow(t *testing.T) {
 	t.Parallel()
 	// Window (2s) fits inside the 5s timeout, so the run resumes the existing
 	// window instead of arming a fresh one.
-	log := runAwaitEventBackoffTest(t, 2*time.Second, "5s", "50ms")
+	labels := runAwaitEventBackoffTest(t, 2*time.Second, "5s", "50ms")
 
-	updates := updateLines(log)
-	if len(updates) == 0 {
-		t.Fatalf("expected bd update calls, log:\n%s", log)
+	// The timeout path bumps idle:1 to idle:2 and clears the window; a
+	// context-yield does neither.
+	if slices.Contains(labels, "idle:2") {
+		t.Fatalf("expected context-yield, got the timeout path; labels %v", labels)
 	}
-	for _, line := range updates {
-		// The timeout path bumps the stub's idle:1 to idle:2 before clearing
-		// the window; a context-yield does neither.
-		if strings.Contains(line, "idle:2") {
-			t.Fatalf("expected context-yield, got the timeout path; log:\n%s", log)
-		}
-		if !strings.Contains(line, "backoff-until:") {
-			t.Fatalf("context-yield cleared backoff window; update %q in log:\n%s", line, log)
-		}
+	if !slices.ContainsFunc(labels, func(l string) bool { return strings.HasPrefix(l, "backoff-until:") }) {
+		t.Fatalf("context-yield cleared the backoff window; labels %v", labels)
 	}
 }
 
 func TestAwaitEventTimeoutClearsBackoffWindow(t *testing.T) {
 	t.Parallel()
 	// Window (2s) outlives the 80ms timeout, so the clear is the timeout's.
-	log := runAwaitEventBackoffTest(t, 2*time.Second, "80ms", "")
+	labels := runAwaitEventBackoffTest(t, 2*time.Second, "80ms", "")
 
-	updates := updateLines(log)
-	if len(updates) == 0 {
-		t.Fatalf("expected bd update calls, log:\n%s", log)
-	}
-	last := updates[len(updates)-1]
-	if strings.Contains(last, "backoff-until:") {
-		t.Fatalf("timeout did not clear backoff window; last update %q in log:\n%s", last, log)
+	if slices.ContainsFunc(labels, func(l string) bool { return strings.HasPrefix(l, "backoff-until:") }) {
+		t.Fatalf("timeout did not clear the backoff window; labels %v", labels)
 	}
 }
 
-// runAwaitEventBackoffTest runs await-event against an in-process bd that
-// reports the agent bead as gt:agent, idle:1, with a backoff window of
-// backoffWindow (whole seconds), and returns the bd call log.
+// armOnFirstShow is a beads.Client that, at the first read of an agent
+// bead, gives it a backoff-until label window from now.
+type armOnFirstShow struct {
+	beads.Client
+	window time.Duration
+	once   sync.Once
+}
+
+func (a *armOnFirstShow) Show(id string) (*beads.Issue, error) {
+	a.once.Do(func() {
+		until := time.Now().Add(a.window).Unix()
+		_ = a.Client.Update(id, beads.UpdateOptions{AddLabels: []string{fmt.Sprintf("backoff-until:%d", until)}})
+	})
+	return a.Client.Show(id)
+}
+
+// runAwaitEventBackoffTest runs await-event against an agent bead labeled
+// gt:agent, idle:1 with a backoff window of backoffWindow (whole seconds),
+// and returns the bead's labels afterwards.
 //
-// The fake computes the window's deadline when bd reads the labels, not when
-// the test starts: a deadline fixed before the setup is consumed by that
-// setup under load, and a window whose remaining time is down to the
-// context-check interval sends the wait down its timeout path instead, which
-// clears the label both callers assert on (gt-ixtg).
-func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout, contextCheck string) string {
+// The window's deadline is computed when await-event first reads the
+// labels, not when the test starts: a deadline fixed before the setup is
+// consumed by that setup under load, and a window whose remaining time is
+// down to the context-check interval sends the wait down its timeout path
+// instead, which clears the label both callers assert on (gt-ixtg).
+func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout, contextCheck string) []string {
 	t.Helper()
 
 	root := t.TempDir()
@@ -605,21 +614,16 @@ func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		if cmd == "show" {
-			until := time.Now().Add(backoffWindow).Unix()
-			return bdOut(fmt.Sprintf(`[{"labels":["gt:agent","idle:1","backoff-until:%d"]}]`, until))
-		}
-		return bdOut("")
-	}}
+	fake := beadsfake.New()
+	fake.Seed(beads.Issue{ID: "gt-agent", Labels: []string{"gt:agent", "idle:1"}})
+	db := &armOnFirstShow{Client: fake, window: backoffWindow}
 	r := awaitEventRun{
 		channel:      "test",
 		agentBead:    "gt-agent",
 		contextCheck: contextCheck,
 		quiet:        true,
 		backoff:      awaitSignalBackoff{timeout: timeout, mult: 2},
-		bd:           bd.run,
+		db:           func(string) beads.Client { return db },
 		out:          io.Discard,
 		beadsDir:     func() (string, error) { return beadsDir, nil },
 		eventRig:     resolveEventRig,
@@ -628,17 +632,11 @@ func runAwaitEventBackoffTest(t *testing.T, backoffWindow time.Duration, timeout
 	if err := r.run(root); err != nil {
 		t.Fatalf("await-event: %v", err)
 	}
-	return bd.log()
-}
-
-func updateLines(log string) []string {
-	var updates []string
-	for _, line := range strings.Split(log, "\n") {
-		if strings.HasPrefix(line, "update ") {
-			updates = append(updates, line)
-		}
+	got, err := fake.Show("gt-agent")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return updates
+	return got.Labels
 }
 
 func TestEffortLevelContextYield(t *testing.T) {

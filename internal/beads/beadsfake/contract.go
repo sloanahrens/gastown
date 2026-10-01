@@ -48,6 +48,7 @@ var contractCases = []contractCase{
 	{"close fence", contractCloseFence},
 	{"list filters", contractListFilters},
 	{"list order", contractListOrder},
+	{"events", contractEvents},
 	{"assignee queries", contractAssigneeQueries},
 	{"comments", contractComments},
 	{"dependencies and ready", contractDependencies},
@@ -450,6 +451,28 @@ func contractListFilters(t *testing.T, s *scope) {
 	kid := s.mustCreate(t, beads.CreateOptions{Title: "kid", Parent: parent.ID, Priority: -1})
 	got, err = s.List(beads.ListOptions{Parent: parent.ID, Priority: -1})
 	s.want(t, "List{Parent}", got, err, kid.ID)
+}
+
+// contractEvents pins event issues: EventKind makes an issue_type "event"
+// carrying its kind and payload, and IssueType filters on issue_type.
+func contractEvents(t *testing.T, s *scope) {
+	payload := `{"date":"2026-01-02","n":3}`
+	ev := s.mustCreate(t, beads.CreateOptions{Title: "audit " + s.tag, Priority: -1, EventKind: "contract.audit", EventPayload: payload})
+	task := s.mustCreate(t, beads.CreateOptions{Title: "work " + s.tag, Priority: -1})
+	got := s.mustShow(t, ev.ID)
+	if got.Type != "event" || got.EventKind != "contract.audit" || got.Payload != payload {
+		t.Errorf("Show = type %q kind %q payload %q, want event contract.audit %s", got.Type, got.EventKind, got.Payload, payload)
+	}
+	mustDo(t, "close event", s.CloseWithReason("recorded", ev.ID))
+	events, err := s.List(beads.ListOptions{IssueType: "event", Status: "all", Priority: -1})
+	s.want(t, "List{IssueType:event}", events, err, ev.ID)
+	for _, is := range s.mine(events) {
+		if is.Payload != payload {
+			t.Errorf("List payload = %q, want %s", is.Payload, payload)
+		}
+	}
+	tasks, err := s.List(beads.ListOptions{IssueType: "task", Status: "all", Priority: -1})
+	s.want(t, "List{IssueType:task}", tasks, err, task.ID)
 }
 
 // contractListOrder pins List's order: priority first, 0 highest. (Within a
