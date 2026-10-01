@@ -117,9 +117,9 @@ func TestCollectExistingMoleculeDepsReadsCanonicalWispEdges(t *testing.T) {
 	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
 		f.logLine(cmd + " " + strings.Join(args, " "))
 		if cmd == "sql" && len(args) > 0 &&
-			strings.Contains(args[0], "wisp_dependencies") &&
-			strings.Contains(args[0], "depends_on_issue_id") &&
-			strings.Contains(args[0], "depends_on_wisp_id") {
+			strings.Contains(args[len(args)-1], "wisp_dependencies") &&
+			strings.Contains(args[len(args)-1], "depends_on_issue_id") &&
+			strings.Contains(args[len(args)-1], "depends_on_wisp_id") {
 			return bdOut(`[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]`)
 		}
 		return bdAnswer{stderr: "unexpected query", code: 1}

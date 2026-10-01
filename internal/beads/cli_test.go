@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 func newPlainRecorded(t *testing.T, r *recorder) *Beads {
@@ -92,7 +94,7 @@ func TestSQLCSVParsesStdoutOnly(t *testing.T) {
 	r := newRecorder(func([]string) reply {
 		return reply{stdout: "id,title\ngt-1,\"a, b\"\n", stderr: "Note: routed via shared server\n"}
 	})
-	got, err := newPlainRecorded(t, r).SQLCSV("SELECT id, title FROM issues")
+	got, err := newPlainRecorded(t, r).SQLCSV(beadsql.EphemeralIssues())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +109,7 @@ func TestSQLCSVErrorCarriesStderr(t *testing.T) {
 	r := newRecorder(func([]string) reply {
 		return reply{stderr: "Error: syntax error near FROM\n", err: exitError{1}}
 	})
-	_, err := newPlainRecorded(t, r).SQLCSV("SELECT FROM")
+	_, err := newPlainRecorded(t, r).SQLCSV(beadsql.EphemeralIssues())
 	if err == nil || !strings.Contains(err.Error(), "syntax error near FROM") {
 		t.Errorf("err = %v, want bd's stderr in it", err)
 	}

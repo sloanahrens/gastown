@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // TestRunBdSQLCSVRunsInDir checks runBdSQLCSV asks the bd of the directory
@@ -15,11 +17,11 @@ func TestRunBdSQLCSVRunsInDir(t *testing.T) {
 	bd := newFakeBD()
 	dir := t.TempDir()
 	bd.db(dir).OnSQL(csvAnswer([]string{"id"}, []string{"gt-abc"}))
-	records, err := runBdSQLCSV(bd.ctx(t.TempDir()), dir, "SELECT id FROM issues")
+	records, err := runBdSQLCSV(bd.ctx(t.TempDir()), dir, beadsql.EphemeralIssues())
 	if err != nil || len(records) != 2 || records[1][0] != "gt-abc" {
 		t.Fatalf("runBdSQLCSV = %v, %v", records, err)
 	}
-	if got := bd.db(dir).SQLStatements(); len(got) != 1 || got[0] != "SELECT id FROM issues" {
+	if got := bd.db(dir).SQLStatements(); len(got) != 1 || got[0] != beadsql.EphemeralIssues().String() {
 		t.Errorf("statements = %q", got)
 	}
 	if opens := bd.opened(); len(opens) != 1 || opens[0].dir != filepath.Clean(dir) || opens[0].env != nil {

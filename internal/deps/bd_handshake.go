@@ -170,7 +170,11 @@ func ReadDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 // machine mode so a database ahead of bd fails with bd's typed schema_skew
 // exit rather than prose.
 func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
-	stdout, stderr, err := run(ctx, []string{"BD_MACHINE=1"}, "sql", "--json", "SELECT MAX(version) AS version FROM schema_migrations")
+	args, err := beadsql.SchemaLevel().BdArgs("--json")
+	if err != nil {
+		return 0, err
+	}
+	stdout, stderr, err := run(ctx, []string{"BD_MACHINE=1"}, args...)
 	if err != nil {
 		var coded interface{ ExitCode() int }
 		if errors.As(err, &coded) && coded.ExitCode() == bdSchemaSkewExit {

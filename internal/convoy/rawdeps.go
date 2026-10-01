@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -47,21 +46,19 @@ func (t Town) DepListRawIDs(dir, issueID, direction, depType string) ([]string, 
 		return ids, nil
 	}
 
-	var lastErr error
-	for _, legacy := range []bool{false, true} {
-		query := rawDepSQLLiteral(issueID, direction, depType, legacy)
-		out, err := t.bdJSONAutoCommit(dir, "sql", query, "--json")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		ids, err := parseRawDepRows(out, parseKey)
-		if err != nil {
-			return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
-		}
-		return ids, nil
+	args, err := beadsql.RawDeps(issueID, direction, depType).BdArgs("--json")
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, lastErr)
+	out, err := t.bdJSONAutoCommit(dir, args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
+	}
+	ids, err := parseRawDepRows(out, parseKey)
+	if err != nil {
+		return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
+	}
+	return ids, nil
 }
 
 func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
@@ -78,53 +75,17 @@ func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, er
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// beadsql holds the database at a schema level with the typed
-	// dependency columns, so the legacy query is never needed here.
 	db, err := beadsql.Open(ctx, dsn, cfg.Database)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
-	query, args := rawDepSQLArgs(issueID, direction, depType, false)
-	return queryRawDepIDs(ctx, db, query, args)
+	return queryRawDepIDs(ctx, db, beadsql.RawDeps(issueID, direction, depType))
 }
 
-func rawDepSQLArgs(issueID, direction, depType string, legacy bool) (string, []any) {
-	var query string
-	var args []any
-	if direction == "up" {
-		if legacy {
-			query = "SELECT issue_id FROM dependencies WHERE depends_on_id = ?"
-			args = append(args, issueID)
-		} else {
-			query = "SELECT issue_id FROM dependencies WHERE (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external LIKE ? ESCAPE '!')"
-			args = append(args, issueID, issueID, "%:"+strings.ReplaceAll(issueID, "_", "!_"))
-		}
-	} else if legacy {
-		query = "SELECT depends_on_id FROM dependencies WHERE issue_id = ?"
-		args = append(args, issueID)
-	} else {
-		query = "SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id FROM dependencies WHERE issue_id = ?"
-		args = append(args, issueID)
-	}
-	if depType != "" {
-		query += " AND type = ?"
-		args = append(args, depType)
-	}
-	return query, args
-}
-
-func rawDepSQLLiteral(issueID, direction, depType string, legacy bool) string {
-	query, args := rawDepSQLArgs(issueID, direction, depType, legacy)
-	for _, arg := range args {
-		query = strings.Replace(query, "?", "'"+arg.(string)+"'", 1)
-	}
-	return query
-}
-
-func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query string, args []any) ([]string, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
+func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query beadsql.Query) ([]string, error) {
+	rows, err := db.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}

@@ -18,9 +18,9 @@ func TestBackupScrubsEveryTestDatabasePrefix(t *testing.T) {
 		if !pat.MatchString(id) {
 			t.Errorf("testDatabaseIDPattern does not match %q", id)
 		}
-		term := `id NOT LIKE '` + strings.ReplaceAll(p, "_", `\_`) + `%'`
-		if !strings.Contains(scrubWhereClause, term) {
-			t.Errorf("scrubWhereClause lacks %s", term)
+		term := `id NOT LIKE '` + strings.ReplaceAll(p, "_", `\\_`) + `%'`
+		if q := backupIssuesQuery("hq", true).String(); !strings.Contains(q, term) {
+			t.Errorf("scrubbed issues query lacks %s: %s", term, q)
 		}
 	}
 	for _, id := range []string{"gt-abc", "hq-1", "beads-xyz"} {
