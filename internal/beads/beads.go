@@ -2627,6 +2627,46 @@ func parseReadyOutput(out []byte) ([]*Issue, error) {
 	}
 }
 
+// molReadyEnvelope is the molecule object bd ready --mol <id> --json prints
+// (bd 1.2.2): the ready steps sit in "steps", each carried as an object with
+// its parallel metadata rather than as a bare issue.
+type molReadyEnvelope struct {
+	Steps []struct {
+		Issue *Issue `json:"issue"`
+	} `json:"steps"`
+}
+
+// parseMolReadyOutput unwraps the molecule object bd ready --mol --json
+// answers with, so ReadyForMol keeps returning one Issue per ready step. A
+// bare array still parses: that is the shape this call accepted before bd
+// wrapped the steps (gt-gmfcc).
+func parseMolReadyOutput(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		var issues []*Issue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+		}
+		return issues, nil
+	}
+
+	var env molReadyEnvelope
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+	}
+	// A step without its issue is a second shape change under the same key;
+	// dropping it quietly would hide exactly the steps this call exists to
+	// find, so the caller reads the drift instead of a short answer.
+	issues := make([]*Issue, 0, len(env.Steps))
+	for i, step := range env.Steps {
+		if step.Issue == nil {
+			return nil, fmt.Errorf("parsing bd ready --mol output: step %d carries no issue", i)
+		}
+		issues = append(issues, step.Issue)
+	}
+	return issues, nil
+}
+
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
 // families (mail, escalations, identity, merge queue, event records) are
 // excluded server-side by the same WorkFilter / --exclude flags
@@ -2760,12 +2800,7 @@ func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
 		return nil, err
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
-	}
-
-	return issues, nil
+	return parseMolReadyOutput(out)
 }
 
 // ReadyWithType returns ready issues filtered by label.
