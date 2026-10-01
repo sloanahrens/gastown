@@ -878,9 +878,9 @@ func TestResolve_TDDCycle(t *testing.T) {
 		}
 	}
 
-	// Verify hard-gate steps have acceptance criteria.
+	// Verify hard-gate steps state when they are done (bd has no acceptance key).
 	for _, tmpl := range f.Template {
-		if tmpl.Acceptance == "" {
+		if !strings.Contains(tmpl.Description, "Done when: ") {
 			t.Errorf("Template %q has no acceptance criteria", tmpl.ID)
 		}
 	}
@@ -955,12 +955,12 @@ func TestResolve_MonorepoTDD(t *testing.T) {
 		t.Errorf("self-review.Needs = %v, want [implement.refactor]", selfReview.Needs)
 	}
 
-	// Verify hard-gate steps have acceptance criteria propagated.
+	// Verify hard-gate steps carry their done-when criteria through expansion.
 	verifyRed := resolved.GetStep("implement.verify-red")
 	if verifyRed == nil {
 		t.Fatal("implement.verify-red step not found")
 	}
-	if verifyRed.Acceptance == "" {
+	if !strings.Contains(verifyRed.Description, "Done when: ") {
 		t.Error("implement.verify-red should have acceptance criteria")
 	}
 
@@ -968,7 +968,7 @@ func TestResolve_MonorepoTDD(t *testing.T) {
 	if verifyGreen == nil {
 		t.Fatal("implement.verify-green step not found")
 	}
-	if verifyGreen.Acceptance == "" {
+	if !strings.Contains(verifyGreen.Description, "Done when: ") {
 		t.Error("implement.verify-green should have acceptance criteria")
 	}
 }

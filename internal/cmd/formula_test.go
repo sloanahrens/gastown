@@ -361,16 +361,6 @@ func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
 	}
 }
 
-func TestApplyFormulaVarsUsesWorkflowBareSyntax(t *testing.T) {
-	t.Parallel()
-
-	got := applyFormulaVars("bd show {{issue}}\nkeep {{.issue}}", map[string]string{"issue": "gt-123"})
-	want := "bd show gt-123\nkeep {{.issue}}"
-	if got != want {
-		t.Fatalf("applyFormulaVars() = %q, want %q", got, want)
-	}
-}
-
 func TestRenderTemplateUsesGoDotSyntax(t *testing.T) {
 	t.Parallel()
 

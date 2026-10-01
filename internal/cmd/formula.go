@@ -100,9 +100,9 @@ Shows:
   - Steps with dependencies
   - Composition rules (extends, aspects)
 
-A formula that extends another or expands a step is shown resolved: every
-inherited step, with overrides and expansions applied, as gt prime renders
-it. --raw shows the file as written (bd formula show).
+The formula is shown as bd cooks it: every inherited step, with overrides,
+expansions and the town overlay applied, as gt prime renders it. --raw shows
+the file as written (bd formula show).
 
 Examples:
   gt formula show shiny
@@ -245,20 +245,22 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 	return passBdFormulaOutput(bdArgs, formulaListJSON)
 }
 
-// runFormulaShow shows a formula that extends another or expands a step as
-// gt resolves it (the steps an agent runs); bd's view lists only the delta.
-// Every other formula, and --raw, delegates to bd formula show.
+// runFormulaShow shows a formula as bd cooks it (the steps an agent runs,
+// inherited and expanded ones included); bd formula show lists only the file.
+// --raw delegates to bd formula show.
 func runFormulaShow(cmd *cobra.Command, args []string) error {
 	formulaName := args[0]
 	if !formulaShowRaw {
 		townRoot, rigName := formulaShowScope()
-		if raw, resolved, err := loadResolvedFormula(formulaName, townRoot, rigName); err == nil && formulaComposes(raw) {
-			if formulaShowJSON {
-				return writeResolvedFormulaJSON(os.Stdout, raw, resolved)
-			}
-			renderResolvedFormula(os.Stdout, raw, resolved)
-			return nil
+		f, err := realFormulaCooker().cookForRender(formulaName, townRoot, rigName, nil)
+		if err != nil {
+			return err
 		}
+		if formulaShowJSON {
+			return writeCookedFormulaJSON(os.Stdout, f)
+		}
+		renderCookedFormula(os.Stdout, f)
+		return nil
 	}
 	bdArgs := []string{"formula", "show", formulaName}
 	if formulaShowJSON {
@@ -1390,7 +1392,7 @@ func findFormulaFile(name string) (string, error) {
 // load from the embedded set, then from the file's own directory.
 func parseFormulaFile(path string) (*formula.Formula, error) {
 	f, err := formula.ParseFile(path)
-	if err != nil || !formulaComposes(f) {
+	if err != nil || (len(f.Extends) == 0 && f.Compose == nil) {
 		return f, err
 	}
 	return formula.Resolve(f, []string{filepath.Dir(path)})

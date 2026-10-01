@@ -4,42 +4,37 @@ type = "workflow"
 version = 1
 
 [[steps]]
-acceptance = "Design doc committed covering approach, trade-offs, and files to change"
-description = "Think carefully about architecture before writing code. Consider: How does this fit into the existing system? What are the edge cases? What could go wrong? Is there a simpler approach?"
+description = "Think carefully about architecture before writing code. Consider: How does this fit into the existing system? What are the edge cases? What could go wrong? Is there a simpler approach?\n\nDone when: Design doc committed covering approach, trade-offs, and files to change"
 id = "design"
 title = "Design {{feature}}"
 
 [[steps]]
-acceptance = "All files from the design doc are modified/created and committed"
-description = "Write the code for {{feature}}. Follow the design. Keep it simple. Don't gold-plate."
+description = "Write the code for {{feature}}. Follow the design. Keep it simple. Don't gold-plate.\n\nDone when: All files from the design doc are modified/created and committed"
 id = "implement"
 needs = ["design"]
 title = "Implement {{feature}}"
 
 [[steps]]
-acceptance = "Self-review complete, no obvious bugs, code is readable and secure"
-description = "Review the implementation. Check for: Does it match the design? Are there obvious bugs? Is it readable and maintainable? Are there security concerns?"
+description = "Review the implementation. Check for: Does it match the design? Are there obvious bugs? Is it readable and maintainable? Are there security concerns?\n\nDone when: Self-review complete, no obvious bugs, code is readable and secure"
 id = "review"
 needs = ["implement"]
 title = "Review implementation"
 
 [[steps]]
-acceptance = "All tests pass, no regressions, test coverage for new code"
-description = "Write and run tests. Unit tests for new code, integration tests if needed, run the full test suite, fix any regressions."
+description = "Write and run tests. Unit tests for new code, integration tests if needed, run the full test suite, fix any regressions.\n\nDone when: All tests pass, no regressions, test coverage for new code"
 id = "test"
 needs = ["review"]
 title = "Test {{feature}}"
 
 [[steps]]
-acceptance = "Clean git status, clear commit message, code pushed to feature branch"
-description = "Submit for merge. Final check: git status, git diff. Commit with clear message. Follow your role's git workflow for landing code."
+description = "Submit for merge. Final check: git status, git diff. Commit with clear message. Follow your role's git workflow for landing code.\n\nDone when: Clean git status, clear commit message, code pushed to feature branch"
 id = "submit"
 needs = ["test"]
 title = "Submit for merge"
 
 [vars]
 [vars.assignee]
-description = "Who is assigned to this work"
+description = "Who is assigned to this work\n\nDone when: Clean git status, clear commit message, code pushed to feature branch"
 [vars.feature]
-description = "The feature being implemented"
+description = "The feature being implemented\n\nDone when: Clean git status, clear commit message, code pushed to feature branch"
 required = true

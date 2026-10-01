@@ -10,40 +10,23 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/formula"
 )
 
-func threeStepFormula() *formula.Formula {
-	return &formula.Formula{
-		Name: "mol-test-work",
-		Steps: []formula.Step{
-			{ID: "one", Title: "Load {{issue}}", Description: "Body of step one for {{issue}}.\nSecond line."},
+// threeStepFormula is a cooked formula: bd has already substituted the vars.
+func threeStepFormula() *cookedFormula {
+	return &cookedFormula{
+		Formula: "mol-test-work",
+		Steps: []cookedStep{
+			{ID: "one", Title: "Load gt-abc", Description: "Body of step one for gt-abc.\nSecond line."},
 			{ID: "two", Title: "Implement", Description: "Body of step two."},
 			{ID: "three", Title: "Submit", Description: "Body of step three."},
 		},
 	}
 }
 
-// TestResolveFormulaForRendering_ResolvesExtends guards gt-g7yy6: a formula
-// that extends another lists the inherited steps too, not only its own delta.
-func TestResolveFormulaForRendering_ResolvesExtends(t *testing.T) {
-	t.Parallel()
-	f, _, err := resolveFormulaForRendering("mol-doc-audit", "", "", nil)
-	if err != nil {
-		t.Fatalf("resolveFormulaForRendering: %v", err)
-	}
-	if len(f.Steps) != 8 {
-		t.Fatalf("rendered %d steps, want 8", len(f.Steps))
-	}
-	if f.Steps[0].ID != "load-context" || f.Steps[2].ID != "audit" {
-		t.Errorf("steps start %q, %q, %q; want load-context, branch-setup, audit", f.Steps[0].ID, f.Steps[1].ID, f.Steps[2].ID)
-	}
-}
-
 func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 	t.Parallel()
-	vars := map[string]string{"issue": "gt-abc"}
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), vars, 1)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 1)
 
 	for _, want := range []string{
 		"**Formula Checklist** (3 steps from mol-test-work)",
@@ -69,7 +52,7 @@ func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 
 func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
 	t.Parallel()
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), nil, 3)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 3)
 	if !strings.Contains(out, "Body of step three.") {
 		t.Fatalf("expected step 3 body:\n%s", out)
 	}
@@ -80,7 +63,7 @@ func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
 
 func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
 	t.Parallel()
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), nil, 9)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 9)
 	if !strings.Contains(out, "Body of step one") {
 		t.Fatalf("out-of-range full step must fall back to step 1:\n%s", out)
 	}
@@ -88,7 +71,7 @@ func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
 
 func TestRenderFormulaChecklist_EmptyFormula(t *testing.T) {
 	t.Parallel()
-	if out := renderFormulaChecklist("x", &formula.Formula{}, nil, 1); out != "" {
+	if out := renderFormulaChecklist("x", &cookedFormula{}, 1); out != "" {
 		t.Fatalf("expected empty output for a formula without steps, got %q", out)
 	}
 }
@@ -292,7 +275,7 @@ func TestUseCompactResumePath(t *testing.T) {
 
 func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	t.Parallel()
-	out, err := renderFormulaStep("mol-test-work", threeStepFormula(), map[string]string{"issue": "gt-abc"}, 2)
+	out, err := renderFormulaStep("mol-test-work", threeStepFormula(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,30 +285,43 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	if strings.Contains(out, "Body of step one") {
 		t.Fatalf("other bodies must not render:\n%s", out)
 	}
-	if _, err := renderFormulaStep("mol-test-work", threeStepFormula(), nil, 4); err == nil {
+	if _, err := renderFormulaStep("mol-test-work", threeStepFormula(), 4); err == nil {
 		t.Fatal("out-of-range step must error")
 	}
 }
 
-func TestShowFormulaStepsFull_UsesBoundedChecklist(t *testing.T) {
+func TestShowStepsFull_RendersCookedChecklist(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	showFormulaStepsFull(&buf, "mol-polecat-work", t.TempDir(), "")
+	fake := &fakeCook{out: cookTreeJSON(docAuditTree)}
+	formulaCooker{run: fake.run}.showStepsFull(&buf, "mol-doc-audit", t.TempDir(), "", nil)
 	out := buf.String()
-	for _, want := range []string{"Step 1: Load context and verify assignment", "Step 2: Set up working branch", "Step 8: Submit work and self-clean", "gt prime --step <N> --formula " + "mol-polecat-work"} {
+	for _, want := range []string{"(3 steps from mol-doc-audit)", "Step 1: Load gt-1", "Read gt-1.", "Step 3: Check links", "gt prime --step <N> --formula mol-doc-audit"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q:\n%s", want, out)
 		}
 	}
-	if len(out) > 6000 {
-		t.Fatalf("bounded checklist for %s is %d chars; the full formula is ~19 KB", "mol-polecat-work", len(out))
+	if strings.Contains(out, "Audit body.") {
+		t.Fatalf("only step 1's body renders:\n%s", out)
+	}
+}
+
+// TestShowStepsFull_CookFailureRendersNothing: a formula bd cannot cook fails
+// closed; prime renders no checklist rather than a guess.
+func TestShowStepsFull_CookFailureRendersNothing(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	fake := &fakeCook{kind: "not_found", msg: "formula nope not found"}
+	formulaCooker{run: fake.run}.showStepsFull(&buf, "nope", t.TempDir(), "", nil)
+	if buf.Len() != 0 {
+		t.Fatalf("cook failure rendered %q", buf.String())
 	}
 }
 
 func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
 	bead := &beads.Issue{
 		ID:    "gt-zz9",
 		Title: "Make the thing do the other thing",
@@ -444,11 +440,11 @@ func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
 
 func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 	t.Parallel()
-	f := &formula.Formula{Steps: []formula.Step{
+	f := &cookedFormula{Steps: []cookedStep{
 		{Title: "Huge", Description: strings.Repeat("a line of step body text\n", 400)}, // ~10 KB
 		{Title: "Small", Description: "tiny"},
 	}}
-	out := renderFormulaChecklist("mol-big", f, nil, 1)
+	out := renderFormulaChecklist("mol-big", f, 1)
 	if len(out) > primeStepBodyMaxChars+600 {
 		t.Fatalf("checklist %d chars; step body must be capped near %d", len(out), primeStepBodyMaxChars)
 	}
@@ -501,7 +497,7 @@ func TestAssemblePrimePayload_MailIsNeverDropped(t *testing.T) {
 func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
 	bead := &beads.Issue{ID: "gt-cont1", Title: "Continue me", Description: "attached_formula: mol-polecat-work\n"}
 	var buf bytes.Buffer
 	_, _ = checkSlungWorkIn(&buf, true, ctx, bead)
@@ -600,7 +596,7 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
+			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
 			var bead *beads.Issue
 			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",
