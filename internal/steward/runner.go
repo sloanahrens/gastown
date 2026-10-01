@@ -139,7 +139,7 @@ func (r *Runner) Start(ctx context.Context, ev Event, model, prompt string) bool
 	}
 	r.running[id] = j
 	r.beads[ev.Bead] = true
-	r.logf("steward: start id=%s event=%s bead=%s rig=%s head=%s model=%s dir=%s", id, ev.Kind, ev.Bead, ev.Rig, shortHead(ev.Head), model, dir)
+	r.logf("steward: start id=%s event=%s bead=%s rig=%s head=%s model=%s dir=%s", id, ev.Kind, ev.Bead, ev.Rig, ShortHead(ev.Head), model, dir)
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
@@ -431,8 +431,9 @@ func oneLine(s string) string {
 	return s
 }
 
-// shortHead is the first 8 characters of a commit id, for a log line.
-func shortHead(head string) string {
+// ShortHead is the first 8 characters of a commit id, for a log line or a
+// message to the overseer.
+func ShortHead(head string) string {
 	if len(head) > 8 {
 		return head[:8]
 	}

@@ -50,3 +50,33 @@ runner records `error` when a job writes none. A row with no `ended` is a job
 whose daemon died — the next daemon closes it at startup. The daemon logs one
 `steward: start …` line and one `steward: end …` line per job, visible in
 `gt tail`.
+
+## Monitoring
+
+`gt steward status [--since 1h] [--last N] [--json]` summarizes the ledger: jobs
+by outcome and by model, median and max duration, running and stuck jobs, the
+escalations raised, the pro (hard-preset) job count, and the newest jobs with
+bead and outcome. The overseer's hourly report quotes the `--json` object
+(`jobs`, `outcomes`, `broke`, `pro`, `median_seconds`, `stuck`, `alerts`) next
+to its audit agreement rate.
+
+A job is *stuck* when it runs a minute past `job_timeout`: the runner kills at
+the timeout, so an open row past it is a job the kill did not end. "Broke"
+means error or timeout; a `fail` verdict is the steward working, and an
+`interrupted` job (a daemon restart) is not an attempt.
+
+`townhealth.json` carries the last hour's counters under `steward`, and the
+`steward` field turns red for a stuck job and degraded when more than
+`operational.health.steward_error_rate` (default 0.5) of the hour's attempted
+jobs broke, once the hour holds `steward_min_jobs` (default 3) attempts.
+`gt status --line` shows it like any other non-green field.
+
+The daemon raises each of these escalations once, recorded in
+`<town>/.runtime/steward/alerts.jsonl` (`gt steward status` counts them as
+`alerts`):
+
+| Escalation | Severity | When |
+|---|---|---|
+| `pro:<job>` | low | every job that ran on `hard_agent`, with why it was the hard one |
+| `stuck:<job>` | medium | a job past its timeout plus the one-minute kill grace |
+| `error-rate:<job>` | medium | the error rate over the threshold; keyed to the episode's first broken job |

@@ -97,7 +97,7 @@ func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *to
 	return townhealth.Inputs{
 		Now: now, Thresholds: th, Prev: prev,
 		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
-		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s,
+		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s, Steward: s,
 	}
 }
 
