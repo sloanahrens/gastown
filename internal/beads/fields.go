@@ -268,8 +268,8 @@ type ConvoyFields struct {
 	BaseBranch           string // Target branch for polecats (e.g., "feat/extraction-review")
 	Agent                string // Runtime agent requested at sling time (--agent), re-used by convoy feeders (gt-yg24)
 	Formula              string // Formula requested at sling time (--formula), re-used by convoy feeders (gt-4lor)
-	Watchers             string // Comma-separated mail notification addresses (added via gt convoy watch)
-	NudgeWatchers        string // Comma-separated nudge notification addresses (added via gt convoy watch --nudge)
+	Watchers             string // Comma-separated mail notification addresses (description key "watchers")
+	NudgeWatchers        string // Comma-separated nudge notification addresses (description key "nudge_watchers")
 	CompletionNotifiedAt string // RFC3339 timestamp when completion notifications were claimed/sent
 }
 

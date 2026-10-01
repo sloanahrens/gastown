@@ -165,12 +165,11 @@ TRACKING SEMANTICS:
 COMMANDS:
   create    Create a convoy tracking specified issues
   add       Add issues to an existing convoy (reopens if closed)
-  close     Close a convoy (verifies all items done, or use --force)
-  land      Land an owned convoy (cleanup worktrees, close convoy)
   status    Show convoy progress, tracked issues, and active workers
   list      List convoys
-  watch     Subscribe to convoy completion notifications
-  unwatch   Unsubscribe from convoy completion notifications`,
+  check     Auto-close convoys whose tracked issues are all done
+  stranded  Find ready work with no active workers
+  close     Close a convoy (verifies all items done, or use --force)`,
 }
 
 var convoyCreateCmd = &cobra.Command{

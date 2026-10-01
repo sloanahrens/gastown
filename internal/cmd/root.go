@@ -41,37 +41,32 @@ across distributed teams of AI agents working on shared codebases.`, cmdName)
 // Commands that don't require beads to be installed/checked.
 // These commands should work even when bd is missing or outdated.
 var beadsExemptCommands = map[string]bool{
-	"version":       true,
-	"help":          true,
-	"completion":    true,
-	"crew":          true,
-	"polecat":       true,
-	"witness":       true,
-	"refinery":      true,
-	"status":        true,
-	"status-line":   true,
-	"mail":          true,
-	"hook":          true,
-	"prime":         true,
-	"nudge":         true,
-	"doctor":        true,
-	"dolt":          true,
-	"handoff":       true,
-	"rig":           true,
-	"scheduler":     true,
-	"config":        true,
-	"install":       true,
-	"tap":           true,
-	"dnd":           true,
-	"estop":         true, // E-stop must work when Dolt is down
-	"thaw":          true, // Thaw must work when Dolt is down
-	"kill-all":      true, // Kill-all must work when Dolt is down
-	"signal":        true, // Hook signal handlers must be fast, handle beads internally
-	"metrics":       true, // Metrics reads local JSONL, no beads needed
-	"run-migration": true, // Migration orchestrator handles its own beads checks
-	"upgrade":       true, // Post-install migration orchestrator
-	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
-	"tail":          true, // Read-only stream; reports an unreachable bd per rig and continues
+	"version":     true,
+	"help":        true,
+	"completion":  true,
+	"crew":        true,
+	"polecat":     true,
+	"status":      true,
+	"status-line": true,
+	"mail":        true,
+	"hook":        true,
+	"prime":       true,
+	"nudge":       true,
+	"doctor":      true,
+	"dolt":        true,
+	"handoff":     true,
+	"rig":         true,
+	"scheduler":   true,
+	"config":      true,
+	"install":     true,
+	"tap":         true,
+	"estop":       true, // E-stop must work when Dolt is down
+	"thaw":        true, // Thaw must work when Dolt is down
+	"kill-all":    true, // Kill-all must work when Dolt is down
+	"signal":      true, // Hook signal handlers must be fast, handle beads internally
+	"metrics":     true, // Metrics reads local JSONL, no beads needed
+	"heartbeat":   true, // Heartbeat state update — must be fast and dependency-free
+	"tail":        true, // Read-only stream; reports an unreachable bd per rig and continues
 }
 
 // Commands exempt from the town root branch warning.
@@ -86,8 +81,6 @@ var branchCheckExemptCommands = map[string]bool{
 	"thaw":        true, // Thaw must always work
 	"kill-all":    true, // Kill-all must always work
 	"install":     true, // Initial setup
-	"git-init":    true, // Git setup
-	"upgrade":     true, // Post-install migration
 	"scheduler":   true, // Daemon hot path; scheduler handles beads internally
 }
 
