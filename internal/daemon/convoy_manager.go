@@ -1727,6 +1727,14 @@ func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 // root is the one the convoy was read from, not the daemon's cwd.
 func (m *ConvoyManager) slingSlinger() convoy.Slinger {
 	return func(ctx context.Context, townRoot string, opts sling.Options) error {
+		// The event path honours the same test seam as slingInProcess: without
+		// it a test's slingFn saw only stranded-scan feeds, never event feeds
+		// (gt-lkw88).
+		if m.slingFn != nil {
+			opts.TownRoot = townRoot
+			_, err := m.slingFn("", opts)
+			return err
+		}
 		if m.slingDeps == nil {
 			return fmt.Errorf("no dispatch engine wired into the daemon")
 		}
