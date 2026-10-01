@@ -21,6 +21,7 @@ import (
 var freshSetupIntegrationCounter atomic.Int32
 
 func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping fresh setup integration test")
 	}
@@ -32,10 +33,6 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	hqPath := filepath.Join(tmpDir, "town")
 	doltPort := freeTCPPort(t)
 	doltPortString := strconv.Itoa(doltPort)
-
-	// createAutoConvoy and related helpers shell out with the process env.
-	t.Setenv("GT_DOLT_PORT", doltPortString)
-	t.Setenv("BEADS_DOLT_PORT", doltPortString)
 
 	env := freshSetupIntegrationEnv(tmpDir, doltPortString)
 	configureGitIdentityForEnv(t, env)
@@ -94,19 +91,40 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 			hookStatus.Target, hookStatus.HasWork, hookStatus.PinnedBead, issue.ID, agentID)
 	}
 
-	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(hqPath, issue.ID, issue.Title, false, "mr", "main", "", "")
-		if err != nil {
-			t.Fatalf("create auto convoy: %v", err)
-		}
-		if !strings.HasPrefix(convoyID, "hq-cv-") {
-			t.Fatalf("convoy ID %q does not use hq-cv- prefix", convoyID)
-		}
-		runFreshSetupCmd(t, hqPath, env, "bd", "show", convoyID)
-		if got := isTrackedByConvoy(hqPath, issue.ID); got != convoyID {
-			t.Fatalf("isTrackedByConvoy(%s) = %q, want %q", issue.ID, got, convoyID)
-		}
-	})
+	// The gt CLI, not the in-process createAutoConvoy: the subprocess takes
+	// its town from the cwd and its Dolt port from env, so the test needs
+	// neither Setenv nor Chdir and can run in the parallel phase.
+	created := runFreshSetupOutputCmd(t, hqPath, env, gtBinary, "convoy", "create", "Work: "+issue.Title, issue.ID, "--merge", "mr", "--base-branch", "main")
+	convoyID := parseCreatedConvoyID(t, created)
+	runFreshSetupCmd(t, hqPath, env, "bd", "show", convoyID)
+	statusJSON := runFreshSetupOutputCmd(t, hqPath, env, gtBinary, "convoy", "status", convoyID, "--json")
+	var convoyStatus struct {
+		Tracked []struct {
+			ID string `json:"id"`
+		} `json:"tracked"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON), &convoyStatus); err != nil {
+		t.Fatalf("parse gt convoy status --json output: %v\n%s", err, statusJSON)
+	}
+	if len(convoyStatus.Tracked) != 1 || convoyStatus.Tracked[0].ID != issue.ID {
+		t.Fatalf("convoy %s tracks %+v, want exactly %s", convoyID, convoyStatus.Tracked, issue.ID)
+	}
+}
+
+// parseCreatedConvoyID reads the convoy ID from gt convoy create's
+// "Created convoy 🚚 <id>" line and checks it uses the hq-cv- prefix.
+func parseCreatedConvoyID(t *testing.T, out string) string {
+	t.Helper()
+	const marker = "Created convoy 🚚 "
+	_, rest, ok := strings.Cut(out, marker)
+	if !ok {
+		t.Fatalf("gt convoy create output has no %q line:\n%s", marker, out)
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "hq-cv-") {
+		t.Fatalf("convoy ID in %q does not use hq-cv- prefix", out)
+	}
+	return fields[0]
 }
 
 type freshSetupIssue struct {
@@ -300,23 +318,6 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port
-}
-
-func withWorkingDir(t *testing.T, dir string, fn func()) {
-	t.Helper()
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get working directory: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir %s: %v", dir, err)
-	}
-	defer func() {
-		if err := os.Chdir(oldWD); err != nil {
-			t.Fatalf("restore working directory %s: %v", oldWD, err)
-		}
-	}()
-	fn()
 }
 
 func runFreshSetupCmd(t *testing.T, dir string, env []string, name string, args ...string) string {

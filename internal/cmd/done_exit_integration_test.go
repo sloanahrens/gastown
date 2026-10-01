@@ -97,7 +97,9 @@ func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir str
 	resetDoneFlagsForTest(t)
 	oldDelays := pushLandingRetryDelays
 	pushLandingRetryDelays = []time.Duration{0}
-	t.Cleanup(func() { pushLandingRetryDelays = oldDelays })
+	oldSleep := doneRetrySleep
+	doneRetrySleep = func(time.Duration) {}
+	t.Cleanup(func() { pushLandingRetryDelays, doneRetrySleep = oldDelays, oldSleep })
 	townRoot := routedSourceTestTownRoot(workDir)
 	t.Setenv("GT_TOWN_ROOT", townRoot)
 	t.Setenv("GT_ROOT", townRoot)

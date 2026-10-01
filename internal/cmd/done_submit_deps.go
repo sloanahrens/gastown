@@ -65,6 +65,11 @@ type doneOptions struct {
 	preVerified bool
 }
 
+// doneRetrySleep is the wait between the real submit path's push and close
+// retries. It is a variable so an end-to-end test of a failing close does not
+// spend the ladder's six seconds.
+var doneRetrySleep = time.Sleep
+
 // useRealSubmitDeps wires the submit path to the worktree's git, routed bd,
 // the rig's gate and the real clock, and reads gt done's flags.
 func (r *doneRun) useRealSubmitDeps(getenv func(string) string) {
@@ -87,6 +92,6 @@ func (r *doneRun) useRealSubmitDeps(getenv func(string) string) {
 		checkBranch:    func(baseRef string, sub doneSubmission) error { return checkBranchForSubmit(r, sub, baseRef) },
 		rewriteBranch:  func(baseRef string, sub doneSubmission) error { return rewriteBranchForSubmit(r, sub, baseRef) },
 		pushSubmodules: func(baseRef string) { pushSubmoduleChanges(r.g, baseRef) },
-		sleep:          time.Sleep,
+		sleep:          doneRetrySleep,
 	}
 }

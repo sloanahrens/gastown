@@ -18,6 +18,7 @@ import (
 )
 
 func TestIntegrationInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "missing-dolt-hq")
 	gtBinary := buildGT(t)
@@ -42,6 +43,7 @@ func TestIntegrationInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
 }
 
 func TestIntegrationInstallNoBeadsAllowsMissingDolt(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "no-beads-hq")
 	gtBinary := buildGT(t)
@@ -64,6 +66,7 @@ func TestIntegrationInstallNoBeadsAllowsMissingDolt(t *testing.T) {
 }
 
 func TestIntegrationInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *testing.T) {
+	t.Parallel()
 	ln := listenAndHoldTCP(t)
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "port-conflict-hq")
@@ -93,6 +96,7 @@ func TestIntegrationInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *t
 }
 
 func TestIntegrationPrimeFlagCombinations(t *testing.T) {
+	t.Parallel()
 	gtBin := buildGT(t)
 
 	cases := []struct {
@@ -160,6 +164,7 @@ func TestIntegrationPrimeFlagCombinations(t *testing.T) {
 
 // TestIntegrationDryRunSkipsSideEffects tests that --dry-run skips various side effects via CLI.
 func TestIntegrationDryRunSkipsSideEffects(t *testing.T) {
+	t.Parallel()
 	gtBin := buildGT(t)
 
 	// Create a temp workspace
@@ -216,6 +221,7 @@ func TestIntegrationDryRunSkipsSideEffects(t *testing.T) {
 // unrelated command alone even when fed to the guard directly (as if "if"
 // were missing).
 func TestIntegrationPRWorkflowGuard(t *testing.T) {
+	t.Parallel()
 	bin := buildGT(t)
 	workDir := t.TempDir() // not under /polecats/, /crew/, or /deacon/dogs/
 
@@ -315,6 +321,7 @@ func TestIntegrationPRWorkflowGuard(t *testing.T) {
 // this package behind the integration tag, so the untagged file keeps only
 // the pure unit tests).
 func TestIntegrationPRWorkflowGuard_Gt3mp1Regression(t *testing.T) {
+	t.Parallel()
 	bin := buildGT(t)
 	workDir := t.TempDir()
 
