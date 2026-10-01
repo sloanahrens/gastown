@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -79,33 +80,15 @@ func resolveBeadDirFromRigsJSON(townRoot, prefix string) string {
 	return ""
 }
 
-// beadInfo holds status and assignee for a bead.
-type beadInfo struct {
-	Title        string           `json:"title"`
-	Status       string           `json:"status"`
-	Assignee     string           `json:"assignee"`
-	Description  string           `json:"description"`
-	Design       string           `json:"design,omitempty"`
-	Notes        string           `json:"notes,omitempty"`
-	Labels       []string         `json:"labels,omitempty"`
-	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
-	IssueType    string           `json:"issue_type,omitempty"`
-}
+// beadInfo is the dispatch engine's view of a bead, owned by internal/sling so
+// the daemon's convoy feeders read and write the same shape the cobra command
+// does.
+type beadInfo = sling.Bead
 
 // isDeferredBead checks whether a bead should be rejected from slinging because
-// it has been deferred. Returns true if the bead has status "deferred" or if its
-// description contains deferral keywords like "deferred to post-launch".
+// it has been deferred.
 func isDeferredBead(info *beadInfo) bool {
-	if info.Status == "deferred" {
-		return true
-	}
-	desc := strings.ToLower(info.Description)
-	if strings.Contains(desc, "deferred to post-launch") ||
-		strings.Contains(desc, "deferred to post launch") ||
-		strings.Contains(desc, "status: deferred") {
-		return true
-	}
-	return false
+	return sling.IsDeferredBead(info)
 }
 
 func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
@@ -448,25 +431,12 @@ func getBeadInfoFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
 	return slingStores{}.beadInfo(townRoot, beadID)
 }
 
-// beadFieldUpdates holds all the fields that need to be stored in a bead's description.
-// This enables a single read-modify-write cycle instead of sequential independent updates,
-// eliminating the race condition where concurrent writers could overwrite each other's fields.
-type beadFieldUpdates struct {
-	Dispatcher       string   // Agent that dispatched the work
-	Args             string   // Natural language instructions
-	Vars             []string // Formula variables (key=value pairs)
-	AttachedMolecule string   // Wisp root ID
-	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
-	ClearAttachment  bool     // Clear stale workflow attachment fields before applying updates
-	AttachedAt       string   // Assignment timestamp; refreshed when workflow metadata is written
-	NoMerge          bool     // Skip merge queue on completion
-	ReviewOnly       bool     // Review-only mode: assignee must not merge/commit/push
-	Mode             *string  // Execution mode: nil means unchanged, "" clears, "ralph" enables Ralph mode
-	ConvoyID         string   // Convoy bead ID (e.g., "hq-cv-abc")
-	MergeStrategy    string   // Convoy merge strategy: "mr", "local"
-	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
-	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
-}
+// beadFieldUpdates holds all the fields that need to be stored in a bead's
+// description. This enables a single read-modify-write cycle instead of
+// sequential independent updates, eliminating the race condition where
+// concurrent writers could overwrite each other's fields. internal/sling owns
+// the shape, because the dispatch engine writes them.
+type beadFieldUpdates = sling.FieldUpdates
 
 func buildSlingFieldUpdates(
 	dispatcher string,
@@ -832,11 +802,7 @@ func isPolecatTarget(target string) bool {
 }
 
 // FormulaOnBeadResult contains the result of instantiating a formula on a bead.
-type FormulaOnBeadResult struct {
-	WispRootID  string   // The wisp root ID (compound root after bonding)
-	BeadToHook  string   // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
-	FormulaVars []string // Vars used to instantiate/render the formula
-}
+type FormulaOnBeadResult = sling.FormulaResult
 
 // formulaBD is how formula instantiation reaches bd: open is the formula
 // engine at a site (nil: the bd on PATH) and sleep is the pause between

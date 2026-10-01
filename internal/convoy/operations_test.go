@@ -15,6 +15,7 @@ import (
 	beadsRouting "github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 func TestExtractIssueID(t *testing.T) {
@@ -162,7 +163,7 @@ func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
 func TestCheckConvoysForIssue_NilStore(t *testing.T) {
 	t.Parallel()
 	// Nil store returns nil immediately (no convoy checks).
-	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
+	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, nil, nil, nil)
 	if result != nil {
 		t.Errorf("expected nil for nil store, got %v", result)
 	}
@@ -172,7 +173,7 @@ func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
 	t.Parallel()
 	// Nil logger should not panic — gets replaced with no-op internally.
 	// With nil store, returns nil.
-	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
+	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, nil, nil, nil)
 	if result != nil {
 		t.Errorf("expected nil for nil store, got %v", result)
 	}
@@ -697,19 +698,39 @@ func setupTownRoot(t *testing.T) string {
 	return townRoot
 }
 
-// slingLog is a slinger that records each gt sling's arguments, one line per
-// call, and fails every call with err when it is set.
+// slingLog is a Slinger that records each dispatch's arguments as the argv a
+// `gt sling` would have been given, one line per call, and fails every call
+// with err when it is set.
 type slingLog struct {
 	mu    sync.Mutex
 	lines []string
 	err   error
 }
 
-func (l *slingLog) sling(_ context.Context, _ string, args []string) error {
+func (l *slingLog) sling(_ context.Context, _ string, opts sling.Options) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lines = append(l.lines, strings.Join(args, " "))
+	l.lines = append(l.lines, renderSlingArgs(opts))
 	return l.err
+}
+
+// renderSlingArgs is one dispatch's options as the command line the feed used
+// to build, so these tests keep asserting on the same string.
+func renderSlingArgs(opts sling.Options) string {
+	args := []string{"sling", opts.BeadID, opts.RigName}
+	if opts.NoBoot {
+		args = append(args, "--no-boot")
+	}
+	if opts.BaseBranch != "" {
+		args = append(args, "--base-branch="+opts.BaseBranch)
+	}
+	if opts.Agent != "" {
+		args = append(args, "--agent="+opts.Agent)
+	}
+	if opts.FormulaName != "" {
+		args = append(args, "--formula="+opts.FormulaName)
+	}
+	return strings.Join(args, " ")
 }
 
 // read returns the recorded calls, or os.ErrNotExist when there were none.
@@ -1164,7 +1185,7 @@ func TestDispatchIssue_Success(t *testing.T) {
 	townRoot := t.TempDir()
 	gt := &slingLog{}
 
-	err := gt.sling(context.Background(), townRoot, slingArgs("test-abc", "myrig", "", "", ""))
+	err := gt.sling(context.Background(), townRoot, dispatchOptions("test-abc", "myrig", "", "", ""))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
@@ -1188,7 +1209,7 @@ func TestDispatchIssue_PassesAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	gt := &slingLog{}
 
-	err := gt.sling(context.Background(), townRoot, slingArgs("test-agent", "myrig", "", "deepseek-flash", ""))
+	err := gt.sling(context.Background(), townRoot, dispatchOptions("test-agent", "myrig", "", "deepseek-flash", ""))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
@@ -2196,7 +2217,7 @@ func TestDispatchIssue_PassesFormula(t *testing.T) {
 	townRoot := t.TempDir()
 	gt := &slingLog{}
 
-	err := gt.sling(context.Background(), townRoot, slingArgs("test-formula", "myrig", "", "deepseek-flash", "mol-custom"))
+	err := gt.sling(context.Background(), townRoot, dispatchOptions("test-formula", "myrig", "", "deepseek-flash", "mol-custom"))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}

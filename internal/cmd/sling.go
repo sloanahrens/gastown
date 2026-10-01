@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -212,13 +213,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		ctx = cmd.Context()
 	}
 	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
-	slingSteps = newSlingTimer(os.Stderr)
-	// The same boundary as executeSling's: a seat the pool claimed for this
-	// sling stops standing when the command returns. StartSession drops it on
-	// the success path, and the failure paths drop it here — including the ones
-	// that return after the spawn without rolling it back, which the rollback
-	// paths alone would miss (gt-t8q5).
-	defer releasePoolSeatClaim()
+	slingSteps = sling.NewTimer(os.Stderr)
 	return newSlingRun(slingOptionsFromFlags()).run(ctx, cmd, args)
 }
 
@@ -227,6 +222,15 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 // itself, rolling back a spawned polecat on every exit short of the commit
 // point.
 func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (retErr error) {
+	// The same boundary as executeSling's: a seat the pool claimed for this
+	// sling stops standing when the sling returns. StartSession drops the claim
+	// on the success path and the rollback drops it when no session will ever
+	// exist; this catches the returns that reach neither — an error between the
+	// spawn and the rollback guard, which the rollback paths alone would miss
+	// (gt-t8q5).
+	var seatSpawn *SpawnedPolecatInfo
+	defer func() { seatSpawn.releaseSeatClaim() }()
+
 	// Polecats cannot sling - check early before writing anything.
 	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
@@ -754,11 +758,22 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
-	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (mayor, crew, self-sling, nudge)
-	// that executeSling does not cover. The rig-target case could be factored out
-	// to use executeSling, limiting this to non-rig targets only.
+	// The inline logic below duplicates executeSling's 12-step flow. Batch sling,
+	// scheduler dispatch and the daemon's convoy feeders already use the unified
+	// path — the feeder used to exec this command and now calls the engine, so
+	// the two are on the same code for the first time (gt-638go.7). Single-sling
+	// is deferred because it handles non-rig targets (mayor, crew, self-sling,
+	// nudge) that executeSling does not cover. The rig-target case could be
+	// factored out to use executeSling, limiting this to non-rig targets only.
+	//
+	// Until then the two are not identical for a rig target, and the difference
+	// is deliberate where it exists. The dispatch guards all live in the engine
+	// (closed, deferred, operator reservation, ready-to-land, flag-like title,
+	// dead-holder auto-force, duplicates), so a bead one path refuses the other
+	// refuses too. What is still inline-only is the interactive surface: the
+	// idempotency no-op for a bead already on the target, the unhook of a force
+	// steal, --dry-run, and the start nudge. Factor the rig-target case out
+	// before adding a guard to one path alone.
 	//
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
@@ -788,6 +803,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	hookWorkDir := resolved.WorkDir
 	hookSetAtomically := resolved.HookSetAtomically
 	newPolecatInfo := resolved.NewPolecatInfo
+	// Hand the spawn to run's boundary: from here every exit drops the seat it
+	// reserved, including the ones that never reach the rollback guard below.
+	seatSpawn = newPolecatInfo
 	isSelfSling := resolved.IsSelfSling
 	if newPolecatInfo != nil {
 		newPolecatInfo.originalHold = &beadHold{Status: originalStatus, Assignee: originalAssignee}
@@ -818,7 +836,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				rollbackConvoyID = convoyID
 			}
 			fmt.Fprintf(r.out, "%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
-			r.rollbackArtifacts(newPolecatInfo, rollbackBeadID, hookWorkDir, rollbackConvoyID)
+			r.rollbackArtifacts(newPolecatInfo, r.townRoot, rollbackBeadID, hookWorkDir, rollbackConvoyID)
 		}
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
@@ -916,20 +934,20 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				fmt.Fprintf(r.out, "Would set convoy merge strategy: %s\n", r.opts.merge)
 			}
 		} else {
-			existingConvoy := r.trackedByConvoy(beadID)
+			existingConvoy := r.trackedByConvoy(r.townRoot, beadID)
 			if existingConvoy == "" {
 				var err error
 				// Record the requested runtime agent and formula on the convoy:
 				// if this sling fails after the convoy exists, the convoy
 				// feeder re-dispatches the bead and must re-use this agent and
 				// formula rather than the rig default (gt-yg24, gt-4lor).
-				convoyID, err = r.createConvoy(beadID, info.Title, r.opts.owned, r.opts.merge, r.opts.baseBranch, r.opts.agent, r.opts.formula)
+				convoyID, err = r.createConvoy(r.townRoot, beadID, info.Title, r.opts.owned, r.opts.merge, r.opts.baseBranch, r.opts.agent, r.opts.formula)
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Fprintf(r.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 				} else {
 					fmt.Fprintf(r.out, "%s Created convoy 🚚 %s\n", style.Bold.Render("→"), convoyID)
-					r.steps.step("convoy")
+					r.steps.Step("convoy")
 					fmt.Fprintf(r.out, "  Tracking: %s\n", beadID)
 					if r.opts.owned {
 						fmt.Fprintf(r.out, "  Lifecycle: caller-managed (owned)\n")
@@ -1049,7 +1067,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		// - gt done: close attached_molecule (wisp) first, then close base bead
 		// - Compound resolution: base bead -> attached_molecule -> wisp
 		attachedMoleculeID = result.WispRootID
-		r.steps.step("formula")
+		r.steps.Step("formula")
 		if len(result.FormulaVars) > 0 {
 			varsForAttachment = append([]string(nil), result.FormulaVars...)
 			formulaVarsForAttachment = strings.Join(result.FormulaVars, "\n")
@@ -1112,7 +1130,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		return err
 	}
 	hooked = true
-	r.steps.step("hook")
+	r.steps.Step("hook")
 	r.clearOrphanLabels(townRoot, beadID, hookWorkDir)
 
 	// The bead is dispatched now, so later dispatches in this process should
@@ -1179,7 +1197,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
-		r.steps.step("session")
+		r.steps.Step("session")
 	}
 
 	// Commit point (gt-7evi4): the work is hooked and any polecat this sling
@@ -1495,6 +1513,6 @@ func resolvePRBranch(prNumber int) (string, error) {
 // Cleanup is best-effort: each step logs warnings but continues to clean as much as possible.
 // beadID is the bead this sling touched ("" when the failure came before the
 // sling wrote to any bead); it is never unhooked from a different assignee.
-func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
-	realSlingRollback().rollback(spawnInfo, beadID, hookWorkDir, convoyID)
+func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir, convoyID string) {
+	realSlingRollbackIn(townRoot, nil).rollback(spawnInfo, beadID, hookWorkDir, convoyID)
 }

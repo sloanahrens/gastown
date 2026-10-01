@@ -61,10 +61,33 @@ type SpawnedPolecatInfo struct {
 	account string
 	agent   string
 
+	// townRoot is the town this spawn belongs to, recorded by its spawner. It
+	// is what startSession and noteStartOutcome read the workspace from: the
+	// daemon's convoy feeder starts sessions in process, and a session started
+	// against whichever town the daemon's cwd names is the wrong town. Empty
+	// falls back to the cwd, which is what a test-built spawn has.
+	townRoot string
+
 	// originalHold is the work bead's status and assignee before this sling
 	// touched it; nil when unknown. A rollback that finds the bead's work
 	// surviving hands it back to this holder instead of releasing it.
 	originalHold *beadHold
+
+	// seatClaim is the pool seat this spawn reserved, and the store it lives
+	// in. It travels with the spawn because that is what both ends of the
+	// claim's life have in hand: startSession drops it once the tmux session
+	// exists, and the rollback drops it when no session ever will. Nil when
+	// the spawn did not go through the pool's seat decision (gt-t8q5).
+	seatClaim *poolSeatClaimStore
+}
+
+// releaseSeatClaim drops the pool seat this spawn reserved. Idempotent, and a
+// no-op for a spawn that reserved none.
+func (s *SpawnedPolecatInfo) releaseSeatClaim() {
+	if s == nil {
+		return
+	}
+	s.seatClaim.release()
 }
 
 // beadHold is a work bead's status and assignee.
@@ -117,6 +140,20 @@ type SlingSpawnOptions struct {
 	// name, or the sling is refused; the pool never substitutes another
 	// polecat (gt-2w4f9). Empty lets the pool choose.
 	Name string
+	// Steps times the spawn path's stages (gt-llg8). Nil falls back to this
+	// process's timer; the daemon passes its own so the lines reach its log
+	// tagged with what it was feeding.
+	Steps func(name string)
+}
+
+// step records the end of one spawn stage on the timer this spawn was handed,
+// or on this process's timer when it was handed none.
+func (o SlingSpawnOptions) step(name string) {
+	if o.Steps != nil {
+		o.Steps(name)
+		return
+	}
+	slingSteps.Step(name)
 }
 
 func effectivePolecatDirCap(configured int) int {
@@ -209,7 +246,7 @@ func reuseIdlePolecatForSling(
 	opts SlingSpawnOptions,
 	recordRespawn func(),
 ) (*SpawnedPolecatInfo, error) {
-	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName), rigName, opts, recordRespawn)
+	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName, opts.step), rigName, opts, recordRespawn)
 }
 
 // idleReuseEnv is what the idle-reuse path reads and writes besides the polecat
@@ -227,7 +264,7 @@ type idleReuseEnv struct {
 	step              func(name string)
 }
 
-func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleReuseEnv {
+func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
 			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
@@ -238,7 +275,7 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleRe
 		logSpawn: func(rigName, polecatName string) {
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 		},
-		step: func(name string) { slingSteps.step(name) },
+		step: step,
 	}
 }
 
@@ -465,7 +502,14 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
 	}
-	return realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+	spawnInfo, err := realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+	if err != nil {
+		return nil, err
+	}
+	// Record the town on the spawn: the session is started later and, on the
+	// daemon's in-process path, from a process whose cwd is not this town.
+	spawnInfo.townRoot = townRoot
+	return spawnInfo, nil
 }
 
 // slingSeatSpawn is the front of SpawnPolecatForSling: the rig's backpressure,
@@ -474,18 +518,30 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // polecat and its worktree. realSlingSeatSpawn wires the real ones.
 type slingSeatSpawn struct {
 	backpressure func(townRoot, rigName string, opts SlingSpawnOptions) error
-	// resolvePool is resolvePolecatPoolAgent.
+	// resolvePool is the pool decision for this spawn, claiming a seat in
+	// seatClaims.
 	resolvePool func(townRoot, requested string) (agent, reason string, err error)
 	releaseSeat func()
 	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
+	// seatClaims is the store this spawn's pool decision claims in and
+	// releaseSeat drops from. It is handed to the spawn record on success, so
+	// StartSession and the rollback drop the same claim this spawn made.
+	seatClaims *poolSeatClaimStore
 }
 
 func realSlingSeatSpawn() slingSeatSpawn {
+	// One store per spawn, never one per process: the daemon dispatches
+	// concurrently inside a single process, and a shared store would let one
+	// dispatch's release drop a seat another is still standing on (gt-t8q5).
+	store := newPoolSeatClaimStore()
 	return slingSeatSpawn{
 		backpressure: checkSlingBackpressure,
-		resolvePool:  resolvePolecatPoolAgent,
-		releaseSeat:  releasePoolSeatClaim,
-		prepare:      prepareSlingPolecat,
+		resolvePool: func(townRoot, requested string) (agent, reason string, err error) {
+			return poolRouterFor(townRoot, store).route(requested, true)
+		},
+		releaseSeat: store.release,
+		prepare:     prepareSlingPolecat,
+		seatClaims:  store,
 	}
 }
 
@@ -521,9 +577,9 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	}
 
 	// The seat claimed above belongs to the polecat this call is about to
-	// spawn: the SpawnedPolecatInfo returned below carries it to StartSession,
-	// which drops it once the tmux session exists — the session is what the
-	// pool counts from then on. Every other way out of this function leaves no
+	// spawn: the SpawnedPolecatInfo returned below carries its store to
+	// StartSession, which drops it once the tmux session exists — the session
+	// is what the pool counts from then on. Every other way out of this function leaves no
 	// session behind — a rig that will not load, Dolt down, no connection
 	// capacity, a parked rig, the respawn breaker, the per-rig directory cap, a
 	// failed allocation — so the claim is dropped on the way out. A claim a
@@ -537,6 +593,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 		s.releaseSeat()
 		return nil, err
 	}
+	info.seatClaim = s.seatClaims
 	return info, nil
 }
 
@@ -576,7 +633,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		return nil, fmt.Errorf("admission control: %w", err)
 	}
 
-	if _, err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
+	if err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
 		return nil, err
 	}
 
@@ -594,7 +651,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		}
 		defer admission.Release()
 	}
-	slingSteps.step("admission")
+	opts.step("admission")
 
 	// Per-bead respawn circuit breaker (clown show #22):
 	// Track how many times this bead has been slung. Block after N attempts
@@ -686,7 +743,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		return nil, fmt.Errorf("allocating and creating polecat: %w", err)
 	}
 	fmt.Printf("Created polecat: %s\n", polecatName)
-	slingSteps.step("allocate")
+	opts.step("allocate")
 
 	// Get polecat object for path info
 	polecatObj, err := polecatMgr.Get(polecatName)
@@ -707,7 +764,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
 	sessionName := polecatSessMgr.SessionName(polecatName)
 
-	slingSteps.step("worktree")
+	opts.step("worktree")
 	fmt.Printf("%s Polecat %s spawned (session start deferred)\n", style.Bold.Render("✓"), polecatName)
 
 	// Log spawn event to activity feed
@@ -753,11 +810,20 @@ func (s *SpawnedPolecatInfo) noteStartOutcome(startErr error) {
 	if s.HookBead == "" {
 		return
 	}
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := s.town()
 	if err != nil {
 		return
 	}
 	s.noteStartOutcomeIn(townRoot, startErr)
+}
+
+// town is the town this spawn belongs to: the one its spawner recorded, or the
+// cwd's when the record has none.
+func (s *SpawnedPolecatInfo) town() (string, error) {
+	if s.townRoot != "" {
+		return s.townRoot, nil
+	}
+	return workspace.FindFromCwdOrError()
 }
 
 // noteStartOutcomeIn is noteStartOutcome for the town at townRoot.
@@ -776,17 +842,17 @@ func (s *SpawnedPolecatInfo) noteStartOutcomeIn(townRoot string, startErr error)
 
 func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// The tmux session this starts is what the pool counts, so the seat claim
-	// this process made for it (sling_pool.go) is redundant the moment the
+	// this spawn made for it (sling_pool.go) is redundant the moment the
 	// session exists — and holding both would read one polecat as two seats.
 	// Releasing on the way out also covers the failure paths, where no session
 	// will ever appear and the seat must not stay claimed.
-	defer releasePoolSeatClaim()
+	defer s.releaseSeatClaim()
 
 	if s.SessionStarted() {
 		return s.Pane, nil
 	}
 
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := s.town()
 	if err != nil {
 		return "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}

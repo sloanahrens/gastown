@@ -50,8 +50,8 @@ func refusingFeedRig(t *testing.T, refusal string) (townRoot string, gt *fakeCLI
 // newFeedManager is NewConvoyManager over townRoot with its gt calls
 // answered by gt.
 func newFeedManager(townRoot string, logger func(string, ...interface{}), gt *fakeCLI) *ConvoyManager {
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
-	m.execCmd = gt.run
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, nil, nil, nil)
+	m.slingFn = slingSeamThrough(gt)
 	answerScanThrough(m, gt)
 	return m
 }

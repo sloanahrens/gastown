@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // scanTestOpts configures the mockGtForScanTest helper.
@@ -80,10 +81,50 @@ func convoyTestTown(t *testing.T, routes string) string {
 
 // newFakeGtManager is NewConvoyManager with its gt calls answered by gt.
 func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
-	m := NewConvoyManager(townRoot, logger, "gt", scanInterval, stores, openStores, isRigParked)
-	m.execCmd = gt.run
+	m := NewConvoyManager(townRoot, logger, nil, scanInterval, stores, openStores, isRigParked)
+	m.slingFn = slingSeamThrough(gt)
 	answerScanThrough(m, gt)
 	return m
+}
+
+// slingSeamThrough answers the feeder's in-process dispatch with gt's reply to
+// the `gt sling` command line the same dispatch used to build. The feeder runs
+// the engine in process now (gt-638go.7); this keeps one fake answering every
+// call the manager makes, and keeps the argv a test asserts on the argv the
+// dispatch asked for.
+func slingSeamThrough(gt *fakeCLI) func(convoyID string, opts sling.Options) (*sling.Result, error) {
+	return func(_ string, opts sling.Options) (*sling.Result, error) {
+		cmd := &exec.Cmd{Path: "gt", Args: append([]string{"gt"}, slingArgv(opts)...)}
+		_, stderr, err := gt.run(cmd)
+		if err != nil {
+			// The refusal text is what the feeder classifies, exactly as it
+			// classified the subprocess's stderr.
+			return nil, errors.New(strings.TrimSpace(string(stderr)))
+		}
+		return &sling.Result{BeadID: opts.BeadID, Success: true}, nil
+	}
+}
+
+// slingArgv is the command line a dispatch's options describe, in the order
+// `gt sling` took them.
+func slingArgv(opts sling.Options) []string {
+	args := []string{"sling", opts.BeadID, opts.RigName}
+	if opts.NoBoot {
+		args = append(args, "--no-boot")
+	}
+	if opts.Actor != "" {
+		args = append(args, "--actor="+opts.Actor)
+	}
+	if opts.BaseBranch != "" {
+		args = append(args, "--base-branch="+opts.BaseBranch)
+	}
+	if opts.Agent != "" {
+		args = append(args, "--agent="+opts.Agent)
+	}
+	if opts.FormulaName != "" {
+		args = append(args, "--formula="+opts.FormulaName)
+	}
+	return args
 }
 
 // answerScanThrough routes m's stranded scan and completion check through gt,
@@ -95,7 +136,7 @@ func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		cmd := &exec.Cmd{Path: m.gtPath, Args: []string{m.gtPath, "convoy", "stranded", "--json"}, Dir: m.townRoot}
+		cmd := &exec.Cmd{Path: "gt", Args: []string{"gt", "convoy", "stranded", "--json"}, Dir: m.townRoot}
 		stdout, stderr, err := gt.run(cmd)
 		if err != nil {
 			return nil, fmt.Errorf("convoy stranded: %s", strings.TrimSpace(string(stderr)))
@@ -110,7 +151,7 @@ func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		cmd := &exec.Cmd{Path: m.gtPath, Args: []string{m.gtPath, "convoy", "check", convoyID}, Dir: m.townRoot}
+		cmd := &exec.Cmd{Path: "gt", Args: []string{"gt", "convoy", "check", convoyID}, Dir: m.townRoot}
 		if _, stderr, err := gt.run(cmd); err != nil {
 			return fmt.Errorf("convoy check %s: %s", convoyID, strings.TrimSpace(string(stderr)))
 		}
@@ -199,7 +240,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -458,7 +499,7 @@ func TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet(t *testing.T) {
 		return storeOpenResult{}
 	}
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
 
 	m.retryMissingStores(time.Now())
@@ -504,7 +545,7 @@ func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 
 	// The daemon hands over a map that is missing hq: Dolt restarted between the
 	// walk's first store and its last, and hq is walked first (gt-i36h).
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"gastown": held}, opener, nil)
 
 	m.retryMissingStores(time.Now())
@@ -549,7 +590,7 @@ func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
 	var raised []firing
 	var cleared []string
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, firing{key, source, msg}) },
@@ -622,7 +663,7 @@ func TestRetryMissingStores_RigStoreMissingDoesNotEscalate(t *testing.T) {
 		}
 	}
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, key) },
@@ -717,7 +758,7 @@ func TestLogMissingRequiredStore_IsRateLimited(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", time.Hour,
+	m := NewConvoyManager(t.TempDir(), logger, nil, time.Hour,
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, nil, nil)
 	m.storeRecovery.missing = []string{"hq"}
 
@@ -760,7 +801,7 @@ func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
 
 	startup := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
 	reopened := &closeTrackingStorage{}
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour, startup,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour, startup,
 		func() storeOpenResult {
 			return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": reopened}}
 		}, nil)
@@ -791,7 +832,7 @@ func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
 	}
 	for i := 0; i < 200; i++ {
 		caller := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
-		m := NewConvoyManager(townRoot, noop, "gt", time.Hour, caller, opener, nil)
+		m := NewConvoyManager(townRoot, noop, nil, time.Hour, caller, opener, nil)
 		adopted := make(chan struct{})
 		go func() {
 			defer close(adopted)
@@ -822,13 +863,13 @@ func (s *closeTrackingStorage) Close() error {
 func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	t.Parallel()
 	noop := func(string, ...interface{}) {}
-	m := NewConvoyManager("/tmp", noop, "gt", 0, nil, nil, nil)
+	m := NewConvoyManager("/tmp", noop, nil, 0, nil, nil, nil)
 	if m.scanInterval != defaultStrandedScanInterval {
 		t.Errorf("interval 0 should use default %v, got %v", defaultStrandedScanInterval, m.scanInterval)
 	}
 
 	custom := 5 * time.Minute
-	m2 := NewConvoyManager("/tmp", noop, "gt", custom, nil, nil, nil)
+	m2 := NewConvoyManager("/tmp", noop, nil, custom, nil, nil, nil)
 	if m2.scanInterval != custom {
 		t.Errorf("interval should be %v, got %v", custom, m2.scanInterval)
 	}
@@ -1123,7 +1164,7 @@ func TestPollEvents_JournalReadError(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	if !m.pollStoresSnapshot(m.stores) {
 		t.Error("a failed journal read did not report an error")
 	}
@@ -1160,7 +1201,7 @@ func TestPollEvents_TruncatedJournalResumesAtFloor(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.eventCursors.Store("hq", int64(2))
 	if m.pollStoresSnapshot(m.stores) {
@@ -1203,7 +1244,7 @@ func TestPollEvents_PagesThroughJournal(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 	closes := 0
@@ -1233,7 +1274,7 @@ func TestPollEvents_WarmupAndUpdateOnClosedIssue(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	for _, s := range logged {
 		if strings.Contains(s, "close detected") {
@@ -1286,7 +1327,7 @@ func TestPollEvents_FailedFirstReadStillWarmsUp(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	if _, ok := m.eventCursors.Load("gastown"); ok {
 		t.Fatal("a failed first read recorded a cursor")
@@ -1317,7 +1358,7 @@ func TestPollEvents_TruncationWithoutProgressSkipsToHead(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	m.eventCursors.Store("hq", int64(3))
 	store.truncateOnce = true
 	if m.pollStoresSnapshot(m.stores) {
@@ -1342,7 +1383,7 @@ func TestPollEvents_TruncationDuringWarmupRecordsNoEarlyCursor(t *testing.T) {
 	store.truncateOnce = true
 	store.failAfterTruncate = errors.New("bd events tail: store_unavailable")
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	if v, ok := m.eventCursors.Load("hq"); ok {
 		t.Errorf("warm-up cut short recorded cursor %v", v)
@@ -1788,7 +1829,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 	}
 	errStore := &holdTestStorage{readErr: fmt.Errorf("dolt: connection refused")}
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"gt": store, "broken": errStore}, nil, nil)
 
 	if _, ok := m.feedHold("missing-rig", "gt-clean"); ok {
@@ -2092,7 +2133,7 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, opener, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, nil, opener, nil)
 
 	// Simulate lazy opening (as runEventPoll does when stores are nil)
 	m.retryMissingStores(time.Now())
@@ -2137,7 +2178,7 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 	m.Stop()
 
 	// Both stores should have been closed
@@ -2204,7 +2245,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 		"shippercrm": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2265,7 +2306,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2341,7 +2382,7 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 		return rig == "shippercrm"
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, isParked)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, isParked)
 	startCursorsAtZero(m)
 	m.eventCursors.Delete("shippercrm") // parked: never read, so never given a cursor
 	m.pollStoresSnapshot(m.stores)
@@ -2397,7 +2438,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 	// because the code checks `name != "hq" && m.isRigParked(name)`
 	alwaysParked := func(string) bool { return true }
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
@@ -2441,7 +2482,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
 
 	// First poll: should detect our close event
@@ -2495,7 +2536,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
@@ -2585,7 +2626,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
@@ -2637,7 +2678,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2685,7 +2726,7 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 
 	// First poll: only hq has a close event
 	m.pollStoresSnapshot(m.stores)
@@ -2800,7 +2841,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2839,7 +2880,7 @@ func TestRecoveryMode_SetOnPollError(t *testing.T) {
 	}
 
 	// Use a broken store that returns errors
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, nil, nil, nil)
 
 	// recoveryMode should start false
 	if m.recoveryMode.Load() {
@@ -4019,7 +4060,7 @@ func TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed(t *testing.T) {
 func TestResolveDeadHolderWork_ClearRunsOncePerAlertKey(t *testing.T) {
 	t.Parallel()
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
 		map[string]beadsdk.Storage{}, nil, nil)
 	m.listOriginBranchesFn = func(string) ([]string, error) { return nil, nil }
 
@@ -4161,7 +4202,7 @@ func TestPollEvents_RigCloseFindsConvoyTrackingItExternally(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	var checked []string
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
 	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
 		checked = append(checked, convoyID)
 		return nil

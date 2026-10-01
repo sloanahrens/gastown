@@ -71,7 +71,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("autocommit off")
 			return func() { h.record("autocommit restore") }
 		},
-		releaseSeat: func() { h.record("release seat") },
+		releaseSeat: func(*SpawnedPolecatInfo) { h.record("release seat") },
 		findTown:    func() (string, error) { return slingTestTown, nil },
 		townOrEnv:   func() (string, error) { return slingTestTown, nil },
 
@@ -182,7 +182,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("start session %s", s.PolecatName)
 			return "%1", nil
 		},
-		cleanupSpawned: func(s *SpawnedPolecatInfo, _, convoyID string) {
+		cleanupSpawned: func(s *SpawnedPolecatInfo, _, _, convoyID string) {
 			h.record("cleanup spawn %s convoy=%s", s.PolecatName, convoyID)
 		},
 		resolveAgent: func(target string) (string, string, string, error) {
@@ -205,13 +205,13 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("reassign %s %s -> %s", id, from, to)
 		},
 
-		trackedByConvoy: func(id string) string {
+		trackedByConvoy: func(_, id string) string {
 			h.record("convoy lookup %s", id)
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			return h.convoys[id]
 		},
-		createConvoy: func(id, _ string, _ bool, _, _, _, _ string) (string, error) {
+		createConvoy: func(_, id, _ string, _ bool, _, _, _, _ string) (string, error) {
 			h.record("create convoy %s", id)
 			return "hq-cv-auto", nil
 		},
@@ -279,7 +279,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 
 		slingContexts: func(string) slingContextStore { return fakeSlingContexts{h} },
 
-		rollbackArtifacts: func(s *SpawnedPolecatInfo, id, _, convoyID string) {
+		rollbackArtifacts: func(s *SpawnedPolecatInfo, _, id, _, convoyID string) {
 			name := ""
 			if s != nil {
 				name = s.PolecatName

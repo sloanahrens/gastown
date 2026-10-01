@@ -1,17 +1,24 @@
 package daemon
 
-import "strings"
+import (
+	"strings"
 
-// slingStepPrefix is the per-step timing line `gt sling` prints on stderr
-// (internal/cmd/sling_timing.go, gt-llg8).
-const slingStepPrefix = "[sling] step "
+	"github.com/steveyegge/gastown/internal/sling"
+)
 
-// slingTimingLines returns the timing lines from a sling subprocess's stderr,
-// in order, with everything else dropped. The feeder logs them on success so
-// an 11-minute convoy-fed sling can be attributed from daemon.log alone.
-func slingTimingLines(stderr string) []string {
+// slingStepPrefix is the per-step timing line a dispatch writes
+// (internal/sling/timer.go, gt-llg8).
+const slingStepPrefix = sling.StepPrefix
+
+// slingTimingLines returns the timing lines from a dispatch's output, in
+// order, with everything else dropped. The feeder logs them so an 11-minute
+// convoy-fed sling can be attributed from daemon.log alone.
+//
+// The output is the engine's step timer buffer on the in-process path, and the
+// child's stderr on the paths that still exec gt (scheduled slings).
+func slingTimingLines(output string) []string {
 	var lines []string
-	for _, l := range strings.Split(stderr, "\n") {
+	for _, l := range strings.Split(output, "\n") {
 		if strings.HasPrefix(l, slingStepPrefix) {
 			lines = append(lines, l)
 		}
@@ -19,12 +26,12 @@ func slingTimingLines(stderr string) []string {
 	return lines
 }
 
-// slingErrorLine is the one-line summary of a failed sling's stderr: the
+// slingErrorLine is the one-line summary of a failed dispatch's output: the
 // first line that is not a timing line, falling back to the first line so a
 // failure is never logged as an empty string.
-func slingErrorLine(stderr string) string {
+func slingErrorLine(output string) string {
 	first := ""
-	for i, l := range strings.Split(stderr, "\n") {
+	for i, l := range strings.Split(output, "\n") {
 		if i == 0 {
 			first = l
 		}
