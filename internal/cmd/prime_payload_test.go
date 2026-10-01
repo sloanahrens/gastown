@@ -26,7 +26,7 @@ func threeStepFormula() *cookedFormula {
 
 func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 	t.Parallel()
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 1)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula().checklist(), 1)
 
 	for _, want := range []string{
 		"**Formula Checklist** (3 steps from mol-test-work)",
@@ -52,7 +52,7 @@ func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 
 func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
 	t.Parallel()
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 3)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula().checklist(), 3)
 	if !strings.Contains(out, "Body of step three.") {
 		t.Fatalf("expected step 3 body:\n%s", out)
 	}
@@ -63,7 +63,7 @@ func TestRenderFormulaChecklist_FullStepSelectsBody(t *testing.T) {
 
 func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
 	t.Parallel()
-	out := renderFormulaChecklist("mol-test-work", threeStepFormula(), 9)
+	out := renderFormulaChecklist("mol-test-work", threeStepFormula().checklist(), 9)
 	if !strings.Contains(out, "Body of step one") {
 		t.Fatalf("out-of-range full step must fall back to step 1:\n%s", out)
 	}
@@ -71,7 +71,7 @@ func TestRenderFormulaChecklist_OutOfRangeFallsBackToStepOne(t *testing.T) {
 
 func TestRenderFormulaChecklist_EmptyFormula(t *testing.T) {
 	t.Parallel()
-	if out := renderFormulaChecklist("x", &cookedFormula{}, 1); out != "" {
+	if out := renderFormulaChecklist("x", nil, 1); out != "" {
 		t.Fatalf("expected empty output for a formula without steps, got %q", out)
 	}
 }
@@ -275,7 +275,7 @@ func TestUseCompactResumePath(t *testing.T) {
 
 func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	t.Parallel()
-	out, err := renderFormulaStep("mol-test-work", threeStepFormula(), 2)
+	out, err := renderFormulaStep("mol-test-work", threeStepFormula().checklist(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,16 +285,17 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	if strings.Contains(out, "Body of step one") {
 		t.Fatalf("other bodies must not render:\n%s", out)
 	}
-	if _, err := renderFormulaStep("mol-test-work", threeStepFormula(), 4); err == nil {
+	if _, err := renderFormulaStep("mol-test-work", threeStepFormula().checklist(), 4); err == nil {
 		t.Fatal("out-of-range step must error")
 	}
 }
 
-func TestShowStepsFull_RendersCookedChecklist(t *testing.T) {
+// An attachment with no poured molecule renders its formula as bd cooks it.
+func TestShowChecklist_NoMoleculeRendersCookedChecklist(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	fake := &fakeCook{out: cookTreeJSON(docAuditTree)}
-	formulaCooker{run: fake.run}.showStepsFull(&buf, "mol-doc-audit", t.TempDir(), "", nil)
+	RoleContext{TownRoot: t.TempDir(), formulaRun: fake.run}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "mol-doc-audit"})
 	out := buf.String()
 	for _, want := range []string{"(3 steps from mol-doc-audit)", "Step 1: Load gt-1", "Read gt-1.", "Step 3: Check links", "gt prime --step <N> --formula mol-doc-audit"} {
 		if !strings.Contains(out, want) {
@@ -306,13 +307,13 @@ func TestShowStepsFull_RendersCookedChecklist(t *testing.T) {
 	}
 }
 
-// TestShowStepsFull_CookFailureRendersNothing: a formula bd cannot cook fails
+// TestShowChecklist_CookFailureRendersNothing: a formula bd cannot cook fails
 // closed; prime renders no checklist rather than a guess.
-func TestShowStepsFull_CookFailureRendersNothing(t *testing.T) {
+func TestShowChecklist_CookFailureRendersNothing(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	fake := &fakeCook{kind: "not_found", msg: "formula nope not found"}
-	formulaCooker{run: fake.run}.showStepsFull(&buf, "nope", t.TempDir(), "", nil)
+	RoleContext{TownRoot: t.TempDir(), formulaRun: fake.run}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "nope"})
 	if buf.Len() != 0 {
 		t.Fatalf("cook failure rendered %q", buf.String())
 	}
@@ -321,11 +322,12 @@ func TestShowStepsFull_CookFailureRendersNothing(t *testing.T) {
 func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
+	molecules, mol := polecatMolecule(t)
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, molecules: molecules}
 	bead := &beads.Issue{
 		ID:    "gt-zz9",
 		Title: "Make the thing do the other thing",
-		Description: "attached_molecule: gt-wisp-abc\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-zz9\"]\n\n" +
+		Description: "attached_molecule: " + mol + "\nattached_formula: mol-polecat-work\nattached_vars: [\"issue=gt-zz9\"]\n\n" +
 			strings.Repeat("A long description line that should be capped by the 5-line rule.\n", 20),
 	}
 	directive := strings.Repeat("Operator directive line.\n", 60) // ~1.5 KB
@@ -444,7 +446,7 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 		{Title: "Huge", Description: strings.Repeat("a line of step body text\n", 400)}, // ~10 KB
 		{Title: "Small", Description: "tiny"},
 	}}
-	out := renderFormulaChecklist("mol-big", f, 1)
+	out := renderFormulaChecklist("mol-big", f.checklist(), 1)
 	if len(out) > primeStepBodyMaxChars+600 {
 		t.Fatalf("checklist %d chars; step body must be capped near %d", len(out), primeStepBodyMaxChars)
 	}
@@ -596,11 +598,12 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
+			molecules, mol := polecatMolecule(t)
+			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, molecules: molecules}
 			var bead *beads.Issue
 			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",
-					Description: "attached_molecule: gt-wisp-1\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
+					Description: "attached_molecule: " + mol + "\nattached_formula: " + f + "\nattached_vars: [\"issue=gt-fix1\"]\n" + strings.Repeat("desc line\n", 30)}
 			}
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },

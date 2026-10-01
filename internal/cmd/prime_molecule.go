@@ -1,129 +1,17 @@
 package cmd
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-// MoleculeCurrentOutput represents the JSON output of bd mol current.
-type MoleculeCurrentOutput struct {
-	MoleculeID    string `json:"molecule_id"`
-	MoleculeTitle string `json:"molecule_title"`
-	NextStep      *struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Status      string `json:"status"`
-	} `json:"next_step"`
-	Completed int `json:"completed"`
-	Total     int `json:"total"`
-}
-
-// showMoleculeExecutionPrompt calls bd mol current and shows the current step
-// with execution instructions. This is the core of the Propulsion Principle.
-func showMoleculeExecutionPrompt(w io.Writer, workDir, moleculeID string) {
-	// Call bd mol current with JSON output
-	cmd := beads.CommandWithEnv(workDir, nil, "mol", "current", moleculeID, "--json")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Fall back to simple message if bd mol current fails
-		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
-		fmt.Fprintf(w, "  Check status with: %s mol progress %s\n", cli.Name(), moleculeID)
-		return
-	}
-	// Handle bd exit 0 bug: empty stdout means not found
-	if stdout.Len() == 0 {
-		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
-		return
-	}
-
-	// Parse JSON output - it's an array with one element
-	var outputs []MoleculeCurrentOutput
-	if err := json.Unmarshal(stdout.Bytes(), &outputs); err != nil || len(outputs) == 0 {
-		// Fall back to simple message
-		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
-		return
-	}
-	output := outputs[0]
-
-	// Show molecule progress
-	fmt.Fprintf(w, "**Progress:** %d/%d steps complete\n\n",
-		output.Completed, output.Total)
-
-	// Show current step if available
-	if output.NextStep != nil {
-		step := output.NextStep
-		fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🎬 CURRENT STEP: "+step.Title))
-		fmt.Fprintf(w, "**Step ID:** %s\n", step.ID)
-		fmt.Fprintf(w, "**Status:** %s (ready to execute)\n\n", step.Status)
-
-		// Show step description if available
-		if step.Description != "" {
-			fmt.Fprintln(w, "### Instructions")
-			fmt.Fprintln(w)
-			// Indent the description for readability
-			lines := strings.Split(step.Description, "\n")
-			for _, line := range lines {
-				fmt.Fprintf(w, "%s\n", line)
-			}
-			fmt.Fprintln(w)
-		}
-
-		// The propulsion directive
-		fmt.Fprintln(w, style.Bold.Render("→ EXECUTE THIS STEP NOW."))
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "When complete:")
-		fmt.Fprintf(w, "  1. Finish the step: %s mol step done %s (closes it and moves you to the next)\n", cli.Name(), step.ID)
-		fmt.Fprintln(w, "  2. Continue until molecule complete")
-	} else {
-		// No next step - molecule may be complete
-		fmt.Fprintln(w, style.Bold.Render("✓ MOLECULE COMPLETE"))
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "All steps are done. You may:")
-		fmt.Fprintln(w, "  - Report completion to supervisor")
-		fmt.Fprintln(w, "  - Check for new work: "+cli.Name()+" mol current")
-	}
-}
-
-// showStepsFull renders the bounded formula checklist (every title, the
-// body of step 1, and how to fetch the rest). Used for polecat work formulas and
-// patrol formulas. The full-body renderer renderStepsFull remains for the
+// renderFormulaStepsFull renders every step with its full body, for the
 // Ralph loop directive, whose /ralph-loop prompt must carry every step inline;
 // Ralph-mode attachments therefore still exceed the hook budget (rare, known).
-// The steps are what bd cooks (formulaCooker.cookForRender); a cook failure is
-// one warning line and no checklist. vars ("key=value") are passed to the cook.
-func (c formulaCooker) showStepsFull(w io.Writer, formulaName, townRoot, rigName string, vars []string) {
-	f, err := c.cookForRender(formulaName, townRoot, rigName, vars)
-	if err != nil {
-		style.PrintWarning("%v", err)
-		return
-	}
-	_, _ = fmt.Fprint(w, renderFormulaChecklist(formulaName, f, 1))
-}
-
-func (c formulaCooker) renderStepsFull(formulaName, townRoot, rigName string, vars []string) (string, error) {
-	f, err := c.cookForRender(formulaName, townRoot, rigName, vars)
-	if err != nil {
-		return "", err
-	}
-	return renderFormulaStepsFullCooked(formulaName, f), nil
-}
-
-func renderFormulaStepsFullCooked(formulaName string, f *cookedFormula) string {
-	steps := f.checklist()
+func renderFormulaStepsFull(formulaName string, steps []checklistStep) string {
 	if len(steps) == 0 {
 		return ""
 	}
@@ -132,7 +20,7 @@ func renderFormulaStepsFullCooked(formulaName string, f *cookedFormula) string {
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
 	for i, step := range steps {
-		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
+		fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", i+1, step.Title, stepStatusSuffix(step))
 		if step.Description != "" {
 			sb.WriteString(step.Description)
 			sb.WriteString("\n\n")

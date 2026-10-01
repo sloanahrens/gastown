@@ -685,6 +685,13 @@ func contractChildren(t *testing.T, s *scope) {
 	s.want(t, "Children", kids, err, a.ID, b.ID, w.ID)
 	none, err := s.Children(a.ID)
 	s.want(t, "Children(leaf)", none, err)
+	grand := s.mustCreate(t, beads.CreateOptions{Title: "grandchild", Parent: w.ID, Priority: -1, Ephemeral: true})
+	byParent, err := s.ChildrenOf(parent.ID, a.ID, w.ID)
+	if err != nil || len(byParent) != 2 {
+		t.Errorf("ChildrenOf: %d parents, err %v; want the parent and the wisp child (a leaf is absent)", len(byParent), err)
+	}
+	s.want(t, "ChildrenOf[parent]", byParent[parent.ID], nil, a.ID, b.ID, w.ID)
+	s.want(t, "ChildrenOf[wisp child]", byParent[w.ID], nil, grand.ID)
 
 	// RemoveDependency removes a parent-child link too.
 	mustDo(t, "RemoveDependency(child, parent)", s.RemoveDependency(a.ID, parent.ID))
