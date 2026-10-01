@@ -182,6 +182,44 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 	}
 }
 
+// gt-gb4ij: a post-landing run holds the restart until its verdict, but
+// only up to postLandRestartCap; the worker reruns the tip after the start.
+func TestUpgradeWaitsForAPostLandRunUpToTheCap(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	keys := captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	d.postLandRuns.Add(1)
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+
+	now := time.Now()
+	if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(postLandRestartCap-time.Minute)) {
+		t.Fatal("restarted under a post-land run before the cap")
+	}
+	if !d.checkUpgradeRestart(now.Add(postLandRestartCap)) {
+		t.Fatal("still waiting for the post-land run at the cap")
+	}
+	if len(*keys) != 0 {
+		t.Fatalf("escalated: %v", *keys)
+	}
+
+	// The run finishing releases the restart at once.
+	d2 := upgradeTestDaemon(t)
+	captureEscalations(d2)
+	withOwnCommit(d2, "aaa")
+	fakeHistory(t, d2, "aaa", "bbb")
+	d2.postLandRuns.Add(1)
+	writeMarker(t, d2, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+	if d2.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a post-land run")
+	}
+	d2.postLandRuns.Add(-1)
+	if !d2.checkUpgradeRestart(now.Add(time.Minute)) {
+		t.Fatal("finished post-land run must not hold the restart")
+	}
+}
+
 func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)

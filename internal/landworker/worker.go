@@ -579,6 +579,10 @@ func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Resu
 // landing put there: a direct push bypasses the worker, and without this
 // nothing would test it (gt-v4ssj.4.1). There is no work bead to blame, so
 // the red-main owner names the commit range and never reverts.
+//
+// The first watch after a start also resumes a landing's run that a daemon
+// restart cut short (gt-gb4ij): when the tip is a recorded landing but the
+// last verdict was at another commit, the landing's run starts again.
 func (w *Worker) watchTarget(ctx context.Context) {
 	if w.WatchTarget == "" || w.PostLand == nil || ctx.Err() != nil {
 		return
@@ -588,8 +592,9 @@ func (w *Worker) watchTarget(ctx context.Context) {
 		w.logf("watching %s for direct pushes: tip %q: %v", w.WatchTarget, tip, err)
 		return
 	}
+	resume := false
 	if w.lastSeen == "" {
-		w.lastSeen = w.seedLastSeen()
+		w.lastSeen, resume = w.seedLastSeen()
 		if w.lastSeen == "" {
 			// Nothing tested yet: watch from here rather than run the whole
 			// tier on a main nobody changed.
@@ -602,56 +607,62 @@ func (w *Worker) watchTarget(ctx context.Context) {
 	}
 	from := w.lastSeen
 	w.lastSeen = tip
-	if w.recentLanding(tip) {
+	if rec, ok := w.landingAt(tip); ok {
+		// The worker's own landing: its run was triggered when it landed,
+		// unless that was before a restart and no verdict was reached.
+		if resume {
+			w.logf("%s tip %s (landed by %s) has no post-landing verdict (last at %s; a restart cut its run short); running it again", w.WatchTarget, short(tip), rec.BeadID, short(from))
+			w.PostLand.Trigger(ctx, PostLand{BeadID: rec.BeadID, Commit: tip, Target: w.WatchTarget})
+		}
 		return
 	}
 	w.logf("%s moved %s..%s without a landing (a direct push); running the post-landing command at %s", w.WatchTarget, short(from), short(tip), short(tip))
 	w.PostLand.Trigger(ctx, PostLand{Commit: tip, Target: w.WatchTarget, Direct: true, From: from})
 }
 
-// seedLastSeen is the newest commit a post-landing run reached a verdict at,
-// else the newest landing on WatchTarget, else "".
-func (w *Worker) seedLastSeen() string {
+// seedLastSeen is the newest commit a post-landing run reached a verdict at
+// (fromRun true), else the newest landing on WatchTarget, else "".
+func (w *Worker) seedLastSeen() (seen string, fromRun bool) {
 	if w.MainState != nil {
 		if st, err := w.MainState.Load(); err != nil {
 			w.logf("reading the main state: %v", err)
 		} else if st.LastRun != "" {
-			return st.LastRun
+			return st.LastRun, true
 		}
 	}
 	if w.Landings == nil {
-		return ""
+		return "", false
 	}
 	recs, err := w.Landings.Recent(recentRepairWindow)
 	if err != nil {
 		w.logf("reading the landings file: %v", err)
-		return ""
+		return "", false
 	}
 	for i := len(recs) - 1; i >= 0; i-- {
 		if recs[i].Target == w.WatchTarget {
-			return recs[i].LandedCommit
+			return recs[i].LandedCommit, false
 		}
 	}
-	return ""
+	return "", false
 }
 
-// recentLanding reports whether commit is a landing the landings file
-// records: the worker's own, whose post-landing run it already triggered.
-func (w *Worker) recentLanding(commit string) bool {
+// landingAt is the landings file's record of commit, if it has one: the
+// worker's own landing, whose post-landing run it triggered.
+func (w *Worker) landingAt(commit string) (land.LandingRecord, bool) {
 	if w.Landings == nil {
-		return false
+		return land.LandingRecord{}, false
 	}
 	recs, err := w.Landings.Recent(recentRepairWindow)
 	if err != nil {
 		w.logf("reading the landings file: %v", err)
-		return false
+		return land.LandingRecord{}, false
 	}
-	for _, rec := range recs {
-		if rec.LandedCommit == commit {
-			return true
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].LandedCommit == commit {
+			return recs[i], true
 		}
 	}
-	return false
+	return land.LandingRecord{}, false
 }
 
 func (w *Worker) clearIntent(work land.Work) {

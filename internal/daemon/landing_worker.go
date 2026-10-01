@@ -348,6 +348,13 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Logf:    d.logger.Printf,
 		OnRed:   redMain.Red,
 		OnGreen: redMain.Green,
+		Busy: func(busy bool) {
+			if busy {
+				d.postLandRuns.Add(1)
+			} else {
+				d.postLandRuns.Add(-1)
+			}
+		},
 	}
 	return &landworker.Worker{
 		Rig:         rigName,
