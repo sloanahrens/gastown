@@ -13,6 +13,14 @@ const DefaultStaleAfter = 10 * time.Minute
 // (settings/config.json operational.health). Every key is optional; an
 // absent key keeps the compiled default. Durations are Go duration strings.
 type Settings struct {
+	// NotifyCommand is the operator's pager: the command the daemon runs
+	// once for each crossing from green to red or unknown, with the
+	// one-line signal appended as its last argument. It is a command line
+	// split on spaces, not a shell string, so a pager that needs quoting,
+	// a pipeline or a redirect is a script. Empty (the compiled default)
+	// means the town announces nothing and the daemon files no notice bead
+	// (gt-s3rec.3).
+	NotifyCommand       string  `json:"notify_command,omitempty"`
 	StaleAfter          string  `json:"stale_after,omitempty"`
 	DoltSamples         int     `json:"dolt_samples,omitempty"`
 	DoltLatencyDegraded string  `json:"dolt_latency_degraded,omitempty"`

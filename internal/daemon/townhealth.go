@@ -39,16 +39,19 @@ const (
 // e-stop too: health is upkeep, and an e-stopped town still wants its line.
 func (d *Daemon) writeTownHealth() {
 	op := d.loadOperationalConfig()
-	th, _, err := op.GetHealthSettings().Resolve()
+	th, stale, err := op.GetHealthSettings().Resolve()
 	if err != nil {
 		// The config field reports the broken block; the computation still
 		// runs on the defaults rather than leaving the file to go stale.
-		th = townhealth.DefaultThresholds()
+		th, stale = townhealth.DefaultThresholds(), townhealth.DefaultStaleAfter
 	}
 	src := &healthSources{d: d, evidence: th.SeatEvidence}
 	if d.townHealthSources != nil {
 		d.townHealthSources(src)
 	}
+	// The transition notice compares against the report the last tick left
+	// on disk, so it is read before this tick replaces it.
+	prevReport := d.previousHealth()
 	ctx, cancel := context.WithTimeout(context.Background(), townHealthTimeout)
 	defer cancel()
 	r := townhealth.Compute(ctx, src.inputs(d.clk().Now(), th, d.lastTownHealth))
@@ -64,7 +67,9 @@ func (d *Daemon) writeTownHealth() {
 		d.logger.Printf("townhealth: writing %s: %v", townhealth.Path(d.config.TownRoot), err)
 		return
 	}
-	d.logger.Printf("townhealth: %s", townhealth.Line(r, r.At, time.Hour))
+	line := townhealth.Line(r, r.At, stale)
+	d.logger.Printf("townhealth: %s", line)
+	d.notifyHealthTransition(prevReport, r, line)
 }
 
 // healthSources answers townhealth's sources from the daemon's records and
