@@ -15,10 +15,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // extractJSON finds the first JSON object in output that may contain non-JSON warnings.
@@ -34,7 +36,7 @@ func extractJSON(output []byte) []byte {
 // createTrackedBeadsRepoWithIssues creates a git repo with .beads/ tracked that contains existing issues.
 // This simulates a clone of a repo that has tracked beads with issues exported to issues.jsonl.
 // The database files are NOT included (gitignored), so prefix must be detected from config.yaml.
-func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssues int) {
+func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssues int, env []string) {
 	t.Helper()
 
 	// Create directory
@@ -82,10 +84,10 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 
 	// Run bd init (pass --server for bd v1.0.0+ which defaults to embedded mode)
 	bdInitArgs := []string{"init", "--prefix", prefix}
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+	if p := envValue(env, "GT_DOLT_PORT"); p != "" {
 		bdInitArgs = append(bdInitArgs, "--server", "--server-port", p)
 	}
-	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs, nil); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs, env); err != nil {
 		t.Fatalf("bd init failed: %v\nOutput: %s", err, output)
 	}
 	var cmd *exec.Cmd
@@ -95,6 +97,7 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 		cmd = exec.Command("bd", "-q", "create",
 			"--type", "task", "--title", fmt.Sprintf("Test issue %d", i))
 		cmd.Dir = path
+		cmd.Env = env
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("bd create issue %d failed: %v\nOutput: %s", i, err, output)
 		}
@@ -132,22 +135,28 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 	}
 	// Dolt server required: bd init auto-detects server on 3307,
 	// and gt rig add --adopt uses --server mode for re-initialization.
-	requireScratchDoltServer(t)
+	// gt install and gt rig add create the databases they name, so the
+	// town needs the scratch container; its lease sets no environment, so
+	// the test runs beside the package's parallel tests, and every bd and
+	// gt below gets env.
+	t.Parallel()
+	port, env := testutil.LeaseScratchDoltContainerEnv(t)
 
 	tmpDir := t.TempDir()
 	configureTestGitIdentity(t, tmpDir)
 	gtBinary := buildGT(t)
+	gtEnv := append(slices.Clip(env), "HOME="+tmpDir)
 
 	// One town serves every subtest: each adopts a rig of its own name, and
 	// a gt install per subtest was most of the test's time.
 	townRoot := filepath.Join(tmpDir, "town")
-	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test", "--dolt-port", os.Getenv("GT_DOLT_PORT"))
-	install.Env = append(os.Environ(), "HOME="+tmpDir)
+	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test", "--dolt-port", port)
+	install.Env = gtEnv
 	if output, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("gt install failed: %v\nOutput: %s", err, output)
 	}
 	// Bridge test Dolt server PID so AddRig/IsRunning checks pass.
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 
 	t.Run("TrackedRepoWithExistingPrefix", func(t *testing.T) {
 		// GitHub Issue #72: gt rig add --adopt should detect existing prefix and init database.
@@ -156,13 +165,13 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		// Create a repo with existing beads prefix "existing-prefix" AND issues
 		// directly at the expected rig location
 		rigDir := filepath.Join(townRoot, "myrig")
-		createTrackedBeadsRepoWithIssues(t, rigDir, "existing-prefix", 3)
+		createTrackedBeadsRepoWithIssues(t, rigDir, "existing-prefix", 3, env)
 
 		// Add rig with --adopt --force (local repo has no git remote)
 		// Pass --prefix to match the existing prefix
 		cmd := exec.Command(gtBinary, "rig", "add", "myrig", "--adopt", "--force", "--prefix", "existing-prefix")
 		cmd.Dir = townRoot
-		cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+		cmd.Env = gtEnv
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("gt rig add failed: %v\nOutput: %s", err, output)
 		}
@@ -182,6 +191,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		cmd = exec.Command("bd", "--json", "-q", "create",
 			"--type", "task", "--title", "test-from-rig")
 		cmd.Dir = rigDir
+		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed (bug!): %v\nOutput: %s\n\nThis is the bug: database doesn't exist after clone because bd init was never run", err, output)
@@ -205,12 +215,12 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 		// Create a tracked beads repo with NO issues at the expected rig location
 		rigDir := filepath.Join(townRoot, "emptyrig")
-		createTrackedBeadsRepoWithNoIssues(t, rigDir, "empty-prefix")
+		createTrackedBeadsRepoWithNoIssues(t, rigDir, "empty-prefix", env)
 
 		// Add rig WITH --prefix and --force (local repo has no git remote)
 		cmd := exec.Command(gtBinary, "rig", "add", "emptyrig", "--adopt", "--force", "--prefix", "empty-prefix")
 		cmd.Dir = townRoot
-		cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+		cmd.Env = gtEnv
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("gt rig add with --prefix failed: %v\nOutput: %s", err, output)
 		}
@@ -229,6 +239,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		cmd = exec.Command("bd", "--json", "-q", "create",
 			"--type", "task", "--title", "test-from-empty-repo")
 		cmd.Dir = rigDir
+		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed: %v\nOutput: %s", err, output)
@@ -254,12 +265,12 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 		// Create a repo with existing beads prefix "real-prefix" with issues
 		rigDir := filepath.Join(townRoot, "mismatchrig")
-		createTrackedBeadsRepoWithIssues(t, rigDir, "real-prefix", 2)
+		createTrackedBeadsRepoWithIssues(t, rigDir, "real-prefix", 2, env)
 
 		// Add rig with WRONG --prefix - should fail
 		cmd := exec.Command(gtBinary, "rig", "add", "mismatchrig", "--adopt", "--force", "--prefix", "wrong-prefix")
 		cmd.Dir = townRoot
-		cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+		cmd.Env = gtEnv
 		output, err := cmd.CombinedOutput()
 
 		// Should fail
@@ -286,12 +297,12 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 		// Create a tracked beads repo with NO issues at the expected rig location
 		rigDir := filepath.Join(townRoot, "testrig")
-		createTrackedBeadsRepoWithNoIssues(t, rigDir, "original-prefix")
+		createTrackedBeadsRepoWithNoIssues(t, rigDir, "original-prefix", env)
 
 		// Add rig WITHOUT --prefix - should derive from rig name "testrig"
 		cmd := exec.Command(gtBinary, "rig", "add", "testrig", "--adopt", "--force")
 		cmd.Dir = townRoot
-		cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+		cmd.Env = gtEnv
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("gt rig add (no --prefix) failed: %v\nOutput: %s", err, output)
@@ -301,6 +312,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		cmd = exec.Command("bd", "--json", "-q", "create",
 			"--type", "task", "--title", "test-derived-prefix")
 		cmd.Dir = rigDir
+		cmd.Env = env
 		output, err = cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed (database not initialized?): %v\nOutput: %s", err, output)
@@ -329,7 +341,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 		// Create a tracked beads repo with issues
 		rigDir := filepath.Join(townRoot, "reinitrig")
-		createTrackedBeadsRepoWithIssues(t, rigDir, "reinit-prefix", 2)
+		createTrackedBeadsRepoWithIssues(t, rigDir, "reinit-prefix", 2, env)
 
 		// Forcibly remove metadata.json and dolt/ to simulate missing DB state.
 		// This forces the rig.go initialization branch (metadata.json check).
@@ -345,7 +357,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		// Add rig with --adopt --force
 		cmd := exec.Command(gtBinary, "rig", "add", "reinitrig", "--adopt", "--force", "--prefix", "reinit-prefix")
 		cmd.Dir = townRoot
-		cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+		cmd.Env = gtEnv
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("gt rig add failed: %v\nOutput: %s", err, output)
@@ -375,7 +387,7 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 
 // createTrackedBeadsRepoWithNoIssues creates a git repo with .beads/ tracked but NO issues.
 // This simulates a fresh bd init that was committed before any issues were created.
-func createTrackedBeadsRepoWithNoIssues(t *testing.T, path, prefix string) {
+func createTrackedBeadsRepoWithNoIssues(t *testing.T, path, prefix string, env []string) {
 	t.Helper()
 
 	// Create directory
@@ -423,10 +435,10 @@ func createTrackedBeadsRepoWithNoIssues(t *testing.T, path, prefix string) {
 
 	// Run bd init (creates database but no issues; pass --server for bd v1.0.0+)
 	bdInitArgs2 := []string{"init", "--prefix", prefix}
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+	if p := envValue(env, "GT_DOLT_PORT"); p != "" {
 		bdInitArgs2 = append(bdInitArgs2, "--server", "--server-port", p)
 	}
-	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs2, nil); err != nil {
+	if output, err := beads.RunTestContainerInit(t.Context(), path, bdInitArgs2, env); err != nil {
 		t.Fatalf("bd init failed: %v\nOutput: %s", err, output)
 	}
 	var cmd *exec.Cmd
@@ -478,4 +490,14 @@ func removeDBFiles(t *testing.T, beadsDir string) {
 	os.RemoveAll(filepath.Join(beadsDir, "export-state"))
 	// Remove Dolt database directory (gitignored since bd v0.50+; managed by Dolt remotes, not git)
 	os.RemoveAll(filepath.Join(beadsDir, "dolt"))
+}
+
+// envValue returns key's value in env, or "" when env does not set it.
+func envValue(env []string, key string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], key+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
