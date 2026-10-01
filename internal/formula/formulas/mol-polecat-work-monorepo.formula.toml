@@ -201,11 +201,11 @@ survive in git, but analysis, findings, and decisions exist only in your context
 window. Persist them to the bead so they survive session death:
 ```bash
 # After completing significant analysis or reaching conclusions:
-bd update {{issue}} --append-notes "Findings so far: <what you discovered>"
-# For detailed reports, use --design:
-bd update {{issue}} --design "<structured findings>"
+gt bead note {{issue}} "Findings so far: <what you discovered>"
+# For detailed reports, a structured block:
+gt bead note {{issue}} "<structured findings>"
 ```
-Use `--append-notes`, never `--notes`: a resumed bead already carries the
+`gt bead note` appends and never overwrites: a resumed bead already carries the
 landing worker's MERGE REJECTION block, and the resume path in load-context greps
 notes for it (gt-nxvg).
 
@@ -214,7 +214,7 @@ persisting and closing, the findings survive. If you close first, they're lost.
 
 **For report-only tasks** (audits, reviews, research): your findings ARE the
 deliverable. There are no code changes to commit. You MUST persist all findings
-to the bead via --append-notes or --design. Without this, your entire work
+to the bead with `gt bead note`. Without this, your entire work
 product is lost when the session ends.
 
 **Commit frequently (for code tasks):**
@@ -233,7 +233,7 @@ it reads as if the commit introduced that problem (gt-hphli).**
 **Discovered work:**
 If you find bugs or improvements outside your scope:
 ```bash
-bd create --title "Found: <description>" --type bug --priority 2
+gt bead create --title "Found: <description>" --type bug --priority 2
 # Note the ID, continue with your work
 ```
 
@@ -393,7 +393,7 @@ Must show "nothing to commit, working tree clean".
 **Report-only tasks (audits, reviews, research — no code changes):**
 If your task produced no code changes, verify your findings are persisted to the bead:
 ```bash
-bd show {{issue}}    # Check notes/design fields have your findings
+bd show {{issue}}    # Check the notes field has your findings
 ```
 If findings are persisted, finish with `gt done --status DEFERRED`.
 
@@ -535,7 +535,7 @@ Nothing is submitted for landing: {{issue}} stays open until the PR merges.
 git push origin HEAD
 
 # Record the PR on the bead, then exit without submitting for landing
-bd update {{issue}} --append-notes "PR: <url>"
+gt bead note {{issue}} "PR: <url>"
 gt done --status DEFERRED
 ```
 

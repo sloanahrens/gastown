@@ -39,7 +39,7 @@ gt done $ARGUMENTS
 
 **If the bead has nothing to implement** (already fixed, can't reproduce):
 ```bash
-bd close <issue-id> --reason="no-changes: <brief explanation>"
+gt bead close <issue-id> --reason="no-changes: <brief explanation>"
 gt done
 ```
 

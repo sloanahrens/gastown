@@ -35,7 +35,6 @@ var deletedCommands = [][]string{
 	{"upgrade"},
 	{"uninstall"},
 	{"git-init"},
-	{"bead"},
 	{"cat"},
 	{"close"},
 	{"info"},

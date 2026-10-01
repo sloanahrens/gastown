@@ -1254,7 +1254,7 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 			if beads.GetRigPathForPrefix(townRoot, beadPrefix) == "" {
 				// Unknown prefix — no route exists, can't resolve rig.
 				return fmt.Errorf("bead %s (prefix %q) is not in rig %q — prefix not in routes\n"+
-					"Create the task from the rig directory: cd %s && bd create --title=...\n"+
+					"Create the task from the rig directory: gt bead create --rig=%s --title=...\n"+
 					"Use --force to override", beadID, strings.TrimSuffix(beadPrefix, "-"), targetRig, targetRig)
 			}
 			// Known town-root prefix — warn but allow. A crew member may have a
@@ -1267,7 +1267,7 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 			return nil
 		}
 		return fmt.Errorf("cross-rig mismatch: bead %s (prefix %q) belongs to rig %q, but target is rig %q\n"+
-			"Create the task from the target rig: cd %s && bd create --title=...\n"+
+			"Create the task from the target rig: gt bead create --rig=%s --title=...\n"+
 			"Use --force to override", beadID, strings.TrimSuffix(beadPrefix, "-"), beadRig, targetRig, targetRig)
 	}
 

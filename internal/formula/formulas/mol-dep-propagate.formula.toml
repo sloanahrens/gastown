@@ -91,7 +91,7 @@ Beads should auto-update blocked status when dependencies close.
 This step verifies and fixes if needed:
 ```bash
 # If still showing as blocked by resolved issue (shouldn't happen):
-bd dep remove <dependent-id> {{resolved_issue}}
+gt bead dep remove <dependent-id> {{resolved_issue}}
 ```
 
 **Exit criteria:** All cross-rig dependents have updated blocked status."""

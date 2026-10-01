@@ -234,7 +234,7 @@ Create summary report of convoy feeding actions.
 
 **2. Record it on the convoy:**
 ```bash
-bd comments add {{convoy}} "$(cat <<'EOF'
+gt bead comment {{convoy}} "$(cat <<'EOF'
 Convoy {{convoy}} feeding complete.
 
 Dispatched: {{dispatch_count}}/{{ready_count}} issues

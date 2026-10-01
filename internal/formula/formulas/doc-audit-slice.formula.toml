@@ -11,7 +11,7 @@ description = """
 ```bash
 bash scripts/docs-lint.sh --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
 bash scripts/docs-lint.sh --words   # record as WORDS_BEFORE
-bd update {{issue}} --notes "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
+gt bead note {{issue}} "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
 ```
 
 **2. Read the standard.** Open docs/writing-for-agents.md and keep every rule id
@@ -38,7 +38,7 @@ names the rule ids applied: `docs: R3 R5 on docs/reference.md ({{issue}})`.
 
 **5. Post the run comment on your bead. This is the audit's output.**
 ```bash
-bd comments add {{issue}} "$(cat <<'EOF'
+gt bead comment {{issue}} "$(cat <<'EOF'
 doc-audit run
 files: <one per line, with the rule ids applied or 'clean'>
 findings per rule: <one R<id>=<n> per rule in docs/writing-for-agents.md>

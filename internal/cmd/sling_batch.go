@@ -419,7 +419,7 @@ func resolveRigFromBeadIDs(beadIDs []string, townRoot string) (string, error) {
 				"    2. Check the bead's route mapping:\n"+
 				"         cat .beads/routes.jsonl | grep %s\n"+
 				"    3. Create the bead from the target rig directory instead:\n"+
-				"         cd <rig> && bd create --title=...\n",
+				"         gt bead create --rig=<rig> --title=...\n",
 				beadID, prefix, strings.Join(beadIDs, " "), prefix)
 		}
 
