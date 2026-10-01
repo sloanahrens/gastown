@@ -9,22 +9,27 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// emptyConvoyBd answers the bd calls checkSingleConvoy and
-// findStrandedConvoys make for one open convoy that tracks nothing.
-func emptyConvoyBd(convoyID, convoyTitle string) *bdScript {
-	return &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		switch positional(c.Args)[0] {
-		case "show":
-			return `[{"id":"` + convoyID + `","title":"` + convoyTitle + `","status":"open","issue_type":"convoy"}]`, "", 0
-		case "sql", "dep":
-			return "[]", "", 0
-		case "list":
-			return `[{"id":"` + convoyID + `","title":"` + convoyTitle + `"}]`, "", 0
-		}
-		return "", "", 0
-	}}
+// emptyConvoyDB is a town database holding one open convoy that tracks
+// nothing.
+func emptyConvoyDB(t *testing.T, convoyID, convoyTitle string) *beadsfake.Fake {
+	db := townDB()
+	seedConvoy(t, db, beads.Issue{ID: convoyID, Title: convoyTitle})
+	return db
+}
+
+// mustStatus fails unless id is in status in db.
+func mustStatus(t *testing.T, db beads.Client, id, status string) {
+	t.Helper()
+	got, err := db.Show(id)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", id, err)
+	}
+	if got.Status != status {
+		t.Errorf("%s is %s, want %s", id, got.Status, status)
+	}
 }
 
 // townWithBeads is an empty town root holding a .beads directory, with
@@ -49,39 +54,33 @@ func TestCheckSingleConvoy_EmptyConvoyDoesNotAutoClose(t *testing.T) {
 	// When getTrackedIssues returns empty (cross-rig resolution failure or truly
 	// no tracked issues), closeConvoyIfComplete must NOT auto-close. A 0/0 result
 	// means "could not resolve", not "all done". (GH#hq-439)
-	bd := emptyConvoyBd("hq-empty1", "Empty test convoy")
+	db := emptyConvoyDB(t, "hq-empty1", "Empty test convoy")
 
-	err := testTown(townWithBeads(t, ""), bd, &gtScript{}).CheckOne("hq-empty1", false)
+	err := testTown(townWithBeads(t, ""), db, &gtScript{}).CheckOne("hq-empty1", false)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() error: %v", err)
 	}
 
-	// Verify bd close was NOT called — 0 tracked issues = no auto-close.
-	if closes := bd.ran("close"); len(closes) != 0 {
-		t.Errorf("convoy with 0 tracked issues should NOT be auto-closed, but bd close ran: %v", closes)
-	}
+	// 0 tracked issues = no auto-close.
+	mustStatus(t, db, "hq-empty1", "open")
 }
 
 func TestCheckSingleConvoy_EmptyConvoyDryRun(t *testing.T) {
 	t.Parallel()
-	bd := emptyConvoyBd("hq-empty2", "Dry run convoy")
+	db := emptyConvoyDB(t, "hq-empty2", "Dry run convoy")
 
-	err := testTown(townWithBeads(t, ""), bd, &gtScript{}).CheckOne("hq-empty2", true)
+	err := testTown(townWithBeads(t, ""), db, &gtScript{}).CheckOne("hq-empty2", true)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() dry-run error: %v", err)
 	}
-
-	// In dry-run mode, bd close should NOT be called
-	if closes := bd.ran("close"); len(closes) != 0 {
-		t.Errorf("dry-run should not call bd close, but it ran: %v", closes)
-	}
+	mustStatus(t, db, "hq-empty2", "open")
 }
 
 func TestFindStrandedConvoys_EmptyConvoyFlagged(t *testing.T) {
 	t.Parallel()
-	bd := emptyConvoyBd("hq-empty3", "Stranded empty convoy")
+	db := emptyConvoyDB(t, "hq-empty3", "Stranded empty convoy")
 
-	stranded, err := testTown(townWithBeads(t, ""), bd, nil).findStrandedWith(context.Background(), noBlockers)
+	stranded, err := testTown(townWithBeads(t, ""), db, nil).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -110,34 +109,14 @@ func TestFindStrandedConvoys_MixedConvoys(t *testing.T) {
 	// Routes needed so isSlingableBead can resolve gt- prefix to a rig
 	townRoot := townWithBeads(t, `{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n")
 
-	// bd returns two convoys: one empty, one with a ready issue.
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		pos := positional(c.Args)
-		switch pos[0] {
-		case "list":
-			return `[{"id":"hq-empty-mix","title":"Empty convoy"},{"id":"hq-feed-mix","title":"Feedable convoy"}]`, "", 0
-		case "sql":
-			// DepListRawIDs: beadsql.RawDeps(<id>, "down", "tracks")
-			if strings.Contains(strings.Join(c.Args, " "), "issue_id = 'hq-feed-mix'") {
-				return `[{"depends_on_id":"gt-ready1"}]`, "", 0
-			}
-			return "[]", "", 0
-		case "dep":
-			if len(pos) > 2 && pos[2] == "hq-feed-mix" {
-				return `[{"id":"gt-ready1","title":"Ready issue","status":"open","issue_type":"task","assignee":"","dependency_type":"tracks"}]`, "", 0
-			}
-			return "[]", "", 0
-		case "show":
-			return `[{"id":"gt-ready1","title":"Ready issue","status":"open","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]`, "", 0
-		case "query":
-			// The fork's --json query prints "[]" for no rows, never nothing.
-			return "[]", "", 0
-		}
-		return "", "", 0
-	}}
+	// Two convoys: one empty, one tracking a ready issue.
+	db := townDB()
+	seedConvoy(t, db, beads.Issue{ID: "hq-empty-mix", Title: "Empty convoy"})
+	seedConvoy(t, db, beads.Issue{ID: "hq-feed-mix", Title: "Feedable convoy"},
+		beads.Issue{ID: "gt-ready1", Title: "Ready issue", Type: "task"})
 
 	// Pass townRoot (not .beads) — matches getTownBeadsDir() which returns the workspace root.
-	stranded, err := testTown(townRoot, bd, nil).findStrandedWith(context.Background(), noBlockers)
+	stranded, err := testTown(townRoot, db, nil).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -204,21 +183,13 @@ func TestFindStrandedConvoys_StuckConvoy(t *testing.T) {
 	t.Parallel()
 	townRoot := townWithBeads(t, `{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n")
 
-	// bd: convoy has tracked issues but all are blocked — none are ready.
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		switch positional(c.Args)[0] {
-		case "list":
-			return `[{"id":"hq-stuck1","title":"Stuck convoy"}]`, "", 0
-		case "sql":
-			return `[{"depends_on_id":"gt-busy1"},{"depends_on_id":"gt-busy2"}]`, "", 0
-		case "dep":
-			return `[{"id":"gt-busy1","title":"Blocked issue 1","status":"open","issue_type":"task","assignee":"","dependency_type":"tracks"},{"id":"gt-busy2","title":"Blocked issue 2","status":"open","issue_type":"task","assignee":"","dependency_type":"tracks"}]`, "", 0
-		case "show":
-			// Both issues have blockers so isReadyIssue returns false
-			return `[{"id":"gt-busy1","title":"Blocked issue 1","status":"open","issue_type":"task","assignee":"","blocked_by":["gt-blocker1"],"blocked_by_count":1,"dependencies":[]},{"id":"gt-busy2","title":"Blocked issue 2","status":"open","issue_type":"task","assignee":"","blocked_by":["gt-blocker1"],"blocked_by_count":1,"dependencies":[]}]`, "", 0
-		}
-		return "", "", 0
-	}}
+	// The convoy's tracked issues are all blocked — none are ready.
+	db := townDB()
+	busy := func(id, title string) beads.Issue {
+		return beads.Issue{ID: id, Title: title, Type: "task", BlockedBy: []string{"gt-blocker1"}, BlockedByCount: 1}
+	}
+	seedConvoy(t, db, beads.Issue{ID: "hq-stuck1", Title: "Stuck convoy"},
+		busy("gt-busy1", "Blocked issue 1"), busy("gt-busy2", "Blocked issue 2"))
 
 	// Both beads are blocked by gt-blocker1, as the blocker check reports.
 	blockedByBlocker1 := func(string) (blockCheck, func(), error) {
@@ -229,7 +200,7 @@ func TestFindStrandedConvoys_StuckConvoy(t *testing.T) {
 			return Block{}
 		}, func() {}, nil
 	}
-	stranded, err := testTown(townRoot, bd, nil).findStrandedWith(context.Background(), blockedByBlocker1)
+	stranded, err := testTown(townRoot, db, nil).findStrandedWith(context.Background(), blockedByBlocker1)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}

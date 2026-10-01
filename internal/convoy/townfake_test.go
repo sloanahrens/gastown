@@ -1,79 +1,13 @@
 package convoy
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
-
-// bdScript is a beads.BDRunner for the unit tier: it records every bd call
-// and answers it with answer (stdout, stderr and an exit code, 0 for
-// success). A nil answer prints nothing and succeeds.
-type bdScript struct {
-	mu     sync.Mutex
-	calls  []beads.BDCall
-	answer func(c beads.BDCall) (stdout, stderr string, code int)
-}
-
-func (s *bdScript) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	s.mu.Lock()
-	s.calls = append(s.calls, c)
-	answer := s.answer
-	s.mu.Unlock()
-	if answer == nil {
-		return nil, nil, nil
-	}
-	stdout, stderr, code := answer(c)
-	if code != 0 {
-		return []byte(stdout), []byte(stderr), bdExit(code)
-	}
-	return []byte(stdout), []byte(stderr), nil
-}
-
-// argvs returns each call's arguments joined by spaces.
-func (s *bdScript) argvs() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []string
-	for _, c := range s.calls {
-		out = append(out, strings.Join(c.Args, " "))
-	}
-	return out
-}
-
-// ran returns the calls whose first positional argument is cmd.
-func (s *bdScript) ran(cmd string) []beads.BDCall {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []beads.BDCall
-	for _, c := range s.calls {
-		if pos := positional(c.Args); len(pos) > 0 && pos[0] == cmd {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// positional drops the flags from args, leaving the subcommand and its
-// operands.
-func positional(args []string) []string {
-	var out []string
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
-// bdExit is a bd exit status, matched like *exec.ExitError.
-type bdExit int
-
-func (e bdExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
-func (e bdExit) ExitCode() int { return int(e) }
 
 // gtCall is one gt notice child: its directory, environment and arguments.
 type gtCall struct {
@@ -101,14 +35,62 @@ func (s *gtScript) recorded() []gtCall {
 	return append([]gtCall(nil), s.calls...)
 }
 
-// testTown is a Town at root whose bd and gt calls go to bd and gt.
-func testTown(root string, bd *bdScript, gt *gtScript) Town {
-	t := Town{Root: root}
-	if bd != nil {
-		t.Run = bd.run
+// envValue is key's value in env, the last one winning as in exec.
+func envValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
 	}
+	return val
+}
+
+// testTown is a Town at root whose every store, the routed issue lookup
+// included, is db, and whose gt calls go to gt.
+func testTown(root string, db Store, gt *gtScript) Town {
+	t := Town{Root: root, Open: func(string) Store { return db }, Issues: db}
 	if gt != nil {
 		t.gtRun = gt.run
 	}
 	return t
+}
+
+// townDB is an empty fake town database (prefix hq).
+func townDB() *beadsfake.Fake { return beadsfake.New(beadsfake.WithPrefix("hq")) }
+
+// seedConvoy stores an open gt:convoy convoy and the issues it tracks. A
+// tracked issue that is not already in db is seeded as given.
+func seedConvoy(t *testing.T, db *beadsfake.Fake, convoy beads.Issue, tracked ...beads.Issue) {
+	t.Helper()
+	if convoy.Type == "" {
+		convoy.Type = "convoy"
+	}
+	convoy.Labels = append(convoy.Labels, ConvoyLabel)
+	db.Seed(convoy)
+	for _, is := range tracked {
+		if _, err := db.Show(is.ID); err != nil {
+			db.Seed(is)
+		}
+		if err := db.AddTypedDependency(convoy.ID, is.ID, "tracks"); err != nil {
+			t.Fatalf("tracks %s -> %s: %v", convoy.ID, is.ID, err)
+		}
+	}
+}
+
+// rawDepsAnswer scripts db's bd sql answer for the tracked-edge query of
+// each convoy in tracks (convoy ID -> raw depends_on_id values); any other
+// convoy has none.
+func rawDepsAnswer(db *beadsfake.Fake, tracks map[string][]string) {
+	db.OnSQL(func(query string) ([][]string, error) {
+		rows := [][]string{{"depends_on_id"}}
+		for convoyID, targets := range tracks {
+			if strings.Contains(query, "issue_id = '"+convoyID+"'") {
+				for _, id := range targets {
+					rows = append(rows, []string{id})
+				}
+			}
+		}
+		return rows, nil
+	})
 }

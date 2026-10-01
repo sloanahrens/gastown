@@ -1,9 +1,7 @@
 package convoy
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,54 +48,36 @@ type ListedConvoy struct {
 // empty and all is set). It also finds legacy convoys, typed "convoy" without
 // the gt:convoy label.
 func (t Town) ListConvoys(status string, all bool) ([]ListedConvoy, error) {
-	args := []string{"list", "--label=" + ConvoyLabel, "--json", "--limit=0"}
-	if status != "" {
-		args = append(args, "--status="+status)
-	} else if all {
-		args = append(args, "--all")
+	if status == "" && all {
+		status = "all"
 	}
-
-	args = beads.InjectFlatForListJSON(args)
-	convoys, err := t.readConvoyIssues(args...)
+	store := t.store(t.Root)
+	labeled, err := store.List(beads.ListOptions{Label: ConvoyLabel, Status: status, Priority: -1})
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool, len(convoys))
-	for _, convoy := range convoys {
-		seen[convoy.ID] = true
-	}
-
-	legacyArgs := []string{"list", "--json", "--limit=0"}
-	if status != "" {
-		legacyArgs = append(legacyArgs, "--status="+status)
-	} else if all {
-		legacyArgs = append(legacyArgs, "--all")
-	}
-	legacyArgs = beads.InjectFlatForListJSON(legacyArgs)
-	legacy, err := t.readConvoyIssues(legacyArgs...)
+	legacy, err := store.List(beads.ListOptions{IssueType: "convoy", Status: status, Priority: -1})
 	if err != nil {
 		return nil, err
 	}
-	for _, issue := range legacy {
-		if seen[issue.ID] || issue.IssueType != "convoy" {
+	var convoys []ListedConvoy
+	seen := make(map[string]bool, len(labeled))
+	for _, issue := range append(labeled, legacy...) {
+		if seen[issue.ID] {
 			continue
 		}
-		convoys = append(convoys, issue)
 		seen[issue.ID] = true
+		convoys = append(convoys, ListedConvoy{
+			ID:          issue.ID,
+			Title:       issue.Title,
+			Status:      issue.Status,
+			CreatedAt:   issue.CreatedAt,
+			Description: issue.Description,
+			IssueType:   issue.Type,
+			Labels:      issue.Labels,
+		})
 	}
 	return convoys, nil
-}
-
-func (t Town) readConvoyIssues(args ...string) ([]ListedConvoy, error) {
-	out, err := t.bdJSON(t.Root, args...)
-	if err != nil {
-		return nil, err
-	}
-	var issues []ListedConvoy
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, err
-	}
-	return issues, nil
 }
 
 // TrackedIssue is an issue a convoy tracks.
@@ -257,58 +237,33 @@ func (t Town) TrackedIssues(convoyID string) ([]TrackedIssue, error) {
 	return tracked, nil
 }
 
-// depListTracked runs `bd dep list <convoyID> --direction=down --type=tracks --json`
-// and returns the tracked issue IDs (unwrapped from external: prefixes).
-// Uses --allow-stale for consistency with sling's other bd calls (verifyBeadExists,
-// bdShowBead) — without it, a jsonl write that straddles a second boundary causes
-// "database out of sync" errors in CI and fast-turnaround production workflows.
+// depListTracked returns the IDs the convoy tracks in the town database
+// (bd dep list --type=tracks).
 func (t Town) depListTracked(convoyID string) ([]string, error) {
-	out, err := t.bdJSONAllowStale(t.Root, "dep", "list", convoyID, "--direction=down", "--type=tracks", "--json")
+	deps, err := t.store(t.Root).DepList(convoyID, "tracks")
 	if err != nil {
 		return nil, err
 	}
-
-	var results []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(out, &results); err != nil {
-		return nil, fmt.Errorf("parsing dep list for %s: %w", convoyID, err)
-	}
-
-	seen := make(map[string]bool, len(results))
-	var ids []string
-	for _, r := range results {
-		id := beads.ExtractIssueID(r.ID)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-	return ids, nil
+	return trackedIDsOf(deps), nil
 }
 
-// showTrackedDeps falls back to `bd show <convoyID> --json` and extracts
-// tracked dependency IDs from the convoy's dependencies array.
-// This handles cross-database dependencies where bd dep list returns empty.
+// showTrackedDeps falls back to the convoy's own dependencies as bd show
+// lists them. This handles cross-database dependencies where bd dep list
+// returns empty.
 func (t Town) showTrackedDeps(convoyID string) ([]string, error) {
-	out, err := t.bdJSON(t.Root, "show", convoyID, "--json")
+	convoy, err := t.store(t.Root).Show(convoyID)
 	if err != nil {
 		return nil, err
 	}
+	return trackedIDsOf(convoy.Dependencies), nil
+}
 
-	var results []struct {
-		Dependencies []issueDependency `json:"dependencies"`
-	}
-	if err := json.Unmarshal(out, &results); err != nil {
-		return nil, fmt.Errorf("parsing show for %s: %w", convoyID, err)
-	}
-	if len(results) == 0 {
-		return nil, nil
-	}
-
+// trackedIDsOf returns the deduplicated, unwrapped targets of deps' tracks
+// edges.
+func trackedIDsOf(deps []beads.IssueDep) []string {
 	seen := make(map[string]bool)
 	var ids []string
-	for _, dep := range results[0].Dependencies {
+	for _, dep := range deps {
 		if dep.DependencyType != "tracks" {
 			continue
 		}
@@ -318,7 +273,7 @@ func (t Town) showTrackedDeps(convoyID string) ([]string, error) {
 			ids = append(ids, id)
 		}
 	}
-	return ids, nil
+	return ids
 }
 
 type issueDependency struct {
@@ -397,8 +352,11 @@ func (t Town) IssueDetails(issueID string) *IssueDetails {
 	return issueDetailsWithClient(t.issueClient(), issueID)
 }
 
-// issueClient returns a beads client pinned to the town root.
-func (t Town) issueClient() *beads.Beads {
+// issueClient returns the routed issue lookup at the town root.
+func (t Town) issueClient() beads.Client {
+	if t.Issues != nil {
+		return t.Issues
+	}
 	// Some callers pass a .beads directory rather than its parent — normalize
 	// the same way beads.ResolveBeadsDir does, since beads.Beads uses this as
 	// the process cwd for bd invocations, not just for computing the beads dir.
@@ -411,10 +369,10 @@ func (t Town) issueClient() *beads.Beads {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	return beads.NewWithBeadsDirAndRunner(root, "", t.Run)
+	return beads.NewWithBeadsDir(root, "")
 }
 
-func issueDetailsWithClient(client *beads.Beads, issueID string) *IssueDetails {
+func issueDetailsWithClient(client beads.Client, issueID string) *IssueDetails {
 	issue, err := client.Show(issueID)
 	if err != nil {
 		return nil
@@ -494,11 +452,7 @@ func (t Town) workersForIssues(issueIDs []string) map[string]*workerInfo {
 
 	// Query all rigs in parallel using bd list
 	type rigResult struct {
-		agents []struct {
-			ID           string `json:"id"`
-			HookBead     string `json:"hook_bead"`
-			LastActivity string `json:"last_activity"`
-		}
+		agents []*beads.Issue
 	}
 
 	resultChan := make(chan rigResult, len(beadsDirs))
@@ -509,22 +463,12 @@ func (t Town) workersForIssues(issueIDs []string) map[string]*workerInfo {
 		go func(workDir string) {
 			defer wg.Done()
 
-			out, err := t.bd("list", "--label=gt:agent", "--status=open", "--include-infra", "--json", "--limit=0", "--flat").
-				Dir(workDir).
-				StripBeadsDir().
-				Stderr(io.Discard).
-				Output()
+			agents, err := t.store(workDir).List(beads.ListOptions{Label: "gt:agent", Status: "open", Priority: -1, IncludeInfra: true})
 			if err != nil {
 				resultChan <- rigResult{}
 				return
 			}
-
-			var rr rigResult
-			if err := json.Unmarshal(out, &rr.agents); err != nil {
-				resultChan <- rigResult{}
-				return
-			}
-			resultChan <- rr
+			resultChan <- rigResult{agents: agents}
 		}(dir)
 	}
 

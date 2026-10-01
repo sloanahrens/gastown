@@ -51,20 +51,14 @@ func strandedXrigTown(t *testing.T) Town {
 	routes := `{"prefix":"hq-","path":"."}` + "\n" +
 		`{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n" +
 		`{"prefix":"oag-","path":"oag/mayor/rig"}` + "\n"
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		switch positional(c.Args)[0] {
-		case "list":
-			return `[{"id":"hq-xr","title":"Cross-rig convoy"}]`, "", 0
-		case "sql":
-			if strings.Contains(strings.Join(c.Args, " "), "issue_id = 'hq-xr'") {
-				return `[{"depends_on_id":"external:gt:gt-work"},{"depends_on_id":"external:gt:gt-sib"}]`, "", 0
-			}
-		case "show":
-			return `[{"id":"gt-work","title":"Work","status":"open","priority":1,"issue_type":"task","assignee":"","dependency_count":1},{"id":"gt-sib","title":"Sibling","status":"open","priority":2,"issue_type":"task","assignee":""}]`, "", 0
-		}
-		return "[]", "", 0
-	}}
-	return testTown(townWithBeads(t, routes), bd, nil)
+	db := townDB()
+	seedConvoy(t, db, beads.Issue{ID: "hq-xr", Title: "Cross-rig convoy"})
+	db.Seed(
+		beads.Issue{ID: "gt-work", Title: "Work", Priority: 1, Type: "task"},
+		beads.Issue{ID: "gt-sib", Title: "Sibling", Priority: 2, Type: "task"},
+	)
+	rawDepsAnswer(db, map[string][]string{"hq-xr": {"external:gt:gt-work", "external:gt:gt-sib"}})
+	return testTown(townWithBeads(t, routes), db, nil)
 }
 
 // storeBlockCheck opens the stranded scan's blocker check over the given
@@ -183,7 +177,7 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 // otherwise-ready bead opens no store.
 func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 	t.Parallel()
-	town := testTown(townWithBeads(t, ""), emptyConvoyBd("hq-empty-open", "Empty convoy"), nil)
+	town := testTown(townWithBeads(t, ""), emptyConvoyDB(t, "hq-empty-open", "Empty convoy"), nil)
 	opened := 0
 	open := func(string) (blockCheck, func(), error) {
 		opened++

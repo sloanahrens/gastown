@@ -332,8 +332,9 @@ type Issue struct {
 	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
 
 	// Agent bead slots (type=agent only)
-	HookBead   string `json:"hook_bead,omitempty"`   // Current work attached to agent's hook
-	AgentState string `json:"agent_state,omitempty"` // Agent lifecycle state (spawning, working, done, stuck)
+	HookBead     string `json:"hook_bead,omitempty"`     // Current work attached to agent's hook
+	AgentState   string `json:"agent_state,omitempty"`   // Agent lifecycle state (spawning, working, done, stuck)
+	LastActivity string `json:"last_activity,omitempty"` // When the agent last reported activity (RFC 3339)
 	// Note: role_bead field removed - role definitions are now config-based
 
 	// Counts from list output
@@ -631,6 +632,9 @@ type ListOptions struct {
 	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
 	Rig        string // filter merge-request descriptions by rig before hydration
 	IssueType  string // filter by bd issue_type (e.g. "event"); Type is the deprecated label filter
+	// IncludeInfra keeps bd's infrastructure types (agent, role, message),
+	// which bd list leaves out by default.
+	IncludeInfra bool
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -700,6 +704,9 @@ type Beads struct {
 	exec bdRunFunc
 	// bin is the bd binary every call runs (WithBin); "" is the bd on PATH.
 	bin string
+	// baseEnv replaces the process environment calls start from (WithEnv);
+	// nil is os.Environ().
+	baseEnv []string
 
 	// plain marks a wrapper built by NewPlain: bd runs in workDir with
 	// exactly plainEnv, and none of the routing policy below applies.
@@ -794,6 +801,7 @@ type beadsFields struct {
 	agentScope bool
 	exec       bdRunFunc
 	bin        string
+	baseEnv    []string
 }
 
 // Option configures a Beads at construction.
@@ -805,6 +813,18 @@ type Option func(*beadsFields)
 // later PATH change cannot swap the binary under it.
 func WithBin(path string) Option {
 	return func(f *beadsFields) { f.bin = path }
+}
+
+// WithEnv starts every call from env instead of the process environment;
+// the pinning and access-mode variables are applied on top as usual. The
+// daemon passes its routing environment this way. A nil env keeps the
+// process environment.
+func WithEnv(env []string) Option {
+	return func(f *beadsFields) {
+		if env != nil {
+			f.baseEnv = append([]string{}, env...)
+		}
+	}
 }
 
 func applyOptions(f beadsFields, opts []Option) beadsFields {
@@ -829,6 +849,7 @@ func newBeads(f beadsFields) *Beads {
 		agentScope: f.agentScope,
 		exec:       f.exec,
 		bin:        f.bin,
+		baseEnv:    f.baseEnv,
 	}
 }
 
@@ -911,6 +932,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		agentScope: true,
 		exec:       b.exec,
 		bin:        b.bin,
+		baseEnv:    b.baseEnv,
 	})
 }
 
@@ -965,6 +987,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		noRoute:    true,
 		exec:       b.exec,
 		bin:        b.bin,
+		baseEnv:    b.baseEnv,
 	})
 }
 
@@ -1112,6 +1135,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		noRoute:    true,
 		exec:       b.exec,
 		bin:        b.bin,
+		baseEnv:    b.baseEnv,
 	})
 }
 
@@ -1613,7 +1637,7 @@ func (b *Beads) buildRunEnv() []string {
 	// runWithStdin appends BEADS_DIR after probing bd --allow-stale support, so
 	// keep buildRunEnv focused on Dolt target isolation and avoid duplicate
 	// first-match-sensitive BEADS_DIR entries.
-	env := BuildPinnedBDEnv(os.Environ(), b.getResolvedBeadsDir())
+	env := BuildPinnedBDEnv(b.processEnv(), b.getResolvedBeadsDir())
 	env = StripEnvKey(env, "BEADS_DIR")
 	return env
 }
@@ -1647,7 +1671,15 @@ func (b *Beads) buildRoutingEnv() []string {
 		}
 		return SuppressBDSideEffects(env)
 	}
-	return BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
+	return BuildRoutingBDEnv(b.processEnv(), b.getResolvedBeadsDir())
+}
+
+// processEnv is the environment a non-isolated call starts from.
+func (b *Beads) processEnv() []string {
+	if b.baseEnv != nil {
+		return append([]string{}, b.baseEnv...)
+	}
+	return os.Environ()
 }
 
 // filterBeadsEnv removes beads-related environment variables from the given
@@ -1772,6 +1804,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	}
 	if opts.NoAssignee {
 		args = append(args, "--no-assignee")
+	}
+	if opts.IncludeInfra {
+		args = append(args, "--include-infra")
 	}
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))
@@ -2887,7 +2922,7 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin})
+					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin, baseEnv: b.baseEnv})
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -3005,6 +3040,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			isolated:   b.isolated,
 			exec:       b.exec,
 			bin:        b.bin,
+			baseEnv:    b.baseEnv,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -3098,6 +3134,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			isolated:   b.isolated,
 			exec:       b.exec,
 			bin:        b.bin,
+			baseEnv:    b.baseEnv,
 		})
 		return bdForCreate.CreateWithID(id, opts)
 	}
@@ -3664,6 +3701,29 @@ func (b *Beads) AddDependency(issue, dependsOn string) error {
 func (b *Beads) AddTypedDependency(issue, dependsOn, depType string) error {
 	_, err := b.run("dep", "add", issue, dependsOn, "--type="+depType)
 	return err
+}
+
+// DepList returns the issues id depends on in this database (bd dep list
+// --direction=down), each with its relation in DependencyType; depType ""
+// keeps every relation. Targets in other databases are left out, since bd
+// joins the edges with its own issues table.
+func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
+	args := []string{"dep", "list", id, "--direction=down", "--json"}
+	if depType != "" {
+		args = append(args, "--type="+depType)
+	}
+	out, err := b.run(args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, nil
+	}
+	var deps []IssueDep
+	if err := json.Unmarshal(out, &deps); err != nil {
+		return nil, fmt.Errorf("parsing bd dep list output: %w", err)
+	}
+	return deps, nil
 }
 
 // RemoveDependency removes a dependency.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -24,13 +25,27 @@ type Town struct {
 	// Warn receives warnings; nil discards them.
 	Warn io.Writer
 
-	// Run answers the town's bd calls in process; nil runs the bd on PATH.
-	Run beads.BDRunner
+	// Open opens the issue store at dir (the town root or a rig directory);
+	// nil opens bd pinned to dir's database, starting from Env. Unit tests
+	// answer from beadsfake databases.
+	Open func(dir string) Store
+	// Issues answers the tracked-issue lookups, which bd routes to each
+	// ID's rig by prefix; nil is bd at the town root.
+	Issues beads.Client
 	// Prefixes maps rigs to the session prefixes the stranded scan probes
 	// assignees' sessions under; nil gives every rig session.DefaultPrefix.
 	Prefixes *session.PrefixRegistry
 	// gtRun runs the town's gt notice children; nil runs the gt on PATH.
 	gtRun gtRunner
+}
+
+// Store is the issue store surface the convoy operations use: the shared
+// Client plus the JSONL export and the raw dependency query.
+// *beads.Beads and beadsfake.Fake implement it.
+type Store interface {
+	beads.Client
+	Export(path string) error
+	SQLCSV(query beadsql.Query) ([][]string, error)
 }
 
 // gtRunner runs gt with args from dir with exactly env (nil inherits the
@@ -50,26 +65,12 @@ func StdTown(root string) Town {
 	return Town{Root: root, Out: os.Stdout, Warn: os.Stderr}
 }
 
-// bdJSON runs bd in dir with the town's environment.
-func (t Town) bdJSON(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, Run: t.Run}, dir, args...)
-}
-
-func (t Town) bdJSONAllowStale(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AllowStale: true, Run: t.Run}, dir, args...)
-}
-
-func (t Town) bdJSONAutoCommit(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AutoCommit: true, Run: t.Run}, dir, args...)
-}
-
-// bd builds a bd command that starts from the town's environment.
-func (t Town) bd(args ...string) *beads.BdCmd {
-	c := beads.NewBdCmd(args...)
-	if t.Env != nil {
-		c.WithEnv(t.Env)
+// store opens the issue store at dir.
+func (t Town) store(dir string) Store {
+	if t.Open != nil {
+		return t.Open(dir)
 	}
-	return c.Via(t.Run).Stderr(t.warnWriter())
+	return beads.NewPinned(beads.ResolveBeadsDir(dir), beads.WithEnv(t.Env))
 }
 
 func (t Town) outWriter() io.Writer {

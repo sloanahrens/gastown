@@ -90,15 +90,18 @@ func (b *Beads) FindOpenSlingContext(workBeadID string) (*Issue, *capacity.Sling
 	return nil, nil, nil
 }
 
+// openSlingContexts lists the open sling context beads.
+var openSlingContexts = ListOptions{
+	Status:    "open",
+	Label:     capacity.LabelSlingContext,
+	Priority:  -1,
+	Limit:     0,
+	Ephemeral: true,
+}
+
 // ListOpenSlingContexts returns all open sling context beads.
 func (b *Beads) ListOpenSlingContexts() ([]*Issue, error) {
-	return b.List(ListOptions{
-		Status:    "open",
-		Label:     capacity.LabelSlingContext,
-		Priority:  -1,
-		Limit:     0,
-		Ephemeral: true,
-	})
+	return b.List(openSlingContexts)
 }
 
 // CloseSlingContext closes a sling context bead with a reason.

@@ -66,6 +66,10 @@ type Client interface {
 	// relation depType (bd's dependency_type: "tracks", "blocks", ...). An
 	// external:<rig>:<id> target need not exist in this database.
 	AddTypedDependency(issue, dependsOn, depType string) error
+	// DepList returns the issues id depends on with relation depType (""
+	// for any), each carrying its relation in DependencyType. Targets
+	// outside this database (external:<rig>:<id>) are left out.
+	DepList(id, depType string) ([]IssueDep, error)
 	// RemoveDependency removes that dependency, whatever its type.
 	RemoveDependency(issue, dependsOn string) error
 	// AppendNotes appends note to the issue's notes, on a new line when
@@ -85,8 +89,8 @@ type Client interface {
 var _ Client = (*Beads)(nil)
 
 // Admin is the maintenance surface beadsfake models: config keys, table
-// probes, counts, stats, the wisp list, gc's dry-run candidates and the
-// events journal.
+// probes, counts, stats, the wisp list, gc's dry-run candidates, the
+// events journal and the JSONL export.
 // beadsfake.RunAdminContract pins the fake to *Beads on it. (SQLCSV and
 // InitDatabase are on *Beads too, but a fake can only script or record them.)
 type Admin interface {
@@ -100,6 +104,8 @@ type Admin interface {
 	// EventsTail reads the events journal after since, at most limit
 	// records (0 = all); a pruned-past since is *EventsTruncatedError.
 	EventsTail(since int64, limit int) (*EventsPage, error)
+	// Export writes every issue to path as JSONL, one issue object a line.
+	Export(path string) error
 }
 
 var _ Admin = (*Beads)(nil)

@@ -421,7 +421,7 @@ type convoyCLI struct {
 	bd       beads.BDRunner // nil is the bd on PATH
 	// townDB opens the town database at townBeads (the town root); nil is
 	// bd pinned to its .beads.
-	townDB      func(townBeads string) beads.Client
+	townDB      func(townBeads string) convoyops.Store
 	out, warn   io.Writer
 	entropy     io.Reader                   // convoy ID suffixes
 	sender      func() string               // the default convoy owner
@@ -441,7 +441,7 @@ func realConvoyCLI() convoyCLI {
 }
 
 // db is the town database at townBeads.
-func (c convoyCLI) db(townBeads string) beads.Client {
+func (c convoyCLI) db(townBeads string) convoyops.Store {
 	if c.townDB != nil {
 		return c.townDB(townBeads)
 	}
@@ -459,7 +459,12 @@ func (c convoyCLI) town() (convoyops.Town, error) {
 
 // townAt is the convoy package's view of the town at root.
 func (c convoyCLI) townAt(root string) convoyops.Town {
-	return convoyops.Town{Root: root, Out: c.out, Warn: c.warn, Run: c.bd}
+	town := convoyops.Town{Root: root, Out: c.out, Warn: c.warn}
+	if c.townDB != nil {
+		town.Open = c.townDB
+		town.Issues = c.townDB(root)
+	}
+	return town
 }
 
 // ensureConvoyTypes registers the custom types (including 'convoy') and
@@ -876,8 +881,7 @@ func runConvoyClose(cmd *cobra.Command, args []string) error {
 	}
 
 	// Close the convoy
-	closeArgs := []string{"close", convoyID, "-r", reason}
-	if err := convoyops.StdTown(townBeads).MutateAndExport(closeArgs...); err != nil {
+	if err := convoyops.StdTown(townBeads).CloseAndExport(convoyID, reason); err != nil {
 		return fmt.Errorf("closing convoy: %w", err)
 	}
 
@@ -1028,31 +1032,10 @@ func (c convoyCLI) status(asJSON bool, args []string) error {
 	}
 
 	// Get convoy details
-	showOut, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: c.bd}, townBeads, "show", convoyID, "--json")
+	convoy, err := c.db(townBeads).Show(convoyID)
 	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
-
-	// Parse convoy data
-	var convoys []struct {
-		ID          string   `json:"id"`
-		Title       string   `json:"title"`
-		Status      string   `json:"status"`
-		Description string   `json:"description"`
-		CreatedAt   string   `json:"created_at"`
-		ClosedAt    string   `json:"closed_at,omitempty"`
-		DependsOn   []string `json:"depends_on,omitempty"`
-		Labels      []string `json:"labels,omitempty"`
-	}
-	if err := json.Unmarshal(showOut, &convoys); err != nil {
-		return fmt.Errorf("parsing convoy data: %w", err)
-	}
-
-	if len(convoys) == 0 {
-		return fmt.Errorf("convoy '%s' not found", convoyID)
-	}
-
-	convoy := convoys[0]
 
 	// Check if convoy is owned (caller-managed lifecycle)
 	isOwned := convoyops.HasLabel(convoy.Labels, "gt:owned")

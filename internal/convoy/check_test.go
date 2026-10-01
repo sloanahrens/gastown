@@ -8,37 +8,25 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// twoConvoyBd answers bd for a town with two open convoys: hq-cv-done
-// tracks one closed issue, hq-cv-open tracks one open issue.
-func twoConvoyBd() *bdScript {
-	return &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		line := strings.Join(c.Args, " ")
-		switch {
-		case line == "--allow-stale version":
-			return "", "", 0
-		case strings.Contains(line, "list") && strings.Contains(line, "--label=gt:convoy"):
-			return `[{"id":"hq-cv-done","title":"Done","status":"open","issue_type":"convoy","labels":["gt:convoy"]},{"id":"hq-cv-open","title":"Open","status":"open","issue_type":"convoy","labels":["gt:convoy"]}]`, "", 0
-		case strings.Contains(line, "list"):
-			return "[]", "", 0
-		case strings.Contains(line, "sql") && strings.Contains(line, "issue_id = 'hq-cv-done'"):
-			return `[{"depends_on_id":"hq-done"}]`, "", 0
-		case strings.Contains(line, "sql") && strings.Contains(line, "issue_id = 'hq-cv-open'"):
-			return `[{"depends_on_id":"hq-open"}]`, "", 0
-		case strings.Contains(line, "show") && strings.Contains(line, "hq-done"):
-			return `[{"id":"hq-done","title":"Done issue","status":"closed","issue_type":"task"}]`, "", 0
-		case strings.Contains(line, "show") && strings.Contains(line, "hq-open"):
-			return `[{"id":"hq-open","title":"Open issue","status":"open","issue_type":"task"}]`, "", 0
-		}
-		return "", "unexpected bd args: " + line, 1
-	}}
+// twoConvoyDB is a town with two open convoys: hq-cv-done tracks one closed
+// issue, hq-cv-open tracks one open issue.
+func twoConvoyDB(t *testing.T) *beadsfake.Fake {
+	db := townDB()
+	seedConvoy(t, db, beads.Issue{ID: "hq-cv-done", Title: "Done"},
+		beads.Issue{ID: "hq-done", Title: "Done issue", Status: "closed", Type: "task"})
+	seedConvoy(t, db, beads.Issue{ID: "hq-cv-open", Title: "Open"},
+		beads.Issue{ID: "hq-open", Title: "Open issue", Type: "task"})
+	return db
 }
 
 func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
 	t.Parallel()
 	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
-	town := testTown(townBeads, twoConvoyBd(), &gtScript{})
+	db := twoConvoyDB(t)
+	town := testTown(townBeads, db, &gtScript{})
 
 	var out bytes.Buffer
 	town.Out = &out
@@ -52,12 +40,15 @@ func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
 	if !strings.Contains(out.String(), "Would auto-close convoy") || !strings.Contains(out.String(), "1 open issue(s) remaining") {
 		t.Errorf("progress output = %q, want the dry-run line and the open-issue count", out.String())
 	}
+	if got, _ := db.Show("hq-cv-done"); got.Status != "open" {
+		t.Errorf("dry run left hq-cv-done %s, want open", got.Status)
+	}
 }
 
 func TestCheckAll_CancelledContextStopsBeforeTheFirstConvoy(t *testing.T) {
 	t.Parallel()
 	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
-	town := testTown(townBeads, twoConvoyBd(), &gtScript{})
+	town := testTown(townBeads, twoConvoyDB(t), &gtScript{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -74,9 +65,9 @@ func TestChecker_CancelledContextRunsNoCheck(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	// The town does not exist: a check that ran would fail with "not found",
+	// The town has no convoy: a check that ran would fail with "not found",
 	// not with the context's error.
-	err := testTown(t.TempDir(), &bdScript{}, &gtScript{}).Checker()(ctx, "hq-cv-x")
+	err := testTown(t.TempDir(), townDB(), &gtScript{}).Checker()(ctx, "hq-cv-x")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Checker on a cancelled context: err = %v, want context.Canceled", err)
 	}
