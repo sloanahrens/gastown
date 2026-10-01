@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"path/filepath"
 	"time"
 
@@ -356,31 +354,13 @@ func getEpicChildren(epicID string) ([]epicChild, error) {
 // silently drops cross-database dependencies. Used as fallback when bd sql
 // is not available.
 func bdDepListFallback(dir, epicID string) ([]string, error) {
-	stdout, err := BdCmd("dep", "list", epicID,
-		"--direction=down", "--type=parent-child", "--json").
-		AllowStale().
-		Dir(dir).
-		StripBeadsDir().
-		Stderr(io.Discard).
-		Output()
+	deps, err := beads.NewPinned(beads.ResolveBeadsDir(dir)).DepList(epicID, "parent-child")
 	if err != nil {
-		if len(stdout) == 0 {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("bd dep list %s: %w", epicID, err)
 	}
-
-	var deps []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(stdout, &deps); err != nil {
-		return nil, fmt.Errorf("parsing dependency list: %w", err)
-	}
-
 	ids := make([]string, 0, len(deps))
 	for _, dep := range deps {
-		id := beads.ExtractIssueID(dep.ID)
-		if id != "" {
+		if id := beads.ExtractIssueID(dep.ID); id != "" {
 			ids = append(ids, id)
 		}
 	}

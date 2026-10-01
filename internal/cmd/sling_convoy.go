@@ -26,7 +26,6 @@ func slingGenerateShortID() string {
 // town and an in-process bd, so nothing is spawned and no cwd or PATH is read.
 type slingConvoyTown struct {
 	root string
-	bd   beads.BDRunner // nil is the bd on PATH
 	// db is the town database; nil is bd pinned to the town's .beads.
 	db convoyops.Store
 }
@@ -196,7 +195,7 @@ func (c slingConvoyTown) createAutoConvoy(beadID, beadTitle string, owned bool, 
 	}
 
 	// Add tracking relation: convoy tracks the issue.
-	if err := addTrackingRelationVia(c.bd, c.root, convoyID, beadID); err != nil {
+	if err := addTrackingRelationWith(c.townDB(), c.root, convoyID, beadID); err != nil {
 		fmt.Printf("Warning: Could not create auto-convoy tracking: %v\n", err)
 	}
 
