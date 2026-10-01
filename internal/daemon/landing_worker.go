@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -316,6 +318,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		ReviewErrorLands: true,
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:   rigName,
 		Beads: bd,
@@ -331,7 +334,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 				d.logger.Printf("landing_worker: %s: red-main: writing status: %v", rigName, err)
 			}
 		},
-		Logf: d.logger.Printf,
+		Logf:     d.logger.Printf,
+		State:    mainState,
+		Landings: landings,
+		Revert:   postLandRevert(repo, workRoot),
 	}
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,
@@ -349,6 +355,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Lander:      lander,
 		Landings:    landings,
 		PostLand:    postLand,
+		Reverts:     redMain,
+		WatchTarget: rigDefaultBranch(rigPath),
+		MainState:   mainState,
 		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
 		Logf:        d.logger.Printf,
 		ClearIntent: func(w land.Work) error {
@@ -457,6 +466,105 @@ func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// RedMainStatePath is the file holding a rig's last green and last tested
+// main commits (landworker.MainState).
+func RedMainStatePath(townRoot, rigName string) string {
+	return filepath.Join(townRoot, ".runtime", "red-main", rigName+".json")
+}
+
+// fileMainState stores a rig's landworker.MainState as JSON; a missing file
+// is the zero state.
+type fileMainState struct {
+	path string
+}
+
+var _ landworker.MainStateStore = fileMainState{}
+
+func (f fileMainState) Load() (landworker.MainState, error) {
+	var st landworker.MainState
+	data, err := os.ReadFile(f.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, fmt.Errorf("reading %s: %w", f.path, err)
+	}
+	return st, nil
+}
+
+func (f fileMainState) Save(st landworker.MainState) error {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
+		return err
+	}
+	tmp := f.path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // G306: two commit ids, read by humans
+		return err
+	}
+	return os.Rename(tmp, f.path)
+}
+
+// rigDefaultBranch is the branch the landing worker watches for direct
+// pushes: the rig's configured default branch, else main.
+func rigDefaultBranch(rigPath string) string {
+	if cfg, err := rig.LoadRigConfig(rigPath); err == nil && cfg.DefaultBranch != "" {
+		return cfg.DefaultBranch
+	}
+	return "main"
+}
+
+// postLandRevert builds the revert of a landing in a throwaway worktree of
+// repo at the landed commit and pushes it to origin as branch. A landing is
+// a --no-ff merge (reverted against its first parent, the target) or a
+// squash (one parent).
+func postLandRevert(repo, workRoot string) landworker.RevertBuilder {
+	return func(_ context.Context, rec land.LandingRecord, branch string) (string, error) {
+		if err := os.MkdirAll(workRoot, 0o700); err != nil {
+			return "", err
+		}
+		parent, err := os.MkdirTemp(workRoot, "revert-*")
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = os.RemoveAll(parent) }()
+		g := git.NewGit(repo)
+		dir := filepath.Join(parent, "wt")
+		if err := g.WorktreeAddDetached(dir, rec.LandedCommit); err != nil {
+			return "", fmt.Errorf("worktree at %s: %w", rec.LandedCommit, err)
+		}
+		defer func() {
+			_ = g.WorktreeRemove(dir, true)
+			_ = g.WorktreePrune()
+		}()
+		wt := git.NewGit(dir)
+		parents, err := wt.Parents(rec.LandedCommit)
+		if err != nil {
+			return "", err
+		}
+		mainline := 0
+		if len(parents) > 1 {
+			mainline = 1
+		}
+		if err := wt.RevertNoEdit(rec.LandedCommit, mainline); err != nil {
+			return "", fmt.Errorf("reverting %s: %w", rec.LandedCommit, err)
+		}
+		head, err := wt.Rev("HEAD")
+		if err != nil {
+			return "", err
+		}
+		if err := wt.Push("origin", "HEAD:refs/heads/"+branch, false); err != nil {
+			return "", fmt.Errorf("pushing %s: %w", branch, err)
+		}
+		return head, nil
+	}
 }
 
 // landingRemoteGit is the git surface gitRemote reads: *git.Git over the

@@ -18,6 +18,9 @@ const redMainNoPackage = "(no Go package named)"
 
 // RedMainBeads is what the red-main owner reads and writes beads through.
 type RedMainBeads interface {
+	Show(id string) (*beads.Issue, error)
+	Update(id string, opts beads.UpdateOptions) error
+	AppendNotes(id, note string) error
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 	Create(opts beads.CreateOptions) (*beads.Issue, error)
 	AddComment(id, text string) error
@@ -31,7 +34,11 @@ type RedMainBeads interface {
 // closes the open beads for every package that passed. Each verdict ends in
 // one status line, which is the signal: never an expiring nudge.
 //
-// Reverting a single culprit landing through Land() is gt-v4ssj.4.1.
+// With State, Landings and Revert set it also reverts a culprit
+// (gt-v4ssj.4.1): when the red commit's landing was built on the last green
+// commit, that landing is the only change between green and red, so a revert
+// of it is filed as a work bead and landed through Land by the worker. With
+// more than one change in between, the red-main beads stand alone.
 type RedMain struct {
 	Rig   string
 	Beads RedMainBeads
@@ -40,6 +47,12 @@ type RedMain struct {
 	// Status records the rig's one-line main status.
 	Status func(line string)
 	Logf   func(format string, args ...any)
+	// State remembers the last green commit; nil turns reverts off.
+	State MainStateStore
+	// Landings finds the red commit's landing record.
+	Landings Landings
+	// Revert builds and pushes a revert branch.
+	Revert RevertBuilder
 }
 
 func (r *RedMain) logf(format string, args ...any) {
@@ -105,6 +118,7 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 			tails[pkg] = rr.Tail
 		}
 	}
+	r.recordVerdict(pl, len(stillRed) == 0)
 	open := r.openBeads()
 	var filed []string
 	for _, pkg := range stillRed {
@@ -113,12 +127,17 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 	}
 	// A package that passed in this run (or on its rerun) is no longer red.
 	r.closePassed(open, passedPackages(res, flaky), pl)
-	line := fmt.Sprintf("main GREEN at %s after rerun (landed by %s)", short(pl.Commit), pl.BeadID)
+	line := fmt.Sprintf("main GREEN at %s after rerun (%s)", short(pl.Commit), pl.by())
 	if len(filed) > 0 {
-		line = fmt.Sprintf("main RED at %s (landed by %s): %s", short(pl.Commit), pl.BeadID, strings.Join(filed, ", "))
+		line = fmt.Sprintf("main RED at %s (%s): %s", short(pl.Commit), pl.by(), strings.Join(filed, ", "))
 	}
 	if len(flaky) > 0 {
 		line += "; flaky (passed on rerun): " + strings.Join(flaky, ", ")
+	}
+	if len(filed) > 0 {
+		if did := r.maybeRevert(ctx, pl); did != "" {
+			line += "; " + did
+		}
 	}
 	r.status(line)
 }
@@ -126,13 +145,14 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 // Green handles a green run of cmd at pl.Commit: every open red-main bead is
 // closed, the one for a red run that named no package included.
 func (r *RedMain) Green(_ context.Context, _ string, pl PostLand, _ PostLandResult) {
+	r.recordVerdict(pl, true)
 	open := r.openBeads()
 	all := map[string]bool{}
 	for pkg := range open {
 		all[pkg] = true
 	}
 	r.closePassed(open, all, pl)
-	r.status(fmt.Sprintf("main GREEN at %s (landed by %s)", short(pl.Commit), pl.BeadID))
+	r.status(fmt.Sprintf("main GREEN at %s (%s)", short(pl.Commit), pl.by()))
 }
 
 func passedPackages(res PostLandResult, flaky []string) map[string]bool {
@@ -168,11 +188,14 @@ func (r *RedMain) openBeads() map[string]string {
 }
 
 func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl PostLand, tail string) string {
-	detail := fmt.Sprintf("%s at %s (landed by %s) via %q; failed again on a rerun of the package. Last lines:\n%s",
-		pkg, pl.Commit, pl.BeadID, cmd, lastLines(tail, postLandTailLines))
+	detail := fmt.Sprintf("%s at %s (%s) via %q; failed again on a rerun of the package. Last lines:\n%s",
+		pkg, pl.Commit, pl.by(), cmd, lastLines(tail, postLandTailLines))
 	if pkg == redMainNoPackage {
-		detail = fmt.Sprintf("%q failed at %s (landed by %s) without naming a failing Go package, so nothing was rerun. Last lines:\n%s",
-			cmd, pl.Commit, pl.BeadID, lastLines(tail, postLandTailLines))
+		detail = fmt.Sprintf("%q failed at %s (%s) without naming a failing Go package, so nothing was rerun. Last lines:\n%s",
+			cmd, pl.Commit, pl.by(), lastLines(tail, postLandTailLines))
+	}
+	if pl.Direct {
+		detail += fmt.Sprintf("\n\nThe commit reached main by a direct push, not a landing: suspect range %s..%s.", pl.From, pl.Commit)
 	}
 	if id, ok := open[pkg]; ok {
 		if err := r.Beads.AddComment(id, "still red: "+detail); err != nil {
@@ -199,7 +222,7 @@ func (r *RedMain) closePassed(open map[string]string, passed map[string]bool, pl
 		if !passed[pkg] {
 			continue
 		}
-		reason := fmt.Sprintf("green on main at %s (landed by %s)", pl.Commit, pl.BeadID)
+		reason := fmt.Sprintf("green on main at %s (%s)", pl.Commit, pl.by())
 		if err := r.Beads.CloseWithReason(reason, id); err != nil {
 			r.logf("closing %s: %v", id, err)
 		}

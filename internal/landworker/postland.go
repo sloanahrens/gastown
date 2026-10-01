@@ -9,11 +9,18 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// PostLand is one landing whose post-landing command should run.
+// PostLand is one commit on the target whose post-landing command should
+// run: a landing, or a direct push the worker noticed.
 type PostLand struct {
+	// BeadID is the landed work bead; "" for a direct push.
 	BeadID string
 	Commit string
 	Target string
+	// Direct marks a commit that reached the target without a landing; From
+	// is the tip the worker last saw before it, so From..Commit is the range
+	// a red run blames.
+	Direct bool
+	From   string
 }
 
 // PostLandResult is one run of the post-landing command. Err means it could
@@ -88,7 +95,7 @@ func (p *PostLandRunner) Trigger(ctx context.Context, pl PostLand) {
 	p.mu.Lock()
 	if p.running {
 		if p.pending != nil {
-			p.logf("%s (%s) supersedes queued %s (%s); one run at the newest commit", pl.BeadID, short(pl.Commit), p.pending.BeadID, short(p.pending.Commit))
+			p.logf("%s (%s) supersedes queued %s (%s); one run at the newest commit", short(pl.Commit), pl.by(), short(p.pending.Commit), p.pending.by())
 		}
 		p.pending = &pl
 		p.mu.Unlock()
@@ -123,18 +130,18 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 	if cmd == "" || ctx.Err() != nil {
 		return
 	}
-	p.logf("running %q at %s for %s", cmd, short(pl.Commit), pl.BeadID)
+	p.logf("running %q at %s (%s)", cmd, short(pl.Commit), pl.by())
 	res := p.Run(ctx, cmd, pl)
 	switch {
 	case res.Err != nil:
 		if ctx.Err() == nil {
-			p.logf("WARNING could not run %q at %s for %s: %v", cmd, short(pl.Commit), pl.BeadID, res.Err)
+			p.logf("WARNING could not run %q at %s (%s): %v", cmd, short(pl.Commit), pl.by(), res.Err)
 		}
 	case res.ExitCode != 0:
 		tail := lastLines(res.Tail, postLandTailLines)
-		p.logf("RED: %q exited %d at %s (landed by %s)\n%s", cmd, res.ExitCode, short(pl.Commit), pl.BeadID, tail)
+		p.logf("RED: %q exited %d at %s (%s)\n%s", cmd, res.ExitCode, short(pl.Commit), pl.by(), tail)
 		msg := fmt.Sprintf("post-landing slow tier RED at %s: %s", pl.Commit, "exit "+fmt.Sprint(res.ExitCode)+", last lines:\n"+tail)
-		if p.Beads != nil {
+		if p.Beads != nil && pl.BeadID != "" {
 			if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
 				p.logf("commenting on %s: %v", pl.BeadID, err)
 			}
@@ -143,7 +150,7 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 			p.OnRed(ctx, cmd, pl, res)
 		}
 	default:
-		p.logf("green at %s (%s)", short(pl.Commit), pl.BeadID)
+		p.logf("green at %s (%s)", short(pl.Commit), pl.by())
 		if p.OnGreen != nil {
 			p.OnGreen(ctx, cmd, pl, res)
 		}
