@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-gt-lib.sh — helpers for install-gt.sh.
+# install-gt-lib.sh — helpers shared by install-gt.sh and uninstall-gt.sh.
 # Sourced, never run. Callers set DAEMON_DIR and SOURCE before using igt_receipt.
 
 # igt_receipt EVENT COMMIT PREV REASON MERGED_AT_EPOCH START_EPOCH
@@ -65,4 +65,16 @@ print(m.group(1) if m else "")
 igt_resolve() {
   [ -n "${2:-}" ] || { echo ""; return 0; }
   git -C "$1" rev-parse --verify --quiet "$2^{commit}" 2>/dev/null || echo ""
+}
+
+# igt_town_root_above DIR — the outermost ancestor of DIR holding
+# mayor/town.json, or empty when there is none. Outermost, as
+# internal/workspace does it: a rig can carry its own mayor/.
+igt_town_root_above() {
+  local d="$1" found=""
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    [ -f "$d/mayor/town.json" ] && found="$d"
+    d=$(dirname "$d")
+  done
+  echo "$found"
 }
