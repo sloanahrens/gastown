@@ -174,7 +174,7 @@ type ConvoyManager struct {
 	waitingLog logLatch
 
 	// skipLog logs the per-scan "skipping this issue" lines once per state: a
-	// bead held for the deacon, a surviving branch, or a convoy with nothing
+	// bead held by its record, a surviving branch, or a convoy with nothing
 	// dispatchable stays that way for hours, and every scan repeated its
 	// lines. Keyed per convoy and issue; a key a scan stops reaching is
 	// forgotten (endPass), so the skip logs again if it recurs.
@@ -1008,8 +1008,7 @@ func (m *ConvoyManager) scan() {
 		if c.ReadyCount > 0 {
 			if c.Owned {
 				// Owned convoys have a designated owner managing their own
-				// dispatch cadence (e.g. the deacon's rejection-aware
-				// redispatch). The system-managed stranded scan must not
+				// dispatch cadence. The system-managed stranded scan must not
 				// race that owner (gt-qw4u).
 				m.logger("Convoy %s: owned, skipping auto-feed (owner manages dispatch)", c.ID)
 				continue
@@ -1137,23 +1136,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// No open store for the rig is a town-level gap the store alert
 			// already reports; the scan proceeds as for a clean record, but
 			// says so rather than folding it in silently (gt-udrrw, gt-jj29p).
-			m.logger("Convoy %s: could not confirm rejection-marker state for %s, proceeding as clear: no open store for rig %s", c.ID, issueID, rig)
-		case hold.MergeRejection:
-			// This bead was previously rejected and reopened for recovery
-			// (RECOVERED_BEAD). Redispatch of rejected work belongs solely
-			// to the deacon, which applies cooldown/escalation gating and
-			// resumes on the surviving branch. The stranded scan must defer
-			// to it rather than race it with a fresh sling (gt-qw4u).
-			m.skipLog.logf(m.logger, c.ID+"|"+issueID, "Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
-			continue
+			m.logger("Convoy %s: could not confirm hold state for %s, proceeding as clear: no open store for rig %s", c.ID, issueID, rig)
 		case hold.Unreadable:
 			// A record the store holds but cannot hand back could carry a
-			// rejection, so the bead is held here (fail-closed). The gate
-			// used to proceed as clear and leave the skip to the hold check
-			// below, which failed closed on the same read; the bead was
-			// never fed, but the dead-holder and surviving-branch checks ran
-			// on a record nobody could read (gt-ghyfx).
-			m.logger("Convoy %s: %s not dispatched: %s — cannot rule out a merge rejection (fail-closed)", c.ID, issueID, hold.Reason)
+			// hold, so the bead is held here (fail-closed). The gate used to
+			// proceed as clear and leave the skip to the hold check below,
+			// which failed closed on the same read; the bead was never fed,
+			// but the dead-holder and surviving-branch checks ran on a record
+			// nobody could read (gt-ghyfx).
+			m.logger("Convoy %s: %s not dispatched: %s — cannot rule out a hold (fail-closed)", c.ID, issueID, hold.Reason)
 			continue
 		}
 
@@ -1169,6 +1160,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				}
 				continue
 			}
+		} else if hold.MergeRejection {
+			// The landing worker reopened this bead as rework and nothing
+			// else redispatches it. The rejected branch on origin is the work
+			// to redo, not work to protect from a second polecat, so the
+			// surviving-branch skip below does not apply; the fresh polecat
+			// reads the rejection from the bead's notes (gt-et7ho).
+			m.logger("Convoy %s: %s carries a merge rejection; its surviving branch does not hold it (rework)", c.ID, issueID)
 		} else if branch, ok := m.survivingBranchFor(rig, issueID); ok {
 			// The previous holder is gone, but its branch is still on origin:
 			// the work is preserved — either mid-flight (killed by a town
@@ -1177,8 +1175,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// from main on the same bead, which is the spawn storm this scan
 			// caused on gt-ibt8 (4 polecats) and gt-da2x (3). Skipping keeps
 			// the convoy able to progress on its other ready issues while a
-			// human or the deacon decides; the deacon's redispatch passes
-			// --force explicitly when a live holder really is wanted.
+			// human decides.
 			m.skipLog.logf(m.logger, c.ID+"|"+issueID, "Convoy %s: %s has surviving branch %s on origin — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
 				c.ID, issueID, branch, issueID, rig, branch)
 			continue

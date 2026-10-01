@@ -242,7 +242,6 @@ the operator owns is refused however the sling was asked for (gt-21pl0).
 | `needs-pro`, `needs-mayor-review` | label |
 | `MAYOR DESIGN DECISION`, `do not redispatch` | notes, design, or a comment |
 | `HOLD RELEASED` | a comment, to lift an earlier comment hold |
-| `MERGE REJECTION` | notes, written by the landing worker when it rejects a branch |
 
 The `operator` label and a human assignee are the operator reservation: work
 the person means to do by hand. An agent address is always slash-qualified
@@ -259,9 +258,12 @@ after the mayor had un-slung it and assigned it to the operator, undoing the
 reversal (gt-21pl0). Release the reservation the same way as any other field
 hold: remove the label, or assign the bead to an agent.
 
-A merge rejection holds the bead for the convoy feeders: rework of a rejected
-branch follows the landing worker's rejection path
-([ADR 0004](../adr/0004-daemon-lands-work.md)), never a fresh convoy sling.
+A merge rejection is not a hold. The landing worker reopens a rejected bead
+open, unassigned and labeled `rework`
+([ADR 0004](../adr/0004-daemon-lands-work.md)), and the convoy feeders dispatch
+it like any ready bead; the fresh polecat reads the rejection from the bead's
+notes. The rejected branch on origin does not trigger the feeder's
+surviving-branch skip.
 
 A decision holds only where it is asserted: at the start of a line, past any
 `#`, `>`, `-`, or `*` in front of it. Prose that mentions the wording — a review

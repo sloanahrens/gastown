@@ -48,11 +48,10 @@ var dispatchHoldRelease = "HOLD RELEASED"
 // be read reports a reason too, so an unreadable bead is never mistaken for an
 // unheld one (gt-tq6l).
 //
-// This is the rule every automatic dispatcher shares, the deacon's
-// RECOVERED_BEAD redispatch included. The convoy feeders apply FeedHold, which
-// adds the one hold the deacon must not see: a merge rejection on record.
+// This is the rule every automatic dispatcher shares. The convoy feeders apply
+// FeedHold, which also reports a merge rejection on record.
 func DispatchHoldReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
-	return readHold(ctx, store, issueID, resolver, false).Reason
+	return readHold(ctx, store, issueID, resolver).Reason
 }
 
 // Hold is a convoy feeder's verdict on one bead's record. The zero value is
@@ -61,10 +60,10 @@ type Hold struct {
 	// Reason says why the bead is held, for the feeder's log; "" when it is not.
 	Reason string
 
-	// MergeRejection is set when the refinery's merge-rejection marker is on
-	// record: the bead was rejected and reopened, and its redispatch belongs to
-	// the deacon, which gates it on cooldown and escalation and resumes the
-	// surviving branch (gt-qw4u, gt-ghyfx).
+	// MergeRejection is set when the landing worker's merge-rejection marker
+	// is on record: the bead was rejected and reopened as rework. It is not a
+	// hold: a rejected bead is ready work, and its preserved branch is the
+	// work to redo, not work to protect (gt-et7ho).
 	MergeRejection bool
 
 	// Unreadable is set when the record could not be read. The bead is held
@@ -74,21 +73,18 @@ type Hold struct {
 
 // FeedHold is the hold rule for the convoy feeders — the daemon's stranded
 // scan and the event-driven continuation feed. It is DispatchHoldReason plus
-// the merge-rejection marker, so a sibling's close event cannot re-sling a
-// bead the refinery rejected (gt-ghyfx). Like DispatchHoldReason it fails
-// closed on a record it cannot read, and reports no hold when there is no
-// store to read from at all — a record whose rig has no store open included,
-// which the town store would otherwise answer "no record" for (gt-2ppfg).
+// whether the record carries a merge rejection. Like DispatchHoldReason it
+// fails closed on a record it cannot read, and reports no hold when there is
+// no store to read from at all — a record whose rig has no store open
+// included, which the town store would otherwise answer "no record" for
+// (gt-2ppfg).
 func FeedHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Hold {
-	return readHold(ctx, store, issueID, resolver, true)
+	return readHold(ctx, store, issueID, resolver)
 }
 
-// mergeRejectionHold is the reason FeedHold gives a rejected bead.
-const mergeRejectionHold = "merge rejection on record (deacon owns redispatch)"
-
-// readHold applies the hold rule to issueID's record, with the merge-rejection
-// marker when withRejection is set.
-func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver, withRejection bool) Hold {
+// readHold applies the hold rule to issueID's record and notes whether it
+// carries a merge rejection.
+func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Hold {
 	// store is the town store the caller already holds; the resolver redirects
 	// a rig bead to its own store, which is where its record lives.
 	owner := store
@@ -121,23 +117,19 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 		return Hold{Reason: "no record for " + issueID, Unreadable: true}
 	}
 
-	// A rejection is checked first: the deacon owns the bead whatever else
-	// its record says.
-	if withRejection && strings.Contains(issue.Notes, dispatch.MergeRejectionNoteMarker) {
-		return Hold{Reason: mergeRejectionHold, MergeRejection: true}
-	}
+	rejected := strings.Contains(issue.Notes, dispatch.MergeRejectionNoteMarker)
 
 	// The fields decide most holds; only a record that gets past them pays for
 	// its comment history.
 	if reason := dispatchHoldInFields(issue); reason != "" {
-		return Hold{Reason: reason}
+		return Hold{Reason: reason, MergeRejection: rejected}
 	}
 
 	comments, err := owner.GetIssueComments(ctx, issueID)
 	if err != nil {
 		return Hold{Reason: "comments unreadable (" + util.FirstLine(err.Error()) + ")", Unreadable: true}
 	}
-	return Hold{Reason: dispatchHoldInComments(comments)}
+	return Hold{Reason: dispatchHoldInComments(comments), MergeRejection: rejected}
 }
 
 // dispatchHoldInFields applies the hold rule to the fields GetIssue returns.

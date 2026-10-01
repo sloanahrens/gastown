@@ -40,7 +40,7 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 		{"patrol scan error", dm("patrol_scan: gastown: scan failed: dolt unreachable"), true},
 		{"upgrade restart", dm("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary"), true},
 		{"red main", dm("townhealth: RED tick 4ms ago: escalation=oldest_2h needs-human=1"), true},
-		{"rejection marker", dm("Convoy hq-cv-zd1: gt-1go.1 carries a rejection marker, deferring to deacon, skipping"), true},
+		{"rejection marker", dm("Convoy hq-cv-zd1: gt-1go.1 carries a merge rejection; its surviving branch does not hold it (rework)"), true},
 		{"landing", tailLine{Rig: "gastown", Kind: tailKindLandings, Text: "landed gt-1 polecat/opal/gt-1 -> main"}, true},
 	}
 	for _, c := range cases {
