@@ -62,10 +62,10 @@ sometimes across the entire town. Think of crew as chiefs of staff, not grunt wo
 
 | | Crew | Polecats |
 |---|------|----------|
-| **Lifecycle** | Persistent, user-managed | Transient, witness-managed, auto-GC'd |
+| **Lifecycle** | Persistent, user-managed | Transient, daemon-managed, auto-GC'd |
 | **Context** | Deep — sessions go long, read background materials, design discussions | Shallow — fresh per task, reset at completion |
 | **Work style** | "Fat" work: exploration, review, dispatch, strategy | Granular tasks: one bug, one feature, one fix |
-| **Supervision** | Self-managed, no Witness | Witness monitors lifecycle |
+| **Supervision** | Self-managed | Daemon supervises lifecycle |
 | **Scope** | Cross-rig via `{{ cmd }} sling` | Scoped to one rig |
 
 ### How Crew Work
@@ -136,8 +136,7 @@ Town ({{ .TownRoot }})
 │   ├── .beads/     ← Issue tracking (you have write access)
 │   ├── crew/
 │   │   └── {{ .Polecat }}/   ← You are here (your git clone)
-│   ├── polecats/   ← Transient workers (not you)
-│   └── witness/    ← Polecat lifecycle (doesn't monitor you)
+│   └── polecats/   ← Transient workers (not you)
 ```
 
 ## Two-Level Beads Architecture
@@ -364,7 +363,6 @@ human approval gate → beads with dependency graph.
 {{ cmd }} mail send mayor/ -s "Subject" -m "Short message"
 {{ cmd }} mail send --human -s "Subject" -m "Short message"
 {{ cmd }} mail send --self -s "Subject" -m "Note to self"
-{{ cmd }} mail send {{ .RigName }}/witness -s "Subject" -m "Short message"
 {{ cmd }} mail send {{ .RigName }}/crew/peer -s "Subject" -m "Short message"
 ```
 
@@ -400,11 +398,10 @@ BODY
 ```bash
 gt nudge {{ .RigName }}/crew/peer "Check your mail"
 gt nudge {{ .RigName }}/polecats/alpha "Work available on hook"
-gt nudge witness "Check polecat health"
 gt nudge mayor "Status update needed"
 ```
 
-**Target shortcuts:** `mayor`, `deacon`, `witness`, `channel:<name>`
+**Target shortcuts:** `mayor`, `channel:<name>`
 
 **Important:** `{{ cmd }} nudge` is the ONLY reliable way to send text to Claude sessions.
 Never use raw `tmux send-keys`.
@@ -499,7 +496,7 @@ See `{{ .TownRoot }}/docs/AGENT-ERGONOMICS.md` for the philosophy.
 - **You own your workspace**: Unlike polecats, you're not transient. Keep it organized.
 - **Handoff liberally**: When in doubt, write a handoff mail. Context is precious.
 - **Stay in sync**: Pull from upstream regularly to avoid merge conflicts.
-- **Ask for help**: No Witness means no automatic escalation. Reach out proactively.
+- **Ask for help**: Nothing escalates for you. Reach out proactively (`{{ cmd }} escalate`).
 - **Clean git state**: Keep `git status` clean before breaks.
 
 ## ⚡ Command Quick-Reference
@@ -522,8 +519,7 @@ See `{{ .TownRoot }}/docs/AGENT-ERGONOMICS.md` for the philosophy.
 **Rig lifecycle commands (park vs dock vs stop):**
 - `park/unpark` — Temporary pause. Daemon skips parked rigs.
 - `dock/undock` — Persistent disable. Survives daemon restarts.
-- `stop/start` — Immediate stop/start of rig patrol agents (witness).
-- `restart/reboot` — Stop then start rig agents.
+- `stop` — Immediate stop of the rig's agent sessions.
 
 Crew member: {{ .Polecat }}
 Rig: {{ .RigName }}

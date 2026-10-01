@@ -32,7 +32,7 @@ GC is destructive. This formula errs on the side of caution:
 Running `gt doctor --fix` handles most of this. This formula wraps it with
 reporting and multi-rig scope."""
 formula = "mol-session-gc"
-version = 1
+version = 2
 
 [[steps]]
 id = "determine-mode"
@@ -208,14 +208,7 @@ None
 ~{{bytes_freed}} bytes
 ```
 
-**2. Send to Deacon:**
-```bash
-gt mail send deacon/ -s "GC complete: {{total_cleaned}} items" --stdin <<'BODY'
-{{report}}
-BODY
-```
-
-**Exit criteria:** Report sent."""
+**Exit criteria:** Report generated."""
 
 [[steps]]
 id = "return-to-kennel"

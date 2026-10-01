@@ -4,7 +4,6 @@ Find and reassign orphaned work.
 This formula scans for orphaned state:
 - Issues marked in_progress with no active polecat
 - Molecules attached but worker gone
-- Merge queue entries with dead owners
 - Wisps from terminated sessions
 
 This is a cleanup and recovery formula. Found orphans are either:
@@ -33,7 +32,7 @@ This is infrastructure work. The agent running this formula:
 Orphan scanning requires multi-rig access, so the agent running this formula
 must be able to reach every rig in scope."""
 formula = "mol-orphan-scan"
-version = 2
+version = 3
 
 [[steps]]
 id = "determine-scope"
@@ -89,7 +88,7 @@ Parse the assignee field to extract rig and polecat name:
 gt session status <rig>/<name> --json | jq -r '.running' | grep -q true && echo ALIVE || echo DEAD
 ```
 
-If the assignee is NOT a polecat (e.g., witness, refinery), use:
+If the assignee is NOT a polecat (e.g., crew, mayor), use:
 ```bash
 gt session status <rig>/<role> --json | jq -r '.running' | grep -q true && echo ALIVE || echo DEAD
 ```
@@ -222,9 +221,10 @@ bd update <issue> --status=open --assignee=""
 
 **2. REASSIGN orphans:**
 ```bash
-# Notify Witness to handle assignment
-gt mail send <rig>/witness -s "Orphan needs assignment: <issue>" \
-  -m "Issue <id> was orphaned. Has partial work. Needs reassignment."
+# Back to open with the partial work named; the dispatcher hands it to the
+# next free polecat
+bd update <issue> --status=open --assignee="" \
+  --append-notes "Orphaned with partial work on <branch>; reassign"
 ```
 
 **3. RECOVER orphans:**
@@ -254,7 +254,7 @@ rm .beads-wisp/<wisp-file>
 
 [[steps]]
 id = "report-findings"
-title = "Generate and send orphan report"
+title = "Generate orphan report"
 needs = ["execute-recovery"]
 description = """
 Create summary report of orphan scan and actions.
@@ -284,14 +284,7 @@ Create summary report of orphan scan and actions.
 {{/each}}
 ```
 
-**2. Send to Deacon (for logs):**
-```bash
-gt mail send deacon/ -s "Orphan scan complete: {{total_count}} found" --stdin <<'BODY'
-{{report}}
-BODY
-```
-
-**3. Send to Mayor (if escalations):**
+**2. Send to Mayor (if escalations):**
 ```bash
 # Only if there were escalations
 gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" --stdin <<'BODY'
@@ -299,7 +292,7 @@ gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" --stdin <<'
 BODY
 ```
 
-**Exit criteria:** Reports sent."""
+**Exit criteria:** Report generated; escalations sent."""
 
 [[steps]]
 id = "return-to-kennel"

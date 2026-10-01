@@ -158,67 +158,6 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 	}
 }
 
-func TestRenderMessage_Spawn(t *testing.T) {
-	t.Parallel()
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := SpawnData{
-		Issue:       "gt-123",
-		Title:       "Test Issue",
-		Priority:    1,
-		Description: "Test description",
-		Branch:      "feature/test",
-		RigName:     "myrig",
-		Polecat:     "TestCat",
-	}
-
-	output, err := tmpl.RenderMessage("spawn", data)
-	if err != nil {
-		t.Fatalf("RenderMessage() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "gt-123") {
-		t.Error("output missing issue ID")
-	}
-	if !strings.Contains(output, "Test Issue") {
-		t.Error("output missing issue title")
-	}
-}
-
-func TestRenderMessage_Nudge(t *testing.T) {
-	t.Parallel()
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := NudgeData{
-		Polecat:    "TestCat",
-		Reason:     "No progress for 30 minutes",
-		NudgeCount: 2,
-		MaxNudges:  3,
-		Issue:      "gt-123",
-		Status:     "in_progress",
-	}
-
-	output, err := tmpl.RenderMessage("nudge", data)
-	if err != nil {
-		t.Fatalf("RenderMessage() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "TestCat") {
-		t.Error("output missing polecat name")
-	}
-	if !strings.Contains(output, "2/3") {
-		t.Error("output missing nudge count")
-	}
-}
-
 // TestRenderRole_NoHardcodedGtPath verifies that no role template renders
 // a literal "~/gt" path — all path references must use {{ .TownRoot }}.
 // This is a regression test for instances running outside ~/gt
@@ -1116,7 +1055,7 @@ func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 }
 
 // renderPolecatForTest renders the role template the way `gt prime` does, with
-// a non-fork rig (the only branch that runs `gt done`'s merge-queue workflow).
+// a non-fork rig (the only branch that runs `gt done`'s landing workflow).
 func renderPolecatForTest(t *testing.T) string {
 	t.Helper()
 	tmpl, err := New()

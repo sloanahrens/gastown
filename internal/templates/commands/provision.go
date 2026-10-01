@@ -41,7 +41,7 @@ func getAgentConfigDir(agent string) string {
 var Commands = []Command{
 	{
 		Name:        "done",
-		Description: "Signal work complete and submit to merge queue",
+		Description: "Signal work complete and submit the branch for landing",
 		AgentFields: map[string][]Field{
 			"claude": {
 				{"allowed-tools", "Bash(gt done:*), Bash(git status:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(bd close:*)"},

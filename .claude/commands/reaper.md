@@ -73,7 +73,7 @@ For each database with reap candidates:
 gt reaper reap --db=<name> --port=3307 --max-age=24h [--dry-run] --json
 ```
 
-**IMPORTANT**: Scan/reap count mismatch is NORMAL (witness closes wisps concurrently).
+**IMPORTANT**: Scan/reap count mismatch is NORMAL (other agents close wisps concurrently).
 Do NOT escalate scan > reap mismatches. Only escalate actual errors.
 
 ### Step 5: Purge old closed wisps and mail

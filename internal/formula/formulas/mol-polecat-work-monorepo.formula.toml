@@ -13,11 +13,11 @@ crash after any step and resume from the last completed step.
 You are a self-cleaning worker. You:
 1. Receive work via your hook (formula checklist + issue)
 2. Work through formula steps in order (shown inline at prime time)
-3. Complete and self-clean via `gt done` (submit + nuke yourself)
-4. You are GONE - Refinery merges from MQ
+3. Complete and self-clean via `gt done` (submit + retire yourself)
+4. You are GONE - a human merges your PR, or the landing worker lands your branch
 
-**Self-cleaning:** When you run `gt done`, you push your work, submit to MQ,
-nuke your sandbox, and exit. There is no idle state. Done means gone.
+**Self-cleaning:** When you run `gt done`, it retires your session. There is
+no idle state. Done means gone.
 
 **Important:** This formula defines the workflow template. Steps are shown inline
 when you run `gt prime` — there are no separate step beads to close. Work through
@@ -31,13 +31,13 @@ on the merged tree, when the landing worker lands your branch.
 
 **Monorepo extras:** After implementation, you push a PR, wait for GitHub Actions
 CI to pass (fixing any failures), then wait for AI reviewers (CodeRabbit, Greptile)
-to post comments and address them all before submitting to the merge queue.
+to post comments and address them all before you submit.
 
 **You do NOT:**
-- Push directly to main (Refinery merges from MQ)
-- Close your own issue (Refinery closes after merge)
+- Push directly to main (a human merges your PR)
+- Close your own issue
 - Wait for merge (you're gone after `gt done`)
-- Fix pre-existing failures on main (Refinery owns main health)
+- Fix pre-existing failures on main (not your bead)
 
 ## Variables
 
@@ -58,11 +58,11 @@ to post comments and address them all before submitting to the merge queue.
 | Build fails | Fix it. Do not proceed if it won't compile. |
 | CI fails | Diagnose and fix. Re-push until green. |
 | AI reviewer comment | Fix or won't-fix, reply to every comment. |
-| Blocked on external | Mail Witness for help, mark yourself stuck |
+| Blocked on external | `gt escalate`, then `gt done --status ESCALATED` |
 | Context filling | Use gt handoff to cycle to fresh session |
-| Unsure what to do | Mail Witness, don't guess |"""
+| Unsure what to do | `gt escalate`, don't guess |"""
 formula = "mol-polecat-work-monorepo"
-version = 2
+version = 3
 
 [[steps]]
 id = "load-context"
@@ -103,10 +103,9 @@ gt mail inbox
 - You understand what to do
 - Required resources are available
 
-If blocked or unclear, mail Witness immediately:
+If blocked or unclear, escalate immediately:
 ```bash
-gt mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
-Question: <what you need clarified>"
+gt escalate "HELP: unclear requirements on {{issue}}" --reason "<what you need clarified>"
 ```
 
 **Exit criteria:** You understand the work and can begin implementation."""
@@ -118,10 +117,10 @@ needs = ["load-context"]
 description = """
 Ensure you're on a FRESH branch named for THIS bead, based on latest origin/{{base_branch}}.
 
-**The branch name is load-bearing metadata.** `gt done` infers the MR's
-source_issue from the bead-id embedded in your branch name. A reused branch
-carries the PREVIOUS bead's id: your MR gets attributed to the wrong (often
-closed) bead, close credit goes to the wrong issue, and your real issue stays
+**The branch name is load-bearing metadata.** `gt done` infers the bead it
+submits from the bead-id embedded in your branch name. A reused branch
+carries the PREVIOUS bead's id: your work gets attributed to the wrong
+(often closed) bead, close credit goes to the wrong issue, and your real issue stays
 open and hooked forever. NEVER reuse a branch from a previous assignment —
 even if your worktree is already checked out on it.
 
@@ -142,7 +141,7 @@ git checkout -b "polecat/<name>/{{issue}}+$(openssl rand -hex 3)" origin/{{base_
 ```
 
 The format is `polecat/<your-name>/<bead-id>+<short-unique-suffix>`. The
-embedded bead-id is what makes MR attribution work; the suffix keeps the
+embedded bead-id is what makes attribution work; the suffix keeps the
 name unique across re-dispatches of the same bead.
 
 **3. Ensure clean working state:**
@@ -170,7 +169,7 @@ git rebase origin/{{base_branch}}      # Get latest, rebase your branch
 
 If rebase conflicts:
 - Resolve them carefully
-- If stuck, mail Witness
+- If stuck, `gt escalate`
 
 **5. Run project setup (if configured):**
 
@@ -208,7 +207,7 @@ bd update {{issue}} --append-notes "Findings so far: <what you discovered>"
 bd update {{issue}} --design "<structured findings>"
 ```
 Use `--append-notes`, never `--notes`: a resumed bead already carries the
-refinery's MERGE REJECTION block, and the resume path in load-context greps
+landing worker's MERGE REJECTION block, and the resume path in load-context greps
 notes for it (gt-nxvg).
 
 Do this BEFORE closing molecule steps, not after. If your session dies between
@@ -242,10 +241,9 @@ bd create --title "Found: <description>" --type bug --priority 2
 Do NOT fix unrelated issues in this branch.
 
 **If stuck:**
-Don't spin for more than 15 minutes. Mail Witness:
+Don't spin for more than 15 minutes. Escalate:
 ```bash
-gt mail send <rig>/witness -s "HELP: Stuck on implementation" -m "Issue: {{issue}}
-Trying to: <what you're attempting>
+gt escalate "HELP: stuck on {{issue}}" --reason "Trying to: <what you're attempting>
 Problem: <what's blocking you>
 Tried: <what you've attempted>"
 ```
@@ -293,9 +291,9 @@ id = "build-check"
 title = "Build and sanity check"
 needs = ["self-review"]
 description = """
-Verify your changes compile and pass basic sanity checks. The Refinery's
-bisecting merge queue runs the full test suite — your job is to catch
-obvious problems fast so you don't waste the MQ's time.
+Verify your changes compile and pass basic sanity checks. CI (and, for a
+feature branch, the landing worker) runs the full test suite; your job is to
+catch obvious problems fast.
 
 **1. Build (REQUIRED — must pass):**
 
@@ -318,13 +316,12 @@ Empty commands mean "not configured" — skip silently.
 
 **2. If build fails:**
 - Fix it. Return to implement step if needed.
-- Do NOT submit broken code to the merge queue.
+- Do NOT push broken code.
 
 **3. Targeted tests (OPTIONAL — run if fast and relevant):**
 
 If you modified or added test files, run those specific tests to catch
-obvious regressions. Do NOT run the full test suite — that's the
-Refinery's job.
+obvious regressions. Do NOT run the full test suite — that's CI's job.
 
 ```bash
 # Example: run only tests in packages you changed
@@ -342,7 +339,7 @@ suite on the shared Docker VM):
 gt slot run --role <rig>/<your-name> -- go test ./internal/pkg/you/changed/...
 ```
 
-If you're unsure which tests are relevant, skip this — the MQ will catch it.
+If you're unsure which tests are relevant, skip this — CI will catch it.
 
 **4. Lint (OPTIONAL — run if configured and fast):**
 
@@ -399,8 +396,7 @@ If your task produced no code changes, verify your findings are persisted to the
 ```bash
 bd show {{issue}}    # Check notes/design fields have your findings
 ```
-If findings are persisted, proceed to cleanup. `gt done --cleanup-status clean`
-handles the no-commit case for report-only tasks.
+If findings are persisted, finish with `gt done --status DEFERRED`.
 
 **Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
 
@@ -433,8 +429,6 @@ gh pr create --title "<type>: <description> ({{issue}})" \
 - [ ] AI review comments addressed
 
 Resolves: {{issue}}
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )" --repo $(git remote get-url origin | sed 's|.*github.com[:/]||;s|\\.git$||')
 ```
@@ -471,7 +465,7 @@ This will:
 
 **3. If CI fails due to pre-existing issues on main:**
 - Note this in your PR description
-- Proceed — Refinery owns main health, not you
+- Proceed — main's health is not your bead
 
 **Exit criteria:** All CI checks pass (or only pre-existing failures remain)."""
 
@@ -535,13 +529,15 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 
 Your PR is the deliverable. A human teammate will review and merge it.
 CI is green, AI reviews are addressed — the PR is ready for human review.
+Nothing is submitted for landing: {{issue}} stays open until the PR merges.
 
 ```bash
 # Ensure latest changes are pushed
 git push origin HEAD
 
-# Exit without submitting to merge queue — the PR is the deliverable
-gt done --no-merge
+# Record the PR on the bead, then exit without submitting for landing
+bd update {{issue}} --append-notes "PR: <url>"
+gt done --status DEFERRED
 ```
 
 **What happens next (not your concern):**
@@ -550,8 +546,8 @@ gt done --no-merge
 
 ## Mode B: Swarm into feature branch (base_branch != main)
 
-You are part of a swarm merging into a shared feature branch. The refinery
-manages the merge queue on that feature branch.
+You are part of a swarm merging into a shared feature branch. The daemon's
+landing worker lands each submission onto that feature branch.
 
 **1. Rebase onto latest feature branch:**
 ```bash
@@ -559,7 +555,7 @@ git fetch origin {{base_branch}}
 git rebase origin/{{base_branch}}
 ```
 
-If rebase conflicts: resolve carefully. If stuck, mail Witness.
+If rebase conflicts: resolve carefully. If stuck, `gt escalate`.
 
 **2. Run the cheap gates on the rebased result:**
 
@@ -568,9 +564,9 @@ If typecheck_command is set: run {{typecheck_command}}
 If lint_command is set: run {{lint_command}}
 
 **Do NOT run {{test_command}}** (gt-d7ir): `gt done` lints and tests your
-changed non-container packages itself, and the refinery runs the
+changed non-container packages itself, and the landing worker runs the
 Docker-backed suite once per submission; a polecat running it too only slows
-the refinery's gate on the shared host. If you changed a package that spins
+the landing gate on the shared host. If you changed a package that spins
 Dolt/testcontainers and want its signal first, run ONLY that package,
 wrapped (gt-tuiy):
 ```bash
@@ -591,18 +587,18 @@ gt done --target {{base_branch}}
 **4. If gates fail:** fix, commit, re-rebase, re-run gates. Do NOT submit broken code.
 
 **What happens next (not your concern):**
-- Refinery merges your work into {{base_branch}} (the feature branch)
+- The landing worker lands your work on {{base_branch}} (the feature branch)
 - Once all swarm work lands, a human opens a PR from the feature branch to main
 
 ## How to decide which mode
 
 Check your base_branch variable:
-- If `{{base_branch}}` is `main` (or `master`) → **Mode A** (PR-only, `--no-merge`)
-- If `{{base_branch}}` is anything else → **Mode B** (merge queue, `gt done --target {{base_branch}}`)
+- If `{{base_branch}}` is `main` (or `master`) → **Mode A** (PR-only, `gt done --status DEFERRED`)
+- If `{{base_branch}}` is anything else → **Mode B** (landing, `gt done --target {{base_branch}}`)
 
 You are GONE after `gt done`. Done means gone.
 
-**Exit criteria:** Work submitted (or PR left for review), sandbox nuked, session exited."""
+**Exit criteria:** Work submitted (or PR left for review), session exited."""
 
 [vars]
 [vars.issue]

@@ -35,11 +35,11 @@ beads created from it. Use `bd mol current` to find them - do NOT read this file
 
 | Situation | Action |
 |-----------|--------|
-| Scope too broad | Mail Witness, request narrower scope |
-| Can't understand code | Mail Witness for context |
-| Critical issue found | Mail Witness immediately, then continue |"""
+| Scope too broad | `gt escalate`, request narrower scope |
+| Can't understand code | `gt escalate` for context |
+| Critical issue found | `gt escalate -s critical` immediately, then continue |"""
 formula = "mol-polecat-code-review"
-version = 1
+version = 2
 
 [[steps]]
 id = "load-context"
@@ -200,7 +200,7 @@ Organize your findings by priority and category.
 
 | Priority | Description | Action |
 |----------|-------------|--------|
-| P0 | Security vulnerability, data loss risk | Mail Witness immediately |
+| P0 | Security vulnerability, data loss risk | Escalate immediately |
 | P1 | Bug affecting users, broken functionality | File as bug, high priority |
 | P2 | Code quality issue, potential future bug | File as task |
 | P3 | Improvement opportunity, nice-to-have | File as task, low priority |
@@ -218,7 +218,7 @@ GT_SCOPE_EOF
 Finding: <description of critical issue>
 Location: <file:line>
 BODY
-} | gt mail send {{rig}}/witness -s "CRITICAL: Security issue found" --stdin
+} | gt escalate "CRITICAL: Security issue found" -s critical --related {{issue}} --stdin
 ```
 
 **3. Prepare bead descriptions:** title, file:line, the issue, why it

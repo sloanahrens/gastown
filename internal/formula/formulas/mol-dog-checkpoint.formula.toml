@@ -30,10 +30,9 @@ The daemon:
 
 - Only checkpoints worktrees with live tmux sessions (dead sessions skipped)
 - Excludes runtime directories (.claude/, .beads/, .runtime/, __pycache__/)
-- WIP commits are squashed by gt done before push
-- Refinery squash-merges anyway, so WIP commits never reach main"""
+- WIP commits are squashed by gt done before push, so they never reach main"""
 formula = "mol-dog-checkpoint"
-version = 1
+version = 2
 
 [[steps]]
 id = "scan"

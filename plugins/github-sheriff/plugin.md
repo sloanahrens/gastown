@@ -19,7 +19,7 @@ severity = "low"
 # GitHub Sheriff
 
 Ships behind a manual gate. This plugin polls GitHub for open pull requests, so
-a town whose merges land through the Refinery gives it nothing to classify — and
+a town whose merges land through the landing worker gives it nothing to classify — and
 an auto-dispatched gate then spent an agent session every two hours finding none
 (gt-gs7g). A manual gate is never auto-dispatched, which keeps the plugin
 discoverable in `gt plugin list` and off the patrol.
@@ -30,7 +30,7 @@ hours — in this file's front matter.
 Polls GitHub for open pull requests, categorizes them by readiness, and creates
 `ci-failure` beads for new failures. Implements the PR Sheriff pattern from the
 [Gas Town User Manual](https://steve-yegge.medium.com/gas-town-emergency-user-manual-cf0e4556d74b)
-as a Deacon plugin.
+as a plugin.
 
 Categorizes each PR as:
 - **Easy win**: CI passing, small (<200 LOC changed), no merge conflicts
