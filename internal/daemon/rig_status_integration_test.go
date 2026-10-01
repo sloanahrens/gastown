@@ -47,10 +47,11 @@ fi
 }
 
 // rigStatusStubMissing answers the way bd does when the identity bead is not
-// there. TestIntegrationIsRigOperational_MissingBeadThroughBD runs it through
-// the real bd read: the wiring guard for showRigBead's default.
+// there: machine mode exits 20 (kind not_found), the only signal gastown reads
+// as absence since gt-yf47z. TestIntegrationIsRigOperational_MissingBeadThroughBD
+// runs it through the real bd read: the wiring guard for showRigBead's default.
 const rigStatusStubMissing = `echo 'Error: no issue found: tr-rig-testrig' >&2
-exit 1`
+exit 20`
 
 func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 	t.Helper()
