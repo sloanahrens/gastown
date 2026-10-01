@@ -27,18 +27,20 @@ import (
 // seats are free and there is work to take them.
 //
 // The numbers live here rather than in the daemon because the seat model does:
-// polecat_pool's own accounting (sling_pool.go) and the merge-queue depth rule
-// (sling_backpressure.go) are both in this package, and internal/cmd imports
+// polecat_pool's own accounting (sling_pool.go) and the landing-queue depth
+// rule (sling_backpressure.go) are both in this package, and internal/cmd imports
 // internal/daemon, so the dependency cannot run the other way. The daemon
 // shells out to `gt daemon dispatch-check --json`.
 
 const (
-	// defaultDispatchReadyMRCeiling is the merge-queue depth above which the
-	// check stops asking the mayor to sling into a rig. It is the operator's
-	// stated rule ("skip rigs whose merge queue has >12 ready MRs"), used when
-	// the rig does not set merge_queue.max_ready_for_dispatch of its own —
-	// that knob, where set, is the rig's own answer and wins.
-	defaultDispatchReadyMRCeiling = 12
+	// defaultDispatchLandingCeiling is the landing-queue depth (open
+	// gt:ready-to-land beads) above which the check stops asking the mayor to
+	// sling into a rig. It is the operator's stated rule ("skip rigs with >12
+	// beads waiting to land"), used when the rig does not set
+	// merge_queue.max_ready_for_dispatch of its own — that knob, where set, is
+	// the rig's own answer and wins. The key keeps its merge_queue name so
+	// existing settings files still load.
+	defaultDispatchLandingCeiling = 12
 
 	// maxDispatchPriority is the lowest priority treated as actionable: P0-P2.
 	// Everything below is backlog, and a nudge that leads with backlog is a
@@ -68,7 +70,7 @@ type dispatchSeats struct {
 }
 
 // dispatchRig is one rig's side of the picture: how much dispatchable work it
-// holds, and whether its merge queue can absorb more.
+// holds, and whether its landing queue can absorb more.
 type dispatchRig struct {
 	Rig string `json:"rig"`
 
@@ -79,13 +81,15 @@ type dispatchRig struct {
 	// P2 beads is not the same signal as a rig with one P1.
 	Urgent int `json:"urgent"`
 
-	// ReadyMRs is the rig's merge-queue depth, measured the way the sling
-	// backpressure guard measures it. Zero when the queue could not be read —
-	// an unreadable queue is not evidence of a full one.
-	ReadyMRs int `json:"ready_mrs"`
+	// ReadyToLand is the rig's landing-queue depth, measured the way the
+	// sling backpressure guard measures it. Zero when the queue could not be
+	// read — an unreadable queue is not evidence of a full one. The JSON name
+	// predates the landing worker and is kept for the daemon's reader.
+	ReadyToLand int `json:"ready_mrs"`
 
-	// MRCeiling is the depth at which this rig stops being a dispatch target.
-	MRCeiling int `json:"mr_ceiling"`
+	// LandingCeiling is the depth at which this rig stops being a dispatch
+	// target.
+	LandingCeiling int `json:"mr_ceiling"`
 
 	// Backpressure marks a rig over its ceiling: named in the nudge, never
 	// counted as a reason to nudge.
@@ -130,7 +134,7 @@ Seats come from polecat_pool (the admission point every spawn path reads), or
 from scheduler.max_polecats when no pool is configured. Work counts actionable
 P0-P2 ready beads per rig, excluding bead families that are bookkeeping rather
 than dispatchable work (agent beads, escalations, merge slots, messages, epics)
-and rigs whose merge queue is already deeper than the rule allows.
+and rigs whose landing queue is already deeper than the rule allows.
 
 Examples:
   gt daemon dispatch-check            # human-readable
@@ -198,7 +202,7 @@ func buildDispatchCheck(townRoot string) (*dispatchCheck, error) {
 // It stays silent for exactly three reasons, and each one is a nudge that
 // would have been wrong: no seat model is configured (the town has no answer
 // to "is a seat free?"), no seat is free (nothing could take the work), or
-// every rig with ready work is over its merge-queue ceiling (the work could
+// every rig with ready work is over its landing-queue ceiling (the work could
 // not land any sooner). Silence is the default, because a cadence that fires
 // without news is a cadence the mayor learns to ignore.
 func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
@@ -208,7 +212,7 @@ func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
 
 	// Rigs worth naming: parked ones are not dispatch targets, and a
 	// backpressured one is named but marked — "the board is empty" and "the
-	// board is full but the queue is deeper than the rule allows" are different
+	// board is full but the landing queue is deeper than the rule allows" are different
 	// answers, and the mayor needs to be able to tell them apart.
 	var named []string
 	var held []string
@@ -218,7 +222,7 @@ func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
 			continue
 		}
 		if rig.Backpressure {
-			held = append(held, fmt.Sprintf("%s=%d ready MRs (ceiling %d)", rig.Rig, rig.ReadyMRs, rig.MRCeiling))
+			held = append(held, fmt.Sprintf("%s=%d waiting to land (ceiling %d)", rig.Rig, rig.ReadyToLand, rig.LandingCeiling))
 			continue
 		}
 		actionable += rig.Ready
@@ -233,7 +237,7 @@ func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
 		seats.Free, seats.Capacity, seats.Occupied)
 	fmt.Fprintf(&b, " Actionable P0-P2 ready beads: %s.", strings.Join(named, ", "))
 	if len(held) > 0 {
-		fmt.Fprintf(&b, " Held by merge-queue depth: %s.", strings.Join(held, ", "))
+		fmt.Fprintf(&b, " Held by landing-queue depth: %s.", strings.Join(held, ", "))
 	}
 	b.WriteString(" Sling now, or mail the overseer why not — idle seats are a fault.")
 	return true, b.String()
@@ -383,8 +387,8 @@ func dispatchRigPictures(townRoot string) ([]dispatchRig, error) {
 			return nil, fmt.Errorf("counting ready work for %s: %w", name, err)
 		}
 		rig.Ready, rig.Urgent = ready, urgent
-		rig.ReadyMRs, rig.MRCeiling = rigMergeQueueDepth(rigPath, name, newDispatchMRLister(rigPath))
-		rig.Backpressure = rig.ReadyMRs > rig.MRCeiling
+		rig.ReadyToLand, rig.LandingCeiling = rigLandingQueueDepth(rigPath, name, newDispatchMRLister(rigPath))
+		rig.Backpressure = rig.ReadyToLand > rig.LandingCeiling
 		rigs = append(rigs, rig)
 	}
 
@@ -565,16 +569,16 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 	return true
 }
 
-// rigMergeQueueDepth reports the rig's ready-MR count and the ceiling it is
-// measured against. The ceiling is the rig's own
+// rigLandingQueueDepth reports the rig's count of beads waiting to land and
+// the ceiling it is measured against. The ceiling is the rig's own
 // merge_queue.max_ready_for_dispatch when set, else the operator's default.
 //
 // An unreadable queue reports zero depth, mirroring the sling backpressure
 // guard's fail-open: a queue we cannot read is not evidence of a queue that is
 // full, and suppressing the nudge on a Dolt hiccup would silence the patrol
 // for the one reason it exists.
-func rigMergeQueueDepth(rigPath, rigName string, lister dispatchMRLister) (ready, ceiling int) {
-	ceiling = defaultDispatchReadyMRCeiling
+func rigLandingQueueDepth(rigPath, rigName string, lister dispatchMRLister) (ready, ceiling int) {
+	ceiling = defaultDispatchLandingCeiling
 	if configured := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), rigName).GetMaxReadyForDispatch(); configured > 0 {
 		ceiling = configured
 	}
@@ -601,11 +605,11 @@ func printDispatchCheck(check *dispatchCheck) {
 		case rig.Parked:
 			fmt.Printf("  %-10s %s — not a dispatch target\n", rig.Rig, rig.ParkReason)
 		case rig.Backpressure:
-			fmt.Printf("  %-10s %3d ready (P0/P1 %d), %d ready MRs > ceiling %d — held\n",
-				rig.Rig, rig.Ready, rig.Urgent, rig.ReadyMRs, rig.MRCeiling)
+			fmt.Printf("  %-10s %3d ready (P0/P1 %d), %d waiting to land > ceiling %d — held\n",
+				rig.Rig, rig.Ready, rig.Urgent, rig.ReadyToLand, rig.LandingCeiling)
 		default:
-			fmt.Printf("  %-10s %3d ready (P0/P1 %d), %d ready MRs\n",
-				rig.Rig, rig.Ready, rig.Urgent, rig.ReadyMRs)
+			fmt.Printf("  %-10s %3d ready (P0/P1 %d), %d waiting to land\n",
+				rig.Rig, rig.Ready, rig.Urgent, rig.ReadyToLand)
 		}
 	}
 

@@ -34,7 +34,7 @@ func TestPrintSlotStatusJSON_CarriesTheHistory(t *testing.T) {
 	t.Parallel()
 	history := []slot.HistoryEntry{
 		{
-			TS: "2026-09-10T20:39:00Z", Role: "gastown/refinery", Slot: 0, PID: 62965,
+			TS: "2026-09-10T20:39:00Z", Role: "gastown/landing", Slot: 0, PID: 62965,
 			WaitedS: 1740, HeldS: secondsPtr(723), TimeoutS: 3600,
 			Reason: slot.WaitReasonTokenHeld, HolderRole: "gastown/polecats/mica", HolderPID: 41234,
 		},
@@ -69,7 +69,7 @@ func TestPrintSlotStatusJSON_CarriesTheHistory(t *testing.T) {
 		t.Fatalf("history entries = %d, want 3: %s", len(decoded.History), out)
 	}
 	first := decoded.History[0]
-	if first.Role != "gastown/refinery" || first.WaitedS != 1740 || first.TS == "" {
+	if first.Role != "gastown/landing" || first.WaitedS != 1740 || first.TS == "" {
 		t.Errorf("first history entry lost its facts: %+v", first)
 	}
 	if first.HeldS == nil || *first.HeldS != 723 {
@@ -106,7 +106,7 @@ func TestPrintSlotStatusJSON_OmitsAnEmptyHistory(t *testing.T) {
 func TestPrintSlotHistory(t *testing.T) {
 	t.Parallel()
 	open := slot.HistoryEntry{
-		TS: "2026-09-10T20:39:00Z", Role: "gastown/refinery", Slot: 0, PID: 62965,
+		TS: "2026-09-10T20:39:00Z", Role: "gastown/landing", Slot: 0, PID: 62965,
 		WaitedS: 1740, TimeoutS: 3600,
 		Reason: slot.WaitReasonTokenHeld, HolderRole: "gastown/polecats/mica", HolderPID: 41234,
 	}
@@ -130,7 +130,7 @@ func TestPrintSlotHistory(t *testing.T) {
 	// The pool the history is read against: slot 0 is still the open entry's
 	// holder, so that entry is an open hold rather than a phantom one.
 	rep := slot.Report{Total: 1, HeldCount: 1, Held: true, Slots: []slot.SlotState{
-		{Index: 0, Held: true, Owner: &slot.Owner{Role: "gastown/refinery", PID: 62965}},
+		{Index: 0, Held: true, Owner: &slot.Owner{Role: "gastown/landing", PID: 62965}},
 	}}
 
 	cmd := &cobra.Command{}
@@ -167,7 +167,7 @@ func TestPrintSlotHistory_ShowsAtMostTheRecentTail(t *testing.T) {
 	for i := 0; i < slotHistoryShown+3; i++ {
 		history = append(history, slot.HistoryEntry{
 			TS:   time.Now().Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
-			Role: "gastown/refinery", Slot: 0, PID: i, WaitedS: float64(i),
+			Role: "gastown/landing", Slot: 0, PID: i, WaitedS: float64(i),
 		})
 	}
 

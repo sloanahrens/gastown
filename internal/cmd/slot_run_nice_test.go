@@ -14,14 +14,14 @@ func TestSlotRunNiceness(t *testing.T) {
 		flag int
 		want int
 	}{
-		{"gastown/refinery", -1, 0},
-		{"gastown/refinery-batch", -1, 0},
-		{"hm/main-branch-test", -1, 0},
+		{"gastown/landing", -1, 0},
+		{"hm/landing", -1, 0},
+		{"gastown/refinery", -1, defaultNonGateNice},
 		{"gastown/amber", -1, defaultNonGateNice},
 		{"pid-1234", -1, defaultNonGateNice},
 		{"gastown/amber", 0, 0},
 		{"gastown/amber", 5, 5},
-		{"gastown/refinery", 7, 7},
+		{"gastown/landing", 7, 7},
 	}
 	for _, c := range cases {
 		if got := slotRunNiceness(c.role, c.flag); got != c.want {

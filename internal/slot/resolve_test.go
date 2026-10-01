@@ -14,7 +14,7 @@ func heldSlot(index int, owner *Owner) SlotState {
 // what its own fields already say.
 func TestResolveHolds(t *testing.T) {
 	t.Parallel()
-	open := HistoryEntry{TS: "2026-09-22T15:16:25Z", Role: "gastown/refinery-batch", Slot: 0, PID: 4242, WaitedS: 0}
+	open := HistoryEntry{TS: "2026-09-22T15:16:25Z", Role: "hm/landing", Slot: 0, PID: 4242, WaitedS: 0}
 	heldFor := 5.0
 	released := HistoryEntry{Role: "gastown/amber", Slot: 0, PID: 7, HeldS: &heldFor}
 	gaveUp := HistoryEntry{Role: "gastown/opal", Slot: 0, PID: 8, TimedOut: true}
@@ -29,7 +29,7 @@ func TestResolveHolds(t *testing.T) {
 		{
 			name:  "an open hold the pool still counts is live",
 			entry: open,
-			rep:   Report{Total: 1, HeldCount: 1, Slots: []SlotState{heldSlot(0, &Owner{Role: "gastown/refinery-batch", PID: 4242})}},
+			rep:   Report{Total: 1, HeldCount: 1, Slots: []SlotState{heldSlot(0, &Owner{Role: "hm/landing", PID: 4242})}},
 			want:  HoldLive,
 		},
 		{
@@ -40,16 +40,16 @@ func TestResolveHolds(t *testing.T) {
 		},
 		{
 			name:  "an open hold the pool no longer knows the slot for is abandoned",
-			entry: HistoryEntry{Role: "gastown/refinery-batch", Slot: 3, PID: 4242},
+			entry: HistoryEntry{Role: "hm/landing", Slot: 3, PID: 4242},
 			rep:   Report{Total: 1, Slots: []SlotState{{Index: 0}}},
 			want:  HoldAbandoned,
 		},
 		{
 			name:  "an open hold whose slot somebody else took is abandoned, naming them",
 			entry: open,
-			rep:   Report{Total: 1, HeldCount: 1, Slots: []SlotState{heldSlot(0, &Owner{Role: "gastown/refinery", PID: 99})}},
+			rep:   Report{Total: 1, HeldCount: 1, Slots: []SlotState{heldSlot(0, &Owner{Role: "gastown/landing", PID: 99})}},
 			want:  HoldAbandoned,
-			taken: &Owner{Role: "gastown/refinery", PID: 99},
+			taken: &Owner{Role: "gastown/landing", PID: 99},
 		},
 		{
 			name:  "an open hold against a holder the pool cannot name is unmatched",
@@ -109,7 +109,7 @@ func TestResolveHolds_LeavesAnEmptyHistoryEmpty(t *testing.T) {
 // holder (gt-97cm finding 5).
 func TestResolveHolds_IgnoresMarkerRows(t *testing.T) {
 	t.Parallel()
-	entry := HistoryEntry{Role: "gastown/refinery-batch", Slot: 1, PID: 4242}
+	entry := HistoryEntry{Role: "hm/landing", Slot: 1, PID: 4242}
 	rep := Report{
 		Total: 1,
 		Slots: []SlotState{

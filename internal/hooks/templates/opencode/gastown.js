@@ -111,8 +111,6 @@ export const GasTown = async ({ $, directory }) => {
       env.push(`GT_SESSION_ID=${shellQuote(sessionID)}`);
     }
     let context = await captureRun(`${env.join(" ")} ${gtCommand()} prime --hook`);
-    // NOTE: session-started nudge to deacon removed — it interrupted
-    // the deacon's await-signal backoff. Deacon wakes on beads activity.
     return context;
   };
 

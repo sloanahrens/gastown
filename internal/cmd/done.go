@@ -35,8 +35,8 @@ var doneCmd = &cobra.Command{
 	Use:     "done",
 	GroupID: GroupWork,
 	Short:   "Submit your branch for landing and end the polecat session",
-	Long: `Submit your finished branch for landing, notify the Witness, and end the
-polecat session. gt done never lands anything on the target branch: the
+	Long: `Submit your finished branch for landing, record completion on the agent
+bead, and end the polecat session. gt done never lands anything on the target branch: the
 daemon's landing worker does that (ADR 0004).
 
 For COMPLETED, gt done:
@@ -53,7 +53,7 @@ For COMPLETED, gt done:
 4. Pushes the branch under a lease and reads the tip back
 5. Marks the work bead ready to land (label gt:ready-to-land and a
    READY TO LAND notes block naming branch, head and target)
-6. Notifies the Witness and retires the session
+6. Records completion on the agent bead and retires the session
 
 A polecat cannot skip the gate, and gt done never lands directly.
 
@@ -63,15 +63,15 @@ branch they already pushed: gt done checks origin/<branch> is at HEAD, runs
 make presubmit (skipped with --pre-verified), then comments "Submitted for
 landing: <branch> @ <sha> onto <target>", appends the READY TO LAND block and
 adds gt:ready-to-land. The bead comes from --bead, else from the branch name.
-BD_ACTOR falls back to git user.name. Crew runs signal no Witness.
+BD_ACTOR falls back to git user.name. Crew sessions are not retired.
 
 Exit statuses:
   COMPLETED      - Work done, branch submitted for landing (default)
   ESCALATED      - Hit blocker, needs human intervention
   DEFERRED       - Work paused, issue still open
 
-Process exit codes (the work was not submitted; the Witness is not told
-"done" and the session stays up so you can fix it and re-run gt done):
+Process exit codes (the work was not submitted; no completion is recorded
+and the session stays up so you can fix it and re-run gt done):
   10  push failed: origin does not have the commit
   11  push unverified: origin is not at the commit gt done would declare
   12  the work bead could not be marked ready to land
@@ -115,8 +115,7 @@ const (
 // envDoneFromHandoff marks a `gt done` subprocess as gt handoff's polecat
 // redirect (handoff.go), not a directly- or agent-issued final status report.
 // Session retirement must not apply to this path (gt-5g3e): polecat-CLAUDE.md
-// promises a mid-work handoff continues the work, and only the Witness's
-// lifecycle handling owns the polecat from here.
+// promises a mid-work handoff continues the work.
 const envDoneFromHandoff = "GT_DONE_FROM_HANDOFF"
 
 // isFinalDoneExitType reports whether a gt done exit status ends the polecat's
@@ -1160,7 +1159,7 @@ func autoSaveUncommittedWork(g *git.Git, cwd, branch string) error {
 
 // submitForLanding is the COMPLETED path: rebase, squash, gate, push and mark the
 // work bead ready to land. It never lands anything. Every failure returns
-// before the Witness is told anything.
+// before any completion is recorded.
 func submitForLanding(r *doneRun) error {
 	var sub doneSubmission
 	if r.branch == r.defaultBranch || r.branch == "master" {
@@ -1363,7 +1362,7 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 	reviewHead, _ := repo.Rev("HEAD")
 	if skipReason, fatal := doneSourceCloseSkipReasonForHead(bd, r.issueID, sub.sourceIssue, reviewHead); skipReason != "" {
 		style.PrintWarning("%s", skipReason)
-		fmt.Printf("  The bead will remain open for witness/mayor review.\n")
+		fmt.Printf("  The bead will remain open for mayor review.\n")
 		notifyDoneCloseSkipped(r.townRoot, r.rigName, r.sender, r.issueID, skipReason)
 		if fatal {
 			return fmt.Errorf("cannot complete review-only/no-code work: %s", skipReason)
@@ -1543,12 +1542,12 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 	return nil
 }
 
-// reportDone tells the Witness and the agent bead how the run ended, then
-// retires the session. Only runs that succeeded reach it.
+// reportDone records on the agent bead how the run ended, then retires the
+// session. Only runs that succeeded reach it.
 func reportDone(r *doneRun, exitType string) error {
-	// Completion metadata on the agent bead is the audit trail the witness
-	// patrol reads for anomalies and crash recovery (gt-1qlg).
-	fmt.Printf("\nNotifying Witness...\n")
+	// Completion metadata on the agent bead is the audit trail for
+	// anomalies and crash recovery (gt-1qlg).
+	fmt.Printf("\nRecording completion...\n")
 	if r.agentBeadID != "" {
 		completionBd := beads.New(r.cwd).ForAgentBead()
 		meta := &beads.CompletionMetadata{
@@ -1586,7 +1585,6 @@ func reportDone(r *doneRun, exitType string) error {
 	fmt.Println()
 	if !isPolecat {
 		fmt.Printf("%s Session exiting\n", style.Bold.Render("→"))
-		fmt.Printf("  Witness will handle cleanup.\n")
 		return nil
 	}
 	// Retire the live session as the final action. The PID exclusion keeps
@@ -2097,7 +2095,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			currentHead, _ := e.head()()
 			if skipReason, fatal := doneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
 				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
 				if fatal {
 					return fmt.Errorf("cannot complete hooked work: %s", skipReason)
@@ -2154,13 +2152,13 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				}
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
 			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
 				// gt-6hmz: refuse rather than close a bead whose branch carries
 				// commits the target lacks; only the landing worker closes
 				// work that has code to land.
 				style.PrintWarning("%s", skipReason)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
+				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
 				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
 			} else if err := hookBd.Close(hookedBeadID); err != nil {
 				// Non-fatal: warn but continue

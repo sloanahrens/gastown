@@ -35,7 +35,7 @@ var templateFS embed.FS
 //   - provider: the preset's HooksProvider (e.g., "claude", "gemini").
 //   - settingsDir: the gastown-managed parent (used by agents with --settings flag).
 //   - workDir: the agent's working directory.
-//   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
+//   - role: the Gas Town role (e.g., "polecat", "crew", "mayor").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
 //   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
 //     boot/polecat settings-sync path, which must not apply to non-Claude agents.

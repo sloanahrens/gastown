@@ -274,7 +274,7 @@ func TestMarker_PoolSlotFilesAreNotMarkers(t *testing.T) {
 	town := t.TempDir()
 	pool := Pool{Slots: 2}
 
-	h := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	h := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, h)
 
 	rep, err := tg.StatusPool(town, pool)

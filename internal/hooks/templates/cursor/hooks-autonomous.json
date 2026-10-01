@@ -27,7 +27,7 @@
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "case \"${GT_ROLE:-}\" in *witness*|*refinery*|deacon*|*boot*) exit 0 ;; *) {{GT_BIN}} mail check --inject ;; esac"
+        "command": "{{GT_BIN}} mail check --inject"
       }
     ]
   }
