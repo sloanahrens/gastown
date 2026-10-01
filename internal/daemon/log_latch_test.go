@@ -44,3 +44,26 @@ func TestLogLatchKeepOnlyForgetsTheRest(t *testing.T) {
 		t.Fatalf("logged %d lines, want 3", n)
 	}
 }
+
+// TestLogLatchEndPassForgetsWhatThePassDidNotReach: a skip the scan stopped
+// reaching (the bead was dispatched, the convoy closed) ends its state, so it
+// logs again if it recurs; one the pass reached stays latched.
+func TestLogLatchEndPassForgetsWhatThePassDidNotReach(t *testing.T) {
+	t.Parallel()
+	var got []string
+	logf := func(format string, args ...interface{}) { got = append(got, fmt.Sprintf(format, args...)) }
+	var l logLatch
+
+	l.logf(logf, "x", "x")
+	l.logf(logf, "y", "y")
+	l.endPass()
+	l.logf(logf, "y", "y") // pass 2 reached only y
+	l.endPass()
+	l.logf(logf, "x", "x") // forgotten by pass 2: logs again
+	l.logf(logf, "y", "y") // reached by pass 2: quiet
+
+	want := []string{"x", "y", "x"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("logged %q, want %q", got, want)
+	}
+}

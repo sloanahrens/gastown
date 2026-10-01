@@ -52,7 +52,7 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 	}}}
 
 	var buf bytes.Buffer
-	err := runTailStream(context.Background(), &buf, []tailSource{gastownEvents, gastownLandings, hmEvents, hqEvents, daemon}, nil, false, nil, tailTestLoc)
+	err := runTailStream(context.Background(), &buf, []tailSource{gastownEvents, gastownLandings, hmEvents, hqEvents, daemon}, nil, false, nil, tailView{Loc: tailTestLoc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,9 @@ func TestRunTailStream_FollowPrintsEachBatchUntilCancelled(t *testing.T) {
 	tick := make(chan time.Time)
 	var buf bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- runTailStream(ctx, &buf, []tailSource{src}, preface, true, tick, tailTestLoc) }()
+	go func() {
+		done <- runTailStream(ctx, &buf, []tailSource{src}, preface, true, tick, tailView{Loc: tailTestLoc})
+	}()
 	tick <- time.Time{}
 	tick <- time.Time{} // an empty poll prints nothing
 	cancel()
@@ -101,7 +103,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken p
 func TestRunTailStream_WriteFailureStops(t *testing.T) {
 	t.Parallel()
 	src := &scriptedTailSource{batches: [][]tailLine{{{At: tailNow, Rig: "x", Kind: "events", Text: "y"}}}}
-	if err := runTailStream(context.Background(), failingWriter{}, []tailSource{src}, nil, true, make(chan time.Time), tailTestLoc); err == nil {
+	if err := runTailStream(context.Background(), failingWriter{}, []tailSource{src}, nil, true, make(chan time.Time), tailView{Loc: tailTestLoc}); err == nil {
 		t.Fatal("a failed write did not stop the stream")
 	}
 }
@@ -148,7 +150,7 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 		t.Fatalf("build: %v %v", err, preface)
 	}
 	var buf bytes.Buffer
-	if err := runTailStream(context.Background(), &buf, sources, preface, false, nil, tailTestLoc); err != nil {
+	if err := runTailStream(context.Background(), &buf, sources, preface, false, nil, tailView{Loc: tailTestLoc}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -182,7 +184,7 @@ func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := runTailStream(context.Background(), &buf, sources, nil, false, nil, tailTestLoc); err != nil {
+	if err := runTailStream(context.Background(), &buf, sources, nil, false, nil, tailView{Loc: tailTestLoc}); err != nil {
 		t.Fatal(err)
 	}
 	want := "2026-09-30T08:59:00-05:00 hm landings landed hm-1 - -> - commit=- patch=- gate=- om=-/0.00 route=-\n" +
