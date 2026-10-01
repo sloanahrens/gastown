@@ -1106,26 +1106,12 @@ func resolveWorkerAgentConfig(h host, workerName, townRoot, rigPath string) *Run
 // ResolveRoleEffort resolves the effort level for a role.
 // Resolution order:
 //  1. Rig's RoleEffort[role]
-//  2. Town's RoleEffort[role]
-//  3. Returns "" (caller falls back to env var / default "high")
+//  2. Town's RoleEffort[role] (gt config cost-tier writes it)
+//  3. Returns "" (caller falls back to the default "high")
 //
 // Invalid effort levels are warned about and skipped.
 func ResolveRoleEffort(role, townRoot, rigPath string) string {
-	return resolveRoleEffort(os.Getenv, role, townRoot, rigPath)
-}
-
-// resolveRoleEffort is ResolveRoleEffort reading GT_COST_TIER through getenv.
-func resolveRoleEffort(getenv func(string) string, role, townRoot, rigPath string) string {
-	// Tier 1: ephemeral cost tier override (mirrors agent resolution)
-	if tierName := getenv("GT_COST_TIER"); tierName != "" && IsValidTier(tierName) {
-		if roleEffort := CostTierRoleEffort(CostTier(tierName)); roleEffort != nil {
-			if effort, ok := roleEffort[role]; ok {
-				return effort
-			}
-		}
-	}
-
-	// Tier 2: rig-level override
+	// Rig-level override
 	if rigPath != "" {
 		if rigSettings, err := LoadRigSettings(RigSettingsPath(rigPath)); err == nil && rigSettings != nil {
 			if effort, ok := rigSettings.RoleEffort[role]; ok && effort != "" {
@@ -1138,7 +1124,7 @@ func resolveRoleEffort(getenv func(string) string, role, townRoot, rigPath strin
 		}
 	}
 
-	// Tier 3: town-level setting
+	// Town-level setting
 	if townRoot != "" {
 		if townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot)); err == nil && townSettings != nil {
 			if effort, ok := townSettings.RoleEffort[role]; ok && effort != "" {
@@ -1193,53 +1179,6 @@ func RoleSettingsDir(role, rigPath string) string {
 	}
 }
 
-// tryResolveFromEphemeralTier checks the GT_COST_TIER environment variable
-// and returns the appropriate RuntimeConfig for the given role if an ephemeral
-// cost tier is set.
-//
-// Returns:
-//   - (rc, true)  — tier is active and has spoken for this role. rc may be nil
-//     if the tier says "use default" (empty agent mapping).
-//   - (nil, false) — no ephemeral tier active, or role is not tier-managed.
-//
-// The caller must respect handled=true even when rc is nil: it means the tier
-// explicitly wants the default agent for this role, and persisted RoleAgents
-// should be skipped to prevent stale config from leaking through.
-func tryResolveFromEphemeralTier(reg *AgentRegistry, role string) (*RuntimeConfig, bool) {
-	tierName := reg.host().getenv("GT_COST_TIER")
-	if tierName == "" || !IsValidTier(tierName) {
-		return nil, false
-	}
-
-	tier := CostTier(tierName)
-	roleAgents := CostTierRoleAgents(tier)
-	if roleAgents == nil {
-		return nil, false
-	}
-
-	agentName, ok := roleAgents[role]
-	if !ok {
-		return nil, false // Role not managed by tiers
-	}
-
-	// Empty agent name means "use default (opus)" — signal handled but no override
-	if agentName == "" {
-		return nil, true
-	}
-
-	// Look up the agent config from the tier's agent definitions
-	agents := CostTierAgents(tier)
-	if agents != nil {
-		if rc, found := agents[agentName]; found && rc != nil {
-			filled := fillRuntimeDefaultsIn(reg, rc)
-			filled.ResolvedAgent = agentName
-			return filled, true
-		}
-	}
-
-	return nil, false
-}
-
 func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1255,19 +1194,6 @@ func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath stri
 	townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
 	if err != nil {
 		townSettings = NewTownSettings()
-	}
-
-	// Check ephemeral cost tier (GT_COST_TIER env var)
-	tierRC, tierHandled := tryResolveFromEphemeralTier(reg, role)
-	if tierHandled {
-		if tierRC != nil {
-			// Tier wants a specific Claude model for this role.
-			return tierRC
-		}
-		// Tier says "use default" for this role. Skip persisted RoleAgents to
-		// prevent stale config from leaking through, go straight to default
-		// resolution (rig's Agent → town's DefaultAgent → "claude").
-		return resolveAgentConfigInternal(reg, townRoot, rigPath)
 	}
 
 	// Check rig's RoleAgents first
@@ -1312,10 +1238,6 @@ func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath stri
 // ResolveRoleAgentName returns the agent name that would be used for a specific role.
 // This is useful for logging and diagnostics.
 // Returns the agent name and whether it came from role-specific configuration.
-//
-// NOTE: This function does not account for ephemeral cost tier overrides
-// (GT_COST_TIER env var). It reflects persisted config only. For the actual
-// runtime agent config, use ResolveRoleAgentConfig.
 func ResolveRoleAgentName(role, townRoot, rigPath string) (agentName string, isRoleSpecific bool) {
 	// Load rig settings
 	var rigSettings *RigSettings

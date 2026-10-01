@@ -202,7 +202,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	if cfg.Rig != "" && cfg.TownRoot != "" {
 		rigPath = filepath.Join(cfg.TownRoot, cfg.Rig)
 	}
-	effort := resolveRoleEffort(getenv, cfg.Role, cfg.TownRoot, rigPath)
+	effort := ResolveRoleEffort(cfg.Role, cfg.TownRoot, rigPath)
 	if effort == "" {
 		effort = "high"
 	}

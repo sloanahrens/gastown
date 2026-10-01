@@ -6,7 +6,7 @@ import (
 )
 
 // host is what agent resolution reads from the running process: its
-// environment (GT_COST_TIER, ${VAR} references in agent env), its PATH (is an
+// environment (${VAR} references in agent env), its PATH (is an
 // agent's binary installed?), its working directory (the town root when a
 // caller gives none) and the system prompt renderer internal/cmd installs.
 // Production resolves against processHost; unit tests pass a scripted host

@@ -358,6 +358,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The cost tier is config only** (gt-y3pgh.2) — `GT_COST_TIER` no longer
+  overrides an agent's model or effort. The tier lives in
+  `settings/config.json` (`cost_tier`, `role_agents`, `role_effort`), written
+  by `gt config cost-tier`; nothing in the town set the variable.
+
 - **One Dolt endpoint source in the daemon** (gt-y3pgh.9) — the daemon's
   Dolt server manager, wisp reaper, compactor and maintenance gc take the
   endpoint from `config.ResolveDoltEndpoint` only. `patrols.dolt_server.port`
