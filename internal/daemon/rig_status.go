@@ -109,8 +109,9 @@ type rigBeadStoreResult struct {
 type rigOperationalCache struct {
 	mu      sync.Mutex
 	entries map[string]rigBeadEntry
-	// escalations holds one serial queue per rig; see enqueueEscalation.
-	escalations map[string]chan func()
+	// escalations holds each rig's pending escalation work, in order; a rig is
+	// listed only while its worker runs. See enqueueEscalation.
+	escalations map[string][]func()
 }
 
 // get returns the memoized read for rigName when it is still fresh.
@@ -173,27 +174,39 @@ const escalationQueueDepth = 8
 // conditions occurred in.
 func (c *rigOperationalCache) enqueueEscalation(rigName string, logf func(string, ...interface{}), work func()) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.escalations == nil {
-		c.escalations = make(map[string]chan func())
+		c.escalations = make(map[string][]func())
 	}
-	queue, ok := c.escalations[rigName]
-	if !ok {
-		queue = make(chan func(), escalationQueueDepth)
-		c.escalations[rigName] = queue
-		go func() {
-			for work := range queue {
-				work()
-			}
-		}()
-	}
-	c.mu.Unlock()
-
-	select {
-	case queue <- work:
-	default:
+	pending, running := c.escalations[rigName]
+	if len(pending) >= escalationQueueDepth {
 		// Never silent: the failure itself still has its log line, and the next
 		// failure episode raises again once this queue drains.
 		logf("rig-status: escalation queue for %s is full (%d pending), dropping an escalation", rigName, escalationQueueDepth)
+		return
+	}
+	c.escalations[rigName] = append(pending, work)
+	if !running {
+		go c.runEscalations(rigName)
+	}
+}
+
+// runEscalations is rigName's worker: it runs the rig's pending work in order
+// and exits once the queue is empty, so no goroutine outlives the work it was
+// started for.
+func (c *rigOperationalCache) runEscalations(rigName string) {
+	for {
+		c.mu.Lock()
+		pending := c.escalations[rigName]
+		if len(pending) == 0 {
+			delete(c.escalations, rigName)
+			c.mu.Unlock()
+			return
+		}
+		work := pending[0]
+		c.escalations[rigName] = pending[1:]
+		c.mu.Unlock()
+		work()
 	}
 }
 

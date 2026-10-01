@@ -99,14 +99,17 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 	}
 	for _, pkg := range pkgs {
 		if ctx.Err() != nil {
+			r.superseded(pl, res)
 			return
 		}
 		rr := r.Rerun(ctx, cmd, pkg, pl)
+		if ctx.Err() != nil {
+			// Killed by the stop, not by the test: no verdict either way.
+			r.superseded(pl, res)
+			return
+		}
 		switch {
 		case rr.Err != nil:
-			if ctx.Err() != nil {
-				return
-			}
 			r.logf("rerun of %s at %s could not run (%v); counting it red", pkg, short(pl.Commit), rr.Err)
 			stillRed = append(stillRed, pkg)
 			tails[pkg] = res.Tail
@@ -122,7 +125,7 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 	open := r.openBeads()
 	var filed []string
 	for _, pkg := range stillRed {
-		id := r.fileOrComment(open, cmd, pkg, pl, tails[pkg])
+		id := r.fileOrComment(open, cmd, pkg, pl, res, tails[pkg])
 		filed = append(filed, fmt.Sprintf("%s [%s]", pkg, id))
 	}
 	// A package that passed in this run (or on its rerun) is no longer red.
@@ -140,6 +143,15 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 		}
 	}
 	r.status(line)
+}
+
+// superseded records a red run whose reruns the daemon's stop cut short
+// (gt-f2voh). Nothing is filed and no verdict is recorded, so the restarted
+// worker runs the post-landing command again from the last verdict to the
+// tip; that run's verdict stands for this one.
+func (r *RedMain) superseded(pl PostLand, res PostLandResult) {
+	r.logf("RED at %s (%s) superseded: the daemon stopped before the reruns reached a verdict; the restarted worker reruns the post-landing command at the untested tip%s",
+		short(pl.Commit), pl.by(), fullLog(res.LogPath))
 }
 
 // Green handles a green run of cmd at pl.Commit: every open red-main bead is
@@ -217,12 +229,15 @@ func fileOrComment(bd interface {
 	return is.ID, nil
 }
 
-func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl PostLand, tail string) string {
+func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl PostLand, res PostLandResult, tail string) string {
 	detail := fmt.Sprintf("%s at %s (%s) via %q; failed again on a rerun of the package. Last lines:\n%s",
 		pkg, pl.Commit, pl.by(), cmd, lastLines(tail, postLandTailLines))
 	if pkg == redMainNoPackage {
-		detail = fmt.Sprintf("%q failed at %s (%s) without naming a failing Go package, so nothing was rerun. Last lines:\n%s",
-			cmd, pl.Commit, pl.by(), lastLines(tail, postLandTailLines))
+		detail = fmt.Sprintf("%q exited %d at %s (%s) without naming a failing Go package (a build or shell-test failure, a timeout or a kill), so nothing was rerun. Last lines:\n%s",
+			cmd, res.ExitCode, pl.Commit, pl.by(), lastLines(tail, postLandTailLines))
+	}
+	if res.LogPath != "" {
+		detail += "\n\nFull log: " + res.LogPath
 	}
 	if pl.Direct {
 		detail += fmt.Sprintf("\n\nThe commit reached main by a direct push, not a landing: suspect range %s..%s.", pl.From, pl.Commit)
