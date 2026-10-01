@@ -150,7 +150,7 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 	case res.ExitCode != 0:
 		tail := lastLines(res.Tail, postLandTailLines)
 		p.logf("RED: %q exited %d at %s (%s)\n%s", cmd, res.ExitCode, short(pl.Commit), pl.by(), tail)
-		msg := fmt.Sprintf("post-landing slow tier RED at %s: %s", pl.Commit, "exit "+fmt.Sprint(res.ExitCode)+", last lines:\n"+tail)
+		msg := fmt.Sprintf("post-landing check RED at %s: %s", pl.Commit, "exit "+fmt.Sprint(res.ExitCode)+", last lines:\n"+tail)
 		if p.Beads != nil && pl.BeadID != "" {
 			if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
 				p.logf("commenting on %s: %v", pl.BeadID, err)

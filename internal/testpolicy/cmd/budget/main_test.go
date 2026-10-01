@@ -29,17 +29,6 @@ func TestSummaryLines_KeepsOnlyPackageSummaries(t *testing.T) {
 	}
 }
 
-// TestWithoutSlow drops exactly the listed packages, not their subpackages.
-func TestWithoutSlow(t *testing.T) {
-	t.Parallel()
-	pkgs := []string{module + "/internal/refinery", module + "/internal/refinery/editorial", module + "/internal/slot"}
-	got := withoutSlow(pkgs, []testpolicy.SlowEntry{{Package: "internal/refinery"}})
-	want := []string{module + "/internal/refinery/editorial", module + "/internal/slot"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("withoutSlow = %v, want %v", got, want)
-	}
-}
-
 // TestSummaryLines_FlushKeepsLastLineWithoutNewline covers a summary line at
 // the end of the stream with no trailing newline: Flush must pass it on.
 func TestSummaryLines_FlushKeepsLastLineWithoutNewline(t *testing.T) {
@@ -92,7 +81,7 @@ func TestSummaryLines_CapsPartialLine(t *testing.T) {
 func TestCheckFastTier_FailsClosedOnEmptyProbe(t *testing.T) {
 	t.Parallel()
 	var summary bytes.Buffer
-	if code := checkFastTier(&summaryLines{w: &summary}, &summary, 3, "slow.txt", false); code == 0 {
+	if code := checkFastTier(&summaryLines{w: &summary}, &summary, 3, false); code == 0 {
 		t.Fatal("checkFastTier passed a run of 3 packages whose output had no summary line; want it to fail closed")
 	}
 }
@@ -104,7 +93,7 @@ func TestCheckFastTier_FailsClosedOnUnreadableTime(t *testing.T) {
 	var summary bytes.Buffer
 	probe := &summaryLines{w: &summary}
 	_, _ = probe.Write([]byte("ok  \tgithub.com/steveyegge/gastown/internal/a\t1.0s\nok  \tgithub.com/steveyegge/gastown/internal/b\tsoon\n"))
-	if code := checkFastTier(probe, &summary, 2, "slow.txt", false); code == 0 {
+	if code := checkFastTier(probe, &summary, 2, false); code == 0 {
 		t.Fatal("checkFastTier passed a summary line with an unreadable time; want it to fail closed")
 	}
 }
@@ -130,7 +119,7 @@ func TestCheckFastTier_Verdicts(t *testing.T) {
 		var summary bytes.Buffer
 		probe := &summaryLines{w: &summary}
 		_, _ = probe.Write([]byte(tc.text))
-		if got := checkFastTier(probe, &summary, 1, "slow.txt", tc.strict); got != tc.want {
+		if got := checkFastTier(probe, &summary, 1, tc.strict); got != tc.want {
 			t.Errorf("%s: checkFastTier = %d, want %d", tc.name, got, tc.want)
 		}
 	}

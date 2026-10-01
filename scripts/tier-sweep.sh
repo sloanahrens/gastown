@@ -3,9 +3,8 @@
 # time so no single run outlives its timeout, and prints one summary line per
 # tier. It exits non-zero when any tier is red.
 #
-#   slow         each package in internal/testpolicy/slow.txt, GT_TEST_DOCKER=0
-#   shell        $SHELL_TESTS (make test-slow's) and the *_test.sh scripts it
-#                does not call, GT_TEST_DOCKER=0
+#   shell        $SHELL_TESTS (which make test-slow runs after the gate) and
+#                the *_test.sh scripts it does not call, GT_TEST_DOCKER=0
 #   integration  each package with a //go:build integration file, with
 #                -tags integration, then the docker.txt packages untagged, as
 #                make test-integration does; all under `gt slot run`
@@ -14,7 +13,7 @@
 #                TestMain must presort the cobra tree like the unit one does
 #                (gt-jz03n.6), and only -race shows a regression
 #
-# Usage: scripts/tier-sweep.sh [slow] [shell] [integration] [race]   (default: all)
+# Usage: scripts/tier-sweep.sh [shell] [integration] [race]   (default: all)
 #
 # TIER_SWEEP_SKIP is the known-red list: whitespace-separated entries of
 #   <tier>:<pkg>             skip the package in that tier, e.g.
@@ -32,7 +31,7 @@ cd "$(dirname "$0")/.." || exit 2
 mkdir -p "$TIER_SWEEP_LOGDIR"
 
 tiers=("$@")
-[ ${#tiers[@]} -eq 0 ] && tiers=(slow shell integration race)
+[ ${#tiers[@]} -eq 0 ] && tiers=(shell integration race)
 
 # skip_for TIER PKG prints "pkg" when the package is skipped whole, the -skip
 # regexp when only some tests are, and nothing otherwise.
@@ -84,11 +83,6 @@ go_tier() {
 # shellcheck disable=SC2207
 for tier in "${tiers[@]}"; do
 	case "$tier" in
-	slow)
-		pkgs=($(sed -e 's/#.*//' internal/testpolicy/slow.txt | awk 'NF{print "./" $1}'))
-		read -r p f s names < <(go_tier slow env GT_TEST_DOCKER=0 :: :: "${pkgs[@]}")
-		summary slow "$p" "$f" "$s" "$names"
-		;;
 	shell)
 		shell_tests=${SHELL_TESTS:-scripts/test-makefile.sh}
 		scripts=("$shell_tests")
@@ -115,7 +109,7 @@ for tier in "${tiers[@]}"; do
 		summary race "$p" "$f" "$s" "$names"
 		;;
 	*)
-		echo "tier-sweep: unknown tier $tier (want slow, shell, integration or race)" >&2
+		echo "tier-sweep: unknown tier $tier (want shell, integration or race)" >&2
 		exit 2
 		;;
 	esac

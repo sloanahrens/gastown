@@ -153,7 +153,7 @@ func TestPostLandExitCodeRouting(t *testing.T) {
 			}
 			if tc.wantComment {
 				c := cs[0]
-				if !strings.HasPrefix(c, "post-landing slow tier RED at abc123def456: ") || !strings.Contains(c, "--- FAIL: TestSlow") ||
+				if !strings.HasPrefix(c, "post-landing check RED at abc123def456: ") || !strings.Contains(c, "--- FAIL: TestSlow") ||
 					strings.Count(c, "noise") != postLandTailLines-2 {
 					t.Fatalf("comment:\n%s", c)
 				}

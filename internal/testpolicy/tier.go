@@ -2,76 +2,24 @@ package testpolicy
 
 import (
 	"bufio"
-	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
-// slow.txt splits the Go suite into two tiers (gt-z862q). `make gate`, the
-// landing gate, runs every package NOT listed; `make test-slow` runs the
-// listed ones after landing. Each line is "<package> <wall> # <why>": the
-// wall the package took in the measurement that put it there (a Go duration,
-// e.g. 301s) and why it belongs in the slow tier. `make tier-check` fails any
-// fast-tier package whose wall time exceeds FastTierMaxWall, so the boundary
-// cannot drift silently; `make gate` only warns, because wall time depends on
-// host load and a landing must not be refused for contention.
+// The unit tier is every package: `make gate` runs them all, and since
+// gt-ik4a1.9 there is no slow tier beside it (internal/cmd and internal/beads,
+// its last members, measured 12s and 11s). `make tier-check` fails any package
+// whose wall time exceeds FastTierMaxWall, so a package that grows slow cannot
+// do so silently; `make gate` only warns, because wall time depends on host
+// load and a landing must not be refused for contention.
 
-// FastTierMaxWall is the one definition of the tier boundary: the most wall
-// time one fast-tier package may take before `make tier-check` fails it (and
-// `make gate` warns), and the cut-off for slow.txt (every listed package measured at least
-// this much). The budget runner's -fast-tier flag reads it; nothing else
-// restates the number.
+// FastTierMaxWall is the one definition of the per-package wall limit: the
+// most wall time one unit-tier package may take before `make tier-check`
+// fails it (and `make gate` warns). The budget runner's -fast-tier flag reads
+// it; nothing else restates the number.
 const FastTierMaxWall = 30 * time.Second
-
-// SlowEntry is one line of slow.txt.
-type SlowEntry struct {
-	Package string
-	Wall    time.Duration
-	Why     string
-	Line    int
-}
-
-// ParseSlowList reads slow.txt's entries. Every entry needs a package, its
-// measured wall time and a justification after "#".
-func ParseSlowList(r io.Reader) ([]SlowEntry, error) {
-	var entries []SlowEntry
-	seen := map[string]int{}
-	sc := bufio.NewScanner(r)
-	for n := 1; sc.Scan(); n++ {
-		line, why, _ := strings.Cut(sc.Text(), "#")
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		why = strings.TrimSpace(why)
-		if len(fields) != 2 || why == "" {
-			return nil, fmt.Errorf("slow.txt:%d: want \"<package> <measured wall> # <why it is slow>\", got %q", n, sc.Text())
-		}
-		wall, err := time.ParseDuration(fields[1])
-		if err != nil || wall <= 0 {
-			return nil, fmt.Errorf("slow.txt:%d: %q is not a measured wall time (want a Go duration such as 45s)", n, fields[1])
-		}
-		if first, dup := seen[fields[0]]; dup {
-			return nil, fmt.Errorf("slow.txt:%d: %s is listed twice (first on line %d)", n, fields[0], first)
-		}
-		seen[fields[0]] = n
-		entries = append(entries, SlowEntry{Package: fields[0], Wall: wall, Why: why, Line: n})
-	}
-	return entries, sc.Err()
-}
-
-// ReadSlowList reads the slow.txt at path.
-func ReadSlowList(path string) ([]SlowEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return ParseSlowList(f)
-}
 
 // PackageWall is the wall time go test reported for one package.
 type PackageWall struct {
