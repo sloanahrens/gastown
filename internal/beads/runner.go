@@ -219,7 +219,7 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 		ctx, cancel = context.WithTimeout(ctx, b.plainTimeout)
 		defer cancel()
 	}
-	env := machineEnvForCall(b.workDir, b.plainEnv, args)
+	env := b.withActor(machineEnvForCall(b.workDir, b.plainEnv, args))
 	stdout, stderr, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
 	if err != nil {
 		return stdout, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}

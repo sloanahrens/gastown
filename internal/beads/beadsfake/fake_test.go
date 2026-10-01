@@ -21,6 +21,11 @@ func TestFakeClientContractSharedDatabase(t *testing.T) {
 	RunClientContract(t, func(t *testing.T) beads.Client { return shared })
 }
 
+func TestFakeActorContract(t *testing.T) {
+	t.Parallel()
+	RunActorContract(t, func(t *testing.T, actor string) beads.Client { return New(WithActor(actor)) })
+}
+
 func TestFakeAdminContract(t *testing.T) {
 	t.Parallel()
 	RunAdminContract(t, func(t *testing.T) AdminClient { return New() })

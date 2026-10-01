@@ -707,6 +707,9 @@ type Beads struct {
 	// baseEnv replaces the process environment calls start from (WithEnv);
 	// nil is os.Environ().
 	baseEnv []string
+	// actor, when set, is the BD_ACTOR every bd call runs as (WithActor,
+	// ActingAs), replacing the one the environment carries.
+	actor string
 
 	// plain marks a wrapper built by NewPlain: bd runs in workDir with
 	// exactly plainEnv, and none of the routing policy below applies.
@@ -807,6 +810,7 @@ type beadsFields struct {
 	exec       bdRunFunc
 	bin        string
 	baseEnv    []string
+	actor      string
 	// budget replaces every call's subprocess deadline; tests only.
 	budget time.Duration
 }
@@ -834,6 +838,50 @@ func WithEnv(env []string) Option {
 	}
 }
 
+// WithActor runs every bd call as actor (BD_ACTOR), whatever the environment
+// says, so bd records it as the author of comments and the creator of issues.
+// An empty actor keeps the environment's.
+func WithActor(actor string) Option {
+	return func(f *beadsFields) { f.actor = actor }
+}
+
+// ActingAs returns a copy of b whose bd calls run as actor (WithActor),
+// including the wrappers derived from it. An empty actor returns b.
+func (b *Beads) ActingAs(actor string) *Beads {
+	if actor == "" {
+		return b
+	}
+	c := newBeads(beadsFields{
+		workDir:    b.workDir,
+		beadsDir:   b.beadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		townRoot:   b.townRoot,
+		noRoute:    b.noRoute,
+		agentScope: b.agentScope,
+		exec:       b.exec,
+		bin:        b.bin,
+		baseEnv:    b.baseEnv,
+		actor:      actor,
+		budget:     b.budget,
+	})
+	c.plain, c.plainEnv, c.plainTimeout = b.plain, b.plainEnv, b.plainTimeout
+	c.accessMode = b.accessMode
+	return c
+}
+
+// withActor sets BD_ACTOR in env to the wrapper's actor, when it has one.
+func (b *Beads) withActor(env []string) []string {
+	if b.actor == "" {
+		return env
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	return append(StripEnvKey(env, "BD_ACTOR"), "BD_ACTOR="+b.actor)
+}
+
 func applyOptions(f beadsFields, opts []Option) beadsFields {
 	for _, o := range opts {
 		o(&f)
@@ -857,6 +905,7 @@ func newBeads(f beadsFields) *Beads {
 		exec:       f.exec,
 		bin:        f.bin,
 		baseEnv:    f.baseEnv,
+		actor:      f.actor,
 		budget:     f.budget,
 	}
 }
@@ -941,6 +990,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		exec:       b.exec,
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
+		actor:      b.actor,
 	})
 }
 
@@ -996,6 +1046,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		exec:       b.exec,
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
+		actor:      b.actor,
 	})
 }
 
@@ -1144,6 +1195,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		exec:       b.exec,
 		bin:        b.bin,
 		baseEnv:    b.baseEnv,
+		actor:      b.actor,
 	})
 }
 
@@ -1497,7 +1549,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]b
 	run := func(argv []string) error {
 		stdout.Reset()
 		stderr.Reset()
-		out, errOut, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: runEnv, stdin: stdinData, args: argv})
+		out, errOut, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: b.withActor(runEnv), stdin: stdinData, args: argv})
 		stdout.Write(out)
 		stderr.Write(errOut)
 		return err
@@ -2933,7 +2985,7 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin, baseEnv: b.baseEnv})
+					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin, baseEnv: b.baseEnv, actor: b.actor})
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -3052,6 +3104,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			exec:       b.exec,
 			bin:        b.bin,
 			baseEnv:    b.baseEnv,
+			actor:      b.actor,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -3146,6 +3199,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			exec:       b.exec,
 			bin:        b.bin,
 			baseEnv:    b.baseEnv,
+			actor:      b.actor,
 		})
 		return bdForCreate.CreateWithID(id, opts)
 	}
