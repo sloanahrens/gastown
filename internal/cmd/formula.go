@@ -377,9 +377,7 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Currently only 'convoy' and 'workflow' formulas can be run.\n")
 		fmt.Printf("\nTo run '%s' manually:\n", formulaName)
 		fmt.Printf("  1. View formula:   gt formula show %s\n", formulaName)
-		fmt.Printf("  2. Cook to proto:  bd cook %s\n", formulaName)
-		fmt.Printf("  3. Pour molecule:  bd pour %s\n", formulaName)
-		fmt.Printf("  4. Sling to rig:   gt sling <mol-id> %s\n", targetRig)
+		fmt.Printf("  2. Sling to rig:   gt sling %s %s  (cooks it and pours a wisp)\n", formulaName, targetRig)
 		return nil
 	}
 }

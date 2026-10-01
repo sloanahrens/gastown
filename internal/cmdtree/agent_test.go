@@ -9,8 +9,9 @@ import (
 
 // TestAgentProseBdAllowlist is the agent prose contract (deep review D1
 // rule 6, gt-7iwy0.6): formulas, role and message templates, plugins, the
-// repo's agent commands and skills, AGENTS.md and gt prime's output may name
-// only the bd commands in AgentBdAllowed. Every mutation goes through a gt
+// repo's agent commands and skills, AGENTS.md, gt prime's output and the
+// hints gt's commands print (gt-7iwy0.9) may name only the bd commands in
+// AgentBdAllowed. Every mutation goes through a gt
 // verb. Sites still waiting on a verb are counted in agent-bd-baseline.txt
 // (gt-7iwy0.8), which may only shrink.
 //
@@ -144,6 +145,32 @@ func TestScanGoStrings(t *testing.T) {
 	assertRefs(t, refs, "3:bd close", "4:bd close", "4:bd show x")
 }
 
+func TestScanGoHints(t *testing.T) {
+	t.Parallel()
+	src := "package p\n" +
+		"func f() {\n" +
+		"\tfmt.Printf(\"  2. Cook to proto:  bd cook %s\\n\", x)\n" +
+		"\tfmt.Fprintf(w, \"%s Warning: bd blocked failed for %s\\n\", icon, x)\n" +
+		"\tfmt.Fprintln(os.Stderr, \"║  Running 'bd init' here would create an orphan\")\n" +
+		"\tfmt.Fprintf(&b, \"more memories — see `bd kv list`.\\n\")\n" +
+		"\tfmt.Println(\"  1. bd close \" + id)\n" +
+		"\tfmt.Println(\"Next:\\n  $ bd update x\")\n" +
+		"\treturn fmt.Errorf(\"bd config set %s: %w\", k, err)\n" +
+		"\tmsg := fmt.Sprintf(\"bd history %s\", id)\n" +
+		"\tif opts.DryRun {\n" +
+		"\t\tfmt.Printf(\"Would run: bd update %s\\n\", id)\n" +
+		"\t} else {\n" +
+		"\t\tfmt.Println(\"Close it: bd close x\")\n" +
+		"\t}\n" +
+		"}\n" +
+		"func dryRunFormula() { fmt.Println(\"  1. bd cook x\") }\n"
+	refs, err := ScanGoHints("p.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefs(t, refs, "3:bd cook", "6:bd kv list", "7:bd close", "8:bd update x", "14:bd close x")
+}
+
 func TestAgentFacing(t *testing.T) {
 	t.Parallel()
 	for rel, want := range map[string]bool{
@@ -155,7 +182,10 @@ func TestAgentFacing(t *testing.T) {
 		".claude/skills/pr-sheriff/skill.md":                      true,
 		"internal/cmd/prime_output.go":                            true,
 		"internal/cmd/prime_output_test.go":                       false,
-		"internal/cmd/sling.go":                                   false,
+		"internal/cmd/memory_index.go":                            true,
+		"internal/cmd/sling.go":                                   true,
+		"internal/cmd/sling_test.go":                              false,
+		"internal/cmd/testdata/x.go":                              false,
 		"scripts/land.sh":                                         false,
 		"docs/reference.md":                                       false,
 	} {

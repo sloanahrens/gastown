@@ -25,8 +25,9 @@ var agentBdReason = "agents may run only bd " + strings.Join(AgentBdAllowed, ", 
 
 // agentFacing reports whether a repo-relative path is prose an agent reads
 // as instructions: formulas, role and message templates, plugins, the
-// repo's agent commands and skills, and AGENTS.md. Repo scripts, git hooks
-// and Go exec literals are run by humans or by gt itself, not by agents.
+// repo's agent commands and skills, AGENTS.md, and the hints gt's commands
+// print. Repo scripts, git hooks and Go exec literals are run by humans or by
+// gt itself, not by agents.
 func agentFacing(rel string) bool {
 	switch {
 	case rel == "AGENTS.md":
@@ -39,15 +40,24 @@ func agentFacing(rel string) bool {
 		strings.HasPrefix(rel, ".claude/skills/"):
 		return scannerFor(rel) != nil
 	}
-	return primeSource(rel)
+	return primeSource(rel) || hintSource(rel)
 }
 
 // primeSource reports whether rel is Go that renders gt prime's output, the
-// role context every agent reads at session start.
+// role context every agent reads at session start: prime*.go and the memory
+// index prime injects.
 func primeSource(rel string) bool {
 	dir, base := path.Split(rel)
-	return dir == "internal/cmd/" && strings.HasPrefix(base, "prime") &&
-		strings.HasSuffix(base, ".go") && !strings.HasSuffix(base, "_test.go")
+	return cmdSource(rel) && (strings.HasPrefix(base, "prime") || base == "memory_index.go") && dir == "internal/cmd/"
+}
+
+// hintSource reports whether rel is gt command Go whose printed output
+// ScanGoHints reads: every non-test internal/cmd file prime does not render.
+func hintSource(rel string) bool { return cmdSource(rel) && !primeSource(rel) }
+
+func cmdSource(rel string) bool {
+	dir, base := path.Split(rel)
+	return dir == "internal/cmd/" && strings.HasSuffix(base, ".go") && !strings.HasSuffix(base, "_test.go")
 }
 
 // ScanGoStrings treats every line of every string literal in a Go file as
@@ -78,6 +88,139 @@ func ScanGoStrings(file string, src []byte) ([]Ref, error) {
 	return refs, nil
 }
 
+// printFuncs are the fmt calls whose string arguments ScanGoHints reads.
+var printFuncs = map[string]bool{"Print": true, "Printf": true, "Println": true, "Fprint": true, "Fprintf": true, "Fprintln": true}
+
+// ScanGoHints returns the invocations gt's commands print as advice: string
+// literals passed to fmt.Print* or fmt.Fprint* (alone or joined with +),
+// read line by line with scanHintLine. Errors (fmt.Errorf), values built
+// with Sprintf, and dry-run output (an if whose condition names a dry-run
+// flag, or a func named dryRun*) describe what gt does, not what an agent
+// should run, and are skipped (gt-7iwy0.9).
+func ScanGoHints(file string, src []byte) ([]Ref, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	var refs []Ref
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncDecl:
+			return !namesDryRun(n.Name)
+		case *ast.IfStmt:
+			if namesDryRun(n.Cond) {
+				if n.Else != nil {
+					ast.Inspect(n.Else, visit)
+				}
+				return false
+			}
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "fmt" || !printFuncs[sel.Sel.Name] {
+				return true
+			}
+			for _, arg := range n.Args {
+				for _, lit := range concatLiterals(arg) {
+					s, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						continue
+					}
+					line := fset.Position(lit.Pos()).Line
+					for _, l := range strings.Split(s, "\n") {
+						refs = append(refs, scanHintLine(file, line, l)...)
+					}
+				}
+			}
+		}
+		return true
+	}
+	ast.Inspect(f, visit)
+	return refs, nil
+}
+
+// concatLiterals returns the string literals in e when e is a literal or a
+// + chain, the forms that put fixed text on screen.
+func concatLiterals(e ast.Expr) []*ast.BasicLit {
+	switch e := e.(type) {
+	case *ast.BasicLit:
+		if e.Kind == token.STRING {
+			return []*ast.BasicLit{e}
+		}
+	case *ast.BinaryExpr:
+		if e.Op == token.ADD {
+			return append(concatLiterals(e.X), concatLiterals(e.Y)...)
+		}
+	case *ast.ParenExpr:
+		return concatLiterals(e.X)
+	}
+	return nil
+}
+
+// namesDryRun reports whether n mentions an identifier naming a dry run.
+func namesDryRun(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && strings.Contains(strings.ToLower(id.Name), "dryrun") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// hintLead is what may precede a command at the start of a printed hint
+// line: indentation, bullets, list numbers, box rules and a shell prompt.
+const hintLead = " \t-*•→>$│║0123456789.)"
+
+// scanHintLine returns the invocations on one printed line that read as
+// something to run: at the line's start (past hintLead and leading %s/%v
+// icons), after a label colon ("Cook to proto:  bd cook"), or in command
+// position such as a code span ("see `bd kv list`"). A diagnostic label
+// ("Warning: bd blocked failed") reports a bd call gt made, and a mention
+// inside prose ("Running 'bd init' here would ...") is not advice.
+func scanHintLine(file string, line int, text string) []Ref {
+	body := text
+	for {
+		trimmed := strings.TrimLeft(body, hintLead)
+		trimmed = strings.TrimPrefix(strings.TrimPrefix(trimmed, "%s"), "%v")
+		if trimmed == body {
+			break
+		}
+		body = trimmed
+	}
+	offset := len(text) - len(body)
+	return scanMatches(file, line, text, func(_ byte, start int) bool {
+		if start < offset {
+			return false
+		}
+		prefix := text[offset:start]
+		if prefix == "" || commandPosition(prefix) {
+			return true
+		}
+		label, ok := strings.CutSuffix(strings.TrimRight(prefix, " \t"), ":")
+		return ok && !diagnosticLabel(label)
+	})
+}
+
+// diagnosticLabel reports whether a label's last word marks a warning or an
+// error rather than an instruction.
+func diagnosticLabel(label string) bool {
+	f := strings.Fields(strings.ToLower(label))
+	if len(f) == 0 {
+		return false
+	}
+	switch f[len(f)-1] {
+	case "warning", "error":
+		return true
+	}
+	return false
+}
+
 // ScanAgentProse walks root and returns every invocation in agent-facing
 // prose, in walk order.
 func ScanAgentProse(root string) ([]Ref, error) {
@@ -103,8 +246,13 @@ func ScanAgentProse(root string) ([]Ref, error) {
 		if !agentFacing(rel) {
 			return nil
 		}
-		scan := ScanGoStrings
-		if !primeSource(rel) {
+		var scan scanFunc
+		switch {
+		case primeSource(rel):
+			scan = ScanGoStrings
+		case hintSource(rel):
+			scan = ScanGoHints
+		default:
 			scan = scannerFor(rel)
 		}
 		src, err := fs.ReadFile(fsys, rel)
