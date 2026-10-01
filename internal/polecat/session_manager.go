@@ -75,7 +75,7 @@ type SessionManager struct {
 	// (gt-4k3fj.4.1); a nil hook goes straight to tmux.
 	hooks SessionHooks
 	// beadsAt opens the beads database at a resolved bd work dir; nil
-	// opens *beads.Beads there.
+	// runs bd there as a plain call bounded by BdCommandTimeout.
 	beadsAt func(dir string) beads.Client
 }
 
@@ -1006,7 +1006,7 @@ func (m *SessionManager) beadsFor(issueID, fallbackDir string) beads.Client {
 	if m.beadsAt != nil {
 		return m.beadsAt(dir)
 	}
-	return beads.New(dir)
+	return beads.NewPlain(dir, nil).WithTimeout(constants.BdCommandTimeout)
 }
 
 // verifyStartupNudgeDelivery checks if the polecat started working after the

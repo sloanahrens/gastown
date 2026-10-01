@@ -661,7 +661,7 @@ func rigForIssue(townRoot, issueID string) string {
 // and shows each rig's IDs in one batch. Pattern from batchFetchBeadInfoByIDs
 // in capacity_dispatch.go.
 func fetchCrossRigBeadStatus(townRoot string, ids []string) map[string]*beadsdk.Issue {
-	return fetchCrossRigBeadStatusWith(townRoot, ids, func(rigPath string) beads.Client { return beads.New(rigPath) })
+	return fetchCrossRigBeadStatusWith(townRoot, ids, func(rigPath string) beads.Client { return beads.NewPlain(rigPath, nil) })
 }
 
 // fetchCrossRigBeadStatusWith is fetchCrossRigBeadStatus with each rig's
