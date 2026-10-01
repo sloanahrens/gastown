@@ -14,8 +14,8 @@ bash scripts/docs-lint.sh --words   # record as WORDS_BEFORE
 bd update {{issue}} --notes "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
 ```
 
-**2. Read the standard.** Open docs/writing-for-agents.md and keep the rule ids
-R1-R13 in front of you. They are the checklist.
+**2. Read the standard.** Open docs/writing-for-agents.md and keep every rule id
+it defines in front of you. They are the checklist.
 
 **3. For every file in the slice, apply every rule.**
 - A `.md` or `.toml` file: read the whole file. For each rule, ask whether any
@@ -41,7 +41,7 @@ names the rule ids applied: `docs: R3 R5 on docs/reference.md ({{issue}})`.
 bd comments add {{issue}} "$(cat <<'EOF'
 doc-audit run
 files: <one per line, with the rule ids applied or 'clean'>
-findings per rule: R1=<n> R2=<n> ... R13=<n>
+findings per rule: <one R<id>=<n> per rule in docs/writing-for-agents.md>
 words agent-facing: before=<WORDS_BEFORE> after=<docs-lint.sh --words now>
 proposals:
 - <deletion | out-of-slice rot | R6 split | rule to sharpen>: <path or rule> — <evidence>

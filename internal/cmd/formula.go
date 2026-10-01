@@ -438,6 +438,10 @@ type formulaSyncReport struct {
 	// edit. It includes copies --force overwrote, which report under BackedUp.
 	Superseded []string `json:"hand_edited_hiding_newer_content"`
 
+	// Orphaned names town copies gt installed that this binary no longer embeds;
+	// sync leaves them on disk, where gt formula list still finds them.
+	Orphaned []string `json:"orphaned_not_in_binary"`
+
 	// BackedUp lists the hand-edited copies --force displaced, and where to.
 	BackedUp map[string]string `json:"backed_up,omitempty"`
 
@@ -468,6 +472,7 @@ func buildFormulaSyncReport(townRoot string, opts formula.SyncOptions) (*formula
 		UpToDate:      plan.UpToDate(),
 		Skipped:       emptyIfNil(plan.SkippedModified()),
 		Superseded:    emptyIfNil(plan.Superseded()),
+		Orphaned:      emptyIfNil(plan.Orphaned()),
 		BinaryVersion: Version,
 		BinaryCommit:  version.ShortCommit(Commit),
 		BuiltAt:       BuildTime,
@@ -586,6 +591,15 @@ func formatFormulaSyncReport(r *formulaSyncReport) string {
 		fmt.Fprint(&b, "      gt formula overlay edit <name>   # ~/gt/formula-overlays/<name>.toml\n")
 		fmt.Fprintf(&b, "  Or take the embedded content anyway with 'gt formula sync --force', which backs\n")
 		fmt.Fprintf(&b, "  the edited copies up under %s.\n", style.Dim.Render(".beads/formulas/.bak/"))
+	}
+
+	if len(r.Orphaned) > 0 {
+		fmt.Fprintf(&b, "\n%s %d town formulas are no longer shipped in this binary; sync leaves them in place:\n",
+			style.WarningPrefix, len(r.Orphaned))
+		for _, name := range r.Orphaned {
+			fmt.Fprintf(&b, "      %s\n", name)
+		}
+		fmt.Fprint(&b, "  Delete each from .beads/formulas/ once nothing still pours it.\n")
 	}
 
 	if len(r.BackedUp) > 0 {
