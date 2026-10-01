@@ -677,27 +677,56 @@ func TestCleanupStatusReconcileCandidateRequiresStrictPredicates(t *testing.T) {
 func TestHookBeadSafeForCleanup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		hookBead     string
-		bd           issueShower
-		wantSafe     bool
-		wantTerminal bool
-		wantBlocker  string
+		name          string
+		hookBead      string
+		bd            issueShower
+		wantSafe      bool
+		wantTerminal  bool
+		wantSubmitted bool
+		wantBlocker   string
 	}{
 		{name: "empty hook", wantSafe: true},
 		{name: "terminal hook", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "closed"}}, wantSafe: true, wantTerminal: true},
 		{name: "open hook blocks", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "open"}}, wantBlocker: "hook_bead=gt-work status=open"},
 		{name: "lookup error blocks", hookBead: "gt-work", bd: fakeIssueShower{err: errors.New("bd exploded")}, wantBlocker: "lookup_error"},
+		// gt-eqiid: the false positive. A reference to a bead that is neither
+		// terminal nor an active assignment is stale — the work it named is
+		// gone, and 'gt hook' renders nothing for it — so it must not read as
+		// a live hook. gt-2xqtj (flint, garnet) and gt-gyw5w (granite) were
+		// exactly this shape: status=deferred, no assignee.
+		{name: "deferred hook is stale, not live work", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "deferred"}}, wantSafe: true},
+		{name: "blocked hook is stale, not live work", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "blocked"}}, wantSafe: true},
+		// A submitted hook IS status=hooked, so it must be recognized before
+		// the active-status test — otherwise every correctly finished polecat
+		// (amber on gt-acdfp, pearl on gt-tt8sg) reports as an unrecovered hook.
+		{
+			name:          "submitted hook is the landing worker's, not a live hook",
+			hookBead:      "gt-acdfp",
+			bd:            fakeIssueShower{issue: &beads.Issue{ID: "gt-acdfp", Status: beads.StatusHooked, Labels: []string{"gt:ready-to-land"}}},
+			wantSafe:      true,
+			wantSubmitted: true,
+		},
+		{
+			// Terminal wins over submitted: a landed bead is done, not in flight.
+			name:         "closed hook that once carried ready-to-land is terminal",
+			hookBead:     "gt-acdfp",
+			bd:           fakeIssueShower{issue: &beads.Issue{ID: "gt-acdfp", Status: "closed", Labels: []string{"gt:ready-to-land"}}},
+			wantSafe:     true,
+			wantTerminal: true,
+		},
+		{name: "hooked active work still blocks", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: beads.StatusHooked}}, wantBlocker: "hook_bead=gt-work status=hooked"},
+		{name: "in_progress active work still blocks", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: string(beads.StatusInProgress)}}, wantBlocker: "hook_bead=gt-work status=in_progress"},
+		{name: "unreadable bd fails closed", hookBead: "gt-work", bd: nil, wantBlocker: "status=unverified"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotSafe, gotTerminal, blocker := hookBeadSafeForCleanup(tt.bd, tt.hookBead)
-			if gotSafe != tt.wantSafe || gotTerminal != tt.wantTerminal {
-				t.Fatalf("hookBeadSafeForCleanup() = (%v, %v), want (%v, %v)", gotSafe, gotTerminal, tt.wantSafe, tt.wantTerminal)
+			got := hookBeadSafeForCleanup(tt.bd, tt.hookBead)
+			if got.Safe != tt.wantSafe || got.Terminal != tt.wantTerminal || got.Submitted != tt.wantSubmitted {
+				t.Fatalf("hookBeadSafeForCleanup() = %+v, want safe=%v terminal=%v submitted=%v", got, tt.wantSafe, tt.wantTerminal, tt.wantSubmitted)
 			}
-			if tt.wantBlocker != "" && !strings.Contains(blocker, tt.wantBlocker) {
-				t.Fatalf("blocker = %q, want contains %q", blocker, tt.wantBlocker)
+			if tt.wantBlocker != "" && !strings.Contains(got.Blocker, tt.wantBlocker) {
+				t.Fatalf("blocker = %q, want contains %q", got.Blocker, tt.wantBlocker)
 			}
 		})
 	}
@@ -962,7 +991,7 @@ func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.
 			status.ActiveMR = fields.ActiveMR
 			facts.ActiveMR = fields.ActiveMR
 			hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
-			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
+			hookDisposition := hookBeadSafeForCleanup(bd, hookBead)
 			sourceHint := agentSourceIssueHint(status.Issue, fields)
 			if status.Issue == "" && sourceHint != "" {
 				status.Issue = sourceHint
@@ -971,8 +1000,9 @@ func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.
 				beadTerminal = isAssignedBeadTerminal(nil, sourceHint)
 			}
 			facts.HookBead = hookBead
-			facts.HookBeadSafe = hookSafe
-			facts.HookBeadTerminal = hookTerminal
+			facts.HookBeadSafe = hookDisposition.Safe
+			facts.HookBeadTerminal = hookDisposition.Terminal
+			facts.HookBeadSubmitted = hookDisposition.Submitted
 			facts.PushFailed = fields.PushFailed
 			facts.MRFailed = fields.MRFailed
 			partialSpawn, _ := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
@@ -1236,6 +1266,46 @@ func TestRecoveryActionsForBlockers(t *testing.T) {
 	}
 	if actions := recoveryActionsForBlockers([]string{"cleanup_status=has_stash"}); len(actions) != 0 {
 		t.Fatalf("stale cleanup-only blocker actions = %v, want none", actions)
+	}
+}
+
+// TestRecoveryActionsOnlyOnRefusingVerdicts: the SUBMITTED and WORKING verdicts
+// carry their git blockers report-only — landing reads the pushed branch, and
+// nothing is to be cleaned up — but the actions synthesized from those blockers
+// read "preserve ... before cleanup". Emitting them on a verdict that says to
+// leave the seat alone sends a --json consumer to recover a seat that is not in
+// recovery (gt-eqiid).
+func TestRecoveryActionsOnlyOnRefusingVerdicts(t *testing.T) {
+	t.Parallel()
+	stashBlockers := []string{"git_state=has_stash stash_count=1"}
+
+	for _, tt := range []struct {
+		name string
+		d    polecat.WorkstateDisposition
+		want bool
+	}{
+		{
+			name: "submitted",
+			d:    polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSubmitted, Blockers: stashBlockers},
+		},
+		{
+			name: "working",
+			d:    polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictWorking, Blockers: stashBlockers},
+		},
+		{
+			name: "needs recovery",
+			d:    polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, Blockers: stashBlockers},
+			want: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var status RecoveryStatus
+			applyWorkstateDispositionToRecoveryStatus(&status, tt.d)
+			if got := len(status.RecoveryActions) > 0; got != tt.want {
+				t.Fatalf("RecoveryActions = %v for verdict %s, want actions=%v", status.RecoveryActions, tt.d.Verdict, tt.want)
+			}
+		})
 	}
 }
 

@@ -112,7 +112,7 @@ func TestIntegrationPolecatInventoryDanglingMRGate(t *testing.T) {
 				WorktreePath: tt.repo,
 			}
 			if !tt.noReader {
-				env.ActiveMRSource = polecatActiveMRReader{index: index, bd: sourceIssues}
+				env.IssueSource = polecatActiveMRReader{index: index, bd: sourceIssues}
 			}
 
 			item := buildPolecatInventoryItem(
