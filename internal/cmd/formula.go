@@ -102,7 +102,7 @@ Shows:
 
 The formula is shown as bd cooks it: every inherited step, with overrides,
 expansions and the town overlay applied, as gt prime renders it. --raw shows
-the file as written (bd formula show).
+the file as written.
 
 Examples:
   gt formula show shiny
