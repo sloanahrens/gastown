@@ -915,19 +915,12 @@ func HasServerModeMetadata(townRoot string) []string {
 	}
 
 	// Check rig-level beads
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	rigs, err := registeredRigs(townRoot)
 	if err != nil {
 		return serverRigs
 	}
-	var config struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return serverRigs
-	}
 
-	for rigName := range config.Rigs {
+	for rigName := range rigs {
 		beadsDir := FindRigBeadsDir(townRoot, rigName)
 		if beadsDir != "" && hasServerMode(beadsDir) {
 			serverRigs = append(serverRigs, rigName)
@@ -3581,21 +3574,14 @@ func collectReferencedDatabases(townRoot string) map[string]bool {
 	}
 
 	// Check all rigs from rigs.json
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
-	if err == nil {
-		var config struct {
-			Rigs map[string]interface{} `json:"rigs"`
-		}
-		if err := json.Unmarshal(data, &config); err == nil {
-			for rigName := range config.Rigs {
-				beadsDir := FindRigBeadsDir(townRoot, rigName)
-				if beadsDir == "" {
-					continue
-				}
-				if db := readExistingDoltDatabase(beadsDir); db != "" {
-					referenced[db] = true
-				}
+	if rigs, err := registeredRigs(townRoot); err == nil {
+		for rigName := range rigs {
+			beadsDir := FindRigBeadsDir(townRoot, rigName)
+			if beadsDir == "" {
+				continue
+			}
+			if db := readExistingDoltDatabase(beadsDir); db != "" {
+				referenced[db] = true
 			}
 		}
 	}
@@ -3666,21 +3652,14 @@ func (h *host) CollectDatabaseOwners(townRoot string) map[string]string {
 	}
 
 	// Check all rigs from rigs.json
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
-	if err == nil {
-		var config struct {
-			Rigs map[string]interface{} `json:"rigs"`
-		}
-		if err := json.Unmarshal(data, &config); err == nil {
-			for rigName := range config.Rigs {
-				beadsDir := FindRigBeadsDir(townRoot, rigName)
-				if beadsDir == "" {
-					continue
-				}
-				if db := readExistingDoltDatabase(beadsDir); db != "" {
-					owners[db] = rigName + " rig beads"
-				}
+	if rigs, err := registeredRigs(townRoot); err == nil {
+		for rigName := range rigs {
+			beadsDir := FindRigBeadsDir(townRoot, rigName)
+			if beadsDir == "" {
+				continue
+			}
+			if db := readExistingDoltDatabase(beadsDir); db != "" {
+				owners[db] = rigName + " rig beads"
 			}
 		}
 	}
@@ -3886,19 +3865,12 @@ func (h *host) FindBrokenWorkspaces(townRoot string) ([]BrokenWorkspace, string)
 	}
 
 	// Check rig-level beads via rigs.json
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	rigs, err := registeredRigs(townRoot)
 	if err != nil {
 		return broken, warning
 	}
-	var config struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return broken, warning
-	}
 
-	for rigName := range config.Rigs {
+	for rigName := range rigs {
 		beadsDir := FindRigBeadsDir(townRoot, rigName)
 		if beadsDir == "" {
 			continue
@@ -4163,23 +4135,15 @@ func EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, doltDatabase 
 // Rigs where the database name equals the directory name are not included.
 func buildRigPrefixMap(townRoot string) map[string]string {
 	result := make(map[string]string)
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	rigs, err := registeredRigs(townRoot)
 	if err != nil {
 		return result
 	}
-	var parsed struct {
-		Rigs map[string]struct {
-			Beads struct {
-				Prefix string `json:"prefix"`
-			} `json:"beads"`
-		} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return result
-	}
-	for rigName, info := range parsed.Rigs {
-		prefix := strings.TrimSuffix(info.Beads.Prefix, "-")
+	for rigName, info := range rigs {
+		if info.BeadsConfig == nil {
+			continue
+		}
+		prefix := strings.TrimSuffix(info.BeadsConfig.Prefix, "-")
 		if prefix != "" && prefix != rigName {
 			result[prefix] = rigName
 		}
@@ -5159,4 +5123,14 @@ func (h *host) doltSQLScriptWithRetry(townRoot, script string) error {
 		return nil
 	}
 	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
+}
+
+// registeredRigs is the town's rig registry: mayor/rigs.json, or its section
+// of mayor/town.json on the two-file layout (config.LoadRigsConfig).
+func registeredRigs(townRoot string) (map[string]configpkg.RigEntry, error) {
+	rc, err := configpkg.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return nil, err
+	}
+	return rc.Rigs, nil
 }

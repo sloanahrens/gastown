@@ -231,19 +231,12 @@ func (c *DoltMetadataCheck) loadRigs(rigsPath string) map[string]struct{} {
 func loadRigNames(rigsPath string) map[string]struct{} {
 	rigs := make(map[string]struct{})
 
-	data, err := os.ReadFile(rigsPath)
+	rc, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
 		return rigs
 	}
 
-	var config struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return rigs
-	}
-
-	for name := range config.Rigs {
+	for name := range rc.Rigs {
 		rigs[name] = struct{}{}
 	}
 	return rigs

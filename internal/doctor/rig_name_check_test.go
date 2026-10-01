@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
-func setupRigNameTestDir(t *testing.T, rigName string, rigConfig *rigConfigLocal, rigsJSON *rigsConfigFile) string {
+func setupRigNameTestDir(t *testing.T, rigName string, rigConfig *rigConfigLocal, rigsJSON *config.RigsConfig) string {
 	t.Helper()
 	townRoot := t.TempDir()
 
@@ -53,11 +55,11 @@ func TestRigNameMismatchCheck_AllMatch(t *testing.T) {
 		Name:    "myrig",
 		Beads:   &rigConfigBeadsLocal{Prefix: "mr"},
 	}
-	rigsJSON := &rigsConfigFile{
+	rigsJSON := &config.RigsConfig{
 		Version: 1,
-		Rigs: map[string]rigsConfigEntry{
+		Rigs: map[string]config.RigEntry{
 			"myrig": {
-				BeadsConfig: &rigsConfigBeadsConfig{Prefix: "mr"},
+				BeadsConfig: &config.BeadsConfig{Prefix: "mr"},
 			},
 		},
 	}
@@ -81,11 +83,11 @@ func TestRigNameMismatchCheck_NameMismatch(t *testing.T) {
 		Name:    "oldname",
 		Beads:   &rigConfigBeadsLocal{Prefix: "mr"},
 	}
-	rigsJSON := &rigsConfigFile{
+	rigsJSON := &config.RigsConfig{
 		Version: 1,
-		Rigs: map[string]rigsConfigEntry{
+		Rigs: map[string]config.RigEntry{
 			"newname": {
-				BeadsConfig: &rigsConfigBeadsConfig{Prefix: "mr"},
+				BeadsConfig: &config.BeadsConfig{Prefix: "mr"},
 			},
 		},
 	}
@@ -112,11 +114,11 @@ func TestRigNameMismatchCheck_PrefixMismatch(t *testing.T) {
 		Name:    "myrig",
 		Beads:   &rigConfigBeadsLocal{Prefix: "ab"},
 	}
-	rigsJSON := &rigsConfigFile{
+	rigsJSON := &config.RigsConfig{
 		Version: 1,
-		Rigs: map[string]rigsConfigEntry{
+		Rigs: map[string]config.RigEntry{
 			"myrig": {
-				BeadsConfig: &rigsConfigBeadsConfig{Prefix: "xy"},
+				BeadsConfig: &config.BeadsConfig{Prefix: "xy"},
 			},
 		},
 	}
@@ -143,11 +145,11 @@ func TestRigNameMismatchCheck_BothMismatch(t *testing.T) {
 		Name:    "wrongname",
 		Beads:   &rigConfigBeadsLocal{Prefix: "ab"},
 	}
-	rigsJSON := &rigsConfigFile{
+	rigsJSON := &config.RigsConfig{
 		Version: 1,
-		Rigs: map[string]rigsConfigEntry{
+		Rigs: map[string]config.RigEntry{
 			"myrig": {
-				BeadsConfig: &rigsConfigBeadsConfig{Prefix: "xy"},
+				BeadsConfig: &config.BeadsConfig{Prefix: "xy"},
 			},
 		},
 	}
@@ -195,11 +197,11 @@ func TestRigNameMismatchCheck_Fix(t *testing.T) {
 		CreatedAt: json.RawMessage(`"2025-01-01T00:00:00Z"`),
 		Beads:     &rigConfigBeadsLocal{Prefix: "ab"},
 	}
-	rigsJSON := &rigsConfigFile{
+	rigsJSON := &config.RigsConfig{
 		Version: 1,
-		Rigs: map[string]rigsConfigEntry{
+		Rigs: map[string]config.RigEntry{
 			"myrig": {
-				BeadsConfig: &rigsConfigBeadsConfig{Prefix: "xy"},
+				BeadsConfig: &config.BeadsConfig{Prefix: "xy"},
 			},
 		},
 	}

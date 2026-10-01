@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,16 +50,8 @@ func (c *StaleSQLServerInfoCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Collect rig names from rigs.json and top-level directories.
 	rigNames := make(map[string]struct{})
-	rigsConfig := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-	if data, err := os.ReadFile(rigsConfig); err == nil {
-		var rigs struct {
-			Rigs map[string]struct{} `json:"rigs"`
-		}
-		if json.Unmarshal(data, &rigs) == nil {
-			for name := range rigs.Rigs {
-				rigNames[name] = struct{}{}
-			}
-		}
+	for name := range loadRigNames(filepath.Join(ctx.TownRoot, "mayor", "rigs.json")) {
+		rigNames[name] = struct{}{}
 	}
 	// Also scan top-level directories as fallback (handles rigs not yet in rigs.json).
 	if entries, err := os.ReadDir(ctx.TownRoot); err == nil {

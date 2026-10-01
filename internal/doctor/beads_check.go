@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -121,7 +122,7 @@ func (c *PrefixMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Load rigs.json
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-	rigsConfig, err := loadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -203,7 +204,7 @@ func (c *PrefixMismatchCheck) Fix(ctx *CheckContext) error {
 
 	// Load rigs.json
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-	rigsConfig, err := loadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
 		return nil // Nothing to fix
 	}
@@ -226,7 +227,7 @@ func (c *PrefixMismatchCheck) Fix(ctx *CheckContext) error {
 
 		// Ensure BeadsConfig exists
 		if rigEntry.BeadsConfig == nil {
-			rigEntry.BeadsConfig = &rigsConfigBeadsConfig{}
+			rigEntry.BeadsConfig = &config.BeadsConfig{}
 		}
 
 		if rigEntry.BeadsConfig.Prefix != routePrefix {
@@ -237,52 +238,10 @@ func (c *PrefixMismatchCheck) Fix(ctx *CheckContext) error {
 	}
 
 	if modified {
-		return saveRigsConfig(rigsPath, rigsConfig)
+		return config.SaveRigsConfig(rigsPath, rigsConfig)
 	}
 
 	return nil
-}
-
-// rigsConfigEntry is a local type for loading rigs.json without importing config package
-// to avoid circular dependencies and keep the check self-contained.
-type rigsConfigEntry struct {
-	GitURL      string                 `json:"git_url"`
-	LocalRepo   string                 `json:"local_repo,omitempty"`
-	AddedAt     string                 `json:"added_at"` // Keep as string to preserve format
-	BeadsConfig *rigsConfigBeadsConfig `json:"beads,omitempty"`
-}
-
-type rigsConfigBeadsConfig struct {
-	Repo   string `json:"repo"`
-	Prefix string `json:"prefix"`
-}
-
-type rigsConfigFile struct {
-	Version int                        `json:"version"`
-	Rigs    map[string]rigsConfigEntry `json:"rigs"`
-}
-
-func loadRigsConfig(path string) (*rigsConfigFile, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var cfg rigsConfigFile
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-
-	return &cfg, nil
-}
-
-func saveRigsConfig(path string, cfg *rigsConfigFile) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
 }
 
 // dbPrefixGetter abstracts querying the database for issue_prefix.

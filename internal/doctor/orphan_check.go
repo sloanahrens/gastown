@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -180,7 +181,7 @@ func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
 
 	// Read rigs.json if it exists
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	if _, err := os.Stat(rigsPath); err == nil {
+	if _, err := config.LoadRigsConfig(rigsPath); err == nil {
 		// For simplicity, just scan directories at town root that look like rigs
 		entries, err := os.ReadDir(townRoot)
 		if err == nil {

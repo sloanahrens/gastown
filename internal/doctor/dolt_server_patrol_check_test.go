@@ -47,7 +47,7 @@ func writeDaemonConfig(t *testing.T, townRoot, patrolsJSON string) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
-	body := `{"type":"daemon","version":1,"patrols":` + patrolsJSON + `}`
+	body := `{"type":"daemon-patrol-config","version":1,"patrols":` + patrolsJSON + `}`
 	if err := os.WriteFile(filepath.Join(dir, "daemon.json"), []byte(body), 0644); err != nil {
 		t.Fatalf("write daemon.json: %v", err)
 	}

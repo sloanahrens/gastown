@@ -2,11 +2,12 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // TownConfigExistsCheck verifies mayor/town.json exists.
@@ -144,7 +145,10 @@ func NewRigsRegistryExistsCheck() *RigsRegistryExistsCheck {
 func (c *RigsRegistryExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 
-	if _, err := os.Stat(rigsPath); os.IsNotExist(err) {
+	// LoadRigsConfig finds the registry in mayor/town.json on the two-file
+	// layout; a registry that does not parse exists and is reported by the
+	// parse checks.
+	if _, err := config.LoadRigsConfig(rigsPath); errors.Is(err, config.ErrNotFound) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -163,21 +167,13 @@ func (c *RigsRegistryExistsCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix creates an empty rigs.json file.
 func (c *RigsRegistryExistsCheck) Fix(ctx *CheckContext) error {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-
-	emptyRigs := struct {
-		Version int                    `json:"version"`
-		Rigs    map[string]interface{} `json:"rigs"`
-	}{
-		Version: 1,
-		Rigs:    make(map[string]interface{}),
-	}
-
-	data, err := json.MarshalIndent(emptyRigs, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling empty rigs.json: %w", err)
-	}
-
-	return atomicfile.WriteFile(rigsPath, data, 0644)
+	return config.UpdateConfigJSON(rigsPath, 0o644, func(rc *config.RigsConfig, exists bool) error {
+		if !exists {
+			rc.Version = config.CurrentRigsVersion
+			rc.Rigs = map[string]config.RigEntry{}
+		}
+		return nil
+	})
 }
 
 // RigsRegistryValidCheck verifies mayor/rigs.json is valid and rigs exist.
@@ -199,45 +195,29 @@ func NewRigsRegistryValidCheck() *RigsRegistryValidCheck {
 	}
 }
 
-// rigsConfig represents the structure of mayor/rigs.json.
-type rigsConfig struct {
-	Version int                    `json:"version"`
-	Rigs    map[string]interface{} `json:"rigs"`
-}
-
 // Run validates mayor/rigs.json and checks that registered rigs exist.
 func (c *RigsRegistryValidCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 
-	data, err := os.ReadFile(rigsPath)
+	registry, err := config.LoadRigsConfig(rigsPath)
+	if errors.Is(err, config.ErrNotFound) {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkipped,
+			Message: "unknown: no mayor/rigs.json found, could not validate registered rigs",
+		}
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &CheckResult{
-				Name:    c.Name(),
-				Status:  StatusSkipped,
-				Message: "unknown: no mayor/rigs.json found, could not validate registered rigs",
-			}
-		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
-			Message: "Cannot read mayor/rigs.json",
+			Message: "The rig registry does not load",
 			Details: []string{err.Error()},
+			FixHint: "Fix the file the error names by hand",
 		}
 	}
 
-	var config rigsConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusError,
-			Message: "mayor/rigs.json is not valid JSON",
-			Details: []string{err.Error()},
-			FixHint: "Fix JSON syntax in mayor/rigs.json",
-		}
-	}
-
-	if len(config.Rigs) == 0 {
+	if len(registry.Rigs) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -249,7 +229,7 @@ func (c *RigsRegistryValidCheck) Run(ctx *CheckContext) *CheckResult {
 	var missing []string
 	var found int
 
-	for rigName := range config.Rigs {
+	for rigName := range registry.Rigs {
 		rigPath := filepath.Join(ctx.TownRoot, rigName)
 		if _, err := os.Stat(rigPath); os.IsNotExist(err) {
 			missing = append(missing, rigName)
@@ -270,7 +250,7 @@ func (c *RigsRegistryValidCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("%d of %d registered rig(s) missing", len(missing), len(config.Rigs)),
+			Message: fmt.Sprintf("%d of %d registered rig(s) missing", len(missing), len(registry.Rigs)),
 			Details: details,
 			FixHint: "Run 'gt doctor --fix' to remove missing rigs from registry",
 		}
@@ -290,29 +270,15 @@ func (c *RigsRegistryValidCheck) Fix(ctx *CheckContext) error {
 	}
 
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-
-	data, err := os.ReadFile(rigsPath)
-	if err != nil {
-		return fmt.Errorf("reading rigs.json: %w", err)
-	}
-
-	var config rigsConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return fmt.Errorf("parsing rigs.json: %w", err)
-	}
-
-	// Remove missing rigs
-	for _, rig := range c.missingRigs {
-		delete(config.Rigs, rig)
-	}
-
-	// Write back
-	newData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling rigs.json: %w", err)
-	}
-
-	return atomicfile.WriteFile(rigsPath, newData, 0644)
+	return config.UpdateConfigJSON(rigsPath, 0o644, func(rc *config.RigsConfig, exists bool) error {
+		if !exists {
+			return fmt.Errorf("%s: %w", rigsPath, config.ErrNotFound)
+		}
+		for _, rig := range c.missingRigs {
+			delete(rc.Rigs, rig)
+		}
+		return nil
+	})
 }
 
 // MayorExistsCheck verifies the mayor/ directory structure.

@@ -64,25 +64,14 @@ func resolveBeadDirFromTownRoot(townRoot, beadID string) string {
 
 // resolveBeadDirFromRigsJSON looks up the rig directory from rigs.json using prefix.
 func resolveBeadDirFromRigsJSON(townRoot, prefix string) string {
-	rigsPath := townRoot + "/mayor/rigs.json"
-	data, err := os.ReadFile(rigsPath)
+	rigsFile, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
 	if err != nil {
-		return ""
-	}
-	var rigsFile struct {
-		Rigs map[string]struct {
-			Beads struct {
-				Prefix string `json:"prefix"`
-			} `json:"beads"`
-		} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &rigsFile); err != nil {
 		return ""
 	}
 	// prefix includes trailing hyphen (e.g., "bd-"), rigs.json stores without (e.g., "bd")
 	trimmedPrefix := strings.TrimSuffix(prefix, "-")
 	for rigName, rigConfig := range rigsFile.Rigs {
-		if rigConfig.Beads.Prefix == trimmedPrefix {
+		if rigConfig.BeadsConfig != nil && rigConfig.BeadsConfig.Prefix == trimmedPrefix {
 			// Return mayor/rig path within the rig (where .beads/ lives)
 			return townRoot + "/" + rigName + "/mayor/rig"
 		}

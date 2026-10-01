@@ -29,20 +29,15 @@ func BeadsDirForDatabase(townRoot, dbName string) (string, error) {
 func candidateBeadsDirs(townRoot string) []string {
 	dirs := []string{filepath.Join(townRoot, ".beads")}
 
-	if data, err := os.ReadFile(filepath.Join(townRoot, "mayor", "rigs.json")); err == nil {
-		var config struct {
-			Rigs map[string]json.RawMessage `json:"rigs"`
+	if rigs, err := registeredRigs(townRoot); err == nil {
+		names := make([]string, 0, len(rigs))
+		for name := range rigs {
+			names = append(names, name)
 		}
-		if json.Unmarshal(data, &config) == nil {
-			names := make([]string, 0, len(config.Rigs))
-			for name := range config.Rigs {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				if dir := FindRigBeadsDir(townRoot, name); dir != "" {
-					dirs = append(dirs, dir)
-				}
+		sort.Strings(names)
+		for _, name := range names {
+			if dir := FindRigBeadsDir(townRoot, name); dir != "" {
+				dirs = append(dirs, dir)
 			}
 		}
 	}
