@@ -3,8 +3,6 @@ package cmd
 import (
 	"errors"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,44 +127,6 @@ func TestGitStateVerdicts(t *testing.T) {
 				tc.check(t, s)
 			}
 		})
-	}
-}
-
-func setupGitStateRemoteRepo(t *testing.T) string {
-	t.Helper()
-	return cachedGitFixtureStrings(t, "setupGitStateRemoteRepo", func(dir string) []string {
-		return []string{buildSetupGitStateRemoteRepo(t, dir)}
-	})[0]
-}
-
-// buildSetupGitStateRemoteRepo makes setupGitStateRemoteRepo's repos under dir.
-func buildSetupGitStateRemoteRepo(t *testing.T, dir string) string {
-	t.Helper()
-	remote := filepath.Join(dir, "remote.git")
-	repo := filepath.Join(dir, "repo")
-	runGitCmd(t, "", "init", "--bare", remote)
-	runGitCmd(t, "", "init", repo)
-	runGitCmd(t, repo, "config", "user.email", "test@example.com")
-	runGitCmd(t, repo, "config", "user.name", "Test User")
-	writeTestFile(t, filepath.Join(repo, "README.md"), "base\n")
-	runGitCmd(t, repo, "add", "README.md")
-	runGitCmd(t, repo, "commit", "-m", "base")
-	runGitCmd(t, repo, "branch", "-M", "main")
-	runGitCmd(t, repo, "remote", "add", "origin", remote)
-	runGitCmd(t, repo, "push", "-u", "origin", "main")
-	runGitCmd(t, repo, "switch", "-c", "integration/test")
-	runGitCmd(t, repo, "push", "-u", "origin", "integration/test")
-	return repo
-}
-
-func runGitCmd(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 

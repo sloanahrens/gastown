@@ -479,6 +479,13 @@ func cleanupStatusAfterSuccessfulPush(status string) string {
 	return status
 }
 
+// cleanupStatusGit is the part of *git.Git the cleanup-status observation
+// reads.
+type cleanupStatusGit interface {
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
+	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
+}
+
 // observeCleanupStatus derives the polecat's self-reported cleanup status from
 // the live worktree: uncommitted files, stashes, and whether the branch is
 // pushed to origin. It returns "" when git cannot be read at all.
@@ -486,7 +493,7 @@ func cleanupStatusAfterSuccessfulPush(status string) string {
 // CheckUncommittedWork.UnpushedCommits doesn't work for branches without
 // upstream tracking (common for polecats), so the pushed check goes through the
 // more robust BranchPushedToRemote, which compares against origin/main.
-func observeCleanupStatus(g *git.Git, branch string) string {
+func observeCleanupStatus(g cleanupStatusGit, branch string) string {
 	workStatus, err := g.CheckUncommittedWork()
 	if err != nil {
 		style.PrintWarning("could not auto-detect cleanup status: %v", err)
@@ -584,7 +591,7 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 //     value, so recording it is fail-closed. It only makes "gt done ran and
 //     could not prove the tree was safe" distinguishable from "gt done never
 //     ran", which is what the blocked slots were indistinguishable from.
-func selfReportCleanupStatus(g *git.Git, branch string, updater cleanupStatusUpdater, agentBeadID, doneCleanupStatus string) {
+func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater cleanupStatusUpdater, agentBeadID, doneCleanupStatus string) {
 	if agentBeadID == "" {
 		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
 		return

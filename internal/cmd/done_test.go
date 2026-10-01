@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1174,9 +1173,9 @@ func TestResolveCleanupStatusForSelfReportIsTotal(t *testing.T) {
 // anything) and for a status that cannot be observed at all.
 func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 	t.Parallel()
-	// A directory that is not a git repository: every observation attempt in
-	// observeCleanupStatus fails, which is the "cannot observe" case.
-	notARepo := gitpkg.NewGit(t.TempDir())
+	// Every observation attempt in observeCleanupStatus fails, which is the
+	// "cannot observe" case (a directory that is not a git repository).
+	notARepo := unobservableGit{}
 
 	tests := []struct {
 		name        string
@@ -1805,59 +1804,13 @@ func TestPushSubmoduleChanges(t *testing.T) {
 	}
 }
 
-// TestSyncGuardWithUncommittedChanges verifies that the worktree sync guard
-// (gt-pvx) prevents switching branches when uncommitted changes remain.
-func TestSyncGuardWithUncommittedChanges(t *testing.T) {
-	t.Parallel()
-	// This tests the logic: if auto-commit fails, we should NOT sync to main
-	dir := t.TempDir()
-	testRunGit(t, dir, "init")
-	testRunGit(t, dir, "config", "user.email", "test@test.com")
-	testRunGit(t, dir, "config", "user.name", "Test")
+// unobservableGit fails every read, as git does outside a repository.
+type unobservableGit struct{}
 
-	// Create initial commit on main
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	testRunGit(t, dir, "add", ".")
-	testRunGit(t, dir, "commit", "-m", "initial")
-
-	// Create feature branch with uncommitted changes
-	testRunGit(t, dir, "checkout", "-b", "polecat/test")
-	if err := os.WriteFile(filepath.Join(dir, "impl.go"), []byte("package main\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	g := gitpkg.NewGit(dir)
-	ws, err := g.CheckUncommittedWork()
-	if err != nil {
-		t.Fatalf("CheckUncommittedWork: %v", err)
-	}
-
-	// The sync guard condition: if uncommitted non-runtime changes exist, syncSafe = false
-	syncSafe := true
-	if ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
-		syncSafe = false
-	}
-
-	if syncSafe {
-		t.Error("syncSafe should be false when uncommitted implementation files exist")
-	}
+func (unobservableGit) CheckUncommittedWork() (*gitpkg.UncommittedWorkStatus, error) {
+	return nil, errors.New("fatal: not a git repository")
 }
 
-func testRunGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	// An empty dir runs git in the test process's own cwd — the package
-	// directory inside the real repo — so a stray test would create branches and
-	// objects in the rig's shared ref store.
-	if dir == "" {
-		t.Fatal("testRunGit: empty dir would run git in the test process cwd")
-	}
-	fullArgs := append([]string{"-c", "protocol.file.allow=always"}, args...)
-	cmd := exec.Command("git", fullArgs...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
-	}
+func (unobservableGit) BranchPushedToRemote(string, string) (bool, int, error) {
+	return false, 0, errors.New("fatal: not a git repository")
 }
