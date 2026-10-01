@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -27,7 +28,7 @@ type MoleculeCurrentOutput struct {
 
 // showMoleculeExecutionPrompt calls bd mol current and shows the current step
 // with execution instructions. This is the core of the Propulsion Principle.
-func showMoleculeExecutionPrompt(workDir, moleculeID string) {
+func showMoleculeExecutionPrompt(w io.Writer, workDir, moleculeID string) {
 	// Call bd mol current with JSON output
 	cmd := beads.CommandWithEnv(workDir, nil, "mol", "current", moleculeID, "--json")
 	var stdout, stderr bytes.Buffer
@@ -36,15 +37,15 @@ func showMoleculeExecutionPrompt(workDir, moleculeID string) {
 
 	if err := cmd.Run(); err != nil {
 		// Fall back to simple message if bd mol current fails
-		fmt.Println(style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Println("  Begin working on this molecule immediately.")
-		fmt.Printf("  Check status with: bd mol current %s\n", moleculeID)
+		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
+		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
+		fmt.Fprintf(w, "  Check status with: bd mol current %s\n", moleculeID)
 		return
 	}
 	// Handle bd exit 0 bug: empty stdout means not found
 	if stdout.Len() == 0 {
-		fmt.Println(style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Println("  Begin working on this molecule immediately.")
+		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
+		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
 		return
 	}
 
@@ -52,49 +53,49 @@ func showMoleculeExecutionPrompt(workDir, moleculeID string) {
 	var outputs []MoleculeCurrentOutput
 	if err := json.Unmarshal(stdout.Bytes(), &outputs); err != nil || len(outputs) == 0 {
 		// Fall back to simple message
-		fmt.Println(style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
-		fmt.Println("  Begin working on this molecule immediately.")
+		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
+		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
 		return
 	}
 	output := outputs[0]
 
 	// Show molecule progress
-	fmt.Printf("**Progress:** %d/%d steps complete\n\n",
+	fmt.Fprintf(w, "**Progress:** %d/%d steps complete\n\n",
 		output.Completed, output.Total)
 
 	// Show current step if available
 	if output.NextStep != nil {
 		step := output.NextStep
-		fmt.Printf("%s\n\n", style.Bold.Render("## 🎬 CURRENT STEP: "+step.Title))
-		fmt.Printf("**Step ID:** %s\n", step.ID)
-		fmt.Printf("**Status:** %s (ready to execute)\n\n", step.Status)
+		fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🎬 CURRENT STEP: "+step.Title))
+		fmt.Fprintf(w, "**Step ID:** %s\n", step.ID)
+		fmt.Fprintf(w, "**Status:** %s (ready to execute)\n\n", step.Status)
 
 		// Show step description if available
 		if step.Description != "" {
-			fmt.Println("### Instructions")
-			fmt.Println()
+			fmt.Fprintln(w, "### Instructions")
+			fmt.Fprintln(w)
 			// Indent the description for readability
 			lines := strings.Split(step.Description, "\n")
 			for _, line := range lines {
-				fmt.Printf("%s\n", line)
+				fmt.Fprintf(w, "%s\n", line)
 			}
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 
 		// The propulsion directive
-		fmt.Println(style.Bold.Render("→ EXECUTE THIS STEP NOW."))
-		fmt.Println()
-		fmt.Println("When complete:")
-		fmt.Printf("  1. Close the step: bd close %s\n", step.ID)
-		fmt.Printf("  2. Check for next step: bd mol current %s\n", moleculeID)
-		fmt.Println("  3. Continue until molecule complete")
+		fmt.Fprintln(w, style.Bold.Render("→ EXECUTE THIS STEP NOW."))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "When complete:")
+		fmt.Fprintf(w, "  1. Close the step: bd close %s\n", step.ID)
+		fmt.Fprintf(w, "  2. Check for next step: bd mol current %s\n", moleculeID)
+		fmt.Fprintln(w, "  3. Continue until molecule complete")
 	} else {
 		// No next step - molecule may be complete
-		fmt.Println(style.Bold.Render("✓ MOLECULE COMPLETE"))
-		fmt.Println()
-		fmt.Println("All steps are done. You may:")
-		fmt.Println("  - Report completion to supervisor")
-		fmt.Println("  - Check for new work: bd mol current")
+		fmt.Fprintln(w, style.Bold.Render("✓ MOLECULE COMPLETE"))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "All steps are done. You may:")
+		fmt.Fprintln(w, "  - Report completion to supervisor")
+		fmt.Fprintln(w, "  - Check for new work: bd mol current")
 	}
 }
 
@@ -104,7 +105,7 @@ func showMoleculeExecutionPrompt(workDir, moleculeID string) {
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides that are substituted into
 // step descriptions before rendering, taking precedence over formula defaults.
-func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ...[]string) {
+func showFormulaSteps(w io.Writer, formulaName, label, townRoot, rigName string, extraVars ...[]string) {
 	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
 	if err != nil {
 		style.PrintWarning("%v", err)
@@ -115,13 +116,13 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 		return
 	}
 
-	fmt.Println()
-	fmt.Printf("**%s** (%d steps from %s):\n", label, len(f.Steps), formulaName)
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "**%s** (%d steps from %s):\n", label, len(f.Steps), formulaName)
 	for i, step := range f.Steps {
 		desc := applyFormulaVars(step.Description, varMap)
-		fmt.Printf("  %d. **%s** — %s\n", i+1, step.Title, truncateDescription(desc, 120))
+		fmt.Fprintf(w, "  %d. **%s** — %s\n", i+1, step.Title, truncateDescription(desc, 120))
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // showFormulaStepsFull renders the bounded formula checklist (every title, the
@@ -131,13 +132,13 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 // Ralph-mode attachments therefore still exceed the hook budget (rare, known).
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides substituted into step descriptions.
-func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) {
+func showFormulaStepsFull(w io.Writer, formulaName, townRoot, rigName string, extraVars ...[]string) {
 	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
 	if err != nil {
 		style.PrintWarning("%v", err)
 		return
 	}
-	fmt.Print(renderFormulaChecklist(formulaName, f, varMap, 1))
+	_, _ = fmt.Fprint(w, renderFormulaChecklist(formulaName, f, varMap, 1))
 }
 
 func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {

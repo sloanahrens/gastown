@@ -150,7 +150,13 @@ func payloadLen(sections []primeSection) int {
 // already has it, and repeating 15-25 KB in the hook would push the payload
 // over Claude Code's 10,000-character hook limit.
 func primeStaticTextDelivered() bool {
-	path := os.Getenv(config.EnvSystemPromptFile)
+	return primeStaticTextDeliveredWith(os.Getenv)
+}
+
+// primeStaticTextDeliveredWith is primeStaticTextDelivered reading the
+// environment through getenv.
+func primeStaticTextDeliveredWith(getenv func(string) string) bool {
+	path := getenv(config.EnvSystemPromptFile)
 	if path == "" {
 		return false
 	}
@@ -183,6 +189,12 @@ func writeSystemPromptFile(path, content string) (bool, error) {
 // fromTemplate reports whether the role template rendered; only that text is
 // worth persisting to the system-prompt file.
 func staticRoleText(ctx RoleContext) (text string, fromTemplate bool, err error) {
+	return staticRoleTextWarn(os.Stderr, ctx)
+}
+
+// staticRoleTextWarn is staticRoleText reporting an unreadable CONTEXT.md on
+// errOut.
+func staticRoleTextWarn(errOut io.Writer, ctx RoleContext) (text string, fromTemplate bool, err error) {
 	text, err = renderRoleTemplate(ctx)
 	if err != nil {
 		return "", false, err
@@ -200,7 +212,7 @@ func staticRoleText(ctx RoleContext) (text string, fromTemplate bool, err error)
 		// CONTEXT.md is optional, so prime carries on without it — but an
 		// unreadable one is not an absent one, and the operator's context
 		// silently missing from an agent's prompt is the failure to avoid.
-		fmt.Fprintf(os.Stderr, "gt prime: could not read %s; operator context NOT injected: %v\n", contextPath, readErr)
+		fmt.Fprintf(errOut, "gt prime: could not read %s; operator context NOT injected: %v\n", contextPath, readErr)
 	}
 	if readErr != nil || len(data) == 0 {
 		explain(true, "CONTEXT.md: not found at "+contextPath)
@@ -263,35 +275,6 @@ const primeHookTestBudget = 8000
 // primeDirectiveMaxChars caps the operator directive text rendered into the
 // hook payload. Directives are meant to steer a role, not to be a manual.
 const primeDirectiveMaxChars = 2000
-
-// captureOutput runs fn with os.Stdout redirected and returns what it wrote.
-// prime's section emitters print directly; capturing lets the payload
-// assembler order and budget them without rewriting every emitter.
-func captureOutput(fn func()) string {
-	r, w, err := os.Pipe()
-	if err != nil {
-		fn()
-		return ""
-	}
-	old := os.Stdout
-	os.Stdout = w
-	var buf bytes.Buffer
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(&buf, r)
-		close(done)
-	}()
-	func() {
-		defer func() {
-			os.Stdout = old
-			_ = w.Close()
-		}()
-		fn()
-	}()
-	<-done
-	_ = r.Close()
-	return buf.String()
-}
 
 // primeParts are the dynamic sections of a prime, each produced on demand.
 // A nil part is skipped.

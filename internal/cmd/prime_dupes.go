@@ -72,17 +72,13 @@ func (c dupesCommit) dupesWarn(tests []string, files []string) bool {
 	return false
 }
 
-// checkHookedPathDupes runs the polecat-side pre-work duplicate check for a
+// hookedPathDupes runs the polecat-side pre-work duplicate check for a
 // fresh session (skips continuation mode, where the continuation directive
 // replaces the autonomous block this warning rides, and dry-run, where no
 // subprocess may run). Every failure path returns without printing: the check
 // must never block or bloat a prime.
-func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
-	primeTools{}.hookedPathDupes(ctx, hookedBead)
-}
-
 func (p primeTools) hookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
-	if primeContinuationMode || primeDryRun {
+	if p.skipDupes {
 		return
 	}
 	if ctx.Role != RolePolecat || hookedBead == nil || hookedBead.ID == "" {

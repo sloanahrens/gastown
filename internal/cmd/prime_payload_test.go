@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,19 +165,21 @@ func TestPrimePayload_EmptySectionsAreSkipped(t *testing.T) {
 }
 
 func TestPrimeStaticTextDelivered_NeedsEnvAndFile(t *testing.T) {
-	t.Setenv(config.EnvSystemPromptFile, "")
-	if primeStaticTextDelivered() {
+	t.Parallel()
+	env := func(path string) func(string) string {
+		return envMap(map[string]string{config.EnvSystemPromptFile: path})
+	}
+	if primeStaticTextDeliveredWith(env("")) {
 		t.Fatal("unset env must mean not delivered")
 	}
 	path := filepath.Join(t.TempDir(), "system-prompt.md")
-	t.Setenv(config.EnvSystemPromptFile, path)
-	if primeStaticTextDelivered() {
+	if primeStaticTextDeliveredWith(env(path)) {
 		t.Fatal("env pointing at a missing file must mean not delivered")
 	}
 	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !primeStaticTextDelivered() {
+	if !primeStaticTextDeliveredWith(env(path)) {
 		t.Fatal("env + existing file must mean delivered")
 	}
 }
@@ -208,11 +210,8 @@ func TestWriteSystemPromptFile_WritesOnlyOnChange(t *testing.T) {
 	}
 }
 
-// Serial: staticRoleText reaches captureOutput, which reassigns os.Stdout on
-// the hardcoded-fallback path, so a parallel peer's own stdout would land in
-// this test's capture. The template path this test takes does not hit it, but
-// the seam is one branch away and a lint cannot see branches (gt-k317).
 func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
@@ -235,10 +234,10 @@ func TestStaticRoleText_TemplatePlusContextFile(t *testing.T) {
 	}
 }
 
-// Serial for the same reason as TestStaticRoleText_TemplatePlusContextFile,
-// and because it swaps os.Stderr. A CONTEXT.md that exists but cannot be read
-// must be said out loud, not dropped as if it were absent (gt-udrrw, gt-bfale).
+// A CONTEXT.md that exists but cannot be read must be said out loud, not
+// dropped as if it were absent (gt-udrrw, gt-bfale).
 func TestStaticRoleText_UnreadableContextFileWarns(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	// A directory named CONTEXT.md exists but cannot be read as a file.
 	if err := os.Mkdir(filepath.Join(town, "CONTEXT.md"), 0o755); err != nil {
@@ -246,9 +245,9 @@ func TestStaticRoleText_UnreadableContextFileWarns(t *testing.T) {
 	}
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
 
-	var text string
-	var err error
-	stderr := captureStderr(t, func() { text, _, err = staticRoleText(ctx) })
+	var errOut bytes.Buffer
+	text, _, err := staticRoleTextWarn(&errOut, ctx)
+	stderr := errOut.String()
 	if err != nil {
 		t.Fatalf("an unreadable optional CONTEXT.md must not abort prime: %v", err)
 	}
@@ -262,8 +261,9 @@ func TestStaticRoleText_UnreadableContextFileWarns(t *testing.T) {
 	// An absent CONTEXT.md stays quiet.
 	empty := t.TempDir()
 	ctx.TownRoot, ctx.WorkDir = empty, empty
-	stderr = captureStderr(t, func() { _, _, err = staticRoleText(ctx) })
-	if err != nil || strings.Contains(stderr, "NOT injected") {
+	errOut.Reset()
+	_, _, err = staticRoleTextWarn(&errOut, ctx)
+	if stderr = errOut.String(); err != nil || strings.Contains(stderr, "NOT injected") {
 		t.Fatalf("absent CONTEXT.md must be silent: err=%v stderr=%q", err, stderr)
 	}
 }
@@ -308,9 +308,10 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 }
 
 func TestShowFormulaStepsFull_UsesBoundedChecklist(t *testing.T) {
-	out := captureStdout(t, func() {
-		showFormulaStepsFull("mol-polecat-work", t.TempDir(), "")
-	})
+	t.Parallel()
+	var buf bytes.Buffer
+	showFormulaStepsFull(&buf, "mol-polecat-work", t.TempDir(), "")
+	out := buf.String()
 	for _, want := range []string{"Step 1: Load context and verify assignment", "Step 2: Set up working branch", "Step 8: Submit work and self-clean", "gt prime --step <N> --formula " + "mol-polecat-work"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q:\n%s", want, out)
@@ -321,18 +322,8 @@ func TestShowFormulaStepsFull_UsesBoundedChecklist(t *testing.T) {
 	}
 }
 
-func TestCaptureOutput_ReturnsWhatFnPrinted(t *testing.T) {
-	got := captureOutput(func() {
-		fmt.Println("hello")
-		fmt.Print(strings.Repeat("x", 100000)) // larger than any pipe buffer
-	})
-	if !strings.HasPrefix(got, "hello\n") || len(got) != len("hello\n")+100000 {
-		t.Fatalf("captured %d chars, prefix %q", len(got), got[:min(len(got), 10)])
-	}
-}
-
 func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
-	t.Setenv(config.EnvSystemPromptFile, "")
+	t.Parallel()
 	town := t.TempDir()
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
 	bead := &beads.Issue{
@@ -345,7 +336,7 @@ func TestAssemblePrimePayload_HookedPolecatFitsAndLeadsWithWork(t *testing.T) {
 
 	payload := assemblePrimePayload(primeParts{
 		session:    func() string { return "GAS TOWN role:myrig/polecats/nux pid:1 session:s\n" },
-		hookedWork: func() string { return captureOutput(func() { _, _ = checkSlungWork(ctx, bead) }) },
+		hookedWork: func() string { return renderSlungWork(ctx, bead) },
 		directives: func() string { return directive },
 		memories:   func() string { return strings.Repeat("- memory-key: preview\n", 200) }, // ~4.6 KB, droppable
 		startup:    func() string { return "**START NOW**\n" },
@@ -382,44 +373,25 @@ func TestAssemblePrimePayload_StaticTextAfterHookedWorkWhenNotDelivered(t *testi
 	}
 }
 
-// keepPrimeHookState restores the hook globals readHookSessionID writes when
-// the test ends, so a hook event one test reads (PreCompact suppresses the
-// session beacon) does not leak into the next serial test.
-func keepPrimeHookState(t *testing.T) {
-	t.Helper()
-	event, structured, seen := primeHookEventName, primeStructuredSessionStartOutput, primeHookInputSeen
-	t.Cleanup(func() {
-		primeHookEventName, primeStructuredSessionStartOutput, primeHookInputSeen = event, structured, seen
-	})
-}
-
 func TestReadHookSessionID_RecordsHookEventName(t *testing.T) {
-	keepPrimeHookState(t)
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+	t.Parallel()
+	r := primeHookEnv{
+		getenv: envMap(nil),
+		stdin: func() *hookInput {
+			return &hookInput{SessionID: "abc", HookEventName: "PreCompact"}
+		},
+		newID: func() string { return "fresh" },
+	}.readHookSession()
+	if r.sessionID != "abc" {
+		t.Fatalf("session id = %q", r.sessionID)
 	}
-	old := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = old })
-	t.Setenv("GT_SESSION_ID", "")
-	t.Setenv("CLAUDE_SESSION_ID", "")
-	t.Setenv("GT_HOOK_SOURCE", "")
-	go func() {
-		_, _ = w.Write([]byte(`{"session_id":"abc","hook_event_name":"PreCompact","trigger":"auto"}` + "\n"))
-		w.Close()
-	}()
-	primeHookEventName = ""
-	id, _ := readHookSessionID()
-	if id != "abc" {
-		t.Fatalf("session id = %q", id)
-	}
-	if primeHookEventName != "PreCompact" {
-		t.Fatalf("primeHookEventName = %q, want PreCompact", primeHookEventName)
+	if r.eventName != "PreCompact" {
+		t.Fatalf("hook event name = %q, want PreCompact", r.eventName)
 	}
 }
 
 func TestOutputRoleDirectives_CapsLongDirective(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "directives"), 0o755); err != nil {
 		t.Fatal(err)
@@ -428,10 +400,8 @@ func TestOutputRoleDirectives_CapsLongDirective(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "directives", "polecat.md"), []byte(long), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	primeHookMode = true
-	t.Cleanup(func() { primeHookMode = false })
 	var sb strings.Builder
-	outputRoleDirectives(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false)
+	outputRoleDirectivesCapped(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false, true)
 	out := sb.String()
 	if len(out) > primeDirectiveMaxChars+400 {
 		t.Fatalf("directive output %d chars, cap %d", len(out), primeDirectiveMaxChars)
@@ -442,15 +412,14 @@ func TestOutputRoleDirectives_CapsLongDirective(t *testing.T) {
 }
 
 func TestHookSessionBeaconLines_SilentForPreCompact(t *testing.T) {
-	primeStructuredSessionStartOutput = false
-	primeHookEventName = "PreCompact"
-	t.Cleanup(func() { primeHookEventName = "" })
-	if lines := hookSessionBeaconLines("abc", "startup"); len(lines) != 0 {
+	t.Parallel()
+	if lines := hookSessionBeaconLinesFor(false, "PreCompact", "abc", "startup"); len(lines) != 0 {
 		t.Fatalf("PreCompact must print no beacon lines, got %v", lines)
 	}
 }
 
 func TestSystemPromptFile_EqualsStaticRoleText(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("ctx"), 0o644); err != nil {
 		t.Fatal(err)
@@ -488,10 +457,10 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 	}
 }
 
-// Serial: an unknown role has no template, so this one really does take
-// staticRoleText's hardcoded-fallback branch and have captureOutput reassign
-// os.Stdout process-wide (gt-k317).
+// An unknown role has no template, so this one takes staticRoleText's
+// hardcoded-fallback branch.
 func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.WriteFile(filepath.Join(town, "CONTEXT.md"), []byte("OPERATOR CONTEXT LINE"), 0o644); err != nil {
 		t.Fatal(err)
@@ -530,12 +499,13 @@ func TestAssemblePrimePayload_MailIsNeverDropped(t *testing.T) {
 }
 
 func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
-	primeContinuationMode = true
-	t.Cleanup(func() { primeContinuationMode = false })
+	t.Parallel()
 	town := t.TempDir()
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
 	bead := &beads.Issue{ID: "gt-cont1", Title: "Continue me", Description: "attached_formula: mol-polecat-work\n"}
-	out := captureOutput(func() { _, _ = checkSlungWork(ctx, bead) })
+	var buf bytes.Buffer
+	_, _ = checkSlungWorkIn(&buf, true, ctx, bead)
+	out := buf.String()
 	if strings.Contains(out, "AUTONOMOUS WORK MODE") || strings.Contains(out, "Announce:") {
 		t.Fatalf("post-compaction prime must not re-announce (GH#1965):\n%s", out[:min(len(out), 800)])
 	}
@@ -557,6 +527,7 @@ func TestSystemPromptPathFor_PolecatIsPerAgent(t *testing.T) {
 }
 
 func TestOutputRoleDirectives_UncappedOutsideHookMode(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "directives"), 0o755); err != nil {
 		t.Fatal(err)
@@ -565,9 +536,8 @@ func TestOutputRoleDirectives_UncappedOutsideHookMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "directives", "polecat.md"), []byte(long), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	primeHookMode = false
 	var sb strings.Builder
-	outputRoleDirectives(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false)
+	outputRoleDirectivesCapped(RoleContext{Role: RolePolecat, TownRoot: town}, &sb, false, false)
 	if strings.Contains(sb.String(), "directive truncated") || len(sb.String()) < len(long) {
 		t.Fatalf("plain gt prime must show the whole directive (%d chars rendered)", len(sb.String()))
 	}
@@ -615,7 +585,7 @@ func TestPrimeStepFormulaName(t *testing.T) {
 // inside the hook budget — TestBuildStartupCommand_FirstDogSpawnCarriesSystemPromptFlag
 // guards it.
 func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
-	t.Setenv(config.EnvSystemPromptFile, "")
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "directives"), 0o755); err != nil {
 		t.Fatal(err)
@@ -638,10 +608,18 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			}
 			parts := primeParts{
 				session:    func() string { return "GAS TOWN role:x pid:1 session:s\n" },
-				hookedWork: func() string { return captureOutput(func() { _, _ = checkSlungWork(ctx, bead) }) },
-				directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, false) }) },
-				memories:   func() string { return memories },
-				startup:    func() string { return captureOutput(func() { outputStartupDirective(ctx) }) },
+				hookedWork: func() string { return renderSlungWork(ctx, bead) },
+				directives: func() string {
+					var b strings.Builder
+					outputRoleDirectivesCapped(ctx, &b, false, true)
+					return b.String()
+				},
+				memories: func() string { return memories },
+				startup: func() string {
+					var b strings.Builder
+					outputStartupDirective(&b, ctx)
+					return b.String()
+				},
 			}
 			out := assemblePrimePayload(parts, "", false, bead != nil).render(primeHookBudget)
 			if len(out) > primeHookTestBudget {
@@ -653,4 +631,11 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// renderSlungWork is the hooked-work section checkSlungWork renders for bead.
+func renderSlungWork(ctx RoleContext, bead *beads.Issue) string {
+	var b strings.Builder
+	_, _ = checkSlungWorkIn(&b, false, ctx, bead)
+	return b.String()
 }

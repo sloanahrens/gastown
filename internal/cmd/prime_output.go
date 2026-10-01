@@ -98,6 +98,12 @@ func roleRigContext(ctx RoleContext) (defaultBranch string, isForkRig bool, upst
 // mutating os.Stdout or the primeExplain global (avoiding data races
 // under t.Parallel).
 func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
+	outputRoleDirectivesCapped(ctx, w, explainEnabled, primeHookMode)
+}
+
+// outputRoleDirectivesCapped is outputRoleDirectives with the hook-mode cap
+// on a long directive applied when capped is set.
+func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, capped bool) {
 	role := string(ctx.Role)
 	townRoot := ctx.TownRoot
 	rigName := ctx.Rig
@@ -157,7 +163,7 @@ func outputRoleDirectives(ctx RoleContext, w io.Writer, explainEnabled bool) {
 	}
 	fmt.Fprintln(w)
 	// The cap protects the hook budget only; a plain `gt prime` shows it all.
-	if primeHookMode && len(content) > primeDirectiveMaxChars {
+	if capped && len(content) > primeDirectiveMaxChars {
 		cut := strings.LastIndexByte(content[:primeDirectiveMaxChars], '\n')
 		if cut <= 0 {
 			cut = primeDirectiveMaxChars
@@ -248,7 +254,7 @@ func outputMayorContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "## Startup")
 	fmt.Fprintln(w, "Check for handoff messages with 🤝 HANDOFF in subject - continue predecessor's work.")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(ctx)
+	outputCommandQuickReference(os.Stdout, ctx)
 	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
 }
 
@@ -268,7 +274,7 @@ func outputWitnessContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
 	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(ctx)
+	outputCommandQuickReference(os.Stdout, ctx)
 	fmt.Fprintf(w, "Rig: %s\n", style.Dim.Render(ctx.Rig))
 }
 
@@ -296,7 +302,7 @@ func outputPolecatContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
 	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(ctx)
+	outputCommandQuickReference(os.Stdout, ctx)
 	fmt.Fprintf(w, "Polecat: %s | Rig: %s\n",
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
@@ -326,7 +332,7 @@ func outputCrewContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
 	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(ctx)
+	outputCommandQuickReference(os.Stdout, ctx)
 	fmt.Fprintf(w, "Crew: %s | Rig: %s\n",
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
@@ -345,7 +351,7 @@ func outputBootContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "- `"+cli.Name()+" boot status` - Show Boot status")
 	fmt.Fprintln(w, "- `"+cli.Name()+" deacon status` - Check Deacon health")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(ctx)
+	outputCommandQuickReference(os.Stdout, ctx)
 	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
 }
 
@@ -368,57 +374,57 @@ func outputUnknownContext(w io.Writer, ctx RoleContext) {
 
 // outputCommandQuickReference outputs a compact role-aware cheatsheet of commonly
 // confused commands. This helps agents avoid guessing wrong commands.
-func outputCommandQuickReference(ctx RoleContext) {
+func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 	c := cli.Name()
-	fmt.Println("## ⚡ Command Quick-Reference")
-	fmt.Println()
-	fmt.Println("**Commonly confused — use the right command:**")
-	fmt.Println()
+	fmt.Fprintln(w, "## ⚡ Command Quick-Reference")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "**Commonly confused — use the right command:**")
+	fmt.Fprintln(w)
 
 	switch ctx.Role {
 	case RoleMayor:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Println("| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
-		fmt.Printf("| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
-		fmt.Printf("| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-		fmt.Printf("| Kill stuck polecat | `%s polecat nuke <rig>/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c)
-		fmt.Printf("| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
-		fmt.Printf("| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
-		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
+		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
+		fmt.Fprintln(w, "|------------|----------------|----------------|")
+		fmt.Fprintln(w, "| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintf(w, "| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
+		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
+		fmt.Fprintf(w, "| Kill stuck polecat | `%s polecat nuke <rig>/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c)
+		fmt.Fprintf(w, "| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
+		fmt.Fprintf(w, "| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
+		fmt.Fprintln(w, "| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
 
 	case RoleCrew:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Println("| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
-		fmt.Printf("| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-		fmt.Printf("| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
-		fmt.Printf("| Stop my session | `%s crew stop %s` | ~~gt rig stop~~ (stops rig agents, not crew) |\n", c, ctx.Polecat)
-		fmt.Printf("| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
-		fmt.Printf("| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
+		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
+		fmt.Fprintln(w, "|------------|----------------|----------------|")
+		fmt.Fprintln(w, "| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
+		fmt.Fprintf(w, "| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
+		fmt.Fprintf(w, "| Stop my session | `%s crew stop %s` | ~~gt rig stop~~ (stops rig agents, not crew) |\n", c, ctx.Polecat)
+		fmt.Fprintf(w, "| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
+		fmt.Fprintf(w, "| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
 
 	case RolePolecat:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Printf("| Signal work complete | `%s done` | ~~bd close <root-issue>~~ (Refinery closes it) |\n", c)
-		fmt.Println("| Close a sub-issue | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
-		fmt.Printf("| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-		fmt.Println("| Check workflow steps | `bd mol current` | ~~bd ready~~ (excludes molecule steps) |")
-		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
-		fmt.Printf("| Escalate blocker | `%s escalate \"desc\" -s HIGH` | ~~waiting for human~~ (never wait) |\n", c)
+		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
+		fmt.Fprintln(w, "|------------|----------------|----------------|")
+		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~bd close <root-issue>~~ (Refinery closes it) |\n", c)
+		fmt.Fprintln(w, "| Close a sub-issue | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
+		fmt.Fprintln(w, "| Check workflow steps | `bd mol current` | ~~bd ready~~ (excludes molecule steps) |")
+		fmt.Fprintln(w, "| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
+		fmt.Fprintf(w, "| Escalate blocker | `%s escalate \"desc\" -s HIGH` | ~~waiting for human~~ (never wait) |\n", c)
 
 	}
 
-	fmt.Println()
-	fmt.Println("**Rig lifecycle commands (park vs dock vs stop):**")
-	fmt.Println("- `park/unpark` — Temporary pause. Daemon skips parked rigs.")
-	fmt.Println("- `dock/undock` — Persistent disable. Survives daemon restarts.")
-	fmt.Println("- `stop/shutdown` — Immediate stop of the rig's polecat sessions.")
-	fmt.Println()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "**Rig lifecycle commands (park vs dock vs stop):**")
+	fmt.Fprintln(w, "- `park/unpark` — Temporary pause. Daemon skips parked rigs.")
+	fmt.Fprintln(w, "- `dock/undock` — Persistent disable. Survives daemon restarts.")
+	fmt.Fprintln(w, "- `stop/shutdown` — Immediate stop of the rig's polecat sessions.")
+	fmt.Fprintln(w)
 }
 
 // outputHandoffContent reads and displays the pinned handoff bead for the role.
-func outputHandoffContent(ctx RoleContext) {
+func outputHandoffContent(w io.Writer, ctx RoleContext) {
 	if ctx.Role == RoleUnknown {
 		return
 	}
@@ -438,63 +444,63 @@ func outputHandoffContent(ctx RoleContext) {
 	}
 
 	// Display handoff content
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## 🤝 Handoff from Previous Session"))
-	fmt.Println(issue.Description)
-	fmt.Println()
-	fmt.Println(style.Dim.Render("(Clear with: gt rig reset --handoff)"))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🤝 Handoff from Previous Session"))
+	fmt.Fprintln(w, issue.Description)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, style.Dim.Render("(Clear with: gt rig reset --handoff)"))
 }
 
 // outputStartupDirective outputs role-specific instructions for the agent.
 // This tells agents like Mayor to announce themselves on startup.
-func outputStartupDirective(ctx RoleContext) {
+func outputStartupDirective(w io.Writer, ctx RoleContext) {
 	switch ctx.Role {
 	case RoleMayor:
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are the Mayor. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Announce: \"Mayor, checking in.\"")
-		fmt.Println("3. Check mail: `" + cli.Name() + " mail inbox` - look for 🤝 HANDOFF messages")
-		fmt.Println("4. Check for attached work: `" + cli.Name() + " hook`")
-		fmt.Println("   - If mol attached → **RUN IT** (no human input needed)")
-		fmt.Println("   - If no mol → await user instruction")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "---")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "**STARTUP PROTOCOL**: You are the Mayor. Please:")
+		fmt.Fprintln(w, "1. Run `"+cli.Name()+" prime` (loads full context, mail, and pending work)")
+		fmt.Fprintln(w, "2. Announce: \"Mayor, checking in.\"")
+		fmt.Fprintln(w, "3. Check mail: `"+cli.Name()+" mail inbox` - look for 🤝 HANDOFF messages")
+		fmt.Fprintln(w, "4. Check for attached work: `"+cli.Name()+" hook`")
+		fmt.Fprintln(w, "   - If mol attached → **RUN IT** (no human input needed)")
+		fmt.Fprintln(w, "   - If no mol → await user instruction")
 	case RolePolecat:
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are a polecat with NO WORK on your hook.")
-		fmt.Println()
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Check if any mail was injected above in this output")
-		fmt.Println("3. If you have mail with work instructions → execute that work")
-		fmt.Println("4. If NO mail → run `" + cli.Name() + " done` IMMEDIATELY")
-		fmt.Println()
-		fmt.Println("Polecat sessions are ephemeral. No work on hook + no mail = terminate.")
-		fmt.Println("DO NOT wait. DO NOT escalate. DO NOT send idle alerts.")
-		fmt.Println("Just run `" + cli.Name() + " done` and exit.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "---")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "**STARTUP PROTOCOL**: You are a polecat with NO WORK on your hook.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "1. Run `"+cli.Name()+" prime` (loads full context, mail, and pending work)")
+		fmt.Fprintln(w, "2. Check if any mail was injected above in this output")
+		fmt.Fprintln(w, "3. If you have mail with work instructions → execute that work")
+		fmt.Fprintln(w, "4. If NO mail → run `"+cli.Name()+" done` IMMEDIATELY")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Polecat sessions are ephemeral. No work on hook + no mail = terminate.")
+		fmt.Fprintln(w, "DO NOT wait. DO NOT escalate. DO NOT send idle alerts.")
+		fmt.Fprintln(w, "Just run `"+cli.Name()+" done` and exit.")
 	case RoleCrew:
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are a crew worker. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Printf("2. Announce: \"%s Crew %s, checking in.\"\n", ctx.Rig, ctx.Polecat)
-		fmt.Println("3. Check mail: `" + cli.Name() + " mail inbox`")
-		fmt.Println("4. If there's a 🤝 HANDOFF message, read it and continue the work")
-		fmt.Println("5. Check for attached work: `" + cli.Name() + " hook`")
-		fmt.Println("   - If attachment found → **RUN IT** (no human input needed)")
-		fmt.Println("   - If no attachment → **STOP and wait for input**. Do NOT run")
-		fmt.Println("     any more commands. Do NOT poll mail. Do NOT check status.")
-		fmt.Println("     Sit idle at your prompt — a nudge or user message will arrive.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "---")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "**STARTUP PROTOCOL**: You are a crew worker. Please:")
+		fmt.Fprintln(w, "1. Run `"+cli.Name()+" prime` (loads full context, mail, and pending work)")
+		fmt.Fprintf(w, "2. Announce: \"%s Crew %s, checking in.\"\n", ctx.Rig, ctx.Polecat)
+		fmt.Fprintln(w, "3. Check mail: `"+cli.Name()+" mail inbox`")
+		fmt.Fprintln(w, "4. If there's a 🤝 HANDOFF message, read it and continue the work")
+		fmt.Fprintln(w, "5. Check for attached work: `"+cli.Name()+" hook`")
+		fmt.Fprintln(w, "   - If attachment found → **RUN IT** (no human input needed)")
+		fmt.Fprintln(w, "   - If no attachment → **STOP and wait for input**. Do NOT run")
+		fmt.Fprintln(w, "     any more commands. Do NOT poll mail. Do NOT check status.")
+		fmt.Fprintln(w, "     Sit idle at your prompt — a nudge or user message will arrive.")
 	}
 }
 
 // outputAttachmentStatus checks for attached work molecule and outputs status.
 // This is key for the autonomous overnight work pattern.
 // The Propulsion Principle: "If you find something on your hook, YOU RUN IT."
-func outputAttachmentStatus(ctx RoleContext) {
+func outputAttachmentStatus(w io.Writer, ctx RoleContext) {
 	// Skip only unknown roles - all valid roles can have pinned work
 	if ctx.Role == RoleUnknown {
 		return
@@ -528,114 +534,114 @@ func outputAttachmentStatus(ctx RoleContext) {
 	}
 
 	// Has attached work - output prominently with current step
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## 🎯 ATTACHED WORK DETECTED"))
-	fmt.Printf("Pinned bead: %s\n", pinnedBeads[0].ID)
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🎯 ATTACHED WORK DETECTED"))
+	fmt.Fprintf(w, "Pinned bead: %s\n", pinnedBeads[0].ID)
 	if attachment.AttachedFormula != "" {
-		fmt.Printf("Attached formula: %s\n", attachment.AttachedFormula)
+		fmt.Fprintf(w, "Attached formula: %s\n", attachment.AttachedFormula)
 	}
 	if attachment.AttachedMolecule != "" {
-		fmt.Printf("Attached molecule: %s\n", attachment.AttachedMolecule)
+		fmt.Fprintf(w, "Attached molecule: %s\n", attachment.AttachedMolecule)
 	}
 	if attachment.AttachedAt != "" {
-		fmt.Printf("Attached at: %s\n", attachment.AttachedAt)
+		fmt.Fprintf(w, "Attached at: %s\n", attachment.AttachedAt)
 	}
 	if len(attachment.AttachedVars) > 0 {
-		fmt.Println()
-		fmt.Printf("%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
 		for _, variable := range attachment.AttachedVars {
-			fmt.Printf("  --var %s\n", variable)
+			fmt.Fprintf(w, "  --var %s\n", variable)
 		}
 	}
 	if attachment.AttachedArgs != "" {
-		fmt.Println()
-		fmt.Printf("%s\n", style.Bold.Render("📋 ARGS (use these to guide execution):"))
-		fmt.Printf("  %s\n", attachment.AttachedArgs)
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("📋 ARGS (use these to guide execution):"))
+		fmt.Fprintf(w, "  %s\n", attachment.AttachedArgs)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	// Show inline formula steps if formula name is known, else fall back to bd mol current
 	if attachment.AttachedFormula != "" {
-		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		showFormulaStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
 	} else {
-		showMoleculeExecutionPrompt(ctx.WorkDir, attachment.AttachedMolecule)
+		showMoleculeExecutionPrompt(w, ctx.WorkDir, attachment.AttachedMolecule)
 	}
 }
 
 // outputContinuationDirective displays a brief continuation prompt for post-compact/resume.
 // Unlike outputAutonomousDirective, this does NOT ask the agent to re-announce or
 // re-run startup protocol — it just reminds the agent what's on the hook. (GH#1965)
-func outputContinuationDirective(hookedBead *beads.Issue, hasMolecule bool) {
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## ▶ CONTINUE HOOKED WORK"))
-	fmt.Println("Your context was compacted/resumed. **Continue working on your hooked bead.**")
-	fmt.Println("Do NOT re-announce, re-initialize, or re-read the bead from scratch.")
-	fmt.Println("Pick up where you left off.")
-	fmt.Println()
-	fmt.Printf("  Hooked: %s — %s\n", style.Bold.Render(hookedBead.ID), hookedBead.Title)
+func outputContinuationDirective(w io.Writer, hookedBead *beads.Issue, hasMolecule bool) {
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## ▶ CONTINUE HOOKED WORK"))
+	fmt.Fprintln(w, "Your context was compacted/resumed. **Continue working on your hooked bead.**")
+	fmt.Fprintln(w, "Do NOT re-announce, re-initialize, or re-read the bead from scratch.")
+	fmt.Fprintln(w, "Pick up where you left off.")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Hooked: %s — %s\n", style.Bold.Render(hookedBead.ID), hookedBead.Title)
 	if hasMolecule {
-		fmt.Println("  (Has attached molecule — check `bd mol current` for next step)")
+		fmt.Fprintln(w, "  (Has attached molecule — check `bd mol current` for next step)")
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // outputHandoffWarning outputs the post-handoff warning message.
-func outputHandoffWarning(prevSession string) {
-	fmt.Println()
-	fmt.Println(style.Bold.Render("╔══════════════════════════════════════════════════════════════════╗"))
-	fmt.Println(style.Bold.Render("║  ✅ HANDOFF COMPLETE - You are the NEW session                   ║"))
-	fmt.Println(style.Bold.Render("╚══════════════════════════════════════════════════════════════════╝"))
-	fmt.Println()
+func outputHandoffWarning(w io.Writer, prevSession string) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, style.Bold.Render("╔══════════════════════════════════════════════════════════════════╗"))
+	fmt.Fprintln(w, style.Bold.Render("║  ✅ HANDOFF COMPLETE - You are the NEW session                   ║"))
+	fmt.Fprintln(w, style.Bold.Render("╚══════════════════════════════════════════════════════════════════╝"))
+	fmt.Fprintln(w)
 	if prevSession != "" {
-		fmt.Printf("Your predecessor (%s) handed off to you.\n", prevSession)
+		fmt.Fprintf(w, "Your predecessor (%s) handed off to you.\n", prevSession)
 	}
-	fmt.Println()
-	fmt.Println(style.Bold.Render("⚠️  DO NOT run /handoff - that was your predecessor's action."))
-	fmt.Println("   The /handoff you see in context is NOT a request for you.")
-	fmt.Println()
-	fmt.Println("Instead: Check your hook (`" + cli.Name() + " mol status`) and mail (`" + cli.Name() + " mail inbox`).")
-	fmt.Println()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, style.Bold.Render("⚠️  DO NOT run /handoff - that was your predecessor's action."))
+	fmt.Fprintln(w, "   The /handoff you see in context is NOT a request for you.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Instead: Check your hook (`"+cli.Name()+" mol status`) and mail (`"+cli.Name()+" mail inbox`).")
+	fmt.Fprintln(w)
 }
 
 // outputState outputs only the session state (for --state flag).
 // If jsonOutput is true, outputs JSON format instead of key:value.
-func outputState(ctx RoleContext, jsonOutput bool) {
+func outputState(w io.Writer, ctx RoleContext, jsonOutput bool) {
 	state := detectSessionState(ctx)
 
 	if jsonOutput {
 		data, err := json.Marshal(state)
 		if err != nil {
 			// Fall back to plain text on error
-			fmt.Printf("state: %s\n", state.State)
-			fmt.Printf("role: %s\n", state.Role)
+			fmt.Fprintf(w, "state: %s\n", state.State)
+			fmt.Fprintf(w, "role: %s\n", state.Role)
 			return
 		}
-		fmt.Println(string(data))
+		fmt.Fprintln(w, string(data))
 		return
 	}
 
-	fmt.Printf("state: %s\n", state.State)
-	fmt.Printf("role: %s\n", state.Role)
+	fmt.Fprintf(w, "state: %s\n", state.State)
+	fmt.Fprintf(w, "role: %s\n", state.Role)
 
 	switch state.State {
 	case "post-handoff":
 		if state.PrevSession != "" {
-			fmt.Printf("prev_session: %s\n", state.PrevSession)
+			fmt.Fprintf(w, "prev_session: %s\n", state.PrevSession)
 		}
 	case "crash-recovery":
 		if state.CheckpointAge != "" {
-			fmt.Printf("checkpoint_age: %s\n", state.CheckpointAge)
+			fmt.Fprintf(w, "checkpoint_age: %s\n", state.CheckpointAge)
 		}
 	case "autonomous":
 		if state.HookedBead != "" {
-			fmt.Printf("hooked_bead: %s\n", state.HookedBead)
+			fmt.Fprintf(w, "hooked_bead: %s\n", state.HookedBead)
 		}
 	}
 }
 
 // outputCheckpointContext reads and displays any previous session checkpoint.
 // This enables crash recovery by showing what the previous session was working on.
-func outputCheckpointContext(ctx RoleContext) {
+func outputCheckpointContext(w io.Writer, ctx RoleContext) {
 	// Only applies to polecats and crew workers
 	if ctx.Role != RolePolecat && ctx.Role != RoleCrew {
 		return
@@ -660,51 +666,57 @@ func outputCheckpointContext(ctx RoleContext) {
 	}
 
 	// Display checkpoint context
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## 📌 Previous Session Checkpoint"))
-	fmt.Printf("A previous session left a checkpoint %s ago.\n\n", cp.Age().Round(time.Minute))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 📌 Previous Session Checkpoint"))
+	fmt.Fprintf(w, "A previous session left a checkpoint %s ago.\n\n", cp.Age().Round(time.Minute))
 
 	if cp.StepTitle != "" {
-		fmt.Printf("  **Working on:** %s\n", cp.StepTitle)
+		fmt.Fprintf(w, "  **Working on:** %s\n", cp.StepTitle)
 	}
 	if cp.MoleculeID != "" {
-		fmt.Printf("  **Molecule:** %s\n", cp.MoleculeID)
+		fmt.Fprintf(w, "  **Molecule:** %s\n", cp.MoleculeID)
 	}
 	if cp.CurrentStep != "" {
-		fmt.Printf("  **Step:** %s\n", cp.CurrentStep)
+		fmt.Fprintf(w, "  **Step:** %s\n", cp.CurrentStep)
 	}
 	if cp.HookedBead != "" {
-		fmt.Printf("  **Hooked bead:** %s\n", cp.HookedBead)
+		fmt.Fprintf(w, "  **Hooked bead:** %s\n", cp.HookedBead)
 	}
 	if cp.Branch != "" {
-		fmt.Printf("  **Branch:** %s\n", cp.Branch)
+		fmt.Fprintf(w, "  **Branch:** %s\n", cp.Branch)
 	}
 	if len(cp.ModifiedFiles) > 0 {
-		fmt.Printf("  **Modified files:** %d\n", len(cp.ModifiedFiles))
+		fmt.Fprintf(w, "  **Modified files:** %d\n", len(cp.ModifiedFiles))
 		// Show first few files
 		maxShow := 5
 		if len(cp.ModifiedFiles) < maxShow {
 			maxShow = len(cp.ModifiedFiles)
 		}
 		for i := 0; i < maxShow; i++ {
-			fmt.Printf("    - %s\n", cp.ModifiedFiles[i])
+			fmt.Fprintf(w, "    - %s\n", cp.ModifiedFiles[i])
 		}
 		if len(cp.ModifiedFiles) > maxShow {
-			fmt.Printf("    ... and %d more\n", len(cp.ModifiedFiles)-maxShow)
+			fmt.Fprintf(w, "    ... and %d more\n", len(cp.ModifiedFiles)-maxShow)
 		}
 	}
 	if cp.Notes != "" {
-		fmt.Printf("  **Notes:** %s\n", cp.Notes)
+		fmt.Fprintf(w, "  **Notes:** %s\n", cp.Notes)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
-	fmt.Println("Use this context to resume work. The checkpoint will be updated as you progress.")
-	fmt.Println()
+	fmt.Fprintln(w, "Use this context to resume work. The checkpoint will be updated as you progress.")
+	fmt.Fprintln(w)
 }
 
 // explain outputs an explanatory message if --explain mode is enabled.
 func explain(condition bool, reason string) {
-	if primeExplain && condition {
-		fmt.Printf("\n[EXPLAIN] %s\n", reason)
+	explainTo(os.Stdout, primeExplain, condition, reason)
+}
+
+// explainTo writes reason to w as an [EXPLAIN] line when enabled and
+// condition both hold.
+func explainTo(w io.Writer, enabled, condition bool, reason string) {
+	if enabled && condition {
+		fmt.Fprintf(w, "\n[EXPLAIN] %s\n", reason)
 	}
 }

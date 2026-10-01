@@ -3,10 +3,6 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -134,34 +130,4 @@ func TestRenderDependencyMergeStatusReportsUnknownHonestly(t *testing.T) {
 	if strings.Contains(out, "landed") {
 		t.Fatalf("unchecked blocker must never read as landed, got:\n%s", out)
 	}
-}
-
-// installFakeBdShow is used only by spec_test.go (slice s-z, gt-jz03n.3);
-// delete it with that use.
-//
-// installFakeBdShow puts a POSIX-shell `bd` on PATH whose `show` prints
-// showJSON and exits with showExit, and returns the file that logs each
-// invocation's argv (one per line). Not parallel-safe: it sets PATH.
-func installFakeBdShow(t *testing.T, showJSON string, showExit int) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell fake bd")
-	}
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "bd.log")
-	payload := filepath.Join(binDir, "show.json")
-	if err := os.WriteFile(payload, []byte(showJSON), 0o644); err != nil {
-		t.Fatalf("write fake show payload: %v", err)
-	}
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> '" + logPath + "'\n" +
-		"case \"$1\" in\n" +
-		"  show) cat '" + payload + "'; exit " + strconv.Itoa(showExit) + ";;\n" +
-		"esac\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
 }

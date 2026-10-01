@@ -14,11 +14,11 @@ internal/beads/client_helpers.go:clearAgentActiveMRIfMatches
 # Was the func-literal var gateSlotHeld, which guardlint could not see; made a named func when the watch's collaborators were injected (gt-22hdp.13). Deliberate, and nothing is swallowed: the error is returned beside held=true and the watch logs itself as blind (see its doc).
 internal/cmd/done_test_verify_container_watch.go:gateSlotHeld
 # not a guard: the bool is "hooked work was found", returned true beside the error so the caller still skips the normal startup directive
-internal/cmd/prime.go:checkSlungWork
+internal/cmd/prime.go:checkSlungWorkIn
 # deliberate os.IsNotExist narrowing: a missing manifest means the plugin is not installed; every other read error is returned
 internal/cmd/prime.go:ralphLoopPluginInstalledIn
 # deliberate: CONTEXT.md is optional, so prime carries on without it; a non-NotExist read error is warned on stderr instead of aborting startup (gt-bfale)
-internal/cmd/prime_payload.go:staticRoleText
+internal/cmd/prime_payload.go:staticRoleTextWarn
 # not a guard: the bool is "a change was applied"; DND reset is best-effort startup work that must not block gt up
 internal/cmd/up.go:disableCurrentAgentDND
 # deliberate fail-open throttle: an unreadable slot state allows the send and returns the error beside true; the worst outcome is one repeated nudge
