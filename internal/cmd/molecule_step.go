@@ -321,7 +321,7 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		return fmt.Errorf("getting session name: %w", err)
 	}
 
-	restartCmd, err := buildRestartCommand(currentSession)
+	restartCmd, err := buildRestartCommand(townRegistry(), currentSession)
 	if err != nil {
 		return fmt.Errorf("building restart command: %w", err)
 	}

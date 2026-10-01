@@ -16,7 +16,7 @@ func cycleCrewSession(direction int, sessionOverride string) error {
 		return fmt.Errorf("not in a tmux session")
 	}
 
-	_, _, rigPrefix, ok := parseCrewSessionName(currentSession)
+	_, _, rigPrefix, ok := parseCrewSessionName(townRegistry(), currentSession)
 	if !ok {
 		return nil
 	}

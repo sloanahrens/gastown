@@ -628,12 +628,12 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 		fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
 		return nil
 	}
-	rigSessions := sessions.namesForRig(r.Name)
+	sessionPolecats := sessions.polecatsForRig(r.Name)
 	if only != "" {
 		polecatNames = filterPolecatNames(polecatNames, only)
-		rigSessions = nil
+		sessionPolecats = nil
 	}
-	if len(polecatNames) == 0 && len(rigSessions) == 0 {
+	if len(polecatNames) == 0 && len(sessionPolecats) == 0 {
 		return nil
 	}
 
@@ -723,11 +723,8 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 	// hermetic test's session escaping onto the wrong socket, gt-yav3);
 	// report it as foreign, not zombie, so it never counts toward capacity or
 	// gets restart/nuke treatment aimed at real polecats.
-	for _, sessionName := range rigSessions {
-		_, polecatName, ok := parsePolecatSessionName(sessionName)
-		if !ok {
-			continue
-		}
+	for _, polecatName := range sessionPolecats {
+		sessionName, _ := sessions.lookup(r.Name, polecatName)
 		if knownNames[polecatName] {
 			continue
 		}
@@ -836,7 +833,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect polecats from all rigs
-	sessions, err := loadPolecatSessionSet(session.DefaultRegistry(), newPoolSessionLister())
+	sessions, err := loadPolecatSessionSet(townRegistry(), newPoolSessionLister())
 	if err != nil {
 		return fmt.Errorf("listing tmux sessions: %w", err)
 	}
@@ -1090,8 +1087,8 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 // polecat, by the same seat pipeline. ok is false when that pipeline cannot
 // produce one (the tmux listing failed, or the worktree is not a listed seat);
 // the caller then keeps the manager's own reading rather than failing status.
-func polecatListRow(r *rig.Rig, name string) (PolecatListItem, bool) {
-	sessions, err := loadPolecatSessionSet(session.DefaultRegistry(), newPoolSessionLister())
+func polecatListRow(reg *session.PrefixRegistry, r *rig.Rig, name string) (PolecatListItem, bool) {
+	sessions, err := loadPolecatSessionSet(reg, newPoolSessionLister())
 	if err != nil {
 		return PolecatListItem{}, false
 	}
@@ -1149,7 +1146,7 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 	// an agent bead still saying agent_state=working with no live session read
 	// "idle" here while list read "stalled" — the two surfaces disagreeing on
 	// the one signal the witness acts on (gt-aj7).
-	if row, ok := polecatListRow(r, polecatName); ok {
+	if row, ok := polecatListRow(townRegistry(), r, polecatName); ok {
 		reconcilePolecatWithListRow(p, row)
 	}
 

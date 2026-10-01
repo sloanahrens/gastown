@@ -99,7 +99,7 @@ func TestLooksLikeIssueID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
 			t.Parallel()
-			got := looksLikeIssueIDIn(testRegistry, tc.input)
+			got := looksLikeIssueID(testRegistry, tc.input)
 			if got != tc.want {
 				t.Errorf("looksLikeIssueID(%q) = %v, want %v", tc.input, got, tc.want)
 			}

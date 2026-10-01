@@ -166,13 +166,13 @@ func categorizeSession(reg *session.PrefixRegistry, name string) *AgentSession {
 }
 
 // getAgentSessions returns all categorized Gas Town sessions from the town socket.
-func getAgentSessions(includePolecats bool) ([]*AgentSession, error) {
+func getAgentSessions(reg *session.PrefixRegistry, includePolecats bool) ([]*AgentSession, error) {
 	t := tmux.NewTmux()
 	sessions, err := t.ListSessions()
 	if err != nil {
 		return nil, err
 	}
-	return filterAndSortSessions(session.DefaultRegistry(), sessions, includePolecats), nil
+	return filterAndSortSessions(reg, sessions, includePolecats), nil
 }
 
 // socketGroup holds sessions for a single tmux socket.
@@ -216,7 +216,7 @@ func findTestSockets() []string {
 // and grouped. The town socket's GT agent sessions come first, followed by
 // personal sessions from other sockets (e.g., default), and finally any
 // active test sockets (gt-test-*) when integration tests are running.
-func getAllSocketSessions(includePolecats bool) []socketGroup {
+func getAllSocketSessions(reg *session.PrefixRegistry, includePolecats bool) []socketGroup {
 	townSocket := tmux.GetDefaultSocket()
 
 	// When gt agents menu is invoked via a tmux binding from a non-town
@@ -233,7 +233,7 @@ func getAllSocketSessions(includePolecats bool) []socketGroup {
 	// Town socket: GT agent sessions
 	townTmux := tmux.NewTmuxWithSocket(townSocket) // explicit socket avoids default-socket ambiguity
 	if sessions, err := townTmux.ListSessions(); err == nil && len(sessions) > 0 {
-		agents := filterAndSortSessions(session.DefaultRegistry(), sessions, includePolecats)
+		agents := filterAndSortSessions(reg, sessions, includePolecats)
 		for _, a := range agents {
 			a.Socket = townSocket
 		}
@@ -419,7 +419,7 @@ func shortcutKey(index int) string {
 }
 
 func runAgents(cmd *cobra.Command, args []string) error {
-	groups := getAllSocketSessions(agentsAllFlag)
+	groups := getAllSocketSessions(townRegistry(), agentsAllFlag)
 
 	// Count total sessions across all groups
 	total := 0
@@ -514,7 +514,7 @@ func runAgents(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentsList(cmd *cobra.Command, args []string) error {
-	agents, err := getAgentSessions(agentsAllFlag)
+	agents, err := getAgentSessions(townRegistry(), agentsAllFlag)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -574,7 +574,7 @@ func runAgentsCheck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	report, err := buildCollisionReport(townRoot)
+	report, err := buildCollisionReport(townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
@@ -628,7 +628,7 @@ func runAgentsFix(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check for remaining issues
-	report, err := buildCollisionReport(townRoot)
+	report, err := buildCollisionReport(townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
@@ -651,7 +651,7 @@ func runAgentsFix(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func buildCollisionReport(townRoot string) (*CollisionReport, error) {
+func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*CollisionReport, error) {
 	report := &CollisionReport{
 		Locks: make(map[string]*lock.LockInfo),
 	}
@@ -695,7 +695,7 @@ func buildCollisionReport(townRoot string) (*CollisionReport, error) {
 		}
 
 		// Check if the locked session exists in tmux
-		expectedSession := guessSessionFromWorkerDir(session.DefaultRegistry(), workerDir, townRoot)
+		expectedSession := guessSessionFromWorkerDir(reg, workerDir, townRoot)
 		if expectedSession != "" {
 			found := false
 			for _, s := range gtSessions {

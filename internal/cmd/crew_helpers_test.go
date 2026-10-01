@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func TestCrewSessionName(t *testing.T) {
@@ -30,19 +32,13 @@ func TestCrewSessionName(t *testing.T) {
 
 func TestParseCrewSessionName(t *testing.T) {
 	t.Parallel()
-	// parseCrewSessionName depends on session.ParseSessionName which uses
-	// a PrefixRegistry to map prefixes to rigs. Without the registry populated,
-	// parsing will fail. We test the roundtrip with the understanding that in
-	// test environment, the registry may not be available.
 	rigName := "gastown"
 	crewName := "tester"
-	sessionName := crewSessionName(rigName, crewName)
+	sessionName := session.CrewSessionName("gt", crewName)
 
-	parsedRig, parsedCrew, _, ok := parseCrewSessionName(sessionName)
+	parsedRig, parsedCrew, _, ok := parseCrewSessionName(nudgeTestRegistry(), sessionName)
 	if !ok {
-		// In test context without PrefixRegistry, parsing may fail.
-		// This is expected - the important thing is it doesn't panic.
-		t.Skipf("parseCrewSessionName(%q) returned ok=false (no PrefixRegistry in test context)", sessionName)
+		t.Fatalf("parseCrewSessionName(%q) returned ok=false", sessionName)
 	}
 	if parsedRig != rigName {
 		t.Errorf("parsed rig = %q, want %q", parsedRig, rigName)
@@ -64,7 +60,7 @@ func TestParseCrewSessionName_Invalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, ok := parseCrewSessionName(tt.session)
+			_, _, _, ok := parseCrewSessionName(nudgeTestRegistry(), tt.session)
 			if ok {
 				t.Errorf("parseCrewSessionName(%q) returned ok=true, want false", tt.session)
 			}

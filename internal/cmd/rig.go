@@ -635,6 +635,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 
 	var rigs []rigInfo
 	allSessions, _ := t.ListSessions()
+	reg := townRegistry()
 
 	for name := range rigsConfig.Rigs {
 		prefix := session.PrefixFor(name)
@@ -647,7 +648,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 
 		opState, _ := getRigOperationalState(townRoot, name)
 
-		sessions := countRigSessions(allSessions, name)
+		sessions := countRigSessions(reg, allSessions, name)
 		summary := r.Summary()
 		rigs = append(rigs, rigInfo{
 			Name:        name,
@@ -731,10 +732,11 @@ func runRigMenu(cmd *cobra.Command, args []string) error {
 
 	var rigs []menuRig
 	allSessions, _ := t.ListSessions()
+	reg := townRegistry()
 	for name := range rigsConfig.Rigs {
 		opState, _ := getRigOperationalState(townRoot, name)
 
-		running := countRigSessions(allSessions, name) > 0
+		running := countRigSessions(reg, allSessions, name) > 0
 		led := GetRigLED(running, opState)
 		rigs = append(rigs, menuRig{
 			name:     name,
@@ -846,7 +848,7 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 
 	// Check for running tmux sessions before removing
 	t := tmux.NewTmux()
-	sessions, sessErr := findRigSessions(t, session.DefaultRegistry(), name)
+	sessions, sessErr := findRigSessions(t, townRegistry(), name)
 	if sessErr != nil {
 		if !rigRemoveForce {
 			return fmt.Errorf("could not verify session state for rig %s: %w (use --force to skip check)", name, sessErr)
@@ -1768,8 +1770,8 @@ func rigSessionsIn(reg *session.PrefixRegistry, all []string, rigName string) []
 
 // countRigSessions counts the sessions in all that belong to rigName: the
 // rig reads as running while any of its agents has a session.
-func countRigSessions(all []string, rigName string) int {
-	return len(rigSessionsIn(session.DefaultRegistry(), all, rigName))
+func countRigSessions(reg *session.PrefixRegistry, all []string, rigName string) int {
+	return len(rigSessionsIn(reg, all, rigName))
 }
 
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,

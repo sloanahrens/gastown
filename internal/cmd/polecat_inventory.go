@@ -189,7 +189,7 @@ func newPolecatSessionSet(reg *session.PrefixRegistry, sessionNames []string) po
 func newPolecatSessionSetFromNames(reg *session.PrefixRegistry, t sessionLister, sessionNames []string) polecatSessionSet {
 	sessions := make(polecatSessionSet, len(sessionNames))
 	for _, sessionName := range sessionNames {
-		rigName, polecatName, ok := parsePolecatSessionNameIn(reg, sessionName)
+		rigName, polecatName, ok := parsePolecatSessionName(reg, sessionName)
 		if !ok {
 			continue
 		}
@@ -230,15 +230,18 @@ func (s polecatSessionSet) session(rigName, polecatName string) (polecatSessionE
 	return entry, ok
 }
 
-func (s polecatSessionSet) namesForRig(rigName string) []string {
+// polecatsForRig returns the names of rigName's polecats that have a session,
+// sorted. The set parsed each session name when it was built, so callers need
+// no prefix registry to recover the polecat.
+func (s polecatSessionSet) polecatsForRig(rigName string) []string {
 	if len(s) == 0 {
 		return nil
 	}
 	var names []string
 	keyPrefix := rigName + polecatSessionKeySep
-	for key, entry := range s {
-		if strings.HasPrefix(key, keyPrefix) {
-			names = append(names, entry.Name)
+	for key := range s {
+		if polecatName, ok := strings.CutPrefix(key, keyPrefix); ok {
+			names = append(names, polecatName)
 		}
 	}
 	sort.Strings(names)

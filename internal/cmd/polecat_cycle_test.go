@@ -118,7 +118,7 @@ func TestParsePolecatSessionName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRig, gotPolecat, gotOk := parsePolecatSessionNameIn(polecatTestRegistry(), tt.sessionName)
+			gotRig, gotPolecat, gotOk := parsePolecatSessionName(polecatTestRegistry(), tt.sessionName)
 			if gotRig != tt.wantRig || gotPolecat != tt.wantPolecat || gotOk != tt.wantOk {
 				t.Errorf("parsePolecatSessionName(%q) = (%q, %q, %v), want (%q, %q, %v)",
 					tt.sessionName, gotRig, gotPolecat, gotOk, tt.wantRig, tt.wantPolecat, tt.wantOk)

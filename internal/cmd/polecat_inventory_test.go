@@ -25,8 +25,8 @@ func TestPolecatSessionSet(t *testing.T) {
 	if _, ok := sessions.lookup("gastown", "dom"); ok {
 		t.Fatal("crew session should not be indexed as polecat")
 	}
-	if got := sessions.namesForRig("gastown"); len(got) != 1 || got[0] != "gt-thunder" {
-		t.Fatalf("namesForRig(gastown) = %v", got)
+	if got := sessions.polecatsForRig("gastown"); len(got) != 1 || got[0] != "thunder" {
+		t.Fatalf("polecatsForRig(gastown) = %v", got)
 	}
 }
 
