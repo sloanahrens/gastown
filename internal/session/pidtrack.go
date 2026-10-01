@@ -3,34 +3,28 @@ package session
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // pidTracker holds the process operations PID tracking depends on, so tests
-// can script process start times and liveness instead of probing real PIDs.
+// can script process start tokens instead of probing real PIDs. A tracked
+// process is a procid.ID: the pid alone is reused once the process dies, so
+// a record is acted on only while the pid's start token still matches.
 type pidTracker struct {
-	startTime func(pid int) (string, error)
-	alive     func(pid int) bool
+	token     func(pid int) (string, bool)
 	terminate func(pid int) error
 }
 
 // osPIDTracker probes and signals real processes.
 var osPIDTracker = pidTracker{
-	startTime: processStartTime,
-	alive:     processAlive,
+	token:     procid.StartToken,
 	terminate: terminateProcess,
-}
-
-type trackedPID struct {
-	PID       int
-	StartTime string
 }
 
 // pidsDir returns the directory for PID tracking files.
@@ -73,17 +67,20 @@ func TrackPID(townRoot, sessionID string, pid int) error {
 }
 
 func (pt pidTracker) track(townRoot, sessionID string, pid int) error {
+	// A record without a start token could never be verified, so it could
+	// never be acted on: write none (deep review G1-21).
+	token, ok := pt.token(pid)
+	if !ok || token == "" {
+		return fmt.Errorf("reading start time of PID %d: process gone or unreadable", pid)
+	}
+
 	dir := pidsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating pids directory: %w", err)
 	}
 
-	path := pidFile(townRoot, sessionID)
-	record := strconv.Itoa(pid)
-	if start, err := pt.startTime(pid); err == nil && start != "" {
-		record = fmt.Sprintf("%d|%s", pid, start)
-	}
-	return os.WriteFile(path, []byte(record+"\n"), 0644)
+	record := procid.ID{PID: pid, Start: token}.String()
+	return os.WriteFile(pidFile(townRoot, sessionID), []byte(record+"\n"), 0644)
 }
 
 // UntrackPID removes the PID tracking file for a session.
@@ -126,7 +123,7 @@ func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []str
 			continue
 		}
 
-		record, err := parseTrackedPID(strings.TrimSpace(string(data)))
+		record, err := procid.Parse(string(data))
 		if err != nil {
 			// Corrupt PID file — remove it
 			_ = os.Remove(path)
@@ -134,27 +131,24 @@ func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []str
 		}
 		pid := record.PID
 
-		if !pt.alive(pid) {
+		if _, live := pt.token(pid); !live {
 			// Process is already dead — clean up PID file
 			_ = os.Remove(path)
 			continue
 		}
 
-		// If we have process birth info, verify this is still the same process.
-		// If PID was reused, skip killing to avoid terminating an active unrelated process.
-		if record.StartTime != "" {
-			currentStart, startErr := pt.startTime(pid)
-			if startErr != nil {
-				// Cannot verify process identity — leave the PID file so a
-				// future cleanup attempt can retry once ps is available again.
-				errSessions = append(errSessions, fmt.Sprintf("%s (PID %d): cannot verify start time: %v — skipping kill, preserving tracking file", sessionID, pid, startErr))
-				continue
-			}
-			if currentStart != record.StartTime {
-				// Confirmed PID reuse — safe to remove tracking file.
-				_ = os.Remove(path)
-				continue
-			}
+		if record.Start == "" {
+			// A bare PID from an older gt: something holds the number, but
+			// nothing says it is the process that was tracked. Refuse to
+			// signal it (deep review G1-21).
+			_ = os.Remove(path)
+			errSessions = append(errSessions, fmt.Sprintf("%s (PID %d): no start time recorded — not signaling an unverified process", sessionID, pid))
+			continue
+		}
+		if !record.Running(pt.token) {
+			// Confirmed PID reuse — safe to remove tracking file.
+			_ = os.Remove(path)
+			continue
 		}
 
 		// Process is alive — kill it
@@ -169,46 +163,6 @@ func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []str
 	}
 
 	return killed, errSessions
-}
-
-func parseTrackedPID(value string) (trackedPID, error) {
-	if value == "" {
-		return trackedPID{}, fmt.Errorf("empty pid record")
-	}
-	parts := strings.SplitN(value, "|", 2)
-	pid, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return trackedPID{}, err
-	}
-	record := trackedPID{PID: pid}
-	if len(parts) == 2 {
-		record.StartTime = parts[1]
-	}
-	return record, nil
-}
-
-// processStartTime returns the start time of a process via ps(1).
-// This works on Linux and macOS. On Windows (or minimal containers without ps),
-// the call will fail and callers degrade gracefully to PID-only tracking.
-func processStartTime(pid int) (string, error) {
-	cmd := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid))
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// processAlive reports whether pid names a running process. Signal 0 checks
-// existence without killing.
-func processAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // terminateProcess sends SIGTERM to pid.
