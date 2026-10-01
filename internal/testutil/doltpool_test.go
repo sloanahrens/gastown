@@ -254,6 +254,37 @@ func TestDoltPoolStoreAndInitLeasesPickTheirState(t *testing.T) {
 	}
 }
 
+func TestDoltPoolBdInitsTakeTemplateDatabasesFirst(t *testing.T) {
+	t.Parallel()
+	p, resets := newFakeDoltPool(t, 1, 0)
+	p.addInits(1)
+	tmpl := p.inits[0]
+	tmpl.initCommit, tmpl.head = "tmpl0", "tmpl0"
+
+	if store, err := p.acquire(leaseStore, "store", ""); err != nil || store != p.stores[0] {
+		t.Fatalf("store lease = %v, %v; want the store database, never a template one", store, err)
+	}
+	first, err := p.acquire(leaseInit, "init 1", "")
+	if err != nil || first != tmpl {
+		t.Fatalf("bd init lease = %v, %v; want the template database %s", first, err, tmpl.name)
+	}
+	if err := p.release(first); err != nil {
+		t.Fatal(err)
+	}
+	if got := resets.all(); len(got) != 1 || got[0] != tmpl.name+"@tmpl0" {
+		t.Errorf("release of a template database reset to %q, want its template commit", got)
+	}
+	if _, err := p.acquire(leaseInit, "init 2", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Every template database is leased and the store one too: the
+	// exhaustion error counts both.
+	_, err = p.acquire(leaseInit, "init 3", "")
+	if err == nil || !strings.Contains(err.Error(), "all 2 are leased") {
+		t.Errorf("third bd init lease = %v, want exhaustion over both kinds", err)
+	}
+}
+
 func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
