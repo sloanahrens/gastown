@@ -71,12 +71,12 @@ func lineColumn(data []byte, offset int64) (line, col int) {
 // absent file is nil; a present one that does not decode is a *ParseError;
 // any other read failure is returned as is.
 func CheckJSONFileParses(path string, v any) error {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	data, label, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	return DecodeJSONFile(path, data, v)
+	return DecodeJSONFile(label, data, v)
 }

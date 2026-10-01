@@ -25,6 +25,13 @@ type TownConfig struct {
 	// gt config set dolt.port write it; gt dolt start writes the server's
 	// config.yaml from it. Resolve it with ResolveDoltEndpoint.
 	Dolt *DoltEndpoint `json:"dolt,omitempty"`
+	// Registry is the rig registry, mayor/rigs.json's whole document, once
+	// gt config migrate moved it here (layout.go, gt-y3pgh.7). Its presence
+	// marks the two-file layout. Read it with LoadRigsConfig on the
+	// mayor/rigs.json path, which follows it here.
+	Registry *RigsConfig `json:"registry,omitempty"`
+	// Overseer is mayor/overseer.json's document on the two-file layout.
+	Overseer *OverseerConfig `json:"overseer,omitempty"`
 }
 
 // DoltEndpoint is where the town's Dolt sql-server listens. An empty Host is
@@ -145,6 +152,14 @@ type TownSettings struct {
 	// "landing_worker", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
+
+	// Daemon is mayor/daemon.json's whole document (heartbeat, patrols) on
+	// the two-file layout (layout.go, gt-y3pgh.7). Read it with
+	// LoadDaemonPatrolConfig on the mayor/daemon.json path.
+	Daemon *DaemonPatrolConfig `json:"daemon,omitempty"`
+	// Escalation is settings/escalation.json's document on the two-file
+	// layout.
+	Escalation *EscalationConfig `json:"escalation,omitempty"`
 }
 
 // NewTownSettings creates a new TownSettings with defaults.
