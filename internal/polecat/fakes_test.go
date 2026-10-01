@@ -2,11 +2,10 @@ package polecat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -14,205 +13,317 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// agentShowJSON is the agent bead the bd stand-ins answer `show` with: an
-// idle polecat whose fields parse the way a real agent bead's do.
-// withCleanup=false leaves cleanup_status out, as for a polecat that never
-// reported one.
-func agentShowJSON(id string, withCleanup bool) string {
-	desc := `agent\n\nrole_type: polecat\nagent_state: idle\nhook_bead: null\n`
-	if withCleanup {
-		desc += `cleanup_status: clean\n`
-	}
-	desc += `active_mr: null\nbranch: polecat/toast/gt-work@abc123`
-	return fmt.Sprintf(`[{"id":%q,"title":"agent","issue_type":"agent","description":"%s"}]`+"\n", id, desc)
+// polecatDB is one beads database as the Manager sees it: a beadsfake
+// database plus the agent-bead and merge-request helpers polecatBeads adds,
+// each reduced to the Client operations *beads.Beads performs. It records the
+// sites the manager opened it for and every write.
+type polecatDB struct {
+	*beadsfake.Fake
+
+	mu sync.Mutex
+	// err, when set, fails every read and write: a rig with no database, or
+	// no bd installed.
+	err error
+	// createErr, when set, fails agent-bead creation only.
+	createErr error
+	// hidden agent beads read as not found (a bead that cannot be read).
+	hidden  map[string]bool
+	sites   []beadsSite
+	updates []string // "<id>" per Update, in order
+	reads   int      // Show, List and assignee reads
 }
 
-// bdCommand is the bd subcommand in args: the first argument that is not a
-// flag, the way the shell stubs these replace picked it.
-func bdCommand(args []string) (cmd string, rest []string) {
-	for i, a := range args {
-		if !strings.HasPrefix(a, "--") {
-			return a, args[i+1:]
-		}
-	}
-	return "", nil
+func newPolecatDB() *polecatDB {
+	return &polecatDB{Fake: beadsfake.New(), hidden: map[string]bool{}}
 }
 
-// fakeBd answers a Manager's bd calls in process, in place of a bd stub put
-// on PATH (which no parallel test may do). It records every call's argv.
-type fakeBd struct {
-	mu     sync.Mutex
-	answer func(cmd string, args []string) string
-	// answerCall, when set, answers instead of answer and also sees the
-	// call's directory and environment.
-	answerCall func(c beads.BDCall) string
-	calls      []beads.BDCall
+// noDatabaseErr is what the real bd says, with exit 1, to any call in a
+// directory with no beads database.
+var noDatabaseErr = errors.New("Error: no beads database found\nHint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database")
+
+// newNoDatabaseDB is a rig with no beads database, what a test with no bd set
+// up used to reach through the real bd on PATH.
+func newNoDatabaseDB() *polecatDB {
+	db := newPolecatDB()
+	db.err = noDatabaseErr
+	return db
 }
 
-func (f *fakeBd) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	cmd, rest := bdCommand(c.Args)
-	f.mu.Lock()
-	f.calls = append(f.calls, beads.BDCall{Dir: c.Dir, Env: append([]string(nil), c.Env...), Args: append([]string(nil), c.Args...)})
-	answer, answerCall := f.answer, f.answerCall
-	f.mu.Unlock()
-	if cmd == "version" {
-		// The --allow-stale probe: answering nothing keeps argv unprefixed.
-		return nil, nil, nil
-	}
-	var out string
-	if answerCall != nil {
-		out = answerCall(c)
-	} else {
-		out = answer(cmd, rest)
-	}
-	if out == bdMissing {
-		return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
-	}
-	if out == "" && (cmd == "list" || cmd == "query") && slices.Contains(c.Args, "--json") {
-		// The fork's --json list/query prints "[]" for no rows, never nothing;
-		// gastown treats empty output from a --json call as a failed read.
-		out = "[]"
-	}
-	if msg, failed := strings.CutPrefix(out, bdFailure); failed {
-		return nil, []byte(msg), bdExit{1}
-	}
-	return []byte(out), nil, nil
+// newMissingDB is a host with no bd installed.
+func newMissingDB() *polecatDB {
+	db := newPolecatDB()
+	db.err = beads.ErrNotInstalled
+	return db
 }
 
-// bdFailure marks an answer as bd's stderr on a failed call (exit 1).
-const bdFailure = "\x00fail:"
-
-// bdMissing answers as if there were no bd on PATH at all.
-const bdMissing = "\x00missing"
-
-// newMissingBd is a host with no bd installed.
-func newMissingBd() *fakeBd {
-	return &fakeBd{answer: func(string, []string) string { return bdMissing }}
+// open is the manager's opener: it records the site and hands out db.
+func (db *polecatDB) open(site beadsSite) polecatBeads {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.sites = append(db.sites, site)
+	return db
 }
 
-// bdExit is a bd exit status, as *exec.ExitError carries one.
-type bdExit struct{ code int }
-
-func (e bdExit) Error() string { return fmt.Sprintf("exit status %d", e.code) }
-func (e bdExit) ExitCode() int { return e.code }
-
-// noDatabaseAnswer is what the real bd says, on stderr with exit 1, to any
-// call in a directory with no beads database.
-const noDatabaseAnswer = bdFailure + "Error: no beads database found\n" +
-	"Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database\n" +
-	"      or set BEADS_DIR to point to your .beads directory\n"
-
-// newNoDatabaseBd is bd in a rig with no beads database, what a test with no
-// bd set up used to reach through the real bd on PATH.
-func newNoDatabaseBd() *fakeBd {
-	return &fakeBd{answer: func(string, []string) string { return noDatabaseAnswer }}
+func (db *polecatDB) openedSites() []beadsSite {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return append([]beadsSite(nil), db.sites...)
 }
 
-// become switches f to answer like other from now on, as a test that put a
-// different bd stub first on PATH mid-test did.
-func (f *fakeBd) become(other *fakeBd) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.answer = other.answer
+func (db *polecatDB) updated() []string {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return append([]string(nil), db.updates...)
 }
 
-// argvs returns every recorded call but the --allow-stale capability probe,
-// joined with spaces, as the shell stubs logged them.
-func (f *fakeBd) argvs() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]string, 0, len(f.calls))
-	for _, c := range f.calls {
-		if cmd, _ := bdCommand(c.Args); cmd == "version" {
+func (db *polecatDB) readCount() int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.reads
+}
+
+func (db *polecatDB) read() {
+	db.mu.Lock()
+	db.reads++
+	db.mu.Unlock()
+}
+
+func (db *polecatDB) Show(id string) (*beads.Issue, error) {
+	db.read()
+	if db.err != nil {
+		return nil, db.err
+	}
+	return db.Fake.Show(id)
+}
+
+func (db *polecatDB) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	db.read()
+	if db.err != nil {
+		return nil, db.err
+	}
+	return db.Fake.List(opts)
+}
+
+func (db *polecatDB) ListByAssignee(assignee string) ([]*beads.Issue, error) {
+	db.read()
+	if db.err != nil {
+		return nil, db.err
+	}
+	return db.Fake.ListByAssignee(assignee)
+}
+
+func (db *polecatDB) GetAssignedIssue(assignee string) (*beads.Issue, error) {
+	db.read()
+	if db.err != nil {
+		return nil, db.err
+	}
+	return db.Fake.GetAssignedIssue(assignee)
+}
+
+func (db *polecatDB) ListIssueStatuses(statuses ...beads.IssueStatus) ([]*beads.Issue, error) {
+	db.read()
+	if db.err != nil {
+		return nil, db.err
+	}
+	return db.Fake.ListIssueStatuses(statuses...)
+}
+
+func (db *polecatDB) Update(id string, opts beads.UpdateOptions) error {
+	if db.err != nil {
+		return db.err
+	}
+	db.mu.Lock()
+	db.updates = append(db.updates, id)
+	db.mu.Unlock()
+	return db.Fake.Update(id, opts)
+}
+
+func (db *polecatDB) ReleaseIfAssignee(id, expected string) (bool, error) {
+	if db.err != nil {
+		return false, db.err
+	}
+	return db.Fake.ReleaseIfAssignee(id, expected)
+}
+
+func (db *polecatDB) RecordReassignment(id, from, to, requester string, branches []string) error {
+	if db.err != nil {
+		return db.err
+	}
+	return beads.RecordReassignmentIn(db.Fake, id, from, to, requester, branches)
+}
+
+func (db *polecatDB) FindMRForBranch(branch string) (*beads.Issue, error) {
+	return db.findMR(branch, true)
+}
+
+func (db *polecatDB) FindMRForBranchAny(branch string) (*beads.Issue, error) {
+	return db.findMR(branch, false)
+}
+
+func (db *polecatDB) findMR(branch string, skipClosed bool) (*beads.Issue, error) {
+	mrs, err := db.List(beads.ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
+	if err != nil {
+		return nil, err
+	}
+	for _, mr := range mrs {
+		if skipClosed && mr.Status == "closed" {
 			continue
 		}
-		out = append(out, strings.Join(c.Args, " "))
-	}
-	return out
-}
-
-// envValue is key's value in env, and whether it is set.
-func envValue(env []string, key string) (string, bool) {
-	for i := len(env) - 1; i >= 0; i-- {
-		if v, ok := strings.CutPrefix(env[i], key+"="); ok {
-			return v, true
+		if strings.HasPrefix(mr.Description, "branch: "+branch+"\n") {
+			return mr, nil
 		}
 	}
-	return "", false
+	return nil, nil
 }
 
-// createAnswer is the stubs' `create` reply: the requested --id, open.
-func createAnswer(args []string) string {
-	id := "mock-1"
-	for _, a := range args {
-		if v, ok := strings.CutPrefix(a, "--id="); ok {
-			id = v
+func (db *polecatDB) isHidden(id string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.hidden[id]
+}
+
+func (db *polecatDB) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
+	if db.isHidden(id) {
+		return nil, nil, fmt.Errorf("%s: %w", id, beads.ErrNotFound)
+	}
+	issue, err := db.Show(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !beads.IsAgentBead(issue) {
+		return nil, nil, fmt.Errorf("issue %s is not an agent bead (type=%s)", id, issue.Type)
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
+	return issue, fields, nil
+}
+
+func (db *polecatDB) CreateOrReopenAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error) {
+	if db.err != nil {
+		return nil, db.err
+	}
+	if db.createErr != nil {
+		return nil, db.createErr
+	}
+	description := beads.FormatAgentDescription(title, fields)
+	if _, err := db.Fake.Show(id); err != nil {
+		return db.Fake.Create(beads.CreateOptions{ID: id, Title: title, Description: description, Labels: []string{"gt:agent"}, Priority: -1})
+	}
+	open := string(beads.StatusOpen)
+	if err := db.Fake.Update(id, beads.UpdateOptions{Title: &title, Description: &description, Status: &open, SetLabels: []string{"gt:agent"}}); err != nil {
+		return nil, err
+	}
+	db.mu.Lock()
+	delete(db.hidden, id)
+	db.mu.Unlock()
+	return db.Fake.Show(id)
+}
+
+func (db *polecatDB) ResetAgentBeadForReuse(id, reason string) error {
+	issue, err := db.Show(id)
+	if err != nil {
+		return err
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	*fields = beads.AgentFields{RoleType: fields.RoleType, Rig: fields.Rig, AgentState: string(beads.AgentStateNuked)}
+	description := beads.FormatAgentDescription(issue.Title, fields)
+	return db.Update(id, beads.UpdateOptions{Description: &description})
+}
+
+func (db *polecatDB) UpdateAgentState(id, state string) error {
+	if db.err != nil {
+		return db.err
+	}
+	return beads.UpdateAgentDescriptionFields(db.Fake, id, beads.AgentFieldUpdates{AgentState: &state})
+}
+
+func (db *polecatDB) ListAgentBeads() (map[string]*beads.Issue, error) {
+	issues, err := db.List(beads.ListOptions{Label: "gt:agent", Priority: -1, IncludeInfra: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*beads.Issue, len(issues))
+	for _, is := range issues {
+		if !db.isHidden(is.ID) {
+			out[is.ID] = is
 		}
 	}
-	return fmt.Sprintf(`{"id":%q,"status":"open","created_at":"2025-01-01T00:00:00Z"}`+"\n", id)
+	return out, nil
 }
 
-// showID is the issue ID a `show` call names.
-func showID(args []string) string {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "--") {
-			return a
-		}
+// setAgent writes agent bead id, creating it when missing: edit changes the
+// fields of what is there (a polecat in its idle resting state, clean, when
+// the bead is new).
+func (db *polecatDB) setAgent(t testing.TB, id string, edit func(*beads.AgentFields)) {
+	t.Helper()
+	fields := &beads.AgentFields{RoleType: "polecat", AgentState: "idle", CleanupStatus: "clean"}
+	title := "agent"
+	if existing, err := db.Fake.Show(id); err == nil {
+		fields = beads.ParseAgentFields(existing.Description)
+		title = existing.Title
 	}
-	return ""
-}
-
-// newAgentBd is the bd AddWithOptions and friends need: creates succeed,
-// writes succeed silently, and every show is an idle agent bead.
-// withCleanup=false omits cleanup_status from that bead.
-func newAgentBd(withCleanup bool) *fakeBd {
-	return &fakeBd{answer: func(cmd string, args []string) string {
-		switch cmd {
-		case "create":
-			return createAnswer(args)
-		case "show":
-			return agentShowJSON(showID(args), withCleanup)
+	if edit != nil {
+		edit(fields)
+	}
+	description := beads.FormatAgentDescription(title, fields)
+	if _, err := db.Fake.Show(id); err != nil {
+		if _, err := db.Fake.Create(beads.CreateOptions{ID: id, Title: title, Description: description, Labels: []string{"gt:agent"}, Priority: -1}); err != nil {
+			t.Fatalf("create agent bead %s: %v", id, err)
 		}
-		return ""
-	}}
+		return
+	}
+	if err := db.Fake.Update(id, beads.UpdateOptions{Description: &description}); err != nil {
+		t.Fatalf("update agent bead %s: %v", id, err)
+	}
+	db.mu.Lock()
+	delete(db.hidden, id)
+	db.mu.Unlock()
 }
 
-// newEmptyBd is a bd with no issues: show and list answer an empty array.
-func newEmptyBd() *fakeBd {
-	return &fakeBd{answer: func(cmd string, _ []string) string {
-		if cmd == "show" || cmd == "list" {
-			return "[]\n"
-		}
-		return ""
-	}}
+// settleAgent puts agent bead id in the resting state of a polecat whose
+// spawn finished: idle, clean, nothing hooked, working on branch.
+func (db *polecatDB) settleAgent(t testing.TB, id, branch string) {
+	t.Helper()
+	db.setAgent(t, id, func(f *beads.AgentFields) {
+		f.AgentState, f.CleanupStatus, f.HookBead, f.ActiveMR, f.Branch = "idle", "clean", "", "", branch
+	})
 }
 
-// newTestManager is NewManager with a fake bd, a fake tmux when tm is
-// non-nil, and git answered by w (a fresh, empty world when nil). Nothing it
-// builds reads PATH, reaches a tmux server or runs git.
+// forgetAgent makes agent bead id unreadable, as a bead that could not be
+// read at all.
+func (db *polecatDB) forgetAgent(id string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.hidden[id] = true
+}
+
+// newTestManager is NewManager with db as the bead store (nil for a real bd),
+// a fake tmux when tm is non-nil, and git answered by w (a fresh, empty world
+// when nil). Nothing it builds reads PATH, reaches a tmux server or runs git.
 //
-// With a fake bd, the rig's own config reads (the rig identity bead) go to it
-// too, and when the rig's beads directory exists the types sentinel is
-// written there: beads.EnsureCustomTypes runs bd itself, outside any runner,
-// unless the sentinel says the custom types are already configured.
-func newTestManager(r *rig.Rig, w *world, tm sessionProbe, bd *fakeBd) *Manager {
-	var run beads.BDRunner
-	if bd != nil {
-		run = bd.run
+// With a fake store, the rig's own config reads (the rig identity bead) go to
+// it too, and when the rig's beads directory exists the types sentinel is
+// written there: beads.EnsureCustomTypes runs bd itself unless the sentinel
+// says the custom types are already configured.
+func newTestManager(r *rig.Rig, w *world, tm sessionProbe, db *polecatDB) *Manager {
+	var open func(beadsSite) polecatBeads
+	if db != nil {
+		open = db.open
 		if r.IdentityBeads == nil {
-			r.IdentityBeads = beads.NewWithBeadsDirAndRunner(r.Path, beads.ResolveBeadsDir(r.Path), run)
+			r.IdentityBeads = db
 		}
 		markTypesConfigured(beads.ResolveBeadsDir(r.Path))
 	}
 	if w == nil {
 		w = newWorld()
 	}
-	m := newManager(r, w.repo(r.Path), tm, run)
+	m := newManager(r, w.repo(r.Path), tm, open)
 	m.gits = w.opener()
 	// util.CheckDiskSpace runs diskutil on macOS; the disk is never full.
 	m.diskSpace = func(string) (util.DiskSpaceLevel, string, error) { return util.DiskSpaceOK, "", nil }
@@ -301,11 +412,4 @@ func driveClock[T any](t *testing.T, clk *clockwork.FakeClock, step time.Duratio
 			clk.Advance(step)
 		}
 	}
-}
-
-// recorded returns a copy of every call f has answered.
-func (f *fakeBd) recorded() []beads.BDCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]beads.BDCall(nil), f.calls...)
 }

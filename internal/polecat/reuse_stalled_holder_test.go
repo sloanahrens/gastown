@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -19,8 +20,8 @@ const stalledBead = "gt-x"
 // stalledHolderFixture is a rig where beta, a polecat whose session is dead and
 // whose bead stalledBead is still hooked, holds heldBranch, which origin also
 // has at main's commit. alpha is the polecat that resumes it. labels are the
-// hooked bead's labels, as a JSON array body.
-func stalledHolderFixture(t *testing.T, labels string) (mgr *Manager, w *world, alpha, beta *Polecat, heldBranch, tip string) {
+// hooked bead's labels.
+func stalledHolderFixture(t *testing.T, labels []string) (mgr *Manager, w *world, alpha, beta *Polecat, heldBranch, tip string) {
 	t.Helper()
 	mgr, mayorRig, bd, added, w := canonicalWithPolecats(t, false, "alpha", "beta")
 	alpha, beta = added["alpha"], added["beta"]
@@ -35,23 +36,13 @@ func stalledHolderFixture(t *testing.T, labels string) (mgr *Manager, w *world, 
 	// the manager cannot tell a dead session from a live one.
 	mgr.tmux = newFakeProbe()
 
-	base := bd.answer
-	hooked := `[{"id":"` + stalledBead + `","status":"hooked","assignee":"` + mgr.assigneeID("beta") + `","labels":` + labels + `}]`
-	bd.mu.Lock()
-	bd.answer = func(cmd string, args []string) string {
-		if cmd == "list" && strings.Contains(strings.Join(args, " "), "hooked") &&
-			strings.Contains(strings.Join(args, " "), mgr.assigneeID("beta")) {
-			return hooked
-		}
-		return base(cmd, args)
-	}
-	bd.mu.Unlock()
+	bd.Seed(beads.Issue{ID: stalledBead, Title: "work", Status: "hooked", Assignee: mgr.assigneeID("beta"), Labels: labels})
 	return mgr, w, alpha, beta, heldBranch, tip
 }
 
 func TestReuseIdlePolecat_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing.T) {
 	t.Parallel()
-	mgr, w, alpha, beta, heldBranch, tip := stalledHolderFixture(t, `[]`)
+	mgr, w, alpha, beta, heldBranch, tip := stalledHolderFixture(t, nil)
 
 	if p, err := mgr.loadFromBeads("beta", nil); err != nil || p.State != StateStalled {
 		t.Fatalf("fixture: beta = %+v, %v; want a stalled polecat", p, err)
@@ -79,7 +70,7 @@ func TestReuseIdlePolecat_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing
 
 func TestAddWithOptions_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing.T) {
 	t.Parallel()
-	mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, `[]`)
+	mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, nil)
 
 	gamma, err := mgr.AddWithOptions("gamma", AddOptions{HookBead: stalledBead, ResumeBranch: heldBranch})
 	if err != nil {
@@ -100,7 +91,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 
 	cases := []struct {
 		name   string
-		labels string
+		labels []string
 		bead   string // the bead alpha is slung; stalledBead when empty
 		setup  func(t *testing.T, w *world, mgr *Manager, beta *Polecat)
 	}{
@@ -114,7 +105,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 		},
 		{
 			name:   "submitted for landing",
-			labels: `["gt:ready-to-land"]`,
+			labels: []string{"gt:ready-to-land"},
 		},
 		{
 			name: "uncommitted edits",
@@ -159,11 +150,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			labels := tc.labels
-			if labels == "" {
-				labels = `[]`
-			}
-			mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, labels)
+			mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, tc.labels)
 			if tc.setup != nil {
 				tc.setup(t, w, mgr, beta)
 			}

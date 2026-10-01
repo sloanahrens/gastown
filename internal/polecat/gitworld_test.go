@@ -81,20 +81,20 @@ func buildRigIn(t *testing.T, w *world, root string, files map[string]string) {
 
 // canonicalRig builds the canonical rig in a new world and returns its
 // manager (with the fake agent bd), the mayor/rig path, the bd and the world.
-func canonicalRig(t *testing.T) (*Manager, string, *fakeBd, *world) {
+func canonicalRig(t *testing.T) (*Manager, string, *polecatDB, *world) {
 	t.Helper()
 	w := newWorld()
 	town := t.TempDir()
 	root := filepath.Join(town, "rig")
 	buildCanonicalRigIn(t, w, root)
-	bd := newAgentBd(true)
+	bd := newPolecatDB()
 	mgr := newTestManager(&rig.Rig{Name: "rig", Path: root}, w, nil, bd)
 	return mgr, filepath.Join(root, "mayor", "rig"), bd, w
 }
 
 // canonicalWithPolecats is canonicalRig with the named polecats added
 // through AddWithOptions and, with clean, their untracked files removed.
-func canonicalWithPolecats(t *testing.T, clean bool, names ...string) (*Manager, string, *fakeBd, map[string]*Polecat, *world) {
+func canonicalWithPolecats(t *testing.T, clean bool, names ...string) (*Manager, string, *polecatDB, map[string]*Polecat, *world) {
 	t.Helper()
 	mgr, mayorRig, bd, w := canonicalRig(t)
 	added := map[string]*Polecat{}
@@ -108,6 +108,8 @@ func canonicalWithPolecats(t *testing.T, clean bool, names ...string) (*Manager,
 				t.Fatal(err)
 			}
 		}
+		// A polecat that finished its spawn rests idle, clean.
+		bd.settleAgent(t, mgr.agentBeadID(name), p.Branch)
 		added[name] = p
 	}
 	return mgr, mayorRig, bd, added, w
