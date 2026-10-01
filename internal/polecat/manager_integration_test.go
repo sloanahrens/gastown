@@ -104,7 +104,7 @@ func TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) 
 	r := &rig.Rig{Name: rigName, Path: rigPath}
 	mgr := NewManager(r, git.NewGit(rigPath), nil, nil)
 
-	stale, err := mgr.beads.Create(beads.CreateOptions{
+	stale, err := mgr.beads.(*beads.Beads).Create(beads.CreateOptions{
 		Title:    "stale old issue",
 		Type:     "task",
 		Priority: 2,
@@ -112,7 +112,7 @@ func TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create stale issue: %v", err)
 	}
-	current, err := mgr.beads.Create(beads.CreateOptions{
+	current, err := mgr.beads.(*beads.Beads).Create(beads.CreateOptions{
 		Title:    "current hooked issue",
 		Type:     "task",
 		Priority: 2,
@@ -246,7 +246,7 @@ func TestIntegrationAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) 
 
 // realAddBeads initializes a real beads database on the test Dolt container
 // in mayorRig and returns nil, so the manager runs the real bd.
-func realAddBeads(t *testing.T, mayorRig, _ string) *fakeBd {
+func realAddBeads(t *testing.T, mayorRig, _ string) *polecatDB {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())

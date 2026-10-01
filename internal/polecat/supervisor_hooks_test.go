@@ -105,7 +105,7 @@ func TestManagerHousekeepingKillsUseCleanupHook(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	tm := newFakeProbe()
-	m := newTestManager(&rig.Rig{Name: "myrig", Path: filepath.Join(townRoot, "myrig")}, nil, tm, newNoDatabaseBd())
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: filepath.Join(townRoot, "myrig")}, nil, tm, newNoDatabaseDB())
 	for _, name := range []string{"toast", "nux"} {
 		if err := tm.NewSessionWithCommandAndEnv(session.PolecatSessionName(session.DefaultPrefix, name), townRoot, "sleep 300", nil); err != nil {
 			t.Fatal(err)

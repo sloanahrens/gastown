@@ -21,6 +21,4 @@ internal/deps/beads.go argv 1
 internal/mail/bd.go argv 2
 internal/mail/router_integration_test.go argv 1
 internal/plugin/recording.go argv 1
-internal/polecat/fakes_test.go BDRunner 1
-internal/polecat/manager.go BDRunner 1
 internal/testutil/cmd.go argv 2
