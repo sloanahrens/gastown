@@ -306,6 +306,36 @@ func TestPassDirectPushWatchSeedsFromTheLastRun(t *testing.T) {
 	}
 }
 
+// gt-gb4ij: a daemon restart kills the in-flight run; the first pass after
+// the start runs the landing again when its verdict was never reached.
+func TestPassResumesALandingRunARestartCutShort(t *testing.T) {
+	t.Parallel()
+	recs := []land.LandingRecord{{BeadID: "gt-old", Target: "main", LandedCommit: "l0"}, {BeadID: "gt-new", Target: "main", LandedCommit: "l1"}}
+	h := newHarness(t)
+	trig := &recordTrigger{}
+	h.w.PostLand, h.w.WatchTarget = trig, "main"
+	h.w.MainState = &MemoryMainState{st: MainState{LastRun: "l0"}}
+	h.files.recs = recs
+	h.remote.tips["main"] = "l1"
+	h.w.Pass(context.Background())
+	h.w.Pass(context.Background())
+	if len(trig.got) != 1 || trig.got[0] != (PostLand{BeadID: "gt-new", Commit: "l1", Target: "main"}) {
+		t.Fatalf("triggers %+v; want one landing run at l1 for gt-new", trig.got)
+	}
+
+	// The landing's verdict was reached before the restart: nothing to resume.
+	h2 := newHarness(t)
+	trig2 := &recordTrigger{}
+	h2.w.PostLand, h2.w.WatchTarget = trig2, "main"
+	h2.w.MainState = &MemoryMainState{st: MainState{LastRun: "l1"}}
+	h2.files.recs = recs
+	h2.remote.tips["main"] = "l1"
+	h2.w.Pass(context.Background())
+	if len(trig2.got) != 0 {
+		t.Fatalf("triggers %+v; l1 was already tested", trig2.got)
+	}
+}
+
 func TestPostLandDirectRedCommentsOnNoBead(t *testing.T) {
 	t.Parallel()
 	comments := &commentLog{}

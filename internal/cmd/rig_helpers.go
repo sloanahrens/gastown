@@ -118,6 +118,30 @@ func hasRigBeadLabel(townRoot, rigName, label string) bool {
 	return false
 }
 
+// slingBlocked reports why a sling into rigName must not run, as a short
+// label and the error to return, or ("", nil) when it may. An E-stop covering
+// the rig (the town sentinel or ESTOP.<rig>, read through estopOn, which
+// fails closed) refuses every sling, explicit ones included, because running
+// sessions keep working under an E-stop and must not dispatch more
+// (gt-4k3fj.4). A parked or docked rig, read through parked, refuses next.
+func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
+	if on, err := estopOn(townRoot, rigName); on {
+		why := "E-stop active"
+		if err != nil {
+			why = err.Error()
+		}
+		return "e-stop", fmt.Errorf("cannot sling to rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)
+	}
+	if blocked, reason := parked(townRoot, rigName); blocked {
+		undoCmd := "gt rig unpark"
+		if reason == "docked" {
+			undoCmd = "gt rig undock"
+		}
+		return "rig " + reason, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
+	}
+	return "", nil
+}
+
 // IsRigParkedOrDocked checks if a rig is parked or docked by any mechanism
 // (wisp ephemeral state or persistent bead labels). Returns (blocked, reason).
 // This is the single entry point for all dispatch paths (sling, convoy launch,

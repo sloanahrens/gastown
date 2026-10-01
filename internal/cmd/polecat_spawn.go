@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -591,12 +592,8 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		return nil, fmt.Errorf("admission control: %w", err)
 	}
 
-	if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
-		undoCmd := "gt rig unpark"
-		if reason == "docked" {
-			undoCmd = "gt rig undock"
-		}
-		return nil, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
+	if _, err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
+		return nil, err
 	}
 
 	// The reclaim sweep frees a slot that counts toward capacity, so it runs

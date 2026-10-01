@@ -511,8 +511,7 @@ func observeCleanupStatus(g *git.Git, branch string) string {
 // That dependency was the silent hole: getAgentBeadID returns "" for a
 // RoleUnknown/rig-less context, and every agent-bead write in gt done is
 // guarded by `agentBeadID != ""`. When role detection degraded, gt done skipped
-// the done-intent label, the resume checkpoints, active_mr, the completion
-// metadata, agent_state AND the cleanup_status self-report, then exited 0 and
+// the resume checkpoints, active_mr, the completion metadata, agent_state AND the cleanup_status self-report, then exited 0 and
 // logged "[done]" — leaving a slot that reads cleanup_status=<missing> with no
 // later writer to repair it (see selfReportCleanupStatus and reclaim.go).
 //
@@ -575,8 +574,8 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 // Two shapes of skip are closed here:
 //
 //   - A failed submission returns before reportDone, so runDone records the
-//     status on that path too. A failed push is exactly the case where the
-//     witness needs to see "has_unpushed".
+//     status on that path too. A failed push is exactly the case where
+//     polecat reclaim needs to see "has_unpushed".
 //   - A status that could not be observed stays "" or parses to CleanupUnknown.
 //     Re-observing the live worktree at completion time is the last chance to
 //     record a real value; if even that fails, "unknown" is recorded rather
@@ -596,7 +595,7 @@ func selfReportCleanupStatus(g *git.Git, branch string, updater cleanupStatusUpd
 	}
 	status := resolveCleanupStatusForSelfReport(doneCleanupStatus, observed)
 	if err := updater.UpdateAgentCleanupStatus(agentBeadID, string(status)); err != nil {
-		// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
+		// Non-fatal: the rest of gt done still runs (za-o9e)
 		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
 	}
 }
@@ -902,9 +901,8 @@ type doneSubmission struct {
 	sourceBD    beads.Client
 }
 
-func runDone(cmd *cobra.Command, args []string) (retErr error) {
+func runDone(cmd *cobra.Command, args []string) error {
 	// Guard: Only polecats should call gt done
-	// Crew, deacons, witnesses etc. don't use gt done - they persist across tasks.
 	// Polecat sessions end with gt done — the session is cleaned up, but the
 	// polecat's persistent identity (agent bead, CV chain) survives across assignments.
 	// Crew submit their pushed branch for landing (gt-3e7tk); every other
@@ -951,7 +949,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Auto-detect cleanup status if not explicitly provided
-	// This prevents premature polecat cleanup by ensuring witness knows git state
+	// This prevents premature polecat cleanup by recording the git state
 	if doneCleanupStatus == "" {
 		doneCleanupStatus = observeCleanupStatus(r.g, r.branch)
 	}
@@ -977,9 +975,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	r.agentBeadID = getAgentBeadID(ctx)
 
-	// Recreate the agent bead if it's missing (hq-xu4p). Done-intent labels
-	// and completion metadata write to it; when it's gone every write fails
-	// 'issue not found' and witness zombie detection silently degrades.
+	// Recreate the agent bead if it's missing (hq-xu4p). Completion metadata
+	// writes to it; when it's gone every write fails
+	// 'issue not found'.
 	ensureAgentBeadExists(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, ctx)
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
@@ -1015,20 +1013,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	// Write the done-intent label before the long stages, so the Witness can
-	// tell a polecat that died inside gt done from one still working. A run
-	// that fails does not report done and keeps its session to fix the
-	// failure, so the label must not outlive it: a stale done-intent label
-	// gets a working polecat restarted (gt-wmpy). Every error return is such a
-	// run: reportDone's only error comes before the Witness nudge. A run that
-	// succeeds leaves the label to updateAgentStateOnDone, which clears it last.
-	if r.agentBeadID != "" {
-		release := holdDoneIntent(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, exitType)
-		defer func() { release(retErr) }()
-	}
-
-	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the witness
-	// trusts the agent until the heartbeat goes stale.
+	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the agent is
+	// trusted until the heartbeat goes stale.
 	r.heartbeatSession = os.Getenv("GT_SESSION")
 	if r.heartbeatSession != "" && r.townRoot != "" {
 		polecat.TouchSessionHeartbeatWithState(r.townRoot, r.heartbeatSession, polecat.HeartbeatExiting, "gt done", r.issueID)
@@ -1862,67 +1848,6 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 	return fmt.Sprintf("push failed for branch '%s': %v [after retry: %v]", branch, pushErr, verifyErr)
 }
 
-// holdDoneIntent writes the done-intent label and returns what runDone
-// defers: it clears the label when the run failed, and leaves it to
-// updateAgentStateOnDone when the run reported done (gt-wmpy).
-func holdDoneIntent(bd beads.Client, agentBeadID, exitType string) func(runErr error) {
-	setDoneIntentLabel(bd, agentBeadID, exitType)
-	return func(runErr error) {
-		if runErr != nil {
-			clearDoneIntentLabel(bd, agentBeadID)
-		}
-	}
-}
-
-// setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
-// EARLY in gt done, before push/MR. This allows the Witness to detect polecats that
-// crashed mid-gt-done: if the session is dead but done-intent exists, the polecat was
-// trying to exit and should be auto-nuked.
-//
-// Follows the existing idle:N / backoff-until:TIMESTAMP label pattern.
-// Non-fatal: if this fails, gt done continues without the safety net.
-func setDoneIntentLabel(bd beads.Client, agentBeadID, exitType string) {
-	if agentBeadID == "" {
-		return
-	}
-	label := fmt.Sprintf("done-intent:%s:%d", exitType, time.Now().Unix())
-	if err := bd.Update(agentBeadID, beads.UpdateOptions{
-		AddLabels: []string{label},
-	}); err != nil {
-		// Non-fatal: warn but continue
-		fmt.Fprintf(os.Stderr, "Warning: couldn't set done-intent label on %s: %v\n", agentBeadID, err)
-	}
-}
-
-// clearDoneIntentLabel removes any done-intent:* label from the agent bead.
-// Called at the end of updateAgentStateOnDone on clean exit.
-// Uses read-modify-write pattern (same as clearAgentBackoffUntil).
-func clearDoneIntentLabel(bd beads.Client, agentBeadID string) {
-	if agentBeadID == "" {
-		return
-	}
-	issue, err := bd.Show(agentBeadID)
-	if err != nil {
-		return // Agent bead gone, nothing to clear
-	}
-
-	var toRemove []string
-	for _, label := range issue.Labels {
-		if strings.HasPrefix(label, "done-intent:") {
-			toRemove = append(toRemove, label)
-		}
-	}
-	if len(toRemove) == 0 {
-		return // No done-intent label to clear
-	}
-
-	if err := bd.Update(agentBeadID, beads.UpdateOptions{
-		RemoveLabels: toRemove,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear done-intent label on %s: %v\n", agentBeadID, err)
-	}
-}
-
 // clearDoneCheckpoints removes done-cp:* labels from the agent bead. gt done
 // no longer writes them (its push is idempotent under a lease), but agent
 // beads from earlier runs still carry them.
@@ -1955,7 +1880,7 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // hook_bead slot (hq-l6mm5: direct bead tracking).
 //
 // Clean completions use "done" to prevent dead completed sessions from
-// re-entering the idle reuse pool before witness/refinery cleanup finishes.
+// re-entering the idle reuse pool before their cleanup finishes.
 // Escalated/deferred exits use "stuck" because they need recovery.
 //
 // cleanup_status is NOT written here — reportDone self-reports it through
@@ -2169,23 +2094,23 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 
 doneStateUpdate:
 	// Clear hook_bead on the agent bead (gt-qbh). The hq-l6mm5 refactor made
-	// SetHookBead/ClearHookBead no-ops, but the witness still reads the
-	// hook_bead field from the agent bead snapshot. If the hooked bead is a
-	// wisp that gets reaped, the witness can't verify it was closed and flags
-	// the polecat as a zombie. Clearing hook_bead prevents this false positive.
+	// SetHookBead/ClearHookBead no-ops, but the daemon's crash detection
+	// still reads the hook_bead field from the agent bead. If the hooked bead
+	// is a wisp that gets reaped, it can't verify it was closed and flags the
+	// polecat as crashed. Clearing hook_bead prevents this false positive.
 	emptyHook := ""
 	if err := agentBd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
 	}
 
 	// Purge closed ephemeral beads (wisps) accumulated during this and prior sessions.
-	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol cycles,
-	// etc. accumulate across sessions and pollute bd ready/list output (hq-6161m).
+	// Without this, closed wisps from mol-polecat-work steps etc. accumulate
+	// across sessions and pollute bd ready/list output (hq-6161m).
 	// Best-effort: failures are non-fatal since the work is already done.
 	purgeClosedEphemeralBeads(bd, townRoot)
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
-	// for audit purposes and anomaly detection by witness patrol.
+	// for audit purposes.
 	doneState := string(beads.AgentStateDone)
 	if exitType != ExitCompleted {
 		doneState = "stuck"
@@ -2198,19 +2123,16 @@ doneStateUpdate:
 	// ZFC #10 cleanup_status self-report moved to reportDone and runDone's
 	// failure path (selfReportCleanupStatus): this function only ever ran when
 	// the submission succeeded, so a failed submission recorded nothing at
-	// all — the exact case where the witness needs "has_unpushed". The report
+	// all — the exact case where polecat reclaim needs "has_unpushed". The report
 	// also used to be skipped whenever the status was empty/unknown, leaving
 	// cleanup_status=<missing> on a slot that can never be reclaimed.
 
-	// Clear done-intent label and checkpoints on clean exit — gt done completed
-	// successfully. If we don't reach here (crash/stuck), the Witness uses the
-	// lingering labels to detect the zombie and resume from checkpoints.
-	clearDoneIntentLabel(agentBd, agentBeadID)
+	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return nil
 }
 
-// ensureAgentBeadExists recreates a missing agent bead so done-intent labels,
+// ensureAgentBeadExists recreates a missing agent bead so completion metadata,
 // checkpoints, and active_mr writes don't silently fail (hq-xu4p). Only
 // rig-level agents are handled — town agents (mayor/deacon) are owned by
 // gt doctor. Best-effort: failures are warned, never fatal.
@@ -2396,7 +2318,7 @@ func parseCleanupStatus(s string) polecat.CleanupStatus {
 
 // isPolecatActor checks if a BD_ACTOR value represents a polecat.
 // Polecat actors have format: rigname/polecats/polecatname
-// Non-polecat actors have formats like: gastown/crew/name, rigname/witness, etc.
+// Non-polecat actors have formats like: gastown/crew/name, mayor, etc.
 func isPolecatActor(actor string) bool {
 	parts := strings.Split(strings.TrimSpace(actor), "/")
 	return len(parts) == 3 && parts[0] != "" && parts[1] == "polecats" && parts[2] != ""
@@ -2516,8 +2438,8 @@ func closedWispDeleteAge(townRoot string) string {
 }
 
 // purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated
-// during this and prior sessions. Polecat/witness sessions create mol-polecat-work
-// steps, mol-witness-patrol cycles, etc. as wisps. These get closed during normal
+// during this and prior sessions. Polecat sessions create mol-polecat-work
+// steps etc. as wisps. These get closed during normal
 // operation but are never deleted, accumulating hundreds of rows that pollute
 // bd ready/list output. (hq-6161m)
 //

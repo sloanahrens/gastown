@@ -875,43 +875,6 @@ func TestIsPolecatActor(t *testing.T) {
 	}
 }
 
-// TestDoneIntentLabelFormat verifies the done-intent label format matches
-// the expected pattern: done-intent:<type>:<unix-ts>
-func TestDoneIntentLabelFormat(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	tests := []struct {
-		exitType string
-		want     string
-	}{
-		{"COMPLETED", fmt.Sprintf("done-intent:COMPLETED:%d", now.Unix())},
-		{"ESCALATED", fmt.Sprintf("done-intent:ESCALATED:%d", now.Unix())},
-		{"DEFERRED", fmt.Sprintf("done-intent:DEFERRED:%d", now.Unix())},
-		{"PHASE_COMPLETE", fmt.Sprintf("done-intent:PHASE_COMPLETE:%d", now.Unix())},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.exitType, func(t *testing.T) {
-			label := fmt.Sprintf("done-intent:%s:%d", tt.exitType, now.Unix())
-			if label != tt.want {
-				t.Errorf("label format = %q, want %q", label, tt.want)
-			}
-
-			// Verify the label can be parsed back
-			parts := strings.SplitN(label, ":", 3)
-			if len(parts) != 3 {
-				t.Fatalf("expected 3 parts, got %d", len(parts))
-			}
-			if parts[0] != "done-intent" {
-				t.Errorf("prefix = %q, want %q", parts[0], "done-intent")
-			}
-			if parts[1] != tt.exitType {
-				t.Errorf("exit type = %q, want %q", parts[1], tt.exitType)
-			}
-		})
-	}
-}
-
 func TestShouldRetirePolecatSessionAfterDone(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1127,8 +1090,7 @@ func TestCleanupStatusFromWorkState(t *testing.T) {
 }
 
 // TestResolveDoneAgentIdentityAlwaysNamesThePolecat pins hq-vx224's other half:
-// gt done's agent-bead writes (done-intent label, checkpoints, active_mr,
-// completion metadata, agent_state, cleanup_status) are all guarded by
+// gt done's agent-bead writes (checkpoints, active_mr, completion metadata, agent_state, cleanup_status) are all guarded by
 // `agentBeadID != ""`, and getAgentBeadID returns "" for a rig-less context.
 // The context is therefore seeded from the polecat identity that gt done has
 // already validated (BD_ACTOR + GT_ROLE/GT_RIG/GT_POLECAT), so a degraded env
@@ -1258,51 +1220,6 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 			t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
 		}
 	})
-}
-
-// TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
-// only done-intent labels while preserving other labels.
-func TestClearDoneIntentLabel(t *testing.T) {
-	t.Parallel()
-	// We can't easily test the full clearDoneIntentLabel function without
-	// a running bd instance, but we can verify the filtering logic.
-	// The function reads labels, filters out done-intent:*, and writes back.
-	allLabels := []string{
-		"gt:agent",
-		"idle:3",
-		"done-intent:COMPLETED:1738972800",
-		"backoff-until:1738972900",
-	}
-
-	var kept []string
-	for _, label := range allLabels {
-		if !strings.HasPrefix(label, "done-intent:") {
-			kept = append(kept, label)
-		}
-	}
-
-	if len(kept) != 3 {
-		t.Errorf("expected 3 labels after filtering, got %d: %v", len(kept), kept)
-	}
-
-	// Verify done-intent was removed
-	for _, label := range kept {
-		if strings.HasPrefix(label, "done-intent:") {
-			t.Errorf("done-intent label was not removed: %s", label)
-		}
-	}
-
-	// Verify other labels were preserved
-	wantKept := map[string]bool{
-		"gt:agent":                 true,
-		"idle:3":                   true,
-		"backoff-until:1738972900": true,
-	}
-	for _, label := range kept {
-		if !wantKept[label] {
-			t.Errorf("unexpected label in kept set: %s", label)
-		}
-	}
 }
 
 // TestMRVerificationSetsMRFailed verifies that if MR bead creation returns
@@ -1714,7 +1631,6 @@ func TestClearDoneCheckpoints(t *testing.T) {
 	allLabels := []string{
 		"gt:agent",
 		"idle:3",
-		"done-intent:COMPLETED:1738972800",
 		"done-cp:pushed:mybranch:1738972801",
 		"done-cp:mr-created:gt-xyz:1738972802",
 		"backoff-until:1738972900",
@@ -1733,8 +1649,8 @@ func TestClearDoneCheckpoints(t *testing.T) {
 	if len(removed) != 2 {
 		t.Errorf("expected 2 checkpoint labels removed, got %d: %v", len(removed), removed)
 	}
-	if len(kept) != 4 {
-		t.Errorf("expected 4 labels kept, got %d: %v", len(kept), kept)
+	if len(kept) != 3 {
+		t.Errorf("expected 3 labels kept, got %d: %v", len(kept), kept)
 	}
 
 	// Verify no checkpoint labels in kept set
@@ -1742,17 +1658,6 @@ func TestClearDoneCheckpoints(t *testing.T) {
 		if strings.HasPrefix(label, "done-cp:") {
 			t.Errorf("checkpoint label was not removed: %s", label)
 		}
-	}
-
-	// Verify done-intent is preserved (not a checkpoint)
-	found := false
-	for _, label := range kept {
-		if strings.HasPrefix(label, "done-intent:") {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("done-intent label should be preserved by clearDoneCheckpoints")
 	}
 }
 

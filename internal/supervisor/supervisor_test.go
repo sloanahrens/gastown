@@ -176,6 +176,38 @@ func TestEstopRefusesKillAndRestart(t *testing.T) {
 	}
 }
 
+// KillAll is the operator's override: it kills through a town e-stop, a rig
+// e-stop and a parked seat, logs verb kill-all with the actor and leaves the
+// park in place (gt-4k3fj.4).
+func TestKillAllBypassesEstopAndHold(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	_ = estop.Activate(h.town, estop.TriggerManual, "x")
+	_ = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+	h.pause(t)
+	if err := h.sup().KillAll(flint, "operator kill-all", "gt kill-all/overseer"); err != nil {
+		t.Fatalf("KillAll = %v, want the kill", err)
+	}
+	if got := h.tmux.kills(); len(got) != 1 || got[0] != flint.SessionName() {
+		t.Fatalf("kills = %v, want [%s]", got, flint.SessionName())
+	}
+	rec, err := intent.Read(h.town, IntentSeat(flint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Held() {
+		t.Errorf("record desired=%q: kill-all dropped the seat's park", rec.Desired)
+	}
+	lines := h.actions(t)
+	if len(lines) != 1 || lines[0].Verb != "kill-all" || lines[0].Actor != "gt kill-all/overseer" || lines[0].Outcome != "done" {
+		t.Fatalf("action log = %+v, want one done kill-all line naming the actor", lines)
+	}
+	// Plain Kill still refuses under the same e-stop.
+	if err := h.sup().Kill(flint, "idle", "daemon"); !errors.Is(err, ErrRefused) {
+		t.Errorf("Kill after KillAll = %v, want a refusal", err)
+	}
+}
+
 func TestShutdownRefusesRestartNotKill(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

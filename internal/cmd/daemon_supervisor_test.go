@@ -337,7 +337,7 @@ func TestRunDaemonStop_StopsTheJobThroughTheSupervisor(t *testing.T) {
 		t.Fatalf("supervisor command = %q, want launchctl bootout gui/<uid>/com.gastown.daemon", got)
 	}
 	if calls.stopped {
-		t.Fatal("signalled the process although the supervisor job took it down")
+		t.Fatal("signaled the process although the supervisor job took it down")
 	}
 }
 

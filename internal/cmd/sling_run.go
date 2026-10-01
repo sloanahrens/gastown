@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -120,6 +121,7 @@ type slingDeps struct {
 	lockBead           func(townRoot, beadID string) (func(), error)
 	lockAssignee       func(townRoot, targetAgent string) (func(), error)
 	rigParked          func(townRoot, rigName string) (bool, string)
+	estopOn            func(townRoot, rigName string) (bool, error)
 	agentDead          func(assignee string) bool
 	survivingWorkGuard func(townRoot, beadID, holder string) error
 	checkDuplicates    func(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error)
@@ -223,6 +225,7 @@ func realSlingDeps() *slingDeps {
 		lockBead:           tryAcquireSlingBeadLock,
 		lockAssignee:       tryAcquireSlingAssigneeLock,
 		rigParked:          IsRigParkedOrDocked,
+		estopOn:            estop.ActiveFor,
 		agentDead:          isHookedAgentDeadFn,
 		survivingWorkGuard: reslingSurvivingWorkGuard,
 		checkDuplicates:    checkSlingDuplicates,

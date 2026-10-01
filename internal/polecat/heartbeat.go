@@ -73,11 +73,9 @@ func heartbeatFile(townRoot, sessionName string) string {
 //
 // Derived from SessionHeartbeatStaleThreshold (3m) — the shortest freshness
 // window any consumer applies — rather than picked as a round number. The
-// witness treats a stale state="exiting" heartbeat as a dead agent and falls
-// through to its done-intent restart (internal/witness/handlers.go), and the
 // daemon's idle-reaper treats a stale heartbeat as an abandoned session and
 // kills it (internal/daemon/daemon.go). Renewing six times per stale window
-// keeps "this polecat is alive and inside gt done" unambiguous in both.
+// keeps "this polecat is alive and inside gt done" unambiguous.
 const HeartbeatKeepAliveInterval = SessionHeartbeatStaleThreshold / 6
 
 // StartExitingHeartbeatKeepAlive renews sessionName's heartbeat with

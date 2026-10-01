@@ -315,6 +315,11 @@ type Daemon struct {
 	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
 	landingPasses atomic.Int32
 
+	// postLandRuns counts rigs whose post-landing runner has a run in flight
+	// or queued. It runs outside the landing pass, so checkUpgradeRestart
+	// holds a restart for it separately, up to postLandRestartCap (gt-gb4ij).
+	postLandRuns atomic.Int32
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog
@@ -1172,10 +1177,10 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
-	// Skip agent management if E-stop is active.
-	// The daemon stays alive (to maintain Dolt, etc.) but does NOT
-	// restart any agents. This prevents fighting the E-stop by auto-spawning
-	// sessions that were intentionally frozen.
+	// Skip agent management if the town E-stop is active. The supervisor
+	// already refuses every Restart and Kill under it, and the dispatch hold
+	// every automatic sling (gt-4k3fj.4); this also keeps the plugins, whose
+	// scripts do not all go through the supervisor yet, from running.
 	if estop.IsActive(d.config.TownRoot) {
 		d.logger.Println("E-STOP active, skipping agent management")
 		return

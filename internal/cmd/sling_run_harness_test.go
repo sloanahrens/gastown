@@ -40,6 +40,7 @@ type slingHarness struct {
 	crew           map[string]bool         // "<rig>/<name>" crew members on disk
 	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
 	batchOpts      slingOptions            // what the last batch path was handed
+	estops         map[string]bool         // e-stopped rigs; "" is the town sentinel
 }
 
 const slingTestTown = "/town"
@@ -58,6 +59,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		convoys:        map[string]string{},
 		stored:         map[string][]beadFieldUpdates{},
 		crew:           map[string]bool{},
+		estops:         map[string]bool{},
 		hookedFormulas: map[string]*beads.Issue{},
 	}
 	d := &slingDeps{
@@ -147,6 +149,11 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			return func() { h.record("unlock assignee %s", agent) }, nil
 		},
 		rigParked: func(string, string) (bool, string) { return false, "" },
+		estopOn: func(_, rig string) (bool, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.estops[""] || h.estops[rig], nil
+		},
 		agentDead: func(a string) bool { h.mu.Lock(); defer h.mu.Unlock(); return h.dead[a] },
 		survivingWorkGuard: func(_, id, holder string) error {
 			h.record("survival guard %s %s", id, holder)

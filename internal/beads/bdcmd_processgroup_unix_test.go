@@ -24,7 +24,7 @@ import (
 // past the deadline before the escalation ends it, and the escalation reaches
 // a child of the group rather than the shell BdCmd started.
 // TestBdCmd_RunTimesOut could not tell either from an immediate SIGKILL: its
-// stub dies the moment it is signalled, whether or not the grace was there.
+// stub dies the moment it is signaled, whether or not the grace was there.
 //
 // The test ends the context itself, once the child's pid is on stdout, the way
 // TestSetProcessGroup_CancelTakesTheGrandchild does: a deadline short enough
@@ -69,7 +69,7 @@ func TestBdCmd_ContextEndKillsTheWholeGroupWithinItsGrace(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if elapsed < grace {
-		t.Errorf("the call returned %s after its context ended, before the %s grace BdCmd inherits: the group was killed without being signalled first",
+		t.Errorf("the call returned %s after its context ended, before the %s grace BdCmd inherits: the group was killed without being signaled first",
 			elapsed.Round(time.Millisecond), grace)
 	}
 	if elapsed > 10*time.Second {

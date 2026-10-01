@@ -65,6 +65,10 @@ type PostLandRunner struct {
 	Logf    func(format string, args ...any)
 	OnRed   func(ctx context.Context, cmd string, pl PostLand, res PostLandResult)
 	OnGreen func(ctx context.Context, cmd string, pl PostLand, res PostLandResult)
+	// Busy, when set, is called with true when a run starts with none in
+	// flight and with false when the last queued run has finished, so the
+	// daemon can hold an upgrade restart for it (gt-gb4ij).
+	Busy func(busy bool)
 
 	mu      sync.Mutex
 	running bool
@@ -104,6 +108,9 @@ func (p *PostLandRunner) Trigger(ctx context.Context, pl PostLand) {
 	p.running = true
 	p.wg.Add(1)
 	p.mu.Unlock()
+	if p.Busy != nil {
+		p.Busy(true)
+	}
 	go p.loop(ctx, pl)
 }
 
@@ -112,6 +119,9 @@ func (p *PostLandRunner) Wait() { p.wg.Wait() }
 
 func (p *PostLandRunner) loop(ctx context.Context, pl PostLand) {
 	defer p.wg.Done()
+	if p.Busy != nil {
+		defer p.Busy(false)
+	}
 	for {
 		p.runOne(ctx, pl)
 		p.mu.Lock()

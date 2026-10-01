@@ -65,6 +65,7 @@ var beadsExemptCommands = map[string]bool{
 	"dnd":           true,
 	"estop":         true, // E-stop must work when Dolt is down
 	"thaw":          true, // Thaw must work when Dolt is down
+	"kill-all":      true, // Kill-all must work when Dolt is down
 	"signal":        true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":       true, // Metrics reads local JSONL, no beads needed
 	"run-migration": true, // Migration orchestrator handles its own beads checks
@@ -84,6 +85,7 @@ var branchCheckExemptCommands = map[string]bool{
 	"status-line": true, // tmux hot path; never run git freshness checks here
 	"estop":       true, // Emergency stop must always work
 	"thaw":        true, // Thaw must always work
+	"kill-all":    true, // Kill-all must always work
 	"install":     true, // Initial setup
 	"git-init":    true, // Git setup
 	"upgrade":     true, // Post-install migration
