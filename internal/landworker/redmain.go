@@ -172,19 +172,49 @@ func passedPackages(res PostLandResult, flaky []string) map[string]bool {
 // A failed read returns nil, so a red package files a duplicate rather than
 // going unreported.
 func (r *RedMain) openBeads() map[string]string {
-	issues, err := r.Beads.List(beads.ListOptions{Status: "open", Label: LabelRedMain, Priority: -1, Limit: 0})
+	open, err := openBeadsByTitle(r.Beads, LabelRedMain, RedMainTitle(r.Rig, ""))
 	if err != nil {
 		r.logf("listing open %s beads: %v", LabelRedMain, err)
 		return nil
 	}
-	prefix := RedMainTitle(r.Rig, "")
+	return open
+}
+
+// openBeadsByTitle maps the rest of each open bead's title after prefix
+// (the key it was filed under) to its id, for the beads labeled label.
+func openBeadsByTitle(bd interface {
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+}, label, prefix string) (map[string]string, error) {
+	issues, err := bd.List(beads.ListOptions{Status: "open", Label: label, Priority: -1, Limit: 0})
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]string{}
 	for _, is := range issues {
-		if pkg, ok := strings.CutPrefix(is.Title, prefix); ok && pkg != "" {
-			out[pkg] = is.ID
+		if key, ok := strings.CutPrefix(is.Title, prefix); ok && key != "" {
+			out[key] = is.ID
 		}
 	}
-	return out
+	return out, nil
+}
+
+// fileOrComment comments on openID when a bead is already open for the
+// same key, else files create. It returns the bead's id.
+func fileOrComment(bd interface {
+	Create(opts beads.CreateOptions) (*beads.Issue, error)
+	AddComment(id, text string) error
+}, openID, comment string, create beads.CreateOptions) (string, error) {
+	if openID != "" {
+		if err := bd.AddComment(openID, comment); err != nil {
+			return openID, fmt.Errorf("commenting on %s: %w", openID, err)
+		}
+		return openID, nil
+	}
+	is, err := bd.Create(create)
+	if err != nil {
+		return "", fmt.Errorf("filing %q: %w", create.Title, err)
+	}
+	return is.ID, nil
 }
 
 func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl PostLand, tail string) string {
@@ -197,13 +227,7 @@ func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl Post
 	if pl.Direct {
 		detail += fmt.Sprintf("\n\nThe commit reached main by a direct push, not a landing: suspect range %s..%s.", pl.From, pl.Commit)
 	}
-	if id, ok := open[pkg]; ok {
-		if err := r.Beads.AddComment(id, "still red: "+detail); err != nil {
-			r.logf("commenting on %s: %v", id, err)
-		}
-		return id
-	}
-	is, err := r.Beads.Create(beads.CreateOptions{
+	id, err := fileOrComment(r.Beads, open[pkg], "still red: "+detail, beads.CreateOptions{
 		Title:    RedMainTitle(r.Rig, pkg),
 		Labels:   []string{LabelRedMain},
 		Priority: 1,
@@ -211,10 +235,12 @@ func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl Post
 			"\n\nFix it on main. The red-main owner closes this bead on the first post-landing run in which the package passes.",
 	})
 	if err != nil {
-		r.logf("filing the red-main bead for %s: %v", pkg, err)
-		return "not filed"
+		r.logf("red-main bead for %s: %v", pkg, err)
+		if id == "" {
+			return "not filed"
+		}
 	}
-	return is.ID
+	return id
 }
 
 func (r *RedMain) closePassed(open map[string]string, passed map[string]bool, pl PostLand) {
