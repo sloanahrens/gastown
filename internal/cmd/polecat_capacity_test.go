@@ -29,35 +29,6 @@ func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
 	return townRoot
 }
 
-func setupPolecatCapacityRig(t *testing.T, maxPolecats int) string {
-	t.Helper()
-	townRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	configureScheduler(t, townRoot, maxPolecats, 1)
-	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "polecats"), 0755); err != nil {
-		t.Fatalf("mkdir rig: %v", err)
-	}
-	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
-		Version: config.CurrentRigsVersion,
-		Rigs: map[string]config.RigEntry{
-			"gastown": {GitURL: "https://example.invalid/gastown.git"},
-		},
-	}); err != nil {
-		t.Fatalf("SaveRigsConfig: %v", err)
-	}
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-	return townRoot
-}
-
 func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
 	t.Parallel()
 	townRoot := setupPolecatCapacityTestTown(t, 1)
@@ -425,11 +396,10 @@ func TestPrintDispatchNoOpReportsExplicitReason(t *testing.T) {
 }
 
 func TestResolveTargetRigPassesHeldAdmissionToSpawn(t *testing.T) {
-	townRoot := setupPolecatCapacityRig(t, 1)
-	oldSpawn := spawnPolecatForSling
-	t.Cleanup(func() { spawnPolecatForSling = oldSpawn })
+	t.Parallel()
+	h := newSlingHarness(t)
 	called := false
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	h.run.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		called = true
 		if rigName != "gastown" {
 			t.Fatalf("rigName = %q, want gastown", rigName)
@@ -437,19 +407,14 @@ func TestResolveTargetRigPassesHeldAdmissionToSpawn(t *testing.T) {
 		if !opts.SkipAdmission {
 			t.Fatal("spawn should skip admission when caller already holds reservation")
 		}
-		if opts.TownRoot != townRoot {
-			t.Fatalf("TownRoot = %q, want %q", opts.TownRoot, townRoot)
+		if opts.TownRoot != slingTestTown {
+			t.Fatalf("TownRoot = %q, want %q", opts.TownRoot, slingTestTown)
 		}
-		return &SpawnedPolecatInfo{
-			RigName:     "gastown",
-			PolecatName: "toast",
-			ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"),
-			SessionName: "gt-gastown-polecat-toast",
-		}, nil
+		return h.newSpawn(rigName), nil
 	}
 
-	resolved, err := resolveTarget("gastown", ResolveTargetOptions{
-		TownRoot:             townRoot,
+	resolved, err := h.run.resolveSlingTarget("gastown", ResolveTargetOptions{
+		TownRoot:             slingTestTown,
 		SkipPolecatAdmission: true,
 		NoBoot:               true,
 	})
@@ -459,59 +424,40 @@ func TestResolveTargetRigPassesHeldAdmissionToSpawn(t *testing.T) {
 	if !called {
 		t.Fatal("spawnPolecatForSling was not called")
 	}
-	if resolved.Agent != "gastown/polecats/toast" {
-		t.Fatalf("resolved agent = %q, want gastown/polecats/toast", resolved.Agent)
+	if resolved.Agent != "gastown/polecats/Toast" {
+		t.Fatalf("resolved agent = %q, want gastown/polecats/Toast", resolved.Agent)
 	}
 }
 
 func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
-	townRoot := setupPolecatCapacityRig(t, 1)
-	oldAcquire := acquirePolecatAdmissionFn
-	oldSpawn := spawnPolecatForSling
-	oldFind := findHookedFormulaSingletonFn
-	oldRollback := rollbackSlingArtifactsFn
-	oldBurn := burnSlingWispFn
-	oldDryRun, oldNoBoot := slingDryRun, slingNoBoot
-	t.Cleanup(func() {
-		acquirePolecatAdmissionFn = oldAcquire
-		spawnPolecatForSling = oldSpawn
-		findHookedFormulaSingletonFn = oldFind
-		rollbackSlingArtifactsFn = oldRollback
-		burnSlingWispFn = oldBurn
-		slingDryRun, slingNoBoot = oldDryRun, oldNoBoot
-	})
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.resolveTarget = h.run.resolveSlingTarget
 	// A formula wisp hooked to a just-spawned polecat is stale and is burned
 	// before dispatch (gt-7evi4). Fail that burn so the sling stops before any
 	// bd call, and record the rollback instead of running the real one.
 	rollbacks := 0
-	rollbackSlingArtifactsFn = func(*SpawnedPolecatInfo, string, string, string) { rollbacks++ }
-	burnSlingWispFn = func(string, string) error { return errors.New("stop before bd") }
-	slingDryRun = false
-	slingNoBoot = true
+	h.run.rollbackArtifacts = func(*SpawnedPolecatInfo, string, string, string) { rollbacks++ }
+	h.run.burnWisp = func(string, string) error { return errors.New("stop before bd") }
 	admissions := 0
-	acquirePolecatAdmissionFn = func(townRootArg, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
+	h.run.admitPolecat = func(townRootArg, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
 		admissions++
-		if townRootArg != townRoot || rigName != "gastown" || beadID != "test-formula" || operation != "formula" {
+		if townRootArg != slingTestTown || rigName != "gastown" || beadID != "test-formula" || operation != "formula" {
 			t.Fatalf("admission args = (%q,%q,%q,%q)", townRootArg, rigName, beadID, operation)
 		}
 		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: 1, Free: 0}, nil
 	}
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	h.run.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		if !opts.SkipAdmission {
 			t.Fatal("formula rig spawn should use caller-held admission")
 		}
-		return &SpawnedPolecatInfo{
-			RigName:     "gastown",
-			PolecatName: "toast",
-			ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"),
-			SessionName: "gt-gastown-polecat-toast",
-		}, nil
+		return h.newSpawn(rigName), nil
 	}
-	findHookedFormulaSingletonFn = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+	h.run.findHookedFormula = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
 		return &beads.Issue{ID: "gt-wisp-existing"}, nil
 	}
 
-	if err := runSlingFormula(context.Background(), []string{"test-formula", "gastown"}); err == nil || !strings.Contains(err.Error(), "stop before bd") {
+	if err := h.run.runFormula(context.Background(), []string{"test-formula", "gastown"}); err == nil || !strings.Contains(err.Error(), "stop before bd") {
 		t.Fatalf("runSlingFormula: want the injected burn failure, got %v", err)
 	}
 	if admissions != 1 {
@@ -523,75 +469,31 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 }
 
 func TestStandaloneFormulaExistingPolecatNoopDoesNotRequireCapacity(t *testing.T) {
-	townRoot := setupPolecatCapacityRig(t, 1)
-	oldAcquire := acquirePolecatAdmissionFn
-	oldResolve := resolveTargetAgentFn
-	oldFind := findHookedFormulaSingletonFn
-	oldDryRun := slingDryRun
-	t.Cleanup(func() {
-		acquirePolecatAdmissionFn = oldAcquire
-		resolveTargetAgentFn = oldResolve
-		findHookedFormulaSingletonFn = oldFind
-		slingDryRun = oldDryRun
-	})
-	slingDryRun = false
-	acquirePolecatAdmissionFn = func(townRootArg, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.resolveTarget = h.run.resolveSlingTarget
+	h.run.admitPolecat = func(townRootArg, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
 		t.Fatalf("no-op existing formula should not acquire capacity, got (%q,%q,%q,%q)", townRootArg, rigName, beadID, operation)
 		return nil, polecatCapacitySnapshot{}, nil
 	}
-	resolveTargetAgentFn = func(target string) (string, string, string, error) {
+	h.run.resolveAgent = func(target string) (string, string, string, error) {
 		if target != "gastown/polecats/toast" {
 			t.Fatalf("target = %q, want gastown/polecats/toast", target)
 		}
-		return "gastown/polecats/toast", "%1", filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"), nil
+		return "gastown/polecats/toast", "%1", slingTestTown + "/gastown/polecats/toast/gastown", nil
 	}
-	findHookedFormulaSingletonFn = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+	h.run.findHookedFormula = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
 		return &beads.Issue{ID: "gt-wisp-existing"}, nil
 	}
 
-	if err := runSlingFormula(context.Background(), []string{"test-formula", "gastown/polecats/toast"}); err != nil {
+	if err := h.run.runFormula(context.Background(), []string{"test-formula", "gastown/polecats/toast"}); err != nil {
 		t.Fatalf("runSlingFormula: %v", err)
 	}
 }
 
-// setupPolecatCapacityRigs creates a direct-dispatch town (scheduler.max_polecats
+// setupPolecatCapacityTown creates a direct-dispatch town (scheduler.max_polecats
 // = -1, no admission from the town cap) with one polecats directory per named
-// rig. Like setupPolecatCapacityRig it chdirs into the town, so these tests run
-// without t.Parallel().
-func setupPolecatCapacityRigs(t *testing.T, rigNames ...string) string {
-	t.Helper()
-	townRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	configureScheduler(t, townRoot, -1, 1)
-	rigs := make(map[string]config.RigEntry, len(rigNames))
-	for _, name := range rigNames {
-		if err := os.MkdirAll(filepath.Join(townRoot, name, "polecats"), 0755); err != nil {
-			t.Fatalf("mkdir rig %s: %v", name, err)
-		}
-		rigs[name] = config.RigEntry{GitURL: "https://example.invalid/" + name + ".git"}
-	}
-	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
-		Version: config.CurrentRigsVersion,
-		Rigs:    rigs,
-	}); err != nil {
-		t.Fatalf("SaveRigsConfig: %v", err)
-	}
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-	return townRoot
-}
-
-// setupPolecatCapacityTown is setupPolecatCapacityRigs without the chdir, for
-// tests that hand the town to acquirePolecatAdmission themselves and can run
-// in parallel.
+// rig, for tests that hand the town to acquirePolecatAdmission themselves.
 func setupPolecatCapacityTown(t *testing.T, rigNames ...string) string {
 	t.Helper()
 	townRoot, err := filepath.EvalSymlinks(t.TempDir())
