@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/testpolicy"
@@ -148,6 +153,168 @@ func TestReportOver(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), tc.line) {
 			t.Errorf("%s: output %q, want it to contain %q", tc.name, out.String(), tc.line)
+		}
+	}
+}
+
+// fakeHalf is a half that writes fixed output and returns a fixed result,
+// after waiting for wait (when set) to close; cancelling ctx ends the wait
+// with code -1. A test whose halves never unblock deadlocks, which
+// synctest.Test reports as a failure instead of hanging.
+func fakeHalf(stdout, stderr string, code int, err error, wait <-chan struct{}) half {
+	return func(ctx context.Context, out, errOut io.Writer) (int, error) {
+		if wait != nil {
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return -1, nil
+			}
+		}
+		_, _ = io.WriteString(out, stdout)
+		_, _ = io.WriteString(errOut, stderr)
+		return code, err
+	}
+}
+
+// TestRunHalves_RunsBothAtOnce checks the halves overlap: each waits for the
+// other to start, so running them one after the other, in either order,
+// deadlocks.
+func TestRunHalves_RunsBothAtOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		judgedStarted, cachedStarted := make(chan struct{}), make(chan struct{})
+		meet := func(mine, theirs chan struct{}) half {
+			return func(ctx context.Context, out, errOut io.Writer) (int, error) {
+				close(mine)
+				<-theirs
+				return 0, nil
+			}
+		}
+		var out, errOut bytes.Buffer
+		code, err := runHalves(meet(judgedStarted, cachedStarted), meet(cachedStarted, judgedStarted), &out, &errOut)
+		if err != nil || code != 0 {
+			t.Fatalf("runHalves = %d, %v; want 0, nil", code, err)
+		}
+	})
+}
+
+// TestRunHalves_CachedOutputComesAfterJudged checks the cached half's output,
+// though it finishes first, is written whole after the judged half's.
+func TestRunHalves_CachedOutputComesAfterJudged(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		cachedDone := make(chan struct{})
+		cached := func(ctx context.Context, out, errOut io.Writer) (int, error) {
+			defer close(cachedDone)
+			_, _ = io.WriteString(out, "ok cached a\nok cached b\n")
+			_, _ = io.WriteString(errOut, "cached took\n")
+			return 0, nil
+		}
+		var out, errOut bytes.Buffer
+		code, err := runHalves(fakeHalf("ok judged\n", "judged took\n", 0, nil, cachedDone), cached, &out, &errOut)
+		if err != nil || code != 0 {
+			t.Fatalf("runHalves = %d, %v; want 0, nil", code, err)
+		}
+		if want := "ok judged\nok cached a\nok cached b\n"; out.String() != want {
+			t.Errorf("stdout = %q, want %q", out.String(), want)
+		}
+		if want := "judged took\ncached took\n"; errOut.String() != want {
+			t.Errorf("stderr = %q, want %q", errOut.String(), want)
+		}
+	})
+}
+
+// TestRunHalves_ExitCode checks either half failing fails the run, the
+// judged half's code winning when both fail, and a missing half.
+func TestRunHalves_ExitCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		judged, cached half
+		want           int
+	}{
+		{"both pass", fakeHalf("", "", 0, nil, nil), fakeHalf("", "", 0, nil, nil), 0},
+		{"judged fails", fakeHalf("", "", 1, nil, nil), fakeHalf("", "", 0, nil, nil), 1},
+		{"cached fails", fakeHalf("", "", 0, nil, nil), fakeHalf("", "", 1, nil, nil), 1},
+		{"both fail, judged code wins", fakeHalf("", "", 2, nil, nil), fakeHalf("", "", 1, nil, nil), 2},
+		{"judged signalled", fakeHalf("", "", -1, nil, nil), fakeHalf("", "", 1, nil, nil), -1},
+		{"no cached half", fakeHalf("", "", 1, nil, nil), nil, 1},
+		{"no judged half", nil, fakeHalf("", "", 1, nil, nil), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			code, err := runHalves(tc.judged, tc.cached, &out, &errOut)
+			if err != nil || code != tc.want {
+				t.Fatalf("runHalves = %d, %v; want %d, nil", code, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunHalves_JudgedErrorCancelsCached checks a runner failure in the
+// judged half stops the cached half (it would wait forever otherwise) and is
+// returned.
+func TestRunHalves_JudgedErrorCancelsCached(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		never := make(chan struct{})
+		var out, errOut bytes.Buffer
+		_, err := runHalves(fakeHalf("", "", 0, errors.New("pipe broke"), nil), fakeHalf("", "", 0, nil, never), &out, &errOut)
+		if err == nil || !strings.Contains(err.Error(), "pipe broke") {
+			t.Fatalf("runHalves error = %v, want the judged half's error alone", err)
+		}
+	})
+}
+
+// TestRunHalves_CachedErrorReturned checks a runner failure in the cached
+// half fails the run even when every package passed.
+func TestRunHalves_CachedErrorReturned(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	_, err := runHalves(fakeHalf("", "", 0, nil, nil), fakeHalf("", "", 0, errors.New("go not found"), nil), &out, &errOut)
+	if err == nil || !strings.Contains(err.Error(), "go not found") {
+		t.Fatalf("runHalves error = %v, want the cached half's error", err)
+	}
+}
+
+func TestParallelism(t *testing.T) {
+	t.Parallel()
+	def := runtime.GOMAXPROCS(0)
+	cases := []struct {
+		before, after []string
+		want          int
+	}{
+		{nil, nil, def},
+		{[]string{"-timeout", "20m"}, nil, def},
+		{[]string{"-p", "4"}, nil, 4},
+		{[]string{"-p=6"}, nil, 6},
+		{[]string{"-p", "4"}, []string{"--p", "3"}, 3},
+		{[]string{"-p", "x"}, nil, def},
+		{[]string{"-parallel", "2"}, nil, def},
+	}
+	for _, tc := range cases {
+		if got := parallelism(tc.before, tc.after); got != tc.want {
+			t.Errorf("parallelism(%q, %q) = %d, want %d", tc.before, tc.after, got, tc.want)
+		}
+	}
+}
+
+func TestSplitParallelism(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ procs, cached, judgedP, cachedP int }{
+		{24, 2, 22, 2},
+		{4, 2, 2, 2},
+		{3, 2, 2, 1},
+		{2, 2, 1, 1},
+		{1, 2, 1, 1},
+		{24, 30, 12, 12},
+	}
+	for _, tc := range cases {
+		j, c := splitParallelism(tc.procs, tc.cached)
+		if j != tc.judgedP || c != tc.cachedP {
+			t.Errorf("splitParallelism(%d, %d) = %d, %d; want %d, %d", tc.procs, tc.cached, j, c, tc.judgedP, tc.cachedP)
 		}
 	}
 }
