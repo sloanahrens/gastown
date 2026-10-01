@@ -592,7 +592,7 @@ cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 ]}],"summary":{},"town_root":"/town"}
 JSON
 run_plugin 23000000
-assert_eq "$(slings)" "2" "selection: only the one eligible bead is slung (to two seats worth, one bead)"
+assert_eq "$(slings)" "1" "selection: only the one eligible bead is slung"
 assert_not_contains "$TEST_STATE/sling.log" "gt-landing" "selection: gt:ready-to-land skipped"
 for b in gt-human gt-wip gt-crew gt-mol gt-agent gt-epic gt-held gt-claimed; do
   assert_not_contains "$TEST_STATE/sling.log" "$b" "selection: $b skipped"
@@ -621,7 +621,6 @@ run_plugin 25000000
 assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent claude-sonnet" "sonnet: needs-sonnet bead to the sonnet seat"
 direct_case
 write_polecats "$LIVE_NONE"
-cp "$TEST_STATE/ready/gastown.json" "$TEST_STATE/ready/gastown.json" 2>/dev/null || true
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[
   {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
