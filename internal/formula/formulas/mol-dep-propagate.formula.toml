@@ -5,7 +5,6 @@ This formula runs when a dependency resolves across rig boundaries.
 When an issue in one rig closes, dependent issues in other rigs may unblock.
 This formula handles:
 - Finding cross-rig dependents
-- Notifying affected rigs
 - Updating blocked status
 - Triggering work dispatch if appropriate
 
@@ -14,9 +13,8 @@ This formula handles:
 This is infrastructure work. The agent running this formula:
 1. Receive closed issue ID via hook_bead
 2. Find all cross-rig dependents (issues in other rigs blocked by this)
-3. Notify affected Witnesses
-4. Optionally trigger dispatch if issues are now ready
-5. Signals completion
+3. Optionally recommend dispatch if issues are now ready
+4. Signals completion
 
 ## Variables
 
@@ -29,7 +27,7 @@ This is infrastructure work. The agent running this formula:
 Cross-rig work needs access to every affected rig, so the agent running this
 formula must be able to reach each dependent's rig."""
 formula = "mol-dep-propagate"
-version = 1
+version = 2
 
 [[steps]]
 id = "load-resolved-issue"
@@ -99,50 +97,9 @@ bd dep remove <dependent-id> {{resolved_issue}}
 **Exit criteria:** All cross-rig dependents have updated blocked status."""
 
 [[steps]]
-id = "notify-witnesses"
-title = "Notify affected rig Witnesses"
-needs = ["update-blocked-status"]
-description = """
-Send notifications to Witnesses of affected rigs.
-
-**1. Group dependents by rig:**
-- gastown/witness: for gt-* issues
-- beads/witness: for bd-* issues
-- etc.
-
-**2. For each affected rig, send notification:**
-```bash
-SUBJECT=$(cat <<'EOF'
-Dependency resolved: {{resolved_issue}}
-EOF
-)
-gt mail send <rig>/witness -s "$SUBJECT" -m "$(cat <<'EOF'
-External dependency has closed, unblocking work in your rig.
-
-## Resolved Issue
-- ID: {{resolved_issue}}
-- Title: {{resolved_issue.title}}
-- Rig: {{resolved_issue.prefix}}
-
-## Unblocked in Your Rig
-{{range dependent}}
-- {{dependent.id}}: {{dependent.title}} ({{dependent.status}})
-{{end}}
-
-These issues may now proceed. Check bd ready for available work.
-EOF
-)"
-```
-
-**3. Log notification:**
-Note which Witnesses were notified for audit trail.
-
-**Exit criteria:** All affected Witnesses notified."""
-
-[[steps]]
 id = "trigger-dispatch"
 title = "Optionally trigger work dispatch"
-needs = ["notify-witnesses"]
+needs = ["update-blocked-status"]
 description = """
 Trigger work dispatch for newly-unblocked issues if appropriate.
 
@@ -160,17 +117,13 @@ bd show <issue-id>
 | Condition | Action |
 |-----------|--------|
 | High priority (P0-P1) + open + unblocked | Recommend immediate dispatch |
-| Medium priority (P2) + open + unblocked | Note in Witness notification |
-| Low priority (P3-P4) | Let Witness handle in next patrol |
+| Lower priority + open + unblocked | Nothing: it shows in `bd ready` |
 
 **3. If triggering dispatch:**
 ```bash
 # For high priority, suggest to Mayor:
 gt mail send mayor/ -s "High-priority work unblocked: <issue>" -m "..."
 ```
-
-Usually, the Witness notification (previous step) is sufficient - Witnesses
-handle their own dispatch decisions.
 
 **Exit criteria:** Dispatch recommendations sent where appropriate."""
 
@@ -181,7 +134,7 @@ needs = ["trigger-dispatch"]
 description = """
 Signal work complete.
 
-Close this step with a one-line summary ({{resolved_issue}}: {{dependent_count}} cross-rig dependents, notified {{witness_list}}). The closed molecule is the
+Close this step with a one-line summary ({{resolved_issue}}: {{dependent_count}} cross-rig dependents, <n> unblocked). The closed molecule is the
 record of the run.
 
 **Exit criteria:** Completion recorded."""
@@ -193,8 +146,4 @@ required = true
 
 [vars.dependent_count]
 description = "Number of cross-rig dependents found (computed during execution)"
-default = ""
-
-[vars.witness_list]
-description = "List of Witnesses notified (computed during execution)"
 default = ""

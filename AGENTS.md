@@ -75,12 +75,10 @@ with other agents using `gt` commands — never by printing text or using raw tm
 ```bash
 gt nudge mayor "Status update: PR review complete"
 gt nudge laneassist/crew/dom "Check your mail — PR ready for review"
-gt nudge witness "Polecat health check needed"
-gt nudge refinery "Merge queue has items"
 ```
 
 **Target formats:**
-- Role shortcuts: `mayor`, `deacon`, `witness`, `refinery`
+- Role shortcut: `mayor`
 - Full path: `<rig>/crew/<name>`, `<rig>/polecats/<name>`
 
 **Important:** `gt nudge` is the ONLY way to send text to another agent's session.

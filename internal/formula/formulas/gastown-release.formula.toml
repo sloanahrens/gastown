@@ -20,10 +20,10 @@ Or assign to a crew member:
 gt sling gastown/crew/max --formula gastown-release --var version=0.3.0
 ```
 
-The release session must be crew, mayor, or refinery, never a polecat. The
+The release session must be crew or mayor, never a polecat. The
 `push-release` step pushes the default branch, and a polecat session's push
 there is refused by the tap guard and the pre-push hook by design (gt-ibt8):
-polecat work lands through `gt done` -> MR -> Refinery, and that path cannot
+polecat work lands through `gt done` -> the landing worker, and that path cannot
 carry a release commit or its tag.
 
 ## Error Handling
@@ -35,7 +35,7 @@ carry a release commit or its tag.
 """
 formula = "gastown-release"
 type = "workflow"
-version = 1
+version = 2
 
 [vars.version]
 description = "The semantic version to release (e.g., 0.3.0)"
@@ -271,10 +271,10 @@ git push origin main
 git push origin v{{version}}
 ```
 
-Run this from a crew, mayor, or refinery session. A polecat session is refused
+Run this from a crew or mayor session. A polecat session is refused
 `git push origin main` by both the tap guard and the pre-push hook (gt-ibt8),
 and rightly so - the refusal is not a bug to route around, it is the fix for
-granite's 09-17 push that skipped the MR, the Refinery gates, and the om review.
+granite's 09-17 push that skipped the landing gates and the om review.
 The tag push is unaffected either way; tags are not what the guard protects.
 
 This triggers GitHub Actions to build release artifacts.

@@ -26,7 +26,7 @@ base config plus per-role/per-rig overrides is the single source of truth.
 ~/.gt/hooks-base.json              ← Shared base config (all agents)
 ~/.gt/hooks-overrides/
   ├── crew.json                    ← Override for all crew workers
-  ├── witness.json                 ← Override for all witnesses
+  ├── polecat.json                 ← Override for all polecats
   ├── gastown__crew.json           ← Override for gastown crew specifically
   └── ...
 ```
@@ -110,7 +110,7 @@ The registry (`~/gt/hooks/registry.toml`) defines 7 hooks, 5 enabled by default:
 | session-prime | SessionStart | Yes | all |
 | pre-compact-prime | PreCompact | Yes | all |
 | mail-check | UserPromptSubmit | Yes | all |
-| costs-record | Stop | Yes | crew, polecat, witness, refinery |
+| costs-record | Stop | Yes | crew, polecat |
 | clone-guard | PreToolUse | No | crew, polecat |
 | dangerous-command-guard | PreToolUse | Yes | crew, polecat |
 
@@ -214,16 +214,16 @@ Example base (empty `""` matcher — replaces):
 }
 ```
 
-Override for witness:
+Override for polecat:
 ```json
 {
   "SessionStart": [
-    { "matcher": "", "hooks": [{ "type": "command", "command": "gt prime --witness" }] }
+    { "matcher": "", "hooks": [{ "type": "command", "command": "gt prime --explain" }] }
   ]
 }
 ```
 
-Result: The witness gets `gt prime --witness` instead of `gt prime`
+Result: Polecats get `gt prime --explain` instead of `gt prime`
 (same `""` matcher = replace).
 
 ## Default base config
