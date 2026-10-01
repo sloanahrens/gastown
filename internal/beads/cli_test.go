@@ -189,3 +189,32 @@ func TestWispGCCandidatesReadsDryRun(t *testing.T) {
 		t.Errorf("argv = %q", argv)
 	}
 }
+
+// SetIssuePrefix runs bd's config-only rename: bd config set refuses the key,
+// and a plain rename rewrites every issue id (beads be-qr3, gt-fcxe9.11).
+// gastown passes the prefix without the trailing hyphen; bd requires it.
+func TestSetIssuePrefixSendsConfigOnlyRename(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(nil)
+	if err := newPlainRecorded(t, r).SetIssuePrefix("gt"); err != nil {
+		t.Fatalf("SetIssuePrefix: %v", err)
+	}
+	want := "rename-prefix --config-only gt-"
+	if argv := r.argvs(); len(argv) != 1 || argv[0] != want {
+		t.Errorf("argv = %q, want [%s]", argv, want)
+	}
+}
+
+// bd refuses the config-only rename (exit 21) when an issue id would have to
+// be rewritten. The refusal is the answer the caller acts on, not a silent
+// half-migration of the config cell.
+func TestSetIssuePrefixReportsBDRefusal(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func([]string) reply {
+		return reply{stderr: "Error: prefix gt- would rewrite 3 issue ids", err: exitError{21}}
+	})
+	err := newPlainRecorded(t, r).SetIssuePrefix("gt")
+	if err == nil || !strings.Contains(err.Error(), "rewrite 3 issue ids") {
+		t.Fatalf("SetIssuePrefix = %v, want bd's refusal", err)
+	}
+}

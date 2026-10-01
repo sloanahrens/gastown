@@ -3872,11 +3872,13 @@ func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
 }
 
 // RemoveDependency removes a dependency.
+//
+// It goes through bd even when the instance carries an in-process store: the
+// store's RemoveDependency writes no event and recomputes is_blocked with the
+// pre-0059 predicate that lacks the null-safe gate COALESCE, dispatching
+// waits-for waiters as soon as any child closes (gt-fcxe9.11). bd's dep remove
+// maintains is_blocked, the journal and row_lock itself.
 func (b *Beads) RemoveDependency(issue, dependsOn string) error {
-	if b.store != nil {
-		return b.storeRemoveDependency(issue, dependsOn)
-	}
-
 	_, err := b.run("dep", "remove", issue, dependsOn)
 	return err
 }

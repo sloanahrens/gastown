@@ -34,6 +34,20 @@ func (b *Beads) ConfigSet(key, value string) error {
 	return err
 }
 
+// SetIssuePrefix sets the database's issue_prefix, for a database whose prefix
+// is unset or stale. prefix is gastown's form, without the trailing hyphen
+// ("gt", "be").
+//
+// It runs bd rename-prefix --config-only, the one verb that writes that cell:
+// bd config set refuses issue_prefix, and a plain rename rewrites every issue
+// id (beads be-qr3). bd refuses that rename when an existing id would have to
+// be rewritten, and the refusal is what the caller gets — a prefix the ids
+// disagree with is not a state to write silently (gt-fcxe9.11).
+func (b *Beads) SetIssuePrefix(prefix string) error {
+	_, err := b.run("rename-prefix", "--config-only", prefix+"-")
+	return err
+}
+
 // SQLCSV runs a declared read through bd sql --csv and returns its records,
 // header row included. Only stdout is parsed: bd writes diagnostics to
 // stderr, and merging them into the CSV breaks it (gt-m7t).
