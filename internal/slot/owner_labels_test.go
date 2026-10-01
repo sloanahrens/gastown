@@ -185,7 +185,7 @@ func TestAcquire_RemovesContainersWhoseOwnerIsGone(t *testing.T) {
 		dockerPSLine("id-3", "dolthub/dolt-sql-server:2.0.7", "sharp_raman", now.Add(-4*time.Minute), ownerLabels(deadPID, testHost, "b341e810")),
 	)
 
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/refinery", 30*time.Second) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/landing", 30*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestAcquire_KeepsContainersWhoseOwnerIsAlive(t *testing.T) {
 				dockerPSLine("id-live", "dolthub/dolt-sql-server:2.0.7", "suite", tg.clk.Now().Add(-tc.created), tc.labels),
 			)
 			timeout := tg.pollInterval + 500*time.Millisecond
-			_, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/refinery", timeout) })
+			_, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/landing", timeout) })
 			if err == nil {
 				t.Fatal("Acquire granted while a live owner's container was running unwrapped")
 			}
@@ -251,7 +251,7 @@ func TestAcquire_RemovesOrphanWhosePIDWasReused(t *testing.T) {
 		dockerPSLine("id-orphan", "dolthub/dolt-sql-server:2.0.7", "x", tg.clk.Now().Add(-3*time.Minute),
 			withStart(ownerLabels(6161, testHost, "s1"), "1790000000.100")),
 	)
-	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/refinery", 30*time.Second) })
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "gastown/landing", 30*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}

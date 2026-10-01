@@ -36,7 +36,7 @@ The daemon:
 2. Nudges the mayor with the seat count and the per-rig counts when seats are
    free and work exists
 3. Stays silent when no seat model is configured, no seat is free, or every rig
-   with work is over its merge-queue ceiling
+   with work is over its landing-queue ceiling (open gt:ready-to-land beads)
 
 ## Safety
 
@@ -75,7 +75,7 @@ Deliver the check's nudge text to the mayor via `gt nudge`, or record why no
 nudge was warranted.
 
 The patrol nudges only when all three hold: a seat model is configured, at least
-one seat is free, and at least one rig outside its merge-queue ceiling has ready
+one seat is free, and at least one rig outside its landing-queue ceiling has ready
 work. Otherwise the step closes as skipped with the reason — silence is the
 common outcome and the receipt should say so.
 

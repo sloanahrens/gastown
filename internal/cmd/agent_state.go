@@ -58,22 +58,21 @@ COMMON LABELS:
   heartbeat:<epoch>  - Liveness stamp: every operation stamps it with the
                        current time, overriding any value passed to --set
 
-The stamp is the freshness field readers age out — the deacon's HEALTH_CHECK
-primary signal reads it — because bd leaves the bead's updated_at untouched on
-a label-only write.
+The stamp is the freshness field readers age out, because bd leaves the
+bead's updated_at untouched on a label-only write.
 
 EXAMPLES:
   # Check current idle count
-  gt agents state gt-gastown-witness
+  gt agents state hq-mayor
 
   # Reset idle counter after finding work
-  gt agents state gt-gastown-witness --set idle=0
+  gt agents state hq-mayor --set idle=0
 
   # Increment idle counter on timeout
-  gt agents state gt-gastown-witness --incr idle
+  gt agents state hq-mayor --incr idle
 
   # Get state as JSON
-  gt agents state gt-gastown-witness --json`,
+  gt agents state hq-mayor --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAgentState,
 }
@@ -248,7 +247,7 @@ func applyLabelOperations(stateLabels map[string]string, setOps []string, incrKe
 // The stamp carries evidence a reader can act on: a state change means the agent
 // is alive and processing, and bd writes labels to their own table, leaving the
 // issue row's updated_at stale. Without the stamp the change is invisible to any
-// freshness reader, the deacon's HEALTH_CHECK primary signal included (gt-dq5z).
+// freshness reader (gt-dq5z).
 func buildAgentStateLabels(allLabels []string, stateLabels map[string]string, now time.Time) []string {
 	finalLabels := make([]string, 0, len(allLabels)+1)
 

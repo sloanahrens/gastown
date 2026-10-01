@@ -36,7 +36,7 @@ func TestIntegrationSlotCommandResolution(t *testing.T) {
 		writeSlotProbe(t, ambientDir, "probe-gt-f4xe", "#!/bin/sh\necho ambient\n")
 		writeSlotProbe(t, binDir, "probe-gt-f4xe", "#!/bin/sh\necho assigned\n")
 		// A gate-class role takes the unwrapped branch.
-		if w := niceWrapper(slotRunNiceness("gastown/refinery", -1)); len(w) != 0 {
+		if w := niceWrapper(slotRunNiceness("gastown/landing", -1)); len(w) != 0 {
 			t.Fatalf("gate role wrapped in %v, want no wrapper", w)
 		}
 

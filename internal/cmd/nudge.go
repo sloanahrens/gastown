@@ -60,7 +60,7 @@ var nudgeCmd = &cobra.Command{
 	Long: `Universal messaging API for Gas Town worker-to-worker communication.
 
 Delivers a message to any worker's Claude Code session: polecats, crew,
-witness, refinery, mayor, or deacon.
+or the mayor.
 
 Delivery modes (--mode):
   wait-idle  Wait for agent to become idle (prompt visible), then deliver
@@ -87,9 +87,6 @@ Do not use raw tmux send-keys elsewhere.
 
 Role shortcuts (expand to session names):
   mayor     Maps to gt-mayor
-  deacon    Maps to gt-deacon
-  witness   Maps to gt-<rig>-witness (uses current rig)
-  refinery  Maps to gt-<rig>-refinery (uses current rig)
 
 Channel syntax:
   channel:<name>  Nudges all members of a named channel defined in
@@ -104,8 +101,6 @@ Examples:
   gt nudge greenplace/furiosa "Check your mail and start working"
   gt nudge greenplace/alpha -m "What's your status?"
   gt nudge mayor "Status update requested"
-  gt nudge witness "Check polecat health"
-  gt nudge deacon session-started
   gt nudge channel:workers "New priority work available"
 
   # Use --stdin for messages with special characters or formatting:
@@ -279,7 +274,7 @@ func consumptionWarningFor(probe func(sessionName string, window time.Duration) 
 		"%s: %s accepted the nudge but started no turn within %s — its input is "+
 			"still stranded in the composer/queue, which is how a wedged session presents "+
 			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
-			"that session ('gt witness restart <rig>' for a witness).\n",
+			"that session.\n",
 		mode, sessionName, window, sessionName)
 }
 
@@ -510,8 +505,8 @@ func validateNudgeFlags(mode, priority string) error {
 // nudgeTargetAndMessage reads the nudge target from args and the message
 // from -m, --stdin (through readStdin) or the second argument.
 func nudgeTargetAndMessage(messageFlag string, stdin bool, readStdin func() ([]byte, error), args []string) (target, message string, err error) {
-	// Normalize trailing slash: the mail system uses "mayor/" and "deacon/"
-	// as canonical addresses, but nudge role shortcuts expect bare names.
+	// Normalize trailing slash: the mail system uses "mayor/" as the
+	// canonical address, but nudge role shortcuts expect bare names.
 	// Without this, "mayor/" falls through to parseAddress which rejects
 	// the empty second component, silently dropping the nudge.
 	target = strings.TrimSuffix(args[0], "/")
@@ -547,7 +542,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// --if-fresh: skip nudge if the caller's tmux session is older than 60s.
-	// This prevents compaction/clear SessionStart hooks from spamming the deacon.
+	// This prevents compaction/clear SessionStart hooks from spamming the target.
 	if nudgeIfFreshFlag {
 		sessionName := tmux.CurrentSessionName()
 		if sessionName != "" {

@@ -11,10 +11,10 @@ import (
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
-// gateRunningReport is the town's pool with the refinery on reserved slot 0 and
+// gateRunningReport is the town's pool with the landing worker on reserved slot 0 and
 // the pool yielding to it (gt-22hdp.29).
 func gateRunningReport() slot.Report {
-	gate := &slot.Owner{Role: "gastown/refinery", PID: 4242, AcquiredAt: time.Now().Add(-5 * time.Minute), Slot: 0}
+	gate := &slot.Owner{Role: "gastown/landing", PID: 4242, AcquiredAt: time.Now().Add(-5 * time.Minute), Slot: 0}
 	return slot.Report{
 		Held:           true,
 		Owner:          gate,
@@ -32,7 +32,7 @@ func gateRunningReport() slot.Report {
 func TestPrintSlotStatusText_ShowsWaitingGateRunning(t *testing.T) {
 	t.Parallel()
 	out := slotStatusTextOf(t, gateRunningReport())
-	if !strings.Contains(out, "waiting: gate running") || !strings.Contains(out, "gastown/refinery (pid 4242, slot 0)") {
+	if !strings.Contains(out, "waiting: gate running") || !strings.Contains(out, "gastown/landing (pid 4242, slot 0)") {
 		t.Errorf("status with a gate running does not explain the wait:\n%s", out)
 	}
 
@@ -59,7 +59,7 @@ func TestPrintSlotStatusJSON_CarriesTheGateYield(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("%v\n%s", err, buf.String())
 	}
-	if !got.YieldingToGate || got.GateHolder == nil || got.GateHolder.Role != "gastown/refinery" {
+	if !got.YieldingToGate || got.GateHolder == nil || got.GateHolder.Role != "gastown/landing" {
 		t.Fatalf("json = %s, want yielding_to_gate and the gate holder", buf.String())
 	}
 }
@@ -68,8 +68,8 @@ func TestPrintSlotStatusJSON_CarriesTheGateYield(t *testing.T) {
 // names the gate.
 func TestSlotHistoryReason_GateRunning(t *testing.T) {
 	t.Parallel()
-	e := slot.HistoryEntry{Reason: slot.WaitReasonGateRunning, HolderRole: "gastown/refinery", HolderPID: 4242}
-	if got := slotHistoryReason(e); got != "gate_running: gastown/refinery (pid 4242)" {
+	e := slot.HistoryEntry{Reason: slot.WaitReasonGateRunning, HolderRole: "gastown/landing", HolderPID: 4242}
+	if got := slotHistoryReason(e); got != "gate_running: gastown/landing (pid 4242)" {
 		t.Fatalf("slotHistoryReason = %q", got)
 	}
 	if got := slotHistoryReason(slot.HistoryEntry{Reason: slot.WaitReasonGateRunning}); got != "gate_running" {

@@ -68,7 +68,7 @@ CONFIGURATION:
 Examples:
   gt escalate "Build failing" --severity critical --reason "CI blocked"
   gt escalate "Need API credentials" --severity high --source "plugin:rebuild-gt"
-  gt escalate "Deacon await-signal timeout" --severity medium --source deacon --fingerprint deacon:await-signal:hq-deacon
+  gt escalate "Dolt latency over 5s" --severity medium --source plugin:dolt-backup --fingerprint dolt:latency:gastown
   gt escalate "Code review requested" --reason "PR #123 ready"
   gt escalate list                          # Show open escalations
   gt escalate ack hq-abc123                 # Acknowledge
@@ -179,7 +179,7 @@ func init() {
 	// Main escalate command flags
 	escalateCmd.Flags().StringVarP(&escalateSeverity, "severity", "s", "medium", "Severity level: critical, high, medium, low")
 	escalateCmd.Flags().StringVarP(&escalateReason, "reason", "r", "", "Detailed reason for escalation")
-	escalateCmd.Flags().StringVar(&escalateSource, "source", "", "Source identifier (e.g., plugin:rebuild-gt, patrol:deacon)")
+	escalateCmd.Flags().StringVar(&escalateSource, "source", "", "Source identifier (e.g., plugin:rebuild-gt, daemon:landing)")
 	escalateCmd.Flags().StringVar(&escalateRelatedBead, "related", "", "Related bead ID (task, bug, etc.)")
 	escalateCmd.Flags().StringVar(&escalateFingerprint, "fingerprint", "", "Stable alert key: a repeat firing records onto the existing open escalation instead of creating another (default: derived from --source and the description)")
 	escalateCmd.Flags().BoolVar(&escalateJSON, "json", false, "Output as JSON")

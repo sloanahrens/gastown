@@ -13,13 +13,9 @@
 // Loaded via: pi -e gastown-hooks.js
 
 export default (pi) => {
-  const role = (process.env.GT_ROLE || "").toLowerCase();
   let primeContext = null;
   let contextInjected = false;
   let lastMailCheck = 0;
-
-  const shouldCheckMail = () =>
-    !role.includes("witness") && !role.includes("refinery") && !role.startsWith("deacon") && !role.includes("boot");
 
   // SessionStart — run gt prime and capture context for injection
   pi.on("session_start", async (event, context) => {
@@ -43,7 +39,7 @@ export default (pi) => {
 
     // Check mail on every prompt (throttled to once per 30s)
     const now = Date.now();
-    if (shouldCheckMail() && now - lastMailCheck >= 30000) {
+    if (now - lastMailCheck >= 30000) {
       lastMailCheck = now;
       try {
         const mailResult = await pi.exec("gt", ["mail", "check", "--inject"]);

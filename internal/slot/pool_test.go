@@ -71,14 +71,14 @@ func TestPool_HeldSlotNamesTheWaitOnce(t *testing.T) {
 	town := t.TempDir()
 	pool := Pool{Slots: 1}
 
-	held := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	held := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer func() { _ = held.Release() }()
 
 	// Several blocked passes, so "once" is a claim about a whole wait.
 	timeout := 3 * tg.pollInterval
 	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/amber", timeout, pool) }); err == nil {
 		t.Fatal("AcquirePool was granted a slot while the only slot was held")
-	} else if !strings.Contains(err.Error(), "token held by gastown/refinery") {
+	} else if !strings.Contains(err.Error(), "token held by gastown/landing") {
 		t.Errorf("timeout error = %q, want the holder the caller queued behind (gt-18zj)", err)
 	}
 
@@ -86,7 +86,7 @@ func TestPool_HeldSlotNamesTheWaitOnce(t *testing.T) {
 	if n := strings.Count(out.String(), "waiting for container-gate slot"); n != 1 {
 		t.Errorf("wait lines = %d, want one line for the whole wait: %q", n, out.String())
 	}
-	if !strings.Contains(out.String(), "token held by gastown/refinery") {
+	if !strings.Contains(out.String(), "token held by gastown/landing") {
 		t.Errorf("wait line = %q, want the holder named", out.String())
 	}
 	if !strings.Contains(out.String(), "cap ") {
@@ -116,11 +116,11 @@ func TestPool_ReservedSlotOnlyForGateRoles(t *testing.T) {
 		t.Fatalf("pool must not report busy while the reserved slot is free: %+v", rep)
 	}
 
-	r := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	r := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	if r.Index != 0 {
-		t.Fatalf("refinery got slot %d, want the reserved slot 0", r.Index)
+		t.Fatalf("landing gate got slot %d, want the reserved slot 0", r.Index)
 	}
-	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/refinery-batch", shortWait, pool) }); err == nil {
+	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "hm/landing", shortWait, pool) }); err == nil {
 		t.Fatal("batch gate got a slot with every slot held")
 	}
 
@@ -139,8 +139,8 @@ func TestPool_GateRoleFallsBackToSharedSlot(t *testing.T) {
 	town := t.TempDir()
 	pool := Pool{Slots: 2, ReservedForGate: 1}
 
-	r := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
-	m := tg.mustAcquirePool(t, town, "gastown/main-branch-test", pool)
+	r := tg.mustAcquirePool(t, town, "gastown/landing", pool)
+	m := tg.mustAcquirePool(t, town, "mango/landing", pool)
 	if r.Index != 0 || m.Index != 1 {
 		t.Fatalf("gate roles got slots %d and %d, want 0 then 1", r.Index, m.Index)
 	}
@@ -155,10 +155,10 @@ func TestPool_UnwrappedCheckSkippedWhenAnotherSlotHeld(t *testing.T) {
 	town := t.TempDir()
 	pool := Pool{Slots: 2}
 
-	h0 := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	h0 := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	tg.rt.setLines("dolt/dolt-sql-server:2.2.0 suite")
 
-	// Slot 0 is held, so the containers are legitimately the refinery's:
+	// Slot 0 is held, so the containers are legitimately the landing worker's:
 	// slot 1 must be granted without waiting for them to clear.
 	h1, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/amber", 5*time.Second, pool) })
 	if err != nil {
@@ -325,7 +325,7 @@ func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
-	const role = "gastown/main-branch-test"
+	const role = "mango/landing"
 
 	tg.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 0, role, foreignPID()))
 
@@ -407,13 +407,14 @@ func TestPool_NormalizedAndCandidates(t *testing.T) {
 		if got := c.in.candidates("gastown/amber"); !eq(got, c.polecat) {
 			t.Errorf("candidates polecat %+v = %v, want %v", c.in, got, c.polecat)
 		}
-		if got := c.in.candidates("gastown/refinery"); !eq(got, c.gate) {
+		if got := c.in.candidates("gastown/landing"); !eq(got, c.gate) {
 			t.Errorf("candidates gate %+v = %v, want %v", c.in, got, c.gate)
 		}
 	}
 	for role, want := range map[string]bool{
-		"gastown/refinery": true, "gastown/refinery-batch": true, "hm/main-branch-test": true,
-		"gastown/amber": false, "gastown/refinery-impostor-polecat": true, "pid-1234": false,
+		"gastown/landing": true, "hm/landing": true,
+		"gastown/refinery": false, "hm/main-branch-test": false,
+		"gastown/amber": false, "gastown/landing-impostor-polecat": false, "pid-1234": false,
 	} {
 		if IsGateRole(role) != want {
 			t.Errorf("IsGateRole(%q) = %v, want %v", role, !want, want)
@@ -449,8 +450,8 @@ func TestTimeoutError_NamesTheCause(t *testing.T) {
 		},
 		{
 			"running gate",
-			waitInfo{Reason: WaitReasonGateRunning, Holder: &Owner{Role: "gastown/refinery", PID: 42, Slot: 0}},
-			"gate running: gastown/refinery pid 42 holds gate-reserved slot 0",
+			waitInfo{Reason: WaitReasonGateRunning, Holder: &Owner{Role: "gastown/landing", PID: 42, Slot: 0}},
+			"gate running: gastown/landing pid 42 holds gate-reserved slot 0",
 		},
 		{"no blocker", waitInfo{}, ""},
 	}
