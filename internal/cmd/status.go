@@ -2,35 +2,22 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/mail"
-	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/townhealth"
-	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/townstatus"
 	"golang.org/x/term"
 )
 
@@ -73,377 +60,14 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 }
 
-// TownStatus represents the overall status of the workspace.
-type TownStatus struct {
-	Name     string         `json:"name"`
-	Location string         `json:"location"`
-	Overseer *OverseerInfo  `json:"overseer,omitempty"` // Human operator
-	DND      *DNDInfo       `json:"dnd,omitempty"`      // Current agent DND status
-	Daemon   *ServiceInfo   `json:"daemon,omitempty"`   // Daemon status
-	Dolt     *DoltInfo      `json:"dolt,omitempty"`     // Dolt server status
-	Tmux     *TmuxInfo      `json:"tmux,omitempty"`     // Tmux server status
-	Agents   []AgentRuntime `json:"agents"`             // Global agents (the Mayor)
-	Rigs     []RigStatus    `json:"rigs"`
-	Summary  StatusSum      `json:"summary"`
-	Slot     *SlotInfo      `json:"container_slot,omitempty"` // Container-suite gate slot (gt-bcsq)
-	// LivenessUnknown lists sessions whose agent-liveness query failed. They
-	// are shown as running (unknown is not dead) and named here so the
-	// failure is visible (gt-fcxe9.1).
-	LivenessUnknown []string `json:"liveness_unknown,omitempty"`
-	// Health is the daemon's last health report (gt-s3rec.2); nil when
-	// there is none. healthLines is it rendered, every field.
-	Health      *townhealth.Report `json:"health,omitempty"`
-	healthLines []string
-}
-
-// SlotInfo represents the town-level container-suite gate slot (see
-// internal/slot). Only populated in the status output when the slot is
-// currently held — an idle slot is not worth a line in every 'gt status'.
-type SlotInfo struct {
-	Role       string    `json:"role"`
-	PID        int       `json:"pid"`
-	AcquiredAt time.Time `json:"acquired_at"`
-}
-
-// readDoltCommitMeter fills the commits-per-day meter into info. A meter
-// that cannot be read leaves it empty: the status line then shows no marker,
-// and gt doctor's dolt-commit-rate check reports the failure.
-func readDoltCommitMeter(info *DoltInfo, townRoot string, measure func(context.Context, string) ([]doltserver.DBCommits, error)) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	counts, err := measure(ctx, townRoot)
-	if err != nil {
-		return
-	}
-	info.CommitsLastDay = counts
-	info.CommitsPerDayWarn = config.LoadOperationalConfig(townRoot).GetDoltConfig().CommitsPerDayWarnV()
-}
-
 // doltCommitMarker is the Services-line marker for databases over the
 // commits-per-day limit, "" when none is.
-func doltCommitMarker(info *DoltInfo) string {
+func doltCommitMarker(info *townstatus.DoltInfo) string {
 	over := doltserver.OverCommitBudget(info.CommitsLastDay, info.CommitsPerDayWarn)
 	if len(over) == 0 {
 		return ""
 	}
 	return fmt.Sprintf("⚠ commits/24h %s > %d", doltserver.FormatCommitCounts(over), info.CommitsPerDayWarn)
-}
-
-// ServiceInfo represents a background service status.
-type ServiceInfo struct {
-	Running bool `json:"running"`
-	PID     int  `json:"pid,omitempty"`
-}
-
-// DoltInfo represents the Dolt server status.
-type DoltInfo struct {
-	Running       bool   `json:"running"`
-	PID           int    `json:"pid,omitempty"`
-	Port          int    `json:"port"`
-	Remote        bool   `json:"remote,omitempty"`
-	DataDir       string `json:"data_dir,omitempty"`
-	PortConflict  bool   `json:"port_conflict,omitempty"`  // Port taken by another town's Dolt
-	ConflictOwner string `json:"conflict_owner,omitempty"` // --data-dir of the process holding the port
-	// CommitsLastDay is the commits-per-day meter (gt-8z769.4): each
-	// database's Dolt commits in the last 24h. Not read under --fast.
-	CommitsLastDay []doltserver.DBCommits `json:"commits_last_day,omitempty"`
-	// CommitsPerDayWarn is the per-database limit the meter is held to
-	// (operational.dolt.commits_per_day_warn).
-	CommitsPerDayWarn int `json:"commits_per_day_warn,omitempty"`
-}
-
-// TmuxInfo represents the tmux server status.
-type TmuxInfo struct {
-	Socket       string `json:"socket"`                // Socket name derived from town name (e.g., "gt-test")
-	SocketPath   string `json:"socket_path,omitempty"` // Full socket path (e.g., /tmp/tmux-501/gt-test)
-	Running      bool   `json:"running"`               // Is the tmux server running?
-	PID          int    `json:"pid,omitempty"`         // PID of the tmux server process
-	SessionCount int    `json:"session_count"`         // Number of sessions
-}
-
-// OverseerInfo represents the human operator's identity and status.
-type OverseerInfo struct {
-	Name       string `json:"name"`
-	Email      string `json:"email,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Source     string `json:"source"`
-	UnreadMail int    `json:"unread_mail"`
-}
-
-// DNDInfo represents Do Not Disturb status for the current agent context.
-type DNDInfo struct {
-	Enabled bool   `json:"enabled"`
-	Level   string `json:"level"`
-	Agent   string `json:"agent,omitempty"`
-}
-
-// AgentRuntime represents the runtime state of an agent.
-type AgentRuntime struct {
-	Name              string `json:"name"`                         // Display name (e.g., "mayor", "nux")
-	Address           string `json:"address"`                      // Full address (e.g., "greenplace/nux")
-	Session           string `json:"session"`                      // tmux session name
-	Role              string `json:"role"`                         // Role type
-	Running           bool   `json:"running"`                      // Is tmux session running?
-	HasWork           bool   `json:"has_work"`                     // Has pinned work?
-	WorkTitle         string `json:"work_title,omitempty"`         // Title of pinned work
-	HookBead          string `json:"hook_bead,omitempty"`          // Pinned bead ID from agent bead
-	State             string `json:"state,omitempty"`              // Agent state from agent bead
-	NotificationLevel string `json:"notification_level,omitempty"` // Notification level (verbose, normal, muted)
-	UnreadMail        int    `json:"unread_mail"`                  // Number of unread messages
-	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
-	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "claude-opus")
-	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus")
-	Paused            bool   `json:"paused,omitempty"`             // True when the pause marker file says paused (gt-ahik)
-	PausedReason      string `json:"paused_reason,omitempty"`      // Reason from the pause marker (gt agent pause)
-}
-
-// RigStatus represents status of a single rig.
-type RigStatus struct {
-	Name         string          `json:"name"`
-	Polecats     []string        `json:"polecats"`
-	PolecatCount int             `json:"polecat_count"`
-	Crews        []string        `json:"crews"`
-	CrewCount    int             `json:"crew_count"`
-	Hooks        []AgentHookInfo `json:"hooks,omitempty"`
-	Agents       []AgentRuntime  `json:"agents,omitempty"` // Runtime state of all agents in rig
-}
-
-// AgentHookInfo represents an agent's hook (pinned work) status.
-type AgentHookInfo struct {
-	Agent    string `json:"agent"`              // Agent address (e.g., "greenplace/toast", "greenplace/crew/max")
-	Role     string `json:"role"`               // Role type (polecat, crew)
-	HasWork  bool   `json:"has_work"`           // Whether agent has pinned work
-	Molecule string `json:"molecule,omitempty"` // Attached molecule ID
-	Title    string `json:"title,omitempty"`    // Pinned bead title
-}
-
-// StatusSum provides summary counts.
-type StatusSum struct {
-	RigCount     int `json:"rig_count"`
-	PolecatCount int `json:"polecat_count"`
-	CrewCount    int `json:"crew_count"`
-	ActiveHooks  int `json:"active_hooks"`
-}
-
-// resolveAgentDisplay inspects the actual running process in the tmux session
-// to determine what runtime and model are being used. Falls back to config
-// when the session isn't running.
-func resolveAgentDisplay(townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
-	// Map legacy role names to config role names
-	configRole := role
-	switch role {
-	case "coordinator":
-		configRole = constants.RoleMayor
-	}
-
-	// Get alias from config
-	if townSettings != nil {
-		alias = townSettings.RoleAgents[configRole]
-		if alias == "" {
-			alias = townSettings.DefaultAgent
-		}
-	}
-
-	// If session is running, inspect the actual process
-	if running && sessionName != "" {
-		if detected := detectRuntimeFromSession(sessionName); detected != "" {
-			info = detected
-			return alias, info
-		}
-	}
-
-	// Fall back to config-based display
-	if townSettings != nil && alias != "" {
-		rc := townSettings.Agents[alias]
-		if rc != nil {
-			info = buildInfoFromConfig(rc)
-		} else {
-			info = alias
-		}
-	}
-	return alias, info
-}
-
-// detectRuntimeFromSession inspects the actual process tree in a tmux session
-// to determine what agent runtime and model are in use.
-func detectRuntimeFromSession(sessionName string) string {
-	// Get the PID of the shell process in the tmux pane
-	t := tmux.NewTmux()
-	pid, err := t.GetPanePID(sessionName)
-	if err != nil || pid == "" {
-		return ""
-	}
-
-	// Walk child processes to find the actual agent (not the shell)
-	cmdline := findAgentCmdline(pid)
-	if cmdline == "" {
-		return ""
-	}
-
-	return parseRuntimeInfo(cmdline)
-}
-
-// findAgentCmdline checks the pane process itself and its descendants for a known agent.
-// The pane PID may BE the agent (e.g., claude), or the agent may be a child (e.g., shell → claude).
-// Also handles wrapper processes (node /path/to/claude).
-func findAgentCmdline(panePid string) string {
-	// Check the pane process itself first
-	cmdline := readCmdline(panePid)
-	if isAgentCmdline(cmdline) {
-		return cmdline
-	}
-
-	// Walk children (shell → agent)
-	childrenPath := "/proc/" + panePid + "/task/" + panePid + "/children"
-	childrenBytes, err := os.ReadFile(childrenPath)
-	if err != nil {
-		return cmdline // return whatever the pane process is
-	}
-
-	children := strings.Fields(string(childrenBytes))
-	for _, childPid := range children {
-		childCmd := readCmdline(childPid)
-		if isAgentCmdline(childCmd) {
-			return childCmd
-		}
-		// Check grandchildren (cgroup-wrap → agent)
-		gcPath := "/proc/" + childPid + "/task/" + childPid + "/children"
-		gcBytes, err := os.ReadFile(gcPath)
-		if err != nil {
-			continue
-		}
-		for _, gcPid := range strings.Fields(string(gcBytes)) {
-			gcCmd := readCmdline(gcPid)
-			if isAgentCmdline(gcCmd) {
-				return gcCmd
-			}
-		}
-	}
-
-	return cmdline // return pane process cmdline as fallback
-}
-
-// isAgentCmdline returns true if the cmdline contains a known agent,
-// either as the main command or as the first arg of a wrapper (node/bun).
-func isAgentCmdline(cmdline string) bool {
-	if cmdline == "" {
-		return false
-	}
-	parts := strings.Split(cmdline, "\x00")
-	if len(parts) == 0 {
-		return false
-	}
-	base := filepath.Base(parts[0])
-	if isKnownAgent(base) {
-		return true
-	}
-	// Check if wrapper (node/bun) is running an agent
-	if isAgentWrapper(base) && len(parts) > 1 {
-		argBase := filepath.Base(parts[1])
-		return isKnownAgent(argBase)
-	}
-	return false
-}
-
-// readCmdline reads /proc/<pid>/cmdline and returns it as a space-joined string.
-func readCmdline(pid string) string {
-	data, err := os.ReadFile("/proc/" + pid + "/cmdline")
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	// cmdline uses null bytes as separators
-	return string(data)
-}
-
-// extractBaseName gets the base command name from a null-separated cmdline.
-func extractBaseName(cmdline string) string {
-	if cmdline == "" {
-		return ""
-	}
-	parts := strings.Split(cmdline, "\x00")
-	if len(parts) == 0 {
-		return ""
-	}
-	return filepath.Base(parts[0])
-}
-
-// isKnownAgent returns true if the command is a recognized agent runtime.
-func isKnownAgent(base string) bool {
-	return config.IsKnownPreset(base)
-}
-
-// isAgentWrapper returns true if the command is a runtime wrapper (node, bun, etc.)
-// that may host an agent as its first argument.
-func isAgentWrapper(base string) bool {
-	switch base {
-	case "node", "bun", "npx", "bunx":
-		return true
-	}
-	return false
-}
-
-// parseRuntimeInfo extracts "runtime/model" from a null-separated cmdline.
-// Handles direct invocation (claude --model opus) and wrapper patterns (node /path/to/claude).
-func parseRuntimeInfo(cmdline string) string {
-	if cmdline == "" {
-		return ""
-	}
-	parts := strings.Split(cmdline, "\x00")
-	if len(parts) == 0 {
-		return ""
-	}
-
-	// Find the actual agent command — skip wrappers (node, bun, cgroup-wrap)
-	cmd := ""
-	startIdx := 0
-	for i, part := range parts {
-		base := filepath.Base(part)
-		if isKnownAgent(base) {
-			cmd = base
-			startIdx = i
-			break
-		}
-	}
-	if cmd == "" {
-		cmd = filepath.Base(parts[0])
-	}
-
-	// Extract the model from flags
-	for i := startIdx; i < len(parts); i++ {
-		arg := parts[i]
-		if (arg == "--model" || arg == "-m") && i+1 < len(parts) && parts[i+1] != "" {
-			return cmd + "/" + parts[i+1]
-		}
-	}
-
-	return cmd
-}
-
-// buildInfoFromConfig builds display info from a RuntimeConfig (fallback when not running).
-func buildInfoFromConfig(rc *config.RuntimeConfig) string {
-	if rc.Command == "" {
-		return "claude"
-	}
-	cmd := filepath.Base(rc.Command)
-	if cmd == "" {
-		cmd = "claude"
-	}
-	if cmd == "cgroup-wrap" && len(rc.Args) > 0 {
-		cmd = rc.Args[0]
-	}
-
-	model := ""
-	for i, arg := range rc.Args {
-		if (arg == "--model" || arg == "-m") && i+1 < len(rc.Args) {
-			model = rc.Args[i+1]
-			break
-		}
-	}
-
-	if model != "" {
-		return cmd + "/" + model
-	}
-	return cmd
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -454,6 +78,17 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return runStatusWatch(cmd, args)
 	}
 	return runStatusOnce(cmd, args)
+}
+
+// gatherTownStatus is the command's one call into the leaf package: the flags
+// and the two caller-owned probes go in, the town's status comes out.
+func gatherTownStatus() (townstatus.TownStatus, error) {
+	return townstatus.Gather(townstatus.Options{
+		Fast:        statusFast,
+		Registry:    townRegistry(),
+		DaemonProbe: daemon.IsRunning,
+		DNDProbe:    detectCurrentDNDStatus,
+	})
 }
 
 // validateStatusWatch rejects the flag combinations --watch cannot run with:
@@ -486,7 +121,7 @@ func runStatusWatch(_ *cobra.Command, _ []string) error {
 	// failures. Watch mode spawns many tmux subprocesses per iteration;
 	// under load the tmux server can intermittently fail, causing all
 	// agents to appear as not running (empty bubbles).
-	var cachedStatus *TownStatus
+	var cachedStatus *townstatus.TownStatus
 	var cachedAt time.Time
 	maxStale := time.Duration(statusInterval) * time.Second * 5
 
@@ -505,25 +140,25 @@ func runStatusWatch(_ *cobra.Command, _ []string) error {
 			fmt.Fprintf(&buf, "%s\n\n", header)
 		}
 
-		status, err := gatherStatus(townRegistry())
+		status, err := gatherTownStatus()
 		usedCache := false
 
 		// On error, retry once before giving up.
 		if err != nil {
-			status, err = gatherStatus(townRegistry())
+			status, err = gatherTownStatus()
 		}
 
 		if err == nil {
 			// Detect degraded results: zero running agents when we
 			// previously had some. This indicates a transient tmux
 			// failure rather than all agents legitimately stopping.
-			running := countRunningAgents(status)
+			running := townstatus.CountRunningAgents(status)
 			if running == 0 && cachedStatus != nil &&
-				countRunningAgents(*cachedStatus) > 0 {
+				townstatus.CountRunningAgents(*cachedStatus) > 0 {
 				// Retry once to confirm.
-				retry, retryErr := gatherStatus(townRegistry())
+				retry, retryErr := gatherTownStatus()
 				if retryErr == nil &&
-					countRunningAgents(retry) > 0 {
+					townstatus.CountRunningAgents(retry) > 0 {
 					status = retry
 				} else if time.Since(cachedAt) < maxStale {
 					status = *cachedStatus
@@ -578,27 +213,8 @@ func runStatusWatch(_ *cobra.Command, _ []string) error {
 	}
 }
 
-// countRunningAgents returns the number of agents with Running=true
-// across all global agents and rig agents in the status.
-func countRunningAgents(s TownStatus) int {
-	count := 0
-	for _, a := range s.Agents {
-		if a.Running {
-			count++
-		}
-	}
-	for _, r := range s.Rigs {
-		for _, a := range r.Agents {
-			if a.Running {
-				count++
-			}
-		}
-	}
-	return count
-}
-
 func runStatusOnce(_ *cobra.Command, _ []string) error {
-	status, err := gatherStatus(townRegistry())
+	status, err := gatherTownStatus()
 	if err != nil {
 		return err
 	}
@@ -608,393 +224,21 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 	return outputStatusText(os.Stdout, status)
 }
 
-func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
-	// Find town root
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return TownStatus{}, fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	fast := statusFast
-	skipBeadsPrefetch := false
-	if !fast {
-		if release, ok := tryStatusDetailLock(townRoot); ok {
-			defer release()
-		} else {
-			fast = true
-			skipBeadsPrefetch = true
-		}
-	}
-
-	// Load town config
-	townConfigPath := constants.MayorTownPath(townRoot)
-	townConfig, err := config.LoadTownConfig(townConfigPath)
-	if err != nil {
-		// Try to continue without config
-		townConfig = &config.TownConfig{Name: filepath.Base(townRoot)}
-	}
-
-	// Load rigs config
-	rigsConfigPath := constants.MayorRigsPath(townRoot)
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
-	if err != nil {
-		// Empty config if file doesn't exist
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
-
-	// Load town settings for agent display info
-	townSettings, _ := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-
-	// Create rig manager
-	g := git.NewGit(townRoot)
-	mgr := rig.NewManager(townRoot, rigsConfig, g)
-
-	// Create tmux instance for runtime checks
-	t := tmux.NewTmux()
-
-	// Pre-fetch all tmux sessions and verify agent liveness for O(1) lookup.
-	// A Gas Town session is only considered "running" if the agent process is
-	// alive inside it, not merely if the tmux session exists. This prevents
-	// zombie sessions (tmux alive, agent dead) from showing as running.
-	// See: gt-bd6i3
-	allSessions := make(map[string]bool)
-	var livenessUnknown []string
-	if sessions, err := t.ListSessions(); err == nil {
-		var sessionMu sync.Mutex
-		var sessionWg sync.WaitGroup
-		for _, s := range sessions {
-			if reg.IsKnownSession(s) {
-				sessionWg.Add(1)
-				go func(name string) {
-					defer sessionWg.Done()
-					// A failed liveness query is unknown, not dead: show
-					// the session as present rather than hide it (gt-fcxe9.1).
-					alive, aliveErr := t.IsAgentAliveChecked(name)
-					sessionMu.Lock()
-					if aliveErr != nil {
-						alive = true
-						livenessUnknown = append(livenessUnknown, name)
-					}
-					allSessions[name] = alive
-					sessionMu.Unlock()
-				}(s)
-			} else {
-				allSessions[s] = true
-			}
-		}
-		sessionWg.Wait()
-	}
-
-	// Discover rigs
-	rigs, err := mgr.DiscoverRigs()
-	if err != nil {
-		return TownStatus{}, fmt.Errorf("discovering rigs: %w", err)
-	}
-
-	// Pre-fetch agent beads across all rig-specific beads DBs. If another status
-	// process already holds the detail lock, skip this Dolt-heavy section and
-	// render runtime-only status instead of amplifying the query storm.
-	allAgentBeads := make(map[string]*beads.Issue)
-	allHookBeads := make(map[string]*beads.Issue)
-	var beadsMu sync.Mutex // Protects allAgentBeads and allHookBeads
-
-	// Helper to safely merge beads into the shared maps
-	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allAgentBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-	mergeHookBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allHookBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-
-	if !skipBeadsPrefetch {
-		var beadsWg sync.WaitGroup
-
-		// Fetch town-level agent beads (the Mayor) from town beads
-		townBeadsPath := beads.GetTownBeadsPath(townRoot)
-		beadsWg.Add(1)
-		go func() {
-			defer beadsWg.Done()
-			townBeadsClient := beads.New(townBeadsPath)
-			townAgentBeads, _ := townBeadsClient.ListAgentBeads()
-			mergeAgentBeads(townAgentBeads)
-
-			// Fetch hook beads from town beads
-			var townHookIDs []string
-			for _, issue := range townAgentBeads {
-				hookID := issue.HookBead
-				if hookID == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						hookID = fields.HookBead
-					}
-				}
-				if hookID != "" {
-					townHookIDs = append(townHookIDs, hookID)
-				}
-			}
-			if len(townHookIDs) > 0 {
-				townHookBeads, _ := townBeadsClient.ShowMultiple(townHookIDs)
-				mergeHookBeads(townHookBeads)
-			}
-		}()
-
-		// Fetch rig-level agent beads in parallel
-		for _, r := range rigs {
-			beadsWg.Add(1)
-			go func(r *rig.Rig) {
-				defer beadsWg.Done()
-				rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
-				rigBeads := beads.New(rigBeadsPath)
-				rigAgentBeads, _ := rigBeads.ListAgentBeads()
-				if rigAgentBeads == nil {
-					return
-				}
-				mergeAgentBeads(rigAgentBeads)
-
-				var hookIDs []string
-				for _, issue := range rigAgentBeads {
-					// Use the HookBead field from the database column; fall back for legacy beads.
-					hookID := issue.HookBead
-					if hookID == "" {
-						fields := beads.ParseAgentFields(issue.Description)
-						if fields != nil {
-							hookID = fields.HookBead
-						}
-					}
-					if hookID != "" {
-						hookIDs = append(hookIDs, hookID)
-					}
-				}
-
-				if len(hookIDs) == 0 {
-					return
-				}
-				hookBeads, _ := rigBeads.ShowMultiple(hookIDs)
-				mergeHookBeads(hookBeads)
-			}(r)
-		}
-
-		beadsWg.Wait()
-	}
-
-	// Create mail router for inbox lookups
-	mailRouter := mail.NewRouter(townRoot, reg)
-
-	// Load overseer config
-	var overseerInfo *OverseerInfo
-	if overseerConfig, err := config.LoadOrDetectOverseer(townRoot); err == nil && overseerConfig != nil {
-		overseerInfo = &OverseerInfo{
-			Name:     overseerConfig.Name,
-			Email:    overseerConfig.Email,
-			Username: overseerConfig.Username,
-			Source:   overseerConfig.Source,
-		}
-		// Get overseer mail count (skip in --fast mode)
-		if !fast {
-			if mailbox, err := mailRouter.GetMailbox("overseer"); err == nil {
-				_, unread, _ := mailbox.Count()
-				overseerInfo.UnreadMail = unread
-			}
-		}
-	}
-
-	// Build status - parallel fetch global agents and rigs
-	status := TownStatus{
-		Name:     townConfig.Name,
-		Location: townRoot,
-		Overseer: overseerInfo,
-		DND:      detectCurrentDNDStatus(townRoot),
-		Rigs:     make([]RigStatus, len(rigs)),
-	}
-	status.healthLines, _, status.Health = townHealthView(townRoot, time.Now())
-
-	// Daemon status
-	if daemonRunning, daemonPid, err := daemon.IsRunning(townRoot); err == nil {
-		status.Daemon = &ServiceInfo{Running: daemonRunning, PID: daemonPid}
-	}
-
-	// Dolt status
-	doltCfg := doltserver.DefaultConfig(townRoot)
-	if doltCfg.IsRemote() {
-		status.Dolt = &DoltInfo{Remote: true, Port: doltCfg.Port}
-	} else {
-		doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
-		port := doltCfg.Port
-		if doltRunning {
-			// Report the port the running server was started on, which
-			// can differ from the configured one until Dolt restarts.
-			if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
-				port = state.Port
-			}
-		}
-		doltInfo := &DoltInfo{
-			Running: doltRunning,
-			PID:     doltPid,
-			Port:    port,
-			DataDir: doltCfg.DataDir,
-		}
-		// Check if port is held by another town's Dolt
-		if !doltRunning {
-			if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
-				doltInfo.PortConflict = true
-				doltInfo.ConflictOwner = conflictDir
-			}
-		}
-		status.Dolt = doltInfo
-	}
-	if !fast && (status.Dolt.Remote || status.Dolt.Running) {
-		readDoltCommitMeter(status.Dolt, townRoot, doltserver.CommitsLastDay)
-	}
-
-	// Tmux status
-	socket := tmux.GetDefaultSocket()
-	socketLabel := "default"
-	if socket != "" {
-		socketLabel = socket
-	}
-	tmuxInfo := &TmuxInfo{
-		Socket:       socketLabel,
-		SessionCount: len(allSessions),
-		Running:      len(allSessions) > 0,
-	}
-	// Resolve socket path: /tmp/tmux-<UID>/<socket>
-	tmuxInfo.SocketPath = filepath.Join(tmux.SocketDir(), socketLabel)
-	if _, err := os.Stat(tmuxInfo.SocketPath); err == nil {
-		tmuxInfo.Running = true
-		tmuxInfo.PID = tmux.NewTmux().ServerPID()
-	}
-	status.Tmux = tmuxInfo
-
-	// Container-suite gate slot: only show a line when something is
-	// actually holding it (gt-bcsq). Best-effort — a lock-read failure
-	// shouldn't break 'gt status'.
-	status.Slot = readGateSlotHolder(townRoot)
-
-	sort.Strings(livenessUnknown)
-	status.LivenessUnknown = livenessUnknown
-
-	var wg sync.WaitGroup
-
-	// Fetch global agents in parallel with rig discovery
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		status.Agents = discoverGlobalAgents(townRoot, allSessions, allAgentBeads, allHookBeads, mailRouter, fast)
-	}()
-
-	// Process all rigs in parallel
-	rigActiveHooks := make([]int, len(rigs)) // Track hooks per rig for thread safety
-	for i, r := range rigs {
-		wg.Add(1)
-		go func(idx int, r *rig.Rig) {
-			defer wg.Done()
-
-			rs := RigStatus{
-				Name:         r.Name,
-				Polecats:     r.Polecats,
-				PolecatCount: len(r.Polecats),
-			}
-
-			// Count crew workers
-			crewGit := git.NewGit(r.Path)
-			crewMgr := crew.NewManager(r, crewGit, reg)
-			if workers, err := crewMgr.List(); err == nil {
-				for _, w := range workers {
-					rs.Crews = append(rs.Crews, w.Name)
-				}
-				rs.CrewCount = len(workers)
-			}
-
-			// Run hooks and agents discovery concurrently within this rig.
-			// Each was previously sequential; now they overlap since they use
-			// independent bd/beads calls.
-			var rigWg sync.WaitGroup
-
-			// Discover hooks for all agents in this rig
-			// In --fast mode, skip expensive handoff bead lookups. Hook info comes from
-			// preloaded agent beads via discoverRigAgents instead.
-			if !fast {
-				rigWg.Add(1)
-				go func() {
-					defer rigWg.Done()
-					rs.Hooks = discoverRigHooks(r, rs.Crews)
-				}()
-			}
-
-			// Discover runtime state for all agents in this rig
-			// (uses preloaded maps, so it's fast — but run concurrently with hooks)
-			rigWg.Add(1)
-			go func() {
-				defer rigWg.Done()
-				rs.Agents = discoverRigAgents(reg, allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailRouter, fast)
-			}()
-
-			rigWg.Wait()
-
-			activeHooks := 0
-			for _, hook := range rs.Hooks {
-				if hook.HasWork {
-					activeHooks++
-				}
-			}
-			rigActiveHooks[idx] = activeHooks
-
-			status.Rigs[idx] = rs
-		}(i, r)
-	}
-
-	wg.Wait()
-
-	// Enrich agents with runtime info — inspect actual running processes
-	for i := range status.Agents {
-		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
-		a.AgentAlias = alias
-		a.AgentInfo = info
-	}
-	for i := range status.Rigs {
-		for j := range status.Rigs[i].Agents {
-			a := &status.Rigs[i].Agents[j]
-			alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
-			a.AgentAlias = alias
-			a.AgentInfo = info
-		}
-	}
-
-	// Aggregate summary (after parallel work completes)
-	for i, rs := range status.Rigs {
-		status.Summary.PolecatCount += rs.PolecatCount
-		status.Summary.CrewCount += rs.CrewCount
-		status.Summary.ActiveHooks += rigActiveHooks[i]
-	}
-	status.Summary.RigCount = len(rigs)
-
-	return status, nil
-}
-
-func outputStatusJSON(status TownStatus) error {
+func outputStatusJSON(status townstatus.TownStatus) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(status)
 }
 
-func outputStatusText(w io.Writer, status TownStatus) error {
+func outputStatusText(w io.Writer, status townstatus.TownStatus) error {
 	// Header
 	fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Town:"), status.Name)
 	fmt.Fprintf(w, "%s\n\n", style.Dim.Render(status.Location))
 
 	// Health report, every field (gt-s3rec.2)
-	if len(status.healthLines) > 0 {
-		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Health:"), status.healthLines[0])
-		for _, l := range status.healthLines[1:] {
+	if len(status.HealthLines) > 0 {
+		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Health:"), status.HealthLines[0])
+		for _, l := range status.HealthLines[1:] {
 			fmt.Fprintln(w, l)
 		}
 		fmt.Fprintln(w)
@@ -1132,7 +376,7 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 		fmt.Fprintf(w, "─── %s ───────────────────────────────────────────\n\n", style.Bold.Render(r.Name+"/"))
 
 		// Group agents by role
-		var crews, polecats []AgentRuntime
+		var crews, polecats []townstatus.AgentRuntime
 		for _, agent := range r.Agents {
 			switch agent.Role {
 			case constants.RoleCrew:
@@ -1185,7 +429,7 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 }
 
 // renderAgentDetails renders full agent bead details
-func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []AgentHookInfo, townRoot string) { //nolint:unparam // indent kept for future customization
+func renderAgentDetails(w io.Writer, agent townstatus.AgentRuntime, indent string, hooks []townstatus.AgentHookInfo, townRoot string) { //nolint:unparam // indent kept for future customization
 	// Line 1: Agent bead ID + status
 	// Per gt-zecmc: derive status from tmux (observable reality), not bead state.
 	// "Discover, don't track" - agent liveness is observable from tmux session.
@@ -1305,7 +549,7 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 }
 
 // renderAgentCompact renders a single-line agent status
-func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []AgentHookInfo, _ string) {
+func renderAgentCompact(w io.Writer, agent townstatus.AgentRuntime, indent string, hooks []townstatus.AgentHookInfo, _ string) {
 	// Build status indicator (gt-zecmc: use tmux state, not bead state)
 	statusIndicator := buildStatusIndicator(agent)
 
@@ -1353,7 +597,7 @@ func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []
 // buildStatusIndicator creates the visual status indicator for an agent.
 // Per gt-zecmc: uses tmux state (observable reality), not bead state.
 // Non-observable states (stuck, awaiting-gate, muted, etc.) are shown as suffixes.
-func buildStatusIndicator(agent AgentRuntime) string {
+func buildStatusIndicator(agent townstatus.AgentRuntime) string {
 	sessionExists := agent.Running
 
 	// Base indicator from tmux state
@@ -1427,196 +671,9 @@ func capitalizeFirst(s string) string {
 	return string(s[0]-32) + s[1:]
 }
 
-// discoverRigHooks finds all hook attachments for agents in a rig.
-// It fetches all pinned handoff beads in a single bd call, then resolves
-// each agent's hook in-memory. This replaces the previous N+1 pattern where
-// each agent triggered a separate bd subprocess.
-func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
-	var hooks []AgentHookInfo
-
-	// Create beads instance for the rig
-	b := beads.New(r.Path)
-
-	// Batch-fetch all handoff beads in one bd call
-	allHandoffs, err := b.FindAllHandoffBeads()
-	if err != nil {
-		// On error, return empty hooks for all agents rather than failing
-		allHandoffs = make(map[string]*beads.Issue)
-	}
-
-	// Check polecats
-	for _, name := range r.Polecats {
-		hooks = append(hooks, resolveHookFromMap(allHandoffs, name, r.Name+"/"+name, constants.RolePolecat))
-	}
-
-	// Check crew workers
-	for _, name := range crews {
-		hooks = append(hooks, resolveHookFromMap(allHandoffs, name, r.Name+"/crew/"+name, constants.RoleCrew))
-	}
-
-	return hooks
-}
-
-// resolveHookFromMap builds an AgentHookInfo from a pre-fetched map of handoff beads.
-// This is the in-memory equivalent of getAgentHook, avoiding per-agent bd subprocess calls.
-func resolveHookFromMap(allHandoffs map[string]*beads.Issue, role, agentAddress, roleType string) AgentHookInfo {
-	hook := AgentHookInfo{
-		Agent: agentAddress,
-		Role:  roleType,
-	}
-
-	handoff, ok := allHandoffs[role]
-	if !ok || handoff == nil {
-		return hook
-	}
-
-	attachment := beads.ParseAttachmentFields(handoff)
-	if attachment != nil && attachment.AttachedMolecule != "" {
-		hook.HasWork = true
-		hook.Molecule = attachment.AttachedMolecule
-		hook.Title = handoff.Title
-	} else if handoff.Description != "" {
-		hook.HasWork = true
-		hook.Title = handoff.Title
-	}
-
-	return hook
-}
-
-// discoverGlobalAgents checks runtime state for town-level agents (the Mayor).
-// Uses parallel fetching for performance. If skipMail is true, mail lookups are skipped.
-// allSessions is a preloaded map of tmux sessions for O(1) lookup.
-// allAgentBeads is a preloaded map of agent beads for O(1) lookup.
-// allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
-	// Get session names dynamically
-	mayorSession := getMayorSessionName()
-
-	// Define agents to discover
-	// Note: the Mayor is a town-level agent with an hq- prefix bead ID
-	agentDefs := []struct {
-		name    string
-		address string
-		session string
-		role    string
-		beadID  string
-	}{
-		{constants.RoleMayor, constants.RoleMayor + "/", mayorSession, "coordinator", beads.MayorBeadIDTown()},
-	}
-
-	// Batch-fetch mail summaries for all agents in one pair of bd calls
-	// instead of one bd subprocess fan-out per agent (gt-978i).
-	var mailSummaries map[string]mail.MailSummary
-	if !skipMail && mailRouter != nil {
-		addresses := make([]string, len(agentDefs))
-		for i, d := range agentDefs {
-			addresses[i] = d.address
-		}
-		mailSummaries, _ = mailRouter.BatchMailSummaries(addresses)
-	}
-
-	agents := make([]AgentRuntime, len(agentDefs))
-	var wg sync.WaitGroup
-
-	for i, def := range agentDefs {
-		wg.Add(1)
-		go func(idx int, d struct {
-			name    string
-			address string
-			session string
-			role    string
-			beadID  string
-		}) {
-			defer wg.Done()
-
-			agent := AgentRuntime{
-				Name:    d.name,
-				Address: d.address,
-				Session: d.session,
-				Role:    d.role,
-			}
-
-			// Check tmux session from preloaded map (O(1))
-			agent.Running = allSessions[d.session]
-
-			// Look up agent bead from preloaded map (O(1))
-			if issue, ok := allAgentBeads[d.beadID]; ok {
-				// Prefer database columns over description parsing
-				// HookBead column is authoritative (cleared by unsling)
-				agent.HookBead = issue.HookBead
-				agent.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
-				if agent.HookBead != "" {
-					agent.HasWork = true
-					// Get hook title from preloaded map
-					if pinnedIssue, ok := allHookBeads[agent.HookBead]; ok {
-						agent.WorkTitle = pinnedIssue.Title
-					}
-				}
-				// Parse description fields for notification level
-				if fields := beads.ParseAgentFields(issue.Description); fields != nil {
-					agent.NotificationLevel = fields.NotificationLevel
-				}
-			}
-
-			// Apply pre-fetched mail summary (skip if --fast)
-			if !skipMail {
-				applyMailSummary(&agent, mailSummaries[agent.Address])
-			}
-
-			applyPauseMarker(&agent, townRoot)
-
-			agents[idx] = agent
-		}(i, def)
-	}
-
-	wg.Wait()
-	return agents
-}
-
-// applyPauseMarker checks the pause marker file layer for this agent
-// (gt-ahik) and records the reason on the AgentRuntime so the status
-// line can show [paused (reason)]. File layer only — cheap, no Dolt.
-func applyPauseMarker(agent *AgentRuntime, townRoot string) {
-	rigName, role, name, ok := agentMarkerTriple(agent.Address)
-	if !ok {
-		return
-	}
-	if st := agentpause.PausedByState(townRoot, rigName, role, name); st != nil {
-		agent.Paused = true
-		agent.PausedReason = st.Reason
-	}
-}
-
-// agentMarkerTriple maps an agent status address to the (rig, role, name)
-// used by the pause marker path, and reports whether the address names a
-// marker-backed agent at all.
-//
-// It goes through session.ParseAddressWithRegistry rather than splitting the
-// string (with no registry: the triple carries no prefix), so
-// every address form the rest of the system uses resolves to the same marker
-// the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
-// "rig/crew/name" — and the town-level "mayor/", whose marker lives at
-// .runtime/agents/<role>.json,
-// so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
-func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
-	id, err := session.ParseAddressWithRegistry(address, nil)
-	if err != nil {
-		return "", "", "", false
-	}
-	return id.Rig, string(id.Role), id.Name, true
-}
-
-// applyMailSummary copies a pre-fetched batch mail summary onto an agent.
-// Summaries come from Router.BatchMailSummaries, fetched once per set of
-// agents rather than once per agent (gt-978i).
-func applyMailSummary(agent *AgentRuntime, summary mail.MailSummary) {
-	agent.UnreadMail = summary.UnreadCount
-	agent.FirstSubject = summary.FirstSubject
-}
-
 // detectCurrentDNDStatus returns DND status for the currently resolved role context.
 // Returns nil when role context cannot be determined (e.g. outside agent context).
-func detectCurrentDNDStatus(townRoot string) *DNDInfo {
+func detectCurrentDNDStatus(townRoot string) *townstatus.DNDInfo {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil
@@ -1645,147 +702,9 @@ func detectCurrentDNDStatus(townRoot string) *DNDInfo {
 		level = beads.NotifyNormal
 	}
 
-	return &DNDInfo{
+	return &townstatus.DNDInfo{
 		Enabled: level == beads.NotifyMuted,
 		Level:   level,
 		Agent:   agentBeadID,
 	}
-}
-
-// agentDef defines an agent to discover
-type agentDef struct {
-	name    string
-	address string
-	session string
-	role    string
-	beadID  string
-}
-
-// discoverRigAgents checks runtime state for all agents in a rig.
-// Uses parallel fetching for performance. If skipMail is true, mail lookups are skipped.
-// allSessions is a preloaded map of tmux sessions for O(1) lookup.
-// allAgentBeads is a preloaded map of agent beads for O(1) lookup.
-// allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverRigAgents(reg *session.PrefixRegistry, allSessions map[string]bool, r *rig.Rig, crews []string, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
-	// Build list of all agents to discover
-	var defs []agentDef
-	townRoot := filepath.Dir(r.Path)
-	prefix := beads.GetPrefixForRig(townRoot, r.Name)
-
-	// Polecats
-	for _, name := range r.Polecats {
-		defs = append(defs, agentDef{
-			name:    name,
-			address: r.Name + "/" + name,
-			session: session.PolecatSessionName(reg.PrefixForRig(r.Name), name),
-			role:    constants.RolePolecat,
-			beadID:  beads.PolecatBeadIDWithPrefix(prefix, r.Name, name),
-		})
-	}
-
-	// Crew
-	for _, name := range crews {
-		defs = append(defs, agentDef{
-			name:    name,
-			address: r.Name + "/crew/" + name,
-			session: crewSessionName(reg, r.Name, name),
-			role:    constants.RoleCrew,
-			beadID:  beads.CrewBeadIDWithPrefix(prefix, r.Name, name),
-		})
-	}
-
-	if len(defs) == 0 {
-		return nil
-	}
-
-	// Batch-fetch mail summaries for all agents in this rig in one pair of
-	// bd calls instead of one bd subprocess fan-out per agent (gt-978i).
-	var mailSummaries map[string]mail.MailSummary
-	if !skipMail && mailRouter != nil {
-		addresses := make([]string, len(defs))
-		for i, d := range defs {
-			addresses[i] = d.address
-		}
-		mailSummaries, _ = mailRouter.BatchMailSummaries(addresses)
-	}
-
-	// Fetch all agents in parallel
-	agents := make([]AgentRuntime, len(defs))
-	var wg sync.WaitGroup
-
-	for i, def := range defs {
-		wg.Add(1)
-		go func(idx int, d agentDef) {
-			defer wg.Done()
-
-			agent := AgentRuntime{
-				Name:    d.name,
-				Address: d.address,
-				Session: d.session,
-				Role:    d.role,
-			}
-
-			// Check tmux session from preloaded map (O(1))
-			agent.Running = allSessions[d.session]
-
-			// Look up agent bead from preloaded map (O(1))
-			if issue, ok := allAgentBeads[d.beadID]; ok {
-				// Prefer database columns over description parsing
-				// HookBead column is authoritative (cleared by unsling)
-				agent.HookBead = issue.HookBead
-				agent.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
-				if agent.HookBead != "" {
-					agent.HasWork = true
-					// Get hook title from preloaded map
-					if pinnedIssue, ok := allHookBeads[agent.HookBead]; ok {
-						agent.WorkTitle = pinnedIssue.Title
-					}
-				}
-				// Parse description fields for notification level
-				if fields := beads.ParseAgentFields(issue.Description); fields != nil {
-					agent.NotificationLevel = fields.NotificationLevel
-				}
-			}
-
-			// Apply pre-fetched mail summary (skip if --fast)
-			if !skipMail {
-				applyMailSummary(&agent, mailSummaries[agent.Address])
-			}
-
-			applyPauseMarker(&agent, townRoot)
-
-			agents[idx] = agent
-		}(i, def)
-	}
-
-	wg.Wait()
-	return agents
-}
-
-// getAgentHook retrieves hook status for a specific agent.
-func getAgentHook(b *beads.Beads, role, agentAddress, roleType string) AgentHookInfo {
-	hook := AgentHookInfo{
-		Agent: agentAddress,
-		Role:  roleType,
-	}
-
-	// Find handoff bead for this role
-	handoff, err := b.FindHandoffBead(role)
-	if err != nil || handoff == nil {
-		return hook
-	}
-
-	// Check for attachment
-	attachment := beads.ParseAttachmentFields(handoff)
-	if attachment != nil && attachment.AttachedMolecule != "" {
-		hook.HasWork = true
-		hook.Molecule = attachment.AttachedMolecule
-		hook.Title = handoff.Title
-	} else if handoff.Description != "" {
-		// Has content but no molecule - still has work
-		hook.HasWork = true
-		hook.Title = handoff.Title
-	}
-
-	return hook
 }

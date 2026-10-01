@@ -2,60 +2,14 @@ package cmd
 
 import (
 	"bytes"
-	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/townstatus"
 )
-
-func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	writeTestRoutes(t, townRoot, []beads.Route{
-		{Prefix: "bd-", Path: "beads/mayor/rig"},
-	})
-
-	r := &rig.Rig{
-		Name: "beads",
-		Path: filepath.Join(townRoot, "beads"),
-	}
-
-	allAgentBeads := map[string]*beads.Issue{
-		"bd-beads-crew-max": {
-			ID:         "bd-beads-crew-max",
-			AgentState: "running",
-			HookBead:   "bd-hook",
-		},
-	}
-	allHookBeads := map[string]*beads.Issue{
-		"bd-hook": {ID: "bd-hook", Title: "Pinned"},
-	}
-
-	agents := discoverRigAgents(cmdTestRegistry(), map[string]bool{}, r, []string{"max"}, allAgentBeads, allHookBeads, nil, true)
-	if len(agents) != 1 {
-		t.Fatalf("discoverRigAgents() returned %d agents, want 1", len(agents))
-	}
-
-	if agents[0].State != "running" {
-		t.Fatalf("agent state = %q, want %q", agents[0].State, "running")
-	}
-	if !agents[0].HasWork {
-		t.Fatalf("agent HasWork = false, want true")
-	}
-	if agents[0].WorkTitle != "Pinned" {
-		t.Fatalf("agent WorkTitle = %q, want %q", agents[0].WorkTitle, "Pinned")
-	}
-}
 
 func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 	t.Parallel()
@@ -64,7 +18,7 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 		{Prefix: "bd-", Path: "beads/mayor/rig"},
 	})
 
-	agent := AgentRuntime{
+	agent := townstatus.AgentRuntime{
 		Name:    "max",
 		Address: "beads/crew/max",
 		Role:    "crew",
@@ -80,70 +34,10 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 	}
 }
 
-func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
-	t.Parallel()
-	// Verify that a session in allSessions with value=false (zombie: tmux alive,
-	// agent dead) results in agent.Running=false. This is the core fix for gt-bd6i3.
-	townRoot := t.TempDir()
-	writeTestRoutes(t, townRoot, []beads.Route{
-		{Prefix: "gt-", Path: "gastown/mayor/rig"},
-	})
-
-	r := &rig.Rig{
-		Name: "gastown",
-		Path: filepath.Join(townRoot, "gastown"),
-	}
-
-	// allSessions has the crew session but marked as zombie (false).
-	// This simulates a tmux session that exists but whose agent process has died.
-	allSessions := map[string]bool{
-		crewSessionName(cmdTestRegistry(), "gastown", "max"): false, // zombie: tmux exists, agent dead
-	}
-
-	agents := discoverRigAgents(cmdTestRegistry(), allSessions, r, []string{"max"}, nil, nil, nil, true)
-	for _, a := range agents {
-		if a.Role == "crew" {
-			if a.Running {
-				t.Fatal("zombie crew session (allSessions=false) should show as not running")
-			}
-			return
-		}
-	}
-	t.Fatal("crew agent not found in results")
-}
-
-func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
-	t.Parallel()
-	// Verify that a session not in allSessions at all results in agent.Running=false.
-	townRoot := t.TempDir()
-	writeTestRoutes(t, townRoot, []beads.Route{
-		{Prefix: "gt-", Path: "gastown/mayor/rig"},
-	})
-
-	r := &rig.Rig{
-		Name: "gastown",
-		Path: filepath.Join(townRoot, "gastown"),
-	}
-
-	// Empty sessions map - no tmux sessions exist at all
-	allSessions := map[string]bool{}
-
-	agents := discoverRigAgents(cmdTestRegistry(), allSessions, r, []string{"max"}, nil, nil, nil, true)
-	for _, a := range agents {
-		if a.Role == "crew" {
-			if a.Running {
-				t.Fatal("crew with no tmux session should show as not running")
-			}
-			return
-		}
-	}
-	t.Fatal("crew agent not found in results")
-}
-
 func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {
 	t.Parallel()
 	// Verify that a zombie agent (Running=false) shows ○ (stopped), not ● (running)
-	agent := AgentRuntime{Running: false}
+	agent := townstatus.AgentRuntime{Running: false}
 	indicator := buildStatusIndicator(agent)
 	if strings.Contains(indicator, "●") {
 		t.Fatal("zombie agent (Running=false) should not show ● indicator")
@@ -153,7 +47,7 @@ func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {
 func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 	t.Parallel()
 	// Verify that an alive agent (Running=true) shows ● (running)
-	agent := AgentRuntime{Running: true}
+	agent := townstatus.AgentRuntime{Running: true}
 	indicator := buildStatusIndicator(agent)
 	if strings.Contains(indicator, "○") {
 		t.Fatal("alive agent (Running=true) should not show ○ indicator")
@@ -162,7 +56,7 @@ func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 
 func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
 	t.Parallel()
-	agent := AgentRuntime{Running: true, NotificationLevel: beads.NotifyMuted}
+	agent := townstatus.AgentRuntime{Running: true, NotificationLevel: beads.NotifyMuted}
 	indicator := buildStatusIndicator(agent)
 	if !strings.Contains(indicator, "🔕") {
 		t.Fatalf("expected muted indicator to include 🔕, got %q", indicator)
@@ -171,10 +65,10 @@ func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
 
 func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 	t.Parallel()
-	status := TownStatus{
+	status := townstatus.TownStatus{
 		Name:     "gt",
 		Location: "/tmp/gt",
-		DND: &DNDInfo{
+		DND: &townstatus.DNDInfo{
 			Enabled: true,
 			Level:   beads.NotifyMuted,
 			Agent:   "hq-mayor",
@@ -196,10 +90,10 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 
 func TestOutputStatusText_ContainerSlot(t *testing.T) {
 	t.Parallel()
-	held := TownStatus{
+	held := townstatus.TownStatus{
 		Name:     "gt",
 		Location: "/tmp/gt",
-		Slot: &SlotInfo{
+		Slot: &townstatus.SlotInfo{
 			Role:       "gastown/refinery",
 			PID:        4242,
 			AcquiredAt: time.Now().Add(-90 * time.Second),
@@ -221,7 +115,7 @@ func TestOutputStatusText_ContainerSlot(t *testing.T) {
 	// Free slot: the line must NOT appear — a status render that always
 	// prints it (e.g. from a nil-Slot zero value) would be indistinguishable
 	// from "always holding the slot" to a reader.
-	free := TownStatus{Name: "gt", Location: "/tmp/gt"}
+	free := townstatus.TownStatus{Name: "gt", Location: "/tmp/gt"}
 	buf.Reset()
 	if err := outputStatusText(&buf, free); err != nil {
 		t.Fatalf("outputStatusText error: %v", err)
@@ -229,45 +123,6 @@ func TestOutputStatusText_ContainerSlot(t *testing.T) {
 	if strings.Contains(buf.String(), "Container suite running:") {
 		t.Fatalf("did not expect container-slot line when Slot is nil, got: %q", buf.String())
 	}
-}
-
-// TestReadGateSlotHolderSkipsDockerProbe pins gt-a8kx at its regression site.
-// readGateSlotHolder feeds the status line from every `gt status` and every
-// --watch tick and carries nothing but the holder, so it must stay a flock
-// read. StatusPoolLocksOnly's own test cannot catch a revert of just this call
-// site, and neither can a check made while a slot is HELD — StatusPool skips
-// its cross-check then too, because a holder's containers are not "unwrapped"
-// ones. Only the idle gate separates the two, and the idle gate is the common
-// case this bug was about. The call site reads through
-// slot.StatusPoolLocksOnly, whose TestStatusPoolLocksOnlySkipsDockerProbe pins
-// that it never lists containers; this test pins the reading itself.
-func TestReadGateSlotHolderSkipsDockerProbe(t *testing.T) {
-	t.Parallel()
-	stubNoContainers(t)
-	t.Run("idle gate", func(t *testing.T) {
-		townRoot := t.TempDir()
-		if got := readGateSlotHolder(townRoot); got != nil {
-			t.Fatalf("readGateSlotHolder = %+v, want nil with no slot held", got)
-		}
-	})
-
-	t.Run("held slot", func(t *testing.T) {
-		townRoot := t.TempDir()
-
-		handle, err := slot.Acquire(townRoot, "gastown/refinery", time.Second)
-		if err != nil {
-			t.Fatalf("slot.Acquire: %v", err)
-		}
-		t.Cleanup(func() { _ = handle.Release() })
-
-		got := readGateSlotHolder(townRoot)
-		if got == nil {
-			t.Fatal("readGateSlotHolder = nil, want the refinery's hold")
-		}
-		if got.Role != "gastown/refinery" || got.PID != os.Getpid() {
-			t.Fatalf("readGateSlotHolder = %+v, want role gastown/refinery at pid %d", got, os.Getpid())
-		}
-	})
 }
 
 func TestValidateStatusWatch(t *testing.T) {
@@ -297,367 +152,6 @@ func TestValidateStatusWatch(t *testing.T) {
 	}
 }
 
-func TestTryStatusDetailLockContention(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-
-	release, ok := tryStatusDetailLock(townRoot)
-	if !ok {
-		t.Fatal("first status detail lock should be acquired")
-	}
-
-	if release2, ok := tryStatusDetailLock(townRoot); ok {
-		release2()
-		t.Fatal("second status detail lock should fail while first is held")
-	}
-
-	release()
-
-	release3, ok := tryStatusDetailLock(townRoot)
-	if !ok {
-		t.Fatal("status detail lock should be reusable after release")
-	}
-	release3()
-}
-
-func TestIsKnownAgent(t *testing.T) {
-	t.Parallel()
-
-	// All agent presets should be recognized
-	for _, name := range config.ListAgentPresets() {
-		t.Run(name+"_known", func(t *testing.T) {
-			if !isKnownAgent(name) {
-				t.Errorf("isKnownAgent(%q) = false, want true", name)
-			}
-		})
-	}
-
-	// Non-agents should not be recognized
-	for _, name := range []string{"bash", "node", ""} {
-		t.Run(name+"_unknown", func(t *testing.T) {
-			if isKnownAgent(name) {
-				t.Errorf("isKnownAgent(%q) = true, want false", name)
-			}
-		})
-	}
-}
-
-func TestIsAgentWrapper(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		base string
-		want bool
-	}{
-		{"node", true},
-		{"bun", true},
-		{"npx", true},
-		{"bunx", true},
-		{"claude", false},
-		{"pi", false},
-		{"bash", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.base, func(t *testing.T) {
-			if got := isAgentWrapper(tt.base); got != tt.want {
-				t.Errorf("isAgentWrapper(%q) = %v, want %v", tt.base, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestParseRuntimeInfo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		cmdline string
-		want    string
-	}{
-		{
-			name:    "claude with model",
-			cmdline: "claude\x00--model\x00opus\x00--dangerously-skip-permissions",
-			want:    "claude/opus",
-		},
-		{
-			name:    "pi with model",
-			cmdline: "pi\x00-e\x00gastown-hooks.js\x00--model\x00google-antigravity/gemini-3-flash",
-			want:    "pi/google-antigravity/gemini-3-flash",
-		},
-		{
-			name:    "cgroup-wrap then claude",
-			cmdline: "cgroup-wrap\x00claude\x00--model\x00opus\x00--dangerously-skip-permissions",
-			want:    "claude/opus",
-		},
-		{
-			name:    "opencode with -m flag",
-			cmdline: "opencode\x00-m\x00kimi-for-coding/kimi-k2.5",
-			want:    "opencode/kimi-for-coding/kimi-k2.5",
-		},
-		{
-			name:    "empty cmdline",
-			cmdline: "",
-			want:    "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseRuntimeInfo(tt.cmdline)
-			if got != tt.want {
-				t.Errorf("parseRuntimeInfo(%q) = %q, want %q", tt.name, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBuildInfoFromConfig(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		rc   *config.RuntimeConfig
-		want string
-	}{
-		{
-			name: "claude with model",
-			rc:   &config.RuntimeConfig{Command: "claude", Args: []string{"--model", "opus"}},
-			want: "claude/opus",
-		},
-		{
-			name: "cgroup-wrap claude",
-			rc:   &config.RuntimeConfig{Command: "cgroup-wrap", Args: []string{"claude", "--model", "opus"}},
-			want: "claude/opus",
-		},
-		{
-			name: "pi bare",
-			rc:   &config.RuntimeConfig{Command: "pi", Args: []string{"-e", "hooks.js"}},
-			want: "pi",
-		},
-		{
-			name: "opencode with -m",
-			rc:   &config.RuntimeConfig{Command: "opencode", Args: []string{"-m", "gpt-5"}},
-			want: "opencode/gpt-5",
-		},
-		{
-			name: "empty command",
-			rc:   &config.RuntimeConfig{Command: ""},
-			want: "claude",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildInfoFromConfig(tt.rc)
-			if got != tt.want {
-				t.Errorf("buildInfoFromConfig(%s) = %q, want %q", tt.name, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsAgentCmdline(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		cmdline string
-		want    bool
-	}{
-		{"claude direct", "claude\x00--model\x00opus", true},
-		{"node wrapper with claude", "node\x00/path/to/claude\x00--model\x00opus", true},
-		{"retired pi runtime", "pi\x00-e\x00hooks.js", false},
-		{"bash not agent", "bash\x00-c\x00echo hi", false},
-		{"node without agent", "node\x00/path/to/server.js", false},
-		{"empty", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isAgentCmdline(tt.cmdline)
-			if got != tt.want {
-				t.Errorf("isAgentCmdline(%q) = %v, want %v", tt.name, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCountRunningAgents(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		status TownStatus
-		want   int
-	}{
-		{
-			name:   "empty status",
-			status: TownStatus{},
-			want:   0,
-		},
-		{
-			name: "global agents only",
-			status: TownStatus{
-				Agents: []AgentRuntime{
-					{Name: "mayor", Running: true},
-					{Name: "deacon", Running: false},
-				},
-			},
-			want: 1,
-		},
-		{
-			name: "rig agents only",
-			status: TownStatus{
-				Rigs: []RigStatus{
-					{
-						Agents: []AgentRuntime{
-							{Name: "polecat-1", Running: true},
-							{Name: "witness", Running: true},
-						},
-					},
-				},
-			},
-			want: 2,
-		},
-		{
-			name: "mixed global and rig agents",
-			status: TownStatus{
-				Agents: []AgentRuntime{
-					{Name: "mayor", Running: true},
-				},
-				Rigs: []RigStatus{
-					{
-						Agents: []AgentRuntime{
-							{Name: "polecat-1", Running: true},
-							{Name: "witness", Running: false},
-						},
-					},
-					{
-						Agents: []AgentRuntime{
-							{Name: "polecat-2", Running: true},
-						},
-					},
-				},
-			},
-			want: 3,
-		},
-		{
-			name: "all not running",
-			status: TownStatus{
-				Agents: []AgentRuntime{
-					{Name: "mayor", Running: false},
-				},
-				Rigs: []RigStatus{
-					{
-						Agents: []AgentRuntime{
-							{Name: "polecat-1", Running: false},
-						},
-					},
-				},
-			},
-			want: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := countRunningAgents(tt.status)
-			if got != tt.want {
-				t.Errorf(
-					"countRunningAgents() = %d, want %d",
-					got, tt.want,
-				)
-			}
-		})
-	}
-}
-
-func TestExtractBaseName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		cmdline string
-		want    string
-	}{
-		{"claude\x00--model\x00opus", "claude"},
-		{"/usr/bin/node\x00/path/pi", "node"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := extractBaseName(tt.cmdline)
-			if got != tt.want {
-				t.Errorf("extractBaseName(%q) = %q, want %q", tt.cmdline, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestAgentMarkerTriple covers the address → marker-coordinate mapping gt
-// status uses to read pause markers. A single-segment address is a town-level
-// agent whose marker lives at .runtime/agents/<role>.json, so it must resolve
-// to an empty rig and a real role rather than to no marker at all
-// (gt-wisp-6ajo).
-func TestAgentMarkerTriple(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		address         string
-		rig, role, name string
-		ok              bool
-	}{
-		{"gastown/flint", "gastown", constants.RolePolecat, "flint", true},
-		{"gastown/polecats/flint", "gastown", constants.RolePolecat, "flint", true},
-		{"gastown/witness", "gastown", constants.RolePolecat, "witness", true}, // witness role retired
-		{"gastown/crew/opal", "gastown", constants.RoleCrew, "opal", true},
-		{"mayor/", "", constants.RoleMayor, "", true},
-		// Not addressable agents: no marker, no reason to look.
-		{"overseer", "", "", "", false},
-		{"deacon/", "", "", "", false}, // deacon role retired (gt-4k3fj.6.1)
-		{"", "", "", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			rig, role, name, ok := agentMarkerTriple(tt.address)
-			if ok != tt.ok || rig != tt.rig || role != tt.role || name != tt.name {
-				t.Errorf("agentMarkerTriple(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
-					tt.address, rig, role, name, ok, tt.rig, tt.role, tt.name, tt.ok)
-			}
-		})
-	}
-}
-
-// TestApplyPauseMarkerNamesAgent is the end-to-end check for the status line:
-// pause an agent the way `gt agent pause` does, then confirm the address gt
-// status uses resolves to the same marker and carries the reason.
-func TestApplyPauseMarkerNamesAgent(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-
-	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan", "mayor", ""); err != nil {
-		t.Fatalf("Pause: %v", err)
-	}
-	agent := AgentRuntime{Address: "gastown/flint"}
-	applyPauseMarker(&agent, townRoot)
-	if agent.PausedReason != "filesystem scan" {
-		t.Errorf("rig agent PausedReason = %q, want %q", agent.PausedReason, "filesystem scan")
-	}
-
-	// Town-level: `gt agent pause mayor` writes agents/mayor.json with an
-	// empty rig, and the status address is "mayor/".
-	if err := agentpause.Pause(townRoot, "", "mayor", "", "operator hold", "human", ""); err != nil {
-		t.Fatalf("Pause mayor: %v", err)
-	}
-	mayor := AgentRuntime{Address: "mayor/"}
-	applyPauseMarker(&mayor, townRoot)
-	if mayor.PausedReason != "operator hold" {
-		t.Errorf("mayor PausedReason = %q, want %q (town-level marker not read)", mayor.PausedReason, "operator hold")
-	}
-
-	// An unpaused agent must not pick up a reason from anywhere.
-	idle := AgentRuntime{Address: "gastown/witness"}
-	applyPauseMarker(&idle, townRoot)
-	if idle.PausedReason != "" {
-		t.Errorf("unpaused witness PausedReason = %q, want empty", idle.PausedReason)
-	}
-}
-
 // TestBeadStatePausedStillShows pins the mayor's decision on gt-ahik/om
 // kgx0: `gt deacon pause` is a separate, existing feature that writes
 // agent_state=paused straight to the deacon bead with no agentpause marker
@@ -666,7 +160,7 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 // deacon paused that way silently disappears from `gt status`.
 func TestBeadStatePausedStillShows(t *testing.T) {
 	t.Parallel()
-	agent := AgentRuntime{Address: "deacon/", State: "paused"}
+	agent := townstatus.AgentRuntime{Address: "deacon/", State: "paused"}
 
 	if indicator := buildStatusIndicator(agent); !strings.Contains(indicator, "paused") {
 		t.Errorf("buildStatusIndicator(%+v) = %q, want it to mention paused", agent, indicator)
@@ -683,7 +177,7 @@ func TestBeadStatePausedStillShows(t *testing.T) {
 // is not known dead) and named on its own line, so the failure is visible.
 func TestOutputStatusText_LivenessUnknown(t *testing.T) {
 	t.Parallel()
-	st := TownStatus{Name: "gt", Location: "/tmp/gt", LivenessUnknown: []string{"gt-gastown-witness"}}
+	st := townstatus.TownStatus{Name: "gt", Location: "/tmp/gt", LivenessUnknown: []string{"gt-gastown-witness"}}
 	var buf bytes.Buffer
 	if err := outputStatusText(&buf, st); err != nil {
 		t.Fatalf("outputStatusText error: %v", err)
@@ -692,7 +186,7 @@ func TestOutputStatusText_LivenessUnknown(t *testing.T) {
 		t.Fatalf("expected an unknown-liveness line naming the session, got: %q", out)
 	}
 	buf.Reset()
-	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt"}); err != nil {
+	if err := outputStatusText(&buf, townstatus.TownStatus{Name: "gt", Location: "/tmp/gt"}); err != nil {
 		t.Fatalf("outputStatusText error: %v", err)
 	}
 	if strings.Contains(buf.String(), "Agent liveness unknown") {
@@ -705,28 +199,24 @@ func TestOutputStatusText_LivenessUnknown(t *testing.T) {
 func TestOutputStatusText_DoltCommitMarker(t *testing.T) {
 	t.Parallel()
 
-	dolt := &DoltInfo{Running: true, PID: 7, Port: 3307}
-	readDoltCommitMeter(dolt, t.TempDir(), func(context.Context, string) ([]doltserver.DBCommits, error) {
-		return []doltserver.DBCommits{
-			{Database: "be", Commits: 17},
-			{Database: "gt", Commits: 3048},
-			{Database: "hq", Commits: 2041},
-		}, nil
-	})
+	dolt := &townstatus.DoltInfo{Running: true, PID: 7, Port: 3307, CommitsPerDayWarn: 500, CommitsLastDay: []doltserver.DBCommits{
+		{Database: "be", Commits: 17},
+		{Database: "gt", Commits: 3048},
+		{Database: "hq", Commits: 2041},
+	}}
 	var buf bytes.Buffer
-	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: dolt}); err != nil {
+	if err := outputStatusText(&buf, townstatus.TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: dolt}); err != nil {
 		t.Fatalf("outputStatusText error: %v", err)
 	}
 	if out := buf.String(); !strings.Contains(out, "⚠ commits/24h gt=3048 hq=2041 > 500") || strings.Contains(out, "be=17") {
 		t.Fatalf("want the over-limit marker for gt and hq only, got: %q", out)
 	}
 
-	under := &DoltInfo{Running: true, PID: 7, Port: 3307}
-	readDoltCommitMeter(under, t.TempDir(), func(context.Context, string) ([]doltserver.DBCommits, error) {
-		return []doltserver.DBCommits{{Database: "gt", Commits: 120}}, nil
-	})
+	under := &townstatus.DoltInfo{Running: true, PID: 7, Port: 3307, CommitsPerDayWarn: 500, CommitsLastDay: []doltserver.DBCommits{
+		{Database: "gt", Commits: 120},
+	}}
 	buf.Reset()
-	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: under}); err != nil {
+	if err := outputStatusText(&buf, townstatus.TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: under}); err != nil {
 		t.Fatalf("outputStatusText error: %v", err)
 	}
 	if strings.Contains(buf.String(), "commits/24h") {
