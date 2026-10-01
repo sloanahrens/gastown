@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 var _ beads.Admin = (*Fake)(nil)
@@ -14,8 +15,8 @@ var _ beads.Admin = (*Fake)(nil)
 // bdTables are the tables a fresh bd database has that callers probe for.
 var bdTables = []string{"issues", "wisps", "labels", "wisp_labels", "dependencies", "wisp_dependencies", "comments", "events", "config"}
 
-// ErrNotScripted is returned by SQL and SQLCSV when the test did not script
-// an answer (OnSQL). SQL is not modeled.
+// ErrNotScripted is returned by SQLCSV when the test did not script an
+// answer (OnSQL). SQL is not modeled.
 var ErrNotScripted = errors.New("beadsfake: SQL not scripted")
 
 func (f *Fake) configMap() map[string]string {
@@ -216,8 +217,8 @@ func (f *Fake) Inits() []beads.InitOptions {
 	return append([]beads.InitOptions(nil), f.inits...)
 }
 
-// OnSQL scripts SQL and SQLCSV: answer receives the statement and returns
-// CSV records (header first) or an error. Without it both return
+// OnSQL scripts SQLCSV: answer receives the statement and returns CSV
+// records (header first) or an error. Without it SQLCSV returns
 // ErrNotScripted.
 func (f *Fake) OnSQL(answer func(query string) ([][]string, error)) {
 	f.mu.Lock()
@@ -225,7 +226,7 @@ func (f *Fake) OnSQL(answer func(query string) ([][]string, error)) {
 	f.sql = answer
 }
 
-// SQLStatements returns every statement SQL and SQLCSV received, in order.
+// SQLStatements returns every statement SQLCSV received, in order.
 func (f *Fake) SQLStatements() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -244,27 +245,7 @@ func (f *Fake) runSQL(query string) ([][]string, error) {
 }
 
 // SQLCSV returns the scripted records for query.
-func (f *Fake) SQLCSV(query string) ([][]string, error) { return f.runSQL(query) }
-
-// SQL returns the scripted records for query, rendered one line per record
-// with fields joined by commas.
-func (f *Fake) SQL(query string) ([]byte, error) {
-	records, err := f.runSQL(query)
-	if err != nil {
-		return nil, err
-	}
-	var out []byte
-	for _, rec := range records {
-		for i, field := range rec {
-			if i > 0 {
-				out = append(out, ',')
-			}
-			out = append(out, field...)
-		}
-		out = append(out, '\n')
-	}
-	return out, nil
-}
+func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL(query.String()) }
 
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:

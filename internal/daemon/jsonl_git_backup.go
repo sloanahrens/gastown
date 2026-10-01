@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/events"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -96,34 +97,15 @@ func testDatabaseIDPattern() *regexp.Regexp {
 	return regexp.MustCompile(`^(` + strings.Join(quoted, "|") + `)`)
 }
 
-// testDatabaseIDNotLike is the scrub clause's AND id NOT LIKE term for each
-// test-database prefix, with LIKE's _ wildcard escaped.
-func testDatabaseIDNotLike() string {
-	var b strings.Builder
-	for _, p := range testdb.Prefixes() {
-		b.WriteString(` AND id NOT LIKE '` + strings.ReplaceAll(p, "_", `\_`) + `%'`)
-	}
-	return b.String()
-}
-
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
 var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// scrubQuery is the WHERE clause for filtering ephemeral data.
-// Kept separate from Sprintf to avoid %% confusion.
-// The query selects only durable work product (bugs, features, tasks, epics, chores).
-var scrubWhereClause = ` WHERE (ephemeral IS NULL OR ephemeral != 1)` +
-	` AND status != 'tombstone'` +
-	` AND issue_type NOT IN ('message', 'event', 'agent', 'convoy', 'molecule', 'role', 'merge-request', 'rig')` +
-	` AND id NOT LIKE '%-wisp-%'` +
-	` AND id NOT LIKE '%-cv-%'` +
-	` AND id NOT LIKE '%-wf-%'` +
-	` AND id NOT LIKE 'test%'` +
-	testDatabaseIDNotLike() +
-	` AND id NOT LIKE 'offlinebrew-%'` +
-	` AND title NOT LIKE '--%'` +
-	` AND title NOT LIKE 'Usage: %'` +
-	` ORDER BY id`
+// backupIssuesQuery reads db's issues for the backup; with scrub, only the
+// durable work product, without the test-database prefixes (internal/testdb,
+// the one list).
+func backupIssuesQuery(db string, scrub bool) beadsql.Query {
+	return beadsql.BackupIssues(db, scrub, testdb.Prefixes())
+}
 
 // jsonlGitBackupInterval returns the configured interval, or the default (15m).
 func jsonlGitBackupInterval(config *DaemonPatrolConfig) time.Duration {
@@ -397,13 +379,7 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 	total := 0
 
 	// 1. Export issues table (with scrub filter).
-	var query string
-	if scrub {
-		query = "SELECT * FROM `" + db + "`.issues" + scrubWhereClause
-	} else {
-		query = "SELECT * FROM `" + db + "`.issues ORDER BY id"
-	}
-	n, err := d.exportTableToJsonl("issues", query, dbDir, dataDir)
+	n, err := d.exportTableToJsonl("issues", backupIssuesQuery(db, scrub), dbDir, dataDir)
 	if err != nil {
 		return 0, fmt.Errorf("issues: %w", err)
 	}
@@ -411,8 +387,7 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 
 	// 2. Export supplemental tables (no scrub, full export).
 	for _, table := range supplementalTables {
-		tQuery := fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY 1", db, table)
-		tn, err := d.exportTableToJsonl(table, tQuery, dbDir, dataDir)
+		tn, err := d.exportTableToJsonl(table, beadsql.BackupTable(db, table), dbDir, dataDir)
 		if err != nil {
 			// Non-fatal for supplemental tables — log and continue.
 			d.logger.Printf("jsonl_git_backup: %s/%s: export failed (non-fatal): %v", db, table, err)
@@ -429,7 +404,11 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 // Connects to the running Dolt server via --host/--port to get current committed data,
 // falling back to embedded mode (cmd.Dir=dataDir) if no server config is available.
 // Returns the number of records exported.
-func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, error) {
+func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir string) (int, error) {
+	query, err := q.Inline()
+	if err != nil {
+		return 0, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), jsonlExportTimeout)
 	defer cancel()
 

@@ -117,7 +117,7 @@ func TestFindStrandedConvoys_MixedConvoys(t *testing.T) {
 		case "list":
 			return `[{"id":"hq-empty-mix","title":"Empty convoy"},{"id":"hq-feed-mix","title":"Feedable convoy"}]`, "", 0
 		case "sql":
-			// bdDepListRawIDs: SELECT depends_on_id FROM dependencies WHERE issue_id = '<id>' AND type = 'tracks'
+			// DepListRawIDs: beadsql.RawDeps(<id>, "down", "tracks")
 			if strings.Contains(strings.Join(c.Args, " "), "issue_id = 'hq-feed-mix'") {
 				return `[{"depends_on_id":"gt-ready1"}]`, "", 0
 			}

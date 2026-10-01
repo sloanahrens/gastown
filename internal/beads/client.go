@@ -84,7 +84,7 @@ var _ Client = (*Beads)(nil)
 // Admin is the maintenance surface beadsfake models: config keys, table
 // probes, counts, stats, the wisp list, gc's dry-run candidates and the
 // events journal.
-// beadsfake.RunAdminContract pins the fake to *Beads on it. (SQL, SQLCSV and
+// beadsfake.RunAdminContract pins the fake to *Beads on it. (SQLCSV and
 // InitDatabase are on *Beads too, but a fake can only script or record them.)
 type Admin interface {
 	ConfigGet(key string) (string, error)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -266,8 +267,11 @@ func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string)
 	}
 
 	dir := resolveBeadDirFromTownRoot(townRoot, beadID)
-	query := fmt.Sprintf(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_issue_id = '%[1]s' OR wisp_dependencies.depends_on_wisp_id = '%[1]s' OR wisp_dependencies.depends_on_external = '%[1]s' OR %[2]s)`, beadID, sqlExternalDepTargetClause(beadID))
-	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, dir, "sql", query, "--json")
+	args, err := beadsql.MoleculesAttachedTo(beadID).BdArgs("--json")
+	if err != nil {
+		return nil, err
+	}
+	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, dir, args...)
 	if err != nil {
 		return nil, err
 	}

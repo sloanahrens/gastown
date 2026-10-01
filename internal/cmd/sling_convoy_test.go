@@ -82,7 +82,7 @@ func TestConvoyTracksBead(t *testing.T) {
 			if got := town.convoyTracksBead("hq-cv-test", "gt-abc123"); got != tc.want {
 				t.Fatalf("convoyTracksBead = %v, want %v; bd log:\n%s", got, tc.want, bd.log())
 			}
-			if !strings.Contains(bd.log(), "sql SELECT") || !strings.Contains(bd.log(), "hq-cv-test") {
+			if !strings.Contains(bd.log(), "sql --json SELECT") || !strings.Contains(bd.log(), "hq-cv-test") {
 				t.Fatalf("tracked deps were not read by raw sql on the convoy:\n%s", bd.log())
 			}
 		})
@@ -136,7 +136,7 @@ func TestDepListRawIDsTurnsAutoCommitOnOverStaleEnv(t *testing.T) {
 		t.Fatalf("bd calls = %d, want 1: %+v", len(calls), calls)
 	}
 	c := calls[0]
-	if len(c.Args) < 2 || c.Args[0] != "sql" || !strings.HasPrefix(c.Args[1], "SELECT COALESCE") {
+	if len(c.Args) < 2 || c.Args[0] != "sql" || !strings.HasPrefix(c.Args[len(c.Args)-1], "SELECT COALESCE") {
 		t.Fatalf("argv = %q, want sql SELECT COALESCE...", c.Args)
 	}
 	if got := callEnv(c, "BD_READONLY"); got != "" {
@@ -144,14 +144,5 @@ func TestDepListRawIDsTurnsAutoCommitOnOverStaleEnv(t *testing.T) {
 	}
 	if got := callEnv(c, "BD_DOLT_AUTO_COMMIT"); got != "on" {
 		t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on", got)
-	}
-}
-
-func TestSQLExternalDepTargetClauseEscapesUnderscore(t *testing.T) {
-	t.Parallel()
-	got := sqlExternalDepTargetClause("gt-a_b")
-	want := "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'"
-	if got != want {
-		t.Fatalf("sqlExternalDepTargetClause() = %q, want %q", got, want)
 	}
 }

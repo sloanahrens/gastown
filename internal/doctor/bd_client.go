@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // bdCLI is the bd surface doctor's checks use directly: typed wrappers over
@@ -16,8 +17,7 @@ import (
 type bdCLI interface {
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
-	SQL(query string) ([]byte, error)
-	SQLCSV(query string) ([][]string, error)
+	SQLCSV(query beadsql.Query) ([][]string, error)
 	CountIssues() (int, error)
 	TableExists(name string) bool
 	StatsJSON() ([]byte, error)

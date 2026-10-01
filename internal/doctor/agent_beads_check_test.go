@@ -345,7 +345,7 @@ func legacyUnlabeledBD() *bdScript {
 			}
 			return fmt.Sprintf(`[{"id":%q,"title":%q,"status":"open","issue_type":"task","labels":[]}]`+"\n", id, id), "", 0
 		case "sql":
-			return "1\n", "", 0
+			return "present\n1\n", "", 0
 		}
 		return emptyBeads(c)
 	}}

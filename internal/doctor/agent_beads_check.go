@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // AgentBeadsCheck verifies that agent beads exist for all agents.
@@ -429,18 +430,13 @@ func ensureAgentLabel(ctx *CheckContext, bd *beads.Beads, workDir, id string) er
 	return nil
 }
 
-// verifyLabelAdded checks whether a label exists on a bead by querying labels table.
-// Returns false if the label is not found or the query fails.
+// verifyLabelAdded reports whether the label is on the bead in workDir's own
+// database, false when it is absent or the read fails. It reads by SQL, not
+// bd show, because show routes by prefix, and an unrouted legacy prefix is
+// exactly the case it verifies (GH#2127).
 func verifyLabelAdded(ctx *CheckContext, workDir, beadID, label string) bool {
-	escapedID := strings.ReplaceAll(beadID, "'", "''")
-	escapedLabel := strings.ReplaceAll(label, "'", "''")
-	query := fmt.Sprintf("SELECT 1 FROM labels WHERE issue_id = '%s' AND label = '%s' LIMIT 1", escapedID, escapedLabel)
-	output, err := ctx.bd(workDir, nil).SQL(query)
-	if err != nil {
-		return false
-	}
-	// bd sql returns header + data rows; if we got more than just a header, the label exists
-	return strings.Contains(string(output), "1")
+	records, err := runBdSQLCSV(ctx, workDir, beadsql.LabelPresent(beadID, label))
+	return err == nil && len(records) > 1
 }
 
 // listPolecats returns the names of canonical polecat directories in a rig.
