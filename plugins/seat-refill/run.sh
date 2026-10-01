@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# seat-refill/run.sh — nudge the mayor when a polecat seat sits empty with
-# slingable work ready.
+# seat-refill/run.sh — fill an empty polecat pool seat with slingable work.
+#
+# Default mode (sling, gt-qvs0b): when a seat is empty and a bead is eligible,
+# sling it into the seat directly with `gt sling <bead> <rig> --agent <agent>`.
+# No mayor is involved. GT_SEAT_REFILL_MODE=nudge keeps the older behavior of
+# nudging the mayor with the candidates; GT_SEAT_REFILL_DRY_RUN=1 only logs
+# what would be slung.
 #
 # Why this exists: the mayor is event-driven. Declining to dispatch opens no
 # slot, so the SLOT_OPEN that would wake it never arrives, and a seat that
 # empties while it sleeps stays empty — gt-59o9 measured 5.5 h idle with 362
 # ready beads. The daemon's mayor_dispatch patrol covers that hole at a 30m
 # cadence with one seat number for the whole pool; this plugin is the per-seat,
-# three-minute half. It tracks each seat's own empty episode, so a seat that
-# empties between patrols is named within one, with the beads that could fill
-# it attached.
+# three-minute half. It tracks each seat's own empty episode.
 #
-# It decides nothing about dispatch. It never slings, and it names a seat only
-# when that seat is empty AND work exists that a sling could take. Which bead,
-# on which model and priority, stays with the mayor (town directive, dispatch
-# routing, 2026-09-19).
+# Candidate choice is mechanical: lowest priority number, then id; the sonnet
+# seat takes only needs-sonnet beads. gt sling keeps its own refusals
+# (backpressure, hold, rig estop).
 #
 # The daemon runs this in-process (execution type script) and records the run
 # itself, so this script must not call `gt plugin record-run` — that would
@@ -41,6 +43,8 @@ skip() {
   printf '%s\n' "$SKIP_MARKER"
   exit 0
 }
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 int_or_default() {
   case "${1:-}" in
@@ -81,6 +85,28 @@ SLING_BOUND=$(int_or_default "${GT_SEAT_REFILL_SLING_BOUND:-}" 120)
 # Seconds a seat must sit empty before a direct sling; 0 fills at once.
 DISPATCH_EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS:-}" 0)
 case "$MODE" in sling|nudge) ;; *) fail "GT_SEAT_REFILL_MODE must be sling or nudge, got $MODE" ;; esac
+
+# --- Run budget ----------------------------------------------------------
+# The plugin's [execution] timeout is 3m. Every gt call is bounded by the
+# smaller of its own cap and what is left of the run budget, measured on the
+# shell's SECONDS, so a wedged call is named instead of eating the whole
+# timeout (gt-d6rse). The pre-dispatch reads (pool list, rig list, one gt ready
+# per rig) share PRE_BUDGET; each gt sling and the nudge draw on RUN_BUDGET.
+PRE_BUDGET=60
+RUN_BUDGET=170
+POOL_BOUND=30
+RIGS_BOUND=20
+READY_BOUND=15
+
+# bound <cap> <budget>: seconds to give `timeout` for one call. Never 0, since
+# `timeout 0` disables the bound; 0 left reads as 1 so the call expires at once.
+bound() {
+  local cap="$1" budget="$2" left
+  left=$(( budget - SECONDS ))
+  [ "$left" -le "$cap" ] && cap="$left"
+  [ "$cap" -gt 0 ] || cap=1
+  printf '%s' "$cap"
+}
 
 iso_age() {
   local iso="$1" epoch
@@ -165,7 +191,12 @@ fi
 # GT_AGENT is that seat's agent, exactly as sling_pool.go counts them. A nudge
 # that named room the next sling would refuse is worse than no nudge (gt-59o9).
 
-SESSIONS_JSON=$(gt polecat list --all --json 2>/dev/null) ||
+POOL_LIMIT=$(bound "$POOL_BOUND" "$PRE_BUDGET")
+pool_rc=0
+SESSIONS_JSON=$(timeout "$POOL_LIMIT" gt polecat list --all --json 2>/dev/null) || pool_rc=$?
+[ "$pool_rc" -ne 124 ] ||
+  fail "gt polecat list --all --json timed out after ${POOL_LIMIT}s; the call wedged, seat occupancy is unknown"
+[ "$pool_rc" -eq 0 ] ||
   fail "gt polecat list --all --json failed; seat occupancy is unknown, not zero"
 printf '%s' "$SESSIONS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 ||
   fail "gt polecat list --all --json did not return an array; seat occupancy is unknown"
@@ -174,34 +205,31 @@ printf '%s' "$SESSIONS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 ||
 # (gt-t8q5). Counting those keeps a seat mid-spawn from reading as empty; a
 # claim whose process is gone, or that outlived the pool's own 30m TTL, has
 # released its seat and is not counted.
-claims_agents() {
-  local dir="$TOWN_ROOT/.runtime/polecat-pool-claims" f pid created agent age
+# live_claims prints agent<TAB>bead for each claim that still holds a seat: its
+# process is alive and it is inside the TTL, the same test sling_pool.go's
+# ledger applies. A dead or expired claim holds neither a seat nor a bead.
+live_claims() {
+  local dir="$TOWN_ROOT/.runtime/polecat-pool-claims" f pid created agent bead age
   [ -d "$dir" ] || return 0
   for f in "$dir"/*.json; do
     [ -e "$f" ] || continue
-    IFS=$'\t' read -r pid created agent < <(
-      jq -r '[(.pid // 0), (.created_at // ""), (.agent // "")] | @tsv' "$f" 2>/dev/null
+    IFS=$'\t' read -r pid created agent bead < <(
+      jq -r '[(.pid // 0), (.created_at // ""), (.agent // ""), (.bead // "")] | @tsv' "$f" 2>/dev/null
     ) || continue
-    [ -n "$agent" ] || continue
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [ "$pid" -gt 0 ] || continue
     kill -0 "$pid" 2>/dev/null || continue
     age=$(iso_age "$created") || continue
     [ "$age" -le "$CLAIM_TTL" ] || continue
-    printf '%s\n' "$agent"
+    printf '%s\t%s\n' "$agent" "$bead"
   done
 }
 
-# Beads already held by a live polecat or an in-flight sling are not candidates
-# (gt-inu1y): slinging them again duplicates work in progress.
-claims_beads() {
-  local dir="$TOWN_ROOT/.runtime/polecat-pool-claims" f
-  [ -d "$dir" ] || return 0
-  for f in "$dir"/*.json; do
-    [ -e "$f" ] || continue
-    jq -r '.bead // empty' "$f" 2>/dev/null || true
-  done
-}
+claims_agents() { live_claims | awk -F'\t' '$1 != "" { print $1 }'; }
+
+# Beads already held by a live polecat or a live in-flight sling are not
+# candidates (gt-inu1y): slinging them again duplicates work in progress.
+claims_beads() { live_claims | awk -F'\t' '$2 != "" { print $2 }'; }
 
 HELD_BEADS=$(
   {
@@ -241,18 +269,25 @@ agent_live() {
 # that asks rather than slings, so it has to read it here.
 
 operational_rigs() {
-  local out rows
-  out=$(gt rig list --json 2>/dev/null) || {
-    log "SKIP: gt rig list --json failed; cannot tell parked from served rigs"
+  local out rows rc=0 limit
+  # stdout here is the rig list the caller reads, so logs go to stderr.
+  limit=$(bound "$RIGS_BOUND" "$PRE_BUDGET")
+  out=$(timeout "$limit" gt rig list --json 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    log "SKIP: gt rig list --json timed out after ${limit}s; cannot tell parked from served rigs" >&2
     return 0
-  }
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log "SKIP: gt rig list --json failed; cannot tell parked from served rigs" >&2
+    return 0
+  fi
   rows=$(printf '%s' "$out" | jq -r '
     if type == "array" then .[] else empty end
     | select((.status // "" | ascii_downcase) == "operational")
     | select((.name // "") != "")
     | .name
   ' 2>/dev/null) || {
-    log "SKIP: gt rig list --json not parseable; cannot tell parked from served rigs"
+    log "SKIP: gt rig list --json not parseable; cannot tell parked from served rigs" >&2
     return 0
   }
   printf '%s\n' "$rows" | awk 'NF >= 1 && $1 != ""'
@@ -268,10 +303,17 @@ while IFS= read -r RIG; do
     continue
   fi
 
-  out=$(gt ready --rig "$RIG" --json 2>/dev/null) || {
+  limit=$(bound "$READY_BOUND" "$PRE_BUDGET")
+  ready_rc=0
+  out=$(timeout "$limit" gt ready --rig "$RIG" --json 2>/dev/null) || ready_rc=$?
+  if [ "$ready_rc" -eq 124 ]; then
+    log "SKIP $RIG: gt ready timed out after ${limit}s"
+    continue
+  fi
+  if [ "$ready_rc" -ne 0 ]; then
     log "SKIP $RIG: gt ready failed"
     continue
-  }
+  fi
   rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" --arg held "$HELD_BEADS" '
     ($held | split("\n")) as $heldids
     | [ .sources[]? | select(.name == $rig) | .issues[]? ]
@@ -306,8 +348,8 @@ candidates_for() {
     label:*)
       local want="${selector#label:}" rig id prio labels
       while IFS=$'\t' read -r rig id prio labels; do
-        case ",${labels}," in
-          *",${want},"*) printf '%s\t%s\t%s\t%s\n' "$rig" "$id" "$prio" "$labels" ;;
+        case ",$(lower "$labels")," in
+          *",$(lower "$want"),"*) printf '%s\t%s\t%s\t%s\n' "$rig" "$id" "$prio" "$labels" ;;
         esac
       done <<< "$SORTED_CANDIDATES"
       ;;
@@ -321,6 +363,15 @@ candidates_for() {
 # starts its clock now rather than being treated as long-empty: the plugin can
 # only measure what it observes.
 
+# A failed sling that printed one of gt's refusal markers (internal/dispatch
+# refusal.go) is a deferral; anything else is an error.
+sling_refusal() {
+  local line
+  line=$(printf '%s\n' "$1" | grep -e 'sling refused:' -e 'refusing to re-sling' | head -n 1) || return 1
+  [ -n "$line" ] || return 1
+  printf '%s' "$line" | sed -e 's/^.*sling refused: *//'
+}
+
 state_field() {
   local seat="$1" field="$2"
   [ -f "$STATE_FILE" ] || { printf '0'; return 0; }
@@ -332,6 +383,9 @@ STATE_ROWS=""
 NUDGE_LINES=""
 SLUNG=","
 DISPATCHED=0
+REFUSALS=0
+ERRORS=""
+BUDGET_SPENT=0
 
 while IFS='|' read -r seat agent cap selector; do
   [ -n "$seat" ] || continue
@@ -368,7 +422,7 @@ while IFS='|' read -r seat agent cap selector; do
         [ "$placed" -lt "$room" ] || break
         case ",$SLUNG," in *",$c_id,"*) continue ;; esac
         if [ "$selector" = any ]; then
-          case ",${c_labels}," in *",${SONNET_LABEL},"*) continue ;; esac
+          case ",$(lower "$c_labels")," in *",$(lower "$SONNET_LABEL"),"*) continue ;; esac
         fi
         if [ -n "$DRY_RUN" ]; then
           log "DRY-RUN: would sling $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
@@ -376,17 +430,33 @@ while IFS='|' read -r seat agent cap selector; do
           placed=$((placed + 1))
           continue
         fi
+        if [ "$BUDGET_SPENT" = 1 ] || [ $((RUN_BUDGET - SECONDS)) -le 5 ]; then
+          BUDGET_SPENT=1
+          ERRORS+="$c_id: run budget exhausted before this sling could start"$'\n'
+          continue
+        fi
+        sling_limit=$(bound "$SLING_BOUND" "$RUN_BUDGET")
         sling_rc=0
-        sling_out=$(timeout "$SLING_BOUND" gt sling "$c_id" "$c_rig" --agent "$agent" 2>&1) || sling_rc=$?
+        sling_out=$(timeout "$sling_limit" gt sling "$c_id" "$c_rig" --agent "$agent" 2>&1) || sling_rc=$?
+        sling_why=$(printf '%s' "$sling_out" | tail -n 1)
         if [ "$sling_rc" -eq 0 ]; then
           log "slung $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
           SLUNG+="$c_id,"
           placed=$((placed + 1))
-        else
-          # A refusal (backpressure, hold, rig estop) is the dispatcher doing
-          # its job, not a plugin fault; log it and try the next candidate.
-          log "sling $c_id to $c_rig refused (exit $sling_rc): $(printf '%s' "$sling_out" | tail -n 1)"
+        elif [ "$sling_rc" -eq 124 ]; then
+          # A wedged sling is a broken dispatcher, not a refusal.
           SLUNG+="$c_id,"
+          ERRORS+="$c_id: gt sling timed out after ${sling_limit}s"$'\n'
+          log "ERROR sling $c_id to $c_rig timed out after ${sling_limit}s"
+        elif reason=$(sling_refusal "$sling_out"); then
+          # Capacity or reservation refusal: the bead is fine, not this sling's to take.
+          SLUNG+="$c_id,"
+          REFUSALS=$((REFUSALS + 1))
+          log "sling $c_id to $c_rig refused: $reason"
+        else
+          SLUNG+="$c_id,"
+          ERRORS+="$c_id: gt sling exit $sling_rc: $sling_why"$'\n'
+          log "ERROR sling $c_id to $c_rig failed (exit $sling_rc): $sling_why"
         fi
       done <<< "$seat_candidates"
     fi
@@ -435,11 +505,24 @@ write_state() {
 
 if [ "$MODE" = sling ]; then
   [ -n "$DRY_RUN" ] || write_state
+  if [ -n "$ERRORS" ] && [ "$DISPATCHED" -eq 0 ]; then
+    # Every sling attempted this run failed: an empty seat with work ready that
+    # the dispatcher could not fill is not "nothing to do" (escalate).
+    fail "every sling failed; seat(s) still empty with work ready:
+$ERRORS"
+  fi
+  if [ -n "$ERRORS" ]; then
+    log "some slings failed:"$'\n'"$ERRORS"
+  fi
   if [ "$DISPATCHED" -gt 0 ]; then
-    log "dispatched $DISPATCHED bead(s) to empty seat(s)"
+    if [ -n "$DRY_RUN" ]; then
+      log "dry run: would dispatch $DISPATCHED bead(s) to empty seat(s); nothing slung"
+    else
+      log "dispatched $DISPATCHED bead(s) to empty seat(s)"
+    fi
     exit 0
   fi
-  skip "no empty seat with a slingable bead"
+  skip "no empty seat with a slingable bead, or every candidate was refused (${REFUSALS} refusal(s))"
 fi
 
 if [ -z "$NUDGE_LINES" ]; then
@@ -474,6 +557,14 @@ log "nudging $MAYOR_TARGET: $seat_n empty seat(s) with work"
 # would record a nudge that never arrived and buy the seat 15 minutes of
 # silence — the one outcome this plugin exists to prevent.
 NUDGE_BOUND=90
+if [ "$MAYOR_TARGET" = mayor ]; then
+  # A mayor that is down is a decision (gt-qvs0b), not a plugin fault. Ask the
+  # session explicitly rather than guess from the nudge's error text.
+  mayor_running=$(timeout "$(bound 15 "$RUN_BUDGET")" gt mayor status --running 2>/dev/null) || mayor_running=""
+  if [ "$mayor_running" = false ]; then
+    skip "mayor session is not running; nothing to nudge"
+  fi
+fi
 nudge_rc=0
 nudge_out=$(timeout "$NUDGE_BOUND" gt nudge "$MAYOR_TARGET" "$message" 2>&1) || nudge_rc=$?
 [ -z "$nudge_out" ] || printf '%s\n' "$nudge_out"
@@ -482,9 +573,6 @@ if [ "$nudge_rc" -eq 124 ]; then
   # watches, so the message may still be delivered on the mayor's next drain;
   # say that rather than claiming it was lost.
   fail "gt nudge $MAYOR_TARGET timed out after ${NUDGE_BOUND}s; delivery unconfirmed (it may be queued for the mayor's next turn)"
-elif [ "$nudge_rc" -ne 0 ] && printf '%s' "$nudge_out" | grep -qi 'not found'; then
-  # A mayor that is down is a decision (gt-qvs0b), not a plugin fault.
-  skip "mayor session $MAYOR_TARGET is not running; nothing to nudge"
 elif [ "$nudge_rc" -ne 0 ]; then
   fail "gt nudge $MAYOR_TARGET failed (exit $nudge_rc); the empty seat was not reported"
 fi
