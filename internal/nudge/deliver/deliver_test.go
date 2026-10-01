@@ -1,4 +1,4 @@
-package cmd
+package deliver
 
 import (
 	"bytes"
@@ -98,31 +98,31 @@ func (p *pollerLog) sessions() []string {
 }
 
 // testDelivery is a wait-idle delivery into townRoot with millisecond timings.
-func testDelivery(ft *deliveryTmux, townRoot string, pollers *pollerLog, stderr *bytes.Buffer) *nudgeDelivery {
-	return &nudgeDelivery{
-		tmux:            ft,
-		townRoot:        townRoot,
-		mode:            NudgeModeWaitIdle,
-		priority:        nudge.PriorityNormal,
-		waitIdleTimeout: time.Millisecond,
-		watchTimeout:    20 * time.Millisecond,
-		pollInterval:    time.Millisecond,
-		probeWindow:     time.Millisecond,
-		clock:           clockwork.NewRealClock(),
-		startPoller:     pollers.start,
-		stderr:          stderr,
+func testDelivery(ft *deliveryTmux, townRoot string, pollers *pollerLog, stderr *bytes.Buffer) *Delivery {
+	return &Delivery{
+		Tmux:            ft,
+		TownRoot:        townRoot,
+		Mode:            ModeWaitIdle,
+		Priority:        nudge.PriorityNormal,
+		WaitIdleTimeout: time.Millisecond,
+		WatchTimeout:    20 * time.Millisecond,
+		PollInterval:    time.Millisecond,
+		ProbeWindow:     time.Millisecond,
+		Clock:           clockwork.NewRealClock(),
+		StartPoller:     pollers.start,
+		Stderr:          stderr,
 	}
 }
 
 const deliveryTarget = "gt-crew-max"
 
-func TestNudgeDeliveryWaitIdleDeliversToIdleTarget(t *testing.T) {
+func TestDeliveryWaitIdleDeliversToIdleTarget(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, true)
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	want := nudge.FormatForInjection([]nudge.QueuedNudge{{Sender: "mayor", Message: "check mail", Priority: nudge.PriorityNormal}})
@@ -137,12 +137,12 @@ func TestNudgeDeliveryWaitIdleDeliversToIdleTarget(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleQueuesForBusyTargetAndWatches(t *testing.T) {
+func TestDeliveryWaitIdleQueuesForBusyTargetAndWatches(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // never idle
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 0 {
@@ -159,13 +159,13 @@ func TestNudgeDeliveryWaitIdleQueuesForBusyTargetAndWatches(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleWatcherDeliversWhenTargetGoesIdle(t *testing.T) {
+func TestDeliveryWaitIdleWatcherDeliversWhenTargetGoesIdle(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.idleOnWait = 2 // the first wait times out; the watcher's first poll sees idle
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	got := ft.Sent(deliveryTarget)
@@ -177,12 +177,12 @@ func TestNudgeDeliveryWaitIdleWatcherDeliversWhenTargetGoesIdle(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleRefusesMissingSession(t *testing.T) {
+func TestDeliveryWaitIdleRefusesMissingSession(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t)
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor")
+	err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor")
 	if !errors.Is(err, tmux.ErrSessionNotFound) {
 		t.Fatalf("deliver = %v, want ErrSessionNotFound", err)
 	}
@@ -191,14 +191,14 @@ func TestNudgeDeliveryWaitIdleRefusesMissingSession(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleQueuesUnverifiedSubmit(t *testing.T) {
+func TestDeliveryWaitIdleQueuesUnverifiedSubmit(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, true)
 	ft.submitErr = tmux.ErrSubmitNotVerified
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if n := nudge.QueueLen(town, deliveryTarget); n != 1 {
@@ -206,14 +206,14 @@ func TestNudgeDeliveryWaitIdleQueuesUnverifiedSubmit(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleQueuesForAgentWithoutPromptDetection(t *testing.T) {
+func TestDeliveryWaitIdleQueuesForAgentWithoutPromptDetection(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, true)
 	ft.agent, ft.preset, ft.presetOK = "codex", &config.AgentPresetInfo{}, true
 	town, pollers, stderr := t.TempDir(), &pollerLog{}, &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, pollers, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, pollers, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 0 {
@@ -227,10 +227,10 @@ func TestNudgeDeliveryWaitIdleQueuesForAgentWithoutPromptDetection(t *testing.T)
 	}
 }
 
-func TestNudgeDeliveryWaitIdleNeedsWorkspace(t *testing.T) {
+func TestDeliveryWaitIdleNeedsWorkspace(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
-	if err := testDelivery(ft, "", &pollerLog{}, &bytes.Buffer{}).deliver(deliveryTarget, "m", "mayor"); err == nil {
+	if err := testDelivery(ft, "", &pollerLog{}, &bytes.Buffer{}).Deliver(t.Context(), deliveryTarget, "m", "mayor"); err == nil {
 		t.Fatal("deliver without a town root succeeded, want the workspace error")
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 0 {
@@ -238,7 +238,7 @@ func TestNudgeDeliveryWaitIdleNeedsWorkspace(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleDeliversImmediatelyWhenQueueFails(t *testing.T) {
+func TestDeliveryWaitIdleDeliversImmediatelyWhenQueueFails(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // busy, so wait-idle times out and queues
 	town := filepath.Join(t.TempDir(), "file")
@@ -247,7 +247,7 @@ func TestNudgeDeliveryWaitIdleDeliversImmediatelyWhenQueueFails(t *testing.T) {
 	}
 	stderr := &bytes.Buffer{}
 
-	if err := testDelivery(ft, town, &pollerLog{}, stderr).deliver(deliveryTarget, "check mail", "mayor"); err != nil {
+	if err := testDelivery(ft, town, &pollerLog{}, stderr).Deliver(t.Context(), deliveryTarget, "check mail", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 1 || !strings.Contains(got[0], "[from mayor] check mail") {
@@ -258,14 +258,14 @@ func TestNudgeDeliveryWaitIdleDeliversImmediatelyWhenQueueFails(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWaitIdleWarnsWhenNudgeNotConsumed(t *testing.T) {
+func TestDeliveryWaitIdleWarnsWhenNudgeNotConsumed(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, true)
 	ft.consumption = tmux.InputConsumptionNotConsumed
 	stderr := &bytes.Buffer{}
 
-	if err := testDelivery(ft, t.TempDir(), &pollerLog{}, stderr).deliver(deliveryTarget, "m", "mayor"); err != nil {
+	if err := testDelivery(ft, t.TempDir(), &pollerLog{}, stderr).Deliver(t.Context(), deliveryTarget, "m", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "wait-idle: "+deliveryTarget+" accepted the nudge but started no turn") {
@@ -273,14 +273,14 @@ func TestNudgeDeliveryWaitIdleWarnsWhenNudgeNotConsumed(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryImmediateRefusesBusyTargetWithoutForce(t *testing.T) {
+func TestDeliveryImmediateRefusesBusyTargetWithoutForce(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // busy
 	town, stderr := t.TempDir(), &bytes.Buffer{}
 	d := testDelivery(ft, town, &pollerLog{}, stderr)
-	d.mode = NudgeModeImmediate
+	d.Mode = ModeImmediate
 
-	if err := d.deliver(deliveryTarget, "m", "mayor"); err != nil {
+	if err := d.Deliver(t.Context(), deliveryTarget, "m", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 0 {
@@ -291,13 +291,13 @@ func TestNudgeDeliveryImmediateRefusesBusyTargetWithoutForce(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryImmediateForceInterruptsWithSenderPrefix(t *testing.T) {
+func TestDeliveryImmediateForceInterruptsWithSenderPrefix(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // busy
 	d := testDelivery(ft, t.TempDir(), &pollerLog{}, &bytes.Buffer{})
-	d.mode, d.force = NudgeModeImmediate, true
+	d.Mode, d.Force = ModeImmediate, true
 
-	if err := d.deliver(deliveryTarget, "m", "mayor"); err != nil {
+	if err := d.Deliver(t.Context(), deliveryTarget, "m", "mayor"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if got := ft.Sent(deliveryTarget); len(got) != 1 || got[0] != "[from mayor] m" {
@@ -305,16 +305,16 @@ func TestNudgeDeliveryImmediateForceInterruptsWithSenderPrefix(t *testing.T) {
 	}
 }
 
-func TestNudgeDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
+func TestDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
 	t.Parallel()
 	// The watcher exits after its first poll when the queue is empty
 	// (someone else drained it), before it consults the session.
 	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
 	d := testDelivery(newDeliveryTmux(t), t.TempDir(), &pollerLog{}, &bytes.Buffer{})
-	d.clock, d.watchTimeout, d.pollInterval = clk, time.Minute, time.Second
+	d.Clock, d.WatchTimeout, d.PollInterval = clk, time.Minute, time.Second
 	done := make(chan struct{})
 	go func() {
-		d.watch("test-session")
+		d.Watch(t.Context(), "test-session")
 		close(done)
 	}()
 	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
@@ -322,48 +322,4 @@ func TestNudgeDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
 	}
 	clk.Advance(time.Second) // one poll, not the whole minute
 	<-done
-}
-
-// nudgeSenderCases pin who gt nudge says a nudge is from, by the caller's
-// working directory (relative to the town root) and identity environment.
-var nudgeSenderCases = []struct {
-	name string
-	cwd  string
-	env  map[string]string
-	want string
-}{
-	{"town root, no identity (the daemon)", ".", nil, "unknown"},
-	{"mayor dir", "mayor", nil, "mayor"},
-	{"crew dir", "gastown/crew/max", nil, "gastown/crew/max"},
-	{"polecat dir", "gastown/polecats/toast", nil, "gastown/toast"},
-	{"rig root", "gastown", nil, "unknown"},
-	{"retired deacon dir", "deacon", nil, "unknown"},
-	{"GT_ROLE mayor anywhere", ".", map[string]string{"GT_ROLE": "mayor"}, "mayor"},
-	{"GT_ROLE crew", ".", map[string]string{"GT_ROLE": "gastown/crew/max"}, "gastown/crew/max"},
-	{"GT_ROLE crew with GT_RIG and GT_CREW", ".", map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "max"}, "gastown/crew/max"},
-	{"GT_ROLE polecat filled from cwd", "gastown/polecats/toast", map[string]string{"GT_ROLE": "polecat"}, "gastown/toast"},
-	{"GT_ROLE beats cwd", "gastown/crew/max", map[string]string{"GT_ROLE": "mayor"}, "mayor"},
-	{"GT_ROLE unknown simple role", ".", map[string]string{"GT_ROLE": "overseer"}, "overseer"},
-	{"GT_ROLE retired witness", ".", map[string]string{"GT_ROLE": "gastown/witness"}, "gastown/witness"},
-}
-
-func TestNudgeSenderFromRole(t *testing.T) {
-	t.Parallel()
-	town := "/town"
-	for _, tc := range nudgeSenderCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			info, err := getRoleWithContextEnv(filepath.Join(town, tc.cwd), town, func(k string) string { return tc.env[k] })
-			if got := nudgeSender(info, err); got != tc.want {
-				t.Errorf("sender = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNudgeSenderUnreadableRoleIsUnknown(t *testing.T) {
-	t.Parallel()
-	if got := nudgeSender(RoleInfo{Role: RoleMayor}, errors.New("not in a Gas Town workspace")); got != "unknown" {
-		t.Errorf("sender = %q, want unknown", got)
-	}
 }

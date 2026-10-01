@@ -1,4 +1,4 @@
-package cmd
+package deliver
 
 import (
 	"errors"
@@ -44,7 +44,7 @@ func TestConsumptionWarningForEachVerdict(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var window time.Duration
-			got := consumptionWarningFor(probeAnswering(tc.verdict, tc.err, &window), 40*time.Millisecond, target, NudgeModeImmediate)
+			got := ConsumptionWarning(probeAnswering(tc.verdict, tc.err, &window), 40*time.Millisecond, target, ModeImmediate)
 			if window != 40*time.Millisecond {
 				t.Errorf("probe window = %s, want the given 40ms", window)
 			}
@@ -69,8 +69,8 @@ func TestConsumptionWarningForEachVerdict(t *testing.T) {
 // came from, so a wait-idle warning is not mistaken for an immediate one.
 func TestConsumptionWarningLabelsItsMode(t *testing.T) {
 	t.Parallel()
-	got := consumptionWarningFor(probeAnswering(tmux.InputConsumptionNotConsumed, nil, nil), time.Millisecond, "gt-mayor", NudgeModeWaitIdle)
-	if !strings.HasPrefix(got, NudgeModeWaitIdle+":") || strings.Contains(got, NudgeModeImmediate+":") {
+	got := ConsumptionWarning(probeAnswering(tmux.InputConsumptionNotConsumed, nil, nil), time.Millisecond, "gt-mayor", ModeWaitIdle)
+	if !strings.HasPrefix(got, ModeWaitIdle+":") || strings.Contains(got, ModeImmediate+":") {
 		t.Errorf("wait-idle warning = %q", got)
 	}
 }

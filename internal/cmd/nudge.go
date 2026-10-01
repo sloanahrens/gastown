@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -31,15 +33,9 @@ var (
 
 // Nudge delivery modes.
 const (
-	// NudgeModeImmediate sends directly via tmux send-keys (current behavior).
-	// This interrupts in-flight work but guarantees immediate delivery.
-	NudgeModeImmediate = "immediate"
-	// NudgeModeQueue writes to a file queue; agent picks up via hook at next
-	// turn boundary. Zero interruption but delivery depends on agent turn frequency.
-	NudgeModeQueue = "queue"
-	// NudgeModeWaitIdle waits for the agent to become idle (prompt visible),
-	// then delivers directly. Falls back to queue on timeout. Best of both worlds.
-	NudgeModeWaitIdle = "wait-idle"
+	NudgeModeImmediate = deliver.ModeImmediate
+	NudgeModeQueue     = deliver.ModeQueue
+	NudgeModeWaitIdle  = deliver.ModeWaitIdle
 )
 
 func init() {
@@ -118,7 +114,7 @@ const ifFreshMaxAge = 60 * time.Second
 
 // waitIdleTimeout is how long --mode=wait-idle will poll before falling back to queue.
 // This is a var (not const) so tests can override it to avoid 15s waits.
-var waitIdleTimeout = 15 * time.Second
+var waitIdleTimeout = deliver.WaitIdleTimeout
 
 // idleWatcherTimeout is how long the background idle watcher polls after
 // queuing a nudge. If the agent becomes idle within this window, the watcher
@@ -126,14 +122,24 @@ var waitIdleTimeout = 15 * time.Second
 // finishes work after WaitForIdle's timeout but before anyone sends new input
 // (so UserPromptSubmit never fires and the queue never drains).
 // Var so tests can override.
-var idleWatcherTimeout = 60 * time.Second
+var idleWatcherTimeout = deliver.WatchTimeout
 
 // idleWatcherPollInterval is how often the background watcher checks for idle.
 // Var so tests can override.
-var idleWatcherPollInterval = 1 * time.Second
+var idleWatcherPollInterval = deliver.PollInterval
+
+// newNudgeDelivery is the delivery the gt nudge flags and timings describe.
+func newNudgeDelivery(t *tmux.Tmux, townRoot string) *deliver.Delivery {
+	d := deliver.New(t, townRoot)
+	d.Mode, d.Priority, d.Force = nudgeModeFlag, nudgePriorityFlag, nudgeForceFlag
+	d.WaitIdleTimeout, d.WatchTimeout, d.PollInterval = waitIdleTimeout, idleWatcherTimeout, idleWatcherPollInterval
+	d.ProbeWindow = immediateTurnProbeWindow
+	d.Stderr = os.Stderr
+	return d
+}
 
 // deliverNudge routes a nudge to sessionName by the --mode, --priority and
-// --force flags (nudgeDelivery.deliver).
+// --force flags (deliver.Delivery.Deliver).
 func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 	// Test hook: when GT_TEST_NUDGE_LOG is set, log the nudge instead of
 	// delivering through real tmux/queue transport. Prevents test-suite
@@ -150,77 +156,18 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 	}
 
 	townRoot, _ := workspace.FindFromCwd()
-	return newNudgeDelivery(t, townRoot, os.Stderr).deliver(sessionName, message, sender)
+	return newNudgeDelivery(t, townRoot).Deliver(context.Background(), sessionName, message, sender)
 }
 
 // immediateTurnProbeWindow is how long immediate mode watches the pane for a
 // reaction before reporting that the target did not start a turn. Var so tests
 // can shorten it.
-var immediateTurnProbeWindow = 3 * time.Second
+var immediateTurnProbeWindow = deliver.ProbeWindow
 
-// consumptionWarning watches a target for a reaction to a nudge that mode has
-// just delivered directly (immediate, or wait-idle's own direct delivery once
-// the target went idle), and returns a warning line when the target took the
-// input without acting on it — or when consumption could not be established
-// (an unreadable pane, or a frozen pane with nothing to date it by, both read
-// UNKNOWN and name a re-probe instead of claiming a wedge, gt-7xnv). It
-// returns "" only on a positive, unambiguous verdict.
-//
-// This exists because "the pty took the keystrokes" and "the agent acted on
-// them" are different claims, and only the first was ever being verified
-// (gt-eigw): on 2026-09-09 be-refinery accepted an immediate nudge, an Enter
-// keystroke and mail, started no turn for any of them, and sat idle for ~15
-// minutes while the daemon logged "Refinery for beads already running,
-// skipping spawn" on every heartbeat. Every delivery had reported success.
-//
-// wait-idle's direct-delivery path had the same gap (gt-8hi4w): a target that
-// WaitForIdle read as idle — a stale prompt, a frozen pane — could take the
-// keystrokes without starting a turn, and 'gt nudge' printed '✓ Nudged ...
-// (wait-idle)' regardless. mode is only used to label the warning; the probe
-// itself does not care how the text was delivered.
-//
-// It reports rather than fails. Delivery genuinely succeeded — the text left
-// the composer — and the target may still act on it later, so a non-zero exit
-// here would make every caller (patrols, slings, operators) treat a delivered
-// nudge as an undelivered one. The warning is the signal; the recovery stays
-// the operator's or the patrol's, per tmux.SubmitPendingInput's contract.
+// consumptionWarning is deliver.ConsumptionWarning over t's consumption probe
+// and immediateTurnProbeWindow.
 func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
-	return consumptionWarningFor(t.WaitForInputConsumed, immediateTurnProbeWindow, sessionName, mode)
-}
-
-// consumptionWarningFor is consumptionWarning over a given probe and window:
-// the message for the verdict the probe returns.
-func consumptionWarningFor(probe func(sessionName string, window time.Duration) (tmux.InputConsumption, error), window time.Duration, sessionName, mode string) string {
-	verdict, err := probe(sessionName, window)
-	if err != nil {
-		// Fail closed (gt-7xnv): an unobservable pane says nothing about the
-		// nudge, so it must not read as one that was consumed — but it must not
-		// claim a wedge either, so the word here is UNKNOWN, not "started no
-		// turn". Re-probe before acting on it.
-		return fmt.Sprintf(
-			"%s: %s took the nudge but consumption is UNKNOWN — the probe could not read the pane (%v). "+
-				"Re-check with 'gt session health %s' before acting.\n",
-			mode, sessionName, err, sessionName)
-	}
-	if verdict == tmux.InputConsumptionUndated {
-		// The pane was frozen and holding input but has no content above the
-		// input box to date it by (gt-7xnv): the nudge may be the input, or
-		// any older text. Not a strand claim — re-probe on a longer window.
-		return fmt.Sprintf(
-			"%s: %s still holds input and the pane was frozen for %s, but it has nothing above "+
-				"the input box to date it by — consumption is UNKNOWN (UNDATED), not a strand. "+
-				"Re-check with 'gt session health %s' before acting.\n",
-			mode, sessionName, window, sessionName)
-	}
-	if verdict != tmux.InputConsumptionNotConsumed {
-		return ""
-	}
-	return fmt.Sprintf(
-		"%s: %s accepted the nudge but started no turn within %s — its input is "+
-			"still stranded in the composer/queue, which is how a wedged session presents "+
-			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
-			"that session.\n",
-		mode, sessionName, window, sessionName)
+	return deliver.ConsumptionWarning(t.WaitForInputConsumed, immediateTurnProbeWindow, sessionName, mode)
 }
 
 // immediateConsumptionWarning is consumptionWarning labeled for immediate mode.
@@ -228,16 +175,14 @@ func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
 	return consumptionWarning(t, sessionName, NudgeModeImmediate)
 }
 
-// watchAndDeliver runs the post-queue idle watcher (nudgeDelivery.watch) over
-// the --priority flag and the idle-watcher timings.
+// watchAndDeliver runs the post-queue idle watcher (deliver.Delivery.Watch)
+// over the --priority flag and the idle-watcher timings.
 func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
-	newNudgeDelivery(t, townRoot, os.Stderr).watch(sessionName)
+	newNudgeDelivery(t, townRoot).Watch(context.Background(), sessionName)
 }
 
 func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
-	if err := nudge.Requeue(townRoot, sessionName, drained); err != nil {
-		fmt.Fprintf(os.Stderr, "%s: requeue for %s failed: %v\n", source, sessionName, err)
-	}
+	deliver.Requeue(os.Stderr, townRoot, sessionName, source, drained)
 }
 
 // validNudgeModes is the set of allowed --mode values.
@@ -656,7 +601,7 @@ func shouldNudgeTarget(reg *session.PrefixRegistry, townRoot, targetAddress stri
 	}
 
 	// Try to determine agent bead ID from address
-	agentBeadID := addressToAgentBeadID(reg, targetAddress)
+	agentBeadID := deliver.AgentBeadID(reg, targetAddress)
 	if agentBeadID == "" {
 		// Can't determine agent bead, allow the nudge
 		return true, "", nil
@@ -696,45 +641,4 @@ func sessionNameToAddress(reg *session.PrefixRegistry, sessionName string) strin
 	default:
 		return ""
 	}
-}
-
-// addressToAgentBeadID converts a target address to an agent bead ID.
-// Examples:
-//   - "mayor" -> "hq-mayor"
-//   - "gastown/alpha" -> "gt-alpha"
-//
-// Returns empty string if the address cannot be converted.
-func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
-	// Handle special cases
-	switch address {
-	case constants.RoleMayor, constants.RoleMayor + "/":
-		return session.MayorSessionName()
-	}
-	if strings.HasPrefix(address, constants.RoleMayor+"/") || strings.HasPrefix(address, "deacon/") {
-		return ""
-	}
-
-	// Parse rig/role format
-	if !strings.Contains(address, "/") {
-		return ""
-	}
-
-	parts := strings.SplitN(address, "/", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-
-	rig := parts[0]
-	role := parts[1]
-
-	if strings.HasPrefix(role, "crew/") {
-		crewName := strings.TrimPrefix(role, "crew/")
-		return session.CrewSessionName(reg.PrefixForRig(rig), crewName)
-	}
-	if strings.HasPrefix(role, "polecats/") {
-		pcName := strings.TrimPrefix(role, "polecats/")
-		return session.PolecatSessionName(reg.PrefixForRig(rig), pcName)
-	}
-	// Assume polecat
-	return session.PolecatSessionName(reg.PrefixForRig(rig), role)
 }
