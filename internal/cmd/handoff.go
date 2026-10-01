@@ -702,17 +702,6 @@ func resolvePathToSession(reg *session.PrefixRegistry, path string) (string, err
 	return "", fmt.Errorf("cannot parse path '%s' - expected <rig>/<polecat> or <rig>/crew/<name>", path)
 }
 
-// claudeEnvVars lists the Claude-related environment variables to propagate
-// during handoff. These vars aren't inherited by tmux respawn-pane's fresh shell.
-var claudeEnvVars = []string{
-	// Claude API and config
-	"ANTHROPIC_API_KEY",
-	"CLAUDE_CODE_USE_BEDROCK",
-	// AWS vars for Bedrock
-	"AWS_PROFILE",
-	"AWS_REGION",
-}
-
 // buildRestartCommand creates the command to run when respawning a session's pane.
 // This needs to be the actual command to execute (e.g., claude), not a session attach command.
 // The command includes a cd to the correct working directory for the role.
@@ -1041,10 +1030,13 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		envMap["GT_PROCESS_NAMES"] = strings.Join(resolved, ",")
 	}
 
-	// Add Claude-related env vars from current environment
-	for _, name := range claudeEnvVars {
-		if val := getenv(name); val != "" {
-			envMap[name] = val
+	// Add the provider settings from the current environment (not inherited
+	// by respawn-pane's fresh shell). Credentials are never among them: the
+	// respawn command is argv (gt-y3pgh.10). The agent's own env wins, as it
+	// does at first spawn.
+	for k, v := range config.ProviderPassthroughEnv(getenv) {
+		if _, set := agentEnv[k]; !set {
+			envMap[k] = v
 		}
 	}
 

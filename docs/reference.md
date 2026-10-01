@@ -256,6 +256,17 @@ that looks like a token is left out), so the daemon's own environment never
 hands one provider's token to every agent. Name entries after the agent, not
 after the variable the agent reads.
 
+The spawning process's own credentials are never forwarded to a session:
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+`AWS_BEARER_TOKEN_BEDROCK`, `ANTHROPIC_FOUNDRY_API_KEY`,
+`CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`, and an `HTTP(S)_PROXY` URL that carries
+`user:password@`. A forwarded value would land in `tmux new-session -e`, the
+startup command and the handoff respawn command. An agent that needs one names
+it as a `${VAR}` reference to `settings/daemon.env`. Plain provider settings
+(model names, `AWS_PROFILE`, `AWS_REGION`, the Bedrock/Vertex/Foundry
+switches, credential file paths) are still forwarded.
+
 A literal token in an agent's env (a value with a known token prefix such as
 `sk-`, or a 16+ character value for a key naming a credential) draws a
 warning: `gt doctor` (`town-config-secrets`) lists its key path, and the

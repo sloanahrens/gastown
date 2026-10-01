@@ -1160,3 +1160,48 @@ func TestIssueSummaryLines(t *testing.T) {
 		t.Fatalf("non-JSON gave lines %q, want nil", lines)
 	}
 }
+
+// The handoff respawn command carries no credential from the agent's
+// environment (G3-18, gt-y3pgh.10): respawn-pane's command is argv and
+// becomes the pane's start command. Plain provider settings still pass.
+func TestBuildRestartCommand_CarriesNoParentCredentials(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	const marker = "fake-cred-"
+	env := map[string]string{
+		"HTTPS_PROXY":     "http://user:" + marker + "proxy@proxy.example:3128",
+		"ANTHROPIC_MODEL": "fake-model",
+	}
+	for _, k := range config.UnforwardedCredentialEnvVars() {
+		env[k] = marker + strings.ToLower(k)
+	}
+
+	for _, sessionName := range []string{"hq-mayor", "gt-witness", "gt-refinery", "gt-crew-holden", "gt-nux"} {
+		t.Run(sessionName, func(t *testing.T) {
+			t.Parallel()
+			cmd, err := buildTestRestartCommand(townRoot, env, sessionName)
+			if err != nil {
+				t.Fatalf("buildRestartCommand: %v", err)
+			}
+			if strings.Contains(cmd, marker) {
+				t.Errorf("restart command carries a parent credential")
+			}
+			if !strings.Contains(cmd, "ANTHROPIC_MODEL=fake-model") {
+				t.Errorf("restart command does not forward ANTHROPIC_MODEL: %s", cmd)
+			}
+		})
+	}
+}
