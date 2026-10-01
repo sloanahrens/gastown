@@ -1231,3 +1231,52 @@ func TestSyncPlan_SupersededMarksBlockedNewerContent(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncFormulas_ReportsOrphanedTownCopies covers a formula gt installed whose
+// embedded source has since left the binary (gt-zggoh: mol-refinery-patrol and
+// mol-witness-patrol outlived their agents). Sync cannot remove a copy a human
+// may still read, so it reports it and leaves the file and its record alone.
+func TestSyncFormulas_ReportsOrphanedTownCopies(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if _, err := ProvisionFormulas(townRoot); err != nil {
+		t.Fatalf("ProvisionFormulas() error: %v", err)
+	}
+	formulasDir := filepath.Join(townRoot, ".beads", "formulas")
+	orphan := "mol-retired-patrol.formula.toml"
+	untracked := "my-own.formula.toml"
+	for _, name := range []string{orphan, untracked} {
+		if err := os.WriteFile(filepath.Join(formulasDir, name), []byte("formula = \"x\"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, err := loadInstalledRecord(formulasDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Formulas[orphan] = "sha-from-an-older-binary"
+	record.Formulas["mol-gone-from-disk.formula.toml"] = "sha-from-an-older-binary"
+	if err := saveInstalledRecord(formulasDir, record); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, opts := range []SyncOptions{{DryRun: true}, {}} {
+		plan, err := SyncFormulas(townRoot, opts)
+		if err != nil {
+			t.Fatalf("SyncFormulas(%+v) error: %v", opts, err)
+		}
+		if got := plan.Orphaned(); len(got) != 1 || got[0] != orphan {
+			t.Errorf("SyncFormulas(%+v).Orphaned() = %v, want [%s]", opts, got, orphan)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(formulasDir, orphan)); err != nil {
+		t.Errorf("sync touched the orphaned copy: %v", err)
+	}
+	after, err := loadInstalledRecord(formulasDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := after.Formulas[orphan]; !ok {
+		t.Error("sync dropped the orphan's install record, so the next sync would stop reporting it")
+	}
+}

@@ -325,6 +325,9 @@ const (
 	// SyncForceOverwrite: the town copy was hand-edited and opts.Force replaced
 	// it with the embedded content, after backing the edit up.
 	SyncForceOverwrite SyncAction = "force-overwrite"
+	// SyncOrphaned: gt installed this town copy, but the binary no longer embeds
+	// it. Sync leaves the file alone and reports it for an operator to delete.
+	SyncOrphaned SyncAction = "orphaned"
 )
 
 // SyncEntry is one formula's disposition in a SyncPlan.
@@ -365,6 +368,10 @@ func (p *SyncPlan) Installed() []string { return p.names(SyncInstall) }
 // SkippedModified returns the formulas sync refused to overwrite. Their embedded
 // content is not on disk, so any fix merged into it is undelivered.
 func (p *SyncPlan) SkippedModified() []string { return p.names(SyncSkipModified) }
+
+// Orphaned returns the town copies gt installed that this binary no longer
+// embeds, such as the patrol formulas of a deleted agent (gt-zggoh).
+func (p *SyncPlan) Orphaned() []string { return p.names(SyncOrphaned) }
 
 // Superseded returns the hand-edited formulas whose embedded content also moved
 // past the last install, i.e. copies hiding a newer formula, not just a local edit.
@@ -499,6 +506,15 @@ func SyncFormulas(beadsPath string, opts SyncOptions) (*SyncPlan, error) {
 		}
 		installed.Formulas[filename] = embeddedHash
 		plan.Entries = append(plan.Entries, SyncEntry{Name: filename, Action: action, Superseded: superseded})
+	}
+
+	for _, filename := range sortedNames(installed.Formulas) {
+		if _, ok := embedded[filename]; ok {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(formulasDir, filename)); err == nil {
+			plan.Entries = append(plan.Entries, SyncEntry{Name: filename, Action: SyncOrphaned})
+		}
 	}
 
 	if opts.DryRun {
