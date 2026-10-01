@@ -162,7 +162,8 @@ func CreatePolecatCLAUDEmd(worktreePath, rigName, polecatName string) (bool, err
 // ProvisionCommands creates the .claude/commands/ directory with standard slash commands.
 // This ensures crew/polecat workspaces have the handoff command and other utilities
 // even if the source repo doesn't have them tracked.
-// If a command already exists, it is skipped (no overwrite).
+// A command on disk that differs from the embedded template is replaced; the
+// binary is canonical (gt-4czhp).
 func ProvisionCommands(workspacePath string) error {
 	return commands.Provision(workspacePath)
 }
