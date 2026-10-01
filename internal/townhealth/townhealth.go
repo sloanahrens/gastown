@@ -14,10 +14,11 @@
 //
 // and Verdict.ExitCode maps them to 0, 1, 2 and 3.
 //
-// The package is pure: every input comes through one of the small source
+// Compute is pure: every input comes through one of the small source
 // interfaces in Inputs, and the clock is Inputs.Now. A nil source is not
 // wired and reads as UNKNOWN. The daemon wires the real sources and writes
-// the report every tick (gt-s3rec.2).
+// the report every tick to one file (file.go); gt status --line reads it
+// and renders it with Line, treating a stale file as UNKNOWN (gt-s3rec.2).
 package townhealth
 
 import (

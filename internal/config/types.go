@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // TownConfig represents the main town identity (mayor/town.json).
@@ -213,6 +214,10 @@ type OperationalConfig struct {
 	// host's Docker VM and how many of those slots are reserved for gate-
 	// class callers (refinery, batch gate, main-branch test).
 	ContainerGate *ContainerGateThresholds `json:"container_gate,omitempty"`
+
+	// Health holds every threshold of the town health signal
+	// (internal/townhealth, gt-s3rec.2); absent keys keep its defaults.
+	Health *townhealth.Settings `json:"health,omitempty"`
 }
 
 // DoltThresholds configures Dolt server thresholds.
