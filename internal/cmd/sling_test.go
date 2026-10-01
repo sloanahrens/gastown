@@ -492,8 +492,8 @@ func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
 func TestFormulaVarsForBeadPassesFeatureAndIssueVars(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	fake := &fakeCook{out: cookTreeJSON(`{"formula": "mol-review", "vars": [], "steps": []}`)}
-	vars, err := formulaBDVia(fake.run).varsForBead("mol-review", "gt-abc123", "My Test Feature", town, town, []string{"k=v"})
+	fake := &fakeCook{out: cookTree(`{"formula": "mol-review", "vars": [], "steps": []}`)}
+	vars, err := formulaBDVia(fake.open).varsForBead("mol-review", "gt-abc123", "My Test Feature", town, town, []string{"k=v"})
 	if err != nil {
 		t.Fatalf("varsForBead: %v", err)
 	}

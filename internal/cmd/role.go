@@ -33,9 +33,9 @@ type RoleInfo struct {
 	TownRoot      string `json:"town_root,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"` // Current working directory
 
-	// formulaRun answers the bd cook prime renders formulas with; nil is the
-	// bd on PATH. Tests set it so prime never starts bd.
-	formulaRun beads.BDRunner
+	// formulaOpen is the formula engine prime cooks with; nil is the bd on
+	// PATH. Tests set it so prime never starts bd.
+	formulaOpen func(formulaSite) formulaEngine
 	// molecules reads poured molecules for prime's checklist; nil is the
 	// rig's beads. Tests set it to a beadsfake.
 	molecules beads.Client
@@ -43,7 +43,7 @@ type RoleInfo struct {
 
 // formulaCooker is the bd cook this role's prime renders formulas with.
 func (r RoleInfo) formulaCooker() formulaCooker {
-	return formulaCooker{run: r.formulaRun}
+	return formulaCooker{open: r.formulaOpen}
 }
 
 // GetRole returns the current role, checking GT_ROLE first then falling back to cwd.

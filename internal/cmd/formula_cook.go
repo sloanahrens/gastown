@@ -64,14 +64,56 @@ func (f *cookedFormula) checklist() []checklistStep {
 	return out
 }
 
-// formulaCooker reaches bd's cook. run answers the call; nil is the bd on PATH.
+// formulaSite is where a formula verb runs: bd's cwd, the database it targets
+// ("" for dir's own) and the town whose formulas and overlay it reads.
+type formulaSite struct {
+	dir, beadsDir, townRoot string
+}
+
+// formulaEngine is bd's formula engine at one site. *beads.Beads implements
+// it; unit tests answer from fakeCook.
+type formulaEngine interface {
+	Cook(formula string, vars []string) ([]byte, error)
+	Bond(proto, beadID string, vars []string) ([]byte, error)
+}
+
+// bdFormulaEngine is the bd on PATH at site: run from site.dir, pinned to
+// its database, with the town's overlay dir and GT_ROOT.
+func bdFormulaEngine(site formulaSite) formulaEngine {
+	beadsDir := site.beadsDir
+	if beadsDir == "" {
+		beadsDir = beads.ResolveBeadsDir(site.dir)
+	}
+	return beads.NewPinned(beadsDir, beads.WithWorkDir(site.dir), beads.WithEnv(formulaEnv(site.townRoot)))
+}
+
+// formulaEnv is formulaOverlayEnv with GT_ROOT the town, so bd finds the
+// town-level formulas.
+func formulaEnv(townRoot string) []string {
+	env := formulaOverlayEnv(townRoot)
+	if townRoot == "" {
+		return env
+	}
+	return append(beads.StripEnvKey(env, "GT_ROOT"), "GT_ROOT="+townRoot)
+}
+
+// formulaCooker reaches bd's cook. open is the engine at a site; nil is
+// bdFormulaEngine.
 type formulaCooker struct {
-	run beads.BDRunner
+	open func(formulaSite) formulaEngine
 }
 
 // realFormulaCooker cooks with the bd on PATH.
 func realFormulaCooker() formulaCooker {
 	return formulaCooker{}
+}
+
+// engine is the formula engine at site.
+func (c formulaCooker) engine(site formulaSite) formulaEngine {
+	if c.open != nil {
+		return c.open(site)
+	}
+	return bdFormulaEngine(site)
 }
 
 // cookForRender cooks formulaName where prime renders it: in the rig's
@@ -82,11 +124,7 @@ func (c formulaCooker) cookForRender(formulaName, townRoot, rigName string, vars
 	if townRoot != "" && rigName != "" {
 		dir = filepath.Join(townRoot, rigName)
 	}
-	f, err := cookFormula(formulaName, BdCmd(cookArgs(formulaName, vars)...).
-		Dir(dir).
-		WithGTRoot(townRoot).
-		WithEnv(formulaOverlayEnv(townRoot)).
-		Via(c.run))
+	f, err := cookFormula(formulaName, c.engine(formulaSite{dir: dir, townRoot: townRoot}), vars)
 	if err != nil {
 		return nil, err
 	}
@@ -96,21 +134,12 @@ func (c formulaCooker) cookForRender(formulaName, townRoot, rigName string, vars
 	return f, nil
 }
 
-// cookArgs is the bd argv that cooks formulaName with vars ("key=value").
-func cookArgs(formulaName string, vars []string) []string {
-	args := []string{"cook", formulaName}
-	for _, v := range vars {
-		args = append(args, "--var", v)
-	}
-	return args
-}
-
-// cookFormula runs the cook cmd carries and decodes bd's tree. A failure is
-// one line naming the formula and bd's own message.
-func cookFormula(formulaName string, cmd *bdCmd) (*cookedFormula, error) {
-	out, err := cmd.Output()
+// cookFormula cooks formulaName with vars ("key=value") on eng and decodes
+// bd's tree. A failure is one line naming the formula and bd's own message.
+func cookFormula(formulaName string, eng formulaEngine, vars []string) (*cookedFormula, error) {
+	out, err := eng.Cook(formulaName, vars)
 	if err != nil {
-		return nil, fmt.Errorf("cook formula %s: %s", formulaName, cookFailure(out, err))
+		return nil, fmt.Errorf("cook formula %s: %s", formulaName, firstTextLine(err.Error()))
 	}
 	var f cookedFormula
 	if err := json.Unmarshal(out, &f); err != nil {
@@ -118,21 +147,6 @@ func cookFormula(formulaName string, cmd *bdCmd) (*cookedFormula, error) {
 	}
 	f.raw = append(json.RawMessage(nil), out...)
 	return &f, nil
-}
-
-// cookFailure is the first line of bd's message from the error envelope a
-// failed machine-mode call leaves on stdout, else of err.
-func cookFailure(out []byte, err error) string {
-	var env struct {
-		Error *struct {
-			Kind    string `json:"kind"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(out, &env) == nil && env.Error != nil && env.Error.Message != "" {
-		return firstTextLine(env.Error.Message)
-	}
-	return firstTextLine(err.Error())
 }
 
 func firstTextLine(s string) string {

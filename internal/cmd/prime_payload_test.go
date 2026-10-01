@@ -296,8 +296,8 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 func TestShowChecklist_NoMoleculeRendersCookedChecklist(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	fake := &fakeCook{out: cookTreeJSON(docAuditTree)}
-	RoleContext{TownRoot: t.TempDir(), formulaRun: fake.run}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "mol-doc-audit"})
+	fake := &fakeCook{out: cookTree(docAuditTree)}
+	RoleContext{TownRoot: t.TempDir(), formulaOpen: fake.open}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "mol-doc-audit"})
 	out := buf.String()
 	for _, want := range []string{"(3 steps from mol-doc-audit)", "Step 1: Load gt-1", "Read gt-1.", "Step 3: Check links", "gt prime --step <N> --formula mol-doc-audit"} {
 		if !strings.Contains(out, want) {
@@ -314,8 +314,8 @@ func TestShowChecklist_NoMoleculeRendersCookedChecklist(t *testing.T) {
 func TestShowChecklist_CookFailureRendersNothing(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	fake := &fakeCook{kind: "not_found", msg: "formula nope not found"}
-	RoleContext{TownRoot: t.TempDir(), formulaRun: fake.run}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "nope"})
+	fake := &fakeCook{msg: "formula nope not found"}
+	RoleContext{TownRoot: t.TempDir(), formulaOpen: fake.open}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "nope"})
 	if buf.Len() != 0 {
 		t.Fatalf("cook failure rendered %q", buf.String())
 	}
@@ -501,7 +501,7 @@ func TestAssemblePrimePayload_MailIsNeverDropped(t *testing.T) {
 func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaRun: polecatChecklistRun()}
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaOpen: polecatChecklistRun()}
 	bead := &beads.Issue{ID: "gt-cont1", Title: "Continue me", Description: "attached_formula: mol-polecat-work\n"}
 	var buf bytes.Buffer
 	_, _ = checkSlungWorkIn(&buf, true, ctx, bead)

@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // formulaTown is a temp town whose routes.jsonl maps each prefix to a path.
@@ -38,25 +36,15 @@ const polecatWorkTree = `{"formula": "mol-polecat-work", "type": "workflow", "va
   {"name": "typecheck_command", "required": false, "default": "", "value": "", "provided": false}
 ], "unresolved_vars": [], "warnings": [], "steps": [{"id": "load-context", "title": "Load", "children": []}]}`
 
-// formulaBDFake answers formula bd calls in process: cook prints
-// polecatWorkTree, mol bond prints bondOut, every other call succeeds
-// silently, and each call is logged as "<cmd> <args...>".
-func formulaBDFake(bondOut string) *inprocBD {
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		switch {
-		case cmd == "cook":
-			return bdOut(string(cookTreeJSON(polecatWorkTree)))
-		case cmd == "mol" && len(args) > 0 && args[0] == "bond":
-			return bdOut(bondOut)
-		}
-		return bdOut("")
-	}}
+// formulaBDFake is a formula engine whose cook prints polecatWorkTree and
+// whose bond prints bondOut.
+func formulaBDFake(bondOut string) *fakeCook {
+	return &fakeCook{out: cookTree(polecatWorkTree), bondOut: []byte(bondOut)}
 }
 
-// formulaBDVia is a formulaBD over run whose contention backoff does not wait.
-func formulaBDVia(run beads.BDRunner) formulaBD {
-	return formulaBD{run: run, sleep: noSleep}
+// formulaBDVia is a formulaBD over open whose contention backoff does not wait.
+func formulaBDVia(open func(formulaSite) formulaEngine) formulaBD {
+	return formulaBD{open: open, sleep: noSleep}
 }
 
 // logLineWith returns the first logged line containing needle, or "".
@@ -78,7 +66,7 @@ func TestInstantiateFormulaOnBead(t *testing.T) {
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-288"}}`)
 
 	extraVars := []string{"branch=polecat/furiosa/gt-abc123"}
-	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, extraVars)
+	result, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, extraVars)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead failed: %v", err)
 	}
@@ -109,45 +97,36 @@ func TestInstantiateFormulaOnBead(t *testing.T) {
 func TestInstantiateFormulaOnBead_CookFailureFailsClosed(t *testing.T) {
 	t.Parallel()
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
-	fake := &fakeCook{kind: "invalid_args", msg: "invalid formula shiny.formula.toml: line 7: steps.acceptance: unknown key"}
+	fake := &fakeCook{msg: "invalid formula shiny.formula.toml: line 7: steps.acceptance: unknown key"}
 
-	_, err := formulaBDVia(fake.run).instantiate("shiny", "gt-test", "Test", "", townRoot, nil)
+	_, err := formulaBDVia(fake.open).instantiate("shiny", "gt-test", "Test", "", townRoot, nil)
 	if err == nil {
 		t.Fatal("cook failure must fail the pour")
 	}
 	if strings.Contains(err.Error(), "\n") || !strings.HasPrefix(err.Error(), "cook formula shiny: invalid formula") {
 		t.Errorf("error = %q, want one line naming the formula and bd's message", err)
 	}
-	for _, c := range fake.calls {
-		if len(c.Args) > 0 && c.Args[0] == "mol" {
-			t.Errorf("bond ran after a failed cook: %v", c.Args)
-		}
+	if bonds := fake.called("mol bond "); len(bonds) != 0 {
+		t.Errorf("bond ran after a failed cook: %v", bonds)
 	}
 }
 
 // TestCookFormula verifies the CookFormula helper cooks the named formula in
-// the work dir, GT_ROOT the town.
+// the work dir, for the town.
 func TestCookFormula(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	var got beads.BDCall
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		got = c
-		return cookTreeJSON(polecatWorkTree), nil, nil
-	}
+	fake := &fakeCook{out: cookTree(polecatWorkTree)}
 
-	if err := formulaBDVia(run).cook("mol-polecat-work", townRoot, townRoot); err != nil {
+	if err := formulaBDVia(fake.open).cook("mol-polecat-work", townRoot, townRoot); err != nil {
 		t.Fatalf("CookFormula failed: %v", err)
 	}
-	if strings.Join(got.Args, " ") != "cook mol-polecat-work" {
-		t.Errorf("bd argv = %q, want cook mol-polecat-work", got.Args)
+	cooks := fake.called("cook ")
+	if len(cooks) != 1 || cooks[0].argv != "cook mol-polecat-work" {
+		t.Fatalf("cooks = %+v, want one cook mol-polecat-work", cooks)
 	}
-	if got.Dir != townRoot {
-		t.Errorf("bd cwd = %q, want %q", got.Dir, townRoot)
-	}
-	env := envSlice(got.Env)
-	if env["GT_ROOT"] != townRoot {
-		t.Errorf("cook env GT_ROOT=%q, want %q", env["GT_ROOT"], townRoot)
+	if want := (formulaSite{dir: townRoot, townRoot: townRoot}); cooks[0].site != want {
+		t.Errorf("cook site = %+v, want %+v", cooks[0].site, want)
 	}
 }
 
@@ -217,7 +196,7 @@ func TestFormulaOnBeadPassesVariables(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-var"}}`)
 
-	if _, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, nil); err != nil {
+	if _, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, nil); err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
 
@@ -242,7 +221,7 @@ func TestInstantiateFormulaOnBead_DirectBondParsesIDMapping(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-mol-fallback"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, nil)
+	result, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -320,28 +299,25 @@ func TestBondFormulaDirectPinsTargetBeadsDir(t *testing.T) {
 				}
 			}
 
-			var got beads.BDCall
-			run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-				got = c
-				return []byte(`{"result_id":"` + tc.beadID + `","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`), nil, nil
-			}
+			fake := formulaBDFake(`{"result_id":"` + tc.beadID + `","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`)
 
-			bondVars, err := formulaBDVia(formulaBDFake("").run).varsForBead("mol-polecat-work", tc.beadID, "Test", formulaWorkDir, townRoot, nil)
+			bondVars, err := formulaBDVia(fake.open).varsForBead("mol-polecat-work", tc.beadID, "Test", formulaWorkDir, townRoot, nil)
 			if err != nil {
 				t.Fatalf("varsForBead: %v", err)
 			}
-			rootID, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, bondVars)
+			rootID, err := formulaBDVia(fake.open).bond("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, bondVars)
 			if err != nil {
 				t.Fatalf("bondFormulaDirect: %v", err)
 			}
 			if rootID != "gt-mol-direct" {
 				t.Fatalf("rootID = %q, want gt-mol-direct", rootID)
 			}
-			if got.Dir != formulaWorkDir {
-				t.Fatalf("bd cwd = %q, want formula work dir %q", got.Dir, formulaWorkDir)
+			bonds := fake.called("mol bond ")
+			if len(bonds) != 1 {
+				t.Fatalf("bonds = %+v, want one", bonds)
 			}
-			if got, want := envSlice(got.Env)["BEADS_DIR"], tc.wantBeadsDir(townRoot); got != want {
-				t.Fatalf("BEADS_DIR = %q, want %q", got, want)
+			if want := (formulaSite{dir: formulaWorkDir, beadsDir: tc.wantBeadsDir(townRoot), townRoot: townRoot}); bonds[0].site != want {
+				t.Fatalf("bond site = %+v, want %+v", bonds[0].site, want)
 			}
 		})
 	}
@@ -354,7 +330,7 @@ func TestInstantiateFormulaOnBead_DirectBondHandlesNonGTIDs(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"oag-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"oag-npeat","id_mapping":{"mol-polecat-work":"oag-wisp-wisp-rsia"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, nil)
+	result, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -381,7 +357,7 @@ func TestInstantiateFormulaOnBead_DirectBondCreatesNoOrphanCleanup(t *testing.T)
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-clean"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, nil)
+	result, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -402,7 +378,7 @@ func TestInstantiateFormulaOnBead_DirectBondParseFailure(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake("NOT-JSON-GARBAGE")
 
-	_, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, nil)
+	_, err := formulaBDVia(bd.open).instantiate("mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, nil)
 	if err == nil {
 		t.Fatal("expected error when bond returns non-JSON, got nil")
 	}
@@ -416,18 +392,14 @@ func TestInstantiateFormulaOnBead_DirectBondParseFailure(t *testing.T) {
 func TestBondFormulaDirectPassesShellMetacharactersVerbatim(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	var args []string
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		args = c.Args
-		return []byte(`{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`), nil, nil
-	}
+	fake := formulaBDFake(`{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`)
 
 	title := `a; b (c) "d" $e $(touch pwned) ` + "`touch pwned`"
-	vars, err := formulaBDVia(formulaBDFake("").run).varsForBead("mol-polecat-work", "gt-x", title, townRoot, townRoot, nil)
+	vars, err := formulaBDVia(fake.open).varsForBead("mol-polecat-work", "gt-x", title, townRoot, townRoot, nil)
 	if err != nil {
 		t.Fatalf("varsForBead: %v", err)
 	}
-	rootID, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, vars)
+	rootID, err := formulaBDVia(fake.open).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, vars)
 	if err != nil {
 		t.Fatalf("bondFormulaDirect: %v", err)
 	}
@@ -435,40 +407,33 @@ func TestBondFormulaDirectPassesShellMetacharactersVerbatim(t *testing.T) {
 		t.Fatalf("rootID = %q, want gt-mol-direct", rootID)
 	}
 	want := "feature=" + title
-	for i, a := range args {
-		if a == want && i > 0 && args[i-1] == "--var" {
+	for _, bond := range fake.called("mol bond ") {
+		if slices.Contains(bond.vars, want) {
 			return
 		}
 	}
-	t.Fatalf("bd argv lost the title as one element; want --var %q in %q", want, args)
+	t.Fatalf("bond lost the title as one var; want %q in %+v", want, fake.called("mol bond "))
 }
 
-// bd --json prints its failure to stdout; the bond error must carry that cause,
-// not just "exit status 1" (gt-4k3fj.12). A 1213 is retried first (gt-4ckuf),
-// so this also pins the retry's cap: exhaustion reports the cause, having made
-// exactly bdContentionAttempts attempts rather than looping.
+// The bond error carries bd's own cause (the engine reads it from bd's --json
+// failure payload), not just "exit status 1" (gt-4k3fj.12). A 1213 is retried
+// first (gt-4ckuf), so this also pins the retry's cap: exhaustion reports the
+// cause, having made exactly bdContentionAttempts attempts rather than looping.
 func TestBondFormulaDirectErrorCarriesBdJSONCause(t *testing.T) {
 	t.Parallel()
-	var mu sync.Mutex
-	attempts := 0
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if len(c.Args) > 1 && c.Args[0] == "mol" && c.Args[1] == "bond" {
-			attempts++
-		}
-		return []byte(`{"error":"creating wisp: sql commit (regular): Error 1213 (40001): serialization failure","schema_version":1}`), nil, inprocBDExit(1)
-	}
+	fake := &fakeCook{bond: func(int) ([]byte, error) {
+		return nil, errors.New("creating wisp: sql commit (regular): Error 1213 (40001): serialization failure")
+	}}
 
 	townRoot := t.TempDir()
-	_, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
+	_, err := formulaBDVia(fake.open).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
 	if err == nil {
 		t.Fatal("bondFormulaDirect succeeded, want failure")
 	}
 	if !strings.Contains(err.Error(), "Error 1213 (40001): serialization failure") {
 		t.Fatalf("error hides bd's cause: %v", err)
 	}
-	if attempts != bdContentionAttempts {
-		t.Fatalf("bond attempts = %d, want the cap %d", attempts, bdContentionAttempts)
+	if n := len(fake.called("mol bond ")); n != bdContentionAttempts {
+		t.Fatalf("bond attempts = %d, want the cap %d", n, bdContentionAttempts)
 	}
 }

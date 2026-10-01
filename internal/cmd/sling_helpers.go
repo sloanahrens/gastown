@@ -838,17 +838,12 @@ type FormulaOnBeadResult struct {
 	FormulaVars []string // Vars used to instantiate/render the formula
 }
 
-func formulaBeadBdCmd(beadID, formulaWorkDir, townRoot string, args ...string) *bdCmd {
-	targetBeadsDir := beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID)
-	return BdCmd(args...).Dir(formulaWorkDir).WithBeadsDir(targetBeadsDir).WithGTRoot(townRoot).WithEnv(formulaOverlayEnv(townRoot))
-}
-
-// formulaBD is how formula instantiation reaches bd: run answers every bd call
-// (nil: the bd on PATH) and sleep is the pause between contention retries of
-// the bond. InstantiateFormulaOnBead, CookFormula and bondFormulaDirect are
-// its methods on realFormulaBD.
+// formulaBD is how formula instantiation reaches bd: open is the formula
+// engine at a site (nil: the bd on PATH) and sleep is the pause between
+// contention retries of the bond. InstantiateFormulaOnBead, CookFormula and
+// bondFormulaDirect are its methods on realFormulaBD.
 type formulaBD struct {
-	run   beads.BDRunner
+	open  func(formulaSite) formulaEngine
 	sleep func(time.Duration)
 }
 
@@ -857,9 +852,20 @@ func realFormulaBD() formulaBD {
 	return formulaBD{sleep: bdContentionSleep}
 }
 
-// beadCmd is formulaBeadBdCmd answered by f.run.
-func (f formulaBD) beadCmd(beadID, formulaWorkDir, townRoot string, args ...string) *bdCmd {
-	return formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, args...).Via(f.run)
+// engine is the formula engine at site.
+func (f formulaBD) engine(site formulaSite) formulaEngine {
+	return formulaCooker{open: f.open}.engine(site)
+}
+
+// beadEngine is the engine in formulaWorkDir, writing to the database
+// beadID's prefix routes to, so a polecat worktree's own .beads cannot
+// capture the wisp.
+func (f formulaBD) beadEngine(beadID, formulaWorkDir, townRoot string) formulaEngine {
+	return f.engine(formulaSite{
+		dir:      formulaWorkDir,
+		beadsDir: beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID),
+		townRoot: townRoot,
+	})
 }
 
 // InstantiateFormulaOnBead bonds a formula directly to a bead.
@@ -910,7 +916,7 @@ func (f formulaBD) varsForBead(formulaName, beadID, title, formulaWorkDir, townR
 		fmt.Sprintf("issue=%s", beadID),
 	}
 	formulaVars = append(formulaVars, extraVars...)
-	cooked, err := cookFormula(formulaName, f.beadCmd(beadID, formulaWorkDir, townRoot, cookArgs(formulaName, formulaVars)...))
+	cooked, err := cookFormula(formulaName, f.beadEngine(beadID, formulaWorkDir, townRoot), formulaVars)
 	if err != nil {
 		return nil, err
 	}
@@ -933,16 +939,10 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 
 // bond is bondFormulaDirect with bd reached through f.
 func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
-	bondArgs := []string{"mol", "bond", bondTarget, beadID, "--json", "--ephemeral"}
-	for _, variable := range vars {
-		bondArgs = append(bondArgs, "--var", variable)
-	}
-
+	eng := f.beadEngine(beadID, formulaWorkDir, townRoot)
 	var lastErr error
 	for attempt := 1; attempt <= bdContentionAttempts; attempt++ {
-		bondOut, err := f.beadCmd(beadID, formulaWorkDir, townRoot, bondArgs...).
-			WithAutoCommit().
-			Output()
+		bondOut, err := eng.Bond(bondTarget, beadID, vars)
 		if err == nil {
 			rootID := parseBondSpawnRootID(bondOut, formulaName, beadID, "")
 			if rootID == "" {
@@ -951,15 +951,10 @@ func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoo
 			return rootID, nil
 		}
 
-		// bd --json reports its failure as {"error": ...} on stdout, so the
-		// cause is in bondOut; err alone is only "exit status 1".
-		cause := bdJSONErrorMessage(bondOut)
-		if cause != "" {
-			lastErr = fmt.Errorf("%w: %s (args: %s)", err, cause, strings.Join(bondArgs, " "))
-		} else {
-			lastErr = fmt.Errorf("%w (args: %s)", err, strings.Join(bondArgs, " "))
-		}
-		if !bdContentionRetryable(err, cause) || attempt == bdContentionAttempts {
+		// The engine's error reads as bd's own message (the --json failure
+		// payload), not just "exit status 1".
+		lastErr = fmt.Errorf("bd mol bond %s %s: %w", bondTarget, beadID, err)
+		if !bdContentionRetryable(err, err.Error()) || attempt == bdContentionAttempts {
 			break
 		}
 
@@ -968,28 +963,6 @@ func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoo
 		f.sleep(wait)
 	}
 	return "", lastErr
-}
-
-// bdJSONErrorMessage returns the message of a bd failure payload (the machine
-// envelope's error.message, or the legacy {"error": "..."} string), the trimmed
-// raw output when it has another shape, or "" when bd printed nothing.
-func bdJSONErrorMessage(out []byte) string {
-	var payload struct {
-		Error json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal(out, &payload) == nil && len(payload.Error) > 0 {
-		var typed struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(payload.Error, &typed) == nil && typed.Message != "" {
-			return typed.Message
-		}
-		var legacy string
-		if json.Unmarshal(payload.Error, &legacy) == nil && legacy != "" {
-			return legacy
-		}
-	}
-	return trimJSONForError(out)
 }
 
 // parseBondSpawnRootID extracts the spawned molecule root from bd mol bond JSON.
@@ -1098,11 +1071,7 @@ func CookFormula(formulaName, workDir, townRoot string) error {
 
 // cook is CookFormula with bd reached through f.
 func (f formulaBD) cook(formulaName, workDir, townRoot string) error {
-	_, err := cookFormula(formulaName, BdCmd(cookArgs(formulaName, nil)...).
-		Dir(workDir).
-		WithGTRoot(townRoot).
-		WithEnv(formulaOverlayEnv(townRoot)).
-		Via(f.run))
+	_, err := cookFormula(formulaName, f.engine(formulaSite{dir: workDir, townRoot: townRoot}), nil)
 	return err
 }
 
