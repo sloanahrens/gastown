@@ -55,6 +55,7 @@ var deletedCommands = [][]string{
 	{"orphans"},
 	{"cleanup"},
 	{"vitals"},
+	{"health"}, // gt-s3rec.4: townhealth and gt status --line replace it
 	{"start"},
 	{"crew", "next"},
 	{"crew", "prev"},

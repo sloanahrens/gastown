@@ -69,7 +69,6 @@ var beadsExemptCommands = map[string]bool{
 	"signal":        true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":       true, // Metrics reads local JSONL, no beads needed
 	"run-migration": true, // Migration orchestrator handles its own beads checks
-	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator
 	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
 	"tail":          true, // Read-only stream; reports an unreachable bd per rig and continues
