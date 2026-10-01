@@ -105,6 +105,14 @@ func TestSessionWorkDir(t *testing.T) {
 			wantDir:     townRoot + "/gastown/crew/holden",
 			wantErr:     false,
 		},
+		{
+			// The overseer is the human operator at the town root; the
+			// deacon dir it used to map to belongs to a retired role.
+			name:        "overseer runs from town root",
+			sessionName: "hq-overseer",
+			wantDir:     townRoot,
+			wantErr:     false,
+		},
 	}
 
 	for _, tt := range tests {
