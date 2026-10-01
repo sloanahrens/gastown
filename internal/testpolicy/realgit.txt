@@ -3,20 +3,15 @@
 # This list only shrinks: moving a file onto gitfake or into the
 # integration tier deletes its line and lowers maxRealGit in realgit_test.go.
 # Regenerate the entries with: go test -run TestRealGit$ -seed-realgit .
-internal/cmd/done_attribution_test.go
 internal/cmd/done_close_invariant_test.go
 internal/cmd/done_test.go
-internal/cmd/done_throwaway_test.go
 internal/cmd/git_fixture_cache_test.go
 internal/cmd/git_fixture_clone_test.go
 internal/cmd/handoff_test.go
 internal/cmd/polecat_check_recovery_missing_status_test.go
 internal/cmd/polecat_git_state_test.go
-internal/cmd/polecat_inventory_mr_test.go
-internal/cmd/polecat_preserve_test.go
 internal/cmd/polecat_recorded_cleanup_test.go
 internal/cmd/prime_dupes_test.go
 internal/cmd/prime_test.go
 internal/cmd/shared_git_helpers_test.go
-internal/cmd/tap_guard_bd_close_invariant_test.go
 internal/cmd/tap_polecat_stop_test.go
