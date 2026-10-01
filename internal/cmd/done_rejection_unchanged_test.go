@@ -1,26 +1,12 @@
 package cmd
 
 import (
-	"os/exec"
-	"path/filepath"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 )
-
-// The scenarios below reproduce gt-0jzd5 against real repositories: a branch is
-// pushed, rejected by the refinery, and resubmitted from a rework that changed
-// nothing about the content. Every scenario has a control that changes the
-// content by the smallest step that counts as addressing a finding, because the
-// guard has to tell "same diff" from "same branch" — the branch is deliberately
-// the same in most of them.
-//
-// The rejected tip enters as a map (the MR bead's commit_sha, which
-// beads.ParseMRFields reads in production), never as the branch ref: gt done
-// pushes the branch on every submit, so the ref is this attempt's own content
-// by the time the guard runs.
 
 // TestRejectedAttemptsFromNotes pins what the guard reads out of a bead's
 // notes: the branch, MR id and one-line reason of each rejection.
@@ -137,84 +123,46 @@ MR: "gt-wisp-1"`,
 	}
 }
 
-// rejectedReworkFixture is a clone on a work branch that has already been
-// pushed and rejected: rejectedSHA is the tip the rejected MR was submitted
-// with, which is what its MR bead records in commit_sha.
-type rejectedReworkFixture struct {
-	seed        string // stands in for the shared origin/main branch
-	polecat     string
-	branch      string
-	rejectedSHA string
+// fakeReworkGit is the guard's view of a clone as a table: HEAD's sha and the
+// patch-id each tip carries against the target. A tip with no entry is one the
+// clone does not hold, so MergeBase fails on it as real git does. Patch-id
+// itself (base-invariant, whitespace-sensitive) is git's to get right; the
+// integration test runs these scenarios against real repositories.
+type fakeReworkGit struct {
+	head     string
+	patchIDs map[string]string // tip sha -> patch-id against the target
 }
 
-// newRejectedReworkFixture builds origin.git with a base commit, clones it into
-// a seed checkout (main) and a polecat checkout, and leaves the polecat on a
-// pushed work branch whose only change is a line in shared.txt.
-//
-// The repos are a copy of ones built once per test binary (cachedGitFixture).
-func newRejectedReworkFixture(t *testing.T) rejectedReworkFixture {
-	t.Helper()
-	_, f := cachedGitFixture(t, "rejected-rework", func(dir string) (rejectedReworkFixture, error) {
-		return buildRejectedReworkFixture(t, dir), nil
-	})
-	return f
-}
-
-// rewriteRoot moves the fixture's paths to a copy of its template.
-func (f rejectedReworkFixture) rewriteRoot(oldRoot, newRoot string) any {
-	f.seed = strings.Replace(f.seed, oldRoot, newRoot, 1)
-	f.polecat = strings.Replace(f.polecat, oldRoot, newRoot, 1)
-	return f
-}
-
-func buildRejectedReworkFixture(t *testing.T, dir string) rejectedReworkFixture {
-	t.Helper()
-	remote := filepath.Join(dir, "origin.git")
-	seed := filepath.Join(dir, "seed")
-	polecat := filepath.Join(dir, "polecat")
-	branch := "polecat/zircon/gt-test"
-
-	runGitCmd(t, "", "init", "--bare", remote)
-	// Point the bare repo's HEAD at main explicitly: git init's default branch
-	// name is host-configurable, and the clone below checks out whatever HEAD
-	// names.
-	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
-	runGitCmd(t, "", "clone", remote, seed)
-	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
-	runGitCmd(t, seed, "config", "user.name", "Seed")
-	writeTestFile(t, filepath.Join(seed, "shared.txt"), "base\n")
-	writeTestFile(t, filepath.Join(seed, "keep.txt"), "keep\n")
-	runGitCmd(t, seed, "add", "-A")
-	runGitCmd(t, seed, "commit", "-m", "base")
-	runGitCmd(t, seed, "push", "origin", "main")
-
-	runGitCmd(t, "", "clone", remote, polecat)
-	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
-	runGitCmd(t, polecat, "config", "user.name", "Polecat")
-	runGitCmd(t, polecat, "checkout", "-b", branch, "origin/main")
-
-	writeTestFile(t, filepath.Join(polecat, "shared.txt"), "base\nwork\n")
-	runGitCmd(t, polecat, "add", "-A")
-	runGitCmd(t, polecat, "commit", "-m", "implement the feature")
-	runGitCmd(t, polecat, "push", "origin", branch)
-
-	return rejectedReworkFixture{
-		seed:        seed,
-		polecat:     polecat,
-		branch:      branch,
-		rejectedSHA: revParse(t, polecat, "HEAD"),
+func (g fakeReworkGit) Rev(ref string) (string, error) {
+	if ref != "HEAD" || g.head == "" {
+		return "", fmt.Errorf("fatal: ambiguous argument %q", ref)
 	}
+	return g.head, nil
 }
 
-func revParse(t *testing.T, dir, ref string) string {
-	t.Helper()
-	cmd := exec.Command("git", "rev-parse", ref)
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse %s in %s: %v", ref, dir, err)
+func (g fakeReworkGit) MergeBase(target, sha string) (string, error) {
+	if _, ok := g.patchIDs[sha]; !ok {
+		return "", fmt.Errorf("fatal: Not a valid commit name %s", sha)
 	}
-	return strings.TrimSpace(string(out))
+	return "base-of-" + sha, nil
+}
+
+func (g fakeReworkGit) PatchIDVerbatim(base, head string) (string, error) {
+	return g.patchIDs[head], nil
+}
+
+const (
+	rejectedBranch = "polecat/zircon/gt-test"
+	rejectedTip    = "rejected-tip"
+	rejectedDiff   = "patch-rejected"
+)
+
+// reworkWith is a clone whose HEAD carries diff, next to the rejected tip.
+func reworkWith(diff string) fakeReworkGit {
+	return fakeReworkGit{head: "rework-tip", patchIDs: map[string]string{
+		rejectedTip:  rejectedDiff,
+		"rework-tip": diff,
+	}}
 }
 
 // rejectionNotes is the refinery's rejection record for one attempt: the format
@@ -233,227 +181,97 @@ func tipsOf(m map[string]string) func(string) (string, bool) {
 	}
 }
 
-// checkRefusal runs the guard the way gt done does: against the target branch,
-// on the fixture's worktree.
-func checkRefusal(t *testing.T, f rejectedReworkFixture, notes string, tips func(string) (string, bool)) error {
-	t.Helper()
-	return reportUnchangedSinceRejection(git.NewGit(f.polecat), notes, "gt-0jzd5", "origin/main", tips)
-}
+// The tip the rejected MR recorded, never the branch ref: gt done pushes the
+// branch on every submit, so the ref is this attempt's own content by the time
+// the guard runs.
+var rejectedMR = tipsOf(map[string]string{"gt-wisp-v8j9": rejectedTip})
 
-// TestReportUnchangedSinceRejection_RefusesZeroCommitRework is the reported
-// bug: the polecat was slung the rejected branch, made no commits, and gt done
-// submitted an MR whose patch-id equalled the rejected MR's.
-func TestReportUnchangedSinceRejection_RefusesZeroCommitRework(t *testing.T) {
+// TestReportUnchangedSinceRejection_RefusesTheRejectedDiff is gt-0jzd5: a
+// rework whose diff is the rejected one is refused whatever produced it — no
+// commit at all, a rebase onto a newer target, or the same change on a fresh
+// branch.
+func TestReportUnchangedSinceRejection_RefusesTheRejectedDiff(t *testing.T) {
 	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA}))
-	if err == nil {
-		t.Fatal("a rework that made no commit was accepted; the identical diff must be refused")
-	}
-	if !strings.Contains(err.Error(), "no change since the rejection: address the findings first") {
-		t.Errorf("refusal does not name the reason: %v", err)
-	}
-	if !strings.Contains(err.Error(), "gt-wisp-v8j9") {
-		t.Errorf("refusal does not name the rejected MR: %v", err)
-	}
-}
-
-// TestReportUnchangedSinceRejection_RefusesContentIdenticalRebase covers the
-// rework that looks like work: the polecat ran the formula's rebase step onto a
-// newer target and nothing else. Patch-id is base-invariant, so the rebase does
-// not launder the rejected diff.
-func TestReportUnchangedSinceRejection_RefusesContentIdenticalRebase(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	writeTestFile(t, filepath.Join(f.seed, "keep.txt"), "keep\nmain touch\n")
-	runGitCmd(t, f.seed, "add", "-A")
-	runGitCmd(t, f.seed, "commit", "-m", "merged: other work")
-	runGitCmd(t, f.seed, "push", "origin", "main")
-
-	runGitCmd(t, f.polecat, "fetch", "origin")
-	runGitCmd(t, f.polecat, "rebase", "origin/main")
-
-	if err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA})); err == nil {
-		t.Fatal("a rebase that changed no content was accepted; the diff is still the rejected one")
-	}
-}
-
-// TestReportUnchangedSinceRejection_RefusesIdenticalDiffOnANewBranch is the
-// same no-op wearing a fresh branch name: the guard compares content, not
-// identity, so a new branch carrying the rejected change-set is refused too.
-func TestReportUnchangedSinceRejection_RefusesIdenticalDiffOnANewBranch(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	runGitCmd(t, f.polecat, "checkout", "-b", "polecat/zircon/gt-test+abc123", "origin/main")
-	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "implement the feature")
-
-	if err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA})); err == nil {
-		t.Fatal("a new branch carrying the rejected diff was accepted; content is what was rejected")
-	}
-}
-
-// TestReportUnchangedSinceRejection_AllowsFixCommit is the control that must
-// keep working: one commit that answers the findings makes the diff different,
-// so the same branch submits cleanly.
-func TestReportUnchangedSinceRejection_AllowsFixCommit(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\naddressed the finding\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "address the docs-lint finding")
-
-	if err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA})); err != nil {
-		t.Fatalf("a rework that changed the content was refused: %v", err)
-	}
-}
-
-// TestReportUnchangedSinceRejection_AllowsWhitespaceOnlyFix is the reported
-// bug (gt-2colr): the lint finding named a trailing space, and stripping it is
-// the whole of the fix, so the reworked diff differs from the rejected
-// attempt's on nothing but whitespace. Comparing stable patch-ids hides that
-// difference — they strip whitespace before hashing — and the guard refused the
-// fix as its own rejected attempt, leaving the polecat nothing to change.
-func TestReportUnchangedSinceRejection_AllowsWhitespaceOnlyFix(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	// The rejected attempt: the fixture's change, carrying the trailing space
-	// the lint finding named.
-	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork \n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "implement the feature")
-	rejected := revParse(t, f.polecat, "HEAD")
-	runGitCmd(t, f.polecat, "push", "origin", f.branch)
-
-	// The rework: the same change, whitespace stripped.
-	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "fix: strip the trailing whitespace the lint finding named")
-
-	err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": rejected}))
-	if err != nil {
-		t.Fatalf("a whitespace-only fix was refused as the rejected attempt: %v", err)
-	}
-}
-
-// TestReportUnchangedSinceRejection_AllowsFixAlreadyPushedOverTheBranch is the
-// false-positive shape the design has to survive: the rework pushed its fix, so
-// origin/<branch> now holds the NEW content. Reading the branch ref instead of
-// the MR's recorded tip would compare the attempt with itself and refuse a
-// legitimate fix.
-func TestReportUnchangedSinceRejection_AllowsFixAlreadyPushedOverTheBranch(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\naddressed the finding\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "address the docs-lint finding")
-	runGitCmd(t, f.polecat, "push", "origin", f.branch)
-
-	if err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA})); err != nil {
-		t.Fatalf("a pushed fix was refused because the branch ref now holds it: %v", err)
-	}
-}
-
-// TestReportUnchangedSinceRejection_UnrelatedRejectedMR checks that a stale
-// rejection whose content this branch does not carry (a different branch's
-// attempt, or the same branch before its fix) does not block submission.
-func TestReportUnchangedSinceRejection_UnrelatedRejectedMR(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	other := "polecat/zircon/gt-other+s1"
-	runGitCmd(t, f.polecat, "checkout", "-b", other, "origin/main")
-	writeTestFile(t, filepath.Join(f.polecat, "keep.txt"), "keep\nother work\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "other work")
-	otherSHA := revParse(t, f.polecat, "HEAD")
-	runGitCmd(t, f.polecat, "checkout", f.branch)
-
-	if err := checkRefusal(t, f, rejectionNotes(other, "gt-wisp-1"), tipsOf(map[string]string{"gt-wisp-1": otherSHA})); err != nil {
-		t.Fatalf("a rejection naming other content blocked the submission: %v", err)
-	}
-}
-
-// TestReportUnchangedSinceRejection_UnknownTip covers the MR records the guard
-// cannot resolve — a purge-reaped MR bead, a missing commit_sha, a tip this
-// clone never fetched. None is evidence that the content changed, but refusing
-// on them strands a polecat with no way to clear the guard.
-func TestReportUnchangedSinceRejection_UnknownTip(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-	notes := rejectionNotes(f.branch, "gt-wisp-v8j9")
-
-	cases := map[string]func(string) (string, bool){
-		"no record of the MR":  tipsOf(nil),
-		"a record with no sha": tipsOf(map[string]string{"gt-wisp-v8j9": ""}),
-		"a tip that is not an object in this clone": tipsOf(map[string]string{
-			"gt-wisp-v8j9": "0000000000000000000000000000000000000001",
-		}),
-	}
-	for name, tips := range cases {
+	for name, g := range map[string]fakeReworkGit{
+		"no commit since the rejection": {head: rejectedTip, patchIDs: map[string]string{rejectedTip: rejectedDiff}},
+		"a rebase or a new branch":      reworkWith(rejectedDiff),
+	} {
 		t.Run(name, func(t *testing.T) {
-			if err := checkRefusal(t, f, notes, tips); err != nil {
-				t.Fatalf("an unresolvable rejected tip blocked the submission: %v", err)
+			t.Parallel()
+			err := reportUnchangedSinceRejection(g, rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), "gt-0jzd5", "origin/main", rejectedMR)
+			if err == nil {
+				t.Fatal("the rejected diff was accepted")
+			}
+			if !strings.Contains(err.Error(), "no change since the rejection: address the findings first") {
+				t.Errorf("refusal does not name the reason: %v", err)
+			}
+			if !strings.Contains(err.Error(), "gt-wisp-v8j9") {
+				t.Errorf("refusal does not name the rejected MR: %v", err)
 			}
 		})
 	}
 }
 
-// TestReportUnchangedSinceRejection_NoRejectionNotes is the ordinary path: a
-// bead that was never rejected is not gated on content at all.
-func TestReportUnchangedSinceRejection_NoRejectionNotes(t *testing.T) {
+// TestReportUnchangedSinceRejection_AllowsAChangedDiff is the control: any
+// change to the content, a whitespace-only fix included (gt-2colr), submits.
+func TestReportUnchangedSinceRejection_AllowsAChangedDiff(t *testing.T) {
 	t.Parallel()
-	f := newRejectedReworkFixture(t)
-
-	if err := checkRefusal(t, f, "Findings: look at the do_flush helper.\n", tipsOf(nil)); err != nil {
-		t.Fatalf("notes without a rejection blocked the submission: %v", err)
+	if err := reportUnchangedSinceRejection(reworkWith("patch-fixed"), rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), "gt-0jzd5", "origin/main", rejectedMR); err != nil {
+		t.Fatalf("a rework that changed the content was refused: %v", err)
 	}
 }
 
-// TestReportUnchangedSinceRejection_ReadsLandsHeadLine: Land() writes its
-// rejections on the work bead with the rejected tip on a Head: line and the
-// work bead (not an MR wisp) on the MR: line. The guard takes the tip from
-// Head: directly, so an unchanged resubmission after a Land rejection is
+// TestReportUnchangedSinceRejection_PassesWhatItCannotJudge covers every input
+// that is no evidence of an unchanged diff: refusing on one strands a polecat
+// with no way to clear the guard.
+func TestReportUnchangedSinceRejection_PassesWhatItCannotJudge(t *testing.T) {
+	t.Parallel()
+	unchanged := reworkWith(rejectedDiff)
+	unchanged.patchIDs["other-tip"] = "patch-other"
+	cases := []struct {
+		name  string
+		g     fakeReworkGit
+		notes string
+		tips  func(string) (string, bool)
+	}{
+		{"notes without a rejection", unchanged, "Findings: look at the do_flush helper.\n", tipsOf(nil)},
+		{"a rejection of other content", unchanged, rejectionNotes("polecat/zircon/gt-other+s1", "gt-wisp-1"), tipsOf(map[string]string{"gt-wisp-1": "other-tip"})},
+		{"no record of the MR", unchanged, rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), tipsOf(nil)},
+		{"a record with no sha", unchanged, rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": ""})},
+		{"a tip that is not an object in this clone", unchanged, rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": "0000000000000000000000000000000000000001"})},
+		{"HEAD does not resolve", fakeReworkGit{patchIDs: unchanged.patchIDs}, rejectionNotes(rejectedBranch, "gt-wisp-v8j9"), rejectedMR},
+		{"an unknown Land Head:", unchanged, landRejection("gate", "1111111111111111111111111111111111111111"), tipsOf(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := reportUnchangedSinceRejection(tc.g, tc.notes, "gt-0jzd5", "origin/main", tc.tips); err != nil {
+				t.Fatalf("the guard refused input it cannot judge: %v", err)
+			}
+		})
+	}
+}
+
+// landRejection is the note Land() writes on the work bead: the rejected tip on
+// a Head: line and the work bead (not an MR wisp) on the MR: line.
+func landRejection(kind, head string) string {
+	return land.FormatRejectionNote(land.RejectionNote{
+		Kind: kind, Reason: "rejected", Branch: rejectedBranch, Target: "main", MR: "gt-0jzd5", Head: head,
+	})
+}
+
+// TestReportUnchangedSinceRejection_ReadsLandsHeadLine: the guard takes the tip
+// from Head: directly, so an unchanged resubmission after a Land rejection is
 // refused with no MR record to look up (ADR 0004).
 func TestReportUnchangedSinceRejection_ReadsLandsHeadLine(t *testing.T) {
 	t.Parallel()
-	f := newRejectedReworkFixture(t)
-	notes := land.FormatRejectionNote(land.RejectionNote{
-		Kind: "gate", Reason: "gate failed on the merged tree", Branch: f.branch, Target: "main",
-		MR: "gt-0jzd5", Head: f.rejectedSHA,
-	})
+	notes := landRejection("gate", rejectedTip)
 	noMRs := tipsOf(map[string]string{})
-	if err := checkRefusal(t, f, notes, noMRs); err == nil {
+	if err := reportUnchangedSinceRejection(reworkWith(rejectedDiff), notes, "gt-0jzd5", "origin/main", noMRs); err == nil {
 		t.Fatal("an unchanged resubmission after a Land rejection was accepted")
 	}
-
-	writeTestFile(t, filepath.Join(f.polecat, "fix.txt"), "addressed\n")
-	runGitCmd(t, f.polecat, "add", "-A")
-	runGitCmd(t, f.polecat, "commit", "-m", "fix: address the finding")
-	if err := checkRefusal(t, f, notes, noMRs); err != nil {
+	if err := reportUnchangedSinceRejection(reworkWith("patch-fixed"), notes, "gt-0jzd5", "origin/main", noMRs); err != nil {
 		t.Fatalf("a changed resubmission was refused: %v", err)
-	}
-}
-
-// A Head: this repository does not hold cannot be compared. "Cannot tell"
-// passes, as it does for an MR with no commit_sha: refusing would strand the
-// polecat on work it cannot unblock.
-func TestReportUnchangedSinceRejection_UnknownHeadPasses(t *testing.T) {
-	t.Parallel()
-	f := newRejectedReworkFixture(t)
-	notes := land.FormatRejectionNote(land.RejectionNote{
-		Kind: "gate", Reason: "r", Branch: f.branch, Target: "main", MR: "gt-0jzd5",
-		Head: "1111111111111111111111111111111111111111",
-	})
-	if err := checkRefusal(t, f, notes, tipsOf(map[string]string{})); err != nil {
-		t.Fatalf("an unknown rejected head refused the submission: %v", err)
 	}
 }
 
@@ -482,12 +300,7 @@ func TestReportUnchangedSinceRejection_OnlyDiffCausedKindsRefuse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run("kind="+tc.kind, func(t *testing.T) {
 			t.Parallel()
-			f := newRejectedReworkFixture(t)
-			notes := land.FormatRejectionNote(land.RejectionNote{
-				Kind: tc.kind, Reason: "rejected", Branch: f.branch, Target: "main",
-				MR: "gt-0jzd5", Head: f.rejectedSHA,
-			})
-			err := checkRefusal(t, f, notes, tipsOf(nil))
+			err := reportUnchangedSinceRejection(reworkWith(rejectedDiff), landRejection(tc.kind, rejectedTip), "gt-0jzd5", "origin/main", tipsOf(nil))
 			if tc.refuse && err == nil {
 				t.Fatalf("an unchanged resubmission after a %q rejection was accepted", tc.kind)
 			}
@@ -503,15 +316,14 @@ func TestReportUnchangedSinceRejection_OnlyDiffCausedKindsRefuse(t *testing.T) {
 // diff did not cause.
 func TestReportUnchangedSinceRejection_EarlierDiffCausedRejectionStillRefuses(t *testing.T) {
 	t.Parallel()
-	f := newRejectedReworkFixture(t)
 	notes := land.FormatRejectionNote(land.RejectionNote{
-		Attempt: 1, Kind: "gate", Reason: "gate red", Branch: f.branch, Target: "main",
-		MR: "gt-0jzd5", Head: f.rejectedSHA,
+		Attempt: 1, Kind: "gate", Reason: "gate red", Branch: rejectedBranch, Target: "main",
+		MR: "gt-0jzd5", Head: rejectedTip,
 	}) + "\n" + land.FormatRejectionNote(land.RejectionNote{
-		Attempt: 2, Kind: "not_pushed", Reason: "head not on origin", Branch: f.branch, Target: "main",
+		Attempt: 2, Kind: "not_pushed", Reason: "head not on origin", Branch: rejectedBranch, Target: "main",
 		MR: "gt-0jzd5", Head: "1111111111111111111111111111111111111111",
 	})
-	if err := checkRefusal(t, f, notes, tipsOf(nil)); err == nil {
+	if err := reportUnchangedSinceRejection(reworkWith(rejectedDiff), notes, "gt-0jzd5", "origin/main", tipsOf(nil)); err == nil {
 		t.Fatal("a later non-diff rejection lifted the refusal for an earlier gate rejection of the same diff")
 	}
 }
