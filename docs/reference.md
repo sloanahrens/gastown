@@ -416,7 +416,7 @@ These are set in tmux session environment when agents are spawned.
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `GT_ROLE` | Agent role type | `mayor`, `polecat`, `crew` |
-| `GT_ROOT` | Town root directory | `/home/user/gt` |
+| `GT_TOWN_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
 | `GIT_AUTHOR_NAME` | Commit attribution (same as BD_ACTOR) | `gastown/polecats/toast` |
 | `BEADS_DIR` | Beads database location | `/home/user/gt/gastown/.beads` |
@@ -435,7 +435,7 @@ These are set in tmux session environment when agents are spawned.
 | Variable | Purpose |
 |----------|---------|
 | `GIT_AUTHOR_EMAIL` | Workspace owner email (from git config) |
-| `GT_TOWN_ROOT` | Override town root detection (manual use) |
+| `GT_TMUX_SOCKET` | tmux socket the town's agents live on |
 | `CLAUDE_RUNTIME_CONFIG_DIR` | Custom Claude settings directory |
 
 ### Environment by Role
@@ -453,7 +453,7 @@ environment variables. Mismatches are reported as warnings:
 
 ```
 ⚠ env-vars: Found 3 env var mismatch(es) across 1 session(s)
-    hq-mayor: missing GT_ROOT (expected "/home/user/gt")
+    hq-mayor: missing GT_TOWN_ROOT (expected "/home/user/gt")
 ```
 
 Fix by restarting sessions: `gt shutdown && gt up`

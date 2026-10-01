@@ -523,7 +523,7 @@ func New(config *Config) (*Daemon, error) {
 	}
 
 	// Set GT_TOWN_ROOT in the daemon process env so Go code (e.g.,
-	// sessionPrefixPattern) can read it without relying on GT_ROOT.
+	// sessionPrefixPattern) can read it without a cwd walk.
 	processEnv{}.Setenv("GT_TOWN_ROOT", config.TownRoot)
 
 	// Also set GT_TOWN_ROOT in tmux global environment so run-shell subprocesses

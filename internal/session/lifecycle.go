@@ -370,7 +370,7 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 		}
 		// Resolve against the agent registry of the session's own town and
 		// rig, never another rig's settings/agents.json (gt-rg4f1).
-		townRoot := envVars["GT_ROOT"]
+		townRoot := envVars["GT_TOWN_ROOT"]
 		rigPath := ""
 		if rig := envVars["GT_RIG"]; rig != "" && townRoot != "" {
 			rigPath = filepath.Join(townRoot, rig)

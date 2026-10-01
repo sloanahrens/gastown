@@ -54,7 +54,7 @@ int_or_default() {
   esac
 }
 
-TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-}}"
+TOWN_ROOT="${GT_TOWN_ROOT:-}"
 [ -n "$TOWN_ROOT" ] || fail "GT_TOWN_ROOT is unset; cannot read the pool config or reach the mayor"
 [ -d "$TOWN_ROOT" ] || fail "town root $TOWN_ROOT is not a directory"
 

@@ -1667,8 +1667,8 @@ func ExtractSimpleRole(gtRole string) string {
 
 // BuildStartupCommand builds a full startup command with environment exports.
 // envVars is a map of environment variable names to values.
-// rigPath is optional - if empty, uses envVars["GT_ROOT"] to find town root,
-// falling back to cwd detection if GT_ROOT is not set.
+// rigPath is optional - if empty, uses envVars["GT_TOWN_ROOT"] to find town
+// root, falling back to cwd detection if it is not set.
 // prompt is optional - if provided, appended as the initial prompt.
 //
 // If envVars contains GT_ROLE, the function uses role-based agent resolution
@@ -1705,10 +1705,11 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
-		// For town-level agents (mayor, deacon), prefer GT_ROOT from envVars
-		// (set by AgentEnv) over cwd detection. This ensures role_agents config
-		// is respected even when the daemon runs outside the town hierarchy.
-		townRoot = envVars["GT_ROOT"]
+		// For town-level agents (mayor, deacon), prefer GT_TOWN_ROOT from
+		// envVars (set by AgentEnv) over cwd detection. This ensures
+		// role_agents config is respected even when the daemon runs outside
+		// the town hierarchy.
+		townRoot = envVars["GT_TOWN_ROOT"]
 		if townRoot == "" {
 			var err error
 			townRoot, err = findTownRootFromCwd(h)
@@ -1736,8 +1737,10 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 	for k, v := range envVars {
 		resolvedEnv[k] = v
 	}
-	// Add GT_ROOT so agents can find town-level resources (formulas, etc.)
+	// Add GT_TOWN_ROOT so agents can find town-level resources (formulas,
+	// etc.), plus the GT_ROOT alias bd still reads (gt-syhch).
 	if townRoot != "" {
+		resolvedEnv["GT_TOWN_ROOT"] = townRoot
 		resolvedEnv["GT_ROOT"] = townRoot
 	}
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
@@ -1798,7 +1801,7 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 		scriptLines = append(scriptLines, agentCmd)
 
 		// Write script to temp file in town's daemon dir
-		townRoot := resolvedEnv["GT_ROOT"]
+		townRoot := resolvedEnv["GT_TOWN_ROOT"]
 		if townRoot == "" {
 			townRoot = os.TempDir()
 		}
@@ -1951,10 +1954,11 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
-		// For town-level agents (mayor, deacon), prefer GT_ROOT from envVars
-		// (set by AgentEnv) over cwd detection. This ensures role_agents config
-		// is respected even when the daemon runs outside the town hierarchy.
-		townRoot = envVars["GT_ROOT"]
+		// For town-level agents (mayor, deacon), prefer GT_TOWN_ROOT from
+		// envVars (set by AgentEnv) over cwd detection. This ensures
+		// role_agents config is respected even when the daemon runs outside
+		// the town hierarchy.
+		townRoot = envVars["GT_TOWN_ROOT"]
 		if townRoot == "" {
 			var err error
 			townRoot, err = findTownRootFromCwd(h)
@@ -2015,8 +2019,10 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 	for k, v := range envVars {
 		resolvedEnv[k] = v
 	}
-	// Add GT_ROOT so agents can find town-level resources (formulas, etc.)
+	// Add GT_TOWN_ROOT so agents can find town-level resources (formulas,
+	// etc.), plus the GT_ROOT alias bd still reads (gt-syhch).
 	if townRoot != "" {
+		resolvedEnv["GT_TOWN_ROOT"] = townRoot
 		resolvedEnv["GT_ROOT"] = townRoot
 	}
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
@@ -2078,7 +2084,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 		}
 		scriptLines = append(scriptLines, agentCmd)
 
-		townRoot := resolvedEnv["GT_ROOT"]
+		townRoot := resolvedEnv["GT_TOWN_ROOT"]
 		if townRoot == "" {
 			townRoot = os.TempDir()
 		}
@@ -2174,7 +2180,8 @@ func buildAgentStartupCommandWithAgentOverride(h host, role, rig, townRoot, rigP
 }
 
 // BuildPolecatStartupCommand builds the startup command for a polecat.
-// Sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
+// Sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR, GIT_AUTHOR_NAME, and
+// GT_TOWN_ROOT.
 func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) (string, error) {
 	var townRoot string
 	if rigPath != "" {
@@ -2205,7 +2212,8 @@ func BuildPolecatStartupCommandWithAgentOverride(rigName, polecatName, rigPath, 
 }
 
 // BuildCrewStartupCommand builds the startup command for a crew member.
-// Sets GT_ROLE, GT_RIG, GT_CREW, BD_ACTOR, GIT_AUTHOR_NAME, and GT_ROOT.
+// Sets GT_ROLE, GT_RIG, GT_CREW, BD_ACTOR, GIT_AUTHOR_NAME, and
+// GT_TOWN_ROOT.
 func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) (string, error) {
 	var townRoot string
 	if rigPath != "" {

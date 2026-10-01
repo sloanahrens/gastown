@@ -330,8 +330,8 @@ func TestFindFromCwdOrError(t *testing.T) {
 	}{
 		{"cwd inside a town", cwdIn(town, nil), town, ""},
 		{"cwd outside, GT_TOWN_ROOT", cwdIn(other, map[string]string{"GT_TOWN_ROOT": town}), town, ""},
-		{"cwd outside, GT_ROOT", cwdIn(other, map[string]string{"GT_ROOT": town}), town, ""},
-		// One reader (TownRootFromEnv): GT_TOWN_ROOT wins, and a non-workspace there is not found.
+		{"cwd outside, GT_ROOT alone", cwdIn(other, map[string]string{"GT_ROOT": town}), "", ErrNotFound.Error()},
+		// One reader (TownRootFromEnv): a non-workspace GT_TOWN_ROOT is not found.
 		{"GT_TOWN_ROOT not a workspace does not fall through", cwdIn(other, map[string]string{"GT_TOWN_ROOT": notTown, "GT_ROOT": town}), "", ErrNotFound.Error()},
 		{"env names a non-workspace", cwdIn(other, map[string]string{"GT_TOWN_ROOT": notTown}), "", ErrNotFound.Error()},
 		{"no cwd, env fallback", envWith(map[string]string{"GT_TOWN_ROOT": town}), town, ""},
@@ -414,8 +414,8 @@ func TestTownRootFromEnv(t *testing.T) {
 		env  map[string]string
 		want string
 	}{
-		{"GT_TOWN_ROOT wins", map[string]string{"GT_TOWN_ROOT": "/a", "GT_ROOT": "/b"}, "/a"},
-		{"GT_ROOT when GT_TOWN_ROOT unset", map[string]string{"GT_ROOT": "/b"}, "/b"},
+		{"GT_TOWN_ROOT", map[string]string{"GT_TOWN_ROOT": "/a"}, "/a"},
+		{"GT_ROOT alone is not a town root", map[string]string{"GT_ROOT": "/b"}, ""},
 		{"neither", nil, ""},
 	}
 	for _, tc := range cases {

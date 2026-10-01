@@ -25,7 +25,7 @@ func busyServer(t *testing.T, agent string) (*fakeServer, *fpane, *Tmux, *clockw
 		if agent != "" {
 			s.env["GT_AGENT"] = agent
 		}
-		s.env["GT_ROOT"] = t.TempDir()
+		s.env["GT_TOWN_ROOT"] = t.TempDir()
 		s.panes[0].activity = clk.Now().Unix()
 	})
 	tm, _ := f.tmux(clk)
@@ -125,7 +125,7 @@ func TestEscapeSafe_CustomClaudeAgentOnIdlePane(t *testing.T) {
 	}
 	setScreen(f, p, "user@host:~$ ")
 	f.with(func() {
-		f.sessions["gt-x"].env["GT_ROOT"] = town
+		f.sessions["gt-x"].env["GT_TOWN_ROOT"] = town
 		f.sessions["gt-x"].env["GT_AGENT"] = "test-9a8-flash"
 	})
 	if tm.escapeSafe("gt-x", "gt-x", "") {

@@ -374,13 +374,9 @@ func doneValidateIdentitySegment(name, value string) error {
 
 func doneValidateSessionTownRoot(townRoot string, getenv func(string) string) error {
 	current := doneCanonicalPath(townRoot)
-	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		envRoot := strings.TrimSpace(getenv(envName))
-		if envRoot == "" {
-			continue
-		}
+	if envRoot := strings.TrimSpace(getenv("GT_TOWN_ROOT")); envRoot != "" {
 		if doneCanonicalPath(envRoot) != current {
-			return fmt.Errorf("gt done town root mismatch: %s=%s but current workspace is %s", envName, doneCanonicalPath(envRoot), current)
+			return fmt.Errorf("gt done town root mismatch: GT_TOWN_ROOT=%s but current workspace is %s", doneCanonicalPath(envRoot), current)
 		}
 	}
 	return nil

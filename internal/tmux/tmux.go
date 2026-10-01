@@ -245,10 +245,10 @@ func liveCreateRefusal(socketName, live string, allowLive bool) error {
 }
 
 // NewTmux creates a new Tmux wrapper using the initialized town socket.
-// Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
+// Falls back to GT_TMUX_SOCKET env var (set by cross-socket tmux bindings).
 // Empty socket means use the default tmux server.
 func NewTmux() *Tmux {
-	sock, err := resolveNewTmuxSocket(GetDefaultSocket(), os.Getenv("GT_TOWN_SOCKET"),
+	sock, err := resolveNewTmuxSocket(GetDefaultSocket(), os.Getenv("GT_TMUX_SOCKET"),
 		testing.Testing() && os.Getenv(AllowLiveTmuxEnv) != "1")
 	if err != nil {
 		panic(err.Error())
@@ -257,33 +257,33 @@ func NewTmux() *Tmux {
 }
 
 // resolveNewTmuxSocket is NewTmux's choice of socket: the initialized default
-// socket, else GT_TOWN_SOCKET (townEnv). refuseTownEnv is set for a test
+// socket, else GT_TMUX_SOCKET (tmuxEnv). refuseTmuxEnv is set for a test
 // binary that has not opted out with AllowLiveTmuxEnv.
 //
-// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
+// GT_TMUX_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
 // so that "gt agents menu" invoked from a personal terminal still
 // target the correct town server even when InitRegistry was not called.
 //
 // That fallback is meant for an interactive CLI process, not a `go test`
 // binary — but a test process started from inside a live polecat/agent shell
-// can inherit GT_TOWN_SOCKET from its ambient environment and silently attach
+// can inherit GT_TMUX_SOCKET from its ambient environment and silently attach
 // to the town's production tmux server, creating real (if oddly-named)
 // sessions there (gt-yav3). Refuse it in test binaries unless explicitly
 // overridden; hermetic test harnesses (internal/testutil) call
 // SetDefaultSocket to an isolated gt-test-* socket before this ever runs, so
 // this only fires for a test that bypasses that harness entirely.
-func resolveNewTmuxSocket(defaultSocket, townEnv string, refuseTownEnv bool) (string, error) {
-	if defaultSocket != "" || townEnv == "" {
+func resolveNewTmuxSocket(defaultSocket, tmuxEnv string, refuseTmuxEnv bool) (string, error) {
+	if defaultSocket != "" || tmuxEnv == "" {
 		return defaultSocket, nil
 	}
-	if refuseTownEnv {
+	if refuseTmuxEnv {
 		return "", fmt.Errorf(
-			"tmux.NewTmux: refusing to use GT_TOWN_SOCKET=%q (a live town socket) "+
+			"tmux.NewTmux: refusing to use GT_TMUX_SOCKET=%q (a live town socket) "+
 				"from a test binary; route the test through the hermetic harness "+
 				"(internal/testutil) or an explicit tmux.NewTmuxWithSocket(\"gt-test-...\"), "+
-				"or set %s=1 to override", townEnv, AllowLiveTmuxEnv)
+				"or set %s=1 to override", tmuxEnv, AllowLiveTmuxEnv)
 	}
-	return townEnv, nil
+	return tmuxEnv, nil
 }
 
 // NewTmuxWithSocket creates a Tmux wrapper that targets a named socket.
@@ -2072,8 +2072,8 @@ func isTmuxIndex(value string) bool {
 }
 
 // SessionAgentPreset resolves the harness preset of the agent running in
-// session from the session's own GT_AGENT, GT_ROOT and GT_RIG. The town root
-// falls back to townRootHint, then the process GT_ROOT. It returns the
+// session from the session's own GT_AGENT, GT_TOWN_ROOT and GT_RIG. The town
+// root falls back to townRootHint, then the process town root. It returns the
 // GT_AGENT value; ok=false means the harness is unknown. (claude-9a8)
 func (t *Tmux) SessionAgentPreset(session, townRootHint string) (string, *config.AgentPresetInfo, bool) {
 	if session == "" {
@@ -2097,10 +2097,10 @@ func (t *Tmux) SessionAgentRegistry(session, townRootHint string) *config.AgentR
 }
 
 // sessionScope returns the town root and rig path of a session from its
-// GT_ROOT and GT_RIG. The town root falls back to townRootHint, then the
+// GT_TOWN_ROOT and GT_RIG. The town root falls back to townRootHint, then the
 // process's own town root; rigPath is empty for town-level sessions.
 func (t *Tmux) sessionScope(session, townRootHint string) (townRoot, rigPath string) {
-	townRoot, _ = t.GetEnvironment(session, "GT_ROOT")
+	townRoot, _ = t.GetEnvironment(session, "GT_TOWN_ROOT")
 	if townRoot == "" {
 		townRoot = townRootHint
 	}
@@ -4900,7 +4900,7 @@ func (t *Tmux) SetRigMenuBinding(session string) error {
 // even when the user is on a different socket than the town socket.
 //
 // townSocket is the socket name where GT agents live (e.g. "gt-a1b2c3"). When
-// non-empty it is embedded in the binding command as GT_TOWN_SOCKET=<name>
+// non-empty it is embedded in the binding command as GT_TMUX_SOCKET=<name>
 // so that gt agents menu can locate agent sessions even when invoked from a
 // directory outside the town root (e.g. a personal tmux session where
 // workspace.FindFromCwd fails and InitRegistry is never called).
@@ -4916,12 +4916,12 @@ func (t *Tmux) SetRigMenuBinding(session string) error {
 func EnsureBindingsOnSocket(socket, townSocket string) error {
 	t := NewTmuxWithSocket(socket)
 
-	// Build the command strings, optionally prefixed with GT_TOWN_SOCKET so
+	// Build the command strings, optionally prefixed with GT_TMUX_SOCKET so
 	// gt agents menu can find the right tmux server even when called
 	// from a non-town directory.
 	agentsCmd := "gt agents menu"
 	if townSocket != "" {
-		agentsCmd = fmt.Sprintf("GT_TOWN_SOCKET=%s gt agents menu", townSocket)
+		agentsCmd = fmt.Sprintf("GT_TMUX_SOCKET=%s gt agents menu", townSocket)
 	}
 
 	// Agents binding (prefix + g)
@@ -4947,7 +4947,7 @@ func EnsureBindingsOnSocket(socket, townSocket string) error {
 	// Rig menu binding (prefix + r)
 	rigMenuCmd := "gt rig menu"
 	if townSocket != "" {
-		rigMenuCmd = fmt.Sprintf("GT_TOWN_SOCKET=%s gt rig menu", townSocket)
+		rigMenuCmd = fmt.Sprintf("GT_TMUX_SOCKET=%s gt rig menu", townSocket)
 	}
 	if !t.isGTBinding("prefix", "r") {
 		ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())

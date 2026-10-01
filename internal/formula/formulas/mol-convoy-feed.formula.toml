@@ -139,11 +139,11 @@ Sling each ready issue to an available polecat.
 automatic dispatch is parked town-wide. Sling nothing, report the convoy as
 held, and let a later feed pick it up:
 ```bash
-if [ -e "$GT_ROOT/seat-refill.hold" ] || [ -e "$GT_ROOT/ESTOP" ]; then
+if [ -e "$GT_TOWN_ROOT/seat-refill.hold" ] || [ -e "$GT_TOWN_ROOT/ESTOP" ]; then
   echo "dispatch hold active; not feeding this convoy"
 fi
 ```
-Skip any issue whose target rig has `$GT_ROOT/ESTOP.<rig>`, and report it as
+Skip any issue whose target rig has `$GT_TOWN_ROOT/ESTOP.<rig>`, and report it as
 held rather than failed.
 
 **For each issue in dispatch plan:**

@@ -129,7 +129,7 @@ func TestSessionPrefixPattern_AlwaysIncludesGTAndHQ(t *testing.T) {
 }
 
 // TestSessionPrefixPattern_WithTownRoot reads rig prefixes from a town's
-// mayor/rigs.json (was skipped unless the host had a live GT_ROOT).
+// mayor/rigs.json (was skipped unless the host had a live GT_TOWN_ROOT).
 func TestSessionPrefixPattern_WithTownRoot(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -148,15 +148,16 @@ func TestSessionPrefixPattern_WithTownRoot(t *testing.T) {
 	}
 }
 
-func TestSessionPrefixPattern_FallsBackToGTTownRoot(t *testing.T) {
+func TestSessionPrefixPattern_FallsBackToTownRootEnv(t *testing.T) {
 	t.Parallel()
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	// workspace.TownRootFromEnv is the one reader: GT_TOWN_ROOT, then GT_ROOT.
-	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a", "GT_TOWN_ROOT": "/b"})); got != "/b" {
+	// workspace.TownRootFromEnv is the one reader, and GT_TOWN_ROOT is the one
+	// name: the GT_ROOT alias no longer names a town root (gt-syhch).
+	if got := townRootFrom(env(map[string]string{"GT_TOWN_ROOT": "/b", "GT_ROOT": "/a"})); got != "/b" {
 		t.Errorf("both set: town root = %q, want GT_TOWN_ROOT /b", got)
 	}
-	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a"})); got != "/a" {
-		t.Errorf("GT_TOWN_ROOT unset: town root = %q, want the GT_ROOT fallback /a", got)
+	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a"})); got != "" {
+		t.Errorf("GT_ROOT alone: town root = %q, want empty", got)
 	}
 	if got := townRootFrom(env(nil)); got != "" {
 		t.Errorf("neither set: town root = %q, want empty", got)
@@ -257,12 +258,12 @@ func TestTmuxEnvironmentIsInjected(t *testing.T) {
 		t.Errorf("empty environment: pattern = %q, want ^(gt|hq)-", got)
 	}
 	tm.getenv = func(k string) string {
-		if k == "GT_ROOT" {
+		if k == "GT_TOWN_ROOT" {
 			return town
 		}
 		return ""
 	}
 	if got := tm.sessionPrefixPattern(); got != "^(al|gt|hq)-" {
-		t.Errorf("GT_ROOT=%s: pattern = %q, want ^(al|gt|hq)-", town, got)
+		t.Errorf("GT_TOWN_ROOT=%s: pattern = %q, want ^(al|gt|hq)-", town, got)
 	}
 }

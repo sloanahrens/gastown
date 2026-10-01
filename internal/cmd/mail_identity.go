@@ -25,11 +25,9 @@ import (
 // have their own mayor/town.json (e.g., gastown/) would be misidentified as
 // the town root when running from the rig directory.
 func findMailWorkDir() (string, error) {
-	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if townRoot := os.Getenv(envName); townRoot != "" {
-			if ok, _ := workspace.IsWorkspace(townRoot); ok {
-				return townRoot, nil
-			}
+	if townRoot := os.Getenv("GT_TOWN_ROOT"); townRoot != "" {
+		if ok, _ := workspace.IsWorkspace(townRoot); ok {
+			return townRoot, nil
 		}
 	}
 	return workspace.FindFromCwdOrError()

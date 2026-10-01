@@ -4100,12 +4100,12 @@ func TestBuildStartupCommand_RoleAgentsCustomAgentSetGTAgent(t *testing.T) {
 	}
 }
 
-// TestBuildStartupCommand_UsesGTRootFromEnvVars verifies that when rigPath is empty
-// but GT_ROOT is provided in envVars, the function uses GT_ROOT to resolve town
-// settings and respects role_agents configuration. This is the path hit when the
+// TestBuildStartupCommand_UsesTownRootFromEnvVars verifies that when rigPath is empty
+// but GT_TOWN_ROOT is provided in envVars, the function uses GT_TOWN_ROOT to resolve
+// town settings and respects role_agents configuration. This is the path hit when the
 // daemon spawns town-level agents (deacon, mayor) where rigPath is always empty.
 // Fixes #433
-func TestBuildStartupCommand_UsesGTRootFromEnvVars(t *testing.T) {
+func TestBuildStartupCommand_UsesTownRootFromEnvVars(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 
@@ -4125,8 +4125,8 @@ func TestBuildStartupCommand_UsesGTRootFromEnvVars(t *testing.T) {
 	}
 
 	envVars := map[string]string{
-		"GT_ROLE": constants.RoleMayor,
-		"GT_ROOT": townRoot,
+		"GT_ROLE":      constants.RoleMayor,
+		"GT_TOWN_ROOT": townRoot,
 	}
 	cmd, err := BuildStartupCommand(envVars, "", "")
 	if err != nil {
@@ -4138,7 +4138,7 @@ func TestBuildStartupCommand_UsesGTRootFromEnvVars(t *testing.T) {
 	}
 }
 
-func TestBuildStartupCommandWithAgentOverride_UsesGTRootFromEnvVars(t *testing.T) {
+func TestBuildStartupCommandWithAgentOverride_UsesTownRootFromEnvVars(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 
@@ -4158,8 +4158,8 @@ func TestBuildStartupCommandWithAgentOverride_UsesGTRootFromEnvVars(t *testing.T
 	}
 
 	envVars := map[string]string{
-		"GT_ROLE": constants.RoleMayor,
-		"GT_ROOT": townRoot,
+		"GT_ROLE":      constants.RoleMayor,
+		"GT_TOWN_ROOT": townRoot,
 	}
 	cmd, err := BuildStartupCommandWithAgentOverride(envVars, "", "", "")
 	if err != nil {

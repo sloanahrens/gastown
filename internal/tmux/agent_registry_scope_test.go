@@ -34,9 +34,9 @@ func TestIsAgentAliveLegacyFallbackUsesTownRegistry(t *testing.T) {
 	plain := f.addSession("gt-plain", ".claude-unwrapped")
 	f.with(func() {
 		nix.env["GT_AGENT"] = "claude"
-		nix.env["GT_ROOT"] = nixTown
+		nix.env["GT_TOWN_ROOT"] = nixTown
 		plain.env["GT_AGENT"] = "claude"
-		plain.env["GT_ROOT"] = plainTown
+		plain.env["GT_TOWN_ROOT"] = plainTown
 	})
 	tm, _ := f.tmux(nil)
 	tm.getenv = func(string) string { return "" }

@@ -19,7 +19,8 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertEnv(t, env, "GT_ROLE", "mayor")
 	assertEnv(t, env, "BD_ACTOR", "mayor")
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "mayor")
-	assertEnv(t, env, "GT_ROOT", "/town")
+	assertEnv(t, env, "GT_TOWN_ROOT", "/town")
+	assertEnv(t, env, "GT_ROOT", "/town") // the alias bd reads until it migrates (gt-syhch)
 	assertEnv(t, env, "GIT_CEILING_DIRECTORIES", "/town") // prevents git walking to umbrella
 	assertEnv(t, env, "NODE_OPTIONS", "")                 // cleared to prevent debugger inheritance
 	assertEnv(t, env, "CLAUDECODE", "")                   // cleared to prevent nested session detection
@@ -98,7 +99,7 @@ func TestIdentityEnvVars_CoversAgentEnvOutput(t *testing.T) {
 
 	// Collect all identity keys produced by AgentEnv across all role types.
 	// Identity keys are role/rig/agent-specific — NOT infrastructure keys like
-	// GT_ROOT, NODE_OPTIONS, CLAUDECODE, etc.
+	// GT_TOWN_ROOT, NODE_OPTIONS, CLAUDECODE, etc.
 	identityKeys := map[string]bool{
 		"GT_ROLE": true, "GT_RIG": true, "GT_CREW": true,
 		"GT_POLECAT": true, "GT_DOG_NAME": true, "GT_SESSION": true,
@@ -152,14 +153,16 @@ func TestAgentEnvSimple(t *testing.T) {
 	assertEnv(t, env, "GT_POLECAT", "Toast")
 	// Simple doesn't set TownRoot, so key should be absent
 	// (not empty string which would override tmux session environment)
+	assertNotSet(t, env, "GT_TOWN_ROOT")
 	assertNotSet(t, env, "GT_ROOT")
 }
 
 func TestAgentEnv_EmptyTownRootOmitted(t *testing.T) {
 	t.Parallel()
 	// Regression test: empty TownRoot should NOT create keys in the map.
-	// If it was set to empty string, ExportPrefix would generate "export GT_ROOT= ..."
-	// which overrides tmux session environment where it's correctly set.
+	// If it was set to empty string, ExportPrefix would generate
+	// "export GT_TOWN_ROOT= ..." which overrides tmux session environment
+	// where it's correctly set.
 	env := AgentEnv(AgentEnvConfig{
 		Role:      "polecat",
 		Rig:       "myrig",
@@ -168,6 +171,7 @@ func TestAgentEnv_EmptyTownRootOmitted(t *testing.T) {
 	})
 
 	// Key should be absent, not empty string
+	assertNotSet(t, env, "GT_TOWN_ROOT")
 	assertNotSet(t, env, "GT_ROOT")
 	assertNotSet(t, env, "GIT_CEILING_DIRECTORIES") // also not set when TownRoot empty
 
