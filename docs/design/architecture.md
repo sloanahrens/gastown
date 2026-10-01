@@ -232,8 +232,9 @@ Stages 1-3 are automated today. Stages 4-6 run as daemon patrols
 These maintenance patrols (`doctor_dog`, `wisp_reaper`, `compactor_dog`,
 `checkpoint_dog`, `jsonl_git_backup`, `scheduled_maintenance`) are imperative Go inside the
 daemon: a ticker fires and the daemon does the work itself, with no agent
-involved. Jobs that pour a `mol-dog-*` molecule pour it only as an observability
-receipt; nothing picks the molecule up. The `_dog` suffix is historical — the
+involved. Each cycle's receipt is one `dog_cycle: <job> outcome=` line in the
+daemon log, plus a `dog_cycle_outcome` feed event when a step failed; no job
+writes a bead. The `_dog` suffix is historical — the
 LLM dog role that once ran such formulas was retired. Reliability-critical
 maintenance stays in the daemon; opportunistic work belongs in a script plugin
 (see [plugin-system.md](plugin-system.md)).

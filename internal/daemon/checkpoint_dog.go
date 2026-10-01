@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/checkpoint"
-	"github.com/steveyegge/gastown/internal/constants"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -74,8 +73,7 @@ func (d *Daemon) triggerCheckpointDog() {
 //
 // ## ZFC Exemption
 // The checkpoint dog executes git operations directly (same pattern as
-// compactor_dog's SQL operations). The daemon pours a molecule for
-// observability, then runs git commands via exec.Command.
+// compactor_dog's SQL operations), via exec.Command.
 func (d *Daemon) runCheckpointDog() {
 	if !d.isPatrolActive("checkpoint_dog") {
 		return
@@ -92,8 +90,8 @@ func (d *Daemon) runCheckpointDog() {
 
 	d.logger.Printf("checkpoint_dog: starting cycle")
 
-	mol := d.pourDogMolecule(constants.MolDogCheckpoint, nil)
-	defer mol.close()
+	cycle := d.startDogCycle("checkpoint_dog")
+	defer cycle.close()
 
 	rigs := d.getKnownRigs()
 	totalScanned := 0
@@ -105,12 +103,12 @@ func (d *Daemon) runCheckpointDog() {
 		totalCheckpointed += checkpointed
 	}
 
-	mol.closeStep("scan")
-	mol.closeStep("checkpoint")
+	cycle.closeStep("scan")
+	cycle.closeStep("checkpoint")
 
 	d.logger.Printf("checkpoint_dog: cycle complete — scanned %d worktrees, checkpointed %d",
 		totalScanned, totalCheckpointed)
-	mol.closeStep("report")
+	cycle.closeStep("report")
 }
 
 // checkpointRigPolecats checkpoints dirty polecat worktrees in a single rig.

@@ -60,15 +60,15 @@ const (
 	TypeRefineryRestartDecision = "refinery_restart_decision"
 
 	// Witness patrol events
-	TypePatrolStarted    = "patrol_started"
-	TypePolecatChecked   = "polecat_checked"
-	TypePolecatNudged    = "polecat_nudged"
+	TypePatrolStarted     = "patrol_started"
+	TypePolecatChecked    = "polecat_checked"
+	TypePolecatNudged     = "polecat_nudged"
 	TypeEscalationSent    = "escalation_sent"
 	TypeEscalationAcked   = "escalation_acked"
 	TypeEscalationClosed  = "escalation_closed"
 	TypeEscalationDropped = "escalation_dropped" // gt escalate call itself failed — the alert never reached a bead
 	TypePatrolComplete    = "patrol_complete"
-	TypeDogCycleOutcome   = "dog_cycle_outcome" // A dog patrol cycle that did NOT end as a clean run (skipped/failed), recorded so a skipped cycle is never read as a clean one (gt-i3rpw)
+	TypeDogCycleOutcome   = "dog_cycle_outcome" // A daemon dog job cycle with a failed step, recorded so a failure reaches readers of the feed (gt-i3rpw)
 
 	// Merge queue events (emitted by refinery)
 	TypeMergeStarted = "merge_started"

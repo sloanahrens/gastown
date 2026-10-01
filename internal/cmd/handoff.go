@@ -278,17 +278,18 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the restart command
-	restartCmd, err := buildRestartCommand(reg, targetSession)
+	plan, err := buildRestartPlan(targetSession, buildRestartCommandOpts{Registry: reg})
 	if err != nil {
 		return err
 	}
+	restartCmd := plan.Command
 
 	// If handing off a different session, we need to find its pane and respawn there.
 	// Remote sessions live on the town socket, so use townTmux for their operations.
 	if targetSession != currentSession {
 		// Update tmux session env before respawn (not during dry-run — see below)
 		updateSessionEnvForHandoff(reg, townTmux, targetSession)
-		return handoffRemoteSession(townTmux, targetSession, restartCmd)
+		return handoffRemoteSession(townTmux, targetSession, plan)
 	}
 
 	// Close any in-progress molecule steps before cycling (gt-e26g).
@@ -370,6 +371,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// If orphans still occur, the solution is to adjust the restart command to
 	// kill orphans at startup, not to kill ourselves before respawning.
 	return superviseHandoff(currentSession, "gt handoff", "handoff", func() error {
+		plan.syncSettings()
 		return respawnOwnPane(t, currentSession, pane, restartCmd)
 	})
 }
@@ -554,7 +556,7 @@ func runHandoffCycle() error {
 	// context from the handoff mail + hook, not from --continue.
 	// Using --continue would resume the same over-threshold conversation,
 	// causing PreCompact to fire again and loop indefinitely.
-	restartCmd, err := buildRestartCommandWithOpts(currentSession, buildRestartCommandOpts{
+	plan, err := buildRestartPlan(currentSession, buildRestartCommandOpts{
 		Registry:        reg,
 		ContinueSession: false,
 	})
@@ -571,7 +573,8 @@ func runHandoffCycle() error {
 
 	// Respawn pane — this atomically kills current process and starts fresh
 	return superviseHandoff(currentSession, "gt handoff", "handoff --cycle", func() error {
-		return respawnOwnPane(t, currentSession, pane, restartCmd)
+		plan.syncSettings()
+		return respawnOwnPane(t, currentSession, pane, plan.Command)
 	})
 }
 
@@ -795,6 +798,14 @@ func liveRespawnConfig(role, agentName, townRoot, rigPath string) (*config.Runti
 }
 
 func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
+	plan, err := buildRestartPlan(sessionName, opts)
+	return plan.Command, err
+}
+
+// buildRestartPlan is buildRestartCommandWithOpts plus what the respawn's
+// settings sync needs: the role, its settings and working directories, and
+// the runtime config the restart command runs.
+func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restartPlan, error) {
 	reg := opts.Registry
 	lookupEnv := opts.LookupEnv
 	if lookupEnv == nil {
@@ -812,19 +823,19 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		townRoot = detectTownRootFromCwd()
 	}
 	if townRoot == "" {
-		return "", fmt.Errorf("cannot detect town root - run from within a Gas Town workspace")
+		return restartPlan{}, fmt.Errorf("cannot detect town root - run from within a Gas Town workspace")
 	}
 
 	// Determine the working directory for this session type
 	workDir, err := sessionWorkDir(reg, sessionName, townRoot)
 	if err != nil {
-		return "", err
+		return restartPlan{}, err
 	}
 
 	// Parse the session name to get the identity (used for GT_ROLE and beacon)
 	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
-		return "", fmt.Errorf("cannot parse session name %q: %w", sessionName, err)
+		return restartPlan{}, fmt.Errorf("cannot parse session name %q: %w", sessionName, err)
 	}
 	gtRole := identity.GTRole()
 	simpleRole := config.ExtractSimpleRole(gtRole)
@@ -890,14 +901,18 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 
 	var runtimeCmd string
 	var roleRuntimeConfig *config.RuntimeConfig
+	// syncHooks is set for a session with a role: its managed settings are
+	// synced before the respawn.
+	var syncHooks bool
 	if currentAgent != "" {
 		// Resolve with the override but still through the role-aware path so
 		// the respawn carries --settings and --append-system-prompt-file
 		// exactly like a daemon spawn would.
 		rc, err := config.ResolveRoleAgentConfigWithOverride(simpleRole, townRoot, rigPath, currentAgent, agentName)
 		if err != nil {
-			return "", fmt.Errorf("resolving agent config: %w", err)
+			return restartPlan{}, fmt.Errorf("resolving agent config: %w", err)
 		}
+		syncHooks = true
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
@@ -906,9 +921,10 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		// per-agent roles keep --append-system-prompt-file on a plain handoff.
 		rc, err := liveRespawnConfig(simpleRole, agentName, townRoot, rigPath)
 		if err != nil {
-			return "", fmt.Errorf("resolving agent config: %w", err)
+			return restartPlan{}, fmt.Errorf("resolving agent config: %w", err)
 		}
 		roleRuntimeConfig = rc
+		syncHooks = true
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else {
 		runtimeCmd = config.GetRuntimeCommandWithPrompt(rigPath, beacon)
@@ -1055,7 +1071,22 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	}
 
 	envCmd := config.PrependEnv(execPrefix+runtimeCmd, envMap)
-	return cdPrefix + envCmd, nil
+	plan := restartPlan{Command: cdPrefix + envCmd}
+	if syncHooks {
+		settingsDir := config.RoleSettingsDir(simpleRole, rigPath)
+		if settingsDir == "" {
+			settingsDir = workDir
+		}
+		plan.Hooks = &respawnHooks{
+			TownRoot:    townRoot,
+			Actor:       gtRole,
+			Session:     sessionName,
+			Role:        simpleRole,
+			SettingsDir: settingsDir,
+			WorkDir:     workDir,
+		}
+	}
+	return plan, nil
 }
 
 // updateSessionEnvForHandoff updates the tmux session environment with the
@@ -1259,7 +1290,8 @@ func detectTownRootFromCwd() string {
 }
 
 // handoffRemoteSession respawns a different session and optionally switches to it.
-func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error {
+func handoffRemoteSession(t *tmux.Tmux, targetSession string, plan restartPlan) error {
+	restartCmd := plan.Command
 	// Check if target session exists
 	exists, err := t.HasSession(targetSession)
 	if err != nil {
@@ -1288,6 +1320,7 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 	}
 
 	if err := superviseHandoff(targetSession, "gt handoff", "handoff (remote)", func() error {
+		plan.syncSettings()
 		return respawnRemotePane(t, targetSession, targetPane, restartCmd)
 	}); err != nil {
 		return err

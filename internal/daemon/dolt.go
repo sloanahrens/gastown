@@ -1221,8 +1221,8 @@ func (m *DoltServerManager) checkHealth() error {
 // Performs a connectivity check (SELECT active_branch()) with latency measurement, and logs
 // warnings for degraded resource conditions (high latency, high connection count,
 // disk usage). Returns an error only if the server is unreachable.
-// Warnings are collected in m.lastWarnings for Option B throttling: the daemon
-// pours a mol-dog-doctor molecule only when anomalies are detected.
+// Warnings are collected in m.lastWarnings, which the daemon reports as a
+// failed doctor_dog cycle (reportDoltWarnings).
 func (m *DoltServerManager) checkHealthLocked() error {
 	m.lastWarnings = nil // Reset warnings each check cycle.
 
@@ -1278,8 +1278,7 @@ func (m *DoltServerManager) checkHealthLocked() error {
 }
 
 // LastWarnings returns warnings from the most recent health check.
-// Used by the Daemon for Option B throttling: only pour a mol-dog-doctor
-// molecule when anomalies are detected.
+// The daemon reports them, throttled, as a failed doctor_dog cycle.
 func (m *DoltServerManager) LastWarnings() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

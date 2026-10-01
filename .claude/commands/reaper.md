@@ -7,7 +7,7 @@ argument-hint: [--dry-run]
 # Wisp Reaper
 
 Reap stale wisps and close stale issues across all production Dolt databases.
-Runs the same cycle as `mol-dog-reaper` but directly, without Dog dispatch.
+Runs the same cycle as the daemon's `wisp_reaper` job, on demand.
 
 Arguments: $ARGUMENTS
 If `--dry-run` is passed, report counts without making changes.

@@ -292,29 +292,9 @@ const (
 	EmojiPolecat = "😺"
 )
 
-// Molecule formula names for the daemon's patrol receipts and convoy
-// workflows. The mol-dog-* names are historical: they are poured by the
-// daemon's in-process patrols (the *_dog jobs), not run by any agent.
-// These are used as formula identifiers in `bd mol wisp <name>` commands.
+// Molecule formula names for the convoy workflows, used as formula
+// identifiers in `bd mol wisp <name>` commands.
 const (
-	// MolDogReaper is the wisp reaper dog formula name.
-	MolDogReaper = "mol-dog-reaper"
-
-	// MolDogJSONL is the JSONL git backup dog formula name.
-	MolDogJSONL = "mol-dog-jsonl"
-
-	// MolDogCompactor is the Dolt compactor dog formula name.
-	MolDogCompactor = "mol-dog-compactor"
-
-	// MolDogCheckpoint is the WIP checkpoint dog formula name.
-	MolDogCheckpoint = "mol-dog-checkpoint"
-
-	// MolDogDoctor is the health anomaly tracking dog formula name.
-	MolDogDoctor = "mol-dog-doctor"
-
-	// MolDogMayorDispatch is the idle-seat dispatch check formula name.
-	MolDogMayorDispatch = "mol-dog-mayor-dispatch"
-
 	// MolConvoyFeed is the convoy feeder formula name.
 	MolConvoyFeed = "mol-convoy-feed"
 

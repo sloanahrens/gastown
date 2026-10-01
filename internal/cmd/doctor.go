@@ -354,6 +354,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleTaskDispatchCheck())
 	d.Register(doctor.NewHooksSyncCheck())
 	d.Register(doctor.NewHooksBaseCheck())
+	// Live sessions whose last start reported hooks:absent, or never
+	// reported (gt-4k3fj.8.4).
+	d.Register(doctor.NewSessionHooksCheck())
 
 	// Dolt data health checks (binary + server reachability moved to top as prerequisites)
 	d.Register(doctor.NewDoltMetadataCheck())
