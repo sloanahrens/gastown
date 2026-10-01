@@ -32,6 +32,7 @@ import (
 var (
 	formulaListJSON   bool
 	formulaShowJSON   bool
+	formulaShowRaw    bool
 	formulaRunPR      int
 	formulaRunRig     string
 	formulaRunDryRun  bool
@@ -102,8 +103,13 @@ Shows:
   - Steps with dependencies
   - Composition rules (extends, aspects)
 
+A formula that extends another or expands a step is shown resolved: every
+inherited step, with overrides and expansions applied, as gt prime renders
+it. --raw shows the file as written (bd formula show).
+
 Examples:
   gt formula show shiny
+  gt formula show mol-doc-audit --raw
   gt formula show rule-of-five --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFormulaShow,
@@ -202,6 +208,7 @@ func init() {
 
 	// Show flags
 	formulaShowCmd.Flags().BoolVar(&formulaShowJSON, "json", false, "Output as JSON")
+	formulaShowCmd.Flags().BoolVar(&formulaShowRaw, "raw", false, "Show the formula as written, without resolving extends and compose")
 
 	// Run flags
 	formulaRunCmd.Flags().IntVar(&formulaRunPR, "pr", 0, "GitHub PR number to run formula on")
@@ -239,9 +246,21 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 	return passBdFormulaOutput(bdArgs, formulaListJSON)
 }
 
-// runFormulaShow delegates to bd formula show
+// runFormulaShow shows a formula that extends another or expands a step as
+// gt resolves it (the steps an agent runs); bd's view lists only the delta.
+// Every other formula, and --raw, delegates to bd formula show.
 func runFormulaShow(cmd *cobra.Command, args []string) error {
 	formulaName := args[0]
+	if !formulaShowRaw {
+		townRoot, rigName := formulaShowScope()
+		if raw, resolved, err := loadResolvedFormula(formulaName, townRoot, rigName); err == nil && formulaComposes(raw) {
+			if formulaShowJSON {
+				return writeResolvedFormulaJSON(os.Stdout, raw, resolved)
+			}
+			renderResolvedFormula(os.Stdout, raw, resolved)
+			return nil
+		}
+	}
 	bdArgs := []string{"formula", "show", formulaName}
 	if formulaShowJSON {
 		bdArgs = append(bdArgs, "--json")
@@ -1395,9 +1414,15 @@ func findFormulaFile(name string) (string, error) {
 	return "", fmt.Errorf("formula '%s' not found in search paths", name)
 }
 
-// parseFormulaFile parses a formula file using the formula package's TOML parser.
+// parseFormulaFile parses a formula file and resolves its extends and compose,
+// so a formula that carries only its delta runs every inherited step. Parents
+// load from the embedded set, then from the file's own directory.
 func parseFormulaFile(path string) (*formula.Formula, error) {
-	return formula.ParseFile(path)
+	f, err := formula.ParseFile(path)
+	if err != nil || !formulaComposes(f) {
+		return f, err
+	}
+	return formula.Resolve(f, []string{filepath.Dir(path)})
 }
 
 // renderTemplate renders a Go text/template with the given context map
