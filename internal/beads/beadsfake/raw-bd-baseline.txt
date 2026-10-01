@@ -35,8 +35,7 @@ internal/cmd/sling_routing_integration_test.go BdCmd 1
 internal/cmd/source_validation.go BDRunner 2
 internal/cmd/tracking_relations.go BDRunner 2
 internal/cmdtree/gen-bd-tree/main.go argv 1
-internal/daemon/patrol_scan.go argv 2
-internal/daemon/scheduled_slings.go argv 1
+internal/daemon/patrol_scan.go argv 1
 internal/deps/bd_handshake.go argv 1
 internal/deps/beads.go argv 1
 internal/doctor/bd_client.go BDRunner 1

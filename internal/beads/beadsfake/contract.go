@@ -582,6 +582,18 @@ func contractComments(t *testing.T, s *scope) {
 	if !reflect.DeepEqual(texts, []string{"first", "second one"}) {
 		t.Errorf("comment texts = %q", texts)
 	}
+	author := s.who("patrol")
+	mustDo(t, "comment as", s.AddCommentAs(is.ID, author, "third"))
+	got, err = s.Comments(is.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := got[len(got)-1]; last.Text != "third" || last.Author != author {
+		t.Errorf("AddCommentAs comment = %+v, want text third by %s", last, author)
+	}
+	if err := s.AddCommentAs(s.tag+"-nosuch", author, "x"); err == nil {
+		t.Error("AddCommentAs on a missing issue succeeded")
+	}
 }
 
 // depOn returns is's dependency on id of relation typ, or nil.
