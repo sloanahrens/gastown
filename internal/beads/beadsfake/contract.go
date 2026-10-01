@@ -449,6 +449,8 @@ func contractListFilters(t *testing.T, s *scope) {
 	s.want(t, "List{Status:open}", got, err, a.ID, b.ID)
 	got, err = s.List(beads.ListOptions{Label: l, Priority: -1})
 	s.want(t, "List{Label}", got, err, a.ID)
+	got, err = s.List(beads.ListOptions{Label: l, Priority: -1, IncludeInfra: true})
+	s.want(t, "List{Label,IncludeInfra}", got, err, a.ID)
 	got, err = s.List(beads.ListOptions{Type: "bug", Priority: -1})
 	s.want(t, "List{Type:bug}", got, err, b.ID)
 	got, err = s.List(beads.ListOptions{Assignee: s.who("alice"), Priority: -1})
@@ -647,6 +649,21 @@ func contractTypedDependencies(t *testing.T, s *scope) {
 	}
 	ready, err := s.Ready()
 	s.want(t, "Ready with a tracks edge", ready, err, tracker.ID, local.ID)
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	mustDo(t, "AddDependency(blocker)", s.AddDependency(tracker.ID, blocker.ID))
+	if deps, err := s.DepList(tracker.ID, "tracks"); err != nil || len(deps) != 1 || deps[0].ID != local.ID || deps[0].DependencyType != "tracks" {
+		t.Errorf("DepList(tracker, tracks) = %+v, %v; want only %s (tracks), no external edge", deps, err, local.ID)
+	}
+	if deps, err := s.DepList(tracker.ID, ""); err != nil || len(deps) != 2 || depOn(&beads.Issue{Dependencies: deps}, blocker.ID, "blocks") == nil {
+		t.Errorf("DepList(tracker, any) = %+v, %v; want %s (tracks) and %s (blocks)", deps, err, local.ID, blocker.ID)
+	}
+	if deps, err := s.DepList(local.ID, "tracks"); err != nil || len(deps) != 0 {
+		t.Errorf("DepList(tracked) = %+v, %v; want none (edges point down only)", deps, err)
+	}
+	if _, err := s.DepList(s.tag+"-nosuch", "tracks"); err == nil {
+		t.Error("DepList of a missing issue succeeded")
+	}
+	mustDo(t, "RemoveDependency(blocker)", s.RemoveDependency(tracker.ID, blocker.ID))
 	mustDo(t, "RemoveDependency(local)", s.RemoveDependency(tracker.ID, local.ID))
 	mustDo(t, "RemoveDependency(external)", s.RemoveDependency(tracker.ID, external))
 	if got := s.mustShow(t, tracker.ID); len(got.Dependencies) != 0 {

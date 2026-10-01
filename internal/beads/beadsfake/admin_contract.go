@@ -2,6 +2,8 @@ package beadsfake
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +48,32 @@ var adminCases = []struct {
 	{"wisp list", adminWispList},
 	{"wisp gc candidates", adminWispGCCandidates},
 	{"events journal", adminEventsJournal},
+	{"export", adminExport},
+}
+
+// adminExport pins Export: a JSONL file holding each issue as one object a
+// line, the bd fallback import's format.
+func adminExport(t *testing.T, s *adminScope) {
+	is := s.mustCreate(t, beads.CreateOptions{Title: "exported " + s.tag, Priority: -1})
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	mustDo(t, "Export", s.Export(path))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading export: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var got beads.Issue
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("export line %q is not an issue object: %v", line, err)
+		}
+		if got.ID == is.ID {
+			if got.Title != is.Title || got.Status != "open" {
+				t.Errorf("exported %s = %+v, want title %q, open", is.ID, got, is.Title)
+			}
+			return
+		}
+	}
+	t.Errorf("export has no line for %s:\n%s", is.ID, data)
 }
 
 // adminEventsJournal pins EventsTail over the mutations the convoy manager

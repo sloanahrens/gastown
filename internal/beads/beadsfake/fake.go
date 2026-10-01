@@ -211,7 +211,8 @@ func hasLabel(is *beads.Issue, label string) bool {
 // List returns the issues matching opts, newest first. Ephemeral selects the
 // wisps instead of the issues. Status "" leaves out closed issues and "all"
 // keeps them; Type is read as the label "gt:<Type>"; Priority -1 means any.
-// Rig is ignored: a Fake is one database.
+// Rig is ignored: a Fake is one database. IncludeInfra changes nothing: no
+// fake issue has an infrastructure type.
 func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -825,6 +826,25 @@ func (f *Fake) AddTypedDependency(issue, dependsOn, depType string) error {
 	}
 	r.deps = append(r.deps, edge{to: dependsOn, typ: depType})
 	return nil
+}
+
+// DepList returns the issues id depends on with relation depType ("" for
+// any), each with its relation in DependencyType, in the order the edges
+// were added. External targets are left out, as bd's join leaves them out.
+func (f *Fake) DepList(id, depType string) ([]beads.IssueDep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.issues[id]
+	if !ok {
+		return nil, notFound(id)
+	}
+	var out []beads.IssueDep
+	for _, d := range f.snapshot(r).Dependencies {
+		if depType == "" || d.DependencyType == depType {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 // isExternalRef reports whether id is a cross-database reference

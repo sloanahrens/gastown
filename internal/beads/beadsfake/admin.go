@@ -1,9 +1,12 @@
 package beadsfake
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -250,7 +253,7 @@ func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
 // "config get <key>", "config set <key>", "stats", "mol wisp list",
-// "mol wisp gc" (the dry run) or "init".
+// "mol wisp gc" (the dry run), "export" or "init".
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -301,4 +304,29 @@ func (f *Fake) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
 		page.NextSince = r.Seq
 	}
 	return page, nil
+}
+
+// Export writes every issue, wisps left out, to path as JSONL in creation
+// order: one issue object a line, as Show returns it.
+func (f *Fake) Export(path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("export"); err != nil {
+		return err
+	}
+	var records []*record
+	for _, r := range f.issues {
+		if !r.issue.Ephemeral {
+			records = append(records, r)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].seq < records[j].seq })
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	for _, r := range records {
+		if err := enc.Encode(f.snapshot(r)); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }

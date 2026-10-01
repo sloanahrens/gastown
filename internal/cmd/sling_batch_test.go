@@ -567,32 +567,39 @@ func TestBatchSling_SliceAliasingInCrossRigGuard(t *testing.T) {
 // convoyByDescription tests
 // ---------------------------------------------------------------------------
 
-// convoyScanBD answers `bd list` with the open convoys, `bd sql` with the raw
-// dep rows (the same rows for every query) and `bd show` with shows.
-func convoyScanBD(list, sqlRows, shows string) *inprocBD {
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		switch cmd {
-		case "list":
-			if argsMention(args, "--label=gt:convoy") {
-				return bdOut(list)
-			}
-			return bdOut("[]")
-		case "sql":
-			return bdOut(sqlRows)
-		case "show":
-			return bdOut(shows)
+// convoyScanTown is an auto-convoy town whose database holds convoys and
+// answers the raw tracks-dep query: up (what tracks a bead) with trackers
+// and down (what a convoy tracks) with tracked, the same rows for every ID.
+func convoyScanTown(t *testing.T, trackers, tracked []string, convoys ...beads.Issue) slingConvoyTown {
+	t.Helper()
+	town := newAutoConvoyTown(t, autoConvoyBD(false))
+	db := town.db.(*beadsfake.Fake)
+	for _, cv := range convoys {
+		if cv.Type == "" {
+			cv.Labels = append(cv.Labels, "gt:convoy")
 		}
-		return bdOut("[]")
-	}}
+		db.Seed(cv)
+	}
+	db.OnSQL(func(query string) ([][]string, error) {
+		rows := [][]string{{"depends_on_id"}}
+		ids := tracked
+		if strings.HasPrefix(query, "SELECT issue_id") {
+			rows, ids = [][]string{{"issue_id"}}, trackers
+		}
+		for _, id := range ids {
+			rows = append(rows, []string{id})
+		}
+		return rows, nil
+	})
+	return town
 }
 
 // TestFindConvoyByDescription_MatchesDescriptionPattern verifies that a convoy
 // whose description contains "tracking <beadID>" is found by description scan.
 func TestFindConvoyByDescription_MatchesDescriptionPattern(t *testing.T) {
 	t.Parallel()
-	bd := convoyScanBD(`[{"id":"hq-cv-match1","description":"Auto-created convoy tracking gt-abc"}]`, "[]", "[]")
-	if got := newAutoConvoyTown(t, bd).convoyByDescription("gt-abc"); got != "hq-cv-match1" {
+	town := convoyScanTown(t, nil, nil, beads.Issue{ID: "hq-cv-match1", Description: "Auto-created convoy tracking gt-abc"})
+	if got := town.convoyByDescription("gt-abc"); got != "hq-cv-match1" {
 		t.Errorf("convoyByDescription() = %q, want %q", got, "hq-cv-match1")
 	}
 }
@@ -601,8 +608,8 @@ func TestFindConvoyByDescription_MatchesDescriptionPattern(t *testing.T) {
 // when no convoy description matches and no convoy tracks the bead.
 func TestFindConvoyByDescription_NoMatch(t *testing.T) {
 	t.Parallel()
-	bd := convoyScanBD(`[{"id":"hq-cv-other","description":"Auto-created convoy tracking gt-other"}]`, "[]", "[]")
-	if got := newAutoConvoyTown(t, bd).convoyByDescription("gt-zzz"); got != "" {
+	town := convoyScanTown(t, nil, nil, beads.Issue{ID: "hq-cv-other", Description: "Auto-created convoy tracking gt-other"})
+	if got := town.convoyByDescription("gt-zzz"); got != "" {
 		t.Errorf("convoyByDescription() = %q, want empty string", got)
 	}
 }
@@ -612,8 +619,8 @@ func TestFindConvoyByDescription_NoMatch(t *testing.T) {
 // convoy.
 func TestFindConvoyByDescription_FallsBackToTrackedDeps(t *testing.T) {
 	t.Parallel()
-	bd := convoyScanBD(`[{"id":"hq-cv-manual","description":"Manually created convoy"}]`, `[{"depends_on_id":"gt-abc"}]`, "[]")
-	if got := newAutoConvoyTown(t, bd).convoyByDescription("gt-abc"); got != "hq-cv-manual" {
+	town := convoyScanTown(t, nil, []string{"gt-abc"}, beads.Issue{ID: "hq-cv-manual", Description: "Manually created convoy"})
+	if got := town.convoyByDescription("gt-abc"); got != "hq-cv-manual" {
 		t.Errorf("convoyByDescription() = %q, want %q", got, "hq-cv-manual")
 	}
 }
@@ -627,9 +634,9 @@ func TestFindConvoyByDescription_FallsBackToTrackedDeps(t *testing.T) {
 // open convoy.
 func TestIsTrackedByConvoy_FoundViaDepList(t *testing.T) {
 	t.Parallel()
-	bd := convoyScanBD("[]", `[{"issue_id":"hq-cv-found"}]`, `[{"id":"hq-cv-found","issue_type":"convoy","status":"open"}]`)
-	if got := newAutoConvoyTown(t, bd).trackingConvoy("gt-abc"); got != "hq-cv-found" {
-		t.Errorf("trackingConvoy() = %q, want %q; bd log:\n%s", got, "hq-cv-found", bd.log())
+	town := convoyScanTown(t, []string{"hq-cv-found"}, nil, beads.Issue{ID: "hq-cv-found", Type: "convoy"})
+	if got := town.trackingConvoy("gt-abc"); got != "hq-cv-found" {
+		t.Errorf("trackingConvoy() = %q, want %q", got, "hq-cv-found")
 	}
 }
 
@@ -638,11 +645,11 @@ func TestIsTrackedByConvoy_FoundViaDepList(t *testing.T) {
 // a tracker bd show does not confirm as an open convoy does not count.
 func TestIsTrackedByConvoy_NotFound(t *testing.T) {
 	t.Parallel()
-	if got := newAutoConvoyTown(t, convoyScanBD("[]", "[]", "[]")).trackingConvoy("gt-zzz"); got != "" {
+	if got := convoyScanTown(t, nil, nil).trackingConvoy("gt-zzz"); got != "" {
 		t.Errorf("trackingConvoy() = %q, want empty string", got)
 	}
-	closed := convoyScanBD("[]", `[{"issue_id":"hq-cv-done"}]`, `[{"id":"hq-cv-done","issue_type":"convoy","status":"closed"}]`)
-	if got := newAutoConvoyTown(t, closed).trackingConvoy("gt-zzz"); got != "" {
+	closed := convoyScanTown(t, []string{"hq-cv-done"}, nil, beads.Issue{ID: "hq-cv-done", Type: "convoy", Status: "closed"})
+	if got := closed.trackingConvoy("gt-zzz"); got != "" {
 		t.Errorf("trackingConvoy() = %q for a closed tracker, want empty string", got)
 	}
 }
