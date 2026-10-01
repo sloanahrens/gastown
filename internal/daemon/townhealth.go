@@ -203,21 +203,28 @@ func (s *healthSources) countOpen(rig, label string, seen func(created time.Time
 	return n, nil
 }
 
-// OldestEscalation reads the town's open escalation wisps.
+// OldestEscalation reads the town's open escalations the way `gt escalate list`
+// reads them: both bead planes, minus the mail carriers routed for each
+// escalation. A carrier carries gt:escalation and outlives the escalation it
+// delivered, so counting one ages the field past every row the display path
+// shows (gt-9k2bx).
+//
+// The read is pinned to the town database, where notify.Raise files every
+// escalation.
 func (s *healthSources) OldestEscalation(ctx context.Context) (time.Time, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, false, err
 	}
 	env := bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(s.townRoot()))
 	issues, err := s.d.workBeads(env, townHealthBDTimeout).List(beads.ListOptions{
-		Label: "gt:escalation", Status: "open", Ephemeral: true, Priority: -1,
+		Label: "gt:escalation", Status: "open", IncludeInfra: true, Priority: -1,
 	})
 	if err != nil {
 		return time.Time{}, false, err
 	}
 	var oldest time.Time
 	for _, is := range issues {
-		if is == nil {
+		if !beads.IsEscalationRecord(is) {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339, is.CreatedAt)
