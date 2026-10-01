@@ -338,12 +338,12 @@ func hasSlingContext(t *testing.T, hqPath, workBeadID string) bool {
 // Tests
 // --------------------------------------------------------------------------
 
-// TestSchedulerSingleRigChecks runs the single-rig checks that leave the town
+// TestIntegrationSchedulerSingleRigChecks runs the single-rig checks that leave the town
 // as they found it (refusals, a dry run, a circuit-broken context the
 // scheduler skips) against one town, so they pay for its bd inits once. They
 // run in order: none creates a queued context or a convoy, which
 // CircuitBreakerExclusion and SlingDryRun assert on the whole town.
-func TestSchedulerSingleRigChecks(t *testing.T) {
+func TestIntegrationSchedulerSingleRigChecks(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 	t.Run("CircuitBreakerExclusion", func(t *testing.T) { checkSchedulerCircuitBreakerExclusion(t, hqPath, rigPath, gtBinary, env) })
@@ -355,9 +355,9 @@ func TestSchedulerSingleRigChecks(t *testing.T) {
 	t.Run("ScheduleBead_ClosedForceDoesNotBypass", func(t *testing.T) { checkScheduleBeadClosedForceDoesNotBypass(t, hqPath, rigPath, gtBinary, env) })
 }
 
-// TestSchedulerMultiRigChecks is TestSchedulerSingleRigChecks for the
+// TestIntegrationSchedulerMultiRigChecks is TestIntegrationSchedulerSingleRigChecks for the
 // multi-rig refusals and the epic dry run.
-func TestSchedulerMultiRigChecks(t *testing.T) {
+func TestIntegrationSchedulerMultiRigChecks(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 	t.Run("ConvoyFlagRejection", func(t *testing.T) { checkSchedulerConvoyFlagRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
@@ -406,10 +406,10 @@ func checkSchedulerCircuitBreakerExclusion(t *testing.T, hqPath, rigPath, gtBina
 	}
 }
 
-// TestSchedulerAutoConvoyCreation verifies that gt sling deferred dispatch (max_polecats > 0)
+// TestIntegrationSchedulerAutoConvoyCreation verifies that gt sling deferred dispatch (max_polecats > 0)
 // creates an auto-convoy, stores the convoy ID in the sling context, and the
 // convoy is resolvable via bd show.
-func TestSchedulerAutoConvoyCreation(t *testing.T) {
+func TestIntegrationSchedulerAutoConvoyCreation(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -486,9 +486,9 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 	}
 }
 
-// TestSchedulerBlockedStatusReporting verifies that scheduler list correctly reports
+// TestIntegrationSchedulerBlockedStatusReporting verifies that scheduler list correctly reports
 // blocked:true/false and scheduler status reports correct queued_ready count.
-func TestSchedulerBlockedStatusReporting(t *testing.T) {
+func TestIntegrationSchedulerBlockedStatusReporting(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -611,7 +611,7 @@ func TestSchedulerBlockedStatusReporting(t *testing.T) {
 	}
 }
 
-func TestSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
+func TestIntegrationSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -644,7 +644,7 @@ func TestSchedulerQueuedContextOpenSourceIsReady(t *testing.T) {
 	}
 }
 
-func TestSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
+func TestIntegrationSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -704,7 +704,7 @@ func TestSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) {
 	}
 }
 
-func TestSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T) {
+func TestIntegrationSchedulerClosedSourceContextCleansUpFailClosed(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -790,9 +790,9 @@ func checkSchedulerSlingDryRun(t *testing.T, hqPath, rigPath, gtBinary string, e
 	}
 }
 
-// TestSchedulerSlingContextIdempotency verifies that scheduling a bead twice
+// TestIntegrationSchedulerSlingContextIdempotency verifies that scheduling a bead twice
 // produces only a single sling context (idempotency).
-func TestSchedulerSlingContextIdempotency(t *testing.T) {
+func TestIntegrationSchedulerSlingContextIdempotency(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -820,9 +820,9 @@ func TestSchedulerSlingContextIdempotency(t *testing.T) {
 	}
 }
 
-// TestSchedulerSlingContextWorkBeadPristine verifies that scheduling a bead
+// TestIntegrationSchedulerSlingContextWorkBeadPristine verifies that scheduling a bead
 // does NOT modify the work bead's description or labels.
-func TestSchedulerSlingContextWorkBeadPristine(t *testing.T) {
+func TestIntegrationSchedulerSlingContextWorkBeadPristine(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -981,10 +981,10 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	return hqPath, rig1Path, rig2Path, gtBinary, env
 }
 
-// TestSchedulerMultiRigDispatch verifies that scheduler list and status correctly
+// TestIntegrationSchedulerMultiRigDispatch verifies that scheduler list and status correctly
 // discover scheduled beads across multiple rigs. beadsSearchDirs scans all
 // rig directories under the town root.
-func TestSchedulerMultiRigDispatch(t *testing.T) {
+func TestIntegrationSchedulerMultiRigDispatch(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
@@ -1032,7 +1032,7 @@ func TestSchedulerMultiRigDispatch(t *testing.T) {
 	}
 }
 
-func TestSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
+func TestIntegrationSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
 	t.Parallel()
 	hqPath, _, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
@@ -1081,10 +1081,10 @@ func TestSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *testing.T) {
 // and convoys.
 // --------------------------------------------------------------------------
 
-// TestSchedulerMultiRigEpicAutoResolve verifies that gt sling <epic> deferred dispatch (max_polecats > 0)
+// TestIntegrationSchedulerMultiRigEpicAutoResolve verifies that gt sling <epic> deferred dispatch (max_polecats > 0)
 // auto-resolves each child's target rig from its prefix. An epic in rig1 with
 // children in rig1 and rig2 should schedule each child to its respective rig.
-func TestSchedulerMultiRigEpicAutoResolve(t *testing.T) {
+func TestIntegrationSchedulerMultiRigEpicAutoResolve(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
@@ -1235,10 +1235,10 @@ func checkSchedulerMixedBatchRejection(t *testing.T, hqPath, rig1Path, rig2Path,
 	}
 }
 
-// TestSchedulerMultiRigConvoyAutoResolve verifies that gt sling <convoy> deferred dispatch (max_polecats > 0)
+// TestIntegrationSchedulerMultiRigConvoyAutoResolve verifies that gt sling <convoy> deferred dispatch (max_polecats > 0)
 // auto-resolves each tracked issue's target rig from its prefix. A convoy in HQ
 // tracking beads in rig1 and rig2 should schedule each bead to its respective rig.
-func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
+func TestIntegrationSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
@@ -1259,7 +1259,7 @@ func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
 	addBeadDependencyOfType(t, convoyID, bead2ExtRef, "tracks", hqPath)
 
 	// Wait for bd's issues.jsonl timestamp to settle (same race as
-	// TestSchedulerDirectConvoyDispatch — 1-second granularity stale check).
+	// TestIntegrationSchedulerDirectConvoyDispatch — 1-second granularity stale check).
 	time.Sleep(2 * time.Second)
 
 	// Dry-run: verify auto-rig-resolution routes each bead correctly.
@@ -1310,9 +1310,9 @@ func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
 // Dispatch mode tests (direct, disabled)
 // --------------------------------------------------------------------------
 
-// TestSchedulerDisabledMode verifies that max_polecats=0 behaves as direct dispatch
+// TestIntegrationSchedulerDisabledMode verifies that max_polecats=0 behaves as direct dispatch
 // (same as -1). Beads should NOT be queued — they fall through to normal dispatch.
-func TestSchedulerDisabledMode(t *testing.T) {
+func TestIntegrationSchedulerDisabledMode(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -1336,9 +1336,9 @@ func TestSchedulerDisabledMode(t *testing.T) {
 	}
 }
 
-// TestSchedulerDirectModeNoQueue verifies that max_polecats=-1 (direct dispatch mode)
+// TestIntegrationSchedulerDirectModeNoQueue verifies that max_polecats=-1 (direct dispatch mode)
 // does not queue beads. Scheduler run and status should show zero queued.
-func TestSchedulerDirectModeNoQueue(t *testing.T) {
+func TestIntegrationSchedulerDirectModeNoQueue(t *testing.T) {
 	t.Parallel()
 	hqPath, _, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -1401,9 +1401,9 @@ func checkSchedulerDeferredNonRigRejection(t *testing.T, hqPath, rigPath, gtBina
 	}
 }
 
-// TestSchedulerDirectEpicDispatch verifies that gt sling <epic-id> --dry-run
+// TestIntegrationSchedulerDirectEpicDispatch verifies that gt sling <epic-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
-func TestSchedulerDirectEpicDispatch(t *testing.T) {
+func TestIntegrationSchedulerDirectEpicDispatch(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 
@@ -1451,9 +1451,9 @@ func checkSchedulerBatchEpicRejection(t *testing.T, hqPath, rig1Path, rig2Path, 
 	}
 }
 
-// TestSchedulerInvalidJSONContextCleanup verifies that sling context beads with
+// TestIntegrationSchedulerInvalidJSONContextCleanup verifies that sling context beads with
 // invalid JSON descriptions get closed as "invalid-context" during stale cleanup.
-func TestSchedulerInvalidJSONContextCleanup(t *testing.T) {
+func TestIntegrationSchedulerInvalidJSONContextCleanup(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -1491,11 +1491,11 @@ func TestSchedulerInvalidJSONContextCleanup(t *testing.T) {
 	}
 }
 
-// TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig verifies the non-dry-run
+// TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig verifies the non-dry-run
 // scheduler path uses the same env-routing boundary as direct sling. The parent
 // process is poisoned with HQ BEADS_* selectors; dispatch must still hook and
 // update the rig-owned work bead in the target rig database.
-func TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
+func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Polluted env actual dispatch")
@@ -1556,7 +1556,7 @@ func TestSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	}
 }
 
-func TestSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
+func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Polluted env formula dispatch")
@@ -1623,7 +1623,7 @@ func TestSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	}
 }
 
-func TestSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
+func TestIntegrationSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
 	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Record dispatch failure in source DB")
@@ -1680,9 +1680,9 @@ func TestSchedulerDispatchFailureRecordedInContextSourceDB(t *testing.T) {
 	}
 }
 
-// TestSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
+// TestIntegrationSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
 // with max_polecats=-1 (direct mode) routes to the direct dispatch path.
-func TestSchedulerDirectConvoyDispatch(t *testing.T) {
+func TestIntegrationSchedulerDirectConvoyDispatch(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
 

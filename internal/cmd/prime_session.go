@@ -271,20 +271,31 @@ func (e primeHookEnv) runtimeStateSearched(name string) string {
 }
 
 // resolveSessionIDForPrime finds the session ID from available sources.
-// Priority: GT_SESSION_ID env, CLAUDE_SESSION_ID env, persisted file, fallback.
+// Priority: the ID this run's hook read, the runtime's session ID env,
+// persisted file, fallback.
 func resolveSessionIDForPrime(actor string) string {
-	// 1. Try runtime's session ID lookup (checks GT_SESSION_ID_ENV, then CLAUDE_SESSION_ID)
-	if id := runtime.SessionIDFromEnv(); id != "" {
+	return sessionIDForPrime(primeHookSessionID, runtime.SessionIDFromEnv, ReadPersistedSessionID, actor, os.Getpid())
+}
+
+// sessionIDForPrime is resolveSessionIDForPrime over its sources.
+func sessionIDForPrime(hookID string, fromEnv, persisted func() string, actor string, pid int) string {
+	// 1. The session ID gt prime --hook read in this run.
+	if hookID != "" {
+		return hookID
+	}
+
+	// 2. Runtime's session ID lookup (checks GT_SESSION_ID_ENV, then CLAUDE_SESSION_ID)
+	if id := fromEnv(); id != "" {
 		return id
 	}
 
-	// 2. Persisted session file (from gt prime --hook)
-	if id := ReadPersistedSessionID(); id != "" {
+	// 3. Persisted session file (from gt prime --hook)
+	if id := persisted(); id != "" {
 		return id
 	}
 
-	// 3. Fallback to generated identifier
-	return fmt.Sprintf("%s-%d", actor, os.Getpid())
+	// 4. Fallback to generated identifier
+	return fmt.Sprintf("%s-%d", actor, pid)
 }
 
 // isRuntimeHookInvocation reports whether the *runtime* invoked this run as a

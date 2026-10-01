@@ -2222,6 +2222,8 @@ func (h *host) Start(townRoot string) error {
 		return fmt.Errorf("writing Dolt config: %w", err)
 	}
 	cmd := NewSQLServerCommand("dolt", config.DataDir, configPath)
+	cmd.Env = h.environ()
+	cmd.Env = doltSQLServerEnv(cmd.Environ()) // as NewSQLServerCommand, over h's environment
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -2337,6 +2339,13 @@ func (h *host) Start(townRoot string) error {
 // Start is (*host).Start on the real machine.
 func Start(townRoot string) error {
 	return std.Start(townRoot)
+}
+
+// StartWithEnv is Start reading env over the process environment, for its
+// config and for the sql-server it starts, without writing the process
+// environment.
+func StartWithEnv(townRoot string, env map[string]string) error {
+	return std.withEnv(env).Start(townRoot)
 }
 
 // WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/

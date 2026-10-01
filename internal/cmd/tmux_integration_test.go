@@ -165,7 +165,7 @@ func markPaneBusy(t *testing.T, tm *tmux.Tmux, session string) {
 	}
 }
 
-// TestMarkPaneBusy_BarrierIgnoresEchoedCommand guards gt-a53g: markPaneBusy's
+// TestIntegrationMarkPaneBusy_BarrierIgnoresEchoedCommand guards gt-a53g: markPaneBusy's
 // barrier must be satisfied by the command's executed output, never by the
 // shell's echo of the typed line.
 //
@@ -173,7 +173,7 @@ func markPaneBusy(t *testing.T, tm *tmux.Tmux, session string) {
 // tty and read back by cat but never executed, however long the test waits —
 // the withheld-Enter condition the barrier has to refuse, with no dependence on
 // the host's $SHELL, prompt, or rc files.
-func TestMarkPaneBusy_BarrierIgnoresEchoedCommand(t *testing.T) {
+func TestIntegrationMarkPaneBusy_BarrierIgnoresEchoedCommand(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -217,10 +217,10 @@ func TestMarkPaneBusy_BarrierIgnoresEchoedCommand(t *testing.T) {
 	}
 }
 
-// TestFindTestSockets_Integration verifies that findTestSockets discovers
+// TestIntegrationFindTestSockets verifies that findTestSockets discovers
 // active gt-test-* sockets. This test creates a temporary tmux server on a
 // gt-test-* socket, verifies discovery, then cleans up.
-func TestFindTestSockets_Integration(t *testing.T) {
+func TestIntegrationFindTestSockets(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux socket discovery unreliable on Windows")
 	}
@@ -257,9 +257,9 @@ func TestFindTestSockets_Integration(t *testing.T) {
 	}
 }
 
-// TestFindTestSockets_SkipsNonTestSockets verifies that findTestSockets only
+// TestIntegrationFindTestSockets_SkipsNonTestSockets verifies that findTestSockets only
 // returns gt-test-* sockets, not the town socket or other custom sockets.
-func TestFindTestSockets_SkipsNonTestSockets(t *testing.T) {
+func TestIntegrationFindTestSockets_SkipsNonTestSockets(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
@@ -272,7 +272,7 @@ func TestFindTestSockets_SkipsNonTestSockets(t *testing.T) {
 	}
 }
 
-func TestIsAgentSessionHealthy_DeadPane(t *testing.T) {
+func TestIntegrationIsAgentSessionHealthy_DeadPane(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -318,7 +318,7 @@ func TestIsAgentSessionHealthy_DeadPane(t *testing.T) {
 	}
 }
 
-func TestFindRigSessions(t *testing.T) {
+func TestIntegrationFindRigSessions(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -374,7 +374,7 @@ func TestFindRigSessions(t *testing.T) {
 	}
 }
 
-func TestFindRigSessions_NoSessions(t *testing.T) {
+func TestIntegrationFindRigSessions_NoSessions(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -393,13 +393,13 @@ func TestFindRigSessions_NoSessions(t *testing.T) {
 	}
 }
 
-// TestDeliverNudge_ImmediateMode_RefusesBusyTarget guards gt-cyyg:
+// TestIntegrationDeliverNudge_ImmediateMode_RefusesBusyTarget guards gt-cyyg:
 // --mode=immediate must not send straight into a busy target. It reproduces
 // the shape of the incident (gastown/refinery interrupted mid a long-running
 // tool call) by rendering the Claude Code busy spinner into a real pane, then
 // asserts the nudge is queued for wait-idle delivery instead of typed
 // directly into the busy composer.
-func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
+func TestIntegrationDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -465,12 +465,12 @@ func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	}
 }
 
-// TestWatchAndDeliver_TimeoutReportsGivingUp covers the second half of
+// TestIntegrationWatchAndDeliver_TimeoutReportsGivingUp covers the second half of
 // gt-z4gs: the watcher's timeout path must say it gave up on stderr, and the
 // nudge must stay queued rather than vanish, so a caller (including the
 // --mode=immediate busy-refusal fallback this watcher serves) can tell "gave
 // up, still queued" from "delivered".
-func TestWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
+func TestIntegrationWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -486,7 +486,7 @@ func TestWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
 
 	// Keep the pane busy for the life of the test so WaitForIdle never
 	// succeeds and the watcher runs out its full timeout (same technique as
-	// TestDeliverNudge_ImmediateMode_RefusesBusyTarget).
+	// TestIntegrationDeliverNudge_ImmediateMode_RefusesBusyTarget).
 	markPaneBusy(t, tm, sessionName)
 
 	townRoot := t.TempDir()
@@ -516,11 +516,11 @@ func TestWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
 	}
 }
 
-// TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal guards the
+// TestIntegrationDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal guards the
 // escape-hatch half of gt-cyyg: --force must still deliver immediately even
 // when the target is busy, since --mode=immediate --force is the documented
 // way to break through a stuck agent.
-func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
+func TestIntegrationDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -554,7 +554,7 @@ func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
 	waitForPaneText(t, tm, sessionName, message, 40)
 }
 
-// rigTestRegistry maps the rig prefixes TestFindRigSessions uses. zz-prefixed
+// rigTestRegistry maps the rig prefixes TestIntegrationFindRigSessions uses. zz-prefixed
 // names avoid collisions with real rig sessions.
 func rigTestRegistry() *session.PrefixRegistry {
 	reg := session.NewPrefixRegistry()

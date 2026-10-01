@@ -18,10 +18,10 @@ type hookShowJSON struct {
 	Status string `json:"status"`
 }
 
-// TestHookShowShorthandResolvesToCanonical verifies that hook show accepts
+// TestIntegrationHookShowShorthandResolvesToCanonical verifies that hook show accepts
 // shorthand polecat targets (rig/name) and resolves them to canonical
 // assignee IDs (rig/polecats/name) before querying hooked work.
-func TestHookShowShorthandResolvesToCanonical(t *testing.T) {
+func TestIntegrationHookShowShorthandResolvesToCanonical(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
 	}

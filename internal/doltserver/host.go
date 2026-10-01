@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"syscall"
 	"time"
 
@@ -98,6 +99,35 @@ func (h *host) environ() []string {
 		return h.environList()
 	}
 	return os.Environ()
+}
+
+// withEnv is a copy of h that reads env over its own environment: lookups
+// find env first, and a child inherits h's environment with env appended,
+// so env's values win.
+func (h *host) withEnv(env map[string]string) *host {
+	if len(env) == 0 {
+		return h
+	}
+	c := *h
+	c.lookupEnv = func(key string) (string, bool) {
+		if v, ok := env[key]; ok {
+			return v, true
+		}
+		return h.lookupEnvVar(key)
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	c.environList = func() []string {
+		out := h.environ()
+		for _, k := range keys {
+			out = append(out, k+"="+env[k])
+		}
+		return out
+	}
+	return &c
 }
 
 // exec runs cmd: the process on the real machine, h.run's answer otherwise.

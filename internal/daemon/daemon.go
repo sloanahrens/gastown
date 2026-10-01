@@ -585,10 +585,11 @@ func New(config *Config) (*Daemon, error) {
 }
 
 // processEnv writes the daemon's own process environment. It is the one
-// place the daemon does: New publishes the town root, daemon.json's env, the
-// augmented PATH and the Dolt endpoint here so every session, bd and gt it
-// starts inherits them, and the libraries that build those children
-// (config.AgentEnv, internal/beads) read the process environment.
+// place the daemon does: PublishIdentity publishes the daemon's identity and
+// New the town root, daemon.json's env, the augmented PATH and the Dolt
+// endpoint here so every session, bd and gt it starts inherits them, and the
+// libraries that build those children (config.AgentEnv, internal/beads) read
+// the process environment.
 type processEnv struct{}
 
 func (processEnv) Setenv(key, value string) {

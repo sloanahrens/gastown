@@ -381,11 +381,11 @@ func restartMayor(mgr mayorStopper, sup *supervisor.Supervisor, actor string, st
 // for the Mayor (it cannot operate without database access).
 // Daemon failures are non-fatal (warned but do not block).
 func ensureMayorInfra(townRoot string) error {
-	// Load daemon.json env vars (e.g., GT_DOLT_LOGLEVEL) for the Dolt start below.
+	// daemon.json's env (e.g., GT_DOLT_LOGLEVEL) for the Dolt start below,
+	// handed to it rather than written into this process's environment.
+	var daemonEnv map[string]string
 	if patrolCfg := daemon.LoadPatrolConfig(townRoot); patrolCfg != nil {
-		for k, v := range patrolCfg.Env {
-			os.Setenv(k, v)
-		}
+		daemonEnv = patrolCfg.Env
 	}
 
 	// Daemon (non-fatal)
@@ -408,7 +408,7 @@ func ensureMayorInfra(townRoot string) error {
 			doltRunning, _, _ := doltserver.IsRunning(townRoot)
 			if !doltRunning {
 				style.PrintWarning("Dolt server is not running, starting...")
-				if err := doltserver.Start(townRoot); err != nil {
+				if err := doltserver.StartWithEnv(townRoot, daemonEnv); err != nil {
 					// Enrich port-conflict errors with a concrete free-port suggestion.
 					msg := fmt.Sprintf("Dolt server start failed: %v", err)
 					if pid, dataDir := doltserver.PortHolder(doltCfg.Port); pid > 0 {
