@@ -712,6 +712,11 @@ type Beads struct {
 	// exactly plainEnv, and none of the routing policy below applies.
 	plain    bool
 	plainEnv []string
+	// budget, when set, replaces subprocessTimeoutFor's deadline: a test
+	// that drives a deadline kill through the runner seam waits
+	// milliseconds, not the env-var minimum of 1s.
+	budget time.Duration
+
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
 	// accessMode marks a wrapper built by NewPinned: each call runs
@@ -802,6 +807,8 @@ type beadsFields struct {
 	exec       bdRunFunc
 	bin        string
 	baseEnv    []string
+	// budget replaces every call's subprocess deadline; tests only.
+	budget time.Duration
 }
 
 // Option configures a Beads at construction.
@@ -850,6 +857,7 @@ func newBeads(f beadsFields) *Beads {
 		exec:       f.exec,
 		bin:        f.bin,
 		baseEnv:    f.baseEnv,
+		budget:     f.budget,
 	}
 }
 
@@ -1361,6 +1369,9 @@ func subprocessTimeoutFor(args []string, testContainer bool) time.Duration {
 
 // subprocessTimeout is subprocessTimeoutFor for this wrapper's target.
 func (b *Beads) subprocessTimeout(args []string) time.Duration {
+	if b.budget > 0 {
+		return b.budget
+	}
 	return subprocessTimeoutFor(args, b.targetsTestDoltContainer())
 }
 
