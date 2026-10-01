@@ -106,7 +106,7 @@ func hangThenOM(t *testing.T, hangs int, calls *int) runFunc {
 
 // TestOMReviewerRunsOnce: om is never retried. A run that hangs past its
 // timeout is killed and reported as ErrOMTimeout; a run that fails fast is
-// reported too; either way om ran once (Sloan 2026-10-01).
+// reported too; either way om ran once (gt-is0ep).
 func TestOMReviewerRunsOnce(t *testing.T) {
 	t.Parallel()
 	calls := 0

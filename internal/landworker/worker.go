@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -70,6 +71,11 @@ const (
 	// infraAnnounceAfter is how many consecutive infrastructure failures on
 	// one bead earn it a comment saying why it is not landing.
 	infraAnnounceAfter = 3
+	// DefaultLintTimeoutEscalateAfter is the run of lint-stage timeouts on one
+	// bead that earns an escalation. A lint timeout is an infrastructure
+	// failure retried every pass, so a hung lint or a stuck lock holder would
+	// otherwise idle the bead unseen (gt-j8ade).
+	DefaultLintTimeoutEscalateAfter = 3
 )
 
 // Worker lands one rig's ready work, serially.
@@ -107,13 +113,20 @@ type Worker struct {
 	Active func(beadID string)
 	// Escalate, when set, raises a rejection left for a human (gt:needs-human)
 	// to the operator, so it is not waiting unseen on a label: an om review
-	// that returned no verdict, a stage timeout, a policy refusal (Sloan
-	// 2026-10-01). It runs in its own goroutine; the pass does not wait.
+	// that returned no verdict, a stage timeout, a policy refusal (gt-is0ep).
+	// It also raises a bead whose lint stage timed out LintTimeoutEscalateAfter
+	// times in a row (gt-j8ade). It runs in its own goroutine, which recovers
+	// and logs a panic; the pass does not wait.
 	Escalate func(beadID, message string)
-	Logf     func(format string, args ...any)
-	Now      func() time.Time
+	// LintTimeoutEscalateAfter is how many consecutive lint-stage timeouts on
+	// one bead raise a single escalation; 0 means DefaultLintTimeoutEscalateAfter.
+	LintTimeoutEscalateAfter int
+	Logf                     func(format string, args ...any)
+	Now                      func() time.Time
 
 	state map[string]*beadState
+	// escWG lets a test wait for Escalate goroutines.
+	escWG sync.WaitGroup
 	// pendingRepair holds landings whose record was left incomplete; the
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
@@ -137,6 +150,9 @@ type beadState struct {
 	failures  int
 	until     time.Time
 	announced string
+	// lintTimeouts counts consecutive lint-stage timeouts; any other outcome
+	// resets it.
+	lintTimeouts int
 }
 
 // Report counts one pass's outcomes.
@@ -445,7 +461,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 
 	st := w.bead(work.BeadID)
 	_, wasRepair := w.pendingRepair[work.BeadID]
-	switch classify(ctx, err) {
+	oc := classify(ctx, err)
+	if oc != outInfra {
+		st.lintTimeouts = 0
+	}
+	switch oc {
 	case outLanded:
 		delete(w.pendingRepair, work.BeadID)
 		delete(w.state, work.BeadID)
@@ -496,10 +516,8 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		errors.As(err, &rej)
 		rep.Rejected++
 		w.logf("%s: %v (left for a human: %s)", work.BeadID, err, land.LabelNeedsHuman)
-		if w.Escalate != nil {
-			go w.Escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for a human (%s): %s",
-				work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
-		}
+		w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for a human (%s): %s",
+			work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
 		if rej.RecordErr != nil {
 			st.until = w.now().Add(rejectRecordBackoff)
 			return
@@ -523,7 +541,48 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: stopped: %v", work.BeadID, err)
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
+		w.countLintTimeout(work, err)
 	}
+}
+
+// escalate calls Escalate in its own goroutine. A panic in it is logged, not
+// fatal: the daemon outlives a broken alert path.
+func (w *Worker) escalate(beadID, message string) {
+	if w.Escalate == nil {
+		return
+	}
+	w.escWG.Add(1)
+	go func() {
+		defer w.escWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				w.logf("%s: escalation panicked: %v", beadID, r)
+			}
+		}()
+		w.Escalate(beadID, message)
+	}()
+}
+
+// countLintTimeout tracks consecutive lint-stage timeouts on one bead and
+// escalates once, on reaching LintTimeoutEscalateAfter. The next landing
+// outcome that is not a lint timeout clears the count (landing or rejecting
+// deletes the bead's state), so a fresh run escalates again.
+func (w *Worker) countLintTimeout(work land.Work, err error) {
+	st := w.bead(work.BeadID)
+	if !errors.Is(err, land.ErrLintTimeout) {
+		st.lintTimeouts = 0
+		return
+	}
+	st.lintTimeouts++
+	limit := w.LintTimeoutEscalateAfter
+	if limit <= 0 {
+		limit = DefaultLintTimeoutEscalateAfter
+	}
+	if st.lintTimeouts != limit {
+		return
+	}
+	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) stuck at the lint stage: it timed out %d times in a row (%v). The worker keeps retrying and no rework is needed; look for a hung lint or a golangci-lint lock holder.",
+		work.BeadID, work.Branch, work.Head, st.lintTimeouts, err))
 }
 
 // maxCommentFindings bounds the om findings one rework comment lists.

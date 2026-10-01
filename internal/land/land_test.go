@@ -656,6 +656,9 @@ func TestLandLintTimeoutIsInfra(t *testing.T) {
 	if !errors.As(err, &infra) || infra.Stage != "gate" {
 		t.Fatalf("Land error = %T %v, want *InfraError at gate", err, err)
 	}
+	if !errors.Is(err, ErrLintTimeout) {
+		t.Errorf("Land error = %v; want it to wrap ErrLintTimeout so the worker can count it", err)
+	}
 	f.assertUntouched(t)
 }
 
@@ -677,6 +680,30 @@ func TestLandRevertLandsWhenOMHasNoVerdict(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.Verdict.Verdict, VerdictErrorPrefix) || f.originMain() != res.LandedCommit {
 		t.Fatalf("verdict %q, want error:<reason> and a landing", res.Verdict.Verdict)
+	}
+	var rec LandingRecord
+	if err := json.Unmarshal([]byte(f.landingLines()[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rec.OMVerdict, VerdictErrorPrefix) {
+		t.Fatalf("landings file om_verdict = %q; want error:<reason>", rec.OMVerdict)
+	}
+}
+
+// TestLandOMBypassIsScopedToTheLabel: ReviewErrorLandsLabels frees only the
+// beads that carry the label. A bead without gt:revert whose om returned no
+// verdict still goes to gt:needs-human and never lands unreviewed (gt-j8ade).
+func TestLandOMBypassIsScopedToTheLabel(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, ErrOMTimeout }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	l.ReviewErrorLandsLabels = []string{"gt:revert"}
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if rej.Rework {
+		t.Errorf("rejection = %+v; an om error is not rework", rej)
 	}
 }
 

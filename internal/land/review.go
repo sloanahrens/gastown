@@ -120,8 +120,7 @@ type OMReviewer struct {
 
 // Review runs om once and returns its verdict. A run that produces none
 // (timeout, execution error, missing or malformed verdict) is not retried:
-// it fails, and the landing goes to a human who reviews instead (Sloan
-// 2026-10-01).
+// it fails, and the landing goes to a human who reviews instead (gt-is0ep).
 func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict, error) {
 	return r.reviewOnce(ctx, dir, base, head)
 }
