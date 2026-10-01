@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -140,6 +141,21 @@ func init() {
 	rootCmd.AddCommand(upCmd)
 }
 
+// syncUpFormulas writes the formulas this binary ships into the town formulas
+// dir. The binary is canonical (gt-y3pgh.6): gt up syncs as gt install does, so
+// an upgraded binary's formulas reach disk and a hand-edited copy is replaced.
+// Files gt does not own are left on disk for gt doctor to report.
+func syncUpFormulas(townRoot string, out, errOut io.Writer) {
+	count, err := formula.ProvisionFormulas(townRoot)
+	if err != nil {
+		fmt.Fprintf(errOut, "Warning: could not sync formulas: %v\n", err)
+		return
+	}
+	if count > 0 {
+		fmt.Fprintf(out, "%s Synced %d formulas from this binary\n", style.SuccessPrefix, count)
+	}
+}
+
 func runUp(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -182,6 +198,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 	} else if changed && !upQuiet {
 		fmt.Printf("%s DND was enabled; reset to normal for current agent\n", style.SuccessPrefix)
 	}
+
+	// Formulas land before any agent starts and cooks one.
+	formulaOut := io.Writer(os.Stdout)
+	if upQuiet || upJSON {
+		formulaOut = io.Discard
+	}
+	syncUpFormulas(townRoot, formulaOut, os.Stderr)
 
 	// Start Dolt, the daemon and the mayor in parallel
 	var daemonErr error

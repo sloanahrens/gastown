@@ -1,8 +1,14 @@
 package cmd
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/formula"
 )
 
 func TestAgentStartResult_Fields(t *testing.T) {
@@ -56,5 +62,42 @@ func TestWaitForDoltReady_NoServerMode(t *testing.T) {
 
 	if elapsed > 1*time.Second {
 		t.Errorf("waitForDoltReady took %v with no server mode, should return immediately", elapsed)
+	}
+}
+
+// gt up writes the formulas the binary ships, replacing a hand-edited copy,
+// and says nothing once the town already matches (gt-y3pgh.6).
+func TestSyncUpFormulas_ReplacesDriftThenIsQuiet(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	var out, errOut bytes.Buffer
+
+	syncUpFormulas(townRoot, &out, &errOut)
+	if !strings.Contains(out.String(), "Synced") || errOut.Len() != 0 {
+		t.Fatalf("first sync: out=%q err=%q", out.String(), errOut.String())
+	}
+
+	const name = "mol-polecat-work.formula.toml"
+	path := filepath.Join(townRoot, ".beads", "formulas", name)
+	if err := os.WriteFile(path, []byte("hand edit"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	syncUpFormulas(townRoot, &out, &errOut)
+	if !strings.Contains(out.String(), "Synced 1 formulas") {
+		t.Fatalf("drift sync: out=%q", out.String())
+	}
+	want, err := formula.GetEmbeddedFormulaContent(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, want) {
+		t.Fatal("hand-edited copy was not replaced with the embedded formula")
+	}
+
+	out.Reset()
+	syncUpFormulas(townRoot, &out, &errOut)
+	if out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("in-sync town: out=%q err=%q", out.String(), errOut.String())
 	}
 }
