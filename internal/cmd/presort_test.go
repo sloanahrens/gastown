@@ -35,3 +35,14 @@ func presortCommandTree(c *cobra.Command) {
 		presortCommandTree(sub)
 	}
 }
+
+// prepareTestCommandTree is what both TestMains call (the unit build in
+// hermetic_main_test.go, the integration build in
+// integration_testmain_test.go): it installs the strict completion command,
+// as Execute does, and then presorts. The integration TestMain once skipped
+// it, and the parallel tree walkers there raced cobra's first sort
+// (gt-jz03n.6: "gt slot run", "gt rig add" reported not in the tree).
+func prepareTestCommandTree() {
+	strictCompletionCmd(rootCmd)
+	presortCommandTree(rootCmd)
+}
