@@ -10,8 +10,9 @@ import (
 
 // runDaemonTests is the body of both tiers' TestMain: it runs the package's
 // tests under the hermetic harness (gt-lwi) — GT_*/BD_* env scrubbed, HOME
-// and town root redirected to a sandbox, and a tripwire that fails the run if
-// state leaks into a live town — and returns the exit code. setup, when not
+// and town root redirected to a sandbox, workspace resolution refusing the
+// live town (leaks there are gt doctor test-leaks' job, gt-ik4a1.3) — and
+// returns the exit code. setup, when not
 // nil, runs once the harness has scrubbed the environment.
 func runDaemonTests(m *testing.M, setup func(), opts ...testutil.HermeticOption) int {
 	h, err := testutil.StartHermetic(opts...)

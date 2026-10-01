@@ -37,6 +37,13 @@ func TestIsIdleForUpgrade(t *testing.T) {
 		{"compactor dog running", func(_ *testing.T, d *Daemon) { d.compactorDogRunning = true }, false},
 		{"scheduled slings running", func(_ *testing.T, d *Daemon) { d.scheduledSlingsRunning.Store(true) }, false},
 		{"mayor dispatch running", func(_ *testing.T, d *Daemon) { d.mayorDispatchRunning.Store(true) }, false},
+		// gt-u641b: a restart mid-pass killed the merged-tree gate of an
+		// in-flight landing, twice in a row.
+		{"landing pass in flight", func(_ *testing.T, d *Daemon) { d.landingPasses.Add(1) }, false},
+		{"landing pass finished", func(_ *testing.T, d *Daemon) {
+			d.landingPasses.Add(1)
+			d.landingPasses.Add(-1)
+		}, true},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
 			writeInstallLock(t, d)
 		}, true},
