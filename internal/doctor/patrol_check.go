@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
@@ -158,13 +159,10 @@ func (c *PatrolNotStuckCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// stuckWispsQuery selects in_progress issues for stuck-wisp detection via Dolt.
-const stuckWispsQuery = `SELECT id, title, status, updated_at FROM issues WHERE status = 'in_progress' ORDER BY updated_at ASC`
-
 // checkStuckWispsDolt queries the Dolt database for stuck wisps using bd sql.
 // Returns an error if the query fails (caller should fall back to JSONL).
 func (c *PatrolNotStuckCheck) checkStuckWispsDolt(ctx *CheckContext, rigPath string, rigName string) ([]string, error) {
-	records, err := runBdSQLCSV(ctx, rigPath, stuckWispsQuery)
+	records, err := runBdSQLCSV(ctx, rigPath, beadsql.InProgressByAge())
 	if err != nil {
 		return nil, err
 	}

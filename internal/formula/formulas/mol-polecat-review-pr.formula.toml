@@ -263,7 +263,7 @@ PR_URL=$(cat <<'GT_PR_URL_EOF'
 {{pr_url}}
 GT_PR_URL_EOF
 )
-bd create --type=bug --title="Found during PR review: <description>" \
+gt bead create --type=bug --title="Found during PR review: <description>" \
   --description="Discovered while reviewing ${PR_URL}.
 
   <details of the issue>"
@@ -271,7 +271,7 @@ bd create --type=bug --title="Found during PR review: <description>" \
 
 **2. For improvements suggested but not required:**
 ```bash
-bd create --type=task --title="Improvement: <description>" \
+gt bead create --type=task --title="Improvement: <description>" \
   --description="Suggested during review of ${PR_URL}.
 
   <details of the improvement>"
@@ -279,7 +279,7 @@ bd create --type=task --title="Improvement: <description>" \
 
 **3. Update the tracking issue:**
 ```bash
-bd update {{issue}} --notes "Review complete. Decision: <APPROVE|REQUEST_CHANGES|etc>
+gt bead note {{issue}} "Review complete. Decision: <APPROVE|REQUEST_CHANGES|etc>
 Followups filed: <list of bead IDs if any>"
 ```
 

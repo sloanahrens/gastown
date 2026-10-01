@@ -3,15 +3,22 @@ package formula
 import (
 	"io/fs"
 	"regexp"
+	"strings"
 	"testing"
 )
 
-// rejectionWriteRE matches a `bd update ... <note-flag> "MERGE REJECTION ...`
-// write and captures the flag that carried the note.
-var rejectionWriteRE = regexp.MustCompile(`bd update[^\n]*?(--append-notes|--notes)\s+"?MERGE REJECTION`)
+// rejectionWriteRE matches a "MERGE REJECTION ..." note write and captures
+// what carried it: `gt bead note <id>`, or a bd update note flag.
+var rejectionWriteRE = regexp.MustCompile(`(gt bead note \S+|bd update[^\n]*?(?:--append-notes|--notes))\s+"?MERGE REJECTION`)
 
 // findingsWriteRE matches the polecat's own progress write on a resumed bead.
-var findingsWriteRE = regexp.MustCompile(`bd update[^\n]*?(--append-notes|--notes)\s+"Findings so far`)
+var findingsWriteRE = regexp.MustCompile(`(gt bead note \S+|bd update[^\n]*?(?:--append-notes|--notes))\s+"Findings so far`)
+
+// appends reports whether a matched note write appends: gt bead note always
+// does (gt-7iwy0.8); a bd update only with --append-notes.
+func appends(writer string) bool {
+	return strings.HasPrefix(writer, "gt bead note ") || strings.HasSuffix(writer, "--append-notes")
+}
 
 // gt-nxvg: `--notes` REPLACES a bead's notes. A rejection write through it
 // wiped the polecat's implementation notes, and the resume path
@@ -47,8 +54,8 @@ func TestFormulaNotesWritesAppend(t *testing.T) {
 				tc.file, len(matches), tc.minMatch)
 		}
 		for _, m := range matches {
-			if m[1] != "--append-notes" {
-				t.Errorf("%s: note write uses %s; it must append so prior notes survive", tc.file, m[1])
+			if !appends(m[1]) {
+				t.Errorf("%s: note write %q replaces; it must append so prior notes survive", tc.file, m[1])
 			}
 		}
 	}
@@ -59,8 +66,8 @@ func TestFormulaNotesWritesAppend(t *testing.T) {
 			t.Fatalf("reading %s: %v", file, err)
 		}
 		for _, m := range rejectionWriteRE.FindAllStringSubmatch(string(raw), -1) {
-			if m[1] != "--append-notes" {
-				t.Errorf("%s: MERGE REJECTION note write uses %s; it must append so the polecat's own notes survive", file, m[1])
+			if !appends(m[1]) {
+				t.Errorf("%s: MERGE REJECTION note write %q replaces; it must append so the polecat's own notes survive", file, m[1])
 			}
 		}
 	}

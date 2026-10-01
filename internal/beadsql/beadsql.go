@@ -11,9 +11,12 @@
 //     DESCRIBE or EXPLAIN, or that calls a dolt_* procedure, is refused
 //     before it reaches the server.
 //
-// The startup handshake (internal/deps) holds the bd on PATH, and so every
-// database it serves, to SchemaVersion too, which covers the reads that go
-// through `bd sql`.
+// Reads that go through `bd sql` or `dolt sql` instead are Query values
+// declared here (statements.go), so their text is written against
+// SchemaVersion in one place and passes ReadOnly before it is sent; a guard
+// test fails the build on a bd sql argv built anywhere else. The startup
+// handshake (internal/deps) holds the bd on PATH, and so every database it
+// serves, to SchemaVersion too.
 package beadsql
 
 import (

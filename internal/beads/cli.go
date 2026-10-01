@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // Typed wrappers over the bd maintenance subcommands (config, sql, stats,
@@ -32,16 +34,15 @@ func (b *Beads) ConfigSet(key, value string) error {
 	return err
 }
 
-// SQL runs one statement through bd sql and returns bd's output.
-func (b *Beads) SQL(query string) ([]byte, error) {
-	return b.run("sql", query)
-}
-
-// SQLCSV runs a query through bd sql --csv and returns its records, header
-// row included. Only stdout is parsed: bd writes diagnostics to stderr, and
-// merging them into the CSV breaks it (gt-m7t).
-func (b *Beads) SQLCSV(query string) ([][]string, error) {
-	out, err := b.run("sql", "--csv", query)
+// SQLCSV runs a declared read through bd sql --csv and returns its records,
+// header row included. Only stdout is parsed: bd writes diagnostics to
+// stderr, and merging them into the CSV breaks it (gt-m7t).
+func (b *Beads) SQLCSV(query beadsql.Query) ([][]string, error) {
+	args, err := query.BdArgs("--csv")
+	if err != nil {
+		return nil, err
+	}
+	out, err := b.run(args...)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +56,7 @@ func (b *Beads) SQLCSV(query string) ([][]string, error) {
 // CountIssues returns how many rows the issues table holds, closed issues
 // included and wisps (their own table) not.
 func (b *Beads) CountIssues() (int, error) {
-	records, err := b.SQLCSV("SELECT COUNT(*) as cnt FROM issues")
+	records, err := b.SQLCSV(beadsql.IssueCount())
 	if err != nil {
 		return 0, err
 	}
@@ -72,7 +73,11 @@ func (b *Beads) CountIssues() (int, error) {
 // TableExists reports whether the database has a table named name: a query
 // on it succeeds.
 func (b *Beads) TableExists(name string) bool {
-	_, err := b.run("sql", fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", name))
+	args, err := beadsql.TableProbe(name).BdArgs()
+	if err != nil {
+		return false
+	}
+	_, err = b.run(args...)
 	return err == nil
 }
 

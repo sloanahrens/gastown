@@ -239,7 +239,7 @@ GT_SCOPE_EOF
 )
 ```
 ```bash
-bd create --type=bug --priority=1 \
+gt bead create --type=bug --priority=1 \
   --title="<clear description of bug>" \
   --description="Found during code review of ${SCOPE}.
 
@@ -257,7 +257,7 @@ Suggested fix:
 
 **2. For code quality issues (P2, P3):**
 ```bash
-bd create --type=task --priority=2 \
+gt bead create --type=task --priority=2 \
   --title="<clear description>" \
   --description="Found during code review of ${SCOPE}.
 
@@ -295,7 +295,7 @@ FOCUS=$(cat <<'GT_FOCUS_EOF'
 {{focus}}
 GT_FOCUS_EOF
 )
-bd update {{issue}} --notes "Code review complete.
+gt bead note {{issue}} "Code review complete.
 
 Scope: ${SCOPE}
 Focus: ${FOCUS}
@@ -316,7 +316,7 @@ Overall assessment:
 **2. Add close evidence for review-only completion:**
 ```bash
 HEAD_SHA=$(git rev-parse HEAD)
-bd comments add {{issue}} "PR-SHERIFF-EVIDENCE: code review complete
+gt bead comment {{issue}} "PR-SHERIFF-EVIDENCE: code review complete
 head_sha: ${HEAD_SHA}
 verdict: <pass|block>
 summary: <brief summary>"

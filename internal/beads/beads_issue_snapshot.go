@@ -1,25 +1,6 @@
 package beads
 
-import (
-	"fmt"
-	"strings"
-)
-
-// issueSelectColumns is the SELECT list of the one issues-table read
-// PreloadIssues makes: the wispSelectColumns fields plus issue_type and
-// ephemeral, which the readers it serves filter on. The LEFT JOIN on labels
-// is what populates labels_csv.
-const issueSelectColumns = "SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, " +
-	"i.created_at, i.updated_at, i.created_by, i.ephemeral, " +
-	"GROUP_CONCAT(al.label) as labels_csv " +
-	"FROM issues i " +
-	"LEFT JOIN labels al ON i.id = al.issue_id "
-
-// issueSelectGroupBy collapses the one-row-per-label join into one row per
-// issue and orders the rows the way `bd list` does (priority, then age).
-const issueSelectGroupBy = " GROUP BY i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, " +
-	"i.created_at, i.updated_at, i.created_by, i.ephemeral " +
-	"ORDER BY i.priority, i.created_at, i.id"
+import "github.com/steveyegge/gastown/internal/beadsql"
 
 // issueSnapshot is the issues-table rows one PreloadIssues round trip read,
 // and what that read covers: every issue carrying any of labels (in any
@@ -45,26 +26,14 @@ type issueSnapshot struct {
 // mid-run.
 func (b *Beads) PreloadIssues(labels []string, statuses []IssueStatus) error {
 	statuses = uniqueStatuses(statuses)
-	var clauses []string
-	if len(labels) > 0 {
-		quoted := make([]string, len(labels))
-		for i, l := range labels {
-			quoted[i] = "'" + strings.ReplaceAll(l, "'", "''") + "'"
-		}
-		clauses = append(clauses, fmt.Sprintf("i.id IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(quoted, ", ")))
-	}
-	if len(statuses) > 0 {
-		quoted := make([]string, len(statuses))
-		for i, s := range statuses {
-			quoted[i] = "'" + strings.ReplaceAll(string(s), "'", "''") + "'"
-		}
-		clauses = append(clauses, fmt.Sprintf("i.status IN (%s)", strings.Join(quoted, ", ")))
-	}
-	if len(clauses) == 0 {
+	if len(labels) == 0 && len(statuses) == 0 {
 		return nil
 	}
-
-	rows, err := b.queryIssueRows(issueSelectColumns + "WHERE " + strings.Join(clauses, " OR ") + issueSelectGroupBy)
+	statusNames := make([]string, len(statuses))
+	for i, st := range statuses {
+		statusNames[i] = string(st)
+	}
+	rows, err := b.queryIssueRows(beadsql.IssuesWithLabelsOrStatuses(labels, statusNames))
 	if err != nil {
 		return err
 	}

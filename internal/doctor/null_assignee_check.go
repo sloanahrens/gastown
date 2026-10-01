@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // NullAssigneeCheck detects in_progress beads with a NULL or empty assignee.
@@ -45,8 +46,6 @@ func NewNullAssigneeCheck() *NullAssigneeCheck {
 		},
 	}
 }
-
-const nullAssigneeSelectQuery = `SELECT id, title, updated_at FROM issues WHERE status = 'in_progress' AND (assignee IS NULL OR assignee = '') ORDER BY updated_at ASC`
 
 // Run queries each registered rig's database for in_progress beads with
 // NULL/empty assignee. It goes by mayor/rigs.json, not the Dolt server's
@@ -137,7 +136,7 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 // queryNullAssigneeBeads returns in_progress beads with NULL/empty assignee for a rig.
 // Uses bd sql --csv (raw SQL passthrough, not affected by bd ORM deserialization).
 func queryNullAssigneeBeads(ctx *CheckContext, rigDir string) ([]nullAssigneeRow, error) {
-	records, err := runBdSQLCSV(ctx, rigDir, nullAssigneeSelectQuery)
+	records, err := runBdSQLCSV(ctx, rigDir, beadsql.UnassignedInProgress())
 	if err != nil {
 		return nil, err
 	}

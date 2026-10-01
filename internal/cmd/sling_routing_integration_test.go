@@ -319,7 +319,7 @@ exit /b 0
 		case strings.Contains(args, "show "+newBeadID) && strings.Contains(args, "--json"):
 			gotTargetDBCheck = true
 			assertTargetRig("target DB check", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
-		case strings.Contains(args, "sql SELECT DISTINCT wisp_dependencies.issue_id"):
+		case strings.Contains(args, "sql --json SELECT DISTINCT wisp_dependencies.issue_id"):
 			assertTargetRig("molecule dep check", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case strings.Contains(args, "formula show "):
 			gotFormulaShow = true

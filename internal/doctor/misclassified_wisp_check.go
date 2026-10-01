@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -119,8 +120,7 @@ func (c *CheckMisclassifiedWisps) Run(ctx *CheckContext) *CheckResult {
 // table that have ephemeral=1. These should be in the wisps table instead.
 // No heuristics — only the ephemeral flag matters.
 func (c *CheckMisclassifiedWisps) findMisplacedEphemeralsDolt(ctx *CheckContext, rigDir, rigName string) ([]misclassifiedWisp, int) {
-	issueQuery := `SELECT id, title FROM issues WHERE ephemeral = 1`
-	issueRecords, err := runBdSQLCSV(ctx, rigDir, issueQuery)
+	issueRecords, err := runBdSQLCSV(ctx, rigDir, beadsql.EphemeralIssues())
 	if err != nil {
 		return nil, 1 // DB unavailable for this rig
 	}

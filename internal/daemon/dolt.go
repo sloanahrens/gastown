@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
@@ -1494,7 +1495,10 @@ func (m *DoltServerManager) checkDatabaseIdentityLocked() error {
 
 	// Try issues table first
 	issueCount := -1
-	query := fmt.Sprintf("SELECT COUNT(*) AS cnt FROM `%s`.`issues`", db)
+	query, err := beadsql.TableRowCount(db, "issues").Inline()
+	if err != nil {
+		return nil // not a name the spot check can read
+	}
 	cmd := m.buildDoltSQLCmd(ctx, "-r", "csv", "-q", query)
 	if output, _, queryErr := runWith(m.execCmd, cmd); queryErr == nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
@@ -1509,7 +1513,10 @@ func (m *DoltServerManager) checkDatabaseIdentityLocked() error {
 	wispCount := -1
 	wispCtx, wispCancel := context.WithTimeout(context.Background(), doltCmdTimeout)
 	defer wispCancel()
-	wispQuery := fmt.Sprintf("SELECT COUNT(*) AS cnt FROM `%s`.`wisps`", db)
+	wispQuery, err := beadsql.TableRowCount(db, "wisps").Inline()
+	if err != nil {
+		return nil
+	}
 	wispCmd := m.buildDoltSQLCmd(wispCtx, "-r", "csv", "-q", wispQuery)
 	if wispOutput, _, wispErr := runWith(m.execCmd, wispCmd); wispErr == nil {
 		wispLines := strings.Split(strings.TrimSpace(string(wispOutput)), "\n")

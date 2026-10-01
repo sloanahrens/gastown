@@ -365,12 +365,6 @@ func getTownBeadsDir() (string, error) {
 	return townRoot, nil
 }
 
-func sqlExternalDepTargetClause(issueID string) string {
-	// Use an escape character that is not valid in bead IDs so underscores stay literal.
-	escapedID := strings.ReplaceAll(issueID, "_", "!_")
-	return fmt.Sprintf("depends_on_external LIKE '%%:%s' ESCAPE '!'", escapedID)
-}
-
 // collectEpicChildren does a BFS walk of an epic's parent-child hierarchy and
 // returns all slingable leaf descendants (task, bug, feature, chore).
 func collectEpicChildren(epicID string) ([]string, error) {

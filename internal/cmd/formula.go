@@ -1183,7 +1183,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			fmt.Printf("  %s %s: %s (interactive — hooked to current session)\n",
 				style.Bold.Render("⇨"), step.ID, stepBeadID)
 			fmt.Printf("    %s\n", step.Title)
-			fmt.Printf("    When done: bd close %s\n\n", stepBeadID)
+			fmt.Printf("    When done: gt bead close %s\n\n", stepBeadID)
 			interactiveCount++
 			continue
 		}
@@ -1224,8 +1224,8 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		fmt.Printf("  Steps:    %d total, %d interactive (current session), %d dispatched, %d awaiting dependencies\n",
 			len(f.Steps), interactiveCount, slingCount, blockedCount)
 		fmt.Printf("\n  This workflow has interactive steps. Work through them sequentially:\n")
-		fmt.Printf("    bd mol current <molecule-id>   — find current step\n")
-		fmt.Printf("    bd close <step-id>             — advance to next step\n")
+		fmt.Printf("    gt mol current                 — find current step\n")
+		fmt.Printf("    gt bead close <step-id>        — advance to next step\n")
 	} else {
 		fmt.Printf("  Steps:    %d total, %d dispatched, %d awaiting dependencies\n",
 			len(f.Steps), slingCount, blockedCount)

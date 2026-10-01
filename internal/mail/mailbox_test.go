@@ -594,30 +594,6 @@ func TestQueryWispMessagesEscapesIdentitySQLLiterals(t *testing.T) {
 	}
 }
 
-func TestSQLStringListEscapesSQLLiterals(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		values []string
-		want   string
-	}{
-		{name: "plain", values: []string{"mayor"}, want: `'mayor'`},
-		{name: "quote", values: []string{"o'brien"}, want: `'o''brien'`},
-		{name: "backslash", values: []string{`rig\agent`}, want: `'rig\\agent'`},
-		{name: "trailing backslash", values: []string{`rig\`}, want: `'rig\\'`},
-		{name: "quote after backslash", values: []string{`rig/o\'malley`}, want: `'rig/o\\''malley'`},
-		{name: "list", values: []string{"mayor/", `rig/o\'malley`}, want: `'mayor/','rig/o\\''malley'`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := sqlStringList(tt.values); got != tt.want {
-				t.Fatalf("sqlStringList(%#v) = %q, want %q", tt.values, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseWispTimestamp(t *testing.T) {
 	t.Parallel()
 	want := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)

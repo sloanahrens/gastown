@@ -17,6 +17,7 @@ import (
 	"github.com/gofrs/flock"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -314,26 +315,7 @@ func (m *Mailbox) queryWispMessages(beadsDir string, identities []string) ([]wis
 		return nil, nil
 	}
 
-	ccLabels := make([]string, 0, len(identities))
-	for _, id := range identities {
-		ccLabels = append(ccLabels, "cc:"+id)
-	}
-	identityList := sqlStringList(identities)
-	ccLabelList := sqlStringList(ccLabels)
-
-	query := fmt.Sprintf(
-		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
-			"GROUP_CONCAT(DISTINCT al.label) as labels_csv, "+
-			"MAX(CASE WHEN w.assignee IN (%s) THEN 1 ELSE 0 END) as assignee_match, "+
-			"MAX(CASE WHEN cc.label IS NOT NULL THEN 1 ELSE 0 END) as cc_match "+
-			"FROM wisps w "+
-			"JOIN wisp_labels msg_label ON w.id = msg_label.issue_id AND msg_label.label = 'gt:message' "+
-			"JOIN wisp_labels al ON w.id = al.issue_id "+
-			"LEFT JOIN wisp_labels cc ON w.id = cc.issue_id AND cc.label IN (%s) "+
-			"WHERE w.status IN ('open', 'hooked') AND (w.assignee IN (%s) OR cc.label IS NOT NULL) "+
-			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
-		identityList, ccLabelList, identityList)
-	return m.runWispSQL(beadsDir, query)
+	return m.runWispSQL(beadsDir, beadsql.MailWisps(identities))
 }
 
 // wispSQLRow represents a row from the wisps SQL query with aggregated labels.
@@ -352,8 +334,11 @@ type wispSQLRow struct {
 }
 
 // runWispSQL executes a bd sql --json query and converts results to wisp query messages.
-func (m *Mailbox) runWispSQL(beadsDir, query string) ([]wispQueryMessage, error) {
-	args := []string{"sql", "--json", query}
+func (m *Mailbox) runWispSQL(beadsDir string, query beadsql.Query) ([]wispQueryMessage, error) {
+	args, err := query.BdArgs("--json")
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := bdReadCtx()
 	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 	cancel()
@@ -410,20 +395,6 @@ func parseWispTimestamp(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func sqlStringList(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, "'"+escapeSQLString(value)+"'")
-	}
-	return strings.Join(quoted, ",")
-}
-
-// escapeSQLString escapes backslashes and single quotes for Dolt/MySQL SQL string literals.
-func escapeSQLString(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	return strings.ReplaceAll(s, "'", "''")
-}
-
 // identityVariants returns all identity formats to query.
 // For town-level agents (mayor/, deacon/), also includes the variant without
 // trailing slash for backwards compatibility with legacy messages.
@@ -466,26 +437,10 @@ func queryIssueMessagesBatch(run beads.BDRunner, workDir, beadsDir string, ident
 		return nil, nil
 	}
 
-	ccLabels := make([]string, 0, len(identities))
-	for _, id := range identities {
-		ccLabels = append(ccLabels, "cc:"+id)
+	args, err := beadsql.MailIssues(identities).BdArgs("--json")
+	if err != nil {
+		return nil, err
 	}
-	identityList := sqlStringList(identities)
-	ccLabelList := sqlStringList(ccLabels)
-
-	query := fmt.Sprintf(
-		"SELECT i.id, i.title, i.status, i.assignee, "+
-			"GROUP_CONCAT(DISTINCT cc.label) AS cc_labels_csv, "+
-			"MAX(CASE WHEN rd.label IS NOT NULL THEN 1 ELSE 0 END) AS is_read "+
-			"FROM issues i "+
-			"JOIN labels msg_label ON i.id = msg_label.issue_id AND msg_label.label = 'gt:message' "+
-			"LEFT JOIN labels cc ON i.id = cc.issue_id AND cc.label IN (%s) "+
-			"LEFT JOIN labels rd ON i.id = rd.issue_id AND rd.label = 'read' "+
-			"WHERE i.status IN ('open', 'hooked') AND (i.assignee IN (%s) OR cc.label IS NOT NULL) "+
-			"GROUP BY i.id, i.title, i.status, i.assignee",
-		ccLabelList, identityList)
-
-	args := []string{"sql", "--json", query}
 	ctx, cancel := bdReadCtx()
 	defer cancel()
 	stdout, err := runBdCommand(ctx, run, args, workDir, beadsDir)

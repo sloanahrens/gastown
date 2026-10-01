@@ -467,7 +467,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 	} else if status.AttachedMolecule == "" && status.AttachedFormula == "" {
 		status.NextAction = "Attach a molecule to start work: gt mol attach <bead-id> <molecule-id>"
 	} else if status.AttachedFormula != "" && status.NextAction == "" && status.PinnedBead != nil {
-		status.NextAction = "Show the workflow steps: gt prime or bd mol current " + status.PinnedBead.ID
+		status.NextAction = "Show the workflow steps: gt prime or gt mol current"
 	}
 
 	// JSON output
@@ -629,7 +629,7 @@ func determineNextAction(status MoleculeStatusInfo) string {
 	}
 
 	if status.Progress.Complete {
-		return "Molecule complete! Close the bead: bd close " + status.PinnedBead.ID
+		return "Molecule complete! Close the bead: gt bead close " + status.PinnedBead.ID
 	}
 
 	if status.Progress.InProgress > 0 {
@@ -637,7 +637,7 @@ func determineNextAction(status MoleculeStatusInfo) string {
 	}
 
 	if len(status.Progress.ReadySteps) > 0 {
-		return fmt.Sprintf("Start next ready step: bd update %s --status=in_progress", status.Progress.ReadySteps[0])
+		return fmt.Sprintf("Start next ready step: gt bead claim %s", status.Progress.ReadySteps[0])
 	}
 
 	if len(status.Progress.BlockedSteps) > 0 {

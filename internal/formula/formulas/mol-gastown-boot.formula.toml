@@ -16,7 +16,7 @@ holds work), so the boot molecule only has to make sure the daemon runs.
 
 ## Execution
 ```bash
-bd mol wisp mol-gastown-boot  # Create wisp
+gt sling mol-gastown-boot  # Pour the wisp onto your own hook
 ```"""
 formula = "mol-gastown-boot"
 version = 1

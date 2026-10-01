@@ -19,7 +19,7 @@ type AdminClient interface {
 // implementation must share. newImpl returns one database, whose issue
 // prefix is "gt", for the whole run; the cases run one after another on it
 // and assert on changes, not absolute counts, so they need not start empty.
-// SQL, SQLCSV and InitDatabase are scripted or recorded by the fake, not
+// SQLCSV and InitDatabase are scripted or recorded by the fake, not
 // modeled, so they are not pinned here.
 func RunAdminContract(t *testing.T, newImpl func(t *testing.T) AdminClient) {
 	t.Helper()
