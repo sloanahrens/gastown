@@ -58,6 +58,6 @@ func (h Home) CheckManagedClaudeSettings(target Target) error {
 }
 
 // InstallForRole is the package-level InstallForRole against this Home.
-func (h Home) InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
-	return h.h.installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command, useSettingsDir)
+func (h Home) InstallForRole(settingsDir, role string) error {
+	return h.h.installForRole(settingsDir, role)
 }

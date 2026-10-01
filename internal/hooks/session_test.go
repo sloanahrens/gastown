@@ -28,7 +28,7 @@ func TestCheckManagedClaudeSettings(t *testing.T) {
 	home := HomeAt(t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".claude", "settings.json")
-	target := Target{Path: path, Key: "mayor", Role: "mayor", Provider: "claude"}
+	target := Target{Path: path, Key: "mayor", Role: "mayor"}
 
 	if err := home.CheckManagedClaudeSettings(target); err == nil {
 		t.Error("missing file passed")

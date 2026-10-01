@@ -5,22 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
-
-func claudeRuntime() *config.RuntimeConfig {
-	useSettingsDir := true
-	return &config.RuntimeConfig{
-		Command: "claude",
-		Hooks: &config.RuntimeHooksConfig{
-			Provider:       "claude",
-			Dir:            ".claude",
-			SettingsFile:   "settings.json",
-			UseSettingsDir: &useSettingsDir,
-		},
-	}
-}
 
 // A session start writes the managed settings into the role's settings dir
 // and reports hooks:present for the file the session loads (gt-4k3fj.8.3).
@@ -30,7 +16,7 @@ func TestSyncSessionSettings_Present(t *testing.T) {
 	settingsDir := filepath.Join(t.TempDir(), "gastown", "crew")
 	workDir := t.TempDir()
 
-	s, err := syncSessionSettings(home, settingsDir, workDir, "crew", claudeRuntime())
+	s, err := syncSessionSettings(home, settingsDir, workDir, "crew")
 	if err != nil {
 		t.Fatalf("syncSessionSettings: %v", err)
 	}
@@ -57,7 +43,7 @@ func TestSyncSessionSettings_ReplacesStaleHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := syncSessionSettings(home, dir, dir, "mayor", claudeRuntime())
+	s, err := syncSessionSettings(home, dir, dir, "mayor")
 	if err != nil || !s.Present {
 		t.Fatalf("status = %+v, err = %v; want present", s, err)
 	}
@@ -74,7 +60,7 @@ func TestSyncSessionSettings_AbsentWhenUnwritable(t *testing.T) {
 	}
 	settingsDir := filepath.Join(blocker, "polecats") // under a regular file
 
-	s, err := syncSessionSettings(home, settingsDir, t.TempDir(), "polecat", claudeRuntime())
+	s, err := syncSessionSettings(home, settingsDir, t.TempDir(), "polecat")
 	if err == nil {
 		t.Fatal("want the write error")
 	}
@@ -83,26 +69,6 @@ func TestSyncSessionSettings_AbsentWhenUnwritable(t *testing.T) {
 	}
 	if got := s.Payload("gt-gastown-p-opal"); got["reason"] != s.Reason || got["session"] != "gt-gastown-p-opal" || got["role"] != "polecat" {
 		t.Errorf("payload = %v", got)
-	}
-}
-
-// A runtime with no Claude hooks never loads the managed guards (gt-be0z).
-func TestSyncSessionSettings_AbsentWithoutClaudeHooks(t *testing.T) {
-	t.Parallel()
-	home := hooks.HomeAt(t.TempDir())
-	dir := t.TempDir()
-	for name, rc := range map[string]*config.RuntimeConfig{
-		"no hooks":   {Command: "claude"},
-		"none":       {Command: "claude", Hooks: &config.RuntimeHooksConfig{Provider: "none"}},
-		"non-claude": {Command: "other", Hooks: &config.RuntimeHooksConfig{Provider: "unknown"}},
-	} {
-		s, err := syncSessionSettings(home, dir, dir, "crew", rc)
-		if err != nil {
-			t.Errorf("%s: %v", name, err)
-		}
-		if s.Present || s.Path != "" || s.Reason == "" {
-			t.Errorf("%s: status = %+v, want absent with a reason", name, s)
-		}
 	}
 }
 

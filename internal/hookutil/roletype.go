@@ -10,8 +10,8 @@ import "github.com/steveyegge/gastown/internal/constants"
 // Interactive roles: mayor, crew (and anything else).
 //
 // This is the single source of truth for the autonomous/interactive
-// classification used by all hook installer packages (claude, gemini,
-// cursor, etc.) and the runtime fallback logic.
+// classification used by the hook installer (settings-autonomous.json vs
+// settings-interactive.json).
 func IsAutonomousRole(role string) bool {
 	switch role {
 	case constants.RolePolecat:

@@ -97,10 +97,6 @@ uninstall tests use a temporary `INSTALL_DIR` and never the real
 `~/.local/bin`. The 2026-09-30 04:14 host wipe came from a guard blind spot,
 filed as gt-tt8sg.
 
-The dispatcher names its agent explicitly, and that choice outranks the bead's
-`route:local` and `route:flash` labels. Every other sling path keeps gt-4lbz,
-where the label wins.
-
 ## Failures
 
 A Dolt serialization failure (Error 1213) retries the whole dispatch up to
@@ -129,13 +125,11 @@ In `mayor/daemon.json`:
 
 Then restart the daemon.
 
-## seat-refill and idle_fill
+## seat-refill
 
 The ticker counts every polecat, whoever slung it, so it never exceeds a cap
-that seat-refill nudges, mayor slings or the pool's `idle_fill` already
-filled. It skips the tick instead. On 2026-09-30 seat-refill plus `idle_fill`
-filled four flash seats on their own and the operator's slings were refused.
-When the ticker is the town's dispatcher, turn the others off so the roster
-is readable: set `polecat_pool.idle_fill` to `false` and disable the
-seat-refill plugin. Do not park seat-refill with its hold file, because the
+that seat-refill nudges or mayor slings already filled. It skips the tick
+instead. On 2026-09-30 seat-refill filled four flash seats on its own and the
+operator's slings were refused. When the ticker is the town's dispatcher, turn
+seat-refill off so the roster is readable: disable the seat-refill plugin. Do not park seat-refill with its hold file, because the
 ticker honors that file too and would stop as well.

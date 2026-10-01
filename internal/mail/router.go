@@ -1820,7 +1820,7 @@ func (r *Router) notifyRecipient(msg *Message) error {
 	}
 
 	if notified == 0 && r.townRoot != "" && (noTmuxServer || len(errs) == 0) {
-		// No tmux session found - enqueue for ACP/propeller delivery. For
+		// No tmux session found - enqueue for delivery when one starts. For
 		// ambiguous aliases, queue every candidate rather than silently choosing
 		// the first session ID.
 		for _, sessionID := range sessionIDs {

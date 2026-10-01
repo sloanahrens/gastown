@@ -64,7 +64,7 @@ var SystemPromptRenderer func(role, townRoot, rigPath, agentName, path string) e
 // prints the static role text itself, so it degrades to the old behavior
 // rather than a dead session.
 func withRoleSystemPromptFlag(reg *AgentRegistry, rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
-	if rc == nil || !isClaudeAgentIn(reg, rc) {
+	if rc == nil {
 		return rc
 	}
 	path := SystemPromptFilePath(role, townRoot, rigPath, agentName)
@@ -124,7 +124,7 @@ func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, 
 		}
 	}
 	reg := AgentRegistryFor(townRoot, rigPath)
-	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
+	rc = withRoleSettingsFlag(rc, role, rigPath)
 	return withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, agentName), nil
 }
 

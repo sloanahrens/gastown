@@ -136,7 +136,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	// attach to a running agent says nothing about the settings it loaded
 	// (gt-4k3fj.8.4).
 	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
-	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig)
+	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew")
 	reportHooks := func() {
 		runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", r.Name, name), sessionID, hooksStatus)
 	}

@@ -64,8 +64,8 @@ type dispatchSeats struct {
 	// Free is Capacity - Occupied, floored at zero.
 	Free int `json:"free"`
 
-	// Uncapped marks a pool whose overflow seat has no cap: such a seat is
-	// always available, so Free is reported as at least one.
+	// Uncapped marks a pool whose seat has no cap: such a seat is always
+	// available, so Free is reported as at least one.
 	Uncapped bool `json:"uncapped,omitempty"`
 }
 
@@ -266,7 +266,7 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 	}
 
 	var sessions []poolSession
-	if settings.PolecatPool != nil && settings.PolecatPool.LocalAgent != "" {
+	if settings.PolecatPool != nil && settings.PolecatPool.OverflowAgent != "" {
 		sessions, err = listPolecatSessions(newPoolSessionLister(), townRoot)
 		if err != nil {
 			return dispatchSeats{}, fmt.Errorf("listing polecat sessions for dispatch seats: %w", err)
@@ -297,28 +297,23 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 // caller listed. Source is empty when no pool is configured, which is the
 // signal that this model has nothing to say.
 func poolSeatPicture(pool *config.PolecatPool, sessions []poolSession) dispatchSeats {
-	if pool == nil || pool.LocalAgent == "" {
+	if pool == nil || pool.OverflowAgent == "" {
 		return dispatchSeats{}
 	}
 
-	local, overflow, _ := poolSeatCounts(pool, sessions)
-
-	// The overflow seat counts toward capacity only when the pool bounds it.
-	// An uncapped overflow seat is unbounded room, so reporting it as one free
-	// seat is a floor rather than a count — the honest answer to "could a sling
-	// spawn right now?" without pretending the pool has a size it does not.
+	// An uncapped seat is unbounded room, so reporting it as one free seat is
+	// a floor rather than a count — the honest answer to "could a sling spawn
+	// right now?" without pretending the pool has a size it does not.
 	capped := pool.OverflowCapped()
-	capacity := pool.MaxLocal
+	capacity := 0
 	if capped {
-		capacity += pool.MaxOverflow
+		capacity = pool.MaxOverflow
 	}
 	seats := dispatchSeats{
 		Source:   "polecat_pool",
 		Capacity: capacity,
-		Occupied: local + overflow,
-	}
-	if !capped && pool.OverflowAgent != "" {
-		seats.Uncapped = true
+		Occupied: poolSeatCount(pool, sessions),
+		Uncapped: !capped,
 	}
 	seats.Free = capacity - seats.Occupied
 	if seats.Free < 0 {

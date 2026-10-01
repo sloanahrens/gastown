@@ -249,8 +249,9 @@ func TestShouldSendEscapeForLines(t *testing.T) {
 func TestEscapeAllowed(t *testing.T) {
 	t.Parallel()
 	claude := config.GetAgentPresetByName("claude")
-	gemini := config.GetAgentPresetByName("gemini")
-	codex := config.GetAgentPresetByName("codex")
+	// A registry preset may clear escape_cancels_request; only then does the
+	// busy scrape gate the Escape keystroke.
+	scrapeGated := &config.AgentPresetInfo{Name: "scrape-gated", Command: "claude"}
 	tests := []struct {
 		name   string
 		agent  string
@@ -260,15 +261,13 @@ func TestEscapeAllowed(t *testing.T) {
 	}{
 		{"claude", "claude", claude, true, false},
 		{"custom agent resolved to claude", "deepseek-flash", claude, true, false},
-		{"gemini", "gemini", gemini, true, false},
-		{"copilot legacy hardcode", "copilot", nil, false, false},
-		{"codex keeps scrape-gated escape", "codex", codex, true, true},
+		{"preset without escape_cancels_request keeps scrape-gated escape", "scrape-gated", scrapeGated, true, true},
 		{"unresolved agent fails safe", "not-a-real-agent", nil, false, false},
 		{"no GT_AGENT fails safe", "", nil, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := escapeAllowed(tt.agent, tt.preset, tt.ok); got != tt.want {
+			if got := escapeAllowed(tt.preset, tt.ok); got != tt.want {
 				t.Errorf("escapeAllowed(%q) = %v, want %v", tt.agent, got, tt.want)
 			}
 		})
@@ -285,7 +284,7 @@ func TestBusyIndicators(t *testing.T) {
 		t.Fatal("busyIndicators must not be empty — busy/idle detection would silently break")
 	}
 
-	// "esc to interrupt" is the legacy marker (Codex/Gemini as of this writing).
+	// "esc to interrupt" is the legacy marker.
 	// "to run in background" is the current Claude Code hint. If either
 	// assertion fails, the change must be deliberate.
 	wantMarkers := []string{"esc to interrupt", "to run in background"}

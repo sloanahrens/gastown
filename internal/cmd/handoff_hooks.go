@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -26,11 +25,10 @@ type respawnHooks struct {
 	Role        string
 	SettingsDir string
 	WorkDir     string
-	Runtime     *config.RuntimeConfig
 
 	// sync and report are runtime.SyncSessionSettings and
 	// runtime.ReportHooks when nil.
-	sync   func(settingsDir, workDir, role string, rc *config.RuntimeConfig) (runtime.HooksStatus, error)
+	sync   func(settingsDir, workDir, role string) (runtime.HooksStatus, error)
 	report func(townRoot, actor, session string, s runtime.HooksStatus)
 }
 
@@ -49,7 +47,7 @@ func (p restartPlan) syncSettings() {
 	if report == nil {
 		report = runtime.ReportHooks
 	}
-	status, err := sync(h.SettingsDir, h.WorkDir, h.Role, h.Runtime)
+	status, err := sync(h.SettingsDir, h.WorkDir, h.Role)
 	report(h.TownRoot, h.Actor, h.Session, status)
 	if err != nil {
 		style.PrintWarning("could not ensure settings for %s: %v", h.Session, err)

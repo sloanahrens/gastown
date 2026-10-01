@@ -70,7 +70,7 @@ type ScheduleOptions struct {
 	NoMerge      bool     // Skip merge queue on completion
 	ReviewOnly   bool     // Review-only mode: assignee evaluates and reports back, no merge/commit/push
 	Account      string   // Claude Code account handle
-	Agent        string   // Agent override (e.g., "gemini", "codex")
+	Agent        string   // Agent override (e.g., "claude-haiku")
 	HookRawBead  bool     // Hook raw bead without default formula
 	Ralph        bool     // Ralph Wiggum loop mode
 }

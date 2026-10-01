@@ -783,38 +783,18 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 		return nil, fmt.Errorf("creating crew README: %w", err)
 	}
 	// Create polecats directory with agent settings scaffold.
-	// Settings are passed to the agent via --settings flag (Claude) or installed
-	// in workDir (other agents). Scaffolding here ensures the settings file exists
-	// before the first polecat session starts, preventing startup failures.
+	// Settings are passed to Claude via the --settings flag. Scaffolding here
+	// ensures the settings file exists before the first polecat session
+	// starts, preventing startup failures.
 	polecatsPath := filepath.Join(rigPath, "polecats")
 	if err := os.MkdirAll(polecatsPath, 0755); err != nil {
 		return nil, fmt.Errorf("creating polecats dir: %w", err)
 	}
-	// Use the town's default_agent for scaffolding, falling back to claude.
-	// This ensures that when the town is configured with opencode (or another agent),
-	// the polecat directory gets the correct config dir (e.g. .opencode/) instead of .claude/.
-	townSettings, tsErr := config.LoadOrCreateTownSettings(config.TownSettingsPath(m.townRoot))
-	if tsErr != nil {
-		townSettings = config.NewTownSettings()
+	if err := hooks.InstallForRole(polecatsPath, "polecat"); err != nil {
+		// Non-fatal: session startup will retry via EnsureSettingsForRole
+		fmt.Printf("  %s Could not scaffold polecat settings: %v\n", "!", err)
 	}
-	defaultAgentName := townSettings.DefaultAgent
-	if defaultAgentName == "" {
-		defaultAgentName = string(config.AgentClaude)
-	}
-	// default_agent may be a custom town agent; scaffold for its harness
-	// and provision commands under the harness name (claude-9a8).
-	defaultPreset, ok := config.ResolveAgentPreset(defaultAgentName, m.townRoot, "")
-	if ok {
-		defaultAgentName = string(defaultPreset.Name)
-	}
-	if ok && defaultPreset.HooksProvider != "" {
-		if err := hooks.InstallForRole(defaultPreset.HooksProvider, polecatsPath, polecatsPath, "polecat",
-			defaultPreset.HooksDir, defaultPreset.HooksSettingsFile, defaultPreset.Command, defaultPreset.HooksUseSettingsDir); err != nil {
-			// Non-fatal: session startup will retry via EnsureSettingsForRole
-			fmt.Printf("  %s Could not scaffold polecat settings: %v\n", "!", err)
-		}
-	}
-	if err := commands.ProvisionFor(polecatsPath, defaultAgentName); err != nil {
+	if err := commands.Provision(polecatsPath); err != nil {
 		// Non-fatal: commands are convenience, not critical
 		fmt.Printf("  %s Could not scaffold polecat commands: %v\n", "!", err)
 	}

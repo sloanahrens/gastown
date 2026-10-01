@@ -86,24 +86,6 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 	}
 }
 
-func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	rig := filepath.Join(town, "myrig")
-	path := SystemPromptFilePath("polecat", town, rig, "nux")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rc := &RuntimeConfig{Command: "codex", Provider: "codex"}
-	got := withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
-	if len(got.Args) != 0 || len(got.Env) != 0 {
-		t.Fatalf("non-Claude agents must be untouched: args=%v env=%v", got.Args, got.Env)
-	}
-}
-
 func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -299,7 +281,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	if !containsArgPair(rc.Args, "--settings", wantSettings) {
 		t.Errorf("polecat override config lacks --settings %s: %v", wantSettings, rc.Args)
 	}
-	rc = withRoleSettingsFlag(nil, withRoleSystemPromptFlag(nil, rc, "polecat", townRoot, rigPath, "marble"), "polecat", rigPath)
+	rc = withRoleSettingsFlag(withRoleSystemPromptFlag(nil, rc, "polecat", townRoot, rigPath, "marble"), "polecat", rigPath)
 	if n := countArg(rc.Args, "--settings"); n != 1 {
 		t.Errorf("--settings appears %d times after re-application, want 1: %v", n, rc.Args)
 	}
@@ -493,10 +475,8 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")
 	// A polecat without a name has no per-agent file.
 	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
-	// Non-Claude runtimes never get the flag, so nothing to render.
-	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
 
 	if calls != 0 {
-		t.Fatalf("renderer ran %d times for roles/runtimes that take no system prompt file", calls)
+		t.Fatalf("renderer ran %d times for roles that take no system prompt file", calls)
 	}
 }

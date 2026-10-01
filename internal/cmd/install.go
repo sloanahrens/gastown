@@ -31,7 +31,6 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/workspace"
-	"github.com/steveyegge/gastown/internal/wrappers"
 )
 
 var (
@@ -44,7 +43,6 @@ var (
 	installGitHub     string
 	installPublic     bool
 	installShell      bool
-	installWrappers   bool
 	installSupervisor bool
 	installDoltPort   int
 )
@@ -90,7 +88,6 @@ func init() {
 	installCmd.Flags().StringVar(&installGitHub, "github", "", "Create GitHub repo (format: owner/repo, private by default)")
 	installCmd.Flags().BoolVar(&installPublic, "public", false, "Make GitHub repo public (use with --github)")
 	installCmd.Flags().BoolVar(&installShell, "shell", false, "Install shell integration (sets GT_TOWN_ROOT/GT_RIG env vars)")
-	installCmd.Flags().BoolVar(&installWrappers, "wrappers", false, "Install gt-codex/gt-gemini/gt-opencode wrapper scripts to ~/bin/")
 	installCmd.Flags().BoolVar(&installSupervisor, "supervisor", false, "Configure launchd/systemd for daemon auto-restart")
 	installCmd.Flags().IntVar(&installDoltPort, "dolt-port", 0, "Dolt SQL server port (default 3307; set when another instance owns the default port)")
 	rootCmd.AddCommand(installCmd)
@@ -125,14 +122,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// Check if already a workspace
 	if isWS, _ := workspace.IsWorkspace(absPath); isWS && !installForce {
-		// If only --wrappers is requested in existing town, just install wrappers and exit
-		if installWrappers {
-			if err := wrappers.Install(); err != nil {
-				return fmt.Errorf("installing wrapper scripts: %w", err)
-			}
-			fmt.Printf("✓ Installed gt-codex, gt-gemini, and gt-opencode to %s\n", wrappers.BinDir())
-			return nil
-		}
 		return fmt.Errorf("directory is already a Gas Town HQ (use --force to reinitialize)")
 	}
 
@@ -293,8 +282,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		fmt.Printf("   %s Could not create mayor directory: %v\n", style.Dim.Render("⚠"), err)
 	} else {
-		mayorRuntimeConfig := config.ResolveRoleAgentConfig("mayor", absPath, mayorDir)
-		if err := runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor", mayorRuntimeConfig); err != nil {
+		if err := runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor"); err != nil {
 			fmt.Printf("   %s Could not create mayor settings: %v\n", style.Dim.Render("⚠"), err)
 		} else {
 			fmt.Printf("   ✓ Created mayor/.claude/settings.json\n")
@@ -441,15 +429,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   %s Could not enable Gas Town: %v\n", style.Dim.Render("⚠"), err)
 		} else {
 			fmt.Printf("   ✓ Enabled Gas Town globally\n")
-		}
-	}
-
-	if installWrappers {
-		fmt.Println()
-		if err := wrappers.Install(); err != nil {
-			fmt.Printf("   %s Could not install wrapper scripts: %v\n", style.Dim.Render("⚠"), err)
-		} else {
-			fmt.Printf("   ✓ Installed gt-codex and gt-opencode to %s\n", wrappers.BinDir())
 		}
 	}
 

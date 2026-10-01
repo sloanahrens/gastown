@@ -36,7 +36,7 @@ func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := home.installForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+			if err := home.installForRole(settingsDir, "polecat"); err != nil {
 				errs <- err
 			}
 		}()
@@ -87,36 +87,11 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 		t.Fatalf("seed file: %v", err)
 	}
 
-	err := HomeAt(t.TempDir()).InstallForRole("claude", dir, dir, "mayor", ".claude", "settings.json", "claude", true)
+	err := HomeAt(t.TempDir()).InstallForRole(dir, "mayor")
 	if err == nil {
 		t.Fatal("expected error from a directory in place of settings.json, got nil")
 	}
 	if !strings.Contains(err.Error(), "installing managed claude settings") {
 		t.Errorf("expected wrapped 'installing managed claude settings' error, got: %v", err)
-	}
-}
-
-// TestSyncForRole_AtomicWriteErrorPropagates is the SyncForRole counterpart
-// to TestInstallForRole_AtomicWriteErrorPropagates — covers the second
-// atomic-write call site introduced in gh#3500.
-func TestSyncForRole_AtomicWriteErrorPropagates(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// The target path is a non-empty directory, so the atomic write's final
-	// rename fails.
-	target := filepath.Join(dir, ".opencode", "plugins", "gastown.js")
-	if err := os.MkdirAll(target, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "occupied"), nil, 0644); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-
-	_, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
-	if err == nil {
-		t.Fatal("expected error from read-only directory, got nil")
-	}
-	if !strings.Contains(err.Error(), "writing hooks file") {
-		t.Errorf("expected wrapped 'writing hooks file' error, got: %v", err)
 	}
 }

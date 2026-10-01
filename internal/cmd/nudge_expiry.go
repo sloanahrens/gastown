@@ -13,7 +13,7 @@ import (
 
 // Install the expiry handler here: internal/mail imports internal/nudge, so the
 // queue cannot deliver its own expiry notices, while every delivery plane — the
-// UserPromptSubmit hook, the poller, the idle watcher and the ACP propeller —
+// UserPromptSubmit hook, the poller and the idle watcher —
 // runs inside the gt binary, where this init has executed (gt-oexm).
 func init() {
 	nudge.ExpiryObserver = mailExpiredNudge

@@ -254,7 +254,7 @@ func TestSpecSlingParams(t *testing.T) {
 	t.Parallel()
 	c := specCandidate{Spec: cleanSpec("gt-a", 1, ""), Rig: "gastown"}
 	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, specdispatch.SeatChoice{Agent: "claude-sonnet"})
-	if p.Agent != "claude-sonnet" || !p.AgentBeatsRoute || !p.NoConvoy || !p.NoBoot || !p.FormulaFailFatal ||
+	if p.Agent != "claude-sonnet" || !p.NoConvoy || !p.NoBoot || !p.FormulaFailFatal ||
 		p.RigName != "gastown" || p.FormulaName != "mol-polecat-work" || !strings.Contains(p.Args, "temporary INSTALL_DIR") {
 		t.Fatalf("params = %+v", p)
 	}
@@ -386,7 +386,7 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 		"local-coder":    {Provider: "openai", Command: "claude"},
 	}
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", OverflowAgent: "deepseek-flash", MaxOverflow: 3, MinSpawnGap: "4m"}
+	ts.PolecatPool = &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3, MinSpawnGap: "4m"}
 
 	b := specBudgetFromConfig(ts, nil)
 	if got := b.Picture(); got != "deepseek-flash 0/3 hooked, claude-sonnet 0/2 hooked" || b.MinSpawnGap != 4*time.Minute {
@@ -425,36 +425,6 @@ func TestSpecRosterCountsByAgent(t *testing.T) {
 	}, ts)
 	if r.Live["claude-sonnet"] != 1 || r.Live["deepseek-flash"] != 3 || !r.Newest.Equal(now.Add(-30*time.Second)) {
 		t.Fatalf("roster = %+v", r)
-	}
-}
-
-func TestResolvePolecatPoolAgentExplicitBeatsRouteLabel(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0, OverflowAgent: "deepseek-flash", MaxOverflow: 2}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	router := realPoolRouter(townRoot)
-	router.sessions = func() sessionLister {
-		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
-	}
-	router.lookupBead = func(beadID string) (poolBead, error) {
-		return poolBead{ID: beadID, Type: "feature", Labels: []string{"spec", routeFlashLabel}}, nil
-	}
-	// The default path keeps gt-4lbz: the label outranks the request
-	// (peekPolecatPoolAgent's route).
-	if a, _, err := router.route("gt-a", "claude-sonnet", false, false); a != "deepseek-flash" || err != nil {
-		t.Fatalf("default route: got %q %v", a, err)
-	}
-	// The dispatcher's explicit agent stands (resolvePolecatPoolAgentExplicit's
-	// route).
-	if a, r, err := router.route("gt-a", "claude-sonnet", true, true); a != "" || r != "" || err != nil {
-		t.Fatalf("explicit route: got %q %q %v, want the request untouched", a, r, err)
-	}
-	if got := withoutRouteLabels([]string{"spec", "Route:Flash", "route:local", "x"}); strings.Join(got, ",") != "spec,x" {
-		t.Errorf("withoutRouteLabels = %v", got)
 	}
 }
 

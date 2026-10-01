@@ -4,7 +4,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,15 +53,15 @@ type TownSettings struct {
 	CLITheme string `json:"cli_theme,omitempty"`
 
 	// DefaultAgent is the name of the agent preset to use by default.
-	// Can be a built-in preset ("claude", "gemini", "codex", "cursor", "auggie", "amp", "opencode", "copilot")
-	// or a custom agent name defined in settings/agents.json.
+	// Can be a built-in preset ("claude", "groq-compound")
+	// or a custom agent name defined in Agents or settings/agents.json.
 	// Default: "claude"
 	DefaultAgent string `json:"default_agent,omitempty"`
 
 	// Agents defines custom agent configurations or overrides.
 	// Keys are agent names that can be referenced by DefaultAgent or rig settings.
 	// Values override or extend the built-in presets.
-	// Example: {"gemini": {"command": "/custom/path/to/gemini"}}
+	// Example: {"claude-opus": {"command": "claude", "args": ["--model", "opus"]}}
 	Agents map[string]*RuntimeConfig `json:"agents,omitempty"`
 
 	// RoleAgents maps role names to agent aliases for per-role model selection.
@@ -72,18 +71,15 @@ type TownSettings struct {
 	// Example: {"mayor": "claude-opus", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
-	// PolecatPool, when set, lets `gt sling` choose a polecat's agent from a
-	// bounded local-model pool instead of role_agents.polecat: up to MaxLocal
-	// live polecat sessions run LocalAgent, new local spawns are at least
-	// MinSpawnGap apart (a fresh session's prefill starves every decoding
-	// slot, so spawns are staggered), and everything else runs OverflowAgent
-	// (empty = the role default). An explicit --agent always wins.
+	// PolecatPool, when set, runs `gt sling`'s polecats on OverflowAgent
+	// instead of role_agents.polecat, at most MaxOverflow at a time; a sling
+	// past the cap is refused. An --agent the pool does not own is left alone.
 	PolecatPool *PolecatPool `json:"polecat_pool,omitempty"`
 
 	// CrewAgents maps individual crew worker names to agent aliases at the town level.
 	// This allows town-wide per-crew agent assignment without modifying each rig's config.
 	// Resolution: --agent flag > rig WorkerAgents > town CrewAgents > role agents > defaults.
-	// Example: {"bob": "codex", "alice": "claude"}
+	// Example: {"bob": "claude-haiku", "alice": "claude"}
 	CrewAgents map[string]string `json:"crew_agents,omitempty"`
 
 	// AgentEmailDomain is the domain used for agent git identity emails.
@@ -538,7 +534,7 @@ type RigSettings struct {
 	Runtime    *RuntimeConfig    `json:"runtime,omitempty"`     // LLM runtime settings (deprecated: use Agent)
 
 	// Agent selects which agent preset to use for this rig.
-	// Can be a built-in preset ("claude", "gemini", "codex", "cursor", "auggie", "amp", "opencode", "copilot")
+	// Can be a built-in preset ("claude", "groq-compound")
 	// or a custom agent defined in settings/agents.json.
 	// If empty, uses the town's default_agent setting.
 	// Takes precedence over Runtime if both are set.
@@ -559,7 +555,7 @@ type RigSettings struct {
 	// WorkerAgents maps individual crew worker names to agent aliases.
 	// Allows per-worker agent selection, overriding RoleAgents["crew"].
 	// Takes precedence over RoleAgents["crew"] but is overridden by explicit --agent flags.
-	// Example: {"denali": "codex", "glacier": "gemini"}
+	// Example: {"denali": "claude-opus", "glacier": "claude-haiku"}
 	WorkerAgents map[string]string `json:"worker_agents,omitempty"`
 
 	// RoleEffort maps role names to effort levels, overriding TownSettings.RoleEffort for this rig.
@@ -587,8 +583,11 @@ type CrewConfig struct {
 // This allows switching between different LLM backends (claude, aider, etc.)
 // without modifying startup code.
 type RuntimeConfig struct {
-	// Provider selects runtime-specific defaults and integration behavior.
-	// Known values: "claude", "codex", "generic". Default: "claude".
+	// Provider names the agent preset whose defaults fill unset fields
+	// ("claude", "groq-compound", or a settings/agents.json entry). A name
+	// that is not a registered preset falls back to "claude": the Claude CLI
+	// is the only runtime, so no provider value can start a session without
+	// Claude Code's hooks and settings (gt-be0z). Default: "claude".
 	Provider string `json:"provider,omitempty"`
 
 	// Command is the CLI command to invoke (e.g., "claude", "aider").
@@ -602,7 +601,7 @@ type RuntimeConfig struct {
 
 	// Env are environment variables to set when starting the agent.
 	// These are merged with the standard GT_* variables.
-	// Used for agent-specific configuration like OPENCODE_PERMISSION.
+	// Used to point the Claude CLI at another backend (ANTHROPIC_BASE_URL etc.).
 	Env map[string]string `json:"env,omitempty"`
 
 	// InitialPrompt is an optional first message to send after startup.
@@ -610,27 +609,14 @@ type RuntimeConfig struct {
 	// Empty by default (hooks handle context).
 	InitialPrompt string `json:"initial_prompt,omitempty"`
 
-	// PromptMode controls how prompts are passed to the runtime.
-	// Supported values: "arg" (append prompt arg), "none" (ignore prompt).
-	// Default: "arg" for built-in interactive runtimes.
-	PromptMode string `json:"prompt_mode,omitempty"`
-
 	// Session config controls environment integration for runtime session IDs.
 	Session *RuntimeSessionConfig `json:"session,omitempty"`
-
-	// Hooks config controls runtime hook installation (if supported).
-	Hooks *RuntimeHooksConfig `json:"hooks,omitempty"`
 
 	// Tmux config controls process detection and readiness heuristics.
 	Tmux *RuntimeTmuxConfig `json:"tmux,omitempty"`
 
 	// Instructions controls the per-workspace instruction file name.
 	Instructions *RuntimeInstructionsConfig `json:"instructions,omitempty"`
-
-	// ACP configures ACP (Agent Communication Protocol) support.
-	// When set, the agent can run in ACP mode. If nil, ACP support is
-	// determined by matching the Command to a known preset with ACP config.
-	ACP *ACPConfig `json:"acp,omitempty"`
 
 	// ExecWrapper is a command prefix inserted between environment variables
 	// and the agent binary in the startup command. Used for sandboxed execution.
@@ -648,36 +634,12 @@ type RuntimeConfig struct {
 // RuntimeSessionConfig configures how Gas Town discovers runtime session IDs.
 type RuntimeSessionConfig struct {
 	// SessionIDEnv is the environment variable set by the runtime to identify a session.
-	// Default: "CLAUDE_SESSION_ID" for claude, empty for codex/generic.
+	// Default: "CLAUDE_SESSION_ID".
 	SessionIDEnv string `json:"session_id_env,omitempty"`
 
 	// ConfigDirEnv is the environment variable that selects a runtime account/config dir.
-	// Default: "CLAUDE_CONFIG_DIR" for claude, empty for codex/generic.
+	// Default: "CLAUDE_CONFIG_DIR".
 	ConfigDirEnv string `json:"config_dir_env,omitempty"`
-}
-
-// RuntimeHooksConfig configures runtime hook installation.
-type RuntimeHooksConfig struct {
-	// Provider controls which hook templates to install: "claude", "opencode", "copilot", or "none".
-	Provider string `json:"provider,omitempty"`
-
-	// Dir is the settings directory (e.g., ".claude").
-	Dir string `json:"dir,omitempty"`
-
-	// SettingsFile is the settings file name (e.g., "settings.json").
-	SettingsFile string `json:"settings_file,omitempty"`
-
-	// Informational indicates the hooks provider installs instructions files only,
-	// not executable lifecycle hooks. When true, Gas Town sends startup fallback
-	// commands (gt prime) via nudge since hooks won't run automatically.
-	// Defaults to false (backwards compatible with claude/opencode which have real hooks).
-	Informational bool `json:"informational,omitempty"`
-
-	// UseSettingsDir is the hooks provider preset's HooksUseSettingsDir, taken
-	// from the agent registry the config was resolved against (town and rig
-	// settings/agents.json included). Nil means not resolved: readers fall
-	// back to the built-in preset. Not read from or written to settings.
-	UseSettingsDir *bool `json:"-"`
 }
 
 // RuntimeTmuxConfig controls tmux heuristics for detecting runtime readiness.
@@ -734,14 +696,8 @@ func (rc *RuntimeConfig) BuildCommand() string {
 // BuildCommandWithPrompt returns the full command line with an initial prompt.
 // If the config has an InitialPrompt, it's appended as a quoted argument.
 // If prompt is provided, it overrides the config's InitialPrompt.
-// For opencode, uses --prompt flag; for other agents, uses positional argument.
+// Claude takes the prompt as a positional argument.
 func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
-	return rc.buildCommandWithPrompt(prompt, os.Stderr)
-}
-
-// buildCommandWithPrompt is BuildCommandWithPrompt writing its dropped-prompt
-// warning to warn.
-func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) string {
 	resolved := normalizeRuntimeConfig(rc)
 	base := resolved.BuildCommand()
 
@@ -751,49 +707,16 @@ func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) s
 		p = resolved.InitialPrompt
 	}
 
-	if p == "" || resolved.PromptMode == "none" {
-		if p != "" {
-			// A non-empty prompt was silently dropped because prompt_mode is "none".
-			// This commonly happens when a user copies a codex agent entry (which ships
-			// with prompt_mode: "none") to create a claude override, inadvertently
-			// suppressing the daemon's startup beacon injection and causing a crash-loop
-			// that looks like a deacon failure. Warn so misconfiguration is self-diagnosing.
-			fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
-		}
+	if p == "" {
 		return base
 	}
 
-	// OpenCode requires --prompt flag for initial prompt in interactive mode.
-	// Positional argument causes opencode to exit immediately.
-	// Match both "opencode" and full paths like "/home/user/.opencode/bin/opencode".
-	if resolved.Command == "opencode" || filepath.Base(resolved.Command) == "opencode" {
-		return base + " --prompt " + quoteForShell(p)
-	}
-
-	// Copilot requires -i flag for initial prompt in interactive mode.
-	if resolved.Command == "copilot" || filepath.Base(resolved.Command) == "copilot" {
-		return base + " -i " + quoteForShell(p)
-	}
-
-	// Gemini requires -i (--prompt-interactive) to auto-execute the prompt
-	// while staying in interactive mode. Positional args populate the input
-	// field but don't execute, and -p runs headless (exits after completion).
-	if resolved.Command == "gemini" || filepath.Base(resolved.Command) == "gemini" {
-		return base + " -i " + quoteForShell(p)
-	}
-
-	// Quote the prompt for shell safety (positional arg for claude and others)
+	// Quote the prompt for shell safety (Claude takes it as a positional arg)
 	return base + " " + quoteForShell(p)
 }
 
 // BuildArgsWithPrompt returns the runtime command and args suitable for exec.
 func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
-	return rc.buildArgsWithPrompt(prompt, os.Stderr)
-}
-
-// buildArgsWithPrompt is BuildArgsWithPrompt writing its dropped-prompt
-// warning to warn.
-func (rc *RuntimeConfig) buildArgsWithPrompt(prompt string, warn io.Writer) []string {
 	resolved := normalizeRuntimeConfig(rc)
 	args := append([]string{resolved.Command}, resolved.Args...)
 
@@ -802,17 +725,8 @@ func (rc *RuntimeConfig) buildArgsWithPrompt(prompt string, warn io.Writer) []st
 		p = resolved.InitialPrompt
 	}
 
-	if p != "" && resolved.PromptMode != "none" {
-		switch resolved.Command {
-		case "opencode":
-			args = append(args, "--prompt", p)
-		case "copilot", "gemini":
-			args = append(args, "-i", p)
-		default:
-			args = append(args, p)
-		}
-	} else if p != "" {
-		fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+	if p != "" {
+		args = append(args, p)
 	}
 
 	return args
@@ -839,10 +753,6 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 		s := *rc.Session
 		rc.Session = &s
 	}
-	if rc.Hooks != nil {
-		h := *rc.Hooks
-		rc.Hooks = &h
-	}
 	if rc.Tmux != nil {
 		t := *rc.Tmux
 		rc.Tmux = &t
@@ -852,8 +762,11 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 		rc.Instructions = &i
 	}
 
-	if rc.Provider == "" {
-		rc.Provider = "claude"
+	// Every runtime is the Claude CLI: a provider that names no registered
+	// preset ("deepseek", or a retired non-Claude runtime) takes Claude's
+	// defaults rather than none, so hooks and settings always install (gt-be0z).
+	if rc.Provider == "" || reg.Preset(rc.Provider) == nil {
+		rc.Provider = string(AgentClaude)
 	}
 
 	if rc.Command == "" {
@@ -862,11 +775,6 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 
 	if rc.Args == nil {
 		rc.Args = defaultRuntimeArgs(reg, rc.Provider)
-	}
-	rc.Args = ensureCodexAutomationArgs(rc.Command, rc.Args)
-
-	if rc.PromptMode == "" {
-		rc.PromptMode = defaultPromptMode(reg, rc.Provider)
 	}
 
 	if rc.Session == nil {
@@ -879,33 +787,6 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 
 	if rc.Session.ConfigDirEnv == "" {
 		rc.Session.ConfigDirEnv = defaultConfigDirEnv(reg, rc.Provider)
-	}
-
-	if rc.Hooks == nil {
-		rc.Hooks = &RuntimeHooksConfig{}
-	}
-
-	if rc.Hooks.Provider == "" {
-		rc.Hooks.Provider = defaultHooksProvider(reg, rc.Provider)
-	}
-
-	if rc.Hooks.Dir == "" {
-		rc.Hooks.Dir = defaultHooksDir(reg, rc.Provider)
-	}
-
-	if rc.Hooks.SettingsFile == "" {
-		rc.Hooks.SettingsFile = defaultHooksFile(reg, rc.Provider)
-	}
-
-	if rc.Hooks.UseSettingsDir == nil {
-		rc.Hooks.UseSettingsDir = hooksUseSettingsDir(reg, rc.Hooks.Provider)
-	}
-
-	// Set informational flag for providers whose "hooks" are instructions files,
-	// not executable lifecycle hooks. This tells startup fallback logic to send
-	// gt prime via nudge since hooks won't run automatically.
-	if !rc.Hooks.Informational {
-		rc.Hooks.Informational = defaultHooksInformational(reg, rc.Provider)
 	}
 
 	if rc.Tmux == nil {
@@ -935,36 +816,7 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 	return rc
 }
 
-const codexUpdateCheckKey = "check_for_update_on_startup"
-const codexUpdateCheckConfig = codexUpdateCheckKey + "=false"
-
-func ensureCodexAutomationArgs(command string, args []string) []string {
-	if !isCodexRuntime(command) || hasCodexUpdateCheckConfig(args) {
-		return args
-	}
-	result := make([]string, 0, len(args)+2)
-	result = append(result, "-c", codexUpdateCheckConfig)
-	result = append(result, args...)
-	return result
-}
-
-func isCodexRuntime(command string) bool {
-	return filepath.Base(command) == string(AgentCodex)
-}
-
-func hasCodexUpdateCheckConfig(args []string) bool {
-	for _, arg := range args {
-		if arg == codexUpdateCheckKey || strings.HasPrefix(arg, codexUpdateCheckKey+"=") {
-			return true
-		}
-	}
-	return false
-}
-
 func defaultRuntimeCommand(reg *AgentRegistry, provider string) string {
-	if provider == "generic" {
-		return ""
-	}
 	if preset := reg.Preset(provider); preset != nil {
 		cmd := preset.Command
 		// Resolve claude path for Claude preset (handles alias installations)
@@ -1008,13 +860,6 @@ func defaultRuntimeArgs(reg *AgentRegistry, provider string) []string {
 	return nil
 }
 
-func defaultPromptMode(reg *AgentRegistry, provider string) string {
-	if preset := reg.Preset(provider); preset != nil && preset.PromptMode != "" {
-		return preset.PromptMode
-	}
-	return "arg"
-}
-
 func defaultSessionIDEnv(reg *AgentRegistry, provider string) string {
 	if preset := reg.Preset(provider); preset != nil {
 		return preset.SessionIDEnv
@@ -1027,48 +872,6 @@ func defaultConfigDirEnv(reg *AgentRegistry, provider string) string {
 		return preset.ConfigDirEnv
 	}
 	return ""
-}
-
-func defaultHooksProvider(reg *AgentRegistry, provider string) string {
-	if preset := reg.Preset(provider); preset != nil && preset.HooksProvider != "" {
-		return preset.HooksProvider
-	}
-	return "none"
-}
-
-func defaultHooksDir(reg *AgentRegistry, provider string) string {
-	if preset := reg.Preset(provider); preset != nil {
-		return preset.HooksDir
-	}
-	return ""
-}
-
-func defaultHooksFile(reg *AgentRegistry, provider string) string {
-	if preset := reg.Preset(provider); preset != nil {
-		return preset.HooksSettingsFile
-	}
-	return ""
-}
-
-// hooksUseSettingsDir returns the HooksUseSettingsDir of the hooks provider's
-// preset in reg, or nil when the provider has no preset.
-func hooksUseSettingsDir(reg *AgentRegistry, hooksProvider string) *bool {
-	preset := reg.Preset(hooksProvider)
-	if preset == nil {
-		return nil
-	}
-	v := preset.HooksUseSettingsDir
-	return &v
-}
-
-// defaultHooksInformational returns true for providers whose hooks are instructions
-// files only (not executable lifecycle hooks). For these providers, Gas Town sends
-// startup fallback commands (gt prime) via nudge since hooks won't auto-run.
-func defaultHooksInformational(reg *AgentRegistry, provider string) bool {
-	if preset := reg.Preset(provider); preset != nil {
-		return preset.HooksInformational
-	}
-	return false
 }
 
 func defaultProcessNames(reg *AgentRegistry, provider, command string) []string {
@@ -1563,25 +1366,28 @@ func NewEscalationConfig() *EscalationConfig {
 	}
 }
 
-// PolecatPool bounds how many polecats run at once: max_local on the local
-// model, max_overflow on the overflow agent. See TownSettings.PolecatPool.
+// PolecatPool bounds how many polecats run at once on the pool's agent. See
+// TownSettings.PolecatPool.
 type PolecatPool struct {
-	// LocalAgent is the agent alias to use while the pool has room.
-	LocalAgent string `json:"local_agent"`
-	// MaxLocal is the number of live polecat sessions allowed on LocalAgent.
-	MaxLocal int `json:"max_local"`
-	// MinSpawnGap is the minimum time between two local spawns (e.g. "4m").
+	// LocalAgent, MaxLocal and IdleFill are retired with the local-model seat
+	// (D4; the local model was retired 2026-09-27): nothing reads them. They
+	// are declared so a settings file that still carries them decodes under
+	// strict decoding, and kept verbatim so a rewrite does not drop operator
+	// data. Delete the keys from settings/config.json by hand.
+	LocalAgent json.RawMessage `json:"local_agent,omitempty"`
+	MaxLocal   json.RawMessage `json:"max_local,omitempty"`
+	IdleFill   json.RawMessage `json:"idle_fill,omitempty"`
+	// MinSpawnGap is the minimum time between two spec-dispatcher spawns
+	// (e.g. "4m").
 	MinSpawnGap string `json:"min_spawn_gap,omitempty"`
-	// OverflowAgent is used when the pool is full or a spawn is too soon.
-	// Empty means the normal role_agents resolution.
+	// OverflowAgent is the agent the pool's polecats run. Empty means the
+	// pool has no seat and the normal role_agents resolution applies. The key
+	// keeps its overflow_ name from the retired local seat so existing
+	// settings files still load.
 	OverflowAgent string `json:"overflow_agent,omitempty"`
 	// MaxOverflow is the number of live polecat sessions allowed on
-	// OverflowAgent. Zero leaves the overflow seat uncapped.
+	// OverflowAgent. Zero leaves the seat uncapped.
 	MaxOverflow int `json:"max_overflow,omitempty"`
-	// IdleFill lets an overflow-shaped bead (bug, feature) take a free local
-	// seat rather than the overflow agent. Unset means on, so a town that never
-	// sets it keeps the behavior it already had.
-	IdleFill *bool `json:"idle_fill,omitempty"`
 }
 
 // MinSpawnGapD returns the parsed MinSpawnGap, or zero when unset/invalid.
@@ -1600,10 +1406,4 @@ func (p *PolecatPool) MinSpawnGapD() time.Duration {
 // OverflowAgent: max_overflow set, and an agent whose sessions to count.
 func (p *PolecatPool) OverflowCapped() bool {
 	return p != nil && p.MaxOverflow > 0 && p.OverflowAgent != ""
-}
-
-// IdleFillEnabled reports whether an overflow-shaped bead may take a free
-// local seat; unset or a nil pool means on.
-func (p *PolecatPool) IdleFillEnabled() bool {
-	return p == nil || p.IdleFill == nil || *p.IdleFill
 }

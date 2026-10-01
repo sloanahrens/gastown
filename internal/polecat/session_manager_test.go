@@ -12,8 +12,6 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
-	gtruntime "github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
@@ -635,13 +633,13 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 			wantGTAgent: false, // fallback needed
 		},
 		{
-			name:        "explicit --agent codex",
-			agent:       "codex",
+			name:        "explicit --agent claude-haiku",
+			agent:       "claude-haiku",
 			wantGTAgent: true,
 		},
 		{
-			name:        "explicit --agent gemini",
-			agent:       "gemini",
+			name:        "explicit --agent groq-compound",
+			agent:       "groq-compound",
 			wantGTAgent: true,
 		},
 	}
@@ -669,9 +667,7 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 // startup-nudge verification runs.
 func startupNudgeRC() *config.RuntimeConfig {
 	return &config.RuntimeConfig{
-		PromptMode: "arg",
-		Hooks:      &config.RuntimeHooksConfig{Provider: "claude"},
-		Tmux:       &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "},
+		Tmux: &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "},
 	}
 }
 
@@ -739,9 +735,6 @@ func TestVerifyStartupNudgeDelivery_BusyAgentIsLeftAlone(t *testing.T) {
 func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
 	t.Parallel()
 	rc := startupNudgeRC()
-	if info := gtruntime.GetStartupFallbackInfo(rc); info.SendBeaconNudge || info.SendStartupNudge {
-		t.Fatal("expected Mode A: !SendBeaconNudge && !SendStartupNudge")
-	}
 	clk := clockwork.NewFakeClockAt(testEpoch)
 	tm := tmuxfake.New(clk)
 	const name = "gt-test-modeA"
@@ -790,80 +783,6 @@ func TestVerifyStartupNudgeDelivery_NilConfig(t *testing.T) {
 	}
 	if sent := tm.Sent(name); len(sent) != 0 {
 		t.Fatalf("sent %q with no prompt detection", sent)
-	}
-}
-
-func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
-	t.Parallel()
-	beaconConfig := session.BeaconConfig{
-		Recipient:               session.BeaconRecipient("polecat", "toast", "demo"),
-		Sender:                  "witness",
-		Topic:                   "assigned",
-		MolID:                   "demo-123",
-		IncludePrimeInstruction: true,
-		ExcludeWorkInstructions: true,
-	}
-
-	prompt := session.BuildStartupPrompt(beaconConfig, gtruntime.StartupNudgeContent())
-
-	if !strings.Contains(prompt, "Run `gt prime`") {
-		t.Fatalf("prompt missing gt prime instruction: %q", prompt)
-	}
-	if !strings.Contains(prompt, gtruntime.StartupNudgeContent()) {
-		t.Fatalf("prompt missing startup nudge content: %q", prompt)
-	}
-}
-
-// TestModeABeaconVerificationCondition verifies that hook+prompt agents (e.g. Claude)
-// satisfy the Mode A beacon delivery verification condition introduced in hi-y44.
-// Fresh spawns may show the Claude Code splash with the CLI beacon pre-filled but
-// not auto-submitted; the condition triggers verifyStartupNudgeDelivery as a safety net.
-func TestModeABeaconVerificationCondition(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		rc        *config.RuntimeConfig
-		wantModeA bool // !SendBeaconNudge && !SendStartupNudge
-	}{
-		{
-			name: "Claude hook+prompt agent triggers Mode A verification",
-			rc: &config.RuntimeConfig{
-				PromptMode: "arg",
-				Hooks: &config.RuntimeHooksConfig{
-					Provider: "claude",
-				},
-			},
-			wantModeA: true,
-		},
-		{
-			name: "Non-hook agent does not trigger Mode A (has startup nudge instead)",
-			rc: &config.RuntimeConfig{
-				PromptMode: "arg",
-				Hooks:      nil,
-			},
-			wantModeA: false,
-		},
-		{
-			name: "Hook agent with no prompt support does not trigger Mode A (uses beacon nudge)",
-			rc: &config.RuntimeConfig{
-				PromptMode: "none",
-				Hooks: &config.RuntimeHooksConfig{
-					Provider: "claude",
-				},
-			},
-			wantModeA: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			info := gtruntime.GetStartupFallbackInfo(tt.rc)
-			gotModeA := !info.SendBeaconNudge && !info.SendStartupNudge
-			if gotModeA != tt.wantModeA {
-				t.Errorf("Mode A condition = %v, want %v (SendBeaconNudge=%v, SendStartupNudge=%v)",
-					gotModeA, tt.wantModeA, info.SendBeaconNudge, info.SendStartupNudge)
-			}
-		})
 	}
 }
 

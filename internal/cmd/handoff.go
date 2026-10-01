@@ -765,7 +765,7 @@ func agentNameForRole(role, workerName string) string {
 //
 // Two pins describe something live config does not, and are kept:
 //   - an explicit --agent override (config.EnvAgentOverride), which nothing
-//     else records — a sling --agent codex or a polecat_pool seat would
+//     else records — a sling --agent claude-haiku or a polecat_pool seat would
 //     otherwise be swapped for the role's preset on the worker's next handoff;
 //   - a crew worker's worker_agents/crew_agents mapping, which outranks
 //     role_agents.crew and belongs to this identity rather than the role.
@@ -901,9 +901,9 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 
 	var runtimeCmd string
 	var roleRuntimeConfig *config.RuntimeConfig
-	// hooksRC is the runtime config the successor runs, nil for a session
-	// without a role; its settings are synced before the respawn.
-	var hooksRC *config.RuntimeConfig
+	// syncHooks is set for a session with a role: its managed settings are
+	// synced before the respawn.
+	var syncHooks bool
 	if currentAgent != "" {
 		// Resolve with the override but still through the role-aware path so
 		// the respawn carries --settings and --append-system-prompt-file
@@ -912,7 +912,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		if err != nil {
 			return restartPlan{}, fmt.Errorf("resolving agent config: %w", err)
 		}
-		hooksRC = rc
+		syncHooks = true
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else if simpleRole != "" {
 		// Preserve role_agents model selection across self-handoff by resolving
@@ -924,7 +924,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 			return restartPlan{}, fmt.Errorf("resolving agent config: %w", err)
 		}
 		roleRuntimeConfig = rc
-		hooksRC = rc
+		syncHooks = true
 		runtimeCmd = rc.BuildCommandWithPrompt(beacon)
 	} else {
 		runtimeCmd = config.GetRuntimeCommandWithPrompt(rigPath, beacon)
@@ -1012,7 +1012,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 
 	// Preserve GT_PROCESS_NAMES across handoff for accurate liveness detection.
 	// Without this, custom agents that shadow built-in presets (e.g., custom
-	// "codex" running "opencode") would revert to GT_AGENT-based lookup after
+	// "claude" running a wrapper script) would revert to GT_AGENT-based lookup after
 	// handoff, causing false liveness failures. A re-resolved agent is not the
 	// one those names describe, so it is recomputed from its own preset.
 	if processNames := getenv("GT_PROCESS_NAMES"); processNames != "" && !staleAgentPin {
@@ -1072,7 +1072,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 
 	envCmd := config.PrependEnv(execPrefix+runtimeCmd, envMap)
 	plan := restartPlan{Command: cdPrefix + envCmd}
-	if hooksRC != nil {
+	if syncHooks {
 		settingsDir := config.RoleSettingsDir(simpleRole, rigPath)
 		if settingsDir == "" {
 			settingsDir = workDir
@@ -1084,7 +1084,6 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 			Role:        simpleRole,
 			SettingsDir: settingsDir,
 			WorkDir:     workDir,
-			Runtime:     hooksRC,
 		}
 	}
 	return plan, nil

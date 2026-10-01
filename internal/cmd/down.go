@@ -778,7 +778,7 @@ func findOrphanedClaudeProcesses(townRoot string) []int {
 		// Only consider known Gas Town process names
 		comm := strings.ToLower(fields[1])
 		switch comm {
-		case "claude", "claude-code", "codex", "opencode", "cursor-agent", "agent", "copilot", "node":
+		case "claude", "claude-code", "node":
 			// Potential Gas Town process
 		default:
 			continue

@@ -330,23 +330,6 @@ func TestFormatStartupBeacon(t *testing.T) {
 			},
 		},
 		{
-			name: "include prime instruction for non-hook agents",
-			cfg: BeaconConfig{
-				Recipient:               BeaconRecipient("polecat", "ruby", "myrig"),
-				Sender:                  "witness",
-				Topic:                   "assigned",
-				IncludePrimeInstruction: true,
-			},
-			wantSub: []string{
-				"[GAS TOWN]",
-				"polecat ruby (rig: myrig)",
-				"gt prime",
-			},
-			wantNot: []string{
-				"begin work", // excluded when IncludePrimeInstruction is set
-			},
-		},
-		{
 			name: "attach topic includes hook/mail instructions",
 			cfg: BeaconConfig{
 				Recipient: "mayor",

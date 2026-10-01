@@ -746,7 +746,7 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 //  1. If rig has Runtime set directly, use it (backwards compatibility)
 //  2. If rig has Agent set, look it up in:
 //     a. Town's custom agents (from TownSettings.Agents)
-//     b. Built-in presets (claude, gemini, codex)
+//     b. Built-in presets (claude, groq-compound)
 //  3. If rig has no Agent set, use town's default_agent
 //  4. Fall back to claude defaults
 //
@@ -843,7 +843,7 @@ func resolveAgentConfigWithOverrideInternal(reg *AgentRegistry, townRoot, rigPat
 	agentName := ""
 	var extraArgs []string
 	if agentOverride != "" {
-		// Handle agent overrides with subcommands (e.g., "opencode acp")
+		// Handle agent overrides with extra args (e.g., "claude --model opus")
 		parts := strings.Fields(agentOverride)
 		if len(parts) > 0 {
 			agentName = parts[0]
@@ -862,17 +862,8 @@ func resolveAgentConfigWithOverrideInternal(reg *AgentRegistry, townRoot, rigPat
 	// If an override is requested, validate it exists
 	if agentOverride != "" {
 		var rc *RuntimeConfig
-		// For subcommand-style overrides (e.g. "opencode acp"), prefer the built-in
-		// preset when one exists. Town agent registry overrides often point at wrappers
-		// like gt-opencode, but ACP/subcommand invocations need the underlying runtime
-		// binary and built-in capability metadata.
-		if len(extraArgs) > 0 {
-			if preset, ok := builtinPresets[AgentPreset(agentName)]; ok {
-				rc = runtimeConfigFromAgentInfo(reg, AgentPreset(agentName), preset)
-			}
-		}
 		// Check rig-level custom agents first
-		if rc == nil && rigSettings != nil && rigSettings.Agents != nil {
+		if rigSettings != nil && rigSettings.Agents != nil {
 			if custom, ok := rigSettings.Agents[agentName]; ok && custom != nil {
 				rc = fillRuntimeDefaultsIn(reg, custom)
 			}
@@ -1035,7 +1026,7 @@ func resolveRoleAgentConfig(h host, role, townRoot, rigPath string) *RuntimeConf
 	defer resolveConfigMu.Unlock()
 	reg := agentRegistryFor(h, townRoot, rigPath)
 	rc := resolveRoleAgentConfigCore(reg, role, townRoot, rigPath)
-	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
+	rc = withRoleSettingsFlag(rc, role, rigPath)
 	return withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, "")
 }
 
@@ -1082,7 +1073,7 @@ func resolveWorkerAgentConfig(h host, workerName, townRoot, rigPath string) *Run
 					townSettings = NewTownSettings()
 				}
 				if rc := tryResolveNamedAgent(reg, agentName, fmt.Sprintf("worker_agents[%s]", workerName), townSettings, rigSettings); rc != nil {
-					return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(reg, rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
+					return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
 				}
 			}
 		}
@@ -1098,7 +1089,7 @@ func resolveWorkerAgentConfig(h host, workerName, townRoot, rigPath string) *Run
 					rigSettings, _ = LoadRigSettings(RigSettingsPath(rigPath))
 				}
 				if rc := tryResolveNamedAgent(reg, agentName, fmt.Sprintf("crew_agents[%s]", workerName), townSettings, rigSettings); rc != nil {
-					return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(reg, rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
+					return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
 				}
 			}
 		}
@@ -1106,7 +1097,7 @@ func resolveWorkerAgentConfig(h host, workerName, townRoot, rigPath string) *Run
 
 	// Tier 3: fall back to crew role resolution (already holds lock; use core function)
 	rc := resolveRoleAgentConfigCore(reg, "crew", townRoot, rigPath)
-	return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(reg, rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
+	return withRoleSystemPromptFlag(reg, withRoleSettingsFlag(rc, "crew", rigPath), "crew", townRoot, rigPath, workerName)
 }
 
 // ResolveRoleEffort resolves the effort level for a role.
@@ -1160,51 +1151,12 @@ func resolveRoleEffort(getenv func(string) string, role, townRoot, rigPath strin
 	return "" // Caller uses env var fallback, then "high" default
 }
 
-// IsResolvedAgentClaude returns true if the RuntimeConfig represents a Claude agent.
-// Exported for use in witness/daemon code that needs to skip hardcoded
-// Claude start commands when a non-Claude agent is configured.
-func IsResolvedAgentClaude(rc *RuntimeConfig) bool {
-	if rc == nil {
-		return true // Default to Claude when config is unavailable
-	}
-	return isClaudeAgent(rc)
-}
-
-// IsResolvedAgentClaudeIn is IsResolvedAgentClaude with presets taken from
-// the agent registry of townRoot and rigPath, so a preset whose command a
-// town or rig settings/agents.json overrides is classified as that town or
-// rig runs it (gt-rg4f1).
-func IsResolvedAgentClaudeIn(townRoot, rigPath string, rc *RuntimeConfig) bool {
-	if rc == nil {
-		return true // Default to Claude when config is unavailable
-	}
-	return isClaudeAgentIn(AgentRegistryFor(townRoot, rigPath), rc)
-}
-
-// isClaudeAgent returns true if the RuntimeConfig launches Claude Code.
-// The command is authoritative (basename, gt- prefix and wrappers such as
-// `env -u X claude` unwrapped — see harnessPresetName); provider is the
-// fallback; empty command and provider default to Claude.
-func isClaudeAgent(rc *RuntimeConfig) bool {
-	return isClaudeAgentIn(nil, rc)
-}
-
-// isClaudeAgentIn is isClaudeAgent with presets taken from reg (nil means the
-// built-in presets).
-func isClaudeAgentIn(reg *AgentRegistry, rc *RuntimeConfig) bool {
-	return harnessPresetName(rc.Command, rc.Args, rc.Provider, reg.presetTable()) == string(AgentClaude)
-}
-
-// withRoleSettingsFlag appends --settings to the Args for Claude agents whose
+// withRoleSettingsFlag appends --settings to the Args for roles whose
 // settings directory differs from the session working directory. Claude Code
 // resolves project-level settings from its working directory only; the --settings
 // flag tells it where to find them when they live in a parent directory.
-func withRoleSettingsFlag(reg *AgentRegistry, rc *RuntimeConfig, role, rigPath string) *RuntimeConfig {
+func withRoleSettingsFlag(rc *RuntimeConfig, role, rigPath string) *RuntimeConfig {
 	if rc == nil || rigPath == "" {
-		return rc
-	}
-
-	if !isClaudeAgentIn(reg, rc) {
 		return rc
 	}
 
@@ -1220,18 +1172,7 @@ func withRoleSettingsFlag(reg *AgentRegistry, rc *RuntimeConfig, role, rigPath s
 		return rc
 	}
 
-	hooksDir := ".claude"
-	settingsFile := "settings.json"
-	if rc.Hooks != nil {
-		if rc.Hooks.Dir != "" {
-			hooksDir = rc.Hooks.Dir
-		}
-		if rc.Hooks.SettingsFile != "" {
-			settingsFile = rc.Hooks.SettingsFile
-		}
-	}
-
-	rc.Args = append(rc.Args, "--settings", filepath.Join(settingsDir, hooksDir, settingsFile))
+	rc.Args = append(rc.Args, "--settings", filepath.Join(settingsDir, ".claude", "settings.json"))
 	return rc
 }
 
@@ -1296,42 +1237,6 @@ func tryResolveFromEphemeralTier(reg *AgentRegistry, role string) (*RuntimeConfi
 	return nil, false
 }
 
-// hasExplicitNonClaudeOverride checks if there is an explicit non-Claude agent
-// assignment either specifically for the role (in rig or town RoleAgents) or
-// globally (via rig Agent or town DefaultAgent). This prevents fallback logic
-// and cost tiers from silently replacing intentional non-Claude agent selections.
-func hasExplicitNonClaudeOverride(reg *AgentRegistry, role string, townSettings *TownSettings, rigSettings *RigSettings) bool {
-	// Check rig's RoleAgents
-	if rigSettings != nil && rigSettings.RoleAgents != nil {
-		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
-			if rc := lookupAgentConfigIfExists(reg, agentName, townSettings, rigSettings); rc != nil && !isClaudeAgentIn(reg, rc) {
-				return true
-			}
-		}
-	}
-	// Check town's RoleAgents
-	if townSettings != nil && townSettings.RoleAgents != nil {
-		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
-			if rc := lookupAgentConfigIfExists(reg, agentName, townSettings, rigSettings); rc != nil && !isClaudeAgentIn(reg, rc) {
-				return true
-			}
-		}
-	}
-	// Check rig's global Agent
-	if rigSettings != nil && rigSettings.Agent != "" {
-		if rc := lookupAgentConfigIfExists(reg, rigSettings.Agent, townSettings, rigSettings); rc != nil && !isClaudeAgentIn(reg, rc) {
-			return true
-		}
-	}
-	// Check town's DefaultAgent
-	if townSettings != nil && townSettings.DefaultAgent != "" {
-		if rc := lookupAgentConfigIfExists(reg, townSettings.DefaultAgent, townSettings, rigSettings); rc != nil && !isClaudeAgentIn(reg, rc) {
-			return true
-		}
-	}
-	return false
-}
-
 func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1354,25 +1259,12 @@ func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath stri
 	if tierHandled {
 		if tierRC != nil {
 			// Tier wants a specific Claude model for this role.
-			// But if there's an explicit non-Claude rig/town override, respect it —
-			// cost tiers only manage Claude model selection, not agent platform choice.
-			if hasExplicitNonClaudeOverride(reg, role, townSettings, rigSettings) {
-				// Fall through to normal resolution below
-			} else {
-				return tierRC
-			}
-		} else {
-			// Tier says "use default" for this role — but if there's an explicit
-			// non-Claude override, respect it (cost tiers only manage Claude models).
-			if hasExplicitNonClaudeOverride(reg, role, townSettings, rigSettings) {
-				// Fall through to normal resolution below
-			} else {
-				// Skip persisted RoleAgents to prevent stale config from leaking
-				// through, go straight to default resolution
-				// (rig's Agent → town's DefaultAgent → "claude").
-				return resolveAgentConfigInternal(reg, townRoot, rigPath)
-			}
+			return tierRC
 		}
+		// Tier says "use default" for this role. Skip persisted RoleAgents to
+		// prevent stale config from leaking through, go straight to default
+		// resolution (rig's Agent → town's DefaultAgent → "claude").
+		return resolveAgentConfigInternal(reg, townRoot, rigPath)
 	}
 
 	// Check rig's RoleAgents first
@@ -1551,7 +1443,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 		Provider:      rc.Provider,
 		Command:       rc.Command,
 		InitialPrompt: rc.InitialPrompt,
-		PromptMode:    rc.PromptMode,
 		ResolvedAgent: rc.ResolvedAgent,
 	}
 
@@ -1583,15 +1474,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 		}
 	}
 
-	if rc.Hooks != nil {
-		result.Hooks = &RuntimeHooksConfig{
-			Provider:       rc.Hooks.Provider,
-			Dir:            rc.Hooks.Dir,
-			SettingsFile:   rc.Hooks.SettingsFile,
-			UseSettingsDir: rc.Hooks.UseSettingsDir,
-		}
-	}
-
 	if rc.Tmux != nil {
 		result.Tmux = &RuntimeTmuxConfig{
 			ReadyPromptPrefix: rc.Tmux.ReadyPromptPrefix,
@@ -1607,18 +1489,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 	if rc.Instructions != nil {
 		result.Instructions = &RuntimeInstructionsConfig{
 			File: rc.Instructions.File,
-		}
-	}
-
-	// Deep copy ACP config
-	if rc.ACP != nil {
-		result.ACP = &ACPConfig{
-			Mode:    rc.ACP.Mode,
-			Command: rc.ACP.Command,
-		}
-		if rc.ACP.Args != nil {
-			result.ACP.Args = make([]string, len(rc.ACP.Args))
-			copy(result.ACP.Args, rc.ACP.Args)
 		}
 	}
 
@@ -1640,21 +1510,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 	if result.Args == nil && preset != nil {
 		result.Args = append([]string(nil), preset.Args...)
 	}
-	result.Args = ensureCodexAutomationArgs(result.Command, result.Args)
-
-	// Auto-fill Hooks defaults from preset for agents that support hooks.
-	if result.Hooks == nil && preset != nil && preset.HooksProvider != "" {
-		result.Hooks = &RuntimeHooksConfig{
-			Provider:     preset.HooksProvider,
-			Dir:          preset.HooksDir,
-			SettingsFile: preset.HooksSettingsFile,
-		}
-	}
-
-	// Record the hooks provider's settings-dir support from the same registry.
-	if result.Hooks != nil && result.Hooks.UseSettingsDir == nil {
-		result.Hooks.UseSettingsDir = hooksUseSettingsDir(reg, result.Hooks.Provider)
-	}
 
 	// Auto-fill Session defaults from preset.
 	if result.Session == nil && preset != nil && (preset.SessionIDEnv != "" || preset.ConfigDirEnv != "") {
@@ -1671,11 +1526,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 			ReadyPromptPrefix: preset.ReadyPromptPrefix,
 			ReadyDelayMs:      preset.ReadyDelayMs,
 		}
-	}
-
-	// Auto-fill PromptMode from preset.
-	if result.PromptMode == "" && preset != nil && preset.PromptMode != "" {
-		result.PromptMode = preset.PromptMode
 	}
 
 	// Auto-fill Instructions defaults from preset.
@@ -1719,19 +1569,6 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 			if _, ok := result.Env[k]; !ok {
 				result.Env[k] = v
 			}
-		}
-	}
-
-	// Auto-fill ACP config from preset if not explicitly set.
-	// This allows custom agents to inherit ACP support from their base preset.
-	if result.ACP == nil && preset != nil && preset.ACP != nil {
-		result.ACP = &ACPConfig{
-			Mode:    preset.ACP.Mode,
-			Command: preset.ACP.Command,
-		}
-		if preset.ACP.Args != nil {
-			result.ACP.Args = make([]string, len(preset.ACP.Args))
-			copy(result.ACP.Args, preset.ACP.Args)
 		}
 	}
 
@@ -1967,20 +1804,19 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
-	// Set GT_AGENT from resolved agent name so IsAgentAliveChecked can detect
-	// non-Claude processes (e.g., opencode). Without this, witness patrol
-	// falls back to ["node", "claude"] process detection and auto-nukes
-	// polecats running non-Claude agents. See: gt-agent-role-agents.
+	// Set GT_AGENT from resolved agent name so IsAgentAliveChecked can resolve
+	// the session's preset (process names, Escape policy) rather than guess.
+	// See: gt-agent-role-agents.
 	if rc.ResolvedAgent != "" {
 		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
 	}
 	// Set GT_PROCESS_NAMES for accurate liveness detection. Custom agents may
-	// shadow built-in preset names (e.g., custom "codex" running "opencode"),
+	// shadow built-in preset names (e.g., custom "claude" running a wrapper script),
 	// or wrap the real binary with a launcher (e.g., `env -u VAR claude ...`).
 	// Pass rc.Args so wrapper-unwrap can find the real binary.
 	processNames := agentRegistryFor(h, townRoot, rigPath).ResolveProcessNames(rc.ResolvedAgent, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
+	// Merge agent-specific env vars (e.g., ANTHROPIC_BASE_URL for a backend),
 	// resolving any ${VAR} reference here rather than at config load so it
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference is an error, not an empty export: this is the only check an
@@ -2187,7 +2023,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 			townRoot, err = findTownRootFromCwd(h)
 			if err != nil {
 				// Can't find town root from cwd - but if agentOverride is specified,
-				// try to use the preset directly. This allows `gt deacon start --agent codex`
+				// try to use the preset directly. This allows `gt deacon start --agent claude`
 				// to work even when run from outside the town directory.
 				if agentOverride != "" {
 					if preset := GetAgentPresetByName(agentOverride); preset != nil {
@@ -2221,7 +2057,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 	// non-override ResolveRoleAgentConfig path included it, causing hooks
 	// to silently not fire for polecats launched with --agent.
 	reg := agentRegistryFor(h, townRoot, rigPath)
-	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
+	rc = withRoleSettingsFlag(rc, role, rigPath)
 	// Same for the rendered role system prompt: when the agent's file exists,
 	// Claude gets it via --append-system-prompt-file and gt prime omits the
 	// static role text from its hook output. Polecat and crew files are per
@@ -2264,7 +2100,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 	// can find the real agent binary.
 	processNamesOverride := reg.ResolveProcessNames(agentForProcess, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNamesOverride, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode),
+	// Merge agent-specific env vars (e.g., ANTHROPIC_BASE_URL for a backend),
 	// resolving any ${VAR} reference here rather than at config load so it
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference stops the spawn: this is the only check an agent resolved out
@@ -2466,7 +2302,7 @@ func BuildCrewStartupCommandWithAgentOverride(rigName, crewName, rigPath, prompt
 
 // resolveExecWrapper loads the exec_wrapper from rig settings.
 // ExecWrapper is a deployment-level setting (sandbox/container) that wraps the agent binary.
-// It is independent of agent choice — exitbox wraps Claude, Codex, or any other runtime.
+// It is independent of agent choice — exitbox wraps the Claude CLI and its wrappers.
 func resolveExecWrapper(rigPath string) []string {
 	if rigPath != "" {
 		if rigSettings, err := LoadRigSettings(RigSettingsPath(rigPath)); err == nil && rigSettings != nil {

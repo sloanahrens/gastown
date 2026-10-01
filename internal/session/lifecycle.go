@@ -162,7 +162,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	}
 	// Every start syncs the managed settings and reports hooks:present or
 	// hooks:absent for the session (gt-4k3fj.8.3).
-	hooksStatus, err := runtime.SyncSessionSettings(settingsDir, cfg.WorkDir, cfg.Role, runtimeConfig)
+	hooksStatus, err := runtime.SyncSessionSettings(settingsDir, cfg.WorkDir, cfg.Role)
 	actor := cfg.Role
 	if cfg.RigName != "" {
 		actor = cfg.RigName + "/" + cfg.Role

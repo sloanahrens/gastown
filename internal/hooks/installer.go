@@ -1,192 +1,48 @@
-// Package hooks provides a generic hook/settings installer for all agent runtimes.
-//
-// Instead of per-agent packages (claude/, gemini/, cursor/, etc.) each containing
-// near-identical boilerplate, this package embeds all agent templates and provides
-// a single generic installer that reads template metadata from AgentPresetInfo.
+// Package hooks installs and syncs the Claude Code settings.json that carries
+// Gas Town's hooks. Claude Code is the only agent runtime (D4), so every role's
+// settings go through one path: the JSON merge of the base config and its
+// overrides that gt hooks sync writes.
 package hooks
 
 import (
-	"bytes"
-	"embed"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-
-	"github.com/steveyegge/gastown/internal/atomicfile"
-	"github.com/steveyegge/gastown/internal/hookutil"
 )
 
-//go:embed templates/*
-var templateFS embed.FS
-
-// InstallForRole provisions hook/settings files for an agent based on its preset config.
-// A Claude settings file is synced to the managed hooks (see below). Any other
-// file is created if it does not exist, or overwritten if it contains known
-// stale patterns (e.g., legacy "export PATH=" format), and otherwise left alone.
-//
-// For explicit sync operations that should update stale files, use SyncForRole.
+// InstallForRole syncs settingsDir/.claude/settings.json for a role to the
+// managed hooks: what gt hooks sync writes, keyed as gt hooks sync keys it
+// (ManagedTargetKey), keeping non-hook settings fields. Each session start so
+// picks up guards added since, without an operator running gt hooks sync
+// (gt-8stz, gt-4k3fj.8.3).
 //
 // Parameters:
-//   - provider: the preset's HooksProvider (e.g., "claude", "gemini").
-//   - settingsDir: the gastown-managed parent (used by agents with --settings flag).
-//   - workDir: the agent's working directory.
+//   - settingsDir: the gastown-managed parent (passed to Claude via --settings
+//     for crew and polecats; the working directory for town-level roles).
 //   - role: the Gas Town role (e.g., "polecat", "crew", "mayor").
-//   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
-//   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     Claude settings-sync path, which must not apply to non-Claude agents.
 //
-// Template resolution:
-//   - Role-aware agents (have both autonomous and interactive templates):
-//     templates/<provider>/settings-autonomous.json + settings-interactive.json
-//     or templates/<provider>/hooks-autonomous.json + hooks-interactive.json
-//   - Role-agnostic agents (single template): templates/<provider>/<hooksFile>
-//
-// The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
-// or workDir for all others.
-//
-// For Claude, every role's install goes through the JSON merge path
-// (SyncManagedClaudeSettings), writing what gt hooks sync writes while keeping
-// non-hook settings fields, and fails closed: an unparseable hooks-base.json,
-// hooks-override file, or existing settings.json aborts the install with an
-// error naming the file, rather than silently falling back to a template that
-// may be missing hooks a rig-scoped override added. See gt-8stz.
-func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
-	return envConfigHome().installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command, useSettingsDir)
+// It fails closed: an unparseable hooks-base.json, hooks-override file, or
+// existing settings.json aborts the install with an error naming the file,
+// rather than silently leaving a file that may be missing hooks a rig-scoped
+// override added. See gt-8stz.
+func InstallForRole(settingsDir, role string) error {
+	return envConfigHome().installForRole(settingsDir, role)
 }
 
-func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
-	if provider == "" || hooksDir == "" || hooksFile == "" {
-		return nil
+func (h configHome) installForRole(settingsDir, role string) error {
+	targetPath := filepath.Join(settingsDir, ".claude", "settings.json")
+	if _, err := h.syncManagedClaudeSettings(Target{
+		Path: targetPath,
+		Key:  ManagedTargetKey(role, settingsDir),
+		Role: role,
+	}, false); err != nil {
+		return fmt.Errorf("installing managed claude settings for role %q at %s: %w", role, targetPath, err)
 	}
-
-	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	// Claude settings are managed through the JSON merge path for every
-	// role, so each session start writes what gt hooks sync writes rather
-	// than a template frozen at first install; the needsUpgrade heuristic
-	// below has no way to detect a hook type added in code (gt-8stz,
-	// gt-4k3fj.8.3). The key is the one gt hooks sync manages the file
-	// under, so rig-scoped overrides survive a spawn (ManagedTargetKey).
-	if (provider == "claude" || command == "claude") && isSettingsFile(hooksFile) {
-		key := ManagedTargetKey(role, settingsDir)
-		if _, err := h.syncManagedClaudeSettings(Target{
-			Path:     targetPath,
-			Key:      key,
-			Role:     role,
-			Provider: "claude",
-		}, false); err != nil {
-			return fmt.Errorf("installing managed claude settings for role %q at %s: %w", role, targetPath, err)
-		}
-		return nil
-	}
-
-	if existing, err := os.ReadFile(targetPath); err == nil {
-		if !needsUpgrade(existing) {
-			return nil // File exists and is current — don't overwrite
-		}
-		// Stale file detected — fall through to overwrite with current template
-	}
-
-	return writeTemplate(provider, role, hooksFile, targetPath)
+	return nil
 }
 
-// needsUpgrade returns true if an existing hooks file contains stale patterns
-// that should be replaced by the current template. This allows the installer
-// to auto-upgrade hooks from earlier versions without requiring manual intervention.
-func needsUpgrade(content []byte) bool {
-	// Stale pattern: export PATH=... && gt — replaced by {{GT_BIN}} in current templates.
-	// The PATH export breaks Gemini CLI's hook runner which expands $PATH into
-	// an enormous string. Also catches files missing GT_HOOK_SOURCE env vars.
-	if bytes.Contains(content, []byte(`export PATH=`)) {
-		return true
-	}
-	if bytes.Contains(content, []byte(`Gas Town OpenCode plugin`)) {
-		return bytes.Contains(content, []byte(`captureRun("gt prime")`)) ||
-			bytes.Contains(content, []byte("$`gt prime`")) ||
-			!bytes.Contains(content, []byte(`prime --hook`))
-	}
-	// Stale pattern: a PreToolUse matcher written as a permission-rule
-	// pattern (e.g. "Bash(gh pr create*)") instead of a bare tool name —
-	// Claude Code's hooks[].matcher only ever matches the tool name, so a
-	// pattern-style matcher never fires (gt-5ihs). Checked structurally
-	// (not a raw substring scan) so it only trips on an actual PreToolUse
-	// matcher field, not on unrelated JSON containing "Bash(" elsewhere.
-	if hasParenPreToolUseMatcher(content) {
-		return true
-	}
-	// Stale pattern: a PreToolUse matcher naming Bash but not Monitor, the
-	// shape the shipped settings-autonomous.json/settings-interactive.json
-	// templates wrote. The paren check above cannot see it ("Bash" has no
-	// "("), so such a file was judged current and kept every self-filtering
-	// shell guard invisible to Monitor (gt-ly9c4).
-	if hasBareBashPreToolUseMatcher(content) {
-		return true
-	}
-	return false
-}
-
-// preToolUseMatchers returns the matcher strings of a settings.json's
-// PreToolUse entries. Non-JSON or non-settings content yields nil, so every
-// caller treats unreadable content as not-stale.
-func preToolUseMatchers(content []byte) []string {
-	var settings struct {
-		Hooks struct {
-			PreToolUse []struct {
-				Matcher string `json:"matcher"`
-			} `json:"PreToolUse"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(content, &settings); err != nil {
-		return nil
-	}
-	matchers := make([]string, 0, len(settings.Hooks.PreToolUse))
-	for _, entry := range settings.Hooks.PreToolUse {
-		matchers = append(matchers, entry.Matcher)
-	}
-	return matchers
-}
-
-// hasParenPreToolUseMatcher reports whether content is a settings.json whose
-// PreToolUse section has a matcher containing "(" — a dead permission-rule
-// pattern rather than a tool name (gt-5ihs).
-func hasParenPreToolUseMatcher(content []byte) bool {
-	for _, matcher := range preToolUseMatchers(content) {
-		if strings.Contains(matcher, "(") {
-			return true
-		}
-	}
-	return false
-}
-
-// hasBareBashPreToolUseMatcher reports whether content is a settings.json
-// whose PreToolUse section has a matcher naming the Bash tool without naming
-// Monitor, which leaves a Monitor-run command (same tool_input.command as
-// Bash) outside every guard mounted on that entry (gt-vx2mm, gt-ly9c4).
-//
-// Matched per "|"-separated token rather than by string equality so a
-// compound matcher that omits Monitor ("Bash|Edit") is caught too, while a
-// different tool name such as "BashOutput" is not mistaken for Bash.
-func hasBareBashPreToolUseMatcher(content []byte) bool {
-	for _, matcher := range preToolUseMatchers(content) {
-		hasBash, hasMonitor := false, false
-		for _, name := range strings.Split(matcher, "|") {
-			switch strings.TrimSpace(name) {
-			case "Bash":
-				hasBash = true
-			case "Monitor":
-				hasMonitor = true
-			}
-		}
-		if hasBash && !hasMonitor {
-			return true
-		}
-	}
-	return false
-}
-
-// SyncResult describes what SyncForRole did.
+// SyncResult describes what a settings sync did.
 type SyncResult int
 
 const (
@@ -194,168 +50,6 @@ const (
 	SyncCreated                     // File did not exist, created
 	SyncUpdated                     // File existed but content differed, updated
 )
-
-// SyncForRole compares the deployed hook/settings file against the current template
-// and overwrites if content differs. Returns what action was taken.
-//
-// This is the explicit sync path used by "gt hooks sync" for template-based agents
-// (OpenCode, Copilot, Pi, OMP, etc.). It should NOT be used for agents whose settings
-// are managed by the JSON merge path (Claude), as that would clobber merged overrides.
-func SyncForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) (SyncResult, error) {
-	if provider == "" || hooksDir == "" || hooksFile == "" {
-		return SyncUnchanged, nil
-	}
-
-	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-
-	content, err := resolveAndSubstitute(provider, hooksFile, role)
-	if err != nil {
-		return 0, err
-	}
-
-	fileExisted := false
-	if existing, err := os.ReadFile(targetPath); err == nil {
-		fileExisted = true
-		if isSettingsFile(hooksFile) {
-			// JSON files: use structural comparison to tolerate whitespace differences.
-			if TemplateContentEqual(existing, content) {
-				return SyncUnchanged, nil
-			}
-		} else {
-			if bytes.Equal(existing, content) {
-				return SyncUnchanged, nil
-			}
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return 0, fmt.Errorf("creating hooks directory: %w", err)
-	}
-
-	perm := os.FileMode(0644)
-	if isSettingsFile(hooksFile) {
-		perm = 0600
-	}
-
-	// Atomic write (temp + rename) prevents concurrent polecat spawns from
-	// interleaving truncates+writes into a partial JSON file that Claude
-	// rejects at startup. See gh#3500.
-	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
-		return 0, fmt.Errorf("writing hooks file: %w", err)
-	}
-
-	if fileExisted {
-		return SyncUpdated, nil
-	}
-	return SyncCreated, nil
-}
-
-// installTargetPath computes the full path for a hook/settings file.
-func installTargetPath(settingsDir, workDir, hooksDir, hooksFile string, useSettingsDir bool) string {
-	installDir := workDir
-	if useSettingsDir {
-		installDir = settingsDir
-	}
-	return filepath.Join(installDir, hooksDir, hooksFile)
-}
-
-// resolveAndSubstitute resolves the template and performs {{GT_BIN}} substitution.
-func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
-	content, err := resolveTemplate(provider, hooksFile, role)
-	if err != nil {
-		return nil, fmt.Errorf("resolving template for %s: %w", provider, err)
-	}
-
-	if bytes.Contains(content, []byte("{{GT_BIN}}")) {
-		gtBin := resolveGTBinary()
-		gtBinBytes := []byte(gtBin)
-		if isSettingsFile(hooksFile) {
-			// JSON-encode the path so Windows backslashes are properly escaped.
-			// json.Marshal produces `"C:\\path\\gt.exe"` (with quotes); strip the quotes.
-			if encoded, err := json.Marshal(gtBin); err == nil {
-				gtBinBytes = encoded[1 : len(encoded)-1]
-			}
-		}
-		content = bytes.ReplaceAll(content, []byte("{{GT_BIN}}"), gtBinBytes)
-	}
-
-	return content, nil
-}
-
-// writeTemplate resolves a template, substitutes placeholders, and writes it to targetPath.
-func writeTemplate(provider, role, hooksFile, targetPath string) error {
-	content, err := resolveAndSubstitute(provider, hooksFile, role)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return fmt.Errorf("creating hooks directory: %w", err)
-	}
-
-	perm := os.FileMode(0644)
-	if isSettingsFile(hooksFile) {
-		perm = 0600
-	}
-
-	// Atomic write (temp + rename) — see gh#3500.
-	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
-		return fmt.Errorf("writing hooks file: %w", err)
-	}
-
-	return nil
-}
-
-// resolveTemplate finds the right template for a provider+role combination.
-func resolveTemplate(provider, hooksFile, role string) ([]byte, error) {
-	// Determine role type
-	autonomous := hookutil.IsAutonomousRole(role)
-
-	// Try role-aware naming conventions
-	if autonomous {
-		for _, pattern := range roleAwarePatterns("autonomous", hooksFile) {
-			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
-			if content, err := templateFS.ReadFile(path); err == nil {
-				return content, nil
-			}
-		}
-	} else {
-		for _, pattern := range roleAwarePatterns("interactive", hooksFile) {
-			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
-			if content, err := templateFS.ReadFile(path); err == nil {
-				return content, nil
-			}
-		}
-	}
-
-	// Fall back to single template (role-agnostic agents)
-	path := fmt.Sprintf("templates/%s/%s", provider, hooksFile)
-	content, err := templateFS.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("no template found for provider %q file %q: %w", provider, hooksFile, err)
-	}
-	return content, nil
-}
-
-// roleAwarePatterns generates candidate template filenames for role-aware agents.
-// Given roleType "autonomous" and hooksFile "settings.json", it tries:
-//   - settings-autonomous.json
-//   - hooks-autonomous.json
-func roleAwarePatterns(roleType, hooksFile string) []string {
-	ext := filepath.Ext(hooksFile)
-	base := hooksFile[:len(hooksFile)-len(ext)]
-
-	return []string{
-		base + "-" + roleType + ext,  // settings-autonomous.json
-		"hooks-" + roleType + ext,    // hooks-autonomous.json
-		"settings-" + roleType + ext, // settings-autonomous.json (fallback)
-	}
-}
-
-// isSettingsFile returns true for files that may contain sensitive role config.
-func isSettingsFile(name string) bool {
-	return filepath.Ext(name) == ".json"
-}
 
 // resolveGTBinary returns the absolute path to the gt binary.
 // Tries os.Executable() first (most reliable when running as gt), then
@@ -369,27 +63,4 @@ func resolveGTBinary() string {
 		return path
 	}
 	return "gt"
-}
-
-// ComputeExpectedTemplate returns the expected file content for a template-based
-// provider (e.g., gemini) with {{GT_BIN}} resolved to the actual gt binary path.
-// This is used by the doctor hooks-sync check to compare installed files against
-// current templates.
-func ComputeExpectedTemplate(provider, hooksFile, role string) ([]byte, error) {
-	return resolveAndSubstitute(provider, hooksFile, role)
-}
-
-// TemplateContentEqual compares two JSON byte slices for structural equality
-// by normalizing whitespace. Returns true if they represent the same JSON.
-func TemplateContentEqual(expected, actual []byte) bool {
-	var e, a interface{}
-	if err := json.Unmarshal(expected, &e); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(actual, &a); err != nil {
-		return false
-	}
-	ej, _ := json.Marshal(e)
-	aj, _ := json.Marshal(a)
-	return string(ej) == string(aj)
 }

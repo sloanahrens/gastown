@@ -72,7 +72,7 @@ var newDispatchMRLister = func(rigPath string) dispatchMRLister {
 // + rig name) rather than resolved through the manager, because this check
 // deliberately runs before the spawn path does any of its work — including
 // before the pool decision, which spends a tmux round trip and may claim a
-// local seat.
+// seat.
 func checkSlingBackpressure(townRoot, rigName string, opts SlingSpawnOptions) error {
 	return slingBackpressure{lookupBead: poolBeadLookup, lister: newDispatchMRLister}.check(townRoot, rigName, opts)
 }

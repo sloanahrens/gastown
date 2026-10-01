@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -47,14 +46,11 @@ func TestBuildRestartPlan_SyncsCrewSettings(t *testing.T) {
 	if got != want {
 		t.Errorf("plan hooks = %+v\nwant %+v", got, want)
 	}
-	if h.Runtime == nil {
-		t.Error("plan hooks carry no runtime config")
-	}
 
 	var synced []string
 	var reported runtime.HooksStatus
 	var reportedTo [3]string
-	h.sync = func(settingsDir, workDir, role string, rc *config.RuntimeConfig) (runtime.HooksStatus, error) {
+	h.sync = func(settingsDir, workDir, role string) (runtime.HooksStatus, error) {
 		synced = []string{settingsDir, workDir, role}
 		return runtime.HooksStatus{Role: role, Reason: "fake"}, nil
 	}

@@ -59,8 +59,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	// The sling/convoy conversion (gt-z56xs.5) deleted dead bd-calling code
 	// and took go to 69. Repo scripts, git hooks and agent wrappers (44) and
 	// the repo's .claude/.cursor commands and skills (20) joined on 2026-09-30
-	// (gt-fd2cu.4).
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 35, "hooks": 8, "scripts": 22, "agent": 10}
+	// (gt-fd2cu.4). The hooks floor went with the non-Claude hook templates
+	// (D4): the Claude settings templates call {{GT_BIN}}, which the scanner
+	// does not read as gt.
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 35, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++
@@ -116,17 +118,15 @@ func refSource(file string) string {
 		return "go"
 	case strings.HasPrefix(file, "internal/formula/formulas/"):
 		return "formulas"
-	case strings.HasPrefix(file, "internal/hooks/templates/"):
-		return "hooks"
 	case strings.HasPrefix(file, "internal/templates/"), strings.HasPrefix(file, "templates/"):
 		return "templates"
 	case strings.HasPrefix(file, "plugins/"):
 		return "plugins"
 	case strings.HasPrefix(file, "internal/config/roles/"):
 		return "roles"
-	case strings.HasPrefix(file, "scripts/"), strings.HasPrefix(file, ".githooks/"), strings.HasPrefix(file, "internal/wrappers/scripts/"):
+	case strings.HasPrefix(file, "scripts/"), strings.HasPrefix(file, ".githooks/"):
 		return "scripts"
-	case strings.HasPrefix(file, ".claude/"), strings.HasPrefix(file, ".cursor/"):
+	case strings.HasPrefix(file, ".claude/"):
 		return "agent"
 	}
 	return "other"

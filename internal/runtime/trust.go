@@ -126,21 +126,12 @@ func seedTrust(projects map[string]any, dir string) bool {
 	return true
 }
 
-// isClaudeRuntime reports whether the runtime invokes the claude binary.
-//
-// A resolved runtime defers to config.IsResolvedAgentClaude, the spawn path's
-// own notion of a Claude harness, so a claude behind a wrapper command is
-// seeded too rather than only a command whose basename is literally "claude"
-// (gt-zbty).
-//
-// An unresolved runtime (nil, or no command) stays a no-op:
-// IsResolvedAgentClaude's nil-means-Claude default decides how to start a
-// session, not which .claude.json to write.
+// isClaudeRuntime reports whether the runtime is resolved enough to seed:
+// every runtime is the Claude CLI (a wrapper command included, gt-zbty), but
+// an unresolved one (nil, or no command) stays a no-op, since nothing says
+// which .claude.json it would read.
 func isClaudeRuntime(rc *config.RuntimeConfig) bool {
-	if rc == nil || rc.Command == "" {
-		return false
-	}
-	return config.IsResolvedAgentClaude(rc)
+	return rc != nil && rc.Command != ""
 }
 
 // resolveTrustConfigDir returns the CLAUDE_CONFIG_DIR path the spawned session
