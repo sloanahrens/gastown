@@ -10,6 +10,7 @@ import (
 // recordedCall is one bd call a recorder saw, with the --allow-stale probe
 // and the wrapper's own dir/env kept for assertions.
 type recordedCall struct {
+	bin   string
 	dir   string
 	env   []string
 	args  []string
@@ -61,6 +62,7 @@ func (r *recorder) exec(_ context.Context, c bdCall) ([]byte, []byte, error) {
 		return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
 	}
 	r.recorded = append(r.recorded, recordedCall{
+		bin:   c.bin,
 		dir:   c.dir,
 		env:   append([]string(nil), c.env...),
 		args:  append([]string(nil), c.args...),

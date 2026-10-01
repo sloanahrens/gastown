@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -71,13 +72,13 @@ func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 	}
 }
 
-func TestBdIssueWorkParsesMoleculeAndTime(t *testing.T) {
+func TestIssueWorkParsesMoleculeAndTime(t *testing.T) {
 	t.Parallel()
-	w := bdIssue{
+	w := issueWork(&beads.Issue{
 		ID: "gt-a", Status: "hooked", Assignee: "gastown/polecats/ruby",
 		Description: "attached_molecule: gt-wisp-6nm\nattached_formula: mol-polecat-work\n",
 		UpdatedAt:   "2026-09-30T11:30:06Z",
-	}.work()
+	})
 	if w.AttachedMolecule != "gt-wisp-6nm" {
 		t.Errorf("attached molecule = %q", w.AttachedMolecule)
 	}

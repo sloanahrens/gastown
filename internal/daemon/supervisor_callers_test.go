@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -24,69 +25,81 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// workBD is an in-process bd that answers only work-bead queries: `list
-// --status=<s>` prints the content set as "list-<s>.json" (default []),
-// `show <id>` prints "show-<id>.json" (default: [] and exit 1, not found).
-// Anything else exits 1. Every call is recorded, so a test can assert which
-// reads were made. Wire it with d.execCmd = bd.run.
+// workBD is the daemon's work-bead database for a test: a beadsfake the
+// daemon reads through openWorkBeads, recording every read and the bd
+// environment it was opened with. Its run is the daemon's execCmd and fails
+// every subprocess, so nothing the test did not plan escapes. Wire it with
+// d.openWorkBeads = bd.open and d.execCmd = bd.run.
 type workBD struct {
 	*fakeCLI
+	db *beadsfake.Fake
+	// onlyIn, when set, is the one BEADS_DIR db answers for: a read opened
+	// with any other sees an empty database, as bd would.
+	onlyIn string
+	// listErr, when set, fails every list.
+	listErr error
 
 	mu    sync.Mutex
-	files map[string]string
+	reads []string
+	envs  [][]string
 }
 
 func newWorkBD(t *testing.T) *workBD {
 	t.Helper()
-	b := &workBD{files: map[string]string{}}
-	b.fakeCLI = newFakeCLI(b.answer)
-	return b
+	return &workBD{
+		fakeCLI: newFakeCLI(func([]string) cliReply { return cliReply{code: 1} }),
+		db:      beadsfake.New(),
+	}
 }
 
-func (b *workBD) answer(args []string) cliReply {
+// seed stores a work bead assigned to myr/polecats/mycat.
+func (b *workBD) seed(id, status string, updated time.Time, labels ...string) {
+	b.db.Seed(beads.Issue{ID: id, Status: status, Assignee: "myr/polecats/mycat",
+		UpdatedAt: updated.UTC().Format(time.RFC3339), Labels: labels})
+}
+
+// open is the daemon's openWorkBeads.
+func (b *workBD) open(env []string) workBeadReader {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(args) == 0 {
-		return cliReply{code: 1}
+	b.envs = append(b.envs, env)
+	if b.onlyIn != "" && (cliCall{env: env}).getenv("BEADS_DIR") != b.onlyIn {
+		return workBDReader{b: b, db: beadsfake.New()}
 	}
-	switch args[0] {
-	case "list":
-		s := ""
-		for _, a := range args {
-			if v, ok := strings.CutPrefix(a, "--status="); ok {
-				s = v
-			}
-		}
-		if out, ok := b.files["list-"+s+".json"]; ok {
-			return cliReply{stdout: out}
-		}
-		return cliReply{stdout: "[]\n"}
-	case "show":
-		if len(args) > 1 {
-			if out, ok := b.files["show-"+args[1]+".json"]; ok {
-				return cliReply{stdout: out}
-			}
-		}
-		return cliReply{stdout: "[]\n", code: 1}
-	}
-	return cliReply{code: 1}
+	return workBDReader{b: b, db: b.db}
 }
 
-func (b *workBD) set(t *testing.T, name, content string) {
-	t.Helper()
+func (b *workBD) read(what string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.files[name] = content
+	b.reads = append(b.reads, what)
 }
 
-// calls returns every recorded argv, one space-joined call per line.
+// calls returns every recorded read, one per line: "show <id>" or
+// "list <status> <assignee>".
 func (b *workBD) calls(t *testing.T) string {
 	t.Helper()
-	var sb strings.Builder
-	for _, c := range b.recorded() {
-		sb.WriteString(strings.Join(c.args, " ") + "\n")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Join(b.reads, "\n")
+}
+
+type workBDReader struct {
+	b  *workBD
+	db *beadsfake.Fake
+}
+
+func (r workBDReader) Show(id string) (*beads.Issue, error) {
+	r.b.read("show " + id)
+	return r.db.Show(id)
+}
+
+func (r workBDReader) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	r.b.read("list " + opts.Status + " " + opts.Assignee)
+	if r.b.listErr != nil {
+		return nil, r.b.listErr
 	}
-	return sb.String()
+	return r.db.List(opts)
 }
 
 func writePolecatHeartbeat(t *testing.T, townRoot string, state polecat.HeartbeatState, age time.Duration) {
@@ -113,7 +126,7 @@ func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 		prefixRegistryFn: myrPrefixes,
 	}
 	if bd != nil {
-		d.bdPath = "bd"
+		d.openWorkBeads = bd.open
 		d.execCmd = bd.run
 	}
 	return d, &logBuf
@@ -182,9 +195,7 @@ func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
 func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
-	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
-	bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked"}]`)
+	bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour))
 	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
@@ -204,8 +215,7 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
-	recent := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
-	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+recent+`"}]`)
+	bd.seed("gt-work1", "hooked", time.Now().Add(-time.Minute))
 	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
@@ -220,7 +230,7 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
-	bd.set(t, "show-gt-intended.json", `[{"id":"gt-intended","status":"in_progress"}]`)
+	bd.seed("gt-intended", "in_progress", time.Now())
 	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 	if _, err := intent.Update(d.config.TownRoot, intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}, func(r *intent.Record) error {

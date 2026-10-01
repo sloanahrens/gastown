@@ -30,12 +30,12 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -71,12 +71,12 @@ func TestCheckPolecatHealth_SkipsParkedPolecat(t *testing.T) {
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 
 	if err := agentpause.Pause(townRoot, "myr", constants.RolePolecat, "mycat", "deliberate stop (gt session stop)", "overseer", ""); err != nil {
@@ -106,12 +106,12 @@ func TestCheckPolecatHealth_SpawningGuardExpires(t *testing.T) {
 
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: t.TempDir()},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -129,16 +129,16 @@ func TestCheckPolecatHealth_SpawningGuardExpires(t *testing.T) {
 func TestCheckPolecatHealth_SkipsClosedHookBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
-	bd.set(t, "show-fe-xyz.json", `[{"id":"fe-xyz","status":"closed"}]`)
+	bd.seed("fe-xyz", "closed", time.Now())
 
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: t.TempDir()},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 	if _, err := intent.Update(d.config.TownRoot, intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}, func(r *intent.Record) error {
 		r.WorkBead = "fe-xyz"
@@ -167,12 +167,12 @@ func TestCheckPolecatHealth_NoActiveWorkIsNotACrash(t *testing.T) {
 	bd := newWorkBD(t)
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: t.TempDir()},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notifyfake.New(),
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -193,12 +193,12 @@ func TestCheckPolecatHealth_CrashSendsNoMail(t *testing.T) {
 	var logBuf strings.Builder
 	notes := notifyfake.New()
 	d := &Daemon{
-		config:   &Config{TownRoot: townRoot},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     newFakeTmux(newFixedClock()),
-		notifier: notes,
-		bdPath:   "bd",
-		execCmd:  bd.run,
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notes,
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -215,14 +215,12 @@ func TestCheckPolecatHealth_CrashSendsNoMail(t *testing.T) {
 	}
 }
 
-// hookedWorkBD returns a fake bd on which work bead id is hooked to
-// myr/polecats/mycat, last updated ago, and still open.
+// hookedWorkBD returns a work-bead database on which work bead id is hooked
+// to myr/polecats/mycat, last updated ago.
 func hookedWorkBD(t *testing.T, id string, ago time.Duration) *workBD {
 	t.Helper()
 	bd := newWorkBD(t)
-	updated := time.Now().UTC().Add(-ago).Format(time.RFC3339)
-	bd.set(t, "list-hooked.json", `[{"id":"`+id+`","status":"hooked","updated_at":"`+updated+`"}]`)
-	bd.set(t, "show-"+id+".json", `[{"id":"`+id+`","status":"hooked"}]`)
+	bd.seed(id, "hooked", time.Now().Add(-ago))
 	return bd
 }
 
@@ -235,20 +233,16 @@ func polecatSessionTmux(paneCommand string, created time.Time) *fakeTmux {
 	return tm
 }
 
-// lookupFailBD is a bd whose `show` fails (bead infrastructure degraded)
-// while `list` answers: with hasWork, an open work bead assigned to
+// lookupFailBD is a work-bead database with no agent beads (an agent-bead
+// lookup finds nothing): with hasWork, an open work bead assigned to
 // myr/polecats/mycat; otherwise nothing.
-func lookupFailBD(hasWork bool) *fakeCLI {
-	listOut := `[]`
+func lookupFailBD(t *testing.T, hasWork bool) *workBD {
+	t.Helper()
+	bd := newWorkBD(t)
 	if hasWork {
-		listOut = `[{"id":"wh-test-1","status":"open","assignee":"myr/polecats/mycat"}]`
+		bd.seed("wh-test-1", "open", time.Now())
 	}
-	return newFakeCLI(func(args []string) cliReply {
-		if len(args) > 0 && args[0] == "list" {
-			return cliReply{stdout: listOut + "\n"}
-		}
-		return cliReply{code: 1}
-	})
+	return bd
 }
 
 // TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork verifies that reapIdlePolecat
@@ -258,7 +252,7 @@ func lookupFailBD(hasWork bool) *fakeCLI {
 func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 	t.Parallel()
 
-	bd := lookupFailBD(true /* hasWork */)
+	bd := lookupFailBD(t, true /* hasWork */)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
@@ -268,7 +262,7 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier:         notifyfake.New(),
-		bdPath:           "bd",
+		openWorkBeads:    bd.open,
 		execCmd:          bd.run,
 	}
 
@@ -294,7 +288,7 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 	t.Parallel()
 
-	bd := lookupFailBD(false /* no work */)
+	bd := lookupFailBD(t, false /* no work */)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
@@ -304,7 +298,7 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier:         notifyfake.New(),
-		bdPath:           "bd",
+		openWorkBeads:    bd.open,
 		execCmd:          bd.run,
 	}
 
@@ -350,7 +344,7 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             polecatSessionTmux("codex", time.Now().Add(-time.Hour)),
 		notifier:         notifyfake.New(),
-		bdPath:           "bd",
+		openWorkBeads:    bd.open,
 		execCmd:          bd.run,
 	}
 
@@ -391,7 +385,7 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier:         notifyfake.New(),
-		bdPath:           "bd",
+		openWorkBeads:    bd.open,
 		execCmd:          bd.run,
 	}
 
@@ -543,7 +537,7 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 	t.Parallel()
 
-	bd := lookupFailBD(false /* no work */)
+	bd := lookupFailBD(t, false /* no work */)
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
@@ -555,7 +549,7 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             tm,
 		notifier:         notifyfake.New(),
-		bdPath:           "bd",
+		openWorkBeads:    bd.open,
 		execCmd:          bd.run,
 	}
 
@@ -588,9 +582,7 @@ func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
 	t.Parallel()
 	t.Run("intent record", func(t *testing.T) {
 		bd := newWorkBD(t)
-		old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-		bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
-		bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked"}]`)
+		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour))
 		d, logBuf := reaperDaemon(t, bd)
 		d.tmux = newFakeTmux(newFixedClock())
 		seat := intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}
@@ -611,9 +603,7 @@ func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
 
 	t.Run("bead label", func(t *testing.T) {
 		bd := newWorkBD(t)
-		old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-		bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
-		bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked","labels":["gt:ready-to-land"]}]`)
+		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour), "gt:ready-to-land")
 		d, logBuf := reaperDaemon(t, bd)
 		d.tmux = newFakeTmux(newFixedClock())
 

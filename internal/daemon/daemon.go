@@ -88,6 +88,11 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// openWorkBeads opens the beads client the daemon's work-bead reads go
+	// through, given bd's whole environment (see workBeads); nil is bd at
+	// bdPath run from the town root. Tests answer from a beadsfake.
+	openWorkBeads func(env []string) workBeadReader
+
 	// prefixRegistryFn replaces the process-wide rig-prefix registry (see
 	// prefixRegistry) in tests; nil reads session.DefaultRegistry().
 	prefixRegistryFn func() *session.PrefixRegistry
@@ -2501,32 +2506,56 @@ func (d *Daemon) emitMassDeathEvent() {
 	d.recentDeaths = nil
 }
 
-// beadFinished reads a bead with bd show --json and reports whether its work
-// is over for crash detection: closed (status "closed"), or submitted for
-// landing (label gt:ready-to-land, not closed). On any error (bead not found,
-// bd failure) both are false, erring toward crash detection rather than
-// silently suppressing alerts.
-func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
-	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
-	setSysProcAttr(cmd.Cmd)
+// workBeadReader is the slice of the beads client the daemon's work-bead
+// reads use.
+type workBeadReader interface {
+	Show(id string) (*beads.Issue, error)
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+}
 
-	output, err := d.bdOutput(cmd)
+// workBeads returns the client for one work-bead read: the daemon's resolved
+// bd run from the town root with exactly env, which pins or routes the read,
+// killed after timeout (zero waits).
+func (d *Daemon) workBeads(env []string, timeout time.Duration) workBeadReader {
+	if d.openWorkBeads != nil {
+		return d.openWorkBeads(env)
+	}
+	b := beads.NewPlain(d.config.TownRoot, env, beads.WithBin(d.bdPathOrDefault()))
+	if timeout > 0 {
+		b = b.WithTimeout(timeout)
+	}
+	return b
+}
+
+// workBeadsEnv is the read-only environment for a read of rigName's work
+// beads: pinned to the rig's database, or routed from the town root when the
+// rig has no directory.
+func (d *Daemon) workBeadsEnv(rigName string) []string {
+	if rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName); rigDir != "" {
+		return bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
+	}
+	return bdReadOnlyRoutingEnv(d.config.TownRoot)
+}
+
+// beadFinished reads a bead and reports whether its work is over for crash
+// detection: closed (status "closed"), or submitted for landing (label
+// gt:ready-to-land, not closed). On any error (bead not found, bd failure)
+// both are false, erring toward crash detection rather than silently
+// suppressing alerts.
+func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
+	issue, err := d.workBeads(bdReadOnlyRoutingEnv(d.config.TownRoot), 0).Show(beadID)
 	if err != nil {
 		return false, false
 	}
-
-	var issues []struct {
-		Status string   `json:"status"`
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal(output, &issues); err != nil || len(issues) == 0 {
-		return false, false
-	}
-
-	if issues[0].Status == "closed" {
+	if issue.Status == "closed" {
 		return true, false
 	}
-	return false, slices.Contains(issues[0].Labels, land.LabelReadyToLand)
+	return false, slices.Contains(issue.Labels, land.LabelReadyToLand)
+}
+
+// assignedWork lists assignee's work beads in status from rigName's database.
+func (d *Daemon) assignedWork(rigName, assignee, status string) ([]*beads.Issue, error) {
+	return d.workBeads(d.workBeadsEnv(rigName), 0).List(beads.ListOptions{Assignee: assignee, Status: status, Priority: -1})
 }
 
 // hasAssignedOpenWork checks if any work bead is assigned to the given polecat
@@ -2536,21 +2565,8 @@ func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 // field (updateAgentHookBead is a no-op). Without this fallback, the idle reaper
 // kills working polecats whose agent bead hook_bead is stale.
 func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
-	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
-
 	for _, status := range []string{"hooked", "in_progress", "open"} {
-		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
-		env := bdReadOnlyRoutingEnv(d.config.TownRoot)
-		if rigDir != "" {
-			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
-		}
-		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := d.bdOutput(cmd)
-		if err != nil {
-			continue
-		}
-		var issues []json.RawMessage
-		if json.Unmarshal(output, &issues) == nil && len(issues) > 0 {
+		if issues, err := d.assignedWork(rigName, assignee, status); err == nil && len(issues) > 0 {
 			return true
 		}
 	}
@@ -2564,26 +2580,11 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 // answer unknown (an error), since the failed status may be the one holding
 // the work. An updated_at that does not parse is returned as zero.
 func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.Time, error) {
-	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
 	var lastErr error
 	for _, status := range []string{"hooked", "in_progress"} {
-		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
-		env := bdReadOnlyRoutingEnv(d.config.TownRoot)
-		if rigDir != "" {
-			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
-		}
-		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := d.bdOutput(cmd)
+		issues, err := d.assignedWork(rigName, assignee, status)
 		if err != nil {
 			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
-			continue
-		}
-		var issues []struct {
-			ID        string `json:"id"`
-			UpdatedAt string `json:"updated_at"`
-		}
-		if err := json.Unmarshal(output, &issues); err != nil {
-			lastErr = fmt.Errorf("parsing bd list --status=%s output: %w", status, err)
 			continue
 		}
 		for _, issue := range issues {
