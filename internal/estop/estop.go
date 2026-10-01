@@ -1,10 +1,11 @@
 // Package estop provides emergency stop functionality for Gas Town.
 //
-// The E-stop is a town-wide mechanism to pause all agent work. It uses a
-// sentinel file (ESTOP) at the town root. When present, all agents should
-// be frozen (SIGTSTP) and the daemon should not restart them.
-//
-// The Mayor is exempt from E-stop so it can coordinate recovery.
+// The E-stop stops dispatch and restarts, town-wide (a sentinel file ESTOP
+// at the town root) or for one rig (ESTOP.<rig>). It is read in two places
+// only: the dispatch hold (internal/dispatch) and the supervisor's Kill and
+// Restart guard (internal/supervisor). Running sessions are never signalled;
+// they finish or idle (gt-4k3fj.4). gt kill-all is the explicit way to end
+// them.
 //
 // Original implementation by outdoorsea (PR #3237).
 package estop

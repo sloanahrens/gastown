@@ -4,9 +4,11 @@
 // indistinguishable from a stuck agent: the stuck-agent dog respawned a
 // frozen flint 20 minutes later, and the witness patrol restarted parked
 // agents through the done-intent-dead path (gt-ahik). This command is the
-// sanctioned freeze: it writes a durable pause marker (the only source of
+// sanctioned pause: it writes a durable pause marker (the only source of
 // truth every scanner reads), then mirrors agent_state=paused onto the agent
-// bead for display, and freezes the session's process group.
+// bead for display. It sends the session no signal: tmux SIGCONTs a stopped
+// pane, so a freeze never held (gt-4k3fj.4). The session finishes or idles;
+// the marker keeps every restart and kill away from it.
 //
 // Every scanner that can resurrect a session (patrol scan, the polecat
 // staleness assessor)
@@ -25,7 +27,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -38,8 +39,8 @@ var agentCmd = &cobra.Command{
 	RunE:    requireSubcommand,
 	Long: `Manage agents.
 
-  gt agent pause <rig>/<name> --reason "..."   Freeze a polecat in place
-  gt agent resume <address>                    Thaw a paused agent
+  gt agent pause <rig>/<name> --reason "..."   Park a polecat: no restarts or kills
+  gt agent resume <address>                    Clear a pause
 
 Pause targets a polecat: it is only meaningful where a scanner reads the
 marker it writes. Resume accepts any agent address, including a stale
@@ -49,13 +50,14 @@ build.`,
 
 var agentPauseCmd = &cobra.Command{
 	Use:   "pause <rig>/<name>",
-	Short: "Pause a polecat: write a pause marker, sync agent_state=paused, and freeze the session",
+	Short: "Pause a polecat: write a pause marker and sync agent_state=paused",
 	Long: `Pause a polecat so no scanner (patrol scan, polecat staleness) will
 restart or nuke it.
 
-Writes a durable pause marker, syncs the agent bead to
-agent_state=paused, and freezes the tmux session's process group
-(context is preserved — no work is lost).
+Writes a durable pause marker and syncs the agent bead to
+agent_state=paused. The session is not signalled: it finishes its
+current work or idles, and the supervisor refuses to restart or kill it
+while the marker stands.
 
 Only polecat is supported: it is the only role any scanner consults the
 pause marker for. Other roles are refused (deacon has its own, separate
@@ -71,12 +73,11 @@ Resume with: gt agent resume <address>`,
 
 var agentResumeCmd = &cobra.Command{
 	Use:   "resume <address>",
-	Short: "Resume a paused agent: clear the pause marker, restore agent_state, and thaw the session",
+	Short: "Resume a paused agent: clear the pause marker and restore agent_state",
 	Long: `Resume an agent that was paused with gt agent pause.
 
-Clears the pause marker, restores the agent bead's agent_state to
-what it was before the pause, and thaws the session's process group
-(SIGCONT).
+Clears the pause marker and restores the agent bead's agent_state to
+what it was before the pause.
 
 Unlike pause, resume accepts any agent address: it exists to clear a
 stale marker or bead mirror, not just to undo a pause this command
@@ -234,22 +235,11 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 		style.PrintWarning("could not mirror agent_state=paused to bead %s: %v", target.BeadID, err)
 	}
 
-	// 3. Freeze the session process group (SIGSTOP/SIGTSTP). Best-effort:
-	//    a dead session still has its marker, so scanners stay away.
-	froze, ferr := freezeAgentSession(target)
-	if ferr != nil {
-		style.PrintWarning("could not freeze session %s: %v (marker still written — scanners will honor it)", target.SessionName(), ferr)
-	}
-
 	fmt.Printf("%s %s paused\n", style.Bold.Render("⏸️"), display)
 	if agentPauseReason != "" {
 		fmt.Printf("  Reason: %s\n", agentPauseReason)
 	}
-	if froze {
-		fmt.Printf("  Session: %s (frozen)\n", target.SessionName())
-	} else {
-		fmt.Printf("  Session: %s\n", target.SessionName())
-	}
+	fmt.Printf("  Session: %s\n", target.SessionName())
 	fmt.Printf("  Marker: %s\n", agentpause.FilePath(townRoot, target.Rig, role, name))
 	fmt.Println()
 	fmt.Println("Patrol scan and the polecat staleness checks will not touch it.")
@@ -266,7 +256,7 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return resumeAgent(cmd.OutOrStdout(), townRoot, target, beadsAgentStates{townRoot: townRoot}, thawAgentSession)
+	return resumeAgent(cmd.OutOrStdout(), townRoot, target, beadsAgentStates{townRoot: townRoot})
 }
 
 // agentStates is the agent bead's agent_state mirror as gt agent resume reads
@@ -285,8 +275,8 @@ func (s beadsAgentStates) write(beadID, state string) error {
 }
 
 // resumeAgent clears target's pause marker under townRoot, restores the bead
-// mirror through states and thaws the session through thaw.
-func resumeAgent(w io.Writer, townRoot string, target *agentAddr, states agentStates, thaw func(*agentAddr) (bool, error)) error {
+// mirror through states.
+func resumeAgent(w io.Writer, townRoot string, target *agentAddr, states agentStates) error {
 	role, name := target.roleAndName()
 	display := target.displayAddress(role, name)
 
@@ -335,42 +325,7 @@ func resumeAgent(w io.Writer, townRoot string, target *agentAddr, states agentSt
 		style.PrintWarning("could not restore agent_state=%s on bead %s: %v", priorState, target.BeadID, err)
 	}
 
-	// 3. Thaw the session process group (SIGCONT). Best-effort.
-	thawed, terr := thaw(target)
-	if terr != nil {
-		style.PrintWarning("could not thaw session %s: %v (marker cleared — agent will run when next started)", target.SessionName(), terr)
-	}
-
 	fmt.Fprintf(w, "%s %s resumed\n", style.Bold.Render("▶️"), display)
-	if thawed {
-		fmt.Fprintf(w, "  Session: %s (thawed)\n", target.SessionName())
-	} else {
-		fmt.Fprintf(w, "  Session: %s\n", target.SessionName())
-	}
+	fmt.Fprintf(w, "  Session: %s\n", target.SessionName())
 	return nil
-}
-
-// freezeAgentSession freezes the agent's tmux session process group.
-// Returns (froze, error): froze is true when the signal was delivered.
-func freezeAgentSession(target *agentAddr) (bool, error) {
-	t := tmux.NewTmux()
-	if running, _ := t.HasSession(target.SessionName()); !running {
-		return false, nil
-	}
-	if err := signalSessionGroup(t, target.SessionName(), sigFreeze); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// thawAgentSession thaws the agent's tmux session process group.
-func thawAgentSession(target *agentAddr) (bool, error) {
-	t := tmux.NewTmux()
-	if running, _ := t.HasSession(target.SessionName()); !running {
-		return false, nil
-	}
-	if err := signalSessionGroup(t, target.SessionName(), sigThaw); err != nil {
-		return false, err
-	}
-	return true, nil
 }

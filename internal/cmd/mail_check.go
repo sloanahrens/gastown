@@ -72,17 +72,16 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 	// at the next task boundary, normal/low is informational but still
 	// checked before going idle (prevents mail from sitting unread).
 	if mailCheckInject {
-		// Agent-side E-stop check (defense-in-depth).
-		// If an E-stop is active (town-wide or per-rig), inject a system reminder
-		// telling the agent to checkpoint and wait. This catches agents that
-		// survived the SIGTSTP freeze.
+		// Agent-side E-stop check. An E-stop never signals a running session
+		// (gt-4k3fj.4): it stops dispatch and restarts, and this reminder is
+		// how a running agent learns to finish its step and wait.
 		if townRoot, twErr := workspace.FindFromCwd(); twErr == nil {
 			rigName := os.Getenv("GT_RIG")
 			if estop.IsActive(townRoot) || (rigName != "" && estop.IsRigActive(townRoot, rigName)) {
 				fmt.Print("<system-reminder>\n")
-				fmt.Print("EMERGENCY STOP ACTIVE. All work is paused.\n")
-				fmt.Print("Do NOT start new tasks or tool calls. Checkpoint your current state\n")
-				fmt.Print("(save progress notes) and wait for the overseer to run 'gt thaw'.\n")
+				fmt.Print("EMERGENCY STOP ACTIVE. Dispatch and restarts are stopped.\n")
+				fmt.Print("Finish or checkpoint your current step (save progress notes). Do NOT\n")
+				fmt.Print("start new tasks or sling work, and wait for the overseer to run 'gt thaw'.\n")
 				fmt.Print("This is a system-level pause — it may be due to infrastructure failure,\n")
 				fmt.Print("maintenance, or the operator traveling.\n")
 				fmt.Print("</system-reminder>\n")

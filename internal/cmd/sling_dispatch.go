@@ -159,15 +159,12 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 		BeadID: params.BeadID,
 	}
 
-	// 0. Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
+	// 0. Refuse an e-stopped, parked or docked rig before dispatching
+	// (gt-4k3fj.4, gt-4owfd.1, gt-11y).
 	if params.RigName != "" {
-		if blocked, reason := d.rigParked(townRoot, params.RigName); blocked {
-			result.ErrMsg = "rig " + reason
-			undoCmd := "gt rig unpark"
-			if reason == "docked" {
-				undoCmd = "gt rig undock"
-			}
-			return result, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, params.RigName, undoCmd, params.RigName)
+		if label, err := slingBlocked(townRoot, params.RigName, d.estopOn, d.rigParked); err != nil {
+			result.ErrMsg = label
+			return result, err
 		}
 	}
 

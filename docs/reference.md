@@ -715,9 +715,24 @@ Never use raw `tmux send-keys` - it doesn't handle Claude's input correctly.
 ### Emergency
 
 ```bash
-gt estop                     # Freeze all agent work
+gt estop [--rig <rig>]       # Stop dispatch and restarts; running sessions finish
+gt estop status              # Show town and per-rig E-stops
+gt thaw [--rig <rig>]        # Clear the E-stop
+gt kill-all [--rig <rig>]    # Show what kill-all would end
+gt kill-all --yes [-r why]   # E-stop, then kill every agent session
 gt down                      # Stop all Gas Town services
 ```
+
+An E-stop (`<town>/ESTOP`, or `<town>/ESTOP.<rig>`) is read in two places
+only: the dispatch hold, which every automatic dispatcher and `gt sling`
+check, and the supervisor's Kill and Restart guard, which every automated
+kill and restart goes through. Nothing is signalled; running sessions
+finish or idle and learn of the stop from their mail-check reminder.
+`gt kill-all` is the explicit way to end them: it sets the E-stop, then
+kills each agent seat through the supervisor (the one kill an E-stop or a
+parked seat does not refuse), logging actor and reason in
+`.runtime/supervisor/actions.jsonl`. Crew sessions are skipped unless
+`--crew` is given; the overseer session is never killed.
 
 ## Beads Commands (bd)
 

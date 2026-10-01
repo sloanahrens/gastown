@@ -18,8 +18,6 @@ func (m mapAgentStates) write(beadID, state string) error {
 	return nil
 }
 
-func noThaw(*agentAddr) (bool, error) { return false, nil }
-
 // TestAgentResumeStaleMirrorCleared verifies the stale-mirror repair: a bead
 // that still reads agent_state=paused with no agent-pause marker behind it is
 // a stale race artifact, and resume clears it to idle.
@@ -31,7 +29,7 @@ func TestAgentResumeStaleMirrorCleared(t *testing.T) {
 	}
 	states := mapAgentStates{target.BeadID: "paused"}
 	var out strings.Builder
-	if err := resumeAgent(&out, t.TempDir(), target, states, noThaw); err != nil {
+	if err := resumeAgent(&out, t.TempDir(), target, states); err != nil {
 		t.Fatalf("resumeAgent: %v", err)
 	}
 	if got := states[target.BeadID]; got != "idle" {
@@ -43,7 +41,7 @@ func TestAgentResumeStaleMirrorCleared(t *testing.T) {
 }
 
 // TestAgentResumeRestoresPriorState pins the paused path: resume removes the
-// marker, writes back the agent_state the pause captured and thaws the session.
+// marker and writes back the agent_state the pause captured.
 func TestAgentResumeRestoresPriorState(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -56,10 +54,8 @@ func TestAgentResumeRestoresPriorState(t *testing.T) {
 		t.Fatal(err)
 	}
 	states := mapAgentStates{target.BeadID: "paused"}
-	thawed := false
-	thaw := func(*agentAddr) (bool, error) { thawed = true; return true, nil }
 	var out strings.Builder
-	if err := resumeAgent(&out, town, target, states, thaw); err != nil {
+	if err := resumeAgent(&out, town, target, states); err != nil {
 		t.Fatalf("resumeAgent: %v", err)
 	}
 	if got := states[target.BeadID]; got != "working" {
@@ -67,9 +63,6 @@ func TestAgentResumeRestoresPriorState(t *testing.T) {
 	}
 	if paused, _, _ := agentpause.IsPaused(town, target.Rig, role, name); paused {
 		t.Error("pause marker still present after resume")
-	}
-	if !thawed || !strings.Contains(out.String(), "(thawed)") {
-		t.Errorf("session not thawed; output %q", out.String())
 	}
 }
 
@@ -86,7 +79,7 @@ func TestAgentResumeStaleMirrorWriteFailureIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	states := failingAgentStates{mapAgentStates{target.BeadID: "paused"}}
-	if err := resumeAgent(&strings.Builder{}, t.TempDir(), target, states, noThaw); err == nil {
+	if err := resumeAgent(&strings.Builder{}, t.TempDir(), target, states); err == nil {
 		t.Fatal("resumeAgent = nil, want the write failure")
 	}
 }

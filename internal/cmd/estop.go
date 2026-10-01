@@ -1,4 +1,6 @@
-// Emergency stop (gt estop / gt thaw) — pause and resume agent work.
+// Emergency stop (gt estop / gt thaw): stop and resume dispatch and
+// restarts. Running sessions are never signalled (gt-4k3fj.4): the SIGTSTP
+// freeze this used to send is gone, since tmux SIGCONTs a stopped pane.
 //
 // Original implementation by outdoorsea (PR #3237). Cherry-picked for
 // manual-only operation: no daemon auto-trigger.
@@ -29,34 +31,42 @@ var (
 var estopCmd = &cobra.Command{
 	Use:     "estop",
 	GroupID: GroupServices,
-	Short:   "Emergency stop — freeze all agent work",
-	Long: `Emergency stop: freeze agent sessions across the town (or a single rig).
+	Short:   "Emergency stop: no new dispatch, no restarts",
+	Long: `Emergency stop for the whole town (or a single rig).
 
-This is the factory floor E-stop button. Agent sessions are sent SIGTSTP
-to freeze in place. Context is preserved — no work is lost.
+An E-stop writes a sentinel file at the town root (ESTOP, or ESTOP.<rig>
+with --rig). While it is present:
 
-The Mayor and overseer are exempt so they can coordinate recovery.
+  - nothing new is dispatched: the daemon's dispatchers (scheduler, convoy
+    feeder, scheduled slings, spec dispatcher, seat refill) hold, and
+    gt sling refuses to send work into a covered rig;
+  - nothing is restarted or killed: the supervisor refuses every Restart
+    and Kill for a covered seat, whoever asks.
 
-Use --rig to freeze a single rig instead of the whole town. Per-rig
-E-stop is useful when traveling or pausing non-critical work while
-keeping other rigs running.
+Running sessions are left alone: they finish their current work or go
+idle. Nothing is signalled, frozen or killed. Agents see the E-stop in
+their mail-check reminder and are told to checkpoint and wait.
+
+To end running sessions as well, use gt kill-all.
+
+Use --rig to stop a single rig instead of the whole town.
 
 To resume: gt thaw [--rig <name>]
 
 Examples:
-  gt estop                              # Freeze everything
-  gt estop -r "closing laptop"          # Freeze with reason
-  gt estop --rig gastown                # Freeze only gastown
-  gt estop --rig beads -r "maintenance" # Freeze beads rig`,
-	// Reject stray operands so `gt estop status` cannot fall through to runEstop.
+  gt estop                              # Stop the whole town
+  gt estop -r "closing laptop"          # Stop with a reason
+  gt estop --rig gastown                # Stop only gastown
+  gt estop status                       # Show E-stop state`,
+	// Reject stray operands so `+"`gt estop status`"+` cannot fall through to runEstop.
 	Args: cobra.NoArgs,
 	RunE: runEstop,
 }
 
 var estopStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show emergency-stop state without freezing agents",
-	Long:  "Report whether a town-wide or per-rig E-stop is active. This is read-only and never freezes agents. To clear an E-stop, use 'gt thaw'.",
+	Short: "Show emergency-stop state",
+	Long:  "Report whether a town-wide or per-rig E-stop is active. This is read-only. To clear an E-stop, use 'gt thaw'.",
 	Args:  cobra.NoArgs,
 	RunE:  runEstopStatus,
 }
@@ -94,23 +104,24 @@ func estopStatus(w io.Writer, townRoot string) {
 var thawCmd = &cobra.Command{
 	Use:     "thaw",
 	GroupID: GroupServices,
-	Short:   "Resume from emergency stop — thaw all frozen agents",
-	Long: `Resume agent sessions that were frozen by gt estop.
+	Short:   "Clear an emergency stop so dispatch and restarts resume",
+	Long: `Clear an E-stop set by gt estop.
 
-Sends SIGCONT to all frozen sessions, removes the ESTOP sentinel file,
-and nudges all sessions to alert them that work can continue.
+Removes the ESTOP sentinel file (or ESTOP.<rig> with --rig), so dispatch
+and supervisor restarts resume, and nudges the covered sessions that work
+may continue.
 
 Examples:
-  gt thaw                    # Thaw everything
-  gt thaw --rig gastown      # Thaw only gastown`,
+  gt thaw                    # Clear the town-wide E-stop
+  gt thaw --rig gastown      # Clear only gastown's E-stop`,
 	Args: cobra.NoArgs,
 	RunE: runThaw,
 }
 
 func init() {
 	estopCmd.Flags().StringVarP(&estopReason, "reason", "r", "", "Reason for the E-stop")
-	estopCmd.Flags().StringVar(&estopRig, "rig", "", "Freeze only this rig (instead of all)")
-	thawCmd.Flags().StringVar(&thawRig, "rig", "", "Thaw only this rig (instead of all)")
+	estopCmd.Flags().StringVar(&estopRig, "rig", "", "Stop only this rig (instead of the whole town)")
+	thawCmd.Flags().StringVar(&thawRig, "rig", "", "Clear only this rig's E-stop")
 	estopCmd.AddCommand(estopStatusCmd)
 	rootCmd.AddCommand(estopCmd)
 	rootCmd.AddCommand(thawCmd)
@@ -121,80 +132,49 @@ func runEstop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return activateEstop(cmd.OutOrStdout(), townRoot, estopRig, estopReason)
+}
 
-	// Per-rig E-stop
-	if estopRig != "" {
-		return runEstopRig(townRoot, estopRig)
-	}
-
-	if estop.IsActive(townRoot) {
-		info := estop.Read(townRoot)
-		if info != nil {
-			fmt.Printf("%s E-stop already active (triggered %s: %s)\n",
-				style.Error.Render("⛔"), info.Trigger, info.Reason)
+// activateEstop writes the town (rig == "") or per-rig ESTOP sentinel and
+// reports it to w. It touches no session: the sentinel alone is what the
+// dispatch hold and the supervisor read.
+func activateEstop(w io.Writer, townRoot, rig, reason string) error {
+	if rig != "" {
+		if info := estop.ReadRig(townRoot, rig); info != nil {
+			fmt.Fprintf(w, "%s E-stop already active for %s (triggered %s: %s)\n",
+				style.Error.Render("⛔"), rig, info.Trigger, info.Reason)
+			return nil
 		}
-		return nil
+		if err := estop.ActivateRig(townRoot, rig, estop.TriggerManual, reason); err != nil {
+			return fmt.Errorf("failed to create ESTOP file for %s: %w", rig, err)
+		}
+		fmt.Fprintf(w, "%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rig))
+	} else {
+		if info := estop.Read(townRoot); info != nil {
+			fmt.Fprintf(w, "%s E-stop already active (triggered %s: %s)\n",
+				style.Error.Render("⛔"), info.Trigger, info.Reason)
+			return nil
+		}
+		if err := estop.Activate(townRoot, estop.TriggerManual, reason); err != nil {
+			return fmt.Errorf("failed to create ESTOP file: %w", err)
+		}
+		fmt.Fprintf(w, "%s EMERGENCY STOP\n", style.Error.Render("⛔"))
 	}
-
-	// Create the sentinel file first — this is the source of truth
-	if err := estop.Activate(townRoot, estop.TriggerManual, estopReason); err != nil {
-		return fmt.Errorf("failed to create ESTOP file: %w", err)
+	if reason != "" {
+		fmt.Fprintf(w, "   Reason: %s\n", reason)
 	}
-
-	fmt.Printf("%s EMERGENCY STOP\n", style.Error.Render("⛔"))
-	if estopReason != "" {
-		fmt.Printf("   Reason: %s\n", estopReason)
-	}
-	fmt.Println()
-
-	t := tmux.NewTmux()
-	if !t.IsAvailable() {
-		fmt.Printf("%s tmux not available — ESTOP file created but cannot freeze sessions\n",
-			style.Warning.Render("!"))
-		return nil
-	}
-
-	frozen := freezeAllSessions(townRegistry(), t, townRoot, "")
-
-	fmt.Println()
-	fmt.Printf("%s %d session(s) frozen\n", style.Error.Render("⛔"), frozen)
-	fmt.Printf("   Resume with: %s\n", style.Bold.Render("gt thaw"))
-
+	fmt.Fprintln(w, "   No new dispatch, no restarts or kills; running sessions finish or idle.")
+	fmt.Fprintf(w, "   End running sessions too: %s\n", style.Bold.Render(withRigFlag("gt kill-all", rig)))
+	fmt.Fprintf(w, "   Resume with: %s\n", style.Bold.Render(withRigFlag("gt thaw", rig)))
 	return nil
 }
 
-func runEstopRig(townRoot, rigName string) error {
-	if estop.IsRigActive(townRoot, rigName) {
-		info := estop.ReadRig(townRoot, rigName)
-		if info != nil {
-			fmt.Printf("%s E-stop already active for %s (triggered %s: %s)\n",
-				style.Error.Render("⛔"), rigName, info.Trigger, info.Reason)
-		}
-		return nil
+// withRigFlag appends --rig <rig> to a command line when rig is set.
+func withRigFlag(cmdline, rig string) string {
+	if rig == "" {
+		return cmdline
 	}
-
-	if err := estop.ActivateRig(townRoot, rigName, estop.TriggerManual, estopReason); err != nil {
-		return fmt.Errorf("failed to create ESTOP file for %s: %w", rigName, err)
-	}
-
-	fmt.Printf("%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rigName))
-	if estopReason != "" {
-		fmt.Printf("   Reason: %s\n", estopReason)
-	}
-	fmt.Println()
-
-	t := tmux.NewTmux()
-	if !t.IsAvailable() {
-		return nil
-	}
-
-	frozen := freezeAllSessions(townRegistry(), t, townRoot, rigName)
-
-	fmt.Println()
-	fmt.Printf("%s %d session(s) frozen in %s\n", style.Error.Render("⛔"), frozen, rigName)
-	fmt.Printf("   Resume with: %s\n", style.Bold.Render("gt thaw --rig "+rigName))
-
-	return nil
+	return cmdline + " --rig " + rig
 }
 
 func runThaw(cmd *cobra.Command, args []string) error {
@@ -203,136 +183,49 @@ func runThaw(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Per-rig thaw
+	var info *estop.Info
 	if thawRig != "" {
-		return runThawRig(townRoot, thawRig)
+		info = estop.ReadRig(townRoot, thawRig)
+	} else {
+		info = estop.Read(townRoot)
 	}
-
-	if !estop.IsActive(townRoot) {
-		fmt.Println("No E-stop active.")
+	if info == nil {
+		if thawRig != "" {
+			fmt.Printf("No E-stop active for %s.\n", thawRig)
+		} else {
+			fmt.Println("No E-stop active.")
+		}
 		return nil
 	}
 
-	info := estop.Read(townRoot)
-
-	t := tmux.NewTmux()
-	if t.IsAvailable() {
-		thawed := thawAllSessions(townRegistry(), t, townRoot, "")
-		fmt.Printf("%s %d session(s) resumed\n", style.Success.Render("✓"), thawed)
-
-		nudged := nudgeAllSessions(townRegistry(), t, townRoot, "")
-		if nudged > 0 {
-			fmt.Printf("   Nudged %d session(s)\n", nudged)
-		}
+	if thawRig != "" {
+		err = estop.DeactivateRig(townRoot, thawRig)
+	} else {
+		err = estop.Deactivate(townRoot, false)
 	}
-
-	if err := estop.Deactivate(townRoot, false); err != nil {
+	if err != nil {
 		return fmt.Errorf("failed to remove ESTOP file: %w", err)
 	}
-
-	if info != nil {
-		duration := time.Since(info.Timestamp).Round(time.Second)
-		fmt.Printf("   E-stop was active for %s\n", duration)
+	scope := ""
+	if thawRig != "" {
+		scope = " for " + thawRig
 	}
+	fmt.Printf("%s E-stop cleared%s (was active for %s)\n", style.Success.Render("✓"),
+		scope, time.Since(info.Timestamp).Round(time.Second))
 
-	return nil
-}
-
-func runThawRig(townRoot, rigName string) error {
-	if !estop.IsRigActive(townRoot, rigName) {
-		fmt.Printf("No E-stop active for %s.\n", rigName)
-		return nil
-	}
-
-	info := estop.ReadRig(townRoot, rigName)
-
-	t := tmux.NewTmux()
-	if t.IsAvailable() {
-		thawed := thawAllSessions(townRegistry(), t, townRoot, rigName)
-		fmt.Printf("%s %d session(s) resumed in %s\n", style.Success.Render("✓"), thawed, rigName)
-
-		nudged := nudgeAllSessions(townRegistry(), t, townRoot, rigName)
-		if nudged > 0 {
+	if t := tmux.NewTmux(); t.IsAvailable() {
+		if nudged := nudgeAllSessions(townRegistry(), t, townRoot, thawRig); nudged > 0 {
 			fmt.Printf("   Nudged %d session(s)\n", nudged)
 		}
 	}
-
-	if err := estop.DeactivateRig(townRoot, rigName); err != nil {
-		return fmt.Errorf("failed to remove ESTOP file for %s: %w", rigName, err)
-	}
-
-	if info != nil {
-		duration := time.Since(info.Timestamp).Round(time.Second)
-		fmt.Printf("   E-stop for %s was active for %s\n", rigName, duration)
-	}
-
 	return nil
 }
 
-// exemptSessions are sessions that should NOT be frozen during E-stop.
+// exemptSessions are not nudged when an E-stop clears: they coordinate the
+// stop rather than wait it out.
 var exemptSessions = map[string]bool{
 	session.MayorSessionName():    true,
 	session.OverseerSessionName(): true,
-}
-
-// freezeAllSessions sends SIGTSTP to all Gas Town agent sessions via
-// process-group signaling. Mayor and overseer sessions are exempt.
-// If rigFilter is non-empty, only sessions for that rig are frozen.
-func freezeAllSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string, rigFilter string) int {
-	sessions := collectGTSessions(reg, t, townRoot)
-	frozen := 0
-
-	var rigPrefix string
-	if rigFilter != "" {
-		rigPrefix = reg.PrefixForRig(rigFilter)
-	}
-
-	for _, sess := range sessions {
-		if exemptSessions[sess] {
-			fmt.Printf("   %s %s (exempt)\n", style.Dim.Render("⏭"), sess)
-			continue
-		}
-
-		if rigFilter != "" && !isRigSession(sess, rigPrefix) {
-			continue
-		}
-
-		if err := signalSessionGroup(t, sess, sigFreeze); err != nil {
-			fmt.Printf("   %s %s: %v\n", style.Warning.Render("!"), sess, err)
-			continue
-		}
-		fmt.Printf("   %s %s\n", style.Error.Render("⏸"), sess)
-		frozen++
-	}
-
-	return frozen
-}
-
-// thawAllSessions sends SIGCONT to all Gas Town agent sessions.
-// If rigFilter is non-empty, only sessions for that rig are thawed.
-func thawAllSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string, rigFilter string) int {
-	sessions := collectGTSessions(reg, t, townRoot)
-	thawed := 0
-
-	var rigPrefix string
-	if rigFilter != "" {
-		rigPrefix = reg.PrefixForRig(rigFilter)
-	}
-
-	for _, sess := range sessions {
-		if exemptSessions[sess] {
-			continue
-		}
-		if rigFilter != "" && !isRigSession(sess, rigPrefix) {
-			continue
-		}
-		if err := signalSessionGroup(t, sess, sigThaw); err != nil {
-			continue
-		}
-		thawed++
-	}
-
-	return thawed
 }
 
 // nudgeAllSessions sends a nudge to all GT sessions to alert them of resume.

@@ -45,6 +45,14 @@ func TestExecuteSlingRefusals(t *testing.T) {
 		{name: "deferred with a dead holder", bead: &beadInfo{Status: "hooked", Assignee: holder, Description: "status: deferred"},
 			setup: func(h *slingHarness) { h.dead[holder] = true }, errSub: "is deferred"},
 		{name: "operator", bead: &beadInfo{Labels: []string{dispatch.OperatorLabel}}, errSub: dispatch.SlingRefusalMarker, errMsg: "operator-reserved"},
+		// An e-stop refuses every sling, explicit ones included (gt-4k3fj.4),
+		// and wins over a parked rig.
+		{name: "town e-stop", bead: &beadInfo{}, setup: func(h *slingHarness) {
+			h.estops[""] = true
+			h.run.rigParked = func(string, string) (bool, string) { return true, "parked" }
+		}, errSub: "gt thaw", errMsg: "e-stop"},
+		{name: "rig e-stop", bead: &beadInfo{}, setup: func(h *slingHarness) { h.estops["gastown"] = true },
+			errSub: "gt thaw --rig gastown", errMsg: "e-stop"},
 		{name: "parked rig", bead: &beadInfo{}, setup: func(h *slingHarness) {
 			h.run.rigParked = func(string, string) (bool, string) { return true, "parked" }
 		}, errSub: "gt rig unpark gastown", errMsg: "rig parked"},
@@ -92,6 +100,29 @@ func TestExecuteSlingRefusals(t *testing.T) {
 			h.wantCalls("release seat", "release seat")
 		})
 	}
+}
+
+// Another rig's e-stop does not hold this one.
+func TestExecuteSlingOtherRigEstopDoesNotRefuse(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{})
+	h.estops["om"] = true
+	if _, err := h.run.executeSling(executeParams()); err != nil {
+		t.Fatalf("executeSling into gastown with only om e-stopped: %v", err)
+	}
+	h.wantCalls("spawn", "spawn gastown")
+}
+
+// A rig target is refused under its rig's e-stop before any polecat spawns.
+func TestResolveSlingTargetRigEstopRefusesBeforeSpawn(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.estops["gastown"] = true
+	_, err := h.run.resolveSlingTarget("gastown", ResolveTargetOptions{TownRoot: slingTestTown, NoBoot: true})
+	wantSlingErr(t, err, "E-stop active")
+	h.wantNo("spawn")
+	h.wantNo("admit")
 }
 
 func TestExecuteSlingSuccess(t *testing.T) {

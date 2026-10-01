@@ -144,6 +144,25 @@ func TestRigHold_RigEstopHoldsOnlyThatRig(t *testing.T) {
 	}
 }
 
+// An ESTOP sentinel whose presence cannot be determined holds dispatch, as
+// the supervisor's e-stop check refuses (gt-e7lqk: the old stat failed open).
+// The hold file is relocated so only the sentinel's stat fails: a town root
+// that is a regular file makes it ENOTDIR, which is not "does not exist".
+func TestRigHold_UnstatableEstop_FailsClosed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	townRoot := filepath.Join(dir, "town")
+	if err := os.WriteFile(townRoot, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	env := envMap{HoldFileEnv: filepath.Join(dir, "no-hold")}.get
+	for _, rig := range []string{"", "gastown"} {
+		if reason := rigHold(townRoot, rig, env); !strings.Contains(reason, "ESTOP unreadable") {
+			t.Errorf("rigHold(%q) with an unstatable ESTOP = %q, want an unreadable-ESTOP hold", rig, reason)
+		}
+	}
+}
+
 func TestRigHold_TownHoldHoldsEveryRig(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

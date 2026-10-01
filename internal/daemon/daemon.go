@@ -1172,10 +1172,10 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
-	// Skip agent management if E-stop is active.
-	// The daemon stays alive (to maintain Dolt, etc.) but does NOT
-	// restart any agents. This prevents fighting the E-stop by auto-spawning
-	// sessions that were intentionally frozen.
+	// Skip agent management if the town E-stop is active. The supervisor
+	// already refuses every Restart and Kill under it, and the dispatch hold
+	// every automatic sling (gt-4k3fj.4); this also keeps the plugins, whose
+	// scripts do not all go through the supervisor yet, from running.
 	if estop.IsActive(d.config.TownRoot) {
 		d.logger.Println("E-STOP active, skipping agent management")
 		return
