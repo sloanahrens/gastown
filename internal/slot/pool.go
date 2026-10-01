@@ -81,16 +81,23 @@ func (p Pool) normalized() Pool {
 	return p
 }
 
-// gateRoleSuffix identifies the one gate-class caller in the role string
-// recorded by every slot user: the daemon's landing worker
-// ("<rig>/landing", landing_worker.go). The refinery and main-branch-test
-// roles that used to share the class are deleted (gt-v4ssj.6, gt-v4ssj.4).
-const gateRoleSuffix = "/landing"
+// gateRoleSuffixes identify the gate-class callers in the role string
+// recorded by every slot user: the daemon's landing worker's gate
+// ("<rig>/landing") and its post-landing run ("<rig>/post-land"), which is
+// the red-main detector (gt-v4ssj.4, gt-bhdk2), both in landing_worker.go.
+// The refinery and main-branch-test roles that used to share the class are
+// deleted (gt-v4ssj.6, gt-v4ssj.4).
+var gateRoleSuffixes = []string{"/landing", "/post-land"}
 
 // IsGateRole reports whether role belongs to the gate class that may use
 // reserved slots and that non-gate acquisitions yield to.
 func IsGateRole(role string) bool {
-	return strings.HasSuffix(role, gateRoleSuffix)
+	for _, suffix := range gateRoleSuffixes {
+		if strings.HasSuffix(role, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // candidates returns the slot indices role may take, in the order Acquire
