@@ -67,8 +67,8 @@ type Fake struct {
 	failures map[string]error
 
 	// journal is the events journal (bd events tail): one record per
-	// create, update, close and comment, as gastown's bd calls journal with
-	// BD_EVENTS_JOURNAL=1.
+	// create, update, close and comment, as bd journals them in a store whose
+	// config turns events-journal on.
 	journal []beads.EventRecord
 }
 

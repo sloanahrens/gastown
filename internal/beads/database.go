@@ -222,9 +222,9 @@ func hasReadOnlySQLPrefix(query string) bool {
 // SuppressBDSideEffects disables Beads JSONL export/backup/push side effects for
 // Gas Town-managed subprocesses. The authoritative data plane is Dolt; exporting
 // JSONL from high-frequency gt callers re-invalidates Beads' import freshness
-// checks and can create a self-feeding Dolt load loop. It also turns the
-// events journal on for every such subprocess, so the mutations gastown makes
-// reach the journal the convoy manager polls.
+// checks and can create a self-feeding Dolt load loop. An inherited
+// BD_EVENTS_JOURNAL is dropped, so each store's config.yaml alone decides
+// whether its events journal is on (gt-7iwy0.7).
 func SuppressBDSideEffects(env []string) []string {
 	for _, key := range []string{
 		"BEADS_NO_AUTO_IMPORT",
@@ -249,10 +249,6 @@ func SuppressBDSideEffects(env []string) []string {
 		"BD_NO_PUSH=true",
 		"BD_EXPORT_GIT_ADD=false",
 		"BD_NO_GIT_OPS=true",
-		// Journal every mutation gastown makes: the convoy manager reads
-		// closes from the events journal (gt-7iwy0.2), and the rig
-		// config.yaml that would enable it is git-tracked in mayor/rig.
-		"BD_EVENTS_JOURNAL=1",
 		// Machine mode on every call: exact ids and the envelope
 		// (gt-fd2cu.5). Callers read the payload through LegacyPayload or
 		// decodeMachineEnvelope, never the raw stdout.

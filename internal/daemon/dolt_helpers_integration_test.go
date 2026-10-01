@@ -108,8 +108,8 @@ func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 // .beads) and convoy tracking through the store. OpenTestStore's pooled
 // database is migrated by the store library and has no bd_events_journal, and
 // the library cannot write to bd's schema (gt-idv8s). So, as in production, bd
-// makes the database and every write, journaled (SuppressBDSideEffects sets
-// BD_EVENTS_JOURNAL=1), and the store only reads.
+// makes the database and every write, journaled (each workspace's config
+// turns events-journal on), and the store only reads.
 func setupJournaledTown(t *testing.T) (string, *beads.Beads, beadsdk.Storage) {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -143,7 +143,8 @@ func addJournaledRig(t *testing.T, townRoot, rig, prefix string) (*beads.Beads, 
 }
 
 // initJournaledWorkspace runs bd init --prefix prefix in dir against the
-// package's container and opens the store its metadata.json names.
+// package's container, turns its events journal on and opens the store its
+// metadata.json names.
 func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, beadsdk.Storage) {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
@@ -156,6 +157,9 @@ func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, bea
 		t.Fatalf("bd init %s in %s: %v\n%s", prefix, dir, err, out)
 	}
 	bd := beads.NewIsolatedWithPort(dir, port)
+	if _, err := beads.EnsureEventsJournal(bd); err != nil {
+		t.Fatalf("events journal on in %s: %v", dir, err)
+	}
 	store, err := beads.OpenStoreFromConfig(context.Background(), filepath.Join(dir, ".beads"))
 	if err != nil {
 		t.Fatalf("open store on the bd workspace in %s: %v", dir, err)
