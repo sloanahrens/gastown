@@ -25,7 +25,8 @@
 #                          turn containers on. Do not wrap it in `gt slot run`.
 #   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
 #                          ./...`, then `go test` of only the packages the branch
-#                          changed against origin/main. The landing worker runs
+#                          changed against origin/main, plus internal/testpolicy
+#                          when a _test.go file changed. The landing worker runs
 #                          `make gate` on the merged tree, so this is the cheap
 #                          first look, not the gate. No containers, no slot.
 #   make test-slow         the post-landing check: the gate, then the shell
