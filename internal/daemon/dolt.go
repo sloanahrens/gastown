@@ -58,8 +58,6 @@ const DefaultDoltHealthCheckInterval = 30 * time.Second
 func DefaultDoltServerConfig(townRoot string) *DoltServerConfig {
 	return &DoltServerConfig{
 		Enabled:              false, // Opt-in
-		Port:                 3306,
-		Host:                 "127.0.0.1",
 		User:                 "root",
 		DataDir:              filepath.Join(townRoot, "dolt"),
 		LogFile:              filepath.Join(townRoot, "daemon", "dolt-server.log"),
@@ -222,11 +220,12 @@ func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltS
 	if config == nil {
 		return nil
 	}
+	// The endpoint is the town's (config.ResolveDoltEndpoint), never
+	// daemon.json's: zero when the town names none (gt-y3pgh.9).
 	normalized := *config
-	if ep, ok := agentconfig.ResolveDoltEndpoint(townRoot); ok {
-		normalized.Host = ep.Host
-		normalized.Port = ep.Port
-	}
+	ep, _ := agentconfig.ResolveDoltEndpoint(townRoot)
+	normalized.Host = ep.Host
+	normalized.Port = ep.Port
 	return &normalized
 }
 

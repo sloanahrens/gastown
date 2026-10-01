@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -521,26 +520,17 @@ func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.D
 	return result.Closed, nil
 }
 
-// doltServerPort returns the configured Dolt server port.
+// doltServerPort is the town's Dolt port (config.ResolveDoltEndpoint), or 0
+// when the town names none: a connection then fails rather than reaching
+// whatever listens on the default port (gt-y3pgh.9).
 func (d *Daemon) doltServerPort() int {
-	if d.doltServer != nil {
-		return d.doltServer.config.Port
-	}
-	if port := agentconfig.ResolveDoltPort(d.config.TownRoot); port > 0 {
-		return port
-	}
-	return doltserver.DefaultPort
+	return agentconfig.ResolveDoltPort(d.config.TownRoot)
 }
 
+// doltServerHost is the town's Dolt host, or the local machine.
 func (d *Daemon) doltServerHost() string {
-	if d.doltServer != nil && d.doltServer.config.Host != "" {
-		return d.doltServer.config.Host
-	}
 	if host := agentconfig.ResolveDoltHost(d.config.TownRoot); host != "" {
 		return host
-	}
-	if cfg := doltserver.DefaultConfig(d.config.TownRoot); cfg.Host != "" {
-		return cfg.Host
 	}
 	return "127.0.0.1"
 }

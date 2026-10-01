@@ -50,13 +50,15 @@ the server's `config.yaml` from it, `gt rig add` stamps it into each new
 rig's `.beads/config.yaml` (`dolt.port`, `dolt.host`) through
 `bd config set`, and gt exports it to the agents and bd processes it starts:
 
-| gt (Gas Town) | bd (Beads) | Purpose |
-|---------------|------------|---------|
-| `GT_DOLT_HOST` | `BEADS_DOLT_SERVER_HOST` | Server host (bd defaults to `127.0.0.1` if unset) |
-| `GT_DOLT_PORT` | `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT` | Server port |
+| bd (Beads) | Purpose |
+|------------|---------|
+| `BEADS_DOLT_SERVER_HOST` | Server host (bd defaults to `127.0.0.1` if unset) |
+| `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT` | Server port |
 
-The exported variables are outputs for children (plugins read `GT_DOLT_*`,
-bd reads `BEADS_DOLT_*`); setting them in a shell does not move gt.
+The exported variables are outputs for bd; setting them in a shell does not
+move gt. gt no longer exports `GT_DOLT_HOST` or `GT_DOLT_PORT` (gt-y3pgh.9):
+nothing read them. The daemon ignores `patrols.dolt_server.port` and `.host`
+in `daemon.json` for the same reason: the town's endpoint is the one source.
 
 **Remote Dolt servers**: If Dolt runs on a different machine (e.g., over
 Tailscale), set `"host"` in `town.json`'s `dolt` block. gt exports it as

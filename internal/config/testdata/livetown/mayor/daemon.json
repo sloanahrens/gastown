@@ -28,19 +28,18 @@
         "om",
         "hm",
         "mango"
+      ],
+      "disabled_rigs": [
+        "gastown"
       ]
     },
     "deacon": {
-      "enabled": true,
+      "enabled": false,
       "interval": "5m",
       "agent": "deacon"
     },
     "handler": {
       "enabled": true
-    },
-    "dolt_remotes": {
-      "enabled": false,
-      "interval": 900000000000
     },
     "dolt_backup": {
       "enabled": true,
@@ -53,7 +52,7 @@
       "spike_threshold": 20
     },
     "wisp_reaper": {
-      "enabled": true,
+      "enabled": false,
       "interval": "30m",
       "max_age": "24h",
       "delete_age": "168h"
@@ -81,21 +80,38 @@
       "gc_growth_ratio": 2
     },
     "main_branch_test": {
-      "enabled": true,
+      "enabled": false,
       "interval": "6h",
       "timeout": "45m",
       "rigs": [
         "gastown"
       ]
     },
-    "quota_resume": {
-      "enabled": true,
-      "interval": "5m"
-    },
     "patrol_watchdog": {
       "enabled": true,
       "cadence": "30m",
       "multiplier": 4
+    },
+    "landing_worker": {
+      "enabled": true,
+      "interval": "60s",
+      "land_timeout": "90m",
+      "rigs": [
+        "gastown"
+      ]
+    },
+    "patrol_scan": {
+      "enabled": true,
+      "interval": "2m",
+      "rigs": [
+        "gastown"
+      ]
+    },
+    "mayor": {
+      "enabled": false
+    },
+    "mayor_dispatch": {
+      "enabled": false
     }
   }
 }

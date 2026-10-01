@@ -435,8 +435,10 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 
 	// Prefer querying the running server (accurate, up-to-date data) over embedded
 	// mode (reads on-disk state which may lag behind server commits).
+	// A managed server always has the town's endpoint (New drops a manager
+	// for a town that names none).
 	host := "127.0.0.1"
-	port := 3307
+	port := 0
 	user := "root"
 	password := ""
 	useServer := false
@@ -444,9 +446,7 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 		if d.doltServer.config.Host != "" {
 			host = d.doltServer.config.Host
 		}
-		if d.doltServer.config.Port != 0 {
-			port = d.doltServer.config.Port
-		}
+		port = d.doltServer.config.Port
 		if d.doltServer.config.User != "" {
 			user = d.doltServer.config.User
 		}

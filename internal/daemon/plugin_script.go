@@ -222,9 +222,9 @@ func daemonScriptEnv() scriptEnv {
 // and a process group of its own, so a timeout kills the whole tree rather
 // than the `bash` wrapper alone (gt-6t43 is the orphan this avoids). The
 // environment is env's plus the town identity a dog would have carried:
-// scripts read GT_TOWN_ROOT/GT_ROOT and default their Dolt coordinates from
-// the ambient GT_DOLT_* variables. The script runs through run (nil runs
-// bash for real).
+// scripts read GT_TOWN_ROOT/GT_ROOT, and bd inside them reads the
+// BEADS_DOLT_* endpoint the daemon exports. The script runs through run (nil
+// runs bash for real).
 func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plugin.Plugin, townRoot string, timeout time.Duration) scriptResult {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
