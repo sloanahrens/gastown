@@ -361,6 +361,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Out:                out,
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,
+		Slow:               d.landingSlowAlarm(rigName, cfg),
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
@@ -425,6 +426,20 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			return err
 		},
 	}, nil
+}
+
+// landingSlowAlarm is the rig's slow-landing alarm: evidence beside the
+// landing's gate logs, a low-severity escalation per slow stage (gt-lcu5p).
+func (d *Daemon) landingSlowAlarm(rigName string, cfg *LandingWorkerConfig) *land.SlowAlarm {
+	return &land.SlowAlarm{
+		After: landingWorkerDuration(cfg.AlarmAfterStr, land.DefaultSlowAfter),
+		Escalate: func(beadID, stage, message string) {
+			_ = d.escalateAlertSeverity("low", "landing-slow:"+beadID+":"+stage, "landing_worker", message)
+		},
+		EvidenceDir: func(ctx context.Context, dir string) string {
+			return landingLogDir(ctx, d.landingLogRoot(rigName), dir)
+		},
+	}
 }
 
 // rigLandGate is the rig's merged-tree gate, resolved per landing so a

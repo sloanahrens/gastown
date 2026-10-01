@@ -422,3 +422,30 @@ func TestLandingWorkerWaitsAfterAFailedOnlyPass(t *testing.T) {
 		t.Fatalf("passes = %d after a failed-only pass, want 1 (it must wait the interval)", n)
 	}
 }
+
+// TestLandingSlowAlarmWiring: alarm_after sets the threshold (8m when unset or
+// invalid), a slow stage files a low-severity escalation keyed by bead and
+// stage, and the evidence goes in the landing's own log directory (gt-lcu5p).
+func TestLandingSlowAlarmWiring(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+
+	for in, want := range map[string]time.Duration{"": 8 * time.Minute, "3m": 3 * time.Minute, "soon": 8 * time.Minute} {
+		if got := d.landingSlowAlarm("gastown", &LandingWorkerConfig{AlarmAfterStr: in}).After; got != want {
+			t.Errorf("alarm_after %q = %s, want %s", in, got, want)
+		}
+	}
+
+	alarm := d.landingSlowAlarm("gastown", &LandingWorkerConfig{})
+	alarm.Escalate("gt-abc", "om", "Landing of gt-abc is slow")
+	got := rec.Escalations()
+	if len(got) != 1 || got[0].Escalation.Severity != "low" || got[0].Escalation.Fingerprint != "landing-slow:gt-abc:om" {
+		t.Fatalf("escalations = %+v, want one low-severity alert keyed landing-slow:gt-abc:om", got)
+	}
+
+	ctx := land.WithLandingID(context.Background(), "land-123")
+	want := filepath.Join(d.config.TownRoot, ".runtime", "landing-logs", "gastown", "land-123")
+	if dir := alarm.EvidenceDir(ctx, "/work/wt"); dir != want {
+		t.Errorf("evidence dir = %q, want %q", dir, want)
+	}
+}
