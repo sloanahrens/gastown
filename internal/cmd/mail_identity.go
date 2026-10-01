@@ -45,16 +45,26 @@ func findMailWorkDir() (string, error) {
 // Polecats use redirect-based beads access, so their worktree doesn't have a full
 // .beads directory. The session manager sets BEADS_DIR to the correct location.
 func findLocalBeadsDir() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return localBeadsWorkDir(cwd, os.Getenv("BEADS_DIR"))
+}
+
+// localBeadsWorkDir is findLocalBeadsDir from cwd with the inherited
+// BEADS_DIR envBeadsDir.
+func localBeadsWorkDir(cwd, envBeadsDir string) (string, error) {
 	// Check BEADS_DIR environment variable first (set by session manager for polecats).
 	// This is important for polecats that use redirect-based beads access.
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if envBeadsDir != "" {
 		// BEADS_DIR points directly to the .beads directory, return its parent
-		if _, err := os.Stat(beadsDir); err == nil {
-			return filepath.Dir(beadsDir), nil
+		if _, err := os.Stat(envBeadsDir); err == nil {
+			return filepath.Dir(envBeadsDir), nil
 		}
 	}
 
-	return findCwdBeadsWorkDir()
+	return findBeadsWorkDirFrom(cwd)
 }
 
 // detectSender determines the current context's address.

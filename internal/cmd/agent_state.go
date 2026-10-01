@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,7 +113,7 @@ func runAgentState(cmd *cobra.Command, args []string) error {
 
 	if hasSet || hasIncr || hasDel {
 		// Modification mode
-		return modifyAgentState(agentBead, beadsDir)
+		return modifyAgentState(nil, os.Stdout, agentBead, beadsDir, agentLabelOps{set: agentStateSet, incr: agentStateIncr, del: agentStateDel}, time.Now())
 	}
 
 	// Query mode
@@ -152,21 +153,29 @@ func queryAgentState(agentBead, beadsDir string) error {
 	return nil
 }
 
-// modifyAgentState modifies labels on an agent bead.
+// agentLabelOps are gt agent state's --set, --incr and --del operations.
+type agentLabelOps struct {
+	set  []string
+	incr string
+	del  []string
+}
+
+// modifyAgentState modifies labels on an agent bead, with bd answered by run
+// (nil: bd on PATH) and now stamped as its heartbeat.
 // Uses read-modify-write pattern: read current labels, apply changes, write back all.
-func modifyAgentState(agentBead, beadsDir string) error {
+func modifyAgentState(run beads.BDRunner, w io.Writer, agentBead, beadsDir string, ops agentLabelOps, now time.Time) error {
 	// Read current labels
-	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
+	allLabels, err := getAllAgentLabelsVia(run, agentBead, beadsDir)
 	if err != nil {
 		return err
 	}
 
 	stateLabels := parseStateLabels(allLabels)
-	if err := applyLabelOperations(stateLabels, agentStateSet, agentStateIncr, agentStateDel); err != nil {
+	if err := applyLabelOperations(stateLabels, ops.set, ops.incr, ops.del); err != nil {
 		return err
 	}
 
-	finalLabels := buildAgentStateLabels(allLabels, stateLabels, time.Now())
+	finalLabels := buildAgentStateLabels(allLabels, stateLabels, now)
 
 	// Build update command with --set-labels to replace all
 	args := []string{"update", agentBead}
@@ -178,19 +187,15 @@ func modifyAgentState(agentBead, beadsDir string) error {
 	defer cancel()
 
 	cmd := beads.CommandContext(ctx, filepath.Dir(beadsDir), beadsDir, beads.MutationPinned, args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
+	if _, stderr, err := runPinnedBD(ctx, run, cmd); err != nil {
+		errMsg := strings.TrimSpace(string(stderr))
 		if errMsg != "" {
 			return fmt.Errorf("%s", errMsg)
 		}
 		return fmt.Errorf("updating agent state: %w", err)
 	}
 
-	fmt.Printf("%s Updated agent state for %s\n", style.Bold.Render("✓"), agentBead)
+	fmt.Fprintf(w, "%s Updated agent state for %s\n", style.Bold.Render("✓"), agentBead)
 
 	return nil
 }
