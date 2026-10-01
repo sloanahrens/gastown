@@ -172,13 +172,15 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 		source: func(id string) (*beads.Issue, beads.Client, error) {
 			// Route from the town, not the worktree: a crew worktree's own
 			// .beads may be the source repo's, not the town's.
-			info, err := resolveSubmitSourceIssue(townRoot, id)
+			// bd records the submission's label and notes as written by
+			// actor, which is git user.name when the shell has no BD_ACTOR.
+			info, err := resolveSubmitSourceIssueIn(townRoot, id, func(cwd, beadsDir string) beads.Client {
+				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(actor)
+			})
 			if err != nil {
 				return nil, nil, err
 			}
-			// bd records the submission's label and notes as written by
-			// actor, which is git user.name when the shell has no BD_ACTOR.
-			return info.Issue, info.BD.ActingAs(actor), nil
+			return info.Issue, info.BD, nil
 		},
 		localGate: doneLocalGate,
 		sleep:     time.Sleep,

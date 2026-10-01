@@ -10,21 +10,29 @@ import (
 type submitSourceIssue struct {
 	ID              string
 	Issue           *beads.Issue
-	BD              *beads.Beads
+	BD              beads.Client
 	CurrentBeadsDir string
 	RoutedBeadsDir  string
 }
 
-func routedIssueBeads(cwd, issueID string) (*beads.Beads, string, string) {
-	return routedIssueBeadsRun(cwd, issueID, nil)
+// sourceStoreOpener opens the store at cwd pinned to beadsDir, the database
+// an issue routes to.
+type sourceStoreOpener func(cwd, beadsDir string) beads.Client
+
+// openSourceStore is the bd store a sourceStoreOpener names.
+func openSourceStore(cwd, beadsDir string) beads.Client {
+	return beads.NewWithBeadsDir(cwd, beadsDir)
 }
 
-// routedIssueBeadsRun is routedIssueBeads whose bd calls go to run; nil is
-// the real bd.
-func routedIssueBeadsRun(cwd, issueID string, run beads.BDRunner) (*beads.Beads, string, string) {
+func routedIssueBeads(cwd, issueID string) (beads.Client, string, string) {
+	return routedIssueBeadsIn(cwd, issueID, openSourceStore)
+}
+
+// routedIssueBeadsIn is routedIssueBeads whose store open opens.
+func routedIssueBeadsIn(cwd, issueID string, open sourceStoreOpener) (beads.Client, string, string) {
 	currentBeadsDir := beads.ResolveBeadsDir(cwd)
 	routedBeadsDir := beads.ResolveBeadsDirForID(currentBeadsDir, issueID)
-	return beads.NewWithBeadsDirAndRunner(cwd, routedBeadsDir, run), currentBeadsDir, routedBeadsDir
+	return open(cwd, routedBeadsDir), currentBeadsDir, routedBeadsDir
 }
 
 func sourceRouteContext(currentBeadsDir, routedBeadsDir string) string {
@@ -32,18 +40,18 @@ func sourceRouteContext(currentBeadsDir, routedBeadsDir string) string {
 }
 
 func resolveSubmitSourceIssue(cwd, issueID string) (*submitSourceIssue, error) {
-	return resolveSubmitSourceIssueRun(cwd, issueID, nil)
+	return resolveSubmitSourceIssueIn(cwd, issueID, openSourceStore)
 }
 
-// resolveSubmitSourceIssueRun is resolveSubmitSourceIssue whose bd calls go to
-// run; nil is the real bd.
-func resolveSubmitSourceIssueRun(cwd, issueID string, run beads.BDRunner) (*submitSourceIssue, error) {
+// resolveSubmitSourceIssueIn is resolveSubmitSourceIssue whose source store
+// open opens.
+func resolveSubmitSourceIssueIn(cwd, issueID string, open sourceStoreOpener) (*submitSourceIssue, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
 		return nil, fmt.Errorf("source_issue is required")
 	}
 
-	sourceBD, currentBeadsDir, routedBeadsDir := routedIssueBeadsRun(cwd, issueID, run)
+	sourceBD, currentBeadsDir, routedBeadsDir := routedIssueBeadsIn(cwd, issueID, open)
 	issue, err := sourceBD.Show(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("source_issue %s could not be resolved (%s): %w", issueID, sourceRouteContext(currentBeadsDir, routedBeadsDir), err)

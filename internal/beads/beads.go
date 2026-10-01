@@ -621,7 +621,7 @@ func isResolvedDependency(dep IssueDep) bool {
 
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
-	Status     string // "open", "closed", "all"
+	Status     string // "open", "closed", "all", or several joined by commas
 	Type       string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
 	Label      string // Label filter (e.g., "gt:agent", "gt:merge-request")
 	Priority   int    // 0-4, -1 for no filter
@@ -635,6 +635,9 @@ type ListOptions struct {
 	// IncludeInfra keeps bd's infrastructure types (agent, role, message),
 	// which bd list leaves out by default.
 	IncludeInfra bool
+	// ClosedAfter, when set, keeps only issues closed at or after it; an
+	// issue never closed is left out. Issues only, not wisps.
+	ClosedAfter time.Time
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -1870,6 +1873,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	}
 	if opts.IncludeInfra {
 		args = append(args, "--include-infra")
+	}
+	if !opts.ClosedAfter.IsZero() {
+		args = append(args, "--closed-after="+opts.ClosedAfter.UTC().Format(time.RFC3339))
 	}
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))

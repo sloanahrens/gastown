@@ -225,14 +225,12 @@ exit /b 0
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(townRoot, "wrong-data"))
 	t.Setenv("GT_DOLT_DATA", filepath.Join(townRoot, "wrong-gt-data"))
 
-	createOut, err := BdCmd("create", "--json", "--title=New sling smoke", "--type=task").
-		Dir(rigDir).
-		Output()
+	created, err := beads.NewWithBeadsDir(rigDir, "").Create(beads.CreateOptions{Title: "New sling smoke", Labels: []string{"gt:task"}, Priority: -1})
 	if err != nil {
 		t.Fatalf("create new rig bead: %v", err)
 	}
-	if !strings.Contains(string(createOut), newBeadID) {
-		t.Fatalf("created bead output = %q, want %s", createOut, newBeadID)
+	if created.ID != newBeadID {
+		t.Fatalf("created bead = %q, want %s", created.ID, newBeadID)
 	}
 
 	if err := runSling(nil, []string{newBeadID, "gastown/polecats/toast"}); err != nil {

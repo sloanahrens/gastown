@@ -34,13 +34,6 @@ func bdShow(beadID string) (*bdShowResult, error) {
 	return parseBdShow(beadID, out, err)
 }
 
-// bdShowIn is bdShow for a bead of the town at townRoot, answered by run;
-// nil is the bd on PATH.
-func bdShowIn(run beads.BDRunner, townRoot, beadID string) (*bdShowResult, error) {
-	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, resolveBeadDirFromTownRoot(townRoot, beadID), "show", beadID, "--json")
-	return parseBdShow(beadID, out, err)
-}
-
 func parseBdShow(beadID string, out []byte, err error) (*bdShowResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd show %s: %w", beadID, err)
