@@ -457,6 +457,7 @@ func (b *Beads) storeCreate(opts CreateOptions) (*Issue, error) {
 		Title:       opts.Title,
 		Description: opts.Description,
 		Priority:    opts.Priority,
+		Assignee:    opts.Assignee,
 		Ephemeral:   opts.Ephemeral,
 	}
 

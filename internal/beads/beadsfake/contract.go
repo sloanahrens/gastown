@@ -202,6 +202,10 @@ func contractCreateShow(t *testing.T, s *scope) {
 	if by := s.mustShow(t, actor.ID).CreatedBy; by != "contract-actor" {
 		t.Errorf("CreatedBy = %q, want contract-actor", by)
 	}
+	assigned := s.mustCreate(t, beads.CreateOptions{Title: "assigned", Priority: -1, Assignee: s.who("holder")})
+	if who := s.mustShow(t, assigned.ID).Assignee; who != s.who("holder") {
+		t.Errorf("Assignee = %q, want %q", who, s.who("holder"))
+	}
 	wisp := s.mustCreate(t, beads.CreateOptions{Title: "a wisp", Priority: -1, Ephemeral: true})
 	if !s.mustShow(t, wisp.ID).Ephemeral {
 		t.Error("ephemeral create is not ephemeral")
