@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestTouchAndReadSessionHeartbeat(t *testing.T) {
@@ -263,6 +264,67 @@ func TestIsSessionProcessDead_HeartbeatStaleWithoutTmuxFailsClosed(t *testing.T)
 	dead := isSessionProcessDead(nil, sessionName, townRoot)
 	if dead {
 		t.Error("expected dead=false for stale heartbeat without tmux liveness evidence")
+	}
+}
+
+// TestPolecatSessionState pins the stale verdict that decides whether a
+// polecat whose session still exists is reclaimed as dead (gt-22hdp.54): the
+// heartbeat is read from the town root (the rig's parent), and only a stale
+// heartbeat plus a confirmed-dead agent is stale.
+func TestPolecatSessionState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		noTmux      bool
+		noSession   bool
+		heartbeat   string // "fresh", "stale"
+		alive       bool
+		aliveErr    error
+		wantRunning bool
+		wantStale   bool
+	}{
+		{name: "nil_tmux", noTmux: true, heartbeat: "stale", wantRunning: false, wantStale: false},
+		{name: "no_session", noSession: true, heartbeat: "stale", wantRunning: false, wantStale: false},
+		{name: "fresh_heartbeat", heartbeat: "fresh", wantRunning: true, wantStale: false},
+		{name: "stale_heartbeat_agent_dead", heartbeat: "stale", alive: false, wantRunning: true, wantStale: true},
+		{name: "stale_heartbeat_agent_alive", heartbeat: "stale", alive: true, wantRunning: true, wantStale: false},
+		{name: "stale_heartbeat_probe_error", heartbeat: "stale", aliveErr: errors.New("tmux query failed"), wantRunning: true, wantStale: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			r := &rig.Rig{Name: "testrig", Path: filepath.Join(townRoot, "testrig")}
+
+			tm := newFakeProbe()
+			var probe sessionProbe = tm
+			if tt.noTmux {
+				probe = nil
+			}
+			mgr := newTestManager(r, nil, probe, nil)
+			sessionName := mgr.sessionName("toast")
+
+			if !tt.noSession {
+				if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
+					t.Fatalf("create session: %v", err)
+				}
+			}
+			switch tt.heartbeat {
+			case "fresh":
+				TouchSessionHeartbeat(townRoot, sessionName)
+			case "stale":
+				writeStaleSessionHeartbeat(t, townRoot, sessionName)
+			}
+			tm.setAlive(sessionName, tt.alive)
+			tm.aliveErr = tt.aliveErr
+
+			running, stale := mgr.polecatSessionState("toast")
+			if running != tt.wantRunning || stale != tt.wantStale {
+				t.Fatalf("polecatSessionState() = (running=%v, stale=%v), want (%v, %v)", running, stale, tt.wantRunning, tt.wantStale)
+			}
+		})
 	}
 }
 
