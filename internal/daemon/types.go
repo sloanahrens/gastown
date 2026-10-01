@@ -273,6 +273,10 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		if config.Patrols.Handler != nil {
 			return config.Patrols.Handler.Enabled
 		}
+	case "git_hygiene":
+		if config.Patrols.GitHygiene != nil {
+			return config.Patrols.GitHygiene.Enabled
+		}
 	}
 	return true // Default: enabled
 }

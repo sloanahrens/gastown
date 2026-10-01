@@ -24,7 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script duplicated it. `github-sheriff` was a parked plugin.md with no
   script, for a town that merges through GitHub pull requests.
 
+- **`git-hygiene`, `gitignore-reconcile` and `submodule-commit` plugins**
+  (gt-4k3fj.8.5) — `git-hygiene` is now the daemon's `git_hygiene` patrol
+  (below). `gitignore-reconcile` committed and pushed straight to main from
+  `<rig>/mayor/rig`, around the landing gates, and in every recorded run found
+  nothing to untrack. `submodule-commit` could never run: no rig has
+  submodules, and its per-rig opt-in key does not exist in rig settings
+  (gt-fcxe9.13). `plugins/rig-list-consumers/run_test.sh`, which tested the
+  three scripts, goes with them.
+
 ### Added
+
+- **`git_hygiene` daemon patrol** (gt-4k3fj.8.5) — every 12h (`patrols.git_hygiene`
+  in `mayor/daemon.json`, on when absent) the daemon fetches with `--prune` in
+  each rig's repository, deletes local branches merged into the default
+  branch, local agent branches (`polecat/`, `dog/`, `fix/`, `pr-`,
+  `integration/`, `worktree-agent-`) that origin no longer has, and merged
+  agent branches on origin (a push guarded by the hash it checked), then runs
+  `git gc`. It runs under the E-stop. Unlike the plugin it replaces, it never
+  clears stashes and does not need `gh`.
 
 - **Nightly Dolt backup in the maintenance window** (gt-8z769.5) — before its
   gc, `scheduled_maintenance` copies every database with

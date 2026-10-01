@@ -47,6 +47,10 @@ type PatrolsConfig struct {
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
+	// GitHygiene cleans merged and orphaned branches and runs git gc in each
+	// rig's repository (internal/daemon/git_hygiene.go). On when absent.
+	GitHygiene *PatrolConfig `json:"git_hygiene,omitempty"`
+
 	// MainBranchTest is the deleted main_branch_test patrol's key
 	// (gt-v4ssj.4: the landing worker's post-landing run owns red main). It is
 	// accepted and ignored so a daemon.json that still carries it parses.

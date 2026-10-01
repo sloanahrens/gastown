@@ -37,6 +37,15 @@ type daemonGit interface {
 	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
 	PackSize() (string, error)
 	LogAll(max int) ([]git.LogEntry, error)
+
+	// Rig repository upkeep, for the git_hygiene patrol.
+	FetchPrune(remote string) error
+	RemoteDefaultBranch() string
+	ListBranches(pattern string) ([]string, error)
+	DeleteBranch(name string, force bool) error
+	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
+	GC() error
 }
 
 var _ daemonGit = (*git.Git)(nil)
