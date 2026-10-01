@@ -197,6 +197,63 @@ func (h *handle) Fetch(remote string) error {
 	return h.fetchInto(r, rr, remote, "")
 }
 
+// FetchPrune is Fetch that also drops remote-tracking refs whose branch the
+// remote no longer has.
+func (h *handle) FetchPrune(remote string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"fetch", "--prune", remote}
+	r, _, err := h.locate(args...)
+	if err != nil {
+		return err
+	}
+	rr, err := h.remoteRepo(r, remote, args...)
+	if err != nil {
+		return err
+	}
+	prefix := "refs/remotes/" + remote + "/"
+	for ref := range r.refs {
+		if branch, ok := strings.CutPrefix(ref, prefix); ok {
+			if _, kept := rr.refs["refs/heads/"+branch]; !kept {
+				delete(r.refs, ref)
+			}
+		}
+	}
+	return h.fetchInto(r, rr, remote, "")
+}
+
+// DeleteRemoteBranchIfAt deletes branch on remote only while it still points
+// at expectedHash, and drops its remote-tracking ref, as git push does.
+func (h *handle) DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	ref := "refs/heads/" + branch
+	args := []string{"push", "--force-with-lease=" + ref + ":" + expectedHash, remote, ":" + ref}
+	r, _, err := h.locate(args...)
+	if err != nil {
+		return err
+	}
+	rr, err := h.remoteRepo(r, remote, args...)
+	if err != nil {
+		return err
+	}
+	if rr.refs[ref] != expectedHash {
+		return gitErr(1, fmt.Sprintf("To %s\n ! [rejected]        (delete) -> %s (stale info)\nerror: failed to push some refs to '%s'", rr.path, branch, rr.path), args...)
+	}
+	delete(rr.refs, ref)
+	delete(r.refs, "refs/remotes/"+remote+"/"+branch)
+	return nil
+}
+
+// GC has nothing to collect in the model; it fails only outside a
+// repository.
+func (h *handle) GC() error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	_, _, err := h.locate("gc", "--quiet")
+	return err
+}
+
 func (h *handle) FetchBranch(remote, branch string) error {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

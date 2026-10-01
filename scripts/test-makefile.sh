@@ -16,13 +16,6 @@ bash scripts/install-gt_test.sh
 bash -n plugins/rebuild-gt/run.sh
 bash -n plugins/rebuild-gt/run_test.sh
 bash plugins/rebuild-gt/run_test.sh
-bash -n plugins/gitignore-reconcile/run.sh
-bash -n plugins/git-hygiene/run.sh
-bash -n plugins/submodule-commit/run.sh
-bash -n plugins/submodule-commit/run_test.sh
-bash plugins/submodule-commit/run_test.sh
-bash -n plugins/rig-list-consumers/run_test.sh
-bash plugins/rig-list-consumers/run_test.sh
 bash -n plugins/seat-refill/run.sh
 bash -n plugins/seat-refill/run_test.sh
 bash plugins/seat-refill/run_test.sh

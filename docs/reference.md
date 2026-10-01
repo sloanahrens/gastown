@@ -586,9 +586,10 @@ consumers:
 | `status`    | string | operational / stopped / … |
 | `repo_path` | string or null | `Rig.RepoPath()` — the first of the rig root, `<rig>/mayor/rig`, `<rig>/refinery/rig` that is a git worktree root; `null` if none |
 
-`repo_path` is the field that plugins (gitignore-reconcile, git-hygiene,
-submodule-commit) consume. When it is `null` or missing, those plugins must
-fail loudly rather than no-op (gt-chqi, gt-xxwx).
+`repo_path` is the field a script that runs git in each rig's repository
+consumes. When it is `null` or missing, such a script must fail loudly rather
+than no-op (gt-chqi, gt-xxwx). The daemon's git_hygiene patrol calls
+`Rig.RepoPath()` directly.
 
 ### Convoy Management (Primary Dashboard)
 

@@ -313,6 +313,10 @@ type Daemon struct {
 	wispReaperRunning     atomic.Bool
 	checkpointDogRunning  atomic.Bool
 
+	// gitHygieneRunning is the git_hygiene patrol's single-flight guard
+	// (git_hygiene.go).
+	gitHygieneRunning atomic.Bool
+
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
 	goos string
@@ -1239,6 +1243,10 @@ var heartbeatSteps = []heartbeatStep{
 
 	// Prune the raw event log (.events.jsonl) when due (gt-ori5j).
 	{name: "events-prune", run: (*Daemon).pruneEventsLog},
+
+	// Clean merged and orphaned branches and gc the rig repos when due
+	// (was the git-hygiene plugin, gt-4k3fj.8.5).
+	{name: "git-hygiene", run: (*Daemon).triggerGitHygiene},
 }
 
 // heartbeatWork is the recovery work of one heartbeat, run after the

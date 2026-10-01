@@ -35,7 +35,10 @@ type BranchRepo interface {
 
 	Fetch(remote string) error
 	FetchBranch(remote, branch string) error
+	FetchPrune(remote string) error
 	Push(remote, branch string, force bool) error
+	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
+	GC() error
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
 	ListRemoteRefsWithHashesTimeout(remote, prefix string, timeout time.Duration) ([]git.RemoteRef, error)
 
@@ -261,6 +264,54 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if err := g.Push("origin", "polecat/y", true); err != nil {
 			t.Errorf("forced push: %v", err)
+		}
+	})
+
+	t.Run("lease-guarded remote delete, fetch --prune and gc", func(t *testing.T) {
+		fx, g := newWtFixture(t, newEnv(t))
+		if _, err := g.Rev("origin/" + fixtureBranch); err != nil {
+			t.Fatalf("clone has no origin/%s: %v", fixtureBranch, err)
+		}
+		if err := g.DeleteRemoteBranchIfAt("origin", fixtureBranch, fx.base); err == nil {
+			t.Error("delete with a stale lease succeeded")
+		}
+		if err := g.DeleteRemoteBranchIfAt("origin", fixtureBranch, fx.head); err != nil {
+			t.Fatalf("delete at the remote's tip: %v", err)
+		}
+		if tip, _ := g.PushRemoteBranchTip("origin", fixtureBranch); tip != "" {
+			t.Errorf("remote %s still at %s after delete", fixtureBranch, tip)
+		}
+		if ok, _ := g.RefExists("refs/remotes/origin/" + fixtureBranch); ok {
+			t.Error("delete left the remote-tracking ref")
+		}
+
+		env := fx.env.(BranchEnv)
+		gone := env.Commit(t, fx.origin, "gone", "gone", map[string]string{"g.txt": "g\n"})
+		if err := g.Fetch("origin"); err != nil {
+			t.Fatal(err)
+		}
+		if id, _ := g.Rev("origin/gone"); id != gone {
+			t.Fatalf("origin/gone = %s, want %s", id, gone)
+		}
+		other := filepath.Join(fx.root, "other")
+		env.Clone(t, fx.origin, other)
+		if err := env.OpenBranchRepo(other).DeleteRemoteBranchIfAt("origin", "gone", gone); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.FetchPrune("origin"); err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := g.RefExists("refs/remotes/origin/gone"); ok {
+			t.Error("FetchPrune kept a ref the remote no longer has")
+		}
+		if ok, _ := g.RefExists("refs/remotes/origin/main"); !ok {
+			t.Error("FetchPrune dropped origin/main")
+		}
+		if err := g.GC(); err != nil {
+			t.Errorf("GC: %v", err)
+		}
+		if err := env.OpenBranchRepo(fx.root).GC(); err == nil {
+			t.Error("GC outside a repository succeeded")
 		}
 	})
 
