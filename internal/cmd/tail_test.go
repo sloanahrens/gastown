@@ -35,19 +35,53 @@ func TestMergeTail_OrdersByTimeStably(t *testing.T) {
 	}
 }
 
-func TestRenderTailLine(t *testing.T) {
+func TestRenderLine_FieldsAndControlCharacters(t *testing.T) {
 	t.Parallel()
+	full := tailView{Loc: tailTestLoc, FullSource: true}
 	l := tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: "events", Text: "close gt-1\nforged line\tx\x1b[31m"}
-	got := renderTailLine(l, tailTestLoc, "")
+	got := full.renderLine(l)
 	want := "2026-09-30T09:05:06-05:00 gastown events close gt-1 forged line x [31m"
 	if got != want {
 		t.Fatalf("render =\n%q\nwant\n%q", got, want)
 	}
-	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Text: "x"}, tailTestLoc, ""); got != "2026-09-30T09:05:06-05:00 - - x" {
+	if got := full.renderLine(tailLine{At: at("2026-09-30T14:05:06Z"), Text: "x"}); got != "2026-09-30T09:05:06-05:00 - - x" {
 		t.Fatalf("empty rig/kind render = %q", got)
 	}
-	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "a b", Kind: "events", Text: "x"}, tailTestLoc, ""); got != "2026-09-30T09:05:06-05:00 a_b events x" {
+	if got := full.renderLine(tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "a b", Kind: "events", Text: "x"}); got != "2026-09-30T09:05:06-05:00 a_b events x" {
 		t.Fatalf("spaced rig render = %q", got)
+	}
+}
+
+// TestRenderLine_SourceTagIsShort: the default line carries the rig as one
+// short tag ("town" for the daemon) and no kind word, so a typical line does
+// not wrap; --verbose keeps the <rig> <kind> columns.
+func TestRenderLine_SourceTagIsShort(t *testing.T) {
+	t.Parallel()
+	short := tailView{Loc: tailTestLoc}
+	long := tailView{Loc: tailTestLoc, FullSource: true}
+	cases := []struct {
+		line        tailLine
+		want        string
+		wantVerbose string
+	}{
+		{
+			tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "town", Kind: tailKindDaemon, Text: "Heartbeat complete (#53)"},
+			"2026-09-30T09:05:06-05:00 town Heartbeat complete (#53)",
+			"2026-09-30T09:05:06-05:00 town daemon Heartbeat complete (#53)",
+		},
+		{
+			tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: tailKindLandings, Text: "landed gt-1"},
+			"2026-09-30T09:05:06-05:00 gastown landed gt-1",
+			"2026-09-30T09:05:06-05:00 gastown landings landed gt-1",
+		},
+	}
+	for _, c := range cases {
+		if got := short.renderLine(c.line); got != c.want {
+			t.Errorf("default render = %q, want %q", got, c.want)
+		}
+		if got := long.renderLine(c.line); got != c.wantVerbose {
+			t.Errorf("--verbose render = %q, want %q", got, c.wantVerbose)
+		}
 	}
 }
 
