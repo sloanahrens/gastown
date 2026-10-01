@@ -77,9 +77,12 @@ dir is not read, and `gt doctor` (overlay-health) reports any file left there
 (gt-fd2cu.3).
 
 **Implementation:**
-- Loader: `internal/formula/overlay.go` → `LoadFormulaOverlay(formulaName, townRoot, rigName) (*FormulaOverlay, error)`
-- Applier: `internal/formula/overlay.go` → `ApplyOverlays(f *Formula, overlay *FormulaOverlay) []string`
-- Integration: `internal/cmd/prime_molecule.go` → `applyFormulaOverlays()` called in `showFormulaStepsFull()`
+- Applier: bd. gt sets `BD_FORMULA_OVERLAY_DIR=<town>/formula-overlays` on every
+  `bd cook` and `bd mol bond` (`formulaOverlayEnv` in `internal/cmd/formula_cook.go`),
+  so the checklist prime renders and the beads pour creates carry the same overlay.
+  A stale override is a warning line in bd's cook output (gt-fd2cu.1).
+- Loader for `gt formula overlay` and `gt doctor`: `internal/formula/overlay.go` →
+  `LoadFormulaOverlay(formulaName, townRoot) (*FormulaOverlay, error)`
 
 ## TOML Format (Overlays)
 

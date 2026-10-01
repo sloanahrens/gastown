@@ -315,11 +315,11 @@ func runPrimeStep(ctx RoleContext) error {
 	if name == "" {
 		return fmt.Errorf("no formula to read: pass --formula <name>")
 	}
-	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(hookedBead, name))
+	f, err := ctx.formulaCooker().cookForRender(name, ctx.TownRoot, ctx.Rig, primeStepVars(hookedBead, name))
 	if err != nil {
 		return err
 	}
-	out, err := renderFormulaStep(name, f, varMap, primeStep)
+	out, err := renderFormulaStep(name, f, primeStep)
 	if err != nil {
 		return err
 	}
@@ -1221,7 +1221,7 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 			fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
 			return nil
 		}
-		showFormulaStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		ctx.formulaCooker().showStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
 		fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
@@ -1264,7 +1264,7 @@ func outputRalphLoopDirectiveWithPluginCheck(w io.Writer, ctx RoleContext, attac
 func renderRalphLoopPrompt(ctx RoleContext, attachment *beads.AttachmentFields) (string, error) {
 	var sb strings.Builder
 	if attachment.AttachedFormula != "" {
-		rendered, err := renderFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		rendered, err := ctx.formulaCooker().renderStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
 		if err != nil {
 			return "", err
 		}

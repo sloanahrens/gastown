@@ -217,14 +217,14 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			errSub: "cooking formula", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
 		{name: "formula fails", params: func(p *SlingParams) { p.FormulaName = "mol-polecat-work" },
 			inject: func(h *slingHarness) {
-				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, bool, []string) (*FormulaOnBeadResult, error) {
+				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
 					return nil, injected
 				}
 			},
 			errSub: "instantiating formula", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
 		{name: "formula fails in a batch", params: func(p *SlingParams) { p.FormulaName, p.FormulaFailFatal = "mol-polecat-work", false },
 			inject: func(h *slingHarness) {
-				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, bool, []string) (*FormulaOnBeadResult, error) {
+				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
 					return nil, injected
 				}
 			}},

@@ -1,14 +1,137 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/formula"
 )
+
+// cookTreeJSON is a machine-mode `bd cook` envelope carrying tree.
+func cookTreeJSON(tree string) []byte {
+	return []byte(`{"schema_version":1,"contract_version":1,"data":` + tree + `,"pagination":null,"error":null}`)
+}
+
+// docAuditTree is bd's cooked tree for a formula shaped like mol-doc-audit: an
+// inherited step, an expanded one with a child, a declared var.
+const docAuditTree = `{
+  "formula": "mol-doc-audit", "type": "workflow", "description": "Audit docs",
+  "vars": [
+    {"name": "issue", "description": "The issue", "required": true, "default": null, "value": "gt-1", "provided": true},
+    {"name": "slice_docs", "description": "Docs to audit", "required": false, "default": "", "value": "", "provided": false}
+  ],
+  "unresolved_vars": [], "warnings": [],
+  "steps": [
+    {"id": "load-context", "title": "Load gt-1", "description": "Read gt-1.", "needs": [], "children": []},
+    {"id": "audit", "title": "Audit", "description": "Audit body.", "needs": ["load-context"],
+     "children": [{"id": "audit.check", "title": "Check links", "description": "", "needs": [], "children": []}]}
+  ]
+}`
+
+// fakeCook answers every bd call with out (or fails with an error envelope
+// when kind is set) and records the calls.
+type fakeCook struct {
+	out   []byte
+	kind  string
+	msg   string
+	calls []beads.BDCall
+}
+
+func (f *fakeCook) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+	f.calls = append(f.calls, c)
+	if f.kind != "" {
+		env := `{"schema_version":1,"contract_version":1,"data":null,"error":{"kind":"` + f.kind + `","message":` + jsonString(f.msg) + `}}`
+		return []byte(env), nil, errors.New("exit status 27")
+	}
+	return f.out, nil, nil
+}
+
+// polecatChecklistRun answers bd cook with a work formula the size of
+// mol-polecat-work (8 steps, ~19 KB of bodies), so the prime budget tests
+// measure a realistic checklist without starting bd.
+func polecatChecklistRun() beads.BDRunner {
+	titles := []string{"Load context and verify assignment", "Set up working branch", "Implement the work",
+		"Self-review", "Run the gates", "Pre-verify", "Commit", "Submit work and self-clean"}
+	steps := make([]string, len(titles))
+	for i, title := range titles {
+		body := jsonString(strings.Repeat("Body line of a polecat work step with commands to run.\n", 42))
+		steps[i] = `{"id": "s` + string(rune('1'+i)) + `", "title": ` + jsonString(title) + `, "description": ` + body + `, "children": []}`
+	}
+	fake := &fakeCook{out: cookTreeJSON(`{"formula": "mol-polecat-work", "type": "workflow", "steps": [` + strings.Join(steps, ",") + `]}`)}
+	return fake.run
+}
+
+func cookedFixture(t *testing.T, tree string) *cookedFormula {
+	t.Helper()
+	fake := &fakeCook{out: cookTreeJSON(tree)}
+	f, err := formulaCooker{run: fake.run}.cookForRender("mol-doc-audit", "", "", nil)
+	if err != nil {
+		t.Fatalf("cookForRender: %v", err)
+	}
+	return f
+}
+
+func TestRenderCookedFormula(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	renderCookedFormula(&sb, cookedFixture(t, docAuditTree))
+	out := sb.String()
+	for _, want := range []string{
+		"mol-doc-audit (cooked)",
+		"gt formula show mol-doc-audit --raw",
+		"{{issue}}: The issue [required]",
+		`{{slice_docs}}: Docs to audit [default=""]`,
+		"Steps (3):",
+		"├── load-context: Load gt-1",
+		"└── audit: Audit [needs: load-context]",
+		"    └── audit.check: Check links",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestWriteCookedFormulaJSON_IsBdTree(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := writeCookedFormulaJSON(&sb, cookedFixture(t, docAuditTree)); err != nil {
+		t.Fatalf("writeCookedFormulaJSON: %v", err)
+	}
+	var got struct {
+		Formula string `json:"formula"`
+		Steps   []struct {
+			ID       string            `json:"id"`
+			Children []json.RawMessage `json:"children"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(sb.String()), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, sb.String())
+	}
+	if got.Formula != "mol-doc-audit" || len(got.Steps) != 2 || len(got.Steps[1].Children) != 1 {
+		t.Errorf("JSON is not bd's tree: %+v", got)
+	}
+}
+
+// TestParseFormulaFile_ResolvesExtends: gt formula run parses by path and must
+// run the inherited steps too, the steps bd cooks.
+func TestParseFormulaFile_ResolvesExtends(t *testing.T) {
+	t.Parallel()
+	f, err := parseFormulaFile(filepath.Join("..", "formula", "formulas", "mol-doc-audit.formula.toml"))
+	if err != nil {
+		t.Fatalf("parseFormulaFile: %v", err)
+	}
+	want := []string{"load-context", "branch-setup", "audit", "commit-changes", "self-review", "build-check", "pre-verify", "submit-and-exit"}
+	if got := formulaStepIDs(f); !slices.Equal(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+}
 
 func formulaStepIDs(f *formula.Formula) []string {
 	ids := make([]string, 0, len(f.Steps))
@@ -16,148 +139,4 @@ func formulaStepIDs(f *formula.Formula) []string {
 		ids = append(ids, s.ID)
 	}
 	return ids
-}
-
-// TestLoadResolvedFormula_ExtendingFormulas guards gt-ad1a1: gt formula show
-// resolves a formula that carries only its delta, as prime does. Embedded
-// formulas only (empty town root).
-func TestLoadResolvedFormula_ExtendingFormulas(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		contains []string
-		absent   []string
-	}{
-		// Inherits load-context, expands implement into audit, overrides commit-changes.
-		{"mol-doc-audit", []string{"load-context", "audit", "commit-changes", "submit-and-exit"}, []string{"implement"}},
-		// Declares no steps of its own; everything comes from its parent and tdd-cycle.
-		{"mol-polecat-work-monorepo-tdd", []string{"load-context", "submit-and-exit"}, []string{"implement"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			raw, resolved, err := loadResolvedFormula(tt.name, "", "")
-			if err != nil {
-				t.Fatalf("loadResolvedFormula: %v", err)
-			}
-			if !formulaComposes(raw) {
-				t.Fatalf("%s should extend or compose", tt.name)
-			}
-			ids := formulaStepIDs(resolved)
-			if len(ids) <= len(raw.Steps) {
-				t.Errorf("resolved has %d steps, raw %d; want inherited steps added", len(ids), len(raw.Steps))
-			}
-			for _, id := range tt.contains {
-				if !slices.Contains(ids, id) {
-					t.Errorf("resolved steps %v missing %q", ids, id)
-				}
-			}
-			for _, id := range tt.absent {
-				if slices.Contains(ids, id) {
-					t.Errorf("resolved steps %v still hold expanded %q", ids, id)
-				}
-			}
-		})
-	}
-}
-
-// TestLoadResolvedFormula_PlainFormula: a formula without extends or compose
-// comes back as written, so gt formula show hands it to bd unchanged.
-func TestLoadResolvedFormula_PlainFormula(t *testing.T) {
-	t.Parallel()
-	raw, resolved, err := loadResolvedFormula("mol-polecat-work", "", "")
-	if err != nil {
-		t.Fatalf("loadResolvedFormula: %v", err)
-	}
-	if formulaComposes(raw) || raw != resolved {
-		t.Fatalf("mol-polecat-work should not compose; raw and resolved should be one formula")
-	}
-}
-
-func TestRenderResolvedFormula(t *testing.T) {
-	t.Parallel()
-	raw, resolved, err := loadResolvedFormula("mol-doc-audit", "", "")
-	if err != nil {
-		t.Fatalf("loadResolvedFormula: %v", err)
-	}
-	var sb strings.Builder
-	renderResolvedFormula(&sb, raw, resolved)
-	out := sb.String()
-	for _, want := range []string{
-		"mol-doc-audit (resolved)",
-		"Extends: mol-polecat-work",
-		"Expands: implement with doc-audit-slice",
-		"gt formula show mol-doc-audit --raw",
-		"{{slice_docs}}",
-		"{{issue}}", // inherited var
-		"── load-context: ",
-		"── audit: ",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
-	}
-	if got := strings.Count(out, "── "); got != len(resolved.Steps) {
-		t.Errorf("rendered %d steps, want %d", got, len(resolved.Steps))
-	}
-}
-
-func TestWriteResolvedFormulaJSON(t *testing.T) {
-	t.Parallel()
-	raw, resolved, err := loadResolvedFormula("mol-doc-audit", "", "")
-	if err != nil {
-		t.Fatalf("loadResolvedFormula: %v", err)
-	}
-	var sb strings.Builder
-	if err := writeResolvedFormulaJSON(&sb, raw, resolved); err != nil {
-		t.Fatalf("writeResolvedFormulaJSON: %v", err)
-	}
-	var got struct {
-		Formula  string   `json:"formula"`
-		Resolved bool     `json:"resolved"`
-		Extends  []string `json:"extends"`
-		Compose  struct {
-			Expand []struct{ Target, With string } `json:"expand"`
-		} `json:"compose"`
-		Vars  map[string]json.RawMessage `json:"vars"`
-		Steps []struct {
-			ID    string   `json:"id"`
-			Needs []string `json:"needs"`
-		} `json:"steps"`
-	}
-	if err := json.Unmarshal([]byte(sb.String()), &got); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, sb.String())
-	}
-	if got.Formula != "mol-doc-audit" || !got.Resolved {
-		t.Errorf("formula=%q resolved=%v", got.Formula, got.Resolved)
-	}
-	if !slices.Equal(got.Extends, []string{"mol-polecat-work"}) {
-		t.Errorf("extends = %v", got.Extends)
-	}
-	if len(got.Compose.Expand) != 1 || got.Compose.Expand[0].Target != "implement" {
-		t.Errorf("compose.expand = %+v", got.Compose.Expand)
-	}
-	if _, ok := got.Vars["issue"]; !ok {
-		t.Errorf("inherited var issue missing from %v", got.Vars)
-	}
-	if len(got.Steps) != len(resolved.Steps) || got.Steps[0].ID != resolved.Steps[0].ID {
-		t.Errorf("steps = %+v, want %v", got.Steps, formulaStepIDs(resolved))
-	}
-}
-
-// TestParseFormulaFile_ResolvesExtends: gt formula run parses by path and must
-// run the inherited steps too, matching the three-tier load.
-func TestParseFormulaFile_ResolvesExtends(t *testing.T) {
-	t.Parallel()
-	f, err := parseFormulaFile(filepath.Join("..", "formula", "formulas", "mol-doc-audit.formula.toml"))
-	if err != nil {
-		t.Fatalf("parseFormulaFile: %v", err)
-	}
-	_, want, err := loadResolvedFormula("mol-doc-audit", "", "")
-	if err != nil {
-		t.Fatalf("loadResolvedFormula: %v", err)
-	}
-	if got := formulaStepIDs(f); !slices.Equal(got, formulaStepIDs(want)) {
-		t.Errorf("steps = %v, want %v", got, formulaStepIDs(want))
-	}
 }

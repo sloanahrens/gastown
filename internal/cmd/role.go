@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -31,6 +32,15 @@ type RoleInfo struct {
 	EnvIncomplete bool   `json:"env_incomplete,omitempty"` // True if env was set but missing rig/polecat, filled from cwd
 	TownRoot      string `json:"town_root,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"` // Current working directory
+
+	// formulaRun answers the bd cook prime renders formulas with; nil is the
+	// bd on PATH. Tests set it so prime never starts bd.
+	formulaRun beads.BDRunner
+}
+
+// formulaCooker is the bd cook this role's prime renders formulas with.
+func (r RoleInfo) formulaCooker() formulaCooker {
+	return formulaCooker{run: r.formulaRun}
 }
 
 // GetRole returns the current role, checking GT_ROLE first then falling back to cwd.

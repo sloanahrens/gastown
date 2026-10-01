@@ -562,7 +562,7 @@ func outputAttachmentStatus(w io.Writer, ctx RoleContext) {
 
 	// Show inline formula steps if formula name is known, else fall back to bd mol current
 	if attachment.AttachedFormula != "" {
-		showFormulaStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		ctx.formulaCooker().showStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
 	} else {
 		showMoleculeExecutionPrompt(w, ctx.WorkDir, attachment.AttachedMolecule)
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/notify"
 )
@@ -122,6 +123,10 @@ type DoltServerManager struct {
 	// could turn a slow gc into a damaged store. A dead server is still
 	// started: there is nothing in flight to protect. Protected by mu.
 	restartSuppressed func() bool
+
+	// pauseLogged is the pause message last logged, "" when not paused, so
+	// a pause is logged once per health tick sequence. Protected by mu.
+	pauseLogged string
 
 	// notifier sends the manager's alert mail; nil means gt (see notify()).
 	notifier notify.Notifier
@@ -481,11 +486,37 @@ func (m *DoltServerManager) restartHeldLocked(what string, cause error) bool {
 	return true
 }
 
+// paused reports whether the town's Dolt pause marker holds, logging the
+// pause once when it starts and once when it ends.
+func (m *DoltServerManager) paused() bool {
+	marker := doltpause.Current(m.townRoot, m.now())
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if marker == nil {
+		if m.pauseLogged != "" {
+			m.logger("Dolt pause lifted; resuming server management")
+			m.pauseLogged = ""
+		}
+		return false
+	}
+	if msg := marker.Message(); msg != m.pauseLogged {
+		m.logger("%s — not starting, probing or restarting the server", msg)
+		m.pauseLogged = msg
+	}
+	return true
+}
+
 // EnsureRunning ensures the Dolt server is running.
 // If not running, starts it. If running but unhealthy, restarts it.
 // Uses exponential backoff and a max-restart cap to avoid crash-looping.
 func (m *DoltServerManager) EnsureRunning() error {
 	if !m.IsEnabled() {
+		return nil
+	}
+
+	// A deliberately paused server (GC, backup, operator) is left alone: no
+	// health probe, no start, no restart (gt-8z769.2).
+	if m.paused() {
 		return nil
 	}
 

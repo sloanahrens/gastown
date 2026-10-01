@@ -391,7 +391,7 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 		}
 		varsForAttachment = append([]string(nil), allVars...)
 		formulaVarsForAttachment = strings.Join(allVars, "\n")
-		formulaResult, err := d.instantiateFormula(context.Background(), params.FormulaName, params.BeadID, info.Title, hookWorkDir, townRoot, true, allVars)
+		formulaResult, err := d.instantiateFormula(context.Background(), params.FormulaName, params.BeadID, info.Title, hookWorkDir, townRoot, allVars)
 		if err != nil {
 			if params.FormulaFailFatal {
 				// Rollback spawned polecat on fatal formula failure

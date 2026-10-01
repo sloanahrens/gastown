@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -277,7 +278,8 @@ var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 // returned unchanged, so an exhausted retry reads as the failure it is.
 func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
 	if b.plain {
-		return b.runPlain(stdinData, args)
+		out, err := b.runPlain(stdinData, args)
+		return out, b.explainPause(err)
 	}
 	attempts := 1
 	if b.targetsTestDoltContainer() {
@@ -296,6 +298,9 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 		if !b.retryableBdTransientFailure(args, err) || attempt >= attempts {
 			break
 		}
+		if doltpause.Current(b.getTownRoot(), time.Now()) != nil {
+			break
+		}
 		if time.Now().After(deadline) {
 			// The container is not merely busy: the attempts so far have already
 			// spent the retry window, so another one multiplies the wait without
@@ -309,7 +314,19 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 		time.Sleep(bdContainerRetryBackoffFn(attempt))
 		args = reset.next(args)
 	}
-	return nil, lastErr
+	return nil, b.explainPause(lastErr)
+}
+
+// explainPause reports a bd call that could not answer while the town's Dolt
+// pause marker holds as the pause ("Dolt paused by <actor> until <t>:
+// <reason>"), keeping ErrUnavailable and bd's own failure in its chain. Any
+// other error, and every error while Dolt is not paused, is unchanged
+// (gt-8z769.2).
+func (b *Beads) explainPause(err error) error {
+	if !errors.Is(err, ErrUnavailable) {
+		return err
+	}
+	return doltpause.Explain(b.getTownRoot(), time.Now(), err)
 }
 
 // bdInitRetryReset repairs what a failed bd init attempt left in the caller's

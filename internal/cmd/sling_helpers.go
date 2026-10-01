@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
@@ -981,7 +979,7 @@ type FormulaOnBeadResult struct {
 
 func formulaBeadBdCmd(beadID, formulaWorkDir, townRoot string, args ...string) *bdCmd {
 	targetBeadsDir := beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID)
-	return BdCmd(args...).Dir(formulaWorkDir).WithBeadsDir(targetBeadsDir).WithGTRoot(townRoot)
+	return BdCmd(args...).Dir(formulaWorkDir).WithBeadsDir(targetBeadsDir).WithGTRoot(townRoot).WithEnv(formulaOverlayEnv(townRoot))
 }
 
 // formulaBD is how formula instantiation reaches bd: run answers every bd call
@@ -1012,51 +1010,25 @@ func (f formulaBD) beadCmd(beadID, formulaWorkDir, townRoot string, args ...stri
 //   - title: the bead title (used for --var feature=<title>)
 //   - hookWorkDir: working directory for bd commands (polecat's worktree)
 //   - townRoot: the town root directory
-//   - skipCook: if true, skip cooking (for batch mode optimization where cook happens once)
 //   - extraVars: additional --var values supplied by the user
 //
 // Returns the spawned molecule root ID while leaving the base bead as the hook target.
-func InstantiateFormulaOnBead(_ context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (*FormulaOnBeadResult, error) {
-	return realFormulaBD().instantiate(formulaName, beadID, title, hookWorkDir, townRoot, skipCook, extraVars)
+func InstantiateFormulaOnBead(_ context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error) {
+	return realFormulaBD().instantiate(formulaName, beadID, title, hookWorkDir, townRoot, extraVars)
 }
 
 // instantiate is InstantiateFormulaOnBead with bd reached through f.
-func (f formulaBD) instantiate(formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
+func (f formulaBD) instantiate(formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error) {
 	// Route bd mutations to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 
-	// Step 1: Cook the formula (ensures proto exists)
-	// If cook fails, retry with the embedded formula extracted to a temp file.
-	// This handles non-gastown rigs that don't have formulas provisioned on disk.
-	// See gt-oir.
-	resolvedFormula := formulaName
-	var formulaCleanup func()
-	if !skipCook {
-		if err := f.beadCmd(beadID, formulaWorkDir, townRoot, "cook", formulaName).
-			WithAutoCommit().
-			Run(); err != nil {
-			// Retry with embedded formula
-			resolvedFormula, formulaCleanup = resolveFormulaToTempFile(formulaName)
-			if formulaCleanup != nil {
-				defer formulaCleanup()
-			}
-			if resolvedFormula != formulaName {
-				if retryErr := f.beadCmd(beadID, formulaWorkDir, townRoot, "cook", resolvedFormula).
-					WithAutoCommit().
-					Run(); retryErr != nil {
-					return nil, fmt.Errorf("cooking formula %s: %w (embedded retry: %v)", formulaName, err, retryErr)
-				}
-			} else {
-				return nil, fmt.Errorf("cooking formula %s: %w", formulaName, err)
-			}
-		}
-	}
-
-	formulaVars, err := formulaVarsForBead(formulaName, beadID, title, townRoot, extraVars)
+	// The cook happens once, here: bd cooks the formula with the bond's vars, and a
+	// cook failure fails the pour with one line.
+	formulaVars, err := f.varsForBead(formulaName, beadID, title, formulaWorkDir, townRoot, extraVars)
 	if err != nil {
 		return nil, err
 	}
-	wispRootID, err := f.bond(resolvedFormula, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
+	wispRootID, err := f.bond(formulaName, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
 	if err != nil {
 		return nil, fmt.Errorf("bonding formula %s to bead %s: %w", formulaName, beadID, err)
 	}
@@ -1068,29 +1040,20 @@ func (f formulaBD) instantiate(formulaName, beadID, title, hookWorkDir, townRoot
 	}, nil
 }
 
-// formulaVarsForBead assembles the --var list for bonding formulaName to beadID:
-// the standard feature/issue pair, the caller's extraVars, and every variable the
-// formula declares a default for.
-func formulaVarsForBead(formulaName, beadID, title, townRoot string, extraVars []string) ([]string, error) {
+// varsForBead assembles the --var list for bonding formulaName to beadID: the
+// standard feature/issue pair, the caller's extraVars, and every variable the
+// formula declares a default for, as bd cooks it in the bead's beads context.
+func (f formulaBD) varsForBead(formulaName, beadID, title, formulaWorkDir, townRoot string, extraVars []string) ([]string, error) {
 	formulaVars := []string{
 		fmt.Sprintf("feature=%s", title),
 		fmt.Sprintf("issue=%s", beadID),
 	}
 	formulaVars = append(formulaVars, extraVars...)
-	return backfillFormulaDefaultVars(formulaName, formulaVars, townRoot, rigNameForBead(townRoot, beadID))
-}
-
-// rigNameForBead names the rig that owns beadID through the prefix routes, or ""
-// when the prefix routes nowhere (town-level beads, unknown prefixes).
-func rigNameForBead(townRoot, beadID string) string {
-	if townRoot == "" {
-		return ""
+	cooked, err := cookFormula(formulaName, f.beadCmd(beadID, formulaWorkDir, townRoot, cookArgs(formulaName, formulaVars)...))
+	if err != nil {
+		return nil, err
 	}
-	prefix := beads.ExtractPrefix(beadID)
-	if prefix == "" {
-		return ""
-	}
-	return beads.GetRigNameForPrefix(townRoot, prefix)
+	return backfillFormulaDefaultVars(cooked, formulaVars)
 }
 
 // bondFormulaDirect attaches a formula to a bead through bd's canonical bond path.
@@ -1220,141 +1183,66 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 }
 
 // backfillFormulaDefaultVars returns vars plus a --var entry for every variable
-// formulaName declares with a default, so bd's bond stops demanding values the
-// formula already supplies.
+// the cooked formula declares with a default, so bd's bond stops demanding values
+// the formula already supplies.
 //
 // bd's bond requires a value for every {{placeholder}} in the cooked proto and
 // ignores the formula's own [vars] defaults (beads cmd/bd/mol_bond.go
 // buildAttachCloneOpts). gt therefore has to hand it those defaults. Reading them
 // from the formula's declarations — rather than a list hard-coded to
 // mol-polecat-work — is what lets any formula bond without --var flags (gt-25wi).
+// An optional variable without a default is bonded empty.
 //
-// A variable that is required, declares no default, has no value, and is used as
-// a {{placeholder}} in the formula is an error naming the formula and the
+// A required variable with no default and no value that bd left as a
+// placeholder (unresolved_vars) is an error naming the formula and the
 // variables: bd rejects that bond anyway, and its own message does not say which
 // formula wanted them. A required variable the formula never interpolates is not
-// an error — bd does not demand a value for it, and failing there would block a
-// bond that works (a single-braced {name} in prose is a substitution, not a
-// placeholder). Values already in vars are never overwritten.
-//
-// When the formula cannot be loaded, vars are returned unchanged and bd reports
-// the real problem — a gt-side load failure must not block a bond bd can do.
-func backfillFormulaDefaultVars(formulaName string, vars []string, townRoot, rigName string) ([]string, error) {
-	_, f, err := loadResolvedFormula(formulaName, townRoot, rigName)
-	if err != nil {
-		return vars, nil
-	}
-
+// an error. Values already in vars are never overwritten.
+func backfillFormulaDefaultVars(f *cookedFormula, vars []string) ([]string, error) {
 	supplied := make(map[string]bool, len(vars))
 	for _, variable := range vars {
 		if eq := strings.Index(variable, "="); eq > 0 {
 			supplied[variable[:eq]] = true
 		}
 	}
-
-	used := make(map[string]bool)
-	for _, name := range f.UsedTemplateVariables() {
-		used[name] = true
+	unresolved := make(map[string]bool, len(f.UnresolvedVars))
+	for _, name := range f.UnresolvedVars {
+		unresolved[name] = true
 	}
-
-	names := make([]string, 0, len(f.Vars))
-	for name := range f.Vars {
-		names = append(names, name)
-	}
-	sort.Strings(names) // map order is random; --var order is not
 
 	var missing []string
-	for _, name := range names {
-		if supplied[name] {
-			continue
+	for _, v := range f.Vars { // bd sorts them by name
+		switch {
+		case supplied[v.Name]:
+		case v.Default != nil:
+			vars = append(vars, v.Name+"="+*v.Default)
+		case !v.Required:
+			vars = append(vars, v.Name+"=")
+		case unresolved[v.Name]:
+			missing = append(missing, v.Name)
 		}
-		def := f.Vars[name]
-		if def.Required && def.Default == "" {
-			// Nothing to backfill. Only a placeholder bd would reject is an error.
-			if used[name] {
-				missing = append(missing, name)
-			}
-			continue
-		}
-		vars = append(vars, name+"="+def.Default)
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("formula %s: required variable(s) %s have no default; pass --var <name>=<value>",
-			formulaName, strings.Join(missing, ", "))
+			f.Formula, strings.Join(missing, ", "))
 	}
 	return vars, nil
 }
 
-// formulaSearchPaths lists the on-disk directories an extends parent may live in,
-// matching the tiers of formula.ResolveFormulaContent. Parents that ship embedded
-// are found without any path.
-func formulaSearchPaths(townRoot, rigName string) []string {
-	var paths []string
-	if townRoot != "" && rigName != "" {
-		paths = append(paths, filepath.Join(townRoot, rigName, ".beads", "formulas"))
-	}
-	if townRoot != "" {
-		paths = append(paths, filepath.Join(townRoot, ".beads", "formulas"))
-	}
-	return paths
-}
-
-// CookFormula cooks a formula to ensure its proto exists.
-// This is useful for batch mode where we cook once before processing multiple beads.
-// townRoot is required for GT_ROOT so bd can find town-level formulas.
-// Falls back to embedded formula extraction if bd can't find the formula on disk.
+// CookFormula cooks a formula once before a batch of pours, so a formula bd
+// cannot cook fails the batch before any bead is touched.
 func CookFormula(formulaName, workDir, townRoot string) error {
 	return realFormulaBD().cook(formulaName, workDir, townRoot)
 }
 
 // cook is CookFormula with bd reached through f.
 func (f formulaBD) cook(formulaName, workDir, townRoot string) error {
-	err := BdCmd("cook", formulaName).
+	_, err := cookFormula(formulaName, BdCmd(cookArgs(formulaName, nil)...).
 		Dir(workDir).
-		WithAutoCommit().
 		WithGTRoot(townRoot).
-		Via(f.run).
-		Run()
-	if err == nil {
-		return nil
-	}
-	// Retry with embedded formula extracted to temp file
-	resolved, cleanup := resolveFormulaToTempFile(formulaName)
-	if cleanup != nil {
-		defer cleanup()
-	}
-	if resolved == formulaName {
-		return err // No embedded fallback available
-	}
-	return BdCmd("cook", resolved).
-		Dir(workDir).
-		WithAutoCommit().
-		WithGTRoot(townRoot).
-		Via(f.run).
-		Run()
-}
-
-// resolveFormulaToTempFile extracts an embedded formula to a temp file.
-// Returns the temp file path and a cleanup function, or the original name
-// if extraction fails. Used as a fallback when bd can't find the formula on disk.
-func resolveFormulaToTempFile(formulaName string) (resolved string, cleanup func()) {
-	content, err := formula.GetEmbeddedFormulaContent(formulaName)
-	if err != nil {
-		return formulaName, nil
-	}
-
-	tmpFile, err := os.CreateTemp("", "gt-formula-*.formula.toml")
-	if err != nil {
-		return formulaName, nil
-	}
-	if _, err := tmpFile.Write(content); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		return formulaName, nil
-	}
-	tmpFile.Close()
-
-	return tmpFile.Name(), func() { os.Remove(tmpFile.Name()) }
+		WithEnv(formulaOverlayEnv(townRoot)).
+		Via(f.run))
+	return err
 }
 
 // isHookedAgentDeadFn is a seam for tests. Production uses isHookedAgentDead.

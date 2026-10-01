@@ -4,6 +4,7 @@ package doltserver
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -222,6 +223,15 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 	}
 	if served, missing, err := h.VerifyDatabases(townRoot); err != nil || len(missing) != 0 || !slices.Contains(served, "testrig") {
 		t.Errorf("VerifyDatabases = %v, missing %v, %v; want testrig served", served, missing, err)
+	}
+	// The commits-per-day meter's query against a real dolt_log: InitRig's
+	// commits were all made in the last 24h.
+	counts, err := h.CommitsLastDay(context.Background(), townRoot)
+	if err != nil {
+		t.Fatalf("CommitsLastDay: %v", err)
+	}
+	if i := slices.IndexFunc(counts, func(c DBCommits) bool { return c.Database == "testrig" }); i < 0 || counts[i].Err != "" || counts[i].Commits < 1 {
+		t.Errorf("CommitsLastDay = %+v, want testrig with at least one commit", counts)
 	}
 	if err := h.Start(townRoot); err != nil {
 		t.Errorf("a second Start of a running server = %v, want idempotent success", err)

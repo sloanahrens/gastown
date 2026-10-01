@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 )
@@ -708,5 +710,39 @@ func TestOutputStatusText_LivenessUnknown(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "Agent liveness unknown") {
 		t.Fatalf("unknown-liveness line printed with nothing unknown: %q", buf.String())
+	}
+}
+
+// The commits-per-day meter marks the Dolt part of the Services line only for
+// databases over the limit, busiest first.
+func TestOutputStatusText_DoltCommitMarker(t *testing.T) {
+	t.Parallel()
+
+	dolt := &DoltInfo{Running: true, PID: 7, Port: 3307}
+	readDoltCommitMeter(dolt, t.TempDir(), func(context.Context, string) ([]doltserver.DBCommits, error) {
+		return []doltserver.DBCommits{
+			{Database: "be", Commits: 17},
+			{Database: "gt", Commits: 3048},
+			{Database: "hq", Commits: 2041},
+		}, nil
+	})
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: dolt}); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "⚠ commits/24h gt=3048 hq=2041 > 500") || strings.Contains(out, "be=17") {
+		t.Fatalf("want the over-limit marker for gt and hq only, got: %q", out)
+	}
+
+	under := &DoltInfo{Running: true, PID: 7, Port: 3307}
+	readDoltCommitMeter(under, t.TempDir(), func(context.Context, string) ([]doltserver.DBCommits, error) {
+		return []doltserver.DBCommits{{Database: "gt", Commits: 120}}, nil
+	})
+	buf.Reset()
+	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: under}); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if strings.Contains(buf.String(), "commits/24h") {
+		t.Fatalf("no marker expected under the limit, got: %q", buf.String())
 	}
 }

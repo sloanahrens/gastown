@@ -44,15 +44,6 @@ escalate it."""
 formula = "mol-dog-reaper"
 version = 7
 
-# Declared command allowlist (gt-9iv), no longer enforced: see Scope Boundary.
-command_allowlist = [
-	"gt reaper",
-	"gt convoy check",
-	"gt convoy list",
-	"gt escalate",
-	"gt dog done",
-]
-
 [[steps]]
 id = "scan"
 title = "Scan databases for reaper candidates"

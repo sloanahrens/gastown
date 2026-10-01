@@ -275,7 +275,7 @@ func TestSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}},
 		{name: "formula instantiation fails", wantErr: "instantiating formula", wantRollback: "rollback Toast bead=gt-abc123 convoy=",
 			inject: func(h *slingHarness) {
-				h.run.instantiateFormula = func(_ context.Context, _, _, _, _, _ string, _ bool, _ []string) (*FormulaOnBeadResult, error) {
+				h.run.instantiateFormula = func(_ context.Context, _, _, _, _, _ string, _ []string) (*FormulaOnBeadResult, error) {
 					return nil, injected
 				}
 			}},

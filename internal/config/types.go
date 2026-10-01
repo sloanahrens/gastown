@@ -165,12 +165,14 @@ type OperationalConfig struct {
 	// and kept verbatim across rewrites.
 	Deacon json.RawMessage `json:"deacon,omitempty"`
 
-	// Polecat, Dolt and Web have no reader (gt-e2kxa): the code uses its own
+	// Polecat and Web have no reader (gt-e2kxa): the code uses its own
 	// constants. They are declared so a settings file that still carries
 	// them decodes, and kept verbatim across rewrites.
 	Polecat json.RawMessage `json:"polecat,omitempty"`
-	Dolt    json.RawMessage `json:"dolt,omitempty"`
 	Web     json.RawMessage `json:"web,omitempty"`
+
+	// Dolt configures Dolt server thresholds.
+	Dolt *DoltThresholds `json:"dolt,omitempty"`
 
 	// Mail configures mail system thresholds.
 	Mail *MailThresholds `json:"mail,omitempty"`
@@ -185,6 +187,21 @@ type OperationalConfig struct {
 	// host's Docker VM and how many of those slots are reserved for gate-
 	// class callers (refinery, batch gate, main-branch test).
 	ContainerGate *ContainerGateThresholds `json:"container_gate,omitempty"`
+}
+
+// DoltThresholds configures Dolt server thresholds.
+type DoltThresholds struct {
+	// CommitsPerDayWarn is the per-database count of Dolt commits in the
+	// last 24h above which gt doctor warns and gt status marks the database
+	// (default 500, the D3 target after bd batches its writes; gt-8z769.4).
+	CommitsPerDayWarn *int `json:"commits_per_day_warn,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa). They are declared so a
+	// settings file that still carries them decodes.
+	HealthCheckInterval string `json:"health_check_interval,omitempty"`
+	CmdTimeout          string `json:"cmd_timeout,omitempty"`
+	MaxConnections      *int   `json:"max_connections,omitempty"`
+	SlowQueryThreshold  string `json:"slow_query_threshold,omitempty"`
 }
 
 // ContainerGateThresholds configures the container-gate slot pool.

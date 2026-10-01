@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/formula"
 )
 
 // primeStepBodyMaxChars caps the one step body the checklist renders in full.
@@ -31,24 +30,27 @@ const primeStepBodyMaxChars = 3000
 // Claude Code delivers at most 10,000 characters of hook output to the model, so
 // prime cannot afford the full body of every step (mol-polecat-work alone is
 // ~19 KB, mol-refinery-patrol ~51 KB).
-func renderFormulaChecklist(formulaName string, f *formula.Formula, varMap map[string]string, fullStep int) string {
-	if f == nil || len(f.Steps) == 0 {
+func renderFormulaChecklist(formulaName string, f *cookedFormula, fullStep int) string {
+	if f == nil {
 		return ""
 	}
-	if fullStep < 1 || fullStep > len(f.Steps) {
+	steps := f.checklist()
+	if len(steps) == 0 {
+		return ""
+	}
+	if fullStep < 1 || fullStep > len(steps) {
 		fullStep = 1
 	}
 
 	var sb strings.Builder
 	sb.WriteString("\n")
-	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
-	for i, step := range f.Steps {
-		title := applyFormulaVars(step.Title, varMap)
-		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, title)
+	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
+	for i, step := range steps {
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
 		if i+1 != fullStep {
 			continue
 		}
-		if desc := applyFormulaVars(step.Description, varMap); desc != "" {
+		if desc := step.Description; desc != "" {
 			if len(desc) > primeStepBodyMaxChars {
 				cut := strings.LastIndexByte(desc[:primeStepBodyMaxChars], '\n')
 				if cut <= 0 {
@@ -253,14 +255,18 @@ func useCompactResumePath(source, handoffReason string, staticDelivered bool) bo
 
 // renderFormulaStep renders the title and full body of one step (1-based) for
 // `gt prime --step N`.
-func renderFormulaStep(formulaName string, f *formula.Formula, varMap map[string]string, n int) (string, error) {
-	if f == nil || n < 1 || n > len(f.Steps) {
+func renderFormulaStep(formulaName string, f *cookedFormula, n int) (string, error) {
+	var steps []cookedStep
+	if f != nil {
+		steps = f.checklist()
+	}
+	if n < 1 || n > len(steps) {
 		return "", fmt.Errorf("formula %s has no step %d", formulaName, n)
 	}
-	step := f.Steps[n-1]
+	step := steps[n-1]
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "### Step %d: %s\n\n", n, applyFormulaVars(step.Title, varMap))
-	if desc := applyFormulaVars(step.Description, varMap); desc != "" {
+	fmt.Fprintf(&sb, "### Step %d: %s\n\n", n, step.Title)
+	if desc := step.Description; desc != "" {
 		sb.WriteString(desc)
 		sb.WriteString("\n")
 	}
