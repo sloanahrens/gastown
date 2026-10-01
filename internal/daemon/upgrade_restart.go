@@ -273,9 +273,11 @@ func (d *Daemon) clearCoveredRestartMarker(now time.Time) {
 func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	m, own, ok := d.loadMarkerForUpgrade()
 	if !ok {
+		d.endUpgradeDrain()
 		return false
 	}
 	if d.clearCoveredMarker(m, own, now) {
+		d.endUpgradeDrain()
 		return false
 	}
 
@@ -292,6 +294,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 
 	if d.restartHadNoEffect(m, own) {
+		d.endUpgradeDrain()
 		if !d.upgradeWaitEscalated {
 			d.upgradeWaitEscalated = true
 			d.logger.Printf("upgrade-restart: restarted from %s for %s but now running %s; not restarting again", m.AttemptedFrom, m.Commit, own)
@@ -302,8 +305,12 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		return false
 	}
 
+	// Landing workers finish their pass and start no new one from here on.
+	d.upgradeRestartPending.Store(true)
+
 	// Read live, immediately before deciding: never cached across heartbeats.
 	if !d.isIdleForUpgrade() {
+		d.logUpgradeWait(now)
 		if !d.upgradeWaitEscalated && now.Sub(d.upgradeWaitSince) >= upgradeStuckAfter {
 			d.upgradeWaitEscalated = true
 			d.seams.escalateUpgrade(d, "daemon:restart-pending-stuck",
@@ -327,6 +334,46 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
 	d.upgradeRestartRequested.Store(true)
 	return true
+}
+
+// endUpgradeDrain lets the landing workers start passes again: no restart is
+// pending (marker gone, covered, or already tried without effect).
+func (d *Daemon) endUpgradeDrain() {
+	d.upgradeRestartPending.Store(false)
+	d.upgradeWaitLogged = ""
+}
+
+// logUpgradeWait says what a pending restart is waiting on, once per state
+// change: the drain starting, then each landing pass it waits for.
+func (d *Daemon) logUpgradeWait(now time.Time) {
+	state := "draining"
+	if bead := d.landingPassBead(); bead != "" {
+		state = "pass:" + bead
+	}
+	if d.upgradeWaitLogged == state {
+		return
+	}
+	if d.upgradeWaitLogged == "" {
+		d.logger.Printf("upgrade-restart: draining: no new landing pass until restart")
+	}
+	d.upgradeWaitLogged = state
+	if bead, ok := strings.CutPrefix(state, "pass:"); ok {
+		d.logger.Printf("upgrade-restart: waiting for landing pass %s (%dm)", bead, int(now.Sub(d.upgradeWaitSince).Minutes()))
+	}
+}
+
+// landingPassBead is the bead of a landing pass in flight (the first rig by
+// name when several), or "" when none is working on one.
+func (d *Daemon) landingPassBead() string {
+	best, bestRig := "", ""
+	d.landingBeads.Range(func(k, v any) bool {
+		id, _ := v.(string)
+		if id != "" && (bestRig == "" || k.(string) < bestRig) {
+			best, bestRig = id, k.(string)
+		}
+		return true
+	})
+	return best
 }
 
 // exitForUpgradeIfRequested is the run loop's exit after a heartbeat: nil when

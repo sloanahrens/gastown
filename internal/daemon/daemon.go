@@ -43,8 +43,8 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townconfig"
+	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -261,6 +261,7 @@ type Daemon struct {
 	upgradeWaitCommit    string
 	upgradeWaitSince     time.Time
 	upgradeWaitEscalated bool
+	upgradeWaitLogged    string // last wait state logged, so a state change logs once
 
 	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
 	// patrol, on its own goroutine so a slow sling never
@@ -309,6 +310,16 @@ type Daemon struct {
 	// most: a restart mid-pass kills the merged-tree gate of the bead being
 	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
 	landingPasses atomic.Int32
+
+	// upgradeRestartPending is true while a restart marker the daemon must
+	// act on exists. The landing workers drain on it: they finish the pass in
+	// flight and start no new one, so the restart finds an idle moment
+	// (gt-nxvpe). Cleared when the marker is gone or covered.
+	upgradeRestartPending atomic.Bool
+
+	// landingBeads maps rig -> the bead its landing pass is working on, for
+	// the restart's wait line.
+	landingBeads sync.Map
 
 	// postLandRuns counts rigs whose post-landing runner has a run in flight
 	// or queued. It runs outside the landing pass, so checkUpgradeRestart
