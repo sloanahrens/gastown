@@ -446,7 +446,7 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		// reference is an ordinary bead in that same database; the counts-only
 		// capacity path passes neither.
 		IssueSource: issueSource,
-		Spawn:          spawn,
+		Spawn:       spawn,
 		// claude-41j.1 D9: probe the worktree so the listed verdict re-derives
 		// from live git rather than the recorded hint. An unresolvable path (no
 		// worktree behind the directory) leaves the probe off, and the verdict

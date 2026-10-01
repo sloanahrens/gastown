@@ -95,9 +95,9 @@ type SafetyCheckResult struct {
 	// gate: the bead is terminal, submitted for landing, or a stale reference
 	// (deferred/blocked/pinned). It is not "the bead is closed" (gt-eqiid).
 	HookStale bool
-	ActiveMR      string
-	OpenMR        string
-	GitState      *GitState
+	ActiveMR  string
+	OpenMR    string
+	GitState  *GitState
 }
 
 // checkPolecatSafety performs safety checks before destructive operations.
