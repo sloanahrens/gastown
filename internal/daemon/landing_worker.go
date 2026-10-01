@@ -390,9 +390,19 @@ type rigLandGate struct {
 func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	mq := rig.ResolveMergeQueueConfig(g.townRoot, g.rig)
 	cg := land.WithSlot(land.LandGate(dir, mq), g.townRoot, g.rig+"/landing")
-	// dir is <work root>/land-XXXX/wt: one log directory per landing.
-	cg.LogDir = filepath.Join(g.logRoot, filepath.Base(filepath.Dir(dir)))
+	cg.LogDir = landingLogDir(ctx, g.logRoot, dir)
 	return cg.Run(ctx, dir)
+}
+
+// landingLogDir is one landing's log directory under logRoot: named by its
+// land.LandingID. Every landing checks out at the same worktree path now
+// (gt-2ycne.2), so the path no longer tells two landings apart; a context
+// without an ID (not from Land) falls back to the worktree's parent name.
+func landingLogDir(ctx context.Context, logRoot, dir string) string {
+	if id := land.LandingID(ctx); id != "" {
+		return filepath.Join(logRoot, id)
+	}
+	return filepath.Join(logRoot, filepath.Base(filepath.Dir(dir)))
 }
 
 // landRerun is Land's flake-policy rerun: only the failed packages, once,
@@ -415,7 +425,7 @@ func landRerun(townRoot, rigName, logRoot string) func(context.Context, string, 
 			cg = land.WithSlot(cg, townRoot, rigName+"/landing")
 		}
 		// Beside the gate's own log for this landing, as test.log.
-		cg.LogDir = filepath.Join(logRoot, filepath.Base(filepath.Dir(dir)), "rerun")
+		cg.LogDir = filepath.Join(landingLogDir(ctx, logRoot, dir), "rerun")
 		return cg.Run(ctx, dir)
 	}
 }

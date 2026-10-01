@@ -82,3 +82,22 @@ func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 func TestIntegrationLandConflictIsARejectionWithFiles(t *testing.T) {
 	conflictIsARejection(t, newRealLandFixture(t))
 }
+
+// TestIntegrationLandPastADeadLandingsWorktree: a landing that died before its
+// cleanup leaves a registered git worktree at WorkRoot/wt. Every landing
+// checks out at that one path (gt-2ycne.2), so the next must clear it, through
+// real git, which refuses to add a worktree where one is registered.
+func TestIntegrationLandPastADeadLandingsWorktree(t *testing.T) {
+	t.Parallel()
+	f := newRealLandFixture(t)
+	if err := os.MkdirAll(f.workRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dead := filepath.Join(f.workRoot, "wt")
+	gitT(t, f.repo, "worktree", "add", "-q", "--detach", dead, "origin/main")
+	writeT(t, dead, "stale.txt", "x\n")
+	landsAndRecords(t, f)
+	if out := gitT(t, f.repo, "worktree", "list", "--porcelain"); strings.Contains(out, dead) {
+		t.Errorf("the dead landing's worktree is still registered after the landing:\n%s", out)
+	}
+}
