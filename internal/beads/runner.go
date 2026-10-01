@@ -189,10 +189,10 @@ func (e *CLIError) Output() string {
 }
 
 // Unwrap exposes the process error, plus ErrNotFound when bd said the id
-// does not exist (BDReportedNotFound) or ErrUnavailable for every other
+// does not exist (bdSaidNotFound) or ErrUnavailable for every other
 // failure, as wrapError does for the policy path.
 func (e *CLIError) Unwrap() []error {
-	if BDReportedNotFound(exitCodeOf(e.Err), e.Stdout, e.Stderr) {
+	if bdSaidNotFound(exitCodeOf(e.Err), e.Stdout) {
 		return []error{e.Err, ErrNotFound}
 	}
 	return []error{e.Err, ErrUnavailable}

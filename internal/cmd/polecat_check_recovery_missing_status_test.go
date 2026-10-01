@@ -133,7 +133,7 @@ func TestCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 					switch firstArg(args) {
 					case agentBeadID:
 						if tt.agentBead == "" {
-							return bdAnswer{stderr: "issue not found", code: 1}
+							return bdAnswer{stderr: "issue not found", code: 20}
 						}
 						return bdOut(showJSON(t, beads.Issue{ID: agentBeadID, Title: "Polecat topaz", Status: "open", Labels: []string{"gt:agent"}, Description: tt.agentBead}))
 					case sourceID:
@@ -141,7 +141,7 @@ func TestCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 					case mrID:
 						return bdOut(showJSON(t, beads.Issue{ID: mrID, Title: "MR", Status: "open", Labels: []string{"gt:merge-request"}, Description: "branch: " + branch + "\nsource_issue: " + sourceID + "\ntarget: main\n"}))
 					}
-					return bdAnswer{stderr: "issue not found", code: 1}
+					return bdAnswer{stderr: "issue not found", code: 20}
 				case "list":
 					return bdOut("[]\n")
 				}

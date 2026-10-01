@@ -1458,7 +1458,7 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exceptions: ErrNotInstalled (exec.ErrNotFound), ErrGuardNotHeld (bd's
 // guard exit) and ErrNotFound, which only bd's own answer can produce
-// (BDReportedNotFound). Every other failure is ErrUnavailable: the answer is
+// (bdSaidNotFound). Every other failure is ErrUnavailable: the answer is
 // unknown, never "the bead is gone" (G3-01).
 func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
@@ -1476,7 +1476,7 @@ func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string
 		return ErrNotInstalled
 	}
 
-	if BDReportedNotFound(exitCode, stdout, []byte(stderr)) {
+	if bdSaidNotFound(exitCode, stdout) {
 		return ErrNotFound
 	}
 
