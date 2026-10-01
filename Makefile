@@ -281,9 +281,10 @@ gate: gate-lint gate-test
 gate-lint: LINT_RUNNER_FLAGS := --allow-serial-runners
 gate-lint: exec-tax-preflight lint
 
-# gate-test is build plus the unit tier. Run on its own, its wall starts here;
-# under make gate it inherits the gate's start, so the wall includes lint.
-gate-test: GATE_START ?= $(shell date +%s)
+# gate-test is build plus the unit tier. Its printed wall is its own: lint
+# reports separately (a target-specific value here wins over the one gate
+# would pass down).
+gate-test: GATE_START := $(shell date +%s)
 gate-test:
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }

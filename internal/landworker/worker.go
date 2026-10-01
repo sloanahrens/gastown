@@ -105,8 +105,13 @@ type Worker struct {
 	// Active is told which bead is being landed (and "" when it ends), so
 	// the daemon can say what a pending restart is waiting for.
 	Active func(beadID string)
-	Logf   func(format string, args ...any)
-	Now    func() time.Time
+	// Escalate, when set, raises a rejection left for a human (gt:needs-human)
+	// to the operator, so it is not waiting unseen on a label: an om review
+	// that returned no verdict, a stage timeout, a policy refusal (Sloan
+	// 2026-10-01). It runs in its own goroutine; the pass does not wait.
+	Escalate func(beadID, message string)
+	Logf     func(format string, args ...any)
+	Now      func() time.Time
 
 	state map[string]*beadState
 	// pendingRepair holds landings whose record was left incomplete; the
@@ -491,6 +496,10 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		errors.As(err, &rej)
 		rep.Rejected++
 		w.logf("%s: %v (left for a human: %s)", work.BeadID, err, land.LabelNeedsHuman)
+		if w.Escalate != nil {
+			go w.Escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for a human (%s): %s",
+				work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
+		}
 		if rej.RecordErr != nil {
 			st.until = w.now().Add(rejectRecordBackoff)
 			return
