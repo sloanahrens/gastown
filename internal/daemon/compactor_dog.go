@@ -17,18 +17,15 @@ const (
 	// escalates. The daemon monitors only — it never rewrites history, so this
 	// is an escalation line, not a compaction trigger.
 	//
-	// 2000 is deliberately far above the agent-facing plugin's escalation table
-	// (>500 escalate, >1000 hard escalate — see plugins/compactor-dog/plugin.md).
 	// Escalating is not free: each d.escalate mints a bead, and beads are Dolt
-	// commits. A threshold at or near the plugin's 500 line would let one busy
-	// 24h cycle push the commit count back over the line with its own
-	// escalations, re-triggering the patrol forever. The 2000 default is the
-	// buffer against that loop. Configurable via daemon.json
-	// (patrols.compactor_dog.threshold).
+	// commits. A low threshold would let one busy 24h cycle push the commit
+	// count back over the line with its own escalations, re-triggering the
+	// patrol forever. The 2000 default is the buffer against that loop.
+	// Configurable via daemon.json (patrols.compactor_dog.threshold).
 	//
-	// Commit count is not the disk cost. With scheduled_maintenance mode gc
-	// handling disk by size, this threshold only guards history-query
-	// latency, and a town running gc mode sets it near 20000 (measurements:
+	// Commit count is not the disk cost. scheduled_maintenance's gc handles
+	// disk; this threshold only guards history-query latency, and this town
+	// sets it near 20000 (measurements:
 	// docs/plans/2026-09-25-dolt-gc-maintenance-design.md, Problem).
 	defaultCompactorCommitThreshold = 2000
 	// compactorQueryTimeout is the timeout for individual SQL queries.
@@ -210,12 +207,9 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 // runCompactorDog checks each production database's commit count and escalates
 // for every database at or above the threshold. It never rewrites history.
 //
-// Reconciliation with the agent-facing plugin (plugins/compactor-dog/plugin.md):
-// both paths now monitor and escalate, and the operator-only destructive path
-// lives in exactly one place — plugins/compactor-dog/run.sh --compact. The two
-// thresholds differ because the two monitors run on different cadences and have
-// different per-run costs; the daemon's 2000 versus the plugin's 500/1000 is
-// explained on defaultCompactorCommitThreshold.
+// Rewriting history is not a routine path at all: it is an offline operator
+// procedure (docs/dolt-history-offline.md) with a single trigger, a database
+// past 2 GB.
 //
 // ZFC Exemption: This dog executes imperatively in Go rather than via agent-driven
 // formula execution. The mol-dog-compactor formula is used for observability
@@ -289,8 +283,8 @@ func (d *Daemon) runCompactorDog() bool {
 			c.name, c.commits, threshold)
 		d.escalateAlert("compactor_dog:"+c.name, "compactor_dog", fmt.Sprintf(
 			"Commit threshold exceeded for %s: %d commits (threshold %d). "+
-				"Compaction is operator-only: run plugins/compactor-dog/run.sh --compact. "+
-				"See plugins/compactor-dog/plugin.md for the escalation policy.",
+				"Nothing rewrites history routinely: flatten is an offline operator procedure "+
+				"(docs/dolt-history-offline.md), triggered only by a database past 2 GB.",
 			c.name, c.commits, threshold))
 	}
 	mol.closeStep("monitor")
@@ -318,7 +312,7 @@ func warnDeprecatedCompactorConfig(d *Daemon, cd *CompactorDogConfig) {
 	d.logger.Printf("compactor_dog: WARNING: deprecated config ignored — "+
 		"patrols.compactor_dog.mode=%q keep_recent=%d have no effect because the "+
 		"daemon patrol no longer compacts; compaction is operator-only via "+
-		"plugins/compactor-dog/run.sh --compact",
+		"the offline procedure in docs/dolt-history-offline.md",
 		cd.Mode, cd.KeepRecent)
 }
 

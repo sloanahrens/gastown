@@ -259,13 +259,14 @@ CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
 | CLOSE | Agent or patrol | Per-task | `bd close`, `gt done` |
 | DECAY | Reaper patrol | Daily | `DELETE FROM wisps WHERE status='closed' AND age > 7d` |
 | COMPACT | Compactor patrol (monitor) | Daily | Counts commits, escalates at threshold — does not rewrite history |
-| FLATTEN | Operator, on that escalation | Manual | `plugins/compactor-dog/run.sh --compact` — `DOLT_RESET --soft` + `DOLT_COMMIT` + force-push |
+| GC | `scheduled_maintenance` patrol, the one GC actor | Weekly, or on old-gen growth >20% | `CALL dolt_gc('--full')` under the pause marker; history kept |
+| FLATTEN | Operator, offline | Only when a database passes 2 GB | [dolt-history-offline.md](../dolt-history-offline.md) — `DOLT_RESET --soft` + `DOLT_COMMIT` |
 
 All six stages are implemented in code. DECAY runs in the Reaper patrol
 (wisp_reaper.go). COMPACT runs in the Compactor patrol (compactor_dog.go), which
-monitors and escalates; FLATTEN is the operator-invoked destructive step that
-follows the escalation, and it lives in exactly one place — the plugin's
-`--compact` flag, whose escalation policy is `plugins/compactor-dog/plugin.md`.
+monitors and escalates. GC runs in scheduled_maintenance (maintenance_gc.go).
+FLATTEN has no command: it is an offline operator procedure with one trigger,
+a database past 2 GB (gt-8z769.3).
 All lifecycle tickers are populated by `EnsureLifecycleDefaults()`
 (lifecycle_defaults.go), which auto-writes missing patrol blocks to daemon.json
 on `gt init` or `gt up` and never overwrites existing ones. There is no Dolt
@@ -296,72 +297,58 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 
 ### History Compaction Operations
 
-**Who compacts.** Compaction rewrites the commit graph and force-pushes the
-result, so it is never unattended. The Compactor patrol patrol counts commits and
-escalates when a database crosses its threshold; an operator then compacts
-it one of two ways:
+**Who compacts.** Nobody, routinely. `gt maintain`, the compactor-dog plugin
+and scheduled_maintenance's `monitor` and `flatten` modes were deleted
+(gt-8z769.3): the 2026-09-29 measurement (gt-8z769) showed the databases'
+size is commit history, not garbage, so a routine rewrite bought little and
+risked the history `bd history` reads. Flatten is an offline operator
+procedure with a single trigger, a database past 2 GB:
+[dolt-history-offline.md](../dolt-history-offline.md). The Compactor patrol
+counts commits and escalates as a history-query latency tripwire.
 
-| Command | Algorithm | Keeps recent history? |
-|---------|-----------|----------------------|
-| `plugins/compactor-dog/run.sh --compact` | Flatten — squash all history into 1 commit, then force-push | No |
-| Offline procedure ([dolt-history-offline.md](../dolt-history-offline.md)) | Surgical — interactive rebase squash, preserve recent N | Yes |
+**The one GC actor.** `scheduled_maintenance` (scheduled_maintenance.go,
+maintenance_gc.go) is the only path in gt that runs a manual gc. Dolt's own
+auto-GC stays on. In the window (`maintenance.window`, one hour) it measures
+each database under the Dolt data dir and runs `CALL dolt_gc('--full')` on one
+when either holds:
 
-The daemon patrol used to run the flatten path itself. It no longer does
-(gt-nfu7): an unattended path that rewrites history and force-pushes to the
-remotes is the same failure mode gt-e14c fixed in the plugin, and the daemon's
-escalation threshold is deliberately set well above the plugin's so that a
-busy cycle's escalations cannot re-trigger the patrol on their own output.
-Compaction itself is unchanged SQL — see below.
+- weekly: its last patrol gc is a week old (7 days less 4 hours of slack, so
+  the run does not drift a window later each week), or none is recorded;
+- old-gen growth: `.dolt/noms/oldgen` is more than 20% larger than right after
+  its last patrol gc.
 
-**Flattening does not check a remote.** Before ADR 0002, `gt maintain` fetched
-each database's Dolt remote and refused to flatten one whose remote had moved
-on, because the force-push after a flatten would have deleted the remote-only
-commits. There is no remote and no push now, so the pre-flight is gone. On a
-town that still has a remote registered, run "Removing Dolt remotes" below
-before any flatten: nothing in gastown pushes any more, but a manual
-`bd dolt push` would still carry the rewritten history over the remote's.
-`--force-diverged` still parses, hidden and deprecated, and does nothing.
-
-`scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
-escalates with the commit counts and rewrites nothing; `flatten` runs
-`gt maintain --force`, which flattens every database over threshold. Set it
-with `gt config set maintenance.mode flatten`. The daemon recognizes only the
-exact lowercase strings `flatten` and `gc` (below), trimmed of surrounding
-whitespace; any other value, including a typo or a case variation like
-`FLATTEN`, is treated as `monitor`, so a misspelling — or a hand-edited
-`daemon.json` — cannot arm the destructive path.
-
-`gc` is the history-preserving mode (claude-05o; design in
-`docs/plans/2026-09-25-dolt-gc-maintenance-design.md`). It ignores commit
-counts. In the window it measures each database's on-disk size under the
-Dolt data dir and runs `CALL dolt_gc('--full')` on a database when both hold:
-
-- size >= `gc_min_bytes` (default 268435456, 256MiB), and
-- size >= `gc_growth_ratio` (default 2.0) x the size recorded right after its
-  last patrol gc, or no such record exists yet.
+Old-gen is the trigger because it is where history accumulates; a total-size
+trigger fires on growth gc cannot remove. The gt-kfzqa audit saw gt-DB read
+latency break stuck-agent-dog at 863 MiB under the old 2x size trigger; 20%
+of old-gen keeps a gc well inside that.
 
 The databases are every directory with a `.dolt` subdirectory under the
 Dolt data dir (discovered each run), not the `compactor_dog` /
-`wisp_reaper` database lists, whose fallback is `hq` alone. gc mode is
+`wisp_reaper` database lists, whose fallback is `hq` alone. The patrol is
 skipped (logged) when the server is externally managed or not on a loopback
-host: the size trigger reads the data dir from this host's disk.
+host: the trigger reads the data dir from this host's disk.
 
-The post-gc sizes live in `daemon/maintenance_state.json` (atomic write). If
-the size cannot be re-measured after a gc, no baseline is recorded, so the
-next interval treats the database as never gc'd and gc's it again if it is
-still over `gc_min_bytes`.
-Eligible databases run smallest first, one at a time, each bounded by 10
-minutes. Before each database the patrol re-checks a quiet-window guard: the
-daemon's upgrade-idle predicate, no container-gate slot or in-flight marker
-held by anyone, and no
-polecat with a fresh `working` heartbeat. If the town is busy it logs why and
-stops; the next 5-minute tick in the window retries, and databases already
-gc'd have fresh baselines so they drop out. A gc error stops the run, logs,
-and escalates once; the patrol does not retry until the next interval. gc mode
-never flattens, never force-pushes and never restarts Dolt.
+Per database, `daemon/maintenance_state.json` (atomic write) records
+`last_gc`, `post_gc_bytes`, `post_gc_oldgen_bytes` (the growth baseline) and
+`reclaimed_bytes`. If the size cannot be re-measured after a gc, no run is
+recorded, so the next window gc's that database again.
+
+Due databases run smallest first, one at a time, each bounded by 10 minutes.
+Before each database the patrol re-checks a quiet-window guard: the daemon's
+upgrade-idle predicate, no container-gate slot or in-flight marker held by
+anyone, no polecat with a fresh `working` heartbeat, and no pause marker held
+by another actor. If the town is busy it logs why and stops; the next 5-minute
+tick in the window retries, and databases already gc'd drop out. A gc error
+stops the run, logs, and escalates once; the patrol does not retry until the
+next window. It never flattens, never pushes and never restarts Dolt.
 
 Around each database's gc the patrol also:
 
+- writes the pause marker `<town>/daemon/dolt.pause` (internal/doltpause;
+  actor `daemon/scheduled_maintenance`, until = now + 15 minutes) before the
+  call and removes it after, whatever the outcome. No marker, no gc: a write
+  failure fails the run. A marker the daemon cannot remove, or one left by a
+  daemon that died mid-gc, lapses at its until.
 - takes the write side of the daemon's Dolt-task lock (non-blocking). The
   daemon's own Dolt tasks (dolt_backup, wisp_reaper,
   jsonl_git_backup, the compactor_dog cycle) take the read side and skip
@@ -373,45 +360,31 @@ Around each database's gc the patrol also:
   under its 10-minute timeout (plus 2 minutes' grace). Past that it escalates
   once and lets the restart proceed. A dead server is still started.
 
-A window that closes with gc still deferred on at least one eligible
-database counts toward a streak kept in `maintenance_state.json`
+A window that closes with gc still deferred on at least one due database
+counts toward a streak kept in `maintenance_state.json`
 (`consecutive_deferred_windows`, `last_deferral_reason`). The patrol
-escalates once at 3 consecutive windows for a daily interval (2 for weekly,
-monthly, or an interval of six days or more), with the waiting databases,
-their sizes and the top deferral reasons, then at most every further 3
-windows. A completed or failed run resets the streak.
+escalates once at 3 consecutive windows, with the waiting databases, their
+sizes and the top deferral reasons, then at most every further 3 windows. A
+completed or failed run resets the streak.
 
 `--full` matters: Dolt's gc is generational, and auto-gc and plain
 `dolt_gc()` only collect the new generation. Chunks promoted to the old
-generation (including pre-flatten history) stay until a `--full` pass.
+generation stay until a `--full` pass.
 
 Settings (`patrols.scheduled_maintenance` in `mayor/daemon.json`):
 
 ```json
-"scheduled_maintenance": {
-  "enabled": true, "window": "03:00", "interval": "daily", "threshold": 1000,
-  "mode": "gc", "gc_min_bytes": 268435456, "gc_growth_ratio": 2.0
-}
+"scheduled_maintenance": { "enabled": true, "window": "03:00" }
 ```
 
-Or with `gt config set maintenance.mode gc`, `maintenance.gc_min_bytes`,
-`maintenance.gc_growth_ratio`. `gc_min_bytes` must be a plain JSON integer
-(`268435456`, not `2.5e8` or `"256MiB"`): a float or string there fails the
-parse of the whole daemon.json, and the daemon then runs with no patrol
-config at all. An invalid `gc_min_bytes` (<= 0) or
-`gc_growth_ratio` (< 1, NaN, Inf) in the file is replaced by its default with
-a logged warning; `gt config set` refuses them.
-
-Compatibility: a `gt` built before gc mode reads `mode: gc` as `monitor`
-(escalate only) and ignores the `gc_*` keys, so a rollback never flattens.
-An older `gt config set maintenance.*` rewrites daemon.json without the
-`gc_*` keys; the defaults then apply.
+or `gt config set maintenance.window 03:00`. The schedule and trigger are
+policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
+`gc_min_bytes`, `gc_growth_ratio`) still parse, so a daemon.json carrying
+them decodes strictly, and the daemon logs them as ignored.
 
 `patrols.compactor_dog.threshold` is an escalation line only; the compactor
-patrol never compacts. Under gc mode, disk is handled by size, so the commit
-threshold only guards history-walking query latency (measurements in the gc
-design doc, Problem). Towns running gc mode set it to 20000 rather than the
-2000 default.
+patrol never compacts and only guards history-walking query latency. This
+town sets it to 20000 rather than the 2000 default.
 
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):

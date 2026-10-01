@@ -29,8 +29,8 @@ var historyCmd = &cobra.Command{
 	Long: `Report how far back a bead's recorded history actually goes.
 
 bd history <id> prints one snapshot of the issue per retained Dolt commit, and
-Dolt commit history is truncated whenever a database is flattened (gt maintain,
-compactor-dog, or the offline procedure). bd history does not disclose that: a bead whose
+Dolt commit history is truncated whenever a database is flattened (the offline
+procedure, or gt maintain and compactor-dog before they were removed). bd history does not disclose that: a bead whose
 snapshots begin at the flatten reads exactly like a bead whose snapshots begin
 at its creation, so a field showing one value looks like a field that never
 changed. Absence before the floor is not evidence of absence.

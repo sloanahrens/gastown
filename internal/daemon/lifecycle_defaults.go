@@ -10,11 +10,10 @@ package daemon
 //   - Doctor Dog (health): every 5m
 //   - JSONL Git Backup: every 15m
 //   - Dolt Filesystem Backup: every 15m
-//   - Scheduled Maintenance (FLATTEN): daily at 03:00, threshold 1000
+//   - Scheduled Maintenance (GC): window 03:00; dolt_gc --full weekly, or on old-gen growth >20%
 //   - Main Branch Test: every 30m, 10m timeout per rig
 //   - Dolt Remotes: every 15m, pushes databases that have a configured remote
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
-	threshold := 1000
 	scrub := true
 	return &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
@@ -54,10 +53,8 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				IntervalStr: "15m",
 			},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled:   true,
-				Window:    "03:00",
-				Interval:  "daily",
-				Threshold: &threshold,
+				Enabled: true,
+				Window:  "03:00",
 			},
 			Handler: &PatrolConfig{
 				Enabled: true,

@@ -14,7 +14,7 @@ import (
 // so before any prompt or stop.
 func TestLifecycleVerbsRejectPositionalArgs(t *testing.T) {
 	t.Parallel()
-	for _, c := range []*cobra.Command{shutdownCmd, downCmd, upCmd, thawCmd, maintainCmd} {
+	for _, c := range []*cobra.Command{shutdownCmd, downCmd, upCmd, thawCmd} {
 		if c.Args == nil {
 			t.Errorf("gt %s has no Args validator, so it accepts and ignores any positional", c.Name())
 			continue

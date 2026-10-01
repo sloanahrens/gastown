@@ -69,9 +69,6 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 	if p.ScheduledMaintenance.Window != "03:00" {
 		t.Errorf("expected maintenance window 03:00, got %s", p.ScheduledMaintenance.Window)
 	}
-	if p.ScheduledMaintenance.Threshold == nil || *p.ScheduledMaintenance.Threshold != 1000 {
-		t.Error("expected maintenance threshold 1000")
-	}
 }
 
 func TestEnsureLifecycleDefaults_NilConfig(t *testing.T) {
@@ -147,7 +144,6 @@ func TestEnsureLifecycleDefaults_PreservesExisting(t *testing.T) {
 func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 	t.Parallel()
 	// Config with all patrols already set (even if disabled)
-	threshold := 2000
 	config := &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
@@ -158,7 +154,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			DoctorDog:            &DoctorDogConfig{Enabled: false},
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
 			DoltBackup:           &DoltBackupConfig{Enabled: false},
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Threshold: &threshold},
+			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Window: "05:30"},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
 	}
@@ -173,8 +169,8 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 	if config.Patrols.WispReaper.Enabled {
 		t.Error("expected wisp_reaper to remain disabled")
 	}
-	if config.Patrols.ScheduledMaintenance.Threshold == nil || *config.Patrols.ScheduledMaintenance.Threshold != 2000 {
-		t.Error("expected threshold to remain 2000")
+	if config.Patrols.ScheduledMaintenance.Window != "05:30" {
+		t.Error("expected window to remain 05:30")
 	}
 }
 

@@ -60,16 +60,13 @@ func TestSaveAndLoadPatrolConfig(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	threshold := 500
 	config := &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
 		Patrols: &PatrolsConfig{
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled:   true,
-				Window:    "03:00",
-				Interval:  "daily",
-				Threshold: &threshold,
+				Enabled: true,
+				Window:  "03:00",
 			},
 		},
 	}
@@ -91,12 +88,6 @@ func TestSaveAndLoadPatrolConfig(t *testing.T) {
 	sm := loaded.Patrols.ScheduledMaintenance
 	if sm.Window != "03:00" {
 		t.Errorf("expected window 03:00, got %q", sm.Window)
-	}
-	if sm.Interval != "daily" {
-		t.Errorf("expected interval daily, got %q", sm.Interval)
-	}
-	if sm.Threshold == nil || *sm.Threshold != 500 {
-		t.Errorf("expected threshold 500, got %v", sm.Threshold)
 	}
 }
 

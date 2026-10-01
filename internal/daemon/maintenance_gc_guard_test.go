@@ -181,13 +181,13 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
 
 	release, ok := d.tryDoltTask("dolt_backup")
 	if !ok {
 		t.Fatal("a task could not take the read side with no gc running")
 	}
-	res := d.maintenanceGCCycle([]string{"hq"}, "/unused", testGCPolicy)
+	res := d.maintenanceGCCycle([]string{"hq"}, "/unused")
 	release()
 
 	if res.outcome != gcOutcomeDeferred || res.reason != "daemon Dolt task in flight" {
@@ -198,7 +198,7 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	}
 
 	// Once the task is done the lock is free and gc runs.
-	res = d.maintenanceGCCycle([]string{"hq"}, "/unused", testGCPolicy)
+	res = d.maintenanceGCCycle([]string{"hq"}, "/unused")
 	if res.outcome != gcOutcomeCompleted || len(f.gcCalls) != 1 {
 		t.Errorf("after release: outcome %v, gc calls %v", res.outcome, f.gcCalls)
 	}
@@ -208,7 +208,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
 
 	var taskRan []bool
 	d.maint.gcExec = func(_ context.Context, d *Daemon, db string) error {
@@ -223,7 +223,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 		return nil
 	}
 
-	d.maintenanceGCCycle([]string{"hq"}, "/unused", testGCPolicy)
+	d.maintenanceGCCycle([]string{"hq"}, "/unused")
 
 	for i, ok := range taskRan {
 		if ok {
@@ -350,18 +350,18 @@ func TestGCPausesConvoyAroundEachDatabase(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}}
 
-	d.maintenanceGCCycle([]string{"hq", "gt"}, "/unused", testGCPolicy)
+	d.maintenanceGCCycle([]string{"hq", "gt"}, "/unused")
 	if f.pauses != 2 || f.resumes != 2 {
 		t.Errorf("pauses=%d resumes=%d, want 2/2 (once around each gc)", f.pauses, f.resumes)
 	}
 
 	d, _ = gcTestDaemon(t) // fresh state: no baseline for hq
 	f2 := withGCFakes(t, d)
-	f2.sizes = map[string]int64{"hq": 300 * mib}
+	f2.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
 	f2.pauseFails = true
-	res := d.maintenanceGCCycle([]string{"hq"}, "/unused", testGCPolicy)
+	res := d.maintenanceGCCycle([]string{"hq"}, "/unused")
 	if res.outcome != gcOutcomeDeferred || res.reason != "convoy poll busy" || len(f2.gcCalls) != 0 {
 		t.Errorf("pause failure: outcome %v reason %q gc %v, want deferred without gc", res.outcome, res.reason, f2.gcCalls)
 	}
@@ -482,9 +482,9 @@ func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}}
 	// The compactor list names only hq; discovery finds both.
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 	if strings.Join(f.gcCalls, ",") != "hq,gt" {
@@ -496,9 +496,9 @@ func TestScheduledMaintenanceGCSkipsExternalServer(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 	if len(f.gcCalls) != 0 {
@@ -548,15 +548,9 @@ func TestDoltGCFullRefusesInvalidNameBeforeConnecting(t *testing.T) {
 
 func TestDeferredWindowThresholds(t *testing.T) {
 	t.Parallel()
-	cases := map[string]int{"daily": 3, "": 3, "48h": 3, "weekly": 2, "monthly": 2, "168h": 2}
-	for interval, want := range cases {
-		if got := maintenanceDeferredWindowsBeforeEscalation(interval); got != want {
-			t.Errorf("threshold(%q) = %d, want %d", interval, got, want)
-		}
-	}
 	var fired []int
 	for n := 1; n <= 10; n++ {
-		if shouldEscalateDeferredWindows(n, 3) {
+		if shouldEscalateDeferredWindows(n, maintenanceDeferredWindowsBeforeEscalation) {
 			fired = append(fired, n)
 		}
 	}
@@ -570,20 +564,20 @@ func TestDeferredWindowStreakEscalates(t *testing.T) {
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	base := time.Date(2026, 9, 26, 4, 0, 0, 0, time.Local)
-	pending := []gcCandidate{{name: "gt", size: 900 * mib}}
+	pending := []gcCandidate{{name: "gt", before: gcMeasure{total: 900 * mib}}}
 
 	window := func(i int) time.Time { return base.Add(time.Duration(i) * 24 * time.Hour) }
 	for i := 0; i < 6; i++ {
 		d.recordGCDeferral(window(i), "slot held by gastown/refinery", pending)
 		// Still inside the window: not counted.
-		d.closeDeferredGCWindow(window(i).Add(-time.Minute), "daily")
+		d.closeDeferredGCWindow(window(i).Add(-time.Minute))
 		st, _ := loadMaintenanceGCState(d.config.TownRoot)
 		if st.ConsecutiveDeferredWindows != i {
 			t.Fatalf("window %d counted before it closed (count=%d)", i, st.ConsecutiveDeferredWindows)
 		}
-		d.closeDeferredGCWindow(window(i).Add(time.Minute), "daily")
+		d.closeDeferredGCWindow(window(i).Add(time.Minute))
 		// A second tick after close does not double count.
-		d.closeDeferredGCWindow(window(i).Add(6*time.Minute), "daily")
+		d.closeDeferredGCWindow(window(i).Add(6 * time.Minute))
 	}
 
 	st, _ := loadMaintenanceGCState(d.config.TownRoot)
@@ -615,16 +609,16 @@ func TestScheduledMaintenanceGCRecordsDeferralAndCompletionResets(t *testing.T) 
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 631 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
 	f.quietUntil = 0 // busy
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 	st, _ := loadMaintenanceGCState(d.config.TownRoot)
 	if st.PendingDeferral == nil || len(st.PendingDeferral.Databases) != 1 || st.PendingDeferral.Databases[0].Name != "hq" {
 		t.Fatalf("deferral not recorded: %+v", st.PendingDeferral)
 	}
-	if !st.PendingDeferral.WindowEnd.After(time.Now()) {
+	if !st.PendingDeferral.WindowEnd.After(gcTestNow) {
 		t.Errorf("window end %v is not in the future", st.PendingDeferral.WindowEnd)
 	}
 

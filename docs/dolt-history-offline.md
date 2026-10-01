@@ -7,9 +7,56 @@ three weeks before removal, and a command an agent can reach is a command an
 agent will eventually run. These are operator procedures. Run them by hand,
 with the town parked, after a backup.
 
-Compaction that runs unattended is a separate path and is not covered here:
-the compactor-dog plugin (`plugins/compactor-dog/run.sh --compact`) and the
-maintain patrol.
+Nothing rewrites history unattended. `gt maintain` and the compactor-dog
+plugin, the last routine flatten paths, were deleted with gt-8z769.3, and the
+daemon's `scheduled_maintenance` patrol is now the town's one GC actor: a
+history-preserving `CALL dolt_gc('--full')`, never a rewrite (see "The GC
+actor" below).
+
+## When to flatten: one trigger, 2 GB
+
+Flatten only when a database directory under `~/gt/.dolt-data` passes
+**2 GB** on disk. Nothing else is a reason: commit count is not (the
+compactor_dog patrol escalates on it to keep history-query latency visible,
+not to ask for a flatten), and neither is slow growth that the weekly GC
+handles. The 2026-09-29 measurement (gt-8z769) put gt at 775 MB, of which
+307 MB was old-gen history for 19,746 commits; a full GC reclaimed almost
+nothing, because the size is history, not garbage.
+
+Measure without touching the store (a read of sizes is safe; never write
+inside `.dolt/`):
+
+```bash
+du -sh ~/gt/.dolt-data/*/                 # whole database
+du -sh ~/gt/.dolt-data/*/.dolt/noms/oldgen # old generation, the growth
+```
+
+`daemon/maintenance_state.json` also records each database's size and
+old-gen size after its last GC, and what that GC reclaimed.
+
+A flatten discards the history `bd history` reads; see
+[reference.md](reference.md), "Reading a bead's history".
+
+## The GC actor
+
+`scheduled_maintenance` (internal/daemon/scheduled_maintenance.go and
+maintenance_gc.go) runs in the window set by `gt config set
+maintenance.window HH:MM` (default 03:00, one hour long). Per database it
+runs `CALL dolt_gc('--full')` when either holds:
+
+- **weekly**: its last patrol GC is a week old, or none is recorded;
+- **old-gen growth**: `.dolt/noms/oldgen` grew more than 20% since right
+  after its last GC.
+
+It runs only while the town is quiet (no gate slot held, no working polecat,
+no daemon Dolt task), defers to a pause someone else holds, and writes the
+pause marker `~/gt/daemon/dolt.pause` before each GC call and removes it
+after. A daemon that dies mid-GC leaves a marker that lapses on its own 15
+minutes after it was written. Dolt's automatic GC stays on.
+
+Never run a manual `dolt gc` or `CALL dolt_gc()` alongside it. If you need
+one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
+`gt dolt unpause` after, so clients and the daemon know.
 
 ## Before any rewrite
 

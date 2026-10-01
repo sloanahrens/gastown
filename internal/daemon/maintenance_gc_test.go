@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,112 +14,52 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-// These tests drive the gc mode entirely through fakes: the size probe, the
-// dolt_gc call, the quiet-window probe and the escalation sink are all seams.
-// Nothing here opens a SQL connection, touches a real .dolt directory or
-// needs Docker. The daemon's town root is always a t.TempDir().
+// These tests drive the gc entirely through fakes: the size probe, the
+// dolt_gc call, the clock, the pause marker, the quiet-window probe and the
+// escalation sink are all seams. Nothing here opens a SQL connection, touches
+// a real .dolt directory or needs Docker. The daemon's town root is always a
+// t.TempDir().
 
 const mib = int64(1024 * 1024)
 
-// --- mode and config -------------------------------------------------------
+// gcTestNow is the fake clock's reading.
+var gcTestNow = time.Date(2026, 10, 1, 3, 10, 0, 0, time.UTC)
 
-func TestMaintenanceModeGC(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		mode string
-		want string
-	}{
-		{"gc", MaintenanceModeGC},
-		{" gc ", MaintenanceModeGC},
-		{"flatten", MaintenanceModeFlatten},
-		{"", MaintenanceModeMonitor},
-		{"monitor", MaintenanceModeMonitor},
-		// Typos, and case variations, fail toward monitor, never toward an
-		// action (gt-aku6: matching used to be case-insensitive here).
-		{"GC", MaintenanceModeMonitor},
-		{"gcc", MaintenanceModeMonitor},
-		{"gc-full", MaintenanceModeMonitor},
-	}
-	for _, tc := range cases {
-		cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{Mode: tc.mode},
-		}}
-		if got := maintenanceMode(cfg); got != tc.want {
-			t.Errorf("maintenanceMode(%q) = %q, want %q", tc.mode, got, tc.want)
-		}
-	}
-}
-
-func TestMaintenanceGCConfigDefaultsAndValidation(t *testing.T) {
-	t.Parallel()
-	i64 := func(n int64) *int64 { return &n }
-	f64 := func(f float64) *float64 { return &f }
-	cfg := func(minBytes *int64, ratio *float64) *DaemonPatrolConfig {
-		return &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{GCMinBytes: minBytes, GCGrowthRatio: ratio},
-		}}
-	}
-
-	cases := []struct {
-		name      string
-		cfg       *DaemonPatrolConfig
-		wantMin   int64
-		wantRatio float64
-		wantWarn  bool
-	}{
-		{"nil config", nil, DefaultGCMinBytes, DefaultGCGrowthRatio, false},
-		{"unset keys", cfg(nil, nil), DefaultGCMinBytes, DefaultGCGrowthRatio, false},
-		{"valid keys", cfg(i64(64*mib), f64(1.5)), 64 * mib, 1.5, false},
-		{"ratio exactly 1", cfg(nil, f64(1.0)), DefaultGCMinBytes, 1.0, false},
-		{"zero min bytes", cfg(i64(0), nil), DefaultGCMinBytes, DefaultGCGrowthRatio, true},
-		{"negative min bytes", cfg(i64(-1), nil), DefaultGCMinBytes, DefaultGCGrowthRatio, true},
-		{"ratio below 1", cfg(nil, f64(0.5)), DefaultGCMinBytes, DefaultGCGrowthRatio, true},
-		{"ratio NaN", cfg(nil, f64(math.NaN())), DefaultGCMinBytes, DefaultGCGrowthRatio, true},
-		{"ratio Inf", cfg(nil, f64(math.Inf(1))), DefaultGCMinBytes, DefaultGCGrowthRatio, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p, warnings := maintenanceGCPolicyFor(tc.cfg)
-			if p.minBytes != tc.wantMin || p.growthRatio != tc.wantRatio {
-				t.Errorf("policy = {min %d, ratio %v}, want {min %d, ratio %v}",
-					p.minBytes, p.growthRatio, tc.wantMin, tc.wantRatio)
-			}
-			if (len(warnings) > 0) != tc.wantWarn {
-				t.Errorf("warnings = %v, want warn=%v", warnings, tc.wantWarn)
-			}
-		})
-	}
-}
+// --- the triggers -------------------------------------------------------------
 
 func TestShouldGCDatabase(t *testing.T) {
 	t.Parallel()
-	p := maintenanceGCPolicy{minBytes: 256 * mib, growthRatio: 2.0}
+	now := gcTestNow
+	days := func(n int) time.Time { return now.Add(-time.Duration(n) * 24 * time.Hour) }
 	cases := []struct {
 		name     string
-		size     int64
+		lastGC   time.Time
+		oldGen   int64
 		baseline int64
 		want     bool
 	}{
-		{"below floor, no baseline", 100 * mib, 0, false},
-		{"at floor, no baseline", 256 * mib, 0, true},
-		{"above floor, no baseline", 600 * mib, 0, true},
-		{"above floor, grown under ratio", 900 * mib, 480 * mib, false},
-		{"above floor, grown exactly ratio", 960 * mib, 480 * mib, true},
-		{"above floor, grown past ratio", 1200 * mib, 480 * mib, true},
-		// A small baseline must not let a tiny database churn: the floor
-		// still applies.
-		{"ratio met but below floor", 200 * mib, 97 * mib, false},
-		{"ratio met and floor met", 300 * mib, 97 * mib, true},
+		{"never gc'd", time.Time{}, 10 * mib, 0, true},
+		{"weekly: 7 days since last gc", days(7), 100 * mib, 100 * mib, true},
+		{"weekly: in the window a day short of a week ahead", now.Add(-maintenanceGCWeekly), 100 * mib, 100 * mib, true},
+		{"6 days, old-gen unchanged", days(6), 100 * mib, 100 * mib, false},
+		{"2 days, old-gen grew 10%", days(2), 110 * mib, 100 * mib, false},
+		{"2 days, old-gen grew exactly 20%", days(2), 120 * mib, 100 * mib, false},
+		{"2 days, old-gen grew 25%", days(2), 125 * mib, 100 * mib, true},
+		{"1 day, old-gen shrank", days(1), 80 * mib, 100 * mib, false},
+		{"1 day, no old-gen before or now", days(1), 0, 0, false},
+		{"1 day, old-gen appeared since an empty baseline", days(1), mib, 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := shouldGCDatabase(tc.size, tc.baseline, p)
+			t.Parallel()
+			got, reason := shouldGCDatabase(now, tc.lastGC, tc.oldGen, tc.baseline)
 			if got != tc.want {
-				t.Errorf("shouldGCDatabase(%d, %d) = %v (%s), want %v", tc.size, tc.baseline, got, reason, tc.want)
+				t.Errorf("shouldGCDatabase = %v (%s), want %v", got, reason, tc.want)
 			}
 			if reason == "" {
 				t.Error("reason is empty; the log line needs it")
@@ -139,15 +78,15 @@ func TestMaintenanceGCStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load of a missing state file: %v", err)
 	}
-	if len(st.PostGCBytes) != 0 {
-		t.Fatalf("missing state file yields baselines %v, want none", st.PostGCBytes)
+	if len(st.PostGCBytes) != 0 || len(st.LastGC) != 0 {
+		t.Fatalf("missing state file yields %v / %v, want none", st.PostGCBytes, st.LastGC)
 	}
 
-	at := time.Date(2026, 9, 25, 3, 5, 0, 0, time.UTC)
-	if err := recordMaintenanceGCBaseline(town, "hq", 97*mib, at); err != nil {
+	at := gcTestNow
+	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{631 * mib, 500 * mib}, gcMeasure{97 * mib, 90 * mib}, at); err != nil {
 		t.Fatalf("record hq: %v", err)
 	}
-	if err := recordMaintenanceGCBaseline(town, "gt", 480*mib, at); err != nil {
+	if err := recordMaintenanceGCRun(town, "gt", gcMeasure{633 * mib, 300 * mib}, gcMeasure{480 * mib, 307 * mib}, at); err != nil {
 		t.Fatalf("record gt: %v", err)
 	}
 
@@ -156,7 +95,13 @@ func TestMaintenanceGCStateRoundTrip(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	if st.PostGCBytes["hq"] != 97*mib || st.PostGCBytes["gt"] != 480*mib {
-		t.Errorf("baselines = %v, want hq=%d gt=%d", st.PostGCBytes, 97*mib, 480*mib)
+		t.Errorf("post_gc_bytes = %v, want hq=97MiB gt=480MiB", st.PostGCBytes)
+	}
+	if st.PostGCOldGenBytes["hq"] != 90*mib || st.PostGCOldGenBytes["gt"] != 307*mib {
+		t.Errorf("post_gc_oldgen_bytes = %v, want hq=90MiB gt=307MiB", st.PostGCOldGenBytes)
+	}
+	if st.ReclaimedBytes["hq"] != 534*mib || st.ReclaimedBytes["gt"] != 153*mib {
+		t.Errorf("reclaimed_bytes = %v, want hq=534MiB gt=153MiB", st.ReclaimedBytes)
 	}
 	if !st.LastGC["gt"].Equal(at) {
 		t.Errorf("LastGC[gt] = %v, want %v", st.LastGC["gt"], at)
@@ -191,7 +136,7 @@ func TestMaintenanceGCStateCorruptIsAnErrorAndRepairable(t *testing.T) {
 		t.Fatal("corrupt state file loaded without error")
 	}
 	// A record after corruption replaces the file rather than failing forever.
-	if err := recordMaintenanceGCBaseline(town, "hq", mib, time.Now()); err != nil {
+	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
 		t.Fatalf("record over corrupt file: %v", err)
 	}
 	st, err := loadMaintenanceGCState(town)
@@ -202,34 +147,41 @@ func TestMaintenanceGCStateCorruptIsAnErrorAndRepairable(t *testing.T) {
 
 // --- size probe --------------------------------------------------------------
 
-func TestMaintenanceDBSize(t *testing.T) {
+func TestMaintenanceMeasure(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
-	db := filepath.Join(dataDir, "hq", ".dolt", "noms")
-	if err := os.MkdirAll(filepath.Join(db, "oldgen"), 0o755); err != nil {
+	noms := filepath.Join(dataDir, "hq", ".dolt", "noms")
+	if err := os.MkdirAll(filepath.Join(noms, "oldgen"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(db, "a"), make([]byte, 1000), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(noms, "a"), make([]byte, 1000), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(db, "oldgen", "b"), make([]byte, 234), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(noms, "oldgen", "b"), make([]byte, 234), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "fresh", ".dolt", "noms"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := maintenanceDBSize(dataDir, "hq")
+	got, err := maintenanceMeasure(dataDir, "hq")
 	if err != nil {
-		t.Fatalf("size: %v", err)
+		t.Fatalf("measure: %v", err)
 	}
-	if got != 1234 {
-		t.Errorf("size = %d, want 1234 (oldgen must count: gc --full is what empties it)", got)
+	if got.total != 1234 || got.oldGen != 234 {
+		t.Errorf("measure = %+v, want total 1234 (oldgen counts) and oldGen 234", got)
 	}
 
-	if _, err := maintenanceDBSize(dataDir, "missing"); err == nil {
-		t.Error("size of a missing database returned no error")
+	// A database that has never had a gc --full has no oldgen directory.
+	if got, err := maintenanceMeasure(dataDir, "fresh"); err != nil || got.oldGen != 0 {
+		t.Errorf("measure of a database without oldgen = %+v, %v; want oldGen 0, no error", got, err)
+	}
+	if _, err := maintenanceMeasure(dataDir, "missing"); err == nil {
+		t.Error("measure of a missing database returned no error")
 	}
 	// A name that escapes the data dir is refused rather than walked.
-	if _, err := maintenanceDBSize(dataDir, "../etc"); err == nil {
-		t.Error("size of a path-escaping database name returned no error")
+	if _, err := maintenanceMeasure(dataDir, "../etc"); err == nil {
+		t.Error("measure of a path-escaping database name returned no error")
 	}
 }
 
@@ -237,22 +189,30 @@ func TestMaintenanceDBSize(t *testing.T) {
 
 // gcFakes records what a gc cycle did through its seams.
 type gcFakes struct {
-	sizes       map[string]int64 // current size per database
-	shrinkTo    map[string]int64 // size after a successful gc
+	sizes       map[string]gcMeasure // current sizes per database
+	shrinkTo    map[string]gcMeasure // sizes after a successful gc
 	gcErr       map[string]error
 	gcCalls     []string
 	quietCalls  int
 	quietUntil  int // quiet for this many calls, then busy; -1 = always quiet
 	escalations []string
-	flattens    int
 	pauses      int
 	resumes     int
 	pauseFails  bool
+
+	// The pause marker: events records "write <db>", "gc <db>" and
+	// "remove" in order; marker is the one on "disk".
+	events       []string
+	marker       *doltpause.Marker
+	written      []doltpause.Marker
+	foreignPause *doltpause.Marker
+	writeErr     error
+	removeErr    error
 }
 
 func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 	t.Helper()
-	f := &gcFakes{sizes: map[string]int64{}, shrinkTo: map[string]int64{}, gcErr: map[string]error{}, quietUntil: -1}
+	f := &gcFakes{sizes: map[string]gcMeasure{}, shrinkTo: map[string]gcMeasure{}, gcErr: map[string]error{}, quietUntil: -1}
 
 	// Discovery returns the databases the fake sizes know about.
 	d.maint.gcDatabases = func(string) ([]string, error) {
@@ -271,16 +231,40 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 		}
 		return func() { f.resumes++ }, true
 	}
+	d.maint.now = func() time.Time { return gcTestNow }
+	d.maint.pauseCurrent = func(string, time.Time) *doltpause.Marker { return f.foreignPause }
+	d.maint.pauseWrite = func(_ string, m doltpause.Marker) error {
+		if f.writeErr != nil {
+			return f.writeErr
+		}
+		f.events = append(f.events, "write "+strings.TrimPrefix(m.Reason, "dolt_gc --full on "))
+		f.marker = &m
+		f.written = append(f.written, m)
+		return nil
+	}
+	d.maint.pauseRemove = func(string) (bool, error) {
+		f.events = append(f.events, "remove")
+		if f.removeErr != nil {
+			return false, f.removeErr
+		}
+		had := f.marker != nil
+		f.marker = nil
+		return had, nil
+	}
 
-	d.maint.dbSize = func(_ string, db string) (int64, error) {
+	d.maint.measure = func(_ string, db string) (gcMeasure, error) {
 		s, ok := f.sizes[db]
 		if !ok {
-			return 0, os.ErrNotExist
+			return gcMeasure{}, os.ErrNotExist
 		}
 		return s, nil
 	}
 	d.maint.gcExec = func(_ context.Context, _ *Daemon, db string) error {
 		f.gcCalls = append(f.gcCalls, db)
+		f.events = append(f.events, "gc "+db)
+		if f.marker == nil {
+			t.Errorf("gc of %s ran with no pause marker written", db)
+		}
 		if err := f.gcErr[db]; err != nil {
 			return err
 		}
@@ -299,10 +283,6 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 	d.maint.escalate = func(_ *Daemon, source, message string) {
 		f.escalations = append(f.escalations, source+"|"+message)
 	}
-	d.maint.exec = func(context.Context, string, string, int) ([]byte, error) {
-		f.flattens++
-		return nil, nil
-	}
 	// Run the dispatched cycle inline so the test observes its result.
 	d.maint.dispatch = func(fn func()) { fn() }
 
@@ -318,30 +298,50 @@ func gcTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer) {
 	}, &buf
 }
 
-var testGCPolicy = maintenanceGCPolicy{minBytes: 256 * mib, growthRatio: 2.0}
+// recordRun seeds db's last patrol gc: daysAgo before the fake clock, with
+// oldGen as its post-gc old-gen size.
+func recordRun(t *testing.T, d *Daemon, db string, daysAgo int, oldGen int64) {
+	t.Helper()
+	at := gcTestNow.Add(-time.Duration(daysAgo) * 24 * time.Hour)
+	if err := recordMaintenanceGCRun(d.config.TownRoot, db, gcMeasure{}, gcMeasure{total: oldGen, oldGen: oldGen}, at); err != nil {
+		t.Fatal(err)
+	}
+}
 
-func TestMaintenanceGCCycleCollectsEligibleSmallestFirst(t *testing.T) {
+func TestMaintenanceGCCycleCollectsDueSmallestFirstUnderPause(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"gt": 633 * mib, "hq": 631 * mib, "om": 185 * mib, "beads": 1 * mib}
-	f.shrinkTo = map[string]int64{"gt": 480 * mib, "hq": 97 * mib}
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 300 * mib}, "hq": {631 * mib, 500 * mib}}
+	f.shrinkTo = map[string]gcMeasure{"gt": {480 * mib, 307 * mib}, "hq": {97 * mib, 90 * mib}}
 
-	out := d.maintenanceGCCycle([]string{"gt", "hq", "om", "beads"}, "/unused", testGCPolicy)
+	out := d.maintenanceGCCycle([]string{"gt", "hq"}, "/unused")
 
 	if out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
-	if got := strings.Join(f.gcCalls, ","); got != "hq,gt" {
-		t.Errorf("gc calls = %s, want hq,gt (eligible only, smallest first)", got)
+	// Smallest first, each gc between its own marker write and remove.
+	want := "write hq,gc hq,remove,write gt,gc gt,remove"
+	if got := strings.Join(f.events, ","); got != want {
+		t.Errorf("events = %s, want %s", got, want)
 	}
-	if f.flattens != 0 {
-		t.Errorf("gc mode ran gt maintain %d time(s); gc must never flatten", f.flattens)
+	if f.marker != nil {
+		t.Errorf("pause marker left behind: %+v", f.marker)
+	}
+	for _, m := range f.written {
+		if m.Actor != maintenancePauseActor {
+			t.Errorf("marker actor = %q, want %q", m.Actor, maintenancePauseActor)
+		}
+		if !m.Since.Equal(gcTestNow) || !m.Until.Equal(gcTestNow.Add(maintenanceGCTimeout+maintenancePauseSlack)) {
+			t.Errorf("marker since/until = %v/%v, want now and now+gc timeout+slack", m.Since, m.Until)
+		}
+		if m.Until.Sub(m.Since) > doltpause.MaxDuration {
+			t.Errorf("marker runs %v, over the doltpause cap", m.Until.Sub(m.Since))
+		}
 	}
 	if len(f.escalations) != 0 {
 		t.Errorf("successful gc escalated: %v", f.escalations)
 	}
-	// Quiet is re-checked before each database gc'd.
 	if f.quietCalls != 2 {
 		t.Errorf("quiet probe ran %d time(s), want 2 (once before each gc)", f.quietCalls)
 	}
@@ -350,55 +350,52 @@ func TestMaintenanceGCCycleCollectsEligibleSmallestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.PostGCBytes["hq"] != 97*mib || st.PostGCBytes["gt"] != 480*mib {
-		t.Errorf("baselines = %v, want post-gc sizes hq=97MiB gt=480MiB", st.PostGCBytes)
+	if st.PostGCBytes["hq"] != 97*mib || st.PostGCOldGenBytes["gt"] != 307*mib || st.ReclaimedBytes["hq"] != 534*mib {
+		t.Errorf("state = %+v, want hq post 97MiB reclaimed 534MiB, gt old-gen 307MiB", st)
 	}
-	if _, ok := st.PostGCBytes["om"]; ok {
-		t.Error("om was not gc'd but got a baseline")
+	if !st.LastGC["gt"].Equal(gcTestNow) {
+		t.Errorf("LastGC[gt] = %v, want the fake clock", st.LastGC["gt"])
 	}
-
-	// Diagnostics: before/after size and duration per database.
-	for _, want := range []string{"gc hq: 631.0MiB -> 97.0MiB", "gc gt: 633.0MiB -> 480.0MiB", "om: 185.0MiB"} {
+	for _, want := range []string{"gc hq: 631.0MiB -> 97.0MiB (old-gen 500.0MiB -> 90.0MiB)", "no patrol gc recorded yet"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log missing %q:\n%s", want, logs.String())
 		}
 	}
 }
 
-func TestMaintenanceGCCycleRespectsBaseline(t *testing.T) {
+func TestMaintenanceGCCycleWeeklyAndOldGenTriggers(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	// gt was gc'd to 480MiB last time; 900MiB is under 2x, hq has doubled.
-	if err := recordMaintenanceGCBaseline(d.config.TownRoot, "gt", 480*mib, time.Now()); err != nil {
-		t.Fatal(err)
+	recordRun(t, d, "weekly", 7, 100*mib) // a week old, old-gen flat
+	recordRun(t, d, "grown", 2, 100*mib)  // two days old, old-gen +30%
+	recordRun(t, d, "steady", 2, 100*mib) // two days old, old-gen +5%
+	f.sizes = map[string]gcMeasure{
+		"weekly": {300 * mib, 100 * mib},
+		"grown":  {200 * mib, 130 * mib},
+		"steady": {150 * mib, 105 * mib},
 	}
-	if err := recordMaintenanceGCBaseline(d.config.TownRoot, "hq", 150*mib, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	f.sizes = map[string]int64{"gt": 900 * mib, "hq": 300 * mib}
 
-	out := d.maintenanceGCCycle([]string{"gt", "hq"}, "/unused", testGCPolicy)
-
-	if out.outcome != gcOutcomeCompleted {
+	if out := d.maintenanceGCCycle([]string{"grown", "steady", "weekly"}, "/unused"); out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
-	if got := strings.Join(f.gcCalls, ","); got != "hq" {
-		t.Errorf("gc calls = %s, want hq only (gt has not doubled since its last gc)", got)
+	if got := strings.Join(f.gcCalls, ","); got != "grown,weekly" {
+		t.Errorf("gc calls = %s, want grown,weekly (steady is neither a week old nor >20%% grown)", got)
 	}
 }
 
-func TestMaintenanceGCCycleNothingEligibleSkipsQuietProbe(t *testing.T) {
+func TestMaintenanceGCCycleNothingDueSkipsQuietProbeAndPause(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"om": 42 * mib}
+	recordRun(t, d, "om", 1, 42*mib)
+	f.sizes = map[string]gcMeasure{"om": {50 * mib, 42 * mib}}
 
-	if out := d.maintenanceGCCycle([]string{"om"}, "/unused", testGCPolicy); out.outcome != gcOutcomeCompleted {
+	if out := d.maintenanceGCCycle([]string{"om"}, "/unused"); out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
-	if len(f.gcCalls) != 0 || f.quietCalls != 0 {
-		t.Errorf("nothing eligible, yet gc=%v quietCalls=%d", f.gcCalls, f.quietCalls)
+	if len(f.gcCalls) != 0 || f.quietCalls != 0 || len(f.events) != 0 {
+		t.Errorf("nothing due, yet gc=%v quietCalls=%d events=%v", f.gcCalls, f.quietCalls, f.events)
 	}
 }
 
@@ -406,10 +403,10 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib, "om": 700 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}, "om": {700 * mib, 0}}
 	f.quietUntil = 1 // quiet before hq, busy before gt
 
-	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused", testGCPolicy)
+	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused")
 
 	if out.outcome != gcOutcomeDeferred {
 		t.Fatalf("outcome = %v, want deferred", out.outcome)
@@ -425,14 +422,36 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 	}
 }
 
-func TestMaintenanceGCCycleStopsAndEscalatesOnceOnError(t *testing.T) {
+// Someone else's pause (the nightly backup, an operator) defers the gc and is
+// left exactly as it was: the gc neither overwrites nor removes it.
+func TestMaintenanceGCCycleDefersToAnotherActorsPause(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib, "om": 700 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	f.foreignPause = &doltpause.Marker{Actor: "sloan", Reason: "restore drill", Until: gcTestNow.Add(time.Hour)}
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+
+	if out.outcome != gcOutcomeDeferred {
+		t.Fatalf("outcome = %v, want deferred", out.outcome)
+	}
+	if len(f.gcCalls) != 0 || len(f.events) != 0 {
+		t.Errorf("gc touched a pause it does not own: gc=%v events=%v", f.gcCalls, f.events)
+	}
+	if !strings.Contains(out.reason, "Dolt paused by sloan") {
+		t.Errorf("deferral reason %q does not name the pause", out.reason)
+	}
+}
+
+func TestMaintenanceGCCycleStopsEscalatesAndUnpausesOnError(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}, "om": {700 * mib, 0}}
 	f.gcErr["gt"] = errors.New("Error 1105: gc failed: boom")
 
-	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused", testGCPolicy)
+	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused")
 
 	if out.outcome != gcOutcomeFailed {
 		t.Fatalf("outcome = %v, want failed", out.outcome)
@@ -440,21 +459,65 @@ func TestMaintenanceGCCycleStopsAndEscalatesOnceOnError(t *testing.T) {
 	if got := strings.Join(f.gcCalls, ","); got != "hq,gt" {
 		t.Errorf("gc calls = %s, want hq,gt — a failure must stop the run", got)
 	}
+	if f.marker != nil || f.events[len(f.events)-1] != "remove" {
+		t.Errorf("failed gc left the pause marker: events=%v", f.events)
+	}
 	if len(f.escalations) != 1 {
 		t.Fatalf("escalations = %d, want exactly 1: %v", len(f.escalations), f.escalations)
 	}
-	msg := f.escalations[0]
 	for _, want := range []string{"scheduled_maintenance|", "gt", "boom", "600.0MiB"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("escalation missing %q:\n%s", want, msg)
+		if !strings.Contains(f.escalations[0], want) {
+			t.Errorf("escalation missing %q:\n%s", want, f.escalations[0])
 		}
 	}
 	st, _ := loadMaintenanceGCState(d.config.TownRoot)
-	if _, ok := st.PostGCBytes["gt"]; ok {
-		t.Error("a failed gc recorded a baseline")
+	if _, ok := st.LastGC["gt"]; ok {
+		t.Error("a failed gc recorded a run")
 	}
-	if st.PostGCBytes["hq"] != 300*mib {
-		t.Errorf("hq baseline = %d, want its post-gc size", st.PostGCBytes["hq"])
+	if _, ok := st.LastGC["hq"]; !ok {
+		t.Error("hq's successful gc was not recorded")
+	}
+}
+
+// No marker, no gc: a gc the clients were not told about is the outage the
+// marker exists to prevent.
+func TestMaintenanceGCCycleRefusesGCWhenPauseCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	f.writeErr = errors.New("read-only file system")
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+
+	if out.outcome != gcOutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", out.outcome)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran without a pause marker: %v", f.gcCalls)
+	}
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "pause marker") {
+		t.Errorf("escalations = %v, want one naming the pause marker", f.escalations)
+	}
+}
+
+// A marker the daemon cannot remove is logged and left to lapse at its until,
+// which the marker sets within the gc bound: the gc itself still counts.
+func TestMaintenanceGCCycleUnremovablePauseLapses(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	f.removeErr = errors.New("permission denied")
+
+	if out := d.maintenanceGCCycle([]string{"hq"}, "/unused"); out.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v, want completed", out.outcome)
+	}
+	if !strings.Contains(logs.String(), "cannot remove pause marker") {
+		t.Errorf("log does not report the stuck marker:\n%s", logs.String())
+	}
+	if f.marker == nil || f.marker.Active(gcTestNow.Add(maintenanceGCTimeout+maintenancePauseSlack)) {
+		t.Errorf("stuck marker %+v must lapse by the gc timeout plus slack", f.marker)
 	}
 }
 
@@ -462,9 +525,9 @@ func TestMaintenanceGCCycleSizeErrorSkipsDatabase(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 300 * mib} // "ghost" has no directory
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}} // "ghost" has no directory
 
-	out := d.maintenanceGCCycle([]string{"ghost", "hq"}, "/unused", testGCPolicy)
+	out := d.maintenanceGCCycle([]string{"ghost", "hq"}, "/unused")
 	if out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
@@ -475,34 +538,27 @@ func TestMaintenanceGCCycleSizeErrorSkipsDatabase(t *testing.T) {
 
 // --- wiring through runScheduledMaintenance ---------------------------------
 
-func gcModeConfig(dbs []string, mode string) *DaemonPatrolConfig {
-	now := time.Now()
-	window := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location()).Format("15:04")
-	minBytes := 256 * mib
+// gcModeConfig is a config whose window is open at the fake clock's reading.
+func gcModeConfig() *DaemonPatrolConfig {
+	window := gcTestNow.Truncate(time.Hour).Format("15:04")
 	return &DaemonPatrolConfig{
 		Type: "daemon-patrol-config", Version: 1,
 		Patrols: &PatrolsConfig{
-			CompactorDog: &CompactorDogConfig{Databases: dbs},
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled: true, Window: window, Interval: "daily", Mode: mode, GCMinBytes: &minBytes,
-			},
+			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: true, Window: window},
 		},
 	}
 }
 
-func TestScheduledMaintenanceGCModeNeverFlattensAndMarksRun(t *testing.T) {
+func TestScheduledMaintenanceRunsGCAndMarksRun(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 631 * mib}
-	f.shrinkTo = map[string]int64{"hq": 97 * mib}
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 500 * mib}}
+	f.shrinkTo = map[string]gcMeasure{"hq": {97 * mib, 90 * mib}}
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 
-	if f.flattens != 0 {
-		t.Errorf("gc mode ran gt maintain %d time(s)", f.flattens)
-	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %s, want hq", got)
 	}
@@ -510,22 +566,46 @@ func TestScheduledMaintenanceGCModeNeverFlattensAndMarksRun(t *testing.T) {
 		t.Error("gc cycle still marked running after it returned")
 	}
 
-	// The completion is folded into lastMaintenanceRun on the next tick, so a
-	// second tick in the same window does nothing.
-	f.sizes["hq"] = 900 * mib
+	// The completion is folded into lastMaintenanceRun, so a second tick in
+	// the same window does nothing even though old-gen grew.
+	f.sizes["hq"] = gcMeasure{900 * mib, 800 * mib}
 	d.runScheduledMaintenance()
 	if len(f.gcCalls) != 1 {
 		t.Errorf("second tick in the same window ran gc again: %v", f.gcCalls)
 	}
 }
 
-func TestScheduledMaintenanceGCModeDeferralRetriesNextTick(t *testing.T) {
+// A live daemon.json still carries the retired mode keys: they decode, change
+// nothing, and are named in the log.
+func TestScheduledMaintenanceIgnoresAndNamesRetiredKeys(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	recordRun(t, d, "hq", 1, 100*mib)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 105 * mib}}
+	cfg := gcModeConfig()
+	threshold, minBytes, ratio := 1, int64(1), 1.0
+	sm := cfg.Patrols.ScheduledMaintenance
+	sm.Interval, sm.Threshold, sm.Mode, sm.GCMinBytes, sm.GCGrowthRatio = "daily", &threshold, "flatten", &minBytes, &ratio
+	d.patrolConfig = cfg
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("retired keys changed the schedule: gc ran on %v", f.gcCalls)
+	}
+	if !strings.Contains(logs.String(), "deprecated config ignored — patrols.scheduled_maintenance.{interval,threshold,mode,gc_min_bytes,gc_growth_ratio}") {
+		t.Errorf("log does not name the retired keys:\n%s", logs.String())
+	}
+}
+
+func TestScheduledMaintenanceDeferralRetriesNextTick(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 631 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
 	f.quietUntil = 0 // busy
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 	if len(f.gcCalls) != 0 {
@@ -539,29 +619,29 @@ func TestScheduledMaintenanceGCModeDeferralRetriesNextTick(t *testing.T) {
 	}
 }
 
-func TestScheduledMaintenanceGCModeFailureDoesNotRetryInWindow(t *testing.T) {
+func TestScheduledMaintenanceFailureDoesNotRetryInWindow(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 631 * mib}
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
 	f.gcErr["hq"] = errors.New("boom")
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
 	d.runScheduledMaintenance()
 
 	if len(f.gcCalls) != 1 || len(f.escalations) != 1 {
-		t.Errorf("after a failure: gc calls %v, escalations %d — want one of each per interval",
+		t.Errorf("after a failure: gc calls %v, escalations %d — want one of each per window",
 			f.gcCalls, len(f.escalations))
 	}
 }
 
-func TestScheduledMaintenanceGCModeSkipsWhileCycleRunning(t *testing.T) {
+func TestScheduledMaintenanceSkipsWhileCycleRunning(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.sizes = map[string]int64{"hq": 631 * mib}
-	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	d.patrolConfig = gcModeConfig()
 	d.maintenanceGCRunning.Store(true)
 
 	d.runScheduledMaintenance()

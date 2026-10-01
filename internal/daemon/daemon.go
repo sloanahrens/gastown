@@ -103,11 +103,6 @@ type Daemon struct {
 	// collaborators in tests (see daemonSeams); the zero value is production.
 	seams daemonSeams
 
-	// countCommitsFn replaces the dolt_log count scheduled_maintenance reads
-	// per database (compactorCountCommits), so tests drive the mode decision
-	// without a Dolt server. Nil queries the server.
-	countCommitsFn func(dbName string) (int, error)
-
 	// maint replaces scheduled maintenance's side effects in tests (see
 	// maintenanceSeams); the zero value is production.
 	maint maintenanceSeams
@@ -939,8 +934,8 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Start scheduled maintenance ticker if configured.
-	// Checks periodically whether we're in the maintenance window and
-	// runs `gt maintain --force` when commit counts exceed threshold.
+	// Checks periodically whether we're in the maintenance window and runs
+	// the town's one Dolt GC cycle there (scheduled_maintenance.go).
 	var scheduledMaintenanceTicker *time.Ticker
 	var scheduledMaintenanceChan <-chan time.Time
 	if d.isPatrolActive("scheduled_maintenance") {
@@ -1102,8 +1097,7 @@ func (d *Daemon) Run() (err error) {
 
 		case <-scheduledMaintenanceChan:
 			// Scheduled maintenance — checks if we're in the maintenance window
-			// and acts on maintenance.mode (monitor escalates, flatten runs
-			// `gt maintain --force`, gc dispatches a dolt_gc('--full') cycle).
+			// and dispatches a dolt_gc('--full') cycle for the databases due.
 			if !d.isShutdownInProgress() {
 				d.runScheduledMaintenance()
 			}

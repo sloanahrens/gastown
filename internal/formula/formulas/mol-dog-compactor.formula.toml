@@ -5,8 +5,8 @@ compaction is warranted.
 Every bd mutation creates a Dolt commit. Over time this builds an enormous
 commit graph (5,000-10,000 commits/day from wisp churn), and the commit graph
 IS the storage cost — deleting rows without compaction leaves ghost commits
-forever. Compacting that history is a commit-graph rewrite followed by a
-force-push, so it is destructive and irreversible.
+forever. Compacting that history is a commit-graph rewrite, so it is
+destructive and irreversible.
 
 The compactor_dog job does NOT compact. It monitors and escalates:
 
@@ -18,26 +18,17 @@ The compactor_dog job does NOT compact. It monitors and escalates:
 ## Why monitoring only
 
 The daemon patrol used to auto-flatten (and force-push) any database over the
-threshold, with no agent or operator judgment in the loop. That is the same
-failure mode that gt-e14c fixed in the plugin: an unattended path that
-rewrites the commit graph and force-pushes the result to remotes. The daemon
-now matches the plugin's shape — monitor and escalate — and the only
-destructive entry point is the operator-invoked
-`plugins/compactor-dog/run.sh --compact`.
+threshold, with no agent or operator judgment in the loop (gt-e14c). Rewriting
+history is now an offline operator procedure, never a routine path
+(gt-8z769.3).
 
-## Threshold reconciliation with the plugin
+## Threshold
 
-The compactor-dog script plugin (plugins/compactor-dog/plugin.md) escalates at >500
-commits and hard-escalates at >1000. The daemon's default threshold is 2000
-(daemon.json: patrols.compactor_dog.threshold). They are not inconsistent:
-both paths escalate, and they differ because they run on different cadences
-and have different per-run costs.
-
-The daemon's number is higher for one concrete reason: escalating is not free.
-Each escalation mints a bead, and beads are Dolt commits. A daemon threshold at
-or near the plugin's 500 line would let a single busy 24h cycle push a database
-back over the line with its own escalations, re-triggering the patrol on its own
-output. The 2000 default is the buffer against that loop.
+The default threshold is 2000 (daemon.json: patrols.compactor_dog.threshold)
+because escalating is not free: each escalation mints a bead, and beads are
+Dolt commits. A low threshold would let a single busy 24h cycle push a
+database back over the line with its own escalations, re-triggering the
+patrol on its own output.
 
 ## ZFC Exemption
 
@@ -64,23 +55,19 @@ There is no verify step: monitoring mutates nothing, so there is no integrity
 surface to check. The old verify step existed to compare row counts before and
 after compaction, and compaction no longer happens here.
 
-## Order of Operations
+## Rewriting history
 
-Reaper (deletes rows) → Compactor (flattens history) → Doctor (runs gc)
-
-The compactor step in that pipeline is now operator-invoked, not a daemon
-patrol. When this job escalates, a human runs:
-
-```bash
-bash plugins/compactor-dog/run.sh --compact
-```
+Nothing rewrites history routinely. Flatten is an offline operator procedure
+(docs/dolt-history-offline.md) with a single trigger: a database passing 2 GB.
+Disk is the GC actor's job: the daemon's scheduled_maintenance runs a
+history-preserving `dolt_gc('--full')` weekly, or sooner on old-gen growth.
 
 ## Safety
 
 Monitoring is read-only — it counts commits and files escalations. No
 irreversible action is taken by this job under any threshold or error path.
-JSONL backups and Dolt filesystem backups provide recovery points for the
-operator-invoked compaction that follows."""
+JSONL backups and Dolt filesystem backups provide recovery points for any
+offline rewrite an operator runs."""
 formula = "mol-dog-compactor"
 version = 3
 
@@ -117,9 +104,8 @@ Escalate for each database at or above the threshold. Nothing is compacted.
 
 **For each candidate:**
 - Log the database and its commit count
-- Escalate with a "compaction recommended" message naming the database, the
-  count, and the operator-only compaction command
-  (`plugins/compactor-dog/run.sh --compact`)
+- Escalate naming the database, the count, and the offline procedure
+  (docs/dolt-history-offline.md)
 
 Escalation is the happy path for an over-threshold database, not an error, so
 this step does not fail. Repeated escalation for the same database is expected
@@ -150,7 +136,7 @@ because the daemon matches poured steps by title.)
 
 [vars]
 [vars.commit_threshold]
-description = "Commit count at or above which the job escalates (default 2000; must stay well above the plugin's 500/1000 escalation lines to avoid a feedback loop)"
+description = "Commit count at or above which the job escalates (default 2000; high enough that the job's own escalation commits cannot re-trigger it)"
 default = "2000"
 
 [vars.databases]

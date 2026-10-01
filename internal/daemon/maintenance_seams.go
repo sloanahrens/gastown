@@ -1,26 +1,35 @@
 package daemon
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/doltpause"
+)
 
 // maintenanceSeams are scheduled maintenance's side effects and host reads,
 // replaceable in tests through Daemon.maint. Each nil field is the production
 // behavior (see maintenance): a test sets only the ones it drives, on its own
 // Daemon, so tests of different daemons never share one.
 type maintenanceSeams struct {
-	// exec runs `gt maintain --force --threshold N`: flatten mode's
-	// destructive path, which monitor mode must never reach.
-	exec func(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error)
+	// now is the clock the gc triggers and the pause marker read.
+	now func() time.Time
 	// escalate reports maintenance findings to the mayor.
 	escalate func(d *Daemon, source, message string)
+	// pauseCurrent, pauseWrite and pauseRemove read, write and remove the
+	// Dolt pause marker (internal/doltpause) around each gc call.
+	pauseCurrent func(townRoot string, now time.Time) *doltpause.Marker
+	pauseWrite   func(townRoot string, m doltpause.Marker) error
+	pauseRemove  func(townRoot string) (bool, error)
 	// convoyPause pauses the ConvoyManager's Dolt reads for one database's gc.
 	convoyPause func(d *Daemon) (resume func(), ok bool)
-	// gcDatabases discovers gc mode's databases under a data dir.
+	// gcDatabases discovers the databases under a data dir.
 	gcDatabases func(dataDir string) ([]string, error)
 	// gcExternal reports whether the Dolt server is not one this daemon can
 	// measure on local disk.
 	gcExternal func(d *Daemon) (bool, string)
-	// dbSize measures a database's on-disk size.
-	dbSize func(dataDir, db string) (int64, error)
+	// measure reads a database's on-disk size and old-gen size.
+	measure func(dataDir, db string) (gcMeasure, error)
 	// gcExec runs CALL dolt_gc('--full') on one database.
 	gcExec func(ctx context.Context, d *Daemon, db string) error
 	// quiet is the quiet-window guard, re-checked before each database.
@@ -40,8 +49,17 @@ type maintenanceSeams struct {
 // with its production behavior.
 func (d *Daemon) maintenance() maintenanceSeams {
 	s := d.maint
-	if s.exec == nil {
-		s.exec = runGtMaintain
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.pauseCurrent == nil {
+		s.pauseCurrent = doltpause.Current
+	}
+	if s.pauseWrite == nil {
+		s.pauseWrite = doltpause.Write
+	}
+	if s.pauseRemove == nil {
+		s.pauseRemove = doltpause.Remove
 	}
 	if s.escalate == nil {
 		s.escalate = (*Daemon).escalate
@@ -55,8 +73,8 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	if s.gcExternal == nil {
 		s.gcExternal = (*Daemon).maintenanceGCExternal
 	}
-	if s.dbSize == nil {
-		s.dbSize = maintenanceDBSize
+	if s.measure == nil {
+		s.measure = maintenanceMeasure
 	}
 	if s.gcExec == nil {
 		s.gcExec = func(ctx context.Context, d *Daemon, db string) error { return d.doltGCFull(ctx, db) }

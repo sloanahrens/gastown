@@ -1,16 +1,18 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/util"
 )
+
+// scheduled_maintenance is the town's one Dolt GC actor (gt-8z769.3): in the
+// configured window it runs CALL dolt_gc('--full') on each database that is
+// due — weekly, or sooner when its old generation grew more than 20% since its
+// last gc (maintenance_gc.go). Nothing else in gt runs a manual gc, and
+// nothing rewrites history: flatten is an offline operator procedure
+// (docs/dolt-history-offline.md). Dolt's own auto-GC stays on.
 
 const (
 	// defaultMaintenanceCheckInterval is how often the daemon checks if it's
@@ -18,42 +20,17 @@ const (
 	// miss a narrow window, but the actual maintenance only runs once per window.
 	defaultMaintenanceCheckInterval = 5 * time.Minute
 
-	// defaultMaintenanceThreshold is the minimum commit count before maintenance
-	// triggers. Lower than compactor_dog (10k) since this is user-configured
-	// scheduled maintenance, not emergency compaction.
-	defaultMaintenanceThreshold = 1000
-
-	// MaintenanceModeMonitor reports over-threshold databases and rewrites
-	// nothing. It is the default: an unattended path that squashes commit
-	// history is the failure mode gt-e14c and gt-nfu7 removed from the
-	// compactor_dog daemon, and this patrol is the same shape of risk.
-	MaintenanceModeMonitor = "monitor"
-
-	// MaintenanceModeFlatten runs `gt maintain --force`, which flattens the
-	// commit history of every database over threshold. Operator opt-in only.
-	MaintenanceModeFlatten = "flatten"
-
-	// maintenanceTailLines is how much of `gt maintain`'s output is logged and
-	// escalated on failure. The interesting line is at the end; the full output
-	// can be hundreds of lines of per-database progress.
-	maintenanceTailLines = 5
+	// maintenanceCycleGap is the minimum time between two completed cycles:
+	// one per daily window. Slightly under 24h so the run time cannot drift
+	// out of a one-hour window. Which databases a cycle gc's is decided per
+	// database (shouldGCDatabase); the cycle itself only measures.
+	maintenanceCycleGap = 20 * time.Hour
 )
 
-// maintenanceCheckInterval returns the configured check interval, or the default (5m).
+// maintenanceCheckInterval returns the check interval (5m). It is internal:
+// the patrol only needs to poll often enough to catch the window.
 func maintenanceCheckInterval(config *DaemonPatrolConfig) time.Duration {
-	// The check interval is not user-configurable — it's internal.
-	// We just need to poll often enough to catch the window.
 	return defaultMaintenanceCheckInterval
-}
-
-// maintenanceThreshold returns the configured commit threshold, or the default (1000).
-func maintenanceThreshold(config *DaemonPatrolConfig) int {
-	if config != nil && config.Patrols != nil && config.Patrols.ScheduledMaintenance != nil {
-		if config.Patrols.ScheduledMaintenance.Threshold != nil {
-			return *config.Patrols.ScheduledMaintenance.Threshold
-		}
-	}
-	return defaultMaintenanceThreshold
 }
 
 // maintenanceWindow returns the configured window start time (HH:MM), or empty string.
@@ -62,87 +39,6 @@ func maintenanceWindow(config *DaemonPatrolConfig) string {
 		return config.Patrols.ScheduledMaintenance.Window
 	}
 	return ""
-}
-
-// maintenanceInterval returns the configured interval string, or "daily".
-func maintenanceInterval(config *DaemonPatrolConfig) string {
-	if config != nil && config.Patrols != nil && config.Patrols.ScheduledMaintenance != nil {
-		if config.Patrols.ScheduledMaintenance.Interval != "" {
-			return config.Patrols.ScheduledMaintenance.Interval
-		}
-	}
-	return "daily"
-}
-
-// maintenanceMode returns the configured compaction mode.
-//
-// Only the trimmed string "flatten" selects the destructive path and only the
-// trimmed string "gc" selects garbage collection; everything else — an empty
-// field, a typo, a case variation like "Flatten", a missing config — is
-// MaintenanceModeMonitor. The negative test is deliberate: a misspelling or a
-// hand-edited case difference must fail toward escalation, never toward
-// rewriting every database's history at 03:00. This matches setMaintenanceConfig
-// (internal/cmd/config.go), which writes only the exact lowercase constants and
-// rejects everything else at `gt config set` time — the two entry points must
-// agree on what arms the destructive path, since daemon.json can also be
-// hand-edited directly.
-func maintenanceMode(config *DaemonPatrolConfig) string {
-	if config != nil && config.Patrols != nil && config.Patrols.ScheduledMaintenance != nil {
-		switch strings.TrimSpace(config.Patrols.ScheduledMaintenance.Mode) {
-		case MaintenanceModeFlatten:
-			return MaintenanceModeFlatten
-		case MaintenanceModeGC:
-			return MaintenanceModeGC
-		}
-	}
-	return MaintenanceModeMonitor
-}
-
-// runGtMaintain runs `gt maintain --force --threshold N`, the flatten
-// branch's destructive step.
-func runGtMaintain(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, gtPath, "maintain", "--force", "--threshold", strconv.Itoa(threshold))
-	cmd.Dir = dir
-	cmd.Env = daemonGTEnv(os.Environ())
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.CombinedOutput()
-}
-
-// maintenanceTarget is a database at or above the maintenance threshold.
-type maintenanceTarget struct {
-	name    string
-	commits int
-}
-
-// maintenanceMonitorMessage renders the monitor-mode escalation body: what
-// crossed the line, and the two operator paths that compact.
-func maintenanceMonitorMessage(targets []maintenanceTarget, threshold int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b,
-		"scheduled_maintenance: %d database(s) at or above the %d-commit threshold. "+
-			"Nothing was rewritten — maintenance.mode is %s.\n",
-		len(targets), threshold, MaintenanceModeMonitor)
-	for _, t := range targets {
-		fmt.Fprintf(&b, "  %s: %d commits\n", t.name, t.commits)
-	}
-	fmt.Fprintf(&b,
-		"To compact, run plugins/compactor-dog/run.sh --compact (operator), "+
-			"or set maintenance.mode=flatten to let this patrol flatten in-window.")
-	return b.String()
-}
-
-// tailLines returns the last n lines of output, for logs and escalations where
-// the interesting failure is at the end.
-func tailLines(output []byte, n int) []string {
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return nil
-	}
-	lines := strings.Split(trimmed, "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return lines
 }
 
 // parseWindowTime parses an HH:MM string and returns the hour and minute.
@@ -198,37 +94,40 @@ func maintenanceWindowEnd(now time.Time, window string) time.Time {
 	return end
 }
 
-// shouldRunMaintenance checks if maintenance should run based on the interval
-// and the last run time. Returns true if enough time has passed since the last run.
-func shouldRunMaintenance(now time.Time, lastRun time.Time, interval string) bool {
-	if lastRun.IsZero() {
-		return true // Never run before
+// deprecatedMaintenanceKeys names the retired scheduled_maintenance keys a
+// daemon.json still sets. They are parsed and ignored.
+func deprecatedMaintenanceKeys(config *DaemonPatrolConfig) []string {
+	if config == nil || config.Patrols == nil || config.Patrols.ScheduledMaintenance == nil {
+		return nil
 	}
-
-	var minGap time.Duration
-	switch interval {
-	case "daily":
-		minGap = 20 * time.Hour // Slightly less than 24h to avoid drift
-	case "weekly":
-		minGap = 6 * 24 * time.Hour
-	case "monthly":
-		minGap = 27 * 24 * time.Hour
-	default:
-		// Try parsing as Go duration
-		d, err := time.ParseDuration(interval)
-		if err != nil || d <= 0 {
-			minGap = 20 * time.Hour // Fall back to daily
-		} else {
-			minGap = d - (d / 10) // 90% of configured interval to avoid drift
-		}
+	mc := config.Patrols.ScheduledMaintenance
+	var keys []string
+	if mc.Interval != "" {
+		keys = append(keys, "interval")
 	}
-
-	return now.Sub(lastRun) >= minGap
+	if mc.Threshold != nil {
+		keys = append(keys, "threshold")
+	}
+	if mc.Mode != "" {
+		keys = append(keys, "mode")
+	}
+	if mc.GCMinBytes != nil {
+		keys = append(keys, "gc_min_bytes")
+	}
+	if mc.GCGrowthRatio != nil {
+		keys = append(keys, "gc_growth_ratio")
+	}
+	return keys
 }
 
-// runScheduledMaintenance checks if we're in the maintenance window and acts
-// on the mode: monitor escalates over-threshold commit counts, flatten runs
-// `gt maintain --force`, gc runs a size-triggered dolt_gc('--full') cycle.
+// shouldRunMaintenanceCycle reports whether a cycle is due: none has completed
+// yet, or the last one is at least maintenanceCycleGap old.
+func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
+	return lastRun.IsZero() || now.Sub(lastRun) >= maintenanceCycleGap
+}
+
+// runScheduledMaintenance checks if we're in the maintenance window and, once
+// per window, dispatches a gc cycle over every database in the data dir.
 func (d *Daemon) runScheduledMaintenance() {
 	if !d.isPatrolActive("scheduled_maintenance") {
 		return
@@ -240,15 +139,14 @@ func (d *Daemon) runScheduledMaintenance() {
 		return
 	}
 
-	now := time.Now()
+	now := d.maintenance().now()
 
-	// gc mode: count a window that closed with gc still deferred (and escalate
-	// a streak) before anything else, including outside the window.
-	if maintenanceMode(d.patrolConfig) == MaintenanceModeGC && !d.maintenanceGCRunning.Load() {
-		d.closeDeferredGCWindow(now, maintenanceInterval(d.patrolConfig))
+	// Count a window that closed with gc still deferred (and escalate a
+	// streak) before anything else, including outside the window.
+	if !d.maintenanceGCRunning.Load() {
+		d.closeDeferredGCWindow(now)
 	}
 
-	// Check if we're in the maintenance window.
 	if !isInMaintenanceWindow(now, window) {
 		return // Not in window — silent skip (this fires every 5 minutes)
 	}
@@ -261,119 +159,35 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 	}
 
-	// Check if we already ran recently (respect interval).
-	interval := maintenanceInterval(d.patrolConfig)
-	if !shouldRunMaintenance(now, d.lastMaintenanceRun, interval) {
+	if !shouldRunMaintenanceCycle(now, d.lastMaintenanceRun) {
 		return // Already ran this window
 	}
 
-	// gc mode is size-triggered and never counts commits or reaches the
-	// flatten path. A cycle that defers (town busy) leaves lastMaintenanceRun
-	// alone, so the next 5-minute tick in the window retries.
-	if maintenanceMode(d.patrolConfig) == MaintenanceModeGC {
-		if d.maintenanceGCRunning.Load() {
-			return
-		}
-		if external, why := d.maintenance().gcExternal(d); external {
-			// The size trigger reads the server's data dir from this host's
-			// disk; against a remote server it would read the wrong one.
-			d.logger.Printf("scheduled_maintenance: mode=%s skipped: %s — gc mode needs a local server", MaintenanceModeGC, why)
-			d.lastMaintenanceRun = now
-			return
-		}
-		dataDir := d.maintenanceDataDir()
-		databases, err := d.maintenance().gcDatabases(dataDir)
-		if err != nil || len(databases) == 0 {
-			d.logger.Printf("scheduled_maintenance: mode=%s: no databases discovered in %s (err=%v)", MaintenanceModeGC, dataDir, err)
-			return
-		}
-		d.logger.Printf("scheduled_maintenance: in window %s, mode=%s, %d database(s) discovered", window, MaintenanceModeGC, len(databases))
-		d.startMaintenanceGC(databases, maintenanceWindowEnd(now, window))
-		if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
-			d.lastMaintenanceRun = time.Unix(0, finished)
-		}
+	// A cycle that defers (town busy) leaves lastMaintenanceRun alone, so
+	// the next 5-minute tick in the window retries.
+	if d.maintenanceGCRunning.Load() {
 		return
 	}
-
-	d.logger.Printf("scheduled_maintenance: in window %s, checking commit counts", window)
-
-	// Check if any database exceeds the threshold.
-	threshold := maintenanceThreshold(d.patrolConfig)
-	databases := d.compactorDatabases() // Reuse the same DB discovery
-	if len(databases) == 0 {
-		d.logger.Printf("scheduled_maintenance: no databases found")
+	if external, why := d.maintenance().gcExternal(d); external {
+		// The old-gen trigger reads the server's data dir from this host's
+		// disk; against a remote server it would read the wrong one.
+		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
+		d.lastMaintenanceRun = now
 		return
 	}
-
-	// Collect every database over threshold rather than stopping at the first:
-	// the escalation should name all of them, not the alphabetically first.
-	var targets []maintenanceTarget
-	for _, dbName := range databases {
-		commitCount, err := d.maintenanceCountCommits(dbName)
-		if err != nil {
-			d.logger.Printf("scheduled_maintenance: %s: error counting commits: %v", dbName, err)
-			continue
-		}
-		if commitCount >= threshold {
-			d.logger.Printf("scheduled_maintenance: %s: %d commits >= threshold %d — maintenance needed",
-				dbName, commitCount, threshold)
-			targets = append(targets, maintenanceTarget{name: dbName, commits: commitCount})
-			continue
-		}
-		d.logger.Printf("scheduled_maintenance: %s: %d commits (below threshold %d)",
-			dbName, commitCount, threshold)
-	}
-
-	if len(targets) == 0 {
-		d.logger.Printf("scheduled_maintenance: all databases below threshold, skipping")
-		d.lastMaintenanceRun = now // Don't re-check until next interval
+	dataDir := d.maintenanceDataDir()
+	databases, err := d.maintenance().gcDatabases(dataDir)
+	if err != nil || len(databases) == 0 {
+		d.logger.Printf("scheduled_maintenance: no databases discovered in %s (err=%v)", dataDir, err)
 		return
 	}
-
-	if maintenanceMode(d.patrolConfig) == MaintenanceModeFlatten {
-		d.maintenanceFlatten(threshold)
-	} else {
-		d.logger.Printf("scheduled_maintenance: mode=%s — escalating %d database(s), rewriting nothing",
-			MaintenanceModeMonitor, len(targets))
-		d.maintenance().escalate(d, "scheduled_maintenance", maintenanceMonitorMessage(targets, threshold))
+	d.logger.Printf("scheduled_maintenance: in window %s, %d database(s) discovered", window, len(databases))
+	if keys := deprecatedMaintenanceKeys(d.patrolConfig); len(keys) > 0 {
+		d.logger.Printf("scheduled_maintenance: WARNING: deprecated config ignored — patrols.scheduled_maintenance.{%s} "+
+			"have no effect; the schedule is weekly gc plus the old-gen trigger (gt-8z769.3)", strings.Join(keys, ","))
 	}
-
-	d.lastMaintenanceRun = now
-}
-
-// maintenanceCountCommits counts dbName's commits through countCommitsFn when
-// a test set one, and on the Dolt server otherwise.
-func (d *Daemon) maintenanceCountCommits(dbName string) (int, error) {
-	if d.countCommitsFn != nil {
-		return d.countCommitsFn(dbName)
-	}
-	return d.compactorCountCommits(dbName)
-}
-
-// maintenanceFlatten runs the destructive maintenance path: `gt maintain
-// --force`, which flattens every database over threshold. Only reachable when
-// maintenance.mode is explicitly "flatten".
-//
-// A non-zero exit can come from any phase (a failed backup probe refuses the
-// whole run before anything is touched), so the output tail is included in the
-// escalation.
-func (d *Daemon) maintenanceFlatten(threshold int) {
-	d.logger.Printf("scheduled_maintenance: mode=%s — running gt maintain --force --threshold %d",
-		MaintenanceModeFlatten, threshold)
-
-	output, err := d.maintenance().exec(d.ctx, d.gtPath, d.config.TownRoot, threshold)
-	if err != nil {
-		d.logger.Printf("scheduled_maintenance: gt maintain failed: %v\nOutput: %s", err, string(output))
-		detail := fmt.Sprintf("gt maintain --force failed: %v", err)
-		if tail := tailLines(output, maintenanceTailLines); len(tail) > 0 {
-			detail += "\n" + strings.Join(tail, "\n")
-		}
-		d.maintenance().escalate(d, "scheduled_maintenance", detail)
-		return
-	}
-
-	d.logger.Printf("scheduled_maintenance: gt maintain completed successfully")
-	for _, line := range tailLines(output, maintenanceTailLines) {
-		d.logger.Printf("scheduled_maintenance: %s", line)
+	d.startMaintenanceGC(databases, maintenanceWindowEnd(now, window))
+	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
+		d.lastMaintenanceRun = time.Unix(0, finished)
 	}
 }

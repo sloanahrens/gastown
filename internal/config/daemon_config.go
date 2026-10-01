@@ -235,16 +235,15 @@ type CompactorDogConfig struct {
 	IntervalStr string `json:"interval,omitempty"`
 	// Threshold is the minimum commit count before this patrol escalates.
 	// The daemon monitors and escalates — it does not compact. Defaults to
-	// 2000; see defaultCompactorCommitThreshold for why that is well above the
-	// plugin's 500/1000 escalation lines.
+	// 2000; see defaultCompactorCommitThreshold.
 	Threshold int `json:"threshold,omitempty"`
 	// Databases lists specific database names to check.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.
 	Databases []string `json:"databases,omitempty"`
 
 	// Deprecated: has no effect. The daemon patrol no longer compacts, so there
-	// is no mode to select. Compaction is operator-only:
-	// plugins/compactor-dog/run.sh --compact. The field is still parsed so that
+	// is no mode to select. Rewriting history is an offline operator
+	// procedure (docs/dolt-history-offline.md). The field is still parsed so that
 	// a stale daemon.json value is reported rather than silently dropped.
 	Mode string `json:"mode,omitempty"`
 	// Deprecated: has no effect. The daemon patrol no longer compacts, so there
@@ -261,17 +260,15 @@ type CheckpointDogConfig struct {
 	IntervalStr string `json:"interval,omitempty"`
 }
 
-// ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance patrol.
-// User opts in via:
+// ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance
+// patrol, the town's one Dolt GC actor. User opts in via:
 //
 //	gt config set maintenance.window 03:00
-//	gt config set maintenance.interval daily
 //
-// The daemon checks commit counts per DB during the window and then acts on
-// the Mode: "monitor" (the default) escalates with the counts, "flatten" runs
-// `gt maintain --force` when any DB exceeds the threshold. "gc" ignores commit
-// counts and gc's each database whose on-disk size crossed the size trigger
-// (GCMinBytes, GCGrowthRatio), history kept.
+// In the window the daemon runs CALL dolt_gc('--full') on each database that
+// is due: weekly, or sooner when its old generation grew more than 20% since
+// its last gc (internal/daemon/maintenance_gc.go). The schedule is fixed by
+// policy (gt-8z769.3); only the window is configurable.
 type ScheduledMaintenanceConfig struct {
 	// Enabled controls whether scheduled maintenance runs.
 	Enabled bool `json:"enabled"`
@@ -280,38 +277,14 @@ type ScheduledMaintenanceConfig struct {
 	// Uses 24-hour format HH:MM in local time.
 	Window string `json:"window,omitempty"`
 
-	// Interval controls how often maintenance runs.
-	// Supported values: "daily", "weekly", "monthly", or a Go duration (e.g., "48h").
-	// Default: "daily".
-	Interval string `json:"interval,omitempty"`
-
-	// Threshold is the minimum commit count before maintenance triggers.
-	// Default: 1000.
-	Threshold *int `json:"threshold,omitempty"`
-
-	// Mode selects what happens to a database at or above the threshold.
-	// MaintenanceModeMonitor (the default) escalates with the counts and
-	// rewrites nothing; MaintenanceModeFlatten runs `gt maintain --force`.
-	// Only the trimmed string "flatten" arms the destructive path — see
-	// maintenanceMode. MaintenanceModeGC ("gc") runs a history-preserving
-	// CALL dolt_gc('--full') per database on a size trigger instead of the
-	// commit threshold; see maintenance_gc.go.
-	//
-	// Compatibility: a binary built before gc mode existed reads "gc" as
-	// monitor (its resolver matches only "flatten"), so rolling back after
-	// setting mode=gc degrades to escalate-only, never to a flatten.
-	Mode string `json:"mode,omitempty"`
-
-	// GCMinBytes is gc mode's size floor: a database smaller than this on
-	// disk is never gc'd by the patrol. Default 256MiB (DefaultGCMinBytes);
-	// a non-positive value is replaced by the default with a warning.
-	GCMinBytes *int64 `json:"gc_min_bytes,omitempty"`
-
-	// GCGrowthRatio is gc mode's growth trigger: a database at or above
-	// GCMinBytes is gc'd when its size is at least this multiple of the size
-	// recorded right after its last patrol gc (daemon/maintenance_state.json),
-	// or when no such record exists. Default 2.0; a value below 1, NaN or
-	// Inf is replaced by the default with a warning.
+	// Deprecated: have no effect. They configured the retired monitor,
+	// flatten and size-triggered gc modes. They are still parsed so a live
+	// daemon.json that carries them decodes strictly, and the daemon logs
+	// that they are ignored rather than dropping them silently.
+	Interval      string   `json:"interval,omitempty"`
+	Threshold     *int     `json:"threshold,omitempty"`
+	Mode          string   `json:"mode,omitempty"`
+	GCMinBytes    *int64   `json:"gc_min_bytes,omitempty"`
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
 }
 

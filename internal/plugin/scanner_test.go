@@ -85,7 +85,6 @@ func TestDoltShellPluginsPreferGTDoltEnv(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join("..", "..")
 	for _, rel := range []string{
-		filepath.Join("plugins", "compactor-dog", "run.sh"),
 		filepath.Join("plugins", "dolt-archive", "run.sh"),
 	} {
 		data, err := os.ReadFile(filepath.Join(root, rel))

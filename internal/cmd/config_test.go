@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // setupTestTown creates a minimal Gas Town workspace for testing.
@@ -704,124 +703,6 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		}
 	})
 
-	t.Run("set and get maintenance.interval", func(t *testing.T) {
-		townRoot := setupTestTownForConfig(t)
-
-		for _, interval := range []string{"daily", "weekly", "monthly", "48h"} {
-			if err := setMaintenanceConfig(townRoot, "maintenance.interval", interval); err != nil {
-				t.Errorf("setMaintenanceConfig(interval=%q) unexpected error: %v", interval, err)
-			}
-		}
-
-		// Invalid interval
-		if err := setMaintenanceConfig(townRoot, "maintenance.interval", "whenever"); err == nil {
-			t.Error("expected error for invalid interval 'whenever'")
-		}
-	})
-
-	t.Run("set and get maintenance.threshold", func(t *testing.T) {
-		townRoot := setupTestTownForConfig(t)
-
-		if err := setMaintenanceConfig(townRoot, "maintenance.threshold", "500"); err != nil {
-			t.Fatalf("setMaintenanceConfig(threshold=500) failed: %v", err)
-		}
-
-		// Invalid thresholds
-		if err := setMaintenanceConfig(townRoot, "maintenance.threshold", "0"); err == nil {
-			t.Error("expected error for threshold 0")
-		}
-		if err := setMaintenanceConfig(townRoot, "maintenance.threshold", "abc"); err == nil {
-			t.Error("expected error for non-numeric threshold")
-		}
-	})
-
-	t.Run("set maintenance.mode validates the mode list", func(t *testing.T) {
-		townRoot := setupTestTownForConfig(t)
-
-		for _, mode := range []string{"monitor", "flatten", "gc"} {
-			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err != nil {
-				t.Errorf("setMaintenanceConfig(mode=%q) unexpected error: %v", mode, err)
-			}
-		}
-
-		// The daemon treats anything but an exact "flatten" as monitor, so an
-		// invalid value would be safe but silent. Refusing it at the point of
-		// entry is what keeps daemon.json honest.
-		for _, mode := range []string{"", "Monitor", "compact", "flaten"} {
-			if err := setMaintenanceConfig(townRoot, "maintenance.mode", mode); err == nil {
-				t.Errorf("setMaintenanceConfig(mode=%q) expected error", mode)
-			}
-		}
-	})
-
-	t.Run("set and get maintenance gc trigger keys", func(t *testing.T) {
-		townRoot := setupTestTownForConfig(t)
-
-		read := func(key string) string {
-			var out bytes.Buffer
-			if err := getMaintenanceConfig(&out, townRoot, key); err != nil {
-				t.Errorf("getMaintenanceConfig(%s) failed: %v", key, err)
-			}
-			return strings.TrimSpace(out.String())
-		}
-
-		// Unset keys read as the daemon's defaults.
-		if got := read("maintenance.gc_min_bytes"); got != "268435456" {
-			t.Errorf("unset gc_min_bytes reads %q, want 268435456", got)
-		}
-		if got := read("maintenance.gc_growth_ratio"); got != "2" {
-			t.Errorf("unset gc_growth_ratio reads %q, want 2", got)
-		}
-
-		if err := setMaintenanceConfig(townRoot, "maintenance.gc_min_bytes", "134217728"); err != nil {
-			t.Fatalf("set gc_min_bytes: %v", err)
-		}
-		if err := setMaintenanceConfig(townRoot, "maintenance.gc_growth_ratio", "1.5"); err != nil {
-			t.Fatalf("set gc_growth_ratio: %v", err)
-		}
-		if got := read("maintenance.gc_min_bytes"); got != "134217728" {
-			t.Errorf("gc_min_bytes reads %q after set", got)
-		}
-		if got := read("maintenance.gc_growth_ratio"); got != "1.5" {
-			t.Errorf("gc_growth_ratio reads %q after set", got)
-		}
-
-		for _, bad := range []string{"0", "-1", "abc", "1.5"} {
-			if err := setMaintenanceConfig(townRoot, "maintenance.gc_min_bytes", bad); err == nil {
-				t.Errorf("gc_min_bytes=%q accepted", bad)
-			}
-		}
-		for _, bad := range []string{"0.5", "0", "abc", "NaN", "+Inf"} {
-			if err := setMaintenanceConfig(townRoot, "maintenance.gc_growth_ratio", bad); err == nil {
-				t.Errorf("gc_growth_ratio=%q accepted", bad)
-			}
-		}
-	})
-
-	t.Run("get maintenance.mode reports the stored value or the default", func(t *testing.T) {
-		townRoot := setupTestTownForConfig(t)
-
-		readMode := func() string {
-			var out bytes.Buffer
-			if err := getMaintenanceConfig(&out, townRoot, "maintenance.mode"); err != nil {
-				t.Errorf("getMaintenanceConfig(mode) failed: %v", err)
-			}
-			return strings.TrimSpace(out.String())
-		}
-
-		// Unset reads as the default the daemon will use.
-		if got := readMode(); got != daemon.MaintenanceModeMonitor {
-			t.Errorf("unset maintenance.mode reads as %q, want %q", got, daemon.MaintenanceModeMonitor)
-		}
-
-		if err := setMaintenanceConfig(townRoot, "maintenance.mode", daemon.MaintenanceModeFlatten); err != nil {
-			t.Fatalf("setMaintenanceConfig(mode=flatten) failed: %v", err)
-		}
-		if got := readMode(); got != daemon.MaintenanceModeFlatten {
-			t.Errorf("maintenance.mode reads as %q after being set to flatten", got)
-		}
-	})
-
 	t.Run("maintenance config routes through runConfigSet", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
@@ -833,6 +714,19 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 		err = configGet(townConfigCmdEnv(townRoot, io.Discard), []string{"maintenance.window"})
 		if err != nil {
 			t.Fatalf("runConfigGet(maintenance.window) failed: %v", err)
+		}
+	})
+
+	// The schedule is policy (gt-8z769.3): the retired mode and trigger keys
+	// are refused rather than written into a daemon.json nothing reads.
+	t.Run("retired maintenance keys are unknown", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		for _, key := range []string{"maintenance.interval", "maintenance.threshold", "maintenance.mode",
+			"maintenance.gc_min_bytes", "maintenance.gc_growth_ratio"} {
+			err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{key, "1"})
+			if err == nil || !strings.Contains(err.Error(), "unknown config key") {
+				t.Errorf("config set %s = %v, want unknown config key", key, err)
+			}
 		}
 	})
 }

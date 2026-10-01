@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -135,107 +134,26 @@ func TestIsInMaintenanceWindow(t *testing.T) {
 	}
 }
 
-func TestShouldRunMaintenance(t *testing.T) {
+func TestShouldRunMaintenanceCycle(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 2, 28, 3, 0, 0, 0, time.Local)
-
+	now := time.Date(2026, 2, 28, 3, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name     string
-		lastRun  time.Time
-		interval string
-		want     bool
+		name    string
+		lastRun time.Time
+		want    bool
 	}{
-		{
-			name:     "never run before",
-			lastRun:  time.Time{},
-			interval: "daily",
-			want:     true,
-		},
-		{
-			name:     "daily - ran 25 hours ago",
-			lastRun:  now.Add(-25 * time.Hour),
-			interval: "daily",
-			want:     true,
-		},
-		{
-			name:     "daily - ran 10 hours ago",
-			lastRun:  now.Add(-10 * time.Hour),
-			interval: "daily",
-			want:     false,
-		},
-		{
-			name:     "weekly - ran 7 days ago",
-			lastRun:  now.Add(-7 * 24 * time.Hour),
-			interval: "weekly",
-			want:     true,
-		},
-		{
-			name:     "weekly - ran 3 days ago",
-			lastRun:  now.Add(-3 * 24 * time.Hour),
-			interval: "weekly",
-			want:     false,
-		},
-		{
-			name:     "monthly - ran 30 days ago",
-			lastRun:  now.Add(-30 * 24 * time.Hour),
-			interval: "monthly",
-			want:     true,
-		},
-		{
-			name:     "monthly - ran 10 days ago",
-			lastRun:  now.Add(-10 * 24 * time.Hour),
-			interval: "monthly",
-			want:     false,
-		},
-		{
-			name:     "custom duration 48h - ran 50h ago",
-			lastRun:  now.Add(-50 * time.Hour),
-			interval: "48h",
-			want:     true,
-		},
-		{
-			name:     "custom duration 48h - ran 30h ago",
-			lastRun:  now.Add(-30 * time.Hour),
-			interval: "48h",
-			want:     false,
-		},
-		{
-			name:     "invalid interval - falls back to daily",
-			lastRun:  now.Add(-25 * time.Hour),
-			interval: "nope",
-			want:     true,
-		},
+		{"never run before", time.Time{}, true},
+		{"ran in yesterday's window", now.Add(-24*time.Hour + 5*time.Minute), true},
+		{"ran 10 hours ago", now.Add(-10 * time.Hour), false},
+		{"ran earlier in this window", now.Add(-30 * time.Minute), false},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRunMaintenance(now, tt.lastRun, tt.interval)
-			if got != tt.want {
-				t.Errorf("shouldRunMaintenance(now, %v, %q) = %v, want %v", tt.lastRun, tt.interval, got, tt.want)
+			t.Parallel()
+			if got := shouldRunMaintenanceCycle(now, tt.lastRun); got != tt.want {
+				t.Errorf("shouldRunMaintenanceCycle(now, %v) = %v, want %v", tt.lastRun, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestMaintenanceThreshold(t *testing.T) {
-	t.Parallel()
-	// Nil config returns default
-	if got := maintenanceThreshold(nil); got != defaultMaintenanceThreshold {
-		t.Errorf("expected default %d, got %d", defaultMaintenanceThreshold, got)
-	}
-
-	// Configured threshold
-	threshold := 500
-	config := &DaemonPatrolConfig{
-		Patrols: &PatrolsConfig{
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled:   true,
-				Threshold: &threshold,
-			},
-		},
-	}
-	if got := maintenanceThreshold(config); got != 500 {
-		t.Errorf("expected 500, got %d", got)
 	}
 }
 
@@ -257,33 +175,6 @@ func TestMaintenanceWindow(t *testing.T) {
 	}
 	if got := maintenanceWindow(config); got != "03:00" {
 		t.Errorf("expected 03:00, got %q", got)
-	}
-}
-
-func TestMaintenanceInterval(t *testing.T) {
-	t.Parallel()
-	// Nil config returns "daily"
-	if got := maintenanceInterval(nil); got != "daily" {
-		t.Errorf("expected daily, got %q", got)
-	}
-
-	// Configured interval
-	config := &DaemonPatrolConfig{
-		Patrols: &PatrolsConfig{
-			ScheduledMaintenance: &ScheduledMaintenanceConfig{
-				Enabled:  true,
-				Interval: "weekly",
-			},
-		},
-	}
-	if got := maintenanceInterval(config); got != "weekly" {
-		t.Errorf("expected weekly, got %q", got)
-	}
-
-	// Empty interval returns default
-	config.Patrols.ScheduledMaintenance.Interval = ""
-	if got := maintenanceInterval(config); got != "daily" {
-		t.Errorf("expected daily for empty, got %q", got)
 	}
 }
 
@@ -310,106 +201,5 @@ func TestIsPatrolEnabledScheduledMaintenance(t *testing.T) {
 	config.Patrols.ScheduledMaintenance.Enabled = true
 	if !IsPatrolEnabled(config, "scheduled_maintenance") {
 		t.Error("expected scheduled_maintenance enabled when Enabled=true")
-	}
-}
-
-func TestMaintenanceMode(t *testing.T) {
-	t.Parallel()
-	withMode := func(mode string) *DaemonPatrolConfig {
-		return &DaemonPatrolConfig{
-			Patrols: &PatrolsConfig{
-				ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: true, Mode: mode},
-			},
-		}
-	}
-
-	tests := []struct {
-		name   string
-		config *DaemonPatrolConfig
-		want   string
-	}{
-		{"nil config defaults to monitor", nil, MaintenanceModeMonitor},
-		{"empty config defaults to monitor", &DaemonPatrolConfig{}, MaintenanceModeMonitor},
-		{"empty mode defaults to monitor", withMode(""), MaintenanceModeMonitor},
-		{"explicit monitor", withMode("monitor"), MaintenanceModeMonitor},
-		{"explicit flatten", withMode("flatten"), MaintenanceModeFlatten},
-		{"flatten tolerates surrounding space", withMode("  flatten  "), MaintenanceModeFlatten},
-		// The load-bearing cases: only the exact lowercase word arms the
-		// destructive path. A typo, or a case variation from a hand-edited
-		// daemon.json, must escalate at 03:00, not rewrite every database
-		// (gt-aku6: a prior version matched case-insensitively, which let
-		// "FLATTEN" arm the path even though setMaintenanceConfig's own
-		// validation and this package's doc comments both claimed only the
-		// exact word could).
-		{"flatten is matched case-sensitively", withMode("FLATTEN"), MaintenanceModeMonitor},
-		{"typo stays monitor", withMode("flaten"), MaintenanceModeMonitor},
-		{"unknown mode stays monitor", withMode("compact"), MaintenanceModeMonitor},
-		{"monitor with trailing junk stays monitor", withMode("monitor flatten"), MaintenanceModeMonitor},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := maintenanceMode(tt.config); got != tt.want {
-				t.Errorf("maintenanceMode() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestMaintenanceMonitorMessage(t *testing.T) {
-	t.Parallel()
-	targets := []maintenanceTarget{
-		{name: "gastown", commits: 1524},
-		{name: "hq", commits: 1204},
-	}
-	msg := maintenanceMonitorMessage(targets, 1000)
-
-	// Every over-threshold database must be named with its count: the
-	// escalation is the only thing a human sees, and "something is over
-	// threshold" is not actionable without the numbers.
-	for _, want := range []string{"gastown", "1524", "hq", "1204", "1000", MaintenanceModeMonitor} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("monitor message missing %q:\n%s", want, msg)
-		}
-	}
-	// And it must say the thing that matters: nothing was rewritten.
-	if !strings.Contains(msg, "Nothing was rewritten") {
-		t.Errorf("monitor message does not state that nothing was rewritten:\n%s", msg)
-	}
-
-	single := maintenanceMonitorMessage([]maintenanceTarget{{name: "om", commits: 7}}, 5)
-	if !strings.Contains(single, "om") || !strings.Contains(single, "7") {
-		t.Errorf("single-target message missing name or count:\n%s", single)
-	}
-}
-
-func TestTailLines(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		output string
-		n      int
-		want   []string
-	}{
-		{"empty output", "", 5, nil},
-		{"whitespace only", "\n\n  \n", 5, nil},
-		{"fewer lines than n", "a\nb", 5, []string{"a", "b"}},
-		{"exactly n", "a\nb", 2, []string{"a", "b"}},
-		{"more lines than n keeps the tail", "a\nb\nc\nd", 2, []string{"c", "d"}},
-		{"trailing newline is not a line", "a\nb\n", 5, []string{"a", "b"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tailLines([]byte(tt.output), tt.n)
-			if len(got) != len(tt.want) {
-				t.Fatalf("tailLines(%q, %d) = %q, want %q", tt.output, tt.n, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("tailLines(%q, %d) = %q, want %q", tt.output, tt.n, got, tt.want)
-				}
-			}
-		})
 	}
 }

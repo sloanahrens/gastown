@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,40 +18,51 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
-// scheduled_maintenance mode "gc": history-preserving garbage collection.
+// scheduled_maintenance's gc: history-preserving garbage collection, the
+// town's one GC actor (gt-8z769.3).
 //
-// Per database, in the maintenance window: when its on-disk size is at least
-// gc_min_bytes AND has grown by gc_growth_ratio since the size recorded after
-// its last gc (or no such record exists yet), run CALL dolt_gc('--full') on it
-// over the daemon's SQL connection to the running server. It never flattens,
-// never rewrites a commit, never pushes — see
-// docs/plans/2026-09-25-dolt-gc-maintenance-design.md (claude-05o).
+// Per database, in the maintenance window, run CALL dolt_gc('--full') over the
+// daemon's SQL connection to the running server when either holds:
+//   - weekly: its last patrol gc is at least maintenanceGCWeekly old, or it
+//     has none recorded;
+//   - old-gen growth: its old generation (.dolt/noms/oldgen) is more than
+//     maintenanceOldGenGrowth larger than right after its last gc.
 //
-// The trigger is size, not commit count; the measurements behind that are in
-// the design doc's Problem section.
+// Old-gen is the trigger because it is the growth: the 2026-09-29 offline
+// measurement (gt-8z769) showed a full gc reclaims almost nothing on a
+// database whose size is commit history, so a total-size trigger fires on
+// growth gc cannot remove. A pause marker (internal/doltpause) covers each gc
+// call. It never flattens, never rewrites a commit, never pushes.
 
 const (
-	// MaintenanceModeGC runs CALL dolt_gc('--full') on each database that
-	// crossed the size trigger. History is kept.
-	MaintenanceModeGC = "gc"
+	// maintenanceGCWeekly is the routine full-gc interval per database,
+	// short of seven days by a window's slack so a weekly run does not drift
+	// a day later each week.
+	maintenanceGCWeekly = 7*24*time.Hour - 4*time.Hour
 
-	// DefaultGCMinBytes is the size floor below which a database is never
-	// gc'd by the patrol: a small database is not worth a --full pass.
-	DefaultGCMinBytes = int64(256 * 1024 * 1024)
-
-	// DefaultGCGrowthRatio is how much a database must have grown since its
-	// last post-gc size before the next gc.
-	DefaultGCGrowthRatio = 2.0
+	// maintenanceOldGenGrowth is the old-gen growth since the last gc that
+	// triggers an early gc: more than 20%.
+	maintenanceOldGenGrowth = 1.20
 
 	// maintenanceGCTimeout bounds one CALL dolt_gc('--full'). A prod --full
 	// gc takes seconds per database (design doc, Problem); ten minutes is a
 	// hang, not a slow gc.
 	maintenanceGCTimeout = 10 * time.Minute
+
+	// maintenancePauseSlack is how long the pause marker outlives the gc
+	// timeout, so a gc cut off at its bound is still covered while the
+	// cycle removes the marker. A daemon that dies mid-gc leaves a marker
+	// that lapses on its own at this horizon.
+	maintenancePauseSlack = 5 * time.Minute
+
+	// maintenancePauseActor is the actor the gc's pause marker names.
+	maintenancePauseActor = "daemon/scheduled_maintenance"
 
 	// maintenancePolecatFreshness is how recent a polecat's "working"
 	// heartbeat must be to count as work in flight. Polecats renew it on
@@ -62,55 +72,27 @@ const (
 	maintenanceGCStateFileName = "maintenance_state.json"
 )
 
-// maintenanceGCPolicy is the resolved size trigger.
-type maintenanceGCPolicy struct {
-	minBytes    int64
-	growthRatio float64
+// gcMeasure is one database's sizes before or after a gc.
+type gcMeasure struct {
+	total  int64
+	oldGen int64
 }
 
-// maintenanceGCPolicyFor resolves gc_min_bytes and gc_growth_ratio, replacing
-// invalid values with the defaults. The returned warnings name every value
-// that was replaced, for the log: a hand-edited daemon.json must not fail
-// silently toward a different trigger than the file says.
-func maintenanceGCPolicyFor(config *DaemonPatrolConfig) (maintenanceGCPolicy, []string) {
-	p := maintenanceGCPolicy{minBytes: DefaultGCMinBytes, growthRatio: DefaultGCGrowthRatio}
-	var warnings []string
-	if config == nil || config.Patrols == nil || config.Patrols.ScheduledMaintenance == nil {
-		return p, nil
+// shouldGCDatabase applies the two triggers to one database. lastGC and
+// oldGenBaseline come from its last patrol gc (zero when none is recorded).
+func shouldGCDatabase(now, lastGC time.Time, oldGen, oldGenBaseline int64) (bool, string) {
+	if lastGC.IsZero() {
+		return true, "no patrol gc recorded yet"
 	}
-	mc := config.Patrols.ScheduledMaintenance
-	if mc.GCMinBytes != nil {
-		if *mc.GCMinBytes > 0 {
-			p.minBytes = *mc.GCMinBytes
-		} else {
-			warnings = append(warnings, fmt.Sprintf("gc_min_bytes=%d is not positive; using %d", *mc.GCMinBytes, DefaultGCMinBytes))
-		}
+	since := now.Sub(lastGC).Round(time.Hour)
+	if now.Sub(lastGC) >= maintenanceGCWeekly {
+		return true, fmt.Sprintf("weekly: last gc %v ago", since)
 	}
-	if mc.GCGrowthRatio != nil {
-		r := *mc.GCGrowthRatio
-		if r >= 1.0 && !math.IsInf(r, 0) && !math.IsNaN(r) {
-			p.growthRatio = r
-		} else {
-			warnings = append(warnings, fmt.Sprintf("gc_growth_ratio=%v is not a finite number >= 1; using %v", r, DefaultGCGrowthRatio))
-		}
+	if float64(oldGen) > float64(oldGenBaseline)*maintenanceOldGenGrowth {
+		return true, fmt.Sprintf("old-gen grew %s -> %s since last gc %v ago (trigger >%.0f%%)",
+			formatBytes(oldGenBaseline), formatBytes(oldGen), since, (maintenanceOldGenGrowth-1)*100)
 	}
-	return p, warnings
-}
-
-// shouldGCDatabase applies the size trigger. baseline is the size recorded
-// after the database's last patrol gc, 0 when there is none.
-func shouldGCDatabase(size, baseline int64, p maintenanceGCPolicy) (bool, string) {
-	if size < p.minBytes {
-		return false, fmt.Sprintf("below gc_min_bytes %s", formatBytes(p.minBytes))
-	}
-	if baseline <= 0 {
-		return true, "no post-gc baseline yet"
-	}
-	ratio := float64(size) / float64(baseline)
-	if ratio < p.growthRatio {
-		return false, fmt.Sprintf("%.2fx last post-gc size %s, under gc_growth_ratio %v", ratio, formatBytes(baseline), p.growthRatio)
-	}
-	return true, fmt.Sprintf("%.2fx last post-gc size %s", ratio, formatBytes(baseline))
+	return false, fmt.Sprintf("last gc %v ago, old-gen %s vs %s after it", since, formatBytes(oldGen), formatBytes(oldGenBaseline))
 }
 
 // formatBytes renders a byte count in MiB for logs and escalations.
@@ -120,15 +102,18 @@ func formatBytes(n int64) string {
 
 // --- state file ----------------------------------------------------------------
 
-// maintenanceGCState is <town>/daemon/maintenance_state.json: the size each
-// database had right after its last patrol gc, which is the growth baseline.
+// maintenanceGCState is <town>/daemon/maintenance_state.json: per database,
+// when its last patrol gc ran, its size and old-gen size right after it (the
+// old-gen size is the growth baseline), and how much that gc reclaimed.
 //
 // It also carries the skipped-window streak (see maintenance_gc_guard.go): a
 // window that closes with gc still deferred on at least one eligible database
 // counts once, and a completed or failed run resets the streak.
 type maintenanceGCState struct {
-	PostGCBytes map[string]int64     `json:"post_gc_bytes"`
-	LastGC      map[string]time.Time `json:"last_gc"`
+	PostGCBytes       map[string]int64     `json:"post_gc_bytes"`
+	PostGCOldGenBytes map[string]int64     `json:"post_gc_oldgen_bytes"`
+	ReclaimedBytes    map[string]int64     `json:"reclaimed_bytes"`
+	LastGC            map[string]time.Time `json:"last_gc"`
 
 	// PendingDeferral is the current window's latest deferral, if any. It is
 	// counted into ConsecutiveDeferredWindows once its window has closed.
@@ -169,7 +154,12 @@ func maintenanceGCStatePath(townRoot string) string {
 // corrupt one is an error the caller logs before treating it as empty (gc is
 // non-destructive, so "no baseline" is a safe reading).
 func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
-	st := maintenanceGCState{PostGCBytes: map[string]int64{}, LastGC: map[string]time.Time{}}
+	st := maintenanceGCState{
+		PostGCBytes:       map[string]int64{},
+		PostGCOldGenBytes: map[string]int64{},
+		ReclaimedBytes:    map[string]int64{},
+		LastGC:            map[string]time.Time{},
+	}
 	data, err := os.ReadFile(maintenanceGCStatePath(townRoot))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -183,6 +173,12 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	}
 	for k, v := range parsed.PostGCBytes {
 		st.PostGCBytes[k] = v
+	}
+	for k, v := range parsed.PostGCOldGenBytes {
+		st.PostGCOldGenBytes[k] = v
+	}
+	for k, v := range parsed.ReclaimedBytes {
+		st.ReclaimedBytes[k] = v
 	}
 	for k, v := range parsed.LastGC {
 		st.LastGC[k] = v
@@ -211,11 +207,14 @@ func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (ma
 	return st, atomicfile.WriteJSON(path, st)
 }
 
-// recordMaintenanceGCBaseline records one database's post-gc size, keeping the
-// other entries. A corrupt file is replaced rather than failing forever.
-func recordMaintenanceGCBaseline(townRoot, db string, size int64, at time.Time) error {
+// recordMaintenanceGCRun records one database's gc: when it ran, its sizes
+// after, and what it reclaimed, keeping the other entries. A corrupt file is
+// replaced rather than failing forever.
+func recordMaintenanceGCRun(townRoot, db string, before, after gcMeasure, at time.Time) error {
 	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
-		st.PostGCBytes[db] = size
+		st.PostGCBytes[db] = after.total
+		st.PostGCOldGenBytes[db] = after.oldGen
+		st.ReclaimedBytes[db] = before.total - after.total
 		st.LastGC[db] = at
 	})
 	return err
@@ -223,14 +222,31 @@ func recordMaintenanceGCBaseline(townRoot, db string, size int64, at time.Time) 
 
 // --- probes (seams) --------------------------------------------------------------
 
-// maintenanceDBSize sums the regular files under <dataDir>/<db>, including the
-// old generation under .dolt/noms/oldgen that only gc --full empties. It only
-// stats; it never opens a file inside .dolt.
-func maintenanceDBSize(dataDir, db string) (int64, error) {
+// maintenanceMeasure measures <dataDir>/<db> on disk: its total size and the
+// old generation under .dolt/noms/oldgen that only gc --full writes. A
+// database with no oldgen directory has an old-gen size of 0. It only stats;
+// it never opens a file inside .dolt.
+func maintenanceMeasure(dataDir, db string) (gcMeasure, error) {
 	if err := validMaintenanceDBName(db); err != nil {
-		return 0, err
+		return gcMeasure{}, err
 	}
 	root := filepath.Join(dataDir, db)
+	total, err := dirSize(root)
+	if err != nil {
+		return gcMeasure{}, err
+	}
+	oldGen, err := dirSize(filepath.Join(root, ".dolt", "noms", "oldgen"))
+	if errors.Is(err, fs.ErrNotExist) {
+		oldGen, err = 0, nil
+	}
+	if err != nil {
+		return gcMeasure{}, err
+	}
+	return gcMeasure{total: total, oldGen: oldGen}, nil
+}
+
+// dirSize sums the regular files under root, which must exist.
+func dirSize(root string) (int64, error) {
 	if _, err := os.Stat(root); err != nil {
 		return 0, err
 	}
@@ -376,9 +392,9 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 	defer conn.Close()
 	conn.SetMaxOpenConns(1)
 
-	// ExecContext, as internal/cmd/maintain.go runs CALL dolt_gc(): the
-	// procedure reports failure as a SQL error, and its status row carries
-	// nothing more. TestIntegrationDoltGCFullAgainstRealServer runs this on a server.
+	// ExecContext: the procedure reports failure as a SQL error, and its
+	// status row carries nothing more. TestIntegrationDoltGCFullAgainstRealServer
+	// runs this on a server.
 	if _, err := conn.ExecContext(ctx, "CALL dolt_gc('--full')"); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("dolt_gc --full: timeout: %w", err)
@@ -415,8 +431,8 @@ func (o maintenanceGCOutcome) String() string {
 }
 
 type gcCandidate struct {
-	name string
-	size int64
+	name   string
+	before gcMeasure
 }
 
 // maintenanceGCResult is a cycle's outcome plus, for a deferral, why and what
@@ -427,36 +443,38 @@ type maintenanceGCResult struct {
 	pending []gcCandidate
 }
 
-// maintenanceGCCycle measures every database, gc's the eligible ones smallest
-// first, and re-checks the quiet-window guard before each.
-func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p maintenanceGCPolicy) maintenanceGCResult {
+// maintenanceGCCycle measures every database, gc's the due ones smallest
+// first, and re-checks the quiet-window guard and the pause marker before
+// each.
+func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintenanceGCResult {
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
-		d.logger.Printf("scheduled_maintenance: WARNING: %v — treating every database as having no post-gc baseline", err)
+		d.logger.Printf("scheduled_maintenance: WARNING: %v — treating every database as never gc'd", err)
 	}
 
+	now := d.maintenance().now()
 	var eligible []gcCandidate
 	for _, db := range databases {
-		size, err := d.maintenance().dbSize(dataDir, db)
+		m, err := d.maintenance().measure(dataDir, db)
 		if err != nil {
 			d.logger.Printf("scheduled_maintenance: %s: cannot measure size: %v — skipping", db, err)
 			continue
 		}
-		ok, reason := shouldGCDatabase(size, st.PostGCBytes[db], p)
+		ok, reason := shouldGCDatabase(now, st.LastGC[db], m.oldGen, st.PostGCOldGenBytes[db])
 		if !ok {
-			d.logger.Printf("scheduled_maintenance: %s: %s, %s — no gc", db, formatBytes(size), reason)
+			d.logger.Printf("scheduled_maintenance: %s: %s, %s — no gc", db, formatBytes(m.total), reason)
 			continue
 		}
-		d.logger.Printf("scheduled_maintenance: %s: %s, %s — gc eligible", db, formatBytes(size), reason)
-		eligible = append(eligible, gcCandidate{name: db, size: size})
+		d.logger.Printf("scheduled_maintenance: %s: %s, %s — gc due", db, formatBytes(m.total), reason)
+		eligible = append(eligible, gcCandidate{name: db, before: m})
 	}
 	if len(eligible) == 0 {
-		d.logger.Printf("scheduled_maintenance: mode=%s — no database needs gc", MaintenanceModeGC)
+		d.logger.Printf("scheduled_maintenance: no database needs gc")
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}
 	}
 	// Smallest first: the cheap databases finish before the town can get
 	// busy, and the operator runbook proved the order on prod.
-	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].size < eligible[j].size })
+	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].before.total < eligible[j].before.total })
 
 	parent := d.ctx
 	if parent == nil {
@@ -477,8 +495,13 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 		if quiet, why := d.maintenance().quiet(d); !quiet {
 			return defer_(i, why)
 		}
-		// Exclusive against the daemon's own Dolt tasks (backups, remote push,
-		// wisp reaper, JSONL export, compactor), which hold the read side.
+		// Someone else's deliberate outage (the backup, an operator) is not
+		// ours to overwrite or end.
+		if m := d.maintenance().pauseCurrent(d.config.TownRoot, d.maintenance().now()); m != nil {
+			return defer_(i, m.Message())
+		}
+		// Exclusive against the daemon's own Dolt tasks (backups, wisp
+		// reaper, JSONL export, compactor), which hold the read side.
 		if !d.doltMaintMu.TryLock() {
 			return defer_(i, "daemon Dolt task in flight")
 		}
@@ -488,42 +511,72 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 			return defer_(i, "convoy poll busy")
 		}
 
-		d.logger.Printf("scheduled_maintenance: gc %s: CALL dolt_gc('--full') (before %s)", c.name, formatBytes(c.size))
-		start := time.Now()
-		d.maintenanceGCOverdueEscalated.Store(false)
-		d.maintenanceGCCallStartedAt.Store(start.UnixNano())
-		ctx, cancel := context.WithTimeout(parent, maintenanceGCTimeout)
-		err := d.maintenance().gcExec(ctx, d, c.name)
-		cancel()
-		d.maintenanceGCCallStartedAt.Store(0)
+		err := d.maintenanceGCOne(parent, dataDir, c)
 		resume()
 		d.doltMaintMu.Unlock()
-		elapsed := time.Since(start).Round(time.Millisecond)
-
 		if err != nil {
-			d.logger.Printf("scheduled_maintenance: gc %s FAILED after %v: %v — stopping this run", c.name, elapsed, err)
 			d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
-				"scheduled_maintenance: CALL dolt_gc('--full') failed on %s after %v (size before %s): %v\n"+
+				"scheduled_maintenance: CALL dolt_gc('--full') on %s (size before %s): %v\n"+
 					"The gc run stopped; remaining databases were not touched. History is intact "+
-					"(gc mode never flattens). Collect gt dolt status before any Dolt restart.",
-				c.name, elapsed, formatBytes(c.size), err))
+					"(gc never flattens). Collect gt dolt status before any Dolt restart.",
+				c.name, formatBytes(c.before.total), err))
 			return maintenanceGCResult{outcome: gcOutcomeFailed, reason: err.Error()}
-		}
-
-		after, sizeErr := d.maintenance().dbSize(dataDir, c.name)
-		if sizeErr != nil {
-			// No baseline means the next interval treats this database as
-			// never gc'd and, if it is over gc_min_bytes, gc's it again.
-			d.logger.Printf("scheduled_maintenance: gc %s: done in %v, but cannot re-measure: %v — no baseline recorded",
-				c.name, elapsed, sizeErr)
-			continue
-		}
-		d.logger.Printf("scheduled_maintenance: gc %s: %s -> %s in %v", c.name, formatBytes(c.size), formatBytes(after), elapsed)
-		if err := recordMaintenanceGCBaseline(d.config.TownRoot, c.name, after, time.Now()); err != nil {
-			d.logger.Printf("scheduled_maintenance: WARNING: cannot record post-gc baseline for %s: %v", c.name, err)
 		}
 	}
 	return maintenanceGCResult{outcome: gcOutcomeCompleted}
+}
+
+// maintenanceGCOne pauses Dolt, runs one database's gc, unpauses, and records
+// the run. The pause marker is written before the gc call and removed after
+// it whatever the outcome; one the daemon cannot remove lapses at its until.
+func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, c gcCandidate) error {
+	s := d.maintenance()
+	start := s.now()
+	marker := doltpause.Marker{
+		Actor:  maintenancePauseActor,
+		Reason: fmt.Sprintf("dolt_gc --full on %s", c.name),
+		Since:  start,
+		Until:  start.Add(maintenanceGCTimeout + maintenancePauseSlack),
+	}
+	if err := s.pauseWrite(d.config.TownRoot, marker); err != nil {
+		d.logger.Printf("scheduled_maintenance: gc %s: cannot write pause marker: %v — not running gc", c.name, err)
+		return fmt.Errorf("cannot write pause marker, gc not run: %w", err)
+	}
+	defer func() {
+		if _, err := s.pauseRemove(d.config.TownRoot); err != nil {
+			d.logger.Printf("scheduled_maintenance: WARNING: cannot remove pause marker: %v — it lapses at %s",
+				err, marker.Until.Format(time.RFC3339))
+		}
+	}()
+
+	d.logger.Printf("scheduled_maintenance: gc %s: CALL dolt_gc('--full') (before %s, old-gen %s)",
+		c.name, formatBytes(c.before.total), formatBytes(c.before.oldGen))
+	d.maintenanceGCOverdueEscalated.Store(false)
+	d.maintenanceGCCallStartedAt.Store(time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(parent, maintenanceGCTimeout)
+	err := s.gcExec(ctx, d, c.name)
+	cancel()
+	d.maintenanceGCCallStartedAt.Store(0)
+	elapsed := s.now().Sub(start).Round(time.Millisecond)
+	if err != nil {
+		d.logger.Printf("scheduled_maintenance: gc %s FAILED after %v: %v — stopping this run", c.name, elapsed, err)
+		return fmt.Errorf("failed after %v: %w", elapsed, err)
+	}
+
+	after, err := s.measure(dataDir, c.name)
+	if err != nil {
+		// Recording no run means the next window treats this database as
+		// never gc'd and gc's it again.
+		d.logger.Printf("scheduled_maintenance: gc %s: done in %v, but cannot re-measure: %v — no run recorded",
+			c.name, elapsed, err)
+		return nil
+	}
+	d.logger.Printf("scheduled_maintenance: gc %s: %s -> %s (old-gen %s -> %s) in %v", c.name,
+		formatBytes(c.before.total), formatBytes(after.total), formatBytes(c.before.oldGen), formatBytes(after.oldGen), elapsed)
+	if err := recordMaintenanceGCRun(d.config.TownRoot, c.name, c.before, after, s.now()); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot record gc of %s: %v", c.name, err)
+	}
+	return nil
 }
 
 // maintenanceDataDir is the Dolt data directory the server serves: the
@@ -548,23 +601,19 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 		d.logger.Printf("scheduled_maintenance: previous gc cycle still running — skipping this tick")
 		return
 	}
-	p, warnings := maintenanceGCPolicyFor(d.patrolConfig)
-	for _, w := range warnings {
-		d.logger.Printf("scheduled_maintenance: WARNING: %s", w)
-	}
 	dataDir := d.maintenanceDataDir()
-	d.logger.Printf("scheduled_maintenance: mode=%s — gc_min_bytes=%s gc_growth_ratio=%v data_dir=%s",
-		MaintenanceModeGC, formatBytes(p.minBytes), p.growthRatio, dataDir)
+	d.logger.Printf("scheduled_maintenance: gc cycle — weekly, or old-gen >%.0f%% since last gc; data_dir=%s",
+		(maintenanceOldGenGrowth-1)*100, dataDir)
 
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		res := d.maintenanceGCCycle(databases, dataDir, p)
+		res := d.maintenanceGCCycle(databases, dataDir)
 		d.logger.Printf("scheduled_maintenance: gc cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
 			d.recordGCDeferral(windowEnd, res.reason, res.pending)
 			return
 		}
 		d.resetGCDeferralStreak()
-		d.maintenanceGCFinishedAt.Store(time.Now().UnixNano())
+		d.maintenanceGCFinishedAt.Store(d.maintenance().now().UnixNano())
 	})
 }

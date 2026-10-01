@@ -95,7 +95,7 @@ func (d *Daemon) doltRestartHeldForGC() bool {
 
 // discoverMaintenanceDatabases lists every Dolt database under dataDir: a
 // non-hidden directory with a .dolt subdirectory and a valid name. This is
-// gc mode's database set — not compactor_dog.databases or
+// gc's database set — not compactor_dog.databases or
 // wisp_reaper.databases, whose fallback is ["hq"] alone.
 func discoverMaintenanceDatabases(dataDir string) ([]string, error) {
 	entries, err := os.ReadDir(dataDir)
@@ -120,7 +120,7 @@ func discoverMaintenanceDatabases(dataDir string) ([]string, error) {
 
 // maintenanceGCExternal is true when the Dolt server is externally managed or
 // not on a loopback host: its data dir is not this host's, so the size
-// trigger would be reading the wrong disk.
+// old-gen trigger would be reading the wrong disk.
 func (d *Daemon) maintenanceGCExternal() (bool, string) {
 	if d.doltServer != nil && d.doltServer.IsEnabled() && d.doltServer.IsExternal() {
 		return true, "Dolt server is externally managed"
@@ -143,21 +143,9 @@ func isLoopbackHost(host string) bool {
 // --- skipped-window streak ------------------------------------------------------
 
 // maintenanceDeferredWindowsBeforeEscalation is the streak length that
-// escalates: 3 windows for a daily (or shorter) interval, 2 for weekly,
-// monthly or any interval of six days or more. After the first escalation the
-// streak re-escalates at most every further 3 windows.
-func maintenanceDeferredWindowsBeforeEscalation(interval string) int {
-	switch interval {
-	case "weekly", "monthly":
-		return 2
-	case "daily", "":
-		return 3
-	}
-	if dur, err := time.ParseDuration(interval); err == nil && dur >= 6*24*time.Hour {
-		return 2
-	}
-	return 3
-}
+// escalates: 3 daily windows in a row. After the first escalation the streak
+// re-escalates at most every further 3 windows.
+const maintenanceDeferredWindowsBeforeEscalation = 3
 
 func shouldEscalateDeferredWindows(count, threshold int) bool {
 	if count < threshold {
@@ -171,7 +159,7 @@ func shouldEscalateDeferredWindows(count, threshold int) bool {
 func (d *Daemon) recordGCDeferral(windowEnd time.Time, reason string, pending []gcCandidate) {
 	dbs := make([]gcDeferredDB, 0, len(pending))
 	for _, c := range pending {
-		dbs = append(dbs, gcDeferredDB{Name: c.name, Bytes: c.size})
+		dbs = append(dbs, gcDeferredDB{Name: c.name, Bytes: c.before.total})
 	}
 	_, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
 		st.PendingDeferral = &gcDeferral{WindowEnd: windowEnd, Reason: reason, Databases: dbs}
@@ -204,10 +192,10 @@ func (d *Daemon) resetGCDeferralStreak() {
 }
 
 // closeDeferredGCWindow counts a pending deferral whose window has closed and
-// escalates when the streak reaches the threshold for interval. Called on
-// every scheduled_maintenance tick in gc mode; a no-op when nothing is pending
+// escalates when the streak reaches maintenanceDeferredWindowsBeforeEscalation.
+// Called on every scheduled_maintenance tick; a no-op when nothing is pending
 // or the window is still open.
-func (d *Daemon) closeDeferredGCWindow(now time.Time, interval string) {
+func (d *Daemon) closeDeferredGCWindow(now time.Time) {
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil || st.PendingDeferral == nil || now.Before(st.PendingDeferral.WindowEnd) {
 		return
@@ -228,7 +216,7 @@ func (d *Daemon) closeDeferredGCWindow(now time.Time, interval string) {
 	if closed.WindowEnd.IsZero() {
 		return
 	}
-	threshold := maintenanceDeferredWindowsBeforeEscalation(interval)
+	threshold := maintenanceDeferredWindowsBeforeEscalation
 	d.logger.Printf("scheduled_maintenance: gc window closed still deferred (%s) — %d consecutive window(s), escalation at %d",
 		closed.Reason, st.ConsecutiveDeferredWindows, threshold)
 	if !shouldEscalateDeferredWindows(st.ConsecutiveDeferredWindows, threshold) {
