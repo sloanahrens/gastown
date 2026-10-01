@@ -625,7 +625,7 @@ fi
 # --- Build -------------------------------------------------------------------
 
 # Yield to a running gate (gt-htx3): make build competes for CPU with a gate
-# suite whose tests are load-sensitive, so a rebuild while a landing-worker
+# suite whose tests are load-sensitive, so a rebuild while a landing, post-land
 # or om-review role holds a container-gate slot is deferred,
 # and past the starvation threshold it waits for that slot instead.
 #
@@ -646,7 +646,7 @@ except Exception:
 roles = []
 for s in d.get("slots") or []:
     role = ((s.get("owner") or {}).get("role") or "")
-    if role.endswith(("/landing", "/om-review")):
+    if role.endswith(("/landing", "/post-land", "/om-review")):
         roles.append(role)
 print(", ".join(roles))
 c = d.get("unwrapped_containers") or []

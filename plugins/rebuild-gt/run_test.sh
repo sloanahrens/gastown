@@ -253,7 +253,7 @@ fi
 if grep -q "gate suite holds a slot (gastown/landing)" "$T/run.out"; then pass "busy gate: names the holder"; else fail "busy gate: no holder named: $(cat "$T/run.out")"; fi
 
 # --- Case 2: every gate-class role suffix defers the rebuild ---
-for role in hm/landing om/om-review; do
+for role in hm/landing gastown/post-land om/om-review; do
   T=$(make_town)
   holder_json "$role" > "$T/slot.json"
   rc=$(run_plugin "$T")
