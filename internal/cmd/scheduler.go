@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -114,22 +115,6 @@ func init() {
 	rootCmd.AddCommand(schedulerCmd)
 }
 
-// scheduledBeadInfo holds info about a scheduled bead for display.
-type scheduledBeadInfo struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	TargetRig string `json:"target_rig"`
-	Blocked   bool   `json:"blocked,omitempty"`
-	// MergePending is set when the bead is held not because a blocker is open
-	// but because a blocker was submitted and its merge request has not landed.
-	// Operators need to distinguish the two: the first is normal waiting, the
-	// second means "look at the merge queue" (gt-0r0z).
-	MergePending bool `json:"merge_pending,omitempty"`
-	// BlockerMR is the open merge request holding the bead back, when known.
-	BlockerMR string `json:"blocker_mr,omitempty"`
-}
-
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -141,7 +126,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading scheduler state: %w", err)
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
+	scheduled, err := schedulerrun.ListScheduled(townRoot)
 	if err != nil {
 		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
@@ -153,14 +138,14 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 
 	if schedulerStatusJSON {
 		out := struct {
-			Paused         bool                    `json:"paused"`
-			PausedBy       string                  `json:"paused_by,omitempty"`
-			ScheduledTotal int                     `json:"queued_total"`
-			ScheduledReady int                     `json:"queued_ready"`
-			ActivePolecats int                     `json:"active_polecats"`
-			Capacity       polecatCapacitySnapshot `json:"capacity"`
-			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
-			Beads          []scheduledBeadInfo     `json:"beads"`
+			Paused         bool                       `json:"paused"`
+			PausedBy       string                     `json:"paused_by,omitempty"`
+			ScheduledTotal int                        `json:"queued_total"`
+			ScheduledReady int                        `json:"queued_ready"`
+			ActivePolecats int                        `json:"active_polecats"`
+			Capacity       polecatCapacitySnapshot    `json:"capacity"`
+			LastDispatchAt string                     `json:"last_dispatch_at,omitempty"`
+			Beads          []schedulerrun.ContextInfo `json:"beads"`
 		}{
 			Paused:         state.Paused,
 			PausedBy:       state.PausedBy,
@@ -222,7 +207,7 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
+	scheduled, err := schedulerrun.ListScheduled(townRoot)
 	if err != nil {
 		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
@@ -239,7 +224,7 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	byRig := make(map[string][]scheduledBeadInfo)
+	byRig := make(map[string][]schedulerrun.ContextInfo)
 	for _, b := range scheduled {
 		byRig[b.TargetRig] = append(byRig[b.TargetRig], b)
 	}
@@ -322,6 +307,13 @@ func runSchedulerResume(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// beadsForContextRecord opens the beads database one sling context lives in.
+// Contexts are created in the target rig's beads dir (GH#3468), which
+// ListOpenSlingContextRecords reports per record.
+func beadsForContextRecord(rec beads.SlingContextRecord) *beads.Beads {
+	return beads.NewWithBeadsDir(rec.WorkDir, rec.BeadsDir)
+}
+
 func runSchedulerClear(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -332,17 +324,17 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 		// Close ALL sling contexts for this specific work bead (there may be
 		// duplicates if concurrent scheduleBead calls raced past idempotency).
 		// Scan all rig dirs since contexts live in target rig beads. (GH#3468)
-		contexts, err := listAllSlingContextRecords(townRoot)
+		contexts, err := beads.ListOpenSlingContextRecords(townRoot)
 		if err != nil {
 			return fmt.Errorf("listing sling contexts: %w", err)
 		}
 
 		closed := 0
 		for _, ctx := range contexts {
-			fields := beads.ParseSlingContextFields(ctx.issue.Description)
+			fields := beads.ParseSlingContextFields(ctx.Issue.Description)
 			if fields != nil && fields.WorkBeadID == schedulerClearBead {
-				if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "cleared"); err != nil {
-					fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.issue.ID, err)
+				if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.Issue.ID, "cleared"); err != nil {
+					fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.Issue.ID, err)
 					continue
 				}
 				closed++
@@ -359,7 +351,7 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 	}
 
 	// Close all open sling contexts across all dirs
-	allContexts, err := listAllSlingContextRecords(townRoot)
+	allContexts, err := beads.ListOpenSlingContextRecords(townRoot)
 	if err != nil {
 		return fmt.Errorf("listing sling contexts: %w", err)
 	}
@@ -371,8 +363,8 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 
 	cleared := 0
 	for _, ctx := range allContexts {
-		if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "cleared"); err != nil {
-			fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.issue.ID, err)
+		if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.Issue.ID, "cleared"); err != nil {
+			fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.Issue.ID, err)
 			continue
 		}
 		cleared++
@@ -388,56 +380,23 @@ func runSchedulerRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err = dispatchScheduledWork(townRoot, detectActor(), schedulerRunBatch, schedulerRunDryRun)
-	return err
-}
-
-// listScheduledBeads returns info about all scheduled beads for display.
-// Reconciles sling context beads with work bead readiness to mark blocked status.
-// Uses batch fetch for work bead info to avoid N+1 subprocess spawns.
-func listScheduledBeads(townRoot string) ([]scheduledBeadInfo, error) {
-	assessments, err := assessScheduledContexts(townRoot)
+	report, err := schedulerrun.Run(cmd.Context(), schedulerrun.Options{
+		TownRoot:      townRoot,
+		Actor:         detectActor(),
+		BatchOverride: schedulerRunBatch,
+		DryRun:        schedulerRunDryRun,
+	}, schedulerDeps())
 	if err != nil {
-		return nil, err
-	}
-	return scheduledBeadInfosFromAssessments(assessments), nil
-}
-
-func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment) []scheduledBeadInfo {
-	var result []scheduledBeadInfo
-	for _, assessment := range assessments {
-		bead, ok := scheduledBeadInfoFromWork(assessment.context.issue.Title, assessment.fields, assessment.info, assessment.found, assessment.ready)
-		if !ok {
-			continue
-		}
-		bead.MergePending = assessment.mergePending
-		bead.BlockerMR = assessment.mergePendingMR
-		result = append(result, bead)
+		return err
 	}
 
-	return result
-}
-
-func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFields, info beadStatusInfo, found, ready bool) (scheduledBeadInfo, bool) {
-	if fields == nil {
-		return scheduledBeadInfo{}, false
+	// Nothing needs waking: the daemon's patrol_scan tick watches the new
+	// polecat (gt-4k3fj.6). Warn when the daemon is not running, since then
+	// nothing restarts a polecat whose session dies (gt-9wv0).
+	for _, rig := range report.Rigs {
+		wakeRigAgents(rig)
 	}
-	title := ctxTitle
-	status := "open"
-	if found {
-		title = info.Title
-		status = info.Status
-		if status == string(beads.IssueStatusHooked) || status == "closed" || status == "tombstone" {
-			return scheduledBeadInfo{}, false
-		}
-	}
-	return scheduledBeadInfo{
-		ID:        fields.WorkBeadID,
-		Title:     title,
-		Status:    status,
-		TargetRig: fields.TargetRig,
-		Blocked:   !ready,
-	}, true
+	return nil
 }
 
 // countActivePolecats counts all running polecat tmux sessions across all rigs.

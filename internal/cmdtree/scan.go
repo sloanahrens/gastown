@@ -1,15 +1,19 @@
 package cmdtree
 
 import (
+	"bytes"
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Ref is one gt or bd invocation found in a file.
@@ -482,6 +486,30 @@ func scannerFor(rel string) scanFunc {
 	return nil
 }
 
+// gitVisible returns the files under root that git would commit: tracked
+// files plus untracked ones .gitignore does not exclude, keyed by their path
+// relative to root. A scan reads only these, so a checkout's ignored local
+// files (a crew workspace's installed .claude/commands, say) cannot change a
+// verdict that a clean worktree reaches differently: TestAgentProseBdAllowlist
+// failed in a crew checkout on its gitignored .claude/commands/done.md and
+// passed in the landing worker's clean merge. It returns nil, meaning no
+// filter, when root is not a git work tree, as a test's temp dir is not.
+func gitVisible(root string) map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").Output() //nolint:gosec // G204: fixed argv; root is the caller's repo path
+	if err != nil {
+		return nil
+	}
+	visible := map[string]bool{}
+	for _, f := range bytes.Split(out, []byte{0}) {
+		if len(f) > 0 {
+			visible[string(f)] = true
+		}
+	}
+	return visible
+}
+
 // ScanRepo walks root and returns every invocation in the lint's inputs, in
 // walk (lexical) order. Ref.File is relative to root. Walking and reading go
 // through an os.Root, so nothing outside root is read.
@@ -492,6 +520,7 @@ func ScanRepo(root string) ([]Ref, error) {
 	}
 	defer func() { _ = r.Close() }()
 	fsys := r.FS()
+	visible := gitVisible(root)
 
 	var refs []Ref
 	err = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
@@ -503,6 +532,9 @@ func ScanRepo(root string) ([]Ref, error) {
 			case ".git", "testdata", "node_modules", "vendor":
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if visible != nil && !visible[rel] {
 			return nil
 		}
 		scan := scannerFor(rel)

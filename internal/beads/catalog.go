@@ -196,4 +196,3 @@ func (mol *CatalogMolecule) ToIssue() *Issue {
 		Priority:    2,
 	}
 }
-

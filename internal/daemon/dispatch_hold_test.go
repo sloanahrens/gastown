@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/schedulerrun"
 )
 
 // The daemon's automatic dispatchers — the stranded-convoy feeder and the
@@ -121,22 +124,29 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce covers
-// heartbeat step 14: `gt scheduler run` slings queued beads (executeSling)
-// and must stand down under the hold, logging once per hold-state change.
-func TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce(t *testing.T) {
+// TestDispatchQueuedWork_OperatorHold_SkipsDispatchAndLogsOnce covers
+// heartbeat step 14: the scheduled-dispatch pass slings queued beads
+// (executeSling) and must stand down under the hold, logging once per
+// hold-state change. It runs in process since gt-638go.9, so the tick forks
+// nothing: the assertion that no gt subprocess appears is the point.
+func TestDispatchQueuedWork_OperatorHold_SkipsDispatchAndLogsOnce(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeOperatorHold(t, townRoot)
 	logger, lines := lineLogger()
 	gt := newFakeCLI(nil)
-	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: logger, execCmd: gt.run}
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        logger,
+		execCmd:       gt.run,
+		schedulerDeps: schedulerDepsForTest(),
+	}
 
 	for i := 0; i < 3; i++ {
 		d.dispatchQueuedWork()
 	}
 	if calls := gt.argvs(); len(calls) != 0 {
-		t.Fatalf("gt scheduler run invoked during an operator hold: %q", calls)
+		t.Fatalf("the daemon forked gt during an operator hold: %q", calls)
 	}
 	if n := countContaining(lines(), "scheduler dispatch", "seat-refill.hold"); n != 1 {
 		t.Errorf("hold logged %d times over 3 ticks, want once; log: %v", n, lines())
@@ -145,15 +155,37 @@ func TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce(t *testing
 	if err := os.Remove(filepath.Join(townRoot, "seat-refill.hold")); err != nil {
 		t.Fatal(err)
 	}
+	// A malformed scheduler state file stops the pass inside planning, before
+	// it reads any store: this is the unit tier, where reaching bd at all is a
+	// tripwire failure. What the tick proves here is that it runs the pass in
+	// this process — the log line is the run, and the empty gt argv is the
+	// absence of the subprocess this change removed.
+	if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, ".runtime", "scheduler-state.json"), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	d.dispatchQueuedWork()
-	calls := gt.recorded()
-	if len(calls) != 1 || calls[0].name != "gt" || strings.Join(calls[0].args, " ") != "scheduler run" {
-		t.Errorf("after the hold lifted, want one gt scheduler run, got %+v", calls)
-	} else if calls[0].dir != townRoot || calls[0].getenv("GT_DAEMON") != "1" {
-		t.Errorf("gt scheduler run ran in %q with GT_DAEMON=%q, want the town root and 1", calls[0].dir, calls[0].getenv("GT_DAEMON"))
+	if calls := gt.argvs(); len(calls) != 0 {
+		t.Errorf("scheduled dispatch still shells out to gt: %q", calls)
+	}
+	if n := countContaining(lines(), "Scheduler dispatch failed"); n != 1 {
+		t.Errorf("after the hold lifted, the tick did not run a dispatch pass; log: %v", lines())
 	}
 	if n := countContaining(lines(), "scheduler dispatch", "hold lifted"); n != 1 {
 		t.Errorf("hold lift logged %d times, want once; log: %v", n, lines())
+	}
+}
+
+// schedulerDepsForTest is a scheduler deps set that dispatches nothing: the
+// tests that drive the heartbeat tick care about the gate, not the sling.
+func schedulerDepsForTest() schedulerrun.Deps {
+	return schedulerrun.Deps{
+		Sling: func(context.Context, string, capacity.PendingBead) (schedulerrun.SlingOutcome, error) {
+			return schedulerrun.SlingOutcome{}, nil
+		},
+		Seats: func(string, bool) (schedulerrun.Seats, error) { return schedulerrun.Seats{}, nil },
 	}
 }
 

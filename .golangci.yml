@@ -119,3 +119,9 @@ linters:
 
 issues:
   uniq-by-line: true
+
+# gofmt as a lint check, so formatting drift fails make lint instead of
+# accumulating: 16 files on main had drifted before this was on.
+formatters:
+  enable:
+    - gofmt

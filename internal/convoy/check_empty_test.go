@@ -56,7 +56,7 @@ func TestCheckSingleConvoy_EmptyConvoyDoesNotAutoClose(t *testing.T) {
 	// means "could not resolve", not "all done". (GH#hq-439)
 	db := emptyConvoyDB(t, "hq-empty1", "Empty test convoy")
 
-	err := testTown(townWithBeads(t, ""), db, &gtScript{}).CheckOne("hq-empty1", false)
+	err := testTown(townWithBeads(t, ""), db, &noticeScript{}).CheckOne("hq-empty1", false)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestCheckSingleConvoy_EmptyConvoyDryRun(t *testing.T) {
 	t.Parallel()
 	db := emptyConvoyDB(t, "hq-empty2", "Dry run convoy")
 
-	err := testTown(townWithBeads(t, ""), db, &gtScript{}).CheckOne("hq-empty2", true)
+	err := testTown(townWithBeads(t, ""), db, &noticeScript{}).CheckOne("hq-empty2", true)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() dry-run error: %v", err)
 	}

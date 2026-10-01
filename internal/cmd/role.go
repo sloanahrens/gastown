@@ -241,6 +241,14 @@ func parseRoleString(s string) (Role, string, string) {
 
 	rig := parts[0]
 
+	// daemon/<job> (daemon/plugin for script plugins, daemon/spec-dispatch,
+	// daemon/patrol-scan, ...) is the daemon itself, never a polecat. Read
+	// through the rig/polecatName fallback below it was polecat "plugin" of
+	// rig "daemon", and gt sling refused every seat-refill dispatch (gt-vsc9w).
+	if rig == "daemon" {
+		return Role(s), "", ""
+	}
+
 	switch parts[1] {
 	case "boot", "witness", "refinery":
 		// The boot, witness (gt-4k3fj.6.1) and refinery (gt-v4ssj.6) roles

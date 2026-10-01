@@ -76,7 +76,7 @@ Daemon heartbeat (every 3 min)
     |
     +- Steps 0-13: Health checks, agent recovery, cleanup
     |
-    +- Step 14: gt scheduler run (capacity-controlled dispatch)
+    +- Step 14: scheduled dispatch, in process (capacity-controlled)
          |
          +- flock (exclusive)
          +- Check paused state
@@ -192,28 +192,33 @@ Key invariant: the work bead is **never modified** by the scheduler. All state l
 5. 1 arg, auto-detect type: epic/convoy/task
 
 All schedule paths go through `scheduleBead()` in `internal/cmd/sling_schedule.go`.
-All dispatch goes through `dispatchScheduledWork()` in `internal/cmd/capacity_dispatch.go`.
+All dispatch goes through `schedulerrun.Run()` in `internal/schedulerrun/`.
 
 ### Daemon Entry Point
 
-The daemon calls `gt scheduler run` as a subprocess on each heartbeat (step 14):
+The daemon runs one dispatch pass per heartbeat (step 14) by calling the same
+`Run` the command calls, in this process (gt-638go.9):
 
 ```go
-// internal/daemon/daemon.go
-func (d *Daemon) dispatchScheduledWork() {
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
-    cmd.Env = append(os.Environ(), "GT_DAEMON=1", "BD_DOLT_AUTO_COMMIT=off")
+// internal/daemon/scheduler_dispatch.go
+func (d *Daemon) dispatchScheduledWork(ctx context.Context) {
+    report, err := schedulerrun.Run(ctx, schedulerrun.Options{
+        TownRoot: d.config.TownRoot, Actor: "daemon", Daemon: true,
+        Out: writer, ErrOut: writer,
+    }, d.schedulerDeps)
     // ...
 }
 ```
 
 | Property | Value |
 |----------|-------|
-| Timeout | 5 minutes |
-| Environment | `GT_DAEMON=1` (identifies daemon dispatch) |
+| Timeout | 5 minutes (`schedulerDispatchTimeout`) |
+| Environment | none — `Daemon: true` marks the daemon's run, replacing `GT_DAEMON=1` |
 | Gating | `scheduler.max_polecats > 0` (deferred mode) |
+
+`schedulerrun.Deps` carries the two collaborators package cmd still owns: the
+sling (`executeSling`) and the polecat-capacity probe. cmd installs them on the
+daemon at construction, since cmd is what starts it.
 
 ---
 
@@ -405,7 +410,7 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 
 **Direct dispatch** (max_polecats=-1): `gt sling <convoy-id>` calls `runConvoySlingByID()` which dispatches all open tracked issues immediately via `executeSling()`. Each issue's rig is auto-resolved from its bead ID prefix. No capacity control — all issues dispatch at once.
 
-**Deferred dispatch** (max_polecats>0): `gt sling <convoy-id>` calls `runConvoyScheduleByID()` which schedules all open tracked issues (creating sling context beads). The daemon dispatches incrementally via `gt scheduler run`, respecting `max_polecats` and `batch_size`. Use this for large batches where simultaneous dispatch would exhaust resources.
+**Deferred dispatch** (max_polecats>0): `gt sling <convoy-id>` calls `runConvoyScheduleByID()` which schedules all open tracked issues (creating sling context beads). The daemon dispatches incrementally through the same dispatch pass `gt scheduler run` runs, respecting `max_polecats` and `batch_size`. Use this for large batches where simultaneous dispatch would exhaust resources.
 
 ### When to Use Which
 
@@ -447,8 +452,9 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 | `internal/cmd/scheduler.go` | `gt scheduler` command tree |
 | `internal/cmd/scheduler_epic.go` | Epic schedule/sling handlers |
 | `internal/cmd/scheduler_convoy.go` | Convoy schedule/sling handlers |
-| `internal/cmd/capacity_dispatch.go` | `dispatchScheduledWork()`, dispatch callback wiring |
-| `internal/daemon/daemon.go` | Heartbeat integration (`gt scheduler run`) |
+| `internal/schedulerrun/` | The queue and dispatch pass: `Run()`, context assessment, validation |
+| `internal/cmd/capacity_dispatch.go` | The sling and capacity deps the dispatcher runs on |
+| `internal/daemon/scheduler_dispatch.go` | Heartbeat integration (`schedulerrun.Run` in process) |
 
 ---
 

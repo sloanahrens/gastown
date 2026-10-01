@@ -66,9 +66,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	// gitignore-reconcile, submodule-commit, dolt-archive and dolt-snapshots
 	// plugins and took plugins to 69. The one-client migration
 	// (gt-7iwy0.4.1) keeps moving raw bd argv onto typed beads methods, which
-	// the scanner does not read; go was 34 after the handoff/hook/rollback move
-	// and 18 after the sling formula/duplicate/done move.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 18, "scripts": 22, "agent": 10}
+	// the scanner does not read; go was 34 after the handoff/hook/rollback move,
+	// 18 after the sling formula/duplicate/done move, and 17 after the
+	// scheduler-run leaf (gt-638go.9) deleted the daemon's `gt scheduler run`.
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 17, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

@@ -27,6 +27,15 @@ func useTestContainerInitSlots(t *testing.T, n int) *initSlots {
 	return s
 }
 
+// watchBlocked makes s report every acquire that finds no free token and
+// starts to wait, so a test can wait for "queued on the slot" as an event
+// instead of sleeping and inferring it from silence (gt-h1vod).
+func watchBlocked(s *initSlots) <-chan struct{} {
+	ch := make(chan struct{}, 8)
+	s.blocked = ch
+	return ch
+}
+
 // TestProcessInitPoolStartsFull pins the property both failed gt-elvf4 patches
 // lacked: the channel holds its tokens before anyone acquires, so the first
 // acquire returns instead of blocking forever.
@@ -375,6 +384,7 @@ func TestInitWaitsForATestContainerInitSlot(t *testing.T) {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
 	slots := useTestContainerInitSlots(t, 1)
+	blocked := watchBlocked(slots)
 	stub := installSucceedingBdStub(t)
 	b := NewIsolatedWithPort(t.TempDir(), 45678)
 
@@ -385,18 +395,14 @@ func TestInitWaitsForATestContainerInitSlot(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- b.Init("gt") }()
 
-	time.Sleep(300 * time.Millisecond)
+	// Init is queued on the slot, not merely slow to start (gt-h1vod).
+	<-blocked
 	if n := readBdCallCount(stub); n != 0 {
 		t.Fatalf("Init ran bd %d times while the only slot was held", n)
 	}
 	release()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Init after the slot freed: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Init never proceeded after the slot freed")
+	if err := <-done; err != nil {
+		t.Fatalf("Init after the slot freed: %v", err)
 	}
 	if n := stub.calls(t); n != 1 {
 		t.Fatalf("bd init calls = %d, want 1", n)
@@ -468,15 +474,11 @@ func TestInitRetriesInsideOneSlot(t *testing.T) {
 	zeroRetryBackoff(t)
 	stub := installFlakyCatalogRaceBDStub(t, 2)
 
-	done := make(chan error, 1)
-	go func() { done <- NewIsolatedWithPort(t.TempDir(), 45678).Init("gt") }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Init with two retried failures: %v", err)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("Init did not finish: the retry loop re-acquired a slot it already held")
+	// A retry loop that re-acquired the slot it already holds would block
+	// here forever; the test binary's own timeout reports that, with every
+	// goroutine's stack, rather than a guessed wall-clock limit (gt-h1vod).
+	if err := NewIsolatedWithPort(t.TempDir(), 45678).Init("gt"); err != nil {
+		t.Fatalf("Init with two retried failures: %v", err)
 	}
 	if n := stub.calls(t); n != 3 {
 		t.Fatalf("bd init calls = %d, want 3 (two failures, one success)", n)
@@ -486,24 +488,11 @@ func TestInitRetriesInsideOneSlot(t *testing.T) {
 	}
 }
 
-// waitForBdCalls polls a stub's counter until it reaches want.
-func waitForBdCalls(t *testing.T, stub *flakyBdStub, want int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if readBdCallCount(stub) >= want {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("bd stub reached %d calls, want %d", readBdCallCount(stub), want)
-}
-
 func TestRunTestContainerInitHoldsASlotAndSetsEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
-	useTestContainerInitSlots(t, 1)
+	blocked := watchBlocked(useTestContainerInitSlots(t, 1))
 	gate := filepath.Join(t.TempDir(), "open")
 	stub := installBdStub(t, `#!/bin/sh
 count=0
@@ -531,27 +520,26 @@ exit 0
 	}
 
 	first := run(nil)
-	waitForBdCalls(t, stub, 1)
 	// An inherited value must be replaced, not passed through.
 	second := run(append(os.Environ(), allowRemoteMigrateEnv+"=0"))
-	time.Sleep(300 * time.Millisecond)
-	if n := readBdCallCount(stub); n != 1 {
+	// One init holds the only slot and the other is queued on it: an event,
+	// not a guess from a sleep (gt-h1vod). Whichever won the race, the one
+	// that is queued cannot have reached bd, and the holder is parked on the
+	// gate, so at most one bd has run.
+	<-blocked
+	if n := readBdCallCount(stub); n > 1 {
 		t.Fatalf("second init ran while the only slot was held: %d bd calls", n)
 	}
 	if err := os.WriteFile(gate, nil, 0o644); err != nil {
 		t.Fatalf("open the gate: %v", err)
 	}
 	for i, ch := range []chan result{first, second} {
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				t.Fatalf("init %d: %v\n%s", i+1, r.err, r.out)
-			}
-			if !strings.Contains(string(r.out), "initialized") {
-				t.Errorf("init %d output = %q, want bd's combined output", i+1, r.out)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("init %d did not finish after the gate opened", i+1)
+		r := <-ch
+		if r.err != nil {
+			t.Fatalf("init %d: %v\n%s", i+1, r.err, r.out)
+		}
+		if !strings.Contains(string(r.out), "initialized") {
+			t.Errorf("init %d output = %q, want bd's combined output", i+1, r.out)
 		}
 	}
 	invocations := stub.invocations(t)

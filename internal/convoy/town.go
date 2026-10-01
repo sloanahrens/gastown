@@ -1,23 +1,26 @@
 package convoy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // Town is the town a convoy operation runs against.
 type Town struct {
 	// Root is the town root; bd runs from it.
 	Root string
-	// Env is the base environment for the bd and gt children; nil is
+	// Env is the base environment for the bd children; nil is
 	// os.Environ(). The daemon sets it to its routing environment.
 	Env []string
 	// Out receives the progress lines a command prints; nil discards them.
@@ -35,8 +38,12 @@ type Town struct {
 	// Prefixes maps rigs to the session prefixes the stranded scan probes
 	// assignees' sessions under; nil gives every rig session.DefaultPrefix.
 	Prefixes *session.PrefixRegistry
-	// gtRun runs the town's gt notice children; nil runs the gt on PATH.
-	gtRun gtRunner
+	// Mail sends one notice message; nil sends it in process through
+	// internal/mail.
+	Mail func(req mail.SendRequest) error
+	// Nudge delivers one notice nudge from sender to target; nil delivers it
+	// in process through internal/nudge/deliver.
+	Nudge func(target, message, sender string) error
 }
 
 // Store is the issue store surface the convoy operations use: the shared
@@ -48,16 +55,39 @@ type Store interface {
 	SQLCSV(query beadsql.Query) ([][]string, error)
 }
 
-// gtRunner runs gt with args from dir with exactly env (nil inherits the
-// process environment).
-type gtRunner func(dir string, env []string, args ...string) error
+// noticeMail sends one notice message: `gt mail send <addr> -s <subject> -m
+// <body> --from <from> --no-notify` at the town root. The router's own
+// notification to the recipient is suppressed because the nudge watchers get
+// a nudge of their own.
+func (t Town) noticeMail(addr, subject, body, from string) error {
+	req := mail.SendRequest{
+		From:           from,
+		To:             addr,
+		Subject:        subject,
+		Body:           body,
+		Priority:       mail.PriorityNormal,
+		Type:           mail.TypeNotification,
+		Wisp:           true,
+		SuppressNotify: true,
+	}
+	if t.Mail != nil {
+		return t.Mail(req)
+	}
+	root := t.rootDir()
+	router := mail.NewRouterWithTownRoot(root, root, t.Prefixes)
+	_, err := router.SendMessage(req)
+	return err
+}
 
-// runGT runs the gt on PATH.
-func runGT(dir string, env []string, args ...string) error {
-	cmd := exec.Command("gt", args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	return cmd.Run()
+// noticeNudge delivers one notice nudge: `gt nudge <target> -m <message>` with
+// the sender attributed explicitly, so no GT_ROLE has to be exported for a
+// child process to read.
+func (t Town) noticeNudge(target, message, sender string) error {
+	if t.Nudge != nil {
+		return t.Nudge(target, message, sender)
+	}
+	town := &deliver.Town{Delivery: deliver.New(tmux.NewTmux(), t.rootDir())}
+	return town.Nudge(context.Background(), target, message, sender)
 }
 
 // StdTown is a Town whose output goes to the terminal: what the CLI uses.
