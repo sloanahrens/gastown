@@ -30,6 +30,11 @@ func TestSlingRefusesPolecatsByRole(t *testing.T) {
 		// GH #664: a coordinator keeps a stale GT_POLECAT from spawning one.
 		{"mayor with stale GT_POLECAT", map[string]string{"GT_ROLE": "mayor", "GT_POLECAT": "Toast"}, false},
 		{"crew", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, false},
+		// gt-vsc9w: the daemon runs script plugins with GT_ROLE=daemon/plugin.
+		// seat-refill's direct dispatch slings from there; read as rig
+		// "daemon", polecat "plugin", every one of its slings was refused.
+		{"daemon plugin runner", map[string]string{"GT_ROLE": "daemon/plugin"}, false},
+		{"daemon job actor", map[string]string{"GT_ROLE": "daemon/spec-dispatch"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
