@@ -118,6 +118,15 @@ func TestNewPinnedPinsTheGivenBeadsDir(t *testing.T) {
 			t.Errorf("bd %v dir/plain = %q/%v, want %q/false", c.args, c.dir, c.plain, filepath.Dir(beadsDir))
 		}
 	}
+	if got, _ := lastEnvValue(calls[0].env, "BD_READONLY"); got != "true" {
+		t.Errorf("show BD_READONLY = %q, want true", got)
+	}
+	if got, _ := lastEnvValue(calls[1].env, "BD_DOLT_AUTO_COMMIT"); got != "on" {
+		t.Errorf("update BD_DOLT_AUTO_COMMIT = %q, want on", got)
+	}
+	if got, ok := lastEnvValue(calls[1].env, "BD_READONLY"); ok {
+		t.Errorf("update BD_READONLY = %q, want unset", got)
+	}
 	if !b.noRoute {
 		t.Error("a pinned wrapper must not route IDs to other databases")
 	}

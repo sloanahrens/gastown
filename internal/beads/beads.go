@@ -695,6 +695,11 @@ type Beads struct {
 	plainEnv []string
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
+	// accessMode marks a wrapper built by NewPinned: each call runs
+	// read-only or as an auto-committed mutation by its argv, as
+	// beads.Command's pinned modes did, whatever BD_READONLY or
+	// BD_DOLT_AUTO_COMMIT the process inherited.
+	accessMode bool
 
 	// Lazy-cached town root for routing resolution.
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
@@ -835,11 +840,14 @@ func NewRigLocal(workDir string) *Beads {
 }
 
 // NewPinned is NewRigLocal for a resolved beads directory: bd runs from
-// beadsDir's parent with BEADS_DIR=beadsDir, and no ID routes elsewhere. It
+// beadsDir's parent with BEADS_DIR=beadsDir, no ID routes elsewhere, and
+// each call is read-only or an auto-committed mutation by its argv. It
 // replaces beads.Command with a pinned mode for callers that already hold
 // the directory.
 func NewPinned(beadsDir string) *Beads {
-	return newBeads(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true})
+	b := newBeads(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true})
+	b.accessMode = true
+	return b
 }
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
@@ -1354,6 +1362,13 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	if machineExempt(args) {
 		runEnv = WithoutMachineEnv(runEnv)
+	}
+	if b.accessMode {
+		if ArgsAreReadOnly(args) {
+			runEnv = forceBDReadOnly(runEnv)
+		} else {
+			runEnv = forceBDMutation(runEnv)
+		}
 	}
 
 	out, err := b.runBdWithRetry(stdinData, runEnv, args)
