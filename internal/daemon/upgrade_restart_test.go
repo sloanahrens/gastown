@@ -621,3 +621,12 @@ func TestUpgradeDrainEndsWhenMarkerIsGone(t *testing.T) {
 		t.Fatal("drain must end with the marker")
 	}
 }
+
+// TestPostLandRestartCapStaysShort pins gt-8p8h7: the drain holds every landing
+// while it waits for post-land, so the cap must stay a couple of minutes.
+func TestPostLandRestartCapStaysShort(t *testing.T) {
+	t.Parallel()
+	if postLandRestartCap > 3*time.Minute {
+		t.Fatalf("postLandRestartCap = %s; a pending upgrade restart holds the landing queue that long (gt-8p8h7)", postLandRestartCap)
+	}
+}
