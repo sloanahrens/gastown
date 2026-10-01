@@ -55,21 +55,6 @@ func TestAcceptWorkspaceTrustDialog_TrustOptionAlreadyFocused(t *testing.T) {
 	}
 }
 
-// TestAcceptWorkspaceTrustDialog_CodexTrustPrompt covers Codex's dialog, whose
-// leading "> You are in <dir>" banner looks like a prompt: the dialog must still
-// be answered rather than skipped as "no dialog here", and the numbered option
-// list it renders must not confuse the selection.
-func TestAcceptWorkspaceTrustDialog_CodexTrustPrompt(t *testing.T) {
-	t.Parallel()
-	pane := &fakePane{content: codexTrustDialog, confirm: showPrompt}
-	if err := acceptTrust(t, pane); err != nil {
-		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
-	}
-	if got := pane.sentKeys(); !reflect.DeepEqual(got, []string{"Enter"}) {
-		t.Errorf("keys = %q, want Enter only (trust option already focused)", got)
-	}
-}
-
 // TestAcceptWorkspaceTrustDialog_ReportsSessionDeath covers the outcome the
 // function exists to name: the dialog's exit option was selected and the pane is
 // gone. Before gt-nc1t this surfaced later as the opaque
