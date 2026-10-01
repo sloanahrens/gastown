@@ -14,9 +14,10 @@
 # cadence with one seat number for the whole pool; this plugin is the per-seat,
 # three-minute half. It tracks each seat's own empty episode.
 #
-# Candidate choice is mechanical: lowest priority number, then id; the sonnet
-# seat takes only needs-sonnet beads. gt sling keeps its own refusals
-# (backpressure, hold, rig estop).
+# Candidate choice is mechanical: lowest priority number, then id; the pro
+# seat takes only needs-pro beads, and every bead it dispatches is recorded
+# (a log line plus one low-severity escalation naming the bead, gt-hpu8h).
+# gt sling keeps its own refusals (backpressure, hold, rig estop).
 #
 # The daemon runs this in-process (execution type script) and records the run
 # itself, so this script must not call `gt plugin record-run` — that would
@@ -72,9 +73,9 @@ EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_EMPTY_SECONDS:-}" 300)
 NUDGE_SECONDS=$(int_or_default "${GT_SEAT_REFILL_NUDGE_SECONDS:-}" 900)
 MAX_PRIORITY=$(int_or_default "${GT_SEAT_REFILL_MAX_PRIORITY:-}" 2)
 TOP_CANDIDATES=$(int_or_default "${GT_SEAT_REFILL_TOP_CANDIDATES:-}" 3)
-SONNET_MAX=$(int_or_default "${GT_SEAT_REFILL_SONNET_MAX:-}" 1)
-SONNET_AGENT="${GT_SEAT_REFILL_SONNET_AGENT:-claude-sonnet}"
-SONNET_LABEL="${GT_SEAT_REFILL_SONNET_LABEL:-needs-sonnet}"
+PRO_MAX=$(int_or_default "${GT_SEAT_REFILL_PRO_MAX:-}" 1)
+PRO_AGENT="${GT_SEAT_REFILL_PRO_AGENT:-deepseek-pro}"
+PRO_LABEL="${GT_SEAT_REFILL_PRO_LABEL:-needs-pro}"
 CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
 # sling (default): fill an empty seat directly, no mayor involved (gt-qvs0b).
 # nudge: the old behavior, ask the mayor. GT_SEAT_REFILL_DRY_RUN=1 decides and
@@ -82,6 +83,9 @@ CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
 MODE="${GT_SEAT_REFILL_MODE:-sling}"
 DRY_RUN="${GT_SEAT_REFILL_DRY_RUN:-}"
 SLING_BOUND=$(int_or_default "${GT_SEAT_REFILL_SLING_BOUND:-}" 120)
+# The record a pro dispatch writes is small and local, so it gets a short cap
+# of its own: a wedged `gt escalate` must not eat the sling budget beside it.
+ESCALATE_BOUND=$(int_or_default "${GT_SEAT_REFILL_ESCALATE_BOUND:-}" 20)
 # Seconds a seat must sit empty before a direct sling; 0 fills at once.
 DISPATCH_EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS:-}" 0)
 case "$MODE" in sling|nudge) ;; *) fail "GT_SEAT_REFILL_MODE must be sling or nudge, got $MODE" ;; esac
@@ -131,12 +135,16 @@ fi
 # --- Seats ---------------------------------------------------------------
 # A seat is one capped agent class, held as name|agent|cap|selector. The pool
 # config is the source: local_agent admits max_local sessions, overflow_agent
-# admits max_overflow. A third class — claude-sonnet, which reaches a seat only
-# through an explicit `gt sling --agent claude-sonnet` — is not expressible in
+# admits max_overflow. A third class — deepseek-pro, which reaches a seat only
+# through an explicit `gt sling --agent deepseek-pro` — is not expressible in
 # polecat_pool today (gt-xmsqb), so the mayor's policy of holding itself to one
-# live sonnet is modeled here as a seat of its own. Set
-# GT_SEAT_REFILL_SONNET_MAX=0 to drop it when that policy changes, or when
+# live pro is modeled here as a seat of its own. Set
+# GT_SEAT_REFILL_PRO_MAX=0 to drop it when that policy changes, or when
 # gt-xmsqb gives the pool N tiers for this to read instead.
+
+# The pro seat's name, as it appears in state, logs and escalations. It is the
+# only seat whose dispatches are recorded one by one (gt-hpu8h).
+PRO_SEAT="pro"
 
 SEATS=""
 add_seat() { SEATS+="$1|$2|$3|$4"$'\n'; }
@@ -176,12 +184,12 @@ if [ -n "$OVERFLOW_AGENT" ]; then
   fi
 fi
 
-# The sonnet seat fills only from work that asks for it: a needs-sonnet bead is
-# the mayor's own signal that this class of work exists (gt-tq6l). Without one,
-# an empty sonnet seat is the resting state, and a nudge about it would be
-# noise the mayor learns to ignore.
-if [ "$SONNET_MAX" -gt 0 ]; then
-  add_seat sonnet "$SONNET_AGENT" "$SONNET_MAX" "label:$SONNET_LABEL"
+# The pro seat fills only from work that asks for it: a needs-pro bead is the
+# operator's own signal that this class of work exists (gt-tq6l). Without one,
+# an empty pro seat is the resting state, and a nudge about it would be noise
+# the mayor learns to ignore.
+if [ "$PRO_MAX" -gt 0 ]; then
+  add_seat "$PRO_SEAT" "$PRO_AGENT" "$PRO_MAX" "label:$PRO_LABEL"
 fi
 
 [ -n "$SEATS" ] || skip "no capped seat configured; nothing can be empty"
@@ -378,6 +386,28 @@ state_field() {
   jq -r --arg s "$seat" --arg f "$field" '.episodes[$s][$f] // 0' "$STATE_FILE" 2>/dev/null || printf '0'
 }
 
+# Every bead the pro seat dispatches is recorded, not just logged (gt-hpu8h):
+# pro is the expensive class, and the overseer wants each invocation to reach
+# them as it happens. The escalation is low severity, so it routes as a bead
+# that waits rather than as an alert. Its key carries the bead and the dispatch
+# time, because gt escalate dedupes on the key: without them a later dispatch
+# of the same bead would bump the earlier record instead of minting its own. A
+# record that cannot be written is named in the log and never fails the run —
+# the bead is already slung by the time this is called.
+record_pro_dispatch() {
+  local bead="$1" rig="$2" prio="$3" limit rc=0 out
+  limit=$(bound "$ESCALATE_BOUND" "$RUN_BUDGET")
+  out=$(timeout "$limit" gt escalate \
+    "seat-refill: pro seat dispatched $bead" \
+    --severity low \
+    --source "plugin:seat-refill" \
+    --fingerprint "seat-refill:pro:$bead:$NOW" \
+    --reason "P$prio $bead dispatched to $rig on the pro seat (agent $PRO_AGENT)" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "WARN: could not record pro dispatch of $bead (gt escalate exit $rc): $(printf '%s' "$out" | tail -n 1)"
+  fi
+}
+
 # seat<TAB>empty_since<TAB>last_nudge, one row per seat still empty.
 STATE_ROWS=""
 NUDGE_LINES=""
@@ -412,8 +442,8 @@ while IFS='|' read -r seat agent cap selector; do
   log "seat $seat: $live/$cap live ($agent), empty ${empty_for}s, $seat_count candidate(s)"
 
   if [ "$MODE" = sling ]; then
-    # Direct dispatch: one bead per open slot, best first. sonnet takes only
-    # needs-sonnet work; the other seats leave it for the sonnet seat.
+    # Direct dispatch: one bead per open slot, best first. The pro seat takes
+    # only needs-pro work; the other seats leave it for the pro seat.
     room=$((cap - live))
     placed=0
     if [ "$seat_count" -gt 0 ] && [ "$empty_for" -ge "$DISPATCH_EMPTY_SECONDS" ]; then
@@ -422,7 +452,7 @@ while IFS='|' read -r seat agent cap selector; do
         [ "$placed" -lt "$room" ] || break
         case ",$SLUNG," in *",$c_id,"*) continue ;; esac
         if [ "$selector" = any ]; then
-          case ",$(lower "$c_labels")," in *",$(lower "$SONNET_LABEL"),"*) continue ;; esac
+          case ",$(lower "$c_labels")," in *",$(lower "$PRO_LABEL"),"*) continue ;; esac
         fi
         if [ -n "$DRY_RUN" ]; then
           log "DRY-RUN: would sling $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
@@ -441,6 +471,7 @@ while IFS='|' read -r seat agent cap selector; do
         sling_why=$(printf '%s' "$sling_out" | tail -n 1)
         if [ "$sling_rc" -eq 0 ]; then
           log "slung $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
+          [ "$seat" = "$PRO_SEAT" ] && record_pro_dispatch "$c_id" "$c_rig" "$c_prio"
           SLUNG+="$c_id,"
           placed=$((placed + 1))
         elif [ "$sling_rc" -eq 124 ]; then
