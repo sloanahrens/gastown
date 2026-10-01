@@ -714,7 +714,7 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 	if err != nil {
 		return []string{}, map[string]error{}
 	}
-	polecatMgr := polecat.NewSessionManager(tmux.NewTmux(), r)
+	polecatMgr := polecat.NewSessionManager(tmux.NewTmux(), r, townRegistry())
 	start := func(polecatName string) error {
 		return polecatMgr.Start(polecatName, polecat.SessionStartOptions{})
 	}

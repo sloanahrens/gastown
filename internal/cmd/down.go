@@ -447,7 +447,7 @@ func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force boo
 			if err != nil {
 				continue
 			}
-			polecatMgr := polecat.NewSessionManager(t, r)
+			polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 			infos, err := polecatMgr.ListPolecats()
 			if err != nil {
 				continue
@@ -477,7 +477,7 @@ func stopAllPolecats(t *tmux.Tmux, townRoot string, rigNames []string, force boo
 			continue
 		}
 
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 		infos, err := polecatMgr.ListPolecats()
 		if err != nil {
 			continue
@@ -537,7 +537,7 @@ func stopAllCrew(t *tmux.Tmux, townRoot string, rigNames []string, dryRun bool) 
 			continue
 		}
 
-		crewMgr := crew.NewManager(r, g)
+		crewMgr := crew.NewManager(r, g, townRegistry())
 		workers, err := crewMgr.List()
 		if err != nil {
 			continue
@@ -754,26 +754,26 @@ func findOrphanedClaudeProcesses(townRoot string) []int {
 // cleanupLegacyDefaultSocket removes Gas Town sessions left on the "default"
 // tmux socket by old binaries. Returns the number of sessions cleaned.
 func cleanupLegacyDefaultSocket() int {
-	return session.CleanupLegacyDefaultSocket()
+	return session.CleanupLegacyDefaultSocket(townRegistry())
 }
 
 // countLegacyDefaultSocketSessions counts Gas Town sessions on the "default"
 // tmux socket (for dry-run output).
 func countLegacyDefaultSocketSessions() int {
-	return session.CountLegacyDefaultSocketSessions()
+	return session.CountLegacyDefaultSocketSessions(townRegistry())
 }
 
 // cleanupLegacyBaseSocket removes Gas Town sessions left on the old basename-only
 // tmux socket (e.g., "gt") by binaries from before path-hashed socket names were
 // introduced (e.g., "gt-a1b2c3"). Returns the number of sessions cleaned.
 func cleanupLegacyBaseSocket(townRoot string) int {
-	return session.CleanupLegacyBaseSocket(townRoot)
+	return session.CleanupLegacyBaseSocket(townRegistry(), townRoot)
 }
 
 // countLegacyBaseSocketSessions counts Gas Town sessions on the old basename-only
 // tmux socket (for dry-run output).
 func countLegacyBaseSocketSessions(townRoot string) int {
-	return session.CountLegacyBaseSocketSessions(townRoot)
+	return session.CountLegacyBaseSocketSessions(townRegistry(), townRoot)
 }
 
 // stopIdleMonitors terminates idle-monitor processes.

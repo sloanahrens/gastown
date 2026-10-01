@@ -66,7 +66,7 @@ func TestIntegrationVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	m := NewSessionManager(tm, fastStartupNudgeRig(t))
+	m := NewSessionManager(tm, fastStartupNudgeRig(t), nil)
 	rc := &config.RuntimeConfig{Tmux: &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "}}
 	const retry = "check-your-hook-retry"
 	m.verifyStartupNudgeDelivery(sessionName, rc, retry)

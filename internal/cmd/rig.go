@@ -248,7 +248,7 @@ func realUncommittedWorkCheck() uncommittedWorkCheck {
 	return uncommittedWorkCheck{
 		listPolecats: func(r *rig.Rig) ([]*polecat.Polecat, error) {
 			polecatGit := git.NewGit(r.Path)
-			polecatMgr := polecat.NewManager(r, polecatGit, nil) // nil tmux: just listing
+			polecatMgr := polecat.NewManager(r, polecatGit, nil, townRegistry()) // nil tmux: just listing
 			return polecatMgr.List()
 		},
 		workStatus: func(clonePath string) (*git.UncommittedWorkStatus, error) {
@@ -1301,7 +1301,7 @@ func runResetStale(bd *beads.Beads, dryRun bool) error {
 		}
 
 		// Parse assignee: rig/name or rig/crew/name
-		sessionName, isPersistent := session.AssigneeSessionName(issue.Assignee)
+		sessionName, isPersistent := townRegistry().AssigneeSessionName(issue.Assignee)
 		if sessionName == "" {
 			continue // Couldn't parse assignee
 		}
@@ -1420,7 +1420,7 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 
 	// 1. Stop all polecat sessions
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 	infos, err := polecatMgr.ListPolecats()
 	if err == nil && len(infos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
@@ -1493,7 +1493,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 
 	// Polecats list (involves per-polecat beads + git queries)
 	polecatGit := git.NewGit(r.Path)
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
 	var polecats []*polecat.Polecat
 	var polecatsErr error
 	dataWg.Add(1)
@@ -1503,7 +1503,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Crew list
-	crewMgr := crew.NewManager(r, git.NewGit(townRoot))
+	crewMgr := crew.NewManager(r, git.NewGit(townRoot), townRegistry())
 	var crewWorkers []*crew.CrewWorker
 	var crewErr error
 	dataWg.Add(1)
@@ -1670,7 +1670,7 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 
 		// 1. Stop all polecat sessions
 		t := tmux.NewTmux()
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 		infos, err := polecatMgr.ListPolecats()
 		if err == nil && len(infos) > 0 {
 			fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))

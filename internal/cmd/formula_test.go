@@ -667,3 +667,22 @@ func TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent(t *testing.T) {
 		t.Error("a real --force run should say the copies were overwritten")
 	}
 }
+
+// TestFormatFormulaSyncReport_NamesOrphanedCopies: a town copy whose formula
+// left the binary is still listed by gt formula list, so the summary names it
+// and says how to remove it (gt-zggoh).
+func TestFormatFormulaSyncReport_NamesOrphanedCopies(t *testing.T) {
+	t.Parallel()
+	report := &formulaSyncReport{
+		UpToDate:     3,
+		Orphaned:     []string{"mol-refinery-patrol.formula.toml"},
+		DriftChecked: true,
+		CompareRef:   "origin/main",
+	}
+	msg := formatFormulaSyncReport(report)
+	for _, want := range []string{"mol-refinery-patrol.formula.toml", "no longer shipped"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("summary lacks %q:\n%s", want, msg)
+		}
+	}
+}

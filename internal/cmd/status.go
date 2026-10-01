@@ -782,7 +782,7 @@ func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 	}
 
 	// Create mail router for inbox lookups
-	mailRouter := mail.NewRouter(townRoot)
+	mailRouter := mail.NewRouter(townRoot, reg)
 
 	// Load overseer config
 	var overseerInfo *OverseerInfo
@@ -898,7 +898,7 @@ func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 
 			// Count crew workers
 			crewGit := git.NewGit(r.Path)
-			crewMgr := crew.NewManager(r, crewGit)
+			crewMgr := crew.NewManager(r, crewGit, reg)
 			if workers, err := crewMgr.List(); err == nil {
 				for _, w := range workers {
 					rs.Crews = append(rs.Crews, w.Name)
@@ -1572,14 +1572,15 @@ func applyPauseMarker(agent *AgentRuntime, townRoot string) {
 // used by the pause marker path, and reports whether the address names a
 // marker-backed agent at all.
 //
-// It goes through session.ParseAddress rather than splitting the string, so
+// It goes through session.ParseAddressWithRegistry rather than splitting the
+// string (with no registry: the triple carries no prefix), so
 // every address form the rest of the system uses resolves to the same marker
 // the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
 // "rig/crew/name" — and the town-level "mayor/", whose marker lives at
 // .runtime/agents/<role>.json,
 // so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
 func agentMarkerTriple(address string) (rig, role, name string, ok bool) {
-	id, err := session.ParseAddress(address)
+	id, err := session.ParseAddressWithRegistry(address, nil)
 	if err != nil {
 		return "", "", "", false
 	}

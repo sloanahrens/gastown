@@ -118,7 +118,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 
 	// Stop polecat sessions if any
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 	polecatInfos, err := polecatMgr.List()
 	if err == nil && len(polecatInfos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(polecatInfos))

@@ -6,7 +6,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -16,8 +15,5 @@ import (
 // real bd and Dolt paths are the integration tier's
 // (testmain_integration_test.go).
 func TestMain(m *testing.M) {
-	// Every test sees the same prefix registry, set once here rather than
-	// swapped per test, so the tests can run in parallel.
-	session.SetDefaultRegistry(testPrefixRegistry())
 	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
 }

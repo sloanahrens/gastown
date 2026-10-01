@@ -71,8 +71,8 @@ type SessionManager struct {
 	// gits opens git on the polecat's worktree; its zero value opens
 	// *git.Git.
 	gits gitOpener
-	// prefixes resolves the rig's session prefix; nil reads
-	// session.DefaultRegistry.
+	// prefixes resolves the rig's session prefix; nil gives
+	// session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
 }
 
@@ -102,9 +102,10 @@ type sessionTmux interface {
 
 var _ sessionTmux = (*tmux.Tmux)(nil)
 
-// NewSessionManager creates a new polecat session manager for a rig.
-func NewSessionManager(t *tmux.Tmux, r *rig.Rig) *SessionManager {
-	m := &SessionManager{rig: r}
+// NewSessionManager creates a new polecat session manager for a rig;
+// prefixes names its sessions.
+func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistry) *SessionManager {
+	m := &SessionManager{rig: r, prefixes: prefixes}
 	if t != nil {
 		m.tmux = t
 	}
@@ -181,10 +182,7 @@ func (m *SessionManager) SessionName(polecat string) string {
 
 // prefix returns the rig's session prefix.
 func (m *SessionManager) prefix() string {
-	if m.prefixes != nil {
-		return m.prefixes.PrefixForRig(m.rig.Name)
-	}
-	return session.PrefixFor(m.rig.Name)
+	return m.prefixes.PrefixForRig(m.rig.Name)
 }
 
 // validateSessionName checks for double-prefix session names.

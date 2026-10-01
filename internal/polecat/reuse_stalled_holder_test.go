@@ -149,7 +149,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 		{
 			name: "live session",
 			setup: func(t *testing.T, _ *world, mgr *Manager, _ *Polecat) {
-				sess := session.PolecatSessionName(session.PrefixFor(mgr.rig.Name), "beta")
+				sess := session.PolecatSessionName(session.DefaultPrefix, "beta")
 				if err := mgr.tmux.(*fakeProbe).NewSessionWithCommandAndEnv(sess, t.TempDir(), "sleep 300", nil); err != nil {
 					t.Fatalf("create session: %v", err)
 				}

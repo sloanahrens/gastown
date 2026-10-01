@@ -25,7 +25,6 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1366,7 +1365,7 @@ var isHookedAgentDeadFn = isHookedAgentDead
 // Returns true if the session is confirmed dead. Returns false if alive or if we
 // can't determine liveness (conservative: don't auto-force on uncertainty).
 func isHookedAgentDead(assignee string) bool {
-	sessionName, _ := session.AssigneeSessionName(assignee)
+	sessionName, _ := townRegistry().AssigneeSessionName(assignee)
 	if sessionName == "" {
 		return false // Unknown format, can't determine
 	}

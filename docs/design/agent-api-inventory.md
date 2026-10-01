@@ -235,9 +235,9 @@ or `POST /telemetry` with rate limit event
 - `internal/config/agents.go` — `builtinPresets` (line ~164): 10 agent presets
   (Claude, Gemini, Codex, Cursor, Auggie, AMP, OpenCode, Copilot, Pi, OMP)
   with 21 fields each (Command, Args, ProcessNames, SessionIDEnv, etc.)
-- `internal/session/identity.go` — `ParseSessionName()` (line ~84),
-  `ParseAddress()` (line ~30), `SessionName()` (line ~163): identity parsing
-  and formatting
+- `internal/session/identity.go` — `ParseSessionNameWithRegistry()`,
+  `ParseAddressWithRegistry()`, `SessionName()`: identity parsing and
+  formatting against a caller-supplied prefix registry
 - `internal/constants/constants.go` — role constants (lines ~196-215):
   `RoleMayor`, `RoleDeacon`, `RoleWitness`, `RoleRefinery`, `RolePolecat`, `RoleCrew`
 

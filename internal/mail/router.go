@@ -40,6 +40,9 @@ type Router struct {
 	workDir  string // fallback directory to run bd commands in
 	townRoot string // town root directory (e.g., ~/gt)
 	tmux     notifyTmux
+	// prefixes maps rigs to the session prefixes notifications address;
+	// nil gives every rig session.DefaultPrefix.
+	prefixes *session.PrefixRegistry
 	// bd runs bd for the router and the mailboxes it opens; nil is the bd
 	// on PATH.
 	bd beads.BDRunner
@@ -64,8 +67,9 @@ type notifyTmux interface {
 
 // NewRouter creates a new mail router.
 // workDir should be a directory containing a .beads database.
-// The town root is auto-detected from workDir if possible.
-func NewRouter(workDir string) *Router {
+// The town root is auto-detected from workDir if possible. prefixes resolves
+// the recipients' session names.
+func NewRouter(workDir string, prefixes *session.PrefixRegistry) *Router {
 	// Try to detect town root from workDir
 	townRoot := detectTownRoot(workDir, os.Getenv)
 
@@ -73,15 +77,17 @@ func NewRouter(workDir string) *Router {
 		workDir:  workDir,
 		townRoot: townRoot,
 		tmux:     tmux.NewTmux(),
+		prefixes: prefixes,
 	}
 }
 
 // NewRouterWithTownRoot creates a router with an explicit town root.
-func NewRouterWithTownRoot(workDir, townRoot string) *Router {
+func NewRouterWithTownRoot(workDir, townRoot string, prefixes *session.PrefixRegistry) *Router {
 	return &Router{
 		workDir:  workDir,
 		townRoot: townRoot,
 		tmux:     tmux.NewTmux(),
+		prefixes: prefixes,
 	}
 }
 
@@ -1707,7 +1713,7 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 // Supports mayor/, deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
 // Respects agent DND/muted state - skips notification if recipient has DND enabled.
 func (r *Router) notifyRecipient(msg *Message) error {
-	sessionIDs := AddressToSessionIDs(msg.To)
+	sessionIDs := AddressToSessionIDs(r.prefixes, msg.To)
 	if len(sessionIDs) == 0 {
 		return nil // Unable to determine session ID
 	}
@@ -1977,7 +1983,7 @@ func (r *Router) ClearReplyReminders(address, threadID string) error {
 	}
 
 	var firstErr error
-	for _, sessionID := range AddressToSessionIDs(address) {
+	for _, sessionID := range AddressToSessionIDs(r.prefixes, address) {
 		if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", threadID); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -1999,7 +2005,7 @@ func (r *Router) IsRecipientMuted(address string) bool {
 // Returns true if the recipient is muted and should not receive tmux nudges.
 // Fails open (returns false) if the agent bead cannot be found.
 func (r *Router) isRecipientMuted(address string) bool {
-	agentBeadID := addressToAgentBeadID(address)
+	agentBeadID := addressToAgentBeadID(r.prefixes, address)
 	if agentBeadID == "" {
 		return false // Can't determine agent bead, allow notification
 	}
@@ -2014,8 +2020,9 @@ func (r *Router) isRecipientMuted(address string) bool {
 }
 
 // addressToAgentBeadID converts a mail address to an agent bead ID for DND lookup.
-// Returns empty string if the address cannot be converted.
-func addressToAgentBeadID(address string) string {
+// Returns empty string if the address cannot be converted. reg maps the rig to
+// its prefix.
+func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead
 	}
@@ -2035,7 +2042,7 @@ func addressToAgentBeadID(address string) string {
 	rig := parts[0]
 	target := parts[1]
 
-	rigPrefix := session.PrefixFor(rig)
+	rigPrefix := reg.PrefixForRig(rig)
 
 	switch {
 	case strings.HasPrefix(target, "crew/"):
@@ -2058,8 +2065,9 @@ func addressToAgentBeadID(address string) string {
 // (gt-rig-name). The caller should try each and use the one that exists.
 //
 // This supersedes the approach in PR #896 which only handled slash-to-dash
-// conversion but didn't address the crew/polecat ambiguity.
-func AddressToSessionIDs(address string) []string {
+// conversion but didn't address the crew/polecat ambiguity. reg maps the rig
+// to its prefix.
+func AddressToSessionIDs(reg *session.PrefixRegistry, address string) []string {
 	// Overseer address: "overseer" (human operator)
 	if address == "overseer" {
 		return []string{session.OverseerSessionName()}
@@ -2082,7 +2090,7 @@ func AddressToSessionIDs(address string) []string {
 
 	rig := parts[0]
 	target := parts[1]
-	rigPrefix := session.PrefixFor(rig)
+	rigPrefix := reg.PrefixForRig(rig)
 
 	// If target already has crew/, polecat/, or polecats/ prefix, use it directly
 	// e.g., "gastown/crew/holden" → "gt-crew-holden"

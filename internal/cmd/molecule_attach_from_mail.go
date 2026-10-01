@@ -53,7 +53,7 @@ func runMoleculeAttachFromMail(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finding mail workspace: %w", err)
 	}
 
-	router := mail.NewRouter(mailWorkDir)
+	router := mail.NewRouter(mailWorkDir, townRegistry())
 	mailbox, err := router.GetMailbox(agentIdentity)
 	if err != nil {
 		return fmt.Errorf("getting mailbox: %w", err)

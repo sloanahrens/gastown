@@ -223,7 +223,7 @@ func runPolecatIdentityAdd(cmd *cobra.Command, args []string) error {
 	if polecatName == "" {
 		polecatGit := git.NewGit(r.Path)
 		t := tmux.NewTmux()
-		mgr := polecat.NewManager(r, polecatGit, t)
+		mgr := polecat.NewManager(r, polecatGit, t, townRegistry())
 		polecatName, err = mgr.AllocateName()
 		if err != nil {
 			return fmt.Errorf("generating polecat name: %w", err)
@@ -278,7 +278,7 @@ func runPolecatIdentityList(cmd *cobra.Command, args []string) error {
 	// Filter for polecat beads in this rig
 	identities := []IdentityInfo{} // Initialize to empty slice (not nil) for JSON
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 
 	for id, issue := range agentBeads {
 		// Parse the bead ID to check if it's a polecat for this rig
@@ -296,7 +296,7 @@ func runPolecatIdentityList(cmd *cobra.Command, args []string) error {
 
 		// Check if worktree exists
 		worktreeExists := false
-		mgr := polecat.NewManager(r, nil, t)
+		mgr := polecat.NewManager(r, nil, t, townRegistry())
 		if p, err := mgr.Get(name); err == nil && p != nil {
 			worktreeExists = true
 		}
@@ -397,8 +397,8 @@ func runPolecatIdentityShow(cmd *cobra.Command, args []string) error {
 
 	// Check worktree and session
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
-	mgr := polecat.NewManager(r, nil, t)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
+	mgr := polecat.NewManager(r, nil, t, townRegistry())
 
 	worktreeExists := false
 	var clonePath string
@@ -584,7 +584,7 @@ func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 
 	// Safety check: no active session
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 	running, _ := polecatMgr.IsRunning(oldName)
 	if running {
 		return fmt.Errorf("cannot rename: polecat session %s is running", oldName)
@@ -655,7 +655,7 @@ func runPolecatIdentityRemove(cmd *cobra.Command, args []string) error {
 
 		// Check for active session
 		t := tmux.NewTmux()
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 		running, _ := polecatMgr.IsRunning(polecatName)
 		if running {
 			reasons = append(reasons, "session is running")

@@ -174,7 +174,7 @@ func (t Town) findStrandedWith(ctx context.Context, openCheck func(townRoot stri
 		var readyIssues []string
 		var held []StrandedHold
 		for _, tr := range tracked {
-			if !isReadyIssue(tr, scheduledSet) {
+			if !isReadyIssue(t.Prefixes, tr, scheduledSet) {
 				continue
 			}
 			if !isSlingableBead(t.Root, tr.ID) {
@@ -245,8 +245,9 @@ func (t Town) findStrandedWith(ctx context.Context, openCheck func(townRoot stri
 //   - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
 //     dead) — an orphaned molecule, whose recovery is a re-dispatch
 //
-// scheduledSet is a pre-computed set of bead IDs with open sling contexts (from beads.AreScheduled).
-func isReadyIssue(t TrackedIssue, scheduledSet map[string]bool) bool {
+// scheduledSet is a pre-computed set of bead IDs with open sling contexts (from
+// beads.AreScheduled); reg names the assignee's session.
+func isReadyIssue(reg *session.PrefixRegistry, t TrackedIssue, scheduledSet map[string]bool) bool {
 	status := beads.IssueStatus(strings.TrimSpace(t.Status))
 	if status != beads.StatusOpen && !status.IsAssigned() {
 		return false
@@ -273,7 +274,7 @@ func isReadyIssue(t TrackedIssue, scheduledSet map[string]bool) bool {
 		return true
 	}
 
-	sessionName, _ := session.AssigneeSessionName(t.Assignee)
+	sessionName, _ := reg.AssigneeSessionName(t.Assignee)
 	if sessionName == "" {
 		return true // Can't determine session = treat as ready
 	}

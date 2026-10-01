@@ -238,7 +238,7 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleRe
 			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
 		},
 		verifyWorktree: verifyWorktreeExists,
-		sessionName:    polecat.NewSessionManager(t, r).SessionName,
+		sessionName:    polecat.NewSessionManager(t, r, townRegistry()).SessionName,
 		defaultBranch:  r.DefaultBranch,
 		logSpawn: func(rigName, polecatName string) {
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
@@ -577,7 +577,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// Get polecat manager (with tmux for session-aware allocation)
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
 
 	// Pre-spawn Dolt health check (gt-94llt7): verify Dolt is reachable before
 	// allocating a polecat. Prevents orphaned polecats when Dolt is down.
@@ -723,7 +723,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	}
 
 	// Get session manager for session name (session start is deferred)
-	polecatSessMgr := polecat.NewSessionManager(t, r)
+	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
 	sessionName := polecatSessMgr.SessionName(polecatName)
 
 	slingSteps.step("worktree")
@@ -840,7 +840,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// Start session
 	t := tmux.NewTmux()
-	polecatSessMgr := polecat.NewSessionManager(t, r)
+	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
 
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
 	startOpts := polecat.SessionStartOptions{
@@ -881,7 +881,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// monitoring visibility, not correctness. Compare with createAgentBeadWithRetry
 	// which fails hard because a polecat without an agent bead is untrackable.
 	polecatGit := git.NewGit(r.Path)
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
+	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
 	if err := polecatMgr.SetAgentStateWithRetry(s.PolecatName, "working"); err != nil {
 		style.PrintWarning("could not update agent state after retries: %v", err)
 	}

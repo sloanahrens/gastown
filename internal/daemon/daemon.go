@@ -448,9 +448,9 @@ func augmentDaemonPath(logger *log.Logger) {
 
 // cleanupLegacySockets removes the town's legacy default- and base-socket
 // sessions (see daemonSeams.cleanupLegacySocketsFor).
-func cleanupLegacySockets(townRoot string) (int, int) {
-	defaultCleaned := session.CleanupLegacyDefaultSocket()
-	baseCleaned := session.CleanupLegacyBaseSocket(townRoot)
+func cleanupLegacySockets(reg *session.PrefixRegistry, townRoot string) (int, int) {
+	defaultCleaned := session.CleanupLegacyDefaultSocket(reg)
+	baseCleaned := session.CleanupLegacyBaseSocket(reg, townRoot)
 	return defaultCleaned, baseCleaned
 }
 
@@ -701,7 +701,7 @@ func applyConfiguredDoltHostEnvTo(env envWriter, townRoot string, logf func(form
 
 func (d *Daemon) cleanupLegacySocketSessions() {
 	d.legacySocketCleanupOnce.Do(func() {
-		defaultCleaned, baseCleaned := d.seams.cleanupLegacySocketsFor(d.config.TownRoot)
+		defaultCleaned, baseCleaned := d.seams.cleanupLegacySocketsFor(d.prefixRegistry(), d.config.TownRoot)
 		if defaultCleaned > 0 {
 			d.logger.Printf("legacy_socket_cleanup: cleaned %d session(s) from default socket", defaultCleaned)
 		}
@@ -819,6 +819,7 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
+	d.convoyManager.prefixes = d.prefixRegistry()
 	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlertsErr)
 	if err := d.convoyManager.Start(); err != nil {
 		d.logger.Printf("Warning: failed to start convoy manager: %v", err)

@@ -596,7 +596,7 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	mgr := polecat.NewManager(r, polecatGit, t)
+	mgr := polecat.NewManager(r, polecatGit, t, townRegistry())
 
 	return mgr, r, nil
 }
@@ -1041,7 +1041,7 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 	for _, p := range targets {
 		// Check if session is running
 		if !polecatForce {
-			polecatMgr := polecat.NewSessionManager(t, p.r)
+			polecatMgr := polecat.NewSessionManager(t, p.r, townRegistry())
 			running, _ := polecatMgr.IsRunning(p.polecatName)
 			if running {
 				removeErrors = append(removeErrors, fmt.Sprintf("%s/%s: session is running (stop first or use --force)", p.rigName, p.polecatName))
@@ -1152,7 +1152,7 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 
 	// Get session info
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
+	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 	sessInfo, err := polecatMgr.Status(polecatName)
 	if err != nil {
 		// Non-fatal - continue without session info
@@ -2707,7 +2707,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// The kill runs before the preserve check on purpose: a live polecat keeps
 	// committing, so a branch verified while its session is still running can
 	// grow a new unpushed commit before the worktree is deleted.
-	sessMgr := polecat.NewSessionManager(t, r)
+	sessMgr := polecat.NewSessionManager(t, r, townRegistry())
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
 			fmt.Printf("  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)
