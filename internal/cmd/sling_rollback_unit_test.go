@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // mutableBead is one bead held by an in-process bd: show reads it, update
@@ -69,6 +70,7 @@ func mutableBD(b *mutableBead) *inprocBD {
 type rollbackFixture struct {
 	r     slingRollback
 	bd    *inprocBD
+	town  *beadsfake.Fake
 	rel   *fakeWorkReleaser
 	sb    *fakeSandbox
 	seats int
@@ -82,12 +84,13 @@ func newRollbackFixture(t *testing.T, bd *inprocBD, rel *fakeWorkReleaser) *roll
 	if rel == nil {
 		rel = &fakeWorkReleaser{beads: map[string][2]string{}}
 	}
-	f := &rollbackFixture{bd: bd, rel: rel, sb: &fakeSandbox{}}
+	f := &rollbackFixture{bd: bd, town: beadsfake.New(beadsfake.WithPrefix("hq")), rel: rel, sb: &fakeSandbox{}}
 	townRoot := t.TempDir()
 	run := bd.run
 	f.r = slingRollback{
 		townRoot:         townRoot,
 		bd:               run,
+		townBeads:        f.town,
 		getBeadInfo:      func(id string) (*beadInfo, error) { return getBeadInfoVia(run, townRoot, id) },
 		collectMolecules: collectExistingMolecules,
 		burnMolecules: func(m []string, id, tr string) error {
@@ -184,17 +187,41 @@ func TestSlingRollbackClearsRawMetadataAfterMoleculeBurnSucceeds(t *testing.T) {
 	}
 }
 
+// convoy creates an open auto-convoy in the fixture's town database.
+func (f *rollbackFixture) convoy(t *testing.T) string {
+	t.Helper()
+	c, err := f.town.Create(beads.CreateOptions{Title: "auto-convoy", Priority: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c.ID
+}
+
+func (f *rollbackFixture) status(t *testing.T, id string) (string, string) {
+	t.Helper()
+	is, err := f.town.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return is.Status, is.CloseReason
+}
+
 // TestSlingRollbackClosesOnlyAGivenConvoy: the auto-convoy is closed in the
 // town beads with the rollback reason, and no convoy means no close.
 func TestSlingRollbackClosesOnlyAGivenConvoy(t *testing.T) {
 	t.Parallel()
-	for _, convoy := range []string{"convoy-rollback-123", ""} {
-		f := newRollbackFixture(t, nil, nil)
-		f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true}, "gt-abc", "", convoy)
-		closed := f.bd.logged("close " + convoy + " -r Sling rollback - hook failed")
-		if closed != (convoy != "") || (convoy == "" && strings.Contains(f.bd.log(), "close ")) {
-			t.Errorf("convoy %q: bd log\n%s", convoy, f.bd.log())
-		}
+	f := newRollbackFixture(t, nil, nil)
+	id := f.convoy(t)
+	f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true}, "gt-abc", "", id)
+	if status, reason := f.status(t, id); status != "closed" || reason != "Sling rollback - hook failed" {
+		t.Errorf("convoy %s: status %q reason %q, want closed with the rollback reason", id, status, reason)
+	}
+
+	f = newRollbackFixture(t, nil, nil)
+	id = f.convoy(t)
+	f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true}, "gt-abc", "", "")
+	if status, _ := f.status(t, id); status != "open" {
+		t.Errorf("a rollback with no convoy closed %s (status %q)", id, status)
 	}
 }
 
@@ -224,20 +251,14 @@ func TestSlingRollbackCleansUpTheSpawnedPolecat(t *testing.T) {
 // is a warning in a best-effort rollback, and outside a town nothing runs.
 func TestCloseConvoyReportsAFailedCloseWithoutPanicking(t *testing.T) {
 	t.Parallel()
-	refusing := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd)
-		return bdAnswer{stderr: "no such convoy", code: 1}
-	}}
-	f := newRollbackFixture(t, refusing, nil)
+	f := newRollbackFixture(t, nil, nil)
 	f.r.closeConvoy("hq-cv-gone", "Sling rollback - hook failed")
-	if !f.bd.logged("close") {
-		t.Fatalf("close was not attempted: %q", f.bd.log())
-	}
 
 	outside := newRollbackFixture(t, nil, nil)
+	id := outside.convoy(t)
 	outside.r.townErr = errors.New("not in a Gas Town workspace")
-	outside.r.closeConvoy("hq-cv-x", "reason")
-	if outside.bd.log() != "" {
-		t.Fatalf("closed a convoy with no town: %q", outside.bd.log())
+	outside.r.closeConvoy(id, "reason")
+	if status, _ := outside.status(t, id); status != "open" {
+		t.Fatalf("closed a convoy with no town: status %q", status)
 	}
 }

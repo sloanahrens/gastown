@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestBatchSling_ConvoyIDStoredInBeadFieldUpdates verifies that the batch convoy ID
@@ -182,42 +181,6 @@ func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
 	errMsg := err.Error()
 	if !strings.Contains(errMsg, "not mapped") || !strings.Contains(errMsg, "town-level") {
 		t.Errorf("error should mention town-level bead, got: %s", errMsg)
-	}
-}
-
-// TestCloseConvoyPinsTownDatabase: convoy cleanup closes hq-cv-* beads
-// through the town database, with auto-commit on, whatever database the
-// ambient bd environment points at.
-func TestCloseConvoyPinsTownDatabase(t *testing.T) {
-	t.Parallel()
-	f := newRollbackFixture(t, nil, nil)
-	rec := &callsBD{bd: f.bd}
-	f.r.bd = rec.run
-
-	f.r.closeConvoy("hq-cv-cleanup-test", "all beads failed to sling")
-
-	townBeads := filepath.Join(f.r.townRoot, ".beads")
-	var closes []beads.BDCall
-	for _, c := range rec.recorded() {
-		if len(c.Args) > 0 && c.Args[0] == "close" {
-			closes = append(closes, c)
-		}
-	}
-	if len(closes) != 1 {
-		t.Fatalf("close calls = %d, want 1; bd log:\n%s", len(closes), f.bd.log())
-	}
-	c := closes[0]
-	if got := strings.Join(c.Args, " "); got != "close hq-cv-cleanup-test -r all beads failed to sling" {
-		t.Errorf("argv = %q", got)
-	}
-	if c.Dir != townBeads {
-		t.Errorf("close dir = %q, want town beads dir %q", c.Dir, townBeads)
-	}
-	if got := callEnv(c, "BEADS_DIR"); got != townBeads {
-		t.Errorf("BEADS_DIR = %q, want %q", got, townBeads)
-	}
-	if got := callEnv(c, "BD_DOLT_AUTO_COMMIT"); got != "on" {
-		t.Errorf("BD_DOLT_AUTO_COMMIT = %q, want on", got)
 	}
 }
 

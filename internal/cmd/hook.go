@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
-	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -421,17 +420,13 @@ func runHook(_ *cobra.Command, args []string) error {
 }
 
 func closeCompletedHookedMolecule(workDir, beadID string) error {
-	return closeCompletedHookedMoleculeVia(nil, workDir, beadID, runtime.SessionIDFromEnv())
+	return closeCompletedHookedMoleculeIn(pinnedBd(workDir), beadID)
 }
 
-// closeCompletedHookedMoleculeVia closes beadID through run (nil runs bd),
-// tagging the close with sessionID when it is not "".
-func closeCompletedHookedMoleculeVia(run beads.BDRunner, workDir, beadID, sessionID string) error {
-	closeArgs := []string{"close", beadID, "--force", "--reason=Auto-replaced by gt hook (molecule complete)"}
-	if sessionID != "" {
-		closeArgs = append(closeArgs, "--session="+sessionID)
-	}
-	return BdCmd(closeArgs...).Dir(workDir).WithAutoCommit().Via(run).Run()
+// closeCompletedHookedMoleculeIn force-closes beadID in db, the replaced
+// hook's database.
+func closeCompletedHookedMoleculeIn(db beads.Client, beadID string) error {
+	return db.ForceCloseWithReason("Auto-replaced by gt hook (molecule complete)", beadID)
 }
 
 // hookBeadArgError rejects a first argument that does not look like a bead

@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1148,16 +1151,39 @@ func TestWriteHandoffMarker(t *testing.T) {
 
 func TestIssueSummaryLines(t *testing.T) {
 	t.Parallel()
-	got := issueSummaryLines([]byte(`[{"id":"gt-a","title":"First","priority":0},{"id":"gt-b","title":"Second"}]`))
-	want := []string{"gt-a [P0] First", "gt-b Second"}
+	got := issueSummaryLines([]*beads.Issue{{ID: "gt-a", Title: "First", Priority: 0}, {ID: "gt-b", Title: "Second", Priority: 2}}, nil)
+	want := []string{"gt-a [P0] First", "gt-b [P2] Second"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("lines = %q, want %q", got, want)
 	}
-	if lines := issueSummaryLines([]byte(`[]`)); len(lines) != 0 {
+	if lines := issueSummaryLines(nil, nil); len(lines) != 0 {
 		t.Fatalf("empty result gave lines %q, want none", lines)
 	}
-	if lines := issueSummaryLines([]byte("No issues ready\n")); lines != nil {
-		t.Fatalf("non-JSON gave lines %q, want nil", lines)
+	if lines := issueSummaryLines([]*beads.Issue{{ID: "gt-a"}}, errors.New("bd failed")); lines != nil {
+		t.Fatalf("a failed read gave lines %q, want nil", lines)
+	}
+}
+
+// TestCreateHandoffMailHooksItToTheAgent: the handoff mail lands in the town
+// database as high-priority mail from and assigned to the agent, hooked so
+// the successor's gt hook finds it.
+func TestCreateHandoffMailHooksItToTheAgent(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New(beadsfake.WithPrefix("hq"))
+	const agent = "gastown/crew/max"
+	id, err := createHandoffMailIn(db, agent, "🤝 HANDOFF: Session cycling", "Context cycling.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "hooked" || got.Assignee != agent || got.Priority != 1 || got.Description != "Context cycling." || got.CreatedBy != agent {
+		t.Errorf("mail = status %q assignee %q priority %d description %q created_by %q", got.Status, got.Assignee, got.Priority, got.Description, got.CreatedBy)
+	}
+	if !slices.Contains(got.Labels, "gt:message") || !slices.Contains(got.Labels, "from:"+agent) {
+		t.Errorf("labels = %v, want gt:message and from:%s", got.Labels, agent)
 	}
 }
 
