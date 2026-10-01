@@ -42,6 +42,21 @@ func TestUsageActor(t *testing.T) {
 	}
 }
 
+// gt daemon run logs as the daemon even though its entry is written before
+// runDaemonRun sets BD_ACTOR, and even when launched from an agent session
+// whose identity runDaemonRun then clears (gt-dswsc).
+func TestCommandActorDaemonRun(t *testing.T) {
+	t.Parallel()
+	for _, env := range []map[string]string{nil, {"GT_ROLE": "gastown/crew/sloan"}} {
+		if got := commandActor(daemonRunCmd, envOf(env), false); got != "daemon" {
+			t.Errorf("commandActor(gt daemon run, %v) = %q, want daemon", env, got)
+		}
+	}
+	if got := commandActor(daemonStartCmd, envOf(nil), false); got != "unknown" {
+		t.Errorf("commandActor(gt daemon start) = %q, want unknown", got)
+	}
+}
+
 // The usage log reads identity only from the D5 allowlist.
 func TestUsageActorReadsOnlyIdentityAllowlist(t *testing.T) {
 	t.Parallel()
