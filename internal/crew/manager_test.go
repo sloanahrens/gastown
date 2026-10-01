@@ -929,3 +929,53 @@ func TestGitAtDefaultsToRealGit(t *testing.T) {
 		t.Errorf("gitAt(%s) = %T; want a *git.Git on it", dir, m.gitAt(dir))
 	}
 }
+
+// replaceReason decides which starts replace a session, which the cmd layer
+// routes through the supervisor's Respawn (gt-4k3fj.4.1).
+func TestReplaceReason(t *testing.T) {
+	t.Parallel()
+	alive := func(ok bool, err error) func() (bool, error) { return func() (bool, error) { return ok, err } }
+	probeErr := errors.New("tmux timeout")
+	cases := []struct {
+		name    string
+		running bool
+		opts    StartOptions
+		alive   func() (bool, error)
+		want    string
+		wantErr error
+	}{
+		{"no session", false, StartOptions{KillExisting: true}, alive(true, nil), "", nil},
+		{"restart replaces a live session", true, StartOptions{KillExisting: true, Topic: "restart"}, alive(true, nil), "crew restart: replace the running session", nil},
+		{"start leaves a live session", true, StartOptions{}, alive(true, nil), "", ErrSessionRunning},
+		{"start replaces a dead agent", true, StartOptions{}, alive(false, nil), "crew start: replace a session whose agent exited", nil},
+		{"unknown liveness kills nothing", true, StartOptions{}, alive(false, probeErr), "", probeErr},
+	}
+	for _, tc := range cases {
+		got, err := replaceReason(tc.running, tc.opts, tc.alive)
+		if got != tc.want || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+			t.Errorf("%s: replaceReason = %q, %v; want %q, %v", tc.name, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
+
+// A replacement runs through the Respawn hook, which may refuse it; without
+// a hook it runs directly.
+func TestRespawnHookGatesReplacement(t *testing.T) {
+	t.Parallel()
+	m := &Manager{}
+	ran := 0
+	run := func() error { ran++; return nil }
+	if err := m.respawn("max", "crew restart", run); err != nil || ran != 1 {
+		t.Fatalf("no hook: err=%v ran=%d", err, ran)
+	}
+	refused := errors.New("supervisor refused: e-stop is active")
+	m.Respawn = func(name, reason string, _ func() error) error {
+		if name != "max" || reason != "crew restart" {
+			t.Errorf("hook got %q %q", name, reason)
+		}
+		return refused
+	}
+	if err := m.respawn("max", "crew restart", run); !errors.Is(err, refused) || ran != 1 {
+		t.Fatalf("refusing hook: err=%v ran=%d", err, ran)
+	}
+}

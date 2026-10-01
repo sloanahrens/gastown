@@ -2,11 +2,9 @@
 package session
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -23,56 +21,6 @@ func TownSessions() []TownSession {
 	return []TownSession{
 		{"Mayor", MayorSessionName()},
 	}
-}
-
-// StopTownSession stops a single town-level tmux session.
-// If force is true, skips graceful shutdown (Ctrl-C) and kills immediately.
-// Returns true if the session was running and stopped, false if not running.
-func StopTownSession(t *tmux.Tmux, ts TownSession, force bool) (bool, error) {
-	running, err := t.HasSession(ts.SessionID)
-	if err != nil {
-		return false, err
-	}
-	if !running {
-		return false, nil
-	}
-
-	return stopTownSessionInternal(t, ts, force)
-}
-
-// StopTownSessionWithCache is like StopTownSession but uses a pre-fetched
-// SessionSet for O(1) existence check instead of spawning a subprocess.
-func StopTownSessionWithCache(t *tmux.Tmux, ts TownSession, force bool, cache *tmux.SessionSet) (bool, error) {
-	if !cache.Has(ts.SessionID) {
-		return false, nil
-	}
-
-	return stopTownSessionInternal(t, ts, force)
-}
-
-// stopTownSessionInternal performs the actual session stop.
-func stopTownSessionInternal(t *tmux.Tmux, ts TownSession, force bool) (bool, error) {
-	// Try graceful shutdown first (unless forced)
-	if !force {
-		_ = t.SendKeysRaw(ts.SessionID, "C-c")
-		WaitForSessionExit(t, ts.SessionID, constants.GracefulShutdownTimeout)
-	}
-
-	// Log pre-death event for crash investigation (before killing)
-	reason := "user shutdown"
-	if force {
-		reason = "forced shutdown"
-	}
-	_ = events.LogFeed(events.TypeSessionDeath, ts.SessionID,
-		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, "gt down"))
-
-	// Kill the session.
-	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-	if err := t.KillSessionWithProcesses(ts.SessionID); err != nil {
-		return false, fmt.Errorf("killing %s session: %w", ts.Name, err)
-	}
-
-	return true, nil
 }
 
 // WaitForSessionExit polls for a session's process to exit within the given timeout.

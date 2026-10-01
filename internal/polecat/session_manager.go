@@ -74,6 +74,15 @@ type SessionManager struct {
 	// prefixes resolves the rig's session prefix; nil gives
 	// session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
+	// stopKill ends a session in Stop; nil kills it through tmux. gt down
+	// sets it to the supervisor's operator stop (gt-4k3fj.4.1).
+	stopKill func(sessionID string) error
+}
+
+// SetStopKill routes the kill in Stop through fn (the supervisor's logged
+// operator stop) instead of straight to tmux.
+func (m *SessionManager) SetStopKill(fn func(sessionID string) error) {
+	m.stopKill = fn
 }
 
 // sessionTmux is the tmux surface a SessionManager drives. *tmux.Tmux
@@ -755,6 +764,12 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		}
 	}
 
+	if m.stopKill != nil {
+		if err := m.stopKill(sessionID); err != nil {
+			return fmt.Errorf("killing session: %w", err)
+		}
+		return nil
+	}
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
