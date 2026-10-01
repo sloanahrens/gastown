@@ -41,30 +41,24 @@ decides and reports without slinging, labeling or commenting.
    comment on the bead, never repeated. A spec that needs planning gets the
    `needs-planning` label and one comment; nothing is spawned (the planner,
    gt-4k3fj.7, is not built yet).
-4. A clean spec takes a free seat of a class it may use and is slung through
-   the shared rig-dispatch path in-process, with no auto-convoy.
+4. A clean spec takes the first free seat and is slung through the shared
+   rig-dispatch path in-process, with no auto-convoy.
 
-## Seats, classes and budget
+## Seats and budget
 
-A seat is one agent with its own cap. The class comes from the agent's
-`provider` in `settings/config.json`, never from its name or model.
-
-- **hooked**: provider `claude`. The session gets the town's managed settings
-  and guard hooks. deepseek-flash is hooked: it is the claude CLI over another
-  backend and runs the same hooks.
-- **hookless**: any other provider. Until gt-be0z lands these spawn with zero
-  guards. No configured polecat agent is hookless today.
+A seat is one agent with its own cap. Every agent runs the claude CLI with the
+town's managed settings and guard hooks, so no seat is less guarded than
+another. The `hooked_*` key names predate that and are kept for compatibility;
+`hookless_agent` and `max_hookless` are retired: still accepted, never read.
 
 Seats, in order:
 
 | Seat | Cap |
 |---|---|
 | `polecat_pool.overflow_agent` | `polecat_pool.max_overflow`, 2 when unset |
-| `patrols.spec_dispatch.hookless_agent`, when set | `max_hookless`, default 2 |
 | `patrols.spec_dispatch.hooked_agent`, default `claude-sonnet` | `max_hooked`, default 2 |
 
-`prefer_hooked` moves the hooked_agent seat first. A hooked_agent that is not
-provider `claude` is dropped.
+`prefer_hooked` moves the hooked_agent seat first.
 
 Occupancy is every live polecat session plus the seat claims in-flight slings
 hold, counted per agent from the session's `GT_AGENT`. An empty `GT_AGENT`
@@ -74,23 +68,6 @@ per tick. A full seat is skipped, never overfilled, and the bead stays ready
 for the next tick.
 
 ## Host safety
-
-The rule fails closed. Every spec takes a hooked seat. A spec may use a
-hookless seat only when it carries the label `host-safe` and the host-safety
-scan finds nothing in its title, description, notes, design or acceptance.
-
-The scan is defense in depth. It matches whole tokens and command words, not
-substrings, so "installer docs" is not an install. It looks for:
-
-- install, uninstall and reinstall as words, `INSTALL_DIR`, `make install`
-- `rm` with a recursive flag (`-r`, `-rf`, `-fr`, `-R`, `--recursive`),
-  `chmod -R`, `chown -R`, `shred`, `dd`, `mkfs`, `sudo`, `dolt cleanup`
-- host paths such as `~/.local/bin`, `/usr/local/bin`, `/etc/`, shell rc files
-  and LaunchAgents, and redirects into `/etc` or `~/.`
-
-A `host-safe` spec that trips the scan is forced onto a hooked seat and gets
-one comment saying so. The scan can only move a spec toward the hooked class.
-When every hooked seat is full the spec waits.
 
 Every dispatch carries sling args telling the polecat that install and
 uninstall tests use a temporary `INSTALL_DIR` and never the real

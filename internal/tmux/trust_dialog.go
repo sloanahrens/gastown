@@ -20,11 +20,11 @@ import (
 // driven by what is on screen instead of by an assumption about ordering.
 
 // trustCursorMarkers are the glyphs a select list uses to mark the focused
-// option. Claude Code renders "❯"; Codex renders "›". ASCII ">" is included
-// because it is the conventional marker, but a line is only treated as an option
-// if its label reads like one, which keeps non-option lines such as Codex's
-// "> You are in /tmp/demo" banner out of the list.
-var trustCursorMarkers = []string{"❯", "›", "»", ">"}
+// option. Claude Code renders "❯". ASCII ">" is included because it is the
+// conventional marker, but a line is only treated as an option if its label
+// reads like one, which keeps non-option lines such as a "> " quoted banner
+// out of the list.
+var trustCursorMarkers = []string{"❯", "»", ">"}
 
 // trustOption is one selectable line of a workspace trust dialog.
 type trustOption struct {
@@ -123,8 +123,8 @@ func firstWord(text string) string {
 }
 
 // stripTrustOptionNumber removes a leading list number ("1. ", "2) ") from an
-// option label. Codex numbers its options; Claude Code renders its trust dialogs
-// with hideIndexes and does not.
+// option label. Claude Code renders its trust dialogs with hideIndexes, but
+// numbered select lists ("1. No, exit") are stripped the same way.
 func stripTrustOptionNumber(text string) string {
 	digits := 0
 	for digits < len(text) && text[digits] >= '0' && text[digits] <= '9' {
@@ -141,8 +141,8 @@ func stripTrustOptionNumber(text string) string {
 
 // isAffirmativeTrustOption reports whether an option grants trust. Claude labels
 // it "Yes, I trust this folder" ("Yes, I trust these settings" for the settings
-// variant) and accepts it as "Yes, I accept" in the bypass dialog; Codex labels
-// it "Yes, proceed". Every cancel variant starts with "No": "No, exit",
+// variant) and accepts it as "Yes, I accept" in the bypass dialog. Every
+// cancel variant starts with "No": "No, exit",
 // "No, continue without these permissions", "No, quit".
 func isAffirmativeTrustOption(label string) bool {
 	return firstWord(label) == "yes"

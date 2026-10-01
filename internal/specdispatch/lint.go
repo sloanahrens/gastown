@@ -1,6 +1,5 @@
 // Package specdispatch is the decision core of the spec dispatcher (gt-4k3fj.5):
-// the dispatch-time spec lint, the host-safety rule, seat classes and budget,
-// candidate ordering, and the Dolt-contention retry. It holds no I/O — the
+// the dispatch-time spec lint, the seat budget, candidate ordering, and the Dolt-contention retry. It holds no I/O — the
 // `gt spec` commands (internal/cmd/spec.go) read beads, sessions and settings
 // and hand them here, so every decision is testable with plain values.
 //

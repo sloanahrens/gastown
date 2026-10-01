@@ -25,10 +25,7 @@ Native source installs require these host tools. Homebrew and Docker installs pr
 | Tool | Version | Check | Install |
 |------|---------|-------|---------|
 | **tmux** | 3.0+ | `tmux -V` | See below |
-| **Claude Code** (default) | >= 2.0.20 | `claude --version` | See [claude.ai/claude-code](https://claude.ai/claude-code) |
-| **Codex CLI** (optional) | latest | `codex --version` | See [developers.openai.com/codex/cli](https://developers.openai.com/codex/cli) |
-| **OpenCode CLI** (optional) | latest | `opencode --version` | See [opencode.ai](https://opencode.ai) |
-| **GitHub Copilot CLI** (optional) | latest | `copilot --version` | See [cli.github.com](https://cli.github.com) (requires Copilot seat) |
+| **Claude Code** (the only runtime) | >= 2.0.20 | `claude --version` | See [claude.ai/claude-code](https://claude.ai/claude-code) |
 
 ## Installing Prerequisites
 
@@ -195,24 +192,25 @@ gt status              # Show workspace status
 
 ### Step 5: Configure Agents (Optional)
 
-Gas Town supports built-in runtimes (`claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`) plus custom agent aliases.
+Every agent runs the Claude Code CLI (or a wrapper that execs it). The built-in
+presets are `claude` and `groq-compound`; custom agent aliases add models,
+flags or another Anthropic-compatible backend.
 
 ```bash
 # List available agents
 gt config agent list
 
 # Create an alias (aliases can encode model/thinking flags)
-gt config agent set codex-low "codex --thinking low"
 gt config agent set claude-haiku "claude --model haiku --dangerously-skip-permissions"
 
 # Set the town default agent (used when a rig doesn't specify one)
-gt config default-agent codex-low
+gt config default-agent claude-haiku
 ```
 
 You can also override the agent per command without changing defaults:
 
 ```bash
-gt mayor start --agent codex-low
+gt mayor start --agent claude-haiku
 gt sling gt-abc12 myproject --agent claude-haiku
 ```
 
@@ -232,7 +230,6 @@ gt sling gt-abc12 myproject
 # Run runtime manually
 cd ~/gt/myproject/polecats/<worker>
 claude --resume          # Claude Code
-# or: codex              # Codex CLI
 
 # Check progress
 gt convoy list
