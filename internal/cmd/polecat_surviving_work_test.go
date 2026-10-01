@@ -11,8 +11,7 @@ import (
 )
 
 func TestReportSurvivingWorkExitContract(t *testing.T) {
-	prev := survivingWorkForBeadFn
-	t.Cleanup(func() { survivingWorkForBeadFn = prev })
+	t.Parallel()
 
 	for _, tc := range []struct {
 		name     string
@@ -28,14 +27,15 @@ func TestReportSurvivingWorkExitContract(t *testing.T) {
 		{name: "cannot tell", err: errors.New("origin unreachable"), wantCode: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			survivingWorkForBeadFn = func(_, beadID string) (string, error) {
+			t.Parallel()
+			survivingWork := func(_, beadID string) (string, error) {
 				if beadID != "gt-elvf4" {
 					t.Fatalf("asked about %s", beadID)
 				}
 				return tc.branch, tc.err
 			}
 			var out, errOut bytes.Buffer
-			err := reportSurvivingWork(&out, &errOut, "/town", "gt-elvf4")
+			err := reportSurvivingWork(&out, &errOut, survivingWork, "/town", "gt-elvf4")
 			code := 0
 			if err != nil {
 				var silent *SilentExitError

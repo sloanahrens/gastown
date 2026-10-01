@@ -230,7 +230,13 @@ func runReady(cmd *cobra.Command, args []string) error {
 	}
 
 	wg.Wait()
+	return renderReady(os.Stdout, sources, townRoot, readyJSON)
+}
 
+// renderReady sorts and summarizes the collected sources and writes the
+// report to w, as JSON when jsonOut is set. A town whose every source failed
+// is an error and writes nothing.
+func renderReady(w io.Writer, sources []ReadySource, townRoot string, jsonOut bool) error {
 	// Sort sources: town first, then rigs alphabetically
 	sort.Slice(sources, func(i, j int) bool {
 		if sources[i].Name == "town" {
@@ -298,13 +304,13 @@ func runReady(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output
-	if readyJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if jsonOut {
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	}
 
-	if err := printReadyHuman(result); err != nil {
+	if err := printReadyHuman(w, result); err != nil {
 		return err
 	}
 
@@ -316,29 +322,29 @@ func runReady(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printReadyHuman(result ReadyResult) error {
+func printReadyHuman(w io.Writer, result ReadyResult) error {
 	if result.Summary.Total == 0 {
-		fmt.Println("No ready work across town.")
+		fmt.Fprintln(w, "No ready work across town.")
 		return nil
 	}
 
-	fmt.Printf("%s Ready work across town:\n\n", style.Bold.Render("📋"))
+	fmt.Fprintf(w, "%s Ready work across town:\n\n", style.Bold.Render("📋"))
 
 	for _, src := range result.Sources {
 		// A capped page is data, not a failure: print the page it is, and
 		// say how much more exists so the number next to the name is not
 		// mistaken for the whole board (gt-m7pq).
 		if src.Error != "" && !src.Capped {
-			fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("(error: "+src.Error+")"))
+			fmt.Fprintf(w, "%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("(error: "+src.Error+")"))
 			continue
 		}
 
 		count := len(src.Issues)
 		if count == 0 {
 			if src.Capped {
-				fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("("+cappedNote(src, 0)+")"))
+				fmt.Fprintf(w, "%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("("+cappedNote(src, 0)+")"))
 			} else {
-				fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Dim.Render("(none)"))
+				fmt.Fprintf(w, "%s %s\n", style.Dim.Render(src.Name+"/"), style.Dim.Render("(none)"))
 			}
 			continue
 		}
@@ -348,7 +354,7 @@ func printReadyHuman(result ReadyResult) error {
 			header += ", " + cappedNote(src, count)
 		}
 		header += ")"
-		fmt.Println(header)
+		fmt.Fprintln(w, header)
 		for _, issue := range src.Issues {
 			priorityStr := fmt.Sprintf("P%d", issue.Priority)
 			var priorityStyled string
@@ -369,9 +375,9 @@ func printReadyHuman(result ReadyResult) error {
 				title = title[:57] + "..."
 			}
 
-			fmt.Printf("  [%s] %s %s\n", priorityStyled, style.Dim.Render(issue.ID), title)
+			fmt.Fprintf(w, "  [%s] %s %s\n", priorityStyled, style.Dim.Render(issue.ID), title)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// Summary line
@@ -393,9 +399,9 @@ func printReadyHuman(result ReadyResult) error {
 	}
 
 	if len(parts) > 0 {
-		fmt.Printf("Total: %d items ready (%s)\n", result.Summary.Total, strings.Join(parts, ", "))
+		fmt.Fprintf(w, "Total: %d items ready (%s)\n", result.Summary.Total, strings.Join(parts, ", "))
 	} else {
-		fmt.Printf("Total: %d items ready\n", result.Summary.Total)
+		fmt.Fprintf(w, "Total: %d items ready\n", result.Summary.Total)
 	}
 
 	return nil
@@ -466,7 +472,12 @@ func getWispIDs(beadsPath string) map[string]bool {
 	if err != nil {
 		return nil // Wisp table may not exist or Dolt unavailable
 	}
+	return parseWispIDs(output)
+}
 
+// parseWispIDs reads the IDs out of bd mol wisp list --json output; nil when
+// it does not parse.
+func parseWispIDs(output []byte) map[string]bool {
 	// bd mol wisp list --json returns {"wisps": [...], "count": N, ...}
 	var wrapper struct {
 		Wisps []struct {

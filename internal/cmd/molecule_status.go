@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -476,7 +477,10 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Human-readable output
-	outputMoleculeStatus(status)
+	outputMoleculeStatus(os.Stdout, status, func() {
+		showGitDivergenceWarning()
+		showRecentTrailSummary()
+	})
 	return nil
 }
 
@@ -642,63 +646,65 @@ func determineNextAction(status MoleculeStatusInfo) string {
 	return ""
 }
 
-// outputMoleculeStatus outputs human-readable status.
-func outputMoleculeStatus(status MoleculeStatusInfo) {
+// outputMoleculeStatus writes human-readable status to w. workspaceHints
+// prints the git divergence warning and recent trail for the current
+// directory; tests pass a no-op so nothing touches the real checkout.
+func outputMoleculeStatus(w io.Writer, status MoleculeStatusInfo, workspaceHints func()) {
 	// Header with hook icon
-	fmt.Printf("\n%s Hook Status: %s\n", style.Bold.Render("🪝"), status.Target)
+	fmt.Fprintf(w, "\n%s Hook Status: %s\n", style.Bold.Render("🪝"), status.Target)
 	if status.Role != "" && status.Role != "unknown" {
-		fmt.Printf("Role: %s\n", status.Role)
+		fmt.Fprintf(w, "Role: %s\n", status.Role)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	if !status.HasWork {
-		fmt.Printf("%s\n", style.Dim.Render("Nothing on hook - no work slung"))
-		fmt.Printf("\n%s %s\n", style.Bold.Render("Next:"), status.NextAction)
+		fmt.Fprintf(w, "%s\n", style.Dim.Render("Nothing on hook - no work slung"))
+		fmt.Fprintf(w, "\n%s %s\n", style.Bold.Render("Next:"), status.NextAction)
 		return
 	}
 
 	// Show hooked bead info
 	if status.PinnedBead == nil {
-		fmt.Printf("%s\n", style.Dim.Render("Work indicated but no bead found"))
+		fmt.Fprintf(w, "%s\n", style.Dim.Render("Work indicated but no bead found"))
 		return
 	}
 
 	// AUTONOMOUS MODE banner - hooked work triggers autonomous execution
-	fmt.Println(style.Bold.Render("🚀 AUTONOMOUS MODE - Work on hook triggers immediate execution"))
-	fmt.Println()
+	fmt.Fprintln(w, style.Bold.Render("🚀 AUTONOMOUS MODE - Work on hook triggers immediate execution"))
+	fmt.Fprintln(w)
 
 	// Check if the hooked bead is already closed (someone closed it externally)
 	if status.PinnedBead.Status == "closed" {
-		fmt.Printf("%s Hooked bead %s is already closed!\n", style.Bold.Render("⚠"), status.PinnedBead.ID)
-		fmt.Printf("   Title: %s\n", status.PinnedBead.Title)
-		fmt.Printf("   This work was completed elsewhere. Clear your hook with: gt unsling\n")
+		fmt.Fprintf(w, "%s Hooked bead %s is already closed!\n", style.Bold.Render("⚠"), status.PinnedBead.ID)
+		fmt.Fprintf(w, "   Title: %s\n", status.PinnedBead.Title)
+		fmt.Fprintf(w, "   This work was completed elsewhere. Clear your hook with: gt unsling\n")
 		return
 	}
 
 	// Check if this is a mail bead - display mail-specific format
 	if status.PinnedBead.Type == "message" {
 		sender := extractMailSender(status.PinnedBead.Labels)
-		fmt.Printf("%s %s (mail)\n", style.Bold.Render("🪝 Hook:"), status.PinnedBead.ID)
+		fmt.Fprintf(w, "%s %s (mail)\n", style.Bold.Render("🪝 Hook:"), status.PinnedBead.ID)
 		if sender != "" {
-			fmt.Printf("   From: %s\n", sender)
+			fmt.Fprintf(w, "   From: %s\n", sender)
 		}
-		fmt.Printf("   Subject: %s\n", status.PinnedBead.Title)
-		fmt.Printf("   Run: gt mail read %s\n", status.PinnedBead.ID)
+		fmt.Fprintf(w, "   Subject: %s\n", status.PinnedBead.Title)
+		fmt.Fprintf(w, "   Run: gt mail read %s\n", status.PinnedBead.ID)
 		return
 	}
 
-	fmt.Printf("%s %s: %s\n", style.Bold.Render("🪝 Hooked:"), status.PinnedBead.ID, status.PinnedBead.Title)
+	fmt.Fprintf(w, "%s %s: %s\n", style.Bold.Render("🪝 Hooked:"), status.PinnedBead.ID, status.PinnedBead.Title)
 	if status.AttachedFormula != "" {
-		fmt.Printf("%s %s\n", style.Bold.Render("📐 Formula:"), status.AttachedFormula)
+		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("📐 Formula:"), status.AttachedFormula)
 	}
 	if len(status.AttachedVars) > 0 {
-		fmt.Printf("%s\n", style.Bold.Render("🧩 Vars:"))
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("🧩 Vars:"))
 		for _, variable := range status.AttachedVars {
-			fmt.Printf("   --var %s\n", variable)
+			fmt.Fprintf(w, "   --var %s\n", variable)
 		}
 	}
 	if status.AttachedArgs != "" {
-		fmt.Printf("%s %s\n", style.Bold.Render("📋 Args:"), status.AttachedArgs)
+		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("📋 Args:"), status.AttachedArgs)
 	}
 	// Show attached molecule
 	if status.AttachedMolecule != "" {
@@ -706,47 +712,46 @@ func outputMoleculeStatus(status MoleculeStatusInfo) {
 		if status.IsWisp {
 			molType = "Wisp"
 		}
-		fmt.Printf("%s %s: %s\n", style.Bold.Render("🧬 "+molType+":"), status.AttachedMolecule, "")
+		fmt.Fprintf(w, "%s %s: %s\n", style.Bold.Render("🧬 "+molType+":"), status.AttachedMolecule, "")
 		if status.AttachedAt != "" {
-			fmt.Printf("   Attached: %s\n", status.AttachedAt)
+			fmt.Fprintf(w, "   Attached: %s\n", status.AttachedAt)
 		}
 	} else if status.AttachedFormula == "" {
-		fmt.Printf("%s\n", style.Dim.Render("No molecule attached (hooked bead still triggers autonomous work)"))
+		fmt.Fprintf(w, "%s\n", style.Dim.Render("No molecule attached (hooked bead still triggers autonomous work)"))
 	}
 
 	// Show progress if available
 	if status.Progress != nil {
-		fmt.Println()
+		fmt.Fprintln(w)
 
 		// Progress bar
 		barWidth := 20
 		filled := (status.Progress.Percent * barWidth) / 100
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-		fmt.Printf("Progress: [%s] %d%% (%d/%d steps)\n",
+		fmt.Fprintf(w, "Progress: [%s] %d%% (%d/%d steps)\n",
 			bar, status.Progress.Percent, status.Progress.DoneSteps, status.Progress.TotalSteps)
 
 		// Step breakdown
-		fmt.Printf("  Done:        %d\n", status.Progress.DoneSteps)
-		fmt.Printf("  In Progress: %d\n", status.Progress.InProgress)
-		fmt.Printf("  Ready:       %d", len(status.Progress.ReadySteps))
+		fmt.Fprintf(w, "  Done:        %d\n", status.Progress.DoneSteps)
+		fmt.Fprintf(w, "  In Progress: %d\n", status.Progress.InProgress)
+		fmt.Fprintf(w, "  Ready:       %d", len(status.Progress.ReadySteps))
 		if len(status.Progress.ReadySteps) > 0 && len(status.Progress.ReadySteps) <= 3 {
-			fmt.Printf(" (%s)", strings.Join(status.Progress.ReadySteps, ", "))
+			fmt.Fprintf(w, " (%s)", strings.Join(status.Progress.ReadySteps, ", "))
 		}
-		fmt.Println()
-		fmt.Printf("  Blocked:     %d\n", len(status.Progress.BlockedSteps))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  Blocked:     %d\n", len(status.Progress.BlockedSteps))
 
 		if status.Progress.Complete {
-			fmt.Printf("\n%s\n", style.Bold.Render("✓ Molecule complete!"))
+			fmt.Fprintf(w, "\n%s\n", style.Bold.Render("✓ Molecule complete!"))
 		}
 	}
 
 	// Git divergence warning and recent trail (gt-7w6cq)
-	showGitDivergenceWarning()
-	showRecentTrailSummary()
+	workspaceHints()
 
 	// Next action hint
 	if status.NextAction != "" {
-		fmt.Printf("\n%s %s\n", style.Bold.Render("Next:"), status.NextAction)
+		fmt.Fprintf(w, "\n%s %s\n", style.Bold.Render("Next:"), status.NextAction)
 	}
 }
 

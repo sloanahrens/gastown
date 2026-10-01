@@ -72,7 +72,7 @@ func runRigQuickAdd(cmd *cobra.Command, args []string) error {
 
 	rigName := sanitizeRigName(filepath.Base(gitRoot))
 
-	townRoot, err := findOrCreateTown()
+	townRoot, err := findOrCreateTown(os.Getenv, workspace.FindFromCwd, os.UserHomeDir)
 	if err != nil {
 		return fmt.Errorf("finding Gas Town: %w", err)
 	}
@@ -164,21 +164,21 @@ func sanitizeRigName(name string) string {
 	return name
 }
 
-func findOrCreateTown() (string, error) {
+func findOrCreateTown(getenv func(string) string, cwdTown, userHome func() (string, error)) (string, error) {
 	// Priority 1: GT_TOWN_ROOT env var (explicit user preference)
-	if townRoot := os.Getenv("GT_TOWN_ROOT"); townRoot != "" {
+	if townRoot := getenv("GT_TOWN_ROOT"); townRoot != "" {
 		if isValidTown(townRoot) {
 			return townRoot, nil
 		}
 	}
 
 	// Priority 2: Try to find from cwd (supports multiple town installations)
-	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+	if townRoot, err := cwdTown(); err == nil && townRoot != "" {
 		return townRoot, nil
 	}
 
 	// Priority 3: Fall back to well-known locations
-	home, err := os.UserHomeDir()
+	home, err := userHome()
 	if err != nil {
 		return "", err
 	}

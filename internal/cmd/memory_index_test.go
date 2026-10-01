@@ -505,6 +505,7 @@ func TestRenderMemoryIndex_MatchesLiveCorpusScale(t *testing.T) {
 // content lost": prime carries the preview and the full kv key, which
 // `bd kv get <key>` resolves to the value in full.
 func TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable(t *testing.T) {
+	t.Parallel()
 	const key = "live-verification-escalation-chain"
 	tail := "TAIL-MARKER only present in the full text."
 	value := "LIVE VERIFICATION PROTOCOL, run twice against destruction-gate fixes. " +

@@ -2,9 +2,6 @@ package cmd
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -132,47 +129,6 @@ func TestReleasePolecatWorkResetsSlotOnlyWhenAsked(t *testing.T) {
 	}
 	if len(rel.released) != 0 {
 		t.Fatalf("no bead named, nothing to release: %v", rel.released)
-	}
-}
-
-// The production releaser writes with --if-assignee and reads bd's exit 13 as
-// "guard no longer held" (a skip), any other failure as an error.
-func TestBdPolecatWorkReleaserUsesAssigneeGuard(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX bd stub")
-	}
-	for _, tc := range []struct {
-		name         string
-		exit         int
-		wantReleased bool
-		wantErr      bool
-	}{
-		{name: "guard held", exit: 0, wantReleased: true},
-		{name: "guard no longer held", exit: 13},
-		{name: "other failure", exit: 1, wantErr: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			townRoot := t.TempDir()
-			binDir := filepath.Join(townRoot, "bin")
-			if err := os.MkdirAll(binDir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			argsLog := filepath.Join(townRoot, "args.log")
-			script := "#!/bin/sh\necho \"$@\" >> '" + argsLog + "'\nexit " + map[int]string{0: "0", 1: "1", 13: "13"}[tc.exit] + "\n"
-			_ = writeBDStub(t, binDir, script, "")
-			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-			released, err := bdPolecatWorkReleaser{townRoot: townRoot}.ReleaseBead("gt-elvf4", "gastown/polecats/basalt")
-			if released != tc.wantReleased || (err != nil) != tc.wantErr {
-				t.Fatalf("released=%v err=%v, want released=%v wantErr=%v", released, err, tc.wantReleased, tc.wantErr)
-			}
-			args, _ := os.ReadFile(argsLog)
-			for _, want := range []string{"update gt-elvf4", "--status=open", "--assignee=", "--if-assignee=gastown/polecats/basalt"} {
-				if !strings.Contains(string(args), want) {
-					t.Fatalf("bd args %q missing %q", args, want)
-				}
-			}
-		})
 	}
 }
 

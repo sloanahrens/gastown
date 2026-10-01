@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,29 +132,15 @@ func TestMaintainDBInfo(t *testing.T) {
 	}
 }
 
-// fakeDoltOnPath writes a `dolt` stub into a temp dir and puts that dir first
-// on PATH for the test.
-func fakeDoltOnPath(t *testing.T, script string) {
-	t.Helper()
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write dolt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 // TestMaintainHasBackupConfigurations drives the probe's two answering cases:
 // the backup is configured, and it is genuinely absent. Both leave the error
 // nil — the caller is entitled to read false as "no backup configured" only
 // when the command actually answered (gt-ij15).
 func TestMaintainHasBackupConfigurations(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stub is a shell script")
-	}
-
+	t.Parallel()
 	tests := []struct {
 		name string
-		// listed is what the stubbed `dolt backup` prints, one name per line.
+		// listed is what `dolt backup` prints, one name per line.
 		listed []string
 		want   bool
 	}{
@@ -167,18 +151,14 @@ func TestMaintainHasBackupConfigurations(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			script := "#!/bin/sh\n"
-			for _, line := range tc.listed {
-				script += "echo '" + line + "'\n"
+			t.Parallel()
+			list := func(dbDir string) ([]byte, []byte, error) {
+				if dbDir != filepath.Join("/data", "gastown") {
+					t.Errorf("dolt backup ran in %s", dbDir)
+				}
+				return []byte(strings.Join(tc.listed, "\n") + "\n"), []byte("warning: noise-backup\n"), nil
 			}
-			fakeDoltOnPath(t, script)
-
-			dataDir := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(dataDir, "gastown"), 0o755); err != nil {
-				t.Fatalf("mkdir db dir: %v", err)
-			}
-
-			got, err := maintainHasBackup(dataDir, "gastown")
+			got, err := maintainHasBackupWith(list, "/data", "gastown")
 			if err != nil {
 				t.Fatalf("maintainHasBackup: unexpected error %v", err)
 			}
@@ -193,19 +173,14 @@ func TestMaintainHasBackupConfigurations(t *testing.T) {
 // probe used to return a bare false, which the plan read as "no backup
 // configured" and the run read as success.
 func TestMaintainHasBackupProbeFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stub is a shell script")
-	}
+	t.Parallel()
 
 	t.Run("command exits non-zero", func(t *testing.T) {
-		fakeDoltOnPath(t, "#!/bin/sh\necho 'cannot read data dir' >&2\nexit 1\n")
-
-		dataDir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dataDir, "gastown"), 0o755); err != nil {
-			t.Fatalf("mkdir db dir: %v", err)
+		t.Parallel()
+		list := func(string) ([]byte, []byte, error) {
+			return nil, []byte("cannot read data dir\n"), errors.New("exit status 1")
 		}
-
-		hasBackup, err := maintainHasBackup(dataDir, "gastown")
+		hasBackup, err := maintainHasBackupWith(list, "/data", "gastown")
 		if err == nil {
 			t.Fatal("a failed probe reported success — the run would skip this database's backup")
 		}
@@ -217,24 +192,14 @@ func TestMaintainHasBackupProbeFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("dolt not on PATH", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-
-		hasBackup, err := maintainHasBackup(t.TempDir(), "gastown")
+	t.Run("command does not start", func(t *testing.T) {
+		t.Parallel()
+		list := func(string) ([]byte, []byte, error) {
+			return nil, nil, errors.New(`exec: "dolt": executable file not found in $PATH`)
+		}
+		hasBackup, err := maintainHasBackupWith(list, "/data", "gastown")
 		if err == nil {
 			t.Fatal("a missing dolt binary reported success — the run would skip this database's backup")
-		}
-		if hasBackup {
-			t.Error("a failed probe must not report a backup either")
-		}
-	})
-
-	t.Run("data dir unreadable", func(t *testing.T) {
-		fakeDoltOnPath(t, "#!/bin/sh\nexit 0\n")
-
-		hasBackup, err := maintainHasBackup(t.TempDir(), "gastown")
-		if err == nil {
-			t.Fatal("an unreadable data dir reported success — the run would skip this database's backup")
 		}
 		if hasBackup {
 			t.Error("a failed probe must not report a backup either")

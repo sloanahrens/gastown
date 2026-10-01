@@ -28,6 +28,7 @@ func newSpawnRenderTown(t *testing.T, rigName, polecat string) (town, rigPath st
 }
 
 func TestRenderSystemPromptFileForSpawn_PolecatMatchesInSessionPrime(t *testing.T) {
+	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
 
@@ -67,6 +68,7 @@ func TestRenderSystemPromptFileForSpawn_PolecatMatchesInSessionPrime(t *testing.
 // renders from inside the session (GT_ROLE plus the session cwd), otherwise
 // prime's refresh rewrites the file on every first run.
 func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T) {
+	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "sloan"), 0o755); err != nil {
 		t.Fatal(err)
@@ -139,6 +141,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 }
 
 func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
+	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	for _, tc := range []struct{ role, rig, agent string }{
 		{"dog", "", "alpha"}, // retired role (gt-ckunw)
@@ -174,7 +177,7 @@ func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *test
 		t.Fatal(err)
 	}
 	if filepath.Base(rc.Command) != "claude" {
-		t.Skipf("default runtime here is %q, the flag applies to Claude agents only", rc.Command)
+		t.Fatalf("a fresh town must resolve the polecat to claude, got %q", rc.Command)
 	}
 	found := false
 	for i, a := range rc.Args {
