@@ -73,14 +73,38 @@ func TestNewTailView_FlagsSelectFilterAndClock(t *testing.T) {
 
 // syncBuffer is a writer the test can read while the stream still writes.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf strings.Builder
+	mu    sync.Mutex
+	buf   strings.Builder
+	wrote chan struct{} // signaled on every write; see waitFor
 }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	ch := b.wrote
+	b.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// waitFor blocks until the buffer holds want, waking on each write rather
+// than polling. A write that never comes hangs until the test binary's
+// timeout, which is the bound.
+func (b *syncBuffer) waitFor(want string) {
+	b.mu.Lock()
+	if b.wrote == nil {
+		b.wrote = make(chan struct{}, 1)
+	}
+	ch := b.wrote
+	b.mu.Unlock()
+	for !strings.Contains(b.String(), want) {
+		<-ch
+	}
 }
 
 func (b *syncBuffer) String() string {
@@ -124,23 +148,13 @@ func TestRunTailStream_FollowPrintsFastSourcesBeforeASlowJournal(t *testing.T) {
 		done <- runTailStream(ctx, &out, []tailSource{slow, fast}, nil, true, make(chan time.Time), tailView{Loc: tailTestLoc})
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(out.String(), "close detected") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the daemon line did not print while the journal was unread; output %q", out.String())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// The daemon line must print while the journal is still unread.
+	out.waitFor("close detected")
 	if strings.Contains(out.String(), "status=closed") {
 		t.Fatal("the journal line printed before its read finished")
 	}
 	close(slow.release)
-	for !strings.Contains(out.String(), "status=closed") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the journal line never printed; output %q", out.String())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	out.waitFor("status=closed")
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
