@@ -154,16 +154,6 @@ const (
 	DefaultQueryTimeout = 30 * time.Second
 	// DefaultBatchSize is the number of rows per batch DELETE operation.
 	DefaultBatchSize = 100
-	// DefaultAlertThreshold is the open-wisp count above which callers should
-	// surface a warning. This must fire on genuine runaway accumulation, NOT on
-	// normal operation. The open-wisp count is dominated by healthy, recent
-	// wisps (observed steady-state ~1966 open in a busy town); actionable wisps
-	// are limited to stale open-parent-free wisps past max-age plus closed
-	// molecule-step wisps (typically ~15-25). The previous value of 800 sat below
-	// the healthy open count, so it false-alarmed HIGH every scan despite nothing
-	// being wrong. Raised to 3000 so the alert tracks runaway growth rather than
-	// the normal working set. See hq-57jr8.
-	DefaultAlertThreshold = 3000
 
 	// DefaultMRProtectionTTL caps how long a cleanup wisp stays protected from
 	// age-based reaping by its state:merge-requested label, measured from when

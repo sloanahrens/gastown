@@ -392,10 +392,16 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			results = append(results, result)
 		}
 
+		var totalReaped, totalMoleculeSteps, totalOpen int
+		for _, r := range results {
+			totalReaped += r.Reaped
+			totalMoleculeSteps += r.MoleculeStepsClosed
+			totalOpen += r.OpenRemain
+		}
+
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
-			var totalReaped, totalMoleculeSteps, totalOpen int
 			for _, r := range results {
 				prefix := ""
 				if r.DryRun {
@@ -407,9 +413,6 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				}
 				fmt.Printf("%s: %sreaped %d wisps%s, %d open remain\n",
 					r.Database, prefix, r.Reaped, extra, r.OpenRemain)
-				totalReaped += r.Reaped
-				totalMoleculeSteps += r.MoleculeStepsClosed
-				totalOpen += r.OpenRemain
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -422,14 +425,38 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				}
 				fmt.Printf("\n%sReap summary (%d databases): reaped %d wisps%s, %d open remain\n",
 					prefix, len(results), totalReaped, extra, totalOpen)
-				if totalOpen > reaper.DefaultAlertThreshold {
-					fmt.Fprintf(os.Stderr, "WARNING: %d open wisps exceed alert threshold (%d)\n",
-						totalOpen, reaper.DefaultAlertThreshold)
-				}
 			}
 		}
+		reportReaperOpenWispAlert(reaper.OpenWispSample{
+			OpenWisps: totalOpen,
+			Databases: len(results),
+			DryRun:    reaperDryRun,
+		})
 		return nil
 	},
+}
+
+// reportReaperOpenWispAlert warns when this run's open-wisp count has grown
+// enough over the last recorded cycle to mean accumulation rather than a
+// working set, and records the run as the reading the next one is judged
+// against. It writes nothing when the run has no town root to keep that
+// reading in: a warning needs a baseline, and an unrecorded cycle is one the
+// next run cannot be compared to (gt-11kyy).
+func reportReaperOpenWispAlert(sample reaper.OpenWispSample) {
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return
+	}
+	previous, err := daemon.LoadWispAlertBaseline(townRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: cannot read the open-wisp baseline (%v) — this run cannot be judged against the last one\n", err)
+	}
+	if alert, detail := reaper.OpenWispAlert(sample, previous); alert {
+		fmt.Fprintf(os.Stderr, "WARNING: %s — investigate wisp lifecycle\n", detail)
+	}
+	if err := daemon.SaveWispAlertBaseline(townRoot, sample); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: cannot record the open-wisp baseline (%v) — the next run will have nothing to compare against\n", err)
+	}
 }
 
 var reaperPurgeCmd = &cobra.Command{
