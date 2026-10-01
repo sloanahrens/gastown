@@ -137,7 +137,7 @@ Town-level role defaults live in `mayor/config.json` under:
 | `presubmit_command` | `string` | `""` | What `gt done` runs on the rebased branch before it pushes. Empty = `make presubmit` when a Go repo's Makefile has that target (lint, build, and the tests of the changed packages only), else `make gate`. The landing worker still runs the full `make gate` on the merged tree. A command that turns `GT_TEST_DOCKER=1` on is refused, as for `test_command`. |
 | `build_command` | `string` | `""` | Build command (e.g., `go build ./...`) |
 | `gate` | `string` | `""` | The command the landing worker runs on the merged tree. Empty = `make gate` when the Makefile has that target, else `make test` under the container slot. Honored from the rig root `config.json` tier only: the resolver does not overlay it from the other two. |
-| `post_land_command` | `string` | `""` | Run once per landing at the landed commit (the slow tier), and at any new tip of the default branch that no landing put there (a direct push). A red run that is the only landing since the last green commit is reverted through the landing worker and its bead reopened for rework; state in `.runtime/red-main/<rig>.status` and `<rig>.json`. Read from `settings/config.json` only. Empty disables it. |
+| `post_land_command` | `string` | `""` | Run once per landing at the landed commit (for gastown, `make test-slow`: the gate, then the shell tests), and at any new tip of the default branch that no landing put there (a direct push). A red run that is the only landing since the last green commit is reverted through the landing worker and its bead reopened for rework; state in `.runtime/red-main/<rig>.status` and `<rig>.json`. Read from `settings/config.json` only. Empty disables it. |
 | `max_ready_for_dispatch` | `int` | `0` | `gt sling` refuses new work while the rig has more ready MRs than this. 0 = guard off. |
 | `merge_strategy` | `string` | `""` | Passed to the polecat formula as `merge_strategy` |
 | `require_review` | `*bool` | `false` | Passed to the polecat formula as `require_review=true` |
@@ -157,7 +157,7 @@ runs the rig's `presubmit_command` (for gastown, `make presubmit`) with the opt-
 so it takes no slot. `make presubmit` tests only the changed packages; the landing worker runs
 the full `make gate` on the merged tree. Both recipes write `GT_TEST_DOCKER=0` themselves: the
 unit tier never starts a container, whoever runs it. The container suites run post-merge
-in `make test-integration`, and the gate's slow tier in `make test-slow` (see [Testing](testing.md), "The gate"). A rig that wants its
+in `make test-integration`, and the shell tests after the gate in `make test-slow` (see [Testing](testing.md), "The gate"). A rig that wants its
 container suite verified at `gt done` asks for it in its own command
 (`test_command: "GT_TEST_DOCKER=1 make <target>"`), and the gate honours that and takes a
 slot for it. The session's own exported value is deliberately not an input: the slot

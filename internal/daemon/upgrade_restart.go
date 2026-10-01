@@ -21,7 +21,7 @@ var ErrRestartForUpgrade = errors.New("daemon: restart for upgrade")
 const upgradeStuckAfter = 30 * time.Minute
 
 // postLandRestartCap is how long a pending upgrade restart waits for an
-// in-flight post-landing run (gt-gb4ij). The slow tier takes minutes, so a
+// in-flight post-landing run (gt-gb4ij). The post-landing check takes minutes, so a
 // run that has started is usually worth its verdict; past the cap the daemon
 // restarts anyway, and the landing worker's first pass after the start runs
 // the untested tip again (Worker.watchTarget). The cap is not in
