@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -539,32 +540,76 @@ func TestLandGateInfraErrorIsNotARejection(t *testing.T) {
 	f2.assertUntouched(t)
 }
 
-func TestLandRunsGateAndReviewConcurrently(t *testing.T) {
+// TestLandReviewsOnlyAfterTheGatePasses: the gate's stages run first and om
+// only once they pass, so a red gate never pays for a review (gt-b5ugw).
+func TestLandReviewsOnlyAfterTheGatePasses(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	gateIn, reviewIn := make(chan struct{}), make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	var order []string
 	f.gate.fn = func(string) GateResult {
-		close(gateIn)
-		select {
-		case <-reviewIn:
-			return GateResult{Passed: true}
-		case <-ctx.Done():
-			return GateResult{Err: errors.New("review never started while the gate ran")}
-		}
+		order = append(order, "gate")
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "lint"}, {Name: "gate"}}}
 	}
 	f.review.fn = func(string) (Verdict, error) {
-		close(reviewIn)
-		select {
-		case <-gateIn:
-			return Verdict{Verdict: VerdictApprove}, nil
-		case <-ctx.Done():
-			return Verdict{}, errors.New("gate never started while the review ran")
-		}
+		order = append(order, "om")
+		return Verdict{Verdict: VerdictApprove}, nil
 	}
 	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
 		t.Fatalf("Land: %v", err)
+	}
+	if !slices.Equal(order, []string{"gate", "om"}) {
+		t.Errorf("order = %v, want the gate then om", order)
+	}
+
+	red := newLandFixture(t)
+	red.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "lint", ExitCode: 1}}}
+	}
+	red.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran on a tree that failed lint")
+		return Verdict{Verdict: VerdictApprove}, nil
+	}
+	_, err := red.lander().Land(context.Background(), red.work)
+	red.assertRejected(t, err, RejectGate, LabelRework)
+}
+
+// TestLandStageTimeoutRejects: a gate stage killed by its own timeout rejects
+// the landing as a timeout naming the stage, and om never runs (gt-b5ugw).
+func TestLandStageTimeoutRejects(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "lint"}, {Name: "gate", Command: "make gate-test", ExitCode: -1, TimedOut: true, Timeout: 6 * time.Minute}}}
+	}
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran after a timed-out stage")
+		return Verdict{Verdict: VerdictApprove}, nil
+	}
+	_, err := f.lander().Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectTimeout, LabelRework)
+	if !strings.Contains(rej.Reason, "make gate-test") || !strings.Contains(rej.Reason, "6m0s") {
+		t.Errorf("reason = %q, want the stage and its timeout named", rej.Reason)
+	}
+}
+
+// TestLandReviewErrorRejectsWhenItMayNotLand: with ReviewErrorRejects, a
+// green tree whose om produced no verdict is rejected to a human rather than
+// landed unreviewed or retried by the next pass (gt-b5ugw).
+func TestLandReviewErrorRejectsWhenItMayNotLand(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{}, errors.New("attempt 1: timed out; attempt 2: timed out")
+	}
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if rej.Rework || !strings.Contains(rej.Reason, "timed out") {
+		t.Errorf("rejection = %+v", rej)
+	}
+	if f.originMain() != f.base {
+		t.Error("origin/main moved: the tree landed unreviewed")
 	}
 }
 

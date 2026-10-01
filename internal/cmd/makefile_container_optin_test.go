@@ -36,7 +36,8 @@ func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
 	for _, tc := range []struct {
 		target, want, inherited string
 	}{
-		{"gate", "0", "1"},
+		// make gate's suite lives in its test stage, gate-test (gt-b5ugw).
+		{"gate-test", "0", "1"},
 		{"test-integration", "1", "0"},
 	} {
 		lines := recipes[tc.target]
