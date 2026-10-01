@@ -61,8 +61,8 @@ const (
 
 // AllRoles returns every Role value GetRole can produce. It is the
 // enumeration half of the single source of truth for actor construction:
-// combined with RoleInfo.ActorString(), it lets callers (e.g. the hermetic
-// test tripwire's cross-check in role_actor_tripwire_test.go) verify every
+// combined with RoleInfo.ActorString(), it lets callers (e.g. the gt doctor
+// test-leaks check's cross-check in role_actor_test_leak_test.go) verify every
 // actor string detectActor() can emit is accounted for, instead of a
 // hand-maintained list that has to be kept in sync by hand (gt-9pn).
 func AllRoles() []Role {
