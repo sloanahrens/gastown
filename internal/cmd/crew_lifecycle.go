@@ -9,7 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/jonboulle/clockwork"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -535,7 +536,7 @@ func runCrewRestartAll() error {
 		crewRig = savedRig
 
 		// Small delay between restarts to avoid overwhelming the system
-		time.Sleep(constants.ShutdownNotifyDelay)
+		clockwork.NewRealClock().Sleep(constants.ShutdownNotifyDelay)
 	}
 
 	fmt.Println()

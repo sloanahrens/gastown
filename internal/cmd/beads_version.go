@@ -19,7 +19,7 @@ func CheckBeadsVersion() error {
 	versionCheckOnce.Do(func() {
 		// Presence and a readable version only: a cheap probe that must not
 		// block read-only commands. The schema/contract handshake gates the
-		// town-running commands (requireBDHandshake).
+		// town-running commands (townStartGate).
 		cachedVersionCheckResult = deps.EnsureBeads()
 	})
 	return cachedVersionCheckResult

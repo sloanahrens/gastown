@@ -161,10 +161,6 @@ type donePolecatWorktree struct {
 	actor       string
 }
 
-var newDoneSessionKiller = func() doneSessionKiller {
-	return tmux.NewTmux()
-}
-
 var updateAgentStateOnDoneFn = updateAgentStateOnDone
 
 // doneLocalGate is gt done's pre-submit gate: the same land.Gate seam Land()
@@ -195,12 +191,13 @@ func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
 }
 
 func resolveDonePolecatWorktreeAt(cwd string) (donePolecatWorktree, error) {
-	return resolveDonePolecatWorktreeIn(cwd, os.Getenv)
+	return resolveDonePolecatWorktreeIn(cwd, os.Getenv, doneGitTopLevel)
 }
 
 // resolveDonePolecatWorktreeIn is resolveDonePolecatWorktreeAt reading the
-// session's identity and town root through getenv.
-func resolveDonePolecatWorktreeIn(cwd string, getenv func(string) string) (donePolecatWorktree, error) {
+// session's identity and town root through getenv and the git root of a
+// directory through topLevel (doneGitTopLevel).
+func resolveDonePolecatWorktreeIn(cwd string, getenv func(string) string, topLevel func(dir string) (string, error)) (donePolecatWorktree, error) {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return donePolecatWorktree{}, fmt.Errorf("gt done must be run from the assigned polecat worktree: current directory unavailable")
@@ -238,7 +235,7 @@ func resolveDonePolecatWorktreeIn(cwd string, getenv func(string) string) (doneP
 		return donePolecatWorktree{}, err
 	}
 
-	gitRoot, err := doneGitTopLevel(absCwd)
+	gitRoot, err := topLevel(absCwd)
 	if err != nil {
 		return donePolecatWorktree{}, fmt.Errorf("gt done must be run from the assigned polecat git worktree: %w", err)
 	}
@@ -446,12 +443,12 @@ func polecatSessionRetirementTarget(reg *session.PrefixRegistry, rigName, poleca
 	return session.PolecatSessionName(reg.PrefixForRig(rigName), polecatName), []string{fmt.Sprintf("%d", pid)}, true
 }
 
-func retirePolecatSessionAfterDone(reg *session.PrefixRegistry, rigName, polecatName string, pid int) error {
+func retirePolecatSessionAfterDone(killer doneSessionKiller, reg *session.PrefixRegistry, rigName, polecatName string, pid int) error {
 	sessionName, excludePIDs, ok := polecatSessionRetirementTarget(reg, rigName, polecatName, pid)
 	if !ok {
 		return nil
 	}
-	return newDoneSessionKiller().KillSessionWithProcessesExcluding(sessionName, excludePIDs)
+	return killer.KillSessionWithProcessesExcluding(sessionName, excludePIDs)
 }
 
 // retirePolecatSessionAfterFinalExit decides whether this exit retires the live
@@ -461,14 +458,16 @@ func retirePolecatSessionAfterDone(reg *session.PrefixRegistry, rigName, polecat
 //
 // Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
 // caller's own PID, so the durable handoff writes above it still finish.
-func retirePolecatSessionAfterFinalExit(reg *session.PrefixRegistry, exitType string, fromHandoff bool, rigName, polecatName string, pid int) bool {
+//
+// killer tears the session down (tmux in production).
+func retirePolecatSessionAfterFinalExit(killer doneSessionKiller, reg *session.PrefixRegistry, exitType string, fromHandoff bool, rigName, polecatName string, pid int) bool {
 	if !shouldRetirePolecatSessionAfterDone(exitType, fromHandoff) {
 		fmt.Printf("%s Session preserved for handoff continuation\n", style.Bold.Render("→"))
 		return false
 	}
 	fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
 	fmt.Printf("%s Terminating polecat session\n", style.Bold.Render("→"))
-	if err := retirePolecatSessionAfterDone(reg, rigName, polecatName, pid); err != nil {
+	if err := retirePolecatSessionAfterDone(killer, reg, rigName, polecatName, pid); err != nil {
 		style.PrintWarning("could not terminate polecat session: %v", err)
 	}
 	return true
@@ -517,7 +516,9 @@ func observeCleanupStatus(g *git.Git, branch string) string {
 // metadata, agent_state AND the cleanup_status self-report, then exited 0 and
 // logged "[done]" — leaving a slot that reads cleanup_status=<missing> with no
 // later writer to repair it (see selfReportCleanupStatus and reclaim.go).
-func resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName string) (RoleContext, string) {
+//
+// getenv is os.Getenv: role detection reads GT_ROLE and friends through it.
+func resolveDoneAgentIdentity(getenv func(string) string, cwd, townRoot, rigName, polecatName string) (RoleContext, string) {
 	ctx := RoleContext{
 		Role:     RolePolecat,
 		Rig:      rigName,
@@ -525,7 +526,7 @@ func resolveDoneAgentIdentity(cwd, townRoot, rigName, polecatName string) (RoleC
 		TownRoot: townRoot,
 		WorkDir:  cwd,
 	}
-	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	roleInfo, err := getRoleWithContextEnv(cwd, townRoot, getenv)
 	if err != nil {
 		return ctx, ""
 	}
@@ -971,7 +972,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Get agent bead ID for cross-referencing.
-	ctx, actorID := resolveDoneAgentIdentity(r.cwd, r.townRoot, r.rigName, r.polecatName)
+	ctx, actorID := resolveDoneAgentIdentity(os.Getenv, r.cwd, r.townRoot, r.rigName, r.polecatName)
 	if actorID != "" {
 		r.sender = actorID
 	}
@@ -1590,7 +1591,7 @@ func reportDone(r *doneRun, exitType string) error {
 	}
 	// Retire the live session as the final action. The PID exclusion keeps
 	// gt done alive until everything above is written.
-	retirePolecatSessionAfterFinalExit(townRegistry(), exitType, fromHandoff, r.rigName, r.polecatName, os.Getpid())
+	retirePolecatSessionAfterFinalExit(tmux.NewTmux(), townRegistry(), exitType, fromHandoff, r.rigName, r.polecatName, os.Getpid())
 	return nil
 }
 

@@ -10,45 +10,27 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
-// stubBDHandshake replaces the handshake for one test and resets the
-// per-process cache around it.
-func stubBDHandshake(t *testing.T, fn func(ctx context.Context) (*deps.BDHandshake, error)) *int {
-	t.Helper()
+// testTownStartGate is a gate over a fixed town whose config check and
+// handshake are fn and config, counting the handshakes it runs.
+func testTownStartGate(handshake func(ctx context.Context) (*deps.BDHandshake, error), config func() error) (*townStartGate, *int) {
 	calls := 0
-	old := bdHandshakeCheck
-	bdHandshakeCheck = func(ctx context.Context) (*deps.BDHandshake, error) {
-		calls++
-		return fn(ctx)
+	g := &townStartGate{
+		townRoot: func() string { return "/town" },
+		config:   func(string) error { return config() },
+		handshake: func(ctx context.Context, _ string) (*deps.BDHandshake, error) {
+			calls++
+			return handshake(ctx)
+		},
 	}
-	resetBDHandshakeCache()
-	t.Cleanup(func() {
-		bdHandshakeCheck = old
-		resetBDHandshakeCache()
-	})
-	// The town config check reads the town the test's cwd sits in; a
-	// handshake test must not depend on the live town's files.
-	stubTownConfig(t, func() error { return nil })
-	return &calls
+	return g, &calls
 }
 
-// stubTownConfig replaces the town config parse check for one test.
-func stubTownConfig(t *testing.T, fn func() error) *int {
-	t.Helper()
-	calls := 0
-	old := townConfigCheck
-	townConfigCheck = func() error {
-		calls++
-		return fn()
-	}
-	t.Cleanup(func() { townConfigCheck = old })
-	return &calls
-}
+func configOK() error { return nil }
 
 // brokenTownConfig is what the town config check returns for a file that
 // does not parse.
@@ -58,10 +40,9 @@ func brokenTownConfig() error {
 
 func findCommand(t *testing.T, path string) *cobra.Command {
 	t.Helper()
-	args := strings.Fields(path)[1:]
-	c, rest, err := rootCmd.Find(args)
-	if err != nil || len(rest) != 0 || c.CommandPath() != path {
-		t.Fatalf("command %q not in the tree (found %v, rest %v, err %v)", path, c, rest, err)
+	c := lookupCommand(rootCmd, strings.Fields(path)[1:])
+	if c == nil || c.CommandPath() != path {
+		t.Fatalf("command %q not in the tree (found %v)", path, c)
 	}
 	return c
 }
@@ -69,6 +50,7 @@ func findCommand(t *testing.T, path string) *cobra.Command {
 // TestBDHandshakeGatedCommandsExist fails when a gated command is renamed or
 // removed, so the gate can never silently stop covering a town-running path.
 func TestBDHandshakeGatedCommandsExist(t *testing.T) {
+	t.Parallel()
 	for path := range bdHandshakeGatedCommands {
 		findCommand(t, path)
 	}
@@ -80,6 +62,7 @@ func TestBDHandshakeGatedCommandsExist(t *testing.T) {
 }
 
 func TestBDHandshakeGate_OnlyTownRunningCommands(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		path  string
 		gated bool
@@ -100,12 +83,13 @@ func TestBDHandshakeGate_OnlyTownRunningCommands(t *testing.T) {
 }
 
 func TestPersistentPreRunRefusesGatedCommandOnFailedHandshake(t *testing.T) {
+	t.Parallel()
 	refusal := fmt.Errorf("%w: no contract_version", deps.ErrBDHandshake)
-	calls := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return nil, refusal })
+	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) { return nil, refusal }, configOK)
 
-	err := persistentPreRun(findCommand(t, "gt up"), nil)
+	err := gateTownCommand(findCommand(t, "gt up"), g)
 	if !errors.Is(err, deps.ErrBDHandshake) {
-		t.Fatalf("persistentPreRun(gt up) = %v, want the handshake refusal", err)
+		t.Fatalf("gateTownCommand(gt up) = %v, want the handshake refusal", err)
 	}
 	if *calls != 1 {
 		t.Errorf("handshake ran %d times, want 1", *calls)
@@ -116,22 +100,23 @@ func TestPersistentPreRunRefusesGatedCommandOnFailedHandshake(t *testing.T) {
 // starts sessions for hours) must recover once bd or Dolt is fixed, so a
 // refusal is re-checked on the next call and only a pass is remembered.
 func TestRequireBDHandshakeCachesOnlySuccess(t *testing.T) {
+	t.Parallel()
 	fail := true
-	calls := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) {
+	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
 		if fail {
 			return nil, fmt.Errorf("%w: store unavailable", deps.ErrBDHandshake)
 		}
 		return &deps.BDHandshake{DBSchema: 66}, nil
-	})
-	if err := requireBDHandshake(); err == nil {
+	}, configOK)
+	if err := g.requireHandshake(); err == nil {
 		t.Fatal("first call: want refusal")
 	}
 	fail = false
-	if err := requireBDHandshake(); err != nil {
+	if err := g.requireHandshake(); err != nil {
 		t.Fatalf("after bd was fixed: %v", err)
 	}
 	fail = true
-	if err := requireBDHandshake(); err != nil {
+	if err := g.requireHandshake(); err != nil {
 		t.Fatalf("a pass must be cached: %v", err)
 	}
 	if *calls != 2 {
@@ -140,10 +125,13 @@ func TestRequireBDHandshakeCachesOnlySuccess(t *testing.T) {
 }
 
 func TestPersistentPreRunSkipsHandshakeForReadOnlyCommands(t *testing.T) {
-	calls := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) {
+	t.Parallel()
+	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
 		return nil, errors.New("must not run")
-	})
-	_ = persistentPreRun(findCommand(t, "gt mayor status"), nil)
+	}, configOK)
+	if err := gateTownCommand(findCommand(t, "gt mayor status"), g); err != nil {
+		t.Fatalf("gateTownCommand(gt mayor status) = %v", err)
+	}
 	if *calls != 0 {
 		t.Fatalf("read-only command ran the handshake %d times", *calls)
 	}
@@ -153,6 +141,7 @@ func TestPersistentPreRunSkipsHandshakeForReadOnlyCommands(t *testing.T) {
 // either gated or exempt with a stated reason, so a new town-running command
 // fails this test until someone decides.
 func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
+	t.Parallel()
 	for path, reason := range bdHandshakeNotTownRunning {
 		findCommand(t, path)
 		if reason == "" || bdHandshakeGatedCommands[path] {
@@ -175,13 +164,12 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 
 	// Every gated command also refuses an unparseable town config file, and
 	// does so before the handshake runs (gt-fcxe9.10).
-	handshakes := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) {
+	g, handshakes := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
 		return &deps.BDHandshake{DBSchema: 66}, nil
-	})
-	stubTownConfig(t, brokenTownConfig)
+	}, brokenTownConfig)
 	for path := range bdHandshakeGatedCommands {
-		if err := persistentPreRun(findCommand(t, path), nil); !errors.Is(err, config.ErrUnparseable) {
-			t.Errorf("%q with an unparseable town config: persistentPreRun = %v, want the config refusal", path, err)
+		if err := gateTownCommand(findCommand(t, path), g); !errors.Is(err, config.ErrUnparseable) {
+			t.Errorf("%q with an unparseable town config: gateTownCommand = %v, want the config refusal", path, err)
 		}
 	}
 	if *handshakes != 0 {
@@ -189,26 +177,14 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 	}
 }
 
-func TestInstallSessionGateRoutesSessionStartsThroughTheHandshake(t *testing.T) {
-	refusal := fmt.Errorf("%w: no contract_version", deps.ErrBDHandshake)
-	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return nil, refusal })
-	installSessionGate()
-	t.Cleanup(func() { bdgate.Set(nil) })
-	if err := bdgate.Require(); !errors.Is(err, deps.ErrBDHandshake) {
-		t.Fatalf("bdgate.Require() = %v, want the handshake refusal", err)
-	}
-}
-
 // TestDefaultBDHandshakeRefusesOutsideATown: with no town root the handshake
 // has no town database to read, so it refuses rather than reading whatever
 // database the working directory resolves to.
 func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-	_, err := defaultBDHandshakeCheck(context.Background())
+	t.Parallel()
+	_, err := runBDHandshake(context.Background(), "")
 	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
-		t.Fatalf("defaultBDHandshakeCheck outside a town = %v", err)
+		t.Fatalf("runBDHandshake outside a town = %v", err)
 	}
 }
 
@@ -216,113 +192,85 @@ func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
 // session start calls refuses on a broken config file, every time (not
 // cached), even after the handshake passed.
 func TestSessionGateRefusesAnUnparseableTownConfig(t *testing.T) {
-	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil })
+	t.Parallel()
 	broken := false
-	stubTownConfig(t, func() error {
+	g, _ := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil }, func() error {
 		if broken {
 			return brokenTownConfig()
 		}
 		return nil
 	})
-	installSessionGate()
-	t.Cleanup(func() { bdgate.Set(nil) })
-	if err := bdgate.Require(); err != nil {
+	if err := g.require(); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
 	broken = true
-	if err := bdgate.Require(); !errors.Is(err, config.ErrUnparseable) {
-		t.Fatalf("config broken after a pass: bdgate.Require() = %v, want the config refusal", err)
+	if err := g.require(); !errors.Is(err, config.ErrUnparseable) {
+		t.Fatalf("config broken after a pass: require() = %v, want the config refusal", err)
 	}
+}
+
+// writeTownFiles writes files (relative path to body) under a new town root.
+func writeTownFiles(t *testing.T, files map[string]string) string {
+	t.Helper()
+	town := t.TempDir()
+	for rel, body := range files {
+		p := filepath.Join(town, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return town
 }
 
 // TestSessionGateRefusesSpawnOnARealBrokenSettingsFile is G3-04 end to end
 // with the real check: a broken settings/config.json refuses the spawn and
 // names the file, instead of moving the role to the default agent.
 func TestSessionGateRefusesSpawnOnARealBrokenSettingsFile(t *testing.T) {
-	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil })
-	townConfigCheck = defaultTownConfigCheck // stubBDHandshake's cleanup restores it
-
-	town := t.TempDir()
-	for rel, body := range map[string]string{
+	t.Parallel()
+	town := writeTownFiles(t, map[string]string{
 		"mayor/town.json":      `{"type":"town","version":2,"name":"t"}`,
 		"settings/config.json": "{\"role_agents\": {\"polecat\": \"deepseek-flash\",}}",
-	} {
-		p := filepath.Join(town, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Chdir(town)
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-
-	installSessionGate()
-	t.Cleanup(func() { bdgate.Set(nil) })
-	err := bdgate.Require()
+	})
+	err := checkTownConfig(town)
 	if !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), filepath.Join("settings", "config.json")) || !strings.Contains(err.Error(), "offset") {
-		t.Fatalf("bdgate.Require() = %v, want a refusal naming settings/config.json and the offset", err)
+		t.Fatalf("checkTownConfig = %v, want a refusal naming settings/config.json and the offset", err)
 	}
 }
 
 // TestDefaultTownConfigCheckRefusesOutsideATown: with no town root there are
 // no config files to check, and "nothing to check" must not read as a pass.
 func TestDefaultTownConfigCheckRefusesOutsideATown(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-	if err := defaultTownConfigCheck(); err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
-		t.Fatalf("defaultTownConfigCheck outside a town = %v, want a refusal", err)
+	t.Parallel()
+	if err := checkTownConfig(""); err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("checkTownConfig outside a town = %v, want a refusal", err)
 	}
 }
 
-// TestDefaultTownConfigCheckPassesFromInsideATown: a gated command run from a
-// rig or polecat worktree deep inside a town with valid config files passes;
-// town-root resolution is the same one the handshake uses.
+// TestDefaultTownConfigCheckPassesFromInsideATown: a town with valid config
+// files passes.
 func TestDefaultTownConfigCheckPassesFromInsideATown(t *testing.T) {
-	town := t.TempDir()
-	for rel, body := range map[string]string{
+	t.Parallel()
+	town := writeTownFiles(t, map[string]string{
 		"mayor/town.json":      `{"type":"town","version":2,"name":"t"}`,
 		"mayor/daemon.json":    `{"type":"daemon-patrol-config","version":1}`,
 		"settings/config.json": `{"type":"town-settings","version":1}`,
-	} {
-		p := filepath.Join(town, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	worktree := filepath.Join(town, "gastown", "polecats", "onyx", "gastown")
-	if err := os.MkdirAll(worktree, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(worktree)
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-	if err := defaultTownConfigCheck(); err != nil {
-		t.Fatalf("defaultTownConfigCheck from a polecat worktree = %v", err)
+	})
+	if err := checkTownConfig(town); err != nil {
+		t.Fatalf("checkTownConfig = %v", err)
 	}
 }
 
 // TestDefaultTownConfigCheckRefusesARootWithoutTownJSON: a root found by its
 // mayor/ directory alone is not a town the gate lets run (gt-y3pgh.1).
 func TestDefaultTownConfigCheckRefusesARootWithoutTownJSON(t *testing.T) {
-	town := t.TempDir()
-	p := filepath.Join(town, "mayor", "daemon.json")
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(`{"type":"daemon-patrol-config","version":1}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(town)
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-	if err := defaultTownConfigCheck(); !errors.Is(err, townconfig.ErrNotATown) {
-		t.Fatalf("defaultTownConfigCheck without town.json = %v, want ErrNotATown", err)
+	t.Parallel()
+	town := writeTownFiles(t, map[string]string{
+		"mayor/daemon.json": `{"type":"daemon-patrol-config","version":1}`,
+	})
+	if err := checkTownConfig(town); !errors.Is(err, townconfig.ErrNotATown) {
+		t.Fatalf("checkTownConfig without town.json = %v, want ErrNotATown", err)
 	}
 }

@@ -114,20 +114,16 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	initCLITheme()
 
 	// gt done can autosave and push; prove ownership before shared pre-run writes.
-	if doneNeedsPolecatWorktree(cmd, os.Getenv, doneCwd()) {
-		if _, err := resolveDonePolecatWorktree(); err != nil {
-			return err
-		}
+	if err := donePolecatGuard(cmd, os.Getenv, doneCwd(), doneGitTopLevel); err != nil {
+		return err
 	}
 
 	// Town-running commands refuse to start on a town config file that does
 	// not parse (gt-fcxe9.10) or against a bd whose schema level or JSON
 	// contract gt does not know (gt-7iwy0.1). Read-only commands skip this
 	// and keep working on whatever bd is installed.
-	if requiresBDHandshake(cmd) {
-		if err := requireTownStart(); err != nil {
-			return err
-		}
+	if err := gateTownCommand(cmd, processTownStartGate); err != nil {
+		return err
 	}
 
 	// Log command usage telemetry (fire-and-forget, excludes tap/signal)
@@ -221,6 +217,16 @@ func isDoneCommand(cmd *cobra.Command) bool {
 // guard and fails there.
 func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string, cwd string) bool {
 	return isDoneCommand(cmd) && !doneIsCrewRun(getenv, cwd)
+}
+
+// donePolecatGuard refuses a polecat's gt done run from anywhere but its own
+// worktree, before persistentPreRun writes anything shared.
+func donePolecatGuard(cmd *cobra.Command, getenv func(string) string, cwd string, topLevel func(dir string) (string, error)) error {
+	if !doneNeedsPolecatWorktree(cmd, getenv, cwd) {
+		return nil
+	}
+	_, err := resolveDonePolecatWorktreeIn(cwd, getenv, topLevel)
+	return err
 }
 
 // doneCwd is the process cwd, or "" when it is unavailable (the polecat
