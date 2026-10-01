@@ -1406,7 +1406,13 @@ type storeProbe interface {
 type bdStoreProbe struct {
 	dir    string
 	run    deps.BDRunner
-	client *beads.Beads
+	client eventsTailer
+}
+
+// eventsTailer is the journal read the probe makes: *beads.Beads, or a
+// beadsfake database in tests.
+type eventsTailer interface {
+	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 }
 
 // newBDStoreProbe returns the probe for the named store ("hq" or a rig).

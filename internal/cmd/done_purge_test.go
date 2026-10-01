@@ -1,13 +1,10 @@
 package cmd
 
 import (
-	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestClosedWispDeleteAge verifies the grace period read for
@@ -71,17 +68,18 @@ func TestPurgeClosedEphemeralBeadsPassesOlderThan(t *testing.T) {
 		t.Fatalf("write daemon.json: %v", err)
 	}
 
-	rigDir := filepath.Join(townRoot, "gastown")
-	var invocations []string
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		invocations = append(invocations, strings.Join(c.Args, " "))
-		return []byte("0\n"), nil, nil
-	}
-	bd := beads.NewWithBeadsDirAndRunner(rigDir, filepath.Join(rigDir, ".beads"), run)
-	purgeClosedEphemeralBeads(bd, townRoot)
+	var bd recordingPurger
+	purgeClosedEphemeralBeads(&bd, townRoot)
 
-	invocation := strings.Join(invocations, "\n")
-	if !strings.Contains(invocation, "purge --force --quiet --older-than 48h") {
-		t.Errorf("bd purge invocation = %q, want it to contain %q", invocation, "--older-than 48h")
+	if len(bd.olderThan) != 1 || bd.olderThan[0] != "48h" {
+		t.Errorf("purge grace periods = %q, want exactly 48h", bd.olderThan)
 	}
+}
+
+// recordingPurger records the grace period each purge was asked for.
+type recordingPurger struct{ olderThan []string }
+
+func (p *recordingPurger) PurgeClosedEphemeral(olderThan string) (string, error) {
+	p.olderThan = append(p.olderThan, olderThan)
+	return "0", nil
 }

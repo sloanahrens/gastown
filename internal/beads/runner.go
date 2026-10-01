@@ -102,47 +102,6 @@ func (b *Beads) allowStaleArgs(env, args []string) []string {
 	return args
 }
 
-// BDCall is one bd invocation as a BDRunner sees it: the argv after "bd",
-// the working directory, the whole environment and stdin (nil for none).
-type BDCall struct {
-	Dir   string
-	Env   []string
-	Args  []string
-	Stdin []byte
-}
-
-// BDRunner answers bd invocations in process. It lets another package test
-// code that holds a *Beads without putting a bd on PATH, which is process
-// state no parallel test may change. A failure that should read as a bd exit
-// status implements interface{ ExitCode() int }.
-type BDRunner func(ctx context.Context, c BDCall) (stdout, stderr []byte, err error)
-
-// NewWithBeadsDirAndRunner is NewWithBeadsDir whose bd calls go to run,
-// including the calls of every wrapper derived from it (ForAgentBead, the
-// per-ID routing targets) and the --allow-stale capability probe. A nil run
-// is the real bd, exactly NewWithBeadsDir.
-func NewWithBeadsDirAndRunner(workDir, beadsDir string, run BDRunner) *Beads {
-	if run == nil {
-		return NewWithBeadsDir(workDir, beadsDir)
-	}
-	return newBeads(beadsFields{workDir: workDir, beadsDir: beadsDir, exec: runnerExec(run)})
-}
-
-// NewRigLocalWithRunner is NewRigLocal whose bd calls go to run. A nil run
-// is the real bd, exactly NewRigLocal.
-func NewRigLocalWithRunner(workDir string, run BDRunner) *Beads {
-	if run == nil {
-		return NewRigLocal(workDir)
-	}
-	return newBeads(beadsFields{workDir: workDir, noRoute: true, exec: runnerExec(run)})
-}
-
-func runnerExec(run BDRunner) bdRunFunc {
-	return func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
-		return run(ctx, BDCall{Dir: c.dir, Env: c.env, Args: c.args, Stdin: c.stdin})
-	}
-}
-
 // NewPlain returns a Beads that runs bd in dir with exactly env (nil
 // inherits the process environment), the way CommandWithEnv builds a bd
 // command. None of the routing policy New applies is added: no BEADS_DIR pin,
@@ -153,16 +112,6 @@ func NewPlain(dir string, env []string, opts ...Option) *Beads {
 	b := newBeads(applyOptions(beadsFields{workDir: dir, noRoute: true}, opts))
 	b.plain = true
 	b.plainEnv = env
-	return b
-}
-
-// NewPlainWithRunner is NewPlain whose bd calls go to run. A nil run is the
-// real bd, exactly NewPlain.
-func NewPlainWithRunner(dir string, env []string, run BDRunner) *Beads {
-	b := NewPlain(dir, env)
-	if run != nil {
-		b.exec = runnerExec(run)
-	}
 	return b
 }
 

@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // repairCall is one bd repair verb a fixer asked for.
@@ -179,10 +179,9 @@ func TestEnsureAgentLabelRetriesPinnedNeverSQL(t *testing.T) {
 		labeled = true
 		return rep.open(dir)
 	}
-	routed := beads.NewWithBeadsDirAndRunner(workDir, filepath.Join(workDir, ".beads"),
-		func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-			return nil, []byte("Error: issue not found"), errors.New("exit status 1")
-		})
+	// The routed store does not hold the bead (a legacy prefix that does not
+	// route): its update fails.
+	routed := doctorDB{Fake: beadsfake.New(), town: newDoctorTown(), dir: workDir}
 
 	if err := ensureAgentLabel(ctx, routed, workDir, "legacy-x"); err != nil {
 		t.Fatalf("ensureAgentLabel: %v", err)
@@ -199,8 +198,7 @@ func TestEnsureAgentLabelRetriesPinnedNeverSQL(t *testing.T) {
 	// GH#2127: the routed update exits 0 but writes nothing; the label is
 	// still absent, and only the pinned update applies it.
 	labeled = false
-	silent := beads.NewWithBeadsDirAndRunner(workDir, filepath.Join(workDir, ".beads"),
-		func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) { return []byte("{}"), nil, nil })
+	silent := silentUpdates{routed}
 	before := len(rep.sorted())
 	if err := ensureAgentLabel(ctx, silent, workDir, "legacy-z"); err != nil {
 		t.Fatalf("ensureAgentLabel after a silent no-op: %v", err)
@@ -214,3 +212,8 @@ func TestEnsureAgentLabelRetriesPinnedNeverSQL(t *testing.T) {
 		t.Errorf("ensureAgentLabel with both bd paths failing = %v, want the pinned refusal", err)
 	}
 }
+
+// silentUpdates is a store whose update exits 0 and writes nothing.
+type silentUpdates struct{ doctorBeads }
+
+func (silentUpdates) Update(string, beads.UpdateOptions) error { return nil }
