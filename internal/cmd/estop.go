@@ -41,7 +41,9 @@ with --rig). While it is present:
     feeder, scheduled slings, spec dispatcher, seat refill) hold, and
     gt sling refuses to send work into a covered rig;
   - nothing is restarted or killed: the supervisor refuses every Restart
-    and Kill for a covered seat, whoever asks.
+    and Kill for a covered seat, whoever asks;
+  - the town E-stop also holds the daemon's plugin runs, while its upkeep
+    (Dolt supervision, log rotation, event pruning) keeps running.
 
 Running sessions are left alone: they finish their current work or go
 idle. Nothing is signaled, frozen or killed. Agents see the E-stop in
