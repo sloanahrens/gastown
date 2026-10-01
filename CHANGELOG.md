@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Dog molecule pours** (gt-4k3fj.8.1) — the daemon's dog jobs (`doctor_dog`,
+  `wisp_reaper`, `jsonl_git_backup`, `compactor_dog`, `checkpoint_dog`,
+  `mayor_dispatch`) and the Dolt health warnings no longer pour a `mol-dog-*`
+  wisp molecule per cycle as their receipt. Under load those pours hit the 15s
+  bd deadline or lost to Dolt serialization and skipped the cycle. Each cycle
+  now logs one `dog_cycle: <job> outcome=` line and writes a
+  `dog_cycle_outcome` feed event when a step failed. The six `mol-dog-*`
+  formulas and the pour-failure escalation are gone.
+
 ### Added
 
 - **Nightly Dolt backup in the maintenance window** (gt-8z769.5) — before its

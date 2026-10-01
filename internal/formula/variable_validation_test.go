@@ -269,36 +269,3 @@ func TestAllEmbeddedFormulas_VariableValidation(t *testing.T) {
 		t.Errorf("Formulas with undefined template variables:\n%s", strings.Join(failures, "\n"))
 	}
 }
-
-func TestDogFormulasDoNotForceDoltPort(t *testing.T) {
-	t.Parallel()
-	formulasDir := "formulas"
-	entries, err := os.ReadDir(formulasDir)
-	if err != nil {
-		t.Fatalf("Formulas directory not found: %v", err)
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, "mol-dog-") || !strings.HasSuffix(name, ".formula.toml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(formulasDir, name))
-		if err != nil {
-			t.Errorf("Failed to read %s: %v", name, err)
-			continue
-		}
-		content := string(data)
-		for _, forbidden := range []string{
-			"--port={{port}}",
-			"--port={{dolt_port}}",
-			"default = \"3307\"",
-			"default 3307",
-			"[vars.dolt_port]",
-		} {
-			if strings.Contains(content, forbidden) {
-				t.Errorf("%s forces Dolt port via %q", name, forbidden)
-			}
-		}
-	}
-}

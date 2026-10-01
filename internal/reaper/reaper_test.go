@@ -54,24 +54,6 @@ func TestDefaultDatabases(t *testing.T) {
 	}
 }
 
-func TestDogReaperFormulaAlertThresholdMatchesDefault(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("../formula/formulas/mol-dog-reaper.formula.toml")
-	if err != nil {
-		t.Fatalf("read mol-dog-reaper formula: %v", err)
-	}
-
-	threshold := fmt.Sprintf("%d", DefaultAlertThreshold)
-	source := string(data)
-	alertThresholdVars := sourceBetween(t, source, "[vars.alert_threshold]", "[vars.dry_run]")
-	if !strings.Contains(alertThresholdVars, fmt.Sprintf("default = %q", threshold)) {
-		t.Fatalf("mol-dog-reaper alert_threshold default should match DefaultAlertThreshold %s", threshold)
-	}
-	if !strings.Contains(source, fmt.Sprintf("default %s", threshold)) {
-		t.Fatalf("mol-dog-reaper alert_threshold prose should document default %s", threshold)
-	}
-}
-
 func TestParentExcludeJoin(t *testing.T) {
 	t.Parallel()
 	joinClause, whereCondition := parentExcludeJoin("testdb")
@@ -663,28 +645,6 @@ func TestPreviewHashFingerprintsTheSet(t *testing.T) {
 		if other.hash == base {
 			t.Errorf("%s hashes the same as the previewed set — the binding would not hold", other.what)
 		}
-	}
-}
-
-// TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview guards the instruction
-// half of gt-39bu: the formula has to hand the dry run's preview hash to the
-// live run, because the live run refuses without it.
-func TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("../formula/formulas/mol-dog-reaper.formula.toml")
-	if err != nil {
-		t.Fatalf("read mol-dog-reaper formula: %v", err)
-	}
-
-	step := sourceBetween(t, string(data), `id = "auto-close"`, `id = "convoy-check"`)
-	if !strings.Contains(step, "--dry-run") {
-		t.Error("auto-close step no longer shows the dry run")
-	}
-	if !strings.Contains(step, "--preview=<hash printed by step 1>") {
-		t.Error("auto-close step's live command must carry the dry run's preview hash")
-	}
-	if !strings.Contains(strings.ToLower(step), "refuses") {
-		t.Error("auto-close step must say a live run with no matching preview is refused")
 	}
 }
 

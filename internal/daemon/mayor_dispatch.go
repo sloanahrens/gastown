@@ -134,16 +134,16 @@ func (d *Daemon) runMayorDispatch() {
 
 	d.logger.Printf("mayor_dispatch: starting cycle")
 
-	mol := d.pourDogMolecule(constants.MolDogMayorDispatch, nil)
-	defer mol.close()
+	cycle := d.startDogCycle("mayor_dispatch")
+	defer cycle.close()
 
 	result, err := d.readDispatchCheck()
 	if err != nil {
 		d.logger.Printf("mayor_dispatch: check failed: %v", err)
-		mol.failStep("inspect", err.Error())
+		cycle.failStep("inspect", err.Error())
 		return
 	}
-	mol.closeStep("inspect")
+	cycle.closeStep("inspect")
 
 	if !result.Nudge {
 		// The silence cases (no seat model, no free seat, no actionable work
@@ -152,9 +152,9 @@ func (d *Daemon) runMayorDispatch() {
 		// fires is visible in the log rather than inferred from silence.
 		d.logger.Printf("mayor_dispatch: no nudge — %d free seat(s), %d actionable ready bead(s)",
 			result.Seats.Free, result.Actionable)
-		mol.skipStep("nudge", fmt.Sprintf("no nudge warranted: %d free seat(s), %d actionable ready bead(s)",
+		cycle.skipStep("nudge", fmt.Sprintf("no nudge warranted: %d free seat(s), %d actionable ready bead(s)",
 			result.Seats.Free, result.Actionable))
-		mol.closeStep("report")
+		cycle.closeStep("report")
 		return
 	}
 
@@ -162,12 +162,12 @@ func (d *Daemon) runMayorDispatch() {
 		result.Seats.Free, result.Actionable)
 	if err := d.nudgeMayor(result.Message); err != nil {
 		d.logger.Printf("mayor_dispatch: nudge failed: %v", err)
-		mol.failStep("nudge", err.Error())
-		mol.closeStep("report")
+		cycle.failStep("nudge", err.Error())
+		cycle.closeStep("report")
 		return
 	}
-	mol.closeStep("nudge")
-	mol.closeStep("report")
+	cycle.closeStep("nudge")
+	cycle.closeStep("report")
 	d.logger.Printf("mayor_dispatch: cycle complete")
 }
 

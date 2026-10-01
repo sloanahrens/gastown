@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Allowlist used by most matcher tests — mirrors mol-dog-reaper's declared
+// Allowlist used by most matcher tests — mirrors the retired mol-dog-reaper's declared
 // command surface (gt-9iv).
 var testAllowlist = []string{
 	"gt reaper",

@@ -155,28 +155,13 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
 
-	// dogPourMu guards dogPour.
-	dogPourMu sync.Mutex
+	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
+	// writes the real feed; tests capture the event instead.
+	dogFeedFn func(eventType string, payload map[string]interface{}) error
 
-	// dogPour is the daemon's memory of each dog's molecule-pour health across
-	// patrol cycles (gt-i3rpw). Guarded rather than heartbeat-only because
-	// compactor_dog's startup catch-up goroutine and pourDoctorMolecule's
-	// anomaly goroutine both pour alongside the heartbeat.
-	dogPour map[string]dogPourHealth
-
-	// dogPourBdFn backs every bd call made through a poured molecule's handle —
-	// the pour, its step discovery, and its closes. dogPourWaitFn replaces the
-	// pour retry's backoff only; the close retries keep their own. Both are set
-	// by tests, which need an always-failing bd and no real wall-clock to drive
-	// the retry and escalation paths without a Dolt server. Nil uses the real bd
-	// and time.Sleep.
-	dogPourBdFn   func(args ...string) (string, error)
-	dogPourWaitFn func(time.Duration)
-
-	// lastDoctorMolTime tracks when the last mol-dog-doctor molecule was poured.
-	// Option B throttling: only pour when anomaly detected AND cooldown elapsed.
+	// lastDoltWarningTime is when Dolt health warnings were last reported.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
-	lastDoctorMolTime time.Time
+	lastDoltWarningTime time.Time
 
 	// lastMaintenanceRun tracks when scheduled maintenance last ran.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -354,8 +339,9 @@ const (
 	massDeathWindow    = 30 * time.Second // Time window to detect mass death
 	massDeathThreshold = 3                // Number of deaths to trigger alert
 
-	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
-	doctorMolCooldown = 5 * time.Minute
+	// doltWarningCooldown is the minimum interval between reports of Dolt
+	// health warnings.
+	doltWarningCooldown = 5 * time.Minute
 )
 
 func daemonPathCandidates(home, exePath string) []string {
@@ -1293,8 +1279,8 @@ func (d *Daemon) rotateOversizedLogs() {
 
 // ensureDoltServerRunning ensures the Dolt SQL server is running if configured.
 // This provides the backend for beads database access in server mode.
-// Option B throttling: pours a mol-dog-doctor molecule only when health check
-// warnings are detected, with a 5-minute cooldown to avoid wisp spam.
+// Health check warnings are reported as a failed doctor_dog cycle, at most once
+// per doltWarningCooldown.
 func (d *Daemon) ensureDoltServerRunning() {
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {
 		return
@@ -1304,11 +1290,10 @@ func (d *Daemon) ensureDoltServerRunning() {
 		d.logger.Printf("Error ensuring Dolt server is running: %v", err)
 	}
 
-	// Option B throttling: pour mol-dog-doctor only on anomaly with cooldown.
 	if warnings := d.doltServer.LastWarnings(); len(warnings) > 0 {
-		if time.Since(d.lastDoctorMolTime) >= doctorMolCooldown {
-			d.lastDoctorMolTime = time.Now()
-			go d.pourDoctorMolecule(warnings)
+		if time.Since(d.lastDoltWarningTime) >= doltWarningCooldown {
+			d.lastDoltWarningTime = time.Now()
+			d.reportDoltWarnings(warnings)
 		}
 	}
 
@@ -1317,7 +1302,7 @@ func (d *Daemon) ensureDoltServerRunning() {
 // ensureDoltServerUp brings the Dolt server up and reports a failure to do so.
 //
 // ensureDoltServerRunning is the heartbeat's step 0 and does more than this: it
-// pours the doctor molecule from state the heartbeat goroutine owns. A patrol cycle running on its own goroutine takes this bare
+// reports Dolt warnings from state the heartbeat goroutine owns. A patrol cycle running on its own goroutine takes this bare
 // bring-up instead of reaching into that state (gt-ox6c).
 func (d *Daemon) ensureDoltServerUp() error {
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {
@@ -1326,24 +1311,12 @@ func (d *Daemon) ensureDoltServerUp() error {
 	return d.doltServer.EnsureRunning()
 }
 
-// pourDoctorMolecule creates a mol-dog-doctor molecule to track a health anomaly.
-// Runs asynchronously — molecule lifecycle is observability, not control flow.
-func (d *Daemon) pourDoctorMolecule(warnings []string) {
-	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
-		"port": strconv.Itoa(d.doltServer.config.Port),
-	})
-	defer mol.close()
-
-	// Step 1: probe — connectivity was already checked (we got here because it passed).
-	mol.closeStep("probe")
-
-	// Step 2: inspect — resource checks produced the warnings.
-	mol.closeStep("inspect")
-
-	// Step 3: report — log the warning summary.
-	summary := strings.Join(warnings, "; ")
-	d.logger.Printf("Doctor molecule: %d warning(s): %s", len(warnings), summary)
-	mol.closeStep("report")
+// reportDoltWarnings records the Dolt health check's warnings as a failed
+// doctor_dog cycle: a log line and a feed event.
+func (d *Daemon) reportDoltWarnings(warnings []string) {
+	cycle := d.startDogCycle("doctor_dog")
+	defer cycle.close()
+	cycle.failStep("dolt-health", strings.Join(warnings, "; "))
 }
 
 // checkAllRigsDolt verifies all rigs are using the Dolt backend.

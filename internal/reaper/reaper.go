@@ -1,11 +1,11 @@
 // Package reaper provides wisp and issue cleanup operations for Dolt databases.
 //
-// These functions are the "callable helper functions" for the Dog-driven
-// mol-dog-reaper formula. They select candidates with read-only SQL and
-// write only through a bd Writer (bd close, bd delete), never with DML, so bd
-// keeps is_blocked, the events journal and its own commits (gt-fcxe9.12).
-// They do not make eligibility decisions — the Dog (or daemon orchestrator)
-// decides what to reap, purge, and auto-close based on the formula.
+// The daemon's wisp_reaper job and `gt reaper` call these. They select
+// candidates with read-only SQL and write only through a bd Writer (bd close,
+// bd delete), never with DML, so bd keeps is_blocked, the events journal and
+// its own commits (gt-fcxe9.12).
+// They do not make eligibility decisions — the caller decides what to reap,
+// purge, and auto-close.
 package reaper
 
 import (

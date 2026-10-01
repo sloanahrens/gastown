@@ -171,7 +171,7 @@ A formula may declare the only shell commands a run of it should need
 allows `gt reaper scan --json` but not `gt dolt cleanup`.
 
 ```toml
-formula = "mol-dog-reaper"
+formula = "mol-example-reaper"
 command_allowlist = [
   "gt reaper",
   "gt convoy check",
