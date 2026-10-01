@@ -10,15 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // gt up's Dolt environment and readiness wait against the real process
-// environment and real sockets: ApplyConfiguredDoltEnv exists to rewrite
+// environment and real sockets: applyConfiguredDoltEnv exists to rewrite
 // os.Environ, and WaitForReady dials the configured port.
 
-func TestIntegrationApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
+func TestIntegrationUpApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
 	townRoot := t.TempDir()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -34,7 +33,7 @@ func TestIntegrationApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 	t.Setenv("BEADS_DOLT_PORT", "9999")
 
-	config.ApplyConfiguredDoltEnv(townRoot)
+	applyConfiguredDoltEnv(townRoot)
 
 	if got := os.Getenv("GT_DOLT_HOST"); got != "127.0.0.2" {
 		t.Fatalf("GT_DOLT_HOST = %q, want 127.0.0.2", got)
@@ -47,7 +46,7 @@ func TestIntegrationApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
 	}
 }
 
-func TestIntegrationApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
+func TestIntegrationUpApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
 	townRoot := t.TempDir()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
@@ -61,7 +60,7 @@ func TestIntegrationApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t *
 	t.Setenv("GT_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
 
-	config.ApplyConfiguredDoltEnv(townRoot)
+	applyConfiguredDoltEnv(townRoot)
 
 	if got := os.Getenv("GT_DOLT_HOST"); got != "" {
 		t.Fatalf("GT_DOLT_HOST = %q, want cleared", got)

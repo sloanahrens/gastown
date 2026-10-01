@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1382,6 +1383,42 @@ func TestNormalizeConfiguredDoltEnv_ConfigYAMLWithoutHostClearsStaleHost(t *test
 	}
 	if got["GT_DOLT_PORT"] != "5507" {
 		t.Fatalf("GT_DOLT_PORT = %q, want 5507 in %v", got["GT_DOLT_PORT"], env)
+	}
+}
+
+func TestConfiguredDoltEnv_ConfigYAMLReplacesStaleEndpoint(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	doltDataDir := filepath.Join(tmpDir, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := configuredDoltEnv([]string{
+		"GT_DOLT_HOST=stale-host",
+		"GT_DOLT_PORT=9999",
+		"BEADS_DOLT_SERVER_HOST=stale-host",
+		"KEEP=1",
+	}, tmpDir, envOf())
+	want := map[string]string{"GT_DOLT_PORT": "5507"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("configuredDoltEnv = %v, want %v", got, want)
+	}
+}
+
+func TestConfiguredDoltEnv_NoManagedConfigKeepsInheritedEndpoint(t *testing.T) {
+	t.Parallel()
+	got := configuredDoltEnv([]string{
+		"GT_DOLT_HOST=inherited",
+		"BEADS_DOLT_PORT=4401",
+		"KEEP=1",
+	}, t.TempDir(), envOf())
+	want := map[string]string{"GT_DOLT_HOST": "inherited", "BEADS_DOLT_PORT": "4401"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("configuredDoltEnv = %v, want %v", got, want)
 	}
 }
 

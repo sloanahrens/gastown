@@ -539,7 +539,13 @@ func New(config *Config) (*Daemon, error) {
 			logger.Printf("Set env %s=%s from daemon.json", k, v)
 		}
 	}
-	agentconfig.ApplyConfiguredDoltEnv(config.TownRoot)
+	doltEnv := agentconfig.ConfiguredDoltEnv(config.TownRoot)
+	for _, key := range agentconfig.DoltEndpointEnvKeys {
+		processEnv{}.Unsetenv(key)
+	}
+	for key, value := range doltEnv {
+		processEnv{}.Setenv(key, value)
+	}
 
 	// Load disabled_patrols from town settings (settings/config.json).
 	// This provides a simpler way to disable patrols than editing daemon.json.
