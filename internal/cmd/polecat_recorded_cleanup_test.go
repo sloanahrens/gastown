@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,64 +10,29 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
-// initInventoryGitWorktree builds a real one-commit repo so the list path's
-// live probe has something to measure, the same way a polecat worktree does.
-func initInventoryGitWorktree(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	for _, args := range [][]string{
-		{"init", "-b", "polecat/topaz"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "initial"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-	return dir
-}
-
-// TestPolecatListReuseVerdictRedrivesFromLiveGit is the claude-41j.1 D9
-// end-to-end table for the list path: the recorded cleanup_status is a hint,
-// the verdict re-derives from a live probe of the worktree, and both are
-// tagged with where they came from.
-func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
+// TestPolecatListReuseVerdictRedrivesFromProbe is the claude-41j.1 D9 table
+// for the list path over canned probe results: the recorded cleanup_status
+// is a hint, the verdict re-derives from the live probe of the worktree, and
+// both are tagged with where they came from.
+// TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit runs the probe
+// against real worktrees.
+func TestPolecatListReuseVerdictRedrivesFromProbe(t *testing.T) {
 	t.Parallel()
-	cleanWorktree := initInventoryGitWorktree(t)
-
-	dirtyWorktree := initInventoryGitWorktree(t)
-	dirtyPath := filepath.Join(dirtyWorktree, "uncommitted.txt")
-	if err := os.WriteFile(dirtyPath, []byte("work in progress\n"), 0644); err != nil {
-		t.Fatalf("write dirty file: %v", err)
+	clean := polecat.LiveGitState{Branch: "polecat/topaz", Source: polecat.GitStateSourceLive}
+	dirty := polecat.LiveGitState{
+		Branch:      "polecat/topaz",
+		Dirty:       true,
+		DirtyReason: "git_state=has_uncommitted uncommitted_files=1",
+		Source:      polecat.GitStateSourceLive,
 	}
-
-	// A leftover polecat directory: it exists, but it is not a worktree of its
-	// own — it sits inside the rig's repository. Probing it must report the
-	// probe as failed, not the rig root's branch and dirt as the polecat's.
-	rigRoot := initInventoryGitWorktree(t)
-	if err := os.WriteFile(filepath.Join(rigRoot, "rig-dirt.txt"), []byte("churn\n"), 0644); err != nil {
-		t.Fatalf("write rig dirt: %v", err)
-	}
-	leftoverDir := filepath.Join(rigRoot, "polecats", "peridot", "gastown")
-	if err := os.MkdirAll(leftoverDir, 0755); err != nil {
-		t.Fatalf("mkdir leftover: %v", err)
+	notRoot := polecat.LiveGitState{
+		Source:       polecat.GitStateSourceUnknown,
+		FailedReason: "git_state=unknown path=/rig/polecats/peridot: resolving worktree root failed: path is not a git worktree root",
 	}
 
 	tests := []struct {
 		name             string
-		worktreePath     string
+		live             *polecat.LiveGitState // nil: no probe target
 		cleanupStatus    string
 		wantReusable     bool
 		wantVerdict      string
@@ -83,7 +46,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			// minutes after the stash was dropped, and it was the only thing
 			// consulted. Live git now decides, and the stale hint loses.
 			name:            "stale recorded has_stash with a clean live worktree is reusable",
-			worktreePath:    cleanWorktree,
+			live:            &clean,
 			cleanupStatus:   string(polecat.CleanupStash),
 			wantReusable:    true,
 			wantVerdict:     polecat.WorkstateVerdictSafeToNuke,
@@ -92,7 +55,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		},
 		{
 			name:            "recorded clean cannot rescue a dirty live worktree",
-			worktreePath:    dirtyWorktree,
+			live:            &dirty,
 			cleanupStatus:   string(polecat.CleanupClean),
 			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
 			wantReason:      "git-dirty",
@@ -100,16 +63,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		},
 		{
 			name:             "a failed live probe fails closed with git_state=unknown",
-			worktreePath:     filepath.Join(t.TempDir(), "gone"),
-			cleanupStatus:    string(polecat.CleanupClean),
-			wantVerdict:      polecat.WorkstateVerdictNeedsRecovery,
-			wantReason:       "git-check-failed",
-			wantGitStateSrc:  polecat.GitStateSourceUnknown,
-			wantGitReasonHas: "git_state=unknown",
-		},
-		{
-			name:             "a directory that is not its own worktree is unmeasurable, not clean",
-			worktreePath:     leftoverDir,
+			live:             &notRoot,
 			cleanupStatus:    string(polecat.CleanupClean),
 			wantVerdict:      polecat.WorkstateVerdictNeedsRecovery,
 			wantReason:       "git-check-failed",
@@ -118,7 +72,6 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		},
 		{
 			name:            "no probe target leaves the recorded hint authoritative",
-			worktreePath:    "",
 			cleanupStatus:   string(polecat.CleanupStash),
 			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
 			wantReason:      "cleanup-has_stash",
@@ -132,8 +85,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			// fields != nil) and a live probe confirms the worktree clean —
 			// not stay blocked forever with no path out.
 			name:            "missing cleanup_status with a clean live worktree is reusable",
-			worktreePath:    cleanWorktree,
-			cleanupStatus:   "",
+			live:            &clean,
 			wantReusable:    true,
 			wantVerdict:     polecat.WorkstateVerdictSafeToNuke,
 			wantReason:      "reusable",
@@ -142,14 +94,12 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		{
 			// The companion negative case: missing cleanup_status must not
 			// become a blanket clearance — a live probe that finds real dirt
-			// still blocks, exactly like every other status. gitSafe is false
-			// here, so ResolveIgnoreCleanupStatus's agentBeadRead branch never
-			// fires and the missing-status blocker (checked first in
-			// decideWorkstate) sets the reported reason; the dirty git fact is
-			// still a second, independent blocker (see item.Disposition.Blockers).
+			// still blocks, exactly like every other status. The
+			// missing-status blocker (checked first in decideWorkstate) sets
+			// the reported reason; the dirty git fact is still a second,
+			// independent blocker.
 			name:            "missing cleanup_status with a dirty live worktree still blocks",
-			worktreePath:    dirtyWorktree,
-			cleanupStatus:   "",
+			live:            &dirty,
 			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
 			wantReason:      "cleanup-unknown",
 			wantGitStateSrc: polecat.GitStateSourceLive,
@@ -159,13 +109,27 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := polecatInventoryEnv{GitProbeLocalOnly: true}
+			env.probe = func(path string, localOnly bool) polecat.LiveGitState {
+				if tt.live == nil {
+					t.Fatalf("probe(%q) called with no probe target", path)
+				}
+				if path != env.WorktreePath || !localOnly {
+					t.Errorf("probe(%q, %v), want (%q, true)", path, localOnly, env.WorktreePath)
+				}
+				return *tt.live
+			}
+			if tt.live != nil {
+				env.WorktreePath = filepath.Join("/rig", "polecats", "topaz", "gastown")
+			}
 			item := buildPolecatInventoryItem(
 				"gastown",
 				"topaz",
-				&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: tt.cleanupStatus, Branch: "polecat/topaz"},
+				&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: tt.cleanupStatus, Branch: "polecat/recorded"},
 				nil,
 				polecatSessionSet{},
-				polecatInventoryEnv{WorktreePath: tt.worktreePath},
+				env,
 			)
 
 			if item.Disposition.Reusable != tt.wantReusable {
@@ -183,8 +147,14 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			if tt.wantGitReasonHas != "" && !strings.Contains(item.GitStateReason, tt.wantGitReasonHas) {
 				t.Fatalf("GitStateReason = %q, want it to mention %q", item.GitStateReason, tt.wantGitReasonHas)
 			}
-			if item.GitStateSource == polecat.GitStateSourceLive && item.Branch != "polecat/topaz" {
-				t.Fatalf("Branch = %q, want the live branch polecat/topaz", item.Branch)
+			// A live branch supersedes the recorded one; a failed or absent
+			// probe leaves the recorded branch.
+			wantBranch := "polecat/recorded"
+			if item.GitStateSource == polecat.GitStateSourceLive {
+				wantBranch = "polecat/topaz"
+			}
+			if item.Branch != wantBranch {
+				t.Fatalf("Branch = %q, want %q", item.Branch, wantBranch)
 			}
 			if tt.wantBlockerHas != "" {
 				found := false

@@ -4,21 +4,22 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/townlog"
 )
 
-// Town delivers nudges by target address inside one town, as `gt nudge
-// <target> <message>` does: it resolves the target to a session, skips a
-// target in DND, delivers through Delivery and logs the nudge.
-//
-// Channel targets (channel:<name>) are not supported here; they stay with
-// gt nudge, which reads the messaging config and lists the town's agents.
+// Town delivers nudges by target address inside one town: it is `gt nudge
+// <target> <message>`. It resolves the target to a session (or a channel to
+// its members), skips a target in DND, delivers through Delivery and logs the
+// nudge.
 type Town struct {
 	// Delivery delivers to the resolved session; its TownRoot is the town's
 	// ("" when the caller is outside any town).
@@ -31,7 +32,29 @@ type Town struct {
 	// Log records a delivered nudge in town.log and the event feed; nil
 	// writes both under the town root.
 	Log func(townRoot, sender, rig, target, message string)
+	// RigExists reports whether rig is one of the town's rigs; nil reads
+	// mayor/rigs.json.
+	RigExists func(townRoot, rig string) bool
+	// Channels reads the town's nudge channels (name to member patterns);
+	// nil reads config/messaging.json.
+	Channels func(townRoot string) (map[string][]string, error)
+	// Skipped reports a target DND skipped; nil prints a line to
+	// Delivery.Stderr.
+	Skipped func(target, level string)
+	// Member reports each channel member's outcome as it is done; nil
+	// reports nothing.
+	Member func(ChannelMember)
 }
+
+// ChannelMember is what a channel nudge did for one member session.
+type ChannelMember struct {
+	Session string
+	DND     string // the notification level that skipped it; "" when it was not skipped
+	Err     error  // the delivery's error
+}
+
+// channelGap is the pause between two channel members' deliveries.
+const channelGap = 100 * time.Millisecond
 
 func (n *Town) registry() *session.PrefixRegistry {
 	if n.Registry != nil {
@@ -47,6 +70,55 @@ func (n *Town) notificationLevel(townRoot, agentBeadID string) (string, error) {
 	return beads.New(townRoot).GetAgentNotificationLevel(agentBeadID)
 }
 
+func (n *Town) rigExists(townRoot, rig string) bool {
+	if n.RigExists != nil {
+		return n.RigExists(townRoot, rig)
+	}
+	rigs, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return false
+	}
+	_, ok := rigs.Rigs[rig]
+	return ok
+}
+
+func (n *Town) channels(townRoot string) (map[string][]string, error) {
+	if n.Channels != nil {
+		return n.Channels(townRoot)
+	}
+	cfg, err := config.LoadMessagingConfig(config.MessagingConfigPath(townRoot))
+	if err != nil {
+		return nil, fmt.Errorf("loading messaging config: %w", err)
+	}
+	return cfg.NudgeChannels, nil
+}
+
+func (n *Town) skipped(target, level string) {
+	if n.Skipped != nil {
+		n.Skipped(target, level)
+		return
+	}
+	fmt.Fprintf(n.Delivery.Stderr, "Target has DND enabled (%s) - nudge skipped\n", level)
+}
+
+// muted is the notification level that skips a nudge to address, or "" when
+// none does: forced, outside a town, no agent bead, or one that cannot be
+// read (fail-open for backward compatibility).
+func (n *Town) muted(address string) string {
+	d := n.Delivery
+	if d.TownRoot == "" || d.Force || address == "" {
+		return ""
+	}
+	beadID := AgentBeadID(n.registry(), address)
+	if beadID == "" {
+		return ""
+	}
+	if level, err := n.notificationLevel(d.TownRoot, beadID); err == nil && level == beads.NotifyMuted {
+		return level
+	}
+	return ""
+}
+
 func (n *Town) log(townRoot, sender, rig, target, message string) {
 	if n.Log != nil {
 		n.Log(townRoot, sender, rig, target, message)
@@ -57,8 +129,8 @@ func (n *Town) log(townRoot, sender, rig, target, message string) {
 }
 
 // Nudge delivers message from sender to target: a role shortcut ("mayor"), a
-// rig address ("gastown/max", "gastown/crew/max", "gastown/polecats/toast")
-// or a raw session name.
+// rig address ("gastown/max", "gastown/crew/max", "gastown/polecats/toast"),
+// a raw session name or a channel ("channel:<name>", NudgeChannel).
 func (n *Town) Nudge(ctx context.Context, target, message, sender string) error {
 	d := n.Delivery
 	townRoot := d.TownRoot
@@ -67,20 +139,14 @@ func (n *Town) Nudge(ctx context.Context, target, message, sender string) error 
 	// Normalize trailing slash: the mail system uses "mayor/" as the
 	// canonical address, but nudge role shortcuts expect bare names.
 	target = strings.TrimSuffix(target, "/")
-	if strings.HasPrefix(target, "channel:") {
-		return fmt.Errorf("channel target %q: channel nudges go through gt nudge", target)
+	if channel, ok := strings.CutPrefix(target, "channel:"); ok {
+		_, err := n.NudgeChannel(ctx, channel, message, sender)
+		return err
 	}
 
-	// Check DND status for target (unless forced).
-	if townRoot != "" && !d.Force {
-		if beadID := AgentBeadID(reg, target); beadID != "" {
-			// An agent bead that cannot be read allows the nudge (fail-open
-			// for backward compatibility).
-			if level, err := n.notificationLevel(townRoot, beadID); err == nil && level == beads.NotifyMuted {
-				fmt.Fprintf(d.Stderr, "Target has DND enabled (%s) - nudge skipped\n", level)
-				return nil
-			}
-		}
+	if level := n.muted(target); level != "" {
+		n.skipped(target, level)
+		return nil
 	}
 
 	// Expand role shortcuts to session names.
@@ -114,19 +180,36 @@ func (n *Town) Nudge(ctx context.Context, target, message, sender string) error 
 		return fmt.Errorf("invalid address format: expected 'rig/polecat', got '%s'", target)
 	}
 	prefix := reg.PrefixForRig(rigName)
+	// A polecat's session is named by its rig's prefix, which an unknown rig
+	// does not have: refuse it rather than nudge another rig's session.
+	polecat := func(name string) (string, error) {
+		if townRoot == "" {
+			return "", fmt.Errorf("not in a Gas Town workspace")
+		}
+		if !n.rigExists(townRoot, rigName) {
+			return "", fmt.Errorf("rig '%s' not found", rigName)
+		}
+		return session.PolecatSessionName(prefix, name), nil
+	}
 	var sessionName string
 	switch {
 	case strings.HasPrefix(name, "crew/"):
 		sessionName = session.CrewSessionName(prefix, strings.TrimPrefix(name, "crew/"))
 	case strings.HasPrefix(name, "polecats/"):
 		// Explicit polecat address: bypasses crew-first resolution.
-		sessionName = session.PolecatSessionName(prefix, strings.TrimPrefix(name, "polecats/"))
+		var err error
+		if sessionName, err = polecat(strings.TrimPrefix(name, "polecats/")); err != nil {
+			return err
+		}
 	default:
 		// Short address: could be crew or polecat. Try crew first (matches
 		// the mail system's addressToSessionIDs), then fall back to polecat.
 		sessionName = session.CrewSessionName(prefix, name)
 		if exists, _ := d.Tmux.HasSession(sessionName); !exists {
-			sessionName = session.PolecatSessionName(prefix, name)
+			var err error
+			if sessionName, err = polecat(name); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -148,6 +231,154 @@ func (n *Town) Nudge(ctx context.Context, target, message, sender string) error 
 		n.log(townRoot, sender, rigName, target, message)
 	}
 	return nil
+}
+
+// NudgeChannel delivers message from sender to every running member of the
+// town's nudge channel, reporting each through Member, skipping members in
+// DND, and logs the nudge once. It returns the members' outcomes, and an
+// error when the channel cannot be resolved or a delivery failed. A channel
+// with no running member is no error: it returns no outcomes.
+func (n *Town) NudgeChannel(ctx context.Context, channel, message, sender string) ([]ChannelMember, error) {
+	d := n.Delivery
+	if d.TownRoot == "" {
+		return nil, fmt.Errorf("channel nudge: not in a Gas Town workspace")
+	}
+	channels, err := n.channels(d.TownRoot)
+	if err != nil {
+		return nil, err
+	}
+	patterns, ok := channels[channel]
+	if !ok {
+		return nil, fmt.Errorf("nudge channel %q not found in messaging config", channel)
+	}
+	if len(patterns) == 0 {
+		return nil, fmt.Errorf("nudge channel %q has no members", channel)
+	}
+	live, err := d.Tmux.ListSessions()
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	members := ChannelSessions(n.registry(), patterns, live)
+	if len(members) == 0 {
+		return nil, nil
+	}
+
+	var results []ChannelMember
+	failed := 0
+	for i, sessionName := range members {
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
+		if i > 0 {
+			d.Clock.Sleep(channelGap)
+		}
+		r := ChannelMember{Session: sessionName}
+		if r.DND = n.muted(SessionAddress(n.registry(), sessionName)); r.DND == "" {
+			if r.Err = d.Deliver(ctx, sessionName, message, sender); r.Err != nil {
+				failed++
+			}
+		}
+		results = append(results, r)
+		if n.Member != nil {
+			n.Member(r)
+		}
+	}
+	n.log(d.TownRoot, sender, "", "channel:"+channel, message)
+	if failed > 0 {
+		return results, fmt.Errorf("%d nudge(s) failed", failed)
+	}
+	return results, nil
+}
+
+// ChannelSessions resolves a nudge channel's member patterns to the running
+// agent sessions among live, each once, in pattern order. A pattern is a
+// role ("mayor"), a rig address ("gastown/crew/max", "gastown/polecats/toast",
+// or "gastown/toast" for a polecat) or one with "*" for the rig or the name
+// ("gastown/polecats/*", "*/crew/*").
+func ChannelSessions(reg *session.PrefixRegistry, patterns, live []string) []string {
+	var agents []*session.AgentIdentity
+	names := map[*session.AgentIdentity]string{}
+	for _, name := range live {
+		id, err := session.ParseSessionNameWithRegistry(name, reg)
+		if err != nil {
+			continue
+		}
+		switch id.Role {
+		case session.RoleMayor, session.RoleCrew, session.RolePolecat:
+			agents = append(agents, id)
+			names[id] = name
+		}
+	}
+	// The mayor first, then by rig, crew before polecats, then by name.
+	sort.SliceStable(agents, func(i, j int) bool {
+		a, b := agents[i], agents[j]
+		if (a.Role == session.RoleMayor) != (b.Role == session.RoleMayor) {
+			return a.Role == session.RoleMayor
+		}
+		if a.Rig != b.Rig {
+			return a.Rig < b.Rig
+		}
+		if a.Role != b.Role {
+			return a.Role == session.RoleCrew
+		}
+		return a.Name < b.Name
+	})
+
+	var out []string
+	seen := map[string]bool{}
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, pattern := range patterns {
+		if pattern == constants.RoleMayor {
+			add(session.MayorSessionName())
+			continue
+		}
+		rigPattern, target, ok := strings.Cut(pattern, "/")
+		if !ok {
+			continue
+		}
+		role, name := session.RolePolecat, target
+		if rest, ok := strings.CutPrefix(target, "polecats/"); ok {
+			name = rest
+		} else if rest, ok := strings.CutPrefix(target, "crew/"); ok {
+			role, name = session.RoleCrew, rest
+		}
+		for _, a := range agents {
+			if a.Role != role || (rigPattern != "*" && rigPattern != a.Rig) {
+				continue
+			}
+			// A bare legacy polecat name ("gastown/toast") takes no wildcard.
+			if name != a.Name && (name != "*" || target == "*") {
+				continue
+			}
+			add(names[a])
+		}
+	}
+	return out
+}
+
+// SessionAddress is the nudge address of an agent session ("" when the name
+// is no agent's): "hq-mayor" -> "mayor", "gt-crew-max" -> "gastown/crew/max",
+// "gt-alpha" -> "gastown/alpha".
+func SessionAddress(reg *session.PrefixRegistry, sessionName string) string {
+	id, err := session.ParseSessionNameWithRegistry(sessionName, reg)
+	if err != nil {
+		return ""
+	}
+	switch id.Role {
+	case session.RoleMayor:
+		return constants.RoleMayor
+	case session.RoleCrew:
+		return fmt.Sprintf("%s/crew/%s", id.Rig, id.Name)
+	case session.RolePolecat:
+		return fmt.Sprintf("%s/%s", id.Rig, id.Name)
+	default:
+		return ""
+	}
 }
 
 // AgentBeadID converts a nudge target address to the agent bead whose

@@ -39,6 +39,16 @@ func (f *nudgeTmux) HasSession(name string) (bool, error) {
 	return f.sessions[name], nil
 }
 
+func (f *nudgeTmux) ListSessions() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var names []string
+	for name := range f.sessions {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 func (f *nudgeTmux) IsBusy(string) bool { return false }
 
 func (f *nudgeTmux) WaitForIdle(session string, _ time.Duration) error {

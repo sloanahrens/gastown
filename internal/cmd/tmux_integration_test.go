@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -422,23 +423,8 @@ func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	// tmux.TestIsBusy_LivePane).
 	markPaneBusy(t, tm, sessionName)
 
-	// deliverNudge resolves townRoot via workspace.FindFromCwd(), so the
-	// refusal's wait-idle fallback needs a real (fake) workspace on disk.
+	// The refusal's wait-idle fallback queues into the town root.
 	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("Chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
 	// Shorten the wait-idle/queue-watcher timeouts so the refusal's fallback
 	// path (which polls for idle before giving up and leaving the message
@@ -457,8 +443,8 @@ func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	t.Cleanup(func() { nudgeModeFlag, nudgeForceFlag = origMode, origForce })
 
 	const message = "should-not-be-typed-into-the-busy-pane"
-	if err := deliverNudge(tm, sessionName, message, "tester"); err != nil {
-		t.Fatalf("deliverNudge: %v", err)
+	if err := newNudgeDelivery(tm, townRoot).Deliver(context.Background(), sessionName, message, "tester"); err != nil {
+		t.Fatalf("Deliver: %v", err)
 	}
 
 	// Refused and queued, not sent: the message must be waiting in the
@@ -556,8 +542,8 @@ func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
 	t.Cleanup(func() { nudgeModeFlag, nudgeForceFlag = origMode, origForce })
 
 	const message = "should-be-typed-into-the-pane-because-forced"
-	if err := deliverNudge(tm, sessionName, message, "tester"); err != nil {
-		t.Fatalf("deliverNudge: %v", err)
+	if err := newNudgeDelivery(tm, "").Deliver(context.Background(), sessionName, message, "tester"); err != nil {
+		t.Fatalf("Deliver: %v", err)
 	}
 
 	// Wait for the delivered text to actually appear in the pane. The wait is

@@ -3,9 +3,9 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -398,35 +399,6 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	})
 }
 
-// makeTestGitRepo creates a minimal git repo in a temp dir and returns its path.
-// The caller is responsible for cleanup via t.Cleanup or defer os.RemoveAll.
-func makeTestGitRepo(t *testing.T) string {
-	t.Helper()
-	return cachedGitFixtureStrings(t, "makeTestGitRepo", func(dir string) []string {
-		return []string{buildMakeTestGitRepo(t, dir)}
-	})[0]
-}
-
-// buildMakeTestGitRepo makes makeTestGitRepo's repos under dir.
-func buildMakeTestGitRepo(t *testing.T, dir string) string {
-	t.Helper()
-	for _, args := range [][]string{
-		{"git", "-C", dir, "init"},
-		{"git", "-C", dir, "config", "user.email", "test@test.com"},
-		{"git", "-C", dir, "config", "user.name", "Test"},
-		// Disable background processes that hold file handles open after exit —
-		// causes TempDir cleanup failures on Windows.
-		{"git", "-C", dir, "config", "gc.auto", "0"},
-		{"git", "-C", dir, "config", "core.fsmonitor", "false"},
-		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
-	} {
-		if err := exec.Command("git", args[1:]...).Run(); err != nil {
-			t.Fatalf("git setup %v: %v", args, err)
-		}
-	}
-	return dir
-}
-
 // TestHandoffPolecatEnvCheck verifies that the polecat guard in runHandoff uses
 // GT_ROLE as the authoritative check, so coordinators with a stale GT_POLECAT
 // in their environment are not redirected to gt done (GH #1707).
@@ -517,89 +489,80 @@ func TestPolecatHandoffDoneCmd(t *testing.T) {
 	}
 }
 
+// fakeHandoffGit answers the handoff's workspace checks from canned values.
+// A nil status with no statusErr is a clean worktree.
+type fakeHandoffGit struct {
+	notRepo   bool
+	branch    string
+	status    *git.UncommittedWorkStatus
+	statusErr error
+	log       string
+}
+
+func (f fakeHandoffGit) IsRepo() bool                      { return !f.notRepo }
+func (f fakeHandoffGit) CurrentBranch() (string, error)    { return f.branch, nil }
+func (f fakeHandoffGit) RecentCommits(int) (string, error) { return f.log, nil }
+func (f fakeHandoffGit) CheckUncommittedWork() (*git.UncommittedWorkStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status == nil {
+		return &git.UncommittedWorkStatus{}, nil
+	}
+	return f.status, nil
+}
+
+// TestWarnHandoffGitStatus covers the warning's decisions over canned git
+// state; TestIntegrationHandoffGitState reads a real repository.
 func TestWarnHandoffGitStatus(t *testing.T) {
 	t.Parallel()
-	warn := func(dir string) string {
-		var buf bytes.Buffer
-		warnHandoffGitStatusIn(&buf, dir)
-		return buf.String()
+	tests := []struct {
+		name string
+		g    fakeHandoffGit
+		want []string // substrings; nil means no output
+	}{
+		{name: "no warning on clean repo", g: fakeHandoffGit{}},
+		{name: "no warning outside git repo", g: fakeHandoffGit{notRepo: true, status: &git.UncommittedWorkStatus{UntrackedFiles: []string{"x"}}}},
+		{name: "no warning when the status cannot be read", g: fakeHandoffGit{statusErr: errors.New("git status failed")}},
+		{
+			name: "no warning for .beads-only changes",
+			g:    fakeHandoffGit{status: &git.UncommittedWorkStatus{HasUncommittedChanges: true, UntrackedFiles: []string{".beads/somefile.db"}}},
+		},
+		{
+			name: "warns on untracked file",
+			g:    fakeHandoffGit{status: &git.UncommittedWorkStatus{HasUncommittedChanges: true, UntrackedFiles: []string{"dirty.txt"}}},
+			want: []string{"uncommitted work", "untracked: dirty.txt", "--no-git-check"},
+		},
+		{
+			name: "warns on modified tracked file",
+			g:    fakeHandoffGit{status: &git.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{"tracked.txt"}}},
+			want: []string{"uncommitted work", "modified: tracked.txt"},
+		},
+		{
+			name: "warns on unpushed commits",
+			g:    fakeHandoffGit{status: &git.UncommittedWorkStatus{UnpushedCommits: 2}},
+			want: []string{"uncommitted work", "2 unpushed commit(s)"},
+		},
 	}
-
-	t.Run("no warning on clean repo", func(t *testing.T) {
-		t.Parallel()
-		dir := makeTestGitRepo(t)
-		output := warn(dir)
-		if output != "" {
-			t.Errorf("expected no output for clean repo, got: %q", output)
-		}
-	})
-
-	t.Run("warns on untracked file", func(t *testing.T) {
-		t.Parallel()
-		dir := makeTestGitRepo(t)
-		os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x"), 0644)
-		output := warn(dir)
-		if !strings.Contains(output, "uncommitted work") {
-			t.Errorf("expected warning about uncommitted work, got: %q", output)
-		}
-		if !strings.Contains(output, "untracked") {
-			t.Errorf("expected 'untracked' in output, got: %q", output)
-		}
-	})
-
-	t.Run("warns on modified tracked file", func(t *testing.T) {
-		t.Parallel()
-		dir := makeTestGitRepo(t)
-		// Create and commit a file
-		fpath := filepath.Join(dir, "tracked.txt")
-		os.WriteFile(fpath, []byte("original"), 0644)
-		exec.Command("git", "-C", dir, "add", ".").Run()
-		exec.Command("git", "-C", dir, "commit", "-m", "add file").Run()
-		// Now modify it
-		os.WriteFile(fpath, []byte("modified"), 0644)
-		output := warn(dir)
-		if !strings.Contains(output, "uncommitted work") {
-			t.Errorf("expected warning about uncommitted work, got: %q", output)
-		}
-		if !strings.Contains(output, "modified") {
-			t.Errorf("expected 'modified' in output, got: %q", output)
-		}
-	})
-
-	t.Run("no warning for .beads-only changes", func(t *testing.T) {
-		t.Parallel()
-		dir := makeTestGitRepo(t)
-		// Only .beads/ untracked files — should be clean (excluded)
-		os.MkdirAll(filepath.Join(dir, ".beads"), 0755)
-		os.WriteFile(filepath.Join(dir, ".beads", "somefile.db"), []byte("db"), 0644)
-		output := warn(dir)
-		if output != "" {
-			t.Errorf("expected no output for .beads-only changes, got: %q", output)
-		}
-	})
-
-	t.Run("no warning outside git repo", func(t *testing.T) {
-		t.Parallel()
-		output := warn(t.TempDir())
-		if output != "" {
-			t.Errorf("expected no output outside git repo, got: %q", output)
-		}
-	})
-
-	t.Run("no-git-check flag suppresses warning", func(t *testing.T) {
-		t.Parallel()
-		dir := makeTestGitRepo(t)
-		os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x"), 0644)
-		// Simulate --no-git-check: runHandoff warns only when it is unset.
-		noGitCheck := true
-		output := ""
-		if !noGitCheck {
-			output = warn(dir)
-		}
-		if output != "" {
-			t.Errorf("expected no output with --no-git-check, got: %q", output)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			warnHandoffGitStatusWith(&buf, tt.g)
+			out := buf.String()
+			if tt.want == nil {
+				if out != "" {
+					t.Fatalf("expected no output, got: %q", out)
+				}
+				return
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output missing %q: %q", w, out)
+				}
+			}
+		})
+	}
 }
 
 func TestHandoffProcessNames(t *testing.T) {
@@ -644,68 +607,63 @@ func TestHandoffProcessNames(t *testing.T) {
 	})
 }
 
-// TestCollectGitState verifies that collectGitState returns deterministic
-// workspace state from a git repo without shelling out to gt/bd. (GH#1996)
+// TestCollectGitState verifies that collectGitState renders deterministic
+// workspace state from git without shelling out to gt/bd (GH#1996), over
+// canned git state; TestIntegrationHandoffGitState reads a real repository.
 func TestCollectGitState(t *testing.T) {
 	t.Parallel()
-	t.Run("returns_state_from_git_repo", func(t *testing.T) {
+	t.Run("renders branch, changes, stashes, unpushed and recent commits", func(t *testing.T) {
 		t.Parallel()
-		// Create a temp git repo
-		tmpDir := t.TempDir()
-		cmds := [][]string{
-			{"git", "init"},
-			{"git", "config", "user.email", "test@test.com"},
-			{"git", "config", "user.name", "Test"},
-		}
-		for _, args := range cmds {
-			cmd := exec.Command("git", args[1:]...)
-			cmd.Dir = tmpDir
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("%v failed: %s", args, out)
-			}
-		}
-
-		// Create a file and commit
-		if err := os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("hello"), 0644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		for _, args := range [][]string{
-			{"git", "add", "file.txt"},
-			{"git", "commit", "-m", "initial commit"},
+		state := collectGitStateWith(fakeHandoffGit{
+			branch: "main",
+			status: &git.UncommittedWorkStatus{
+				HasUncommittedChanges: true,
+				ModifiedFiles:         []string{"file.txt"},
+				UntrackedFiles:        []string{"new.txt"},
+				StashCount:            1,
+				UnpushedCommits:       3,
+			},
+			log: "abc1234 initial commit",
+		})
+		for _, want := range []string{
+			"## Workspace State", "Branch: main", "Modified: file.txt", "Untracked: new.txt",
+			"Stashes: 1", "Unpushed commits: 3", "Recent commits:\nabc1234 initial commit",
 		} {
-			cmd := exec.Command("git", args[1:]...)
-			cmd.Dir = tmpDir
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("%v failed: %s", args, out)
+			if !strings.Contains(state, want) {
+				t.Errorf("state missing %q:\n%s", want, state)
 			}
 		}
+	})
 
-		// Modify a file to create uncommitted changes
-		if err := os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("modified"), 0644); err != nil {
-			t.Fatalf("write: %v", err)
+	t.Run("caps long file lists", func(t *testing.T) {
+		t.Parallel()
+		var modified, untracked []string
+		for i := 0; i < 12; i++ {
+			modified = append(modified, fmt.Sprintf("m%d.go", i))
+			untracked = append(untracked, fmt.Sprintf("u%d.go", i))
 		}
-
-		state := collectGitStateIn(tmpDir)
-
-		if state == "" {
-			t.Fatal("collectGitState() returned empty string for a git repo with changes")
+		state := collectGitStateWith(fakeHandoffGit{status: &git.UncommittedWorkStatus{
+			HasUncommittedChanges: true, ModifiedFiles: modified, UntrackedFiles: untracked,
+		}})
+		if !strings.Contains(state, "m9.go, ... (+2 more)") || strings.Contains(state, "m10.go") {
+			t.Errorf("modified list not capped at 10:\n%s", state)
 		}
-		if !strings.Contains(state, "## Workspace State") {
-			t.Errorf("expected '## Workspace State' header, got: %s", state)
-		}
-		if !strings.Contains(state, "Modified") {
-			t.Errorf("expected 'Modified' in state, got: %s", state)
-		}
-		if !strings.Contains(state, "initial commit") {
-			t.Errorf("expected recent commit in state, got: %s", state)
+		if !strings.Contains(state, "u4.go, ... (+7 more)") || strings.Contains(state, "u5.go") {
+			t.Errorf("untracked list not capped at 5:\n%s", state)
 		}
 	})
 
 	t.Run("returns_empty_outside_git_repo", func(t *testing.T) {
 		t.Parallel()
-		state := collectGitStateIn(t.TempDir())
-		if state != "" {
+		if state := collectGitStateWith(fakeHandoffGit{notRepo: true, branch: "main"}); state != "" {
 			t.Errorf("expected empty string outside git repo, got: %s", state)
+		}
+	})
+
+	t.Run("returns_empty_with_nothing_to_report", func(t *testing.T) {
+		t.Parallel()
+		if state := collectGitStateWith(fakeHandoffGit{}); state != "" {
+			t.Errorf("expected empty string with nothing to report, got: %s", state)
 		}
 	})
 }

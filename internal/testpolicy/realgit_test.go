@@ -15,7 +15,7 @@ var seedRealGit = flag.Bool("seed-realgit", false, "print the realgit.txt the tr
 // files outside gitfree.txt that still run real git. The list only shrinks:
 // moving a file's git onto gitfake or into the integration tier deletes its
 // line AND lowers this, in the same change.
-const maxRealGit = 12
+const maxRealGit = 7
 
 // TestRealGit holds every unit-tier test file outside gitfree.txt to the
 // realgit.txt baseline, and logs the converted share of test lines, which

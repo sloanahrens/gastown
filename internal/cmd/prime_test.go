@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -801,15 +800,6 @@ func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 
 func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *testing.T) {
 	t.Parallel()
-	runGit := func(t *testing.T, dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
-
 	townRoot := t.TempDir()
 	rigRoot := filepath.Join(townRoot, "testrig")
 	rigBeadsDir := filepath.Join(rigRoot, ".beads")
@@ -832,8 +822,6 @@ func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *te
 	if err := os.MkdirAll(workBeadsDir, 0755); err != nil {
 		t.Fatalf("mkdir work beads dir: %v", err)
 	}
-	runGit(t, workDir, "init")
-
 	redirectPath := filepath.Join(workBeadsDir, "redirect")
 	if err := os.WriteFile(redirectPath, []byte("../../../mayor/rig/.beads\n"), 0644); err != nil {
 		t.Fatalf("write redirect: %v", err)
