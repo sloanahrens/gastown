@@ -111,7 +111,7 @@ func TestShortPatrolCheckTick(t *testing.T) {
 		interval time.Duration
 		want     time.Duration
 	}{
-		{15 * time.Minute, 3*time.Minute + 45*time.Second}, // jsonl_git_backup, dolt_backup
+		{15 * time.Minute, 3*time.Minute + 45*time.Second}, // jsonl_git_backup
 		{1 * time.Hour, 5 * time.Minute},                   // wisp_reaper: interval/4 (15m) clamped to the 5m ceiling
 		{10 * time.Minute, 2*time.Minute + 30*time.Second}, // checkpoint_dog, patrol_watchdog
 		{60 * time.Minute, 5 * time.Minute},                // main_branch_test default

@@ -113,7 +113,6 @@ type (
 	PatrolConfig               = agentconfig.PatrolConfig
 	PatrolsConfig              = agentconfig.PatrolsConfig
 	DoltServerConfig           = agentconfig.DoltServerConfig
-	DoltBackupConfig           = agentconfig.DoltBackupConfig
 	JsonlGitBackupConfig       = agentconfig.JsonlGitBackupConfig
 	WispReaperConfig           = agentconfig.WispReaperConfig
 	DoctorDogConfig            = agentconfig.DoctorDogConfig
@@ -179,12 +178,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledSlings.Enabled
-	}
-	if patrol == "dolt_backup" {
-		if config == nil || config.Patrols == nil || config.Patrols.DoltBackup == nil {
-			return false
-		}
-		return config.Patrols.DoltBackup.Enabled
 	}
 	if patrol == "jsonl_git_backup" {
 		if config == nil || config.Patrols == nil || config.Patrols.JsonlGitBackup == nil {

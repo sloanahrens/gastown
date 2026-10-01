@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -89,6 +90,10 @@ type DoltServerManager struct {
 	config   *DoltServerConfig
 	townRoot string
 	logger   func(format string, v ...interface{})
+
+	// backupRoot is where the nightly Dolt backups live; empty skips the
+	// health check's backup-freshness warning. The daemon sets it.
+	backupRoot string
 
 	mu        sync.Mutex
 	process   *os.Process
@@ -1386,38 +1391,23 @@ func (m *DoltServerManager) countDataDirDatabases() int {
 	return count
 }
 
-// checkBackupFreshness checks if Dolt backups are fresh. Returns warnings for any configured
-// backup database that hasn't been synced in over 2 hours. Non-fatal: failures return nil.
+// checkBackupFreshness warns when the newest nightly backup
+// (scheduled_maintenance, gt-8z769.5) is older than doltbackup.StaleAfter.
+// No backup root, or no backup yet, is no warning: the first night has not
+// run. Non-fatal: failures return nil.
 func (m *DoltServerManager) checkBackupFreshness() []string {
-	backupDir := filepath.Join(m.townRoot, ".dolt-backup")
-	info, err := os.Stat(backupDir)
-	if err != nil || !info.IsDir() {
-		return nil // No backup directory — backup patrol may not be configured
-	}
-
-	entries, err := os.ReadDir(backupDir)
-	if err != nil {
+	if m.backupRoot == "" {
 		return nil
 	}
-
-	const staleThreshold = 2 * time.Hour
-	now := time.Now()
-	var warnings []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		dbInfo, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		age := now.Sub(dbInfo.ModTime())
-		if age > staleThreshold {
-			warnings = append(warnings, fmt.Sprintf("Dolt backup %q is %.0f minutes old (threshold %.0fm) — backup patrol may be stalled",
-				entry.Name(), age.Minutes(), staleThreshold.Minutes()))
-		}
+	b, ok, err := doltbackup.Newest(m.backupRoot)
+	if err != nil || !ok {
+		return nil
 	}
-	return warnings
+	if age := b.Age(time.Now()); age > doltbackup.StaleAfter {
+		return []string{fmt.Sprintf("newest Dolt backup %s is %.0f hours old (threshold %.0fh) — the nightly backup in scheduled_maintenance may be failing",
+			b.Path, age.Hours(), doltbackup.StaleAfter.Hours())}
+	}
+	return nil
 }
 
 // checkWriteHealthLocked probes the Dolt server's write capability by attempting

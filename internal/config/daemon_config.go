@@ -35,7 +35,6 @@ type PatrolsConfig struct {
 	Mayor                *PatrolConfig               `json:"mayor,omitempty"`
 	Handler              *PatrolConfig               `json:"handler,omitempty"`
 	DoltServer           *DoltServerConfig           `json:"dolt_server,omitempty"`
-	DoltBackup           *DoltBackupConfig           `json:"dolt_backup,omitempty"`
 	JsonlGitBackup       *JsonlGitBackupConfig       `json:"jsonl_git_backup,omitempty"`
 	WispReaper           *WispReaperConfig           `json:"wisp_reaper,omitempty"`
 	DoctorDog            *DoctorDogConfig            `json:"doctor_dog,omitempty"`
@@ -60,6 +59,13 @@ type PatrolsConfig struct {
 	// LandingWorker lands work beads labeled gt:ready-to-land, one worker per
 	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
 	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
+
+	// DoltBackup is retired: the 15-minute dolt_backup patrol (dolt backup
+	// sync into <town>/.dolt-backup plus an iCloud rsync) was replaced by the
+	// nightly backup in scheduled_maintenance (gt-8z769.5) and nothing reads
+	// this key. It is declared so a daemon.json that still carries it decodes
+	// under strict decoding, and kept verbatim. Delete the key by hand.
+	DoltBackup json.RawMessage `json:"dolt_backup,omitempty"`
 
 	// DoltRemotes is retired: the dolt_remotes push patrol was removed
 	// (ADR 0002) and nothing reads this key. It is declared so a daemon.json
@@ -142,20 +148,6 @@ type DoltServerConfig struct {
 	HealthCheckInterval time.Duration `json:"health_check_interval,omitempty"`
 }
 
-// DoltBackupConfig holds configuration for the dolt_backup patrol.
-// This patrol periodically syncs Dolt databases to local filesystem backups.
-type DoltBackupConfig struct {
-	// Enabled controls whether backup sync runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to sync, as a string (e.g., "15m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// Databases lists specific database names to back up.
-	// If empty, auto-discovers databases with configured backup remotes.
-	Databases []string `json:"databases,omitempty"`
-}
-
 // JsonlGitBackupConfig holds configuration for the jsonl_git_backup patrol.
 // This patrol exports issues to JSONL files, scrubs ephemeral data, and pushes to a git repo.
 type JsonlGitBackupConfig struct {
@@ -225,7 +217,7 @@ type DoctorDogConfig struct {
 	// OrphanAlertCount: database count threshold. Default: 20.
 	OrphanAlertCount int `json:"orphan_alert_count,omitempty"`
 
-	// BackupStaleSeconds: backup age threshold in seconds. Default: 3600 (1hr).
+	// BackupStaleSeconds: nightly backup age threshold in seconds. Default: 129600 (36h).
 	BackupStaleSeconds float64 `json:"backup_stale_seconds,omitempty"`
 }
 
@@ -494,7 +486,7 @@ func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 }
 
 // Count returns how many patrol entries daemon.json declares, not counting
-// the retired keys (dolt_remotes, quota_dog, quota_resume, witness, deacon,
+// the retired keys (dolt_backup, dolt_remotes, quota_dog, quota_resume, witness, deacon,
 // patrol_watchdog).
 func (p *PatrolsConfig) Count() int {
 	if p == nil {

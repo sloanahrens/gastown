@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nightly Dolt backup in the maintenance window** (gt-8z769.5) — before its
+  gc, `scheduled_maintenance` copies every database with
+  `CALL dolt_backup('sync-url', ...)` through the running server into
+  `~/gt-backups/dolt/<date>/<db>`, each under its own pause marker, and keeps
+  seven nights. The gc runs only once the night's backup is on disk; a failed
+  backup escalates and skips that night's gc. `gt health`, the Dolt health
+  check and `doctor_dog` read backup freshness from it (stale after 36h).
+  Restore procedure: `docs/dolt-restore.md`. The 15-minute `dolt_backup`
+  patrol (`dolt backup sync` into `<town>/.dolt-backup` plus an iCloud rsync),
+  the `dolt-backup` plugin, the `mol-dog-backup` formula and the `/backup`
+  command are removed; a daemon.json `dolt_backup` key still parses and is
+  ignored.
+
 - **`gt done` submits only; `internal/land` lands on the merged tree** (gt-v4ssj.3,
   gt-v4ssj.9, ADR 0004) — `gt done` fetches, rebases onto the target, squashes
   auto-save commits, runs the local gate (`make lint`, `go build ./...`, the unit

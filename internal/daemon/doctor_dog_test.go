@@ -108,8 +108,8 @@ func TestDoctorDogDefaultThresholds(t *testing.T) {
 	if defaultDoctorDogOrphanAlertCount != 20 {
 		t.Errorf("expected orphan alert at 20, got %d", defaultDoctorDogOrphanAlertCount)
 	}
-	if defaultDoctorDogBackupStaleSeconds != 3600.0 {
-		t.Errorf("expected backup stale at 3600s, got %.0f", defaultDoctorDogBackupStaleSeconds)
+	if defaultDoctorDogBackupStaleSeconds != 36*3600.0 {
+		t.Errorf("expected backup stale at 36h (nightly backup), got %.0fs", defaultDoctorDogBackupStaleSeconds)
 	}
 }
 
@@ -280,8 +280,7 @@ func TestDoctorDogFindings_EachCheckTrips(t *testing.T) {
 	}
 }
 
-// .dolt-backup keeps directories for databases the server no longer serves
-// (on the live town: forkrig, pt0, testrig — untouched for weeks). Judging
+// Old nightly backups hold databases the server no longer serves. Judging
 // those stale would pour a molecule on every run forever.
 func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
 	t.Parallel()
@@ -296,8 +295,8 @@ func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
 		t.Errorf("backup ages checked for %v, want exactly the served databases [hq gt]", asked)
 	}
 
-	// A served database with no backup directory is not a finding: the backup
-	// patrol may not cover it, which is configuration, not an outage.
+	// A served database with no backup yet is not a finding: it may predate
+	// its first night, which is not an outage.
 	p.backupAge = func(string) (time.Duration, bool) { return 0, false }
 	if r := doctorDogFindings(p, defaultDoctorLimits()); len(r.findings) != 0 {
 		t.Errorf("missing backup dirs produced findings: %v", r.findings)

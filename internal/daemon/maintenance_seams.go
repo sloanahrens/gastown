@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 )
 
@@ -32,6 +33,10 @@ type maintenanceSeams struct {
 	measure func(dataDir, db string) (gcMeasure, error)
 	// gcExec runs CALL dolt_gc('--full') on one database.
 	gcExec func(ctx context.Context, d *Daemon, db string) error
+	// backupRoot is where the nightly backups live (~/gt-backups/dolt).
+	backupRoot func() (string, error)
+	// backupExec copies one database into the backup directory dest.
+	backupExec func(ctx context.Context, d *Daemon, db, dest string) error
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -78,6 +83,14 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.gcExec == nil {
 		s.gcExec = func(ctx context.Context, d *Daemon, db string) error { return d.doltGCFull(ctx, db) }
+	}
+	if s.backupRoot == nil {
+		s.backupRoot = doltbackup.DefaultRoot
+	}
+	if s.backupExec == nil {
+		s.backupExec = func(ctx context.Context, d *Daemon, db, dest string) error {
+			return d.doltBackupSyncURL(ctx, db, dest)
+		}
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet

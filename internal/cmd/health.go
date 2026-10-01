@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/health"
 	"github.com/steveyegge/gastown/internal/style"
@@ -97,7 +98,7 @@ Sections:
   1. Dolt Server: status, PID, port, latency
   2. Databases: per-DB counts of issues, wisps, commits
   3. Pollution: scan for known test/garbage patterns
-  4. Backups: Dolt filesystem and JSONL git freshness
+  4. Backups: nightly Dolt backup and JSONL git freshness
   5. Processes: zombie dolt servers
   6. Orphan DBs: databases not referenced by any rig
 
@@ -310,15 +311,13 @@ func checkPollution(townRoot string, port int) []PollutionRecord {
 func checkBackupHealth(townRoot string) *BackupHealth {
 	bh := &BackupHealth{}
 
-	// Dolt filesystem backup freshness.
-	backupDir := filepath.Join(townRoot, ".dolt-backup")
-	if _, err := os.Stat(backupDir); err == nil {
-		newest := findNewestFile(backupDir)
-		if !newest.IsZero() {
-			age := time.Since(newest)
+	// Nightly Dolt backup freshness (scheduled_maintenance, gt-8z769.5).
+	if root, err := doltbackup.DefaultRoot(); err == nil {
+		if b, ok, err := doltbackup.Newest(root); err == nil && ok {
+			age := b.Age(time.Now())
 			bh.DoltAgeSeconds = int(age.Seconds())
 			bh.DoltFreshness = age.Round(time.Second).String()
-			bh.DoltStale = age > 30*time.Minute
+			bh.DoltStale = age > doltbackup.StaleAfter
 		}
 	}
 
@@ -422,9 +421,9 @@ func printHealthReport(r *HealthReport) {
 		if r.Backups.DoltStale {
 			icon = style.Bold.Render("!")
 		}
-		fmt.Printf("  %s Dolt filesystem: %s ago\n", icon, r.Backups.DoltFreshness)
+		fmt.Printf("  %s Dolt nightly: %s ago\n", icon, r.Backups.DoltFreshness)
 	} else {
-		fmt.Printf("  %s Dolt filesystem: not found\n", style.Dim.Render("○"))
+		fmt.Printf("  %s Dolt nightly: not found\n", style.Dim.Render("○"))
 	}
 	if r.Backups.JSONLFreshness != "" {
 		icon := style.Bold.Render("✓")
@@ -460,19 +459,4 @@ func printHealthReport(r *HealthReport) {
 	}
 
 	fmt.Println()
-}
-
-// findNewestFile walks a directory and returns the most recent file mtime.
-func findNewestFile(dir string) time.Time {
-	var newest time.Time
-	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !info.IsDir() && info.ModTime().After(newest) {
-			newest = info.ModTime()
-		}
-		return nil
-	})
-	return newest
 }

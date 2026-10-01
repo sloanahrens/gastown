@@ -312,9 +312,6 @@ const (
 	// MolDogDoctor is the health anomaly tracking dog formula name.
 	MolDogDoctor = "mol-dog-doctor"
 
-	// MolDogBackup is the Dolt backup dog formula name.
-	MolDogBackup = "mol-dog-backup"
-
 	// MolDogMayorDispatch is the idle-seat dispatch check formula name.
 	MolDogMayorDispatch = "mol-dog-mayor-dispatch"
 
