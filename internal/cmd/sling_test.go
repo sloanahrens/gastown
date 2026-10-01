@@ -704,24 +704,25 @@ func TestIsHookedAgentDead_NoTmuxSession(t *testing.T) {
 	_ = result
 }
 
-// TestHookBeadWithRetryForcesAutoCommit: the hook write commits on its own,
-// so the read-back and every later bd call see it.
-func TestHookBeadWithRetryForcesAutoCommit(t *testing.T) {
+// TestHookBeadWithRetryWritesHookDirDatabase: the hook lands as hooked to the
+// target agent in hookDir's own database (a pinned store, whose mutations
+// auto-commit, so the read-back and every later bd call see it).
+func TestHookBeadWithRetryWritesHookDirDatabase(t *testing.T) {
 	t.Parallel()
-	var got beads.BDCall
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		got = c
-		return nil, nil, nil
-	}
+	hookDir := t.TempDir()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-test123", Title: "t", Status: "open"})
+	stores := dirSlingStores(map[string]*beadsfake.Fake{beads.ResolveBeadsDir(hookDir): db}, beadsfake.New())
 
-	if err := hookBeadWithRetryVia(run, nil, "gt-test123", "gastown/polecats/toast", t.TempDir()); err != nil {
+	if err := stores.hookWithRetry(nil, "gt-test123", "gastown/polecats/toast", hookDir); err != nil {
 		t.Fatalf("hookBeadWithRetry: %v", err)
 	}
-	if strings.Join(got.Args, " ") != "update gt-test123 --status=hooked --assignee=gastown/polecats/toast" {
-		t.Fatalf("hook argv = %q", got.Args)
+	got, err := db.Show("gt-test123")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if v := envSlice(got.Env)["BD_DOLT_AUTO_COMMIT"]; v != "on" {
-		t.Fatalf("hook update BD_DOLT_AUTO_COMMIT = %q, want on", v)
+	if got.Status != "hooked" || got.Assignee != "gastown/polecats/toast" {
+		t.Fatalf("hooked bead = status %q assignee %q", got.Status, got.Assignee)
 	}
 }
 

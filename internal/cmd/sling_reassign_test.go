@@ -4,19 +4,34 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // reassignmentFixture is a town whose routes send gt-zd7c to the gastown rig,
-// and an in-process bd that logs every call as "<cmd> <args...>".
-func reassignmentFixture(t *testing.T) (townRoot string, bd *inprocBD) {
+// and one fake database holding gt-zd7c that answers every store.
+func reassignmentFixture(t *testing.T) (townRoot string, db *beadsfake.Fake) {
 	t.Helper()
 	townRoot = t.TempDir()
 	writeGastownRoutes(t, townRoot)
-	bd = &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		return bdOut("[]")
-	}}
-	return townRoot, bd
+	db = beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-zd7c", Title: "t", Status: "hooked"})
+	return townRoot, db
+}
+
+// commentText is every comment on id, joined.
+func commentText(t *testing.T, db *beadsfake.Fake, id string) string {
+	t.Helper()
+	comments, err := db.Comments(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, c := range comments {
+		texts = append(texts, c.Text)
+	}
+	return strings.Join(texts, "\n")
 }
 
 // TestRecordReassignmentCarriesOutgoingAssignee is the gt-zd7c fix: the bead
@@ -25,7 +40,7 @@ func reassignmentFixture(t *testing.T) (townRoot string, bd *inprocBD) {
 // enumeration that cannot tell still writes the record.
 func TestRecordReassignmentCarriesOutgoingAssignee(t *testing.T) {
 	t.Parallel()
-	townRoot, bd := reassignmentFixture(t)
+	townRoot, db := reassignmentFixture(t)
 	var branchesFor string
 	branches := func(tr, beadID string) []string {
 		branchesFor = beadID
@@ -35,17 +50,16 @@ func TestRecordReassignmentCarriesOutgoingAssignee(t *testing.T) {
 		return nil
 	}
 
-	recordReassignmentVia(bd.run, branches, io.Discard, townRoot, "gt-zd7c", "gastown/polecats/jasper", "gastown/polecats/obsidian", "mayor")
+	fakeSlingStores(db).recordReassignment(branches, io.Discard, townRoot, "gt-zd7c", "gastown/polecats/jasper", "gastown/polecats/obsidian", "mayor")
 
-	log := bd.log()
+	got := commentText(t, db, "gt-zd7c")
 	for _, want := range []string{
-		"comments add gt-zd7c",
 		"REASSIGNED: gastown/polecats/jasper -> gastown/polecats/obsidian",
 		"Branch: (unknown)",
 		"By: mayor",
 	} {
-		if !strings.Contains(log, want) {
-			t.Errorf("reassignment record missing %q; got: %q", want, log)
+		if !strings.Contains(got, want) {
+			t.Errorf("reassignment record missing %q; got: %q", want, got)
 		}
 	}
 	if branchesFor != "gt-zd7c" {
@@ -58,16 +72,17 @@ func TestRecordReassignmentCarriesOutgoingAssignee(t *testing.T) {
 // unchanged assignee has anything to record.
 func TestRecordReassignmentSkipsNoOps(t *testing.T) {
 	t.Parallel()
-	townRoot, bd := reassignmentFixture(t)
+	townRoot, db := reassignmentFixture(t)
 	branches := func(string, string) []string {
 		t.Error("a no-op reassignment must not list branches")
 		return nil
 	}
 
-	recordReassignmentVia(bd.run, branches, io.Discard, townRoot, "gt-zd7c", "", "gastown/polecats/obsidian", "mayor")
-	recordReassignmentVia(bd.run, branches, io.Discard, townRoot, "gt-zd7c", "gastown/polecats/obsidian", "gastown/polecats/obsidian", "mayor")
+	stores := fakeSlingStores(db)
+	stores.recordReassignment(branches, io.Discard, townRoot, "gt-zd7c", "", "gastown/polecats/obsidian", "mayor")
+	stores.recordReassignment(branches, io.Discard, townRoot, "gt-zd7c", "gastown/polecats/obsidian", "gastown/polecats/obsidian", "mayor")
 
-	if got := bd.log(); got != "" {
-		t.Errorf("expected no bd call for a no-op reassignment, got: %q", got)
+	if got := commentText(t, db, "gt-zd7c"); got != "" {
+		t.Errorf("expected no comment for a no-op reassignment, got: %q", got)
 	}
 }

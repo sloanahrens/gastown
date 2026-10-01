@@ -1267,16 +1267,16 @@ var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown",
 // and no write. workDir is the hook write's work dir, so an unrouted bead is
 // read from the same database the hook just wrote.
 func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
-	clearOrphanEpisodeLabelsVia(nil, os.Stdout, townRoot, beadID, workDir)
+	slingStores{}.clearOrphanEpisodeLabels(os.Stdout, townRoot, beadID, workDir)
 }
 
-// clearOrphanEpisodeLabelsVia is clearOrphanEpisodeLabels with bd answered by
-// run (nil: bd on PATH) and its warnings written to w.
-func clearOrphanEpisodeLabelsVia(run beads.BDRunner, w io.Writer, townRoot, beadID, workDir string) {
+// clearOrphanEpisodeLabels is clearOrphanEpisodeLabels in s's stores, with
+// its warnings written to w.
+func (s slingStores) clearOrphanEpisodeLabels(w io.Writer, townRoot, beadID, workDir string) {
 	if beadID == "" {
 		return
 	}
-	b := beads.NewWithBeadsDirAndRunner(beads.ResolveHookDir(townRoot, beadID, workDir), "", run)
+	b := s.routedFrom(beads.ResolveHookDir(townRoot, beadID, workDir))
 	issue, err := b.Show(beadID)
 	if err != nil {
 		fmt.Fprintf(w, "  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)
@@ -1323,19 +1323,17 @@ func survivingBranchesForBead(townRoot, beadID string) []string {
 // of the old value is the Dolt events table. Best-effort: a beads failure warns
 // and returns, because a missing audit line must not abort a dispatch.
 func recordReassignment(townRoot, beadID, from, to, requester string) {
-	recordReassignmentVia(nil, survivingBranchesForBead, os.Stdout, townRoot, beadID, from, to, requester)
+	slingStores{}.recordReassignment(survivingBranchesForBead, os.Stdout, townRoot, beadID, from, to, requester)
 }
 
-// recordReassignmentVia is recordReassignment with bd answered by run (nil:
-// bd on PATH), the old holder's branches listed by branches, and its report
-// written to w.
-func recordReassignmentVia(run beads.BDRunner, branches func(townRoot, beadID string) []string, w io.Writer, townRoot, beadID, from, to, requester string) {
+// recordReassignment is recordReassignment in s's stores, with the old
+// holder's branches listed by branches and its report written to w.
+func (s slingStores) recordReassignment(branches func(townRoot, beadID string) []string, w io.Writer, townRoot, beadID, from, to, requester string) {
 	if beadID == "" || from == "" || from == to {
 		return
 	}
-	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	b := beads.NewWithBeadsDirAndRunner(dir, "", run)
-	if err := b.RecordReassignment(beadID, from, to, requester, branches(townRoot, beadID)); err != nil {
+	b := s.routedFrom(beads.ResolveHookDir(townRoot, beadID, ""))
+	if err := beads.RecordReassignmentIn(b, beadID, from, to, requester, branches(townRoot, beadID)); err != nil {
 		fmt.Fprintf(w, "  %s Could not record reassignment of %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
 		return
 	}
@@ -1367,28 +1365,22 @@ func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string
 	if os.Getenv("GT_TEST_SKIP_HOOK_VERIFY") != "" {
 		verify = nil
 	}
-	return hookBeadWithRetryVia(nil, verify, beadID, targetAgent, hookDir)
+	return slingStores{}.hookWithRetry(verify, beadID, targetAgent, hookDir)
 }
 
-// hookBeadWithRetryVia is hookBeadWithRetryWithTownRoot with the hook write
-// answered by run (nil: bd on PATH) and each landed write read back by verify
-// (nil: no read-back).
-func hookBeadWithRetryVia(run beads.BDRunner, verify func(beadID string) (*beadInfo, error), beadID, targetAgent, hookDir string) error {
+// hookWithRetry is hookBeadWithRetryWithTownRoot with the hook written to
+// hookDir's database in s's stores (pinned, so the write auto-commits) and
+// each landed write read back by verify (nil: no read-back).
+func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error), beadID, targetAgent, hookDir string) error {
 	const maxRetries = 10
 	const baseBackoff = 500 * time.Millisecond
 	const maxBackoff = 30 * time.Second
 
+	hooked := "hooked"
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		out, err := BdCmd("update", beadID, "--status=hooked", "--assignee="+targetAgent).
-			Dir(hookDir).
-			WithAutoCommit().
-			Via(run).
-			CombinedOutput()
+		err := s.pinnedAt(hookDir).Update(beadID, beads.UpdateOptions{Status: &hooked, Assignee: &targetAgent})
 		if err != nil {
-			if len(out) > 0 {
-				err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-			}
 			lastErr = err
 			// Fail fast on config/init errors — retrying won't help (gt-2ra)
 			if isSlingConfigError(err) {
