@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestGetFormulaNames(t *testing.T) {
@@ -152,14 +153,23 @@ func TestFilterFormulaScaffolds_EmptyIssues(t *testing.T) {
 	}
 }
 
-func TestParseWispIDs(t *testing.T) {
+func TestWispIDsFrom(t *testing.T) {
 	t.Parallel()
-	ids := parseWispIDs([]byte(`{"wisps":[{"id":"dolt-wisp-1"},{"id":"dolt-wisp-2"}],"count":2}`))
-	if len(ids) != 2 || !ids["dolt-wisp-1"] || !ids["dolt-wisp-2"] {
-		t.Fatalf("expected IDs from bd mol wisp list, got %#v", ids)
+	bd := beadsfake.New()
+	wisp, err := bd.Create(beads.CreateOptions{Title: "patrol", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ids := parseWispIDs([]byte("not json")); ids != nil {
-		t.Fatalf("unparseable output = %#v, want nil", ids)
+	if _, err := bd.Create(beads.CreateOptions{Title: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	ids := wispIDsFrom(bd)
+	if len(ids) != 1 || !ids[wisp.ID] {
+		t.Fatalf("wisp IDs = %#v, want only %s", ids, wisp.ID)
+	}
+	bd.FailWith("mol wisp list", errors.New("no wisps table"))
+	if ids := wispIDsFrom(bd); ids != nil {
+		t.Fatalf("failed list = %#v, want nil", ids)
 	}
 }
 

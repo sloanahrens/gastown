@@ -37,3 +37,9 @@ func bdErrOutput(err error) string {
 func townBeadsClient(townRoot string) beads.Client {
 	return beads.NewPlain("", append(os.Environ(), "BEADS_DIR="+filepath.Join(townRoot, ".beads")))
 }
+
+// pinnedBd runs bd against dir's resolved .beads database and nowhere else,
+// as BdCmd(...).Dir(dir) without routing did.
+func pinnedBd(dir string) *beads.Beads {
+	return beads.NewPinned(beads.ResolveBeadsDir(dir))
+}

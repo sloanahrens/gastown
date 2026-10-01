@@ -673,10 +673,7 @@ var poolBeadLookup = func(townRoot, beadID string) (poolBead, error) {
 // poolBeadLabelAdd attaches a label to a bead. A var so tests can watch the
 // write the spec dispatcher makes without a live database.
 var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
-	return BdCmd("label", "add", beadID, label).
-		Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
-		StripBeadsDir().
-		Run()
+	return pinnedBd(resolveBeadDirFromTownRoot(townRoot, beadID)).Update(beadID, beads.UpdateOptions{AddLabels: []string{label}})
 }
 
 // poolRouter is the pool decision for one town with its collaborators

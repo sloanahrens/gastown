@@ -464,32 +464,18 @@ func filterFormulaScaffolds(issues []*beads.Issue, formulaNames map[string]bool)
 // This is a defense-in-depth exclusion - bd ready should already filter wisps,
 // but we double-check at the display layer to ensure operational work doesn't leak.
 func getWispIDs(beadsPath string) map[string]bool {
-	output, err := BdCmd("mol", "wisp", "list", "--json").
-		Dir(beadsPath).
-		StripBeadsDir().
-		Stderr(io.Discard).
-		Output()
-	if err != nil {
-		return nil // Wisp table may not exist or Dolt unavailable
-	}
-	return parseWispIDs(output)
+	return wispIDsFrom(pinnedBd(beadsPath))
 }
 
-// parseWispIDs reads the IDs out of bd mol wisp list --json output; nil when
-// it does not parse.
-func parseWispIDs(output []byte) map[string]bool {
-	// bd mol wisp list --json returns {"wisps": [...], "count": N, ...}
-	var wrapper struct {
-		Wisps []struct {
-			ID string `json:"id"`
-		} `json:"wisps"`
-	}
-	if err := json.Unmarshal(output, &wrapper); err != nil {
+// wispIDsFrom is the set of live wisp IDs bd lists; nil when it cannot list
+// them (the wisp table may not exist or Dolt may be unavailable).
+func wispIDsFrom(bd interface{ MolWispList() ([]*beads.Issue, error) }) map[string]bool {
+	wisps, err := bd.MolWispList()
+	if err != nil {
 		return nil
 	}
-
-	wispIDs := make(map[string]bool, len(wrapper.Wisps))
-	for _, w := range wrapper.Wisps {
+	wispIDs := make(map[string]bool, len(wisps))
+	for _, w := range wisps {
 		wispIDs[w.ID] = true
 	}
 	return wispIDs
