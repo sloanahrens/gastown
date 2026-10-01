@@ -402,7 +402,7 @@ func historyDatabaseForBead(townRoot, beadID string) (string, error) {
 
 	dbName := doltserver.DatabaseForBeadsDir(beadsDir)
 	if dbName == "" {
-		return "", fmt.Errorf("no dolt_database in %s/metadata.json — cannot locate the database for %s",
+		return "", fmt.Errorf("no dolt_database in the rig registry or %s/metadata.json — cannot locate the database for %s",
 			beadsDir, beadID)
 	}
 	return dbName, nil

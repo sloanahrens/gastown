@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // PrefixConflictCheck detects duplicate prefixes across rigs in routes.jsonl.
@@ -298,21 +298,10 @@ type databasePrefixMismatch struct {
 	dbPrefix     string // From database config
 }
 
-type beadsMetadata struct {
-	DoltDatabase string `json:"dolt_database"`
-}
-
+// readBeadsDoltDatabase is the workspace's database through the config
+// kernel: a registered rig's registry dolt_database, else its metadata.json's.
 func readBeadsDoltDatabase(beadsDir string) string {
-	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
-		return ""
-	}
-
-	var metadata beadsMetadata
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(metadata.DoltDatabase)
+	return townconfig.DatabaseForBeadsDir(beadsDir)
 }
 
 func beadsCommandEnv(beadsDir string) []string {

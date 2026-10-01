@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -111,17 +110,8 @@ func loadRegisteredRigNames(townRoot string) map[string]bool {
 }
 
 // readDoltDatabase reads the dolt_database field from a .beads/metadata.json.
-// Returns empty string if the file doesn't exist or can't be parsed.
+// Returns empty string if the file doesn't exist or can't be parsed. The
+// directory is not a registered rig, so the registry has no name for it.
 func readDoltDatabase(beadsDir string) string {
-	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
-		return ""
-	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return ""
-	}
-	return meta.DoltDatabase
+	return config.BeadsMetadataDatabase(beadsDir)
 }

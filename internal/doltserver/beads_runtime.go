@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // BeadsRuntimeConfig is the Dolt server a .beads directory's metadata.json
-// points at.
+// points at, and the database on it (townconfig.DatabaseForBeadsDir).
 type BeadsRuntimeConfig struct {
 	Source   string
 	Database string
@@ -30,7 +32,6 @@ func ReadBeadsRuntimeConfig(beadsDir string) (cfg BeadsRuntimeConfig, ok bool) {
 		Backend        string `json:"backend"`
 		Database       string `json:"database"`
 		DoltMode       string `json:"dolt_mode"`
-		DoltDatabase   string `json:"dolt_database"`
 		DoltServerHost string `json:"dolt_server_host"`
 		DoltServerPort int    `json:"dolt_server_port"`
 	}
@@ -56,7 +57,7 @@ func ReadBeadsRuntimeConfig(beadsDir string) (cfg BeadsRuntimeConfig, ok bool) {
 	if port == 0 {
 		port = DefaultPort
 	}
-	database := metadata.DoltDatabase
+	database := townconfig.DatabaseForBeadsDir(beadsDir)
 	if database == "" {
 		database = metadata.Database
 	}

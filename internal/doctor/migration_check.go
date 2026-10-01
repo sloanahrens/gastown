@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 type serverModeRig struct {
@@ -78,9 +79,16 @@ func (c *DoltMetadataCheck) Run(ctx *CheckContext) *CheckResult {
 		// Resolve the expected DB name: some rigs use their prefix as the
 		// database name (e.g., "lc" for laneassist) rather than the rig name.
 		// Check both rig name and prefix in .dolt-data/. (gt-85w7)
+		// The registry's dolt_database, when recorded, is the rig's database
+		// (gt-y3pgh.11).
 		expectedDB := rigName
 		prefix := config.GetRigPrefix(ctx.TownRoot, rigName)
-		if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
+		if reg := townconfig.RegistryDatabase(ctx.TownRoot, rigName); reg != "" {
+			if _, err := os.Stat(filepath.Join(doltDataDir, reg)); os.IsNotExist(err) {
+				continue // The registry's database is not on this server
+			}
+			expectedDB = reg
+		} else if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
 			// Rig name not found — check if prefix-named DB exists
 			if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); os.IsNotExist(err) {
 				continue // No database under either name
@@ -152,17 +160,17 @@ func (c *DoltMetadataCheck) hasDoltMetadata(beadsDir, expectedDB string) bool {
 	}
 
 	var metadata struct {
-		Backend      string `json:"backend"`
-		DoltMode     string `json:"dolt_mode"`
-		DoltDatabase string `json:"dolt_database"`
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
 	}
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return false
 	}
 
+	// bd reads metadata.json itself, so this compares bd's copy of the name.
 	return metadata.Backend == "dolt" &&
 		metadata.DoltMode == "server" &&
-		metadata.DoltDatabase == expectedDB
+		config.BeadsMetadataDatabase(beadsDir) == expectedDB
 }
 
 // writeDoltMetadata writes dolt server config to a rig's metadata.json.
@@ -185,8 +193,11 @@ func (c *DoltMetadataCheck) writeDoltMetadata(townRoot, rigName string) error {
 	// Resolve the correct database name. Some rigs use their prefix as the
 	// DB name (e.g., "lc" for laneassist). Preserve existing dolt_database
 	// if it matches a known prefix; otherwise fall back to rig name. (gt-85w7)
+	// The registry's dolt_database, when recorded, is the rig's (gt-y3pgh.11).
 	dbName := rigName
-	if existingDB, ok := existing["dolt_database"].(string); ok && existingDB != "" {
+	if reg := townconfig.RegistryDatabase(townRoot, rigName); reg != "" {
+		dbName = reg
+	} else if existingDB, ok := existing["dolt_database"].(string); ok && existingDB != "" {
 		// Preserve the existing DB name if it's a known prefix
 		prefix := config.GetRigPrefix(townRoot, rigName)
 		if existingDB == prefix {
@@ -450,21 +461,10 @@ func portForAddr(addr string) int {
 }
 
 func (c *DoltServerReachableCheck) getDoltDatabase(beadsDir, fallback string) string {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	data, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return fallback
+	if db := townconfig.DatabaseForBeadsDir(beadsDir); db != "" {
+		return db
 	}
-	var metadata struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return fallback
-	}
-	if metadata.DoltDatabase == "" {
-		return fallback
-	}
-	return metadata.DoltDatabase
+	return fallback
 }
 
 // getServerAddr reads metadata.json and returns the configured server address if dolt_mode is "server".

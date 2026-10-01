@@ -1,13 +1,13 @@
 package doctor
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // StaleBeadsRedirectCheck detects .beads directories that have both a redirect
@@ -330,19 +330,11 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 	return nil
 }
 
-// metadataDoltDatabase returns the metadata.json dolt_database value, if any.
+// metadataDoltDatabase returns the dolt_database of the metadata.json file in
+// beadsDir itself, if any: this check is about the files on disk, not the
+// rig's registered name.
 func metadataDoltDatabase(beadsDir string) string {
-	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
-		return ""
-	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(meta.DoltDatabase)
+	return config.BeadsMetadataDatabase(beadsDir)
 }
 
 func shouldPreserveRedirectMetadata(beadsDir string) bool {

@@ -1082,11 +1082,8 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				// Format: "beads_<prefix>" (e.g. "beads_my_project" → "my_project").
 				// This survives clone because metadata.json is tracked by git.
 				if !prefixDetected {
-					var fullMeta struct {
-						DoltDatabase string `json:"dolt_database"`
-					}
-					if json.Unmarshal(metaBytes, &fullMeta) == nil && strings.HasPrefix(fullMeta.DoltDatabase, "beads_") {
-						detected := strings.TrimPrefix(fullMeta.DoltDatabase, "beads_")
+					if db := config.BeadsMetadataDatabase(beadsDir); strings.HasPrefix(db, "beads_") {
+						detected := strings.TrimPrefix(db, "beads_")
 						if detected != "" {
 							if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
 								return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)

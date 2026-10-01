@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -380,18 +381,17 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	metadataFile := filepath.Join(beadsDir, "metadata.json")
 	if data, err := os.ReadFile(metadataFile); err == nil {
 		var meta struct {
-			DoltMode     string `json:"dolt_mode"`
-			DoltDatabase string `json:"dolt_database"`
+			DoltMode string `json:"dolt_mode"`
 		}
 		if err := json.Unmarshal(data, &meta); err != nil {
 			return nil // Can't parse — assume initialized (backward compat)
 		}
-		if meta.DoltMode == "server" && meta.DoltDatabase != "" {
+		if db := townconfig.DatabaseForBeadsDir(beadsDir); meta.DoltMode == "server" && db != "" {
 			townRoot := FindTownRoot(filepath.Dir(beadsDir))
 			if townRoot == "" {
 				return nil // Can't find town root — assume initialized
 			}
-			dbDir := filepath.Join(townRoot, ".dolt-data", meta.DoltDatabase)
+			dbDir := filepath.Join(townRoot, ".dolt-data", db)
 			if _, err := os.Stat(dbDir); !os.IsNotExist(err) {
 				return nil // Database exists (or stat error — assume initialized)
 			}

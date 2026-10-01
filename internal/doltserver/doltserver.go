@@ -57,6 +57,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -3528,26 +3529,16 @@ func FindOrphanedDatabases(townRoot string) ([]OrphanedDatabase, error) {
 	return std.FindOrphanedDatabases(townRoot)
 }
 
-// readExistingDoltDatabase reads the dolt_database field from an existing metadata.json.
-// Returns empty string if the file doesn't exist or can't be read.
+// readExistingDoltDatabase is the database of the workspace at beadsDir
+// through the config kernel (townconfig.DatabaseForBeadsDir): a registered
+// rig's registry dolt_database, else its metadata.json's, else "".
 func readExistingDoltDatabase(beadsDir string) string {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	data, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return ""
-	}
-	var meta map[string]interface{}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return ""
-	}
-	if db, ok := meta["dolt_database"].(string); ok {
-		return db
-	}
-	return ""
+	return townconfig.DatabaseForBeadsDir(beadsDir)
 }
 
-// DatabaseForBeadsDir returns the dolt_database named by beadsDir's
-// metadata.json, or "" when there is no metadata.json or it names none.
+// DatabaseForBeadsDir returns the database of the workspace at beadsDir: a
+// registered rig's registry dolt_database, else the one beadsDir's
+// metadata.json names, or "" when neither names one.
 //
 // Address a rig's database over SQL by this value rather than by the rig's
 // name: the two differ on upgraded towns (the gastown rig keeps the "gt"
@@ -3573,14 +3564,19 @@ func collectReferencedDatabases(townRoot string) map[string]bool {
 		referenced[db] = true
 	}
 
-	// Check all rigs from rigs.json
+	// Check all rigs from rigs.json: the registry's name and the one bd's
+	// metadata.json names, which differ only on a drifted rig (gt doctor
+	// rig-database); neither may be dropped as an orphan.
 	if rigs, err := registeredRigs(townRoot); err == nil {
-		for rigName := range rigs {
+		for rigName, entry := range rigs {
+			if entry.DoltDatabase != "" {
+				referenced[entry.DoltDatabase] = true
+			}
 			beadsDir := FindRigBeadsDir(townRoot, rigName)
 			if beadsDir == "" {
 				continue
 			}
-			if db := readExistingDoltDatabase(beadsDir); db != "" {
+			if db := configpkg.BeadsMetadataDatabase(beadsDir); db != "" {
 				referenced[db] = true
 			}
 		}
@@ -3898,9 +3894,8 @@ func (h *host) checkWorkspace(townRoot, rigName, beadsDir string, servedDBs map[
 	}
 
 	var metadata struct {
-		DoltMode     string `json:"dolt_mode"`
-		DoltDatabase string `json:"dolt_database"`
-		Backend      string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+		Backend  string `json:"backend"`
 	}
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil
@@ -3911,7 +3906,7 @@ func (h *host) checkWorkspace(townRoot, rigName, beadsDir string, servedDBs map[
 		return nil
 	}
 
-	dbName := metadata.DoltDatabase
+	dbName := townconfig.DatabaseForBeadsDir(beadsDir)
 	if dbName == "" {
 		dbName = rigName
 	}
@@ -4025,10 +4020,14 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// Callers from EnsureAllMetadata pass the actual DB prefix ("at", "be") so
 	// that rigs with short prefixes get the correct database name, not the full
 	// rig directory name.
+	// A registered rig's registry dolt_database outranks the rig name
+	// (gt-y3pgh.11).
 	explicitDB := len(doltDatabase) > 0 && doltDatabase[0] != ""
 	effectiveDB := rigName
 	if explicitDB {
 		effectiveDB = doltDatabase[0]
+	} else if reg := townconfig.RegistryDatabase(townRoot, rigName); reg != "" {
+		effectiveDB = reg
 	}
 
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -4180,6 +4179,17 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 		dbToRig[k] = v
 		rigCanonical[v] = k
 	}
+	// The registry's dolt_database (gt-y3pgh.11) outranks every inference:
+	// it is the rig's database, and metadata.json is kept equal to it for bd.
+	registryDB := make(map[string]string)
+	if rigs, err := registeredRigs(townRoot); err == nil {
+		for rig, entry := range rigs {
+			if entry.DoltDatabase != "" {
+				registryDB[rig] = entry.DoltDatabase
+				dbToRig[entry.DoltDatabase] = rig
+			}
+		}
+	}
 
 	// Group candidate database names by rig. When routes.jsonl and rigs.json
 	// use different prefixes for the same rig (e.g. "gas" vs "gt" both map to
@@ -4201,6 +4211,7 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 	for rigName, candidates := range rigCandidates {
 		// When multiple databases map to the same rig, choose one effective
 		// DB name. Authority order:
+		//   0. The registry's dolt_database, when that database exists.
 		//   1. The canonical name declared in rigs.json, when that database
 		//      exists — a stale alias left behind by a migration must not win
 		//      just because metadata.json still points at it. (gt-ddb)
@@ -4208,7 +4219,9 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 		//      candidates), to avoid oscillating between aliases. (gas-ar0)
 		//   3. The first candidate (alphabetical, from os.ReadDir ordering).
 		dbName := candidates[0]
-		if canonical, ok := rigCanonical[rigName]; ok && slices.Contains(candidates, canonical) {
+		if reg, ok := registryDB[rigName]; ok && slices.Contains(candidates, reg) {
+			dbName = reg
+		} else if canonical, ok := rigCanonical[rigName]; ok && slices.Contains(candidates, canonical) {
 			dbName = canonical
 		} else if len(candidates) > 1 {
 			dbName = pickDBForRig(townRoot, rigName, candidates)
@@ -4236,15 +4249,10 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 func pickDBForRig(townRoot, rigName string, candidates []string) string {
 	beadsDir := FindRigBeadsDir(townRoot, rigName)
 	if beadsDir != "" {
-		if data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json")); err == nil {
-			var meta map[string]interface{}
-			if json.Unmarshal(data, &meta) == nil {
-				if existingDB, _ := meta["dolt_database"].(string); existingDB != "" {
-					for _, c := range candidates {
-						if c == existingDB {
-							return c // Already correct — no repair needed
-						}
-					}
+		if existingDB := configpkg.BeadsMetadataDatabase(beadsDir); existingDB != "" {
+			for _, c := range candidates {
+				if c == existingDB {
+					return c // Already correct — no repair needed
 				}
 			}
 		}
