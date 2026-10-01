@@ -36,6 +36,8 @@ type Settings struct {
 	SeatStallDegraded   string  `json:"seat_stall_degraded,omitempty"`
 	SeatStallRed        string  `json:"seat_stall_red,omitempty"`
 	SeatEvidence        string  `json:"seat_evidence,omitempty"`
+	StewardErrorRate    float64 `json:"steward_error_rate,omitempty"`
+	StewardMinJobs      int     `json:"steward_min_jobs,omitempty"`
 }
 
 // Resolve returns the thresholds and stale age s sets over the compiled
@@ -85,6 +87,15 @@ func (s *Settings) Resolve() (Thresholds, time.Duration, error) {
 	}
 	if s.DoltSamples < 0 || s.TickDegradedFactor < 0 || s.TickRedFactor < 0 {
 		return th, stale, fmt.Errorf("operational.health: dolt_samples and tick factors must not be negative")
+	}
+	if s.StewardErrorRate < 0 || s.StewardErrorRate > 1 || s.StewardMinJobs < 0 {
+		return th, stale, fmt.Errorf("operational.health: steward_error_rate must be between 0 and 1 and steward_min_jobs must not be negative")
+	}
+	if s.StewardErrorRate > 0 {
+		th.StewardErrorRate = s.StewardErrorRate
+	}
+	if s.StewardMinJobs > 0 {
+		th.StewardMinJobs = s.StewardMinJobs
 	}
 	if s.DoltSamples > 0 {
 		th.DoltSamples = s.DoltSamples

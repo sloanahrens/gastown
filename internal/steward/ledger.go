@@ -259,3 +259,13 @@ func (l *Ledger) Active() ([]Job, error) {
 	}
 	return out, nil
 }
+
+// Latest returns one row per job, its latest, in the order the jobs started:
+// the ledger holds a start row and an end row for each.
+func (l *Ledger) Latest() ([]Job, error) {
+	all, err := l.Read()
+	if err != nil {
+		return nil, err
+	}
+	return latestRows(all), nil
+}

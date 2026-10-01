@@ -323,13 +323,19 @@ type Daemon struct {
 	// across scans, not within one (gt-9bioi.1, steward.go).
 	stewardRunning atomic.Bool
 	stewardCycles  sync.WaitGroup
-	stewardRunner  *steward.Runner
+	// stewardMonitoring is the monitoring pass's own single-flight guard
+	// (steward_monitor.go).
+	stewardMonitoring atomic.Bool
+	stewardRunner     *steward.Runner
 	// stewardRunnerMu guards stewardRunner's assignment against the upgrade
 	// idleness check, which reads it from another goroutine (gt-9bioi.5).
 	stewardRunnerMu sync.Mutex
 	// stewardListFn replaces the bd list behind a steward scan (see
 	// stewardEvents) in tests; nil runs bd.
 	stewardListFn func(rigPath string, opts beads.ListOptions) ([]*beads.Issue, error)
+	// stewardEscalate replaces escalateAlertSeverity behind the steward's
+	// monitoring escalations in tests; nil files the real escalation.
+	stewardEscalate func(severity, key, source, message string) error
 
 	// landingPasses counts landing-worker passes in flight, one per rig at
 	// most: a restart mid-pass kills the merged-tree gate of the bead being

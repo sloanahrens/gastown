@@ -92,6 +92,7 @@ func stewardRigs(config *DaemonPatrolConfig, known []string) []string {
 // triggerSteward starts one scan on its own goroutine unless one is
 // already running. It reports whether a scan started.
 func (d *Daemon) triggerSteward() bool {
+	d.triggerStewardMonitor()
 	if !d.stewardRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("steward: previous scan still running, skipping")
 		return false
@@ -103,6 +104,21 @@ func (d *Daemon) triggerSteward() bool {
 		d.runSteward()
 	}()
 	return true
+}
+
+// triggerStewardMonitor runs the monitoring pass on a goroutine of its own:
+// an escalation retries for minutes when the town store is slow, and a scan
+// waiting behind it would hold every review back (gt-9bioi.3).
+func (d *Daemon) triggerStewardMonitor() {
+	if !d.stewardMonitoring.CompareAndSwap(false, true) {
+		return
+	}
+	d.stewardCycles.Add(1)
+	go func() {
+		defer d.stewardCycles.Done()
+		defer d.stewardMonitoring.Store(false)
+		d.monitorSteward()
+	}()
 }
 
 // runSteward scans every rig the patrol covers and starts the jobs it finds
