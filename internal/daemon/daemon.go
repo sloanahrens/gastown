@@ -55,6 +55,10 @@ import (
 // This is recovery-focused: normal wake is handled by feed subscription (bd activity --follow).
 // The daemon is the safety net for dead sessions, GUPP violations, and orphaned work.
 type Daemon struct {
+	// crashSkipLog logs a polecat's "Skipping crash detection" reason once
+	// per state, not every heartbeat (gt tail noise).
+	crashSkipLog logLatch
+
 	config        *Config
 	patrolConfig  *DaemonPatrolConfig
 	tmux          sessionTmux
@@ -2370,9 +2374,18 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// operator parked — gt agent pause, or the deliberate stop gt session
 	// stop records (gt-fojqs) — has a dead session on purpose.
 	seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)
+	// A seat that reaches any outcome other than a logged skip has left the
+	// skip state; its next skip is news and is logged again.
+	skipped := false
+	defer func() {
+		if !skipped {
+			d.crashSkipLog.forget(rigName + "/" + polecatName)
+		}
+	}()
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
-		d.logger.Printf("Skipping crash detection for %s/%s: agent is parked (%s)",
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: agent is parked (%s)",
 			rigName, polecatName, rec.HoldReason())
 		return
 	}
@@ -2381,7 +2394,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// landing worker and the session ended on purpose. The hook still holds
 	// the bead until it lands, which would read as a crash (gt-obbx2).
 	if rec.Submitted() {
-		d.logger.Printf("Skipping crash detection for %s/%s: work %s is submitted for landing",
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s is submitted for landing",
 			rigName, polecatName, rec.WorkBead)
 		return
 	}
@@ -2427,7 +2441,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// so a dead session holding closed work completed normally.
 	closed, submitted := d.beadFinished(hookBead)
 	if closed {
-		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
 			rigName, polecatName, hookBead)
 		return
 	}
@@ -2436,7 +2451,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// it. This is the label half of the intent-record check above, for a seat
 	// whose record was never written (gt-obbx2).
 	if submitted {
-		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is submitted for landing",
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: hook_bead %s is submitted for landing",
 			rigName, polecatName, hookBead)
 		return
 	}
@@ -2446,7 +2462,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// starting up. Reporting it would double-spawn (issue #1752).
 	if !workUpdated.IsZero() {
 		if age := time.Since(workUpdated); age < polecatSpawnGrace {
-			d.logger.Printf("Skipping crash detection for %s/%s: work %s hooked %s ago, polecat may be spawning",
+			skipped = true
+			d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s hooked %s ago, polecat may be spawning",
 				rigName, polecatName, hookBead, age.Round(time.Second))
 			return
 		}
