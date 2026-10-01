@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sort"
@@ -169,5 +170,46 @@ func assertRefused(t *testing.T, name string, method reflect.Value) {
 	}
 	if !errors.Is(err, ErrStoreReadOnly) {
 		t.Errorf("%s = %v, want ErrStoreReadOnly", name, err)
+	}
+}
+
+// depRecordStorage answers GetDependencyRecords the way the Dolt store does.
+type depRecordStorage struct {
+	beadsdk.Storage
+	got  string
+	deps []*beadsdk.Dependency
+}
+
+func (s *depRecordStorage) GetDependencyRecords(_ context.Context, issueID string) ([]*beadsdk.Dependency, error) {
+	s.got = issueID
+	return s.deps, nil
+}
+
+// TestReadOnlyStore_PassesDependencyRecordsThrough pins the read convoys need:
+// readOnlyStore embedding beadsdk.Storage alone hid GetDependencyRecords, and
+// every convoy then failed with "cannot read raw dependency records" (gt-lkw88).
+func TestReadOnlyStore_PassesDependencyRecordsThrough(t *testing.T) {
+	t.Parallel()
+	want := []*beadsdk.Dependency{{IssueID: "hq-cv-1", DependsOnID: "gt-a", Type: "tracks"}}
+	inner := &depRecordStorage{deps: want}
+	var store beadsdk.Storage = readOnlyStore{Storage: inner}
+
+	r, ok := store.(interface {
+		GetDependencyRecords(context.Context, string) ([]*beadsdk.Dependency, error)
+	})
+	if !ok {
+		t.Fatal("readOnlyStore does not expose GetDependencyRecords")
+	}
+	got, err := r.GetDependencyRecords(context.Background(), "hq-cv-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.got != "hq-cv-1" || !reflect.DeepEqual(got, want) {
+		t.Fatalf("pass-through read %q -> %v, want hq-cv-1 -> %v", inner.got, got, want)
+	}
+
+	// A wrapped store without the read is refused, not silently empty.
+	if _, err := (readOnlyStore{}).GetDependencyRecords(context.Background(), "x"); err == nil {
+		t.Fatal("expected an error from a store that cannot read dependency records")
 	}
 }

@@ -170,7 +170,7 @@ func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
 		},
 		{
 			name:  "label, however typed",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-SONNET"}},
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-PRO"}},
 		},
 		{
 			name:  "deferred status",

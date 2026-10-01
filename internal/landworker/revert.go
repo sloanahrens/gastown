@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
@@ -204,7 +205,7 @@ func (r *RedMain) fileRevert(rec land.LandingRecord, branch, head string) (strin
 	if err != nil {
 		return "", err
 	}
-	work := land.Work{Branch: branch, Head: head, Target: rec.Target}
+	work := land.Work{Branch: branch, Head: head, Target: rec.Target, Submitted: time.Now().UTC()}
 	if err := r.Beads.AppendNotes(is.ID, land.FormatReadyNote(work)+"\n\n"+FormatRevertNote(rec)); err != nil {
 		return is.ID, err
 	}

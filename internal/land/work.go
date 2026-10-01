@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -35,13 +36,23 @@ type Work struct {
 	Head   string
 	Target string
 	Worker string
+	// Submitted is when the bead was submitted for landing, and is what the
+	// landing worker orders the ready queue by: a comment on the bead is not
+	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted
+	// before the note carried one.
+	Submitted time.Time
 }
 
 // FormatReadyNote renders the READY TO LAND block for w. Every value is
 // collapsed onto one line, so no field can inject a line the parser reads.
+// Submitted is left out while it is zero.
 func FormatReadyNote(w Work) string {
-	return fmt.Sprintf("%s\nBranch: %s\nHead: %s\nTarget: %s\nWorker: %s",
+	note := fmt.Sprintf("%s\nBranch: %s\nHead: %s\nTarget: %s\nWorker: %s",
 		ReadyNoteMarker, NoteField(w.Branch), NoteField(w.Head), NoteField(w.Target), NoteField(w.Worker))
+	if !w.Submitted.IsZero() {
+		note += "\nSubmitted: " + w.Submitted.UTC().Format(time.RFC3339)
+	}
+	return note
 }
 
 // ParseReadyNote reads the last READY TO LAND block in notes. A rework
@@ -74,6 +85,12 @@ func ParseReadyNote(notes string) (Work, bool) {
 			w.Target = value
 		case "worker":
 			w.Worker = value
+		case "submitted":
+			// A time this code cannot read orders as if the block carried
+			// none: a bad stamp is not a reason to refuse to land the work.
+			if at, err := time.Parse(time.RFC3339, value); err == nil {
+				w.Submitted = at
+			}
 		default:
 			return finishReady(w)
 		}

@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	beadsdk "github.com/steveyegge/beads"
 )
@@ -107,4 +108,19 @@ func (s readOnlyStore) SlotSet(context.Context, string, string, string, string) 
 
 func (s readOnlyStore) SlotClear(context.Context, string, string, string) error {
 	return ErrStoreReadOnly
+}
+
+// GetDependencyRecords passes the opened store's raw dependency read through.
+// beadsdk.Storage does not declare it, so embedding alone hides it, and
+// convoy.trackedIDs, which needs it to see cross-rig tracked beads, then
+// refused every convoy (gt-lkw88). A store without it gets the same refusal
+// the caller would have produced.
+func (s readOnlyStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadsdk.Dependency, error) {
+	r, ok := s.Storage.(interface {
+		GetDependencyRecords(context.Context, string) ([]*beadsdk.Dependency, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("store %T cannot read raw dependency records", s.Storage)
+	}
+	return r.GetDependencyRecords(ctx, issueID)
 }
