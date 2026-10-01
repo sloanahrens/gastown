@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
 )
 
 // TestClosedWispDeleteAge verifies the grace period read for
