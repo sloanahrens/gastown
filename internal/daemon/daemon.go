@@ -1172,12 +1172,15 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
-	// Skip agent management if the town E-stop is active. The supervisor
-	// already refuses every Restart and Kill under it, and the dispatch hold
-	// every automatic sling (gt-4k3fj.4); this also keeps the plugins, whose
-	// scripts do not all go through the supervisor yet, from running.
+	// The town E-stop holds dispatch and restarts, not upkeep: Dolt stays
+	// supervised and the logs keep rotating while it is on (gt-4k3fj.8).
+	// The steps it holds are the lifecycle ones in heartbeatSteps. No plugin
+	// script kills or restarts a session any more (the stuck-agent dog was
+	// deleted in 339ac0ce), and every daemon kill and restart goes through
+	// the supervisor, which refuses them under the e-stop as well.
 	if estop.IsActive(d.config.TownRoot) {
-		d.logger.Println("E-STOP active, skipping agent management")
+		d.logger.Println("E-STOP active, holding dispatch and restarts; Dolt and upkeep still run")
+		d.seams.runHeartbeatWork(d, state, false)
 		return
 	}
 
@@ -1186,90 +1189,116 @@ func (d *Daemon) heartbeat(state *State) {
 	if d.checkUpgradeRestart(time.Now()) {
 		return
 	}
-	d.seams.runHeartbeatWork(d, state)
+	d.seams.runHeartbeatWork(d, state, true)
 }
 
-// heartbeatWork is the recovery work of one heartbeat, run after the
-// shutdown, E-stop and upgrade-restart guards in heartbeat.
-func (d *Daemon) heartbeatWork(state *State) {
-	d.logger.Println("Heartbeat starting (recovery-focused)")
+// heartbeatStep is one step of a heartbeat. A lifecycle step dispatches
+// work, kills or restarts sessions or processes; the town E-stop holds it.
+type heartbeatStep struct {
+	name      string
+	lifecycle bool
+	run       func(d *Daemon)
+}
 
+// heartbeatSteps is the recovery work of one heartbeat, in order.
+var heartbeatSteps = []heartbeatStep{
 	// Invalidate the per-tick rigs cache so this heartbeat re-reads from disk.
 	// Within a tick the cache coalesces the ~10 getKnownRigs() call sites into
 	// a single read; invalidating here ensures we pick up rigs.json changes
 	// between ticks.
-	d.invalidateKnownRigsCache()
+	{name: "rigs-cache", run: (*Daemon).invalidateKnownRigsCache},
 
-	// 0a. Reload prefix registry so new/changed rigs get correct session names.
+	// Reload prefix registry so new/changed rigs get correct session names.
 	// Without this, rigs added after daemon startup get the "gt" default prefix,
 	// causing ghost sessions like gt-witness instead of ti-witness. (hq-ouz, hq-eqf, hq-3i4)
-	if err := session.InitRegistry(d.config.TownRoot); err != nil {
-		d.logger.Printf("Warning: failed to reload prefix registry: %v", err)
-	}
+	{name: "prefix-registry", run: func(d *Daemon) {
+		if err := session.InitRegistry(d.config.TownRoot); err != nil {
+			d.logger.Printf("Warning: failed to reload prefix registry: %v", err)
+		}
+	}},
 
-	// 0b. Kill ghost sessions left over from stale registry (default "gt" prefix).
-	d.killDefaultPrefixGhosts()
-
-	// 0. Ensure Dolt server is running (if configured)
+	// Ensure Dolt server is running (if configured).
 	// This must happen before beads operations that depend on Dolt.
-	d.ensureDoltServerRunning()
+	{name: "dolt", run: (*Daemon).ensureDoltServerRunning},
 
-	// 6. Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
+	// Kill ghost sessions left over from stale registry (default "gt" prefix).
+	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},
+
+	// Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
 	// in mayor/daemon.json turns the supervision off (the town runs without a
 	// resident Mayor while polecats and om cover the work).
-	if d.isPatrolActive(constants.RoleMayor) {
-		d.ensureMayorRunning()
-	} else {
-		d.logger.Printf("Mayor patrol disabled in config, skipping")
-	}
+	{name: "mayor", lifecycle: true, run: func(d *Daemon) {
+		if d.isPatrolActive(constants.RoleMayor) {
+			d.ensureMayorRunning()
+		} else {
+			d.logger.Printf("Mayor patrol disabled in config, skipping")
+		}
+	}},
 
-	// 6.5. Run due plugins. Pressure-gated: a plugin run is new work the
+	// Run due plugins. Pressure-gated: a plugin run is new work the
 	// town can put off while it is loaded.
-	if d.isPatrolActive("handler") {
+	{name: "plugins", lifecycle: true, run: func(d *Daemon) {
+		if !d.isPatrolActive("handler") {
+			d.logger.Printf("Handler patrol disabled in config, skipping")
+			return
+		}
 		if p := d.checkPressure("plugin"); !p.OK {
 			d.logger.Printf("Deferring plugin runs: %s", p.Reason)
-		} else {
-			d.handlePlugins()
+			return
 		}
-	} else {
-		d.logger.Printf("Handler patrol disabled in config, skipping")
-	}
+		d.handlePlugins()
+	}},
 
-	// 12. Check polecat session health (proactive crash detection)
+	// Check polecat session health (proactive crash detection)
 	// This validates tmux sessions are still alive for polecats with work-on-hook
-	d.checkPolecatSessionHealth()
+	{name: "polecat-health", lifecycle: true, run: (*Daemon).checkPolecatSessionHealth},
 
-	// 12b. Reap idle polecat sessions to prevent API slot burn.
+	// Reap idle polecat sessions to prevent API slot burn.
 	// Polecats transition to IDLE after gt done but sessions stay alive.
 	// Kill sessions that have been idle longer than the configured threshold.
-	d.reapIdlePolecats()
+	{name: "idle-reap", lifecycle: true, run: (*Daemon).reapIdlePolecats},
 
-	// 13. Clean up orphaned claude subagent processes (memory leak prevention)
+	// Clean up orphaned claude subagent processes (memory leak prevention)
 	// These are Task tool subagents that didn't clean up after completion.
-	// This is a safety net - Deacon patrol also does this more frequently.
-	d.cleanupOrphanedProcesses()
+	{name: "orphan-processes", lifecycle: true, run: (*Daemon).cleanupOrphanedProcesses},
 
-	// 13. Prune stale local polecat tracking branches across all rig clones.
+	// Prune stale local polecat tracking branches across all rig clones.
 	// When polecats push branches to origin, other clones create local tracking
 	// branches via git fetch. After merge, remote branches are deleted but local
 	// branches persist indefinitely. This cleans them up periodically.
-	d.pruneStaleBranches()
+	{name: "branch-prune", run: (*Daemon).pruneStaleBranches},
 
-	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
+	// Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
 	// Pressure-gated: polecats are the primary resource consumers.
-	if p := d.checkPressure("polecat"); !p.OK {
-		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
-	} else {
+	{name: "dispatch", lifecycle: true, run: func(d *Daemon) {
+		if p := d.checkPressure("polecat"); !p.OK {
+			d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+			return
+		}
 		d.dispatchQueuedWork()
-	}
+	}},
 
-	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
+	// Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
-	d.rotateOversizedLogs()
+	{name: "log-rotation", run: (*Daemon).rotateOversizedLogs},
 
-	// 16. Prune the raw event log (.events.jsonl) when due (gt-ori5j).
-	d.pruneEventsLog()
+	// Prune the raw event log (.events.jsonl) when due (gt-ori5j).
+	{name: "events-prune", run: (*Daemon).pruneEventsLog},
+}
+
+// heartbeatWork is the recovery work of one heartbeat, run after the
+// shutdown, E-stop and upgrade-restart guards in heartbeat. lifecycle false
+// (the town E-stop) skips the steps that dispatch, kill or restart.
+func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
+	d.logger.Println("Heartbeat starting (recovery-focused)")
+
+	for _, step := range heartbeatSteps {
+		if step.lifecycle && !lifecycle {
+			continue
+		}
+		d.seams.runHeartbeatStep(d, step)
+	}
 
 	// Update state
 	state.LastHeartbeat = time.Now()
@@ -2879,7 +2908,7 @@ func (d *Daemon) pruneStaleBranches() {
 func (d *Daemon) dispatchQueuedWork() {
 	// `gt scheduler run` slings queued beads (executeSling); the operator's
 	// town-wide hold parks it like every other automatic dispatcher
-	// (gt-ifijm). ESTOP already stops the heartbeat before this step; the
+	// (gt-ifijm). ESTOP holds this heartbeat step (heartbeatSteps); the
 	// hold file does not, so it is checked here.
 	reason := dispatch.OperatorHold(d.config.TownRoot)
 	if d.queuedWorkHold.Changed(reason) {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -261,6 +262,58 @@ func TestKillDefaultPrefixGhosts_HonorsTheTownEstop(t *testing.T) {
 	lines, _ := os.ReadFile(supervisor.ActionLogPath(d.config.TownRoot))
 	if !strings.Contains(string(lines), `"verb":"kill-stray"`) {
 		t.Errorf("ghost kill missing from the action log: %s", lines)
+	}
+}
+
+// The town e-stop holds dispatch and restarts, not upkeep: the heartbeat
+// still ensures Dolt under it and runs no lifecycle step (gt-4k3fj.8).
+func TestHeartbeat_EstopStillEnsuresDoltRefusesRestarts(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	probes := 0
+	d.doltServer = &DoltServerManager{
+		config:        &DoltServerConfig{Enabled: true},
+		townRoot:      d.config.TownRoot,
+		logger:        func(string, ...interface{}) {},
+		runningFn:     func() (int, bool) { return 4242, true },
+		healthCheckFn: func() error { probes++; return nil },
+	}
+	var ran []string
+	d.seams.heartbeatStep = func(d *Daemon, step heartbeatStep) {
+		ran = append(ran, step.name)
+		if step.name == "dolt" {
+			step.run(d)
+		}
+	}
+	if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "drill"); err != nil {
+		t.Fatal(err)
+	}
+
+	state := &State{}
+	d.heartbeat(state)
+
+	if probes != 1 {
+		t.Errorf("Dolt health probes under the e-stop = %d, want 1", probes)
+	}
+	for _, step := range heartbeatSteps {
+		if step.lifecycle && slices.Contains(ran, step.name) {
+			t.Errorf("lifecycle step %q ran under the town e-stop", step.name)
+		}
+	}
+	if want := []string{"rigs-cache", "prefix-registry", "dolt", "branch-prune", "log-rotation", "events-prune"}; !slices.Equal(ran, want) {
+		t.Errorf("steps under the e-stop = %v, want %v", ran, want)
+	}
+	if state.HeartbeatCount != 1 {
+		t.Errorf("HeartbeatCount = %d, want 1: the e-stop heartbeat must still record itself", state.HeartbeatCount)
+	}
+
+	ran = nil
+	d.heartbeatWork(&State{}, true)
+	if len(ran) != len(heartbeatSteps) {
+		t.Errorf("steps without the e-stop = %v, want all %d", ran, len(heartbeatSteps))
+	}
+	if i := slices.Index(ran, "dolt"); i < 0 || i > slices.Index(ran, "mayor") {
+		t.Errorf("Dolt must be ensured before the mayor step: %v", ran)
 	}
 }
 

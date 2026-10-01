@@ -427,7 +427,7 @@ func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
 
 	d := upgradeTestDaemon(t)
 	captureEscalations(d)
-	d.seams.heartbeatWork = func(*Daemon, *State) { calls++ }
+	d.seams.heartbeatWork = func(*Daemon, *State, bool) { calls++ }
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	d.heartbeat(&State{})
