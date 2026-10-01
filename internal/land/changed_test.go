@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -11,13 +12,12 @@ func TestChangedPackages(t *testing.T) {
 	t.Parallel()
 	// The tree after the change: these directories hold Go files.
 	live := map[string]bool{
-		"internal/land":       true,
-		"internal/cmd":        true,
-		"internal/formula":    true,
-		"internal/newhome":    true,
-		"internal/oldhome":    true, // lost one file but keeps others
-		"internal/testpolicy": true,
-		"cmd/gt":              true,
+		"internal/land":    true,
+		"internal/cmd":     true,
+		"internal/formula": true,
+		"internal/newhome": true,
+		"internal/oldhome": true, // lost one file but keeps others
+		"cmd/gt":           true,
 	}
 	hasGo := func(dir string) bool { return live[dir] }
 
@@ -28,22 +28,7 @@ func TestChangedPackages(t *testing.T) {
 	}{
 		{"empty diff", "", nil},
 		{"one modified go file", "M\tinternal/land/gate.go\n", []string{"internal/land"}},
-		{"test file adds the test policy package", "M\tinternal/land/gate_test.go\n", []string{"internal/land", "internal/testpolicy"}},
-		{"added test file adds the test policy package", "A\tinternal/cmd/new_test.go\n", []string{"internal/cmd", "internal/testpolicy"}},
-		{
-			"rename to a test file adds the test policy package",
-			"R090\tinternal/land/a.go\tinternal/land/a_test.go\n",
-			[]string{"internal/land", "internal/testpolicy"},
-		},
-		{
-			"rename away from a test file does not",
-			"R090\tinternal/land/a_test.go\tinternal/land/a.go\n",
-			[]string{"internal/land"},
-		},
-		{"deleted test file in a surviving package does not", "D\tinternal/land/old_test.go\n", []string{"internal/land"}},
-		{"test file in the test policy package names it once", "M\tinternal/testpolicy/scan_test.go\n", []string{"internal/testpolicy"}},
-		{"no test file leaves the test policy package out", "M\tinternal/land/gate.go\nM\tinternal/cmd/done.go\n", []string{"internal/cmd", "internal/land"}},
-		{"a testdata file is not a test file", "A\tinternal/land/testdata/x_test.go.txt\n", []string{"internal/land"}},
+		{"test file counts", "M\tinternal/land/gate_test.go\n", []string{"internal/land"}},
 		{
 			"two files one package, sorted and deduplicated",
 			"M\tinternal/land/gate.go\nA\tinternal/cmd/done.go\nM\tinternal/land/changed.go\n",
@@ -58,6 +43,13 @@ func TestChangedPackages(t *testing.T) {
 			"rename within a package",
 			"R100\tinternal/land/a.go\tinternal/land/b.go\n",
 			[]string{"internal/land"},
+		},
+		{
+			// A copy leaves its source untouched, so only the destination's
+			// package is retested.
+			"copy names only the destination",
+			"C075\tinternal/land/a.go\tinternal/newhome/a.go\n",
+			[]string{"internal/newhome"},
 		},
 		{
 			"deleted package is dropped",
@@ -78,8 +70,8 @@ func TestChangedPackages(t *testing.T) {
 		{"makefile and scripts name nothing", "M\tMakefile\nA\tscripts/x.sh\n", nil},
 		{
 			"testdata maps to the owning package",
-			"A\tinternal/testpolicy/testdata/case/input.txt\n",
-			[]string{"internal/testpolicy"},
+			"A\tinternal/land/testdata/case/input.txt\n",
+			[]string{"internal/land"},
 		},
 		{
 			"embedded file maps to the owning package",
@@ -110,6 +102,144 @@ func TestChangedPackages(t *testing.T) {
 	}
 }
 
+// guardTriggers names, per guard package in treeWideGuards, a diff that
+// trips its guard tests. TestGuardSelects fails when the table grows a
+// package this list does not name, so a new guard cannot land untested.
+var guardTriggers = []struct {
+	pkg     string
+	trigger string
+}{
+	{"internal/testpolicy", "M\tinternal/land/gate_test.go\n"},
+	{"internal/cmdtree", "M\tinternal/templates/roles/mayor.md.tmpl\n"},
+	{"internal/cmd", "M\tMakefile\n"},
+	{"internal/bdgate", "M\tinternal/session/lifecycle.go\n"},
+	{"internal/polecat", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/beads", "M\tinternal/plugin/dispatch.go\n"},
+	{"internal/beads/beadsfake", "A\tinternal/newpkg/new.go\n"},
+	{"internal/beadsql", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/config", "M\tcmd/gt/main.go\n"},
+	{"internal/townconfig", "M\tcmd/gt/main.go\n"},
+	{"internal/guardlint", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/rig", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/tmux", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/doltserver", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/deps", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/testdb", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/testutil", "M\tinternal/daemon/patrol.go\n"},
+	{"internal/dispatch", "M\tplugins/seat-refill/run.sh\n"},
+	{"internal/plugin", "M\tplugins/rebuild-gt/plugin.md\n"},
+}
+
+// unguarded is a changed path no guard reads: a doc outside every guard's
+// inputs, so a branch holding only this one triggers nothing.
+const unguarded = "M\tdocs/testing.md\n"
+
+func TestGuardSelects(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+
+	if got := GuardSelects(unguarded, hasGo); got != nil {
+		t.Errorf("GuardSelects(%q) = %v, want nil", unguarded, got)
+	}
+	if got := GuardSelects("", hasGo); got != nil {
+		t.Errorf("GuardSelects(empty) = %v, want nil", got)
+	}
+	for _, tc := range guardTriggers {
+		t.Run(tc.pkg, func(t *testing.T) {
+			t.Parallel()
+			got := GuardSelects(tc.trigger, hasGo)
+			for _, s := range got {
+				if s.Package == tc.pkg {
+					if len(s.Tests) == 0 {
+						t.Fatalf("%s triggered with no tests to run", tc.pkg)
+					}
+					return
+				}
+			}
+			t.Errorf("GuardSelects(%q) = %v, want %s among them", tc.trigger, got, tc.pkg)
+		})
+	}
+}
+
+// TestEveryGuardIsSampled keeps the two lists in step: a guard package the
+// sampler does not name has a predicate no test exercises.
+func TestEveryGuardIsSampled(t *testing.T) {
+	t.Parallel()
+	sampled := map[string]bool{}
+	for _, tc := range guardTriggers {
+		sampled[tc.pkg] = true
+	}
+	for _, g := range treeWideGuards {
+		if !sampled[g.pkg] {
+			t.Errorf("treeWideGuards names %s, which guardTriggers does not sample", g.pkg)
+		}
+	}
+}
+
+func TestGuardSelectsRemovals(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+
+	tests := []struct {
+		name string
+		diff string
+		want string // the package that must be selected, "" for none
+	}{
+		{
+			// A guard that reads a path directly fails when the path is gone.
+			"deleting a session start file selects bdgate",
+			"D\tinternal/crew/manager.go\n",
+			"internal/bdgate",
+		},
+		{
+			// The lists testpolicy ratchets go stale when a listed package's
+			// last test file goes with it.
+			"deleting a test file selects testpolicy",
+			"D\tinternal/land/old_test.go\n",
+			"internal/testpolicy",
+		},
+		{
+			"deleting a doc selects nothing",
+			"D\tdocs/old.md\n",
+			"",
+		},
+		{
+			// A guard that ratchets a baseline down fails on the rename away:
+			// the file it counted no longer exists.
+			"renaming away from agent prose selects cmdtree",
+			"R100\tinternal/templates/roles/mayor.md.tmpl\tinternal/templates/roles/mayor.txt\n",
+			"internal/cmdtree",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var pkgs []string
+			for _, s := range GuardSelects(tt.diff, hasGo) {
+				pkgs = append(pkgs, s.Package)
+			}
+			sort.Strings(pkgs)
+			if tt.want == "" {
+				if len(pkgs) != 0 {
+					t.Errorf("GuardSelects(%q) = %v, want none", tt.diff, pkgs)
+				}
+				return
+			}
+			if !contains(pkgs, tt.want) {
+				t.Errorf("GuardSelects(%q) = %v, want %s among them", tt.diff, pkgs, tt.want)
+			}
+		})
+	}
+}
+
+func TestGuardSelectsSkipsMissingPackages(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return false }
+	if got := GuardSelects("M\tinternal/templates/roles/mayor.md.tmpl\n", hasGo); got != nil {
+		t.Errorf("GuardSelects = %v, want nil when the guard package holds no Go", got)
+	}
+}
+
 func TestPackageDirHasGo(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -128,6 +258,15 @@ func TestPackageDirHasGo(t *testing.T) {
 			t.Errorf("PackageDirHasGo(%q) = %v, want %v", dir, got, want)
 		}
 	}
+}
+
+func contains(hay []string, needle string) bool {
+	for _, s := range hay {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFile(t *testing.T, root, rel, content string) {
