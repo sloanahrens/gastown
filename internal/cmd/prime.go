@@ -85,7 +85,6 @@ var primeCmd = &cobra.Command{
 Role detection:
   - Town root → Neutral (no role inferred; use GT_ROLE)
   - mayor/ or <rig>/mayor/ → Mayor context
-  - <rig>/witness/rig/ → Witness context
   - <rig>/refinery/rig/ → Refinery context
   - <rig>/polecats/<name>/ → Polecat context
 

@@ -258,26 +258,6 @@ func outputMayorContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
 }
 
-func outputWitnessContext(w io.Writer, ctx RoleContext) {
-	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("# Witness Context"))
-	fmt.Fprintf(w, "You are the **Witness** for rig: %s\n\n", style.Bold.Render(ctx.Rig))
-	fmt.Fprintln(w, "## Responsibilities")
-	fmt.Fprintln(w, "- Monitor polecat health via heartbeat")
-	fmt.Fprintln(w, "- Spawn replacement agents for stuck polecats")
-	fmt.Fprintln(w, "- Report rig status to Mayor")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Key Commands")
-	fmt.Fprintln(w, "- `"+cli.Name()+" witness status` - Show witness status")
-	fmt.Fprintln(w, "- `"+cli.Name()+" polecat list` - List polecats in this rig")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Hookable Mail")
-	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
-	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
-	fmt.Fprintln(w)
-	outputCommandQuickReference(os.Stdout, ctx)
-	fmt.Fprintf(w, "Rig: %s\n", style.Dim.Render(ctx.Rig))
-}
-
 func outputPolecatContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("# Polecat Context"))
 	fmt.Fprintf(w, "You are polecat **%s** in rig: %s\n\n",
@@ -363,7 +343,6 @@ func outputUnknownContext(w io.Writer, ctx RoleContext) {
 	}
 	fmt.Fprintln(w, "Navigate to a specific agent directory:")
 	fmt.Fprintln(w, "- `<rig>/polecats/<name>/` - Polecat role")
-	fmt.Fprintln(w, "- `<rig>/witness/rig/` - Witness role")
 	fmt.Fprintln(w, "- `<rig>/refinery/rig/` - Refinery role")
 	fmt.Fprintln(w, "- `mayor/` or `<rig>/mayor/` - Mayor role")
 	fmt.Fprintln(w, "- Town root is neutral (set GT_ROLE or cd into a role directory)")
