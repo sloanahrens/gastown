@@ -463,21 +463,22 @@ type LandingWorkerConfig struct {
 	// $HOME/go/bin/om.
 	OMPath string `json:"om_path,omitempty"`
 
-	// OMTimeoutStr bounds each om attempt (e.g. "5m"); a stalled attempt is
-	// retried once. Default 5m. om runs only after lint and tests pass, and
-	// work never lands unreviewed: a review with no verdict after the retry
-	// rejects the landing to gt:needs-human (gt-b5ugw).
+	// OMTimeoutStr bounds the one om run (e.g. "5m"). Default 5m. om runs
+	// only after lint and tests pass and is never retried; work never lands
+	// unreviewed: a review with no verdict rejects the landing to
+	// gt:needs-human and escalates (gt-b5ugw), except a red-main revert.
 	OMTimeoutStr string `json:"om_timeout,omitempty"`
 
 	// LintTimeoutStr bounds the gate's lint stage (make gate-lint), its
-	// lint-lock retries included (e.g. "2m"). Default 2m. A lint that
-	// outlives it rejects the landing as a timeout (gt-b5ugw).
+	// lint-lock wait included (e.g. "2m"). Default 2m. A lint that outlives
+	// it is an infrastructure failure (lock contention, not a verdict): the
+	// next pass retries it (gt-b5ugw).
 	LintTimeoutStr string `json:"lint_timeout,omitempty"`
 
 	// TestTimeoutStr bounds the gate's test stage (make gate-test: build and
 	// the unit tier), or the whole gate when the rig's gate is one command
 	// (e.g. "6m"). Default 6m. A test stage that outlives it rejects the
-	// landing as a timeout (gt-b5ugw).
+	// landing as a timeout to gt:needs-human and escalates (gt-b5ugw).
 	TestTimeoutStr string `json:"test_timeout,omitempty"`
 
 	// WorkRoot is where throwaway landing and post-landing worktrees are

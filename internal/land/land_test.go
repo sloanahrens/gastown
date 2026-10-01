@@ -573,8 +573,9 @@ func TestLandReviewsOnlyAfterTheGatePasses(t *testing.T) {
 	red.assertRejected(t, err, RejectGate, LabelRework)
 }
 
-// TestLandStageTimeoutRejects: a gate stage killed by its own timeout rejects
-// the landing as a timeout naming the stage, and om never runs (gt-b5ugw).
+// TestLandStageTimeoutRejects: a test stage killed by its own timeout rejects
+// the landing as a timeout naming the stage, to a human (the author cannot
+// tell a hang from a loaded host by editing), and om never runs (gt-b5ugw).
 func TestLandStageTimeoutRejects(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -586,9 +587,47 @@ func TestLandStageTimeoutRejects(t *testing.T) {
 		return Verdict{Verdict: VerdictApprove}, nil
 	}
 	_, err := f.lander().Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectTimeout, LabelRework)
+	rej := f.assertRejected(t, err, RejectTimeout, LabelNeedsHuman)
 	if !strings.Contains(rej.Reason, "make gate-test") || !strings.Contains(rej.Reason, "6m0s") {
 		t.Errorf("reason = %q, want the stage and its timeout named", rej.Reason)
+	}
+}
+
+// TestLandLintTimeoutIsInfra: a lint stage over its timeout is waiting on
+// the lint lock, not judging the tree: nothing is written to the bead and the
+// next pass retries (gt-b5ugw review).
+func TestLandLintTimeoutIsInfra(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "lint", Command: "make gate-lint", ExitCode: -1, TimedOut: true, Timeout: 2 * time.Minute}}}
+	}
+	_, err := f.lander().Land(context.Background(), f.work)
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "gate" {
+		t.Fatalf("Land error = %T %v, want *InfraError at gate", err, err)
+	}
+	f.assertUntouched(t)
+}
+
+// TestLandRevertLandsWhenOMHasNoVerdict: a revert of a red main lands a green
+// tree with om_verdict error rather than wait on om (gt-b5ugw review).
+func TestLandRevertLandsWhenOMHasNoVerdict(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{"gt:revert"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, ErrOMTimeout }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	l.ReviewErrorLandsLabels = []string{"gt:revert"}
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v; a revert must not wait on om", err)
+	}
+	if !strings.HasPrefix(res.Verdict.Verdict, VerdictErrorPrefix) || f.originMain() != res.LandedCommit {
+		t.Fatalf("verdict %q, want error:<reason> and a landing", res.Verdict.Verdict)
 	}
 }
 

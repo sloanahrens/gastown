@@ -63,6 +63,9 @@ var rejectionKindsNotCausedByDiff = map[string]bool{
 	"not_pushed": true,
 	"empty":      true,
 	"policy":     true,
+	// A test stage over its timeout says nothing the author can fix by
+	// editing (gt-b5ugw review).
+	"timeout": true,
 }
 
 // rejectionKindFromSummary reads the class out of a rejection's first line,

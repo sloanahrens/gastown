@@ -361,6 +361,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Out:                out,
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,
+		// A revert of a red main lands without om rather than wait on it.
+		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
@@ -412,8 +414,11 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		MainState:   mainState,
 		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
 		Logf:        d.logger.Printf,
-		Draining:    d.upgradeRestartPending.Load,
-		Active:      func(id string) { d.landingBeads.Store(rigName, id) },
+		Escalate: func(beadID, message string) {
+			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
+		},
+		Draining: d.upgradeRestartPending.Load,
+		Active:   func(id string) { d.landingBeads.Store(rigName, id) },
 		ClearIntent: func(w land.Work) error {
 			seat := supervisor.IntentSeat(supervisor.SeatFor(rigName, constants.RolePolecat, w.Worker))
 			_, err := intent.ClearLanded(townRoot, seat, w.BeadID, "landing worker", time.Now())
