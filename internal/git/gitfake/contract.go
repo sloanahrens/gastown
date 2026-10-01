@@ -101,6 +101,7 @@ func readFile(t *testing.T, path string) string {
 // what git does, then make the fake copy it.
 func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	t.Run("Rev resolves branches, remote-tracking refs, ids and HEAD", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		if id, err := g.Rev("HEAD"); err != nil || id != fx.base {
@@ -131,6 +132,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("fetch creates and force-updates remote-tracking refs, and fails on a missing ref", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		later := fx.env.Commit(t, fx.origin, "later", "later", map[string]string{"c.txt": "c\n"})
@@ -157,6 +159,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("IsAncestor", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		for _, c := range []struct {
@@ -173,6 +176,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("PushRemoteBranchTip reads the remote, empty for a missing branch", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		moved := fx.env.Commit(t, fx.origin, fixtureBranch, "more", map[string]string{"b.txt": "more\n"})
@@ -185,6 +189,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("TreesIdentical compares trees, not commits", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		same := fx.env.Commit(t, fx.origin, "main", "main: b by another route", map[string]string{"b.txt": "work\n"})
@@ -201,6 +206,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CommitMessages lists base..head newest first with bodies", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		second := fx.env.Commit(t, fx.origin, fixtureBranch, "fix: second\n\nCo-Authored-By: Someone <s@example.com>", map[string]string{"b.txt": "work\nmore\n"})
 		g := fx.env.Open(fx.clone)
@@ -223,6 +229,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CommitLineStatsInRange counts lines per commit, newest first, merges skipped", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		edit := fx.env.Commit(t, fx.origin, fixtureBranch, "edit a", map[string]string{"a.txt": "one\nTWO\nthree\nfour\n"})
 		cut := fx.env.Commit(t, fx.origin, fixtureBranch, "cut a", map[string]string{"a.txt": "one\n"})
@@ -261,6 +268,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("PatchID is the change, not the commit", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		// The same change (add b.txt) on top of a moved main.
 		moved := fx.env.Commit(t, fx.origin, "main", "main: c", map[string]string{"c.txt": "c\n"})
@@ -284,6 +292,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("a detached worktree checks out the ref and is removed", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		dir, wt := fx.worktree(t, fx.base)
 		if id, err := wt.Rev("HEAD"); err != nil || id != fx.base {
@@ -314,6 +323,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("MergeNoFF makes a two-parent commit with both sides' files", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		moved := fx.env.Commit(t, fx.origin, "main", "main: c", map[string]string{"c.txt": "c\n"})
 		g := fx.env.Open(fx.clone)
@@ -341,6 +351,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("a conflicting MergeNoFF lists the files and aborts back to HEAD", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		clash := fx.env.Commit(t, fx.origin, "main", "main: b", map[string]string{"b.txt": "main's b\n"})
 		g := fx.env.Open(fx.clone)
@@ -367,6 +378,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("MergeSquash makes a one-parent commit; a conflict cannot be aborted", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		moved := fx.env.Commit(t, fx.origin, "main", "main: c", map[string]string{"c.txt": "c\n"})
 		g := fx.env.Open(fx.clone)
@@ -408,6 +420,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("PushForceWithLease pushes on a matching lease and refuses a stale one", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone)
 		_, wt := fx.worktree(t, fx.base)
@@ -442,6 +455,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 	t.Run("a bare clone takes the remote HEAD branch alone, or the branch named", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		town := fx.env.Open(fx.root) // clones run from outside any repository
 		bare := filepath.Join(fx.root, "bare.git")
@@ -497,6 +511,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("an empty remote clones empty, and has no branch to name", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		town := fx.env.Open(fx.root)
 		empty := filepath.Join(fx.root, "empty.git")
@@ -526,6 +541,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("a branch clone checks the branch out", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		town := fx.env.Open(fx.root)
 		variants := []func(dest string) error{
@@ -570,6 +586,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("push URLs and the upstream remote", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		bare := filepath.Join(fx.root, "bare.git")
 		if err := fx.env.Open(fx.root).CloneBareWithBranch(fx.origin, bare, ""); err != nil {
@@ -617,6 +634,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("a bare clone fetches a branch; CommonDir is shared with worktrees", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		bare := filepath.Join(fx.root, "bare.git")
 		if err := fx.env.Open(fx.root).CloneBareWithBranch(fx.origin, bare, ""); err != nil {

@@ -46,6 +46,7 @@ func openPathRepo(env BranchEnv, dir string) PathRepo { return env.OpenBranchRep
 // it to what git does, then make the fake copy it.
 func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	t.Run("Remotes lists, RemoveRemote drops a remote and its refs", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -76,6 +77,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("MergeBase finds a common ancestor and fails for unrelated history", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -97,6 +99,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("PullRebase fast-forwards to the upstream and needs one", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -122,6 +125,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("FetchDefaultBranchWithTimeout refreshes the default branch's tracking ref", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -138,6 +142,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("CheckoutDetach detaches a checkout and not a bare repository", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -163,6 +168,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("path state: tracked, ignored, changed and untracked", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
@@ -220,6 +226,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("a bare repository's directory holds HEAD, made or cloned", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		if _, err := os.Stat(filepath.Join(fx.origin, "HEAD")); err != nil {
@@ -238,6 +245,7 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("DisableSparseCheckout turns the setting off", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx := newFixture(t, env)
 		g := openPathRepo(env, fx.clone)
