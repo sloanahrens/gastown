@@ -281,12 +281,16 @@ func TestHeartbeat_EstopStillEnsuresDoltRefusesRestarts(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)
 	probes := 0
+	alerts := notifyfake.New()
 	d.doltServer = &DoltServerManager{
-		config:        &DoltServerConfig{Enabled: true},
-		townRoot:      d.config.TownRoot,
-		logger:        func(string, ...interface{}) {},
-		runningFn:     func() (int, bool) { return 4242, true },
-		healthCheckFn: func() error { probes++; return nil },
+		config:            &DoltServerConfig{Enabled: true},
+		townRoot:          d.config.TownRoot,
+		logger:            func(string, ...interface{}) {},
+		notifier:          alerts,
+		runningFn:         func() (int, bool) { return 4242, true },
+		healthCheckFn:     func() error { probes++; return nil },
+		writeProbeCheckFn: func() error { return nil },
+		identityCheckFn:   func() error { return nil },
 	}
 	var ran []string
 	d.seams.heartbeatStep = func(d *Daemon, step heartbeatStep) {
@@ -304,6 +308,9 @@ func TestHeartbeat_EstopStillEnsuresDoltRefusesRestarts(t *testing.T) {
 
 	if probes != 1 {
 		t.Errorf("Dolt health probes under the e-stop = %d, want 1", probes)
+	}
+	if mails := alerts.Mails(); len(mails) != 0 {
+		t.Errorf("a healthy Dolt sent alerts: %v", mails)
 	}
 	for _, step := range heartbeatSteps {
 		if step.lifecycle && slices.Contains(ran, step.name) {
