@@ -57,6 +57,57 @@ required = true
 	}
 }
 
+// TestParse_AspectAdviceOnly covers bd's aspect form: [[advice]] and
+// [[pointcuts]] with no [[aspects]] (security-audit, gt-2yaks).
+func TestParse_AspectAdviceOnly(t *testing.T) {
+	t.Parallel()
+	data := []byte(`
+formula = "test-aspect"
+type = "aspect"
+version = 1
+
+[[advice]]
+target = "implement"
+[[advice.around.before]]
+id = "{step.id}-prescan"
+title = "Prescan {step.id}"
+
+[[pointcuts]]
+glob = "implement"
+`)
+
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if f.Type != TypeAspect {
+		t.Errorf("Type = %q, want %q", f.Type, TypeAspect)
+	}
+	if len(f.Advice) != 1 || f.Advice[0].Target != "implement" {
+		t.Fatalf("Advice = %+v, want one rule targeting implement", f.Advice)
+	}
+	if f.Advice[0].Around == nil || len(f.Advice[0].Around.Before) != 1 ||
+		f.Advice[0].Around.Before[0].ID != "{step.id}-prescan" {
+		t.Errorf("Around = %+v, want one before step {step.id}-prescan", f.Advice[0].Around)
+	}
+	if len(f.Pointcuts) != 1 || f.Pointcuts[0].Glob != "implement" {
+		t.Errorf("Pointcuts = %+v, want one glob implement", f.Pointcuts)
+	}
+}
+
+func TestParse_AspectRejectsEmptyAndTargetless(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct{ body, wantErr string }{
+		"empty":     {"", "requires at least one aspect or advice rule"},
+		"no target": {"[[advice]]\n[advice.before]\nid = \"x\"\n", "advice[0] missing required target"},
+	} {
+		_, err := Parse([]byte("formula = \"a\"\ntype = \"aspect\"\nversion = 1\n" + tc.body))
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: err = %v, want containing %q", name, err, tc.wantErr)
+		}
+	}
+}
+
 func TestParse_Convoy(t *testing.T) {
 	t.Parallel()
 	data := []byte(`
