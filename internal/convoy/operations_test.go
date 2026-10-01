@@ -11,7 +11,9 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	beadsRouting "github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
@@ -1663,14 +1665,13 @@ func setupTownRootWithCrossRig(t *testing.T) string {
 	return townRoot
 }
 
-// showScript is a bd show for fetchCrossRigBeadStatusWith that prints out and
-// records each call as "<rigPath>: <args>".
-func showScript(out string) (show func(string, []string) ([]byte, error), calls *[]string) {
-	calls = new([]string)
-	return func(rigPath string, args []string) ([]byte, error) {
-		*calls = append(*calls, rigPath+": "+strings.Join(args, " "))
-		return []byte(out), nil
-	}, calls
+// rigDBs opens db for every rig and records each rig path it opened.
+func rigDBs(db beads.Client) (open func(string) beads.Client, opened *[]string) {
+	opened = new([]string)
+	return func(rigPath string) beads.Client {
+		*opened = append(*opened, rigPath)
+		return db
+	}, opened
 }
 
 func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
@@ -1741,9 +1742,12 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 func TestFetchCrossRigBeadStatus(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTownRootWithCrossRig(t)
-	show, calls := showScript(`[{"id":"oag-abc","status":"closed","assignee":"","priority":1,"issue_type":"task"},{"id":"oag-xyz","status":"open","assignee":"gastown/polecats/beta","priority":3,"issue_type":"bug"}]`)
+	db := beadsfake.New(beadsfake.WithPrefix("oag"))
+	db.Seed(beads.Issue{ID: "oag-abc", Title: "abc", Status: "closed", Priority: 1},
+		beads.Issue{ID: "oag-xyz", Title: "xyz", Status: "open", Assignee: "gastown/polecats/beta", Priority: 3})
+	open, opened := rigDBs(db)
 
-	result := fetchCrossRigBeadStatusWith(townRoot, []string{"oag-abc", "oag-xyz"}, show)
+	result := fetchCrossRigBeadStatusWith(townRoot, []string{"oag-abc", "oag-xyz"}, open)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(result))
@@ -1768,30 +1772,30 @@ func TestFetchCrossRigBeadStatus(t *testing.T) {
 		t.Errorf("oag-xyz assignee = %q, want %q", xyz.Assignee, "gastown/polecats/beta")
 	}
 
-	// One bd show, in the oag rig, for both IDs.
-	if len(*calls) != 1 || !strings.HasSuffix((*calls)[0], "show --json oag-abc oag-xyz") || !strings.Contains((*calls)[0], "osr_ai_gm") {
-		t.Errorf("bd show calls = %q, want one show of oag-abc oag-xyz in osr_ai_gm", *calls)
+	// One database opened, the oag rig's, for both IDs.
+	if len(*opened) != 1 || !strings.Contains((*opened)[0], "osr_ai_gm") {
+		t.Errorf("rig databases opened = %q, want only osr_ai_gm", *opened)
 	}
 }
 
 func TestFetchCrossRigBeadStatus_UnknownPrefix(t *testing.T) {
 	t.Parallel()
-	show, calls := showScript(`[]`)
+	open, opened := rigDBs(beadsfake.New())
 
 	// "zzz-" prefix has no route — should return empty, not panic
-	result := fetchCrossRigBeadStatusWith(setupTownRootWithCrossRig(t), []string{"zzz-unknown"}, show)
+	result := fetchCrossRigBeadStatusWith(setupTownRootWithCrossRig(t), []string{"zzz-unknown"}, open)
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for unknown prefix, got %d", len(result))
 	}
-	if len(*calls) != 0 {
-		t.Errorf("bd show ran for an unrouted prefix: %q", *calls)
+	if len(*opened) != 0 {
+		t.Errorf("a database was opened for an unrouted prefix: %q", *opened)
 	}
 }
 
 func TestFetchCrossRigBeadStatus_EmptyInput(t *testing.T) {
 	t.Parallel()
-	show, _ := showScript(`[]`)
-	result := fetchCrossRigBeadStatusWith("/nonexistent", nil, show)
+	open, _ := rigDBs(beadsfake.New())
+	result := fetchCrossRigBeadStatusWith("/nonexistent", nil, open)
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for empty input, got %d", len(result))
 	}
