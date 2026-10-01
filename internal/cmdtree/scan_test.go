@@ -69,6 +69,31 @@ func TestScanShell(t *testing.T) {
 	)
 }
 
+func TestScanScript(t *testing.T) {
+	t.Parallel()
+	text := strings.Join([]string{
+		"gt rig list", // 1
+		`echo "gt does not land integration branches"`, // 2: quoted log text
+		`if pgrep -f "bd daemon" >/dev/null; then`,     // 3: quoted pattern
+		`echo '| run | bd timeouts |'`,                 // 4: | is not a separator in quotes
+		`cd "$d" # bd operates from the parent`,        // 5: trailing comment
+		`bash -c "gt prime --hook"`,                    // 6: sh -c command line
+		`ssh host "cd /x && bd list"`,                  // 7: separator inside the quote
+		"cat <<EOF",                                    // 8
+		"  gt binary to use",                           // 9: here-document body
+		"EOF",                                          // 10
+		"# Run with: gt crew add",                      // 11: instruction comment
+		`n=$(gt mq list --json)`,                       // 12
+	}, "\n")
+	assertRefs(t, ScanScript("f.sh", text),
+		"1:gt rig list",
+		"6:gt prime",
+		"7:bd list",
+		"11:gt crew add #",
+		"12:gt mq list",
+	)
+}
+
 func TestScanMarkdown(t *testing.T) {
 	t.Parallel()
 	text := strings.Join([]string{
@@ -221,6 +246,12 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 	write("internal/hooks/templates/claude/s.json", `"gt five"`+"\n")
 	write("internal/hooks/templates/pi/h.js", `pi.exec("gt", ["fivejs"]); log("gt skipped")`+"\n")
 	write("scripts/guards/g.sh", "gt six\n")
+	write("scripts/s.sh", "gt nine\n")
+	write("scripts/s.py", "gt skipped\n")
+	write(".githooks/pre-push", "gt ten\n")
+	write("internal/wrappers/scripts/gt-codex", "exec gt eleven\n")
+	write(".claude/commands/c.md", "`gt twelve`\n")
+	write(".claude/skills/k/SKILL.md", "`bd thirteen`\n")
 	write("internal/config/roles/x.toml", "nudge = \"Run 'gt seven'\"\n")
 	write("internal/x/x.go", "package x\nimport \"os/exec\"\nvar _ = exec.Command(\"gt\", \"eight\")\n")
 	write("internal/x/x_test.go", "package x\nimport \"os/exec\"\nvar _ = exec.Command(\"gt\", \"skipped\")\n")
@@ -236,7 +267,7 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 		words = append(words, r.Words[0])
 	}
 	got := strings.Join(words, ",")
-	if got != "seven,one,five,fivejs,two,eight,three,four,six" {
+	if got != "twelve,thirteen,ten,seven,one,five,fivejs,two,eleven,eight,three,four,six,nine" {
 		t.Fatalf("ScanRepo words = %s", got)
 	}
 	for _, r := range refs {

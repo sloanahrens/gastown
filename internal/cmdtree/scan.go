@@ -129,21 +129,35 @@ func scanMatches(file string, line int, text string, keep func(boundary byte, st
 func isSpace(b byte) bool { return b == ' ' || b == '\t' }
 
 // insideQuote reports whether prefix ends inside an unclosed shell quote.
-func insideQuote(prefix string) bool {
+func insideQuote(prefix string) bool { return openQuote(prefix) >= 0 }
+
+// openQuote returns the index of the quote prefix ends inside, or -1.
+func openQuote(prefix string) int {
 	var quote byte
+	open := -1
 	for i := 0; i < len(prefix); i++ {
 		c := prefix[i]
 		switch {
 		case c == '\\' && quote != '\'':
 			i++
 		case quote == 0 && (c == '"' || c == '\''):
-			quote = c
+			quote, open = c, i
 		case c == quote:
-			quote = 0
+			quote, open = 0, -1
 		}
 	}
-	return quote != 0
+	return open
 }
+
+// A quoted string is a command line when it is handed to sh -c, eval or a
+// watch/timeout-style runner (quotedCommandLine matches the text before the
+// quote), or when gt/bd follows a command separator inside it
+// (quotedCommandPosition matches the quoted text before gt/bd). A bare | is
+// not a separator here, since quoted report text uses it as a table rule.
+var (
+	quotedCommandLine     = regexp.MustCompile(`(?:\s-c|\beval)\s+$`)
+	quotedCommandPosition = regexp.MustCompile(`(?:&&|\|\||;|\$\()\s*$`)
+)
 
 var (
 	trailingAssignments = regexp.MustCompile(`(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+$`)
@@ -165,6 +179,61 @@ func ScanShell(file, text string, firstLine int) []Ref {
 		refs = append(refs, scanShellLine(file, firstLine+i, l)...)
 	}
 	return refs
+}
+
+// heredocStart matches a here-document operator and captures its delimiter:
+// <<EOF, <<-'EOF', << "EOF".
+var heredocStart = regexp.MustCompile(`<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
+
+// ScanScript is ScanShell for repo scripts and git hooks, whose quoted
+// strings and here-documents are mostly log, usage and report text
+// ("gt does not land integration branches", pgrep -f "bd daemon"). A quoted
+// mention counts only where it opens the quote or follows a command
+// separator inside it, a mention in a trailing comment does not count, and
+// here-document bodies are skipped.
+func ScanScript(file, text string) []Ref {
+	var refs []Ref
+	heredoc := ""
+	for i, l := range strings.Split(text, "\n") {
+		if heredoc != "" {
+			if strings.TrimSpace(l) == heredoc {
+				heredoc = ""
+			}
+			continue
+		}
+		if m := heredocStart.FindStringSubmatch(l); m != nil && !insideQuote(l[:strings.Index(l, m[0])]) {
+			heredoc = m[1]
+		}
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			refs = append(refs, scanShellLine(file, i+1, l)...)
+			continue
+		}
+		refs = append(refs, scanMatches(file, i+1, l, func(_ byte, start int) bool {
+			if q := openQuote(l[:start]); q >= 0 {
+				body := trailingAssignments.ReplaceAllString(l[q+1:start], "")
+				if strings.TrimSpace(body) == "" {
+					return quotedCommandLine.MatchString(l[:q])
+				}
+				return quotedCommandPosition.MatchString(body)
+			}
+			if trailingComment(l[:start]) {
+				return false
+			}
+			return true
+		})...)
+	}
+	return refs
+}
+
+// trailingComment reports whether prefix contains an unquoted # that starts
+// a shell comment (at a word boundary).
+func trailingComment(prefix string) bool {
+	for i := 0; i < len(prefix); i++ {
+		if prefix[i] == '#' && (i == 0 || isSpace(prefix[i-1])) && !insideQuote(prefix[:i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // markdown tracks fenced-code state across lines. Fenced lines are shell;
@@ -386,11 +455,14 @@ var (
 	scanMDFile    = textScan(ScanMarkdown)
 	scanTOMLFile  = textScan(ScanTOMLMarkdown)
 	scanJSFile    = textScan(ScanJS)
+	scanScript    = textScan(ScanScript)
 )
 
 // scannerFor picks the scanner for a repo-relative path, or nil when the
 // file is not one of the lint's inputs: formulas, templates, plugins, hook
-// templates and scripts, role configs, and non-test Go under internal/ and cmd/.
+// templates and scripts, role configs, repo scripts and git hooks, the
+// installed agent wrappers, the repo's agent commands and skills, and non-test
+// Go under internal/ and cmd/.
 func scannerFor(rel string) scanFunc {
 	base := filepath.Base(rel)
 	ext := filepath.Ext(rel)
@@ -425,6 +497,16 @@ func scannerFor(rel string) scanFunc {
 	case under("scripts/guards/"):
 		if ext == ".sh" {
 			return scanShellFile
+		}
+	case under("scripts/"):
+		if ext == ".sh" {
+			return scanScript
+		}
+	case under("internal/wrappers/scripts/"), under(".githooks/"):
+		return scanScript
+	case under(".claude/commands/"), under(".claude/skills/"), under(".cursor/skills/"):
+		if ext == ".md" {
+			return scanMDFile
 		}
 	case under("internal/config/roles/"):
 		if ext == ".toml" {
