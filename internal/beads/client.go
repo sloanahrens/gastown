@@ -60,6 +60,9 @@ type Client interface {
 	ReleaseWithReason(id, reason string) error
 	// AddComment appends a comment.
 	AddComment(id, comment string) error
+	// AddCommentAs appends a comment recorded as written by author (bd's
+	// comments add --author) instead of the store's actor.
+	AddCommentAs(id, author, comment string) error
 	// AddDependency makes issue depend on (be blocked by) dependsOn.
 	AddDependency(issue, dependsOn string) error
 	// AddTypedDependency records that issue depends on dependsOn with

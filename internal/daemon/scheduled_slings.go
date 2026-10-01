@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -122,44 +120,18 @@ func decideScheduledSling(beads []scheduledBead, interval time.Duration, now tim
 // and goes through beads.ParseIssueTime: bd/Dolt timestamps can carry
 // fractional seconds, which encoding/json's strict RFC3339 time.Time
 // unmarshaller rejects, and one bad row would fail the whole list.
-func parseScheduledBeads(data []byte) ([]scheduledBead, error) {
-	var rows []struct {
-		ID          string `json:"id"`
-		Status      string `json:"status"`
-		CloseReason string `json:"close_reason"`
-		CreatedAt   string `json:"created_at"`
-	}
-	if err := json.Unmarshal(data, &rows); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
-	}
-	out := make([]scheduledBead, 0, len(rows))
-	for _, r := range rows {
+// scheduledBeadsOf is the run beads as the patrol reads them.
+func scheduledBeadsOf(issues []*beads.Issue) []scheduledBead {
+	out := make([]scheduledBead, 0, len(issues))
+	for _, is := range issues {
 		out = append(out, scheduledBead{
-			ID:          r.ID,
-			Status:      r.Status,
-			CloseReason: r.CloseReason,
-			CreatedAt:   beads.ParseIssueTime(r.CreatedAt),
+			ID:          is.ID,
+			Status:      is.Status,
+			CloseReason: is.CloseReason,
+			CreatedAt:   beads.ParseIssueTime(is.CreatedAt),
 		})
 	}
-	return out, nil
-}
-
-// parseCreatedBeadID reads `bd create --json`, which some bd versions print
-// as an object and others as a one-element array.
-func parseCreatedBeadID(data []byte) (string, error) {
-	var obj struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &obj); err == nil && obj.ID != "" {
-		return obj.ID, nil
-	}
-	var arr []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &arr); err == nil && len(arr) > 0 && arr[0].ID != "" {
-		return arr[0].ID, nil
-	}
-	return "", errors.New("bd create output has no id")
+	return out
 }
 
 // scheduledSlingRunner is the side-effect boundary: bd list, bd create, gt
@@ -179,61 +151,44 @@ const (
 
 type execScheduledSlingRunner struct {
 	townRoot, bdPath, gtPath string
-	// execCmd runs the bd and gt subprocesses; nil runs them for real.
+	// execCmd runs the gt subprocesses; nil runs them for real.
 	execCmd cmdRunFunc
+	// open opens a rig's database; nil is bdPath pinned to the rig's .beads.
+	open func(rig string) beads.Client
 }
 
-func (r *execScheduledSlingRunner) runBd(ctx context.Context, rig string, args ...string) ([]byte, error) {
-	// Dir is the rig dir, so bd's cwd routing lands on the rig database
-	// (never --repo: see the bd-create-repo memory).
-	rigDir := filepath.Join(r.townRoot, rig)
-	cmd := beads.CommandContextWithBin(ctx, r.bdPath, rigDir, filepath.Join(rigDir, ".beads"), beads.SubprocessModeForArgs(args), args...)
-	stdout, stderr, err := bdRunWith(r.execCmd, cmd)
-	if err != nil {
-		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(stderr)))
+// store is the rig's own database: run beads are created, listed and closed
+// there, never routed elsewhere.
+func (r *execScheduledSlingRunner) store(rig string) beads.Client {
+	if r.open != nil {
+		return r.open(rig)
 	}
-	return stdout, nil
+	return beads.NewPinned(filepath.Join(r.townRoot, rig, ".beads"), beads.WithBin(r.bdPath))
 }
 
-// listArgs is the canonical `bd list --json` shape (--json --flat --no-pager).
-// Both extra flags are load-bearing for this patrol:
-//
-//   - --flat: bd v0.59+ ignores --json on "list" without it and prints
-//     human-readable tree text, so parsing would fail on every tick.
-//   - --all: bd's default list filter excludes closed issues, and the run bead
-//     is closed when the run finishes. Without --all the newest run is always
-//     invisible, `newest` stays zero, and every tick re-dispatches regardless
-//     of the configured interval.
-func (r *execScheduledSlingRunner) listArgs(label string) []string {
-	return []string{"list", "--label", label, "--json", "--flat", "--all", "--no-pager", "--limit", "0"}
-}
-
-func (r *execScheduledSlingRunner) listBeads(ctx context.Context, rig, label string) ([]scheduledBead, error) {
-	out, err := r.runBd(ctx, rig, r.listArgs(label)...)
+// listBeads lists every run bead with label, closed ones included: the run
+// bead is closed when the run finishes, and a list without the closed ones
+// never sees the newest run, so every tick would re-dispatch regardless of
+// the configured interval.
+func (r *execScheduledSlingRunner) listBeads(_ context.Context, rig, label string) ([]scheduledBead, error) {
+	issues, err := r.store(rig).List(beads.ListOptions{Label: label, Status: "all", Priority: -1})
 	if err != nil {
 		return nil, err
 	}
-	// Prose or nothing from a --json call is a failed read, never "no
-	// runs": reading it as empty re-dispatches on every tick (B5-05).
-	if err := beads.RequireJSON(out, "bd list"); err != nil {
-		return nil, err
-	}
-	return parseScheduledBeads(out)
+	return scheduledBeadsOf(issues), nil
 }
 
 // closeBead closes a run bead with a reason.
-func (r *execScheduledSlingRunner) closeBead(ctx context.Context, rig, beadID, reason string) error {
-	_, err := r.runBd(ctx, rig, "close", beadID, "--reason", reason)
-	return err
+func (r *execScheduledSlingRunner) closeBead(_ context.Context, rig, beadID, reason string) error {
+	return r.store(rig).CloseWithReason(reason, beadID)
 }
 
-func (r *execScheduledSlingRunner) createBead(ctx context.Context, rig, title, label, description string, priority int) (string, error) {
-	out, err := r.runBd(ctx, rig, "create", "--title", title, "--type", "task",
-		"--priority", fmt.Sprint(priority), "--labels", label, "--description", description, "--json")
+func (r *execScheduledSlingRunner) createBead(_ context.Context, rig, title, label, description string, priority int) (string, error) {
+	issue, err := r.store(rig).Create(beads.CreateOptions{Title: title, Labels: []string{label}, Priority: priority, Description: description})
 	if err != nil {
 		return "", err
 	}
-	return parseCreatedBeadID(out)
+	return issue.ID, nil
 }
 
 func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntry) []string {

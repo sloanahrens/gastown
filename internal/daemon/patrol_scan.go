@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -290,6 +289,9 @@ func (h *patrolScanHost) bdMutating(rig string, args ...string) ([]byte, error) 
 			env = beads.BuildMutationPinnedBDEnv(base, beads.ResolveBeadsDir(rigDir))
 		}
 	}
+	// Kept raw (gt-7iwy0.4.1): its one caller is bd gate check, which has no
+	// machine output to type and nothing a fake database could model; the
+	// patrol logs its last prose line.
 	cmd := beads.CommandContextWithPath(ctx, h.d.bdPathOrDefault(), h.town(), env, args...)
 	util.SetProcessGroup(cmd.Cmd)
 	out, err := cmd.CombinedOutput()
@@ -415,17 +417,8 @@ func (h *patrolScanHost) SurvivingBranch(rig, beadID string) (string, error) {
 }
 
 func (h *patrolScanHost) Comment(beadID, text string) error {
-	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), patrolScanBdTimeout)
-	defer cancel()
-	cmd := beads.CommandContextWithPath(ctx, h.d.bdPathOrDefault(), h.town(), bdMutationRoutingEnv(h.town()),
-		"comments", "add", beadID, text, "--author", patrolscan.Actor)
-	util.SetProcessGroup(cmd.Cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return fmt.Errorf("bd comments add %s: %w: %s", beadID, err, lastLine(msg))
-		}
+	b := beads.NewPlain(h.town(), bdMutationRoutingEnv(h.town()), beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout)
+	if err := b.AddCommentAs(beadID, patrolscan.Actor, text); err != nil {
 		return fmt.Errorf("bd comments add %s: %w", beadID, err)
 	}
 	return nil
