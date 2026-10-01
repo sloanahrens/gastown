@@ -121,7 +121,8 @@ The same file is the town's automatic-dispatch hold. The following all refuse
 to sling while it exists and log why (`internal/dispatch`):
 
 - the daemon's convoy feeders
-- `gt scheduler run`, whether the daemon heartbeat or a person runs it
+- `gt scheduler run`, and the daemon's scheduled-dispatch pass, which runs the
+  same code in process
 - the `scheduled_slings` patrol
 
 The file is always `<town-root>/seat-refill.hold`. A rig's `ESTOP.<rig>`
