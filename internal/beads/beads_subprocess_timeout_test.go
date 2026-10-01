@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -94,14 +93,26 @@ func TestBeadsSubprocessTimeoutScope(t *testing.T) {
 // to stderr and is then killed at its deadline; the error must name the
 // timeout instead of surfacing only the warning, which is what made the
 // original failure read as a redirect bug rather than an exhausted budget.
+//
+// bd is a runner that has written its warning and blocks until the deadline
+// kills it. A real stub process with a 1s budget was flaky under host load
+// (gt-cx3rt): a freshly written script could take longer than the budget to
+// start, so the kill came before the warning and the error had no stderr.
 func TestInitDeadlineIsReportedAsTimeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock for bd")
+	t.Parallel()
+	const warning = "Warning: ignoring redirect from .beads to mayor/rig/.beads because the target has no database or metadata.json; fix or delete the redirect file"
+	r := newRecorder(nil)
+	r.allowStale = true
+	blocked := func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+		if len(c.args) == 2 && c.args[1] == "version" {
+			return r.exec(ctx, c)
+		}
+		<-ctx.Done()
+		return nil, []byte(warning + "\n"), errors.New("signal: killed")
 	}
-	t.Setenv(bdTimeoutEnvVar, "1")
-	installBlockingBd(t)
+	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, exec: blocked, budget: 10 * time.Millisecond})
 
-	err := NewIsolated(t.TempDir()).Init("gt")
+	err := b.Init("gt")
 	if err == nil {
 		t.Fatal("Init should fail when bd blocks past its deadline")
 	}
@@ -114,31 +125,7 @@ func TestInitDeadlineIsReportedAsTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "ignoring redirect") {
 		t.Errorf("error should keep bd's stderr, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "after 1s") {
+	if !strings.Contains(err.Error(), "after 10ms") {
 		t.Errorf("error should name the budget that expired, got %v", err)
 	}
-}
-
-// installBlockingBd puts a fake bd on PATH that answers the --allow-stale
-// capability probe immediately and, for every other invocation, writes the
-// redirect warning bd emits when a redirect target has no database yet before
-// blocking past the subprocess deadline. `exec sleep` replaces the shell so a
-// deadline kill reaps the blocking process itself rather than orphaning a
-// child.
-func installBlockingBd(t *testing.T) {
-	t.Helper()
-	binDir := t.TempDir()
-	script := `#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    version) echo "bd test-version"; exit 0 ;;
-  esac
-done
-echo "Warning: ignoring redirect from $PWD/.beads to $PWD/mayor/rig/.beads because the target has no database or metadata.json; fix or delete the redirect file" >&2
-exec sleep 30
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

@@ -67,7 +67,7 @@ func TestCommandTokensResolve(t *testing.T) {
 	// plugins and took plugins to 69. The one-client migration
 	// (gt-7iwy0.4.1) keeps moving raw bd argv onto typed beads methods, which
 	// the scanner does not read; go was 34 after the handoff/hook/rollback move.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 23, "scripts": 22, "agent": 10}
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 22, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

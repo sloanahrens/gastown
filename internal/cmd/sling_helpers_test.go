@@ -171,20 +171,28 @@ func TestIsSlingConfigError(t *testing.T) {
 	}
 }
 
+// updateFailsStore is a sling store whose every Update fails with err.
+type updateFailsStore struct {
+	slingFake
+	err   error
+	calls *int
+}
+
+func (s updateFailsStore) Update(string, beads.UpdateOptions) error {
+	*s.calls++
+	return s.err
+}
+
 // TestHookBeadWithRetryFailsFastOnBdStderr: a Dolt/beads configuration
 // failure bd reports on stderr is not retried, and the error carries bd's
 // words plus the reconciliation guidance (gt-2ra).
 func TestHookBeadWithRetryFailsFastOnBdStderr(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	bd := &inprocBD{answer: func(_ *inprocBD, cmd string, _ []string) bdAnswer {
-		if cmd == "update" {
-			calls++
-		}
-		return bdAnswer{stderr: "Dolt circuit breaker is open: server appears down", code: 1}
-	}}
+	store := updateFailsStore{slingFake{beadsfake.New()}, fmt.Errorf("bd update gt-work: Dolt circuit breaker is open: server appears down"), &calls}
+	stores := slingStores{pinned: func(string) slingStore { return store }}
 
-	err := hookBeadWithRetryVia(bd.run, nil, "gt-work", "gastown/polecats/rust", t.TempDir())
+	err := stores.hookWithRetry(nil, "gt-work", "gastown/polecats/rust", t.TempDir())
 	if err == nil {
 		t.Fatal("hookBeadWithRetry error = nil, want fail-fast error")
 	}

@@ -46,8 +46,13 @@ func formatReassignmentNote(from, to, requester string, branches []string) strin
 // only surviving copy of the old value is the Dolt events table, which no gt
 // command reads. A no-op when from is empty or already equals to.
 func (b *Beads) RecordReassignment(id, from, to, requester string, branches []string) error {
+	return RecordReassignmentIn(b, id, from, to, requester, branches)
+}
+
+// RecordReassignmentIn is RecordReassignment on any Client.
+func RecordReassignmentIn(c Client, id, from, to, requester string, branches []string) error {
 	if id == "" || from == "" || from == to {
 		return nil
 	}
-	return b.AddComment(id, formatReassignmentNote(from, to, requester, branches))
+	return c.AddComment(id, formatReassignmentNote(from, to, requester, branches))
 }

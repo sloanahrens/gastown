@@ -1,17 +1,16 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
@@ -79,56 +78,47 @@ func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
 	}
 }
 
+// showFailsStore is a sling store whose every Show fails.
+type showFailsStore struct{ slingFake }
+
+func (showFailsStore) Show(id string) (*beads.Issue, error) {
+	return nil, errors.New("bd show " + id + ": boom")
+}
+
 // clearOrphanEpisodeLabels removes only the episode labels the bead carries,
 // writes nothing when it carries none, and never fails the caller.
 func TestClearOrphanEpisodeLabels(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name       string
-		labels     string
-		showFails  bool
-		wantUpdate string // "" = no update call
+		name      string
+		labels    []string
+		showFails bool
+		want      []string
 	}{
-		{name: "all three present", labels: `"gt:preserved-orphan","keep-me","gt:survival-unknown","gt:survival-escalated"`,
-			wantUpdate: "update gt-lbl1 --remove-label=gt:preserved-orphan --remove-label=gt:survival-unknown --remove-label=gt:survival-escalated"},
-		{name: "one present", labels: `"gt:survival-unknown"`, wantUpdate: "update gt-lbl1 --remove-label=gt:survival-unknown"},
-		{name: "none present", labels: `"keep-me"`},
-		{name: "read fails", showFails: true},
+		{name: "all three present", labels: []string{"gt:preserved-orphan", "keep-me", "gt:survival-unknown", "gt:survival-escalated"}, want: []string{"keep-me"}},
+		{name: "one present", labels: []string{"gt:survival-unknown"}, want: nil},
+		{name: "none present", labels: []string{"keep-me"}, want: []string{"keep-me"}},
+		{name: "read fails", labels: []string{"gt:survival-unknown"}, showFails: true, want: []string{"gt:survival-unknown"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+			db := beadsfake.New()
+			db.Seed(beads.Issue{ID: "gt-lbl1", Title: "t", Status: "hooked", Labels: tc.labels})
+			var store slingStore = slingFake{db}
+			if tc.showFails {
+				store = showFailsStore{slingFake{db}}
+			}
+			stores := slingStores{routed: func(string) slingStore { return store }}
+
+			stores.clearOrphanEpisodeLabels(io.Discard, t.TempDir(), "gt-lbl1", "")
+
+			got, err := db.Show("gt-lbl1")
+			if err != nil {
 				t.Fatal(err)
 			}
-			bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-				f.logLine(cmd + " " + strings.Join(args, " "))
-				if cmd == "show" {
-					if tc.showFails {
-						return bdAnswer{stderr: "boom", code: 1}
-					}
-					return bdOut(`[{"id":"gt-lbl1","title":"t","status":"hooked","labels":[` + tc.labels + `]}]`)
-				}
-				return bdOut("")
-			}}
-
-			clearOrphanEpisodeLabelsVia(bd.run, io.Discard, townRoot, "gt-lbl1", "")
-
-			var updates []string
-			for _, l := range strings.Split(strings.TrimSpace(bd.log()), "\n") {
-				if i := strings.Index(l, "update "); i >= 0 {
-					updates = append(updates, l[i:])
-				}
-			}
-			if tc.wantUpdate == "" {
-				if len(updates) != 0 {
-					t.Fatalf("want no update, got %v", updates)
-				}
-				return
-			}
-			if len(updates) != 1 || !strings.HasPrefix(updates[0], tc.wantUpdate) {
-				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, bd.log())
+			if strings.Join(got.Labels, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("labels = %v, want %v", got.Labels, tc.want)
 			}
 		})
 	}
@@ -145,24 +135,18 @@ func TestClearOrphanEpisodeLabelsUsesHookWorkDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var mu sync.Mutex
-	var showDirs []string
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		for _, a := range c.Args {
-			if a == "show" {
-				mu.Lock()
-				showDirs = append(showDirs, c.Dir)
-				mu.Unlock()
-				return []byte(`[{"id":"zz-lbl2","title":"t","status":"hooked","labels":["gt:preserved-orphan"]}]`), nil, nil
-			}
-		}
-		return nil, nil, nil
-	}
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "zz-lbl2", Title: "t", Status: "hooked", Labels: []string{"gt:preserved-orphan"}})
+	var dirs []string
+	stores := slingStores{routed: func(dir string) slingStore {
+		dirs = append(dirs, dir)
+		return slingFake{db}
+	}}
 
-	clearOrphanEpisodeLabelsVia(run, io.Discard, townRoot, "zz-lbl2", workDir)
+	stores.clearOrphanEpisodeLabels(io.Discard, townRoot, "zz-lbl2", workDir)
 
-	if len(showDirs) != 1 || showDirs[0] != workDir {
-		t.Fatalf("bd show ran in %q, want hook work dir %q", showDirs, workDir)
+	if len(dirs) != 1 || dirs[0] != workDir {
+		t.Fatalf("store opened at %q, want hook work dir %q", dirs, workDir)
 	}
 }
 
