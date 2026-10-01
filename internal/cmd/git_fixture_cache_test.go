@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -322,4 +323,15 @@ func TestCachedGitFixtureCopiesAreIndependent(t *testing.T) {
 	if got := revParse(t, second[0], "origin/main"); got != second[1] {
 		t.Fatalf("the second copy's origin saw the first copy's push: origin/main = %s, want %s", got, second[1])
 	}
+}
+
+func revParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", ref)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s in %s: %v", ref, dir, err)
+	}
+	return strings.TrimSpace(string(out))
 }
