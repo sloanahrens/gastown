@@ -17,12 +17,16 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -35,6 +39,7 @@ var (
 	tailAll      bool
 	tailVerbose  bool
 	tailISO      bool
+	tailColor    string
 )
 
 // tailMinInterval keeps --follow from spawning bd per rig in a tight loop.
@@ -51,19 +56,35 @@ merged from three read-only sources:
   landings  each rig's landings file (.runtime/landings/<rig>.jsonl)
   daemon    daemon/daemon.log, plus its rotated backups for --since
 
-Every line is "<local time> <rig> <kind> <text>", so the first three fields
-can be cut or grepped by position. The time is HH:MM:SS in local time; --iso
-prints RFC3339 with the date and zone. The daemon's rig column is "town".
+Every line is "<local time> <tag> <text>": one short source tag, the daemon's
+"town" or the store's rig name, so a typical line fits a terminal without
+wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
+date and zone. --verbose keeps the "<rig> <kind>" columns, the form to cut or
+grep by position.
+
+On a terminal each line is colored by what it says and tagged with an emoji:
+green and ✅ for a landing, a post-land check or a green health line, red and
+❌ for a rejection, a RED line or a failure, yellow and ⚠️ for SLOW, a timeout
+or an escalation, blue and 🛬 for a landing still in flight, 🚀 for a
+dispatch, 🔁 for a restart. Everything else is dim. A pipe gets plain text,
+with no emoji. --color selects: auto (the default) draws color and emoji only
+on a terminal, and honors NO_COLOR and GT_NO_EMOJI; never draws either;
+always draws both.
 
 The default view hides what the town does every few seconds: wisp events
-(gt-wisp-*, hq-wisp-*) and their "close detected" lines, and the daemon's
-heartbeat, plugin-handler skips, and the checkpoint, jsonl-backup and
-patrol-scan routine lines. Landings, rejections, escalations, upgrade
-restarts, seat-refill runs and bead create/close/status changes always show.
---all (or --verbose) shows everything.
+(gt-wisp-*, hq-wisp-*) and their "close detected" lines, the daemon's
+heartbeat, plugin-handler skips, the patrols a config leaves off, the
+checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, the convoy
+bookkeeping ("tracked by", "checking convoy"), clearAlerts lines, a polecat
+agent bead's own status writes, and a townhealth line that repeats the last
+one shown but for the age and the exec-tax reading it carries. Landings,
+rejections, escalations, upgrade restarts, seat-refill runs and bead
+create/close/status changes always show, and a hidden line that reports a
+failure shows anyway. --all (or --verbose) shows everything.
 
-With -f the daemon and landings lines print first and each store's journal
-joins as its bd read finishes, so the backlog is not ordered across sources.
+The first poll is gathered from every source — each one bounded by its own
+read budget — and printed in time order, so gt tail -f shows one ordered
+backlog. What arrives after it prints as each later poll returns.
 
 gt tail only reads. It computes no verdict and exits 0 whatever it shows:
 the town's health is gt status. A source that cannot be read says so in one
@@ -75,7 +96,7 @@ Examples:
   gt tail -f                        # the last 15 minutes, then follow
   gt tail --rig gastown --since 2h  # one rig (daemon lines naming it)
   gt tail --kind landings --since 1d
-  gt tail -f --since 0 | grep ' landings '`,
+  gt tail -f --verbose --since 0 | grep ' landings '`,
 	Args: cobra.NoArgs,
 	RunE: runTail,
 }
@@ -87,13 +108,18 @@ func init() {
 	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon")
 	tailCmd.Flags().DurationVar(&tailInterval, "interval", 3*time.Second, "Poll interval with --follow")
 	tailCmd.Flags().BoolVar(&tailAll, "all", false, "Show routine lines too: wisp events, heartbeats, handler skips, dog and patrol-scan chatter")
-	tailCmd.Flags().BoolVar(&tailVerbose, "verbose", false, "Same as --all")
+	tailCmd.Flags().BoolVar(&tailVerbose, "verbose", false, "Same as --all, and keep the <rig> <kind> columns")
 	tailCmd.Flags().BoolVar(&tailISO, "iso", false, "Print each time as RFC3339 with the date and zone, not HH:MM:SS")
+	tailCmd.Flags().StringVar(&tailColor, "color", string(tailColorAuto), "How to color the lines: auto (only on a terminal), never, always")
 	rootCmd.AddCommand(tailCmd)
 }
 
 func runTail(cmd *cobra.Command, _ []string) error {
 	kinds, err := parseTailKinds(tailKind)
+	if err != nil {
+		return err
+	}
+	colorMode, err := parseTailColor(tailColor)
 	if err != nil {
 		return err
 	}
@@ -124,20 +150,74 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		defer ticker.Stop()
 		tick = ticker.C
 	}
-	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, newTailView(loc, tailAll || tailVerbose, tailISO))
+	view := newTailView(loc, tailViewOptions{
+		all:        tailAll || tailVerbose,
+		iso:        tailISO,
+		fullSource: tailVerbose,
+		decorate:   tailDecorate(colorMode),
+	})
+	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, view)
+}
+
+// tailViewOptions is what the flags ask the view to do.
+type tailViewOptions struct {
+	all        bool // show the routine lines
+	iso        bool // RFC3339 times with the date and zone
+	fullSource bool // keep the <rig> <kind> columns
+	decorate   bool // color the lines and tag them with an emoji
 }
 
 // newTailView is the view the flags select: the routine lines hidden unless
-// all, the time as HH:MM:SS unless iso.
-func newTailView(loc *time.Location, all, iso bool) tailView {
-	v := tailView{Loc: loc, Layout: tailClockLayout, Show: tailVisible}
-	if all {
-		v.Show = nil
-	}
-	if iso {
+// all, the time as HH:MM:SS unless iso, one short source tag unless
+// fullSource, and plain text unless decorate.
+func newTailView(loc *time.Location, o tailViewOptions) tailView {
+	v := tailView{Loc: loc, Layout: tailClockLayout, FullSource: o.fullSource}
+	if o.iso {
 		v.Layout = time.RFC3339
 	}
+	if o.decorate {
+		v.Decor = newTailDecor()
+	}
+	if !o.all {
+		// The latch is the view's: it remembers the townhealth line this
+		// view last showed, not one an earlier run showed.
+		latch := &tailTownHealthLatch{}
+		v.Show = func(l tailLine) bool { return tailVisible(l) && latch.visible(l.Text) }
+	}
 	return v
+}
+
+// tailColorMode is what --color selects.
+type tailColorMode string
+
+const (
+	tailColorAuto   tailColorMode = "auto"
+	tailColorNever  tailColorMode = "never"
+	tailColorAlways tailColorMode = "always"
+)
+
+// parseTailColor reads --color.
+func parseTailColor(s string) (tailColorMode, error) {
+	switch mode := tailColorMode(strings.TrimSpace(s)); mode {
+	case tailColorAuto, tailColorNever, tailColorAlways:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("--color %q: want auto, never or always", s)
+	}
+}
+
+// tailDecorate reports whether the stream colors its lines and tags them with
+// an emoji. auto follows the terminal conventions the rest of the CLI uses
+// (NO_COLOR, CLICOLOR, GT_NO_EMOJI, and stdout being a terminal); the
+// explicit modes answer for the operator instead.
+func tailDecorate(mode tailColorMode) bool {
+	switch mode {
+	case tailColorNever:
+		return false
+	case tailColorAlways:
+		return true
+	}
+	return ui.ShouldUseColor() && ui.ShouldUseEmoji()
 }
 
 // tailOptions selects gt tail's sources.
@@ -226,22 +306,90 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 }
 
 // tailView is how the stream is shown: the zone and layout of each line's
-// time (RFC3339 when Layout is empty) and which lines print (all when Show is
-// nil).
+// time (RFC3339 when Layout is empty), which lines print (all when Show is
+// nil), how the source is written (one short tag unless FullSource), and how
+// the line is drawn (plain unless Decor).
 type tailView struct {
-	Loc    *time.Location
-	Layout string
-	Show   func(tailLine) bool
+	Loc        *time.Location
+	Layout     string
+	Show       func(tailLine) bool
+	FullSource bool
+	Decor      *tailDecor
 }
 
 // tailClockLayout is the default time column: the day is the operator's own.
 const tailClockLayout = "15:04:05"
 
+// The emoji a class is tagged with. They are the operator's own vocabulary
+// for the stream, not the CLI's icon set: ✅ for something that landed, ❌ for
+// something that broke, ⚠️ for something to look at, 🛬 for a landing still
+// in the air, 🚀 for a dispatch, 🔁 for a restart.
+const (
+	tailIconSuccess  = "✅"
+	tailIconFailure  = "❌"
+	tailIconWarning  = "⚠️"
+	tailIconLanding  = "🛬"
+	tailIconDispatch = "🚀"
+	tailIconRestart  = "🔁"
+)
+
+// tailDecor draws a line's class: the color its text takes and the emoji that
+// tags it. A nil decor draws neither, which is what a pipe gets.
+//
+// The styles come from internal/style, so gt tail colors the town the way the
+// rest of the CLI does. They are bound to a renderer gt tail owns rather than
+// the process-wide one, because --color=always has to draw color on a stream
+// lipgloss would otherwise decide is not a terminal.
+type tailDecor struct {
+	classes [tailClassCount]tailClassDraw
+}
+
+// tailClassDraw is how one class is drawn. The plain class carries no emoji:
+// the routine lines stay quiet, and are dimmed so a classified line stands
+// out of them.
+type tailClassDraw struct {
+	icon  string
+	style lipgloss.Style
+}
+
+func newTailDecor() *tailDecor {
+	r := lipgloss.NewRenderer(os.Stdout)
+	r.SetColorProfile(termenv.TrueColor)
+	r.SetHasDarkBackground(ui.HasDarkBackground())
+	return &tailDecor{classes: [tailClassCount]tailClassDraw{
+		tailClassPlain:    {style: style.Dim.Renderer(r)},
+		tailClassSuccess:  {icon: tailIconSuccess, style: style.Success.Renderer(r)},
+		tailClassFailure:  {icon: tailIconFailure, style: style.Error.Renderer(r)},
+		tailClassWarning:  {icon: tailIconWarning, style: style.Warning.Renderer(r)},
+		tailClassLanding:  {icon: tailIconLanding, style: style.Info.Renderer(r)},
+		tailClassDispatch: {icon: tailIconDispatch, style: style.Info.Renderer(r)},
+		tailClassRestart:  {icon: tailIconRestart, style: style.Warning.Renderer(r)},
+	}}
+}
+
+// icon is the emoji the class is tagged with, or "" (the plain class, or a
+// view that draws no decor).
+func (d *tailDecor) icon(c tailClass) string {
+	if d == nil {
+		return ""
+	}
+	return d.classes[c].icon
+}
+
+// paint draws text in the class's color, or returns it unchanged when the
+// view draws no decor.
+func (d *tailDecor) paint(c tailClass, text string) string {
+	if d == nil {
+		return text
+	}
+	return d.classes[c].style.Render(text)
+}
+
 // pollTailSources polls every source at once and returns each one's batch in
 // source order, so a store's bd call does not wait on the one before it. The
-// callback runs as each source finishes, and the sources the daemon and the
-// landings file answer from disk finish first.
-func pollTailSources(sources []tailSource, done func(i int, lines []tailLine)) [][]tailLine {
+// sources answer from disk (the daemon log, the landings files) first, and
+// each bd read takes as long as its own budget allows.
+func pollTailSources(sources []tailSource) [][]tailLine {
 	out := make([][]tailLine, len(sources))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -253,9 +401,6 @@ func pollTailSources(sources []tailSource, done func(i int, lines []tailLine)) [
 			mu.Lock()
 			defer mu.Unlock()
 			out[i] = lines
-			if done != nil {
-				done(i, lines)
-			}
 		}()
 	}
 	wg.Wait()
@@ -264,11 +409,10 @@ func pollTailSources(sources []tailSource, done func(i int, lines []tailLine)) [
 
 // runTailStream polls every source and prints the merged batch; with follow
 // it polls again on each tick until ctx ends. The sources are polled
-// concurrently. The first poll of a follow prints each source's backlog as it
-// arrives, so the daemon and landings lines show at once and the journals
-// join when their bd reads finish; every other batch is merged and sorted on
-// its own, so a line that reaches a source late prints after lines already
-// shown. A failed write (a closed pipe) ends the stream with its error.
+// concurrently and each poll's batch is merged and sorted on its own, so the
+// first poll of a follow prints one backlog in time order across every source
+// and a later line prints after the lines already shown. A failed write (a
+// closed pipe) ends the stream with its error.
 func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, view tailView) error {
 	bw := bufio.NewWriter(w)
 	show := func(lines []tailLine) error {
@@ -276,7 +420,7 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 			if view.Show != nil && !view.Show(l) {
 				continue
 			}
-			if _, err := bw.WriteString(renderTailLine(l, view.Loc, view.Layout) + "\n"); err != nil {
+			if _, err := bw.WriteString(view.renderLine(l) + "\n"); err != nil {
 				return err
 			}
 		}
@@ -284,7 +428,7 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 	}
 	emit := func(extra []tailLine) error {
 		all := extra
-		for _, b := range pollTailSources(sources, nil) {
+		for _, b := range pollTailSources(sources) {
 			all = append(all, b...)
 		}
 		return show(all)
@@ -292,17 +436,8 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 	if !follow {
 		return emit(preface)
 	}
-	if err := show(preface); err != nil {
+	if err := emit(preface); err != nil {
 		return err
-	}
-	var writeErr error
-	pollTailSources(sources, func(_ int, lines []tailLine) {
-		if writeErr == nil {
-			writeErr = show(lines)
-		}
-	})
-	if writeErr != nil {
-		return writeErr
 	}
 	for {
 		select {
@@ -356,15 +491,36 @@ func mergeTail(batches ...[]tailLine) []tailLine {
 	return out
 }
 
-// renderTailLine formats one line in loc, its time in layout (RFC3339 when
-// empty). Rig and kind are single tokens and the text has no control
-// characters, so every record is exactly one line and the first three fields
-// can be cut or grepped by position.
-func renderTailLine(l tailLine, loc *time.Location, layout string) string {
+// renderLine formats one line: the time in the view's layout (RFC3339 when
+// empty), the source, and the text. The source is one short tag — the rig, or
+// "town" for the daemon — or the "<rig> <kind>" pair when the view keeps the
+// full source. A decorated view puts the class's emoji between the source and
+// the text and draws the text in the class's color.
+//
+// The rig and kind are single tokens and the text has no control characters,
+// so every record is exactly one line and, with --verbose, the first three
+// fields can be cut or grepped by position.
+func (v tailView) renderLine(l tailLine) string {
+	layout := v.Layout
 	if layout == "" {
 		layout = time.RFC3339
 	}
-	return l.At.In(loc).Format(layout) + " " + tailToken(l.Rig) + " " + tailToken(l.Kind) + " " + tailText(l.Text)
+	var b strings.Builder
+	b.WriteString(l.At.In(v.Loc).Format(layout))
+	b.WriteByte(' ')
+	b.WriteString(tailToken(l.Rig))
+	if v.FullSource {
+		b.WriteByte(' ')
+		b.WriteString(tailToken(l.Kind))
+	}
+	class := tailClassOf(l.Text)
+	if icon := v.Decor.icon(class); icon != "" {
+		b.WriteByte(' ')
+		b.WriteString(icon)
+	}
+	b.WriteByte(' ')
+	b.WriteString(v.Decor.paint(class, tailText(l.Text)))
+	return b.String()
 }
 
 func tailToken(s string) string {
