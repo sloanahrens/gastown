@@ -267,7 +267,7 @@ func realSlingDeps() *slingDeps {
 		enqueueNudge:       nudge.Enqueue,
 
 		findHookedFormula: findHookedFormulaSingletonFn,
-		cookFormula:       cookStandaloneFormula,
+		cookFormula:       CookFormula,
 		createWisp:        createFormulaWisp,
 		hookWisp:          hookBeadWithRetryFn,
 		burnWisp:          burnSlingWispFn,

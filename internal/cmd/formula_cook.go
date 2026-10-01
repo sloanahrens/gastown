@@ -101,6 +101,8 @@ type formulaSite struct {
 type formulaEngine interface {
 	Cook(formula string, vars []string) ([]byte, error)
 	Bond(proto, beadID string, vars []string) ([]byte, error)
+	FormulaShow(formula string) ([]byte, error)
+	Wisp(formula string, vars []string) ([]byte, error)
 }
 
 // bdFormulaEngine is the bd on PATH at site: run from site.dir, pinned to

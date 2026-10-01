@@ -36,6 +36,29 @@ func (b *Beads) Bond(proto, beadID string, vars []string) ([]byte, error) {
 	return out, nil
 }
 
+// FormulaShow returns what bd formula show prints for formula. bd can exit
+// 0 for a formula it did not find, printing nothing (or a JSON null), so a
+// caller checks the output too.
+func (b *Beads) FormulaShow(formula string) ([]byte, error) {
+	out, err := b.run("formula", "show", formula)
+	if err != nil {
+		return nil, withBDMessage(err)
+	}
+	return out, nil
+}
+
+// Wisp instantiates formula with vars as an ephemeral wisp (bd mol wisp)
+// and returns bd's JSON answer, which names the wisp's root. Failures read
+// as Cook's do.
+func (b *Beads) Wisp(formula string, vars []string) ([]byte, error) {
+	args := append([]string{"mol", "wisp", formula}, varArgs(vars)...)
+	out, err := b.run(append(args, "--json")...)
+	if err != nil {
+		return nil, withBDMessage(err)
+	}
+	return out, nil
+}
+
 // varArgs is vars as bd's repeated --var flags.
 func varArgs(vars []string) []string {
 	args := make([]string, 0, 2*len(vars))

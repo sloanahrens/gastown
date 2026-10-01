@@ -13,6 +13,12 @@ type slingFake struct {
 }
 
 func (f slingFake) DetachMoleculeWithAudit(id string, _ beads.DetachOptions) (*beads.Issue, error) {
+	return fakeDetach(f, id)
+}
+
+// fakeDetach clears id's attachment fields in c the way
+// (*beads.Beads).DetachMoleculeWithAudit does, without the audit log.
+func fakeDetach(f beads.Client, id string) (*beads.Issue, error) {
 	issue, err := f.Show(id)
 	if err != nil {
 		return nil, err

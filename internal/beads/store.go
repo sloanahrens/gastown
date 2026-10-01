@@ -243,9 +243,19 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 		Limit: opts.Limit,
 	}
 
-	if opts.Status != "" && opts.Status != "all" {
+	switch {
+	case opts.Status == "" || opts.Status == "all":
+	case strings.Contains(opts.Status, ","):
+		for _, s := range strings.Split(opts.Status, ",") {
+			f.Statuses = append(f.Statuses, beadsdk.Status(s))
+		}
+	default:
 		status := beadsdk.Status(opts.Status)
 		f.Status = &status
+	}
+	if !opts.ClosedAfter.IsZero() {
+		after := opts.ClosedAfter
+		f.ClosedAfter = &after
 	}
 
 	// Prefer Label; fall back to deprecated Type
