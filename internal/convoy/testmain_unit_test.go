@@ -11,7 +11,7 @@ import (
 
 // TestMain runs the unit tier under the hermetic harness with no container:
 // every beads store a unit test touches is an in-memory one (fakeRigStore),
-// and bd and gt calls go to in-process scripts (bdScript, gtScript,
+// and bd and notice calls go to in-process scripts (bdScript, noticeScript,
 // slingLog). Git on PATH refuses to run (internal/testpolicy/gitfree.txt).
 // The Dolt-backed test lives in the integration tier, whose TestMain
 // (testmain_integration_test.go) starts the container.
