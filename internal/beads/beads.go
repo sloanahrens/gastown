@@ -1615,6 +1615,15 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 	return b.run(args...)
 }
 
+// PurgeClosedEphemeral deletes closed ephemeral beads (wisps) closed longer
+// ago than olderThan (a duration such as "48h") and returns bd's output, the
+// count purged. The grace period keeps a just-closed MR bead, and the verdict
+// in its close reason, from being deleted outright (gt-1q46).
+func (b *Beads) PurgeClosedEphemeral(olderThan string) (string, error) {
+	out, err := b.run("purge", "--force", "--quiet", "--older-than", olderThan)
+	return strings.TrimSpace(string(out)), err
+}
+
 // wrapError wraps bd errors with context.
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
 // Exceptions: ErrNotInstalled (exec.ErrNotFound), ErrGuardNotHeld (bd's

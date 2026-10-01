@@ -290,3 +290,8 @@ func TestDoneLeavesReadyToLandBeadOpenWithSubmissionNote(t *testing.T) {
 		t.Fatalf("submission comment = %q, want %q", comments[0].Text, want)
 	}
 }
+
+// envMap is a getenv over a fixed set of variables; any other is unset.
+func envMap(vars map[string]string) func(string) string {
+	return func(k string) string { return vars[k] }
+}

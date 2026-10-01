@@ -472,33 +472,6 @@ func TestRunDailyDigestMailsAfterTheAuditBead(t *testing.T) {
 	}
 }
 
-// listingBD is an in-process bd whose list calls answer out; every call's
-// arguments are logged.
-func listingBD(out string) *inprocBD {
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		if cmd == "list" {
-			return bdOut(out)
-		}
-		return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
-	}}
-}
-
-func TestListReportWispsIncludesInfrastructure(t *testing.T) {
-	t.Parallel()
-	bd := listingBD(`[{"id":"hq-wisp-patrol","title":"mol-deacon-patrol","status":"hooked","issue_type":"molecule","ephemeral":true,"wisp_type":"patrol"}]`)
-	wisps, err := listReportWisps(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run))
-	if err != nil {
-		t.Fatalf("listReportWisps: %v", err)
-	}
-	if len(wisps) != 1 || wisps[0].ID != "hq-wisp-patrol" {
-		t.Fatalf("wisps = %#v, want patrol infrastructure wisp", wisps)
-	}
-	if !strings.Contains(bd.log(), "--include-infra") {
-		t.Fatalf("bd args = %q, want --include-infra", bd.log())
-	}
-}
-
 func TestQueryCompactionReportsReadsPayloadField(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()

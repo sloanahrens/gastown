@@ -1567,7 +1567,7 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 // instance and its preloaded caches — see PreloadAgentBeads/
 // PreloadMergeRequests) drive; the two callers differ only in how many times
 // they call it and whether bd's caches are warmed first.
-func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
+func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
@@ -1943,6 +1943,16 @@ func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, dispositi
 	status.RecoveryActions = recoveryActionsForBlockers(disposition.Blockers)
 }
 
+// recoveryBeads is the bead store check-recovery reads: *beads.Beads, or a
+// beadsfake database with the agent-bead and merge-request helpers in tests.
+type recoveryBeads interface {
+	Show(issueID string) (*beads.Issue, error)
+	GetAssignedIssue(assignee string) (*beads.Issue, error)
+	GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error)
+	FindMRForBranchAny(branch string) (*beads.Issue, error)
+	UpdateAgentCleanupStatus(id string, cleanupStatus string) error
+}
+
 type issueShower interface {
 	Show(issueID string) (*beads.Issue, error)
 }
@@ -2201,7 +2211,7 @@ func isRecoveryBaseBranch(branch string) bool {
 // reuse it instead of re-running the same lookup — FindMRForBranchAny scans
 // every gt:merge-request bead in the rig's Dolt db, so repeating it per
 // check-recovery invocation was a real, measured cost (gt-ct3).
-func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extraIssueIDs ...string) (refs []string, lookupFailed bool, mrForBranch *beads.Issue, mrForBranchErr error) {
+func recoveryTargetRefs(bd recoveryBeads, issueID, activeMR, branch string, extraIssueIDs ...string) (refs []string, lookupFailed bool, mrForBranch *beads.Issue, mrForBranchErr error) {
 	appendMRTarget := func(issue *beads.Issue) {
 		if fields := beads.ParseMRFields(issue); fields != nil && fields.Target != "" {
 			refs = append(refs, fields.Target)
@@ -2241,7 +2251,7 @@ func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extra
 	return uniqueStrings(refs), lookupFailed, mrForBranch, mrForBranchErr
 }
 
-func appendAttachmentTargets(refs *[]string, bd *beads.Beads, issue *beads.Issue) {
+func appendAttachmentTargets(refs *[]string, bd issueShower, issue *beads.Issue) {
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil {
 		return
@@ -2295,7 +2305,7 @@ type mrFinder interface {
 // is in a terminal status (closed/tombstone). Returns false on any lookup
 // failure — callers must only use this to *skip* further escalation, never to
 // escalate, so a false negative is safe.
-func isAssignedBeadTerminal(bd *beads.Beads, issueID string) bool {
+func isAssignedBeadTerminal(bd issueShower, issueID string) bool {
 	if issueID == "" || bd == nil {
 		return false
 	}

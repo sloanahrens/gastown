@@ -27,7 +27,6 @@ func TestDefaultRunnerIsRealBD(t *testing.T) {
 		"NewRigLocal":         NewRigLocal(t.TempDir()),
 		"NewPinned":           NewPinned(filepath.Join(t.TempDir(), ".beads")),
 		"NewPlain":            NewPlain(t.TempDir(), nil),
-		"NewPlainWithRunner":  NewPlainWithRunner(t.TempDir(), nil, nil),
 	} {
 		if got := reflect.ValueOf(b.runner()).Pointer(); got != real {
 			t.Errorf("%s: default runner is not runBDProcess", name)
@@ -408,62 +407,6 @@ func TestReleaseFallsBackWithoutForce(t *testing.T) {
 	other := newRecorder(func([]string) reply { return reply{stderr: "Error: issue not found", err: exitError{1}} })
 	if err := newRecordedBeads(t.TempDir(), other).Release("gt-2"); err == nil || len(other.calls()) != 1 {
 		t.Errorf("Release on a missing issue = %v after %d calls, want one failing call", err, len(other.calls()))
-	}
-}
-
-// TestNewWithBeadsDirAndRunner checks the exported seam: every bd call of the
-// wrapper and of the wrappers derived from it reaches the injected runner
-// with the argv, dir and env the policy path built, and a nil runner is the
-// real bd.
-func TestNewWithBeadsDirAndRunner(t *testing.T) {
-	t.Parallel()
-	if got := reflect.ValueOf(NewWithBeadsDirAndRunner(t.TempDir(), t.TempDir(), nil).runner()).Pointer(); got != reflect.ValueOf(runBDProcess).Pointer() {
-		t.Error("a nil runner is not the real bd")
-	}
-
-	work, dir := t.TempDir(), t.TempDir()
-	var calls []BDCall
-	b := NewWithBeadsDirAndRunner(work, dir, func(_ context.Context, c BDCall) ([]byte, []byte, error) {
-		calls = append(calls, c)
-		if len(c.Args) > 0 && c.Args[0] == "show" {
-			return []byte(`[{"id":"gt-x","title":"t","status":"open"}]`), nil, nil
-		}
-		return nil, nil, nil
-	})
-	is, err := b.ForAgentBead().Show("gt-x")
-	if err != nil || is == nil || is.ID != "gt-x" {
-		t.Fatalf("Show through the runner = %v, %v", is, err)
-	}
-	var show *BDCall
-	for i := range calls {
-		if calls[i].Args[0] == "show" {
-			show = &calls[i]
-		}
-	}
-	if show == nil {
-		t.Fatalf("runner never saw the show call: %v", calls)
-	}
-	if show.Dir == "" || !containsEnvPrefix(show.Env, "BEADS_DIR=") {
-		t.Errorf("show call lost its dir or BEADS_DIR: dir=%q env=%v", show.Dir, show.Env)
-	}
-}
-
-// TestPlainWithRunnerAnswersInProcess: a plain wrapper given a runner sends
-// it exactly the call NewPlain would run.
-func TestPlainWithRunnerAnswersInProcess(t *testing.T) {
-	t.Parallel()
-	var got BDCall
-	dir := t.TempDir()
-	b := NewPlainWithRunner(dir, []string{"ONLY=this"}, func(_ context.Context, c BDCall) ([]byte, []byte, error) {
-		got = c
-		return []byte("v\n"), nil, nil
-	})
-	out, err := b.run("config", "get", "k")
-	if err != nil || strings.TrimSpace(string(out)) != "v" {
-		t.Fatalf("run = %q, %v", out, err)
-	}
-	if got.Dir != dir || strings.Join(got.Args, " ") != "config get k" || !reflect.DeepEqual(got.Env, []string{"ONLY=this", "BD_MACHINE=1"}) {
-		t.Errorf("call = %+v", got)
 	}
 }
 

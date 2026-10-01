@@ -159,11 +159,11 @@ type Manager struct {
 	git gitRepo
 	// gits opens git on other directories: worktrees, the repo base,
 	// branch holders. Its zero value opens *git.Git.
-	gits     gitOpener
-	beads    polecatBeads
+	gits  gitOpener
+	beads polecatBeads
 	// agentBD is beads scoped to agent beads: rig-local first, with the
 	// dual-scope resolution agent-bead helpers need (gt-8we).
-	agentBD polecatBeads
+	agentBD  polecatBeads
 	namePool *NamePool
 	// tmux is nil when the caller has no tmux; NewManager never stores a
 	// typed-nil *tmux.Tmux here, so the nil checks below stay meaningful.

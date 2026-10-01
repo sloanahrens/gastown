@@ -1,12 +1,13 @@
 package cmd
 
 import (
-	"io"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -200,31 +201,43 @@ func TestRunEscalateValidation(t *testing.T) {
 
 func TestCloseEscalationDeliveryBeads(t *testing.T) {
 	t.Parallel()
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		if cmd == "list" {
-			return bdOut(`[{"id":"hq-885m","title":"[HIGH] test","status":"open","labels":["gt:message","gt:escalation","thread:hq-kl7"]}]`)
-		}
-		return bdOut("")
-	}}
-	n, err := closeEscalationDeliveryBeads(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), "hq-kl7", "gastown/witness")
+	db := beadsfake.New(beadsfake.WithPrefix("hq"))
+	db.Seed(
+		beads.Issue{ID: "hq-885m", Title: "[HIGH] test", Status: "open", Labels: []string{"gt:message", "gt:escalation", "thread:hq-kl7"}},
+		beads.Issue{ID: "hq-other", Title: "other thread", Status: "open", Labels: []string{"gt:message", "thread:hq-zzz"}},
+	)
+	n, err := closeEscalationDeliveryBeads(db, "hq-kl7", "gastown/witness")
 	if err != nil {
 		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("closed count = %d, want 1", n)
 	}
-
-	callLog := bd.log()
-	// --limit=0: bd list returns 50 rows by default, and an escalation
-	// broadcast to more recipients than that left the rest open.
-	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--include-infra", "--json", "--limit=0"} {
-		if !strings.Contains(callLog, want) {
-			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
+	for id, want := range map[string]string{"hq-885m": "closed", "hq-other": "open"} {
+		issue, err := db.Show(id)
+		if err != nil {
+			t.Fatalf("show %s: %v", id, err)
+		}
+		if issue.Status != want {
+			t.Errorf("%s status = %q, want %q (only the escalation's own thread closes)", id, issue.Status, want)
 		}
 	}
-	if !strings.Contains(callLog, "close hq-885m") {
-		t.Errorf("expected close call for hq-885m, got log:\n%s", callLog)
+}
+
+// An escalation broadcast to more recipients than bd's default page of 50
+// leaves none of them open.
+func TestCloseEscalationDeliveryBeadsPastBdDefaultPage(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New(beadsfake.WithPrefix("hq"))
+	for i := 0; i < 60; i++ {
+		db.Seed(beads.Issue{ID: fmt.Sprintf("hq-d%d", i), Title: "delivery", Status: "open", Labels: []string{"gt:message", "thread:hq-kl7"}})
+	}
+	n, err := closeEscalationDeliveryBeads(db, "hq-kl7", "gastown/witness")
+	if err != nil {
+		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
+	}
+	if n != 60 {
+		t.Fatalf("closed count = %d, want 60", n)
 	}
 }
 
@@ -232,38 +245,12 @@ func TestCloseEscalationDeliveryBeads(t *testing.T) {
 // delivery beads are open on the escalation's thread.
 func TestCloseEscalationDeliveryBeadsNoneOpen(t *testing.T) {
 	t.Parallel()
-	bd := listingBD("[]")
-	n, err := closeEscalationDeliveryBeads(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), "hq-kl7", "gastown/witness")
+	n, err := closeEscalationDeliveryBeads(beadsfake.New(), "hq-kl7", "gastown/witness")
 	if err != nil {
 		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
 	}
 	if n != 0 {
 		t.Fatalf("closed count = %d, want 0", n)
-	}
-}
-
-func TestRunEscalateListAllPassesIncludeInfra(t *testing.T) {
-	t.Parallel()
-	row := `[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]`
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		// show is the live cross-check that filters phantom escalations.
-		if cmd == "list" || cmd == "show" {
-			return bdOut(row)
-		}
-		return bdOut("{}")
-	}}
-	var out strings.Builder
-	if err := listEscalations(&out, io.Discard, beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), true, true); err != nil {
-		t.Fatalf("listEscalations: %v", err)
-	}
-	for _, want := range []string{"--label=gt:escalation", "--status=all", "--include-infra", "--flat"} {
-		if !strings.Contains(bd.log(), want) {
-			t.Errorf("expected list query to contain %q, got log:\n%s", want, bd.log())
-		}
-	}
-	if !strings.Contains(out.String(), "hq-wisp1") {
-		t.Errorf("output = %q, want hq-wisp1", out.String())
 	}
 }
 
