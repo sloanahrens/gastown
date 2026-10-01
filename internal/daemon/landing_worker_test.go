@@ -173,6 +173,41 @@ func TestGitRemoteReadsTheTargetOnOrigin(t *testing.T) {
 	}
 }
 
+// A direct push is seen on origin only: the post-land run fetches the target
+// so the worktree can be added at the pushed commit (gt-p2rs0).
+func TestPostLandFetchBringsADirectPushIntoTheRigRepo(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	root := t.TempDir()
+	origin, bare := filepath.Join(root, "origin.git"), filepath.Join(root, ".repo.git")
+	f.InitBare(t, origin)
+	seed := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	if err := f.Open(root).CloneBareWithBranch(origin, bare, "main"); err != nil {
+		t.Fatal(err)
+	}
+	pushed := f.Commit(t, origin, "main", "direct push", map[string]string{"b.txt": "b\n"})
+	g := f.Open(bare)
+	if have, _ := g.RefExists(pushed + "^{commit}"); have {
+		t.Fatal("fixture: the rig repo already has the pushed commit")
+	}
+
+	if err := postLandFetch(g, "origin", landworker.PostLand{Commit: pushed, Target: "main", Direct: true, From: seed}); err != nil {
+		t.Fatalf("postLandFetch: %v", err)
+	}
+	if have, err := g.RefExists(pushed + "^{commit}"); err != nil || !have {
+		t.Fatalf("pushed commit in the rig repo after the fetch = %v, %v", have, err)
+	}
+	if err := g.WorktreeAddDetached(filepath.Join(root, "wt"), pushed); err != nil {
+		t.Fatalf("worktree at the pushed commit: %v", err)
+	}
+	if err := postLandFetch(g, "origin", landworker.PostLand{Commit: seed, Target: "no-such-branch"}); err != nil {
+		t.Errorf("a commit already present fetched anyway: %v", err)
+	}
+	if err := postLandFetch(g, "origin", landworker.PostLand{Commit: strings.Repeat("e", 40), Target: "main"}); err == nil {
+		t.Error("a commit not on origin after the fetch was accepted")
+	}
+}
+
 func TestPostLandRerunCommandMatchesTheTier(t *testing.T) {
 	t.Parallel()
 	const pkg = "github.com/steveyegge/gastown/internal/cmd"

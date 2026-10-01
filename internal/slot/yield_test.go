@@ -351,7 +351,7 @@ func TestYield_StaleGateMarkerStillYields(t *testing.T) {
 
 	// Inherited from a landing hold on slot 1 that has since ended.
 	child := tg.child()
-	child.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "mango/landing", foreignPID()+7))
+	armReentrant(child.env, town, 1, "mango/landing", foreignPID()+7)
 
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)

@@ -434,6 +434,9 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 		}
 		defer func() { _ = os.RemoveAll(parent) }()
 		g := git.NewGit(repo)
+		if err := postLandFetch(g, "origin", pl); err != nil {
+			return landworker.PostLandResult{ExitCode: -1, Err: err}
+		}
 		dir := filepath.Join(parent, "wt")
 		if err := g.WorktreeAddDetached(dir, pl.Commit); err != nil {
 			return landworker.PostLandResult{ExitCode: -1, Err: fmt.Errorf("worktree at %s: %w", pl.Commit, err)}
@@ -457,6 +460,30 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 		step := res.Steps[len(res.Steps)-1]
 		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages}
 	}
+}
+
+// postLandFetch makes pl.Commit present in the rig repository before a
+// worktree is added at it. A landing's commit is already there (Land built
+// it in that repository), but a direct push is only seen on origin, so the
+// target is fetched when the commit is missing (gt-p2rs0).
+func postLandFetch(g landingRemoteGit, remote string, pl landworker.PostLand) error {
+	if have, err := g.RefExists(pl.Commit + "^{commit}"); err != nil {
+		return fmt.Errorf("reading %s in the rig repository: %w", pl.Commit, err)
+	} else if have {
+		return nil
+	}
+	if pl.Target == "" {
+		return fmt.Errorf("%s is not in the rig repository and no target names where to fetch it from", pl.Commit)
+	}
+	if err := g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", pl.Target, remote, pl.Target), landingRemoteFetchTimeout); err != nil {
+		return fmt.Errorf("fetching %s/%s for %s: %w", remote, pl.Target, pl.Commit, err)
+	}
+	if have, err := g.RefExists(pl.Commit + "^{commit}"); err != nil {
+		return fmt.Errorf("reading %s in the rig repository: %w", pl.Commit, err)
+	} else if !have {
+		return fmt.Errorf("%s is not on %s/%s after fetching it", pl.Commit, remote, pl.Target)
+	}
+	return nil
 }
 
 // postLandPackageRE is what a package path from go test output must look like
