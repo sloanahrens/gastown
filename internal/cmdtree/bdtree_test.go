@@ -11,9 +11,8 @@ func TestLoadBdTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
-	if snap.ContractVersion != 1 {
-		t.Errorf("contract_version = %d; want 1 (refresh the snapshot and this test together)", snap.ContractVersion)
-	}
+	// internal/deps TestBdCommandTreeSnapshotMatchesContract pins
+	// snap.ContractVersion to the handshake's known contracts.
 	if snap.Commit == "" || snap.Source == "" {
 		t.Errorf("snapshot provenance missing: source=%q commit=%q", snap.Source, snap.Commit)
 	}

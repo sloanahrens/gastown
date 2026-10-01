@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 // fakeExit is a bd exit status as a BDRunner reports it.
@@ -204,4 +206,26 @@ func containsEnv(env []string, kv string) bool {
 		}
 	}
 	return false
+}
+
+// TestBdCommandTreeSnapshotMatchesContract ties the command-tree lint's bd
+// snapshot (internal/cmdtree/bd-command-tree.json) to the handshake: the
+// snapshot must come from a bd whose contract is the newest one this gt
+// accepts. Adding a contract version here without refreshing the snapshot
+// (make bd-command-tree), or refreshing it from a bd on a contract the
+// handshake would refuse, fails.
+func TestBdCommandTreeSnapshotMatchesContract(t *testing.T) {
+	t.Parallel()
+	_, snap, err := cmdtree.LoadBdTree()
+	if err != nil {
+		t.Fatalf("LoadBdTree: %v", err)
+	}
+	newest := 0
+	for _, v := range KnownBDContractVersions {
+		newest = max(newest, v)
+	}
+	if snap.ContractVersion != newest {
+		t.Fatalf("bd-command-tree.json is from %s at contract_version %d; the handshake's newest known contract is %d (KnownBDContractVersions %v): refresh the snapshot with make bd-command-tree, or fix KnownBDContractVersions",
+			snap.Source, snap.ContractVersion, newest, KnownBDContractVersions)
+	}
 }
