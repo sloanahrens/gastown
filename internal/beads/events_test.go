@@ -98,14 +98,12 @@ func TestEventsTail_RefusesUnreadableOutput(t *testing.T) {
 	}
 }
 
-// Every bd process gastown starts journals its mutations, whatever the
-// workspace's config.yaml says: the convoy manager reads closes from the
-// journal (gt-7iwy0.2), and the rig config.yaml that would turn it on is
-// git-tracked in mayor/rig.
-func TestSuppressBDSideEffects_EnablesEventsJournal(t *testing.T) {
+// The store's config.yaml alone turns the events journal on (gt-7iwy0.7):
+// gastown neither forces it nor passes an inherited override through.
+func TestSuppressBDSideEffects_LeavesEventsJournalToConfig(t *testing.T) {
 	t.Parallel()
 	env := SuppressBDSideEffects([]string{"BD_EVENTS_JOURNAL=0"})
-	if v, _ := lastEnvValue(env, "BD_EVENTS_JOURNAL"); v != "1" {
-		t.Errorf("BD_EVENTS_JOURNAL = %q, want 1", v)
+	if v, ok := lastEnvValue(env, "BD_EVENTS_JOURNAL"); ok {
+		t.Errorf("BD_EVENTS_JOURNAL = %q, want unset", v)
 	}
 }

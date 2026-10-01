@@ -1455,7 +1455,7 @@ type storeProbe interface {
 	// EventsTail reads the events journal; the check reads one record.
 	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 	// JournalConfig is events-journal as the store's config.yaml sets it,
-	// read without gastown's BD_EVENTS_JOURNAL override.
+	// read without any inherited BD_EVENTS_JOURNAL.
 	JournalConfig() (string, error)
 }
 
@@ -1524,7 +1524,8 @@ func parseConfigGetValue(out []byte) (string, error) {
 // is not the level bd migrates to (bdSchema), or whose events journal bd
 // cannot read. It compares schema integers read from schema_migrations, the
 // table bd advances (B5-02). A journal left off in a store's config.yaml is
-// passed to warn, not refused: gastown's own bd calls journal regardless.
+// passed to warn, not refused: closes in that store wait for the stranded
+// scan, and gt doctor --check events-journal is the check that fails it.
 func checkBeadsStoreCompatibility(ctx context.Context, townRoot string, names []string, bdSchema int, probeFor func(townRoot, name string) (storeProbe, error), warn func(string)) error {
 	if len(names) == 0 {
 		return nil
@@ -1578,9 +1579,9 @@ func checkSingleBeadsStoreCompatibility(ctx context.Context, townRoot, name stri
 
 	switch v, err := probe.JournalConfig(); {
 	case err != nil:
-		warning = fmt.Sprintf("%s: cannot read events-journal from its config (%v); bd calls made outside gt may not journal, so convoy closes they make wait for the stranded scan. Check with bd config get events-journal; enable with bd config set events-journal true", label, err)
+		warning = fmt.Sprintf("%s: cannot read events-journal from its config (%v); if the journal is off, convoy closes there wait for the stranded scan. Check with bd config get events-journal; enable with bd config set events-journal true", label, err)
 	case v != "true":
-		warning = fmt.Sprintf("%s: events journal is off in its config.yaml (events-journal=%q): closes made by bd calls outside gt are not journaled and wait for the stranded scan. Enable with bd config set events-journal true in that beads directory and commit the config.yaml", label, v)
+		warning = fmt.Sprintf("%s: events journal is off in its config.yaml (events-journal=%q): closes there are not journaled and wait for the stranded scan. Enable with bd config set events-journal true in that beads directory and commit the config.yaml", label, v)
 	}
 	return problem, warning
 }

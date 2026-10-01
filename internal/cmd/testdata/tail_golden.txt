@@ -4,5 +4,5 @@
 2026-09-30T08:52:00-05:00 gastown events close gt-1 status=closed actor=gastown/polecats/opal seq=3
 2026-09-30T08:55:00-05:00 gastown landings landed gt-1 polecat/opal/gt-1 -> main commit=33333333 patch=44444444 gate=pass om=approve/0.92 route=worker
 2026-09-30T08:58:00-05:00 hq events create hq-9 status=open actor=mayor seq=41
-2026-09-30T09:00:00-05:00 gastown events journal off in config (events-journal=false): only mutations made through gt are journaled
+2026-09-30T09:00:00-05:00 gastown events journal off in config (events-journal=false): nothing is journaled
 2026-09-30T09:00:00-05:00 hm events read failed: bd events tail: exit status 25

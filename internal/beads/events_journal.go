@@ -18,9 +18,9 @@ func EventsJournalOn(v string) bool {
 	return err == nil && on
 }
 
-// EventsJournalProbeEnv is env pinned to beadsDir with gastown's own
-// BD_EVENTS_JOURNAL override removed, so bd answers events-journal from the
-// store's config rather than from gt's environment.
+// EventsJournalProbeEnv is env pinned to beadsDir with any inherited
+// BD_EVENTS_JOURNAL removed, so bd answers events-journal from the store's
+// config rather than from the caller's environment.
 func EventsJournalProbeEnv(env []string, beadsDir string) []string {
 	env = StripEnvKey(StripEnvKey(env, "BD_EVENTS_JOURNAL"), "BEADS_DIR")
 	return append(env, "BEADS_DIR="+beadsDir)

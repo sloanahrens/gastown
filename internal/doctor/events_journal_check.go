@@ -12,10 +12,9 @@ import (
 )
 
 // EventsJournalCheck fails when a store's config leaves bd's events journal
-// off. The convoy manager polls the journal (gt-7iwy0.2); gastown's own bd
-// calls journal regardless (BD_EVENTS_JOURNAL=1), but a close an agent makes
-// with bd directly reaches the journal only when the store's config.yaml turns
-// it on (gt-7iwy0.7). The value is read with gastown's override removed.
+// off. The convoy manager polls the journal (gt-7iwy0.2), and a close reaches
+// it only when the store's config.yaml turns it on (gt-7iwy0.7). The value is
+// read with any inherited BD_EVENTS_JOURNAL removed.
 type EventsJournalCheck struct {
 	BaseCheck
 	// environ is the environment bd runs under before the check pins it to
