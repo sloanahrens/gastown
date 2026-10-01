@@ -167,7 +167,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			os.Setenv(k, v)
 		}
 	}
-	config.ApplyConfiguredDoltEnv(townRoot)
+	applyConfiguredDoltEnv(townRoot)
 
 	allOK := true
 	var services []ServiceStatus
@@ -383,6 +383,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// applyConfiguredDoltEnv points gt up's own environment at the target
+// town's managed Dolt endpoint: every server and agent gt up starts inherits
+// this process's environment.
+func applyConfiguredDoltEnv(townRoot string) {
+	doltEnv := config.ConfiguredDoltEnv(townRoot)
+	for _, key := range config.DoltEndpointEnvKeys {
+		_ = os.Unsetenv(key)
+	}
+	for key, value := range doltEnv {
+		_ = os.Setenv(key, value)
+	}
 }
 
 func printStatus(name string, ok bool, detail string) {

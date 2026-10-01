@@ -451,21 +451,28 @@ func normalizeConfiguredDoltEnv(base []string, townRoot string, getenv func(stri
 	return base
 }
 
-// ApplyConfiguredDoltEnv applies NormalizeConfiguredDoltEnv to the current
-// process environment for target-town startup boundaries.
-func ApplyConfiguredDoltEnv(townRoot string) {
-	normalized := NormalizeConfiguredDoltEnv(os.Environ(), townRoot)
-	for _, key := range []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
-		//testpolicy:allow prod-no-setenv — gt up's target-town startup boundary: the servers and agents it spawns inherit this process's environment, which is what this function rewrites
-		_ = os.Unsetenv(key)
-	}
-	for _, entry := range normalized {
+// DoltEndpointEnvKeys are the environment variables that name a Dolt
+// endpoint. A target-town startup boundary unsets all of them before
+// exporting ConfiguredDoltEnv.
+var DoltEndpointEnvKeys = []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+
+// ConfiguredDoltEnv returns the Dolt endpoint variables a target-town startup
+// boundary (gt up, the daemon) exports to the children it spawns: the endpoint
+// keys of NormalizeConfiguredDoltEnv applied to the current process
+// environment. The caller unsets DoltEndpointEnvKeys and then sets these.
+func ConfiguredDoltEnv(townRoot string) map[string]string {
+	return configuredDoltEnv(os.Environ(), townRoot, os.Getenv)
+}
+
+func configuredDoltEnv(environ []string, townRoot string, getenv func(string) string) map[string]string {
+	env := make(map[string]string)
+	for _, entry := range normalizeConfiguredDoltEnv(environ, townRoot, getenv) {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && isDoltEndpointEnvKey(key) {
-			//testpolicy:allow prod-no-setenv — see the Unsetenv above: gt up's children inherit this process's environment
-			os.Setenv(key, value)
+			env[key] = value
 		}
 	}
+	return env
 }
 
 func stripDoltEndpointEnv(env []string) []string {
@@ -481,7 +488,7 @@ func stripDoltEndpointEnv(env []string) []string {
 }
 
 func isDoltEndpointEnvKey(key string) bool {
-	for _, want := range []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+	for _, want := range DoltEndpointEnvKeys {
 		if runtime.GOOS == "windows" {
 			if strings.EqualFold(key, want) {
 				return true
