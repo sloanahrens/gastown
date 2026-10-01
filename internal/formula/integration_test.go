@@ -6,28 +6,24 @@ import (
 	"testing"
 )
 
-// TestParseRealFormulas tests parsing all embedded formula files.
-// Composition formulas (extends/compose) are now also resolved and validated.
+// TestParseRealFormulas parses every embedded formula with Parse, with no
+// skip list: any formula gt's loaders cannot read fails here (gt-2yaks).
+// Composition formulas (extends/compose) are also resolved and validated.
 func TestParseRealFormulas(t *testing.T) {
 	t.Parallel()
-	// Formulas that use aspect-oriented features not yet implemented.
-	skipFormulas := map[string]string{
-		"security-audit.formula.toml": "uses aspect-oriented features (advice/pointcuts)",
-	}
-
 	entries, err := fs.ReadDir(formulasFS, "formulas")
 	if err != nil {
 		t.Fatalf("reading embedded formulas: %v", err)
 	}
 
+	parsed := 0
 	for _, entry := range entries {
+		// Non-formula files (gate-bead-instructions.md) share the directory.
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".formula.toml") {
 			continue
 		}
+		parsed++
 		name := entry.Name()
-		if _, excluded := skipFormulas[name]; excluded {
-			continue
-		}
 		t.Run(name, func(t *testing.T) {
 
 			data, err := formulasFS.ReadFile("formulas/" + name)
@@ -78,7 +74,15 @@ func TestParseRealFormulas(t *testing.T) {
 					t.Error("Expansion formula has no templates")
 				}
 				t.Logf("Expansion formula with %d templates", len(f.Template))
+			case TypeAspect:
+				if len(f.Aspects) == 0 && len(f.Advice) == 0 {
+					t.Error("Aspect formula has no aspects or advice")
+				}
+				t.Logf("Aspect formula with %d advice rules", len(f.Advice))
 			}
 		})
+	}
+	if parsed == 0 {
+		t.Fatal("no embedded *.formula.toml files found")
 	}
 }

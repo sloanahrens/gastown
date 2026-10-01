@@ -148,6 +148,22 @@ title = "Maintainability Review"
 focus = "Code clarity and documentation"
 ```
 
+An aspect formula may instead be bd's cross-cutting form: `[[advice]]` rules
+(with optional `[[pointcuts]]`) and no `[[aspects]]`. Another formula applies
+it through `compose.aspects`, and `bd cook` inserts the advice steps around
+matching targets. `security-audit` is this form.
+
+```toml
+formula = "security-audit"
+type = "aspect"
+
+[[advice]]
+target = "implement"
+[[advice.around.before]]
+id = "{step.id}-security-prescan"
+title = "Security prescan for {step.id}"
+```
+
 ## Command Allowlists
 
 A formula may declare the only shell commands a run of it should need

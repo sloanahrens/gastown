@@ -51,7 +51,7 @@ func (f *Formula) inferType() {
 		f.Type = TypeConvoy
 	} else if len(f.Template) > 0 {
 		f.Type = TypeExpansion
-	} else if len(f.Aspects) > 0 {
+	} else if len(f.Aspects) > 0 || len(f.Advice) > 0 {
 		f.Type = TypeAspect
 	}
 }
@@ -201,8 +201,15 @@ func (f *Formula) validateExpansion() error {
 }
 
 func (f *Formula) validateAspect() error {
-	if len(f.Aspects) == 0 {
-		return fmt.Errorf("aspect formula requires at least one aspect")
+	// bd's aspect formulas are advice-only (security-audit), so either form
+	// satisfies the type.
+	if len(f.Aspects) == 0 && len(f.Advice) == 0 {
+		return fmt.Errorf("aspect formula requires at least one aspect or advice rule")
+	}
+	for i, rule := range f.Advice {
+		if rule.Target == "" {
+			return fmt.Errorf("advice[%d] missing required target field", i)
+		}
 	}
 
 	// Check aspect IDs are unique

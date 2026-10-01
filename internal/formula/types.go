@@ -5,7 +5,7 @@
 //   - convoy: Parallel execution of legs with synthesis
 //   - workflow: Sequential steps with dependencies
 //   - expansion: Template-based step generation
-//   - aspect: Multi-aspect parallel analysis (like convoy but for analysis)
+//   - aspect: Multi-aspect parallel analysis, or bd advice rules (security-audit)
 package formula
 
 import "fmt"
@@ -20,7 +20,8 @@ const (
 	TypeWorkflow FormulaType = "workflow"
 	// TypeExpansion is an expansion formula with template-based steps.
 	TypeExpansion FormulaType = "expansion"
-	// TypeAspect is an aspect-based formula for multi-aspect parallel analysis.
+	// TypeAspect is multi-aspect parallel analysis ([[aspects]]) or a bd
+	// cross-cutting concern ([[advice]]) applied via compose.aspects.
 	TypeAspect FormulaType = "aspect"
 )
 
@@ -64,6 +65,38 @@ type Formula struct {
 
 	// Aspect-specific (similar to convoy but for analysis)
 	Aspects []Aspect `toml:"aspects"`
+
+	// Advice and Pointcuts carry bd's cross-cutting aspect form: advice
+	// inserts steps around matching targets when another formula lists this
+	// one in compose.aspects. bd cooks it; gt only parses and validates it.
+	Advice    []AdviceRule `toml:"advice"`
+	Pointcuts []Pointcut   `toml:"pointcuts"`
+}
+
+// AdviceRule inserts steps before, after, or around steps matching Target.
+type AdviceRule struct {
+	Target string        `toml:"target"`
+	Before *AdviceStep   `toml:"before"`
+	After  *AdviceStep   `toml:"after"`
+	Around *AroundAdvice `toml:"around"`
+}
+
+// AdviceStep is a step inserted by advice. ID and Title support {step.id}.
+type AdviceStep struct {
+	ID          string `toml:"id"`
+	Title       string `toml:"title"`
+	Description string `toml:"description"`
+}
+
+// AroundAdvice wraps a target with steps before and after it.
+type AroundAdvice struct {
+	Before []AdviceStep `toml:"before"`
+	After  []AdviceStep `toml:"after"`
+}
+
+// Pointcut is a step-ID glob an aspect formula applies to.
+type Pointcut struct {
+	Glob string `toml:"glob"`
 }
 
 // ComposeRules defines how a formula can be composed with others.
