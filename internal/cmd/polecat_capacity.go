@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -214,7 +215,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	}
 	rigMax := configuredRigMaxPolecats(townRoot, rigName)
 	if max <= 0 && rigMax <= 0 {
-		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
+		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}, nil
 	}
 
 	lock, err := acquirePolecatAdmissionLock(townRoot)
@@ -230,7 +231,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	// A town cap needs the whole-town snapshot; a rig cap alone (the direct
 	// dispatch case) only needs that rig counted, so it never pays for a scan
 	// of every rig in the town.
-	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max > 0 {
 		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(townRoot)
 		if err != nil {
@@ -314,7 +315,7 @@ func configuredRigMaxPolecats(townRoot, rigName string) int {
 	// Built the same way rig.Manager.loadRig builds it (name, path, beads
 	// config), which is the identity `gt rig config show` resolves the three
 	// config layers against.
-	r := &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName), Config: entry.BeadsConfig}
+	r := townRigBD(townRoot, &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName), Config: entry.BeadsConfig})
 	if cap := r.GetIntConfig("max_polecats"); cap > 0 {
 		return cap
 	}
@@ -339,7 +340,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
 	}
-	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats(townRoot)}
 	if max <= 0 {
 		return snapshot, nil
 	}
@@ -350,7 +351,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
 	}
 
-	sessions, err := currentPolecatSessions(townRegistry())
+	sessions, err := currentPolecatSessions(townRoot, townRegistry())
 	if err != nil {
 		return snapshot, err
 	}
@@ -417,7 +418,7 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 // scoped to one rig so direct mode pays for one rig's worth of scanning.
 func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnapshot, error) {
 	snapshot := polecatCapacitySnapshot{}
-	sessions, err := currentPolecatSessions(townRegistry())
+	sessions, err := currentPolecatSessions(townRoot, townRegistry())
 	if err != nil {
 		return snapshot, err
 	}
@@ -430,8 +431,22 @@ func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnaps
 	return snapshot, nil
 }
 
-func currentPolecatSessions(reg *session.PrefixRegistry) (polecatSessionSet, error) {
-	sessionNames, err := tmux.NewTmux().ListSessions()
+// townSessionListers maps a town root to the tmux session lister its capacity
+// accounting uses instead of the real tmux server. Tests register a
+// tmuxfake.Server per t.TempDir() town root, so parallel tests never share one.
+var townSessionListers sync.Map // townRoot -> func() ([]string, error)
+
+// listTownTmuxSessions lists the tmux session names the capacity accounting
+// for townRoot counts.
+func listTownTmuxSessions(townRoot string) ([]string, error) {
+	if fn, ok := townSessionListers.Load(townRoot); ok {
+		return fn.(func() ([]string, error))()
+	}
+	return tmux.NewTmux().ListSessions()
+}
+
+func currentPolecatSessions(townRoot string, reg *session.PrefixRegistry) (polecatSessionSet, error) {
+	sessionNames, err := listTownTmuxSessions(townRoot)
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
 	}

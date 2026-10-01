@@ -294,8 +294,10 @@ func TestLoadTTLConfigWithRoleDefaults(t *testing.T) {
 
 func TestLoadTTLConfigWithRoleSkipsInvalidPaths(t *testing.T) {
 	t.Parallel()
-	// With nonexistent paths, rig bead lookup should gracefully skip
-	ttls := loadTTLConfigWithRole("/nonexistent/town", "myrig")
+	// With a failing rig bead lookup, the TTLs fall back to the defaults
+	townRoot := t.TempDir()
+	useFailingTownBD(t, townRoot)
+	ttls := loadTTLConfigWithRole(townRoot, "myrig")
 
 	// Should still have defaults even though lookups failed
 	if ttls["patrol"] != defaultTTLs["patrol"] {

@@ -90,7 +90,7 @@ func TestAllowedToolsFixture(t *testing.T) {
 // the tree: the external tools unit tiers still start. It only shrinks:
 // seaming a tool out of a package's unit tier deletes its name from that
 // package's TestMain AND lowers this, in the same change.
-const maxAllowedTools = 5
+const maxAllowedTools = 3
 
 // TestAllowedTools holds the AllowTools baseline to maxAllowedTools. Run it
 // with -v to see what each package still starts.

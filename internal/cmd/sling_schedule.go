@@ -333,10 +333,10 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 	}
 	// Check rig property layers: wisp → bead → system default (issue gt-y18).
 	if townRoot != "" && rigName != "" {
-		r := &rig.Rig{
+		r := townRigBD(townRoot, &rig.Rig{
 			Name: rigName,
 			Path: filepath.Join(townRoot, rigName),
-		}
+		})
 		if df := r.GetStringConfig("default_formula"); df != "" {
 			return df
 		}
