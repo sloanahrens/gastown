@@ -222,6 +222,13 @@ func supervisorData(townRoot string, exitTimeout time.Duration) (SupervisorData,
 		return SupervisorData{}, fmt.Errorf("loading daemon env: %w", err)
 	}
 	delete(env, "GT_TOWN_ROOT")
+	// A token in daemon.env stays there: the supervisor file is not a secret
+	// store, and spawn reads the token from daemon.env itself (gt-y3pgh.5).
+	for k, v := range env {
+		if config.LooksLikeSecret(k, v) {
+			delete(env, k)
+		}
+	}
 
 	return SupervisorData{
 		GTPath:             gtPath,
