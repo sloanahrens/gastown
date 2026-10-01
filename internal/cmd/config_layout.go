@@ -31,7 +31,10 @@ with 'gt config validate', and restart the daemon to apply it.
 Each old file moves verbatim into a section of its new home. The new files
 are written and verified by a strict load before the old ones are removed,
 all under the files' locks; an interrupted run is finished by running it
-again. On a town that is already on two files it refuses.
+again. It then records each rig's database name, from the dolt_database
+of the rig's bd .beads/metadata.json, in the rig's registry entry;
+metadata.json stays, because bd reads it. On a town that is already on two
+files and whose registry has every name it refuses.
 
 Examples:
   gt config migrate --dry-run   # show what would move; write nothing
@@ -80,19 +83,39 @@ func configMigrate(e configCmdEnv, dryRun bool) error {
 	} else {
 		steps, err = config.MigrateLayout(townRoot)
 	}
-	if errors.Is(err, config.ErrAlreadyMigrated) {
-		return fmt.Errorf("%w; nothing to do", err)
-	}
-	if err != nil {
+	moved := !errors.Is(err, config.ErrAlreadyMigrated)
+	if err != nil && moved {
 		return err
+	}
+	// The registry absorbs each rig's database name after the layout move,
+	// so a leftover rigs.json still equals its section when the move
+	// compares them (gt-y3pgh.11).
+	absorbed, absorbErr := townconfig.AbsorbRigDatabases(townRoot, dryRun)
+	if !moved && len(absorbed) == 0 && absorbErr == nil {
+		return fmt.Errorf("%w; nothing to do", err)
 	}
 	verb := "Migrated"
 	if dryRun {
 		verb = "Would migrate"
 	}
-	fmt.Fprintf(e.out, "%s the town config to two files (%s, %s):\n", verb, config.MachineConfigFile, config.OperatorConfigFile)
-	for _, s := range steps {
-		fmt.Fprintf(e.out, "  %s\n", s)
+	if moved {
+		fmt.Fprintf(e.out, "%s the town config to two files (%s, %s):\n", verb, config.MachineConfigFile, config.OperatorConfigFile)
+		for _, s := range steps {
+			fmt.Fprintf(e.out, "  %s\n", s)
+		}
+	}
+	if absorbErr != nil {
+		return fmt.Errorf("recording the rigs' database names in the registry: %w", absorbErr)
+	}
+	if len(absorbed) > 0 {
+		verb = "Recorded"
+		if dryRun {
+			verb = "Would record"
+		}
+		fmt.Fprintf(e.out, "%s each rig's database in the registry (%s; bd keeps reading metadata.json):\n", verb, config.MachineConfigFile)
+		for _, s := range absorbed {
+			fmt.Fprintf(e.out, "  %s: dolt_database %q from %s\n", s.Rig, s.Metadata, s.MetadataFile)
+		}
 	}
 	if dryRun {
 		return nil
@@ -100,7 +123,7 @@ func configMigrate(e configCmdEnv, dryRun bool) error {
 	if err := townconfig.Check(townRoot); err != nil {
 		return fmt.Errorf("the migrated config does not load:\n%w", err)
 	}
-	fmt.Fprintf(e.out, "\nVerify with 'gt config validate' and 'gt doctor' (config-layout).\n")
+	fmt.Fprintf(e.out, "\nVerify with 'gt config validate' and 'gt doctor' (config-layout, rig-database).\n")
 	return nil
 }
 

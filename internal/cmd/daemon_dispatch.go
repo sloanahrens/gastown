@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -494,20 +495,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 		return false
 	}
 	var meta struct {
-		DoltMode     string `json:"dolt_mode"`
-		DoltDatabase string `json:"dolt_database"`
+		DoltMode string `json:"dolt_mode"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return true // Unparseable — assume initialized, matching bdDatabaseExists
 	}
-	if meta.DoltMode != "server" || meta.DoltDatabase == "" {
+	db := townconfig.DatabaseForBeadsDir(beadsDir)
+	if meta.DoltMode != "server" || db == "" {
 		return true // Not a server-mode database reference — assume initialized
 	}
 	townRoot := beads.FindTownRoot(filepath.Dir(beadsDir))
 	if townRoot == "" {
 		return true // No town to look in — assume initialized
 	}
-	_, err = os.Stat(filepath.Join(townRoot, ".dolt-data", meta.DoltDatabase))
+	_, err = os.Stat(filepath.Join(townRoot, ".dolt-data", db))
 	return !os.IsNotExist(err)
 }
 

@@ -2,13 +2,13 @@ package beads
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	beadsdk "github.com/steveyegge/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
 // ErrNoConfiguredDatabase is OpenStoreFromConfig's refusal of a .beads
@@ -38,18 +38,10 @@ func OpenStoreFromConfig(ctx context.Context, beadsDir string) (beadsdk.Storage,
 // reads, in its order: beadsDir's own metadata.json (no redirect followed),
 // else the legacy config.json it migrates from.
 func configuredDatabase(beadsDir string) string {
-	for _, name := range []string{"metadata.json", "config.json"} {
-		data, err := os.ReadFile(filepath.Join(beadsDir, name))
-		if err != nil {
-			continue
+	for _, name := range []string{agentconfig.BeadsMetadataFile, "config.json"} {
+		if db, present := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name)); present {
+			return db
 		}
-		var meta struct {
-			DoltDatabase string `json:"dolt_database"`
-		}
-		if json.Unmarshal(data, &meta) != nil {
-			return ""
-		}
-		return meta.DoltDatabase
 	}
 	return ""
 }

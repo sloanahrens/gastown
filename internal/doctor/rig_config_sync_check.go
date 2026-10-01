@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // RigConfigSyncCheck verifies that all registered rigs have a config.json file,
@@ -190,13 +191,15 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		var metadata struct {
-			DoltDatabase string `json:"dolt_database"`
-			DoltMode     string `json:"dolt_mode"`
+			DoltMode string `json:"dolt_mode"`
 		}
 		if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
 			details = append(details, fmt.Sprintf("Rig %s has invalid metadata.json: %v", rigName, err))
 			continue
 		}
+		// bd's copy of the database name; the rig-database check compares
+		// it with the registry's.
+		metadataDB := config.BeadsMetadataDatabase(beadsDir)
 
 		// Check if Dolt database exists (only for server mode)
 		if metadata.DoltMode == "server" {
@@ -215,9 +218,14 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			// is absent and .dolt-data/<prefix> exists. Without this, the check reports
 			// a false mismatch and --fix reverts metadata to the non-existent rig-name
 			// DB. (gt-5hd2)
+			//
+			// The registry's dolt_database, when recorded, outranks both
+			// (gt-y3pgh.11).
 			expectedDBName := rigName
 			doltDataDir := filepath.Join(ctx.TownRoot, ".dolt-data")
-			if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
+			if reg := townconfig.RegistryDatabase(ctx.TownRoot, rigName); reg != "" {
+				expectedDBName = reg
+			} else if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
 				if prefix := config.GetRigPrefix(ctx.TownRoot, rigName); prefix != "" {
 					if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); err == nil {
 						expectedDBName = prefix
@@ -227,28 +235,28 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 			if expectedDBName != "" {
 				// Check if database name matches the rig directory name
-				if metadata.DoltDatabase != expectedDBName {
+				if metadataDB != expectedDBName {
 					c.dbNameMismatches = append(c.dbNameMismatches, dbMismatch{
 						rigName:    rigName,
 						prefix:     configPrefix,
-						currentDB:  metadata.DoltDatabase,
+						currentDB:  metadataDB,
 						expectedDB: expectedDBName,
 					})
 					details = append(details, fmt.Sprintf(
 						"Rig %s database name mismatch: metadata has '%s', should be '%s' (rig name)",
-						rigName, metadata.DoltDatabase, expectedDBName))
+						rigName, metadataDB, expectedDBName))
 				}
 
-				if exists, err := c.doltDatabaseExists(ctx, metadata.DoltDatabase); err != nil {
+				if exists, err := c.doltDatabaseExists(ctx, metadataDB); err != nil {
 					c.dbCheckErrors = append(c.dbCheckErrors, rigName)
 					details = append(details, fmt.Sprintf("Rig %s Dolt database status could not be verified: %v", rigName, err))
 				} else if !exists {
-					if expectedExists, err := c.doltDatabaseExists(ctx, expectedDBName); err == nil && metadata.DoltDatabase != expectedDBName && expectedExists {
+					if expectedExists, err := c.doltDatabaseExists(ctx, expectedDBName); err == nil && metadataDB != expectedDBName && expectedExists {
 						// The canonical database exists; the mismatch repair below will
 						// repoint metadata without re-initializing anything destructive.
 					} else {
 						c.missingDoltDB = append(c.missingDoltDB, rigName)
-						details = append(details, fmt.Sprintf("Rig %s Dolt database '%s' not found on server", rigName, metadata.DoltDatabase))
+						details = append(details, fmt.Sprintf("Rig %s Dolt database '%s' not found on server", rigName, metadataDB))
 					}
 				}
 			}

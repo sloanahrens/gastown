@@ -345,6 +345,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewTownConfigParseCheck())
 	d.Register(doctor.NewTownConfigSecretsCheck())
 	d.Register(doctor.NewConfigLayoutCheck())
+	d.Register(doctor.NewRigDatabaseCheck())
 	d.Register(doctor.NewLifecycleDefaultsCheck())
 
 	// Hook attachment checks
