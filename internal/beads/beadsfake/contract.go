@@ -487,6 +487,16 @@ func contractListFilters(t *testing.T, s *scope) {
 	kid := s.mustCreate(t, beads.CreateOptions{Title: "kid", Parent: parent.ID, Priority: -1})
 	got, err = s.List(beads.ListOptions{Parent: parent.ID, Priority: -1})
 	s.want(t, "List{Parent}", got, err, kid.ID)
+	got, err = s.List(beads.ListOptions{Status: "open,closed", Priority: 3})
+	s.want(t, "List{Status:open,closed}", got, err, b.ID, cl.ID)
+	closedAt, err := time.Parse(time.RFC3339, s.mustShow(t, cl.ID).ClosedAt)
+	if err != nil {
+		t.Fatalf("closed_at of %s: %v", cl.ID, err)
+	}
+	got, err = s.List(beads.ListOptions{Status: "all", Priority: 3, ClosedAfter: closedAt.Add(-time.Hour)})
+	s.want(t, "List{ClosedAfter:before close}", got, err, cl.ID)
+	got, err = s.List(beads.ListOptions{Status: "all", Priority: 3, ClosedAfter: closedAt.Add(time.Hour)})
+	s.want(t, "List{ClosedAfter:after close}", got, err)
 }
 
 // contractEvents pins event issues: EventKind makes an issue_type "event"

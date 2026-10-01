@@ -81,11 +81,7 @@ func (r *doneRun) useRealSubmitDeps(getenv func(string) string) {
 			if err != nil {
 				return nil, nil, err
 			}
-			var client beads.Client
-			if info.BD != nil {
-				client = info.BD
-			}
-			return info.Issue, client, nil
+			return info.Issue, info.BD, nil
 		},
 		localGate:      doneLocalGate,
 		checkBranch:    func(baseRef string, sub doneSubmission) error { return checkBranchForSubmit(r, sub, baseRef) },

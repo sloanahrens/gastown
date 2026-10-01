@@ -109,3 +109,11 @@ func argsMention(args []string, needle string) bool {
 func envMap(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
 }
+
+// firstArg is the stubs' beadID="$1".
+func firstArg(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}

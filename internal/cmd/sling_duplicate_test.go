@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // The fixtures below are transcribed from the beads named in gt-mcq — the two
@@ -440,20 +443,20 @@ func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
 // pair-replay tests above build both sides of the comparison with
 // newDuplicateCandidate, which hands the pool bead full title+description+
 // design+notes text directly. That is not what production does — the pool
-// comes from listDuplicateCandidatesVia, which runs bd list, and bd list's JSON
+// comes from listDuplicateCandidates, which runs bd list, and bd list's JSON
 // never carries design or notes at all. The real gt-g6b defect (see the
 // fixture comment above) named its shared tests only in design and notes, so
 // a check that only ever exercises fully-populated candidates can pass while
 // the wired-up pipeline still misses that exact case. This test drives the
 // check through the production pool fetch over a bd shaped like production:
-// the pool bead's `bd list` row is silent on the shared test, and the overlap
-// is recoverable only from the batched `bd show` fetchDuplicateFullText makes.
+// the pool bead's list row is silent on the shared test, and the overlap is
+// recoverable only from the batched show fetchDuplicateFullText makes.
 func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 	t.Parallel()
 	townRoot := duplicateTown(t)
-	bd := designNotesDuplicateBD()
+	store := designNotesDuplicateStore()
 	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
-		return fetchDuplicatePoolVia(bd.run, func(dir string, err error) {
+		return fetchDuplicatePoolFrom(store, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)
 	})
@@ -489,27 +492,38 @@ func duplicateTown(t *testing.T) string {
 	return townRoot
 }
 
-// designNotesDuplicateBD answers the pool reads for
-// TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes: the live list holds
-// gt-pool1, whose row is silent on TestFoo, the closed list is empty, and
-// only `bd show gt-pool1` reveals TestFoo in design and notes.
-func designNotesDuplicateBD() *inprocBD {
-	return &inprocBD{answer: func(_ *inprocBD, cmd string, args []string) bdAnswer {
-		switch cmd {
-		case "list":
-			if argsMention(args, "--closed-after=") {
-				return bdOut(`[]`)
-			}
-			return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open",` +
-				`"description":"Unrelated prose, no test names here.","close_reason":""}]`)
-		case "show":
-			return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open",` +
-				`"description":"Unrelated prose, no test names here.",` +
-				`"design":"Root cause: TestFoo fails intermittently under load.",` +
-				`"notes":"Added regression coverage: TestFoo."}]`)
-		}
-		return bdAnswer{stderr: "unexpected bd " + cmd, code: 1}
-	}}
+// listLikeBD is a store whose List rows lack design and notes, as bd list's
+// JSON does; Show and ShowMultiple carry them. showErr, when set, fails
+// ShowMultiple.
+type listLikeBD struct {
+	beads.Client
+	showErr error
+}
+
+func (s listLikeBD) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	rows, err := s.Client.List(opts)
+	for _, row := range rows {
+		row.Design, row.Notes = "", ""
+	}
+	return rows, err
+}
+
+func (s listLikeBD) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	if s.showErr != nil {
+		return nil, s.showErr
+	}
+	return s.Client.ShowMultiple(ids)
+}
+
+// designNotesDuplicateStore holds gt-pool1, open, whose list row is silent
+// on TestFoo; only its design and notes name it.
+func designNotesDuplicateStore() listLikeBD {
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-pool1", Title: "Some pool bead", Status: "open",
+		Description: "Unrelated prose, no test names here.",
+		Design:      "Root cause: TestFoo fails intermittently under load.",
+		Notes:       "Added regression coverage: TestFoo."})
+	return listLikeBD{Client: db}
 }
 
 // TestSchedulerSlingParamsRunDuplicateCheck is the gt-skk7 / gt-eisp2 wiring
@@ -618,18 +632,15 @@ func jsonString(s string) string {
 func TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	bd := &inprocBD{answer: func(_ *inprocBD, cmd string, _ []string) bdAnswer {
-		if cmd == "show" {
-			return bdAnswer{stderr: "dolt connection refused", code: 1}
-		}
-		return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open","description":"Touches internal/cmd/sling_duplicate.go and TestFoo."}]`)
-	}}
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-pool1", Title: "Some pool bead", Status: "open", Description: "Touches internal/cmd/sling_duplicate.go and TestFoo."})
+	store := listLikeBD{Client: db, showErr: errors.New("bd show: dolt connection refused")}
 
 	var warnedDir string
 	var warnedErr error
 	warn := func(beadsDir string, err error) { warnedDir, warnedErr = beadsDir, err }
 
-	got, err := listDuplicateCandidatesVia(bd.run, warn, beadsDir, []string{"open"}, time.Time{})
+	got, err := listDuplicateCandidates(store, warn, beadsDir, []string{"open"}, time.Time{})
 	if err != nil {
 		t.Fatalf("a failed enrichment must not fail the pool fetch: %v", err)
 	}
@@ -646,7 +657,7 @@ func TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly(t *testing.T) {
 		t.Errorf("warning names %q, want %q", warnedDir, beadsDir)
 	}
 	if !strings.Contains(warnedErr.Error(), "dolt connection refused") {
-		t.Errorf("warning error should carry bd's stderr: %v", warnedErr)
+		t.Errorf("warning error should carry bd's failure: %v", warnedErr)
 	}
 }
 
@@ -657,7 +668,7 @@ func TestListDuplicateCandidates_EnrichmentSuccessIsQuiet(t *testing.T) {
 	warned := false
 	warn := func(string, error) { warned = true }
 
-	got, err := listDuplicateCandidatesVia(designNotesDuplicateBD().run, warn, t.TempDir(), []string{"open"}, time.Time{})
+	got, err := listDuplicateCandidates(designNotesDuplicateStore(), warn, t.TempDir(), []string{"open"}, time.Time{})
 	if err != nil {
 		t.Fatalf("listDuplicateCandidates: %v", err)
 	}

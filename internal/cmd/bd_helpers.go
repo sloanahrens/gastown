@@ -8,15 +8,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// The bd command builder lives in internal/beads so the daemon, deacon and
-// convoy packages run bd through it without importing package cmd.
-type bdCmd = beads.BdCmd
-
-// BdCmd creates a bd command builder; see beads.NewBdCmd.
-func BdCmd(args ...string) *bdCmd {
-	return beads.NewBdCmd(args...)
-}
-
 // filterEnvKey removes every entry for key from env.
 func filterEnvKey(env []string, key string) []string {
 	return beads.StripEnvKey(env, key)
@@ -39,7 +30,7 @@ func townBeadsClient(townRoot string) beads.Client {
 }
 
 // pinnedBd runs bd against dir's resolved .beads database and nowhere else,
-// as BdCmd(...).Dir(dir) without routing did.
+// with no prefix routing.
 func pinnedBd(dir string) *beads.Beads {
 	return beads.NewPinned(beads.ResolveBeadsDir(dir))
 }

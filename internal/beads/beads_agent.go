@@ -457,12 +457,8 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 		return target.UpdateAgentDescriptionFields(id, updates)
 	}
 
-	// Validate notification level if provided
-	if updates.NotificationLevel != nil {
-		level := *updates.NotificationLevel
-		if level != "" && level != NotifyVerbose && level != NotifyNormal && level != NotifyMuted {
-			return fmt.Errorf("invalid notification level %q: must be verbose, normal, or muted", level)
-		}
+	if err := updates.validate(); err != nil {
+		return err
 	}
 
 	// Lock the agent bead to prevent concurrent read-modify-write races.
@@ -474,7 +470,24 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	issue, err := b.Show(id)
+	return updateAgentDescriptionFields(b, id, updates)
+}
+
+// validate refuses an update no agent bead may carry.
+func (updates AgentFieldUpdates) validate() error {
+	if updates.NotificationLevel != nil {
+		level := *updates.NotificationLevel
+		if level != "" && level != NotifyVerbose && level != NotifyNormal && level != NotifyMuted {
+			return fmt.Errorf("invalid notification level %q: must be verbose, normal, or muted", level)
+		}
+	}
+	return nil
+}
+
+// updateAgentDescriptionFields is the Show-Parse-Modify-Update cycle, with
+// updates already validated. *Beads runs it under the agent-bead lock.
+func updateAgentDescriptionFields(c Client, id string, updates AgentFieldUpdates) error {
+	issue, err := c.Show(id)
 	if err != nil {
 		return err
 	}
@@ -523,7 +536,7 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	}
 
 	description := FormatAgentDescription(issue.Title, fields)
-	return b.Update(id, UpdateOptions{Description: &description})
+	return c.Update(id, UpdateOptions{Description: &description})
 }
 
 // UpdateAgentCleanupStatus updates the cleanup_status field in an agent bead.

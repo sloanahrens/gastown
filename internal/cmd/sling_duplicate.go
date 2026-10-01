@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -463,59 +462,34 @@ func resetDuplicatePoolCache() {
 
 // fetchDuplicatePool reads the live and recently-closed beads of one rig.
 func fetchDuplicatePool(beadsDir string) ([]duplicateCandidate, error) {
-	return fetchDuplicatePoolVia(nil, warnDuplicateEnrichmentFailed, beadsDir)
+	return fetchDuplicatePoolFrom(slingStores{}.pinnedAt(beadsDir), warnDuplicateEnrichmentFailed, beadsDir)
 }
 
-// fetchDuplicatePoolVia is fetchDuplicatePool with bd answered by run (nil:
-// bd on PATH) and a failed design/notes enrichment reported to warn. The pool
-// is cached for duplicatePoolTTL, so warn fires once per fetch, not once per
-// sling.
-func fetchDuplicatePoolVia(run beads.BDRunner, warn func(beadsDir string, err error), beadsDir string) ([]duplicateCandidate, error) {
-	active, err := listDuplicateCandidatesVia(run, warn, beadsDir, duplicatePoolStatuses, time.Time{})
+// fetchDuplicatePoolFrom is fetchDuplicatePool read from store, with a
+// failed design/notes enrichment reported to warn. The pool is cached for
+// duplicatePoolTTL, so warn fires once per fetch, not once per sling.
+func fetchDuplicatePoolFrom(store beads.Client, warn func(beadsDir string, err error), beadsDir string) ([]duplicateCandidate, error) {
+	active, err := listDuplicateCandidates(store, warn, beadsDir, duplicatePoolStatuses, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	closed, err := listDuplicateCandidatesVia(run, warn, beadsDir, []string{"closed"}, time.Now().Add(-duplicateLookback))
+	closed, err := listDuplicateCandidates(store, warn, beadsDir, []string{"closed"}, time.Now().Add(-duplicateLookback))
 	if err != nil {
 		return nil, err
 	}
 	return append(active, closed...), nil
 }
 
-// listDuplicateCandidatesVia runs one bd list through run (nil: bd on PATH)
-// and reduces every row to its comparison fields, then enriches every row with
-// a batched bd show for design and notes text, reporting a failed enrichment
-// to warn. bd list --json never carries those two fields, and --closed-after
-// excludes rows that were never closed, so live and closed work take separate
-// list queries; neither can be folded into the other.
-func listDuplicateCandidatesVia(run beads.BDRunner, warn func(beadsDir string, err error), beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
-	args := []string{
-		"list",
-		"--status=" + strings.Join(statuses, ","),
-		"--json",
-		"--flat",
-		"-n", "0",
-		"--no-pager",
-	}
-	if !closedAfter.IsZero() {
-		args = append(args, "--closed-after="+closedAfter.UTC().Format(time.RFC3339))
-	}
-
-	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{AllowStale: true, Run: run}, beadsDir, args...)
+// listDuplicateCandidates lists one status set from store and reduces every
+// row to its comparison fields, then enriches every row with a batched show
+// for design and notes text, reporting a failed enrichment to warn. bd list
+// --json never carries those two fields, and a closed-after filter excludes
+// rows that were never closed, so live and closed work take separate list
+// queries; neither can be folded into the other.
+func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err error), beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
+	rows, err := store.List(beads.ListOptions{Status: strings.Join(statuses, ","), Priority: -1, ClosedAfter: closedAfter})
 	if err != nil {
 		return nil, fmt.Errorf("listing %s beads: %w", strings.Join(statuses, ","), err)
-	}
-
-	var rows []struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Status      string `json:"status"`
-		ClosedAt    string `json:"closed_at"`
-		CloseReason string `json:"close_reason"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	ids := make([]string, 0, len(rows))
@@ -534,7 +508,7 @@ func listDuplicateCandidatesVia(run beads.BDRunner, warn func(beadsDir string, e
 	// The degrade is reported, though: a pool without design/notes text is
 	// blind to exactly the overlap this check was extended to catch, and the
 	// operator must be able to tell that apart from "no duplicates found".
-	fullText, ftErr := fetchDuplicateFullText(run, beadsDir, ids)
+	fullText, ftErr := fetchDuplicateFullText(store, ids)
 	if ftErr != nil {
 		fullText = nil
 		warn(beadsDir, ftErr)
@@ -574,38 +548,21 @@ type duplicateFullText struct {
 }
 
 // fetchDuplicateFullText recovers design and notes text for a pool of beads
-// with a single batched "bd show <ids...>" call through run (nil: bd on
-// PATH), so the pool comparison sees
-// the same fields the sling-time candidate already does (checkSlingDuplicates
-// reads its candidate via bd show, which carries design and notes; bd list
-// does not). Returns nil, nil for an empty pool — nothing to enrich.
-func fetchDuplicateFullText(run beads.BDRunner, beadsDir string, ids []string) (map[string]duplicateFullText, error) {
+// with a single batched show, so the pool comparison sees the same fields
+// the sling-time candidate already does (checkSlingDuplicates reads its
+// candidate via bd show, which carries design and notes; bd list does not).
+// Returns nil, nil for an empty pool — nothing to enrich.
+func fetchDuplicateFullText(store beads.Client, ids []string) (map[string]duplicateFullText, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"show"}, ids...)
-	args = append(args, "--json")
-
-	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{AllowStale: true, Run: run}, beadsDir, args...)
+	issues, err := store.ShowMultiple(ids)
 	if err != nil {
 		return nil, fmt.Errorf("fetching design/notes for %d bead(s): %w", len(ids), err)
 	}
-
-	var rows []struct {
-		ID     string `json:"id"`
-		Design string `json:"design"`
-		Notes  string `json:"notes"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parsing bd show output: %w", err)
-	}
-
-	text := make(map[string]duplicateFullText, len(rows))
-	for _, row := range rows {
-		if row.ID == "" {
-			continue
-		}
-		text[row.ID] = duplicateFullText{Design: row.Design, Notes: row.Notes}
+	text := make(map[string]duplicateFullText, len(issues))
+	for id, is := range issues {
+		text[id] = duplicateFullText{Design: is.Design, Notes: is.Notes}
 	}
 	return text, nil
 }
