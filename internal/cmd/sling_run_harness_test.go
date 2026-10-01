@@ -220,7 +220,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		rigCommandVars: func(string, string) []string { return nil },
 		priorAttempt:   func(string, string) []string { return nil },
 		cook:           func(name, _, _ string) error { h.record("cook %s", name); return nil },
-		instantiateFormula: func(_ context.Context, name, id, _, _, _ string, _ bool, vars []string) (*FormulaOnBeadResult, error) {
+		instantiateFormula: func(_ context.Context, name, id, _, _, _ string, vars []string) (*FormulaOnBeadResult, error) {
 			h.record("instantiate %s on %s vars=%s", name, id, strings.Join(vars, ","))
 			return &FormulaOnBeadResult{WispRootID: "gt-wisp-new", BeadToHook: id}, nil
 		},

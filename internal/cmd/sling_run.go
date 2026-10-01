@@ -153,7 +153,7 @@ type slingDeps struct {
 	rigCommandVars     func(townRoot, rig string) []string
 	priorAttempt       func(beadsDir, issueID string) []string
 	cook               func(formulaName, workDir, townRoot string) error
-	instantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (*FormulaOnBeadResult, error)
+	instantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaOnBeadResult, error)
 	actor              func() string
 	hookDir            func(townRoot, beadID, workDir string) string
 	storeFields        func(townRoot, beadID string, updates beadFieldUpdates) error

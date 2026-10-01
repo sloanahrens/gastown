@@ -1,6 +1,12 @@
 # Formula Resolution Architecture
 
 > **Status: Partially implemented** — Basic formula resolution works. Tier enforcement, Mol Mall integration, and HOP federation are planned.
+>
+> **gt resolves no formula (gt-fd2cu.1).** bd is the one formula engine: gt
+> renders the step tree `bd cook` returns, cooked in the rig's directory with
+> `GT_ROOT` set, so prime finds exactly the file pour does (the rig's beads
+> dir, the checkout, `~/.beads`, then `$GT_ROOT/.beads/formulas`, which gt
+> syncs from the binary). The gastown tier lookup below is gone.
 
 > Where formulas live, how they're found, and how they'll scale to Mol Mall
 

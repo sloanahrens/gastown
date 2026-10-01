@@ -494,13 +494,14 @@ func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
 
 // TestFormulaVarsForBeadPassesFeatureAndIssueVars verifies that gt sling
 // <formula> --on <bead> bonds with --var feature=<title> and --var
-// issue=<beadID> first, then the caller's vars, even for a formula gt cannot
-// load to backfill defaults.
+// issue=<beadID> first, then the caller's vars, for a formula declaring none.
 func TestFormulaVarsForBeadPassesFeatureAndIssueVars(t *testing.T) {
 	t.Parallel()
-	vars, err := formulaVarsForBead("mol-review", "gt-abc123", "My Test Feature", t.TempDir(), []string{"k=v"})
+	town := t.TempDir()
+	fake := &fakeCook{out: cookTreeJSON(`{"formula": "mol-review", "vars": [], "steps": []}`)}
+	vars, err := formulaBDVia(fake.run).varsForBead("mol-review", "gt-abc123", "My Test Feature", town, town, []string{"k=v"})
 	if err != nil {
-		t.Fatalf("formulaVarsForBead: %v", err)
+		t.Fatalf("varsForBead: %v", err)
 	}
 	want := []string{"feature=My Test Feature", "issue=gt-abc123", "k=v"}
 	if strings.Join(vars, "|") != strings.Join(want, "|") {

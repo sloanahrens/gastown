@@ -1031,7 +1031,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			formulaVarsForAttachment = strings.Join(r.opts.vars, "\n")
 		}
 
-		result, err := r.instantiateFormula(ctx, formulaName, beadID, info.Title, hookWorkDir, townRoot, false, r.opts.vars)
+		result, err := r.instantiateFormula(ctx, formulaName, beadID, info.Title, hookWorkDir, townRoot, r.opts.vars)
 		if err != nil {
 			// The guard rolls back the partial artifacts: a wisp creation
 			// failure (e.g., missing required vars) must not orphan a polecat.

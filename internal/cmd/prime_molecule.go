@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -99,152 +98,47 @@ func showMoleculeExecutionPrompt(w io.Writer, workDir, moleculeID string) {
 	}
 }
 
-// showFormulaSteps renders the formula steps inline in the prime output.
-// Agents read these steps instead of materializing them as wisp rows.
-// The label parameter customizes the section header (e.g., "Patrol Steps", "Work Steps").
-// townRoot and rigName are used to load formula overlays (operator customizations).
-// extraVars is an optional list of "key=value" overrides that are substituted into
-// step descriptions before rendering, taking precedence over formula defaults.
-func showFormulaSteps(w io.Writer, formulaName, label, townRoot, rigName string, extraVars ...[]string) {
-	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
-	if err != nil {
-		style.PrintWarning("%v", err)
-		return
-	}
-
-	if len(f.Steps) == 0 {
-		return
-	}
-
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "**%s** (%d steps from %s):\n", label, len(f.Steps), formulaName)
-	for i, step := range f.Steps {
-		desc := applyFormulaVars(step.Description, varMap)
-		fmt.Fprintf(w, "  %d. **%s** — %s\n", i+1, step.Title, truncateDescription(desc, 120))
-	}
-	fmt.Fprintln(w)
-}
-
-// showFormulaStepsFull renders the bounded formula checklist (every title, the
+// showStepsFull renders the bounded formula checklist (every title, the
 // body of step 1, and how to fetch the rest). Used for polecat work formulas and
-// patrol formulas. The full-body renderer renderFormulaStepsFull remains for the
+// patrol formulas. The full-body renderer renderStepsFull remains for the
 // Ralph loop directive, whose /ralph-loop prompt must carry every step inline;
 // Ralph-mode attachments therefore still exceed the hook budget (rare, known).
-// townRoot and rigName are used to load formula overlays (operator customizations).
-// extraVars is an optional list of "key=value" overrides substituted into step descriptions.
-func showFormulaStepsFull(w io.Writer, formulaName, townRoot, rigName string, extraVars ...[]string) {
-	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
+// The steps are what bd cooks (formulaCooker.cookForRender); a cook failure is
+// one warning line and no checklist. vars ("key=value") are passed to the cook.
+func (c formulaCooker) showStepsFull(w io.Writer, formulaName, townRoot, rigName string, vars []string) {
+	f, err := c.cookForRender(formulaName, townRoot, rigName, vars)
 	if err != nil {
 		style.PrintWarning("%v", err)
 		return
 	}
-	_, _ = fmt.Fprint(w, renderFormulaChecklist(formulaName, f, varMap, 1))
+	_, _ = fmt.Fprint(w, renderFormulaChecklist(formulaName, f, 1))
 }
 
-func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
-	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
+func (c formulaCooker) renderStepsFull(formulaName, townRoot, rigName string, vars []string) (string, error) {
+	f, err := c.cookForRender(formulaName, townRoot, rigName, vars)
 	if err != nil {
 		return "", err
 	}
-	return renderFormulaStepsFullParsed(formulaName, f, varMap), nil
+	return renderFormulaStepsFullCooked(formulaName, f), nil
 }
 
-func renderFormulaRootAndStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
-	f, varMap, err := resolveFormulaForRendering(formulaName, townRoot, rigName, firstFormulaVars(extraVars))
-	if err != nil {
-		return "", err
-	}
-
-	var sb strings.Builder
-	if desc := strings.TrimSpace(applyFormulaVars(f.Description, varMap)); desc != "" {
-		sb.WriteString(desc)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString(strings.TrimLeft(renderFormulaStepsFullParsed(formulaName, f, varMap), "\n"))
-	return strings.TrimSpace(sb.String()), nil
-}
-
-func resolveFormulaForRendering(formulaName, townRoot, rigName string, vars []string) (*formula.Formula, map[string]string, error) {
-	_, f, err := loadResolvedFormula(formulaName, townRoot, rigName)
-	if err != nil {
-		return nil, nil, err
-	}
-	applyFormulaOverlays(f, formulaName, townRoot)
-	return f, buildFormulaVarMap(f, vars), nil
-}
-
-// loadResolvedFormula loads formulaName through the three tiers (rig > town >
-// embedded) and returns it as written (raw) and resolved. A formula that
-// extends another or expands a step carries only its delta; resolved lists
-// every step the agent must run. Without extends or compose the two are the
-// same formula.
-func loadResolvedFormula(formulaName, townRoot, rigName string) (raw, resolved *formula.Formula, err error) {
-	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
-	if err != nil {
-		return nil, nil, fmt.Errorf("could not load formula %s: %w", formulaName, err)
-	}
-
-	raw, err = formula.Parse(content)
-	if err != nil {
-		return nil, nil, fmt.Errorf("could not parse formula %s: %w", formulaName, err)
-	}
-	if !formulaComposes(raw) {
-		return raw, raw, nil
-	}
-	resolved, err = formula.Resolve(raw, formulaSearchPaths(townRoot, rigName))
-	if err != nil {
-		return nil, nil, fmt.Errorf("could not resolve formula %s: %w", formulaName, err)
-	}
-	return raw, resolved, nil
-}
-
-// formulaComposes reports whether f extends another formula or expands a
-// step, i.e. whether f as written is only a delta.
-func formulaComposes(f *formula.Formula) bool {
-	return len(f.Extends) > 0 || f.Compose != nil
-}
-
-func firstFormulaVars(extraVars [][]string) []string {
-	if len(extraVars) == 0 {
-		return nil
-	}
-	return extraVars[0]
-}
-
-func renderFormulaStepsFullParsed(formulaName string, f *formula.Formula, varMap map[string]string) string {
-	if len(f.Steps) == 0 {
+func renderFormulaStepsFullCooked(formulaName string, f *cookedFormula) string {
+	steps := f.checklist()
+	if len(steps) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
 	sb.WriteString("\n")
-	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
-	for i, step := range f.Steps {
-		title := applyFormulaVars(step.Title, varMap)
-		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, title)
+	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
+	for i, step := range steps {
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
 		if step.Description != "" {
-			sb.WriteString(applyFormulaVars(step.Description, varMap))
+			sb.WriteString(step.Description)
 			sb.WriteString("\n\n")
 		}
 	}
 	return sb.String()
-}
-
-// buildFormulaVarMap builds a map of variable name → value for substitution.
-// Formula defaults are applied first; extraVars (key=value strings) override them.
-func buildFormulaVarMap(f *formula.Formula, extraVars []string) map[string]string {
-	m := make(map[string]string, len(f.Vars))
-	for k, v := range f.Vars {
-		if v.Default != "" || !v.Required {
-			m[k] = v.Default
-		}
-	}
-	for _, kv := range extraVars {
-		if idx := strings.IndexByte(kv, '='); idx > 0 {
-			m[kv[:idx]] = kv[idx+1:]
-		}
-	}
-	return m
 }
 
 func attachmentFormulaVars(attachment *beads.AttachmentFields) []string {
@@ -277,14 +171,6 @@ func attachmentFormulaVars(attachment *beads.AttachmentFields) []string {
 		add(variable)
 	}
 	return vars
-}
-
-// applyFormulaVars replaces {{key}} placeholders in text with values from varMap.
-func applyFormulaVars(text string, varMap map[string]string) string {
-	for k, v := range varMap {
-		text = strings.ReplaceAll(text, "{{"+k+"}}", v)
-	}
-	return text
 }
 
 // extractFormulaVar extracts a specific key's value from a newline-separated
@@ -333,48 +219,4 @@ func resolveMRTarget(target, branch, defaultBranch string, explicit bool) (strin
 		return "", fmt.Errorf("cannot submit MR: resolved target %q is another polecat's branch; pass --target (or --epic) explicitly if merging into it is intentional", target)
 	}
 	return target, nil
-}
-
-// truncateDescription truncates a multi-line description to a single line summary.
-func truncateDescription(desc string, maxLen int) string {
-	// Take just the first line
-	if idx := strings.IndexByte(desc, '\n'); idx >= 0 {
-		desc = desc[:idx]
-	}
-	desc = strings.TrimSpace(desc)
-	if len(desc) > maxLen {
-		desc = desc[:maxLen-3] + "..."
-	}
-	if desc == "" {
-		desc = "(no description)"
-	}
-	return desc
-}
-
-// applyFormulaOverlays loads and applies overlays to a parsed formula.
-// It emits warnings for stale step IDs and, in --explain mode, shows which overlays are active.
-func applyFormulaOverlays(f *formula.Formula, formulaName, townRoot string) {
-	if townRoot == "" {
-		return
-	}
-
-	overlay, err := formula.LoadFormulaOverlay(formulaName, townRoot)
-	if err != nil {
-		style.PrintWarning("could not load overlay for %s: %v", formulaName, err)
-		return
-	}
-	if overlay == nil {
-		explain(true, fmt.Sprintf("Formula overlay: no overlay found for %s", formulaName))
-		return
-	}
-
-	explain(true, fmt.Sprintf("Formula overlay: applying %d override(s) for %s", len(overlay.StepOverrides), formulaName))
-	for _, so := range overlay.StepOverrides {
-		explain(true, fmt.Sprintf("  overlay: step_id=%s mode=%s", so.StepID, so.Mode))
-	}
-
-	warnings := formula.ApplyOverlays(f, overlay)
-	for _, w := range warnings {
-		style.PrintWarning("formula overlay: %s", w)
-	}
 }
