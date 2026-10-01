@@ -200,7 +200,6 @@ JSON
   export GT_TOWN_ROOT="$CASE_DIR"
   export GT_SEAT_REFILL_CONFIG="$CASE_DIR/settings.json"
   export GT_SEAT_REFILL_STATE="$CASE_DIR/state.json"
-  export GT_SEAT_REFILL_HOLD="$CASE_DIR/seat-refill.hold"
 }
 
 # run_plugin <now-epoch>: runs the plugin with a pinned clock, leaving stdout in
@@ -325,11 +324,11 @@ setup_case
 write_polecats "$LIVE_NONE"
 ready_bug gastown
 run_plugin 6000000
-touch "$GT_SEAT_REFILL_HOLD"
+touch "$CASE_DIR/seat-refill.hold"
 run_plugin 6000600
 assert_eq "$(nudges)" "0" "hold flag: no nudge while the flag is set"
 assert_contains "$TEST_STATE/stdout.log" "hold flag" "hold flag: the run says why it was skipped"
-rm -f "$GT_SEAT_REFILL_HOLD"
+rm -f "$CASE_DIR/seat-refill.hold"
 run_plugin 6000700
 assert_eq "$(nudges)" "1" "hold flag: removing the flag resumes the episode"
 

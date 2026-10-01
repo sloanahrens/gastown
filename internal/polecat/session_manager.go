@@ -23,13 +23,6 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// debugSession logs non-fatal errors during session startup when GT_DEBUG_SESSION=1.
-func debugSession(context string, err error) {
-	if os.Getenv("GT_DEBUG_SESSION") != "" && err != nil {
-		fmt.Fprintf(os.Stderr, "[session-debug] %s: %v\n", context, err)
-	}
-}
-
 // reportBranchRepairFailure makes a session-branch repair that did not run
 // visible in two places, because neither one reaches every path that starts a
 // session. The stderr warning reaches an operator running gt session start or
@@ -635,7 +628,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning
 	// and FindAgentPane. Legacy sessions without GT_PANE_ID fall back to scanning.
 	if paneID, err := m.tmux.GetPaneID(sessionID); err == nil {
-		debugSession("SetEnvironment GT_PANE_ID", m.tmux.SetEnvironment(sessionID, "GT_PANE_ID", paneID))
+		_ = m.tmux.SetEnvironment(sessionID, "GT_PANE_ID", paneID)
 	}
 
 	// Hook the issue to the polecat if provided via --issue flag
@@ -648,17 +641,17 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 
 	// Apply theme (non-fatal)
 	theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "polecat", polecat)
-	debugSession("ConfigureGasTownSession", m.tmux.ConfigureGasTownSession(sessionID, theme, m.rig.Name, polecat, "polecat"))
+	_ = m.tmux.ConfigureGasTownSession(sessionID, theme, m.rig.Name, polecat, "polecat")
 
 	// Set pane-died hook for crash detection (non-fatal)
 	agentID := fmt.Sprintf("%s/%s", m.rig.Name, polecat)
-	debugSession("SetPaneDiedHook", m.tmux.SetPaneDiedHook(sessionID, agentID))
+	_ = m.tmux.SetPaneDiedHook(sessionID, agentID)
 
 	// Wait for Claude to start (non-fatal)
-	debugSession("WaitForCommand", m.tmux.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout))
+	_ = m.tmux.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout)
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear
-	debugSession("AcceptStartupDialogs", m.tmux.AcceptStartupDialogs(sessionID))
+	_ = m.tmux.AcceptStartupDialogs(sessionID)
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
 		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
@@ -667,7 +660,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// Wait for runtime to be fully ready at the prompt (not just started).
 	// Uses prompt-based polling for agents with ReadyPromptPrefix (e.g., Claude "❯ "),
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
-	debugSession("WaitForRuntimeReady", m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
+	_ = m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout)
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
 		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
