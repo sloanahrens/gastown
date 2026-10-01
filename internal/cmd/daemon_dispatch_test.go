@@ -249,6 +249,7 @@ func TestPoolSeatPicture_UncappedOverflowIsAtLeastOneFreeSeat(t *testing.T) {
 // to the operator default. Routing through rig.ResolveMergeQueueConfig makes
 // the rig-root value visible with no rig-local settings/config.json present.
 func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(townRoot, rigName)
@@ -265,12 +266,7 @@ func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lister := &fakeDispatchMRLister{mrs: readyMRs(5)}
-	origLister := newDispatchMRLister
-	newDispatchMRLister = func(string) dispatchMRLister { return lister }
-	t.Cleanup(func() { newDispatchMRLister = origLister })
-
-	ready, ceiling := rigMergeQueueDepth(rigPath, rigName)
+	ready, ceiling := rigMergeQueueDepth(rigPath, rigName, &fakeDispatchMRLister{mrs: readyMRs(5)})
 	if ceiling != 3 {
 		t.Errorf("ceiling = %d, want 3 (rig-root merge_queue floor invisible to dispatch patrol)", ceiling)
 	}
@@ -307,7 +303,7 @@ func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
 	mkdirTestDir(t, beadsDir)
 	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
 
-	issues, err := readyIssuesUnlimited(rigPath)
+	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
 	if err != nil {
 		t.Fatalf("uninitialized rig is no ready work, not a read failure: %v", err)
 	}
@@ -326,6 +322,7 @@ func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
 // a runner standing in for bd: the read is one machine-mode bd ready --limit
 // 0 (gt-7iwy0.2), not the in-process store it replaced.
 func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
 	mkdirTestDir(t, beadsDir)
@@ -350,13 +347,11 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 		}
 		return nil, nil, nil
 	}
-	prev := readyBoardFor
-	readyBoardFor = func(rigPath string) readyBoard {
+	board := func(rigPath string) readyBoard {
 		return beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), run)
 	}
-	t.Cleanup(func() { readyBoardFor = prev })
 
-	issues, err := readyIssuesUnlimited(rigPath)
+	issues, err := readyIssuesUnlimited(rigPath, board)
 	if err != nil {
 		t.Fatalf("readyIssuesUnlimited: %v", err)
 	}
@@ -397,7 +392,7 @@ func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
 	mkdirTestDir(t, beadsDir)
 	writeTestFile(t, filepath.Join(beadsDir, "redirect"), "mayor/rig/.beads\n")
 
-	issues, err := readyIssuesUnlimited(rigPath)
+	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
 	if err != nil {
 		t.Fatalf("a redirect to a missing database is no ready work, not a read failure: %v", err)
 	}

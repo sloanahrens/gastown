@@ -924,7 +924,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		// Identity is corroborated, not just read from env: unset GT_ROLE/BD_ACTOR
 		// off-terminal is treated as an agent, so agents cannot pose as human
 		// operators by unsetting their env (gt-2oy).
-		if actor, isAgent := resolveDestructiveActor(agentActor(), ui.IsTerminal()); isAgent {
+		if actor, isAgent := resolveDestructiveActor(agentActor(os.Getenv), ui.IsTerminal()); isAgent {
 			if err := checkAgentForceAuthorization(actor, doltCleanupAuthorizedBy); err != nil {
 				return err
 			}
@@ -1125,11 +1125,11 @@ func holdsGateError(holdsErr error, dryRun bool) error {
 
 // agentActor returns the agent identity when this process runs as a Gas Town
 // agent (GT_ROLE or BD_ACTOR set), or "" for a human at a plain terminal.
-func agentActor() string {
-	if role := os.Getenv("GT_ROLE"); role != "" {
+func agentActor(getenv func(string) string) string {
+	if role := getenv("GT_ROLE"); role != "" {
 		return role
 	}
-	if actor := os.Getenv("BD_ACTOR"); actor != "" {
+	if actor := getenv("BD_ACTOR"); actor != "" {
 		return actor
 	}
 	return ""
@@ -1137,7 +1137,7 @@ func agentActor() string {
 
 // cleanupActorLabel names the actor for audit comments.
 func cleanupActorLabel() string {
-	if actor := agentActor(); actor != "" {
+	if actor := agentActor(os.Getenv); actor != "" {
 		return actor
 	}
 	return "human operator"

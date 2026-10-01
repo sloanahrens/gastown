@@ -75,9 +75,8 @@ var deletedCommands = [][]string{
 // TestDeletedCommandsGone fails if any deleted command path resolves in the
 // cobra tree again. Find may land on a parent or apply prefix matching, so the
 // check compares the resolved command's full path with the deleted one.
-//
-// Not parallel: it walks the shared rootCmd, which other tests execute.
 func TestDeletedCommandsGone(t *testing.T) {
+	t.Parallel()
 	// Positive control: the same lookup must find commands that stayed, or a
 	// broken lookup would pass every deleted path vacuously. These are the
 	// survivors of the clusters the deletions thinned.
@@ -96,13 +95,14 @@ func TestDeletedCommandsGone(t *testing.T) {
 // resolvesExactly reports whether path names a command in rootCmd, as opposed
 // to Find stopping on a parent or the root.
 func resolvesExactly(path []string) bool {
-	c, _, err := rootCmd.Find(path)
-	return err == nil && c != nil && c.CommandPath() == "gt "+strings.Join(path, " ")
+	c := lookupCommand(rootCmd, path)
+	return c != nil && c.CommandPath() == "gt "+strings.Join(path, " ")
 }
 
 // TestNoPolecatSafeAnnotation pins the proxy removal: the polecatSafe
 // annotation's only reader was gt proxy-subcmds, so no command may carry it.
 func TestNoPolecatSafeAnnotation(t *testing.T) {
+	t.Parallel()
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		if _, ok := c.Annotations["polecatSafe"]; ok {

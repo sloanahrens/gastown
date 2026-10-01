@@ -23,10 +23,8 @@ import (
 //
 // Fix a failure by correcting the file that names the command, never by
 // loosening the lint.
-//
-// Not parallel: it walks the shared rootCmd (Commands, Args validators), and
-// other tests in this package execute that tree.
 func TestCommandTokensResolve(t *testing.T) {
+	t.Parallel()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)

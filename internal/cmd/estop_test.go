@@ -2,37 +2,12 @@ package cmd
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/estop"
 )
-
-func setupEstopCommandTestTown(t *testing.T) string {
-	t.Helper()
-
-	townRoot := t.TempDir()
-	if err := os.Mkdir(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("create mayor marker: %v", err)
-	}
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir test town: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(oldWd); err != nil {
-			t.Errorf("restore cwd: %v", err)
-		}
-	})
-
-	return townRoot
-}
 
 func TestEstopCmdRejectsUnexpectedArgs(t *testing.T) {
 	t.Parallel()
@@ -48,15 +23,12 @@ func TestEstopCmdRejectsUnexpectedArgs(t *testing.T) {
 }
 
 func TestRunEstopStatusDoesNotCreateSentinel(t *testing.T) {
-	townRoot := setupEstopCommandTestTown(t)
+	t.Parallel()
+	townRoot := t.TempDir()
 
-	var runErr error
-	out := captureStdout(t, func() {
-		runErr = runEstopStatus(estopStatusCmd, nil)
-	})
-	if runErr != nil {
-		t.Fatalf("runEstopStatus: %v", runErr)
-	}
+	var buf strings.Builder
+	estopStatus(&buf, townRoot)
+	out := buf.String()
 	if !strings.Contains(out, "No E-stop active.") {
 		t.Fatalf("status output = %q, want no-active message", out)
 	}
@@ -66,18 +38,15 @@ func TestRunEstopStatusDoesNotCreateSentinel(t *testing.T) {
 }
 
 func TestRunEstopStatusReportsPerRigEstop(t *testing.T) {
-	townRoot := setupEstopCommandTestTown(t)
+	t.Parallel()
+	townRoot := t.TempDir()
 	if err := estop.ActivateRig(townRoot, "gastown", estop.TriggerManual, "maintenance"); err != nil {
 		t.Fatalf("ActivateRig: %v", err)
 	}
 
-	var runErr error
-	out := captureStdout(t, func() {
-		runErr = runEstopStatus(estopStatusCmd, nil)
-	})
-	if runErr != nil {
-		t.Fatalf("runEstopStatus: %v", runErr)
-	}
+	var buf strings.Builder
+	estopStatus(&buf, townRoot)
+	out := buf.String()
 	for _, want := range []string{"E-STOP: gastown", "maintenance", "Clear with:"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output = %q, want %q", out, want)

@@ -485,7 +485,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating daemon: %w", err)
 	}
 
-	return daemonRunExit(d.Run())
+	return daemonRunExit(d.Run(), os.Exit)
 }
 
 func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
@@ -493,7 +493,12 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return enableSupervisor(townRoot, templates.ProvisionSupervisor)
+}
 
+// enableSupervisor installs the town's supervisor file through provision
+// (templates.ProvisionSupervisor) unless a daemon already runs.
+func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error)) error {
 	// Refuse while a manual daemon holds the lock. RunAtLoad + KeepAlive.Crashed
 	// means launchd would immediately spawn a second daemon that loses the
 	// flock on daemon.lock and exits non-zero, then gets respawned every ~10s
@@ -506,7 +511,7 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("a daemon is already running — stop the running daemon first: gt daemon stop")
 	}
 
-	msg, err := templates.ProvisionSupervisor(townRoot, daemon.ShutdownBudget)
+	msg, err := provision(townRoot, daemon.ShutdownBudget)
 	if err != nil {
 		return fmt.Errorf("configuring supervisor: %w", err)
 	}
@@ -585,15 +590,13 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// daemonExit is os.Exit; a test seam.
-var daemonExit = os.Exit
-
 // daemonRunExit maps daemon.ErrRestartForUpgrade to exit code 75 so launchd
 // (KeepAlive SuccessfulExit=false) restarts the daemon on the installed
-// binary. A plain nil return would exit 0 and leave the daemon down.
-func daemonRunExit(err error) error {
+// binary. A plain nil return would exit 0 and leave the daemon down. exit is
+// os.Exit.
+func daemonRunExit(err error, exit func(code int)) error {
 	if errors.Is(err, daemon.ErrRestartForUpgrade) {
-		daemonExit(75)
+		exit(75)
 		return nil
 	}
 	return err

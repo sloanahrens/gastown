@@ -72,11 +72,16 @@ func bdListChildren(parentID string) ([]bdShowResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd list --parent=%s: %w", parentID, err)
 	}
+	return childrenOrDepsFallback(parentID, out, bdListChildrenViaDeps)
+}
 
+// childrenOrDepsFallback parses `bd list --parent` output, consulting viaDeps
+// only when that output lists no children.
+func childrenOrDepsFallback(parentID string, out []byte, viaDeps func(parentID string) ([]bdShowResult, error)) ([]bdShowResult, error) {
 	// Handle empty output (no children) — try the deps-table fallback first.
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed == "" || trimmed == "[]" {
-		return bdListChildrenViaDeps(parentID)
+		return viaDeps(parentID)
 	}
 
 	var results []bdShowResult

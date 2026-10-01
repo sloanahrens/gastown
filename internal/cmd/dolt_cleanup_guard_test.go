@@ -7,29 +7,21 @@ import (
 )
 
 func TestAgentActor(t *testing.T) {
-	t.Run("human terminal has no actor", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "")
-		t.Setenv("BD_ACTOR", "")
-		if actor := agentActor(); actor != "" {
-			t.Errorf("expected empty actor, got %q", actor)
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"human terminal has no actor", nil, ""},
+		{"GT_ROLE wins", map[string]string{"GT_ROLE": "deacon/dogs/alpha", "BD_ACTOR": "deacon-alpha"}, "deacon/dogs/alpha"},
+		{"BD_ACTOR fallback", map[string]string{"BD_ACTOR": "deacon-alpha"}, "deacon-alpha"},
+	} {
+		getenv := func(k string) string { return tc.env[k] }
+		if actor := agentActor(getenv); actor != tc.want {
+			t.Errorf("%s: agentActor = %q, want %q", tc.name, actor, tc.want)
 		}
-	})
-
-	t.Run("GT_ROLE wins", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "deacon/dogs/alpha")
-		t.Setenv("BD_ACTOR", "deacon-alpha")
-		if actor := agentActor(); actor != "deacon/dogs/alpha" {
-			t.Errorf("expected GT_ROLE value, got %q", actor)
-		}
-	})
-
-	t.Run("BD_ACTOR fallback", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "")
-		t.Setenv("BD_ACTOR", "deacon-alpha")
-		if actor := agentActor(); actor != "deacon-alpha" {
-			t.Errorf("expected BD_ACTOR value, got %q", actor)
-		}
-	})
+	}
 }
 
 func TestCheckAgentForceAuthorization(t *testing.T) {

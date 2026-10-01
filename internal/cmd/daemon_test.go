@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/daemon"
-	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld verifies that
@@ -20,6 +20,7 @@ import (
 // immediately spawn a second daemon that loses the flock and gets respawned
 // forever alongside the manually-started one.
 func TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("MkdirAll mayor: %v", err)
@@ -44,22 +45,15 @@ func TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld(t *testing.T) {
 	}
 	defer func() { _ = lock.Unlock() }()
 
-	// Isolate HOME so a refusal-path bug can't touch the real machine's
-	// LaunchAgents/systemd directories.
-	t.Setenv("HOME", t.TempDir())
-	t.Chdir(townRoot)
-
-	if err := runDaemonEnableSupervisor(nil, nil); err == nil {
-		t.Fatal("runDaemonEnableSupervisor() error = nil, want error while daemon.lock is held")
+	provisioned := false
+	provision := func(string, time.Duration) (string, error) { provisioned = true; return "", nil }
+	if err := enableSupervisor(townRoot, provision); err == nil {
+		t.Fatal("enableSupervisor() error = nil, want error while daemon.lock is held")
 	} else if !strings.Contains(err.Error(), "stop the running daemon first: gt daemon stop") {
-		t.Errorf("runDaemonEnableSupervisor() error = %q, want it to mention 'gt daemon stop'", err.Error())
+		t.Errorf("enableSupervisor() error = %q, want it to mention 'gt daemon stop'", err.Error())
 	}
-
-	// Nothing should have been written.
-	if plistPath, perr := templates.LaunchdPlistPath(); perr == nil {
-		if _, statErr := os.Stat(plistPath); statErr == nil {
-			t.Error("plist file was written despite daemon.lock being held")
-		}
+	if provisioned {
+		t.Error("supervisor file was provisioned despite daemon.lock being held")
 	}
 }
 
@@ -102,12 +96,11 @@ func TestReadDaemonStartupFailure_MissingPIDReturnsEmpty(t *testing.T) {
 }
 
 func TestDaemonRunExitMapsUpgradeTo75(t *testing.T) {
+	t.Parallel()
 	var code = -1
-	orig := daemonExit
-	daemonExit = func(c int) { code = c }
-	t.Cleanup(func() { daemonExit = orig })
+	exit := func(c int) { code = c }
 
-	if err := daemonRunExit(fmt.Errorf("wrapped: %w", daemon.ErrRestartForUpgrade)); err != nil {
+	if err := daemonRunExit(fmt.Errorf("wrapped: %w", daemon.ErrRestartForUpgrade), exit); err != nil {
 		t.Fatalf("daemonRunExit(upgrade) = %v, want nil", err)
 	}
 	if code != 75 {
@@ -116,10 +109,10 @@ func TestDaemonRunExitMapsUpgradeTo75(t *testing.T) {
 
 	code = -1
 	other := errors.New("boom")
-	if err := daemonRunExit(other); err != other {
+	if err := daemonRunExit(other, exit); err != other {
 		t.Fatalf("daemonRunExit(other) = %v, want passthrough", err)
 	}
-	if err := daemonRunExit(nil); err != nil || code != -1 {
+	if err := daemonRunExit(nil, exit); err != nil || code != -1 {
 		t.Fatalf("daemonRunExit(nil) = %v, code %d; want nil and no exit", err, code)
 	}
 }

@@ -7,10 +7,33 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// These tests resolve commands with rootCmd.Find and call RunE directly, so
-// persistentPreRun (usage logging, town discovery) never runs. They are not
-// parallel: they read the shared rootCmd that other tests in this package
-// execute.
+// These tests resolve commands with lookupCommand and call RunE directly, so
+// persistentPreRun (usage logging, town discovery) never runs. TestMain
+// installs the strict completion command and sorts the tree, so every walk
+// here only reads it. They never call rootCmd.Find on a path that names a
+// command: Find records the name each command was called as, a write that
+// races every other walker.
+
+// lookupCommand resolves path through the tree by exact name or alias, as
+// Find does with prefix matching off, and returns nil when a word names no
+// child. It only reads the tree.
+func lookupCommand(root *cobra.Command, path []string) *cobra.Command {
+	c := root
+	for _, word := range path {
+		var next *cobra.Command
+		for _, child := range c.Commands() {
+			if child.Name() == word || child.HasAlias(word) {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		c = next
+	}
+	return c
+}
 
 // TestParentCommandsAreNotHelpOnly walks the whole command tree (gt-fcxe9.6,
 // deep review G4-04). A parent with subcommands and no Run/RunE is answered by
@@ -18,7 +41,7 @@ import (
 // subcommand, so `gt tap guard <typo>` in a PreToolUse hook allows every tool
 // call and a misspelled formula step "succeeds".
 func TestParentCommandsAreNotHelpOnly(t *testing.T) {
-	strictCompletionCmd(rootCmd) // what Execute does; cobra would add it lazily
+	t.Parallel()
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
 		for _, child := range c.Commands() {
@@ -32,22 +55,20 @@ func TestParentCommandsAreNotHelpOnly(t *testing.T) {
 }
 
 // TestUnknownSubcommandExitsTwo checks every parent that uses
-// requireSubcommand: a word that names none of its children resolves to the
-// parent itself (no prefix match) and fails with exit status 2.
+// requireSubcommand: a word that names none of its children names no command
+// (TestPrefixMatchingDisabled pins that Find does not guess one), so cobra
+// hands it to the parent, which fails with exit status 2.
 func TestUnknownSubcommandExitsTwo(t *testing.T) {
+	t.Parallel()
 	const bogus = "zz-no-such-subcommand"
 	var walk func(c *cobra.Command)
 	checked := 0
 	walk = func(c *cobra.Command) {
 		for _, child := range c.Commands() {
 			if child.HasSubCommands() && isRequireSubcommand(child) {
-				path := append(strings.Fields(child.CommandPath())[1:], bogus)
-				found, rest, err := rootCmd.Find(path)
-				if err != nil {
-					t.Errorf("Find(%v): %v", path, err)
-				} else if found != child {
-					t.Errorf("Find(%v) resolved to %q, want %q", path, found.CommandPath(), child.CommandPath())
-				} else if code := exitCodeForError(found.RunE(found, rest)); code != 2 {
+				if lookupCommand(child, []string{bogus}) != nil {
+					t.Errorf("%s has a subcommand named %s", child.CommandPath(), bogus)
+				} else if code := exitCodeForError(child.RunE(child, []string{bogus})); code != 2 {
 					t.Errorf("%s %s: exit %d, want 2", child.CommandPath(), bogus, code)
 				}
 				checked++
@@ -64,6 +85,7 @@ func TestUnknownSubcommandExitsTwo(t *testing.T) {
 }
 
 func TestRequireSubcommandExitsTwo(t *testing.T) {
+	t.Parallel()
 	parent := &cobra.Command{Use: "p", RunE: requireSubcommand}
 	parent.AddCommand(&cobra.Command{Use: "child", Run: func(*cobra.Command, []string) {}})
 	for _, args := range [][]string{nil, {"chidl"}} {
@@ -83,13 +105,15 @@ func TestRequireSubcommandExitsTwo(t *testing.T) {
 // TestTapGuardUnknownGuardBlocks is the security case behind G4-04: a
 // renamed or misspelled guard must block (exit 2), not allow.
 func TestTapGuardUnknownGuardBlocks(t *testing.T) {
-	c, rest, err := rootCmd.Find([]string{"tap", "guard", "dangerous-commands-typo"})
-	if err != nil {
-		t.Fatalf("Find: %v", err)
+	t.Parallel()
+	if lookupCommand(rootCmd, []string{"tap", "guard", "dangerous-commands-typo"}) != nil {
+		t.Fatal("dangerous-commands-typo names a guard")
 	}
+	c := lookupCommand(rootCmd, []string{"tap", "guard"})
 	if c != tapGuardCmd {
-		t.Fatalf("resolved to %q, want gt tap guard", c.CommandPath())
+		t.Fatal("gt tap guard does not resolve to tapGuardCmd")
 	}
+	rest := []string{"dangerous-commands-typo"}
 	if c.RunE == nil {
 		t.Fatal("gt tap guard has no RunE; cobra prints help and exits 0")
 	}
@@ -102,11 +126,13 @@ func TestTapGuardUnknownGuardBlocks(t *testing.T) {
 // `gt status` and a truncated or typo'd word in a formula or hook could run a
 // different command than the author named (deep review G4-11).
 func TestPrefixMatchingDisabled(t *testing.T) {
+	t.Parallel()
 	if cobra.EnablePrefixMatching {
 		t.Fatal("cobra.EnablePrefixMatching is on")
 	}
 	// "stat" is a declared alias of status, so it still resolves; these are
-	// bare abbreviations.
+	// bare abbreviations. Find writes nothing on a word that matches no
+	// command, so this is safe beside the parallel walkers.
 	for _, args := range [][]string{{"statu"}, {"witn"}} {
 		c, _, err := rootCmd.Find(args)
 		if err == nil {

@@ -9,52 +9,6 @@ import (
 	"testing"
 )
 
-func writeRoutingBdStub(t *testing.T, scriptBody string) {
-	t.Helper()
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	script := "#!/bin/sh\n" + scriptBody
-	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func chdirConvoyTest(t *testing.T, dir string) {
-	t.Helper()
-
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir %s: %v", dir, err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-}
-
-func makeRoutingTownWorkspace(t *testing.T) (string, string) {
-	t.Helper()
-
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-
-	expectedWD := townRoot
-	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil && resolved != "" {
-		expectedWD = resolved
-	}
-	return townRoot, expectedWD
-}
-
 // convoyCLIFixture is a convoyCLI over a temp town with an in-process bd.
 // Nothing it does starts a process or reads the cwd, the environment or a
 // package global.

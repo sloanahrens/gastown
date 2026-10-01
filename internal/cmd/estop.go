@@ -66,6 +66,12 @@ func runEstopStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	estopStatus(cmd.OutOrStdout(), townRoot)
+	return nil
+}
+
+// estopStatus reports the town-wide and per-rig E-stops under townRoot to w.
+func estopStatus(w io.Writer, townRoot string) {
 	if !estop.IsActive(townRoot) {
 		entries, _ := filepath.Glob(filepath.Join(townRoot, "ESTOP.*"))
 		hasRigEstop := false
@@ -77,13 +83,12 @@ func runEstopStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if !hasRigEstop {
-			fmt.Println("No E-stop active.")
-			return nil
+			fmt.Fprintln(w, "No E-stop active.")
+			return
 		}
 	}
-	addEstopToStatus(townRoot)
-	fmt.Printf("Clear with: %s\n", style.Bold.Render("gt thaw"))
-	return nil
+	addEstopToStatus(w, townRoot)
+	fmt.Fprintf(w, "Clear with: %s\n", style.Bold.Render("gt thaw"))
 }
 
 var thawCmd = &cobra.Command{
@@ -403,17 +408,17 @@ func isGTSession(name string, rigPrefixes map[string]bool) bool {
 
 // addEstopToStatus checks for E-stop and prints a banner if active.
 // Called from gt status to surface E-stop state.
-func addEstopToStatus(townRoot string) {
+func addEstopToStatus(w io.Writer, townRoot string) {
 	if estop.IsActive(townRoot) {
 		info := estop.Read(townRoot)
 		if info != nil {
 			age := time.Since(info.Timestamp).Round(time.Second)
-			fmt.Printf("%s  E-STOP ACTIVE (%s, %s ago", style.Error.Render("⛔"), info.Trigger, age)
+			fmt.Fprintf(w, "%s  E-STOP ACTIVE (%s, %s ago", style.Error.Render("⛔"), info.Trigger, age)
 			if info.Reason != "" {
-				fmt.Printf(": %s", info.Reason)
+				fmt.Fprintf(w, ": %s", info.Reason)
 			}
-			fmt.Println(")")
-			fmt.Println()
+			fmt.Fprintln(w, ")")
+			fmt.Fprintln(w)
 		}
 	}
 
@@ -424,15 +429,15 @@ func addEstopToStatus(townRoot string) {
 		info := estop.ReadRig(townRoot, rigName)
 		if info != nil {
 			age := time.Since(info.Timestamp).Round(time.Second)
-			fmt.Printf("%s  E-STOP: %s (%s, %s ago", style.Error.Render("⏸"), rigName, info.Trigger, age)
+			fmt.Fprintf(w, "%s  E-STOP: %s (%s, %s ago", style.Error.Render("⏸"), rigName, info.Trigger, age)
 			if info.Reason != "" {
-				fmt.Printf(": %s", info.Reason)
+				fmt.Fprintf(w, ": %s", info.Reason)
 			}
-			fmt.Println(")")
+			fmt.Fprintln(w, ")")
 		}
 	}
 	if len(entries) > 0 {
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
 
