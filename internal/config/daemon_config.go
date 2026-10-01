@@ -459,7 +459,7 @@ type LandingWorkerConfig struct {
 	// $HOME/go/bin/om.
 	OMPath string `json:"om_path,omitempty"`
 
-	// OMTimeoutStr bounds one om review (e.g. "20m"). Default 20m. An om
+	// OMTimeoutStr bounds each om attempt (e.g. "5m"); a stalled attempt is retried once. Default 5m. An om
 	// that times out does not block the landing: it lands with
 	// om_verdict "error:<reason>".
 	OMTimeoutStr string `json:"om_timeout,omitempty"`
