@@ -535,23 +535,6 @@ func New(config *Config) (*Daemon, error) {
 		}
 	}
 
-	// Fallback: if GT_DOLT_PORT still isn't set (no DoltServerManager, daemon
-	// started independently of gt up), detect the port from dolt config.
-	// This ensures AgentEnv() always has the port for spawned sessions. (GH#2412)
-	if os.Getenv("GT_DOLT_PORT") == "" {
-		if port := agentconfig.ResolveConfiguredDoltPort(config.TownRoot); port > 0 {
-			portStr := strconv.Itoa(port)
-			processEnv{}.Setenv("GT_DOLT_PORT", portStr)
-			processEnv{}.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-			processEnv{}.Setenv("BEADS_DOLT_PORT", portStr)
-			logger.Printf("Set GT_DOLT_PORT=%s from resolved Dolt config (fallback)", portStr)
-		}
-	} else {
-		portStr := os.Getenv("GT_DOLT_PORT")
-		processEnv{}.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-		processEnv{}.Setenv("BEADS_DOLT_PORT", portStr)
-	}
-
 	// Propagate Dolt host to process env so bd doesn't fall back to 127.0.0.1
 	// when the server runs on a remote machine. BEADS_DOLT_SERVER_HOST is a
 	// derived alias, not an authority, so stale inherited values are replaced or
@@ -651,15 +634,16 @@ func applyConfiguredDoltHostEnv(townRoot string, logf func(format string, v ...i
 }
 
 func applyConfiguredDoltHostEnvTo(env envWriter, townRoot string, logf func(format string, v ...interface{})) {
-	if host := agentconfig.ResolveConfiguredDoltHost(townRoot); host != "" {
-		env.Setenv("GT_DOLT_HOST", host)
-		env.Setenv("BEADS_DOLT_SERVER_HOST", host)
+	ep, ok := agentconfig.ResolveDoltEndpoint(townRoot)
+	if ep.Host != "" {
+		env.Setenv("GT_DOLT_HOST", ep.Host)
+		env.Setenv("BEADS_DOLT_SERVER_HOST", ep.Host)
 		if logf != nil {
-			logf("Set BEADS_DOLT_SERVER_HOST=%s from resolved Dolt host", host)
+			logf("Set BEADS_DOLT_SERVER_HOST=%s from resolved Dolt host", ep.Host)
 		}
 		return
 	}
-	if _, _, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
+	if ok {
 		env.Unsetenv("GT_DOLT_HOST")
 	}
 	env.Unsetenv("BEADS_DOLT_SERVER_HOST")

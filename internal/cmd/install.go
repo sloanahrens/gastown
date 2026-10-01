@@ -145,6 +145,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			"Use --force to override (not recommended).", absPath, existingRoot)
 	}
 
+	// installEndpointPort is the Dolt port this install writes to
+	// mayor/town.json; 0 when it sets up no Dolt (--no-beads without
+	// --dolt-port), which leaves the town without an endpoint.
+	installEndpointPort := installDoltPort
+
 	// Ensure beads (bd) is available before proceeding
 	if !installNoBeads {
 		if err := deps.EnsureBeads(); err != nil {
@@ -162,15 +167,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 		// Preflight: check Dolt port availability before creating any files.
 		// A port conflict would leave a partial install that needs --force to retry.
+		// The port is --dolt-port, else the endpoint of the town being
+		// reinstalled (--force), else DefaultPort. It is written to
+		// mayor/town.json below; nothing reads it from the environment
+		// (gt-y3pgh.3).
 		port := doltserver.DefaultPort
 		if installDoltPort != 0 {
 			port = installDoltPort
-			os.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-		} else if p := os.Getenv("GT_DOLT_PORT"); p != "" {
-			if envPort, err := strconv.Atoi(p); err == nil {
-				port = envPort
-			}
+		} else if ep, ok := config.ResolveDoltEndpoint(absPath); ok {
+			port = ep.Port
 		}
+		installEndpointPort = port
 		externalTestDolt := useExternalTestDoltServer(port)
 		if err := doltserver.CheckPortAvailable(port); err != nil {
 			// Port is in use — but if a Dolt server is already running
@@ -249,6 +256,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("town.json exists but is not a regular file")
 	} else {
 		fmt.Printf("   • mayor/town.json already exists, preserving\n")
+	}
+	if installEndpointPort != 0 {
+		if err := stampTownDoltPort(townPath, installEndpointPort); err != nil {
+			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
+		}
 	}
 
 	// Create rigs.json in mayor/ (only if it doesn't already exist).
@@ -525,7 +537,10 @@ func canReuseInstallDoltServer(townRoot string, port int) bool {
 }
 
 func useExternalTestDoltServer(port int) bool {
-	if os.Getenv("GT_TEST_EXTERNAL_DOLT") == "" {
+	// A test's external server is never on the default port, which is the
+	// operator's own town: an install that fell back to it (no --dolt-port)
+	// must fail its port preflight, not adopt that server.
+	if os.Getenv("GT_TEST_EXTERNAL_DOLT") == "" || port == doltserver.DefaultPort {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), installDoltServerProbeTimeout)
@@ -642,38 +657,34 @@ func writeJSON(path string, data interface{}) error {
 	return os.WriteFile(path, content, 0644)
 }
 
-// buildBdInitArgs returns the arguments for `bd init` including the correct
-// --server-port derived from the town's Dolt configuration.
+// stampTownDoltPort writes port as the town's Dolt endpoint port in
+// town.json, keeping the rest of the file (gt-y3pgh.3).
+func stampTownDoltPort(townPath string, port int) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Dolt == nil {
+			town.Dolt = &config.DoltEndpoint{}
+		}
+		town.Dolt.Port = port
+		return nil
+	})
+}
+
+// buildBdInitArgs returns the arguments for `bd init` including the
+// --server-port from the town's Dolt endpoint.
+// A town without an endpoint passes no port.
 func buildBdInitArgs(townPath string) []string {
-	return buildBdInitArgsWith(townPath, os.Getenv)
-}
-
-// buildBdInitArgsWith is buildBdInitArgs reading the environment through getenv.
-func buildBdInitArgsWith(townPath string, getenv func(string) string) []string {
-	cfg := bdInitDoltConfigWith(townPath, getenv)
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
-	return []string{"init", "--prefix", "hq", "--server",
-		"--server-port", strconv.Itoa(cfg.Port)}
+	args := []string{"init", "--prefix", "hq", "--server"}
+	if port := bdInitDoltConfig(townPath).Port; port > 0 {
+		args = append(args, "--server-port", strconv.Itoa(port))
+	}
+	return args
 }
 
+// bdInitDoltConfig is the town's Dolt server config, endpoint included
+// (gt install wrote it to mayor/town.json before bd init runs).
 func bdInitDoltConfig(townPath string) *doltserver.Config {
-	return bdInitDoltConfigWith(townPath, os.Getenv)
-}
-
-// bdInitDoltConfigWith is bdInitDoltConfig reading the environment through getenv.
-func bdInitDoltConfigWith(townPath string, getenv func(string) string) *doltserver.Config {
-	cfg := doltserver.DefaultConfig(townPath)
-	// bd init targets durable town configuration. Keep non-endpoint defaults from
-	// DefaultConfig, but do not let ambient endpoint env override target config.
-	cfg.Host = ""
-	if host := config.ResolveConfiguredDoltHostWithEnv(townPath, getenv); host != "" {
-		cfg.Host = host
-	}
-	cfg.Port = doltserver.DefaultPort
-	if port := config.ResolveConfiguredDoltPortWithEnv(townPath, getenv); port > 0 {
-		cfg.Port = port
-	}
-	return cfg
+	return doltserver.DefaultConfig(townPath)
 }
 
 // initTownBeads initializes town-level beads database using bd init.
@@ -707,9 +718,7 @@ func initTownBeads(townPath string) error {
 	// Run: bd init --prefix hq --server --server-port <port>
 	// Dolt is the only backend since bd v0.51.0; no --backend flag needed.
 	// Filter inherited BEADS_DIR so bd init targets this town, not a parent .beads.
-	// Always pass --server-port so bd connects to the correct Dolt server.
-	// bd init targets durable town config, so config.yaml beats ambient
-	// GT_DOLT_PORT that may be stale in long-lived agent sessions.
+	// Always pass --server-port so bd connects to the town's Dolt server.
 	bdInitArgs := buildBdInitArgs(townPath)
 	cmd := beads.CommandWithEnv(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads")), bdInitArgs...)
 
@@ -783,25 +792,16 @@ func initTownBeads(townPath string) error {
 }
 
 // withBeadsDirEnv returns the hardened bd mutation environment pinned to the
-// target beads directory, with stale selectors stripped and canonical Dolt
-// endpoint aliases rebuilt from the shared helper.
+// target beads directory, with stale selectors stripped and the Dolt
+// endpoint variables set from the target town's endpoint.
 func withBeadsDirEnv(beadsDir string) []string {
-	return withBeadsDirEnvFrom(os.Environ(), os.Getenv, beadsDir)
+	return withBeadsDirEnvFrom(os.Environ(), beadsDir)
 }
 
-// withBeadsDirEnvFrom is withBeadsDirEnv over the environment base, read
-// through getenv.
-func withBeadsDirEnvFrom(base []string, getenv func(string) string, beadsDir string) []string {
+// withBeadsDirEnvFrom is withBeadsDirEnv over the environment base.
+func withBeadsDirEnvFrom(base []string, beadsDir string) []string {
 	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
-		base = config.NormalizeConfiguredDoltEnvWithEnv(base, townRoot, getenv)
-		if host := config.ResolveConfiguredDoltHostWithEnv(townRoot, getenv); host != "" {
-			base = beads.StripEnvKey(base, "GT_DOLT_HOST")
-			base = append(base, "GT_DOLT_HOST="+host)
-		}
-		if port := config.ResolveConfiguredDoltPortWithEnv(townRoot, getenv); port > 0 {
-			base = beads.StripEnvKey(base, "GT_DOLT_PORT")
-			base = append(base, "GT_DOLT_PORT="+strconv.Itoa(port))
-		}
+		base = config.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
 	return beads.BuildMutationPinnedBDEnv(base, beadsDir)
 }

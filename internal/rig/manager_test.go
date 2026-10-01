@@ -625,9 +625,9 @@ func TestBdSubprocessEnvUsesHardenedBDEnv(t *testing.T) {
 		"BEADS_DB=/wrong.db",
 		"BD_DB=/wrong.bd",
 		"BEADS_DOLT_SERVER_DATABASE=wrongdb",
-		"BEADS_DOLT_SERVER_HOST=stale-host",
-		"BEADS_DOLT_SERVER_PORT=9999",
-		"BEADS_DOLT_PORT=9999",
+		"BEADS_DOLT_SERVER_HOST=inherited-host",
+		"BEADS_DOLT_SERVER_PORT=4401",
+		"BEADS_DOLT_PORT=4401",
 		"BEADS_DOLT_DATA_DIR=/wrong/data",
 		"BEADS_DOLT_AUTO_START=1",
 		"GT_DOLT_DATA=/wrong/gt-data",
@@ -642,11 +642,13 @@ func TestBdSubprocessEnvUsesHardenedBDEnv(t *testing.T) {
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "explicit_db" {
 		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
 	}
-	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want GT host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	// Outside a town there is no endpoint: bd gets the endpoint it
+	// inherited, and GT_DOLT_* is never translated (gt-y3pgh.3).
+	if got["BEADS_DOLT_SERVER_HOST"] != "inherited-host" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
 	}
-	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	if got["BEADS_DOLT_SERVER_PORT"] != "4401" || got["BEADS_DOLT_PORT"] != "4401" {
+		t.Fatalf("ports = server:%q legacy:%q, want the inherited 4401 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
 	}
 	if got["BEADS_DOLT_AUTO_START"] != "0" || got["BD_DOLT_AUTO_COMMIT"] != "on" {
 		t.Fatalf("bd mutation guardrails missing in %v", env)
@@ -733,9 +735,9 @@ func TestBdSubprocessEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
 	}
 }
 
-// The town's configured port wins over GT_DOLT_PORT, which the hermetic
-// harness points at a dead port for the whole test process.
-func TestBdInitServerPortConfigBeatsStaleEnv(t *testing.T) {
+// bd init gets the town's port; a town without an endpoint passes none
+// rather than a guessed default (gt-y3pgh.3).
+func TestBdInitServerPortArgs(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
@@ -745,9 +747,11 @@ func TestBdInitServerPortConfigBeatsStaleEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	if got := bdInitServerPort(townRoot); got != 5507 {
-		t.Fatalf("bdInitServerPort() = %d, want 5507", got)
+	if got := bdInitServerPortArgs(townRoot); !slices.Equal(got, []string{"--server-port", "5507"}) {
+		t.Fatalf("bdInitServerPortArgs() = %v, want --server-port 5507", got)
+	}
+	if got := bdInitServerPortArgs(t.TempDir()); got != nil {
+		t.Fatalf("bdInitServerPortArgs(no endpoint) = %v, want none", got)
 	}
 }
 

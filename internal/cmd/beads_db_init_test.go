@@ -141,7 +141,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	// One town serves every subtest: each adopts a rig of its own name, and
 	// a gt install per subtest was most of the test's time.
 	townRoot := filepath.Join(tmpDir, "town")
-	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test")
+	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test", "--dolt-port", os.Getenv("GT_DOLT_PORT"))
 	install.Env = append(os.Environ(), "HOME="+tmpDir)
 	if output, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("gt install failed: %v\nOutput: %s", err, output)

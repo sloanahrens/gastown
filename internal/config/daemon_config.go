@@ -19,7 +19,7 @@ type DaemonPatrolConfig struct {
 	Patrols   *PatrolsConfig `json:"patrols,omitempty"`
 	// Env holds environment variables to set at startup.
 	// Propagated to all sessions spawned by the daemon and read by gt up/mayor attach.
-	// Example: {"GT_DOLT_PORT": "43211"}
+	// Example: {"GT_DOLT_LOGLEVEL": "info"}
 	Env map[string]string `json:"env,omitempty"`
 }
 

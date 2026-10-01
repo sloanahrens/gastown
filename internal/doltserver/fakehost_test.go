@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // fakeHost is a machine in memory for host's seams: an environment, a
@@ -36,6 +38,8 @@ type fakeHost struct {
 	started       []*exec.Cmd
 	// onStart, when set, runs for each process start with the new PID.
 	onStart func(pid int, cmd *exec.Cmd)
+	// endpointPort, when set, is every town's Dolt endpoint port (townPort).
+	endpointPort int
 }
 
 // fakeProc is one process: its argv, working directory and the loopback
@@ -85,20 +89,21 @@ func newFakeHost() *fakeHost {
 // host is the host whose seams answer from f.
 func (f *fakeHost) host() *host {
 	return &host{
-		lookupEnv:   f.lookupEnv,
-		environList: f.environ,
-		run:         f.run,
-		start:       f.start,
-		alive:       f.alive,
-		signal:      f.signal,
-		dial:        f.dial,
-		listen:      f.listen,
-		lookupHost:  f.lookupHost,
-		readlink:    f.readlink,
-		openDB:      func(string) (*sql.DB, error) { return nil, errors.New("fake host: no SQL server") },
-		now:         f.clockNow,
-		sleep:       f.sleep,
-		bdArgs:      func(_, args []string) []string { return args },
+		lookupEnv:    f.lookupEnv,
+		environList:  f.environ,
+		run:          f.run,
+		start:        f.start,
+		alive:        f.alive,
+		signal:       f.signal,
+		dial:         f.dial,
+		listen:       f.listen,
+		lookupHost:   f.lookupHost,
+		readlink:     f.readlink,
+		openDB:       func(string) (*sql.DB, error) { return nil, errors.New("fake host: no SQL server") },
+		now:          f.clockNow,
+		sleep:        f.sleep,
+		bdArgs:       func(_, args []string) []string { return args },
+		doltEndpoint: f.doltEndpoint,
 	}
 }
 
@@ -369,10 +374,24 @@ func (f *fakeHost) ranMatching(substr string) []string {
 	return out
 }
 
-// townPort gives a fake town its own Dolt port through the fake machine's
-// environment, the way GT_DOLT_PORT does on a real one.
+// townPort gives every town on the fake machine the Dolt endpoint port, the
+// way mayor/town.json does on a real one.
 func (f *fakeHost) townPort(port int) *fakeHost {
-	return f.setenv("GT_DOLT_PORT", strconv.Itoa(port))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.endpointPort = port
+	return f
+}
+
+// doltEndpoint is the endpoint townPort set, else the town's config files.
+func (f *fakeHost) doltEndpoint(townRoot string) (configpkg.DoltEndpoint, bool) {
+	f.mu.Lock()
+	port := f.endpointPort
+	f.mu.Unlock()
+	if port > 0 {
+		return configpkg.DoltEndpoint{Port: port}, true
+	}
+	return configpkg.ResolveDoltEndpoint(townRoot)
 }
 
 // doltServer adds a live dolt sql-server of the town at townRoot listening on

@@ -22,6 +22,17 @@ type TownConfig struct {
 	Owner      string    `json:"owner,omitempty"`       // owner email (entity identity)
 	PublicName string    `json:"public_name,omitempty"` // public display name
 	CreatedAt  time.Time `json:"created_at"`
+	// Dolt is the town's Dolt server endpoint (gt-y3pgh.3). gt install and
+	// gt config set dolt.port write it; gt dolt start writes the server's
+	// config.yaml from it. Resolve it with ResolveDoltEndpoint.
+	Dolt *DoltEndpoint `json:"dolt,omitempty"`
+}
+
+// DoltEndpoint is where the town's Dolt sql-server listens. An empty Host is
+// the local machine.
+type DoltEndpoint struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port"`
 }
 
 // MayorConfig represents town-level behavioral configuration (mayor/config.json).

@@ -855,9 +855,8 @@ func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 		doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
 		port := doltCfg.Port
 		if doltRunning {
-			// Read the actual port from state — doltCfg.Port comes from
-			// DefaultConfig which reads GT_DOLT_PORT from the shell env,
-			// but gt status is typically run without that env var set.
+			// Report the port the running server was started on, which
+			// can differ from the configured one until Dolt restarts.
 			if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
 				port = state.Port
 			}

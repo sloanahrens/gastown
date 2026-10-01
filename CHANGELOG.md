@@ -313,6 +313,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Dolt endpoint is config, never environment** (gt-y3pgh.3, D5 Q3,
+  G3-05) — the town's endpoint is `"dolt": {"host", "port"}` in
+  `mayor/town.json`, written by `gt install` and `gt config set dolt.port`
+  (which wrote `GT_DOLT_PORT` into daemon.json's env before); a town.json
+  without it reads the `.dolt-data/config.yaml` listener, as every live town
+  does today. One resolver (`config.ResolveDoltEndpoint`, the kernel's
+  `Town.DoltEndpoint`) answers for the server and every client: `gt dolt
+  start` writes `config.yaml` from it, `gt rig add` stamps it into a new
+  rig's `.beads/config.yaml` through `bd config set`, and gt exports it to
+  its children. gt no longer reads `GT_DOLT_PORT`, `GT_DOLT_HOST`,
+  `GT_DOLT_IGNORE_CONFIG` or daemon.json's `env.GT_DOLT_PORT`, so a stale
+  shell variable can no longer be written into `config.yaml` and every rig
+  `metadata.json`. A town with no endpoint has none: `gt dolt start`
+  refuses, and nothing falls back to 3307. bd's own `BEADS_DOLT_*` pass
+  through to bd unread when the town names no endpoint.
+
 - **Parked is one record in `mayor/rigs.json`** (gt-y3pgh.4, D5 Q5, G3-11) —
   `gt rig park [--reason]` writes `{since, by, reason}` onto the rig's registry
   entry and `gt rig unpark` clears it; they are the only writers, and

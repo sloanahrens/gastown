@@ -289,14 +289,16 @@ type Config struct {
 	lookupHost func(string) ([]string, error)
 }
 
-// DefaultConfig returns the default Dolt server configuration.
+// ErrNoEndpoint: the town names no Dolt endpoint, neither in mayor/town.json
+// nor in a managed .dolt-data/config.yaml.
+var ErrNoEndpoint = errors.New("town has no Dolt endpoint: mayor/town.json has no \"dolt\" port and .dolt-data/config.yaml is absent; set one with: gt config set dolt.port <port>")
+
+// DefaultConfig returns the town's Dolt server configuration.
 //
-// Port priority is resolved by config.ResolveDoltPort so client and server
-// callsites share one precedence model: explicit env, durable config, daemon
-// env, then DefaultPort.
+// Host and Port are the town's endpoint (config.ResolveDoltEndpoint); Port
+// is 0 when the town has none.
 //
-// Other environment variables:
-//   - GT_DOLT_HOST → Host
+// Environment variables for the other settings:
 //   - GT_DOLT_USER → User
 //   - GT_DOLT_PASSWORD → Password
 //   - GT_DOLT_LOGLEVEL → LogLevel (trace, debug, info, warning, error, fatal)
@@ -304,7 +306,6 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
 		TownRoot:         townRoot,
-		Port:             DefaultPort,
 		User:             DefaultUser,
 		DataDir:          filepath.Join(townRoot, ".dolt-data"),
 		LogFile:          filepath.Join(daemonDir, "dolt.log"),
@@ -339,13 +340,11 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 		config.TimeZone = v
 	}
 
-	if host := configpkg.ResolveDoltHostWithEnv(townRoot, h.getenv); host != "" {
-		config.Host = host
-	}
-
-	if port := configpkg.ResolveDoltPortWithEnv(townRoot, h.getenv); port > 0 {
-		config.Port = port
-	}
+	// The endpoint is the town's config, never the environment (gt-y3pgh.3).
+	// A town without one gets port 0, which nothing listens on and Start
+	// refuses: there is no fallback to DefaultPort.
+	ep, _ := h.resolveDoltEndpoint(townRoot)
+	config.Host, config.Port = ep.Host, ep.Port
 	if scheduler, ok := h.lookupEnvVar("GT_DOLT_EVENT_SCHEDULER"); ok {
 		config.EventScheduler = scheduler
 	}
@@ -857,6 +856,9 @@ func (h *host) WaitForReady(townRoot string, timeout time.Duration) error {
 	}
 
 	config := h.DefaultConfig(townRoot)
+	if config.Port == 0 {
+		return ErrNoEndpoint
+	}
 	addr := config.HostPort()
 	deadline := h.clockNow().Add(timeout)
 	interval := 100 * time.Millisecond
@@ -1917,8 +1919,8 @@ func (h *host) checkPortAvailable(port int) error {
 		}
 		return fmt.Errorf("port %d is already in use.%s\n"+
 			"If you're running multiple Gas Town instances, each needs a unique Dolt port.\n"+
-			"Set GT_DOLT_PORT in mayor/daemon.json env section:\n"+
-			"  {\"env\": {\"GT_DOLT_PORT\": \"<port>\"}}", port, detail)
+			"Set the town's port with:\n"+
+			"  gt config set dolt.port <port>", port, detail)
 	}
 	return nil
 }
@@ -1988,8 +1990,9 @@ func writeServerConfig(config *Config, configPath string) error {
 
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town (gt dolt start)
 # Do not edit manually; changes are overwritten on each server start.
-# To customize, set Gas Town environment variables:
-#   GT_DOLT_PORT, GT_DOLT_HOST, GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
+# The listener comes from mayor/town.json (gt config set dolt.port).
+# To customize the rest, set Gas Town environment variables:
+#   GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
 #   GT_DOLT_EVENT_SCHEDULER (OFF, ON, omit), GT_DOLT_STATS_ENABLED (0, 1, omit)
 #   GT_DOLT_AUTO_GC (on, off)
 
@@ -2026,6 +2029,9 @@ func (h *host) Start(townRoot string) error {
 		return &doltpause.Error{Marker: *p}
 	}
 	config := h.DefaultConfig(townRoot)
+	if config.Port == 0 {
+		return ErrNoEndpoint
+	}
 
 	// Ensure daemon directory exists
 	daemonDir := filepath.Dir(config.LogFile)
@@ -4072,7 +4078,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 		_ = json.Unmarshal(data, &existing) // best effort
 	}
 
-	// Resolve the authoritative server config (config.yaml > env > daemon.json > default).
+	// The town's server config; its endpoint is the town's (gt-y3pgh.3).
 	config := h.DefaultConfig(townRoot)
 
 	// Patch dolt server fields. Only write when values actually change so tracked
@@ -4115,15 +4121,18 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// bd reads dolt_server_host and dolt_server_port from metadata.json to
 	// connect to the Dolt server. Stale values (e.g., port 13729 from a
 	// previous bd init) cause "connection refused" errors.
-	wantHost := config.EffectiveHost()
-	wantPort := float64(config.Port) // JSON numbers are float64
-	if existing["dolt_server_host"] != wantHost {
-		existing["dolt_server_host"] = wantHost
-		changed = true
-	}
-	if existing["dolt_server_port"] != wantPort {
-		existing["dolt_server_port"] = wantPort
-		changed = true
+	// A town without an endpoint leaves them as they are (gt-y3pgh.3).
+	if config.Port > 0 {
+		wantHost := config.EffectiveHost()
+		wantPort := float64(config.Port) // JSON numbers are float64
+		if existing["dolt_server_host"] != wantHost {
+			existing["dolt_server_host"] = wantHost
+			changed = true
+		}
+		if existing["dolt_server_port"] != wantPort {
+			existing["dolt_server_port"] = wantPort
+			changed = true
+		}
 	}
 
 	// Fast path: avoid rewriting metadata.json when already correct.

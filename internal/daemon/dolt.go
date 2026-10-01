@@ -223,11 +223,9 @@ func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltS
 		return nil
 	}
 	normalized := *config
-	if host, port, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
-		normalized.Host = host
-		if port > 0 {
-			normalized.Port = port
-		}
+	if ep, ok := agentconfig.ResolveDoltEndpoint(townRoot); ok {
+		normalized.Host = ep.Host
+		normalized.Port = ep.Port
 	}
 	return &normalized
 }

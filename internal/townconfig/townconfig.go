@@ -50,8 +50,8 @@ var (
 	ErrNoRigPrefix = errors.New("rig has no beads prefix")
 )
 
-// DoltEndpoint is the managed Dolt server's listener and data directory, as
-// gt dolt start wrote them to .dolt-data/config.yaml.
+// DoltEndpoint is the town's Dolt server listener (Town.DoltEndpoint) and
+// the data directory gt dolt start wrote to .dolt-data/config.yaml.
 type DoltEndpoint struct {
 	Host    string
 	Port    int
@@ -367,8 +367,14 @@ func (t *Town) DaemonEnv() map[string]string {
 	return out
 }
 
-// DoltEndpoint is the managed Dolt server's endpoint; ok is false when the
-// town has no managed .dolt-data/config.yaml.
+// DoltEndpoint is the town's Dolt server endpoint, with the precedence of
+// config.ResolveDoltEndpoint: mayor/town.json "dolt", else the managed
+// .dolt-data/config.yaml listener. ok is false when neither is present.
 func (t *Town) DoltEndpoint() (DoltEndpoint, bool) {
+	if d := t.identity.Dolt; d != nil {
+		ep := t.dolt
+		ep.Host, ep.Port = strings.TrimSpace(d.Host), d.Port
+		return ep, true
+	}
 	return t.dolt, t.present[FileDolt]
 }

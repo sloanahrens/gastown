@@ -1079,7 +1079,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	}
 
 	// Step 2: Run gt install
-	cmd := exec.Command(gtBinary, "install", hqPath, "--name", "test-town")
+	cmd := exec.Command(gtBinary, "install", hqPath, "--name", "test-town", "--dolt-port", os.Getenv("GT_DOLT_PORT"))
 	cmd.Env = append(os.Environ(), "HOME="+tmpDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

@@ -223,9 +223,6 @@ func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 		"BD_DB=/wrong.bd",
 		"BEADS_DOLT_DATABASE=legacy-hq",
 		"BEADS_DOLT_SERVER_DATABASE=hq",
-		"BEADS_DOLT_SERVER_HOST=wrong-host",
-		"BEADS_DOLT_SERVER_PORT=9999",
-		"BEADS_DOLT_PORT=9999",
 		"BEADS_DOLT_DATA_DIR=/wrong/data",
 		"BEADS_DOLT_FUTURE_SELECTOR=wrong",
 		"BEADS_DOLT_AUTO_START=0",
@@ -356,12 +353,12 @@ func TestBuildBDEnvConnectionOverridesAndDoesNotRestoreDataDir(t *testing.T) {
 
 	base := []string{
 		"PATH=/usr/bin",
-		"GT_DOLT_HOST=127.0.0.2",
-		"GT_DOLT_PORT=5507",
+		"GT_DOLT_HOST=127.0.0.9",
+		"GT_DOLT_PORT=9999",
 		"GT_DOLT_DATA=/wrong/data",
-		"BEADS_DOLT_SERVER_HOST=stale-host",
-		"BEADS_DOLT_SERVER_PORT=9999",
-		"BEADS_DOLT_PORT=9999",
+		"BEADS_DOLT_SERVER_HOST=127.0.0.2",
+		"BEADS_DOLT_SERVER_PORT=5507",
+		"BEADS_DOLT_PORT=5507",
 		"BEADS_DOLT_DATA_DIR=/stale/data",
 		"BEADS_DOLT_SERVER_DATABASE=hq",
 	}
@@ -378,8 +375,10 @@ func TestBuildBDEnvConnectionOverridesAndDoesNotRestoreDataDir(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := envMap(tc.env)
+			// Outside a town the inherited endpoint beats metadata.json;
+			// GT_DOLT_* is never read (gt-y3pgh.3).
 			if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-				t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want GT_DOLT_HOST in %v", got["BEADS_DOLT_SERVER_HOST"], tc.env)
+				t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host in %v", got["BEADS_DOLT_SERVER_HOST"], tc.env)
 			}
 			if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
 				t.Fatalf("Beads port aliases = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], tc.env)
@@ -463,8 +462,8 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 				if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
 					t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want metadata host in %v", got["BEADS_DOLT_SERVER_HOST"], tc.env)
 				}
-				if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-					t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], tc.env)
+				if got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
+					t.Fatalf("ports = server:%q legacy:%q, want metadata 4407 (GT_DOLT_PORT is never read) in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], tc.env)
 				}
 			} else {
 				for _, key := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
@@ -524,8 +523,8 @@ func TestBuildPinnedBDEnvStripsCaseVariantTargetEnvWhenKeysAreCaseInsensitive(t 
 	if got["BEADS_DIR"] != beadsDir || got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
 		t.Fatalf("pinned target env not restored canonically: %v", env)
 	}
-	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" || got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
-		t.Fatalf("connection env not restored canonically: %v", env)
+	if got["BEADS_DOLT_SERVER_HOST"] != "wrong-host" || got["BEADS_DOLT_SERVER_PORT"] != "9999" || got["BEADS_DOLT_PORT"] != "9999" {
+		t.Fatalf("inherited connection env not passed through canonically: %v", env)
 	}
 	if _, ok := got["beads_dolt_auto_start"]; ok {
 		t.Fatalf("case-variant BEADS_DOLT_AUTO_START should be stripped, got %v", env)
@@ -538,30 +537,54 @@ func TestBuildPinnedBDEnvStripsCaseVariantTargetEnvWhenKeysAreCaseInsensitive(t 
 	}
 }
 
-func TestBuildPinnedBDEnvUsesLastCaseVariantGTDoltEndpoint(t *testing.T) {
-	withCaseInsensitiveEnvKeys(t)
-
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+// The town's endpoint beats both the inherited endpoint and metadata.json;
+// outside a town the inherited endpoint beats metadata.json (gt-y3pgh.3).
+func TestBuildPinnedBDEnvEndpointPrecedence(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"rigdb"}`), 0644); err != nil {
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"host":"127.0.0.3","port":6607}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(townJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	env := BuildPinnedBDEnv([]string{
-		"PATH=/usr/bin",
-		"gt_dolt_host=stale-host",
-		"GT_DOLT_HOST=127.0.0.2",
-		"gt_dolt_port=3307",
-		"GT_DOLT_PORT=5507",
-	}, beadsDir)
-	got := envMap(env)
-	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want last GT_DOLT_HOST in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	inTown := filepath.Join(townRoot, "rig", ".beads")
+	outside := filepath.Join(t.TempDir(), ".beads")
+	for _, dir := range []string{inTown, outside} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), metadata, 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	inherited := []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=127.0.0.2", "BEADS_DOLT_PORT=5507", "GT_DOLT_PORT=9999"}
+
+	for _, tc := range []struct {
+		name, beadsDir     string
+		base               []string
+		wantHost, wantPort string
+	}{
+		{"town endpoint wins", inTown, inherited, "127.0.0.3", "6607"},
+		{"inherited beats metadata outside a town", outside, inherited, "127.0.0.2", "5507"},
+		{"metadata outside a town without inherited endpoint", outside, []string{"PATH=/usr/bin", "GT_DOLT_PORT=9999"}, "127.0.0.1", "4407"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := BuildPinnedBDEnv(tc.base, tc.beadsDir)
+			got := envMap(env)
+			if got["BEADS_DOLT_SERVER_HOST"] != tc.wantHost {
+				t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q in %v", got["BEADS_DOLT_SERVER_HOST"], tc.wantHost, env)
+			}
+			if got["BEADS_DOLT_PORT"] != tc.wantPort {
+				t.Fatalf("BEADS_DOLT_PORT = %q, want %q in %v", got["BEADS_DOLT_PORT"], tc.wantPort, env)
+			}
+			// An inherited endpoint passes through as it came: here
+			// without BEADS_DOLT_SERVER_PORT, so metadata's is gone too.
+			if wantServer := map[bool]string{true: "", false: tc.wantPort}[tc.wantPort == "5507"]; got["BEADS_DOLT_SERVER_PORT"] != wantServer {
+				t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q in %v", got["BEADS_DOLT_SERVER_PORT"], wantServer, env)
+			}
+		})
 	}
 }
 
@@ -579,9 +602,6 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 		"PATH=/usr/bin",
 		"BEADS_DIR=/wrong",
 		"BEADS_DOLT_SERVER_DATABASE=hq",
-		"BEADS_DOLT_SERVER_HOST=wrong-host",
-		"BEADS_DOLT_SERVER_PORT=9999",
-		"BEADS_DOLT_PORT=9999",
 	}, beadsDir)
 	got := envMap(env)
 	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
@@ -594,7 +614,8 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 	}
 }
 
-func TestBuildPinnedBDEnvFallsBackToGTDoltPort(t *testing.T) {
+// GT_DOLT_* is never translated into bd's endpoint variables (gt-y3pgh.3).
+func TestBuildPinnedBDEnvIgnoresGTDoltEndpoint(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -613,11 +634,10 @@ func TestBuildPinnedBDEnvFallsBackToGTDoltPort(t *testing.T) {
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
 		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
 	}
-	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want GT_DOLT_HOST fallback in %v", got["BEADS_DOLT_SERVER_HOST"], env)
-	}
-	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	for _, key := range bdEndpointEnvKeys {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s = %q translated from GT_DOLT_* in %v", key, value, env)
+		}
 	}
 }
 
@@ -5354,9 +5374,11 @@ func TestBuildRunEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("43113\n"), 0644); err != nil {
 		t.Fatalf("write dolt-server.port: %v", err)
 	}
+	// GT_DOLT_PORT is never read; with no inherited bd endpoint the
+	// beads directory's own port is used (gt-y3pgh.3).
 	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "3307")
+	t.Setenv("GT_DOLT_PORT", "3307")
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	env := (&Beads{workDir: tmpDir}).buildRunEnv()
 
@@ -5366,7 +5388,7 @@ func TestBuildRunEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 		case "BEADS_DOLT_PORT=43113":
 			found = true
 		case "BEADS_DOLT_PORT=3307":
-			t.Fatalf("stale BEADS_DOLT_PORT preserved in env: %v", env)
+			t.Fatalf("GT_DOLT_PORT translated into env: %v", env)
 		}
 	}
 	if !found {
@@ -5383,9 +5405,11 @@ func TestBuildRoutingEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("43113\n"), 0644); err != nil {
 		t.Fatalf("write dolt-server.port: %v", err)
 	}
+	// GT_DOLT_PORT is never read; with no inherited bd endpoint the
+	// beads directory's own port is used (gt-y3pgh.3).
 	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("BEADS_DOLT_PORT", "3307")
+	t.Setenv("GT_DOLT_PORT", "3307")
+	t.Setenv("BEADS_DOLT_PORT", "")
 
 	env := (&Beads{workDir: tmpDir}).buildRoutingEnv()
 
@@ -5395,7 +5419,7 @@ func TestBuildRoutingEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 		case "BEADS_DOLT_PORT=43113":
 			found = true
 		case "BEADS_DOLT_PORT=3307":
-			t.Fatalf("stale BEADS_DOLT_PORT preserved in env: %v", env)
+			t.Fatalf("GT_DOLT_PORT translated into env: %v", env)
 		}
 	}
 	if !found {

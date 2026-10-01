@@ -2,7 +2,9 @@ package rig
 
 import (
 	"fmt"
+	"strconv"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -30,6 +32,28 @@ func seedRigDatabaseConfig(bd configSetter, setPrefix func(prefix string) error,
 	} {
 		if err := bd.ConfigSet(kv[0], kv[1]); err != nil {
 			warnings = append(warnings, fmt.Sprintf("could not set %s in rig database: %v", kv[0], err))
+		}
+	}
+	return warnings
+}
+
+// stampRigDoltEndpoint writes the town's Dolt endpoint into a new rig's
+// .beads/config.yaml through bd config set (gt-y3pgh.3, D1), so bd finds
+// the server from the rig's own config without gt's environment. A town
+// without an endpoint stamps nothing. Each failure comes back as a warning
+// naming its key.
+func stampRigDoltEndpoint(bd configSetter, ep config.DoltEndpoint, ok bool) []string {
+	if !ok {
+		return nil
+	}
+	kvs := [][2]string{{"dolt.port", strconv.Itoa(ep.Port)}}
+	if ep.Host != "" {
+		kvs = append(kvs, [2]string{"dolt.host", ep.Host})
+	}
+	var warnings []string
+	for _, kv := range kvs {
+		if err := bd.ConfigSet(kv[0], kv[1]); err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not set %s in config.yaml: %v", kv[0], err))
 		}
 	}
 	return warnings

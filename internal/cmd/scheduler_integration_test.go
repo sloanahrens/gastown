@@ -97,8 +97,10 @@ func initSchedulerGitRepo(t *testing.T, dir, homeDir string) {
 func schedulerBDInitEnv(homeDir, beadsDir string) []string {
 	env := cleanSchedulerTestEnv(homeDir)
 	if p := schedulerDoltPort(); p != "" {
-		env = beads.StripEnvKey(env, "GT_DOLT_PORT")
-		env = append(env, "GT_DOLT_PORT="+p)
+		for _, key := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+			env = beads.StripEnvKey(env, key)
+			env = append(env, key+"="+p)
+		}
 	}
 	return beads.BuildMutationPinnedBDEnv(env, beadsDir)
 }
