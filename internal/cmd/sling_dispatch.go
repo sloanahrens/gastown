@@ -322,9 +322,21 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 
 	// 4. Auto-convoy (if !NoConvoy)
 	convoyID := ""
+	// A rollback leaves the auto-convoy open so the convoy feeder re-dispatches
+	// the bead with the agent and formula the convoy recorded (gt-yg24). Only a
+	// sling that never reached a dispatchable bead closes the convoy it
+	// created, because the feeder could only re-dispatch the same failure
+	// (gt-7evi4). runSling's inline rollback has read the reason this way since
+	// gt-7evi4; executeSling closed the convoy on every rollback until gt-hk555.
+	rollbackConvoyID := func(reason string) string {
+		if reason == rawSlingMetadataRollbackReason {
+			return convoyID
+		}
+		return ""
+	}
 	rollbackSpawnedPolecat := func(rollbackBeadID, reason string) {
 		fmt.Fprintf(d.out, "  %s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, spawnInfo.PolecatName)
-		d.rollbackArtifacts(spawnInfo, rollbackBeadID, hookWorkDir, convoyID)
+		d.rollbackArtifacts(spawnInfo, rollbackBeadID, hookWorkDir, rollbackConvoyID(reason))
 		d.restoreRawFields(rollbackBeadID, townRoot, hookWorkDir, info)
 		if params.Force && info.Status == "pinned" {
 			d.restorePinned(townRoot, params.BeadID, info.Assignee)
@@ -436,7 +448,10 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 	// Acquire per-assignee lock to serialize concurrent hook writes (issue #3114).
 	assigneeUnlock, assigneeLockErr := d.lockAssignee(townRoot, targetAgent)
 	if assigneeLockErr != nil {
-		d.cleanupSpawned(spawnInfo, params.RigName, convoyID)
+		// The formula above is instantiated and bonded by now, so this undoes
+		// it as well as the spawn (gt-7evi4: a wisp this sling created and did
+		// not commit must not block the next attempt).
+		rollbackSpawnedPolecat(beadToHook, "Assignee lock failed")
 		result.ErrMsg = "assignee lock failed"
 		return result, fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}

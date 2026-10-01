@@ -753,20 +753,24 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
-	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
-	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (mayor, crew, self-sling, nudge)
-	// that executeSling does not cover. The rig-target case could be factored out
-	// to use executeSling, limiting this to non-rig targets only.
+	// A rig target runs executeSling, the engine batch sling, the scheduler and
+	// the daemon's convoy feeders share, so a rig dispatch has one
+	// implementation instead of two (gt-hk555). What stays inline below is what
+	// executeSling does not cover — self-sling, mayor, crew, named polecats and
+	// dogs — plus --dry-run, which previews this path because executeSling has
+	// no preview mode.
 	//
-	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
 	var target string
 	if len(args) > 1 {
 		target = args[1]
 	}
+	if rigName, isRig := r.isRigName(target); isRig && !r.opts.dryRun {
+		return r.runRigTarget(rigName, beadID, formulaName, townRoot, force)
+	}
+
+	// Resolve target agent using shared dispatch logic.
 	resolved, err := r.resolveTarget(target, ResolveTargetOptions{
 		DryRun:       r.opts.dryRun,
 		Force:        force,
@@ -1217,6 +1221,67 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
+	return nil
+}
+
+// runRigTarget dispatches `gt sling <bead> <rig>` through executeSling, the
+// engine batch sling, the scheduler and the daemon's convoy feeders share, so
+// a rig target has one implementation instead of two (gt-hk555). run's inline
+// path keeps the targets executeSling does not cover: self-sling, mayor, crew,
+// named polecats and dogs.
+//
+// executeSling's documented caller duties happen here: the cross-rig guard
+// before the dispatch and the rig wake-up after it. The rig's default formula
+// is resolved here as well, because executeSling hooks the raw bead when no
+// formula is named — a bare bead slung to a polecat target takes the rig's
+// default (issue #288), which is what the inline path did for the same case.
+func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string, force bool) error {
+	// The guard the inline path ran for every polecat-bound target (gt-myecw).
+	// It costs a refusal before any side effect, so it runs before the spawn.
+	if err := r.crossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
+		return err
+	}
+	if formulaName == "" {
+		formulaName = r.resolveFormula(r.opts.formula, r.opts.hookRawBead, townRoot, rigName)
+	}
+	mode := ""
+	if r.opts.ralph {
+		mode = "ralph"
+	}
+	params := SlingParams{
+		BeadID:      beadID,
+		FormulaName: formulaName,
+		RigName:     rigName,
+
+		Args:         r.opts.argsText,
+		Vars:         append([]string(nil), r.opts.vars...),
+		Merge:        r.opts.merge,
+		BaseBranch:   r.opts.baseBranch,
+		ResumeBranch: r.opts.resumeBranch,
+		Account:      r.opts.account,
+		Agent:        r.opts.agent,
+		NoConvoy:     r.opts.noConvoy,
+		Owned:        r.opts.owned,
+		NoMerge:      r.opts.noMerge,
+		Force:        force,
+		HookRawBead:  r.opts.hookRawBead,
+		NoBoot:       r.opts.noBoot,
+		Mode:         mode,
+		ReviewOnly:   r.opts.reviewOnly,
+
+		// One bead: a formula that cannot be applied fails the sling and rolls
+		// the spawn back, where the batch path hooks the raw bead and goes on.
+		FormulaFailFatal: true,
+		CallerContext:    r.requester(),
+		TownRoot:         townRoot,
+	}
+	if _, err := r.executeSling(params); err != nil {
+		return err
+	}
+	if !r.opts.noBoot {
+		r.wakeRig(rigName)
+	}
+	fmt.Fprintf(r.out, "%s Work attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 	return nil
 }
 
