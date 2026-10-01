@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"gopkg.in/yaml.v3"
 )
 
@@ -136,7 +137,7 @@ func writeAndReadDaemonAutoGC(t *testing.T, env mapEnv) struct {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
-	if err := writeDaemonDoltConfig(cfg, configPath, env.lookup); err != nil {
+	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfigWithEnv(dir, env.lookup)); err != nil {
 		t.Fatalf("writeDaemonDoltConfig: %v", err)
 	}
 	data, err := os.ReadFile(configPath)

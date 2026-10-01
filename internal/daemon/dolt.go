@@ -922,36 +922,31 @@ func IsDoltUnhealthy(townRoot string) bool {
 // daemon's DoltServerConfig. Unlike CLI flags, config.yaml can set
 // read_timeout_millis and write_timeout_millis, which prevents CLOSE_WAIT
 // accumulation when clients disconnect without completing their SQL sessions.
-// lookupEnv reads the GT_DOLT_* switches that shape the file.
-func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, lookupEnv func(string) (string, bool)) error {
+// knobs carries the event scheduler, stats and auto-GC switches, resolved by
+// doltserver's one reader of them (gt-y3pgh.2).
+func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, knobs *doltserver.Config) error {
 	hostLine := ""
 	if cfg.Host != "" {
 		hostLine = fmt.Sprintf("\n  host: %s", cfg.Host)
 	}
 	eventSchedulerLine := "  event_scheduler: \"OFF\"\n"
-	if scheduler, ok := os.LookupEnv("GT_DOLT_EVENT_SCHEDULER"); ok {
-		if strings.EqualFold(scheduler, "omit") {
-			eventSchedulerLine = ""
-		} else if strings.TrimSpace(scheduler) != "" {
-			eventSchedulerLine = fmt.Sprintf("  event_scheduler: %q\n", strings.ToUpper(strings.TrimSpace(scheduler)))
-		}
+	if strings.EqualFold(knobs.EventScheduler, "omit") {
+		eventSchedulerLine = ""
+	} else if strings.TrimSpace(knobs.EventScheduler) != "" {
+		eventSchedulerLine = fmt.Sprintf("  event_scheduler: %q\n", strings.ToUpper(strings.TrimSpace(knobs.EventScheduler)))
 	}
 	systemVariablesBlock := "\nsystem_variables:\n  dolt_stats_enabled: 0\n"
-	if stats, ok := lookupEnv("GT_DOLT_STATS_ENABLED"); ok {
-		if strings.EqualFold(stats, "omit") {
-			systemVariablesBlock = ""
-		} else if strings.TrimSpace(stats) != "" {
-			systemVariablesBlock = fmt.Sprintf("\nsystem_variables:\n  dolt_stats_enabled: %s\n", strings.TrimSpace(stats))
-		}
+	if strings.EqualFold(knobs.DoltStatsEnabled, "omit") {
+		systemVariablesBlock = ""
+	} else if strings.TrimSpace(knobs.DoltStatsEnabled) != "" {
+		systemVariablesBlock = fmt.Sprintf("\nsystem_variables:\n  dolt_stats_enabled: %s\n", strings.TrimSpace(knobs.DoltStatsEnabled))
 	}
 	// Non-blocking storage GC bounds the sql-server's RSS (hq-excy9g); on by
 	// default. GT_DOLT_AUTO_GC=off (or false/0/disabled) disables it at the next
 	// Dolt restart without a source revert+rebuild — the runtime escape hatch.
 	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
-	if v, ok := lookupEnv("GT_DOLT_AUTO_GC"); ok {
-		if vv := strings.ToLower(strings.TrimSpace(v)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
-			autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
-		}
+	if vv := strings.ToLower(strings.TrimSpace(knobs.AutoGC)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
+		autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
 	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town daemon
 # Do not edit manually; overwritten on each daemon-managed server start.
@@ -1018,7 +1013,7 @@ func (m *DoltServerManager) startLocked() error {
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
 	env := m.environ()
 	lookupEnv := func(key string) (string, bool) { return lookupEnvIn(env, key) }
-	if err := writeDaemonDoltConfig(m.config, configPath, lookupEnv); err != nil {
+	if err := writeDaemonDoltConfig(m.config, configPath, doltserver.DefaultConfigWithEnv(m.townRoot, lookupEnv)); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 
