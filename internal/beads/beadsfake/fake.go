@@ -357,6 +357,22 @@ func (f *Fake) Children(parentID string) ([]*beads.Issue, error) {
 	return out, nil
 }
 
+// ChildrenOf returns Children for each of parentIDs, keyed by parent; a
+// parent with no children is absent.
+func (f *Fake) ChildrenOf(parentIDs ...string) (map[string][]*beads.Issue, error) {
+	out := make(map[string][]*beads.Issue)
+	for _, id := range parentIDs {
+		kids, err := f.Children(id)
+		if err != nil {
+			return nil, err
+		}
+		if len(kids) > 0 {
+			out[id] = kids
+		}
+	}
+	return out, nil
+}
+
 // Comments returns an issue's comments, oldest first, or an error for a
 // missing issue.
 func (f *Fake) Comments(id string) ([]beads.Comment, error) {

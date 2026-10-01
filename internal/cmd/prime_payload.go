@@ -30,11 +30,7 @@ const primeStepBodyMaxChars = 3000
 // Claude Code delivers at most 10,000 characters of hook output to the model, so
 // prime cannot afford the full body of every step (mol-polecat-work alone is
 // ~19 KB, mol-refinery-patrol ~51 KB).
-func renderFormulaChecklist(formulaName string, f *cookedFormula, fullStep int) string {
-	if f == nil {
-		return ""
-	}
-	steps := f.checklist()
+func renderFormulaChecklist(formulaName string, steps []checklistStep, fullStep int) string {
 	if len(steps) == 0 {
 		return ""
 	}
@@ -46,7 +42,7 @@ func renderFormulaChecklist(formulaName string, f *cookedFormula, fullStep int) 
 	sb.WriteString("\n")
 	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(steps), formulaName)
 	for i, step := range steps {
-		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, step.Title)
+		fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", i+1, step.Title, stepStatusSuffix(step))
 		if i+1 != fullStep {
 			continue
 		}
@@ -68,6 +64,19 @@ func renderFormulaChecklist(formulaName string, f *cookedFormula, fullStep int) 
 	fmt.Fprintf(&sb, "Only step %d is shown in full. Before starting any other step, read it with `%s prime --step <N> --formula %s`.\n\n",
 		fullStep, cli.Name(), formulaName)
 	return sb.String()
+}
+
+// stepStatusSuffix marks a poured step that is no longer open, so the agent
+// sees where its molecule stands. A cooked step has no status.
+func stepStatusSuffix(step checklistStep) string {
+	switch step.Status {
+	case "", string(beads.StatusOpen):
+		return ""
+	case string(beads.StatusClosed):
+		return " (done)"
+	default:
+		return " (" + step.Status + ")"
+	}
 }
 
 // primeHookBudget is the most prime will print as a SessionStart hook. Claude
@@ -255,17 +264,13 @@ func useCompactResumePath(source, handoffReason string, staticDelivered bool) bo
 
 // renderFormulaStep renders the title and full body of one step (1-based) for
 // `gt prime --step N`.
-func renderFormulaStep(formulaName string, f *cookedFormula, n int) (string, error) {
-	var steps []cookedStep
-	if f != nil {
-		steps = f.checklist()
-	}
+func renderFormulaStep(formulaName string, steps []checklistStep, n int) (string, error) {
 	if n < 1 || n > len(steps) {
 		return "", fmt.Errorf("formula %s has no step %d", formulaName, n)
 	}
 	step := steps[n-1]
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "### Step %d: %s\n\n", n, step.Title)
+	fmt.Fprintf(&sb, "### Step %d: %s%s\n\n", n, step.Title, stepStatusSuffix(step))
 	if desc := step.Description; desc != "" {
 		sb.WriteString(desc)
 		sb.WriteString("\n")

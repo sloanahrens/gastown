@@ -38,6 +38,9 @@ type Client interface {
 	ReadyAll() ([]*Issue, error)
 	// Children returns the direct children of parentID.
 	Children(parentID string) ([]*Issue, error)
+	// ChildrenOf returns the direct children of each of parentIDs in one
+	// read, keyed by parent; a parent with no children is absent.
+	ChildrenOf(parentIDs ...string) (map[string][]*Issue, error)
 	// Comments returns the comments on an issue, oldest first.
 	Comments(id string) ([]Comment, error)
 

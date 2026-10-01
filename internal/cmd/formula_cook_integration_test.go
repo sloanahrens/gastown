@@ -56,7 +56,7 @@ func TestIntegrationFormulaCook(t *testing.T) {
 		if f.Type != "workflow" {
 			continue
 		}
-		out := renderFormulaChecklist(name, f, 1)
+		out := renderFormulaChecklist(name, f.checklist(), 1)
 		if len(f.checklist()) == 0 || len(out) > 6000 {
 			t.Errorf("%s: checklist has %d steps and %d chars; want steps, bounded", name, len(f.checklist()), len(out))
 		}
@@ -66,7 +66,7 @@ func TestIntegrationFormulaCook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mol-polecat-work: %v", err)
 	}
-	if out := renderFormulaChecklist("mol-polecat-work", f, 1); !strings.Contains(out, "TOWN OVERLAY LINE") || !strings.Contains(out, "gt-cook") {
+	if out := renderFormulaChecklist("mol-polecat-work", f.checklist(), 1); !strings.Contains(out, "TOWN OVERLAY LINE") || !strings.Contains(out, "gt-cook") {
 		t.Errorf("step 1 lacks the overlay or the issue var:\n%s", out)
 	}
 

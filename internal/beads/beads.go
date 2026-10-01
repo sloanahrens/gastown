@@ -2704,6 +2704,41 @@ func (b *Beads) Children(parentID string) ([]*Issue, error) {
 	return parseChildrenJSON(out)
 }
 
+// ChildrenOf is Children for several parents in one `bd show --children`,
+// keyed by parent. A molecule's steps share its prefix, so the call is
+// routed by the first parent.
+func (b *Beads) ChildrenOf(parentIDs ...string) (map[string][]*Issue, error) {
+	if len(parentIDs) == 0 {
+		return map[string][]*Issue{}, nil
+	}
+	if !b.noRoute {
+		if target := b.forIssueID(parentIDs[0]); target != b {
+			return target.ChildrenOf(parentIDs...)
+		}
+	}
+
+	if b.store != nil {
+		out := make(map[string][]*Issue)
+		for _, id := range parentIDs {
+			kids, err := b.storeChildren(id)
+			if err != nil {
+				return nil, err
+			}
+			if len(kids) > 0 {
+				out[id] = kids
+			}
+		}
+		return out, nil
+	}
+
+	args := append([]string{"show"}, parentIDs...)
+	out, err := b.run(append(args, "--children", "--json")...)
+	if err != nil {
+		return nil, err
+	}
+	return parseChildrenMapJSON(out)
+}
+
 // parseChildrenJSON parses `bd show <id> --children --json` output. bd
 // returns a map keyed by (resolved) parent ID plus envelope metadata, e.g.
 // {"gt-wisp-abc": [{...}, ...], "schema_version": 1}. Since Children always
@@ -2736,6 +2771,33 @@ func parseChildrenJSON(raw []byte) ([]*Issue, error) {
 	}
 
 	return nil, nil
+}
+
+// parseChildrenMapJSON parses `bd show <ids...> --children --json`: one
+// array per resolved parent ID. Parents with no children are dropped.
+func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
+	out := make(map[string][]*Issue)
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return out, nil
+	}
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return nil, fmt.Errorf("parsing bd show --children output: %w", err)
+	}
+	for key, group := range wrapped {
+		if key == "schema_version" || len(bytes.TrimSpace(group)) == 0 {
+			continue
+		}
+		var children []*Issue
+		if err := json.Unmarshal(group, &children); err != nil {
+			return nil, fmt.Errorf("parsing bd show --children entries for %s: %w", key, err)
+		}
+		if len(children) > 0 {
+			out[key] = children
+		}
+	}
+	return out, nil
 }
 
 // FindLatestIssueByTitleAndAssignee finds the newest issue matching the given title and assignee.

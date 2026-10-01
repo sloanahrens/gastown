@@ -51,12 +51,12 @@ type cookedStep struct {
 
 // checklist returns every step an agent runs, each parent before its
 // children: the order pour creates them in.
-func (f *cookedFormula) checklist() []cookedStep {
-	var out []cookedStep
+func (f *cookedFormula) checklist() []checklistStep {
+	var out []checklistStep
 	var walk func([]cookedStep)
 	walk = func(steps []cookedStep) {
 		for _, s := range steps {
-			out = append(out, s)
+			out = append(out, checklistStep{ID: s.ID, Title: s.Title, Description: s.Description})
 			walk(s.Children)
 		}
 	}
