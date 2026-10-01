@@ -36,9 +36,6 @@ const (
 	landingRemoteFetchTimeout    = 2 * time.Minute
 )
 
-// landingGatePolicy is the flake-policy seam (gt-v4ssj.5).
-var landingGatePolicy landworker.GatePolicy = landworker.NoRerun
-
 func landingWorkerConfig(config *DaemonPatrolConfig) *LandingWorkerConfig {
 	if config == nil || config.Patrols == nil {
 		return nil
@@ -307,9 +304,11 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Repo:     repo,
 		WorkRoot: workRoot,
 		Route:    "daemon",
-		Gate: landingGatePolicy(rigName, rigLandGate{
+		Gate: rigLandGate{
 			townRoot: townRoot, rig: rigName, gtPath: gtPath, logRoot: d.landingLogRoot(rigName),
-		}),
+		},
+		Rerun:            landRerun(townRoot, rigName, gtPath, d.landingLogRoot(rigName)),
+		GateBeads:        landworker.GateBeads{Rig: rigName, Beads: bd},
 		Reviewer:         reviewer,
 		Beads:            bd,
 		Landings:         landings,
@@ -384,6 +383,31 @@ func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	return cg.Run(ctx, dir)
 }
 
+// landRerun is Land's flake-policy rerun: only the failed packages, once,
+// in the merged tree, in the gate's tier. `make gate` is the unit tier
+// (containers off, no slot). Any other gate may have run containers, so its
+// packages rerun in the full tier under the container slot: a superset of
+// what the gate ran, never less.
+func landRerun(townRoot, rigName, gtPath, logRoot string) func(context.Context, string, []string) land.GateResult {
+	return func(ctx context.Context, dir string, pkgs []string) land.GateResult {
+		mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
+		gate := land.LandGate(dir, mq)
+		cmd, err := rerunCommand(gate.Steps[0].Command != "make gate", pkgs...)
+		if err != nil {
+			return land.GateResult{Err: err}
+		}
+		// Named "test" so WithSlot holds the container slot around it; the
+		// unit tier needs none.
+		cg := land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}
+		if strings.Contains(cmd, "GT_TEST_DOCKER=1") {
+			cg = land.WithSlot(cg, gtPath, rigName+"/landing")
+		}
+		// Beside the gate's own log for this landing, as test.log.
+		cg.LogDir = filepath.Join(logRoot, filepath.Base(filepath.Dir(dir)), "rerun")
+		return cg.Run(ctx, dir)
+	}
+}
+
 // rigPostLandCommand is merge_queue.post_land_command from the rig's own
 // settings/config.json only: the repo-committed tier is merged content and
 // must not choose a command the daemon runs.
@@ -441,13 +465,24 @@ var postLandPackageRE = regexp.MustCompile(`^[A-Za-z0-9._/~-]+$`)
 // integration tier (cmd names test-integration) with its build tag and
 // containers on, any other tier with containers off.
 func postLandRerunCommand(cmd, pkg string) (string, error) {
-	if !postLandPackageRE.MatchString(pkg) || strings.HasPrefix(pkg, "-") {
-		return "", fmt.Errorf("refusing to rerun package %q: not a Go package path", pkg)
+	return rerunCommand(strings.Contains(cmd, "test-integration"), pkg)
+}
+
+// rerunCommand is `go test` of pkgs, once and uncached: the integration tier
+// with its build tag and containers on, or the unit tier with containers off.
+func rerunCommand(integration bool, pkgs ...string) (string, error) {
+	if len(pkgs) == 0 {
+		return "", fmt.Errorf("no package to rerun")
 	}
-	if strings.Contains(cmd, "test-integration") {
-		return "GT_TEST_DOCKER=1 go test -count=1 -tags integration -timeout 20m " + pkg, nil
+	for _, pkg := range pkgs {
+		if !postLandPackageRE.MatchString(pkg) || strings.HasPrefix(pkg, "-") {
+			return "", fmt.Errorf("refusing to rerun package %q: not a Go package path", pkg)
+		}
 	}
-	return "GT_TEST_DOCKER=0 go test -count=1 -timeout 20m " + pkg, nil
+	if integration {
+		return "GT_TEST_DOCKER=1 go test -count=1 -tags integration -timeout 20m " + strings.Join(pkgs, " "), nil
+	}
+	return "GT_TEST_DOCKER=0 go test -count=1 -timeout 20m " + strings.Join(pkgs, " "), nil
 }
 
 // RedMainStatusPath is the file holding a rig's red-main status line.

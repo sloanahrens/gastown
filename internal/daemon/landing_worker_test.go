@@ -191,6 +191,23 @@ func TestPostLandRerunCommandMatchesTheTier(t *testing.T) {
 	}
 }
 
+func TestRerunCommandRerunsOnlyThePackagesInTheTier(t *testing.T) {
+	t.Parallel()
+	const a, b = "github.com/x/a", "github.com/x/b"
+	if got, err := rerunCommand(false, a, b); err != nil || got != "GT_TEST_DOCKER=0 go test -count=1 -timeout 20m "+a+" "+b {
+		t.Errorf("unit tier: %q, %v", got, err)
+	}
+	if got, err := rerunCommand(true, a); err != nil || got != "GT_TEST_DOCKER=1 go test -count=1 -tags integration -timeout 20m "+a {
+		t.Errorf("full tier: %q, %v", got, err)
+	}
+	if got, err := rerunCommand(false, a, "$(id)"); err == nil {
+		t.Errorf("a bad package among good ones accepted as %q", got)
+	}
+	if got, err := rerunCommand(false); err == nil {
+		t.Errorf("no package accepted as %q", got)
+	}
+}
+
 func TestWriteRedMainStatusReplacesTheLine(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
