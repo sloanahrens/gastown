@@ -61,7 +61,7 @@ type AgentEnvConfig struct {
 	AgentName string
 
 	// TownRoot is the root of the Gas Town workspace.
-	// Sets GT_ROOT environment variable.
+	// Sets GT_TOWN_ROOT (and the GT_ROOT alias bd still reads).
 	TownRoot string
 
 	// RuntimeConfigDir is the optional CLAUDE_CONFIG_DIR path
@@ -132,9 +132,12 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 
 	}
 
-	// Only set GT_ROOT if provided
+	// Only set the town root if provided
 	// Empty values would override tmux session environment
 	if cfg.TownRoot != "" {
+		env["GT_TOWN_ROOT"] = cfg.TownRoot
+		// GT_ROOT is the alias bd reads for orchestrator detection and
+		// town-level formulas; it retires when bd reads GT_TOWN_ROOT (gt-syhch).
 		env["GT_ROOT"] = cfg.TownRoot
 		// Prevent git from walking up to umbrella repo when running in rig worktrees.
 		// This stops accidental commits to the umbrella when running git commands from

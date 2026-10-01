@@ -43,7 +43,7 @@ func TestBuildCommandUsesSocketArgs(t *testing.T) {
 }
 
 // TestResolveNewTmuxSocket pins NewTmux's choice of socket without touching
-// the process-wide default: the initialized default wins, GT_TOWN_SOCKET is
+// the process-wide default: the initialized default wins, GT_TMUX_SOCKET is
 // the fallback, and a test binary is refused the town socket (gt-yav3).
 func TestResolveNewTmuxSocket(t *testing.T) {
 	t.Parallel()

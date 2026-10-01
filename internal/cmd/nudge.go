@@ -248,7 +248,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	if townRoot != "" {
 		// Initialize tmux socket and prefix registry so NewTmux() connects
 		// to the correct town socket. Without this, nudge from non-agent
-		// contexts (e.g., crew workspaces without GT_TOWN_SOCKET) falls
+		// contexts (e.g., crew workspaces without GT_TMUX_SOCKET) falls
 		// through to the sentinel socket and fails to find sessions.
 		_ = session.InitRegistry(townRoot)
 	}

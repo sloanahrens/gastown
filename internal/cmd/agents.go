@@ -222,10 +222,10 @@ func getAllSocketSessions(reg *session.PrefixRegistry, includePolecats bool) []s
 	// When gt agents menu is invoked via a tmux binding from a non-town
 	// directory (e.g. a personal session), workspace.FindFromCwd fails in
 	// persistentPreRun, InitRegistry is never called, and GetDefaultSocket
-	// returns "". Fall back to GT_TOWN_SOCKET, which EnsureBindingsOnSocket
+	// returns "". Fall back to GT_TMUX_SOCKET, which EnsureBindingsOnSocket
 	// embeds in the binding command at gt-up time.
 	if townSocket == "" {
-		townSocket = os.Getenv("GT_TOWN_SOCKET")
+		townSocket = os.Getenv("GT_TMUX_SOCKET")
 	}
 
 	var groups []socketGroup

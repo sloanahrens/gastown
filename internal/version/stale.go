@@ -174,7 +174,7 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 
 	// Decide which ref to compare the binary against.
 	//
-	// GetRepoRoot resolves to $GT_ROOT/gastown/mayor/rig, a worktree that
+	// GetRepoRoot resolves to $GT_TOWN_ROOT/gastown/mayor/rig, a worktree that
 	// normally sits on a feature branch (that's where the Mayor does git work).
 	// Diffing the binary against that worktree's HEAD compares it to unmerged
 	// feature work and produces a false "N commits behind" warning advising a
@@ -268,7 +268,7 @@ const remoteFetchTimeout = 5 * time.Second
 // origin/upstream remote-tracking refs before trusting one of them to say
 // the binary is current.
 //
-// repoDir is normally $GT_ROOT/gastown/mayor/rig — a shared worktree nobody
+// repoDir is normally $GT_TOWN_ROOT/gastown/mayor/rig — a shared worktree nobody
 // guarantees to keep fetched — so refs/remotes/origin/main there can lag the
 // true tip. CheckStaleBinary compared against it as-is: if the binary
 // happened to match that stale cached ref, it reported "fresh" even though
@@ -378,7 +378,7 @@ func (c checker) fetchRemoteBranch(repoDir, remote, branch string) bool {
 
 // resolveBuildBranchRef finds a build-branch ref to compare the binary against
 // when the resolved source worktree is parked on a non-build branch (the normal
-// state for $GT_ROOT/gastown/mayor/rig). Without this, staleness would be
+// state for $GT_TOWN_ROOT/gastown/mayor/rig). Without this, staleness would be
 // computed against unmerged feature work (GH#4034).
 //
 // Candidate refs are fully qualified to avoid branch/tag shadowing. Among refs
@@ -512,7 +512,7 @@ func GetRepoRootForTown(townRoot string) (string, error) {
 }
 
 // GetRepoRoot returns the git repository root for the gt source code.
-// The canonical source is the gastown repo itself ($GT_ROOT/gastown).
+// The canonical source is the gastown repo itself ($GT_TOWN_ROOT/gastown).
 // Crew rigs also contain cmd/gt/main.go but have different HEADs,
 // so we prefer the gastown repo over CWD-based git toplevel detection.
 func GetRepoRoot() (string, error) {

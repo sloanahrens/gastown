@@ -17,13 +17,40 @@ import (
 )
 
 // gtEnvIdentity are the GT_ variables production code may read from its
-// environment (D5 Q4, gt-y3pgh.2): the identity a process is spawned with
-// (role, rig, agent name, session) and the town root. Every other fact is
-// config, read through the kernel.
+// environment (D5 Q4, gt-y3pgh.2): what a process is spawned with — role, rig,
+// agent name, session, town root, tmux socket. GT_TOWN_ROOT is the one name gt
+// reads for the town root; GT_ROOT survives only as the alias bd reads.
 var gtEnvIdentity = map[string]bool{
 	"GT_ROLE": true, "GT_RIG": true, "GT_CREW": true, "GT_POLECAT": true,
 	"GT_DOG_NAME": true, "GT_SESSION": true, EnvAgent: true,
-	"GT_TOWN_ROOT": true, "GT_ROOT": true,
+	EnvAgentOverride: true, "GT_TOWN_ROOT": true, "GT_TMUX_SOCKET": true,
+}
+
+// gtEnvPreferences are the GT_ variables that carry the operator's display and
+// invocation preferences rather than a fact about the town: theme, pager,
+// agent-mode marker, command name, and the ~/.gt data home. They stay env
+// because a user sets them once for a shell and nothing resolves them.
+var gtEnvPreferences = map[string]bool{
+	"GT_THEME": true, "GT_PAGER": true, "GT_NO_PAGER": true,
+	"GT_AGENT_MODE": true, "GT_COMMAND": true, "GT_HOME": true,
+}
+
+// gtEnvInvocation are the per-invocation session and hook signals: a hook
+// command, a spawning session, or gt itself sets one for the single process it
+// launches (prime's session-start hook, handoff's done call, the statusline's
+// issue). They describe an invocation, not the town, so nothing outside it can
+// supply them (gt-y3pgh.2).
+var gtEnvInvocation = map[string]bool{
+	"GT_SESSION_ID": true, "GT_SESSION_ID_ENV": true, "GT_HOOK_SOURCE": true,
+	"GT_SESSION_START_CALLER": true, "GT_SESSION_START_REASON": true,
+	"GT_DONE_FROM_HANDOFF": true, "GT_ISSUE": true, "GT_STALE_WARNED": true,
+	"GT_PROCESS_NAMES": true,
+}
+
+// gtEnvAllowed reports whether production code may read name from the
+// environment without a baseline line.
+func gtEnvAllowed(name string) bool {
+	return gtEnvIdentity[name] || gtEnvPreferences[name] || gtEnvInvocation[name]
 }
 
 // gtEnvReaders are the call names that read one variable from an
@@ -33,21 +60,21 @@ var gtEnvReaders = map[string]bool{
 	"Getenv": true, "LookupEnv": true, "getenv": true, "lookupEnv": true, "lookupEnvVar": true,
 }
 
-// TestNoNewGTEnvReads fails on any production read of a GT_ variable outside
-// gtEnvIdentity that gtenv-baseline.txt does not already count (gt-y3pgh.2).
-// The baseline holds the sites still waiting to move to config; it may only
-// shrink. Fix a failure by reading the fact from config, never by raising a
-// count. internal/testutil is the test harness and is not scanned.
+// TestNoNewGTEnvReads fails on any production read of a GT_ variable that
+// gtEnvAllowed does not name and gtenv-baseline.txt does not already count
+// (gt-y3pgh.2). The baseline holds the sites still waiting to move to config;
+// it may only shrink. Fix a failure by reading the fact from config, never by
+// raising a count. internal/testutil is the test harness and is not scanned.
 func TestNoNewGTEnvReads(t *testing.T) {
 	t.Parallel()
 	reads, err := scanGTEnvReads(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Near half the 2026-10-01 count of baselined reads: a scanner gone
-	// blind passes everything.
-	if len(reads) < 30 {
-		t.Fatalf("scanGTEnvReads found %d non-identity GT_ reads (floor 30); the scanner has stopped seeing them", len(reads))
+	// Just under the 24 reads gtenv-baseline.txt listed on 2026-10-01: a
+	// scanner gone blind passes everything.
+	if len(reads) < 20 {
+		t.Fatalf("scanGTEnvReads found %d non-allowlisted GT_ reads (floor 20); the scanner has stopped seeing them", len(reads))
 	}
 	src, err := os.ReadFile("gtenv-baseline.txt")
 	if err != nil {
@@ -258,7 +285,7 @@ func gtEnvReadsInFile(rel string, src []byte, consts map[string]string) ([]gtEnv
 				name = consts[pkg.Name+"."+a.Sel.Name]
 			}
 		}
-		if strings.HasPrefix(name, "GT_") && !gtEnvIdentity[name] {
+		if strings.HasPrefix(name, "GT_") && !gtEnvAllowed(name) {
 			reads = append(reads, gtEnvRead{file: rel, line: fset.Position(call.Pos()).Line, name: name})
 		}
 		return true

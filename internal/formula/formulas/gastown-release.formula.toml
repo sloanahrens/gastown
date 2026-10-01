@@ -48,7 +48,7 @@ Check all crew workspaces and the mayor rig:
 
 ```bash
 # Check each workspace
-for dir in $GT_ROOT/gastown/crew/* $GT_ROOT/gastown/mayor; do
+for dir in $GT_TOWN_ROOT/gastown/crew/* $GT_TOWN_ROOT/gastown/mayor; do
   if [ -d "$dir/.git" ] || [ -d "$dir" ]; then
     echo "=== Checking $dir ==="
     cd "$dir" 2>/dev/null || continue

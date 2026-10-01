@@ -107,13 +107,8 @@ func TestDetectTownRoot_PrefersEnvVar(t *testing.T) {
 		}
 	})
 
-	t.Run("GT_ROOT also works", func(t *testing.T) {
-		getenv := envOf(map[string]string{"GT_ROOT": outerTown})
-		got := detectTownRoot(nestedRig, getenv)
-		if got != outerTown {
-			t.Errorf("detectTownRoot(%q) = %q, want %q (outer town root via GT_ROOT)", nestedRig, got, outerTown)
-		}
-	})
+	// GT_ROOT is the bd alias, not a town-root name gt reads (gt-syhch);
+	// workspace.TownRootFromEnv's test covers that it no longer resolves one.
 
 	t.Run("falls back to workspace.Find without env vars", func(t *testing.T) {
 		// Without env vars, starting from the nested rig finds the nested

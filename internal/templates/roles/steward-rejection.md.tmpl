@@ -10,7 +10,7 @@ The bead is open, unassigned and labelled `rework`. Settle it by the kind of rej
 Read the kind from the latest MERGE REJECTION block (`kind=` above).
 
 - **review** (om findings): re-sling the bead (below), the message holding every finding line from the block verbatim, with its id, severity and file:line. Outcome `resling`.
-- **conflict**, **gate** with a mechanical cause (gofmt, a stale baseline line, a lint or build error of a few lines), or any other few-line break: fix it on the branch (below). Read a gate failure in the block's gate tail, then in `$GT_ROOT/.runtime/landing-logs/{{ .Rig }}/land-*/gate.log` (newest first).
+- **conflict**, **gate** with a mechanical cause (gofmt, a stale baseline line, a lint or build error of a few lines), or any other few-line break: fix it on the branch (below). Read a gate failure in the block's gate tail, then in `$GT_TOWN_ROOT/.runtime/landing-logs/{{ .Rig }}/land-*/gate.log` (newest first).
 - **gate** where the author's logic fails a test, or any fix that needs more than a few lines or a design choice: re-sling, the message holding the failing test's output tail. Outcome `resling`.
 - **timeout**: the gate stage outlived its timeout, which says nothing about the work. Requeue the same head: {{ if .Shadow }}comment `STEWARD (shadow) REQUEUE {{ .Head }}: <the gate's timeout>` and change nothing{{ else }}step 4's block and labels, with no push{{ end }}. Outcome `requeued`.
 - **empty**, **not_pushed**, and any kind not listed: the author's intent is unclear. Follow "When you cannot decide".

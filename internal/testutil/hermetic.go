@@ -473,7 +473,7 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 // tmux.SetDefaultSocket) to an isolated per-process name so any test in this
 // binary that constructs tmux.NewTmux() lands on a throwaway server instead
 // of a live town's production socket (gt-yav3: a `go test` run inside a live
-// polecat worktree previously inherited GT_TOWN_SOCKET and created real
+// polecat worktree previously inherited GT_TMUX_SOCKET and created real
 // sessions — including ones named like polecats — on the town's tmux
 // server, flapping zombie/capacity readings and risking a phantom-session
 // auto-nuke). Returns the socket name bound and the tmux found, or "" for

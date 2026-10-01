@@ -75,8 +75,8 @@ const bareRepoDir = ".repo.git"
 // guard falls back to its host-root rule alone, exactly as before.
 //
 // Resolution is workspace.FindFromCwdOrError's, read through proc — the same
-// walk-up-from-cwd plus GT_TOWN_ROOT/GT_ROOT fallback every other gt command
-// uses — and internal/workspace's checks also mean a test harness running with
+// walk-up-from-cwd plus GT_TOWN_ROOT fallback every other gt command uses —
+// and internal/workspace's checks also mean a test harness running with
 // GT_TEST_FORBIDDEN_TOWN_ROOT set never picks up the operator's live town.
 //
 // Cost: this runs on every Bash tool call, so it is a handful of stat(2)
@@ -88,11 +88,9 @@ func currentTownRoot(proc guardProcess) string {
 			return root
 		}
 	}
-	for _, name := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if root := proc.getenv(name); root != "" {
-			if ok, _ := workspace.IsWorkspace(root); ok {
-				return root
-			}
+	if root := proc.getenv("GT_TOWN_ROOT"); root != "" {
+		if ok, _ := workspace.IsWorkspace(root); ok {
+			return root
 		}
 	}
 	return ""

@@ -418,7 +418,7 @@ func sandboxFileExists(dir, name string) bool {
 // liveFireProbeEnvKeys are the variables a probe must not inherit: Gas
 // Town's role markers, which every guard's agent-context and role check
 // reads, plus the pointers that scope a guard to one agent's checkout.
-// Location variables (GT_ROOT, GT_TOWN_ROOT, GT_DOLT_*) stay — hook
+// Location variables (GT_TOWN_ROOT, GT_DOLT_*) stay — hook
 // commands resolve the town through them.
 var liveFireProbeEnvKeys = []string{
 	"GT_ROLE",

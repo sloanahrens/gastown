@@ -619,8 +619,8 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 	for _, k := range config.IdentityEnvVars {
 		identitySet[k] = true
 	}
-	// Also include GT_ROOT and GT_SESSION — core session identity.
-	identitySet["GT_ROOT"] = true
+	// Also include GT_TOWN_ROOT and GT_SESSION — core session identity.
+	identitySet["GT_TOWN_ROOT"] = true
 	identitySet["GT_SESSION"] = true
 
 	var repaired int

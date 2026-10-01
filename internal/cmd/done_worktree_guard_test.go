@@ -195,17 +195,24 @@ func TestResolveDonePolecatWorktreeRejectsIdentityMismatch(t *testing.T) {
 
 func TestResolveDonePolecatWorktreeRejectsTownRootMismatch(t *testing.T) {
 	t.Parallel()
-	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		t.Run(envName, func(t *testing.T) {
-			t.Parallel()
-			townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
-			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
-			env[envName] = filepath.Join(t.TempDir(), "other-town")
+	townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
+	env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
+	env["GT_TOWN_ROOT"] = filepath.Join(t.TempDir(), "other-town")
 
-			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
-				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want town root mismatch", err)
-			}
-		})
+	if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
+		t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want town root mismatch", err)
+	}
+}
+
+func TestResolveDonePolecatWorktreeIgnoresGTRootAlias(t *testing.T) {
+	t.Parallel()
+	townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
+	env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
+	// GT_ROOT is the bd alias, not a town-root name gt validates (gt-syhch).
+	env["GT_ROOT"] = filepath.Join(t.TempDir(), "other-town")
+
+	if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err != nil {
+		t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want the GT_ROOT alias ignored", err)
 	}
 }
 

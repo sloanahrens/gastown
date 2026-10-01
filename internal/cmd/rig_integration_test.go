@@ -1075,7 +1075,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	// Step 4: Create a crew member
 	cmd = exec.Command(gtBinary, "crew", "add", "testcrew", "--rig", "testrig")
 	cmd.Dir = hqPath
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_ROOT="+hqPath)
+	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_TOWN_ROOT="+hqPath)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gt crew add failed: %v\nOutput: %s", err, output)
@@ -1091,7 +1091,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	defer cancel()
 	cmd = exec.CommandContext(ctx, gtBinary, "polecat", "add", "testrig", "TestCat")
 	cmd.Dir = hqPath
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_ROOT="+hqPath)
+	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_TOWN_ROOT="+hqPath)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("gt polecat identity add failed (non-fatal, beads may not be available): %v", err)

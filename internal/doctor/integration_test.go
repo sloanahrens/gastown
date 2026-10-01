@@ -148,10 +148,10 @@ func TestIntegrationEnvVarsBeadsDirMismatch(t *testing.T) {
 		sessions: []string{"ga-crew-max"},
 		sessionEnvs: map[string]map[string]string{
 			"ga-crew-max": {
-				"GT_ROLE":   "crew",
-				"GT_RIG":    "gastown",
-				"BEADS_DIR": townBeadsDir, // WRONG: Should be rigBeadsDir
-				"GT_ROOT":   townRoot,
+				"GT_ROLE":      "crew",
+				"GT_RIG":       "gastown",
+				"BEADS_DIR":    townBeadsDir, // WRONG: Should be rigBeadsDir
+				"GT_TOWN_ROOT": townRoot,
 			},
 		},
 	}

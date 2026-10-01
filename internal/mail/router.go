@@ -229,8 +229,8 @@ func (r *Router) expandAnnounce(announceName string) (*config.AnnounceConfig, er
 //
 // Uses workspace.Find which correctly handles nested workspaces by always
 // searching to the filesystem root and returning the outermost workspace.
-// Falls back to GT_TOWN_ROOT/GT_ROOT env vars when workspace.Find cannot
-// locate a workspace (e.g., running from outside any workspace).
+// Falls back to the GT_TOWN_ROOT env var when workspace.Find cannot locate a
+// workspace (e.g., running from outside any workspace).
 func detectTownRoot(startDir string, getenv func(string) string) string {
 	// workspace.Find handles nested workspaces correctly: it always searches
 	// to the filesystem root and returns the outermost mayor/town.json match.
@@ -239,13 +239,11 @@ func detectTownRoot(startDir string, getenv func(string) string) string {
 		return townRoot
 	}
 
-	// Fallback: try GT_TOWN_ROOT or GT_ROOT env vars when workspace detection
-	// fails (e.g., running from outside any workspace directory).
-	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if envRoot := getenv(envName); envRoot != "" {
-			if ok, _ := workspace.IsWorkspace(envRoot); ok {
-				return envRoot
-			}
+	// Fallback: the GT_TOWN_ROOT the session was spawned with, when workspace
+	// detection fails (e.g., running from outside any workspace directory).
+	if envRoot := getenv("GT_TOWN_ROOT"); envRoot != "" {
+		if ok, _ := workspace.IsWorkspace(envRoot); ok {
+			return envRoot
 		}
 	}
 	return ""

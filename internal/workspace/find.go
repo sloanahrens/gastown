@@ -197,20 +197,18 @@ func (e procEnv) findFromCwd() (string, error) {
 
 // FindFromCwdOrError is like FindFromCwd but returns an error if not found.
 // It searches for a workspace starting from the CWD. If none is found, it
-// falls back to the GT_TOWN_ROOT or GT_ROOT environment variables.
+// falls back to the GT_TOWN_ROOT environment variable.
 func FindFromCwdOrError() (string, error) {
 	return processEnv.findFromCwdOrError()
 }
 
 // TownRootFromEnv is the one reader of the town root a process was spawned
-// with (gt-y3pgh.2): GT_TOWN_ROOT (the daemon and tmux global environment),
-// then GT_ROOT (agent sessions). It does not check that the directory is a
-// town; callers that walk up from cwd consult it only when that fails.
+// with (gt-y3pgh.2): GT_TOWN_ROOT, the name the daemon, the tmux global
+// environment, and agent sessions all use. It does not check that the
+// directory is a town; callers that walk up from cwd consult it only when that
+// fails.
 func TownRootFromEnv(getenv func(string) string) string {
-	if root := getenv("GT_TOWN_ROOT"); root != "" {
-		return root
-	}
-	return getenv("GT_ROOT")
+	return getenv("GT_TOWN_ROOT")
 }
 
 func (e procEnv) findFromCwdOrError() (string, error) {

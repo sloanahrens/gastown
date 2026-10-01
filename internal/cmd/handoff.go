@@ -994,9 +994,9 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		}
 	}
 
-	// Propagate GT_ROOT so subsequent handoffs can use it as fallback
+	// Propagate GT_TOWN_ROOT so subsequent handoffs can use it as fallback
 	// when cwd-based detection fails (broken state recovery)
-	envMap["GT_ROOT"] = townRoot
+	envMap["GT_TOWN_ROOT"] = townRoot
 
 	// Record the agent the successor runs, so agent selection survives the
 	// handoff. After a role_agents re-resolution that is the newly resolved

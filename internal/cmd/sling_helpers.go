@@ -659,7 +659,7 @@ func ensureAgentReady(sessionName string) error {
 	// For unknown/custom agents: falls back to a 1s fixed delay (mirrors old behavior).
 	// Note: uses preset-only resolution (not ResolveRoleAgentConfig) because
 	// ensureAgentReady only has the session name; the registry is the one of
-	// the session's own town and rig (GT_ROOT/GT_RIG).
+	// the session's own town and rig (GT_TOWN_ROOT/GT_RIG).
 	effectiveName := agentName
 	if effectiveName == "" {
 		effectiveName = "claude" // Default sessions without GT_AGENT are Claude

@@ -6,7 +6,7 @@ import (
 )
 
 // stalePattern can never be current: sessionPrefixPattern always includes hq.
-// (A stale pattern of ^(gt|hq)- is current on a host without GT_ROOT, which
+// (A stale pattern of ^(gt|hq)- is current on a host without GT_TOWN_ROOT, which
 // made the fixture depend on the environment.)
 const stalePattern = "^(gt)-"
 
