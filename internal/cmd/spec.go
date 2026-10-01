@@ -148,24 +148,11 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 
 // showSpec reads one bead in full (bd show), routed by its prefix.
 func showSpec(townRoot, beadID string) (specdispatch.Spec, error) {
-	var out []byte
-	var err error
-	if townRoot != "" {
-		out, err = bdShowBeadOutputFromTownRoot(townRoot, beadID)
-	} else {
-		out, err = bdShowBeadOutput(beadID)
-	}
+	issue, err := showBead(townRoot, beadID)
 	if err != nil {
 		return specdispatch.Spec{}, fmt.Errorf("bead %s not found: %w", beadID, err)
 	}
-	var issues []beads.Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return specdispatch.Spec{}, fmt.Errorf("parsing bead %s: %w", beadID, err)
-	}
-	if len(issues) == 0 {
-		return specdispatch.Spec{}, fmt.Errorf("bead %s not found", beadID)
-	}
-	return specFromIssue(&issues[0]), nil
+	return specFromIssue(issue), nil
 }
 
 func runSpecLint(cmd *cobra.Command, args []string) error {

@@ -242,12 +242,12 @@ func collectExistingMoleculesForBead(info *beadInfo, beadID, townRoot string) ([
 }
 
 func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
-	return collectExistingMoleculeDepsVia(nil, beadID, townRoot)
+	return slingStores{}.moleculeDeps(beadID, townRoot)
 }
 
-// collectExistingMoleculeDepsVia is collectExistingMoleculeDeps with bd
-// answered by run (nil: bd on PATH).
-func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string) ([]string, error) {
+// moleculeDeps returns the molecules bonded to beadID, read by one sql
+// query over the wisp dependency edges in the bead's database.
+func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
 	}
@@ -255,28 +255,30 @@ func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string)
 		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
 	}
 
-	dir := resolveBeadDirFromTownRoot(townRoot, beadID)
-	args, err := beadsql.MoleculesAttachedTo(beadID).BdArgs("--json")
+	rows, err := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).SQLCSV(beadsql.MoleculesAttachedTo(beadID))
 	if err != nil {
 		return nil, err
 	}
-	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, dir, args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(strings.TrimSpace(string(out))) == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
-
-	var rows []map[string]string
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parsing canonical molecule deps for %s: %w", beadID, err)
+	col := -1
+	for i, name := range rows[0] {
+		if name == "issue_id" {
+			col = i
+		}
+	}
+	if col < 0 {
+		return nil, fmt.Errorf("parsing canonical molecule deps for %s: no issue_id column in %q", beadID, rows[0])
 	}
 
 	seen := make(map[string]bool, len(rows))
 	var molecules []string
-	for _, row := range rows {
-		moleculeID := row["issue_id"]
+	for _, row := range rows[1:] {
+		if col >= len(row) {
+			continue
+		}
+		moleculeID := row[col]
 		if moleculeID == "" || seen[moleculeID] {
 			continue
 		}
@@ -291,12 +293,11 @@ func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string)
 // Matches nukeCleanupMolecules pattern. Returns an error if detach fails, since
 // proceeding with a stale attached_molecule reference creates harder-to-debug orphans.
 func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
-	return burnExistingMoleculesVia(nil, molecules, beadID, townRoot)
+	return slingStores{}.burnMolecules(molecules, beadID, townRoot)
 }
 
-// burnExistingMoleculesVia is burnExistingMolecules with bd answered by run
-// (nil: bd on PATH).
-func burnExistingMoleculesVia(run beads.BDRunner, molecules []string, beadID, townRoot string) error {
+// burnMolecules is burnExistingMolecules in s.
+func (s slingStores) burnMolecules(molecules []string, beadID, townRoot string) error {
 	if len(molecules) == 0 {
 		return nil
 	}
@@ -309,7 +310,7 @@ func burnExistingMoleculesVia(run beads.BDRunner, molecules []string, beadID, to
 	//   4. Force-close molecule roots
 	// Closing descendants first ensures that if detach succeeds but a later step
 	// crashes, we don't leave a detached root with live children.
-	bd := beads.NewWithBeadsDirAndRunner(burnDir, "", run)
+	bd := s.routedFrom(burnDir)
 
 	// Step 1: Force-close descendant steps before detaching. Uses force variant
 	// since burn is a destructive recovery path where prior state may be inconsistent.
@@ -358,7 +359,7 @@ func burnExistingMoleculesVia(run beads.BDRunner, molecules []string, beadID, to
 	return nil
 }
 
-func removeMoleculeBonds(bd *beads.Beads, beadID, molID string) {
+func removeMoleculeBonds(bd beads.Client, beadID, molID string) {
 	for _, bond := range []struct {
 		from string
 		to   string
@@ -389,12 +390,8 @@ func dependencyRemovalMissing(err error) bool {
 // StripBeadsDir prevents inherited BEADS_DIR from overriding the resolved
 // directory, which caused rig-prefixed beads to fail (GH#2126).
 func verifyBeadExists(beadID string) error {
-	out, err := bdShowBeadOutput(beadID)
-	if err != nil {
+	if _, err := showBead("", beadID); err != nil {
 		return fmt.Errorf("bead '%s' not found (bd show failed: %w)", beadID, err)
-	}
-	if len(strings.TrimSpace(string(out))) == 0 {
-		return fmt.Errorf("bead '%s' not found", beadID)
 	}
 	return nil
 }
@@ -404,12 +401,11 @@ func verifyBeadExists(beadID string) error {
 // spawning polecats or creating molecule/hook side effects for beads that only
 // resolve from HQ or another rig database.
 func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) error {
-	return verifyBeadExistsInTargetRigDatabaseVia(nil, beadID, targetRig, townRoot)
+	return slingStores{}.verifyInTargetRig(beadID, targetRig, townRoot)
 }
 
-// verifyBeadExistsInTargetRigDatabaseVia is
-// verifyBeadExistsInTargetRigDatabase with bd answered by run (nil: bd on PATH).
-func verifyBeadExistsInTargetRigDatabaseVia(run beads.BDRunner, beadID, targetRig, townRoot string) error {
+// verifyInTargetRig is verifyBeadExistsInTargetRigDatabase in s.
+func (s slingStores) verifyInTargetRig(beadID, targetRig, townRoot string) error {
 	if beadID == "" {
 		return nil
 	}
@@ -424,145 +420,32 @@ func verifyBeadExistsInTargetRigDatabaseVia(run beads.BDRunner, beadID, targetRi
 	if !ok {
 		return fmt.Errorf("cannot resolve target rig %q beads database for bead %s; refusing to sling before creating hooks or molecule side effects", targetRig, beadID)
 	}
-	targetRigDir := filepath.Dir(targetBeadsDir)
-
-	out, err := BdCmd("show", beadID, "--json").
-		AllowStale().
-		Dir(targetRigDir).
-		WithBeadsDir(targetBeadsDir).
-		StripBeadsDir().
-		Stderr(io.Discard).
-		Via(run).
-		Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		if routedBeadExistsForTargetRig(run, beadID, targetRig, townRoot) {
-			return nil
-		}
-		return fmt.Errorf("bead %s is not present in target rig %q beads database; refusing to sling before creating hooks or molecule side effects", beadID, targetRig)
+	if _, err := s.pinnedDB(targetBeadsDir).Show(beadID); err == nil {
+		return nil
 	}
-
-	var infos []beadInfo
-	if err := json.Unmarshal(out, &infos); err != nil {
-		return fmt.Errorf("checking target rig %q database for bead %s: %w", targetRig, beadID, err)
+	if s.routedBeadExistsForTargetRig(beadID, targetRig, townRoot) {
+		return nil
 	}
-	if len(infos) == 0 {
-		if routedBeadExistsForTargetRig(run, beadID, targetRig, townRoot) {
-			return nil
-		}
-		return fmt.Errorf("bead %s is not present in target rig %q beads database; refusing to sling before creating hooks or molecule side effects", beadID, targetRig)
-	}
-
-	return nil
+	return fmt.Errorf("bead %s is not present in target rig %q beads database; refusing to sling before creating hooks or molecule side effects", beadID, targetRig)
 }
 
-func routedBeadExistsForTargetRig(run beads.BDRunner, beadID, targetRig, townRoot string) bool {
+func (s slingStores) routedBeadExistsForTargetRig(beadID, targetRig, townRoot string) bool {
 	prefixRig := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(beadID))
 	if prefixRig != targetRig {
 		return false
 	}
-	out, err := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output()
-	return err == nil && len(strings.TrimSpace(string(out))) > 0
-}
-
-func bdShowBeadOutput(beadID string) ([]byte, error) {
-	out, err := bdShowBeadDirectCmd(beadID).Stderr(io.Discard).Output()
-	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		return out, nil
-	}
-	routedOut, routedErr := bdShowBeadRoutedCmd(beadID).Stderr(io.Discard).Output()
-	if routedErr == nil && len(strings.TrimSpace(string(routedOut))) > 0 {
-		return routedOut, nil
-	}
-	return out, err
-}
-
-func bdShowBeadOutputFromTownRoot(townRoot, beadID string) ([]byte, error) {
-	if townRoot == "" {
-		return bdShowBeadOutput(beadID)
-	}
-	out, err := bdShowBeadDirectCmdFromTownRoot(townRoot, beadID).Stderr(io.Discard).Output()
-	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		return out, nil
-	}
-	routedOut, routedErr := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Stderr(io.Discard).Output()
-	if routedErr == nil && len(strings.TrimSpace(string(routedOut))) > 0 {
-		return routedOut, nil
-	}
-	return out, err
-}
-
-func bdShowBeadDirectCmd(beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").
-		AllowStale().
-		Dir(resolveBeadDir(beadID)).
-		StripBeadsDir()
-}
-
-func bdShowBeadDirectCmdFromTownRoot(townRoot, beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").
-		AllowStale().
-		Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
-		StripBeadsDir()
-}
-
-func bdShowBeadRoutedCmd(beadID string) *bdCmd {
-	bdc := BdCmd("show", beadID, "--json").AllowStale()
-	if townRoot, err := workspace.FindFromCwdOrError(); err == nil && townRoot != "" {
-		return bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID)
-	}
-	return bdc.Dir(resolveBeadDir(beadID)).StripBeadsDir()
-}
-
-func bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").AllowStale().Dir(townRoot).WithRouting()
+	_, err := s.routedFrom(townRoot).Show(beadID)
+	return err == nil
 }
 
 // getBeadInfo returns status and assignee for a bead.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 func getBeadInfo(beadID string) (*beadInfo, error) {
-	out, err := bdShowBeadOutput(beadID)
-	if err != nil {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	return parseBeadInfo(beadID, out)
-}
-
-// getBeadInfoVia is getBeadInfoFromTownRoot answered by run (nil: bd on
-// PATH): the direct show in the bead's rig, then the routed show.
-func getBeadInfoVia(run beads.BDRunner, townRoot, beadID string) (*beadInfo, error) {
-	out, err := bdShowBeadDirectCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		if routed, routedErr := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output(); routedErr == nil && len(strings.TrimSpace(string(routed))) > 0 {
-			out, err = routed, nil
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	return parseBeadInfo(beadID, out)
+	return slingStores{}.beadInfo("", beadID)
 }
 
 func getBeadInfoFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
-	out, err := bdShowBeadOutputFromTownRoot(townRoot, beadID)
-	if err != nil {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	return parseBeadInfo(beadID, out)
-}
-
-func parseBeadInfo(beadID string, out []byte) (*beadInfo, error) {
-	if len(out) == 0 {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	// bd show --json returns an array (issue + dependents), take first element.
-	var infos []beadInfo
-	if err := json.Unmarshal(out, &infos); err != nil {
-		return nil, fmt.Errorf("parsing bead info: %w", err)
-	}
-	if len(infos) == 0 {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	return &infos[0], nil
+	return slingStores{}.beadInfo(townRoot, beadID)
 }
 
 // beadFieldUpdates holds all the fields that need to be stored in a bead's description.
@@ -633,22 +516,11 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	issue := &beads.Issue{}
 	if logPath == "" {
 		// Read the bead once
-		out, err := bdShowBeadOutputFromTownRoot(townRoot, beadID)
+		shown, err := showBead(townRoot, beadID)
 		if err != nil {
 			return fmt.Errorf("fetching bead: %w", err)
 		}
-		if len(out) == 0 {
-			return fmt.Errorf("bead not found")
-		}
-
-		var issues []beads.Issue
-		if err := json.Unmarshal(out, &issues); err != nil {
-			return fmt.Errorf("parsing bead: %w", err)
-		}
-		if len(issues) == 0 {
-			return fmt.Errorf("bead not found")
-		}
-		issue = &issues[0]
+		issue = shown
 	}
 
 	newDesc := applyBeadFieldUpdates(issue, updates)

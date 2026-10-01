@@ -29,12 +29,9 @@ internal/cmd/sling_288_test.go BDRunner 1
 internal/cmd/sling_convoy.go BDRunner 1
 internal/cmd/sling_duplicate.go BDRunner 3
 internal/cmd/sling_formula.go BdCmd 4
-internal/cmd/sling_helpers.go BdCmd 8
-internal/cmd/sling_helpers.go BDRunner 9
-internal/cmd/sling_rollback.go BDRunner 1
+internal/cmd/sling_helpers.go BdCmd 3
+internal/cmd/sling_helpers.go BDRunner 4
 internal/cmd/sling_routing_integration_test.go BdCmd 1
-internal/cmd/sling.go BdCmd 1
-internal/cmd/sling.go BDRunner 1
 internal/cmd/source_validation.go BDRunner 2
 internal/cmd/tracking_relations.go BDRunner 2
 internal/cmdtree/gen-bd-tree/main.go argv 1
