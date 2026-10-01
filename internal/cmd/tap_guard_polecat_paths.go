@@ -1438,8 +1438,10 @@ func gitDashCDirs(args []string) []string {
 }
 
 // splitShellSegments splits a tokenised command on the shell operators that
-// start a new command (&&, ||, ;, |), so each sub-command is judged on its own
-// command word — "cd x && cp a /elsewhere/b" must be checked at cp, not at cd.
+// start a new command (; / & / && / || / |), so each sub-command is judged on
+// its own command word — "cd x && cp a /elsewhere/b" must be checked at cp, not
+// at cd. A background & belongs here with the others: it runs the following
+// command just as ; does (gt-wwwht).
 func splitShellSegments(tokens []string) [][]string {
 	var (
 		segments [][]string
