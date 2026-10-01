@@ -72,7 +72,6 @@ Clone divergence checks:
 
 Crew workspace checks:
   - crew-state               Validate crew worker state.json files (fixable)
-  - crew-worktrees           Detect stale cross-rig worktrees (fixable)
 
 Migration checks (fixable):
   - sparse-checkout          Detect legacy sparse checkout across all rigs
@@ -340,7 +339,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Crew workspace checks
 	d.Register(doctor.NewCrewStateCheck())
-	d.Register(doctor.NewCrewWorktreeCheck())
 	d.Register(doctor.NewCommandsCheck())
 
 	// Lifecycle config checks

@@ -240,16 +240,10 @@ func getBeadsDirsToCheck(rigDir string) []string {
 	}
 
 	// Crew .beads directories: <rig>/crew/*/.beads
-	crewDir := filepath.Join(rigDir, "crew")
-	if entries, err := os.ReadDir(crewDir); err == nil {
-		for _, entry := range entries {
-			// Skip hidden directories (like .claude)
-			if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
-				beadsDir := filepath.Join(crewDir, entry.Name(), ".beads")
-				if _, err := os.Stat(beadsDir); err == nil {
-					dirs = append(dirs, beadsDir)
-				}
-			}
+	for _, crewPath := range crewCloneDirs(filepath.Join(rigDir, "crew")) {
+		beadsDir := filepath.Join(crewPath, ".beads")
+		if _, err := os.Stat(beadsDir); err == nil {
+			dirs = append(dirs, beadsDir)
 		}
 	}
 
@@ -443,16 +437,7 @@ func getWorktreePaths(rigDir string) []string {
 	var paths []string
 
 	// Crew workspaces: <rig>/crew/*
-	crewDir := filepath.Join(rigDir, "crew")
-	if entries, err := os.ReadDir(crewDir); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			// Skip hidden directories (like .claude)
-			if entry.IsDir() && !strings.HasPrefix(name, ".") {
-				paths = append(paths, filepath.Join(crewDir, name))
-			}
-		}
-	}
+	paths = append(paths, crewCloneDirs(filepath.Join(rigDir, "crew"))...)
 
 	// Polecats: <rig>/polecats/*
 	// Polecats may use nested structure: polecats/<name>/<rig_name>/
