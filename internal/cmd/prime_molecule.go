@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -38,7 +39,7 @@ func showMoleculeExecutionPrompt(w io.Writer, workDir, moleculeID string) {
 		// Fall back to simple message if bd mol current fails
 		fmt.Fprintln(w, style.Bold.Render("→ PROPULSION PRINCIPLE: Work is on your hook. RUN IT."))
 		fmt.Fprintln(w, "  Begin working on this molecule immediately.")
-		fmt.Fprintf(w, "  Check status with: bd mol current %s\n", moleculeID)
+		fmt.Fprintf(w, "  Check status with: %s mol progress %s\n", cli.Name(), moleculeID)
 		return
 	}
 	// Handle bd exit 0 bug: empty stdout means not found
@@ -85,16 +86,15 @@ func showMoleculeExecutionPrompt(w io.Writer, workDir, moleculeID string) {
 		fmt.Fprintln(w, style.Bold.Render("→ EXECUTE THIS STEP NOW."))
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "When complete:")
-		fmt.Fprintf(w, "  1. Close the step: bd close %s\n", step.ID)
-		fmt.Fprintf(w, "  2. Check for next step: bd mol current %s\n", moleculeID)
-		fmt.Fprintln(w, "  3. Continue until molecule complete")
+		fmt.Fprintf(w, "  1. Finish the step: %s mol step done %s (closes it and moves you to the next)\n", cli.Name(), step.ID)
+		fmt.Fprintln(w, "  2. Continue until molecule complete")
 	} else {
 		// No next step - molecule may be complete
 		fmt.Fprintln(w, style.Bold.Render("✓ MOLECULE COMPLETE"))
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "All steps are done. You may:")
 		fmt.Fprintln(w, "  - Report completion to supervisor")
-		fmt.Fprintln(w, "  - Check for new work: bd mol current")
+		fmt.Fprintln(w, "  - Check for new work: "+cli.Name()+" mol current")
 	}
 }
 

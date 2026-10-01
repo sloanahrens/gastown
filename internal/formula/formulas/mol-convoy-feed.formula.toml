@@ -66,13 +66,13 @@ bd show <issue-id> --json
 
 An issue is "ready" if ALL of these are true:
 - status = "open" (NOT in_progress, closed, or hooked)
-- not in blocked list (check: bd blocked --json)
+- listed by `bd ready --json` (no open blockers)
 - assignee is empty OR assignee session is dead
 
 Check blocked status:
 ```bash
-bd blocked --json
-# If issue ID appears here, it's blocked (skip it)
+bd ready --json
+# If the issue ID is missing here, it's blocked (skip it)
 ```
 
 Check assignee session if set:

@@ -291,7 +291,6 @@ func outputPolecatContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "## Key Commands")
 	fmt.Fprintln(w, "- `"+cli.Name()+" mail inbox` - Check your inbox for work assignments")
 	fmt.Fprintln(w, "- `bd show <issue>` - View your assigned issue")
-	fmt.Fprintln(w, "- `bd close <issue>` - Mark issue complete")
 	if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
 		fmt.Fprintln(w, "- Fork rig: push to origin and use PR/no-merge workflow; do not submit upstream changes to MQ")
 	} else {
@@ -323,7 +322,7 @@ func outputCrewContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "- `"+cli.Name()+" mail inbox` - Check your inbox")
 	fmt.Fprintln(w, "- `bd ready` - Available issues")
 	fmt.Fprintln(w, "- `bd show <issue>` - View issue details")
-	fmt.Fprintln(w, "- `bd close <issue>` - Mark issue complete")
+	fmt.Fprintln(w, "- `"+cli.Name()+" done --bead <issue>` - Submit your pushed branch; landing closes the issue")
 	if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
 		fmt.Fprintln(w, "- Fork rig: branch from upstream, push to origin, create PR against upstream")
 	}
@@ -409,7 +408,7 @@ func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~bd close <root-issue>~~ (Refinery closes it) |\n", c)
 		fmt.Fprintln(w, "| Close a sub-issue | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
 		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-		fmt.Fprintln(w, "| Check workflow steps | `bd mol current` | ~~bd ready~~ (excludes molecule steps) |")
+		fmt.Fprintf(w, "| Check workflow steps | `%s prime` (shows inline checklist) | ~~bd ready~~ (excludes molecule steps) |\n", c)
 		fmt.Fprintln(w, "| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
 		fmt.Fprintf(w, "| Escalate blocker | `%s escalate \"desc\" -s HIGH` | ~~waiting for human~~ (never wait) |\n", c)
 
@@ -580,7 +579,7 @@ func outputContinuationDirective(w io.Writer, hookedBead *beads.Issue, hasMolecu
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  Hooked: %s — %s\n", style.Bold.Render(hookedBead.ID), hookedBead.Title)
 	if hasMolecule {
-		fmt.Fprintln(w, "  (Has attached molecule — check `bd mol current` for next step)")
+		fmt.Fprintln(w, "  (Has attached molecule — check `"+cli.Name()+" mol current` for next step)")
 	}
 	fmt.Fprintln(w)
 }

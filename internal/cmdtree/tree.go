@@ -153,3 +153,13 @@ func (t *Tree) Resolve(words []string) Resolution {
 	r.OK = true
 	return r
 }
+
+// Canonical returns the name of the top-level command word names, through
+// its aliases, and whether the tree has it.
+func (t *Tree) Canonical(word string) (string, bool) {
+	n, ok := t.root.Children[word]
+	if !ok {
+		return "", false
+	}
+	return n.Name, true
+}

@@ -430,7 +430,8 @@ var (
 // scannerFor picks the scanner for a repo-relative path, or nil when the
 // file is not one of the lint's inputs: formulas, templates, plugins, hook
 // scripts, role configs, repo scripts and git hooks, the repo's
-// agent commands and skills, and non-test Go under internal/ and cmd/.
+// agent commands and skills and AGENTS.md, and non-test Go under internal/
+// and cmd/.
 func scannerFor(rel string) scanFunc {
 	base := filepath.Base(rel)
 	ext := filepath.Ext(rel)
@@ -438,6 +439,8 @@ func scannerFor(rel string) scanFunc {
 	switch {
 	case strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, "_test.sh"):
 		return nil
+	case rel == "AGENTS.md":
+		return scanMDFile
 	case ext == ".go":
 		if under("internal/") || under("cmd/") {
 			return ScanGo

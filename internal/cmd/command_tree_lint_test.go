@@ -61,8 +61,9 @@ func TestCommandTokensResolve(t *testing.T) {
 	// the repo's .claude/.cursor commands and skills (20) joined on 2026-09-30
 	// (gt-fd2cu.4). The hooks floor went with the non-Claude hook templates
 	// (D4): the Claude settings templates call {{GT_BIN}}, which the scanner
-	// does not read as gt.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 35, "scripts": 22, "agent": 10}
+	// does not read as gt. Deleting the dolt and git-hygiene plugins
+	// (gt-4k3fj.8.5) took plugins to 69.
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 35, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

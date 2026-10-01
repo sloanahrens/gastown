@@ -771,7 +771,7 @@ Implementation of: $PROBLEM
 
 **5. Verify the dependency graph:**
 ```bash
-bd blocked  # should show clean topological order
+bd ready    # the first tasks in topological order, and nothing else
 bv --robot-mode  # if available: graph visualization
 ```
 
@@ -895,9 +895,8 @@ If you do find something, create the bead.
 
 **2. Validate the dependency graph:**
 ```bash
-bd blocked       # verify topological order makes sense
 bd ready         # verify at least one task is unblocked and ready to start
-bd stats         # summary of what was created
+bd list --status=open --limit=0   # everything created
 ```
 
 **3. Spot-check 3 random beads:**

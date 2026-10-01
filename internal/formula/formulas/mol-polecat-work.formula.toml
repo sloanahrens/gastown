@@ -65,7 +65,6 @@ Initialize your session and understand your assignment.
 **1. Prime your environment:**
 ```bash
 gt prime                    # Load role context
-bd prime                    # Load beads context
 ```
 
 **2. Preflight check (validate connectivity):**
