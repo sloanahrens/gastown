@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // EnsureConfigYAML ensures config.yaml has both prefix keys set for the given
@@ -91,7 +93,7 @@ func ConfigDefaultsFromMetadata(beadsDir, fallbackPrefix string) string {
 
 	if derived := firstString(meta, "issue_prefix", "issue-prefix", "prefix"); derived != "" {
 		prefix = strings.TrimSpace(strings.TrimSuffix(derived, "-"))
-	} else if doltDB := firstString(meta, "dolt_database"); doltDB != "" {
+	} else if doltDB := townconfig.DatabaseForBeadsDir(beadsDir); doltDB != "" {
 		prefix = normalizeDoltDatabasePrefix(doltDB)
 	}
 

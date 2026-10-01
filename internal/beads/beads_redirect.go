@@ -2,11 +2,12 @@
 package beads
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // ResolveBeadsDir returns the actual beads directory, following any redirect.
@@ -400,20 +401,10 @@ func IsLocalBeadsDir(cwd, resolvedPath string) bool {
 	return cleanResolved == cleanLocal
 }
 
-// rigHasOwnDB checks if a rig's .beads/metadata.json declares its own
-// dolt_database. Rigs with their own database (e.g., laneassist with "lc-"
-// prefix) must not be redirected to town-level beads ("hq-" prefix).
+// rigHasOwnDB checks if a rig's beads directory has its own database (the
+// registry's dolt_database, else its metadata.json's). Rigs with their own
+// database (e.g., laneassist with "lc-" prefix) must not be redirected to
+// town-level beads ("hq-" prefix).
 func rigHasOwnDB(rigBeadsPath string) bool {
-	metadataPath := filepath.Join(rigBeadsPath, "metadata.json")
-	data, err := os.ReadFile(metadataPath) //nolint:gosec // G304: trusted beads path
-	if err != nil {
-		return false
-	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return false
-	}
-	return meta.DoltDatabase != ""
+	return townconfig.DatabaseForBeadsDir(rigBeadsPath) != ""
 }

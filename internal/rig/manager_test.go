@@ -1299,6 +1299,32 @@ func TestRegisterRig_DetectPushURLEmptyWhenPushEqualsFetch(t *testing.T) {
 	}
 }
 
+// TestRegisterRig_RecordsTheRigDatabase: adopting a rig records the database
+// its bd metadata.json names in the registry entry (gt-y3pgh.11).
+func TestRegisterRig_RecordsTheRigDatabase(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	rigName := "adoptdb"
+	url := remoteRepo(t, f, filepath.Join(root, "upstream-db.git"), nil)
+	f.Clone(t, url, filepath.Join(root, rigName))
+	meta := filepath.Join(root, rigName, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(meta), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, []byte(`{"dolt_mode":"server","dolt_database":"adb"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.RegisterRig(RegisterRigOptions{Name: rigName, GitURL: url}); err != nil {
+		t.Fatalf("RegisterRig: %v", err)
+	}
+	if got := rigsConfig.Rigs[rigName].DoltDatabase; got != "adb" {
+		t.Errorf("registry dolt_database = %q, want adb", got)
+	}
+}
+
 func TestDetectGitURL_MayorRigFallback(t *testing.T) {
 	t.Parallel()
 	// Verify detectGitURL finds the origin remote from mayor/rig when the

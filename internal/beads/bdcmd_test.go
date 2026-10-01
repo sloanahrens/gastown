@@ -1012,3 +1012,31 @@ func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript s
 	}
 	return path
 }
+
+// TestBdCmd_DirPinsRegistryDatabase: a registered rig's bd calls carry the
+// registry's dolt_database, not the one metadata.json names (gt-y3pgh.11).
+func TestBdCmd_DirPinsRegistryDatabase(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	for rel, body := range map[string]string{
+		"mayor/town.json":                        `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"}`,
+		"mayor/rigs.json":                        `{"version":1,"rigs":{"gastown":{"git_url":"x","added_at":"2026-01-01T00:00:00Z","dolt_database":"gt"}}}`,
+		"gastown/mayor/rig/.beads/metadata.json": `{"dolt_mode":"server","dolt_database":"gastown_stale"}`,
+	} {
+		path := filepath.Join(town, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rigDir := filepath.Join(town, "gastown", "mayor", "rig")
+	if got := DatabaseNameFromMetadata(filepath.Join(rigDir, ".beads")); got != "gt" {
+		t.Fatalf("DatabaseNameFromMetadata = %q, want the registry's gt", got)
+	}
+	cmd := (&BdCmd{args: []string{"show", "gt-abc"}, env: []string{"PATH=/usr/bin"}, stderr: os.Stderr}).Dir(rigDir).Build()
+	if got := parseEnv(cmd.Env)["BEADS_DOLT_SERVER_DATABASE"]; got != "gt" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gt in %v", got, cmd.Env)
+	}
+}

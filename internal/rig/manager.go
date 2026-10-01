@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/templates/commands"
+	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -864,6 +865,14 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 		fmt.Fprintf(os.Stderr, "  Run 'gt doctor --fix' to repair if needed.\n")
 	}
 
+	// The registry records the database metadata.json now names: gastown
+	// reads it from the registry, bd from metadata.json (gt-y3pgh.11).
+	if db, _ := config.RigMetadataDatabase(m.townRoot, opts.Name); db != "" {
+		entry := m.config.Rigs[opts.Name]
+		entry.DoltDatabase = db
+		m.config.Rigs[opts.Name] = entry
+	}
+
 	// Persist rigs.json atomically before marking success.
 	// This ensures directory creation and rigs.json registration are an atomic unit:
 	// if the save fails, success remains false and the deferred cleanup removes the dir.
@@ -960,8 +969,7 @@ func (m *Manager) VerifyRigIdentity(rigPath, rigName, prefix string) error {
 	}
 
 	var metadata struct {
-		DoltDatabase string `json:"dolt_database"`
-		DoltMode     string `json:"dolt_mode"`
+		DoltMode string `json:"dolt_mode"`
 	}
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return fmt.Errorf("parsing metadata.json: %w", err)
@@ -970,18 +978,20 @@ func (m *Manager) VerifyRigIdentity(rigPath, rigName, prefix string) error {
 	if metadata.DoltMode != "server" {
 		return nil // Not using server mode, skip check
 	}
+	// bd's copy of the name: bd init is what can write the wrong one.
+	metadataDB := config.BeadsMetadataDatabase(resolvedBeadsDir)
 
 	// Verify the database name matches what we expect.
 	// The database should be named after the rig (e.g., "gastown") not after
 	// a bd init artifact (e.g., "beads_gt") or a stale value from another rig.
-	if metadata.DoltDatabase != "" && metadata.DoltDatabase != rigName {
+	if metadataDB != "" && metadataDB != rigName {
 		fmt.Fprintf(os.Stderr, "   ⚠ metadata.json has dolt_database=%q (expected %q) — attempting repair\n",
-			metadata.DoltDatabase, rigName)
+			metadataDB, rigName)
 		if repairErr := doltserver.EnsureMetadata(m.townRoot, rigName); repairErr != nil {
 			return fmt.Errorf("metadata.json has dolt_database=%q (expected %q) and auto-repair failed: %w",
-				metadata.DoltDatabase, rigName, repairErr)
+				metadataDB, rigName, repairErr)
 		}
-		fmt.Printf("   ✓ Repaired metadata.json identity (was %q, now %q)\n", metadata.DoltDatabase, rigName)
+		fmt.Printf("   ✓ Repaired metadata.json identity (was %q, now %q)\n", metadataDB, rigName)
 	}
 
 	return m.verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefix)
@@ -1540,8 +1550,7 @@ func bdDatabaseExists(beadsDir string) bool {
 
 	// Parse metadata to check if the referenced Dolt database actually exists.
 	var meta struct {
-		DoltMode     string `json:"dolt_mode"`
-		DoltDatabase string `json:"dolt_database"`
+		DoltMode string `json:"dolt_mode"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return true // Can't parse — assume it exists (backward compat)
@@ -1550,13 +1559,13 @@ func bdDatabaseExists(beadsDir string) bool {
 	// For server mode, verify the database exists in .dolt-data/.
 	// metadata.json may be tracked in git from another workspace where
 	// the Dolt server had this database, but this is a fresh server.
-	if meta.DoltMode == "server" && meta.DoltDatabase != "" {
+	if db := townconfig.DatabaseForBeadsDir(beadsDir); meta.DoltMode == "server" && db != "" {
 		// Walk up from beadsDir to find the town root (.dolt-data lives there).
 		townRoot := beads.FindTownRoot(filepath.Dir(beadsDir))
 		if townRoot == "" {
 			return true // Can't find town root — assume it exists
 		}
-		dbDir := filepath.Join(townRoot, ".dolt-data", meta.DoltDatabase)
+		dbDir := filepath.Join(townRoot, ".dolt-data", db)
 		if _, err := os.Stat(dbDir); os.IsNotExist(err) {
 			return false // Database doesn't exist on this server
 		}
@@ -1817,6 +1826,13 @@ func (m *Manager) RegisterRig(opts RegisterRigOptions) (*RegisterRigResult, erro
 		BeadsConfig: &config.BeadsConfig{
 			Prefix: result.BeadsPrefix,
 		},
+	}
+	// The adopted rig's existing database, from its bd metadata.json
+	// (gt-y3pgh.11).
+	if db, _ := config.RigMetadataDatabase(m.townRoot, opts.Name); db != "" {
+		entry := m.config.Rigs[opts.Name]
+		entry.DoltDatabase = db
+		m.config.Rigs[opts.Name] = entry
 	}
 
 	return result, nil

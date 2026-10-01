@@ -50,6 +50,30 @@ func TestConfigMigrateDryRunThenOnce(t *testing.T) {
 	if err := configMigrate(e, false); !errors.Is(err, config.ErrAlreadyMigrated) {
 		t.Fatalf("second migrate = %v, want ErrAlreadyMigrated", err)
 	}
+
+	// A rig whose bd metadata.json appears after the move: migrate records
+	// its database in the registry instead of refusing (gt-y3pgh.11).
+	meta := filepath.Join(town, "r", "mayor", "rig", ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(meta), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"rdb"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := configMigrate(e, false); err != nil || !strings.Contains(out.String(), `r: dolt_database "rdb" from r/mayor/rig/.beads/metadata.json`) {
+		t.Fatalf("migrate with an unrecorded rig database = %v:\n%s", err, out.String())
+	}
+	rc, err := config.LoadRigsConfig(filepath.Join(town, "mayor", "rigs.json"))
+	if err != nil || rc.Rigs["r"].DoltDatabase != "rdb" {
+		t.Fatalf("registry after migrate = %+v, %v", rc, err)
+	}
+	if _, err := os.Stat(meta); err != nil {
+		t.Errorf("migrate removed bd's metadata.json: %v", err)
+	}
+	if err := configMigrate(e, false); !errors.Is(err, config.ErrAlreadyMigrated) {
+		t.Fatalf("migrate after recording = %v, want ErrAlreadyMigrated", err)
+	}
 	out.Reset()
 	if err := configValidate(e); err != nil || !strings.Contains(out.String(), "two-file layout") {
 		t.Fatalf("validate = %v:\n%s", err, out.String())

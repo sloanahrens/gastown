@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 var envKeysCaseInsensitive = runtime.GOOS == "windows"
@@ -22,24 +23,17 @@ var bdTargetEnvKeys = []string{
 	"GT_DOLT_DATA",
 }
 
-// DatabaseNameFromMetadata reads the dolt_database field from .beads/metadata.json.
-// Returns empty string if metadata doesn't exist or has no database configured.
+// DatabaseNameFromMetadata is the database of the workspace at beadsDir
+// (redirects followed), through the config kernel: a registered rig's
+// registry dolt_database, else the one its .beads/metadata.json names
+// (townconfig.DatabaseForBeadsDir). Returns empty string when neither names
+// one.
 func DatabaseNameFromMetadata(beadsDir string) string {
 	beadsDir = canonicalBeadsDir(beadsDir)
 	if beadsDir == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
-		return ""
-	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if json.Unmarshal(data, &meta) != nil {
-		return ""
-	}
-	return meta.DoltDatabase
+	return townconfig.DatabaseForBeadsDir(beadsDir)
 }
 
 // DatabaseEnv returns the BEADS_DOLT_SERVER_DATABASE=<name> env var string
