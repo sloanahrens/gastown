@@ -224,6 +224,14 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 		return
 	}
 	d.logger.Printf("landing_worker: %s: worker started", rigName)
+	d.landingWorkerLoop(rigName, interval, w.Pass)
+}
+
+// landingWorkerLoop passes, then waits the interval, until the daemon stops
+// or the patrol is disabled. The first pass runs as the loop starts, so a
+// daemon restarted for an upgrade resumes landing without waiting out an
+// interval (gt-fzwcd).
+func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass func(context.Context) landworker.Report) {
 	skipLogged := ""
 	for {
 		if !d.isPatrolActive("landing_worker") {
@@ -243,11 +251,17 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
 			d.landingPasses.Add(1)
 			d.landingBeads.Store(rigName, "")
-			rep := w.Pass(d.ctx)
+			rep := pass(d.ctx)
 			d.landingBeads.Delete(rigName)
 			d.landingPasses.Add(-1)
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
+			}
+			// This pass was the last thing a pending restart waited for, so
+			// its end is the idle moment: wake the run loop now rather than
+			// up to a heartbeat (3 min) later (gt-fzwcd).
+			if d.upgradeRestartPending.Load() {
+				d.signalLandingDrained()
 			}
 		}
 		select {
@@ -255,6 +269,23 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 			return
 		case <-time.After(interval):
 		}
+	}
+}
+
+// landingDrained is the run loop's wake channel for drained landing passes,
+// created once so every signaller shares the loop's channel.
+func (d *Daemon) landingDrained() chan struct{} {
+	d.landingDrainedOnce.Do(func() { d.landingDrainedCh = make(chan struct{}, 1) })
+	return d.landingDrainedCh
+}
+
+// signalLandingDrained tells the run loop that a landing pass ended with an
+// upgrade restart pending. It never blocks: one queued wake is all the run
+// loop needs, and it may be busy in a heartbeat.
+func (d *Daemon) signalLandingDrained() {
+	select {
+	case d.landingDrained() <- struct{}{}:
+	default:
 	}
 }
 

@@ -391,3 +391,11 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 	_ = d.shutdown(state)
 	return ErrRestartForUpgrade
 }
+
+// restartOnDrainedLanding is the run loop's response to a landing worker
+// waking it at the end of a drained pass: the pass was the last thing a
+// pending restart waited for, so check now and restart if idle (gt-fzwcd).
+func (d *Daemon) restartOnDrainedLanding(state *State) error {
+	d.checkUpgradeRestart(time.Now())
+	return d.exitForUpgradeIfRequested(state)
+}
