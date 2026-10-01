@@ -138,7 +138,7 @@ func showFormulaStepsFull(w io.Writer, formulaName, townRoot, rigName string, ex
 		style.PrintWarning("%v", err)
 		return
 	}
-	fmt.Fprint(w, renderFormulaChecklist(formulaName, f, varMap, 1))
+	_, _ = fmt.Fprint(w, renderFormulaChecklist(formulaName, f, varMap, 1))
 }
 
 func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
