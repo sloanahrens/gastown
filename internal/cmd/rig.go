@@ -1796,14 +1796,17 @@ func countRigSessions(reg *session.PrefixRegistry, all []string, rigName string)
 }
 
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,
-// routes.jsonl) to the town repo after rig add/adopt. Without this commit, changes
-// are silently reverted by any process that does a git restore/checkout.
+// routes.jsonl, and town.json, which holds the registry on the two-file layout)
+// to the town repo after rig add/adopt. Without this commit, changes are
+// silently reverted by any process that does a git restore/checkout.
+// settings/config.json is never committed: it carries agent tokens.
 func commitTownConfigChanges(townRoot, rigName string) {
 	g := git.NewGit(townRoot)
 
 	// Collect the town-level files that rig add/adopt modifies.
 	files := []string{
 		filepath.Join("mayor", "rigs.json"),
+		filepath.Join("mayor", "town.json"),
 		filepath.Join("mayor", "daemon.json"),
 		filepath.Join(".beads", "routes.jsonl"),
 	}

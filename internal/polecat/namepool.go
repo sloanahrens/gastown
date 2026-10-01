@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
 )
 
@@ -716,17 +717,8 @@ func DeleteCustomTheme(townRoot, name string) error {
 // FindRigsUsingTheme checks all rigs in a town and returns the names of any
 // rigs whose namepool style matches the given theme name.
 func FindRigsUsingTheme(townRoot, theme string) []string {
-	rigsFile := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsFile)
+	registry, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
 	if err != nil {
-		return nil
-	}
-
-	// Minimal parse — just need rig names from the "rigs" map keys.
-	var registry struct {
-		Rigs map[string]json.RawMessage `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &registry); err != nil {
 		return nil
 	}
 

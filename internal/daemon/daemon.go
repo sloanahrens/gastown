@@ -1774,16 +1774,8 @@ func (d *Daemon) invalidateKnownRigsCache() {
 
 // readKnownRigsFromDisk reads and parses mayor/rigs.json.
 func (d *Daemon) readKnownRigsFromDisk() []string {
-	rigsPath := filepath.Join(d.config.TownRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	parsed, err := d.loadRigsConfig()
 	if err != nil {
-		return nil
-	}
-
-	var parsed struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil
 	}
 

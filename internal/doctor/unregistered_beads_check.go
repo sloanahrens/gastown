@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // UnregisteredBeadsDirsCheck detects directories in the town root that have
@@ -30,13 +32,13 @@ func NewUnregisteredBeadsDirsCheck() *UnregisteredBeadsDirsCheck {
 // knownSystemDirs are directories at town root that are expected to exist
 // without being registered in rigs.json.
 var knownSystemDirs = map[string]bool{
-	"mayor":     true,
-	"deacon":    true, // holds only the dog kennel (deacon/dogs)
-	".beads":    true,
+	"mayor":      true,
+	"deacon":     true, // holds only the dog kennel (deacon/dogs)
+	".beads":     true,
 	".dolt-data": true,
-	".runtime":  true,
-	".git":      true,
-	".github":   true,
+	".runtime":   true,
+	".git":       true,
+	".github":    true,
 }
 
 // Run checks for unregistered directories with beads metadata.
@@ -97,19 +99,12 @@ func (c *UnregisteredBeadsDirsCheck) Run(ctx *CheckContext) *CheckResult {
 
 // loadRegisteredRigNames reads rig names from mayor/rigs.json.
 func loadRegisteredRigNames(townRoot string) map[string]bool {
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	rc, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
 	if err != nil {
 		return nil
 	}
-	var config struct {
-		Rigs map[string]json.RawMessage `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil
-	}
-	names := make(map[string]bool, len(config.Rigs))
-	for name := range config.Rigs {
+	names := make(map[string]bool, len(rc.Rigs))
+	for name := range rc.Rigs {
 		names[name] = true
 	}
 	return names

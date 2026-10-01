@@ -217,21 +217,33 @@ func sanitizeTownName(name string) string {
 	return name
 }
 
-// BuildPrefixRegistryFromTown reads rigs.json and returns a populated PrefixRegistry.
-// Checks mayor/rigs.json first (canonical), then falls back to town-root rigs.json.
-// Warns to stderr if rigs.json is missing entirely — an empty registry causes
-// silent failures in session name parsing (crew cycling, nudge routing, etc.).
+// BuildPrefixRegistryFromTown reads the rig registry and returns a populated
+// PrefixRegistry. It reads mayor/rigs.json (canonical; config.LoadRigsConfig
+// follows it into mayor/town.json on the two-file layout), then falls back to
+// town-root rigs.json. Warns to stderr if the registry is missing entirely —
+// an empty registry causes silent failures in session name parsing (crew
+// cycling, nudge routing, etc.).
 func BuildPrefixRegistryFromTown(townRoot string) (*PrefixRegistry, error) {
 	// Canonical location: inside mayor worktree.
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	fallbackPath := filepath.Join(townRoot, "rigs.json")
-	if _, err := os.Stat(rigsPath); err == nil {
-		r, err := BuildPrefixRegistryFromFile(rigsPath)
-		if err == nil {
-			// Maintain fallback copy at town root (resilient to git ops in mayor/).
+	rc, err := config.LoadRigsConfig(rigsPath)
+	if err == nil {
+		// Maintain fallback copy at town root (resilient to git ops in
+		// mayor/). The two-file layout has no rigs.json file to copy.
+		if _, statErr := os.Stat(rigsPath); statErr == nil {
 			copyFileIfNewer(rigsPath, fallbackPath)
 		}
-		return r, err
+		r := NewPrefixRegistry()
+		for rigName, entry := range rc.Rigs {
+			if entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
+				r.Register(entry.BeadsConfig.Prefix, rigName)
+			}
+		}
+		return r, nil
+	}
+	if !errors.Is(err, config.ErrNotFound) {
+		return nil, err
 	}
 
 	// Fallback: town root (safe from git operations in mayor worktree).

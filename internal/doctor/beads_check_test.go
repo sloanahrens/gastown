@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestNewPrefixMismatchCheck(t *testing.T) {
@@ -252,7 +254,7 @@ func TestPrefixMismatchCheck_Fix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := loadRigsConfig(rigsPath)
+	cfg, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
 		t.Fatalf("failed to load fixed rigs.json: %v (content: %s)", err, data)
 	}

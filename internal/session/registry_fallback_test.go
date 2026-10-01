@@ -107,3 +107,31 @@ func TestCopyFileIfNewer_AtomicWrite(t *testing.T) {
 		t.Error("temp file was not cleaned up")
 	}
 }
+
+// TestBuildPrefixRegistryFromTown_TwoFileLayout: after gt config migrate the
+// registry is a section of mayor/town.json; it is read there, and no
+// rigs.json is written anywhere.
+func TestBuildPrefixRegistryFromTown_TwoFileLayout(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":` + testRigsJSON + `}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(town), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := BuildPrefixRegistryFromTown(townRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rig := r.RigForPrefix("bd-"); rig != "beads" {
+		t.Errorf("RigForPrefix(bd-) = %q, want beads", rig)
+	}
+	for _, p := range []string{filepath.Join(mayorDir, "rigs.json"), filepath.Join(townRoot, "rigs.json")} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s written on the two-file layout (%v)", p, err)
+		}
+	}
+}

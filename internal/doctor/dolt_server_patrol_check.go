@@ -1,10 +1,8 @@
 package doctor
 
 import (
-	"encoding/json"
-	"fmt"
+	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -131,27 +129,15 @@ func doltServerAddr(host string, port int) string {
 // an error when the config could not be read or parsed.
 func (c *DoltServerPatrolCheck) doltServerPatrolEnabled(townRoot string) (bool, string, error) {
 	cfgPath := config.DaemonPatrolConfigPath(townRoot)
-	data, err := os.ReadFile(cfgPath)
+	cfg, err := config.LoadDaemonPatrolConfig(cfgPath)
+	if errors.Is(err, config.ErrNotFound) {
+		// No daemon config at all: the dolt_server patrol is not enabled.
+		return false, cfgPath, nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			// No daemon config at all: the dolt_server patrol is not enabled.
-			return false, cfgPath, nil
-		}
-		return false, cfgPath, fmt.Errorf("read %s: %w", cfgPath, err)
+		return false, cfgPath, err
 	}
-
-	var cfg struct {
-		Patrols struct {
-			DoltServer *struct {
-				Enabled bool `json:"enabled"`
-			} `json:"dolt_server"`
-		} `json:"patrols"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false, cfgPath, fmt.Errorf("parse %s: %w", cfgPath, err)
-	}
-
-	if cfg.Patrols.DoltServer == nil {
+	if cfg.Patrols == nil || cfg.Patrols.DoltServer == nil {
 		return false, cfgPath, nil
 	}
 	return cfg.Patrols.DoltServer.Enabled, cfgPath, nil
