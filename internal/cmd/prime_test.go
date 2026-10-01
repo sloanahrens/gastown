@@ -639,8 +639,8 @@ func TestOutputContinuationDirective(t *testing.T) {
 
 func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	t.Parallel()
-	notFound := &fakeCook{kind: "not_found", msg: "formula mol-nonexistent not found"}
-	ctx := RoleContext{Role: RoleCrew, formulaRun: notFound.run}
+	notFound := &fakeCook{msg: "formula mol-nonexistent not found"}
+	ctx := RoleContext{Role: RoleCrew, formulaOpen: notFound.open}
 	hookedBead := &beads.Issue{
 		ID:    "gt-wisp-xyz",
 		Title: "Standalone formula work",
@@ -867,7 +867,7 @@ func TestOutputRalphLoopDirective_PluginInstalled(t *testing.T) {
 	}
 	var gotErr error
 	var outputBuf bytes.Buffer
-	gotErr = outputRalphLoopDirectiveWithPluginCheck(&outputBuf, RoleContext{formulaRun: polecatChecklistRun()}, attachment, true, t.TempDir())
+	gotErr = outputRalphLoopDirectiveWithPluginCheck(&outputBuf, RoleContext{formulaOpen: polecatChecklistRun()}, attachment, true, t.TempDir())
 	output := outputBuf.String()
 	if gotErr != nil {
 		t.Fatalf("outputRalphLoopDirectiveWithPluginCheck: %v", gotErr)

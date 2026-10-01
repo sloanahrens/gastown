@@ -1,21 +1,20 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
-// cookTreeJSON is a machine-mode `bd cook` envelope carrying tree.
-func cookTreeJSON(tree string) []byte {
-	return []byte(`{"schema_version":1,"contract_version":1,"data":` + tree + `,"pagination":null,"error":null}`)
+// cookTree is tree as the formula engine's Cook returns it.
+func cookTree(tree string) []byte {
+	return []byte(tree)
 }
 
 // docAuditTree is bd's cooked tree for a formula shaped like mol-doc-audit: an
@@ -34,28 +33,97 @@ const docAuditTree = `{
   ]
 }`
 
-// fakeCook answers every bd call with out (or fails with an error envelope
-// when kind is set) and records the calls.
+// fakeCook is bd's formula engine in memory. Cook prints out, or fails with
+// bd's message msg when msg is set; Bond answers through bond (n counts the
+// bonds from 1), or prints bondOut when bond is nil. Every call is recorded
+// with the site it ran at.
 type fakeCook struct {
-	out   []byte
-	kind  string
-	msg   string
-	calls []beads.BDCall
+	out     []byte
+	msg     string
+	bond    func(n int) ([]byte, error)
+	bondOut []byte
+
+	mu    sync.Mutex
+	calls []formulaCall
 }
 
-func (f *fakeCook) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	f.calls = append(f.calls, c)
-	if f.kind != "" {
-		env := `{"schema_version":1,"contract_version":1,"data":null,"error":{"kind":"` + f.kind + `","message":` + jsonString(f.msg) + `}}`
-		return []byte(env), nil, errors.New("exit status 27")
+// formulaCall is one engine call: its site, and the call as bd's argv reads
+// ("cook <name> --var k=v ..." or "mol bond <proto> <bead> --json
+// --ephemeral --var k=v ...").
+type formulaCall struct {
+	site formulaSite
+	argv string
+	vars []string
+}
+
+func (f *fakeCook) open(site formulaSite) formulaEngine { return fakeCookAt{f, site} }
+
+func (f *fakeCook) record(site formulaSite, argv string, vars []string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, v := range vars {
+		argv += " --var " + v
 	}
-	return f.out, nil, nil
+	f.calls = append(f.calls, formulaCall{site: site, argv: argv, vars: append([]string(nil), vars...)})
+	n := 0
+	for _, c := range f.calls {
+		if strings.HasPrefix(c.argv, "mol bond ") {
+			n++
+		}
+	}
+	return n
+}
+
+// log is every call's argv, one per line.
+func (f *fakeCook) log() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lines := make([]string, len(f.calls))
+	for i, c := range f.calls {
+		lines[i] = c.argv
+	}
+	return strings.Join(lines, "\n")
+}
+
+// called returns the calls whose argv starts with prefix.
+func (f *fakeCook) called(prefix string) []formulaCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []formulaCall
+	for _, c := range f.calls {
+		if strings.HasPrefix(c.argv, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// fakeCookAt is fakeCook at one site.
+type fakeCookAt struct {
+	f    *fakeCook
+	site formulaSite
+}
+
+func (e fakeCookAt) Cook(formula string, vars []string) ([]byte, error) {
+	e.f.record(e.site, "cook "+formula, vars)
+	if e.f.msg != "" {
+		return nil, errors.New(e.f.msg)
+	}
+	return e.f.out, nil
+}
+
+func (e fakeCookAt) Bond(proto, beadID string, vars []string) ([]byte, error) {
+	n := e.f.record(e.site, "mol bond "+proto+" "+beadID+" --json --ephemeral", vars)
+	if e.f.bond != nil {
+		return e.f.bond(n)
+	}
+	return e.f.bondOut, nil
 }
 
 // polecatChecklistRun answers bd cook with a work formula the size of
 // mol-polecat-work (8 steps, ~19 KB of bodies), so the prime budget tests
 // measure a realistic checklist without starting bd.
-func polecatChecklistRun() beads.BDRunner {
+func polecatChecklistRun() func(formulaSite) formulaEngine {
 	titles := []string{"Load context and verify assignment", "Set up working branch", "Implement the work",
 		"Self-review", "Run the gates", "Pre-verify", "Commit", "Submit work and self-clean"}
 	steps := make([]string, len(titles))
@@ -63,14 +131,14 @@ func polecatChecklistRun() beads.BDRunner {
 		body := jsonString(strings.Repeat("Body line of a polecat work step with commands to run.\n", 42))
 		steps[i] = `{"id": "s` + string(rune('1'+i)) + `", "title": ` + jsonString(title) + `, "description": ` + body + `, "children": []}`
 	}
-	fake := &fakeCook{out: cookTreeJSON(`{"formula": "mol-polecat-work", "type": "workflow", "steps": [` + strings.Join(steps, ",") + `]}`)}
-	return fake.run
+	fake := &fakeCook{out: cookTree(`{"formula": "mol-polecat-work", "type": "workflow", "steps": [` + strings.Join(steps, ",") + `]}`)}
+	return fake.open
 }
 
 func cookedFixture(t *testing.T, tree string) *cookedFormula {
 	t.Helper()
-	fake := &fakeCook{out: cookTreeJSON(tree)}
-	f, err := formulaCooker{run: fake.run}.cookForRender("mol-doc-audit", "", "", nil)
+	fake := &fakeCook{out: cookTree(tree)}
+	f, err := formulaCooker{open: fake.open}.cookForRender("mol-doc-audit", "", "", nil)
 	if err != nil {
 		t.Fatalf("cookForRender: %v", err)
 	}
