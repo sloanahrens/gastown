@@ -57,7 +57,7 @@ TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-}}"
 # without a town, a tmux server, or Dolt. The defaults are the real ones.
 CONFIG_FILE="${GT_SEAT_REFILL_CONFIG:-$TOWN_ROOT/settings/config.json}"
 STATE_FILE="${GT_SEAT_REFILL_STATE:-$TOWN_ROOT/.runtime/seat-refill.json}"
-HOLD_FILE="${GT_SEAT_REFILL_HOLD:-$TOWN_ROOT/seat-refill.hold}"
+HOLD_FILE="$TOWN_ROOT/seat-refill.hold"
 MAYOR_TARGET="${GT_SEAT_REFILL_MAYOR:-mayor}"
 
 NOW="${GT_SEAT_REFILL_NOW:-$(date +%s)}"

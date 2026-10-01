@@ -13,8 +13,7 @@ import (
 // all three pass through, so the operator hold is enforced there.
 
 // With the hold in place nothing is read or slung: the dispatch lock is never
-// taken, so the gate stops the run before the planner. (The hermetic harness
-// scrubs GT_*, so GT_SEAT_REFILL_HOLD cannot move the hold file.)
+// taken, so the gate stops the run before the planner.
 func TestDispatchScheduledWork_OperatorHold_DispatchesNothing(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

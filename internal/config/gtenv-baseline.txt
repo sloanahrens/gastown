@@ -33,7 +33,6 @@ internal/cmd/tap_guard_mol_patrol.go GT_MAYOR 1
 internal/cmd/tap_guard_polecat_paths.go GT_POLECAT_PATH 1
 internal/cmd/telemetry.go GT_TEST_HERMETIC 1
 internal/cmd/theme.go GT_THEME 1
-internal/dispatch/hold.go GT_SEAT_REFILL_HOLD 1
 internal/doltserver/doltserver.go GT_DOLT_AUTO_GC 1
 internal/doltserver/doltserver.go GT_DOLT_EVENT_SCHEDULER 1
 internal/doltserver/doltserver.go GT_DOLT_LOGLEVEL 1

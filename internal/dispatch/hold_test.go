@@ -10,7 +10,7 @@ import (
 func TestOperatorHold_NoHoldFile_AllowsDispatch(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	if reason := operatorHold(townRoot, noEnv); reason != "" {
+	if reason := OperatorHold(townRoot); reason != "" {
 		t.Fatalf("OperatorHold on a town with no hold = %q, want \"\"", reason)
 	}
 }
@@ -22,7 +22,7 @@ func TestOperatorHold_HoldFilePresent_RefusesAndNamesTheFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0644); err != nil {
 		t.Fatalf("write hold: %v", err)
 	}
-	reason := operatorHold(townRoot, noEnv)
+	reason := OperatorHold(townRoot)
 	if reason == "" {
 		t.Fatal("OperatorHold ignored the operator hold file")
 	}
@@ -39,7 +39,7 @@ func TestOperatorHold_HoldDirectoryAlsoCounts(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(townRoot, "seat-refill.hold"), 0755); err != nil {
 		t.Fatalf("mkdir hold: %v", err)
 	}
-	if operatorHold(townRoot, noEnv) == "" {
+	if OperatorHold(townRoot) == "" {
 		t.Fatal("a hold path that exists as a directory must still hold, as `[ -e ]` does in run.sh")
 	}
 }
@@ -50,7 +50,7 @@ func TestOperatorHold_TownEstop_Refuses(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP"), []byte("manual\t2026-09-24T00:00:00Z\ttest\n"), 0644); err != nil {
 		t.Fatalf("write ESTOP: %v", err)
 	}
-	reason := operatorHold(townRoot, noEnv)
+	reason := OperatorHold(townRoot)
 	if !strings.Contains(reason, "ESTOP") {
 		t.Fatalf("OperatorHold under a town ESTOP = %q, want a reason naming ESTOP", reason)
 	}
@@ -66,14 +66,14 @@ func TestOperatorHold_UnstatableHoldPath_FailsClosed(t *testing.T) {
 	if err := os.WriteFile(townRoot, nil, 0644); err != nil {
 		t.Fatalf("write town file: %v", err)
 	}
-	if reason := operatorHold(townRoot, noEnv); !strings.Contains(reason, "unreadable") {
+	if reason := OperatorHold(townRoot); !strings.Contains(reason, "unreadable") {
 		t.Fatalf("OperatorHold could not stat the hold path and returned %q, want an unreadable-hold refusal", reason)
 	}
 }
 
 func TestOperatorHold_EmptyTownRoot_AllowsDispatch(t *testing.T) {
 	t.Parallel()
-	if reason := operatorHold("", noEnv); reason != "" {
+	if reason := OperatorHold(""); reason != "" {
 		t.Fatalf("OperatorHold(\"\") = %q; with no town there is no hold to read", reason)
 	}
 }
@@ -92,74 +92,41 @@ func TestHoldFileName_MatchesSeatRefillPlugin(t *testing.T) {
 	}
 }
 
-// GT_SEAT_REFILL_HOLD relocates the hold file for run.sh (run.sh:60); Go
-// honors the same override so one hold means one file everywhere.
-func TestOperatorHold_EnvOverrideRelocatesHoldFile(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	elsewhere := filepath.Join(t.TempDir(), "custom.hold")
-	env := envMap{HoldFileEnv: elsewhere}.get
-
-	// The default path is no longer the hold.
-	if err := os.WriteFile(filepath.Join(townRoot, HoldFileName), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if reason := operatorHold(townRoot, env); reason != "" {
-		t.Errorf("with %s set, the default path still held: %q", HoldFileEnv, reason)
-	}
-	if err := os.WriteFile(elsewhere, nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if reason := operatorHold(townRoot, env); !strings.Contains(reason, elsewhere) {
-		t.Errorf("OperatorHold = %q, want it to name the overridden hold %s", reason, elsewhere)
-	}
-}
-
-func TestOperatorHold_EmptyEnvOverrideUsesDefault(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	env := envMap{HoldFileEnv: ""}.get
-	if err := os.WriteFile(filepath.Join(townRoot, HoldFileName), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if operatorHold(townRoot, env) == "" {
-		t.Error("an empty override must fall back to <town>/seat-refill.hold, as ${VAR:-default} does")
-	}
-}
-
 func TestRigHold_RigEstopHoldsOnlyThatRig(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gastown"), []byte("manual\t2026-09-24T00:00:00Z\tt\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if reason := rigHold(townRoot, "gastown", noEnv); !strings.Contains(reason, "ESTOP.gastown") {
+	if reason := RigHold(townRoot, "gastown"); !strings.Contains(reason, "ESTOP.gastown") {
 		t.Errorf("RigHold(gastown) = %q, want a reason naming ESTOP.gastown", reason)
 	}
-	if reason := rigHold(townRoot, "om", noEnv); reason != "" {
+	if reason := RigHold(townRoot, "om"); reason != "" {
 		t.Errorf("RigHold(om) = %q; another rig's ESTOP must not hold it", reason)
 	}
-	if reason := rigHold(townRoot, "", noEnv); reason != "" {
+	if reason := RigHold(townRoot, ""); reason != "" {
 		t.Errorf("RigHold with no rig = %q, want the town answer (none)", reason)
 	}
 }
 
 // An ESTOP sentinel whose presence cannot be determined holds dispatch, as
 // the supervisor's e-stop check refuses (gt-e7lqk: the old stat failed open).
-// The hold file is relocated so only the sentinel's stat fails: a town root
-// that is a regular file makes it ENOTDIR, which is not "does not exist".
-func TestRigHold_UnstatableEstop_FailsClosed(t *testing.T) {
+// A town root that is a regular file makes the stat ENOTDIR, which is not
+// "does not exist". estopHold is checked directly because the hold file's own
+// stat fails first through RigHold.
+func TestEstopHold_UnstatableEstop_FailsClosed(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	townRoot := filepath.Join(dir, "town")
+	townRoot := filepath.Join(t.TempDir(), "town")
 	if err := os.WriteFile(townRoot, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
-	env := envMap{HoldFileEnv: filepath.Join(dir, "no-hold")}.get
 	for _, rig := range []string{"", "gastown"} {
-		if reason := rigHold(townRoot, rig, env); !strings.Contains(reason, "ESTOP unreadable") {
-			t.Errorf("rigHold(%q) with an unstatable ESTOP = %q, want an unreadable-ESTOP hold", rig, reason)
+		if reason := estopHold(townRoot, rig); !strings.Contains(reason, "ESTOP unreadable") {
+			t.Errorf("estopHold(%q) with an unstatable ESTOP = %q, want an unreadable-ESTOP hold", rig, reason)
 		}
+	}
+	if reason := RigHold(townRoot, "gastown"); !strings.Contains(reason, "treating as held") {
+		t.Errorf("RigHold on an unstatable town = %q, want a fail-closed hold", reason)
 	}
 }
 
@@ -169,7 +136,7 @@ func TestRigHold_TownHoldHoldsEveryRig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, HoldFileName), nil, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if rigHold(townRoot, "om", noEnv) == "" {
+	if RigHold(townRoot, "om") == "" {
 		t.Error("the town hold must hold every rig")
 	}
 }
@@ -193,32 +160,5 @@ func TestHoldLatch_ReportsOnlyTransitions(t *testing.T) {
 		if got := l.Changed(s.reason); got != s.want {
 			t.Errorf("step %d Changed(%q) = %v, want %v", i, s.reason, got, s.want)
 		}
-	}
-}
-
-// envMap is a process environment for a test; missing keys read as "".
-type envMap map[string]string
-
-func (m envMap) get(k string) string { return m[k] }
-
-// noEnv is an environment with nothing set.
-func noEnv(string) string { return "" }
-
-// The exported entry points are the injected ones reading the process
-// environment.
-func TestOperatorHold_ExportedWrappersReadProcessEnv(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.om"), []byte("manual\t2026-09-24T00:00:00Z\tt\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := HoldFilePath(townRoot), holdFilePath(townRoot, os.Getenv); got != want {
-		t.Errorf("HoldFilePath = %q, want %q", got, want)
-	}
-	if got, want := OperatorHold(townRoot), operatorHold(townRoot, os.Getenv); got != want {
-		t.Errorf("OperatorHold = %q, want %q", got, want)
-	}
-	if got, want := RigHold(townRoot, "om"), rigHold(townRoot, "om", os.Getenv); got != want {
-		t.Errorf("RigHold(om) = %q, want %q", got, want)
 	}
 }

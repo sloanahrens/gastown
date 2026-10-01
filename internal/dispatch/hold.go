@@ -20,23 +20,8 @@ import (
 // sling on their own.
 const HoldFileName = "seat-refill.hold"
 
-// HoldFileEnv relocates the hold file, with the same ${VAR:-default}
-// semantics as run.sh: set and non-empty, it names the hold file; unset or
-// empty, the hold is <town>/seat-refill.hold. It is read from each process's
-// own environment (daemon, deacon, witness, seat-refill, a manual gt), so it
-// must be set consistently across them or not at all.
-const HoldFileEnv = "GT_SEAT_REFILL_HOLD"
-
 // HoldFilePath returns the operator hold file for a town.
 func HoldFilePath(townRoot string) string {
-	return holdFilePath(townRoot, os.Getenv)
-}
-
-// holdFilePath is HoldFilePath reading HoldFileEnv through getenv.
-func holdFilePath(townRoot string, getenv func(string) string) string {
-	if p := getenv(HoldFileEnv); p != "" {
-		return p
-	}
 	return filepath.Join(townRoot, HoldFileName)
 }
 
@@ -55,15 +40,10 @@ func holdFilePath(townRoot string, getenv func(string) string) string {
 // dispatching through a hold is the outcome it exists to prevent (gt-ifijm,
 // gt-e7lqk).
 func OperatorHold(townRoot string) string {
-	return operatorHold(townRoot, os.Getenv)
-}
-
-// operatorHold is OperatorHold reading HoldFileEnv through getenv.
-func operatorHold(townRoot string, getenv func(string) string) string {
 	if townRoot == "" {
 		return ""
 	}
-	path := holdFilePath(townRoot, getenv)
+	path := HoldFilePath(townRoot)
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Sprintf("operator dispatch hold present (%s); remove it to resume", path)
 	} else if !os.IsNotExist(err) {
@@ -92,12 +72,7 @@ func estopHold(townRoot, rig string) string {
 // dispatcher that knows which rig it is about to sling into. seat-refill
 // honors the same per-rig file (run.sh). An empty rig answers for the town.
 func RigHold(townRoot, rig string) string {
-	return rigHold(townRoot, rig, os.Getenv)
-}
-
-// rigHold is RigHold reading HoldFileEnv through getenv.
-func rigHold(townRoot, rig string, getenv func(string) string) string {
-	if reason := operatorHold(townRoot, getenv); reason != "" {
+	if reason := OperatorHold(townRoot); reason != "" {
 		return reason
 	}
 	if townRoot == "" || rig == "" {
