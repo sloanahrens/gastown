@@ -178,8 +178,7 @@ gt rig add myproject https://github.com/you/repo.git
 #   ~/gt/myproject/
 #   ├── .beads/            # Project issue tracking
 #   ├── mayor/rig/         # Mayor's clone (canonical)
-#   ├── refinery/rig/      # Merge queue processor
-#   ├── witness/           # Worker monitor
+#   ├── crew/              # Human workspaces
 #   └── polecats/          # Worker clones (created on demand)
 ```
 
@@ -259,7 +258,6 @@ gt convoy list
 
 # Attach to any agent session
 gt mayor attach
-gt witness attach myproject
 ```
 
 **When to use**: Production workflows with multiple concurrent agents.
@@ -307,9 +305,8 @@ Gas Town is modular. Enable only what you need:
 
 | Configuration | Roles | Use Case |
 |--------------|-------|----------|
-| **Polecats only** | Workers | Manual spawning, no monitoring |
-| **+ Witness** | + Monitor | Automatic lifecycle, stuck detection |
-| **+ Refinery** | + Merge queue | MR review, code integration |
+| **Polecats only** | Workers | Manual spawning |
+| **+ Daemon** | + Supervisor, landing worker | Dead-session restart, gated landing on main |
 | **+ Mayor** | + Coordinator | Cross-project coordination |
 
 ## Troubleshooting

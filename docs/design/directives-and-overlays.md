@@ -5,7 +5,7 @@
 > **Reference examples:** [`docs/contrib-harnesses/`](../contrib-harnesses/)
 > contains copy-and-adapt directives and overlays that contributors can drop
 > into their own rig. See for example `polecat-pr-flow/` for a rig that gates
-> work on GitHub PR review rather than the canonical Refinery merge queue.
+> work on GitHub PR review rather than the daemon's landing worker.
 
 ## Problem
 

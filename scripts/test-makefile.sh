@@ -29,9 +29,6 @@ bash -n plugins/submodule-commit/run_test.sh
 bash plugins/submodule-commit/run_test.sh
 bash -n plugins/rig-list-consumers/run_test.sh
 bash plugins/rig-list-consumers/run_test.sh
-bash -n plugins/quality-review/run.sh
-bash -n plugins/quality-review/run_test.sh
-bash plugins/quality-review/run_test.sh
 bash -n plugins/seat-refill/run.sh
 bash -n plugins/seat-refill/run_test.sh
 bash plugins/seat-refill/run_test.sh

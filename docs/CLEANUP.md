@@ -8,8 +8,8 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt deacon cleanup-orphans` | Kills orphaned Claude subagent processes (no controlling TTY) |
-| `gt deacon zombie-scan` | Finds/kills zombie Claude processes not in active tmux sessions |
+| `gt down --all` | Full shutdown with orphaned-process cleanup and verification |
+| (daemon, automatic) | The daemon's orphan cleanup kills orphaned Claude processes on its heartbeat |
 
 ## Polecat (Agent Sandbox) Cleanup
 
@@ -22,7 +22,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt polecat stale <rig>` | Detects stale polecats; `--cleanup` auto-nukes them |
 | `gt polecat check-recovery` | Pre-nuke safety check (SAFE_TO_NUKE vs NEEDS_RECOVERY) |
 | `gt polecat identity remove <rig> <name>` | Removes a polecat identity |
-| `gt done` | Polecat self-cleaning: pushes branch, submits MR/PR path as configured, preserves handoff metadata, kills own session. MR skipped for `--status ESCALATED\|DEFERRED` or `no_merge` paths |
+| `gt done` | Polecat self-cleaning: pushes branch, marks the bead `gt:ready-to-land`, preserves handoff metadata, kills own session. No landing for `--status ESCALATED\|DEFERRED` |
 
 ## Rig-Level Cleanup
 
@@ -33,15 +33,14 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt rig reset --mail` | Clears stale mail only |
 | `gt rig reset --stale` | Resets orphaned in_progress issues |
 | `gt rig remove <name>` | Unregisters rig from registry, cleans up beads routes |
-| `gt rig shutdown <rig>` | Stops all agents: polecats, refinery, witness |
+| `gt rig shutdown <rig>` | Stops all polecat sessions in the rig |
 | `gt rig stop <rig>...` | Stop one or more rigs |
-| `gt rig restart <rig>...` | Stop then start (stop phase cleans up) |
 
 ## Town-Wide Shutdown
 
 | Command | What it does |
 |---------|-------------|
-| `gt down` | Stops all infrastructure (refinery, witness, mayor, boot, deacon, daemon, dolt) |
+| `gt down` | Stops all infrastructure (crew, mayor, daemon, dolt) |
 | `gt down --polecats` | Also stops all polecat sessions |
 | `gt down --all` | Full shutdown with orphan cleanup and verification |
 | `gt down --nuke` | Kills entire tmux server (DESTRUCTIVE - kills non-GT sessions too) |
@@ -122,7 +121,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | Layer | Scope | Key Commands |
 |-------|-------|-------------|
 | **L0** | Ephemeral data | `gt compact` (TTL-based lifecycle) |
-| **L1** | Processes | `gt deacon cleanup-orphans` |
+| **L1** | Processes | `gt down --all`, daemon orphan cleanup |
 | **L2** | Git artifacts | `gt polecat gc` |
 | **L3** | Agents/sessions | `gt polecat nuke`, `gt done`, `gt shutdown`, `gt down` |
 | **L4** | Workspace | `gt rig reset`, `gt doctor --fix`, `gt dolt cleanup` |

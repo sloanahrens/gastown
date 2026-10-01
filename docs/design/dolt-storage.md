@@ -90,7 +90,7 @@ even when the Gas Town Dolt server on port 3307 is healthy.
 
 ## Write Concurrency: All-on-Main
 
-All agents — polecats, crew, witness, refinery, deacon — write directly
+All agents — polecats, crew, mayor, the daemon — write directly
 to `main`. Concurrency is managed through transaction discipline: every
 write wraps `BEGIN` / `DOLT_COMMIT` / `COMMIT` atomically.
 
@@ -603,9 +603,6 @@ survive the recipient's session death.**
 | Role | Mail budget | Nudge for everything else |
 |------|-------------|--------------------------|
 | Polecat | 0-1 per session (HELP only) | Status, questions, updates |
-| Witness | Protocol messages only | Health checks, polecat pokes |
-| Refinery | Protocol messages only | Status to Witness |
-| Deacon | Escalations only | Timer callbacks, health pokes |
 
 ## Standalone Beads Note
 

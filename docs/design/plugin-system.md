@@ -203,7 +203,7 @@ severity = "low"          # Escalation severity if failed
 | `cooldown` | `duration = "1h"` | Query wisps, run if none in window |
 | `cron` | `schedule = "0 9 * * *"` | Run on cron schedule |
 | `condition` | `check = "cmd"` | Run check command, run if exit 0 |
-| `event` | `on = "startup"` | Run on Deacon startup |
+| `event` | `on = "startup"` | Run on startup |
 | `manual` | (no gate section) | Never auto-run, dispatch explicitly |
 
 ### Instructions Section
@@ -271,5 +271,4 @@ Standard sections:
 ## References
 
 - PRIMING.md - Core design principles
-- mol-deacon-patrol.formula.toml - Patrol step plugin-run
 - ~/gt/plugins/README.md - Current plugin stub

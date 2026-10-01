@@ -180,7 +180,7 @@ bd cook <formula>            # Formula → Proto
 bd formula list
   mol-polecat-work          v4    [project]
   mol-polecat-code-review   v1    [town]
-  mol-witness-patrol        v2    [system]
+  mol-convoy-feed           v1    [system]
 
 # Show resolution path
 bd formula show mol-polecat-work --resolve

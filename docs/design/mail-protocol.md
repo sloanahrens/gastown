@@ -1,3 +1,5 @@
+> Status: superseded (2026-09). The protocol messages and flows here ran between roles that were deleted (ADR 0003, 0004, 0005); the mail-vs-nudge guidance still holds. Not maintained.
+
 # Gas Town Mail Protocol
 
 > Reference for inter-agent mail communication in Gas Town
