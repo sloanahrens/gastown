@@ -43,6 +43,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -92,6 +93,14 @@ type Daemon struct {
 	// through, given bd's whole environment (see workBeads); nil is bd at
 	// bdPath run from the town root. Tests answer from a beadsfake.
 	openWorkBeads func(env []string) workBeadReader
+
+	// lastTownHealth is the previous health report, the baseline for the
+	// heartbeat advance check. Heartbeat goroutine only.
+	lastTownHealth *townhealth.Report
+
+	// townHealthSources replaces the health report's outside probes (Dolt
+	// ping, backup root, slot status) in tests; nil probes for real.
+	townHealthSources func(s *healthSources)
 
 	// prefixRegistryFn replaces the process-wide rig-prefix registry (see
 	// prefixRegistry) in tests; nil reads session.DefaultRegistry().
@@ -1194,6 +1203,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Clean merged and orphaned branches and gc the rig repos when due
 	// (was the git-hygiene plugin, gt-4k3fj.8.5).
 	{name: "git-hygiene", run: (*Daemon).triggerGitHygiene},
+
+	// Compute the town health report and write the one health file gt
+	// status --line reads (gt-s3rec.2). Last, so it sees this tick's Dolt
+	// check and the steps' records.
+	{name: "townhealth", run: (*Daemon).writeTownHealth},
 }
 
 // heartbeatWork is the recovery work of one heartbeat, run after the

@@ -3,6 +3,8 @@ package config
 import (
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // Compiled-in defaults for operational thresholds.
@@ -318,4 +320,13 @@ func (rt *RecoveryThresholds) HeartbeatStartupGraceD() time.Duration {
 		return ParseDurationOrDefault(rt.HeartbeatStartupGrace, DefaultRecoveryHeartbeatStartupGrace)
 	}
 	return DefaultRecoveryHeartbeatStartupGrace
+}
+
+// GetHealthSettings returns the health signal's settings block; nil when
+// absent, which townhealth.Settings.Resolve reads as all defaults.
+func (c *OperationalConfig) GetHealthSettings() *townhealth.Settings {
+	if c == nil {
+		return nil
+	}
+	return c.Health
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
 )
@@ -38,6 +39,7 @@ var statusFast bool
 var statusWatch bool
 var statusInterval int
 var statusVerbose bool
+var statusHealthLine bool
 
 var statusCmd = &cobra.Command{
 	Use:     "status",
@@ -49,7 +51,15 @@ var statusCmd = &cobra.Command{
 Shows town name, registered rigs, polecats, and crew.
 
 Use --fast to skip mail lookups for faster execution.
-Use --watch to continuously refresh status at regular intervals.`,
+Use --watch to continuously refresh status at regular intervals.
+
+Use --line for the town's one health line, read from the report the daemon
+writes every heartbeat, with the verdict as the exit code: 0 green,
+1 degraded, 2 red, 3 unknown (no report, or one older than
+operational.health.stale_after, default 10m). A green line is the verdict,
+the report's age and the day's landings; any other line lists the non-green
+fields worst first as key=value, where [R] marks a RECORDED field and [?] an
+UNKNOWN one. gt status prints every field.`,
 	RunE: runStatus,
 }
 
@@ -59,6 +69,7 @@ func init() {
 	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "Watch mode: refresh status continuously")
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
+	statusCmd.Flags().BoolVar(&statusHealthLine, "line", false, "Print the one health line; exit 0 green, 1 degraded, 2 red, 3 unknown")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -79,6 +90,10 @@ type TownStatus struct {
 	// are shown as running (unknown is not dead) and named here so the
 	// failure is visible (gt-fcxe9.1).
 	LivenessUnknown []string `json:"liveness_unknown,omitempty"`
+	// Health is the daemon's last health report (gt-s3rec.2); nil when
+	// there is none. healthLines is it rendered, every field.
+	Health      *townhealth.Report `json:"health,omitempty"`
+	healthLines []string
 }
 
 // SlotInfo represents the town-level container-suite gate slot (see
@@ -432,6 +447,9 @@ func buildInfoFromConfig(rc *config.RuntimeConfig) string {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	if statusHealthLine {
+		return runStatusHealthLine(cmd)
+	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
 	}
@@ -796,6 +814,7 @@ func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 		DND:      detectCurrentDNDStatus(townRoot),
 		Rigs:     make([]RigStatus, len(rigs)),
 	}
+	status.healthLines, _, status.Health = townHealthView(townRoot, time.Now())
 
 	// Daemon status
 	if daemonRunning, daemonPid, err := daemon.IsRunning(townRoot); err == nil {
@@ -971,6 +990,15 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	// Header
 	fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Town:"), status.Name)
 	fmt.Fprintf(w, "%s\n\n", style.Dim.Render(status.Location))
+
+	// Health report, every field (gt-s3rec.2)
+	if len(status.healthLines) > 0 {
+		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Health:"), status.healthLines[0])
+		for _, l := range status.healthLines[1:] {
+			fmt.Fprintln(w, l)
+		}
+		fmt.Fprintln(w)
+	}
 
 	// E-stop banner (if active)
 	addEstopToStatus(w, status.Location)
