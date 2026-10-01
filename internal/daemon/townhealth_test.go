@@ -220,6 +220,43 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// A parked decision is not a pending one: deferring gt-v4ssj.7 held needs-human
+// at 1 and hid the beads that arrived after it (gt-tk2xd).
+func TestWriteTownHealth_NeedsHumanCountsOnlyPendingBeads(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	bead := func(id, status string) *beads.Issue {
+		return &beads.Issue{ID: id, Status: status, CreatedAt: at}
+	}
+	for _, tc := range []struct {
+		name    string
+		beads   []*beads.Issue
+		want    string
+		verdict townhealth.Verdict
+	}{
+		{"an open bead beside a deferred one", []*beads.Issue{bead("gt-3", "open"), bead("gt-4", "deferred")}, "1", townhealth.Degraded},
+		{"only parked beads", []*beads.Issue{bead("gt-4", "deferred"), bead("gt-5", "pinned")}, "0", townhealth.Green},
+		{"a blocked bead still waits on an unblocker", []*beads.Issue{bead("gt-6", "blocked")}, "1", townhealth.Degraded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, bd := healthTown(t, now)
+			bd.issuesByLabel["gt:needs-human"] = tc.beads
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := healthField(t, r, "needs-human")
+			if got.Value != tc.want || got.Verdict != tc.verdict {
+				t.Errorf("needs-human = %s %q, want %s %q", got.Verdict, got.Value, tc.verdict, tc.want)
+			}
+		})
+	}
+}
+
 // The exec-tax line the daemon logs is its field's state changing, and a
 // beat that reports the same state says nothing (gt-2ycne.1).
 func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {

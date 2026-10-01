@@ -223,8 +223,12 @@ func (s *healthSources) landingHistory(rig string, since time.Time) (time.Time, 
 	return last, n, nil
 }
 
-// countOpen counts rig's non-closed beads carrying label, and reports each
-// one's creation time to seen when it is set.
+// countOpen counts rig's pending beads carrying label, and reports each one's
+// creation time to seen when it is set.
+//
+// Pending is beads.IsActionable, not non-closed: a deferred bead is parked by
+// the operator, so counting it holds the field at a constant and hides the
+// beads that do need attention (gt-tk2xd).
 func (s *healthSources) countOpen(rig, label string, seen func(created time.Time)) (int, error) {
 	issues, err := s.d.workBeads(s.d.workBeadsEnv(rig), townHealthBDTimeout).List(beads.ListOptions{Label: label, Priority: -1})
 	if err != nil {
@@ -232,7 +236,7 @@ func (s *healthSources) countOpen(rig, label string, seen func(created time.Time
 	}
 	n := 0
 	for _, is := range issues {
-		if is == nil || beads.IssueStatus(strings.TrimSpace(is.Status)).IsTerminal() {
+		if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
 			continue
 		}
 		n++

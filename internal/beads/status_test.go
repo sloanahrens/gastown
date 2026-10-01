@@ -93,6 +93,28 @@ func TestIssueStatusIsTerminal(t *testing.T) {
 	}
 }
 
+func TestIssueStatusIsActionable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status IssueStatus
+		want   bool
+	}{
+		{StatusOpen, true},
+		{StatusInProgress, true},
+		{StatusBlocked, true},
+		{IssueStatusHooked, true},
+		{StatusDeferred, false},
+		{IssueStatusPinned, false},
+		{StatusClosed, false},
+		{StatusTombstone, false},
+	}
+	for _, tt := range tests {
+		if got := tt.status.IsActionable(); got != tt.want {
+			t.Errorf("IssueStatus(%q).IsActionable() = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestIssueStatusIsAssigned(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
