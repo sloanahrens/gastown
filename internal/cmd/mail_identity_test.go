@@ -7,11 +7,7 @@ import (
 )
 
 func TestDetectSenderFromCwdUsesAgentFileWitnessIdentity(t *testing.T) {
-	t.Setenv("GT_ROLE", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-
+	t.Parallel()
 	tmp := t.TempDir()
 	witnessDir := filepath.Join(tmp, "x267", "witness")
 	if err := os.MkdirAll(filepath.Join(witnessDir, "rig"), 0o755); err != nil {
@@ -25,27 +21,14 @@ func TestDetectSenderFromCwdUsesAgentFileWitnessIdentity(t *testing.T) {
 		t.Fatalf("write .gt-agent: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(filepath.Join(witnessDir, "rig")); err != nil {
-		t.Fatalf("chdir witness rig dir: %v", err)
-	}
-
-	got := detectSender()
+	got := detectSenderWith(envMap(map[string]string{}), filepath.Join(witnessDir, "rig"))
 	if got != "x267/witness" {
 		t.Fatalf("detectSender() = %q, want %q", got, "x267/witness")
 	}
 }
 
 func TestDetectSenderFromCwdUsesAgentFileRefineryIdentity(t *testing.T) {
-	t.Setenv("GT_ROLE", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-
+	t.Parallel()
 	tmp := t.TempDir()
 	refineryDir := filepath.Join(tmp, "x267", "refinery")
 	if err := os.MkdirAll(filepath.Join(refineryDir, "rig"), 0o755); err != nil {
@@ -59,16 +42,7 @@ func TestDetectSenderFromCwdUsesAgentFileRefineryIdentity(t *testing.T) {
 		t.Fatalf("write .gt-agent: %v", err)
 	}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(filepath.Join(refineryDir, "rig")); err != nil {
-		t.Fatalf("chdir refinery rig dir: %v", err)
-	}
-
-	got := detectSender()
+	got := detectSenderWith(envMap(map[string]string{}), filepath.Join(refineryDir, "rig"))
 	if got != "x267/refinery" {
 		t.Fatalf("detectSender() = %q, want %q", got, "x267/refinery")
 	}
@@ -82,21 +56,8 @@ func TestDetectSenderFromCwdUsesAgentFileRefineryIdentity(t *testing.T) {
 // have `gt mail check --inject` read and ACK the real human operator's mail
 // (gt-wyia).
 func TestDetectSenderPolecatWithoutRoleNeverFallsToOverseer(t *testing.T) {
-	t.Setenv("GT_ROLE", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("GT_POLECAT", "live-fire")
-	t.Setenv("GT_CREW", "")
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(t.TempDir()); err != nil {
-		t.Fatalf("chdir sandbox dir: %v", err)
-	}
-
-	got := detectSender()
+	t.Parallel()
+	got := detectSenderWith(envMap(map[string]string{"GT_POLECAT": "live-fire"}), t.TempDir())
 	if got != "live-fire" {
 		t.Fatalf("detectSender() = %q, want %q (never overseer)", got, "live-fire")
 	}
@@ -107,21 +68,8 @@ func TestDetectSenderPolecatWithoutRoleNeverFallsToOverseer(t *testing.T) {
 // with GT_ROLE manually unset): the rig-qualified address is preferred over
 // the bare polecat name.
 func TestDetectSenderPolecatWithoutRoleUsesRigWhenPresent(t *testing.T) {
-	t.Setenv("GT_ROLE", "")
-	t.Setenv("GT_RIG", "gastown")
-	t.Setenv("GT_POLECAT", "granite")
-	t.Setenv("GT_CREW", "")
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(t.TempDir()); err != nil {
-		t.Fatalf("chdir sandbox dir: %v", err)
-	}
-
-	got := detectSender()
+	t.Parallel()
+	got := detectSenderWith(envMap(map[string]string{"GT_RIG": "gastown", "GT_POLECAT": "granite"}), t.TempDir())
 	if got != "gastown/granite" {
 		t.Fatalf("detectSender() = %q, want %q", got, "gastown/granite")
 	}

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,15 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
 func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
-	oldDB := reaperDB
-	t.Cleanup(func() { reaperDB = oldDB })
-
-	reaperDB = " hq, gastown ,, beads "
-	got := reaperDatabaseNames()
+	t.Parallel()
+	got := parseReaperDatabaseList(" hq, gastown ,, beads ")
 	want := []string{"hq", "gastown", "beads"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("reaperDatabaseNames() = %#v, want %#v", got, want)
@@ -43,39 +42,48 @@ func TestReaperAutoClosePreviewFlag(t *testing.T) {
 }
 
 func TestWaitBeforeReaperDatabase(t *testing.T) {
-	oldDelay := reaperDBDelay
-	t.Cleanup(func() { reaperDBDelay = oldDelay })
-
-	reaperDBDelay = "0s"
-	if err := waitBeforeReaperDatabase(0); err != nil {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	if err := waitBeforeReaperDatabase(clk, 0, "not-a-duration"); err != nil {
 		t.Fatalf("first database wait returned error: %v", err)
 	}
-	if err := waitBeforeReaperDatabase(1); err != nil {
+	if err := waitBeforeReaperDatabase(clk, 1, "0s"); err != nil {
 		t.Fatalf("zero-delay wait returned error: %v", err)
 	}
 
-	reaperDBDelay = "not-a-duration"
-	if err := waitBeforeReaperDatabase(1); err == nil {
+	done := make(chan error, 1)
+	go func() { done <- waitBeforeReaperDatabase(clk, 1, "250ms") }()
+	if err := clk.BlockUntilContext(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(250 * time.Millisecond)
+	if err := <-done; err != nil {
+		t.Fatalf("250ms wait returned error: %v", err)
+	}
+
+	if err := waitBeforeReaperDatabase(clk, 1, "not-a-duration"); err == nil {
 		t.Fatal("invalid delay should return an error")
 	}
 }
 
-func TestDefaultReaperEndpointIgnoresStaleBeadsAliases(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_PORT", "9999")
+// staleBeadsAliasEnv is an environment carrying only the stale BEADS_*
+// aliases the reaper must ignore.
+var staleBeadsAliasEnv = envMap(map[string]string{
+	"BEADS_DOLT_SERVER_HOST": "stale-host",
+	"BEADS_DOLT_SERVER_PORT": "9999",
+	"BEADS_DOLT_PORT":        "9999",
+})
 
-	host, port := defaultReaperEndpoint()
+func TestDefaultReaperEndpointIgnoresStaleBeadsAliases(t *testing.T) {
+	t.Parallel()
+	host, port := reaperEndpoint("", staleBeadsAliasEnv)
 	if host != "127.0.0.1" || port != 3307 {
 		t.Fatalf("defaultReaperEndpoint() = %s:%d, want 127.0.0.1:3307", host, port)
 	}
 }
 
 func TestDefaultReaperEndpointUsesTownConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -91,15 +99,8 @@ func TestDefaultReaperEndpointUsesTownConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(townRoot)
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("BEADS_DOLT_PORT", "9999")
 
-	host, port := defaultReaperEndpoint()
+	host, port := reaperEndpoint(townRoot, staleBeadsAliasEnv)
 	if host != "127.0.0.2" || port != 5507 {
 		t.Fatalf("defaultReaperEndpoint() = %s:%d, want 127.0.0.2:5507", host, port)
 	}

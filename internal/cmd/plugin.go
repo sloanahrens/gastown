@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -465,14 +466,39 @@ func outputPluginShowText(p *plugin.Plugin) error {
 }
 
 func runPluginRun(cmd *cobra.Command, args []string) error {
-	name := args[0]
-
 	scanner, townRoot, err := getPluginScanner()
 	if err != nil {
 		return err
 	}
+	return pluginRun{
+		scanner:  scanner,
+		recorder: plugin.NewRecorder(townRoot),
+		force:    pluginRunForce,
+		dryRun:   pluginRunDryRun,
+		out:      os.Stdout,
+		errOut:   os.Stderr,
+	}.run(args[0])
+}
 
-	p, err := scanner.GetPlugin(name)
+// pluginRunRecorder is the run ledger gt plugin run reads the cooldown gate
+// from and writes its receipt to. *plugin.Recorder implements it.
+type pluginRunRecorder interface {
+	CountRunsSince(pluginName, duration string) (int, error)
+	RecordRun(record plugin.PluginRunRecord) (string, error)
+}
+
+// pluginRun is one gt plugin run: where plugins are found, the run ledger,
+// the --force and --dry-run flags and where output goes.
+type pluginRun struct {
+	scanner     *plugin.Scanner
+	recorder    pluginRunRecorder
+	force       bool
+	dryRun      bool
+	out, errOut io.Writer
+}
+
+func (r pluginRun) run(name string) error {
+	p, err := r.scanner.GetPlugin(name)
 	if err != nil {
 		return err
 	}
@@ -480,39 +506,38 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 	// Check gate status for cooldown gates
 	gateOpen := true
 	gateReason := ""
-	if p.Gate != nil && p.Gate.Type == plugin.GateCooldown && !pluginRunForce {
-		recorder := plugin.NewRecorder(townRoot)
+	if p.Gate != nil && p.Gate.Type == plugin.GateCooldown && !r.force {
 		duration := p.Gate.Duration
 		if duration == "" {
 			duration = "1h" // default
 		}
-		count, err := recorder.CountRunsSince(p.Name, duration)
+		count, err := r.recorder.CountRunsSince(p.Name, duration)
 		if err != nil {
 			// Log warning but continue
-			fmt.Fprintf(os.Stderr, "Warning: checking gate status: %v\n", err)
+			fmt.Fprintf(r.errOut, "Warning: checking gate status: %v\n", err)
 		} else if count > 0 {
 			gateOpen = false
 			gateReason = fmt.Sprintf("ran %d time(s) within %s cooldown", count, duration)
 		}
 	}
 
-	if pluginRunDryRun {
-		fmt.Printf("%s Dry run for plugin: %s\n", style.Bold.Render("Plugin:"), p.Name)
-		fmt.Printf("%s %s\n", style.Bold.Render("Location:"), p.Path)
+	if r.dryRun {
+		fmt.Fprintf(r.out, "%s Dry run for plugin: %s\n", style.Bold.Render("Plugin:"), p.Name)
+		fmt.Fprintf(r.out, "%s %s\n", style.Bold.Render("Location:"), p.Path)
 		if p.Gate != nil {
-			fmt.Printf("%s %s\n", style.Bold.Render("Gate type:"), p.Gate.Type)
+			fmt.Fprintf(r.out, "%s %s\n", style.Bold.Render("Gate type:"), p.Gate.Type)
 		}
 		if !gateOpen {
-			fmt.Printf("%s %s (use --force to override)\n", style.Warning.Render("Gate closed:"), gateReason)
+			fmt.Fprintf(r.out, "%s %s (use --force to override)\n", style.Warning.Render("Gate closed:"), gateReason)
 		} else {
-			fmt.Printf("%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
+			fmt.Fprintf(r.out, "%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
 		}
 		return nil
 	}
 
-	if !gateOpen && !pluginRunForce {
-		fmt.Printf("%s Gate closed: %s\n", style.Warning.Render("⚠"), gateReason)
-		fmt.Printf("  Use --force to bypass gate check\n")
+	if !gateOpen && !r.force {
+		fmt.Fprintf(r.out, "%s Gate closed: %s\n", style.Warning.Render("⚠"), gateReason)
+		fmt.Fprintf(r.out, "  Use --force to bypass gate check\n")
 
 		// No receipt: the run never happened, so there is nothing to
 		// record. The daemon's own manual-gate skip (handler.go) only
@@ -531,33 +556,32 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 	// (gt-o1z7, d249eaeae0f3/fec069dde34c: executing run.sh from the CLI
 	// both fails open on a bd error and can overlap the daemon's own run).
 	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript {
-		fmt.Fprintf(os.Stderr, "Plugin %s has a run.sh; `gt plugin run` does not execute plugin scripts (there is no script interpreter here). If its gate is cooldown, the daemon heartbeat runs it; otherwise, run the script directly or edit the plugin's gate.\n", p.Name)
+		fmt.Fprintf(r.errOut, "Plugin %s has a run.sh; `gt plugin run` does not execute plugin scripts (there is no script interpreter here). If its gate is cooldown, the daemon heartbeat runs it; otherwise, run the script directly or edit the plugin's gate.\n", p.Name)
 		return fmt.Errorf("plugin %s is script-type; gt plugin run does not run scripts", p.Name)
 	}
 
 	// Print the instructions for the agent/user to execute. This command
 	// does the plugin's work for no one: the receipt says exactly that, and
 	// the real result is recorded afterwards, by whoever did the work.
-	fmt.Printf("%s Running plugin: %s\n", style.Success.Render("●"), p.Name)
-	if pluginRunForce && !gateOpen {
-		fmt.Printf("  %s\n", style.Dim.Render("(gate bypassed with --force)"))
+	fmt.Fprintf(r.out, "%s Running plugin: %s\n", style.Success.Render("●"), p.Name)
+	if r.force && !gateOpen {
+		fmt.Fprintf(r.out, "  %s\n", style.Dim.Render("(gate bypassed with --force)"))
 	}
-	fmt.Println()
-	fmt.Printf("%s\n", style.Bold.Render("Instructions:"))
-	fmt.Println(p.Instructions)
+	fmt.Fprintln(r.out)
+	fmt.Fprintf(r.out, "%s\n", style.Bold.Render("Instructions:"))
+	fmt.Fprintln(r.out, p.Instructions)
 
-	recorder := plugin.NewRecorder(townRoot)
-	beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
+	beadID, err := r.recorder.RecordRun(plugin.PluginRunRecord{
 		PluginName: p.Name,
 		RigName:    p.RigName,
 		Result:     plugin.ResultPrinted,
 		Body:       "Manual run via gt plugin run: instructions printed, not executed. Record the real result with `gt plugin record-run --plugin " + p.Name + " --result <success|failure|skipped|warning>` once the work is done.",
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to record run: %v\n", err)
+		fmt.Fprintf(r.errOut, "Warning: failed to record run: %v\n", err)
 	} else {
-		fmt.Printf("\n%s Recorded run: %s\n", style.Dim.Render("●"), beadID)
-		fmt.Println("This receipt says the instructions were printed, not executed. Record the real result after doing the work.")
+		fmt.Fprintf(r.out, "\n%s Recorded run: %s\n", style.Dim.Render("●"), beadID)
+		fmt.Fprintln(r.out, "This receipt says the instructions were printed, not executed. Record the real result after doing the work.")
 	}
 
 	return nil
@@ -568,9 +592,31 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return pluginSyncRun{
+		townRoot: townRoot,
+		source:   pluginSyncSource,
+		clean:    pluginSyncClean,
+		dryRun:   pluginSyncDryRun,
+		force:    pluginSyncForce,
+		out:      os.Stdout,
+		errOut:   os.Stderr,
+	}.run()
+}
+
+// pluginSyncRun is one gt plugin sync: the town, the --source, --clean,
+// --dry-run and --force flags, and where output goes.
+type pluginSyncRun struct {
+	townRoot             string
+	source               string
+	clean, dryRun, force bool
+	out, errOut          io.Writer
+}
+
+func (r pluginSyncRun) run() error {
+	townRoot := r.townRoot
 
 	// Determine source directory
-	sourceDir := pluginSyncSource
+	sourceDir := r.source
 	sourceRule := "explicit --source"
 	if sourceDir == "" {
 		src, err := plugin.FindGastownSource(townRoot)
@@ -595,49 +641,49 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	// up-to-date one: which checkout supplies the plugins is what a sync from
 	// the wrong directory gets silently wrong, and "already up to date" is
 	// exactly where that hides (gt-nc7q).
-	fmt.Printf("%s\n", style.Bold.Render("Plugin sync:"))
-	fmt.Printf("  Source: %s (%s)\n", sourceDir, sourceRule)
-	fmt.Printf("  Target: %s\n\n", targetDir)
+	fmt.Fprintf(r.out, "%s\n", style.Bold.Render("Plugin sync:"))
+	fmt.Fprintf(r.out, "  Source: %s (%s)\n", sourceDir, sourceRule)
+	fmt.Fprintf(r.out, "  Target: %s\n\n", targetDir)
 
-	if pluginSyncDryRun {
+	if r.dryRun {
 		report, err := plugin.DetectDrift(sourceDir, targetDir)
 		if err != nil {
 			return fmt.Errorf("detecting drift: %w", err)
 		}
 
-		fmt.Printf("  %s\n\n", style.Dim.Render("dry run — nothing written"))
+		fmt.Fprintf(r.out, "  %s\n\n", style.Dim.Render("dry run — nothing written"))
 
 		if !report.HasDrift() && len(report.Extra) == 0 {
-			fmt.Printf("  %s All plugins up to date\n", style.Success.Render("✓"))
+			fmt.Fprintf(r.out, "  %s All plugins up to date\n", style.Success.Render("✓"))
 			return nil
 		}
 
 		for _, d := range report.Drifted {
-			fmt.Printf("  %s %s (content differs)\n", style.Warning.Render("~"), d.Name)
+			fmt.Fprintf(r.out, "  %s %s (content differs)\n", style.Warning.Render("~"), d.Name)
 		}
 		for _, name := range report.Missing {
-			fmt.Printf("  %s %s (new, would be copied)\n", style.Success.Render("+"), name)
+			fmt.Fprintf(r.out, "  %s %s (new, would be copied)\n", style.Success.Render("+"), name)
 		}
-		if pluginSyncClean {
+		if r.clean {
 			for _, name := range report.Extra {
-				fmt.Printf("  %s %s (would be removed)\n", style.Error.Render("-"), name)
+				fmt.Fprintf(r.out, "  %s %s (would be removed)\n", style.Error.Render("-"), name)
 			}
 		}
 		return nil
 	}
 
-	result, err := plugin.SyncPluginsWithOptions(sourceDir, targetDir, plugin.SyncOptions{Clean: pluginSyncClean, Force: pluginSyncForce})
+	result, err := plugin.SyncPluginsWithOptions(sourceDir, targetDir, plugin.SyncOptions{Clean: r.clean, Force: r.force})
 	if err != nil {
 		return fmt.Errorf("syncing plugins: %w", err)
 	}
-	printPluginSyncResult(result)
-	return reportProtectedPlugins(result.Protected)
+	printPluginSyncResult(r.out, r.errOut, result)
+	return reportProtectedPlugins(r.errOut, result.Protected)
 }
 
 // reportProtectedPlugins lists plugins the sync left untouched because their
 // runtime copy holds edits the source repo lacks, and returns an error so
 // callers (make install, rebuild-gt) see the drift instead of a success line.
-func reportProtectedPlugins(protected map[string][]string) error {
+func reportProtectedPlugins(errOut io.Writer, protected map[string][]string) error {
 	if len(protected) == 0 {
 		return nil
 	}
@@ -646,36 +692,36 @@ func reportProtectedPlugins(protected map[string][]string) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	fmt.Fprintf(os.Stderr, "%s Left untouched: runtime edits the source repo does not have\n", style.Warning.Render("⚠"))
+	fmt.Fprintf(errOut, "%s Left untouched: runtime edits the source repo does not have\n", style.Warning.Render("⚠"))
 	for _, name := range names {
 		for _, f := range protected[name] {
-			fmt.Fprintf(os.Stderr, "  %s %s/%s\n", style.Warning.Render("!"), name, f)
+			fmt.Fprintf(errOut, "  %s %s/%s\n", style.Warning.Render("!"), name, f)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "  Land these through the merge queue, or re-run with --force to discard them.\n")
+	fmt.Fprintf(errOut, "  Land these through the merge queue, or re-run with --force to discard them.\n")
 	return fmt.Errorf("%d plugin(s) hold runtime edits and were not synced", len(protected))
 }
 
-func printPluginSyncResult(result *plugin.SyncResult) {
+func printPluginSyncResult(out, errOut io.Writer, result *plugin.SyncResult) {
 	if len(result.Copied) == 0 && len(result.Removed) == 0 && len(result.Protected) == 0 {
-		fmt.Printf("%s Plugins already up to date (%d checked)\n",
+		fmt.Fprintf(out, "%s Plugins already up to date (%d checked)\n",
 			style.Success.Render("✓"), len(result.Skipped))
 		return
 	}
 
-	fmt.Printf("%s Synced plugins\n", style.Success.Render("●"))
+	fmt.Fprintf(out, "%s Synced plugins\n", style.Success.Render("●"))
 	for _, name := range result.Copied {
-		fmt.Printf("  %s %s\n", style.Success.Render("↑"), name)
+		fmt.Fprintf(out, "  %s %s\n", style.Success.Render("↑"), name)
 	}
 	for _, name := range result.Removed {
-		fmt.Printf("  %s %s\n", style.Error.Render("×"), name)
+		fmt.Fprintf(out, "  %s %s\n", style.Error.Render("×"), name)
 	}
 	if len(result.Skipped) > 0 {
-		fmt.Printf("  %s %d plugin(s) already current\n",
+		fmt.Fprintf(out, "  %s %d plugin(s) already current\n",
 			style.Dim.Render("·"), len(result.Skipped))
 	}
 	for _, e := range result.Errors {
-		fmt.Fprintf(os.Stderr, "  %s %s\n", style.Error.Render("!"), e)
+		fmt.Fprintf(errOut, "  %s %s\n", style.Error.Render("!"), e)
 	}
 }
 

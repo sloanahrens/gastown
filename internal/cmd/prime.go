@@ -873,7 +873,7 @@ func findAgentWorkWithAttempts(ctx RoleContext, maxAttempts int) (*beads.Issue, 
 	backoff := 500 * time.Millisecond
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			time.Sleep(backoff)
+			clockwork.NewRealClock().Sleep(backoff)
 			backoff *= 2
 		}
 

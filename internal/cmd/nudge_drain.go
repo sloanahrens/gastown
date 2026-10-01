@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/steveyegge/gastown/internal/nudge"
@@ -21,13 +22,18 @@ import (
 // draining here surfaces nudges as ordinary tool output instead of waiting
 // for idle (gt-saz7a).
 func drainSessionNudges(townRoot string) []nudge.QueuedNudge {
-	sessionName := tmux.CurrentSessionName()
+	return drainNudgesFor(os.Stderr, townRoot, tmux.CurrentSessionName())
+}
+
+// drainNudgesFor drains sessionName's queued nudges; nil when sessionName is
+// "" (not in a tmux pane). A drain failure is reported on errOut.
+func drainNudgesFor(errOut io.Writer, townRoot, sessionName string) []nudge.QueuedNudge {
 	if sessionName == "" {
 		return nil
 	}
 	drained, err := nudge.Drain(townRoot, sessionName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "nudge queue drain error: %v\n", err)
+		fmt.Fprintf(errOut, "nudge queue drain error: %v\n", err)
 		return nil
 	}
 	return drained
@@ -53,5 +59,11 @@ func printSessionNudges() {
 	if err != nil {
 		return
 	}
-	fmt.Fprint(os.Stderr, nudge.FormatForInjection(drainSessionNudges(townRoot)))
+	writeSessionNudges(os.Stderr, townRoot, tmux.CurrentSessionName())
+}
+
+// writeSessionNudges drains sessionName's queued nudges and writes them to
+// stderr as a system-reminder block, or nothing when the queue is empty.
+func writeSessionNudges(stderr io.Writer, townRoot, sessionName string) {
+	fmt.Fprint(stderr, nudge.FormatForInjection(drainNudgesFor(stderr, townRoot, sessionName)))
 }

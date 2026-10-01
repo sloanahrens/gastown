@@ -355,7 +355,12 @@ func runLogCrash(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("cannot find town root (tried cwd and ~/gt)")
 		}
 	}
+	return logCrash(townRoot, crashAgent, crashSession, crashExitCode)
+}
 
+// logCrash records a session exit in townRoot's town log, and a crash as a
+// feed-visible session death.
+func logCrash(townRoot, crashAgent, crashSession string, crashExitCode int) error {
 	// Determine event type based on exit code
 	var eventType townlog.EventType
 	var context string
@@ -422,8 +427,12 @@ func runLogPruneWorktree(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	actor := detectActor()
-	payload := events.WorktreePrunePayload(prunedWorktreeKind, prunedWorktreeOwner, prunedWorktreePath)
+	return logPruneWorktree(townRoot, detectActor(), prunedWorktreeKind, prunedWorktreeOwner, prunedWorktreePath)
+}
+
+// logPruneWorktree records a removed worktree as a feed-visible event.
+func logPruneWorktree(townRoot, actor, kind, owner, path string) error {
+	payload := events.WorktreePrunePayload(kind, owner, path)
 	return events.LogFeedTo(townRoot, events.TypeWorktreePrune, actor, payload)
 }
 

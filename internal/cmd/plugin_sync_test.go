@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,14 +28,16 @@ func markTestTown(t *testing.T, dir string) {
 	writeFile(t, filepath.Join(dir, "mayor", "town.json"), `{"name":"test-town"}`)
 }
 
-// resetPluginSyncFlags restores the sync subcommand's package-level flags.
-func resetPluginSyncFlags(t *testing.T) {
+// runPluginSyncFor runs gt plugin sync for townRoot from source ("" finds
+// the town's checkout) and returns what it printed.
+func runPluginSyncFor(t *testing.T, townRoot, source string) string {
 	t.Helper()
-	prevSource, prevClean, prevDryRun, prevForce := pluginSyncSource, pluginSyncClean, pluginSyncDryRun, pluginSyncForce
-	t.Cleanup(func() {
-		pluginSyncSource, pluginSyncClean, pluginSyncDryRun, pluginSyncForce = prevSource, prevClean, prevDryRun, prevForce
-	})
-	pluginSyncSource, pluginSyncClean, pluginSyncDryRun, pluginSyncForce = "", false, false, false
+	var out bytes.Buffer
+	r := pluginSyncRun{townRoot: townRoot, source: source, out: &out, errOut: io.Discard}
+	if err := r.run(); err != nil {
+		t.Errorf("runPluginSync() error = %v", err)
+	}
+	return out.String()
 }
 
 // gt-nc7q: a gastown checkout in the working directory must not supply the
@@ -43,7 +47,7 @@ func resetPluginSyncFlags(t *testing.T) {
 // the one that matters — a sync from the wrong source is silent there, so
 // naming the directory it read is the only way to see it.
 func TestRunPluginSync_ReadsTownCheckoutNotWorkingDirectoryClone(t *testing.T) {
-	resetPluginSyncFlags(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
@@ -60,16 +64,7 @@ func TestRunPluginSync_ReadsTownCheckoutNotWorkingDirectoryClone(t *testing.T) {
 	writeFile(t, filepath.Join(clone, "go.mod"), "module github.com/steveyegge/gastown\n")
 	writeTestPlugin(t, filepath.Join(clone, "plugins"), "stale-plugin", "stale")
 
-	// Keep the fallback resolution on the fixture town if the cwd walk ever
-	// stops finding it, rather than on the operator's live town.
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	t.Chdir(clone)
-
-	out := captureStdout(t, func() {
-		if err := runPluginSync(nil, nil); err != nil {
-			t.Errorf("runPluginSync() error = %v", err)
-		}
-	})
+	out := runPluginSyncFor(t, townRoot, "")
 
 	canonical := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
 	if !strings.Contains(out, canonical) || !strings.Contains(out, "mayor rig checkout") {
@@ -86,7 +81,7 @@ func TestRunPluginSync_ReadsTownCheckoutNotWorkingDirectoryClone(t *testing.T) {
 // The explicit path stays available and is labelled as such, so a run against
 // a directory outside the town is never mistaken for the town's own checkout.
 func TestRunPluginSync_SourceFlagIsLabelledExplicit(t *testing.T) {
-	resetPluginSyncFlags(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	markTestTown(t, townRoot)
@@ -94,15 +89,8 @@ func TestRunPluginSync_SourceFlagIsLabelledExplicit(t *testing.T) {
 
 	elsewhere := t.TempDir()
 	writeTestPlugin(t, elsewhere, "handed-plugin", "handed")
-	pluginSyncSource = elsewhere
 
-	t.Chdir(townRoot)
-
-	out := captureStdout(t, func() {
-		if err := runPluginSync(nil, nil); err != nil {
-			t.Errorf("runPluginSync() error = %v", err)
-		}
-	})
+	out := runPluginSyncFor(t, townRoot, elsewhere)
 
 	if !strings.Contains(out, elsewhere) || !strings.Contains(out, "explicit --source") {
 		t.Errorf("sync did not report the --source directory as its source; output:\n%s", out)

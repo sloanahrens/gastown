@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
@@ -216,8 +217,8 @@ func runHook(_ *cobra.Command, args []string) error {
 	// match against a registered subcommand, so anything reaching here that
 	// doesn't look like a bead ID is almost certainly a typo'd subcommand.
 	// See GH#3701.
-	if !isBeadID(beadID) {
-		return fmt.Errorf("%q is not a bead ID. See 'gt hook --help' for available subcommands and usage", beadID)
+	if err := hookBeadArgError(beadID); err != nil {
+		return err
 	}
 
 	// Parse optional target agent
@@ -375,7 +376,7 @@ func runHook(_ *cobra.Command, args []string) error {
 			if attempt < hookMaxRetries {
 				backoff := slingBackoff(attempt, hookBaseBackoff, hookBackoffMax)
 				fmt.Printf("%s Hook attempt %d failed, retrying in %v...\n", style.Warning.Render("⚠"), attempt, backoff)
-				time.Sleep(backoff)
+				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
 			return fmt.Errorf("hooking bead after %d attempts: %w", hookMaxRetries, lastHookErr)
@@ -423,11 +424,26 @@ func runHook(_ *cobra.Command, args []string) error {
 }
 
 func closeCompletedHookedMolecule(workDir, beadID string) error {
+	return closeCompletedHookedMoleculeVia(nil, workDir, beadID, runtime.SessionIDFromEnv())
+}
+
+// closeCompletedHookedMoleculeVia closes beadID through run (nil runs bd),
+// tagging the close with sessionID when it is not "".
+func closeCompletedHookedMoleculeVia(run beads.BDRunner, workDir, beadID, sessionID string) error {
 	closeArgs := []string{"close", beadID, "--force", "--reason=Auto-replaced by gt hook (molecule complete)"}
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+	if sessionID != "" {
 		closeArgs = append(closeArgs, "--session="+sessionID)
 	}
-	return BdCmd(closeArgs...).Dir(workDir).WithAutoCommit().Run()
+	return BdCmd(closeArgs...).Dir(workDir).WithAutoCommit().Via(run).Run()
+}
+
+// hookBeadArgError rejects a first argument that does not look like a bead
+// ID: cobra fell through to the bead-id positional on a mistyped subcommand.
+func hookBeadArgError(arg string) error {
+	if isBeadID(arg) {
+		return nil
+	}
+	return fmt.Errorf("%q is not a bead ID. See 'gt hook --help' for available subcommands and usage", arg)
 }
 
 // checkPinnedBeadComplete checks if a pinned bead's attached molecule is 100% complete.
