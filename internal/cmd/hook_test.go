@@ -1,13 +1,11 @@
 package cmd
 
 import (
-	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -152,41 +150,21 @@ func TestNormalizeHookShowTarget(t *testing.T) {
 	}
 }
 
-func TestCloseCompletedHookedMoleculeUsesBdCmdEnv(t *testing.T) {
+func TestCloseCompletedHookedMoleculeClosesTheBead(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	beadsDir := filepath.Join(workDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	db := beadsfake.New()
+	old, err := db.Create(beads.CreateOptions{Title: "old molecule", Priority: -1})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"hookdb"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var calls []beads.BDCall
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		calls = append(calls, c)
-		return nil, nil, nil
-	}
-	if err := closeCompletedHookedMoleculeVia(run, workDir, "gt-old", "ses-hook-test"); err != nil {
+	if err := closeCompletedHookedMoleculeIn(db, old.ID); err != nil {
 		t.Fatalf("closeCompletedHookedMolecule: %v", err)
 	}
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %d, want 1", len(calls))
+	got, err := db.Show(old.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantArgs := []string{"close", "gt-old", "--force", "--reason=Auto-replaced by gt hook (molecule complete)", "--session=ses-hook-test"}
-	if got := calls[0].Args; strings.Join(got, "|") != strings.Join(wantArgs, "|") {
-		t.Fatalf("args = %q, want %q", got, wantArgs)
-	}
-	env := envSlice(calls[0].Env)
-	for k, want := range map[string]string{
-		"BEADS_DIR":                  beadsDir,
-		"BEADS_DOLT_SERVER_DATABASE": "hookdb",
-		"BD_READONLY":                "",
-		"BD_DOLT_AUTO_COMMIT":        "on",
-	} {
-		if env[k] != want {
-			t.Errorf("%s = %q, want %q", k, env[k], want)
-		}
+	if got.Status != "closed" || got.CloseReason != "Auto-replaced by gt hook (molecule complete)" {
+		t.Fatalf("status %q reason %q, want closed with the auto-replace reason", got.Status, got.CloseReason)
 	}
 }

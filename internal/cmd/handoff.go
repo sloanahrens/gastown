@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1422,9 +1421,6 @@ func sendHandoffMail(subject, message string) (string, error) {
 		return "", fmt.Errorf("cannot detect town root")
 	}
 
-	// Build labels for mail metadata (matches mail router format)
-	labels := fmt.Sprintf("from:%s", agentID)
-
 	// Close stale hooked mail beads from previous sessions before creating a new one.
 	// Without this, each handoff cycle accumulates beads in status=hooked. (GH#3859)
 	townB := beads.New(filepath.Join(townRoot, ".beads"))
@@ -1434,61 +1430,34 @@ func sendHandoffMail(subject, message string) (string, error) {
 		fmt.Printf("%s Closed %d stale hooked mail bead(s)\n", style.Dim.Render("🧹"), n)
 	}
 
-	// Create mail bead directly using bd create with --silent to get the ID
-	// Mail goes to town-level beads (hq- prefix)
-	// Flags go first, then -- to end flag parsing, then the positional subject.
-	// This prevents subjects like "--help" from being parsed as flags.
-	args := []string{
-		"create",
-		"--assignee", agentID,
-		"-d", message,
-		"--priority", "1", // high — handoffs should float above normal mail
-		"--labels", labels + ",gt:message",
-		"--actor", agentID,
-		// NOT ephemeral: handoff mail must be in issues table so gt hook can find it.
-		// Ephemeral wisps are invisible to hook queries and may be reaped before successor reads.
-		"--silent", // Output only the bead ID
-		"--", subject,
-	}
+	return createHandoffMailIn(beads.NewPinned(filepath.Join(townRoot, ".beads")), agentID, subject, message)
+}
 
-	cmd := BdCmd(args...).
-		WithAutoCommit().
-		Dir(townRoot).
-		Build()
-	cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(townRoot, ".beads"))
-
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return "", fmt.Errorf("creating handoff mail: %s", errMsg)
-		}
+// createHandoffMailIn creates the handoff mail in the town database db,
+// assigned to agentID, and hooks it. It returns the mail's ID, or an error
+// when the create failed; a failed hook is a warning, since the mail exists.
+func createHandoffMailIn(db beads.Client, agentID, subject, message string) (string, error) {
+	// NOT ephemeral: handoff mail must be in issues table so gt hook can find it.
+	// Ephemeral wisps are invisible to hook queries and may be reaped before successor reads.
+	created, err := db.Create(beads.CreateOptions{
+		Title:       subject,
+		Description: message,
+		Priority:    1, // high — handoffs should float above normal mail
+		Labels:      []string{"from:" + agentID, "gt:message"},
+		Assignee:    agentID,
+		Actor:       agentID,
+	})
+	if err != nil {
 		return "", fmt.Errorf("creating handoff mail: %w", err)
 	}
 
-	beadID := strings.TrimSpace(stdout.String())
-	if beadID == "" {
-		return "", fmt.Errorf("bd create did not return bead ID")
-	}
-
 	// Auto-hook the created mail bead
-	hookCmd := BdCmd("update", beadID, "--status=hooked", "--assignee="+agentID).
-		WithAutoCommit().
-		Dir(townRoot).
-		Build()
-	hookCmd.Env = append(hookCmd.Env, "BEADS_DIR="+filepath.Join(townRoot, ".beads"))
-	hookCmd.Stderr = os.Stderr
-
-	if err := hookCmd.Run(); err != nil {
+	hooked := string(beads.StatusHooked)
+	if err := db.Update(created.ID, beads.UpdateOptions{Status: &hooked, Assignee: &agentID}); err != nil {
 		// Non-fatal: mail was created, just couldn't hook
-		style.PrintWarning("created mail %s but failed to auto-hook: %v", beadID, err)
-		return beadID, nil
+		style.PrintWarning("created mail %s but failed to auto-hook: %v", created.ID, err)
 	}
-
-	return beadID, nil
+	return created.ID, nil
 }
 
 // warnHandoffGitStatus checks the current workspace for uncommitted or unpushed
@@ -1572,8 +1541,8 @@ func looksLikeBeadID(s string) bool {
 // hookBeadForHandoff attaches a bead to the current agent's hook.
 func hookBeadForHandoff(beadID string) error {
 	// Verify the bead exists first
-	verifyCmd := beads.CommandWithEnv("", nil, "show", beadID, "--json")
-	if err := verifyCmd.Run(); err != nil {
+	db := beads.NewPlain("", nil)
+	if _, err := db.Show(beadID); err != nil {
 		return fmt.Errorf("bead '%s' not found", beadID)
 	}
 
@@ -1591,9 +1560,8 @@ func hookBeadForHandoff(beadID string) error {
 	}
 
 	// Pin the bead using bd update (discovery-based approach)
-	pinCmd := beads.CommandWithEnv("", nil, "update", beadID, "--status=pinned", "--assignee="+agentID)
-	pinCmd.Stderr = os.Stderr
-	if err := pinCmd.Run(); err != nil {
+	pinned := string(beads.StatusPinned)
+	if err := db.Update(beadID, beads.UpdateOptions{Status: &pinned, Assignee: &agentID}); err != nil {
 		return fmt.Errorf("pinning bead: %w", err)
 	}
 
@@ -1637,7 +1605,8 @@ func collectHandoffState() string {
 	}
 
 	// Get ready beads
-	if lines := bdIssueSummaryLines("ready", "--json"); len(lines) > 0 {
+	db := beads.NewPlain("", nil)
+	if lines := issueSummaryLines(db.Ready()); len(lines) > 0 {
 		// Limit to first 10 lines
 		if len(lines) > 10 {
 			lines = append(lines[:10], "... (more issues)")
@@ -1646,7 +1615,7 @@ func collectHandoffState() string {
 	}
 
 	// Get in-progress beads
-	if lines := bdIssueSummaryLines("list", "--status=in_progress", "--json"); len(lines) > 0 {
+	if lines := issueSummaryLines(db.List(beads.ListOptions{Status: "in_progress", Priority: -1})); len(lines) > 0 {
 		if len(lines) > 5 {
 			lines = append(lines[:5], "... (more)")
 		}
@@ -1660,34 +1629,16 @@ func collectHandoffState() string {
 	return strings.Join(parts, "\n\n")
 }
 
-// bdIssueSummaryLines runs a bd read that lists issues and returns one summary
-// line per issue. It returns nil when bd fails or lists nothing, so the caller
-// omits the section.
-func bdIssueSummaryLines(args ...string) []string {
-	out, err := beads.CommandWithEnv("", nil, beads.InjectFlatForListJSON(args)...).Output()
-	if err != nil {
-		return nil
-	}
-	return issueSummaryLines(out)
-}
-
-// issueSummaryLines renders a bd issue-array payload as "id [P<n>] title" lines.
-func issueSummaryLines(payload []byte) []string {
-	var issues []struct {
-		ID       string `json:"id"`
-		Title    string `json:"title"`
-		Priority *int   `json:"priority"`
-	}
-	if json.Unmarshal(payload, &issues) != nil {
+// issueSummaryLines renders a bd read's issues as "id [P<n>] title" lines.
+// It returns nil when the read failed or found nothing, so the caller omits
+// the section.
+func issueSummaryLines(issues []*beads.Issue, err error) []string {
+	if err != nil || len(issues) == 0 {
 		return nil
 	}
 	lines := make([]string, 0, len(issues))
 	for _, issue := range issues {
-		line := issue.ID
-		if issue.Priority != nil {
-			line += fmt.Sprintf(" [P%d]", *issue.Priority)
-		}
-		lines = append(lines, line+" "+issue.Title)
+		lines = append(lines, fmt.Sprintf("%s [P%d] %s", issue.ID, issue.Priority, issue.Title))
 	}
 	return lines
 }

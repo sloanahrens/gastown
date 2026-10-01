@@ -19,6 +19,9 @@ type slingRollback struct {
 	townRoot string
 	townErr  error // set when the cwd is not in a town
 	bd       beads.BDRunner
+	// townBeads is the town database an auto-convoy is closed in; nil is
+	// bd pinned to the town's .beads.
+	townBeads beads.Client
 
 	getBeadInfo      func(beadID string) (*beadInfo, error)
 	collectMolecules func(info *beadInfo) []string
@@ -169,9 +172,11 @@ func (s slingRollback) closeConvoy(convoyID, reason string) {
 		fmt.Printf("  %s Could not find workspace to close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
 		return
 	}
-	townBeads := filepath.Join(townRoot, ".beads")
-	closeArgs := []string{"close", convoyID, "-r", reason}
-	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Via(s.bd).Run(); err != nil {
+	db := s.townBeads
+	if db == nil {
+		db = beads.NewPinned(filepath.Join(townRoot, ".beads"))
+	}
+	if err := db.CloseWithReason(reason, convoyID); err != nil {
 		fmt.Printf("  %s Could not close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
 	} else {
 		fmt.Printf("  %s Closed convoy %s\n", style.Dim.Render("○"), convoyID)

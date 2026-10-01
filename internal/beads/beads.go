@@ -642,6 +642,7 @@ type CreateOptions struct {
 	Priority    int      // 0-4
 	Description string
 	Parent      string
+	Assignee    string // Who the issue is assigned to from creation ("" is nobody)
 	Actor       string // Who is creating this issue (populates created_by)
 	Ephemeral   bool   // Create as ephemeral (wisp) - not synced to git
 	Rig         string // Target rig database (e.g., "gantry"). When set, binds create to the rig's .beads directory.
@@ -3037,6 +3038,9 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	}
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)
+	}
+	if opts.Assignee != "" {
+		args = append(args, "--assignee="+opts.Assignee)
 	}
 	if opts.Ephemeral {
 		args = append(args, "--ephemeral")

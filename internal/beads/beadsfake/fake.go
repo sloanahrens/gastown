@@ -437,6 +437,7 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 			Description: opts.Description,
 			Status:      string(beads.StatusOpen),
 			Priority:    priority,
+			Assignee:    opts.Assignee,
 			Type:        "task",
 			CreatedAt:   now,
 			CreatedBy:   actor,
