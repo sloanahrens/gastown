@@ -252,7 +252,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the restart command
-	restartCmd, err := buildRestartCommand(targetSession)
+	restartCmd, err := buildRestartCommand(townRegistry(), targetSession)
 	if err != nil {
 		return err
 	}
@@ -526,6 +526,7 @@ func runHandoffCycle() error {
 	// Using --continue would resume the same over-threshold conversation,
 	// causing PreCompact to fire again and loop indefinitely.
 	restartCmd, err := buildRestartCommandWithOpts(currentSession, buildRestartCommandOpts{
+		Registry:        townRegistry(),
 		ContinueSession: false,
 	})
 	if err != nil {
@@ -691,13 +692,12 @@ type buildRestartCommandOpts struct {
 	// ContinueSession is true. If empty, falls back to a generic
 	// continuation message.
 	ContinuePrompt string
-	// Registry supplies the rig prefixes the session name parses with; nil
-	// reads session.DefaultRegistry().
+	// Registry supplies the rig prefixes the session name parses with.
 	Registry *session.PrefixRegistry
 }
 
-func buildRestartCommand(sessionName string) (string, error) {
-	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{})
+func buildRestartCommand(reg *session.PrefixRegistry, sessionName string) (string, error) {
+	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{Registry: reg})
 }
 
 // agentNameForRole returns the worker name a role keys its agent config and
@@ -756,9 +756,6 @@ func liveRespawnConfig(role, agentName, townRoot, rigPath string) (*config.Runti
 
 func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
 	reg := opts.Registry
-	if reg == nil {
-		reg = session.DefaultRegistry()
-	}
 
 	// Detect town root from current directory
 	townRoot := detectTownRootFromCwd()
@@ -1121,7 +1118,7 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 
 	case strings.Contains(sessionName, "-crew-"):
 		// gt-<rig>-crew-<name> -> <townRoot>/<rig>/crew/<name>
-		rig, name, _, ok := parseCrewSessionNameIn(reg, sessionName)
+		rig, name, _, ok := parseCrewSessionName(reg, sessionName)
 		if !ok {
 			return "", fmt.Errorf("cannot parse crew session name: %s", sessionName)
 		}

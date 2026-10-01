@@ -714,7 +714,8 @@ func runNudgeChannel(channelName, message, sender string) error {
 	}
 
 	// Get all running sessions for pattern matching
-	agents, err := getAgentSessions(true)
+	reg := townRegistry()
+	agents, err := getAgentSessions(reg, true)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -748,7 +749,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 	for i, sessionName := range targets {
 		// Check DND status before nudging each target
 		// Convert session name back to address format for DND lookup
-		targetAddr := sessionNameToAddress(sessionName)
+		targetAddr := sessionNameToAddress(reg, sessionName)
 		if targetAddr != "" {
 			if shouldSend, level, _ := shouldNudgeTarget(townRoot, targetAddr, false); !shouldSend {
 				skipped++
@@ -892,12 +893,7 @@ func shouldNudgeTarget(townRoot, targetAddress string, force bool) (bool, string
 //   - "gt-gastown-crew-max" -> "gastown/crew/max"
 //   - "gt-gastown-alpha" -> "gastown/alpha"
 //   - "hq-mayor" -> "mayor"
-func sessionNameToAddress(sessionName string) string {
-	return sessionNameToAddressIn(session.DefaultRegistry(), sessionName)
-}
-
-// sessionNameToAddressIn is sessionNameToAddress reading rig prefixes from reg.
-func sessionNameToAddressIn(reg *session.PrefixRegistry, sessionName string) string {
+func sessionNameToAddress(reg *session.PrefixRegistry, sessionName string) string {
 	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return ""

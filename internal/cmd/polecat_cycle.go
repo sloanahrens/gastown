@@ -20,12 +20,13 @@ func cyclePolecatSession(direction int, sessionOverride string) error {
 		return fmt.Errorf("not in a tmux session")
 	}
 
-	rigName, _, ok := parsePolecatSessionName(currentSession)
+	reg := townRegistry()
+	rigName, _, ok := parsePolecatSessionName(reg, currentSession)
 	if !ok {
 		return nil
 	}
 
-	sessions, err := findRigPolecatSessions(rigName)
+	sessions, err := findRigPolecatSessions(reg, rigName)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -37,15 +38,9 @@ func cyclePolecatSession(direction int, sessionOverride string) error {
 // Format: gt-<rig>-<name> where name is NOT crew-*, witness, refinery, mayor, or deacon.
 // Returns empty strings and false if the format doesn't match.
 //
-// Delegates to session.ParseSessionName for consistent parsing of hyphenated
-// rig names (e.g., gt-my-rig-Toast correctly yields rig="my-rig", name="Toast").
-func parsePolecatSessionName(sessionName string) (rigName, polecatName string, ok bool) { //nolint:unparam // polecatName kept for API consistency
-	return parsePolecatSessionNameIn(session.DefaultRegistry(), sessionName)
-}
-
-// parsePolecatSessionNameIn is parsePolecatSessionName reading rig prefixes
-// from reg.
-func parsePolecatSessionNameIn(reg *session.PrefixRegistry, sessionName string) (rigName, polecatName string, ok bool) {
+// Delegates to session.ParseSessionNameWithRegistry, reading rig prefixes from
+// reg, for consistent parsing of hyphenated rig names (e.g., gt-my-rig-Toast correctly yields rig="my-rig", name="Toast").
+func parsePolecatSessionName(reg *session.PrefixRegistry, sessionName string) (rigName, polecatName string, ok bool) {
 	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return "", "", false
@@ -68,7 +63,7 @@ func parsePolecatSessionNameIn(reg *session.PrefixRegistry, sessionName string) 
 // findRigPolecatSessions returns all polecat sessions for a given rig.
 // Finds sessions matching gt-<rig>-<name> pattern, excluding crew, witness,
 // and refinery sessions.
-func findRigPolecatSessions(rigName string) ([]string, error) { //nolint:unparam // error return kept for future use
+func findRigPolecatSessions(reg *session.PrefixRegistry, rigName string) ([]string, error) { //nolint:unparam // error return kept for future use
 	allSessions, err := listTmuxSessions()
 	if err != nil {
 		return nil, nil
@@ -81,7 +76,7 @@ func findRigPolecatSessions(rigName string) ([]string, error) { //nolint:unparam
 		if !strings.HasPrefix(s, prefix) {
 			continue
 		}
-		if _, _, ok := parsePolecatSessionName(s); ok {
+		if _, _, ok := parsePolecatSessionName(reg, s); ok {
 			sessions = append(sessions, s)
 		}
 	}

@@ -84,7 +84,7 @@ func recordOwnSessionCycle(townRoot, workDir, session string) {
 // to a live caller: respawn-pane -k kills this process.
 func respawnOwnSessionFresh(session string) error {
 	pane := os.Getenv("TMUX_PANE")
-	restartCmd, err := buildRestartCommandWithOpts(session, buildRestartCommandOpts{ContinueSession: false})
+	restartCmd, err := buildRestartCommandWithOpts(session, buildRestartCommandOpts{Registry: townRegistry(), ContinueSession: false})
 	if err != nil {
 		return err
 	}

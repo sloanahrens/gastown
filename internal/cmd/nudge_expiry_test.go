@@ -23,7 +23,7 @@ func TestExpiryObserverInstalled(t *testing.T) {
 // claims: the notice still has a mailbox to reach (gt-oexm).
 func TestExpiredNudgeMailTargetFallsBackToMayor(t *testing.T) {
 	t.Parallel()
-	if got := expiredNudgeMailTarget("not a session name"); got != constants.RoleMayor {
+	if got := expiredNudgeMailTarget(nudgeTestRegistry(), "not a session name"); got != constants.RoleMayor {
 		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want %q", got, constants.RoleMayor)
 	}
 }

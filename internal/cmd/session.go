@@ -808,7 +808,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 func runSessionHealth(cmd *cobra.Command, args []string) error {
 	sessionName := args[0]
-	if err := sessionHealthArgError(session.DefaultRegistry(), sessionName); err != nil {
+	if err := sessionHealthArgError(townRegistry(), sessionName); err != nil {
 		return err
 	}
 	status := tmux.NewTmux().CheckSessionHealth(sessionName, sessionHealthMaxInactivity)

@@ -350,7 +350,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
 	}
 
-	sessions, err := currentPolecatSessions()
+	sessions, err := currentPolecatSessions(townRegistry())
 	if err != nil {
 		return snapshot, err
 	}
@@ -417,7 +417,7 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 // scoped to one rig so direct mode pays for one rig's worth of scanning.
 func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnapshot, error) {
 	snapshot := polecatCapacitySnapshot{}
-	sessions, err := currentPolecatSessions()
+	sessions, err := currentPolecatSessions(townRegistry())
 	if err != nil {
 		return snapshot, err
 	}
@@ -430,12 +430,12 @@ func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnaps
 	return snapshot, nil
 }
 
-func currentPolecatSessions() (polecatSessionSet, error) {
+func currentPolecatSessions(reg *session.PrefixRegistry) (polecatSessionSet, error) {
 	sessionNames, err := tmux.NewTmux().ListSessions()
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
 	}
-	return newPolecatSessionSet(session.DefaultRegistry(), sessionNames), nil
+	return newPolecatSessionSet(reg, sessionNames), nil
 }
 
 func listPolecatDirectoryNames(rigPath string) ([]string, error) {
