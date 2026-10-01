@@ -479,15 +479,18 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 // closeEscalationDeliveryBeads closes the open mail-delivery beads routed for
 // an escalation (identified by thread:<escalationID>), so they don't linger
 // as phantom open escalations in `bd ready`. Returns the number closed.
-func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
-	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--limit=0", "--json")
+func closeEscalationDeliveryBeads(bd beads.Client, escalationID, closedBy string) (int, error) {
+	// --limit=0: bd list returns 50 rows by default, and an escalation
+	// broadcast to more recipients than that left the rest open.
+	all, err := bd.List(beads.ListOptions{Label: "gt:message", Status: string(beads.StatusOpen), Priority: -1, IncludeInfra: true, Limit: 0})
 	if err != nil {
 		return 0, fmt.Errorf("listing delivery beads: %w", err)
 	}
-
 	var issues []*beads.Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return 0, fmt.Errorf("parsing delivery beads: %w", err)
+	for _, issue := range all {
+		if beads.HasLabel(issue, "thread:"+escalationID) {
+			issues = append(issues, issue)
+		}
 	}
 	if len(issues) == 0 {
 		return 0, nil

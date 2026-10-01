@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 var tapGuardContainerSuiteCmd = &cobra.Command{
@@ -635,10 +636,10 @@ func containerSuiteWrap(command, gtRole string) string {
 	if isCompoundShellCommand(command) {
 		return fmt.Sprintf("gt slot run --role %s -- sh -c %s", role, config.ShellQuote(command))
 	}
-	// splitEnvPrefix is the same rule runSlotRun applies to its own argv
-	// (gt-18nx), so the guard's advice and the runner's reading of it cannot
-	// drift: whatever it peels is exactly what 'env' has to carry.
-	if envAssigns, _ := splitEnvPrefix(shellTokenize(command)); len(envAssigns) > 0 {
+	// slot.SplitEnvPrefix is the same rule the runner applies to its own
+	// argv (gt-18nx), so the guard's advice and the runner's reading of it
+	// cannot drift: whatever it peels is exactly what 'env' has to carry.
+	if envAssigns, _ := slot.SplitEnvPrefix(shellTokenize(command)); len(envAssigns) > 0 {
 		return fmt.Sprintf("gt slot run --role %s -- env %s", role, command)
 	}
 	return fmt.Sprintf("gt slot run --role %s -- %s", role, command)

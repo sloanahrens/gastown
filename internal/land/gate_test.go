@@ -123,20 +123,20 @@ func TestCommandGateStartFailureIsInfraNotRed(t *testing.T) {
 	}
 }
 
-func TestCommandGateWrapAndLogDir(t *testing.T) {
+func TestCommandGateLogDir(t *testing.T) {
 	t.Parallel()
 	logDir := filepath.Join(t.TempDir(), "logs")
 	s := &scriptedRun{answers: map[string]scriptedAnswer{"make test": {output: "hello\n"}}}
 	g := CommandGate{
-		Steps:  []Step{{Name: "test", Command: "make test", Wrap: func(argv []string) []string { return append([]string{"gt", "slot", "run", "--"}, argv...) }}},
+		Steps:  []Step{{Name: "test", Command: "make test"}},
 		LogDir: logDir,
 	}
 	g.run = s.run
 	if res := g.Run(context.Background(), "/w"); !res.Passed {
 		t.Fatalf("gate = %+v", res)
 	}
-	if got := strings.Join(s.calls[0].argv, " "); got != "gt slot run -- sh -c make test" {
-		t.Fatalf("wrapped argv = %q", got)
+	if got := strings.Join(s.calls[0].argv, " "); got != "sh -c make test" {
+		t.Fatalf("argv = %q", got)
 	}
 	info, err := os.Stat(filepath.Join(logDir, "test.log"))
 	if err != nil {
@@ -254,25 +254,90 @@ func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
 	}
 }
 
-func TestWithSlotWrapsOnlyTheTestStep(t *testing.T) {
+func TestWithSlotHoldsOnlyForTheTestStep(t *testing.T) {
 	t.Parallel()
 	s := &scriptedRun{answers: map[string]scriptedAnswer{}}
-	g := WithSlot(GoGate(false), "/bin/gt", "gastown/landing")
+	g := WithSlot(GoGate(false), "/town", "gastown/landing")
 	g.run = s.run
+
+	var held []string
+	var released []*int
+	g.holdSlot = func(_ context.Context, townRoot, role string) (func(*int), error) {
+		held = append(held, townRoot+" "+role)
+		return func(code *int) { released = append(released, code) }, nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 	if res := g.Run(ctx, "/w"); !res.Passed {
 		t.Fatalf("gate = %+v", res)
 	}
-	if got := strings.Join(s.calls[2].argv, " "); got != "/bin/gt slot run --role gastown/landing -- sh -c make test" {
-		t.Errorf("test argv = %q", got)
+	if len(held) != 1 || held[0] != "/town gastown/landing" {
+		t.Errorf("holds taken = %v, want the test step's alone", held)
+	}
+	if len(released) != 1 || released[0] == nil || *released[0] != 0 {
+		t.Errorf("releases = %v, want one carrying the step's exit 0", released)
+	}
+	// The hold is in process: the step's own argv is unchanged, with no `gt
+	// slot run` in front of it.
+	if got := strings.Join(s.calls[2].argv, " "); got != "sh -c make test" {
+		t.Errorf("test argv = %q, want it unwrapped", got)
 	}
 	if got := strings.Join(s.calls[0].argv, " "); got != "sh -c make lint" {
 		t.Errorf("lint argv = %q, want it unwrapped", got)
 	}
-	if GoGate(false).Steps[2].Wrap != nil {
+	if GoGate(false).Steps[2].SlotRole != "" {
 		t.Error("WithSlot mutated the gate it was given")
 	}
+}
+
+// A step whose command never ran has no exit status, and a gate that could not
+// take the slot at all must not run the step: both are the hold's own
+// outcomes, and both must leave the slot behind (gt-638go.12).
+func TestWithSlotReleasesOnInfraFailureAndRefusesWithoutTheSlot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a step that never ran releases without an exit code", func(t *testing.T) {
+		t.Parallel()
+		s := &scriptedRun{answers: map[string]scriptedAnswer{"make test": {code: -1, err: errors.New("exec: sh: not found")}}}
+		g := CommandGate{TownRoot: "/town", Steps: []Step{{Name: "test", Command: "make test", SlotRole: "gastown/landing"}}}
+		g.run = s.run
+		var released []*int
+		g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+			return func(code *int) { released = append(released, code) }, nil
+		}
+		if res := g.Run(context.Background(), "/w"); res.Err == nil {
+			t.Fatalf("gate = %+v, want an infrastructure error", res)
+		}
+		if len(released) != 1 || released[0] != nil {
+			t.Errorf("releases = %v, want one with no exit status", released)
+		}
+	})
+
+	t.Run("a slot the gate cannot take stops the step", func(t *testing.T) {
+		t.Parallel()
+		s := &scriptedRun{answers: map[string]scriptedAnswer{"make test": {}}}
+		g := CommandGate{TownRoot: "/town", Steps: []Step{{Name: "test", Command: "make test", SlotRole: "gastown/landing"}}}
+		g.run = s.run
+		g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+			return nil, errors.New("pool has no slot available")
+		}
+		res := g.Run(context.Background(), "/w")
+		if res.Err == nil || len(s.calls) != 0 {
+			t.Fatalf("gate = %+v with %d step(s) run, want the failure before the step", res, len(s.calls))
+		}
+	})
+
+	t.Run("a slot step with no town is refused", func(t *testing.T) {
+		t.Parallel()
+		s := &scriptedRun{answers: map[string]scriptedAnswer{"make test": {}}}
+		g := CommandGate{Steps: []Step{{Name: "test", Command: "make test", SlotRole: "gastown/landing"}}}
+		g.run = s.run
+		res := g.Run(context.Background(), "/w")
+		if res.Err == nil || len(s.calls) != 0 {
+			t.Fatalf("gate = %+v with %d step(s) run, want the failure before the step", res, len(s.calls))
+		}
+	})
 }
 
 // Without a deadline the lint lock is not waited on: a contended first
@@ -340,7 +405,7 @@ func writeMakefile(t *testing.T, body string) string {
 }
 
 // Land's gate comes from the rig: merge_queue.gate, else make gate when the
-// target exists, else make test (the only one WithSlot wraps).
+// target exists, else make test (the only step WithSlot puts under the slot).
 func TestLandGateComesFromTheRig(t *testing.T) {
 	t.Parallel()
 	withGate := writeMakefile(t, "lint:\n\ttrue\ngate: lint\n\ttrue\n")
@@ -360,9 +425,9 @@ func TestLandGateComesFromTheRig(t *testing.T) {
 		if len(g.Steps) != 1 || g.Steps[0].Command != tc.want || g.Steps[0].Name != tc.step {
 			t.Errorf("%s: steps = %+v, want one %q step %q", tc.name, g.Steps, tc.step, tc.want)
 		}
-		wrapped := WithSlot(g, "gt", "r").Steps[0].Wrap != nil
-		if wrapped != (tc.step == "test") {
-			t.Errorf("%s: WithSlot wrapped=%v", tc.name, wrapped)
+		underSlot := WithSlot(g, "/town", "r").Steps[0].SlotRole != ""
+		if underSlot != (tc.step == "test") {
+			t.Errorf("%s: WithSlot holds the slot=%v", tc.name, underSlot)
 		}
 	}
 }

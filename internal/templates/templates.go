@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -274,9 +275,10 @@ func SupervisorFileContent(kind, townRoot string, exitTimeout time.Duration) (co
 // file at path, and whether there is a repair to make at all (gt-x872).
 //
 // The file at path describes a job run out of townRoot; the caller has already
-// established that it is this town's. A repair is a rewrite of the ONE value
-// in it that is compiled into the binary that wrote it — launchd's
-// ExitTimeOut, which comes from daemon.ShutdownBudget. It goes stale on a
+// established that it is this town's. A repair is a rewrite of the values
+// in it that are compiled into the binary that wrote it — launchd's
+// ExitTimeOut, which comes from daemon.ShutdownBudget, and its ProcessType,
+// which comes from the template (gt-2ycne). It goes stale on a
 // binary upgrade and nowhere else, and it is not cosmetic: a job whose
 // ExitTimeOut is shorter than the daemon's own graceful shutdown gets its
 // daemon SIGKILLed mid-shutdown on every restart, which for the Dolt SQL
@@ -327,17 +329,27 @@ func SupervisorFileRepair(path, kind, townRoot string, exitTimeout time.Duration
 	return current, true, nil
 }
 
-// withExitTimeOutStripped removes the ExitTimeOut key and its integer from a
-// rendered plist, so that two plists differing only in that value compare
-// equal. Matching is line-based against what renderLaunchdPlist produces —
-// the key on its own line, the value on the next — so a file formatted some
-// other way (the key and value on one line) keeps its difference and is not
-// treated as a repairable one.
+// binaryOwnedKeys are the launchd keys whose values come from the binary that
+// renders the plist rather than from the town: ExitTimeOut from
+// daemon.ShutdownBudget (gt-x872) and ProcessType from the template itself
+// (gt-2ycne: ProcessType Background made the daemon and every child it spawns
+// darwinbg — efficiency cores, throttled CPU and I/O — so landing gates ran
+// 5-10x slower than the same gate from a shell; the template now says
+// Standard). A file that differs from the current rendering only in these
+// keys is this binary's file, written by an older build, and is repaired.
+var binaryOwnedKeys = []string{"<key>ExitTimeOut</key>", "<key>ProcessType</key>"}
+
+// withExitTimeOutStripped removes the binary-owned keys (binaryOwnedKeys) and
+// their values from a rendered plist, so that two plists differing only in
+// those values compare equal. Matching is line-based against what
+// renderLaunchdPlist produces — the key on its own line, the value on the
+// next — so a file formatted some other way (the key and value on one line)
+// keeps its difference and is not treated as a repairable one.
 func withExitTimeOutStripped(plist string) string {
 	lines := strings.Split(plist, "\n")
 	kept := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "<key>ExitTimeOut</key>" {
+		if slices.Contains(binaryOwnedKeys, strings.TrimSpace(lines[i])) {
 			i++ // the value line goes with the key
 			continue
 		}

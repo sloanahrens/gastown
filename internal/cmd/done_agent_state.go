@@ -358,6 +358,11 @@ func closedWispDeleteAge(townRoot string) string {
 	return age
 }
 
+// ephemeralPurger is the purge purgeClosedEphemeralBeads asks of a bead store.
+type ephemeralPurger interface {
+	PurgeClosedEphemeral(olderThan string) (string, error)
+}
+
 // purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated
 // during this and prior sessions. Polecat sessions create mol-polecat-work
 // steps etc. as wisps. These get closed during normal
@@ -372,16 +377,16 @@ func closedWispDeleteAge(townRoot string) string {
 // a "superseded by X" or rejection-verdict record for the next attempt.
 //
 // Best-effort: errors are logged but don't block gt done completion.
-func purgeClosedEphemeralBeads(bd *beads.Beads, townRoot string) {
+func purgeClosedEphemeralBeads(bd ephemeralPurger, townRoot string) {
 	olderThan := closedWispDeleteAge(townRoot)
-	out, err := bd.Run("purge", "--force", "--quiet", "--older-than", olderThan)
+	out, err := bd.PurgeClosedEphemeral(olderThan)
 	if err != nil {
 		// Non-fatal: purge failure shouldn't block session completion
 		fmt.Fprintf(os.Stderr, "Warning: wisp purge failed: %v\n", err)
 		return
 	}
 	// bd purge --force --quiet outputs the count of purged beads
-	outStr := strings.TrimSpace(string(out))
+	outStr := out
 	if outStr != "" && outStr != "0" {
 		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
 	}

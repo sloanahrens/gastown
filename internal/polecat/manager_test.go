@@ -69,13 +69,13 @@ func setupManagerSquashPreservedRepo(t *testing.T) (*world, string) {
 // addBeads readies the beads side of an AddWithOptions test and returns
 // the bd the manager runs: fakeAddBeads in the unit tier, realAddBeads (a
 // real bd on the test Dolt container) in the integration tier.
-type addBeads func(t *testing.T, mayorRig, mayorBeads string) *fakeBd
+type addBeads func(t *testing.T, mayorRig, mayorBeads string) *polecatDB
 
 // fakeAddBeads returns the fake agent bd and writes the type-config sentinel
 // so EnsureCustomTypes is a no-op.
-func fakeAddBeads(_ *testing.T, _, mayorBeads string) *fakeBd {
+func fakeAddBeads(_ *testing.T, _, mayorBeads string) *polecatDB {
 	_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	return newAgentBd(true)
+	return newPolecatDB()
 }
 
 // createStalePolecatCommit creates branchName at startPoint in the checkout
@@ -91,15 +91,8 @@ func createStalePolecatCommit(t *testing.T, w *world, repoPath, startPoint, bran
 
 func TestManagerGetMapsDoneAgentStateFromBead(t *testing.T) {
 	t.Parallel()
-	bd := &fakeBd{answer: func(cmd string, _ []string) string {
-		switch cmd {
-		case "list":
-			return "[]"
-		case "show":
-			return `[{"id":"gt-testrig-polecat-toast","title":"agent","issue_type":"agent","status":"open","description":"agent\n\nrole_type: polecat\nrig: testrig\nagent_state: done\nhook_bead: null\ncleanup_status: clean"}]`
-		}
-		return ""
-	}}
+	bd := newPolecatDB()
+	bd.setAgent(t, "gt-testrig-polecat-toast", func(f *beads.AgentFields) { f.Rig = "testrig"; f.AgentState = "done" })
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
@@ -165,7 +158,7 @@ func TestListEmpty(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -183,7 +176,7 @@ func TestGetNotFound(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	_, err := m.Get("nonexistent")
 	if err != ErrPolecatNotFound {
@@ -198,7 +191,7 @@ func TestRemoveNotFound(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	err := m.Remove("nonexistent", false)
 	if err != ErrPolecatNotFound {
@@ -247,7 +240,7 @@ func TestPolecatDir(t *testing.T) {
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	dir := m.polecatDir("Toast")
 	expected := "/home/user/ai/test-rig/polecats/Toast"
@@ -262,7 +255,7 @@ func TestAssigneeID(t *testing.T) {
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	id := m.assigneeID("Toast")
 	expected := "test-rig/polecats/Toast"
@@ -291,8 +284,8 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 
 	// Construct two Managers from the same rig path — they must produce
 	// identical agentBeadIDs regardless of construction context.
-	m1 := newTestManager(r, nil, nil, newNoDatabaseBd())
-	m2 := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m1 := newTestManager(r, nil, nil, newNoDatabaseDB())
+	m2 := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	id1a := m1.agentBeadID("Toast")
 	id1b := m1.agentBeadID("Toast")
@@ -329,7 +322,7 @@ func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: "myrig", Path: rigPath}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 	pool := m.GetNamePool()
 
 	name, err := pool.Allocate()
@@ -365,7 +358,7 @@ func TestGetReturnsWorkingWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newMissingBd())
+	m := newTestManager(r, nil, nil, newMissingDB())
 
 	// Get should return polecat with StateWorking (assume active if beads unavailable)
 	polecat, err := m.Get("Test")
@@ -405,7 +398,7 @@ func TestListWithPolecats(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -442,13 +435,7 @@ func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	bd := &fakeBd{answer: func(cmd string, _ []string) string {
-		switch cmd {
-		case "list", "query", "show":
-			return "[]"
-		}
-		return ""
-	}}
+	bd := newPolecatDB()
 
 	r := &rig.Rig{Name: "test-rig", Path: root}
 	m := newTestManager(r, nil, nil, bd)
@@ -461,19 +448,13 @@ func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
 		t.Fatalf("polecats count = %d, want %d", len(polecats), len(names))
 	}
 
-	// argvs leaves out the "bd --allow-stale version" capability probe: it
-	// is not one of the rig-wide beads queries this test is guarding.
-	calls := bd.argvs()
-
-	// Batched: 4 rig-wide queries total, independent of polecat count —
-	// hooked list, assigned/status query, agent-beads list, and the
-	// agent-beads wisps-table fallback ListAgentBeads runs internally.
-	// Per-polecat querying would need at least one bd call per polecat here
-	// (5), typically 2-3.
-	const wantBatchedCalls = 4
-	if len(calls) != wantBatchedCalls {
-		t.Fatalf("bd invoked %d times (excluding the version probe) for %d polecats — want exactly %d rig-wide queries (batched); got calls:\n%s",
-			len(calls), len(names), wantBatchedCalls, strings.Join(calls, "\n"))
+	// Batched: the rig-wide queries are independent of polecat count —
+	// hooked list, assigned/status query, agent-beads list. Per-polecat
+	// querying would need at least one store read per polecat here (5).
+	const wantBatchedReads = 3
+	if reads := bd.readCount(); reads != wantBatchedReads {
+		t.Fatalf("store read %d times for %d polecats — want exactly %d rig-wide queries (batched)",
+			reads, len(names), wantBatchedReads)
 	}
 }
 
@@ -500,7 +481,7 @@ func TestSetStateWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	// SetState should succeed (no-op when no issue assigned)
 	err := m.SetState("Test", StateWorking)
@@ -527,7 +508,7 @@ func TestClearIssueWithoutAssignment(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	// ClearIssue should succeed even when no issue assigned
 	err := m.ClearIssue("Test")
@@ -635,7 +616,7 @@ func TestReconcilePoolWith(t *testing.T) {
 				Name: "myrig",
 				Path: tmpDir,
 			}
-			m := newTestManager(r, nil, nil, newNoDatabaseBd())
+			m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 			// Call ReconcilePoolWith
 			m.ReconcilePoolWith(tt.namesWithDirs, tt.namesWithSessions)
@@ -689,7 +670,7 @@ func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
 	tm := newFakeProbe()
-	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm, newNoDatabaseBd())
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm, newNoDatabaseDB())
 	activeName := "toast"
 	orphanName := "nux"
 	activeSession := session.PolecatSessionName(session.DefaultPrefix, activeName)
@@ -777,7 +758,7 @@ func TestReconcilePoolWith_Allocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	// Mark first few pool names as in-use via directories
 	// (furiosa, nux, slit are first 3 in mad-max theme)
@@ -814,7 +795,7 @@ func TestReconcilePoolWith_OrphanDoesNotBlockAllocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	// furiosa has orphan session (no dir) - should NOT block allocation
 	m.ReconcilePoolWith([]string{}, []string{"furiosa"})
@@ -1018,7 +999,7 @@ func TestBuildBranchName(t *testing.T) {
 				t.Fatalf("unset wisp template: %v", err)
 			}
 
-			m := newTestManager(r, w, nil, newNoDatabaseBd())
+			m := newTestManager(r, w, nil, newNoDatabaseDB())
 
 			got := m.buildBranchName("alpha", tt.issue)
 
@@ -1050,7 +1031,7 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 	w.InitRepo(t, tmpDir)
 
 	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
-	m := newTestManager(r, w, nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseDB())
 
 	validator := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/_.#+,-]*$`)
 	cases := []struct {
@@ -1234,20 +1215,7 @@ func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 
 	// From here on 'show' reports agent_state=done instead of idle, with
 	// the same clean facts (no hook, no active MR) otherwise.
-	doneAgent := func(id string) string {
-		return fmt.Sprintf(`{"id":%q,"title":"agent","issue_type":"agent","description":"agent\n\nrole_type: polecat\nagent_state: done\nhook_bead: null\ncleanup_status: clean\nactive_mr: null"}`, id)
-	}
-	bd.become(&fakeBd{answer: func(cmd string, args []string) string {
-		if cmd == "show" {
-			return "[" + doneAgent(showID(args)) + "]"
-		}
-		if cmd == "list" && slices.Contains(args, "--label=gt:agent") {
-			// The agent listing reports the same bead: an empty answer here
-			// used to fail the listing and only reached show by accident.
-			return "[" + doneAgent("gt-rig-polecat-toast") + "]"
-		}
-		return ""
-	}})
+	bd.setAgent(t, "gt-rig-polecat-toast", func(f *beads.AgentFields) { f.AgentState = "done" })
 
 	found, err := mgr.FindIdlePolecat()
 	if err != nil {
@@ -1404,7 +1372,7 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLive
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
 	// worktree itself is locally clean, verified by workstateInputForPolecat's
 	// own live probe (GitStateSourceLive) — not a bypass of it.
-	bd.become(newAgentBd(false))
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) { f.CleanupStatus = "" })
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
 	if d.Verdict != WorkstateVerdictSafeToNuke {
@@ -1430,10 +1398,10 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 	t.Parallel()
 	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
 
-	// newEmptyBd's `show` returns an empty result, so GetAgentBead
-	// resolves to (nil, nil, nil) — exactly the not-found shape workstateInputForPolecat
-	// must not treat as "safe to ignore the missing cleanup_status".
-	bd.become(newEmptyBd())
+	// The bead reads as not found, so GetAgentBead resolves to (nil, nil,
+	// nil) — exactly the not-found shape workstateInputForPolecat must not
+	// treat as "safe to ignore the missing cleanup_status".
+	bd.forgetAgent(mgr.agentBeadID("toast"))
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
 	if d.Verdict != WorkstateVerdictNeedsRecovery {
@@ -1455,11 +1423,13 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 // B, even though both worktrees see the identical raw `git stash list` output.
 func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, added, w := canonicalWithPolecats(t, false, "seata")
+	mgr, _, bd, added, w := canonicalWithPolecats(t, false, "seata")
 	seatA := added["seata"]
-	if _, err := mgr.AddWithOptions("seatb", AddOptions{}); err != nil {
+	seatB, err := mgr.AddWithOptions("seatb", AddOptions{})
+	if err != nil {
 		t.Fatalf("AddWithOptions(seatb): %v", err)
 	}
+	bd.settleAgent(t, mgr.agentBeadID("seatb"), seatB.Branch)
 	_ = w.repo(seatA.ClonePath).CleanForce()
 
 	// Stash uncommitted work on seat A's branch only. Both worktrees share the
@@ -1741,7 +1711,7 @@ func TestPendingMarkerBlocksReallocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	// Simulate AllocateName: create polecats/ dir and write a .pending marker
 	// for "furiosa" (as if AllocateName ran but AddWithOptions hasn't yet).
@@ -1783,7 +1753,7 @@ func TestStalePendingMarkerIsCleanedUp(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	polecatsDir := filepath.Join(tmpDir, "polecats")
 	if err := os.MkdirAll(polecatsDir, 0755); err != nil {
@@ -1814,7 +1784,7 @@ func TestCleanupOrphanPolecatStatePreservesUnverifiedBrokenPolecat(t *testing.T)
 
 	tmpDir := t.TempDir()
 	r := &rig.Rig{Name: "myrig", Path: tmpDir}
-	m := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseDB())
 
 	polecatDir := filepath.Join(tmpDir, "polecats", "furiosa")
 	clonePath := filepath.Join(polecatDir, r.Name)
@@ -1834,7 +1804,7 @@ func TestCleanupOrphanPolecatStatePreservesOldLayoutWorktree(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	r := &rig.Rig{Name: "myrig", Path: tmpDir}
-	m := newTestManager(r, nil, newFakeProbe(), newEmptyBd())
+	m := newTestManager(r, nil, newFakeProbe(), newPolecatDB())
 
 	polecatDir := filepath.Join(tmpDir, "polecats", "furiosa")
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
@@ -1857,13 +1827,14 @@ func TestCleanupOrphanPolecatStatePreservesOldLayoutWorktree(t *testing.T) {
 
 func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, _ := canonicalRig(t)
+	mgr, _, bd, _ := canonicalRig(t)
 	mgr.tmux = newFakeProbe() // no session: the proof that no polecat is live
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
 	}
+	bd.settleAgent(t, mgr.agentBeadID("toast"), p.Branch)
 	if err := os.Remove(filepath.Join(p.ClonePath, ".git")); err != nil {
 		t.Fatalf("break worktree .git: %v", err)
 	}
@@ -1901,7 +1872,8 @@ func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 	// Swap to a bd that omits cleanup_status entirely, matching a
 	// polecat that never ran a fresh cleanup check against the (now gone)
 	// worktree.
-	bd.become(newAgentBd(false))
+	bd.settleAgent(t, mgr.agentBeadID("toast"), p.Branch)
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) { f.CleanupStatus = "" })
 
 	if err := mgr.ReclaimBrokenIdlePolecat("toast"); err != nil {
 		t.Fatalf("ReclaimBrokenIdlePolecat: %v, want success — a gone worktree with no branch/MR/active work at risk must be reclaimable despite a missing cleanup_status", err)
@@ -1955,7 +1927,7 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := newTestManager(r, w, nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseDB())
 
 	// Allocate a name (simulates what gt sling does before AddWithOptions)
 	name, err := m.AllocateName()
@@ -2018,13 +1990,9 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 	w.AddRemote(t, mayorRig, "origin", mayorRig)
 	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
 
-	// A bd that FAILS on create (simulates agent bead creation failure).
-	bd := &fakeBd{answer: func(cmd string, _ []string) string {
-		if cmd == "create" {
-			return bdFailure + "error: database not initialized\n"
-		}
-		return ""
-	}}
+	// A store that FAILS on agent bead creation.
+	bd := newPolecatDB()
+	bd.createErr = errors.New("error: database not initialized")
 
 	// Create rig-level .beads directory
 	rigBeads := filepath.Join(root, ".beads")
@@ -2056,7 +2024,7 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 	// AddWithOptions should fail at agent bead creation (mock bd fails on create)
 	_, err = m.AddWithOptions(name, AddOptions{})
 	if err == nil {
-		t.Fatal("AddWithOptions should have failed with mock bd failing on create")
+		t.Fatal("AddWithOptions should have failed with store failing on create")
 	}
 
 	// Verify name was released back to pool
@@ -2128,49 +2096,29 @@ func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
 		}
 	}
 
-	// bd refuses (exit 9) any call made with a BEADS_DIR other than the
-	// rig's own.
-	bd := &fakeBd{answerCall: func(c beads.BDCall) string {
-		cmd, _ := bdCommand(c.Args)
-		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != rigBeadsDir {
-			return bdFailure + "wrong BEADS_DIR " + dir + "\n"
-		}
-		switch cmd {
-		case "create":
-			return `{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: spawning\nhook_bead: gt-work"}`
-		case "show":
-			return `[{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-work\nactive_mr: gt-mr\ncleanup_status: has_unpushed"}]`
-		}
-		return ""
-	}}
+	bd := newPolecatDB()
+	agentID := "gt-gastown-polecat-rust"
 
 	m := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, nil, bd)
-	agentID := m.agentBeadID("rust")
-	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning"}); err != nil {
+	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: "gt-work"}); err != nil {
 		t.Fatalf("createAgentBeadWithRetry: %v", err)
 	}
 	if err := m.resetAgentBeadForReuse(agentID, "test reset"); err != nil {
 		t.Fatalf("resetAgentBeadForReuse: %v", err)
 	}
 
-	var sawCreate, sawShow, sawUpdate bool
-	for _, c := range bd.recorded() {
-		cmd, _ := bdCommand(c.Args)
-		if cmd == "version" {
-			continue
-		}
-		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != rigBeadsDir {
-			t.Fatalf("bd %v ran with BEADS_DIR=%q, want the rig-local %q (agent beads are rig-local, gt-8we)", c.Args, dir, rigBeadsDir)
-		}
-		sawCreate = sawCreate || cmd == "create"
-		sawShow = sawShow || cmd == "show"
-		sawUpdate = sawUpdate || cmd == "update"
+	// Agent beads are rig-local (gt-8we): the store was opened on the rig's
+	// own database, and the lifecycle reached it.
+	want := beadsSite{workDir: mayorRig, beadsDir: rigBeadsDir}
+	if sites := bd.openedSites(); len(sites) != 1 || sites[0] != want {
+		t.Fatalf("store opened at %+v, want exactly %+v", sites, want)
 	}
-	if !sawCreate {
-		t.Fatalf("manager create never reached bd; calls: %v", bd.argvs())
+	_, fields, err := bd.GetAgentBead(agentID)
+	if err != nil {
+		t.Fatalf("GetAgentBead after create and reset: %v", err)
 	}
-	if !sawShow || !sawUpdate {
-		t.Fatalf("manager reset did not show and update the agent bead; calls: %v", bd.argvs())
+	if fields.AgentState != string(beads.AgentStateNuked) || fields.HookBead != "" {
+		t.Fatalf("agent bead after reset = state %q hook %q, want nuked and no hook", fields.AgentState, fields.HookBead)
 	}
 }
 
@@ -2201,7 +2149,7 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := newTestManager(r, w, nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseDB())
 
 	// Launch concurrent AllocateAndAdd calls. They will fail at worktree
 	// creation (no origin/main), but the names they attempt must be unique.
@@ -2333,7 +2281,7 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 
 	tm := newFakeProbe()
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
+	mgr := newTestManager(r, nil, tm, newNoDatabaseDB())
 
 	// Create a live tmux session (simulates Claude sitting at ❯ after gt done)
 	sessionName := session.PolecatSessionName(session.DefaultPrefix, polecatName)
@@ -2428,7 +2376,7 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	}
 	TouchSessionHeartbeat(townRoot, sessionName)
 
-	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, tm, newAgentBd(true))
+	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, tm, newPolecatDB())
 	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{HookBead: "gt-next"}); err != nil {
 		t.Fatalf("RepairWorktreeWithOptions: %v", err)
 	}
@@ -2460,7 +2408,7 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 
 	tm := newFakeProbe() // the pane runs no agent, as "sleep 300" did
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
+	mgr := newTestManager(r, nil, tm, newNoDatabaseDB())
 
 	sessionName := session.PolecatSessionName(session.DefaultPrefix, polecatName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
@@ -2514,7 +2462,7 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, nil, newFakeProbe(), newNoDatabaseBd())
+	mgr := newTestManager(r, nil, newFakeProbe(), newNoDatabaseDB())
 
 	// No tmux session, no heartbeat — the common idle case
 	_, reuseErr := mgr.ReuseIdlePolecat(polecatName, AddOptions{})
@@ -2554,7 +2502,7 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), newNoDatabaseBd().run)}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: newNoDatabaseDB()}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
@@ -2593,7 +2541,7 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), newNoDatabaseBd().run)}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: newNoDatabaseDB()}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
@@ -2634,26 +2582,20 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 	fresh := now.Add(-30 * time.Second).Format(time.RFC3339)
 	stale := now.Add(-10 * time.Minute).Format(time.RFC3339)
 
-	// bd that answers the rig-wide queries loadFromBeads issues: the agent
-	// bead (spawning, dated per case), a hooked work bead, and the
-	// assigned-issue query.
-	bdFor := func(updatedAt string) *fakeBd {
-		return &fakeBd{answer: func(cmd string, args []string) string {
-			switch cmd {
-			case "show":
-				if showID(args) == agentBeadID {
-					return `[{"id":"` + agentBeadID + `","issue_type":"agent","status":"open","updated_at":"` + updatedAt +
-						`","description":"agent\n\nrole_type: polecat\nrig: ` + rigName + `\nagent_state: spawning\nhook_bead: ` + hookedID + `\ncleanup_status: clean"}]`
-				}
-				return "[]"
-			case "list":
-				if strings.Contains(strings.Join(args, " "), "hooked") {
-					return `[{"id":"` + hookedID + `","status":"hooked","assignee":"` + assigneeIDT + `","updated_at":"` + fresh + `"}]`
-				}
-				return "[]"
-			}
-			return ""
-		}}
+	// A database with the rig-wide state loadFromBeads reads: the agent bead
+	// (spawning, dated per case), a hooked work bead, and the assigned issue.
+	dbFor := func(t *testing.T, updatedAt string) *polecatDB {
+		db := newPolecatDB()
+		db.Seed(
+			beads.Issue{
+				ID: agentBeadID, Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: updatedAt,
+				Description: beads.FormatAgentDescription("agent", &beads.AgentFields{
+					RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: hookedID, CleanupStatus: "clean",
+				}),
+			},
+			beads.Issue{ID: hookedID, Title: "work", Status: "hooked", Assignee: assigneeIDT, UpdatedAt: fresh},
+		)
+		return db
 	}
 
 	cases := []struct {
@@ -2677,7 +2619,7 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 					t.Fatalf("mkdir %s: %v", dir, err)
 				}
 			}
-			bd := bdFor(tc.updatedAt)
+			bd := dbFor(t, tc.updatedAt)
 			// No session on the fake tmux: the session is provably down.
 			mgr := newTestManager(&rig.Rig{Name: rigName, Path: root}, nil, newFakeProbe(), bd)
 			mgr.spawnGraceWindow = 5 * time.Minute

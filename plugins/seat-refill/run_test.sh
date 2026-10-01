@@ -72,9 +72,12 @@ write_fake_timeout() {
   local bin_dir="$1"
   cat > "$bin_dir/timeout" <<'SH'
 #!/usr/bin/env bash
-printf '%s|%s\n' "$1" "$2" >> "$TEST_STATE/timeout.log"
+printf '%s|%s|%s\n' "$1" "$2" "${3:-}" >> "$TEST_STATE/timeout.log"
 if [ -f "$TEST_STATE/timeout_expires" ]; then
-  exit 124
+  want=$(cat "$TEST_STATE/timeout_expires")
+  case "$*" in
+    *"$want"*) exit 124 ;;
+  esac
 fi
 shift
 exec "$@"
@@ -137,11 +140,35 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  mayor)
+    if [ "${2:-}" = "status" ]; then
+      if [ -f "$TEST_STATE/mayor_down" ]; then echo false; else echo true; fi
+      exit 0
+    fi
+    exit 1
+    ;;
+  sling)
+    shift
+    printf 'SLING|%s\n' "$*" >> "$TEST_STATE/sling.log"
+    if [ -f "$TEST_STATE/sling_fails" ]; then
+      echo "Error: sling refused: merge queue over max_ready_for_dispatch" >&2
+      exit 1
+    fi
+    if [ -f "$TEST_STATE/sling_errors" ]; then
+      echo "Error: dolt connection refused" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   nudge)
     shift
     target="${1:-}"
     shift || true
     printf 'NUDGE|%s|%s\n' "$target" "$*" >> "$TEST_STATE/nudge.log"
+    if [ -f "$TEST_STATE/nudge_notfound" ]; then
+      echo "gt: command not found" >&2
+      exit 1
+    fi
     if [ -f "$TEST_STATE/nudge_fails" ]; then
       echo "nudge: could not reach target" >&2
       exit 1
@@ -169,6 +196,7 @@ setup_case() {
 
   unset GT_SEAT_REFILL_SONNET_MAX GT_SEAT_REFILL_SONNET_AGENT GT_SEAT_REFILL_SONNET_LABEL
   unset GT_SEAT_REFILL_EMPTY_SECONDS GT_SEAT_REFILL_NUDGE_SECONDS GT_SEAT_REFILL_MAYOR
+  unset GT_SEAT_REFILL_DRY_RUN GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS
   unset GT_SEAT_REFILL_CLAIM_TTL GT_SEAT_REFILL_TOP_CANDIDATES GT_SEAT_REFILL_MAX_PRIORITY
 
   # The pool every case starts from: one local seat, one capped overflow seat.
@@ -191,6 +219,7 @@ JSON
 ]
 JSON
   : > "$TEST_STATE/nudge.log"
+  : > "$TEST_STATE/sling.log"
   : > "$TEST_STATE/unexpected.log"
 
   write_fake_gt "$TEST_STATE/bin"
@@ -198,6 +227,7 @@ JSON
   export PATH="$TEST_STATE/bin:$ORIGINAL_PATH"
   export TEST_STATE
   export GT_TOWN_ROOT="$CASE_DIR"
+  export GT_SEAT_REFILL_MODE=nudge
   export GT_SEAT_REFILL_CONFIG="$CASE_DIR/settings.json"
   export GT_SEAT_REFILL_STATE="$CASE_DIR/state.json"
 }
@@ -211,6 +241,7 @@ run_plugin() {
   set -e
 }
 
+slings() { grep -c 'SLING' "$TEST_STATE/sling.log" || true; }
 nudges() { grep -c 'NUDGE' "$TEST_STATE/nudge.log" || true; }
 nudges_of() { grep -c "$1" "$TEST_STATE/nudge.log" || true; }
 
@@ -465,7 +496,7 @@ setup_case
 write_polecats "$LIVE_NONE"
 ready_bug gastown
 run_plugin 15000000
-touch "$TEST_STATE/timeout_expires"
+printf nudge > "$TEST_STATE/timeout_expires"
 run_plugin 15000300
 assert_eq "$EXIT" "1" "nudge bound fired: still exits nonzero"
 assert_contains "$TEST_STATE/stderr.log" "timed out" "nudge bound fired: the failure names the timeout"
@@ -501,6 +532,218 @@ JSON
 run_plugin 16000600
 assert_eq "$(nudges)" "1" \
   "operator label: another label does not reserve the bead"
+
+# === Direct dispatch (gt-qvs0b) and candidate selection (gt-inu1y) ==========
+# Mode sling is the default: no mayor, the plugin slings itself.
+direct_case() { setup_case; unset GT_SEAT_REFILL_MODE; export GT_SEAT_REFILL_SONNET_MAX=0; }
+
+# --- Case 20: an empty seat is filled at once, mayor never contacted -------
+direct_case
+touch "$TEST_STATE/mayor_down"
+write_polecats "$LIVE_OVERFLOW_ONLY"
+ready_bug gastown
+run_plugin 20000000
+assert_eq "$EXIT" "0" "direct: exits 0 with the mayor down"
+assert_eq "$(slings)" "1" "direct: one sling for the one empty seat"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-bug1 gastown --agent local-coder-polecat"   "direct: slings the bead into the rig on the seat's agent"
+assert_eq "$(nudges)" "0" "direct: no nudge to the mayor"
+
+# --- Case 21: both seats empty take distinct beads, best first -------------
+direct_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-b","title":"B","status":"open","priority":2,"issue_type":"task"},
+  {"id":"gt-a","title":"A","status":"open","priority":1,"issue_type":"bug"},
+  {"id":"gt-c","title":"C","status":"open","priority":2,"issue_type":"task"}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 21000000
+assert_eq "$(slings)" "2" "two seats: two slings"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-a gastown --agent local-coder-polecat" "two seats: P1 to local"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-b gastown --agent deepseek-flash" "two seats: next to overflow"
+
+# --- Case 22: hold, estop, parked rig stop dispatch ------------------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+touch "$CASE_DIR/seat-refill.hold"
+run_plugin 22000000
+assert_eq "$(slings)" "0" "direct: hold file blocks slinging"
+rm -f "$CASE_DIR/seat-refill.hold"
+touch "$CASE_DIR/ESTOP"
+run_plugin 22000001
+assert_eq "$(slings)" "0" "direct: town estop blocks slinging"
+rm -f "$CASE_DIR/ESTOP"
+touch "$CASE_DIR/ESTOP.gastown"
+run_plugin 22000002
+assert_eq "$(slings)" "0" "direct: rig estop blocks that rig"
+rm -f "$CASE_DIR/ESTOP.gastown"
+ready_bug beads
+rm -f "$TEST_STATE/ready/gastown.json"
+run_plugin 22000003
+assert_eq "$(slings)" "0" "direct: parked rig is not a target"
+
+# --- Case 23: candidate selection skips landed, in-flight, claimed ---------
+direct_case
+write_polecats '[{"rig":"gastown","name":"p","agent":"x","session_running":false,"issue":"gt-held"}]'
+mkdir -p "$GT_TOWN_ROOT/.runtime/polecat-pool-claims"
+cat > "$GT_TOWN_ROOT/.runtime/polecat-pool-claims/c.json" <<JSON
+{"id":"c","pid":$$,"agent":"x","bead":"gt-claimed","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-landing","title":"x","status":"open","priority":0,"issue_type":"task","labels":["gt:ready-to-land"]},
+  {"id":"gt-human","title":"x","status":"open","priority":0,"issue_type":"task","labels":["gt:needs-human"]},
+  {"id":"gt-wip","title":"x","status":"in_progress","priority":0,"issue_type":"task"},
+  {"id":"gt-crew","title":"x","status":"open","priority":0,"issue_type":"task","assignee":"gastown/crew/sloan"},
+  {"id":"gt-mol","title":"x","status":"open","priority":0,"issue_type":"molecule"},
+  {"id":"gt-agent","title":"x","status":"open","priority":0,"issue_type":"agent"},
+  {"id":"gt-epic","title":"x","status":"open","priority":0,"issue_type":"epic"},
+  {"id":"gt-held","title":"x","status":"open","priority":0,"issue_type":"task"},
+  {"id":"gt-claimed","title":"x","status":"open","priority":0,"issue_type":"task"},
+  {"id":"gt-ok","title":"fine","status":"open","priority":2,"issue_type":"task"}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin "$(date +%s)"
+assert_eq "$(slings)" "1" "selection: only the one eligible bead is slung"
+assert_not_contains "$TEST_STATE/sling.log" "gt-landing" "selection: gt:ready-to-land skipped"
+for b in gt-human gt-wip gt-crew gt-mol gt-agent gt-epic gt-held gt-claimed; do
+  assert_not_contains "$TEST_STATE/sling.log" "$b" "selection: $b skipped"
+done
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-ok" "selection: gt-ok slung"
+
+# --- Case 24: dry run decides but touches nothing --------------------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+GT_SEAT_REFILL_DRY_RUN=1 run_plugin 24000000
+assert_eq "$(slings)" "0" "dry run: no sling"
+assert_contains "$TEST_STATE/stdout.log" "DRY-RUN: would sling gt-bug1" "dry run: says what it would do"
+assert_contains "$TEST_STATE/stdout.log" "would dispatch" "dry run: summary says would dispatch"
+assert_not_contains "$TEST_STATE/stdout.log" "dispatched 1" "dry run: never says dispatched"
+assert_eq "$([ -e "$GT_SEAT_REFILL_STATE" ] && echo yes || echo no)" "no" "dry run: no state written"
+
+# --- Case 25: sonnet seat takes only needs-sonnet work, others skip it -----
+direct_case
+unset GT_SEAT_REFILL_SONNET_MAX
+write_polecats "$LIVE_BOTH"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 25000000
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent claude-sonnet" "sonnet: needs-sonnet bead to the sonnet seat"
+direct_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 25000001
+assert_eq "$(slings)" "0" "sonnet: local/overflow seats leave needs-sonnet work alone"
+
+# --- Case 26: a refused sling is logged, not escalated ---------------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+touch "$TEST_STATE/sling_fails"
+run_plugin 26000000
+assert_eq "$EXIT" "0" "refused sling: exits 0"
+assert_contains "$TEST_STATE/stdout.log" "refused: merge queue" "refused sling: logged with its reason"
+
+# --- Case 27: nudge mode with the mayor down skips instead of failing ------
+setup_case
+touch "$TEST_STATE/mayor_down"
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 27000000
+run_plugin 27000300
+assert_eq "$EXIT" "0" "mayor down (nudge mode): not a failure"
+assert_contains "$TEST_STATE/stdout.log" "not running" "mayor down (nudge mode): says why"
+
+# --- Case 28: a dead or expired claim does not strand its bead -------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+mkdir -p "$GT_TOWN_ROOT/.runtime/polecat-pool-claims"
+# pid 999999 is not running: the claim is dead, so gt-bug1 is not held.
+cat > "$GT_TOWN_ROOT/.runtime/polecat-pool-claims/dead.json" <<JSON
+{"id":"dead","pid":999999,"agent":"x","bead":"gt-bug1","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
+# live pid but created long ago: expired.
+cat > "$GT_TOWN_ROOT/.runtime/polecat-pool-claims/old.json" <<JSON
+{"id":"old","pid":$$,"agent":"x","bead":"gt-bug1","created_at":"2020-01-01T00:00:00Z"}
+JSON
+run_plugin "$(date +%s)"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-bug1" "stale claim: dead and expired claims do not hold the bead"
+
+# --- Case 29: every sling erroring exits nonzero and names the bead --------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+touch "$TEST_STATE/sling_errors"
+run_plugin 29000000
+assert_eq "$EXIT" "1" "all slings fail: exits nonzero so the daemon escalates"
+assert_contains "$TEST_STATE/stderr.log" "gt-bug1" "all slings fail: names the bead"
+assert_contains "$TEST_STATE/stderr.log" "dolt connection refused" "all slings fail: names why"
+assert_not_contains "$TEST_STATE/stdout.log" "[plugin-result skipped]" "all slings fail: not recorded as skipped"
+
+# --- Case 30: a sling timeout is an error, not a refusal -------------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+printf 'sling' > "$TEST_STATE/timeout_expires"
+run_plugin 30000000
+assert_eq "$EXIT" "1" "sling timeout: exits nonzero"
+assert_contains "$TEST_STATE/stderr.log" "timed out" "sling timeout: named as a timeout"
+
+# --- Case 31: only refusals is quiet, and says so --------------------------
+direct_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+touch "$TEST_STATE/sling_fails"
+run_plugin 31000000
+assert_eq "$EXIT" "0" "all refused: exits 0"
+assert_contains "$TEST_STATE/stdout.log" "refusal(s)" "all refused: receipt counts the refusals"
+
+# --- Case 32: "command not found" is not a mayor-down skip -----------------
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+touch "$TEST_STATE/nudge_notfound"
+run_plugin 32000000
+run_plugin 32000300
+assert_eq "$EXIT" "1" "nudge error text: 'command not found' fails, it is not mayor-down"
+
+# --- Case 33: an unknown MODE is rejected ----------------------------------
+setup_case
+write_polecats "$LIVE_NONE"
+GT_SEAT_REFILL_MODE=bogus run_plugin 33000000
+assert_eq "$EXIT" "1" "bad mode: exits nonzero"
+assert_contains "$TEST_STATE/stderr.log" "GT_SEAT_REFILL_MODE" "bad mode: names the knob"
+
+# --- Case 34: needs-sonnet label matches case-insensitively ----------------
+direct_case
+unset GT_SEAT_REFILL_SONNET_MAX
+write_polecats "$LIVE_BOTH"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["Needs-Sonnet"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 34000000
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent claude-sonnet" "sonnet label: case-insensitive"
+
+# --- Case 35: a wedged pool read is named ----------------------------------
+direct_case
+write_polecats "$LIVE_NONE"
+printf 'polecat list' > "$TEST_STATE/timeout_expires"
+run_plugin 35000000
+assert_eq "$EXIT" "1" "pool wedge: exits nonzero"
+assert_contains "$TEST_STATE/stderr.log" "gt polecat list --all --json timed out" "pool wedge: named (gt-d6rse)"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

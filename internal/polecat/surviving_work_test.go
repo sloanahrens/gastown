@@ -3,9 +3,9 @@ package polecat
 import (
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -264,16 +264,23 @@ func assertSurvivor(t *testing.T, f *survivalFixture, want string) {
 	}
 }
 
-// newWorkBeadBd is the bd unassignWorkBeads sees: `list` returns one
-// in_progress work bead assigned to gastown/polecats/basalt, and every other
-// call succeeds silently.
-func newWorkBeadBd() *fakeBd {
-	return &fakeBd{answer: func(cmd string, _ []string) string {
-		if cmd == "list" {
-			return `[{"id":"gt-elvf4","title":"work","status":"in_progress","assignee":"gastown/polecats/basalt","issue_type":"task"}]`
-		}
-		return ""
-	}}
+// newWorkBeadDB is the database unassignWorkBeads sees: one work bead in
+// status assigned to gastown/polecats/basalt.
+func newWorkBeadDB(status string, labels ...string) *polecatDB {
+	db := newPolecatDB()
+	db.Seed(beads.Issue{ID: "gt-elvf4", Title: "work", Status: status, Assignee: "gastown/polecats/basalt", Labels: labels})
+	return db
+}
+
+// released is whether the manager gave the work bead back: open, with no
+// assignee.
+func released(t *testing.T, db *polecatDB) bool {
+	t.Helper()
+	issue, err := db.Show("gt-elvf4")
+	if err != nil {
+		t.Fatalf("show work bead: %v", err)
+	}
+	return issue.Status == "open" && issue.Assignee == ""
 }
 
 // Polecat removal gives a hooked bead back only when its work does not
@@ -301,35 +308,16 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 			t.Parallel()
 			f := newSurvivalFixture(t)
 			tc.setup(t, f)
-			bd := newWorkBeadBd()
+			bd := newWorkBeadDB("in_progress")
 
 			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 			mgr.unassignWorkBeads("basalt", nil)
 
-			releases := guardedReleases(bd)
-			if !tc.wantRelease {
-				if len(releases) != 0 {
-					t.Fatalf("surviving work was released: %v", releases)
-				}
-				return
-			}
-			if len(releases) != 1 || !strings.Contains(releases[0], "--if-assignee=gastown/polecats/basalt") {
-				t.Fatalf("want one guarded release, got %v", releases)
+			if got := released(t, bd); got != tc.wantRelease {
+				t.Fatalf("work bead released = %v, want %v", got, tc.wantRelease)
 			}
 		})
 	}
-}
-
-// guardedReleases returns the guarded release writes the manager made, one per
-// bead it returned to open.
-func guardedReleases(bd *fakeBd) []string {
-	var releases []string
-	for _, line := range bd.argvs() {
-		if strings.Contains(line, "--status=open") {
-			releases = append(releases, line)
-		}
-	}
-	return releases
 }
 
 // Removal replays the verdict its caller already reached for a bead instead of
@@ -358,14 +346,13 @@ func TestUnassignWorkBeadsReplaysJudgedVerdict(t *testing.T) {
 				f.branchWithWork(t, branch, "work.txt")
 				f.push(t, branch)
 			}
-			bd := newWorkBeadBd()
+			bd := newWorkBeadDB("in_progress")
 
 			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 			mgr.unassignWorkBeads("basalt", map[string]SurvivalVerdict{survivalIssue: tc.judged})
 
-			held := len(guardedReleases(bd)) == 0
-			if held != tc.wantHold {
-				t.Fatalf("released = %v, want held = %v (guarded releases: %v)", !held, tc.wantHold, guardedReleases(bd))
+			if held := !released(t, bd); held != tc.wantHold {
+				t.Fatalf("held = %v, want %v", held, tc.wantHold)
 			}
 		})
 	}
@@ -396,15 +383,10 @@ func TestUnassignWorkBeadsKeepsSubmittedWork(t *testing.T) {
 	f.push(t, branch)
 	f.mergeIntoMain(t, branch)
 	f.push(t, "main")
-	bd := &fakeBd{answer: func(cmd string, _ []string) string {
-		if cmd == "list" {
-			return `[{"id":"gt-elvf4","title":"work","status":"hooked","assignee":"gastown/polecats/basalt","issue_type":"task","labels":["gt:ready-to-land"]}]`
-		}
-		return ""
-	}}
+	bd := newWorkBeadDB("hooked", "gt:ready-to-land")
 	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 	mgr.unassignWorkBeads("basalt", nil)
-	if releases := guardedReleases(bd); len(releases) != 0 {
-		t.Fatalf("submitted work was released: %v", releases)
+	if released(t, bd) {
+		t.Fatal("submitted work was released")
 	}
 }

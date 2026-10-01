@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +35,11 @@ import (
 // lessees are sequential tests, so a wait means one is running in parallel.
 const scratchLeaseWait = 5 * time.Minute
 
+// scratchParallelLeaseWait is how long a parallel test's lease waits. The
+// parallel lessees queue for the container behind each other, so the wait is
+// the sum of their runs, not a sign of misuse.
+const scratchParallelLeaseWait = 10 * time.Minute
+
 // scratchResetTimeout bounds the catalog reset at the end of a lease.
 const scratchResetTimeout = 2 * time.Minute
 
@@ -52,6 +59,47 @@ var scratchDolt struct {
 // the environment, and the lease is exclusive.
 func LeaseScratchDoltContainer(t *testing.T) string {
 	t.Helper()
+	leaseScratch(t, scratchLeaseWait)
+	for _, kv := range scratchEnv(scratchDolt.port) {
+		k, v, _ := strings.Cut(kv, "=")
+		t.Setenv(k, v)
+	}
+	return scratchDolt.port
+}
+
+// LeaseScratchDoltContainerEnv is LeaseScratchDoltContainer for a parallel
+// test. It takes the same exclusive lease, waiting for the other parallel
+// lessees for up to scratchParallelLeaseWait, and sets nothing: it returns
+// the port and os.Environ() with the variables LeaseScratchDoltContainer
+// would set, which the test must give every bd and gt it runs. A subprocess
+// that inherits the process environment instead reaches the package's shared
+// container, whose catalog must not change.
+func LeaseScratchDoltContainerEnv(t *testing.T) (port string, env []string) {
+	t.Helper()
+	leaseScratch(t, scratchParallelLeaseWait)
+	env = os.Environ()
+	for _, kv := range scratchEnv(scratchDolt.port) {
+		k, _, _ := strings.Cut(kv, "=")
+		env = beads.StripEnvKey(env, k)
+	}
+	return scratchDolt.port, append(env, scratchEnv(scratchDolt.port)...)
+}
+
+// scratchEnv is the environment that points bd and gt at the scratch
+// container on port.
+func scratchEnv(port string) []string {
+	return []string{
+		"GT_DOLT_PORT=" + port,
+		"BEADS_DOLT_PORT=" + port,
+		"BEADS_DOLT_SERVER_PORT=" + port,
+		"BEADS_TEST_SERVER=1",
+	}
+}
+
+// leaseScratch takes the scratch container for the rest of t, waiting at
+// most wait for the previous lessee, and drops what t created when t ends.
+func leaseScratch(t *testing.T, wait time.Duration) {
+	t.Helper()
 	if !DockerTestsEnabled() {
 		t.Skip(dockerTestsSkipMsg)
 	}
@@ -62,8 +110,8 @@ func LeaseScratchDoltContainer(t *testing.T) string {
 	scratchDolt.once.Do(startScratchDoltContainer)
 	select {
 	case scratchDolt.lease <- struct{}{}:
-	case <-time.After(scratchLeaseWait):
-		t.Fatalf("scratch Dolt container still leased after %s: is a parallel test leasing it?", scratchLeaseWait)
+	case <-time.After(wait):
+		t.Fatalf("scratch Dolt container still leased after %s", wait)
 	}
 	if scratchDolt.err != nil {
 		<-scratchDolt.lease
@@ -76,12 +124,6 @@ func LeaseScratchDoltContainer(t *testing.T) string {
 			t.Errorf("scratch Dolt container: %v", scratchDolt.err)
 		}
 	})
-
-	t.Setenv("GT_DOLT_PORT", scratchDolt.port)
-	t.Setenv("BEADS_DOLT_PORT", scratchDolt.port)
-	t.Setenv("BEADS_DOLT_SERVER_PORT", scratchDolt.port)
-	t.Setenv("BEADS_TEST_SERVER", "1")
-	return scratchDolt.port
 }
 
 // startScratchDoltContainer starts the scratch container and records its

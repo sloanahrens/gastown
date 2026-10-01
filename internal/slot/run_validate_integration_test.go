@@ -1,6 +1,6 @@
 //go:build integration
 
-package cmd
+package slot
 
 import (
 	"errors"
@@ -21,12 +21,12 @@ func writeSlotProbe(t *testing.T, dir, name, script string) string {
 	return path
 }
 
-// TestIntegrationSlotCommandResolution pins gt slot run's program resolution
+// TestIntegrationCommandResolution pins gt slot run's program resolution
 // against real executables, the working directory and a real child process:
 // exec.LookPath's own answer to "is this an executable file", which the unit
 // tests cannot fake (gt-f4xe, gt-h9wh, gt-18nx).
-func TestIntegrationSlotCommandResolution(t *testing.T) {
-	// TestSlotChildCommandRunsResolvedProgram covers the gate-role case, where no
+func TestIntegrationCommandResolution(t *testing.T) {
+	// TestChildCommandRunsResolvedProgram covers the gate-role case, where no
 	// nice(1) wrapper intervenes — the case validation and exec disagreed on. Two
 	// programs share a name; the one the child runs has to be the assigned PATH's,
 	// not the ambient one exec.Command would find (gt-f4xe).
@@ -36,15 +36,15 @@ func TestIntegrationSlotCommandResolution(t *testing.T) {
 		writeSlotProbe(t, ambientDir, "probe-gt-f4xe", "#!/bin/sh\necho ambient\n")
 		writeSlotProbe(t, binDir, "probe-gt-f4xe", "#!/bin/sh\necho assigned\n")
 		// A gate-class role takes the unwrapped branch.
-		if w := niceWrapper(slotRunNiceness("gastown/landing", -1)); len(w) != 0 {
+		if w := niceWrapper(runNiceness("gastown/landing", -1)); len(w) != 0 {
 			t.Fatalf("gate role wrapped in %v, want no wrapper", w)
 		}
 
-		program, err := resolveSlotCommand([]string{"PATH=" + binDir}, []string{"probe-gt-f4xe"}, ambientDir)
+		program, err := resolveCommand([]string{"PATH=" + binDir}, []string{"probe-gt-f4xe"}, ambientDir)
 		if err != nil {
-			t.Fatalf("resolveSlotCommand: %v", err)
+			t.Fatalf("resolveCommand: %v", err)
 		}
-		out, err := slotChildCommand(program, []string{"probe-gt-f4xe"}, nil).Output()
+		out, err := childCommand(program, []string{"probe-gt-f4xe"}, nil).Output()
 		if err != nil {
 			t.Fatalf("running the resolved program: %v", err)
 		}
@@ -53,7 +53,7 @@ func TestIntegrationSlotCommandResolution(t *testing.T) {
 		}
 	})
 
-	// TestResolveSlotCommandRefusesProgramFromCwd pins the rule for a program the
+	// TestResolveCommandRefusesProgramFromCwd pins the rule for a program the
 	// child's PATH reaches inside the working directory: gt refuses it with
 	// exec.ErrDot rather than exec a file whose identity depends on where gt
 	// happens to run. Naming the same program by path is the deliberate way to run
@@ -71,18 +71,18 @@ func TestIntegrationSlotCommandResolution(t *testing.T) {
 		// Each entry names the working directory or a directory under it: a
 		// literal "." entry, an empty entry, and a relative one (gt-h9wh).
 		for _, pathEnv := range []string{".", string(os.PathListSeparator) + "bin", "bin"} {
-			if _, err := resolveSlotCommand([]string{"PATH=" + pathEnv}, []string{"probe-gt-f4xe"}, ""); !errors.Is(err, exec.ErrDot) {
-				t.Errorf("resolveSlotCommand(PATH=%q) = %v, want an error satisfying errors.Is(err, exec.ErrDot)", pathEnv, err)
+			if _, err := resolveCommand([]string{"PATH=" + pathEnv}, []string{"probe-gt-f4xe"}, ""); !errors.Is(err, exec.ErrDot) {
+				t.Errorf("resolveCommand(PATH=%q) = %v, want an error satisfying errors.Is(err, exec.ErrDot)", pathEnv, err)
 			}
 		}
 
 		byPath := "bin" + string(os.PathSeparator) + "probe-gt-f4xe"
-		program, err := resolveSlotCommand(nil, []string{byPath}, "")
+		program, err := resolveCommand(nil, []string{byPath}, "")
 		if err != nil {
-			t.Fatalf("resolveSlotCommand(%q) = %v, want the named path to resolve", byPath, err)
+			t.Fatalf("resolveCommand(%q) = %v, want the named path to resolve", byPath, err)
 		}
 		if program != byPath {
-			t.Errorf("resolveSlotCommand(%q) resolved %q, want the path the operator named", byPath, program)
+			t.Errorf("resolveCommand(%q) resolved %q, want the path the operator named", byPath, program)
 		}
 	})
 
@@ -158,12 +158,12 @@ func TestIntegrationSlotCommandResolution(t *testing.T) {
 	})
 
 	// TestSplitEnvPrefix_ChildSeesVariable proves the split is enough for the
-	// child to observe the assignment when applied the way runSlotRun applies it.
+	// child to observe the assignment when applied the way Run applies it.
 	t.Run("child sees the assigned variable", func(t *testing.T) {
 		t.Parallel()
-		envAssigns, cmdArgs := splitEnvPrefix([]string{"GT_SLOT_RUN_PROBE=bar", "sh", "-c", "printf %s \"$GT_SLOT_RUN_PROBE\""})
+		envAssigns, cmdArgs := SplitEnvPrefix([]string{"GT_SLOT_RUN_PROBE=bar", "sh", "-c", "printf %s \"$GT_SLOT_RUN_PROBE\""})
 		cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...) //nolint:gosec // G204: fixed test args
-		cmd.Env = slotRunEnv(os.Environ(), envAssigns)
+		cmd.Env = runEnv(os.Environ(), envAssigns)
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("child: %v", err)

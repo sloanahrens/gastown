@@ -3,13 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -55,13 +49,6 @@ The containers a dead suite leaves behind are a separate matter — run
 'gt slot reap' when a container the gate matches looks stale, and read
 'gt slot status' to see which containers it is judging.`,
 }
-
-// slotAcquiredFormat is the line every holder gets the moment it holds the
-// slot. Script plugins outside Go read it to tell a command that never ran
-// from one that ran and failed — the rebuild plugin greps for it to decide
-// between deferring (nothing was built) and escalating a failure — so it is a
-// string to keep stable; TestSlotAcquiredFormat pins it (gt-kox0).
-const slotAcquiredFormat = "Container-gate slot acquired (role=%s, waited %s, slot %d/%d).\n"
 
 var slotRunCmd = &cobra.Command{
 	Use:   "run -- <command> [args...]",
@@ -150,111 +137,35 @@ func init() {
 	rootCmd.AddCommand(slotCmd)
 }
 
-// resolveSlotRunRole is the --role default 'gt slot run' actually applies.
-// Split out from runSlotRun so it's testable without the full
-// workspace/exec harness that function needs (following resolveSlotCommand's
-// precedent below).
-//
-// An explicit flagRole always wins, unchanged. An omitted one usually means
-// a nested wrap that has no way to know its ancestor's exact role string
-// (gt-cet2, gt-tuiy): default to riding that ancestor's hold via
-// slot.InheritedRole instead of a per-invocation placeholder that is
-// guaranteed to mismatch it and contend for the full --timeout — the
-// deadlock class gt-tuiy exists to prevent. A top-level invocation with no
-// ancestor hold at all still falls back to the old unique-pid role, so two
-// unrelated unnamed invocations never collide with each other.
-//
-// inheritedRole reads the ancestor's hold (slot.InheritedRole in production).
-func resolveSlotRunRole(flagRole, townRoot string, inheritedRole func(townRoot string) (string, bool)) string {
-	if flagRole != "" {
-		return flagRole
-	}
-	if inherited, ok := inheritedRole(townRoot); ok {
-		return inherited
-	}
-	return fmt.Sprintf("pid-%d", os.Getpid())
-}
-
+// runSlotRun is `gt slot run`: it resolves the town and hands the operator's
+// argv to the slot package, which owns the whole run — the hold, the child and
+// its exit status (internal/slot/run.go). Everything left here is the CLI's
+// own: the flags, the cwd, and the process exit code.
 func runSlotRun(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return slotRun(cmd.OutOrStdout(), townRoot, args, os.Getenv("PATH"), os.Environ)
-}
-
-// slotRun is gt slot run in townRoot: it validates args, takes the gate, and
-// runs the command, reporting to out. ambientPath is this process's PATH, and
-// environ reads its environment, which the child inherits: it is read after
-// the slot is taken, so the child carries the reentrant marker the hold armed
-// (slot.ReentrantEnvVar) and a wrap nested in it rides the hold (gt-tuiy).
-func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, environ func() []string) error {
-	role := resolveSlotRunRole(slotRunRole, townRoot, slot.InheritedRole)
-
-	// Resolve and validate the command before taking the slot: the gate is the
-	// merge path's critical section, and a command that cannot run must not hold
-	// it (gt-f4xe). Leading VAR=value tokens are env(1) assignments, so the
-	// program is looked up under the PATH the child will see (gt-18nx).
-	envAssigns, cmdArgs := splitEnvPrefix(args)
-	program, err := resolveSlotCommand(envAssigns, cmdArgs, ambientPath)
+	code, err := slot.Run(townRoot, slot.RunOptions{
+		Role:    slot.RunRole(slotRunRole, townRoot, slot.InheritedRole),
+		Timeout: slotRunTimeout,
+		Pool:    containerGatePool(townRoot),
+		Nice:    slotRunNice,
+		Args:    args,
+		Path:    os.Getenv("PATH"),
+		Env:     os.Environ,
+		Stdin:   os.Stdin,
+		Stdout:  cmd.OutOrStdout(),
+		Stderr:  cmd.ErrOrStderr(),
+	})
 	if err != nil {
-		return fmt.Errorf("gt slot run: %w", err)
+		return err
 	}
-
-	fmt.Fprintf(out, "Waiting for container-gate slot (role=%s)...\n", role)
-	pool := containerGatePool(townRoot)
-	h, err := slot.AcquirePool(townRoot, role, slotRunTimeout, pool)
-	if err != nil {
-		return fmt.Errorf("acquiring container-gate slot: %w", err)
-	}
-	defer func() { _ = h.Release() }()
-	// The wait is reported even when it was negligible: a queued invocation and
-	// the one it queued behind only read as a pair (gt-dc81).
-	fmt.Fprintf(out, slotAcquiredFormat,
-		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
-
-	// A polecat's own suite is optional verification where a gate-class holder
-	// is the merge path's critical section, and three concurrent suites
-	// tripled the merge gate (gt-93m1) — so non-gate holders run under
-	// nice(1) unless --nice says otherwise.
-	niceness := slotRunNiceness(role, slotRunNice)
-	if niceness > 0 {
-		fmt.Fprintf(out, "Running at nice %d (non-gate holder; --nice 0 to disable).\n", niceness)
-	}
-	sub := slotChildCommand(program, cmdArgs, niceWrapper(niceness))
-	if len(envAssigns) > 0 {
-		sub.Env = slotRunEnv(environ(), envAssigns)
-	}
-	sub.Stdin = os.Stdin
-	sub.Stdout = os.Stdout
-	sub.Stderr = os.Stderr
-
-	// Forward interrupts to the child so it can shut down its containers
-	// cleanly; the slot itself is released either by our deferred Release()
-	// on a graceful return, or by the kernel if we are killed outright.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
-	go func() {
-		for range sigCh {
-			if sub.Process != nil {
-				_ = sub.Process.Signal(os.Interrupt)
-			}
-		}
-	}()
-
-	runErr := sub.Run()
-	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			// os.Exit skips deferred calls, so the hold has to be closed here
-			// rather than by the deferred Release above — otherwise the release
-			// (and its held_s) would never be recorded for a failing suite,
-			// which is exactly the suite an operator is most likely to be
-			// looking up (gt-dc81).
-			_ = h.ReleaseWithExit(exitErr.ExitCode())
-			os.Exit(exitErr.ExitCode())
-		}
-		return fmt.Errorf("running %s: %w", cmdArgs[0], runErr)
+	if code != 0 {
+		// The wrapped suite's verdict is this process's verdict. Run has
+		// already released the hold and recorded the code, so exiting here
+		// drops nothing (gt-dc81).
+		os.Exit(code)
 	}
 	return nil
 }
@@ -622,158 +533,4 @@ func printSlotReapJSON(cmd *cobra.Command, report slot.ReapReport) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
-}
-
-// envAssignmentRe matches a leading environment assignment token as env(1)
-// accepts it: an identifier, "=", and any value (possibly empty).
-var envAssignmentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
-
-// splitEnvPrefix peels leading VAR=value tokens off args, returning them and
-// the remaining command. A token that merely contains "=" later in the word
-// (e.g. "--flag=value") is part of the command, not an assignment; splitting
-// stops at the first non-assignment token.
-func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
-	i := 0
-	for i < len(args) && envAssignmentRe.MatchString(args[i]) {
-		i++
-	}
-	return args[:i], args[i:]
-}
-
-// resolveSlotCommand resolves the program gt slot run will exec, rejecting a
-// command it must not take a gate slot for: one naming no program at all (only
-// VAR=value assignments), or one whose program cannot be exec'd. It is called
-// before slot.AcquirePool so the refusal costs nothing (gt-f4xe). ambientPath
-// is this process's PATH.
-func resolveSlotCommand(envAssigns, cmdArgs []string, ambientPath string) (string, error) {
-	if len(cmdArgs) == 0 {
-		return "", fmt.Errorf("no command after environment assignment(s) %v", envAssigns)
-	}
-	return lookPathForSlot(cmdArgs[0], slotChildPath(envAssigns, ambientPath))
-}
-
-// slotChildPath is the PATH the child is run with, and so the one its program
-// is resolved against: the assigned PATH= when the leading assignments set one,
-// ambientPath otherwise. slotRunEnv builds the child's environment out of
-// those same assignments, so this is the PATH the child — and the nice(1)
-// wrapper resolving the program inside it — searches.
-func slotChildPath(envAssigns []string, ambientPath string) string {
-	for i := len(envAssigns) - 1; i >= 0; i-- {
-		if path, ok := strings.CutPrefix(envAssigns[i], "PATH="); ok {
-			return path
-		}
-	}
-	return ambientPath
-}
-
-// lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
-// resolves against the ambient one, including an entry naming the current
-// directory — empty or "." — and a relative result refused with exec.ErrDot.
-// exec.LookPath offers no way to substitute a PATH but does resolve a name
-// containing a separator directly, so joining each entry and delegating keeps
-// exec.LookPath's own answer to "is this an executable file".
-func lookPathForSlot(name, pathEnv string) (string, error) {
-	if strings.ContainsRune(name, os.PathSeparator) {
-		resolved, err := exec.LookPath(name)
-		if err != nil {
-			// Deliberately not exec.LookPath's own error: it reads well for a
-			// bare name and poorly for a path, where it blames a $PATH that was
-			// never consulted.
-			return "", fmt.Errorf("not an executable file: %s", name)
-		}
-		return resolved, nil
-	}
-	for _, dir := range filepath.SplitList(pathEnv) {
-		candidate := filepath.Join(dir, name)
-		if !strings.ContainsRune(candidate, os.PathSeparator) {
-			// The entry named the current directory and Join cleaned it away:
-			// what is left is a bare name, which exec.LookPath reads as one to
-			// search the ambient PATH for, so the entry would resolve gt's own
-			// PATH instead (gt-f4xe, gt-h9wh). Writing "./name" holds the
-			// search in the entry, and the relative result the ErrDot check
-			// below refuses is then this entry's file, not another's.
-			candidate = "." + string(os.PathSeparator) + name
-		}
-		resolved, err := exec.LookPath(candidate)
-		if err != nil {
-			continue
-		}
-		if !filepath.IsAbs(resolved) {
-			// A candidate always carries a separator, so this resolution is
-			// exec.LookPath's path branch: it answers only "is this an
-			// executable file", never the ErrDot check its bare-name branch
-			// applies. What would run is whatever the working directory holds
-			// under this name at exec time (gt-8p4f).
-			return "", &exec.Error{Name: name, Err: exec.ErrDot}
-		}
-		return resolved, nil
-	}
-	return "", fmt.Errorf("executable file not found in $PATH: %s", name)
-}
-
-// defaultNonGateNice is the nice(1) increment for non-gate slot holders.
-const defaultNonGateNice = 10
-
-// slotRunNiceness resolves the niceness for a holder: an explicit --nice
-// wins; otherwise gate-class roles (slot.IsGateRole) run at normal priority
-// and everyone else at defaultNonGateNice.
-func slotRunNiceness(role string, flag int) int {
-	if flag >= 0 {
-		return flag
-	}
-	if slot.IsGateRole(role) {
-		return 0
-	}
-	return defaultNonGateNice
-}
-
-// niceWrapper is the nice(1) prefix for a holder at the given niceness: nil
-// when niceness is 0 or no nice binary exists, in which case the caller runs
-// the command itself.
-func niceWrapper(niceness int) []string {
-	if niceness <= 0 {
-		return nil
-	}
-	nicePath, err := exec.LookPath("nice")
-	if err != nil {
-		return nil
-	}
-	return []string{nicePath, "-n", strconv.Itoa(niceness)}
-}
-
-// slotChildCommand builds the child process for a command resolveSlotCommand
-// has already validated, wrapping it in nice(1) when wrapper is non-empty.
-// Without a wrapper it execs the resolved program by path: exec.Command would
-// resolve a bare argv[0] against gt's own PATH, where the child's assigned
-// PATH does not apply, so validation and the exec would disagree (gt-f4xe).
-func slotChildCommand(program string, cmdArgs, wrapper []string) *exec.Cmd {
-	argv := append(append([]string(nil), wrapper...), cmdArgs...)
-	if len(wrapper) == 0 {
-		// Args[0] stays the operator's own token; Path is what runs.
-		return &exec.Cmd{Path: program, Args: argv}
-	}
-	// With a wrapper, nice(1) is argv[0] and resolves the program in the
-	// child, under the PATH that resolveSlotCommand validated against.
-	return exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
-}
-
-// slotRunEnv is the environment for the slot's child: environ (this process's
-// own), with the operator's leading VAR=value assignments applied over it.
-//
-// An assigned key's inherited entry is removed rather than left beside the
-// assignment, so the child reads the operator's value by construction instead
-// of because os/exec dedups the slice it is handed and keeps the last entry.
-// That dedup is a rule of the exec path, not of the environment, and this repo
-// does not otherwise lean on it: filterEnvKey and verifyGateEnv strip the
-// inherited key before appending their own value for theirs (gt-g7ym).
-//
-// A repeated assignment settles on the last one, as env(1) leaves it.
-func slotRunEnv(environ, envAssigns []string) []string {
-	env := append([]string(nil), environ...)
-	for _, kv := range envAssigns {
-		key, _, _ := strings.Cut(kv, "=")
-		env = filterEnvKey(env, key)
-		env = append(env, kv)
-	}
-	return env
 }

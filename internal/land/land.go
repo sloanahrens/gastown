@@ -65,9 +65,10 @@ type Lander struct {
 	Route string
 
 	// Gate runs on the merged tree. The landing worker passes
-	// WithSlot(LandGate(tree, rigMergeQueueConfig), gt, role): LandGate reads
-	// the rig's merge_queue.gate, and WithSlot holds the container-gate slot
-	// for the `make test` fallback only. Land does not take the slot itself.
+	// WithSlot(LandGate(tree, rigMergeQueueConfig), townRoot, role): LandGate
+	// reads the rig's merge_queue.gate, and WithSlot holds the container-gate
+	// slot for the `make test` fallback only. Land does not take the slot
+	// itself.
 	Gate     Gate
 	Reviewer Reviewer
 	Beads    Beads

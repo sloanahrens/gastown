@@ -31,9 +31,6 @@ type BdCmd struct {
 	// timeout path takes milliseconds instead of GT_BD_TIMEOUT_SEC's whole
 	// seconds.
 	timeout time.Duration
-	// run answers the call in process instead of starting bd (Via). nil is
-	// the bd on PATH.
-	run BDRunner
 }
 
 // NewBdCmd creates a new bd command builder with the given arguments.
@@ -50,30 +47,6 @@ func NewBdCmd(args ...string) *BdCmd {
 		env:    os.Environ(),
 		stderr: os.Stderr,
 	}
-}
-
-// Via sends the call to run instead of the bd on PATH; nil keeps bd. Tests
-// pass an in-process bd so they need no stub script on PATH.
-func (b *BdCmd) Via(run BDRunner) *BdCmd {
-	b.run = run
-	return b
-}
-
-// runVia answers the call through b.run, with stdout unwrapped from the
-// machine envelope as Cmd unwraps it.
-func (b *BdCmd) runVia(ctx context.Context) (stdout, stderr []byte, err error) {
-	args := b.resolvedArgs()
-	var stdin []byte
-	if b.stdin != nil {
-		if stdin, err = io.ReadAll(b.stdin); err != nil {
-			return nil, nil, err
-		}
-	}
-	stdout, stderr, err = b.run(ctx, BDCall{Dir: b.dir, Env: b.buildEnv(), Args: args, Stdin: stdin})
-	if err == nil {
-		stdout = LegacyPayload(args, stdout)
-	}
-	return stdout, stderr, err
 }
 
 // WithAutoCommit sets BD_DOLT_AUTO_COMMIT=on in the environment.
@@ -282,8 +255,7 @@ func (b *BdCmd) resolvedArgs() []string {
 	if !requestedAllowStale {
 		return b.args
 	}
-	// An in-process bd has no version to probe; it gets the flag.
-	if b.run != nil || BdSupportsAllowStaleWithEnv(b.buildEnv()) {
+	if BdSupportsAllowStaleWithEnv(b.buildEnv()) {
 		return append([]string{"--allow-stale"}, filtered...)
 	}
 	return filtered
@@ -295,13 +267,6 @@ func (b *BdCmd) Run() error {
 	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
-	if b.run != nil {
-		_, stderr, err := b.runVia(ctx)
-		if b.stderr != nil {
-			_, _ = b.stderr.Write(stderr)
-		}
-		return b.wrapCommandError(ctx, err, deadline)
-	}
 	return b.wrapCommandError(ctx, b.buildContextCommand(ctx).Run(), deadline)
 }
 
@@ -313,13 +278,6 @@ func (b *BdCmd) Output() ([]byte, error) {
 	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
-	if b.run != nil {
-		out, stderr, err := b.runVia(ctx)
-		if b.stderr != nil {
-			_, _ = b.stderr.Write(stderr)
-		}
-		return out, b.wrapCommandError(ctx, err, deadline)
-	}
 	out, err := b.buildContextCommand(ctx).Output()
 	return out, b.wrapCommandError(ctx, err, deadline)
 }
@@ -331,13 +289,6 @@ func (b *BdCmd) CombinedOutput() ([]byte, error) {
 	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
-	if b.run != nil {
-		out, stderr, err := b.runVia(ctx)
-		if err != nil {
-			return append(stderr, out...), b.wrapCommandError(ctx, err, deadline)
-		}
-		return append(out, stderr...), nil
-	}
 	args := b.resolvedArgs()
 	cmd := CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
 	util.SetProcessGroup(cmd.Cmd)

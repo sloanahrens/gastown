@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,15 +18,22 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot runs the real
-// post-land runner against a real repository, with a stub gt whose "slot
-// run" only strips its own arguments. The runner's shell and gt run inside
-// internal/land's CommandGate, which has no seam this package can reach.
+// post-land runner against a real repository and a real container-gate hold,
+// in a temp town whose slot nobody else contends for. The hold is taken in
+// process by internal/land's CommandGate (gt-638go.12), so what this test can
+// observe of it is the town's own slot history.
 func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.Mkdir(townRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubSlotContainers()
 	repo := filepath.Join(root, "repo")
 	lwGit(t, root, "init", "-q", "-b", "main", repo)
 	if err := os.WriteFile(filepath.Join(repo, "marker"), []byte("landed\n"), 0o644); err != nil {
@@ -34,13 +42,7 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	lwGit(t, repo, "add", ".")
 	lwGit(t, repo, "commit", "-q", "-m", "landed")
 	commit := lwGit(t, repo, "rev-parse", "HEAD")
-	stub := filepath.Join(root, "gt")
-	slotLog := filepath.Join(root, "slot.log")
-	script := "#!/bin/sh\necho \"$@\" >> " + slotLog + "\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), stub, "gastown", time.Minute)
+	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
 
 	res := run(context.Background(), "cat marker && echo slow tier failed && exit 3", landworker.PostLand{BeadID: "gt-a", Commit: commit})
 	if res.Err != nil || res.ExitCode != 3 || !strings.Contains(res.Tail, "landed") || !strings.Contains(res.Tail, "slow tier failed") {
@@ -56,13 +58,39 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	if res.Err != nil || res.ExitCode != 0 {
 		t.Fatalf("green run: %+v", res)
 	}
-	data, err := os.ReadFile(slotLog)
-	if err != nil || strings.Count(string(data), "slot run --role gastown/post-land --") != 2 {
-		t.Fatalf("slot wrapper calls: %q %v", data, err)
+	// One hold per run, under the post-land role, either side of the
+	// container-suite gate.
+	history, err := slot.History(townRoot)
+	if err != nil {
+		t.Fatalf("reading the town's slot history: %v", err)
+	}
+	var holds int
+	for _, e := range history {
+		if e.Role == "gastown/post-land" && e.HeldS != nil {
+			holds++
+		}
+	}
+	if holds != 2 {
+		t.Fatalf("slot history holds = %d, want one per run: %+v", holds, history)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(root, "work")); len(entries) != 0 {
 		t.Fatalf("worktrees left behind: %v", entries)
 	}
+}
+
+// stubSlotContainers makes the container-gate's `docker ps` check answer "no
+// containers" for this test binary, so an acquire in a temp town grants at
+// once instead of polling for the full timeout against a host that happens to
+// be running a dolt or testcontainers container (see
+// slot.SetContainerListerForTest). Installed once, never restored: every
+// caller in this package wants the same answer, and a per-test restore races
+// under t.Parallel.
+var stubSlotContainersOnce sync.Once
+
+func stubSlotContainers() {
+	stubSlotContainersOnce.Do(func() {
+		slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
+	})
 }
 
 // TestIntegrationPostLandRunFetchesADirectPush is gt-p2rs0: a commit pushed
@@ -91,11 +119,12 @@ func TestIntegrationPostLandRunFetchesADirectPush(t *testing.T) {
 	lwGit(t, seed, "commit", "-q", "-m", "direct push")
 	lwGit(t, seed, "push", "-q", "origin", "main")
 	pushed := lwGit(t, seed, "rev-parse", "HEAD")
-	stub := filepath.Join(root, "gt")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n"), 0o755); err != nil {
+	townRoot := filepath.Join(root, "town")
+	if err := os.Mkdir(townRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), stub, "gastown", time.Minute)
+	stubSlotContainers()
+	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
 
 	res := run(context.Background(), "cat pushed.txt", landworker.PostLand{Commit: pushed, Target: "main", Direct: true, From: from})
 	if res.Err != nil || res.ExitCode != 0 || !strings.Contains(res.Tail, "direct") {

@@ -159,8 +159,11 @@ type Manager struct {
 	git gitRepo
 	// gits opens git on other directories: worktrees, the repo base,
 	// branch holders. Its zero value opens *git.Git.
-	gits     gitOpener
-	beads    *beads.Beads
+	gits  gitOpener
+	beads polecatBeads
+	// agentBD is beads scoped to agent beads: rig-local first, with the
+	// dual-scope resolution agent-bead helpers need (gt-8we).
+	agentBD  polecatBeads
 	namePool *NamePool
 	// tmux is nil when the caller has no tmux; NewManager never stores a
 	// typed-nil *tmux.Tmux here, so the nil checks below stay meaningful.
@@ -256,9 +259,9 @@ func (m *Manager) sessionName(name string) string {
 }
 
 // newManager is NewManager with its collaborators injected: tmux answers the
-// session probes (nil for none), and bd, when non-nil, answers every bd call
-// the manager's beads wrapper makes instead of the bd on PATH.
-func newManager(r *rig.Rig, g gitRepo, t sessionProbe, bd beads.BDRunner) *Manager {
+// session probes (nil for none), and open, when non-nil, opens the bead store
+// instead of bd.
+func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) polecatBeads) *Manager {
 	// Use the resolved beads directory to find where bd commands should run.
 	// For tracked beads: rig/.beads/redirect -> mayor/rig/.beads, so use mayor/rig
 	// For local beads: rig/.beads is the database, so use rig root
@@ -311,10 +314,13 @@ func newManager(r *rig.Rig, g gitRepo, t sessionProbe, bd beads.BDRunner) *Manag
 	// derivation from re-reading town settings per polecat in List().
 	spawnGraceWindow := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().HeartbeatStartupGraceD()
 
+	store, agents := openPolecatBeads(open, beadsSite{workDir: beadsPath, beadsDir: resolvedBeads})
+
 	return &Manager{
 		rig:              r,
 		git:              g,
-		beads:            beads.NewWithBeadsDirAndRunner(beadsPath, resolvedBeads, bd),
+		beads:            store,
+		agentBD:          agents,
 		namePool:         pool,
 		tmux:             t,
 		townRoot:         townRoot,
@@ -473,8 +479,8 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
 }
 
-func (m *Manager) agentBeads() *beads.Beads {
-	return m.beads.ForAgentBead()
+func (m *Manager) agentBeads() polecatBeads {
+	return m.agentBD
 }
 
 func (m *Manager) resetAgentBeadForReuse(agentID, reason string) error {
@@ -3009,7 +3015,7 @@ func (m *Manager) reuseTargetRefs(fields *beads.AgentFields, branch string) ([]s
 	return uniqueRefs(refs), lookupFailed
 }
 
-func attachmentTargetRefs(bd *beads.Beads, issue *beads.Issue) []string {
+func attachmentTargetRefs(bd IssueReader, issue *beads.Issue) []string {
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil {
 		return nil

@@ -25,7 +25,6 @@ import (
 	"github.com/steveyegge/gastown/internal/suggest"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -397,8 +396,7 @@ func runSessionStart(cmd *cobra.Command, args []string) error {
 	// Log wake event
 	if townRoot != "" {
 		agent := fmt.Sprintf("%s/%s", rigName, polecatName)
-		logger := townlog.NewLogger(townRoot)
-		_ = logger.Log(townlog.EventWake, agent, sessionIssue)
+		_ = logSessionWake(townRoot, agent, rigName, sessionIssue)
 	}
 
 	return nil
@@ -460,8 +458,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		if sessionForce {
 			reason = "gt session stop --force"
 		}
-		logger := townlog.NewLogger(townRoot)
-		_ = logger.Log(townlog.EventKill, agent, reason)
+		_ = logSessionKill(townRoot, agent, rigName, polecatName, reason)
 	}
 
 	return nil
@@ -759,14 +756,13 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Log wake event, same as an explicit start (gt-tcrgb). A restart used to
-	// leave no town-log trace at all, so the session it created could not be
+	// leave no trace at all, so the session it created could not be
 	// attributed to it: a hooked-but-idle polecat that the witness restarted
 	// looked like a session appearing from nowhere, and the only visible
 	// correlation left was whichever patrol happened to be running.
 	if townRoot != "" {
 		agent := fmt.Sprintf("%s/%s", rigName, polecatName)
-		logger := townlog.NewLogger(townRoot)
-		_ = logger.Log(townlog.EventWake, agent, sessionRestartWakeContext(sessionRequestedBy))
+		_ = logSessionWake(townRoot, agent, rigName, sessionRestartWakeContext(sessionRequestedBy))
 	}
 
 	return nil

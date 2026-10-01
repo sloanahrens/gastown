@@ -111,11 +111,17 @@ func newBdShowInvocation(args []string, environ []string, resolveDir func(beadID
 		}
 	}
 
-	bdc := beads.NewBdCmd(append([]string{"show"}, args...)...).WithEnv(environ)
+	// Keep-raw: bd show replaces this process (syscall exec) and prints to the
+	// operator's terminal, so it takes bd's argv as given and cannot go
+	// through a typed Client method. The environment is the read-only policy
+	// every bd call gets: pinned to the bead's database when dir names one,
+	// prefix-routed when it does not.
+	mode, beadsDir := beads.ReadOnlyRouting, ""
 	if dir != "" {
-		bdc.Dir(dir)
+		mode, beadsDir = beads.ReadOnlyPinned, beads.ResolveBeadsDir(dir)
 	}
-	cmd := bdc.Build()
+	cmd := beads.CommandWithEnv(dir, beads.EnvForSubprocessMode(append([]string{}, environ...), beadsDir, mode),
+		append([]string{"show"}, args...)...)
 	commandArgs := append([]string(nil), cmd.Args[1:]...)
 
 	// bd show replaces this process and prints to the operator's terminal, so

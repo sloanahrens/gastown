@@ -9,33 +9,31 @@ Ten legs, each a polecat running in parallel and writing one findings file:
 seven analyze the code (correctness, performance, security, elegance,
 resilience, style, smells) and three verify the implementation (wiring,
 commit-discipline, test-quality). The synthesis step merges them into one
-prioritized review. Presets (below) pick a subset; --legs picks any.
+prioritized review.
 """
 formula = "code-review"
 type = "convoy"
 version = 1
 
-# Input variables - provided at runtime
-[inputs]
-[inputs.pr]
-description = "Pull request number to review"
-type = "number"
-required_unless = ["files", "branch"]
+# Every step is a leg but the one metadata.convoy marks the synthesis.
 
-[inputs.files]
+# Inputs: gt formula run --set name=value
+[vars.pr]
+description = "Pull request number to review"
+type = "int"
+
+[vars.files]
 description = "File glob pattern to review"
 type = "string"
-required_unless = ["pr", "branch"]
 
-[inputs.branch]
+[vars.branch]
 description = "Branch name to review (diff against main)"
 type = "string"
-required_unless = ["pr", "files"]
 
 # Base prompt template - injected into all leg prompts
 # NOTE: Uses Go text/template syntax (not Handlebars)
-[prompts]
-base = """
+[vars.base_prompt]
+default = """
 # Code Review Assignment
 
 You are a specialized code reviewer participating in a convoy review.
@@ -96,16 +94,20 @@ Use specific file:line references. Be actionable. Prioritize impact.
 """
 
 # Output configuration
-[output]
-directory = ".reviews/{{.review_id}}"
-leg_pattern = "{{.leg.id}}-findings.md"
-synthesis = "review-summary.md"
+[vars.output_directory]
+default = ".reviews/{{.review_id}}"
+
+[vars.output_leg_pattern]
+default = "{{.leg.id}}-findings.md"
+
+[vars.output_synthesis]
+default = "review-summary.md"
 
 # Leg definitions - each spawns a parallel polecat
-[[legs]]
+[[steps]]
 id = "correctness"
 title = "Correctness Review"
-focus = "Logical correctness and edge case handling"
+metadata.focus = "Logical correctness and edge case handling"
 description = """
 Review the code for logical errors and edge case handling.
 
@@ -121,10 +123,10 @@ Review the code for logical errors and edge case handling.
 - Are all code paths tested or obviously correct?
 """
 
-[[legs]]
+[[steps]]
 id = "performance"
 title = "Performance Review"
-focus = "Performance bottlenecks and efficiency"
+metadata.focus = "Performance bottlenecks and efficiency"
 description = """
 Review the code for performance issues.
 
@@ -140,10 +142,10 @@ Review the code for performance issues.
 - Is performance being traded for readability appropriately?
 """
 
-[[legs]]
+[[steps]]
 id = "security"
 title = "Security Review"
-focus = "Security vulnerabilities and attack surface"
+metadata.focus = "Security vulnerabilities and attack surface"
 description = """
 Review the code for security vulnerabilities.
 
@@ -159,10 +161,10 @@ Review the code for security vulnerabilities.
 - Are there defense-in-depth gaps?
 """
 
-[[legs]]
+[[steps]]
 id = "elegance"
 title = "Elegance Review"
-focus = "Design clarity and abstraction quality"
+metadata.focus = "Design clarity and abstraction quality"
 description = """
 Review the code for design quality.
 
@@ -178,10 +180,10 @@ Review the code for design quality.
 - Is the complexity justified?
 """
 
-[[legs]]
+[[steps]]
 id = "resilience"
 title = "Resilience Review"
-focus = "Error handling and failure modes"
+metadata.focus = "Error handling and failure modes"
 description = """
 Review the code for resilience and error handling.
 
@@ -197,10 +199,10 @@ Review the code for resilience and error handling.
 - Are errors actionable for operators?
 """
 
-[[legs]]
+[[steps]]
 id = "style"
 title = "Style Review"
-focus = "Convention compliance and consistency"
+metadata.focus = "Convention compliance and consistency"
 description = """
 Review the code for style and convention compliance.
 
@@ -216,10 +218,10 @@ Review the code for style and convention compliance.
 - Is the code self-documenting where possible?
 """
 
-[[legs]]
+[[steps]]
 id = "smells"
 title = "Code Smells Review"
-focus = "Anti-patterns and technical debt"
+metadata.focus = "Anti-patterns and technical debt"
 description = """
 Review the code for code smells and anti-patterns.
 
@@ -239,10 +241,10 @@ Review the code for code smells and anti-patterns.
 # VERIFICATION LEGS - Check implementation quality (not just code analysis)
 # ============================================================================
 
-[[legs]]
+[[steps]]
 id = "wiring"
 title = "Wiring Review"
-focus = "Installed-but-not-wired gaps"
+metadata.focus = "Installed-but-not-wired gaps"
 description = """
 Detect dependencies, configs, or libraries that were added but not actually used.
 
@@ -261,10 +263,10 @@ is still in use.
 - Is there dead config that suggests incomplete migration?
 """
 
-[[legs]]
+[[steps]]
 id = "commit-discipline"
 title = "Commit Discipline Review"
-focus = "Commit quality and atomicity"
+metadata.focus = "Commit quality and atomicity"
 description = """
 Review commit history for good practices.
 
@@ -280,10 +282,10 @@ Review commit history for good practices.
 - Are commits atomic (one logical change each)?
 """
 
-[[legs]]
+[[steps]]
 id = "test-quality"
 title = "Test Quality Review"
-focus = "Test meaningfulness, not just coverage"
+metadata.focus = "Test meaningfulness, not just coverage"
 description = """
 Verify tests are actually testing something meaningful.
 
@@ -302,29 +304,10 @@ Coverage numbers lie. A test that can't fail provides no value.
 - Are edge cases and error paths tested?
 """
 
-# ============================================================================
-# PRESETS - Configurable leg selection
-# ============================================================================
-
-[presets]
-[presets.gate]
-description = "Light review for automatic flow - fast, focused on blockers"
-legs = ["wiring", "security", "smells", "test-quality"]
-
-[presets.full]
-description = "Comprehensive review - all legs, for major features"
-legs = ["correctness", "performance", "security", "elegance", "resilience", "style", "smells", "wiring", "commit-discipline", "test-quality"]
-
-[presets.security-focused]
-description = "Security-heavy review for sensitive changes"
-legs = ["security", "resilience", "correctness", "wiring"]
-
-[presets.refactor]
-description = "Review focused on code quality during refactoring"
-legs = ["elegance", "smells", "style", "commit-discipline"]
-
 # Synthesis step - combines all leg outputs
-[synthesis]
+[[steps]]
+id = "synthesis"
+metadata.convoy = "synthesis"
 title = "Review Synthesis"
 description = """
 Combine all leg findings into a unified, prioritized review.

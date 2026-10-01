@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
-// containerGatePool resolves the town's container-gate pool from
-// settings/config.json (operational.container_gate). Defaults to the
-// single-slot pool, so a town that never set it behaves exactly as before
-// gt-yihz.
+// containerGatePool is the town's container-gate pool (slot.PoolForTown).
+// The resolution itself lives in the slot package so the daemon's landing
+// worker builds the same pool the commands here do.
 func containerGatePool(townRoot string) slot.Pool {
-	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	return slot.PoolFromConfig(cg)
+	return slot.PoolForTown(townRoot)
 }
 
 // readGateSlotHolder reads the container-gate pool's current holder for the

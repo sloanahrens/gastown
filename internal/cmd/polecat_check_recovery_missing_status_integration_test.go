@@ -3,12 +3,12 @@
 package cmd
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -21,7 +21,7 @@ import (
 // the `gt polecat list` end-to-end table both pass with the escape wired wrong
 // in checkRecoveryForPolecat, the fact-gathering `gt polecat nuke` and the
 // witness read the verdict from. So this drives checkRecoveryForPolecat itself
-// with a real worktree and an in-process bd, and pins both sides: the escape
+// with a real worktree and an beadsfake database, and pins both sides: the escape
 // clears the missing status, and every other blocker still holds.
 func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 	t.Parallel()
@@ -129,27 +129,15 @@ func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 			agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 			assignee := rigName + "/polecats/" + polecatName
 
-			bd := &inprocBD{answer: func(_ *inprocBD, cmd string, args []string) bdAnswer {
-				switch cmd {
-				case "show":
-					switch firstArg(args) {
-					case agentBeadID:
-						if tt.agentBead == "" {
-							return bdAnswer{stderr: "issue not found", code: 20}
-						}
-						return bdOut(showJSON(t, beads.Issue{ID: agentBeadID, Title: "Polecat topaz", Status: "open", Labels: []string{"gt:agent"}, Description: tt.agentBead}))
-					case sourceID:
-						return bdOut(showJSON(t, beads.Issue{ID: sourceID, Title: "source", Status: tt.sourceState, Assignee: assignee}))
-					case mrID:
-						return bdOut(showJSON(t, beads.Issue{ID: mrID, Title: "MR", Status: "open", Labels: []string{"gt:merge-request"}, Description: "branch: " + branch + "\nsource_issue: " + sourceID + "\ntarget: main\n"}))
-					}
-					return bdAnswer{stderr: "issue not found", code: 20}
-				case "list":
-					return bdOut("[]\n")
-				}
-				return bdAnswer{}
-			}}
-			b := beads.NewWithBeadsDirAndRunner(t.TempDir(), t.TempDir(), bd.run)
+			db := &recoveryDB{Fake: beadsfake.New()}
+			if tt.agentBead != "" {
+				db.Seed(beads.Issue{ID: agentBeadID, Title: "Polecat topaz", Status: "open", Labels: []string{"gt:agent"}, Description: tt.agentBead})
+			}
+			db.Seed(
+				beads.Issue{ID: sourceID, Title: "source", Status: tt.sourceState, Assignee: assignee},
+				beads.Issue{ID: mrID, Title: "MR", Status: "open", Labels: []string{"gt:merge-request"}, Description: "branch: " + branch + "\nsource_issue: " + sourceID + "\ntarget: main\n"},
+			)
+			b := db
 
 			p := &polecat.Polecat{Name: polecatName, Rig: rigName, State: polecat.StateIdle, ClonePath: tt.worktree(t), Branch: branch, Issue: sourceID}
 			status := checkRecoveryForPolecat(b, r, rigName, polecatName, p, false)
@@ -168,12 +156,33 @@ func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 	}
 }
 
-// showJSON is bd show --json's one-element array for issue.
-func showJSON(t *testing.T, issue beads.Issue) string {
-	t.Helper()
-	out, err := json.Marshal([]beads.Issue{issue})
+// recoveryDB is a beadsfake database with the agent-bead and merge-request
+// helpers check-recovery reads, each reduced to Client operations.
+type recoveryDB struct{ *beadsfake.Fake }
+
+func (db *recoveryDB) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
+	issue, err := db.Show(id)
 	if err != nil {
-		t.Fatalf("marshal issue: %v", err)
+		return nil, nil, err
 	}
-	return string(out) + "\n"
+	fields := beads.ParseAgentFields(issue.Description)
+	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
+	return issue, fields, nil
+}
+
+func (db *recoveryDB) FindMRForBranchAny(branch string) (*beads.Issue, error) {
+	mrs, err := db.List(beads.ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
+	if err != nil {
+		return nil, err
+	}
+	for _, mr := range mrs {
+		if strings.HasPrefix(mr.Description, "branch: "+branch+"\n") {
+			return mr, nil
+		}
+	}
+	return nil, nil
+}
+
+func (db *recoveryDB) UpdateAgentCleanupStatus(id, status string) error {
+	return beads.UpdateAgentDescriptionFields(db.Fake, id, beads.AgentFieldUpdates{CleanupStatus: &status})
 }

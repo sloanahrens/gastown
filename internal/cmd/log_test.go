@@ -27,12 +27,8 @@ func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
 		t.Fatalf("runLogCrash: %v", err)
 	}
 
-	townLog, err := os.ReadFile(filepath.Join(townRoot, "logs", "town.log"))
-	if err != nil {
-		t.Fatalf("read town log: %v", err)
-	}
-	if !strings.Contains(string(townLog), "[crash]") || !strings.Contains(string(townLog), "exit code 42") {
-		t.Fatalf("town log missing crash entry: %s", townLog)
+	if _, err := os.Stat(filepath.Join(townRoot, "logs", "town.log")); !os.IsNotExist(err) {
+		t.Fatalf("gt log crash still writes logs/town.log: %v", err)
 	}
 
 	rawEvents, err := os.ReadFile(filepath.Join(townRoot, gtevents.EventsFile))

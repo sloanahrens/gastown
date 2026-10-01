@@ -8,6 +8,7 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // TestSchemaLevelProblem is the guard's verdict without a database: equal
@@ -172,9 +173,9 @@ type exitStatus int
 func (e exitStatus) Error() string { return "exit status " + itoa(int(e)) }
 func (e exitStatus) ExitCode() int { return int(e) }
 
-// The real probe, driven through recorded runners: every read is pinned to
+// The real probe, driven through a recorded runner: every read is pinned to
 // the store's directory with gastown's journal override cleared, runs in
-// machine mode, and maps bd's typed failures (gt-7iwy0.2).
+// machine mode, and maps bd's typed failures (gt-7iwy0.2; the events read's own mapping is pinned in internal/beads).
 func TestBDStoreProbe_ReadsThroughPinnedBD(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -189,10 +190,7 @@ func TestBDStoreProbe_ReadsThroughPinnedBD(t *testing.T) {
 		}
 		return nil, nil, errors.New("unexpected " + strings.Join(args, " "))
 	}
-	tail := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		return []byte(`{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"no store"}}`), nil, exitStatus(25)
-	}
-	p := &bdStoreProbe{dir: dir, run: run, client: beads.NewWithBeadsDirAndRunner(dir, dir, tail)}
+	p := &bdStoreProbe{dir: dir, run: run, client: beadsfake.New()}
 
 	if _, err := p.SchemaLevel(context.Background()); err == nil || !strings.Contains(err.Error(), "ahead of this bd") {
 		t.Errorf("SchemaLevel on exit 26 = %v, want the schema-ahead refusal", err)
@@ -200,8 +198,8 @@ func TestBDStoreProbe_ReadsThroughPinnedBD(t *testing.T) {
 	if v, err := p.JournalConfig(); err != nil || v != "false" {
 		t.Errorf("JournalConfig = %q, %v; want false", v, err)
 	}
-	if _, err := p.EventsTail(0, 1); err == nil {
-		t.Error("EventsTail on exit 25 succeeded")
+	if _, err := p.EventsTail(0, 1); err != nil {
+		t.Errorf("EventsTail through the store's client = %v", err)
 	}
 	for _, env := range envs {
 		joined := strings.Join(env, " ")
