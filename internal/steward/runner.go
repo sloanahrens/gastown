@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Defaults for a town that configures nothing.
@@ -50,6 +52,11 @@ type SpawnRequest struct {
 	Model   string
 	Timeout time.Duration
 	Event   Event
+	// Started is called once the job's process exists, with its process
+	// group. The runner records the group so a daemon that dies can kill it;
+	// an error means it could not, and the spawner must not leave the job
+	// running unrecorded. Nil when no one is listening.
+	Started func(pgid int) error
 }
 
 // SpawnResult is what running a job's process produced.
@@ -88,6 +95,9 @@ type Runner struct {
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
 	NewID    func() string
+	// Kill ends an orphaned job's process group; nil is
+	// util.KillProcessGroupID.
+	Kill KillGroup
 
 	mu      sync.Mutex
 	running map[string]Job
@@ -107,7 +117,7 @@ func (r *Runner) Start(ctx context.Context, ev Event, model, prompt string) bool
 	if r.beads == nil {
 		r.beads = map[string]bool{}
 	}
-	if r.beads[ev.Bead] {
+	if r.busyLocked(ev.Bead) {
 		return false
 	}
 	id := "steward-" + r.newID()
@@ -133,7 +143,7 @@ func (r *Runner) Start(ctx context.Context, ev Event, model, prompt string) bool
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.run(ctx, j, SpawnRequest{ID: id, Dir: dir, Prompt: prompt, Model: model, Timeout: r.timeout(), Event: ev})
+		r.run(ctx, j, SpawnRequest{ID: id, Dir: dir, Prompt: prompt, Model: model, Timeout: r.timeout(), Event: ev, Started: r.recordGroup(j)})
 	}()
 	return true
 }
@@ -152,15 +162,41 @@ func (r *Runner) run(ctx context.Context, j Job, req SpawnRequest) {
 	jctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
 	res := r.spawnerFor(req.Event).Spawn(jctx, req)
-	if jctx.Err() != nil && res.Err == nil && res.Verdict == nil {
+	// ctx is the daemon's: when it is done the daemon is going away, and a
+	// job killed for that was not given its time, so it neither timed out nor
+	// failed. A job that already has a verdict and ran clean finished first.
+	shutdown := ctx.Err() != nil && !res.TimedOut && (res.Err != nil || res.Verdict == nil)
+	if jctx.Err() != nil && !shutdown && res.Err == nil && res.Verdict == nil {
 		res.TimedOut = true
 	}
-	j.Ended, j.Outcome, j.Summary, j.Transcript = r.classify(res, r.now())
+	if shutdown {
+		j.Ended, j.Outcome, j.Summary, j.Transcript = r.now(), OutcomeInterrupted, "the daemon shut down while the job was running", res.Transcript
+	} else {
+		j.Ended, j.Outcome, j.Summary, j.Transcript = r.classify(res, r.now())
+	}
 	if err := r.Ledger.Append(j); err != nil {
 		r.logf("steward: %s: recording the outcome failed: %v", j.ID, err)
 	}
 	r.logf("steward: end id=%s event=%s bead=%s outcome=%s dur=%s summary=%q transcript=%s",
 		j.ID, j.Event, j.Bead, j.Outcome, j.Ended.Sub(j.Started).Round(time.Second), j.Summary, j.Transcript)
+}
+
+// recordGroup is the Started callback for job j: it appends j's row again
+// with the process group, which supersedes the start row (Ledger.Active reads
+// the latest row of each id).
+func (r *Runner) recordGroup(j Job) func(pgid int) error {
+	return func(pgid int) error {
+		j.Pgid = pgid
+		r.mu.Lock()
+		if _, ok := r.running[j.ID]; ok {
+			r.running[j.ID] = j
+		}
+		r.mu.Unlock()
+		if err := r.Ledger.Append(j); err != nil {
+			return fmt.Errorf("recording process group %d: %w", pgid, err)
+		}
+		return nil
+	}
 }
 
 // classify is the job's outcome: what the job reported, else why there is
@@ -218,11 +254,55 @@ func (r *Runner) Running() []Job {
 	return out
 }
 
-// RunningBead reports whether a job for bead is in flight.
+// RunningBead reports whether a job for bead is in flight, this process's or
+// a previous daemon's that is still alive (see ReapOrphans).
 func (r *Runner) RunningBead(bead string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.beads[bead]
+	return r.busyLocked(bead)
+}
+
+// busyLocked is RunningBead with r.mu held. A job the ledger shows with no end
+// is either this process's own or one whose process group could not be killed
+// (ReapOrphans closes the rest), so it may still be pushing to the bead's
+// branch: no second job starts beside it. A ledger that cannot be read answers
+// busy, the safe side.
+func (r *Runner) busyLocked(bead string) bool {
+	if r.beads[bead] {
+		return true
+	}
+	active, err := r.Ledger.Active()
+	if err != nil {
+		r.logf("steward: reading the ledger for %s: %v; treating it as busy", bead, err)
+		return true
+	}
+	for _, j := range active {
+		if j.Bead == bead {
+			return true
+		}
+	}
+	return false
+}
+
+// ReapOrphans closes the ledger's running jobs this runner did not start,
+// killing their process groups first: a daemon that died left them behind.
+// It returns how many it closed. A group it cannot kill stays open and busy,
+// so the scan calls this again each cycle until the group is gone.
+func (r *Runner) ReapOrphans() (int, error) {
+	// The snapshot comes before the ledger read: a job that ends in between
+	// has its end row written before it leaves r.running, so it is either in
+	// own or already closed, never an orphan.
+	r.mu.Lock()
+	own := make(map[string]bool, len(r.running))
+	for id := range r.running {
+		own[id] = true
+	}
+	r.mu.Unlock()
+	kill := r.Kill
+	if kill == nil {
+		kill = util.KillProcessGroupID
+	}
+	return r.Ledger.CloseOrphans(kill, own, r.now())
 }
 
 // spawnerFor is the spawner one job runs on.
@@ -279,7 +359,7 @@ func ChooseModel(history []Job, routine, hard string) (string, bool) {
 	if hard == "" {
 		hard = DefaultHardAgent
 	}
-	jobs := latestRows(history)
+	jobs := attempts(history)
 	switch len(jobs) {
 	case 0:
 		return routine, true
@@ -308,12 +388,25 @@ func latestRows(rows []Job) []Job {
 	return out
 }
 
+// attempts is the jobs that count against an event's retries: every one but
+// those a restart cut short. An interrupted job never got to try, so two
+// restarts do not spend the routine run and the hard retry (gt-9bioi.5).
+func attempts(history []Job) []Job {
+	var out []Job
+	for _, j := range latestRows(history) {
+		if j.Outcome != OutcomeInterrupted {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 // StartedModel is the preset a job runs on when no history exists yet, so a
 // conflict — which the routine model is not trusted to resolve — starts hard
 // (gt-9bioi).
 func StartedModel(ev Event, history []Job, routine, hard string) (string, bool) {
 	model, run := ChooseModel(history, routine, hard)
-	if run && len(latestRows(history)) == 0 && strings.HasPrefix(ev.RejectionDetail, "kind=conflict") {
+	if run && len(attempts(history)) == 0 && strings.HasPrefix(ev.RejectionDetail, "kind=conflict") {
 		return hard, true
 	}
 	return model, run

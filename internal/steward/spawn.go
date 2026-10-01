@@ -51,7 +51,9 @@ type AgentSpawner struct {
 	// config.ResolveAgentConfigWithOverride against the town.
 	ResolveAgent func(model string) (*agentconfig.RuntimeConfig, error)
 	// Run executes the job's command in dir; nil runs it for real, in its own
-	// process group so the job's timeout kills the whole tree.
+	// process group so the job's timeout kills the whole tree, and reports
+	// the group through SpawnRequest.Started. A Run that replaces it owns
+	// both.
 	Run func(ctx context.Context, cmd *exec.Cmd) error
 
 	// FetchTimeout bounds the fetch that makes the head present.
@@ -92,7 +94,7 @@ func (s *AgentSpawner) Spawn(ctx context.Context, req SpawnRequest) SpawnResult 
 	run := s.Run
 	if run == nil {
 		util.SetProcessGroup(cmd)
-		run = func(_ context.Context, c *exec.Cmd) error { return c.Run() }
+		run = func(_ context.Context, c *exec.Cmd) error { return runRecorded(c, req.Started) }
 	}
 	runErr := run(jctx, cmd)
 	timedOut := jctx.Err() != nil && ctx.Err() == nil
@@ -120,6 +122,23 @@ func (s *AgentSpawner) Spawn(ctx context.Context, req SpawnRequest) SpawnResult 
 		res.Verdict = &verdict
 	}
 	return res
+}
+
+// runRecorded runs cmd, a process group leader, and reports its group through
+// started as soon as it exists. A job the ledger could not record is killed:
+// a group no row names is one no later daemon can find (gt-9bioi.5).
+func runRecorded(cmd *exec.Cmd, started func(pgid int) error) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if started != nil {
+		if err := started(cmd.Process.Pid); err != nil {
+			_ = util.KillProcessGroup(cmd)
+			_ = cmd.Wait()
+			return err
+		}
+	}
+	return cmd.Wait()
 }
 
 // worktreeAt puts req.Event.Head in a detached worktree at req.Dir, fetching

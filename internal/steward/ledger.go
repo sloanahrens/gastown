@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,10 +39,17 @@ const (
 	OutcomeError Outcome = "error"
 	// OutcomeTimeout: the job outlived its timeout and was killed.
 	OutcomeTimeout Outcome = "timeout"
+	// OutcomeInterrupted: the daemon went away under the job, by shutdown or
+	// by dying, so the job never got to finish. Only the runner and the
+	// ledger write it (a job's verdict file cannot, see Outcomes), and it is
+	// not an attempt: ChooseModel does not count it, because a restart says
+	// nothing about the work.
+	OutcomeInterrupted Outcome = "interrupted"
 )
 
-// Outcomes lists every outcome the ledger accepts, in the order the bead
-// names them.
+// Outcomes lists every outcome a job may report in its verdict file, in the
+// order the bead names them. OutcomeInterrupted is not among them: the job
+// is not alive to report it.
 var Outcomes = []Outcome{OutcomePass, OutcomeFail, OutcomeFixed, OutcomeRequeued, OutcomeResling, OutcomeEscalated, OutcomeError, OutcomeTimeout}
 
 // Valid reports whether o is an outcome the ledger accepts.
@@ -64,14 +72,18 @@ func (o Outcome) Failed() bool {
 // starts, the record is rewritten complete when it ends; Ended's zero value
 // is "still running" (see Ledger.CloseRunning).
 type Job struct {
-	ID         string    `json:"id"`
-	Event      Kind      `json:"event"`
-	Bead       string    `json:"bead"`
-	Rig        string    `json:"rig"`
-	Branch     string    `json:"branch,omitempty"`
-	Head       string    `json:"head,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Started    time.Time `json:"started"`
+	ID      string    `json:"id"`
+	Event   Kind      `json:"event"`
+	Bead    string    `json:"bead"`
+	Rig     string    `json:"rig"`
+	Branch  string    `json:"branch,omitempty"`
+	Head    string    `json:"head,omitempty"`
+	Model   string    `json:"model,omitempty"`
+	Started time.Time `json:"started"`
+	// Pgid is the job's process group, recorded once the process starts.
+	// Rows without one (the job had not started yet, or the row predates the
+	// field) have no group to kill.
+	Pgid       int       `json:"pgid,omitempty"`
 	Ended      time.Time `json:"ended,omitempty"`
 	Outcome    Outcome   `json:"outcome,omitempty"`
 	Summary    string    `json:"summary,omitempty"`
@@ -180,48 +192,68 @@ func (l *Ledger) History(key string) ([]Job, error) {
 	return out, nil
 }
 
-// CloseRunning writes outcome for every job with no end time and returns how
-// many it closed. Only the daemon that starts jobs calls it, at startup: jobs
-// are children of the daemon process, so a record without an end time is a
-// job whose daemon died, never one still running (gt-9bioi.1).
-func (l *Ledger) CloseRunning(outcome Outcome, summary string, now time.Time) (int, error) {
-	all, err := l.Read()
+// KillGroup ends every process in a process group, returning an error when
+// it cannot be signaled. util.KillProcessGroupID is the production one.
+type KillGroup func(pgid int) error
+
+// CloseRunning closes every job whose row has no end time as interrupted and
+// returns how many it closed. Only the daemon that starts jobs calls it, at
+// startup: jobs are children of the daemon process, so a record without an
+// end time is a job whose daemon died (gt-9bioi.1).
+//
+// A job runs in a process group of its own, which outlives a daemon that
+// died, so the group is killed before its row closes: the retry that follows
+// must not run beside the original, both able to push. A group the kill
+// cannot reach leaves its row open and is reported in the error, because
+// that job may still be running.
+func (l *Ledger) CloseRunning(kill KillGroup, now time.Time) (int, error) {
+	return l.CloseOrphans(kill, nil, now)
+}
+
+// CloseOrphans is CloseRunning for a process that has jobs of its own: the
+// rows whose ids are in own are left alone.
+func (l *Ledger) CloseOrphans(kill KillGroup, own map[string]bool, now time.Time) (int, error) {
+	active, err := l.Active()
 	if err != nil {
 		return 0, err
 	}
 	closed := 0
-	for _, j := range all {
-		if !j.Ended.IsZero() {
+	var stuck []error
+	for _, j := range active {
+		if own[j.ID] {
 			continue
 		}
-		j.Ended, j.Outcome, j.Summary = now, outcome, summary
+		summary := "the daemon restarted while the job was running"
+		if j.Pgid > 0 && kill != nil {
+			if err := kill(j.Pgid); err != nil {
+				stuck = append(stuck, fmt.Errorf("job %s: killing process group %d: %w", j.ID, j.Pgid, err))
+				continue
+			}
+			summary += "; its process group " + strconv.Itoa(j.Pgid) + " was killed"
+		}
+		j.Ended, j.Outcome, j.Summary = now, OutcomeInterrupted, summary
 		j.Transcript = ""
 		if err := l.Append(j); err != nil {
 			return closed, err
 		}
 		closed++
 	}
-	return closed, nil
+	return closed, errors.Join(stuck...)
 }
 
-// Active returns the records with no end time, the jobs a previous daemon
-// left behind. The running Ledger view is Runner's, not this file's.
+// Active returns the jobs with no end time, in the order they started: the
+// ones a previous daemon left behind and this process's own. A job writes a
+// start row, then another with its process group; the latest row of each id
+// is the one that counts, so a completed copy (CloseRunning's, or the
+// runner's) retires every earlier row.
 func (l *Ledger) Active() ([]Job, error) {
 	all, err := l.Read()
 	if err != nil {
 		return nil, err
 	}
-	// CloseRunning appends a completed copy; the stale start row stays in the
-	// file, so a job is running only if no completed row has its id.
-	done := make(map[string]bool, len(all))
-	for _, j := range all {
-		if !j.Ended.IsZero() {
-			done[j.ID] = true
-		}
-	}
 	var out []Job
-	for _, j := range all {
-		if j.Ended.IsZero() && !done[j.ID] {
+	for _, j := range latestRows(all) {
+		if j.Ended.IsZero() {
 			out = append(out, j)
 		}
 	}

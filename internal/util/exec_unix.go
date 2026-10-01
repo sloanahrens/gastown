@@ -4,6 +4,7 @@ package util
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"time"
@@ -56,6 +57,17 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 		return nil
 	}
 	return killProcessGroup(cmd.Process.Pid)
+}
+
+// KillProcessGroupID is KillProcessGroup for a group known only by its id,
+// such as one a previous process recorded before it died. It refuses an id
+// below 2: kill(-1) signals every process the caller may signal, and 0 is the
+// caller's own group.
+func KillProcessGroupID(pgid int) error {
+	if pgid < 2 {
+		return fmt.Errorf("refusing to signal process group %d", pgid)
+	}
+	return killProcessGroup(pgid)
 }
 
 func killProcessGroup(pgid int) error {
