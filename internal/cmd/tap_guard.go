@@ -33,14 +33,16 @@ Available guards:
 External guards (standalone scripts, not compiled into gt):
   context-budget   - scripts/guards/context-budget-guard.sh
 
-Example hook configuration (matcher is the TOOL NAME only — a command
-pattern like "Bash(gh pr create*)" in "matcher" never fires, gt-5ihs — and
-no "if" either: Claude Code's "if" evaluator matches ANY pattern for a
+Example hook configuration (matcher is the TOOL NAME only, a shell guard's
+being "Bash|Monitor" — a bare "Bash" lets a command run through the
+Monitor tool reach the guard's target unguarded, gt-vx2mm; a command
+pattern like "Bash(gh pr create*)" in "matcher" never fires, gt-5ihs —
+and no "if" either: Claude Code's "if" evaluator matches ANY pattern for a
 command it cannot statically resolve, so a deny guard must read
 tool_input.command off stdin and self-filter, gt-3mp1):
   {
     "PreToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|Monitor",
       "hooks": [{"command": "gt tap guard pr-workflow"}]
     }]
   }`,
