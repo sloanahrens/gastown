@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -38,9 +37,8 @@ var cycleCmd = &cobra.Command{
 	Long: `Cycle between related tmux sessions based on the current session type.
 
 Session groups:
-- Town sessions: Mayor ↔ Deacon
 - Crew sessions: All crew members in the same rig
-- Rig ops sessions: Witness + Refinery + Polecats in the same rig
+- Polecat sessions: All polecats in the same rig
 
 The appropriate cycling is detected automatically from the session name.
 
@@ -55,12 +53,12 @@ var cycleNextCmd = &cobra.Command{
 	Long: `Switch to the next session in the current group.
 
 This command is typically invoked via the C-b n keybinding. It automatically
-detects whether you're in a town-level session (Mayor/Deacon) or a crew session
-and cycles within the appropriate group.
+detects whether you're in a crew or polecat session and cycles within the
+appropriate group.
 
 Examples:
   gt cycle next
-  gt cycle next --session gt-gastown-witness  # Explicit session context`,
+  gt cycle next --session gt-crew-sloan  # Explicit session context`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cycleToSession(1, cycleSession, cycleClient)
 	},
@@ -72,12 +70,12 @@ var cyclePrevCmd = &cobra.Command{
 	Long: `Switch to the previous session in the current group.
 
 This command is typically invoked via the C-b p keybinding. It automatically
-detects whether you're in a town-level session (Mayor/Deacon) or a crew session
-and cycles within the appropriate group.
+detects whether you're in a crew or polecat session and cycles within the
+appropriate group.
 
 Examples:
   gt cycle prev
-  gt cycle prev --session gt-gastown-witness  # Explicit session context`,
+  gt cycle prev --session gt-crew-sloan  # Explicit session context`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cycleToSession(-1, cycleSession, cycleClient)
 	},
@@ -106,46 +104,21 @@ func cycleToSession(direction int, sessionOverride, clientOverride string) error
 		}
 	}
 
-	// Store client for use by cycleRigInfraSession
+	// Store client for use by cycleInGroup
 	cycleClientTarget = clientOverride
-
-	// Check if it's a town-level session
-	townLevelSessions := getTownLevelSessions()
-	if townLevelSessions != nil {
-		for _, townSession := range townLevelSessions {
-			if session == townSession {
-				return cycleTownSession(direction, session)
-			}
-		}
-	}
 
 	// Check if it's a crew session (format: <prefix>-crew-<name>)
 	if identity, err := sessionpkg.ParseSessionNameWithRegistry(session, townRegistry()); err == nil && identity.Role == sessionpkg.RoleCrew {
 		return cycleCrewSession(direction, session)
 	}
 
-	// Check if it's a rig ops session (witness, refinery, or polecat).
-	// These all share one cycle group per rig.
-	if rig := parseRigOpsSession(session); rig != "" {
-		return cycleRigOpsSession(direction, session, rig)
+	// Check if it's a polecat session; polecats share one cycle group per rig.
+	if rig, _, ok := parsePolecatSessionName(townRegistry(), session); ok {
+		return cyclePolecatSession(direction, session, rig)
 	}
 
 	// Unknown session type - do nothing
 	return nil
-}
-
-// parseRigOpsSession extracts the rig name if this is a polecat session.
-// Returns empty string if not a rig ops session.
-func parseRigOpsSession(sess string) string {
-	identity, err := sessionpkg.ParseSessionNameWithRegistry(sess, townRegistry())
-	if err != nil {
-		return ""
-	}
-	switch identity.Role {
-	case sessionpkg.RolePolecat:
-		return identity.Rig
-	}
-	return ""
 }
 
 // cycleClientTarget holds the client TTY to pass to switch-client -c.
@@ -196,23 +169,6 @@ func cycleInGroup(direction int, currentSession string, sessions []string) error
 	}
 	args = append(args, "-t", sessions[targetIdx])
 	return tmux.BuildCommand(args...).Run()
-}
-
-// cycleRigOpsSession cycles between witness, refinery, and polecat sessions for a rig.
-func cycleRigOpsSession(direction int, currentSession, rig string) error {
-	allSessions, err := listTmuxSessions()
-	if err != nil {
-		return fmt.Errorf("listing sessions: %w", err)
-	}
-
-	var sessions []string
-	for _, s := range allSessions {
-		if parseRigOpsSession(s) == rig {
-			sessions = append(sessions, s)
-		}
-	}
-
-	return cycleInGroup(direction, currentSession, sessions)
 }
 
 // listTmuxSessions returns all tmux session names.

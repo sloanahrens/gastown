@@ -3,7 +3,7 @@ package protocol
 import "testing"
 
 // refineryRecoveredBeadBody is the dead-worker RECOVERED_BEAD template the
-// refinery sends to the deacon (internal/refinery/dead_worker_recovery.go).
+// deleted refinery sent to the deacon.
 // It is the payload from gt-8sex: the body a deacon received in place of the
 // prose a refinery had typed into `gt mail reply -m`.
 const refineryRecoveredBeadBody = `Merge rejection with no live worker (transient polecat).
@@ -19,8 +19,8 @@ The source bead has been reopened with merge-rejection notes.
 Please re-dispatch. The branch survives on origin, so the next polecat
 can check it out and make a targeted fix instead of starting over.`
 
-// witnessRecoveredBeadBody is the witness's RECOVERED_BEAD template
-// (internal/witness/handlers.go), which carries a different field set.
+// witnessRecoveredBeadBody is the deleted witness's RECOVERED_BEAD template,
+// which carries a different field set.
 const witnessRecoveredBeadBody = `Recovered abandoned bead from dead polecat.
 
 Bead: gt-abc
