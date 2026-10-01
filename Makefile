@@ -25,10 +25,11 @@
 #                          turn containers on. Do not wrap it in `gt slot run`.
 #   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
 #                          ./...`, then `go test` of only the packages the branch
-#                          changed against origin/main, plus internal/testpolicy
-#                          when a _test.go file changed. The landing worker runs
-#                          `make gate` on the merged tree, so this is the cheap
-#                          first look, not the gate. No containers, no slot.
+#                          changed against origin/main and of the tree-wide guard
+#                          tests its changed paths trigger (gt-ydzwb). The
+#                          landing worker runs `make gate` on the merged tree, so
+#                          this is the cheap first look, not the gate. No
+#                          containers, no slot.
 #   make test-slow         the post-landing check: the gate, then the shell
 #                          tests (scripts/test-makefile.sh, which `make
 #                          test-makefile` also runs alone), with
@@ -330,6 +331,12 @@ tier-check:
 # unit-tested in internal/land/changed_test.go). It skips the budget runner, the
 # drift guard and the shell tests. Judged by exit code alone, like the gate. A
 # package the branch deleted is not tested: there is nothing to run.
+#
+# It then runs the tree-wide guard tests the branch's changed paths trigger,
+# under -run so the whole suite of the package hosting one stays out of it:
+# internal/cmd and internal/polecat take minutes each, the guard test inside
+# them a second. Otherwise a branch that breaks a guard learns it from the
+# landing gate minutes later, which is what gt-ydzwb exists to stop.
 # PRESUBMIT_BASE is the ref the branch is compared against.
 PRESUBMIT_BASE ?= origin/main
 presubmit: LINT_RUNNER_FLAGS := --allow-serial-runners
@@ -339,10 +346,17 @@ presubmit: lint
 	@go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
-	if [ -z "$$pkgs" ]; then echo "presubmit: no Go package changed against $(PRESUBMIT_BASE); no tests to run" >&2; \
+	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
+	if [ -z "$$pkgs" ] && [ -z "$$guards" ]; then echo "presubmit: neither a Go package nor a tree-wide guard input changed against $(PRESUBMIT_BASE); no tests to run" >&2; \
 	else \
-		echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
-		GT_TEST_DOCKER=0 go test -timeout 10m $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+		if [ -n "$$pkgs" ]; then \
+			echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
+			GT_TEST_DOCKER=0 go test -timeout 10m $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+		fi; \
+		if [ -n "$$guards" ]; then \
+			echo "presubmit: go test of the tree-wide guard tests:" $$guards >&2; \
+			GT_TEST_DOCKER=0 go test -timeout 10m $$guards || { echo "presubmit: FAILED at the tree-wide guard tests" >&2; exit 1; }; \
+		fi; \
 	fi; \
 	echo "presubmit: PASSED in $$(( $$(date +%s) - $(GATE_START) ))s wall" >&2
 
