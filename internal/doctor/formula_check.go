@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
@@ -122,20 +123,30 @@ func sameVersionClause(townRoot, name string) string {
 		return ""
 	}
 
-	townF, err := formula.Parse(townData)
+	townVersion, err := formulaVersion(townData)
 	if err != nil {
 		return ""
 	}
-	embeddedF, err := formula.Parse(embedded)
+	embeddedVersion, err := formulaVersion(embedded)
 	if err != nil {
 		return ""
 	}
-	if townF.Version != embeddedF.Version {
+	if townVersion != embeddedVersion {
 		return ""
 	}
 
 	return fmt.Sprintf("; same version as embedded (%d), different bytes: town %s vs embedded %s",
-		townF.Version, exactBytes(len(townData)), exactBytes(len(embedded)))
+		townVersion, exactBytes(len(townData)), exactBytes(len(embedded)))
+}
+
+// formulaVersion is the version a formula file declares: its one top-level key
+// this check reads, decoded on its own (bd owns the rest of the format).
+func formulaVersion(data []byte) (int, error) {
+	var head struct {
+		Version int `toml:"version"`
+	}
+	_, err := toml.Decode(string(data), &head)
+	return head.Version, err
 }
 
 // exactBytes groups a byte count for a detail line ("30,870 B"). The package's
