@@ -71,6 +71,7 @@ const fixtureBlob = "4cb29ea38f70d7c61b2a3a25b02e3bdf44905402"
 // then make the fake copy it.
 func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	t.Run("CommitTime is the committer time of a commit", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		base, err := g.CommitTime(fx.base)
@@ -97,6 +98,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Status reports unstaged, staged and untracked changes", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		wantStatus(t, g, true, map[string][]string{})
@@ -120,6 +122,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Add stages files, deletions and directories; ResetFiles unstages them", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		writeFiles(t, fx.clone, map[string]string{"a.txt": "changed\n", "dir/c.txt": "c\n", "dir/sub/d.txt": "d\n"})
@@ -150,6 +153,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Add leaves ignored untracked files alone and refuses one named exactly", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		writeFiles(t, fx.clone, map[string]string{".gitignore": "*.log\nbuild/\n/top.tmp\n", "x.log": "x\n",
@@ -166,6 +170,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Commit commits the index on HEAD, and refuses an empty one", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		if err := g.Commit("nothing"); err == nil {
@@ -203,6 +208,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("WriteTree records the index without committing", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		writeFiles(t, fx.clone, map[string]string{"a.txt": "staged\n", "b.txt": "b\n"})
@@ -228,6 +234,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("TreeFileBlobs and BlobContent read git's blob ids", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		blobs, err := g.TreeFileBlobs(fx.base)
@@ -246,6 +253,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("BlobDiffLines counts added and removed lines", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		changed := fx.env.Commit(t, fx.origin, "main", "edit a", map[string]string{"a.txt": "one\n2\nthree\nfour\n"})
@@ -264,6 +272,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CommitFileChanges and MergeBase read history", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		changes, err := g.CommitFileChanges("origin/"+fixtureBranch, 10)
@@ -280,6 +289,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CurrentBranch, upstream and the clean base ref", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		if url, err := g.GetUpstreamURL(); err != nil || url != "" {
@@ -303,6 +313,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Push updates the remote and the tracking ref, and refuses a non-fast-forward", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		repo := fx.env.Open(fx.clone)
@@ -345,6 +356,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CheckUncommittedWorkLocalFailClosed reports dirt, stashes and unpushed commits", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		st, err := g.CheckUncommittedWorkLocalFailClosed()
@@ -375,6 +387,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("InitRepo makes an empty repository and leaves an existing one alone", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		dir := filepath.Join(fx.root, "backup")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -409,6 +422,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("ConfigSet and ConfigGet round-trip a value", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		g := fx.env.Open(fx.clone).(WorkTree)
 		if v, err := g.ConfigGet("http.postBuffer"); err != nil || v != "" {
@@ -423,6 +437,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CommitWithAuthor commits on an unborn branch; LogAll lists newest first", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		dir := filepath.Join(fx.root, "backup")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
