@@ -142,11 +142,13 @@ type fakeGate struct {
 	mu   sync.Mutex
 	fn   func(dir string) GateResult
 	dirs []string
+	ids  []string // LandingID(ctx) per run
 }
 
-func (g *fakeGate) Run(_ context.Context, dir string) GateResult {
+func (g *fakeGate) Run(ctx context.Context, dir string) GateResult {
 	g.mu.Lock()
 	g.dirs = append(g.dirs, dir)
+	g.ids = append(g.ids, LandingID(ctx))
 	g.mu.Unlock()
 	return g.fn(dir)
 }
@@ -202,6 +204,89 @@ func (f *landFixture) assertRejected(t *testing.T, err error, kind RejectionKind
 		t.Errorf("rejection note:\n%s", b.Notes)
 	}
 	return rej
+}
+
+// TestLandReusesOneWorktreePath is gt-2ycne.2: Go's build cache keys include
+// the package directory, so a worktree at a new random path per landing
+// recompiled every package and wrote a full new cache generation each time
+// (~470 GB). Every landing checks out at the same WorkRoot/wt; what tells two
+// landings apart (their log directories) is LandingID on the gate's context.
+func TestLandReusesOneWorktreePath(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	red := true
+	f.gate.fn = func(string) GateResult {
+		if red {
+			red = false
+			return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+		}
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+	}
+	if _, err := f.lander().Land(context.Background(), f.work); err == nil || !strings.Contains(err.Error(), "landing rejected (gate)") {
+		t.Fatalf("first Land (red gate) = %v, want a gate rejection", err)
+	}
+	f.ready(f.work.Head)
+	f.gate.fn = func(string) GateResult { return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}} }
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("second Land: %v", err)
+	}
+	want := filepath.Join(f.workRoot, "wt")
+	// f.ready replaced f.gate; the first landing's run is on the first gate.
+	if len(f.gate.dirs) != 1 || f.gate.dirs[0] != want {
+		t.Fatalf("second landing gated in %v, want [%s]", f.gate.dirs, want)
+	}
+	if f.gate.ids[0] == "" {
+		t.Fatal("the gate's context carries no LandingID")
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Errorf("worktree %s left behind after the landing (stat err %v)", want, err)
+	}
+}
+
+// TestLandReusesTheWorktreePathPastALeftover: a landing that died before its
+// cleanup leaves WorkRoot/wt behind; the next landing clears it, not fails.
+func TestLandReusesTheWorktreePathPastALeftover(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	leftover := filepath.Join(f.workRoot, "wt")
+	if err := os.MkdirAll(leftover, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, "stale.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var sawStale bool
+	f.gate.fn = func(dir string) GateResult {
+		_, err := os.Stat(filepath.Join(dir, "stale.txt"))
+		sawStale = err == nil
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+	}
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land past a leftover worktree: %v", err)
+	}
+	if sawStale {
+		t.Error("the gate saw the dead landing's files")
+	}
+}
+
+// TestLandingIDsDiffer: two landings get two log directories.
+func TestLandingIDsDiffer(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	g := f.gate
+	g.fn = func(string) GateResult {
+		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+	}
+	for i := 0; i < 2; i++ {
+		f.ready(f.work.Head)
+		f.gate = g
+		if _, err := f.lander().Land(context.Background(), f.work); err == nil || !strings.Contains(err.Error(), "landing rejected (gate)") {
+			t.Fatalf("Land %d (red gate) = %v, want a gate rejection", i+1, err)
+		}
+	}
+	if len(g.ids) != 2 || g.ids[0] == "" || g.ids[0] == g.ids[1] {
+		t.Fatalf("landing IDs = %q, want two distinct non-empty IDs", g.ids)
+	}
 }
 
 func TestLandMergesGatesPushesAndRecords(t *testing.T) {

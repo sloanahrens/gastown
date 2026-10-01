@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -296,11 +297,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		})}, nil)
 	}
 
-	dir, cleanup, err := l.addWorktree(g, base)
+	dir, id, cleanup, err := l.addWorktree(g, base)
 	if err != nil {
 		return Result{}, &InfraError{Stage: "worktree", Err: err}
 	}
 	defer cleanup()
+	ctx = WithLandingID(ctx, id)
 	wt := l.open(dir)
 
 	merged, rej, err := mergeWork(wt, w, base)
@@ -481,27 +483,63 @@ func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	return nil, nil
 }
 
-// addWorktree adds a detached worktree at base under WorkRoot.
-func (l *Lander) addWorktree(g Repo, base string) (string, func(), error) {
+// landingIDKey carries a landing's ID on the context Land hands its gate.
+type landingIDKey struct{}
+
+// LandingID is the ID of the landing whose gate or rerun ctx belongs to,
+// unique per landing (the name of its land-* directory under WorkRoot): what
+// keeps two landings' logs apart now that every landing checks out at the
+// same path. "" outside a landing.
+func LandingID(ctx context.Context) string {
+	id, _ := ctx.Value(landingIDKey{}).(string)
+	return id
+}
+
+// WithLandingID returns ctx carrying id as its LandingID: what Land does for
+// its gate, for a caller (or a test) that runs a gate outside Land.
+func WithLandingID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, landingIDKey{}, id)
+}
+
+// landWorktreeName is the one worktree directory every landing of a rig uses,
+// under WorkRoot. A fixed path is what lets Go's build cache hit across
+// landings: its keys include each package's directory, so a new random path
+// per landing recompiled every package and wrote a whole new cache
+// generation each time (gt-2ycne.2, ~470 GB). The worker lands one bead at a
+// time per rig, so one path per WorkRoot is never shared.
+const landWorktreeName = "wt"
+
+// addWorktree adds a detached worktree at base at WorkRoot/wt, clearing one a
+// dead landing left there, and returns it with this landing's ID.
+func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(), err error) {
 	if err := os.MkdirAll(l.WorkRoot, 0o700); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if err := os.Chmod(l.WorkRoot, 0o700); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
+	// The land-* directory is only the landing's identity now: unique, and
+	// the name its logs go under.
 	parent, err := os.MkdirTemp(l.WorkRoot, "land-*")
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
-	dir := parent + "/wt"
+	dir = filepath.Join(l.WorkRoot, landWorktreeName)
+	removeWorktree := func() {
+		_ = g.WorktreeRemove(dir, true)
+		_ = os.RemoveAll(dir)
+		_ = g.WorktreePrune()
+	}
+	if _, statErr := os.Lstat(dir); statErr == nil {
+		removeWorktree()
+	}
 	if err := g.WorktreeAddDetached(dir, base); err != nil {
 		_ = os.RemoveAll(parent)
-		return "", nil, err
+		return "", "", nil, err
 	}
-	return dir, func() {
-		_ = g.WorktreeRemove(dir, true)
+	return dir, filepath.Base(parent), func() {
+		removeWorktree()
 		_ = os.RemoveAll(parent)
-		_ = g.WorktreePrune()
 	}, nil
 }
 
