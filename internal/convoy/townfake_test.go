@@ -7,51 +7,63 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/mail"
 )
 
-// gtCall is one gt notice child: its directory, environment and arguments.
-type gtCall struct {
-	Dir  string
-	Env  []string
-	Args []string
+// nudgeCall is one notice nudge: its target, message and sender.
+type nudgeCall struct {
+	Target  string
+	Message string
+	Sender  string
 }
 
-// gtScript is a gtRunner that records every gt call and fails none.
-type gtScript struct {
-	mu    sync.Mutex
-	calls []gtCall
+// noticeScript is a Town's notice seams: it records every mail and nudge a
+// convoy sent and fails none. onMail runs after each mail is recorded, which
+// is how the notice order tests place a send among the store's calls.
+type noticeScript struct {
+	mu     sync.Mutex
+	mails  []mail.SendRequest
+	nudges []nudgeCall
+	onMail func()
 }
 
-func (s *gtScript) run(dir string, env []string, args ...string) error {
+func (s *noticeScript) mail(req mail.SendRequest) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls = append(s.calls, gtCall{Dir: dir, Env: env, Args: args})
+	s.mails = append(s.mails, req)
+	onMail := s.onMail
+	s.mu.Unlock()
+	if onMail != nil {
+		onMail()
+	}
 	return nil
 }
 
-func (s *gtScript) recorded() []gtCall {
+func (s *noticeScript) nudge(target, message, sender string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]gtCall(nil), s.calls...)
+	s.nudges = append(s.nudges, nudgeCall{Target: target, Message: message, Sender: sender})
+	return nil
 }
 
-// envValue is key's value in env, the last one winning as in exec.
-func envValue(env []string, key string) string {
-	val := ""
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
-			val = v
-		}
-	}
-	return val
+func (s *noticeScript) mailsSent() []mail.SendRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mail.SendRequest(nil), s.mails...)
+}
+
+func (s *noticeScript) nudgesSent() []nudgeCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]nudgeCall(nil), s.nudges...)
 }
 
 // testTown is a Town at root whose every store, the routed issue lookup
-// included, is db, and whose gt calls go to gt.
-func testTown(root string, db Store, gt *gtScript) Town {
+// included, is db, and whose notices go to notices. A nil notices leaves the
+// town's real mail and nudge delivery in place.
+func testTown(root string, db Store, notices *noticeScript) Town {
 	t := Town{Root: root, Open: func(string) Store { return db }, Issues: db}
-	if gt != nil {
-		t.gtRun = gt.run
+	if notices != nil {
+		t.Mail, t.Nudge = notices.mail, notices.nudge
 	}
 	return t
 }

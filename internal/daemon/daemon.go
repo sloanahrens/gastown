@@ -40,6 +40,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -93,6 +94,11 @@ type Daemon struct {
 	// through, given bd's whole environment (see workBeads); nil is bd at
 	// bdPath run from the town root. Tests answer from a beadsfake.
 	openWorkBeads func(env []string) workBeadReader
+
+	// schedulerDeps are the collaborators scheduled dispatch runs on (the
+	// sling and the polecat-capacity probe, both in package cmd). Set through
+	// SetSchedulerDeps; empty means this daemon does not dispatch.
+	schedulerDeps schedulerrun.Deps
 
 	// lastTownHealth is the previous health report, the baseline for the
 	// heartbeat advance check. Heartbeat goroutine only.
@@ -1194,7 +1200,7 @@ var heartbeatSteps = []heartbeatStep{
 	{name: "branch-prune", run: (*Daemon).pruneStaleBranches},
 
 	// Dispatch scheduled work (capacity-controlled polecat dispatch).
-	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
+	// Runs internal/schedulerrun in process; package cmd installs the deps.
 	// Pressure-gated: polecats are the primary resource consumers.
 	{name: "dispatch", lifecycle: true, run: func(d *Daemon) {
 		if p := d.checkPressure("polecat"); !p.OK {
@@ -2812,17 +2818,17 @@ func (d *Daemon) pruneStaleBranches() {
 	pruneInDir(d.config.TownRoot, "town-root")
 }
 
-// dispatchQueuedWork shells out to `gt scheduler run` to dispatch scheduled beads.
-// This avoids circular import between the daemon and cmd packages.
-// Uses a 5m timeout to allow multi-bead dispatch with formula cooking and hook retries.
+// dispatchQueuedWork dispatches scheduled beads through internal/schedulerrun,
+// the same code `gt scheduler run` runs, in this process (gt-638go.9). The
+// deps it needs live in package cmd and arrive through SetSchedulerDeps.
 //
 // Timeout safety: if the timeout fires mid-dispatch, a bead may be left with
 // metadata written but label not yet swapped (or vice versa). The dispatch flock
-// is released on process death, and dispatchSingleBead's label swap retry logic
+// is released on process death, and the sling path's label swap retry logic
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
 func (d *Daemon) dispatchQueuedWork() {
-	// `gt scheduler run` slings queued beads (executeSling); the operator's
+	// Scheduled dispatch slings queued beads (executeSling); the operator's
 	// town-wide hold parks it like every other automatic dispatcher
 	// (gt-ifijm). ESTOP holds this heartbeat step (heartbeatSteps); the
 	// hold file does not, so it is checked here.
@@ -2837,18 +2843,7 @@ func (d *Daemon) dispatchQueuedWork() {
 	if reason != "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), schedulerDispatchTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
-	setSysProcAttr(cmd)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(daemonGTEnv(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads"))), "GT_DAEMON=1")
-	out, err := d.combinedOutput(cmd)
-	if ctx.Err() == context.DeadlineExceeded {
-		d.logger.Printf("Scheduler dispatch timed out after 5m")
-	} else if err != nil {
-		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
-	} else if len(out) > 0 {
-		d.logger.Printf("Scheduler dispatch: %s", string(out))
-	}
+	d.dispatchScheduledWork(ctx)
 }

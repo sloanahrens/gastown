@@ -45,6 +45,11 @@ const allowRemoteMigrateEnv = "BD_ALLOW_REMOTE_MIGRATE"
 // a pool cannot exist unfilled.
 type initSlots struct {
 	tokens chan struct{}
+	// blocked, when set, receives once each time an acquire finds no free
+	// token and starts to wait. Tests use it to see "queued on the slot" as
+	// an event rather than infer it from a sleep (gt-h1vod); production
+	// never sets it.
+	blocked chan<- struct{}
 }
 
 func newInitSlots(n int) *initSlots {
@@ -67,8 +72,15 @@ func (s *initSlots) acquire(ctx context.Context) (release func(), err error) {
 	}
 	select {
 	case <-s.tokens:
-	case <-ctx.Done():
-		return nil, fmt.Errorf("test Dolt init slot: %w", ctx.Err())
+	default:
+		if s.blocked != nil {
+			s.blocked <- struct{}{}
+		}
+		select {
+		case <-s.tokens:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("test Dolt init slot: %w", ctx.Err())
+		}
 	}
 	var once sync.Once
 	return func() { once.Do(func() { s.tokens <- struct{}{} }) }, nil

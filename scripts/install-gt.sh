@@ -73,17 +73,9 @@ done
 case "$SOURCE" in manual|rebuild-gt|post-land) ;; *) echo "install-gt: --source must be manual, rebuild-gt or post-land" >&2; exit 1 ;; esac
 [ -n "$SHA" ] || { echo "install-gt: --sha needs a commit" >&2; exit 1; }
 
-# town_root_above DIR — the outermost ancestor of DIR holding mayor/town.json
-# (outermost, as internal/workspace does: a rig can carry its own mayor/).
-town_root_above() {
-  local d="$1" found=""
-  while [ "$d" != "/" ] && [ -n "$d" ]; do
-    [ -f "$d/mayor/town.json" ] && found="$d"
-    d=$(dirname "$d")
-  done
-  echo "$found"
-}
-TOWN_ROOT="${GT_TOWN_ROOT:-$(town_root_above "$SCRIPT_DIR")}"
+# The town root comes from the shared helper in lib/install-gt-lib.sh, so
+# install and uninstall agree on what a town is (gt-acdfp).
+TOWN_ROOT="${GT_TOWN_ROOT:-$(igt_town_root_above "$SCRIPT_DIR")}"
 BIN_DIR="${INSTALL_GT_BIN_DIR:-$HOME/.local/bin}"
 DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/daemon}"
 RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/gastown/mayor/rig}"

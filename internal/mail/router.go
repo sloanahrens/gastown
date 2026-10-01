@@ -49,6 +49,9 @@ type Router struct {
 	// town answers the router's reads of the town's channel and agent
 	// beads; nil is bd in the town root.
 	town townBeads
+	// resolve resolves a recipient address in SendMessage; nil resolves it
+	// through the address resolver over the town's beads.
+	resolve func(address string) ([]Recipient, error)
 
 	// IdleNotifyTimeout controls how long to wait for a session to become
 	// idle before falling back to a queued nudge. Zero uses the default.

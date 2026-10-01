@@ -277,6 +277,7 @@ func ScanAgentProse(root string) ([]Ref, error) {
 	}
 	defer func() { _ = r.Close() }()
 	fsys := r.FS()
+	visible := gitVisible(root)
 
 	var refs []Ref
 	err = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
@@ -288,6 +289,9 @@ func ScanAgentProse(root string) ([]Ref, error) {
 			case ".git", "testdata", "node_modules", "vendor":
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if visible != nil && !visible[rel] {
 			return nil
 		}
 		if !agentFacing(rel) {

@@ -11,7 +11,6 @@ internal/beads/beads.go GT_TEST_BD_TIMEOUT_SEC 1
 internal/beads/test_container.go GT_TEST_DOLT_INIT_CONCURRENCY 1
 internal/cli/name.go GT_COMMAND 1
 internal/cmd/agents.go GT_TOWN_SOCKET 1
-internal/cmd/capacity_dispatch.go GT_DAEMON 1
 internal/cmd/handoff.go GT_AGENT_OVERRIDE 2
 internal/cmd/handoff.go GT_PROCESS_NAMES 2
 internal/cmd/install.go GT_TEST_EXTERNAL_DOLT 1

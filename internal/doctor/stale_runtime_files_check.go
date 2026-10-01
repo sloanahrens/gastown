@@ -28,7 +28,7 @@ func buildPrefixSet(registeredRigs map[string]bool, townRoot string) map[string]
 // think agents are running or try to start agents for removed rigs.
 type StaleRuntimeFilesCheck struct {
 	FixableCheck
-	stalePIDFiles   []string
+	stalePIDFiles    []string
 	staleWispConfigs []string
 }
 
@@ -174,4 +174,3 @@ func extractRigPrefix(filename string) string {
 	}
 	return name
 }
-

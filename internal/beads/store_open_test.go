@@ -16,7 +16,7 @@ import (
 func TestOpenStoreFromConfig_RefusesBeadsDirWithoutDatabase(t *testing.T) {
 	t.Parallel()
 	for name, metadata := range map[string]string{
-		"no metadata.json":         "",
+		"no metadata.json":        "",
 		"metadata without a name": `{"backend":"dolt","dolt_mode":"server"}`,
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -71,6 +71,8 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 		}},
 	}
 
+	// Scheduled dispatch forks nothing since gt-638go.9; it runs the scheduler
+	// in process, so it contributes no gt call here.
 	d.dispatchQueuedWork()
 	_, _ = d.runSpecDispatchCommand()
 	_, _ = d.readDispatchCheck()
@@ -82,7 +84,7 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	_, _, _ = m.runGt(pollutedEnv(), "sling", "gt-issue1")
 
 	calls := gt.recorded()
-	want := []string{"scheduler run", "spec dispatch", "daemon dispatch-check", "session restart", "sling gt-run1", "sling gt-issue1"}
+	want := []string{"spec dispatch", "daemon dispatch-check", "session restart", "sling gt-run1", "sling gt-issue1"}
 	if len(calls) != len(want) {
 		t.Fatalf("recorded %d gt calls, want %d: %+v", len(calls), len(want), calls)
 	}

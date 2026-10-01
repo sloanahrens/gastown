@@ -358,7 +358,6 @@ func RenderStatusIcon(status string) string {
 	}
 }
 
-
 // RenderPriority renders a priority level with semantic styling
 // Format: "● P0" (icon + label)
 // P0/P1/P2 get color; P3/P4 use standard text
@@ -419,4 +418,3 @@ func RenderType(issueType string) string {
 		return issueType
 	}
 }
-
