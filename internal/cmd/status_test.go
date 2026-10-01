@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,29 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 )
-
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create pipe: %v", err)
-	}
-	os.Stderr = w
-
-	fn()
-
-	_ = w.Close()
-	os.Stderr = old
-
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatalf("read stderr: %v", err)
-	}
-	_ = r.Close()
-
-	return buf.String()
-}
 
 func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 	t.Parallel()

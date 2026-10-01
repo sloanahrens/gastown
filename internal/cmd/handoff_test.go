@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +24,25 @@ func handoffTestRegistry() *session.PrefixRegistry {
 	return reg
 }
 
-// buildTestRestartCommand is buildRestartCommand parsing with handoffTestRegistry.
-func buildTestRestartCommand(sessionName string) (string, error) {
-	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{Registry: handoffTestRegistry()})
+// restartOpts are buildRestartCommandOpts for a session of townRoot parsed
+// with handoffTestRegistry, reading env as the process environment and no
+// tmux.
+func restartOpts(townRoot string, env map[string]string) buildRestartCommandOpts {
+	return buildRestartCommandOpts{
+		Registry: handoffTestRegistry(),
+		TownRoot: townRoot,
+		LookupEnv: func(k string) (string, bool) {
+			v, ok := env[k]
+			return v, ok
+		},
+		SessionEnv: func(string, string) (string, error) { return "", errors.New("no tmux in a unit test") },
+	}
+}
+
+// buildTestRestartCommand is buildRestartCommand for a session of townRoot
+// whose process environment is env.
+func buildTestRestartCommand(townRoot string, env map[string]string, sessionName string) (string, error) {
+	return buildRestartCommandWithOpts(sessionName, restartOpts(townRoot, env))
 }
 
 func TestResolvePathToSessionRejectsUnsafeSegments(t *testing.T) {
@@ -39,24 +57,26 @@ func TestResolvePathToSessionRejectsUnsafeSegments(t *testing.T) {
 }
 
 func TestHandoffStdinFlag(t *testing.T) {
+	t.Parallel()
 	t.Run("errors when both stdin and message provided", func(t *testing.T) {
-		// Save and restore flag state
-		origMessage := handoffMessage
-		origStdin := handoffStdin
-		defer func() {
-			handoffMessage = origMessage
-			handoffStdin = origStdin
-		}()
-
-		handoffMessage = "some message"
-		handoffStdin = true
-
-		err := runHandoff(handoffCmd, nil)
+		t.Parallel()
+		_, err := handoffMessageInput("some message", true, func() ([]byte, error) {
+			t.Fatal("stdin read")
+			return nil, nil
+		})
 		if err == nil {
 			t.Fatal("expected error when both --stdin and --message are set")
 		}
 		if !strings.Contains(err.Error(), "cannot use --stdin with --message/-m") {
 			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reads the message from stdin", func(t *testing.T) {
+		t.Parallel()
+		got, err := handoffMessageInput("", true, func() ([]byte, error) { return []byte("from stdin\n\n"), nil })
+		if err != nil || got != "from stdin" {
+			t.Fatalf("handoffMessageInput = %q, %v; want %q", got, err, "from stdin")
 		}
 	})
 }
@@ -100,10 +120,8 @@ func TestSessionWorkDir(t *testing.T) {
 }
 
 func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
+	t.Parallel()
+	env := map[string]string{}
 
 	// TempDir must be called BEFORE registering the Chdir cleanup so that
 	// LIFO ordering restores the working directory before TempDir removal.
@@ -111,12 +129,6 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 	// inside it.
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 	crewDir := filepath.Join(rigPath, "crew", "holden")
 
@@ -148,20 +160,9 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	if err := os.Setenv("GT_AGENT", ""); err != nil {
-		t.Fatalf("Setenv GT_AGENT: %v", err)
-	}
-	if err := os.Setenv("GT_TOWN_ROOT", ""); err != nil {
-		t.Fatalf("Setenv GT_TOWN_ROOT: %v", err)
-	}
-	if err := os.Setenv("GT_ROOT", ""); err != nil {
-		t.Fatalf("Setenv GT_ROOT: %v", err)
-	}
-	if err := os.Chdir(crewDir); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = ""
 
-	cmd, err := buildTestRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -172,23 +173,15 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 }
 
 func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{}
 	// Regression test: ensure agent preset Env block (config.json [agents.X.env])
 	// is fully merged into the respawn command, not just NODE_OPTIONS.
 	// Without this, custom env vars like ANTHROPIC_BASE_URL configured for
 	// proxied Claude were silently dropped on handoff/respawn.
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
 
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 	crewDir := filepath.Join(rigPath, "crew", "holden")
 
@@ -222,14 +215,9 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	_ = os.Setenv("GT_AGENT", "claude-proxy")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(crewDir); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = "claude-proxy"
 
-	cmd, err := buildTestRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -250,16 +238,8 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 }
 
 func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
+	t.Parallel()
+	env := map[string]string{}
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "gastown")
@@ -298,14 +278,9 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	_ = os.Setenv("GT_AGENT", "target-cleaner")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(crewDir); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = "target-cleaner"
 
-	cmd, err := buildTestRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -328,19 +303,11 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 }
 
 func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
+	t.Parallel()
+	env := map[string]string{}
 
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 	crewDir := filepath.Join(rigPath, "crew", "bear")
 
@@ -363,14 +330,14 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	_ = os.Setenv("GT_AGENT", "")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	_ = os.Chdir(crewDir)
+	env["GT_AGENT"] = ""
 
 	t.Run("custom ContinuePrompt overrides default", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			Registry:        handoffTestRegistry(),
+			TownRoot:        townRoot,
+			LookupEnv:       restartOpts(townRoot, env).LookupEnv,
+			SessionEnv:      restartOpts(townRoot, env).SessionEnv,
 			ContinueSession: true,
 			ContinuePrompt:  "Context compacted. Continue your previous task.",
 		})
@@ -388,6 +355,9 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	t.Run("empty ContinuePrompt falls back to default", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			Registry:        handoffTestRegistry(),
+			TownRoot:        townRoot,
+			LookupEnv:       restartOpts(townRoot, env).LookupEnv,
+			SessionEnv:      restartOpts(townRoot, env).SessionEnv,
 			ContinueSession: true,
 		})
 		if err != nil {
@@ -404,6 +374,9 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 	t.Run("ContinueSession false uses beacon", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
 			Registry:        handoffTestRegistry(),
+			TownRoot:        townRoot,
+			LookupEnv:       restartOpts(townRoot, env).LookupEnv,
+			SessionEnv:      restartOpts(townRoot, env).SessionEnv,
 			ContinueSession: false,
 		})
 		if err != nil {
@@ -416,13 +389,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 }
 
 func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
-	// Save original env vars and restore after test
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
-	defer func() {
-		os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		os.Setenv("GT_ROOT", origRoot)
-	}()
+	t.Parallel()
 
 	// Create a temp directory that looks like a valid town
 	tmpTown := t.TempDir()
@@ -435,95 +402,62 @@ func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
 		t.Fatalf("creating town.json: %v", err)
 	}
 
-	// Clear both env vars initially
-	os.Setenv("GT_TOWN_ROOT", "")
-	os.Setenv("GT_ROOT", "")
-
 	t.Run("uses GT_TOWN_ROOT when cwd detection fails", func(t *testing.T) {
-		// Set GT_TOWN_ROOT to our temp town
-		os.Setenv("GT_TOWN_ROOT", tmpTown)
-		os.Setenv("GT_ROOT", "")
+		t.Parallel()
+		env := envMap(map[string]string{"GT_TOWN_ROOT": tmpTown, "GT_ROOT": ""})
 
-		// Save cwd, cd to a non-town directory, and restore after
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		defer os.Chdir(origCwd)
-
-		result := detectTownRootFromCwd()
+		result := townRootFromEnv(env)
 		if result != tmpTown {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should use GT_TOWN_ROOT fallback)", result, tmpTown)
 		}
 	})
 
 	t.Run("uses GT_ROOT when GT_TOWN_ROOT not set", func(t *testing.T) {
-		// Set only GT_ROOT
-		os.Setenv("GT_TOWN_ROOT", "")
-		os.Setenv("GT_ROOT", tmpTown)
+		t.Parallel()
+		env := envMap(map[string]string{"GT_TOWN_ROOT": "", "GT_ROOT": tmpTown})
 
-		// Save cwd, cd to a non-town directory, and restore after
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		defer os.Chdir(origCwd)
-
-		result := detectTownRootFromCwd()
+		result := townRootFromEnv(env)
 		if result != tmpTown {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should use GT_ROOT fallback)", result, tmpTown)
 		}
 	})
 
 	t.Run("prefers GT_TOWN_ROOT over GT_ROOT", func(t *testing.T) {
+		t.Parallel()
 		// Create another temp town for GT_ROOT
 		anotherTown := t.TempDir()
 		anotherMayor := filepath.Join(anotherTown, "mayor")
 		os.MkdirAll(anotherMayor, 0755)
 		os.WriteFile(filepath.Join(anotherMayor, "town.json"), []byte(`{"name": "other-town"}`), 0644)
 
-		// Set both env vars
-		os.Setenv("GT_TOWN_ROOT", tmpTown)
-		os.Setenv("GT_ROOT", anotherTown)
+		env := envMap(map[string]string{"GT_TOWN_ROOT": tmpTown, "GT_ROOT": anotherTown})
 
-		// Save cwd, cd to a non-town directory, and restore after
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		defer os.Chdir(origCwd)
-
-		result := detectTownRootFromCwd()
+		result := townRootFromEnv(env)
 		if result != tmpTown {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should prefer GT_TOWN_ROOT)", result, tmpTown)
 		}
 	})
 
 	t.Run("ignores invalid GT_TOWN_ROOT", func(t *testing.T) {
-		// Set GT_TOWN_ROOT to non-existent path, GT_ROOT to valid
-		os.Setenv("GT_TOWN_ROOT", "/nonexistent/path/to/town")
-		os.Setenv("GT_ROOT", tmpTown)
+		t.Parallel()
+		env := envMap(map[string]string{"GT_TOWN_ROOT": "/nonexistent/path/to/town", "GT_ROOT": tmpTown})
 
-		// Save cwd, cd to a non-town directory, and restore after
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		defer os.Chdir(origCwd)
-
-		result := detectTownRootFromCwd()
+		result := townRootFromEnv(env)
 		if result != tmpTown {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should skip invalid GT_TOWN_ROOT and use GT_ROOT)", result, tmpTown)
 		}
 	})
 
 	t.Run("uses secondary marker when primary missing", func(t *testing.T) {
+		t.Parallel()
 		// Create a temp town with only mayor/ directory (no town.json)
 		secondaryTown := t.TempDir()
 		mayorOnlyDir := filepath.Join(secondaryTown, workspace.SecondaryMarker)
 		os.MkdirAll(mayorOnlyDir, 0755)
 
-		os.Setenv("GT_TOWN_ROOT", secondaryTown)
-		os.Setenv("GT_ROOT", "")
+		env := envMap(map[string]string{"GT_TOWN_ROOT": secondaryTown, "GT_ROOT": ""})
 
-		// Save cwd, cd to a non-town directory, and restore after
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		defer os.Chdir(origCwd)
-
-		result := detectTownRootFromCwd()
+		result := townRootFromEnv(env)
 		if result != secondaryTown {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should accept secondary marker)", result, secondaryTown)
 		}
@@ -552,7 +486,7 @@ func buildMakeTestGitRepo(t *testing.T, dir string) string {
 		{"git", "-C", dir, "config", "core.fsmonitor", "false"},
 		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
 	} {
-		if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
+		if err := exec.Command("git", args[1:]...).Run(); err != nil {
 			t.Fatalf("git setup %v: %v", args, err)
 		}
 	}
@@ -563,6 +497,7 @@ func buildMakeTestGitRepo(t *testing.T, dir string) string {
 // GT_ROLE as the authoritative check, so coordinators with a stale GT_POLECAT
 // in their environment are not redirected to gt done (GH #1707).
 func TestHandoffPolecatEnvCheck(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		role      string
@@ -621,76 +556,30 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			binDir := t.TempDir()
-			gtLog := filepath.Join(t.TempDir(), "gt.log")
-			_ = writeBDStub(t, binDir, "#!/bin/sh\nexit 0\n", "@echo off\r\nexit /b 0\r\n")
-			gtStub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + gtLog + "\"\nenv | grep -q '^" + envDoneFromHandoff + "=1$' && printf 'env-marker-set\\n' >> \"" + gtLog + "\"\nprintf 'stub gt %s\\n' \"$*\"\nexit 0\n"
-			if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtStub), 0755); err != nil {
-				t.Fatalf("write gt stub: %v", err)
-			}
-			gtCmdStub := "@echo off\r\necho %* >> \"" + gtLog + "\"\r\necho stub gt %*\r\nexit /b 0\r\n"
-			if err := os.WriteFile(filepath.Join(binDir, "gt.cmd"), []byte(gtCmdStub), 0644); err != nil {
-				t.Fatalf("write gt.cmd stub: %v", err)
-			}
-			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			isolatedRoot := t.TempDir()
-			t.Setenv("GT_TOWN_ROOT", isolatedRoot)
-			t.Setenv("GT_ROOT", isolatedRoot)
-			t.Chdir(isolatedRoot)
-			t.Setenv("GT_ROLE", tt.role)
-			t.Setenv("GT_POLECAT", tt.polecat)
-			// Ensure deterministic non-tmux execution so the non-polecat
-			// paths fail predictably instead of triggering real side effects.
-			t.Setenv("TMUX", "")
-			t.Setenv("TMUX_PANE", "")
-
-			// Reset flags to avoid interference
-			origMessage := handoffMessage
-			origStdin := handoffStdin
-			origAuto := handoffAuto
-			defer func() {
-				handoffMessage = origMessage
-				handoffStdin = origStdin
-				handoffAuto = origAuto
-			}()
-			handoffMessage = ""
-			handoffStdin = false
-			handoffAuto = false
-
-			// The polecat path tries to exec "gt done" which will fail in tests.
-			// We capture stdout to detect the "Polecat detected" message, which
-			// confirms the polecat guard triggered. Non-polecat paths will fail
-			// later (missing tmux, etc.) without printing the polecat message.
-			var blocked bool
-			output := captureStdout(t, func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// Panic means we got past the guard — not blocked
-					}
-				}()
-				runHandoff(handoffCmd, nil)
-			})
-			blocked = strings.Contains(output, "Polecat detected")
-
+			t.Parallel()
+			blocked, name := handoffPolecat(envMap(map[string]string{"GT_ROLE": tt.role, "GT_POLECAT": tt.polecat}))
 			if blocked != tt.wantBlock {
-				if tt.wantBlock {
-					t.Errorf("expected polecat redirect but was not redirected (GT_ROLE=%q GT_POLECAT=%q)", tt.role, tt.polecat)
-				} else {
-					t.Errorf("unexpected polecat redirect with GT_ROLE=%q GT_POLECAT=%q; output: %s", tt.role, tt.polecat, output)
-				}
+				t.Errorf("handoffPolecat redirect = %v, want %v (GT_ROLE=%q GT_POLECAT=%q)", blocked, tt.wantBlock, tt.role, tt.polecat)
 			}
-			gtLogBytes, _ := os.ReadFile(gtLog)
-			stubRan := strings.Contains(string(gtLogBytes), "done --status DEFERRED")
-			if stubRan != tt.wantBlock {
-				t.Errorf("gt stub ran = %v, want %v; log: %s", stubRan, tt.wantBlock, gtLogBytes)
-			}
-			// The handoff-triggered gt done must carry the marker that tells it
-			// to preserve the session instead of retiring it (gt-5g3e).
-			envMarkerSet := strings.Contains(string(gtLogBytes), "env-marker-set")
-			if envMarkerSet != tt.wantBlock {
-				t.Errorf("%s propagated to gt done subprocess = %v, want %v; log: %s", envDoneFromHandoff, envMarkerSet, tt.wantBlock, gtLogBytes)
+			if blocked && name != tt.polecat {
+				t.Errorf("polecat name = %q, want %q", name, tt.polecat)
 			}
 		})
+	}
+}
+
+// TestPolecatHandoffDoneCmd: a polecat's handoff runs gt done DEFERRED and
+// marks it handoff-originated, so gt done preserves the session instead of
+// retiring it (gt-5g3e).
+func TestPolecatHandoffDoneCmd(t *testing.T) {
+	t.Parallel()
+	cmd := polecatHandoffDoneCmd([]string{"GT_ROLE=gastown/polecats/Toast"})
+	if got := strings.Join(cmd.Args, " "); got != "gt done --status DEFERRED" {
+		t.Fatalf("args = %q, want gt done --status DEFERRED", got)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	if !strings.Contains(env, envDoneFromHandoff+"=1") || !strings.Contains(env, "GT_ROLE=gastown/polecats/Toast") {
+		t.Fatalf("env = %v, want the caller's environment plus %s=1", cmd.Env, envDoneFromHandoff)
 	}
 }
 
@@ -780,21 +669,24 @@ func TestWarnHandoffGitStatus(t *testing.T) {
 }
 
 func TestHandoffProcessNames(t *testing.T) {
-	t.Run("same-agent restart preserves GT_PROCESS_NAMES from env", func(t *testing.T) {
+	t.Parallel()
+	newTown := func(t *testing.T) string {
 		tmpTown := t.TempDir()
 		mayorDir := filepath.Join(tmpTown, "mayor")
-		os.MkdirAll(mayorDir, 0755)
-		os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644)
+		if err := os.MkdirAll(mayorDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return tmpTown
+	}
 
-		t.Setenv("GT_ROOT", tmpTown)
-		t.Setenv("GT_AGENT", "claude")
-		t.Setenv("GT_PROCESS_NAMES", "node,claude")
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		t.Cleanup(func() { os.Chdir(origCwd) })
-
+	t.Run("same-agent restart preserves GT_PROCESS_NAMES from env", func(t *testing.T) {
+		t.Parallel()
+		env := map[string]string{"GT_AGENT": "claude", "GT_PROCESS_NAMES": "node,claude"}
 		// Same-agent restart should preserve existing process names from env
-		cmd, err := buildTestRestartCommand("gt-crew-propane")
+		cmd, err := buildTestRestartCommand(newTown(t), env, "gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -804,21 +696,10 @@ func TestHandoffProcessNames(t *testing.T) {
 	})
 
 	t.Run("first boot without GT_PROCESS_NAMES computes from config", func(t *testing.T) {
-		tmpTown := t.TempDir()
-		mayorDir := filepath.Join(tmpTown, "mayor")
-		os.MkdirAll(mayorDir, 0755)
-		os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644)
-
-		t.Setenv("GT_ROOT", tmpTown)
-		t.Setenv("GT_AGENT", "claude")
-		// Explicitly clear GT_PROCESS_NAMES to simulate first boot
-		t.Setenv("GT_PROCESS_NAMES", "")
-		origCwd, _ := os.Getwd()
-		os.Chdir(os.TempDir())
-		t.Cleanup(func() { os.Chdir(origCwd) })
-
-		// No GT_PROCESS_NAMES in env — should compute from agent config
-		cmd, err := buildTestRestartCommand("gt-crew-propane")
+		t.Parallel()
+		// GT_PROCESS_NAMES explicitly empty, as on first boot
+		env := map[string]string{"GT_AGENT": "claude", "GT_PROCESS_NAMES": ""}
+		cmd, err := buildTestRestartCommand(newTown(t), env, "gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -843,7 +724,7 @@ func TestCollectGitState(t *testing.T) {
 			{"git", "config", "user.name", "Test"},
 		}
 		for _, args := range cmds {
-			cmd := exec.Command(args[0], args[1:]...)
+			cmd := exec.Command("git", args[1:]...)
 			cmd.Dir = tmpDir
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("%v failed: %s", args, out)
@@ -858,7 +739,7 @@ func TestCollectGitState(t *testing.T) {
 			{"git", "add", "file.txt"},
 			{"git", "commit", "-m", "initial commit"},
 		} {
-			cmd := exec.Command(args[0], args[1:]...)
+			cmd := exec.Command("git", args[1:]...)
 			cmd.Dir = tmpDir
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("%v failed: %s", args, out)
@@ -898,10 +779,10 @@ func TestCollectGitState(t *testing.T) {
 // TestRecordHandoffTime verifies that recordHandoffTime creates the
 // timestamp file in .runtime/ with a recent modification time.
 func TestRecordHandoffTime(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
 
-	recordHandoffTime()
+	recordHandoffTimeIn(tmpDir)
 
 	tsPath := filepath.Join(tmpDir, constants.DirRuntime, constants.FileLastHandoffTS)
 	info, err := os.Stat(tsPath)
@@ -918,13 +799,14 @@ func TestRecordHandoffTime(t *testing.T) {
 // - Cooldown triggers when last handoff was recent
 // - No cooldown when enough time has passed
 func TestEnforceHandoffCooldown(t *testing.T) {
+	t.Parallel()
 	t.Run("no cooldown without previous handoff", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "")
+		t.Parallel()
+		role := ""
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
 
 		// Should return almost immediately (no file to check)
 		if elapsed != 0 {
@@ -933,9 +815,9 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 	})
 
 	t.Run("no cooldown when last handoff is old", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "")
+		t.Parallel()
+		role := ""
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
 		// Create a last_handoff_ts file with old mtime
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
@@ -947,7 +829,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.Chtimes(tsPath, oldTime, oldTime)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
 
 		if elapsed != 0 {
 			t.Errorf("expected no cooldown for old handoff, but waited %v", elapsed)
@@ -955,10 +837,9 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 	})
 
 	t.Run("cooldown triggers for recent handoff", func(t *testing.T) {
-		// Use a non-exempt role so cooldown applies
-		t.Setenv("GT_ROLE", "gastown/witness")
+		t.Parallel()
+		role := "gastown/witness"
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
 		// Create a last_handoff_ts file with very recent mtime
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
@@ -970,7 +851,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.Chtimes(tsPath, recentTime, recentTime)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
 
 		// Should wait approximately 1 second (the remaining cooldown)
 		if elapsed < 500*time.Millisecond {
@@ -982,9 +863,9 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 	})
 
 	t.Run("no cooldown for crew role", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "gastown/crew/max")
+		t.Parallel()
+		role := "gastown/crew/max"
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
 		// Create a recent handoff file that would normally trigger cooldown
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
@@ -993,7 +874,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.WriteFile(tsPath, []byte("now"), 0644)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
 
 		if elapsed != 0 {
 			t.Errorf("crew should be exempt from cooldown, but waited %v", elapsed)
@@ -1001,9 +882,9 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 	})
 
 	t.Run("no cooldown for mayor role", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "mayor")
+		t.Parallel()
+		role := "mayor"
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
 		// Create a recent handoff file that would normally trigger cooldown
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
@@ -1012,37 +893,10 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.WriteFile(tsPath, []byte("now"), 0644)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
 
 		if elapsed != 0 {
 			t.Errorf("mayor should be exempt from cooldown, but waited %v", elapsed)
-		}
-	})
-
-	// Wiring guard: the exported path really sleeps. The last handoff is
-	// placed 50ms short of the cooldown so the real wait stays short.
-	t.Run("enforceHandoffCooldown sleeps the remaining cooldown", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "gastown/witness")
-		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
-
-		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
-		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
-		if err := os.WriteFile(tsPath, []byte("now"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		recentTime := time.Now().Add(-(constants.MinHandoffCooldown - 50*time.Millisecond))
-		if err := os.Chtimes(tsPath, recentTime, recentTime); err != nil {
-			t.Fatal(err)
-		}
-
-		start := time.Now()
-		enforceHandoffCooldown()
-		if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
-			t.Errorf("enforceHandoffCooldown returned after %v; it did not sleep the remaining cooldown", elapsed)
 		}
 	})
 }
@@ -1057,21 +911,11 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 // GT_AGENT alone no longer means "override" after gt-di8p — the resolver is
 // now chosen by GT_AGENT_OVERRIDE, which only --agent spawns set.
 func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
+	t.Parallel()
+	env := map[string]string{}
 
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 	crewDir := filepath.Join(rigPath, "crew", "holden")
 
@@ -1093,11 +937,6 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	}
 	if err := os.WriteFile(promptPath, []byte("# crew\n"), 0644); err != nil {
 		t.Fatalf("write system prompt: %v", err)
-	}
-	// buildRestartCommand detects the town root from the resolved cwd, so on
-	// macOS the path comes back through /private/var; compare canonical forms.
-	if real, err := filepath.EvalSymlinks(promptPath); err == nil {
-		promptPath = real
 	}
 
 	townSettings := config.NewTownSettings()
@@ -1126,15 +965,10 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	_ = os.Setenv("GT_AGENT", "claude-proxy")
-	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(crewDir); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = "claude-proxy"
+	env["GT_AGENT_OVERRIDE"] = "1"
 
-	cmd, err := buildTestRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1168,21 +1002,11 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 // claude-opus-cycle (gt-di8p). The mapping is live config; the pin is a
 // snapshot of it taken at spawn.
 func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
+	t.Parallel()
+	env := map[string]string{}
 
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 	crewDir := filepath.Join(rigPath, "crew", "holden")
 
@@ -1225,15 +1049,10 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 
 	// The session was spawned while role_agents.crew was claude-opus, so
 	// that is the GT_AGENT its environment carries.
-	_ = os.Setenv("GT_AGENT", "claude-opus")
-	_ = os.Setenv("GT_AGENT_OVERRIDE", "")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(crewDir); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = "claude-opus"
+	env["GT_AGENT_OVERRIDE"] = ""
 
-	spawned, err := buildTestRestartCommand("gt-crew-holden")
+	spawned, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand before the config change: %v", err)
 	}
@@ -1245,7 +1064,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	// session still carries the old GT_AGENT.
 	writeRigRoleAgents("claude-opus-cycle")
 
-	handoff, err := buildTestRestartCommand("gt-crew-holden")
+	handoff, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand after the config change: %v", err)
 	}
@@ -1263,10 +1082,10 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 
 	// An explicit --agent override is not a snapshot of role_agents, so it
 	// survives the handoff even when the role is mapped.
-	_ = os.Setenv("GT_AGENT", "claude-opus")
-	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
+	env["GT_AGENT"] = "claude-opus"
+	env["GT_AGENT_OVERRIDE"] = "1"
 
-	overridden, err := buildTestRestartCommand("gt-crew-holden")
+	overridden, err := buildTestRestartCommand(townRoot, env, "gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand with an explicit override: %v", err)
 	}
@@ -1287,21 +1106,11 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 // swapped for the role's preset — and a change to the worker's own mapping must
 // take effect, exactly as it would on a fresh spawn (gt-di8p).
 func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	origGTAgent := os.Getenv("GT_AGENT")
-	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	origRoot := os.Getenv("GT_ROOT")
+	t.Parallel()
+	env := map[string]string{}
 
 	townRoot := t.TempDir()
 
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd)
-		_ = os.Setenv("GT_AGENT", origGTAgent)
-		_ = os.Setenv("GT_AGENT_OVERRIDE", origGTAgentOverride)
-		_ = os.Setenv("GT_TOWN_ROOT", origTownRoot)
-		_ = os.Setenv("GT_ROOT", origRoot)
-	})
 	rigPath := filepath.Join(townRoot, "gastown")
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
@@ -1349,15 +1158,10 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 	}
 	writeWorkerAgent("claude-worker")
 
-	_ = os.Setenv("GT_AGENT", "claude-worker")
-	_ = os.Setenv("GT_AGENT_OVERRIDE", "")
-	_ = os.Setenv("GT_TOWN_ROOT", "")
-	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(filepath.Join(rigPath, "crew", "toast")); err != nil {
-		t.Fatalf("chdir crew dir: %v", err)
-	}
+	env["GT_AGENT"] = "claude-worker"
+	env["GT_AGENT_OVERRIDE"] = ""
 
-	cmd, err := buildTestRestartCommand("gt-crew-toast")
+	cmd, err := buildTestRestartCommand(townRoot, env, "gt-crew-toast")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1373,7 +1177,7 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 	// spawn of the same worker resolves worker_agents first.
 	writeWorkerAgent("claude-worker2")
 
-	changed, err := buildTestRestartCommand("gt-crew-toast")
+	changed, err := buildTestRestartCommand(townRoot, env, "gt-crew-toast")
 	if err != nil {
 		t.Fatalf("buildRestartCommand after the worker mapping change: %v", err)
 	}
@@ -1420,6 +1224,7 @@ func TestWriteHandoffMarker(t *testing.T) {
 }
 
 func TestIssueSummaryLines(t *testing.T) {
+	t.Parallel()
 	got := issueSummaryLines([]byte(`[{"id":"gt-a","title":"First","priority":0},{"id":"gt-b","title":"Second"}]`))
 	want := []string{"gt-a [P0] First", "gt-b Second"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {

@@ -174,7 +174,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Check for handoff marker (prevents handoff loop bug)
 	if primeDryRun {
-		checkHandoffMarkerDryRun(cwd)
+		if reason := checkHandoffMarkerDryRun(os.Stdout, primeExplain, cwd); reason != "" {
+			primeHandoffReason = reason
+		}
 	} else {
 		checkHandoffMarker(cwd)
 	}
@@ -191,7 +193,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	// --state mode: output state only and exit
 	if primeState {
-		outputState(ctx, primeStateJSON)
+		outputState(os.Stdout, ctx, primeStateJSON)
 		return nil
 	}
 
@@ -257,34 +259,40 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// (refinery safety-stop lookup, formula rendering) must abort before the
 	// side-effecting sections (mail inject, checkpoint cleanup) run.
 	var slungErr error
-	hookedWorkText := captureOutput(func() {
-		_, slungErr = checkSlungWork(ctx, hookedBead)
-		outputAttachmentStatus(ctx)
-	})
+	var hookedWork strings.Builder
+	_, slungErr = checkSlungWork(&hookedWork, ctx, hookedBead)
+	outputAttachmentStatus(&hookedWork, ctx)
 	if slungErr != nil {
 		return slungErr
+	}
+	section := func(render func(w io.Writer)) string {
+		var b strings.Builder
+		render(&b)
+		return b.String()
 	}
 	parts := primeParts{
 		session: func() string {
 			explain(true, "Session metadata: always included")
-			return captureOutput(func() { outputSessionMetadata(ctx) })
+			return section(func(w io.Writer) { outputSessionMetadata(w, ctx) })
 		},
-		hookedWork: func() string { return hookedWorkText },
-		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },
-		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
-		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
-		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(ctx, cwd) }) },
-		mail:       func() string { return captureOutput(func() { runPrimeMailInject(cwd) }) },
+		hookedWork: func() string { return hookedWork.String() },
+		directives: func() string {
+			return section(func(w io.Writer) { outputRoleDirectives(ctx, w, primeExplain) })
+		},
+		handoff:    func() string { return section(func(w io.Writer) { outputHandoffContent(w, ctx) }) },
+		checkpoint: func() string { return section(func(w io.Writer) { outputCheckpointContext(w, ctx) }) },
+		memories:   func() string { return section(func(w io.Writer) { primeTools{out: w}.memoryInject(ctx, cwd) }) },
+		mail:       func() string { return section(func(w io.Writer) { primeTools{out: w}.mailInject(cwd) }) },
 		startup: func() string {
 			if primeContinuationMode {
 				return "\n---\n\n**Continue your current task.** Context was compacted; your role text is in the system prompt and the sections above are current.\n"
 			}
 			explain(true, "Startup directive: normal mode (no hooked work)")
-			return captureOutput(func() { outputStartupDirective(ctx) })
+			return section(func(w io.Writer) { outputStartupDirective(w, ctx) })
 		},
 	}
 	if ctx.Role == RoleMayor {
-		parts.escalations = func() string { return captureOutput(func() { checkPendingEscalations(ctx) }) }
+		parts.escalations = func() string { return section(func(w io.Writer) { primeTools{out: w}.pendingEscalations(ctx) }) }
 	}
 	payload := assemblePrimePayload(parts, staticText, includeStatic, hasSlungWork)
 	// The hook budget only helps when the static text is out of the payload;
@@ -348,30 +356,36 @@ func roleRequiresWorktreeIntegrity(role Role) bool {
 // the full AUTONOMOUS WORK MODE block. This prevents agents from re-announcing
 // and re-initializing after compaction. (GH#1965)
 func runPrimeCompactResume(ctx RoleContext) error {
+	return primeCompactResume(os.Stdout, ctx, primeHookSource, primeHandoffReason)
+}
+
+// primeCompactResume writes the brief compact/resume prime for a session
+// whose hook source and handoff reason are hookSource and handoffReason.
+func primeCompactResume(w io.Writer, ctx RoleContext, hookSource, handoffReason string) error {
 	// Brief identity confirmation
 	actor := getAgentIdentity(ctx)
-	source := primeHookSource
-	if source == "" && primeHandoffReason != "" {
-		source = "handoff-" + primeHandoffReason
+	source := hookSource
+	if source == "" && handoffReason != "" {
+		source = "handoff-" + handoffReason
 	}
-	fmt.Printf("\n> **Recovery**: Context %s complete. You are **%s** (%s).\n",
+	fmt.Fprintf(w, "\n> **Recovery**: Context %s complete. You are **%s** (%s).\n",
 		source, actor, ctx.Role)
 
 	// Session identity line
-	outputSessionMetadata(ctx)
+	outputSessionMetadata(w, ctx)
 
-	fmt.Println("\n---")
-	fmt.Println()
-	fmt.Println("**Continue your current task.** If you've lost context, run `gt prime` for full reload.")
+	fmt.Fprintln(w, "\n---")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "**Continue your current task.** If you've lost context, run `gt prime` for full reload.")
 
 	// Remind polecats about gt done — after compaction the agent may have lost
 	// the formula checklist and forgotten that gt done is required to submit work.
 	// Without this, polecats finish implementation and sit at the prompt forever.
 	if ctx.Role == RolePolecat {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-			fmt.Printf("\n**IMPORTANT**: This is a fork-backed rig. Do not submit to the Refinery merge queue; complete the PR/no-merge workflow your assignment specifies.\n")
+			fmt.Fprintf(w, "\n**IMPORTANT**: This is a fork-backed rig. Do not submit to the Refinery merge queue; complete the PR/no-merge workflow your assignment specifies.\n")
 		} else {
-			fmt.Printf("\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit to the merge queue.\n", cli.Name())
+			fmt.Fprintf(w, "\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit to the merge queue.\n", cli.Name())
 		}
 	}
 	return nil
@@ -452,7 +466,14 @@ func handlePrimeHookMode(townRoot, cwd string) {
 // tries to auto-detect JSON, sees the leading '[', and misclassifies the startup
 // stream as JSON instead of plain text metadata.
 func hookSessionBeaconLines(sessionID, source string) []string {
-	if primeStructuredSessionStartOutput || primeHookEventName == "PreCompact" {
+	return hookSessionBeaconLinesFor(primeStructuredSessionStartOutput, primeHookEventName, sessionID, source)
+}
+
+// hookSessionBeaconLinesFor is hookSessionBeaconLines for a hook whose
+// output is structured SessionStart JSON (structured) and whose event is
+// eventName.
+func hookSessionBeaconLinesFor(structured bool, eventName, sessionID, source string) []string {
+	if structured || eventName == "PreCompact" {
 		return nil
 	}
 	lines := []string{fmt.Sprintf("[session:%s]", sessionID)}
@@ -487,7 +508,12 @@ func signalAgentReady() {
 // Without this, the new session runs full prime with AUTONOMOUS WORK MODE,
 // causing the agent to re-initialize instead of continuing. (GH#1965)
 func isCompactResume() bool {
-	return primeHookSource == "compact" || primeHookSource == "resume" || primeHandoffReason == "compaction"
+	return isCompactResumeFor(primeHookSource, primeHandoffReason)
+}
+
+// isCompactResumeFor is isCompactResume for a hook source and handoff reason.
+func isCompactResumeFor(hookSource, handoffReason string) bool {
+	return hookSource == "compact" || hookSource == "resume" || handoffReason == "compaction"
 }
 
 // warnRoleMismatch outputs a prominent warning if GT_ROLE disagrees with cwd detection.
@@ -620,6 +646,9 @@ type primeTools struct {
 	run   primeRunFunc
 	clock clockwork.Clock
 	out   io.Writer
+	// skipDupes turns off the pre-work duplicate check: set in continuation
+	// and dry-run primes.
+	skipDupes bool
 }
 
 func (p primeTools) runner() primeRunFunc {
@@ -650,44 +679,32 @@ func (p primeTools) command(workDir, name string, args ...string) (bytes.Buffer,
 	return p.runner()(ctx, workDir, name, args...)
 }
 
-// runPrimeExternalTools runs lightweight memory and mail injection in one go.
-// runPrime renders the two as separate payload sections; this wrapper keeps
-// the combined behavior for callers and tests.
-func runPrimeExternalTools(ctx RoleContext, cwd string) {
-	primeTools{}.externalTools(ctx, cwd)
-}
-
+// externalTools runs lightweight memory and mail injection in one go.
+// runPrime renders the two as separate payload sections; this keeps the
+// combined behavior for tests.
 func (p primeTools) externalTools(ctx RoleContext, cwd string) {
 	p.memoryInject(ctx, cwd)
 	p.mailInject(cwd)
 }
 
-// runPrimeMemoryInject renders the memory index section (skipped in dry-run and
-// for roles that do not render memories).
-func runPrimeMemoryInject(ctx RoleContext, cwd string) {
-	primeTools{}.memoryInject(ctx, cwd)
-}
-
+// memoryInject renders the memory index section (skipped in dry-run and for
+// roles that do not render memories).
 func (p primeTools) memoryInject(ctx RoleContext, cwd string) {
 	if primeDryRun {
-		explain(true, "memory injection: skipped in dry-run mode")
+		explainTo(p.w(), primeExplain, true, "memory injection: skipped in dry-run mode")
 		return
 	}
 	if !shouldRenderMemories(string(ctx.Role)) {
-		explain(true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
+		explainTo(p.w(), primeExplain, true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
 		return
 	}
 	p.memoryIndex(cwd)
 }
 
-// runPrimeMailInject renders pending mail (skipped in dry-run).
-func runPrimeMailInject(cwd string) {
-	primeTools{}.mailInject(cwd)
-}
-
+// mailInject renders pending mail (skipped in dry-run).
 func (p primeTools) mailInject(cwd string) {
 	if primeDryRun {
-		explain(true, "gt mail check --inject: skipped in dry-run mode")
+		explainTo(p.w(), primeExplain, true, "gt mail check --inject: skipped in dry-run mode")
 		return
 	}
 	p.mailCheck(cwd)
@@ -809,31 +826,37 @@ func (p primeTools) mailCheck(workDir string) {
 //
 // hookedBead is pre-fetched by the caller (runPrime) via findAgentWork to avoid a
 // redundant lookup and ensure work context is already injected before output runs.
-func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
+func checkSlungWork(w io.Writer, ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
+	return checkSlungWorkIn(w, primeContinuationMode, ctx, hookedBead)
+}
+
+// checkSlungWorkIn is checkSlungWork in continuation mode (a compacted
+// session resuming its work) when continuation is set.
+func checkSlungWorkIn(w io.Writer, continuation bool, ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	if hookedBead == nil {
 		return false, nil
 	}
 	attachment := beads.ParseAttachmentFields(hookedBead)
 	hasWorkflow := hasWorkflowAttachment(attachment)
 
-	if primeContinuationMode {
-		outputContinuationDirective(hookedBead, hasWorkflow)
+	if continuation {
+		outputContinuationDirective(w, hookedBead, hasWorkflow)
 	} else {
-		outputAutonomousDirective(ctx, hookedBead, hasWorkflow)
+		outputAutonomousDirective(w, ctx, hookedBead, hasWorkflow)
 	}
-	outputHookedBeadDetails(ctx, hookedBead)
+	outputHookedBeadDetails(w, ctx, hookedBead)
 
 	// gt-csng: polecat-side pre-work duplicate check — two bounded local git
 	// commands against origin/main, terse output, best-effort (silent on any
 	// failure). It rides this section so hook-budget truncation cannot drop it.
-	checkHookedPathDupes(ctx, hookedBead)
+	primeTools{out: w, skipDupes: continuation || primeDryRun}.hookedPathDupes(ctx, hookedBead)
 
 	if hasWorkflow {
-		if err := outputMoleculeWorkflow(ctx, attachment); err != nil {
+		if err := outputMoleculeWorkflow(w, ctx, attachment); err != nil {
 			return true, err
 		}
 	} else {
-		outputBeadPreview(hookedBead)
+		outputBeadPreview(w, hookedBead)
 	}
 
 	return true, nil
@@ -1003,72 +1026,72 @@ func rigBeadsRoot(ctx RoleContext) string {
 }
 
 // outputAutonomousDirective displays the AUTONOMOUS WORK MODE header and instructions.
-func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMolecule bool) {
+func outputAutonomousDirective(w io.Writer, ctx RoleContext, hookedBead *beads.Issue, hasMolecule bool) {
 	roleAnnounce := buildRoleAnnouncement(ctx)
 	_, isForkRig, _ := roleRigContext(ctx)
 
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## 🚨 AUTONOMOUS WORK MODE 🚨"))
-	fmt.Println("Work is on your hook. After announcing your role, begin IMMEDIATELY.")
-	fmt.Println()
-	fmt.Println("This is physics, not politeness. Gas Town is a steam engine - you are a piston.")
-	fmt.Println("Every moment you wait is a moment the engine stalls. Other agents may be")
-	fmt.Println("blocked waiting on YOUR output. The hook IS your assignment. RUN IT.")
-	fmt.Println()
-	fmt.Println("Remember: Every completion is recorded in the capability ledger. Your work")
-	fmt.Println("history is visible, and quality matters. Execute with care - you're building")
-	fmt.Println("a track record that proves autonomous execution works at scale.")
-	fmt.Println()
-	fmt.Println("1. Announce: \"" + roleAnnounce + "\" (ONE line, no elaboration)")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🚨 AUTONOMOUS WORK MODE 🚨"))
+	fmt.Fprintln(w, "Work is on your hook. After announcing your role, begin IMMEDIATELY.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "This is physics, not politeness. Gas Town is a steam engine - you are a piston.")
+	fmt.Fprintln(w, "Every moment you wait is a moment the engine stalls. Other agents may be")
+	fmt.Fprintln(w, "blocked waiting on YOUR output. The hook IS your assignment. RUN IT.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Remember: Every completion is recorded in the capability ledger. Your work")
+	fmt.Fprintln(w, "history is visible, and quality matters. Execute with care - you're building")
+	fmt.Fprintln(w, "a track record that proves autonomous execution works at scale.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "1. Announce: \""+roleAnnounce+"\" (ONE line, no elaboration)")
 
 	if hasMolecule {
-		fmt.Println("2. This bead has an ATTACHED MOLECULE (formula workflow)")
-		fmt.Println("3. Work through molecule steps in order - see CURRENT STEP below")
-		fmt.Println("4. Close each step with `bd close <step-id>`, then check `bd mol current` for next step")
+		fmt.Fprintln(w, "2. This bead has an ATTACHED MOLECULE (formula workflow)")
+		fmt.Fprintln(w, "3. Work through molecule steps in order - see CURRENT STEP below")
+		fmt.Fprintln(w, "4. Close each step with `bd close <step-id>`, then check `bd mol current` for next step")
 	} else {
-		fmt.Printf("2. Then IMMEDIATELY run: `bd show %s`\n", hookedBead.ID)
-		fmt.Println("3. Begin execution - no waiting for user input")
+		fmt.Fprintf(w, "2. Then IMMEDIATELY run: `bd show %s`\n", hookedBead.ID)
+		fmt.Fprintln(w, "3. Begin execution - no waiting for user input")
 	}
 
 	// Polecats MUST call gt done — this is the single most important instruction.
 	// Without it, work lands but sessions accumulate and the merge queue stalls.
 	if ctx.Role == RolePolecat {
-		fmt.Println()
+		fmt.Fprintln(w)
 		if isForkRig {
-			fmt.Println("**⚠️ FORK-BACKED RIG: do not submit to the Refinery merge queue.**")
-			fmt.Println("Push branches to the fork remote and use a GitHub PR/no-merge workflow against upstream unless the assignment explicitly says otherwise.")
+			fmt.Fprintln(w, "**⚠️ FORK-BACKED RIG: do not submit to the Refinery merge queue.**")
+			fmt.Fprintln(w, "Push branches to the fork remote and use a GitHub PR/no-merge workflow against upstream unless the assignment explicitly says otherwise.")
 		} else {
-			fmt.Printf("**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
-			fmt.Printf("Do NOT stop at the prompt. Do NOT push to main directly. `%s done` is your final action.\n", cli.Name())
+			fmt.Fprintf(w, "**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
+			fmt.Fprintf(w, "Do NOT stop at the prompt. Do NOT push to main directly. `%s done` is your final action.\n", cli.Name())
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("**DO NOT:**")
-	fmt.Println("- Wait for user response after announcing")
-	fmt.Println("- Ask clarifying questions")
-	fmt.Println("- Describe what you're going to do")
-	fmt.Println("- Check mail first (hook takes priority)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "**DO NOT:**")
+	fmt.Fprintln(w, "- Wait for user response after announcing")
+	fmt.Fprintln(w, "- Ask clarifying questions")
+	fmt.Fprintln(w, "- Describe what you're going to do")
+	fmt.Fprintln(w, "- Check mail first (hook takes priority)")
 	if hasMolecule {
-		fmt.Println("- Skip molecule steps or work on the base bead directly")
+		fmt.Fprintln(w, "- Skip molecule steps or work on the base bead directly")
 	}
 	if ctx.Role == RolePolecat {
 		if isForkRig {
-			fmt.Println("- Use the Refinery/MQ for upstream changes in this fork-backed rig")
-			fmt.Println("- Push directly to upstream main")
+			fmt.Fprintln(w, "- Use the Refinery/MQ for upstream changes in this fork-backed rig")
+			fmt.Fprintln(w, "- Push directly to upstream main")
 		} else {
-			fmt.Printf("- Sit idle after committing (run `%s done`)\n", cli.Name())
-			fmt.Println("- Push directly to main (use the merge queue)")
+			fmt.Fprintf(w, "- Sit idle after committing (run `%s done`)\n", cli.Name())
+			fmt.Fprintln(w, "- Push directly to main (use the merge queue)")
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // outputHookedBeadDetails displays the hooked bead's ID, title, and description summary.
-func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
-	fmt.Printf("%s\n\n", style.Bold.Render("## Hooked Work"))
-	fmt.Printf("  Bead ID: %s\n", style.Bold.Render(hookedBead.ID))
-	fmt.Printf("  Title: %s\n", hookedBead.Title)
+func outputHookedBeadDetails(w io.Writer, ctx RoleContext, hookedBead *beads.Issue) {
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## Hooked Work"))
+	fmt.Fprintf(w, "  Bead ID: %s\n", style.Bold.Render(hookedBead.ID))
+	fmt.Fprintf(w, "  Title: %s\n", hookedBead.Title)
 	if hookedBead.Description != "" {
 		lines := strings.Split(hookedBead.Description, "\n")
 		maxLines := 5
@@ -1076,13 +1099,13 @@ func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
 			lines = lines[:maxLines]
 			lines = append(lines, "...")
 		}
-		fmt.Println("  Description:")
+		fmt.Fprintln(w, "  Description:")
 		for _, line := range lines {
-			fmt.Printf("    %s\n", line)
+			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
-	outputDependencyMergeStatus(ctx, hookedBead)
-	fmt.Println()
+	outputDependencyMergeStatus(w, ctx, hookedBead)
+	fmt.Fprintln(w)
 }
 
 // outputDependencyMergeStatus tells a starting worker what state each of its
@@ -1096,9 +1119,9 @@ func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
 // exist — and until now it had no way to find that out. One line here is the
 // difference between "my prerequisite is on main" and "my prerequisite is
 // sitting in the queue behind me".
-func outputDependencyMergeStatus(ctx RoleContext, hookedBead *beads.Issue) {
+func outputDependencyMergeStatus(w io.Writer, ctx RoleContext, hookedBead *beads.Issue) {
 	issue := beadWithFullDependencies(hookedBead, beads.New(rigBeadsRoot(ctx)).Show)
-	renderDependencyMergeStatus(os.Stdout, beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), issue))
+	renderDependencyMergeStatus(w, beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), issue))
 }
 
 // beadWithFullDependencies re-fetches hookedBead via `bd show` when it looks
@@ -1165,67 +1188,67 @@ func renderDependencyMergeStatus(w io.Writer, statuses []beads.DependencyMergeSt
 }
 
 // outputMoleculeWorkflow displays attached molecule context with current step.
-func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields) error {
-	fmt.Printf("%s\n\n", style.Bold.Render("## 🧬 ATTACHED FORMULA (WORKFLOW CHECKLIST)"))
+func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.AttachmentFields) error {
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("## 🧬 ATTACHED FORMULA (WORKFLOW CHECKLIST)"))
 	if attachment.AttachedFormula != "" {
-		fmt.Printf("Formula: %s\n", attachment.AttachedFormula)
+		fmt.Fprintf(w, "Formula: %s\n", attachment.AttachedFormula)
 	}
 	if attachment.AttachedMolecule != "" {
-		fmt.Printf("Molecule ID: %s\n", attachment.AttachedMolecule)
+		fmt.Fprintf(w, "Molecule ID: %s\n", attachment.AttachedMolecule)
 	}
 	if len(attachment.AttachedVars) > 0 {
-		fmt.Printf("\n%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
+		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
 		for _, variable := range attachment.AttachedVars {
-			fmt.Printf("  --var %s\n", variable)
+			fmt.Fprintf(w, "  --var %s\n", variable)
 		}
 	}
 	if attachment.AttachedArgs != "" {
-		fmt.Printf("\n%s\n", style.Bold.Render("📋 ARGS (use these to guide execution):"))
-		fmt.Printf("  %s\n", attachment.AttachedArgs)
+		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("📋 ARGS (use these to guide execution):"))
+		fmt.Fprintf(w, "  %s\n", attachment.AttachedArgs)
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 
 	// Ralph loop mode: output Ralph Wiggum loop command instead of step-by-step execution
 	if attachment.Mode == "ralph" {
-		return outputRalphLoopDirective(ctx, attachment)
+		return outputRalphLoopDirective(w, ctx, attachment)
 	}
 
 	// Show inline formula steps from the embedded binary (root-only: no child wisps to query).
 	if attachment.AttachedFormula != "" {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
-			fmt.Printf("%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
-			fmt.Printf("Formula %q is attached, but its embedded polecat checklist is not rendered because it contains local Refinery/MQ completion steps.\n", attachment.AttachedFormula)
-			fmt.Println("Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
+			fmt.Fprintf(w, "%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
+			fmt.Fprintf(w, "Formula %q is attached, but its embedded polecat checklist is not rendered because it contains local Refinery/MQ completion steps.\n", attachment.AttachedFormula)
+			fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
 			return nil
 		}
-		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
-		fmt.Println()
-		fmt.Printf("%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
-		fmt.Println("The base bead is your assignment. The formula steps define your workflow.")
-		fmt.Printf("\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit to the merge queue. Do NOT stop after implementation — the formula has submit steps you must follow."))
+		showFormulaStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
+		fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
+		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit to the merge queue. Do NOT stop after implementation — the formula has submit steps you must follow."))
 		return nil
 	}
 
 	// Legacy path: no formula name stored, fall back to bd mol current
-	showMoleculeExecutionPrompt(ctx.WorkDir, attachment.AttachedMolecule)
-	fmt.Println()
-	fmt.Printf("%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
-	fmt.Println("The base bead is just a container. The molecule steps define your workflow.")
+	showMoleculeExecutionPrompt(w, ctx.WorkDir, attachment.AttachedMolecule)
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
+	fmt.Fprintln(w, "The base bead is just a container. The molecule steps define your workflow.")
 	return nil
 }
 
 const ralphLoopPluginID = "ralph-loop@claude-plugins-official"
 
 // outputRalphLoopDirective emits the ralph-loop plugin command for Ralph mode.
-func outputRalphLoopDirective(ctx RoleContext, attachment *beads.AttachmentFields) error {
+func outputRalphLoopDirective(w io.Writer, ctx RoleContext, attachment *beads.AttachmentFields) error {
 	installed, configDir, err := isRalphLoopPluginInstalled()
 	if err != nil {
 		return err
 	}
-	return outputRalphLoopDirectiveWithPluginCheck(ctx, attachment, installed, configDir)
+	return outputRalphLoopDirectiveWithPluginCheck(w, ctx, attachment, installed, configDir)
 }
 
-func outputRalphLoopDirectiveWithPluginCheck(ctx RoleContext, attachment *beads.AttachmentFields, pluginInstalled bool, configDir string) error {
+func outputRalphLoopDirectiveWithPluginCheck(w io.Writer, ctx RoleContext, attachment *beads.AttachmentFields, pluginInstalled bool, configDir string) error {
 	if !pluginInstalled {
 		return missingRalphLoopPluginError(configDir)
 	}
@@ -1234,7 +1257,7 @@ func outputRalphLoopDirectiveWithPluginCheck(ctx RoleContext, attachment *beads.
 	if err != nil {
 		return err
 	}
-	fmt.Printf("/ralph-loop %s --completion-promise DONE\n", quoteForRalphLoop(prompt))
+	fmt.Fprintf(w, "/ralph-loop %s --completion-promise DONE\n", quoteForRalphLoop(prompt))
 	return nil
 }
 
@@ -1264,6 +1287,12 @@ func renderRalphLoopPrompt(ctx RoleContext, attachment *beads.AttachmentFields) 
 
 func isRalphLoopPluginInstalled() (bool, string, error) {
 	configDir, err := config.ClaudeConfigDir()
+	return isRalphLoopPluginInstalledIn(configDir, err)
+}
+
+// isRalphLoopPluginInstalledIn checks the ralph-loop plugin manifest under
+// the Claude config dir configDir, which resolving failed with err.
+func isRalphLoopPluginInstalledIn(configDir string, err error) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("resolving Claude config dir for ralph-loop plugin: %w", err)
 	}
@@ -1308,11 +1337,11 @@ func quoteForRalphLoop(s string) string {
 }
 
 // outputBeadPreview runs `bd show` and displays a truncated preview of the bead.
-func outputBeadPreview(hookedBead *beads.Issue) {
-	fmt.Println("**Bead details:**")
-	fmt.Printf("  %s: %s\n", hookedBead.ID, hookedBead.Title)
+func outputBeadPreview(w io.Writer, hookedBead *beads.Issue) {
+	fmt.Fprintln(w, "**Bead details:**")
+	fmt.Fprintf(w, "  %s: %s\n", hookedBead.ID, hookedBead.Title)
 	if hookedBead.Status != "" {
-		fmt.Printf("  status: %s\n", hookedBead.Status)
+		fmt.Fprintf(w, "  status: %s\n", hookedBead.Status)
 	}
 	if hookedBead.Description != "" {
 		lines := strings.Split(hookedBead.Description, "\n")
@@ -1322,10 +1351,10 @@ func outputBeadPreview(hookedBead *beads.Issue) {
 			lines = append(lines, "...")
 		}
 		for _, line := range lines {
-			fmt.Printf("  %s\n", line)
+			fmt.Fprintf(w, "  %s\n", line)
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // buildRoleAnnouncement creates the role announcement string for autonomous mode.
@@ -1484,17 +1513,13 @@ func worktreeBeadsNeedsCleanup(workDir string) bool {
 	return false
 }
 
-// checkPendingEscalations queries for open escalation beads and displays them prominently.
+// pendingEscalations queries for open escalation beads and displays them prominently.
 // This is called on Mayor startup to surface issues needing human attention.
 //
 // Escalations are created as ephemeral wisps labeled gt:escalation (gt-fcsf).
 // `--tag=escalation` is not a real bd flag — it errored on every invocation,
 // so this check silently no-op'd since the day it was written. --include-infra
 // is also required or ephemeral escalation wisps are hidden from bd list.
-func checkPendingEscalations(ctx RoleContext) {
-	primeTools{}.pendingEscalations(ctx)
-}
-
 func (p primeTools) pendingEscalations(ctx RoleContext) {
 	// Query for open escalations using bd list with label filter
 	stdout, _, err := p.command(ctx.WorkDir, "bd", "list", "--status=open", "--label=gt:escalation", "--include-infra", "--json")

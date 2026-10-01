@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -436,7 +437,7 @@ func sessionStartCallerFrom(getenv func(string) string) string {
 
 // outputSessionMetadata prints the session's identity line.
 // Format: [GAS TOWN] role:<role> pid:<pid> session:<session_id>
-func outputSessionMetadata(ctx RoleContext) {
+func outputSessionMetadata(w io.Writer, ctx RoleContext) {
 	if ctx.Role == RoleUnknown {
 		return
 	}
@@ -451,7 +452,7 @@ func outputSessionMetadata(ctx RoleContext) {
 	sessionID := resolveSessionIDForPrime(actor)
 
 	// Output structured metadata line
-	fmt.Println(formatSessionMetadataLine(actor, sessionID))
+	fmt.Fprintln(w, formatSessionMetadataLine(actor, sessionID))
 }
 
 // formatSessionMetadataLine keeps the bracketed "[GAS TOWN]" banner for normal
@@ -459,7 +460,13 @@ func outputSessionMetadata(ctx RoleContext) {
 // SessionStart hooks because Codex will see '[' and try to parse the line as
 // JSON instead of treating it as plain text session metadata.
 func formatSessionMetadataLine(actor, sessionID string) string {
-	if primeStructuredSessionStartOutput {
+	return formatSessionMetadataLineFor(primeStructuredSessionStartOutput, actor, sessionID)
+}
+
+// formatSessionMetadataLineFor is formatSessionMetadataLine for structured
+// SessionStart output when structured is set.
+func formatSessionMetadataLineFor(structured bool, actor, sessionID string) string {
+	if structured {
 		return fmt.Sprintf("GAS TOWN role:%s pid:%d session:%s", actor, os.Getpid(), sessionID)
 	}
 	return fmt.Sprintf("[GAS TOWN] role:%s pid:%d session:%s", actor, os.Getpid(), sessionID)
@@ -579,46 +586,57 @@ func detectSessionState(ctx RoleContext) SessionState {
 // This enables compaction-triggered handoff cycles to route through the lighter
 // compact/resume path instead of full re-initialization. (GH#1965)
 func checkHandoffMarker(workDir string) {
+	if reason := checkHandoffMarkerTo(os.Stdout, workDir); reason != "" {
+		primeHandoffReason = reason
+	}
+}
+
+// checkHandoffMarkerTo consumes workDir's handoff marker, writes the
+// post-handoff warning to w, and returns the handoff reason the marker
+// carried ("" when it carried none or there was no marker).
+func checkHandoffMarkerTo(w io.Writer, workDir string) (reason string) {
 	markerPath := filepath.Join(workDir, constants.DirRuntime, constants.FileHandoffMarker)
 	data, err := os.ReadFile(markerPath)
 	if err != nil {
 		// No marker = not post-handoff, normal startup
-		return
+		return ""
 	}
 
 	// Parse marker: first line is session ID, optional second line is reason
 	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
 	prevSession := strings.TrimSpace(lines[0])
 	if len(lines) > 1 {
-		primeHandoffReason = strings.TrimSpace(lines[1])
+		reason = strings.TrimSpace(lines[1])
 	}
 
 	// Remove the marker FIRST so we don't warn twice
 	_ = os.Remove(markerPath)
 
 	// Output prominent warning
-	outputHandoffWarning(prevSession)
+	outputHandoffWarning(w, prevSession)
+	return reason
 }
 
 // checkHandoffMarkerDryRun checks for handoff marker without removing it (for --dry-run).
-func checkHandoffMarkerDryRun(workDir string) {
+func checkHandoffMarkerDryRun(w io.Writer, explainOn bool, workDir string) (reason string) {
 	markerPath := filepath.Join(workDir, constants.DirRuntime, constants.FileHandoffMarker)
 	data, err := os.ReadFile(markerPath)
 	if err != nil {
 		// No marker = not post-handoff, normal startup
-		explain(true, "Post-handoff: no handoff marker found")
-		return
+		explainTo(w, explainOn, true, "Post-handoff: no handoff marker found")
+		return ""
 	}
 
 	// Parse marker: first line is session ID, optional second line is reason
 	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
 	prevSession := strings.TrimSpace(lines[0])
 	if len(lines) > 1 {
-		primeHandoffReason = strings.TrimSpace(lines[1])
+		reason = strings.TrimSpace(lines[1])
 	}
 
-	explain(true, fmt.Sprintf("Post-handoff: marker found (predecessor: %s, reason: %s), marker NOT removed in dry-run", prevSession, primeHandoffReason))
+	explainTo(w, explainOn, true, fmt.Sprintf("Post-handoff: marker found (predecessor: %s, reason: %s), marker NOT removed in dry-run", prevSession, reason))
 
 	// Output the warning but don't remove marker
-	outputHandoffWarning(prevSession)
+	outputHandoffWarning(w, prevSession)
+	return reason
 }

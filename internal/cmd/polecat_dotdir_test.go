@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -34,30 +33,6 @@ func TestDiscoverHooksSkipsPolecatDotDirs(t *testing.T) {
 	}
 }
 
-// addRigEntry, setupTestTownForDotDir and writeScript are shared with
-// session_stop_marker_test.go and slot_run_validate_test.go (slice s-z,
-// gt-jz03n.3); delete them with those uses.
-
-func addRigEntry(t *testing.T, townRoot, rigName string) {
-	t.Helper()
-
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		t.Fatalf("load rigs.json: %v", err)
-	}
-	if rigsConfig.Rigs == nil {
-		rigsConfig.Rigs = make(map[string]config.RigEntry)
-	}
-	rigsConfig.Rigs[rigName] = config.RigEntry{
-		GitURL:  "file:///dev/null",
-		AddedAt: time.Now(),
-	}
-	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
-		t.Fatalf("save rigs.json: %v", err)
-	}
-}
-
 func setupTestTownForDotDir(t *testing.T) string {
 	t.Helper()
 
@@ -83,13 +58,4 @@ func setupTestTownForDotDir(t *testing.T) string {
 	}
 
 	return townRoot
-}
-
-func writeScript(t *testing.T, dir, name, content string) {
-	t.Helper()
-
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
 }
