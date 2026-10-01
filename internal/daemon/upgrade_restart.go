@@ -20,6 +20,15 @@ var ErrRestartForUpgrade = errors.New("daemon: restart for upgrade")
 // before the daemon escalates (it keeps waiting afterwards).
 const upgradeStuckAfter = 30 * time.Minute
 
+// postLandRestartCap is how long a pending upgrade restart waits for an
+// in-flight post-landing run (gt-gb4ij). The slow tier takes minutes, so a
+// run that has started is usually worth its verdict; past the cap the daemon
+// restarts anyway, and the landing worker's first pass after the start runs
+// the untested tip again (Worker.watchTarget). The cap is not in
+// isIdleForUpgrade: it needs the marker's wait time, and the gc cycle's quiet
+// check already sees the run through its gate-class container slot.
+const postLandRestartCap = 20 * time.Minute
+
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds
 // attempted_from (its own commit) just before it exits for the marker.
@@ -296,6 +305,13 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 					m.Commit, now.Sub(d.upgradeWaitSince).Round(time.Minute), own))
 		}
 		return false
+	}
+
+	if d.postLandRuns.Load() > 0 {
+		if now.Sub(d.upgradeWaitSince) < postLandRestartCap {
+			return false
+		}
+		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
 	}
 
 	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {

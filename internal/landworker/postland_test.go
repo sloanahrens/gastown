@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +87,40 @@ func TestPostLandCoalescesToTheNewestLanding(t *testing.T) {
 	p.Wait()
 	if got := strings.Join(b.commits(), ","); got != "c1,c4,c5" {
 		t.Fatalf("runs at %s", got)
+	}
+}
+
+// gt-gb4ij: Busy brackets the whole run, coalesced runs included, so the
+// daemon can hold an upgrade restart until the verdict.
+func TestPostLandBusyBracketsQueuedRuns(t *testing.T) {
+	t.Parallel()
+	b := newBlockingRun()
+	var mu sync.Mutex
+	var calls []bool
+	p := &PostLandRunner{Rig: "gastown", Command: func() string { return "make test-slow" }, Run: b.run, Logf: t.Logf,
+		Busy: func(busy bool) {
+			mu.Lock()
+			calls = append(calls, busy)
+			mu.Unlock()
+		}}
+	got := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return fmt.Sprint(calls)
+	}
+	ctx := context.Background()
+	p.Trigger(ctx, PostLand{BeadID: "gt-1", Commit: "c1"})
+	<-b.started
+	p.Trigger(ctx, PostLand{BeadID: "gt-2", Commit: "c2"})
+	b.release <- PostLandResult{}
+	<-b.started
+	if g := got(); g != "[true]" {
+		t.Fatalf("Busy calls %s mid-queue; want [true]", g)
+	}
+	b.release <- PostLandResult{}
+	p.Wait()
+	if g := got(); g != "[true false]" {
+		t.Fatalf("Busy calls %s; want [true false]", g)
 	}
 }
 

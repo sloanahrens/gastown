@@ -315,6 +315,11 @@ type Daemon struct {
 	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
 	landingPasses atomic.Int32
 
+	// postLandRuns counts rigs whose post-landing runner has a run in flight
+	// or queued. It runs outside the landing pass, so checkUpgradeRestart
+	// holds a restart for it separately, up to postLandRestartCap (gt-gb4ij).
+	postLandRuns atomic.Int32
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog
