@@ -1,3 +1,5 @@
+> Status: historical (2026-09). The deacon patrol it proposes wiring checks into was deleted (ADR 0005). Not maintained.
+
 # gt doctor check triage: cadence / occasional / delete
 
 > Measured 2026-09-23/24 against `internal/doctor/*.go` on `main`, not estimated. Source: gt-0bp42.

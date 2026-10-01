@@ -1,3 +1,5 @@
+> Status: historical (2026-09). The witness, refinery and deacon roles and the merge queue it relies on were deleted (ADR 0003, 0004, 0005). Not maintained.
+
 # Convoy Stability Roadmap
 
 How to get from where we are to the target UX, while preserving existing

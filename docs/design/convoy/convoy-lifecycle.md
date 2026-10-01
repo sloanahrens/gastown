@@ -1,3 +1,5 @@
+> Status: historical (2026-09). Shipped; the witness, refinery and deacon roles and the merge queue it relies on were deleted (ADR 0003, 0004, 0005). Not maintained.
+
 # Convoy Lifecycle Design
 
 > Making convoys actively converge on completion.

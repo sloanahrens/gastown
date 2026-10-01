@@ -27,10 +27,13 @@ These roles manage the Gas Town system itself:
 
 | Role | Description | Lifecycle |
 |------|-------------|-----------|
-| **Mayor** | Global coordinator at mayor/ | Singleton, persistent |
-| **Deacon** | Background supervisor daemon | Singleton, persistent |
-| **Witness** | Per-rig polecat lifecycle manager | One per rig, persistent |
-| **Refinery** | Per-rig merge queue processor | One per rig, persistent |
+| **Mayor** | Global coordinator at mayor/ | Singleton |
+| **Daemon** | Go process: supervises agents, lands work | Singleton, persistent |
+
+The daemon is not an agent. It is the only process that kills or restarts a
+session, and its landing worker is the only route to main
+([ADR 0003](adr/0003-one-supervisor-no-idle-llm.md),
+[ADR 0004](adr/0004-daemon-lands-work.md)).
 
 ### Worker Roles
 
@@ -38,7 +41,7 @@ These roles do actual project work:
 
 | Role | Description | Lifecycle |
 |------|-------------|-----------|
-| **Polecat** | Worker with persistent identity, ephemeral sessions | Witness-managed ([details](concepts/polecat-lifecycle.md)) |
+| **Polecat** | Worker with persistent identity, ephemeral sessions | Daemon-supervised ([details](concepts/polecat-lifecycle.md)) |
 | **Crew** | Persistent worker with own clone | Long-lived, user-managed |
 
 ## Convoys: Tracking Work
@@ -72,10 +75,10 @@ Both do project work, but with key differences:
 
 | Aspect | Crew | Polecat |
 |--------|------|---------|
-| **Lifecycle** | Persistent (user controls) | Transient (Witness controls) |
-| **Monitoring** | None | Witness watches, nudges, recycles |
+| **Lifecycle** | Persistent (user controls) | Transient (daemon supervises) |
+| **Monitoring** | None | Daemon restarts a dead session that holds work |
 | **Work assignment** | Human-directed or self-assigned | Slung via `gt sling` |
-| **Git state** | Pushes to main directly | Works on branch, Refinery merges |
+| **Git state** | Works on branch, `gt done`, landing worker merges | Works on branch, `gt done`, landing worker merges |
 | **Cleanup** | Manual | Automatic on completion |
 | **Identity** | `<rig>/crew/<name>` | `<rig>/polecats/<name>` |
 
@@ -104,14 +107,11 @@ gt convoy create "Auth fix" bd-xyz
 gt sling bd-xyz beads
 ```
 
-Infrastructure and system tasks belong to the Deacon.
-
 ## Directory Structure
 
-The town root (`~/gt/`) contains infrastructure directories (`mayor/`, `deacon/`)
-and per-project rigs. Each rig holds a bare repo (`.repo.git/`), a canonical beads
-database (`mayor/rig/.beads/`), and agent directories (`witness/`, `refinery/`,
-`crew/`, `polecats/`).
+The town root (`~/gt/`) contains the `mayor/` directory and per-project rigs.
+Each rig holds a bare repo (`.repo.git/`), a canonical beads database
+(`mayor/rig/.beads/`), and agent directories (`crew/`, `polecats/`).
 
 > For the full directory tree, see [architecture.md](design/architecture.md).
 
@@ -150,7 +150,7 @@ capability-based routing.
 
 ## Common Mistakes
 
-1. **Confusing crew with polecats**: Crew is persistent and human-managed. Polecats are transient and Witness-managed.
+1. **Confusing crew with polecats**: Crew is persistent and human-managed. Polecats are transient and daemon-supervised.
 2. **Working in wrong directory**: Gas Town uses cwd for identity detection. Stay in your home directory.
 3. **Waiting for confirmation when work is hooked**: The hook IS your assignment. Execute immediately.
 4. **Creating worktrees when dispatch is better**: If work should be owned by the target rig, dispatch it instead.

@@ -10,7 +10,7 @@ from project implementation work.
 | Level | Location | Prefix | Purpose |
 |-------|----------|--------|---------|
 | **Town** | `~/gt/.beads/` | `hq-*` | Cross-rig coordination, Mayor mail, agent identity |
-| **Rig** | `<rig>/mayor/rig/.beads/` | project prefix | Implementation work, MRs, project issues |
+| **Rig** | `<rig>/mayor/rig/.beads/` | project prefix | Implementation work, landing records, project issues |
 
 ### Town-Level Beads (`~/gt/.beads/`)
 
@@ -18,16 +18,16 @@ Organizational chain for cross-rig coordination:
 - Mayor mail and messages
 - Convoy coordination (batch work across rigs)
 - Strategic issues and decisions
-- **Town-level agent beads** (Mayor, Deacon)
+- **Town-level agent beads** (Mayor)
 - **Role definition beads** (global templates)
 
 ### Rig-Level Beads (`<rig>/mayor/rig/.beads/`)
 
 Project chain for implementation work:
 - Bugs, features, tasks for the project
-- Merge requests and code reviews
+- Landing records and review verdicts, on the work beads
 - Project-specific molecules
-- **Rig-level agent beads** (Witness, Refinery, Polecats)
+- **Rig-level agent beads** (Polecats, Crew)
 
 ## Agent Bead Storage
 
@@ -37,10 +37,6 @@ the agent's scope.
 | Agent Type | Scope | Bead Location | Bead ID Format |
 |------------|-------|---------------|----------------|
 | Mayor | Town | `~/gt/.beads/` | `hq-mayor` |
-| Deacon | Town | `~/gt/.beads/` | `hq-deacon` |
-| Boot | Town | `~/gt/.beads/` | `hq-boot` |
-| Witness | Rig | `<rig>/.beads/` | `<prefix>-<rig>-witness` |
-| Refinery | Rig | `<rig>/.beads/` | `<prefix>-<rig>-refinery` |
 | Polecats | Rig | `<rig>/.beads/` | `<prefix>-<rig>-polecat-<name>` |
 | Crew | Rig | `<rig>/.beads/` | `<prefix>-<rig>-crew-<name>` |
 
@@ -48,10 +44,6 @@ the agent's scope.
 
 Role beads are global templates stored in town beads with `hq-` prefix:
 - `hq-mayor-role` - Mayor role definition
-- `hq-deacon-role` - Deacon role definition
-- `hq-boot-role` - Boot role definition
-- `hq-witness-role` - Witness role definition
-- `hq-refinery-role` - Refinery role definition
 - `hq-polecat-role` - Polecat role definition
 - `hq-crew-role` - Crew role definition
 
@@ -64,17 +56,21 @@ Each agent bead references its role bead via the `role_bead` field.
 | Agent | Role | Persistence |
 |-------|------|-------------|
 | **Mayor** | Global coordinator, handles cross-rig communication and escalations | Persistent |
-| **Deacon** | Daemon beacon — receives heartbeats, runs plugins and monitoring | Persistent |
-| **Boot** | Deacon watchdog — spawned by daemon for triage decisions when Deacon is down | Ephemeral |
 
 ### Rig-Level Agents (Per-Project)
 
 | Agent | Role | Persistence |
 |-------|------|-------------|
-| **Witness** | Monitors polecat health, handles nudging and cleanup | Persistent |
-| **Refinery** | Processes merge queue, runs verification | Persistent |
 | **Polecats** | Workers with persistent identity, assigned to specific issues | Persistent identity, ephemeral sessions |
 | **Crew** | Human workspaces — full git clones, user-managed lifecycle | Persistent |
+
+### The Daemon
+
+The daemon is a Go process, not an agent. It is the only process that kills or
+restarts a session ([ADR 0003](../adr/0003-one-supervisor-no-idle-llm.md)), runs
+the per-rig `patrol_scan` tick that restarts a dead polecat holding work
+([ADR 0005](../adr/0005-patrol-scan-tick.md)), and hosts the per-rig landing
+worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 
 ## Directory Structure
 
@@ -88,11 +84,12 @@ Each agent bead references its role bead via the `role_bead` field.
 │   ├── gastown/                Gastown rig database (gt-* prefix)
 │   ├── beads/                  Beads rig database (bd-* prefix)
 │   └── <other rigs>/           Per-rig databases
+├── .runtime/                   Town runtime state
+│   └── landings/<rig>.jsonl    Append-only landings file, written by the landing worker
 ├── daemon/                     Daemon runtime state
 │   ├── dolt-state.json         Dolt server state (pid, port, databases)
 │   ├── dolt-server.log         Server log
 │   └── dolt.pid                Server PID file
-├── deacon/                     Deacon workspace
 ├── mayor/                      Mayor agent home
 │   ├── town.json               Town configuration
 │   ├── rigs.json               Rig registry
@@ -115,9 +112,6 @@ Each agent bead references its role bead via the `role_bead` field.
     │   └── <formula>.toml
     ├── mayor/rig/              Canonical clone (beads live here, NOT an agent)
     │   └── .beads/             Rig-level beads (redirected to Dolt)
-    ├── refinery/               Refinery agent home
-    │   └── rig/                Worktree from mayor/rig
-    ├── witness/                Witness agent home (no clone)
     ├── crew/                   Crew parent
     │   └── <name>/             Human workspaces (full clones)
     └── polecats/               Polecats parent
@@ -130,7 +124,7 @@ via SessionStart hook.
 
 ### Worktree Architecture
 
-Polecats and refinery are git worktrees, not full clones. This enables fast spawning
+Polecats are git worktrees, not full clones. This enables fast spawning
 and shared object storage. The worktree base is `mayor/rig`:
 
 ```go
@@ -188,70 +182,37 @@ bd show gt-xyz      # Routes to gastown/mayor/rig/.beads
 
 ## Beads Redirects
 
-Worktrees (polecats, refinery, crew) don't have their own beads databases. Instead,
+Worktrees (polecats, crew) don't have their own beads databases. Instead,
 they use a `.beads/redirect` file that points to the canonical beads location:
 
 ```
 polecats/alpha/.beads/redirect → ../../mayor/rig/.beads
-refinery/rig/.beads/redirect   → ../../mayor/rig/.beads
 ```
 
 `ResolveBeadsDir()` follows redirect chains (max depth 3) with circular detection.
 This ensures all agents in a rig share a single beads database via the Dolt server.
 
-## Merge Queue: Batch-then-Bisect
+## Landing: The Daemon Lands Work
 
-The refinery processes MRs through a batch-then-bisect merge queue (Bors-style).
-This is a core capability, not a pluggable strategy.
-
-### How It Works
-
-```
-MRs waiting:  [A, B, C, D]
-                    ↓
-Batch:        Rebase A..D as a stack on main
-                    ↓
-Test tip:     Run tests on D (tip of stack)
-                    ↓
-If PASS:      Fast-forward merge all 4 → done
-If FAIL:      Binary bisect → test B (midpoint)
-                    ↓
-              If B passes: C or D broke it → bisect [C,D]
-              If B fails:  A or B broke it → bisect [A,B]
-```
-
-### Implementation Phases
-
-| Phase | Bead | What | Status |
-|-------|------|------|--------|
-| 1: GatesParallel | gt-8b2i | Run test + lint concurrently per MR | In progress |
-| 2: Batch-then-bisect | gt-i2vm | Bors-style batching with binary bisect | Blocked by Phase 1 |
-| 3: Pre-verification | gt-lu84 | Polecats run tests before MR submission | Blocked by Phase 2 |
-
-Gates (test command, lint, etc.) are pluggable. The batching strategy is core.
-
-Design doc: produced by gt-yxx0 review.
-
-## Polecat Lifecycle: Self-Managed Completion
-
-Polecats manage their own lifecycle end-to-end. The Witness observes but does NOT
-gate completion. This prevents the Witness from becoming a bottleneck.
-
-### Polecat Completion Flow
+Work reaches main only through the daemon's landing worker
+([ADR 0004](../adr/0004-daemon-lands-work.md)). There is no merge queue,
+batching or bisection.
 
 ```
-Polecat finishes work
-  → Push branch to remote
-  → Submit MR (bd update --mr-ready)
-  → Update bead status
-  → Tear down worktree
-  → Go idle (available for next assignment)
+Polecat or crew finishes work
+  → gt done: fetch, rebase onto target, squash checkpoints, local gate
+  → Push branch under a lease, read the tip back
+  → Label the work bead gt:ready-to-land
+Landing worker (one per rig, serial within a rig)
+  → Throwaway worktree at origin/<target>, merge the branch
+  → Gate and review the merged tree concurrently
+  → Push with --force-with-lease, read the tip back
+  → Close the bead with the landing record; append to the landings file
 ```
 
-The Witness monitors for stuck/zombie polecats (no activity for extended period)
-and nudges or escalates. It does NOT process completion — that's the polecat's job.
-
-Design bead: gt-0wkk.
+A rejection is written to the work bead and the bead goes back for rework.
+Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
+the daemon restarts a session only when it is dead while holding work.
 
 ## Data Plane Lifecycle
 

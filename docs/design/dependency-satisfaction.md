@@ -1,3 +1,5 @@
+> Status: superseded (2026-09). The landing worker closes the work bead at landing (ADR 0004); the refinery close convention this works around is gone. Not maintained.
+
 # Dependency Satisfaction Is Merge-Aware
 
 **Status:** implemented in gt-0r0z.

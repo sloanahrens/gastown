@@ -25,9 +25,6 @@ This is set automatically when agents are spawned and used for all attribution.
 | Role Type | Format | Example |
 |-----------|--------|---------|
 | **Mayor** | `mayor` | `mayor` |
-| **Deacon** | `deacon` | `deacon` |
-| **Witness** | `{rig}/witness` | `gastown/witness` |
-| **Refinery** | `{rig}/refinery` | `gastown/refinery` |
 | **Crew** | `{rig}/crew/{name}` | `gastown/crew/joe` |
 | **Polecat** | `{rig}/polecats/{name}` | `gastown/polecats/toast` |
 
@@ -35,7 +32,7 @@ This is set automatically when agents are spawned and used for all attribution.
 
 The slash format mirrors filesystem paths and enables:
 - Hierarchical parsing (extract rig, role, name)
-- Consistent mail addressing (`gt mail send gastown/witness`)
+- Consistent mail addressing (`gt mail send gastown/crew/joe`)
 - Path-like routing in beads operations
 - Visual clarity about agent location
 
@@ -66,7 +63,7 @@ abc123 Fix bug (gastown/crew/joe <steve@example.com>)
 {
   "id": "gt-xyz",
   "created_by": "gastown/crew/joe",
-  "updated_by": "gastown/witness"
+  "updated_by": "mayor"
 }
 ```
 
@@ -89,7 +86,7 @@ All events include actor attribution:
 ## Environment Setup
 
 Gas Town uses a centralized `config.AgentEnv()` function to set environment
-variables consistently across all agent spawn paths (managers, daemon, boot).
+variables consistently across all agent spawn paths (managers and the daemon).
 
 ### Example: Polecat Environment
 
@@ -135,19 +132,9 @@ environment variable reference.
 
 The format supports programmatic parsing:
 
-```go
-// identityToBDActor converts daemon identity to BD_ACTOR format
-// Town level: mayor, deacon
-// Rig level: {rig}/witness, {rig}/refinery
-// Workers: {rig}/crew/{name}, {rig}/polecats/{name}
-```
-
 | Input | Parsed Components |
 |-------|-------------------|
 | `mayor` | role=mayor |
-| `deacon` | role=deacon |
-| `gastown/witness` | rig=gastown, role=witness |
-| `gastown/refinery` | rig=gastown, role=refinery |
 | `gastown/crew/joe` | rig=gastown, role=crew, name=joe |
 | `gastown/polecats/toast` | rig=gastown, role=polecat, name=toast |
 

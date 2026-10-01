@@ -12,12 +12,12 @@ They cycle within groups based on the current session type:
 
 | Group | Sessions included | Example |
 |-------|-------------------|---------|
-| **Town** | Mayor + Deacon | `hq-mayor` ↔ `hq-deacon` |
+| **Town** | Mayor | `hq-mayor` |
 | **Crew** | All crew in the same rig | `gt-crew-max` ↔ `gt-crew-joe` |
-| **Rig ops** | Witness + Refinery + Polecats in the same rig | `gt-witness` ↔ `gt-refinery` ↔ `gt-furiosa` ↔ `gt-nux` |
+| **Rig ops** | Polecats in the same rig | `gt-furiosa` ↔ `gt-nux` |
 
-Groups are per-rig: `gt-witness` cycles with `gt-refinery` and gastown
-polecats, but NOT with `bd-witness` or `bd-refinery`.
+Groups are per-rig: gastown polecats cycle with each other, but NOT with
+beads polecats.
 
 If a group has only one session, prefix+n/p is a no-op.
 
@@ -30,8 +30,8 @@ If a group has only one session, prefix+n/p is a no-op.
 ## How Bindings Are Set Up
 
 Bindings are configured by `ConfigureGasTownSession()` in the tmux package,
-which is called whenever a session is created (by the daemon for patrol
-agents, by the witness for polecats, by `gt crew at` for crew). This means:
+which is called whenever a session is created (by `gt sling` and the daemon
+for polecats, by `gt crew at` for crew). This means:
 
 - Bindings are set on the **first** Gas Town session created on a tmux server
 - They apply server-wide (tmux keybindings are global, not per-session)

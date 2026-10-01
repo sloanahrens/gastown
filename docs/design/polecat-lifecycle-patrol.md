@@ -1,3 +1,5 @@
+> Status: superseded (2026-09). The daemon's patrol_scan tick and landing worker replaced the witness and refinery this design coordinates (ADR 0003, 0004, 0005). Not maintained.
+
 # Polecat Lifecycle and Patrol Coordination
 
 > **Bead:** gt-t6muy
