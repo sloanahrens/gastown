@@ -747,7 +747,7 @@ func (d *Daemon) Run() (err error) {
 			return stores
 		}
 	}
-	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
+	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.config.SlingEngine, 0, d.beadsStores, storeOpener, isRigParked)
 	d.convoyManager.prefixes = d.prefixRegistry()
 	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlertsErr)
 	if err := d.convoyManager.Start(); err != nil {

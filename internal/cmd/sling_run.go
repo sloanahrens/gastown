@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -85,7 +86,7 @@ type slingDeps struct {
 	getenv func(string) string
 	out    io.Writer
 	stdin  io.Reader
-	steps  *slingTimer
+	steps  *sling.Timer
 
 	// Process state.
 	autoCommitOff func() (restore func())
@@ -134,7 +135,7 @@ type slingDeps struct {
 	spawnPolecat   func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
 	admitPolecat   func(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error)
 	startSession   func(spawn *SpawnedPolecatInfo) (string, error)
-	cleanupSpawned func(spawn *SpawnedPolecatInfo, rigName, convoyID string)
+	cleanupSpawned func(spawn *SpawnedPolecatInfo, townRoot, rigName, convoyID string)
 	resolveAgent   func(target string) (agentID, pane, hookRoot string, err error)
 	cwdTown        func() string
 	crewExists     func(townRoot, rigName, name string) bool
@@ -147,9 +148,11 @@ type slingDeps struct {
 	unhook             func(townRoot, beadID string) error
 	recordReassignment func(townRoot, beadID, from, to, requester string)
 
-	// Convoy, formula and hook writes.
-	trackedByConvoy    func(beadID string) string
-	createConvoy       func(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (string, error)
+	// Convoy, formula and hook writes. trackedByConvoy and createConvoy take
+	// the town root: the daemon's convoy feeder reaches them in process, where
+	// the cwd is not the town.
+	trackedByConvoy    func(townRoot, beadID string) string
+	createConvoy       func(townRoot, beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (string, error)
 	collectMolecules   func(info *beadInfo, beadID, townRoot string) ([]string, error)
 	burnMolecules      func(molecules []string, beadID, townRoot string) error
 	rigCommandVars     func(townRoot, rig string) []string
@@ -178,7 +181,7 @@ type slingDeps struct {
 	slingContexts func(rigBeadsDir string) slingContextStore
 
 	// Undoing a partial sling.
-	rollbackArtifacts func(spawn *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string)
+	rollbackArtifacts func(spawn *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir, convoyID string)
 	restoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo)
 	restorePinned     func(townRoot, beadID, assignee string)
 

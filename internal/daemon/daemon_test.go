@@ -400,7 +400,7 @@ func TestDaemon_StopsManagerAndScanner(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
-	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil)
+	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, nil, 1*time.Hour, nil, nil, nil)
 	manager.findStrandedFn = noStranded
 	if err := manager.Start(); err != nil {
 		t.Fatalf("manager Start: %v", err)

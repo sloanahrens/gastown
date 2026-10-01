@@ -37,6 +37,16 @@ type slingRollback struct {
 // PATH, and the package seams (which tests of other paths still replace).
 func realSlingRollback() slingRollback {
 	townRoot, err := workspace.FindFromCwdOrError()
+	return realSlingRollbackIn(townRoot, err)
+}
+
+// realSlingRollbackIn is realSlingRollback for a caller that already resolved
+// the town root — the dispatch engine, which reaches the daemon's convoy
+// feeder as well as the cobra command. The cwd is only the fallback.
+func realSlingRollbackIn(townRoot string, err error) slingRollback {
+	if townRoot == "" && err == nil {
+		townRoot, err = workspace.FindFromCwdOrError()
+	}
 	return slingRollback{
 		townRoot:         townRoot,
 		townErr:          err,

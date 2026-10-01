@@ -429,7 +429,7 @@ func TestSlingAutoConvoy(t *testing.T) {
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{})
 		h.run.opts.noConvoy = false
-		h.run.createConvoy = func(string, string, bool, string, string, string, string) (string, error) {
+		h.run.createConvoy = func(string, string, string, bool, string, string, string, string) (string, error) {
 			return "", errors.New("dolt busy")
 		}
 		if err := h.sling(slingBead, "gastown"); err != nil {

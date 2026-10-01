@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -87,28 +88,13 @@ func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
 	return rigName, r, nil
 }
 
-// slingBlocked reports why a sling into rigName must not run, as a short
-// label and the error to return, or ("", nil) when it may. An E-stop covering
-// the rig (the town sentinel or ESTOP.<rig>, read through estopOn, which
-// fails closed) refuses every sling, explicit ones included, because running
-// sessions keep working under an E-stop and must not dispatch more
-// (gt-4k3fj.4). A parked or docked rig, read through parked, refuses next.
-func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
-	if on, err := estopOn(townRoot, rigName); on {
-		why := "E-stop active"
-		if err != nil {
-			why = err.Error()
-		}
-		return "e-stop", fmt.Errorf("cannot sling to rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)
-	}
-	if blocked, reason := parked(townRoot, rigName); blocked {
-		undoCmd := "gt rig unpark"
-		if reason == "docked" {
-			undoCmd = "gt rig undock"
-		}
-		return "rig " + reason, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
-	}
-	return "", nil
+// slingBlocked is why a sling into rigName must not run, or nil when it may.
+// The guards themselves are sling.Blocked's: the dispatch engine runs them for
+// the daemon's convoy feeder as well as for this command, and a second copy
+// here is a rule the two could drift apart on.
+func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) error {
+	_, err := sling.Blocked(townRoot, rigName, estopOn, parked)
+	return err
 }
 
 // IsRigParkedOrDocked checks if a rig is parked or docked. Returns

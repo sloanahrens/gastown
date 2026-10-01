@@ -165,7 +165,7 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 			townRoot = d.cwdTown()
 		}
 		if townRoot != "" {
-			if _, err := slingBlocked(townRoot, rigName, d.estopOn, d.rigParked); err != nil {
+			if err := slingBlocked(townRoot, rigName, d.estopOn, d.rigParked); err != nil {
 				return nil, err
 			}
 		}

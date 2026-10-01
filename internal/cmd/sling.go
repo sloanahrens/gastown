@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -212,7 +213,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		ctx = cmd.Context()
 	}
 	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
-	slingSteps = newSlingTimer(os.Stderr)
+	slingSteps = sling.NewTimer(os.Stderr)
 	// The same boundary as executeSling's: a seat the pool claimed for this
 	// sling stops standing when the command returns. StartSession drops it on
 	// the success path, and the failure paths drop it here — including the ones
@@ -818,7 +819,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				rollbackConvoyID = convoyID
 			}
 			fmt.Fprintf(r.out, "%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
-			r.rollbackArtifacts(newPolecatInfo, rollbackBeadID, hookWorkDir, rollbackConvoyID)
+			r.rollbackArtifacts(newPolecatInfo, r.townRoot, rollbackBeadID, hookWorkDir, rollbackConvoyID)
 		}
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
@@ -916,20 +917,20 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				fmt.Fprintf(r.out, "Would set convoy merge strategy: %s\n", r.opts.merge)
 			}
 		} else {
-			existingConvoy := r.trackedByConvoy(beadID)
+			existingConvoy := r.trackedByConvoy(r.townRoot, beadID)
 			if existingConvoy == "" {
 				var err error
 				// Record the requested runtime agent and formula on the convoy:
 				// if this sling fails after the convoy exists, the convoy
 				// feeder re-dispatches the bead and must re-use this agent and
 				// formula rather than the rig default (gt-yg24, gt-4lor).
-				convoyID, err = r.createConvoy(beadID, info.Title, r.opts.owned, r.opts.merge, r.opts.baseBranch, r.opts.agent, r.opts.formula)
+				convoyID, err = r.createConvoy(r.townRoot, beadID, info.Title, r.opts.owned, r.opts.merge, r.opts.baseBranch, r.opts.agent, r.opts.formula)
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Fprintf(r.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 				} else {
 					fmt.Fprintf(r.out, "%s Created convoy 🚚 %s\n", style.Bold.Render("→"), convoyID)
-					r.steps.step("convoy")
+					r.steps.Step("convoy")
 					fmt.Fprintf(r.out, "  Tracking: %s\n", beadID)
 					if r.opts.owned {
 						fmt.Fprintf(r.out, "  Lifecycle: caller-managed (owned)\n")
@@ -1049,7 +1050,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		// - gt done: close attached_molecule (wisp) first, then close base bead
 		// - Compound resolution: base bead -> attached_molecule -> wisp
 		attachedMoleculeID = result.WispRootID
-		r.steps.step("formula")
+		r.steps.Step("formula")
 		if len(result.FormulaVars) > 0 {
 			varsForAttachment = append([]string(nil), result.FormulaVars...)
 			formulaVarsForAttachment = strings.Join(result.FormulaVars, "\n")
@@ -1112,7 +1113,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		return err
 	}
 	hooked = true
-	r.steps.step("hook")
+	r.steps.Step("hook")
 	r.clearOrphanLabels(townRoot, beadID, hookWorkDir)
 
 	// The bead is dispatched now, so later dispatches in this process should
@@ -1179,7 +1180,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
-		r.steps.step("session")
+		r.steps.Step("session")
 	}
 
 	// Commit point (gt-7evi4): the work is hooked and any polecat this sling
@@ -1495,6 +1496,6 @@ func resolvePRBranch(prNumber int) (string, error) {
 // Cleanup is best-effort: each step logs warnings but continues to clean as much as possible.
 // beadID is the bead this sling touched ("" when the failure came before the
 // sling wrote to any bead); it is never unhooked from a different assignee.
-func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
-	realSlingRollback().rollback(spawnInfo, beadID, hookWorkDir, convoyID)
+func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir, convoyID string) {
+	realSlingRollbackIn(townRoot, nil).rollback(spawnInfo, beadID, hookWorkDir, convoyID)
 }
