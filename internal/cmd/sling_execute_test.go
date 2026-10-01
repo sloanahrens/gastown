@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // executeSling is the batch, convoy and scheduler dispatch path. These tests
@@ -45,6 +46,17 @@ func TestExecuteSlingRefusals(t *testing.T) {
 		{name: "deferred with a dead holder", bead: &beadInfo{Status: "hooked", Assignee: holder, Description: "status: deferred"},
 			setup: func(h *slingHarness) { h.dead[holder] = true }, errSub: "is deferred"},
 		{name: "operator", bead: &beadInfo{Labels: []string{dispatch.OperatorLabel}}, errSub: dispatch.SlingRefusalMarker, errMsg: "operator-reserved"},
+		// Work gt done submitted to the landing worker stays its work, for the
+		// automatic dispatchers too — and --force, which every one of them
+		// passes, does not open it (gt-v4ssj.2).
+		{name: "submitted for landing", bead: &beadInfo{Labels: []string{land.LabelReadyToLand}},
+			errSub: "the landing worker owns it", errMsg: "ready-to-land"},
+		{name: "submitted for landing under force", bead: &beadInfo{Labels: []string{land.LabelReadyToLand}},
+			params: func(p *SlingParams) { p.Force = true },
+			errSub: "the landing worker owns it", errMsg: "ready-to-land"},
+		// A bead whose title is a CLI flag is a garbage bead from a flag-parsing
+		// bug; dispatching one bounces the work between polecats (gt-e0kx5).
+		{name: "flag-like title", bead: &beadInfo{Title: "--force"}, errSub: "looks like a CLI flag", errMsg: "flag-like title"},
 		// An e-stop refuses every sling, explicit ones included (gt-4k3fj.4),
 		// and wins over a parked rig.
 		{name: "town e-stop", bead: &beadInfo{}, setup: func(h *slingHarness) {
@@ -231,7 +243,10 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 		{name: "assignee lock fails", inject: func(h *slingHarness) {
 			h.run.lockAssignee = func(string, string) (func(), error) { return nil, injected }
 		}, errSub: "serializing hook write", undo: "cleanup spawn Toast convoy="},
-		{name: "raw metadata fails", params: func(p *SlingParams) { p.ReviewOnly = true },
+		// Raw metadata is only stored when no formula is attached, so this case
+		// asks for the raw bead: an unnamed formula now means the rig's default,
+		// which is what `gt sling` applies to a polecat target.
+		{name: "raw metadata fails", params: func(p *SlingParams) { p.ReviewOnly = true; p.HookRawBead = true },
 			inject: func(h *slingHarness) {
 				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
 			},

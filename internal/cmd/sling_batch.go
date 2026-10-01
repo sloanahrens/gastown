@@ -326,8 +326,8 @@ func (b batchSling) guardCrossRig(beadIDs []string, rigName, townRoot string) er
 
 // cleanupSpawnedPolecat undoes a spawn whose session/hook failed before any
 // work bead was hooked to it. See cleanupSpawnedPolecatWork.
-func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, rigName, convoyID string) {
-	cleanupSpawnedPolecatWork(spawnInfo, rigName, "", "", convoyID)
+func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, convoyID string) {
+	cleanupSpawnedPolecatWork(spawnInfo, townRoot, rigName, "", "", convoyID)
 }
 
 // spawnedPolecatSandbox is the rig surface a rollback may touch: the polecat's
@@ -376,8 +376,8 @@ func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox,
 //   - Only a branch this sling created, on a sandbox this sling created, is a
 //     candidate for deletion, and deletePolecatBranch still keeps it when its
 //     tip is not on a remote. A resumed branch is never deleted.
-func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir, convoyID string) {
-	realSlingRollback().cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir, convoyID)
+func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, beadID, hookWorkDir, convoyID string) {
+	realSlingRollbackIn(townRoot, nil).cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir, convoyID)
 }
 
 // allBeadIDs returns true if every arg looks like a bead ID (syntactic check).

@@ -18,6 +18,9 @@ type fake struct {
 	pingErrs []error
 	pinged   int
 
+	execTax    time.Duration
+	execTaxErr error
+
 	hb    HeartbeatRecord
 	hbErr error
 
@@ -65,7 +68,11 @@ func (f *fake) Ping(context.Context) (time.Duration, error) {
 }
 
 func (f *fake) Heartbeat() (HeartbeatRecord, error) { return f.hb, f.hbErr }
-func (f *fake) Ticks() ([]Tick, error)              { return f.ticks, f.ticksErr }
+func (f *fake) ExecTax(context.Context) (time.Duration, error) {
+	return f.execTax, f.execTaxErr
+}
+
+func (f *fake) Ticks() ([]Tick, error) { return f.ticks, f.ticksErr }
 func (f *fake) Landings(_ context.Context, since time.Time) ([]RigLandings, error) {
 	f.since = since
 	return f.landings, f.landingsErr
@@ -85,6 +92,7 @@ func (f *fake) NeedsHuman(context.Context) (int, time.Time, error) {
 // healthy is a fake town with every field green.
 func healthy() *fake {
 	return &fake{
+		execTax:  9 * time.Millisecond,
 		hb:       HeartbeatRecord{At: ago(time.Minute), Count: 41},
 		ticks:    []Tick{{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)}},
 		landings: []RigLandings{{Rig: "gastown", Last: ago(time.Hour), Landed: 7, Pending: 1}},
@@ -97,7 +105,7 @@ func healthy() *fake {
 func inputs(f *fake) Inputs {
 	return Inputs{
 		Now: now, Thresholds: DefaultThresholds(),
-		Dolt: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
+		Dolt: f, ExecTax: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
 		Backups: f, Mains: f, Config: f, NeedsHuman: f, Seats: f,
 	}
 }
@@ -154,8 +162,8 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
-	if len(r.Fields) != 11 {
-		t.Errorf("got %d fields, want one per source (11)", len(r.Fields))
+	if len(r.Fields) != 12 {
+		t.Errorf("got %d fields, want one per source (12)", len(r.Fields))
 	}
 }
 
@@ -165,8 +173,9 @@ func TestFailedQueriesAreUnknown(t *testing.T) {
 	f := healthy()
 	f.hbErr, f.ticksErr, f.landingsErr, f.escErr, f.holdersErr = boom, boom, boom, boom, boom
 	f.backupErr, f.mainsErr, f.waitErr, f.seatsErr = boom, boom, boom, boom
+	f.execTaxErr = boom
 	r := Compute(context.Background(), inputs(f))
-	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "needs-human", "seat"} {
+	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "needs-human", "seat", "exec-tax"} {
 		got := field(t, r, key)
 		if got.Tag != Unknown || got.Detail != boom.Error() {
 			t.Errorf("%s = %+v, want UNKNOWN carrying the error", key, got)
@@ -232,6 +241,49 @@ func TestDolt(t *testing.T) {
 				t.Errorf("pinged %d times, want DoltSamples (3)", f.pinged)
 			}
 		})
+	}
+}
+
+// TestExecTax checks the field the daemon's exec probe publishes: the
+// verdict on the median, and the raw milliseconds a reader compares between
+// reports (gt-2ycne.1).
+func TestExecTax(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		median    time.Duration
+		threshold Limits
+		want      Verdict
+		value     string
+	}{
+		"clear":                           {median: 9 * time.Millisecond, threshold: DefaultThresholds().ExecTax, want: Green, value: "9ms/exec"},
+		"at the threshold":                {median: 50 * time.Millisecond, threshold: DefaultThresholds().ExecTax, want: Red, value: "50ms/exec"},
+		"taxed":                           {median: 180 * time.Millisecond, threshold: DefaultThresholds().ExecTax, want: Red, value: "180ms/exec"},
+		"degenerate is degraded":          {median: 80 * time.Millisecond, threshold: Limits{Degraded: 60 * time.Millisecond, Red: 100 * time.Millisecond}, want: Degraded, value: "80ms/exec"},
+		"a threshold of zero never trips": {median: time.Minute, threshold: Limits{}, want: Green, value: "1m/exec"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.execTax = tc.median
+			in := inputs(f)
+			in.Thresholds.ExecTax = tc.threshold
+			r := Compute(context.Background(), in)
+			got := field(t, r, "exec-tax")
+			if got.Tag != Live || got.Verdict != tc.want || got.Value != tc.value {
+				t.Errorf("exec-tax = %+v, want LIVE %s %q", got, tc.want, tc.value)
+			}
+			if r.ExecTaxMS == nil || *r.ExecTaxMS != float64(tc.median)/float64(time.Millisecond) {
+				t.Errorf("ExecTaxMS = %v, want %v", r.ExecTaxMS, tc.median)
+			}
+			if tc.want != Green && got.Detail == "" {
+				t.Errorf("exec-tax = %+v, want a detail naming what pays the cost", got)
+			}
+		})
+	}
+	// An unanswered probe is a question nobody can answer, not a fast tree.
+	r := Compute(context.Background(), Inputs{Now: now, Thresholds: DefaultThresholds(), ExecTax: &fake{execTaxErr: errors.New("no temp dir")}})
+	if r.ExecTaxMS != nil {
+		t.Errorf("ExecTaxMS = %v with the probe failed, want nil", *r.ExecTaxMS)
 	}
 }
 

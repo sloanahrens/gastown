@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // TestIntegrationConvoyManager_FullLifecycle starts a real ConvoyManager over a
@@ -44,7 +46,7 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	}
 
 	// Start with short scan interval so stranded scan fires quickly.
-	m := NewConvoyManager(townRoot, logger, "gt", 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
 	m.installScanFakes(strandedJSON, checkLogPath)
 
 	// S-08: Start should succeed.
@@ -167,21 +169,6 @@ func TestIntegrationConvoyManager_LoggingFlow(t *testing.T) {
 		t.Fatalf("close %s: %v", task1, err)
 	}
 
-	binDir := t.TempDir()
-	slingLogPath := filepath.Join(binDir, "sling.log")
-	gtScript := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "sling" ]; then
-  echo "$@" >> "%s"
-  exit 0
-fi
-exit 0
-`, slingLogPath)
-
-	gtPath := filepath.Join(binDir, "gt")
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
 	// Thread-safe logger
 	var mu sync.Mutex
 	var logged []string
@@ -193,8 +180,17 @@ exit 0
 
 	// Start manager with short scan interval; event poll is 5s (fixed).
 	stores := map[string]beadsdk.Storage{"hq": hqStore, "gt": rigStore}
-	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 1*time.Hour, stores, nil, nil)
 	m.installScanFakes("[]", "")
+	// The feeder dispatches in process (gt-638go.7): record the bead it feeds
+	// instead of running a stub gt.
+	var slung []string
+	m.slingFn = func(_ string, opts sling.Options) (*sling.Result, error) {
+		mu.Lock()
+		slung = append(slung, opts.BeadID)
+		mu.Unlock()
+		return &sling.Result{BeadID: opts.BeadID, Success: true}, nil
+	}
 	// Start the cursor at zero so the poll processes events instead of warming up.
 	startCursorsAtZero(m)
 	// Drive one poll manually instead of waiting for the 5s ticker.
@@ -222,12 +218,12 @@ exit 0
 		}
 	}
 
-	// Verify sling was actually called for task2
-	data, err := os.ReadFile(slingLogPath)
-	if err != nil {
-		t.Errorf("sling was never called (expected dispatch of %s): %v", task2, err)
-	} else if !strings.Contains(string(data), task2) {
-		t.Errorf("sling log does not contain %s: %q", task2, string(data))
+	// Verify the feeder dispatched task2 through the engine.
+	mu.Lock()
+	dispatched := slices.Clone(slung)
+	mu.Unlock()
+	if !slices.Contains(dispatched, task2) {
+		t.Errorf("dispatched beads = %v, want %s", dispatched, task2)
 	}
 }
 
@@ -269,7 +265,7 @@ func TestIntegrationConvoyManager_ShutdownKillsHangingSubprocess(t *testing.T) {
 	}
 
 	// Short scan interval so the hanging gt fires immediately.
-	m := NewConvoyManager(townRoot, logger, "gt", 100*time.Millisecond, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 100*time.Millisecond, nil, nil, nil)
 	// A stuck scan: it returns only when the manager's context is cancelled.
 	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
 		<-ctx.Done()

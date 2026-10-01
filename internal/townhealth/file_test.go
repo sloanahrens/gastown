@@ -102,14 +102,17 @@ func TestSettingsResolve(t *testing.T) {
 	if err != nil || stale != DefaultStaleAfter || th != DefaultThresholds() {
 		t.Fatalf("nil settings = %+v %v %v, want defaults", th, stale, err)
 	}
-	th, stale, err = (&Settings{StaleAfter: "20m", BackupRed: "96h", DoltSamples: 5, TickRedFactor: 6}).Resolve()
+	th, stale, err = (&Settings{StaleAfter: "20m", BackupRed: "96h", DoltSamples: 5, TickRedFactor: 6, ExecTaxRed: "120ms", ExecTaxDegraded: "60ms"}).Resolve()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stale != 20*time.Minute || th.Backup.Red != 96*time.Hour || th.Backup.Degraded != 36*time.Hour || th.DoltSamples != 5 || th.TickRedFactor != 6 {
 		t.Errorf("resolved %+v stale %v", th, stale)
 	}
-	for _, bad := range []Settings{{BackupRed: "soon"}, {SeatEvidence: "-1m"}, {StaleAfter: "0s"}, {DoltSamples: -1}} {
+	if th.ExecTax.Red != 120*time.Millisecond || th.ExecTax.Degraded != 60*time.Millisecond {
+		t.Errorf("ExecTax = %+v, want the configured 60ms/120ms (default %+v)", th.ExecTax, DefaultThresholds().ExecTax)
+	}
+	for _, bad := range []Settings{{BackupRed: "soon"}, {SeatEvidence: "-1m"}, {StaleAfter: "0s"}, {DoltSamples: -1}, {ExecTaxRed: "50"}} {
 		if _, _, err := bad.Resolve(); err == nil {
 			t.Errorf("Resolve(%+v) succeeded, want an error", bad)
 		}

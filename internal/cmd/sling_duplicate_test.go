@@ -647,7 +647,7 @@ func TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "gt-pool1" {
 		t.Fatalf("expected the list-only candidate gt-pool1, got %+v", got)
 	}
-	if got[0].Refs.empty() {
+	if got[0].Refs.Empty() {
 		t.Error("list-only refs from the description should survive a failed enrichment")
 	}
 	if warnedErr == nil {

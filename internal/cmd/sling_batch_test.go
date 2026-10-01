@@ -356,7 +356,7 @@ func TestCreateAutoConvoy_DepFailIsNonFatal(t *testing.T) {
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
 	t.Parallel()
-	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "", "", "")
+	_, err := createAutoConvoy(t.TempDir(), "gt-aaa", "--verbose", false, "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
 	}

@@ -3,10 +3,8 @@
 package convoy
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -33,22 +32,22 @@ import (
 //   - issueID: the issue ID that was just closed
 //   - caller: identifier for logging (e.g., "Convoy")
 //   - logger: optional logger function (can be nil)
-//   - gtPath: resolved path to the gt binary, for the continuation feed's gt sling
+//   - sling: the continuation feed's dispatch, run in process by the caller
 //   - check: runs the completion check on one convoy (see Town.Checker)
 //   - resolver: optional StoreResolver for cross-database issue resolution (nil falls back to subprocess)
 //
 // Returns the convoy IDs that were checked (may be empty if issue isn't tracked).
-func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), gtPath string, check Checker, isRigParked func(string) bool, resolver ...*StoreResolver) []string {
+func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), sling Slinger, check Checker, isRigParked func(string) bool, resolver ...*StoreResolver) []string {
 	var res *StoreResolver
 	if len(resolver) > 0 {
 		res = resolver[0]
 	}
-	return checkConvoysForIssue(ctx, store, townRoot, issueID, caller, logger, gtSlinger(gtPath), check, isRigParked, res)
+	return checkConvoysForIssue(ctx, store, townRoot, issueID, caller, logger, sling, check, isRigParked, res)
 }
 
 // checkConvoysForIssue is CheckConvoysForIssue with the continuation feed's
-// gt sling behind sling.
-func checkConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), sling slinger, check Checker, isRigParked func(string) bool, res *StoreResolver) []string {
+// dispatch behind sling.
+func checkConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), sling Slinger, check Checker, isRigParked func(string) bool, res *StoreResolver) []string {
 	if logger == nil {
 		logger = func(format string, args ...interface{}) {} // no-op
 	}
@@ -423,7 +422,7 @@ func BlockOf(ctx context.Context, store beadsdk.Storage, issueID string, resolve
 // Only one issue is dispatched per call. When that issue completes, the
 // next close event triggers another feed cycle.
 // sling runs the gt sling that dispatches the issue.
-func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, convoyID, caller string, logger func(format string, args ...interface{}), sling slinger, isRigParked func(string) bool, resolver *StoreResolver) {
+func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, convoyID, caller string, logger func(format string, args ...interface{}), sling Slinger, isRigParked func(string) bool, resolver *StoreResolver) {
 	// The operator's town-wide hold parks every automatic dispatcher
 	// (gt-ifijm). Checked before the store is read: nothing below matters
 	// while the town is held, and the next close event after the hold lifts
@@ -521,7 +520,7 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		if convoyFormula != "" {
 			logger("%s: convoy %s: feeding %s with formula %q recorded on convoy at sling time", caller, convoyID, issue.ID, convoyFormula)
 		}
-		if err := sling(ctx, townRoot, slingArgs(issue.ID, rig, baseBranch, agent, convoyFormula)); err != nil {
+		if err := sling(ctx, townRoot, dispatchOptions(issue.ID, rig, baseBranch, agent, convoyFormula)); err != nil {
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
 			continue // Try next issue on dispatch failure
 		}
@@ -835,41 +834,29 @@ func FeedDispatchAgent(convoyAgent, townRoot, rig string) (agent, description st
 	return "", fmt.Sprintf("rig default agent %q (no --agent recorded on convoy)", name)
 }
 
-// slinger runs gt with args from townRoot: the gt sling that dispatches an
-// issue. The context enables cancellation on daemon shutdown.
-type slinger func(ctx context.Context, townRoot string, args []string) error
+// Slinger dispatches one bead to one rig in process. internal/sling's engine
+// is what a caller passes here; the alternative was exec'ing `gt sling`, which
+// put an untyped process boundary — and the daemon's cwd and environment —
+// between the feeder and the dispatch it was making.
+//
+// The context enables cancellation on daemon shutdown.
+type Slinger func(ctx context.Context, townRoot string, opts sling.Options) error
 
-// gtSlinger is the slinger that runs the gt binary at gtPath.
-func gtSlinger(gtPath string) slinger {
-	return func(ctx context.Context, townRoot string, args []string) error {
-		cmd := exec.CommandContext(ctx, gtPath, args...)
-		cmd.Dir = townRoot
-		util.SetProcessGroup(cmd)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
-		}
-		return nil
-	}
-}
-
-// slingArgs is the gt sling that dispatches issueID to rig.
-// agent is the runtime agent to re-dispatch with; empty leaves the choice to
-// gt sling's own resolution.
+// dispatchOptions is the dispatch that feeds issueID to rig.
+//
+// baseBranch is the convoy's recorded base branch. agent is the runtime agent
+// to re-dispatch with; empty leaves the choice to the engine's own resolution.
 // formula is the formula the convoy recorded at sling time; empty leaves the
-// choice to gt sling's default. Re-dispatching without it runs the bead under
-// the default formula instead of the one originally asked for (gt-4lor, gt-o9sbq).
-func slingArgs(issueID, rig, baseBranch, agent, formula string) []string {
-	args := []string{"sling", issueID, rig, "--no-boot"}
-	if baseBranch != "" {
-		args = append(args, "--base-branch="+baseBranch)
+// choice to the engine's default, and re-dispatching without it runs the bead
+// under the default formula instead of the one originally asked for
+// (gt-4lor, gt-o9sbq).
+func dispatchOptions(issueID, rig, baseBranch, agent, formula string) sling.Options {
+	return sling.Options{
+		BeadID:      issueID,
+		RigName:     rig,
+		NoBoot:      true,
+		BaseBranch:  baseBranch,
+		Agent:       agent,
+		FormulaName: formula,
 	}
-	if agent != "" {
-		args = append(args, "--agent="+agent)
-	}
-	if formula != "" {
-		args = append(args, "--formula="+formula)
-	}
-	return args
 }

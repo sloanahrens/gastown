@@ -604,6 +604,27 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	}
 }
 
+// gt-fzwcd: the wake a landing worker sends when its drained pass ends
+// restarts the daemon right then, instead of waiting out a heartbeat.
+func TestUpgradeRestartsOnTheDrainedLandingWake(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+	// The heartbeat drained the workers while the pass was in flight.
+	d.upgradeRestartPending.Store(true)
+
+	state := &State{Running: true}
+	if err := d.restartOnDrainedLanding(state); !errors.Is(err, ErrRestartForUpgrade) {
+		t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
+	}
+	if state.Running {
+		t.Fatal("the drained-pass wake shut nothing down")
+	}
+}
+
 func TestUpgradeDrainEndsWhenMarkerIsGone(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)

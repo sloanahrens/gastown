@@ -711,14 +711,6 @@ func (b *Beads) storeAddDependency(issue, dependsOn string) error {
 	return b.store.AddDependency(ctx, dep, b.getActor())
 }
 
-// storeRemoveDependency implements RemoveDependency using the in-process store.
-func (b *Beads) storeRemoveDependency(issue, dependsOn string) error {
-	ctx, cancel := storeCtx()
-	defer cancel()
-
-	return b.store.RemoveDependency(ctx, issue, dependsOn, b.getActor())
-}
-
 // storeAddLabel implements AddLabel using the in-process store.
 func (b *Beads) storeAddLabel(id, label string) error {
 	ctx, cancel := storeCtx()
