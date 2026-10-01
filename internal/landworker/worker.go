@@ -85,6 +85,15 @@ type Worker struct {
 	// PostLand, when set, runs the rig's post-landing command after each
 	// new landing (never after a record repair).
 	PostLand PostLandTrigger
+	// Reverts finishes the red-main owner's reverts (*RedMain): told of each
+	// new landing and each rework rejection. nil skips it.
+	Reverts RevertHooks
+	// WatchTarget is the branch the worker watches for commits that reached
+	// it without a landing (a direct push); each pass that finds one runs
+	// the post-landing command for it. "" turns the watch off. MainState
+	// seeds the tip it last saw across restarts.
+	WatchTarget string
+	MainState   MainStateStore
 	// LandTimeout bounds one landing (gate included); 0 means
 	// DefaultLandTimeout.
 	LandTimeout time.Duration
@@ -96,7 +105,20 @@ type Worker struct {
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
 	startupDone   bool
+	// lastSeen is the WatchTarget tip the worker last saw or landed.
+	lastSeen string
 }
+
+// RevertHooks is the red-main owner's side of an automatic revert.
+type RevertHooks interface {
+	// RevertLanded is called after every new landing.
+	RevertLanded(ctx context.Context, work land.Work, res land.Result)
+	// RevertRejected is called on every rework rejection; true means the
+	// work was a revert and has been dealt with, so no rework comment.
+	RevertRejected(work land.Work, rej *land.Rejection) bool
+}
+
+var _ RevertHooks = (*RedMain)(nil)
 
 type beadState struct {
 	failures  int
@@ -138,9 +160,16 @@ func (w *Worker) bead(id string) *beadState {
 	return s
 }
 
-// Pass lands every ready bead once, oldest first, and returns what happened.
-// It stops early only when ctx is done.
+// Pass lands every ready bead once, oldest first, then checks WatchTarget for
+// a direct push, and returns what happened. It stops early only when ctx is
+// done.
 func (w *Worker) Pass(ctx context.Context) Report {
+	rep := w.landReady(ctx)
+	w.watchTarget(ctx)
+	return rep
+}
+
+func (w *Worker) landReady(ctx context.Context) Report {
 	var rep Report
 	if w.pendingRepair == nil {
 		w.pendingRepair = map[string]land.Work{}
@@ -401,7 +430,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
 		w.clearIntent(work)
 		if !wasRepair {
-			w.triggerPostLand(ctx, work, res)
+			w.afterLanding(ctx, work, res)
 		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
@@ -410,7 +439,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: %v; the next pass finishes the record", work.BeadID, err)
 		w.clearIntent(work)
 		if !wasRepair {
-			w.triggerPostLand(ctx, work, res)
+			var recEr *land.RecordError
+			if errors.As(err, &recEr) {
+				res = recEr.Result
+			}
+			w.afterLanding(ctx, work, res)
 		}
 	case outRejectedRework:
 		var rej *land.Rejection
@@ -423,6 +456,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		delete(w.state, work.BeadID)
+		if w.Reverts != nil && w.Reverts.RevertRejected(work, rej) {
+			return
+		}
 		msg := reworkMessage(rej)
 		if cerr := w.Beads.AddComment(work.BeadID, msg); cerr != nil {
 			w.logf("%s: adding the rework comment: %v", work.BeadID, cerr)
@@ -525,11 +561,97 @@ func (w *Worker) announce(id, key, msg string) {
 	st.announced = key
 }
 
-func (w *Worker) triggerPostLand(ctx context.Context, work land.Work, res land.Result) {
-	if w.PostLand == nil || res.LandedCommit == "" {
+// afterLanding runs the post-landing command for a new landing and tells
+// the red-main owner, which finishes the landing if it was a revert.
+func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Result) {
+	if res.LandedCommit != "" && work.Target == w.WatchTarget {
+		w.lastSeen = res.LandedCommit
+	}
+	if w.PostLand != nil && res.LandedCommit != "" {
+		w.PostLand.Trigger(ctx, PostLand{BeadID: work.BeadID, Commit: res.LandedCommit, Target: work.Target})
+	}
+	if w.Reverts != nil {
+		w.Reverts.RevertLanded(ctx, work, res)
+	}
+}
+
+// watchTarget runs the post-landing command for a WatchTarget tip that no
+// landing put there: a direct push bypasses the worker, and without this
+// nothing would test it (gt-v4ssj.4.1). There is no work bead to blame, so
+// the red-main owner names the commit range and never reverts.
+func (w *Worker) watchTarget(ctx context.Context) {
+	if w.WatchTarget == "" || w.PostLand == nil || ctx.Err() != nil {
 		return
 	}
-	w.PostLand.Trigger(ctx, PostLand{BeadID: work.BeadID, Commit: res.LandedCommit, Target: work.Target})
+	tip, err := w.Remote.BranchTip(w.WatchTarget)
+	if err != nil || tip == "" {
+		w.logf("watching %s for direct pushes: tip %q: %v", w.WatchTarget, tip, err)
+		return
+	}
+	if w.lastSeen == "" {
+		w.lastSeen = w.seedLastSeen()
+		if w.lastSeen == "" {
+			// Nothing tested yet: watch from here rather than run the whole
+			// tier on a main nobody changed.
+			w.lastSeen = tip
+			return
+		}
+	}
+	if tip == w.lastSeen {
+		return
+	}
+	from := w.lastSeen
+	w.lastSeen = tip
+	if w.recentLanding(tip) {
+		return
+	}
+	w.logf("%s moved %s..%s without a landing (a direct push); running the post-landing command at %s", w.WatchTarget, short(from), short(tip), short(tip))
+	w.PostLand.Trigger(ctx, PostLand{Commit: tip, Target: w.WatchTarget, Direct: true, From: from})
+}
+
+// seedLastSeen is the newest commit a post-landing run reached a verdict at,
+// else the newest landing on WatchTarget, else "".
+func (w *Worker) seedLastSeen() string {
+	if w.MainState != nil {
+		if st, err := w.MainState.Load(); err != nil {
+			w.logf("reading the main state: %v", err)
+		} else if st.LastRun != "" {
+			return st.LastRun
+		}
+	}
+	if w.Landings == nil {
+		return ""
+	}
+	recs, err := w.Landings.Recent(recentRepairWindow)
+	if err != nil {
+		w.logf("reading the landings file: %v", err)
+		return ""
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Target == w.WatchTarget {
+			return recs[i].LandedCommit
+		}
+	}
+	return ""
+}
+
+// recentLanding reports whether commit is a landing the landings file
+// records: the worker's own, whose post-landing run it already triggered.
+func (w *Worker) recentLanding(commit string) bool {
+	if w.Landings == nil {
+		return false
+	}
+	recs, err := w.Landings.Recent(recentRepairWindow)
+	if err != nil {
+		w.logf("reading the landings file: %v", err)
+		return false
+	}
+	for _, rec := range recs {
+		if rec.LandedCommit == commit {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Worker) clearIntent(work land.Work) {

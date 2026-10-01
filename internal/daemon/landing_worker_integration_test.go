@@ -192,3 +192,91 @@ type approve struct{}
 func (approve) Review(context.Context, string, string, string) (land.Verdict, error) {
 	return land.Verdict{Verdict: land.VerdictApprove, Score: 0.9}, nil
 }
+
+// TestIntegrationRedMainRevertsTheCulpritThroughLand lands one piece of work
+// on a green main, reports its post-landing run red, and checks the whole
+// revert with real git: the revert branch is built and pushed from the rig's
+// bare repo, the worker lands it through Land, main's tree is back to the
+// last green one, and the culprit is reopened for rework.
+func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
+	root := t.TempDir()
+	origin, seed, bare, town := filepath.Join(root, "origin.git"), filepath.Join(root, "seed"), filepath.Join(root, ".repo.git"), filepath.Join(root, "town")
+	lwGit(t, root, "init", "-q", "--bare", "-b", "main", origin)
+	lwGit(t, root, "clone", "-q", origin, seed)
+	lwGit(t, seed, "config", "core.hooksPath", "/dev/null")
+	lwGit(t, seed, "checkout", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lwGit(t, seed, "add", ".")
+	lwGit(t, seed, "commit", "-q", "-m", "seed")
+	lwGit(t, seed, "push", "-q", "origin", "main")
+	green := lwGit(t, seed, "rev-parse", "HEAD")
+	const branch = "polecat/opal/gt-cul+x1"
+	lwGit(t, seed, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(seed, "b.txt"), []byte("breaks main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lwGit(t, seed, "add", ".")
+	lwGit(t, seed, "commit", "-q", "-m", "feat: b")
+	head := lwGit(t, seed, "rev-parse", "HEAD")
+	lwGit(t, seed, "push", "-q", "origin", branch)
+	lwGit(t, root, "clone", "-q", "--bare", origin, bare)
+	lwGit(t, bare, "config", "user.email", "t@example.com")
+	lwGit(t, bare, "config", "user.name", "T")
+
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	bd.Seed(beads.Issue{ID: "gt-cul", Title: "b", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
+		Labels: []string{land.LabelReadyToLand},
+		Notes:  land.FormatReadyNote(land.Work{Branch: branch, Head: head, Target: "main", Worker: "opal"})})
+	landings, err := land.RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workRoot, err := landingWorkRoot("", town, fmt.Sprintf("revert-%d", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workRoot) })
+	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Gate: &passGate{}, Reviewer: approve{},
+		Beads: bd, Landings: landings, RangeChecks: []land.RangeCheck{land.AttributionCheck}}
+	state := fileMainState{path: RedMainStatePath(town, "gastown")}
+	var status []string
+	redMain := &landworker.RedMain{Rig: "gastown", Beads: bd, Logf: t.Logf, State: state, Landings: landings,
+		Revert: postLandRevert(bare, workRoot),
+		Rerun: func(context.Context, string, string, landworker.PostLand) landworker.PostLandResult {
+			return landworker.PostLandResult{ExitCode: 1, Tail: "--- FAIL: TestB"}
+		},
+		Status: func(line string) { status = append(status, line) }}
+	w := &landworker.Worker{Rig: "gastown", Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander,
+		Landings: landings, Reverts: redMain, LandTimeout: time.Minute, Logf: t.Logf}
+
+	redMain.Green(context.Background(), "make test-slow", landworker.PostLand{BeadID: "gt-prev", Commit: green}, landworker.PostLandResult{})
+	if rep := w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("landing the culprit: %s", rep)
+	}
+	red := lwGit(t, origin, "rev-parse", "refs/heads/main")
+	redMain.Red(context.Background(), "make test-slow", landworker.PostLand{BeadID: "gt-cul", Commit: red, Target: "main"},
+		landworker.PostLandResult{ExitCode: 1, Packages: []land.PackageResult{{Package: "example.com/b"}}})
+	if last := status[len(status)-1]; !strings.Contains(last, "reverting gt-cul as ") {
+		t.Fatalf("status %q", last)
+	}
+
+	if rep := w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("landing the revert: %s", rep)
+	}
+	reverted := lwGit(t, origin, "rev-parse", "refs/heads/main")
+	if lwGit(t, origin, "rev-parse", reverted+"^{tree}") != lwGit(t, origin, "rev-parse", green+"^{tree}") {
+		t.Fatalf("main %s after the revert does not have the last green tree", reverted)
+	}
+	if recs, err := landings.Recent(1); err != nil || len(recs) != 1 || recs[0].LandedCommit != reverted || !strings.HasPrefix(recs[0].Branch, "revert/gt-cul-") {
+		t.Fatalf("landings file %+v %v; want the revert's landing record", recs, err)
+	}
+	cul, _ := bd.Show("gt-cul")
+	if cul.Status != "open" || !beads.HasLabel(cul, land.LabelRework) {
+		t.Fatalf("culprit after the revert: status=%s labels=%v", cul.Status, cul.Labels)
+	}
+	if st, err := state.Load(); err != nil || st.LastGreen != green || st.LastRun != red {
+		t.Fatalf("main state %+v %v", st, err)
+	}
+}
