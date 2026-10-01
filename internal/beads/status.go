@@ -109,6 +109,20 @@ func (s IssueStatus) IsTerminal() bool {
 	}
 }
 
+// IsActionable reports whether this status still asks something of the bead's
+// owner, so a deferred or pinned bead is parked rather than pending (gt-tk2xd).
+func (s IssueStatus) IsActionable() bool {
+	if s.IsTerminal() {
+		return false
+	}
+	switch s {
+	case StatusDeferred, IssueStatusPinned:
+		return false
+	default:
+		return true
+	}
+}
+
 // IsAssigned returns true if this status indicates the issue is actively
 // assigned to an agent (hooked or in_progress).
 func (s IssueStatus) IsAssigned() bool {
