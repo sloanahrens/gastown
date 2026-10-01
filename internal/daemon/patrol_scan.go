@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -269,29 +268,14 @@ func (h *patrolScanHost) Assess(rig, name string) liveness.Result {
 	return h.d.assessSeat(h.seat(rig, name), liveness.Input{})
 }
 
-// bdJSON runs a read-only bd command pinned to the rig's database (or routed
-// from the town root when the rig has no route) and returns stdout.
-func (h *patrolScanHost) bdJSON(rig string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), patrolScanBdTimeout)
-	defer cancel()
+// readBeads is the read-only client for rig's database (pinned), or routed
+// from the town root for rig "" or a rig with no directory.
+func (h *patrolScanHost) readBeads(rig string) workBeadReader {
 	env := bdReadOnlyRoutingEnv(h.town())
 	if rig != "" {
-		if rigDir := beads.GetRigDirForName(h.town(), rig); rigDir != "" {
-			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
-		}
+		env = h.d.workBeadsEnv(rig)
 	}
-	cmd := beads.CommandContextWithPath(ctx, h.d.bdPathOrDefault(), h.town(), env, args...)
-	util.SetProcessGroup(cmd.Cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, fmt.Errorf("bd %s: %w: %s", args[0], err, lastLine(msg))
-		}
-		return nil, fmt.Errorf("bd %s: %w", args[0], err)
-	}
-	return stdout.Bytes(), nil
+	return h.d.workBeads(env, patrolScanBdTimeout)
 }
 
 // bdMutating runs a bd command that may write, pinned to the rig's database
@@ -315,25 +299,13 @@ func (h *patrolScanHost) bdMutating(rig string, args ...string) ([]byte, error) 
 	return out, nil
 }
 
-// bdIssue is the slice of `bd list/show --json` the tick reads.
-type bdIssue struct {
-	ID          string   `json:"id"`
-	Status      string   `json:"status"`
-	Assignee    string   `json:"assignee"`
-	Labels      []string `json:"labels"`
-	Description string   `json:"description"`
-	Design      string   `json:"design"`
-	Notes       string   `json:"notes"`
-	UpdatedAt   string   `json:"updated_at"`
-	AgentState  string   `json:"agent_state"`
-}
-
-func (b bdIssue) work() patrolscan.Work {
-	w := patrolscan.Work{ID: b.ID, Status: b.Status, Assignee: b.Assignee, Labels: b.Labels, Design: b.Design, Notes: b.Notes}
-	if t, err := time.Parse(time.RFC3339, b.UpdatedAt); err == nil {
+// issueWork is the slice of a work bead the tick reads.
+func issueWork(is *beads.Issue) patrolscan.Work {
+	w := patrolscan.Work{ID: is.ID, Status: is.Status, Assignee: is.Assignee, Labels: is.Labels, Design: is.Design, Notes: is.Notes}
+	if t, err := time.Parse(time.RFC3339, is.UpdatedAt); err == nil {
 		w.UpdatedAt = t
 	}
-	if f := beads.ParseAttachmentFields(&beads.Issue{Description: b.Description}); f != nil {
+	if f := beads.ParseAttachmentFields(&beads.Issue{Description: is.Description}); f != nil {
 		w.AttachedMolecule = f.AttachedMolecule
 	}
 	return w
@@ -342,22 +314,12 @@ func (b bdIssue) work() patrolscan.Work {
 // listByStatus lists the rig's beads in the given statuses, optionally for
 // one assignee. Any failed status makes the whole answer an error: the
 // failed status may be the one holding the work.
-func (h *patrolScanHost) listByStatus(rig, assignee string, statuses ...string) ([]bdIssue, error) {
-	var all []bdIssue
+func (h *patrolScanHost) listByStatus(rig, assignee string, statuses ...string) ([]*beads.Issue, error) {
+	var all []*beads.Issue
 	for _, status := range statuses {
-		args := []string{"list", "--status=" + status, "--json", "--limit=0"}
-		if assignee != "" {
-			args = append(args, "--assignee="+assignee)
-		}
-		out, err := h.bdJSON(rig, beads.InjectFlatForListJSON(args)...)
+		batch, err := h.readBeads(rig).List(beads.ListOptions{Status: status, Assignee: assignee, Priority: -1})
 		if err != nil {
 			return nil, err
-		}
-		var batch []bdIssue
-		if len(bytes.TrimSpace(out)) > 0 {
-			if err := json.Unmarshal(out, &batch); err != nil {
-				return nil, fmt.Errorf("parsing bd list --status=%s: %w", status, err)
-			}
 		}
 		all = append(all, batch...)
 	}
@@ -371,7 +333,7 @@ func (h *patrolScanHost) AssignedWork(rig, name string) (*patrolscan.Work, error
 	}
 	for _, is := range issues {
 		if is.ID != "" {
-			w := is.work()
+			w := issueWork(is)
 			return &w, nil
 		}
 	}
@@ -380,18 +342,11 @@ func (h *patrolScanHost) AssignedWork(rig, name string) (*patrolscan.Work, error
 
 func (h *patrolScanHost) AgentState(rig, name string) (string, error) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
-	out, err := h.bdJSON(rig, "show", id, "--json")
+	issue, err := h.readBeads(rig).Show(id)
 	if err != nil {
 		return "", err
 	}
-	var issues []bdIssue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return "", fmt.Errorf("parsing bd show %s: %w", id, err)
-	}
-	if len(issues) == 0 {
-		return "", nil // a polecat with no agent bead has not parked itself
-	}
-	return beads.ResolveAgentState(issues[0].Description, issues[0].AgentState), nil
+	return beads.ResolveAgentState(issue.Description, issue.AgentState), nil
 }
 
 func (h *patrolScanHost) Heartbeat(rig, name string) *patrolscan.Heartbeat {
@@ -413,7 +368,7 @@ func (h *patrolScanHost) ActiveWork(rig string) ([]patrolscan.Work, error) {
 	}
 	out := make([]patrolscan.Work, 0, len(issues))
 	for _, is := range issues {
-		out = append(out, is.work())
+		out = append(out, issueWork(is))
 	}
 	return out, nil
 }
@@ -434,18 +389,11 @@ func (h *patrolScanHost) SessionExists(rig, name string) (bool, error) {
 }
 
 func (h *patrolScanHost) MoleculeStatus(id string) (string, error) {
-	out, err := h.bdJSON("", "show", id, "--json")
+	issue, err := h.readBeads("").Show(id)
 	if err != nil {
 		return "", err
 	}
-	var issues []bdIssue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return "", fmt.Errorf("parsing bd show %s: %w", id, err)
-	}
-	if len(issues) == 0 {
-		return "", nil
-	}
-	return issues[0].Status, nil
+	return issue.Status, nil
 }
 
 // CloseMolecule force-closes the molecule root and every step wisp under it,

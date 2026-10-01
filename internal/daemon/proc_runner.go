@@ -56,18 +56,6 @@ func (d *Daemon) combinedOutput(cmd *exec.Cmd) ([]byte, error) {
 	return combinedOutputWith(d.execCmd, cmd)
 }
 
-// bdOutput is (*beads.Cmd).Output through the daemon's execCmd seam: stdout,
-// unwrapped from bd's machine envelope on success and untouched on failure.
-func (d *Daemon) bdOutput(cmd *beads.Cmd) ([]byte, error) {
-	return bdOutputWith(d.execCmd, cmd)
-}
-
-// bdOutputWith is (*beads.Cmd).Output through run.
-func bdOutputWith(run cmdRunFunc, cmd *beads.Cmd) ([]byte, error) {
-	out, _, err := bdRunWith(run, cmd)
-	return out, err
-}
-
 // bdRunWith is (*beads.Cmd).Run through run, with stdout and stderr
 // captured: stdout is unwrapped from bd's machine envelope on success and
 // left as bd printed it on failure, whose envelope holds the typed error.

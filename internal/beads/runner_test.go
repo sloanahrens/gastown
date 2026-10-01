@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDefaultRunnerIsRealBD is the wiring guard for the bd seam: a Beads
@@ -36,7 +37,7 @@ func TestDefaultRunnerIsRealBD(t *testing.T) {
 	// runBDProcess's policy branch builds its command with newBDCmd; pin
 	// what that command is without starting it.
 	var stdout, stderr bytes.Buffer
-	cmd := newBDCmd(context.Background(), "/work", []string{"A=1"}, []byte("in"), []string{"show", "x"}, &stdout, &stderr)
+	cmd := newBDCmd(context.Background(), "", "/work", []string{"A=1"}, []byte("in"), []string{"show", "x"}, &stdout, &stderr)
 	if filepath.Base(cmd.Path) != "bd" && filepath.Base(cmd.Args[0]) != "bd" {
 		t.Errorf("newBDCmd runs %q, want bd", cmd.Path)
 	}
@@ -68,6 +69,57 @@ func TestDerivedWrappersKeepRunner(t *testing.T) {
 	p.exec = r.exec
 	if reflect.ValueOf(p.WithTimeout(1).exec).Pointer() != want {
 		t.Error("WithTimeout dropped the runner")
+	}
+}
+
+// TestWithBinRunsEveryCallFromThatBinary: a wrapper built WithBin sends
+// every call, on the policy and plain paths and from the wrappers derived
+// from it, to that binary, and the subprocess it builds runs it.
+func TestWithBinRunsEveryCallFromThatBinary(t *testing.T) {
+	t.Parallel()
+	const bin = "/opt/daemon/bd"
+	r := newRecorder(func([]string) reply { return reply{stdout: `[{"id":"gt-1","title":"t","status":"open"}]`} })
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	pinned := NewPinned(beadsDir, WithBin(bin))
+	pinned.exec = r.exec
+	plain := NewPlain(t.TempDir(), nil, WithBin(bin))
+	plain.exec = r.exec
+	routed := New(t.TempDir(), WithBin(bin))
+	for name, b := range map[string]*Beads{
+		"NewPinned":        pinned,
+		"NewPlain":         plain,
+		"WithTimeout":      plain.WithTimeout(time.Minute),
+		"ForAgentBead":     routed.ForAgentBead(),
+		"pinnedToBeadsDir": routed.pinnedToBeadsDir(beadsDir),
+	} {
+		if b.bin != bin {
+			t.Errorf("%s: bin = %q, want %q", name, b.bin, bin)
+		}
+	}
+	for _, b := range []*Beads{pinned, plain} {
+		if _, err := b.Show("gt-1"); err != nil {
+			t.Fatalf("Show: %v", err)
+		}
+	}
+	calls := r.calls()
+	if len(calls) != 2 {
+		t.Fatalf("recorded %d calls, want 2", len(calls))
+	}
+	for _, c := range calls {
+		if c.bin != bin {
+			t.Errorf("bd %v ran %q, want %q", c.args, c.bin, bin)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	for _, plainCall := range []bool{false, true} {
+		cmd := newBDProcess(context.Background(), bdCall{bin: bin, dir: "/rig", args: []string{"stats"}, plain: plainCall}, &stdout, &stderr)
+		if cmd.Path != bin {
+			t.Errorf("plain=%v: subprocess runs %q, want %q", plainCall, cmd.Path, bin)
+		}
+	}
+	if b := New(t.TempDir()); b.bin != "" {
+		t.Errorf("New without WithBin: bin = %q, want the bd on PATH", b.bin)
 	}
 }
 

@@ -150,7 +150,13 @@ func BdSupportsAllowStale() bool {
 // BdSupportsAllowStaleWithEnv returns true if the installed bd binary accepts
 // --allow-stale, probing with the provided environment when supplied.
 func BdSupportsAllowStaleWithEnv(env []string) bool {
-	bdPath, err := exec.LookPath("bd")
+	return bdSupportsAllowStale("", env)
+}
+
+// bdSupportsAllowStale is BdSupportsAllowStaleWithEnv for the bd binary bin
+// ("" is the bd on PATH).
+func bdSupportsAllowStale(bin string, env []string) bool {
+	bdPath, err := exec.LookPath(bdBinary(bin))
 	if err != nil {
 		return false
 	}
@@ -688,6 +694,8 @@ type Beads struct {
 	// exec runs every bd subprocess; nil means the real bd on PATH (see
 	// runner). Tests of this package inject a recording runner.
 	exec bdRunFunc
+	// bin is the bd binary every call runs (WithBin); "" is the bd on PATH.
+	bin string
 
 	// plain marks a wrapper built by NewPlain: bd runs in workDir with
 	// exactly plainEnv, and none of the routing policy below applies.
@@ -781,6 +789,25 @@ type beadsFields struct {
 	noRoute    bool
 	agentScope bool
 	exec       bdRunFunc
+	bin        string
+}
+
+// Option configures a Beads at construction.
+type Option func(*beadsFields)
+
+// WithBin runs bd from path instead of the bd on PATH, for every subprocess
+// the wrapper and the wrappers derived from it start, the --allow-stale probe
+// included. The daemon resolves bd once at startup and holds the path, so a
+// later PATH change cannot swap the binary under it.
+func WithBin(path string) Option {
+	return func(f *beadsFields) { f.bin = path }
+}
+
+func applyOptions(f beadsFields, opts []Option) beadsFields {
+	for _, o := range opts {
+		o(&f)
+	}
+	return f
 }
 
 // newBeads is the single composite-literal construction point for *Beads.
@@ -797,12 +824,13 @@ func newBeads(f beadsFields) *Beads {
 		noRoute:    f.noRoute,
 		agentScope: f.agentScope,
 		exec:       f.exec,
+		bin:        f.bin,
 	}
 }
 
 // New creates a new Beads wrapper for the given directory.
-func New(workDir string) *Beads {
-	return newBeads(beadsFields{workDir: workDir})
+func New(workDir string, opts ...Option) *Beads {
+	return newBeads(applyOptions(beadsFields{workDir: workDir}, opts))
 }
 
 // NewIsolated creates a Beads wrapper for test isolation.
@@ -844,8 +872,8 @@ func NewRigLocal(workDir string) *Beads {
 // each call is read-only or an auto-committed mutation by its argv. It
 // replaces beads.Command with a pinned mode for callers that already hold
 // the directory.
-func NewPinned(beadsDir string) *Beads {
-	b := newBeads(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true})
+func NewPinned(beadsDir string, opts ...Option) *Beads {
+	b := newBeads(applyOptions(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true}, opts))
 	b.accessMode = true
 	return b
 }
@@ -878,6 +906,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		townRoot:   b.getTownRoot(),
 		agentScope: true,
 		exec:       b.exec,
+		bin:        b.bin,
 	})
 }
 
@@ -931,6 +960,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		townRoot:   b.getTownRoot(),
 		noRoute:    true,
 		exec:       b.exec,
+		bin:        b.bin,
 	})
 }
 
@@ -1077,6 +1107,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		townRoot:   b.townRoot,
 		noRoute:    true,
 		exec:       b.exec,
+		bin:        b.bin,
 	})
 }
 
@@ -1326,8 +1357,8 @@ func SubprocessFailureError(ctx context.Context, timeout time.Duration, err erro
 // Building the command in one place keeps the pinned (run/runWithStdin) and
 // routed (runWithRouting) paths from drifting — notably so both get --flat
 // handling, since bd v0.59+ ignores --json on "list" without it.
-func newBDCmd(ctx context.Context, workDir string, env []string, stdinData []byte, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
+func newBDCmd(ctx context.Context, bin, workDir string, env []string, stdinData []byte, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bdBinary(bin), args...) //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = workDir
 	cmd.Env = append([]string{}, env...)
@@ -1427,7 +1458,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]b
 	run := func(argv []string) error {
 		stdout.Reset()
 		stderr.Reset()
-		out, errOut, err := b.runner()(ctx, bdCall{dir: b.workDir, env: runEnv, stdin: stdinData, args: argv})
+		out, errOut, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: runEnv, stdin: stdinData, args: argv})
 		stdout.Write(out)
 		stderr.Write(errOut)
 		return err
@@ -2852,7 +2883,7 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec})
+					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin})
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -2969,6 +3000,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
 			exec:       b.exec,
+			bin:        b.bin,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -3052,6 +3084,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
 			exec:       b.exec,
+			bin:        b.bin,
 		})
 		return bdForCreate.CreateWithID(id, opts)
 	}
