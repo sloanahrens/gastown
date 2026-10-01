@@ -260,9 +260,10 @@ var polecatCheckRecoveryBatchCmd = &cobra.Command{
 	Short: "Check recovery status for every polecat in a rig in one pass",
 	Long: `Check recovery status for every polecat in a rig, fleet-wide, in one process.
 
-Answers the same SAFE_TO_NUKE / NEEDS_MQ_SUBMIT / PENDING_MR / NEEDS_RECOVERY
-question as 'gt polecat check-recovery' for each polecat in the rig, but
-without spawning one 'gt polecat check-recovery' subprocess per polecat.
+Answers the same SAFE_TO_NUKE / NEEDS_MQ_SUBMIT / PENDING_MR / SUBMITTED /
+NEEDS_RECOVERY question as 'gt polecat check-recovery' for each polecat in the
+rig, but without spawning one 'gt polecat check-recovery' subprocess per
+polecat.
 
 check-recovery's per-polecat cost is dominated by bd subprocess round trips:
 one bulk agent-bead fetch and one bulk merge-request fetch, shared by every
@@ -1445,7 +1446,7 @@ type RecoveryStatus struct {
 	Polecat              string                `json:"polecat"`
 	CleanupStatus        polecat.CleanupStatus `json:"cleanup_status"`
 	NeedsRecovery        bool                  `json:"needs_recovery"`
-	Verdict              string                `json:"verdict"` // SAFE_TO_NUKE, PENDING_MR, NEEDS_RECOVERY, or NEEDS_MQ_SUBMIT
+	Verdict              string                `json:"verdict"` // SAFE_TO_NUKE, PENDING_MR, SUBMITTED, NEEDS_RECOVERY, NEEDS_MQ_SUBMIT, or WORKING
 	Reason               string                `json:"reason,omitempty"`
 	Reusable             bool                  `json:"reusable"`
 	SafeToNuke           bool                  `json:"safe_to_nuke"`
@@ -1657,7 +1658,7 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		status.ActiveMR = fields.ActiveMR
 		facts.ActiveMR = fields.ActiveMR
 		hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
-		hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
+		hookDisposition := hookBeadSafeForCleanup(bd, hookBead)
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed, mrForBranch, mrForBranchErr = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
 		if status.Issue == "" && sourceHint != "" {
@@ -1666,9 +1667,7 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		if !beadTerminal && sourceHint != "" {
 			beadTerminal = isAssignedBeadTerminal(bd, sourceHint)
 		}
-		facts.HookBead = hookBead
-		facts.HookBeadSafe = hookSafe
-		facts.HookBeadTerminal = hookTerminal
+		applyHookDispositionToWorkstateFacts(&facts, hookBead, hookDisposition)
 		facts.PushFailed = fields.PushFailed
 		facts.MRFailed = fields.MRFailed
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
@@ -1729,7 +1728,7 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 			switch {
 			case !polecat.RecordedCleanupBlocks(facts.CleanupStatus, facts.GitStateSource):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s cleanup_status_source=%s git_state_source=%s live_git_supersedes=recorded", facts.CleanupStatus, polecat.CleanupStatusSourceRecorded, facts.GitStateSource))
-			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, facts.WorkTerminal(), hookSafe, !activeMRAssessment.Pending, directGitSafe):
+			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, facts.WorkTerminal(), hookDisposition.Safe, !activeMRAssessment.Pending, directGitSafe):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v agent_bead_read=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead))
 			}
 		}
@@ -1797,6 +1796,20 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 		fmt.Fprintf(w, "  Verdict:         %s\n", style.Warning.Render("PENDING_MR"))
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "  Work is waiting on an active merge request; preserve this polecat until it lands.")
+	case polecat.WorkstateVerdictSubmitted:
+		fmt.Fprintf(w, "  Verdict:         %s\n", style.Success.Render("SUBMITTED"))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Work is submitted for landing and the landing worker owns it. Leave this polecat alone — nothing to recover, nothing to restart.")
+		if len(status.Blockers) > 0 {
+			// Report-only: the verdict does not refuse on these, but landing
+			// reads the pushed branch, so a reader should see what a live
+			// probe measured in the worktree without re-probing by hand.
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "  Reported, not refused (landing reads the pushed branch):")
+			for _, blocker := range status.Blockers {
+				fmt.Fprintf(w, "    - %s\n", blocker)
+			}
+		}
 	case polecat.WorkstateVerdictNeedsRecovery:
 		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render("NEEDS_RECOVERY"))
 		if status.Reason != "" {
@@ -1850,6 +1863,17 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  %s Unrecognized verdict %q — treating as NOT safe to nuke. Escalate to Mayor.\n", style.Warning.Render("⚠"), status.Verdict)
 	}
+}
+
+// applyHookDispositionToWorkstateFacts installs the live classification of a
+// hook reference on the facts the classifier reads. The four fields are one
+// answer, and a set half-copied by hand is how the reference gets read as if
+// it were the bead (gt-eqiid).
+func applyHookDispositionToWorkstateFacts(facts *polecat.WorkstateFacts, hookBead string, d polecat.HookBeadDisposition) {
+	facts.HookBead = hookBead
+	facts.HookBeadSafe = d.Safe
+	facts.HookBeadTerminal = d.Terminal
+	facts.HookBeadSubmitted = d.Submitted
 }
 
 func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath string, gitState *GitState, gitErr error) {
@@ -2036,24 +2060,20 @@ func activeMRGitSafeForWorktree(worktreePath string) bool {
 	return pushed && unpushed == 0
 }
 
-func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) { //nolint:unparam // blocker is diagnostic output for tests/logging; callers discard it today
+// hookBeadSafeForCleanup resolves a hook-bead reference to what the bead it
+// names actually is, live. The lookup stays here; the policy is
+// polecat.ClassifyHookBead, so this path cannot drift from the Manager's
+// (hookBeadSafeForWorkstate) or the nuke gate's reading of the same reference.
+func hookBeadSafeForCleanup(bd issueShower, hookBead string) polecat.HookBeadDisposition {
 	if hookBead == "" {
-		return true, false, ""
+		return polecat.HookBeadDisposition{Safe: true}
 	}
 	if bd == nil {
-		return false, false, fmt.Sprintf("hook_bead=%s status=unverified", hookBead)
+		// Unverifiable, not absent: fail closed the way an unreadable bead does.
+		return polecat.HookBeadDisposition{Blocker: fmt.Sprintf("hook_bead=%s status=unverified", hookBead)}
 	}
 	issue, err := bd.Show(hookBead)
-	if err != nil {
-		return false, false, fmt.Sprintf("hook_bead=%s status=lookup_error: %v", hookBead, err)
-	}
-	if issue == nil {
-		return false, false, fmt.Sprintf("hook_bead=%s status=missing", hookBead)
-	}
-	if !beads.IssueStatus(issue.Status).IsTerminal() {
-		return false, false, fmt.Sprintf("hook_bead=%s status=%s", hookBead, issue.Status)
-	}
-	return true, true, ""
+	return polecat.ClassifyHookBead(hookBead, issue, err)
 }
 
 type cleanupStatusUpdater interface {

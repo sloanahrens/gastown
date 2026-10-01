@@ -8,6 +8,14 @@ const (
 	WorkstateVerdictPendingMR     = "PENDING_MR"
 	WorkstateVerdictNeedsRecovery = "NEEDS_RECOVERY"
 	WorkstateVerdictNeedsMQSubmit = "NEEDS_MQ_SUBMIT"
+	// WorkstateVerdictSubmitted means the polecat's work is submitted for
+	// landing and the landing worker owns it until it lands. Like PENDING_MR it
+	// is a hands-off verdict: nothing to recover, nothing to restart, and the
+	// seat is not reusable until the landing releases the assignment. It is
+	// separate from PENDING_MR because there need not be a merge request at all
+	// (a direct-to-main landing carries none), and reporting an MR that does
+	// not exist sends a reader looking for one (gt-eqiid).
+	WorkstateVerdictSubmitted = "SUBMITTED"
 )
 
 // CleanupStatusSourceRecorded is the provenance tag for a cleanup_status
@@ -46,8 +54,13 @@ const (
 // WorkstateInput contains the lifecycle, git, and merge-queue facts needed to
 // classify a polecat consistently across list, recovery, witness, and capacity.
 type WorkstateInput struct {
-	State                          State
-	HookBead                       string
+	State    State
+	HookBead string
+	// HookBeadSubmitted reports that the hook reference names work submitted
+	// for landing (HookBeadDisposition.Submitted). The hook is still set — by
+	// design, the landing worker needs it — so without this the classifier
+	// reads a submitted seat as a seat still holding work.
+	HookBeadSubmitted              bool
 	CleanupStatus                  CleanupStatus
 	IgnoreCleanupStatus            bool
 	PartialSpawnWithoutDurableHook bool
@@ -177,6 +190,28 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			ReuseStatus: "idle-pr-open",
 			Blockers:    []string{in.ActiveMRBlocker},
 		}
+	}
+
+	// Submitted work is the landing worker's, not a recovery case (gt-eqiid).
+	// The hook stays on the ready-to-land bead until the landing takes it —
+	// which is why the hook-still-set predicate below would otherwise fire on
+	// every correctly finished polecat — and StateSubmitted is not a stall.
+	//
+	// A live WORKING session outranks it: a polecat still typing on a
+	// ready-to-land bead is working, and SUBMITTED would advertise it as
+	// hands-off.
+	if in.State != StateWorking && (in.HookBeadSubmitted || in.State == StateSubmitted) {
+		d := WorkstateDisposition{
+			Verdict:              WorkstateVerdictSubmitted,
+			Reason:               "submitted-for-landing",
+			ReuseStatus:          "idle-submitted",
+			CountsTowardCapacity: true,
+		}
+		// Report-only: landing reads the pushed branch, so a worktree the probe
+		// found dirty does not change the verdict, but a reader should not have
+		// to re-probe to see it (gt-d9z9z).
+		d.Blockers = append(d.Blockers, liveGitRiskBlockers(in)...)
+		return d
 	}
 
 	// StateDone (agent_state=done, seen before a polecat's own idle transition
@@ -490,10 +525,13 @@ func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpaw
 // it unset is a claim of its own — "no live probe was attempted" — and keeps
 // the recorded cleanup_status authoritative for git-derived verdicts.
 type WorkstateFacts struct {
-	State                          State
-	HookBead                       string
-	HookBeadSafe                   bool
-	HookBeadTerminal               bool
+	State            State
+	HookBead         string
+	HookBeadSafe     bool
+	HookBeadTerminal bool
+	// HookBeadSubmitted comes from ClassifyHookBead on the same lookup that
+	// produced HookBeadTerminal — see WorkstateInput.HookBeadSubmitted.
+	HookBeadSubmitted              bool
 	PartialSpawnWithoutDurableHook bool
 	WorktreeStructurallyMissing    bool
 	// AgentBeadRead marks that the caller successfully read the polecat's
@@ -573,6 +611,7 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 
 	input := WorkstateInput{
 		State:                          f.State,
+		HookBeadSubmitted:              f.HookBeadSubmitted,
 		CleanupStatus:                  f.CleanupStatus,
 		PartialSpawnWithoutDurableHook: f.PartialSpawnWithoutDurableHook,
 		PushFailed:                     f.PushFailed,

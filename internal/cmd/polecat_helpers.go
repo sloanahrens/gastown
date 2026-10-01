@@ -172,15 +172,12 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
 			}
-			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
 			facts := polecat.WorkstateFacts{
 				CleanupStatus:          result.CleanupStatus,
-				HookBead:               hookBead,
-				HookBeadSafe:           hookSafe,
-				HookBeadTerminal:       hookTerminal,
 				AssignedBeadTerminal:   beadTerminal,
 				ActiveMRSourceTerminal: activeMRAssessment.SourceTerminal,
 			}
+			applyHookDispositionToWorkstateFacts(&facts, hookBead, hookBeadSafeForCleanup(bd, hookBead))
 			if activeMRAssessment.Pending {
 				facts.ActiveMRBlocker = activeMRAssessment.Reason
 				if facts.ActiveMRBlocker == "" {
@@ -197,16 +194,16 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		// Check 3: Work on hook
 		if hookBead != "" {
 			result.HookBead = hookBead
-			// Check if hooked bead is still active (not closed)
-			hookedIssue, err := bd.Show(hookBead)
-			if err == nil && hookedIssue != nil {
-				if hookedIssue.Status != "closed" {
-					result.Reasons = append(result.Reasons, fmt.Sprintf("has work on hook (%s)", hookBead))
-				} else {
-					result.HookStale = true
-				}
+			// The same classifier the recovery report uses, so "stale" means
+			// the same thing in both: a reference whose bead is terminal,
+			// submitted for landing, or no longer an active assignment is not
+			// work this nuke would destroy. Anything else, including a
+			// reference that cannot be read, still blocks (gt-eqiid).
+			disposition := hookBeadSafeForCleanup(bd, hookBead)
+			if disposition.Safe {
+				result.HookStale = true
 			} else {
-				result.Reasons = append(result.Reasons, fmt.Sprintf("has work on hook (%s, unverified)", hookBead))
+				result.Reasons = append(result.Reasons, disposition.Blocker)
 			}
 		}
 
