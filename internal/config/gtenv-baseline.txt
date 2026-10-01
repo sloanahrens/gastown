@@ -48,7 +48,6 @@ internal/events/events.go GT_TEST_HERMETIC 1
 internal/hooks/config.go GT_HOME 1
 internal/runtime/runtime.go GT_SESSION_ID_ENV 1
 internal/session/registry.go GT_TMUX_SOCKET 1
-internal/specdispatch/lint.go GT_SPEC_TEMPLATE 1
 internal/tmux/tmux.go GT_TOWN_SOCKET 1
 internal/ui/pager.go GT_NO_PAGER 1
 internal/ui/pager.go GT_PAGER 1

@@ -36,9 +36,6 @@ const (
 	MinAcceptance       = 1
 	PreferredAcceptance = 3
 	MaxAcceptance       = 6
-
-	// TemplateEnv overrides the template path (tests, other homes).
-	TemplateEnv = "GT_SPEC_TEMPLATE"
 )
 
 // DefaultSections are the template's required sections, used when the
@@ -54,12 +51,10 @@ type Template struct {
 	Source string
 }
 
-// DefaultTemplatePath is the operator's template: $GT_SPEC_TEMPLATE, else
-// ~/.claude/docs/agents/spec-template.md.
+// DefaultTemplatePath is the operator's template,
+// ~/.claude/docs/agents/spec-template.md. daemon.json
+// patrols.spec_dispatch.template overrides it.
 func DefaultTemplatePath() string {
-	if p := os.Getenv(TemplateEnv); p != "" {
-		return p
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
