@@ -110,17 +110,24 @@ These beads sync via git, so all clones of the rig see the same state.
 
 ## Two-Level Rig Control
 
-### Level 1: Park (Local, Ephemeral)
+### Level 1: Park (Town-Local)
 
 ```bash
-gt rig park gastown      # Stop services, daemon won't restart
-gt rig unpark gastown    # Allow services to run
+gt rig park gastown --reason "local upgrade"   # dispatch + daemon skip the rig
+gt rig unpark gastown                          # allow dispatch and auto-start
 ```
 
-- Stored in wisp layer (`.beads-wisp/config/`)
+- Stored as one record `{since, by, reason}` on the rig's entry in
+  `mayor/rigs.json` (gt-y3pgh.4). `gt rig park` / `gt rig unpark` are its only
+  writers; `gt rig config` refuses the `status` key.
+- Read through the config kernel (`townconfig.IsParked`) by dispatch and the
+  daemon, failing closed: if the town config does not load, every rig reads
+  as parked.
 - Only affects this town
-- Disappears on cleanup
 - Use: Local maintenance, debugging
+- Older gt versions stored park as `"status": "parked"` in
+  `.beads-wisp/config/<rig>.json`. Such a rig still reads as parked;
+  `gt rig park --migrate` moves the record into `mayor/rigs.json`.
 
 ### Level 2: Dock (Global, Persistent)
 
@@ -136,23 +143,13 @@ gt rig undock gastown    # Remove label
 
 ### Daemon Behavior
 
-The daemon checks both levels before auto-restarting:
-
-```go
-func shouldAutoRestart(rig *Rig) bool {
-    status := rig.GetConfig("status")
-    if status == "parked" || status == "docked" {
-        return false
-    }
-    return true
-}
-```
+The daemon checks both levels before auto-restarting: the park record in
+`mayor/rigs.json` (fail closed), then the rig bead's `status:docked` label.
 
 ## Configuration Keys
 
 | Key | Type | Behavior | Description |
 |-----|------|----------|-------------|
-| `status` | string | Override | operational/parked/docked |
 | `auto_restart` | bool | Override | Daemon auto-restart behavior |
 | `max_polecats` | int | Override | Max concurrent polecats in this rig; `0` = uncapped (town-wide cap: `scheduler.max_polecats`) |
 | `priority_adjustment` | int | **Stack** | Scheduling priority modifier |
@@ -194,8 +191,8 @@ key's reader would ignore; keys with no declared type are still guessed
 ### Rig Lifecycle
 
 ```bash
-gt rig park gastown          # Local: stop + prevent restart
-gt rig unpark gastown        # Local: allow restart
+gt rig park gastown          # Local: prevent dispatch + restart
+gt rig unpark gastown        # Local: allow dispatch + restart
 
 gt rig dock gastown          # Global: mark as offline
 gt rig undock gastown        # Global: mark as operational
@@ -265,7 +262,6 @@ Wisp config stored in `.beads-wisp/config/<rig>.json`:
 {
   "rig": "gastown",
   "values": {
-    "status": "parked",
     "priority_adjustment": 10
   },
   "blocked": ["auto_restart"]

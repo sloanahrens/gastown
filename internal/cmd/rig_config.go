@@ -42,7 +42,6 @@ which layer each value comes from.
 Example output:
   gt rig config show gastown --layers
   Key                 Value        Source
-  status              parked       wisp
   priority_adjustment 10           bead
   auto_restart        true         system
   max_polecats        4            town`,
@@ -68,8 +67,8 @@ direct dispatch; 0 (the default) leaves the rig uncapped. To cap the whole town
 instead: gt config set scheduler.max_polecats N.
 
 Examples:
-  gt rig config set gastown status parked           # Wisp layer
-  gt rig config set gastown status docked --global  # Bead layer
+  gt rig config set gastown max_polecats 4          # Wisp layer
+  gt rig config set gastown dnd true --global       # Bead layer
   gt rig config set gastown auto_restart --block    # Block inheritance`,
 	Args: cobra.RangeArgs(2, 3),
 	RunE: runRigConfigSet,
@@ -163,6 +162,9 @@ func runRigConfigSet(cmd *cobra.Command, args []string) error {
 func rigConfigSet(e rigCmdEnv, args []string, global, block bool) error {
 	rigName := args[0]
 	key := args[1]
+	if err := refuseStatusKey(key); err != nil {
+		return err
+	}
 
 	// Validate: --block requires no value, otherwise value is required
 	if block {
@@ -227,6 +229,9 @@ func runRigConfigUnset(cmd *cobra.Command, args []string) error {
 func rigConfigUnset(e rigCmdEnv, args []string) error {
 	rigName := args[0]
 	key := args[1]
+	if err := refuseStatusKey(key); err != nil {
+		return err
+	}
 
 	townRoot, r, err := e.findRig(rigName)
 	if err != nil {
@@ -239,6 +244,16 @@ func rigConfigUnset(e rigCmdEnv, args []string) error {
 	}
 
 	fmt.Fprintf(e.out, "%s Unset %s from wisp layer for rig %s\n", style.Success.Render("✓"), key, rigName)
+	return nil
+}
+
+// refuseStatusKey keeps rig config from writing a rig's operational status.
+// Parked lives in mayor/rigs.json and gt rig park / unpark are its only
+// writers; docked is gt rig dock / undock (gt-y3pgh.4).
+func refuseStatusKey(key string) error {
+	if key == "status" {
+		return fmt.Errorf("status is not a rig config key: use gt rig park / gt rig unpark, or gt rig dock / gt rig undock")
+	}
 	return nil
 }
 

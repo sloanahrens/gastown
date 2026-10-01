@@ -2,152 +2,153 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/townconfig"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// RigStatusKey is the wisp config key for rig operational status.
-const RigStatusKey = "status"
-
-// RigStatusParked is the value indicating a rig is parked.
-const RigStatusParked = "parked"
+var (
+	rigParkReason  string
+	rigParkMigrate bool
+)
 
 var rigParkCmd = &cobra.Command{
-	Use:   "park <rig>...",
-	Short: "Park one or more rigs (daemon won't auto-restart agents)",
-	Long: `Park rigs to temporarily disable them.
+	Use:   "park [<rig>...]",
+	Short: "Park one or more rigs (dispatch and the daemon start nothing for them)",
+	Long: `Park rigs to take them out of service.
 
-Parking a rig:
-  - Sets status=parked in the wisp layer (local/ephemeral)
-  - The daemon respects this status and won't auto-restart agents
+Parking a rig writes a "parked" record {since, by, reason} into the rig's
+entry in mayor/rigs.json. Dispatch (gt sling, convoys, gt dispatch) refuses
+the rig and the daemon auto-starts nothing for it until 'gt rig unpark'.
+A rig that is already parked keeps its original record.
 
-This is a Level 1 (local/ephemeral) operation:
-  - Only affects this town
-  - Disappears on wisp cleanup
-  - Use 'gt rig unpark' to resume normal operation
+gt rig park and gt rig unpark are the only writers of that record. Every
+reader fails closed: if mayor/rigs.json (or any town config file) does not
+load, every rig reads as parked.
+
+--migrate moves park records left by older gt versions (a "status" value in
+.beads-wisp/config/<rig>.json) into mayor/rigs.json and removes them. Until
+it runs, such a rig reads as parked.
 
 Examples:
-  gt rig park gastown
-  gt rig park beads gastown mayor`,
-	Args: cobra.MinimumNArgs(1),
+  gt rig park gastown --reason "rubric rework"
+  gt rig park beads gastown
+  gt rig park --migrate`,
 	RunE: runRigPark,
 }
 
 var rigUnparkCmd = &cobra.Command{
 	Use:   "unpark <rig>...",
-	Short: "Unpark one or more rigs (allow daemon to auto-restart agents)",
+	Short: "Unpark one or more rigs (allow dispatch and daemon auto-start)",
 	Long: `Unpark rigs to resume normal operation.
 
-Unparking a rig:
-  - Removes the parked status from the wisp layer
-  - Allows the daemon to auto-restart agents
-  - Does NOT automatically start agents (use 'gt rig start' for that)
+Unparking a rig removes its "parked" record from mayor/rigs.json (and any
+legacy record in .beads-wisp/config/<rig>.json). It does NOT start agents;
+use 'gt rig start' for that.
 
 Examples:
   gt rig unpark gastown
-  gt rig unpark beads gastown mayor`,
+  gt rig unpark beads gastown`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runRigUnpark,
 }
 
 func init() {
+	rigParkCmd.Flags().StringVar(&rigParkReason, "reason", "", "Why the rig is parked (recorded in mayor/rigs.json)")
+	rigParkCmd.Flags().BoolVar(&rigParkMigrate, "migrate", false, "Move legacy .beads-wisp park records into mayor/rigs.json")
 	rigCmd.AddCommand(rigParkCmd)
 	rigCmd.AddCommand(rigUnparkCmd)
 }
 
 func runRigPark(cmd *cobra.Command, args []string) error {
-	var errs []error
-
-	for _, rigName := range args {
-		if err := parkOneRig(rigName); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", rigName, err))
-		}
-	}
-
-	if len(errs) > 0 {
-		for _, err := range errs {
-			fmt.Printf("%s %v\n", style.Error.Render("✗"), err)
-		}
-		return fmt.Errorf("failed to park %d rig(s)", len(errs))
-	}
-
-	return nil
-}
-
-func parkOneRig(rigName string) error {
-	// Get rig and town root
-	townRoot, _, err := getRig(rigName)
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
-		return err
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-
-	fmt.Printf("Parking rig %s...\n", style.Bold.Render(rigName))
-
-	// Set parked status in wisp layer
-	wispCfg := wisp.NewConfig(townRoot, rigName)
-	if err := wispCfg.Set(RigStatusKey, RigStatusParked); err != nil {
-		return fmt.Errorf("setting parked status: %w", err)
+	if rigParkMigrate {
+		if len(args) > 0 {
+			return fmt.Errorf("--migrate takes no rig names: it migrates every registered rig")
+		}
+		return migrateParkedRigs(os.Stdout, townRoot, detectActor())
 	}
-
-	// Output
-	fmt.Printf("%s Rig %s parked (local only)\n", style.Success.Render("✓"), rigName)
-	fmt.Printf("  Daemon will not auto-restart\n")
-
-	return nil
+	if len(args) == 0 {
+		return fmt.Errorf("name at least one rig to park (or pass --migrate)")
+	}
+	rec := config.RigParked{Since: time.Now().UTC(), By: detectActor(), Reason: rigParkReason}
+	return parkRigs(os.Stdout, townRoot, args, rec)
 }
 
 func runRigUnpark(cmd *cobra.Command, args []string) error {
-	var errs []error
-
-	for _, rigName := range args {
-		if err := unparkOneRig(rigName); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", rigName, err))
-		}
-	}
-
-	if len(errs) > 0 {
-		for _, err := range errs {
-			fmt.Printf("%s %v\n", style.Error.Render("✗"), err)
-		}
-		return fmt.Errorf("failed to unpark %d rig(s)", len(errs))
-	}
-
-	return nil
-}
-
-func unparkOneRig(rigName string) error {
-	// Get rig and town root
-	townRoot, _, err := getRig(rigName)
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
-		return err
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return unparkRigs(os.Stdout, townRoot, args)
+}
 
-	// Remove parked status from wisp layer
-	wispCfg := wisp.NewConfig(townRoot, rigName)
-	if err := wispCfg.Unset(RigStatusKey); err != nil {
-		return fmt.Errorf("clearing parked status: %w", err)
+// parkRigs writes rec as each rig's park record.
+func parkRigs(w io.Writer, townRoot string, rigNames []string, rec config.RigParked) error {
+	failed := 0
+	for _, rigName := range rigNames {
+		kept, err := townconfig.Park(townRoot, rigName, rec)
+		if err != nil {
+			fmt.Fprintf(w, "%s %s: %v\n", style.Error.Render("✗"), rigName, err)
+			failed++
+			continue
+		}
+		fmt.Fprintf(w, "%s Rig %s %s\n", style.Success.Render("✓"), rigName, townconfig.Describe(&kept))
 	}
-
-	fmt.Printf("%s Rig %s unparked\n", style.Success.Render("✓"), rigName)
-	fmt.Printf("  Daemon can now auto-restart agents\n")
-	fmt.Printf("  Use '%s' to start agents immediately\n", style.Dim.Render("gt rig start "+rigName))
-
+	if failed > 0 {
+		return fmt.Errorf("failed to park %d rig(s)", failed)
+	}
 	return nil
 }
 
-// IsRigParked checks if a rig is parked.
-// Checks the wisp layer (ephemeral) first, then falls back to the rig
-// identity bead's status:parked label (persistent). This ensures parked
-// state survives wisp cleanup. (Fixes upstream #2079)
-func IsRigParked(townRoot, rigName string) bool {
-	// Check wisp layer first (fast, local)
-	wispCfg := wisp.NewConfig(townRoot, rigName)
-	if wispCfg.GetString(RigStatusKey) == RigStatusParked {
-		return true
+// unparkRigs clears each rig's park record.
+func unparkRigs(w io.Writer, townRoot string, rigNames []string) error {
+	failed := 0
+	for _, rigName := range rigNames {
+		was, err := townconfig.Unpark(townRoot, rigName)
+		if err != nil {
+			fmt.Fprintf(w, "%s %s: %v\n", style.Error.Render("✗"), rigName, err)
+			failed++
+			continue
+		}
+		if !was {
+			fmt.Fprintf(w, "%s Rig %s was not parked\n", style.Dim.Render("○"), rigName)
+			continue
+		}
+		fmt.Fprintf(w, "%s Rig %s unparked\n", style.Success.Render("✓"), rigName)
+		fmt.Fprintf(w, "  Use '%s' to start agents now\n", style.Dim.Render("gt rig start "+rigName))
 	}
+	if failed > 0 {
+		return fmt.Errorf("failed to unpark %d rig(s)", failed)
+	}
+	return nil
+}
 
-	// Fall back to persistent bead label
-	return hasRigBeadLabel(townRoot, rigName, "status:parked")
+// migrateParkedRigs moves legacy wisp park records into mayor/rigs.json.
+func migrateParkedRigs(w io.Writer, townRoot, by string) error {
+	migrated, err := townconfig.MigrateLegacyParked(townRoot, by)
+	if len(migrated) > 0 {
+		fmt.Fprintf(w, "%s Migrated park records into mayor/rigs.json: %s\n", style.Success.Render("✓"), strings.Join(migrated, ", "))
+	} else if err == nil {
+		fmt.Fprintf(w, "%s No legacy park records to migrate\n", style.Dim.Render("○"))
+	}
+	return err
+}
+
+// IsRigParked reports whether a rig is parked, failing closed: a rig whose
+// park state cannot be read is parked. The record lives in mayor/rigs.json
+// and is read through the config kernel (townconfig.IsParked).
+func IsRigParked(townRoot, rigName string) bool {
+	parked, _ := townconfig.IsParked(townRoot, rigName)
+	return parked
 }

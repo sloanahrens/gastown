@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -539,6 +538,8 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	registerTestRigs(t, tmpDir, map[string]string{rigName: "tr"})
+
 	// A Dolt server that is down: the rig bead read fails.
 	var asked []string
 	d := &Daemon{
@@ -599,6 +600,8 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	registerTestRigs(t, tmpDir, map[string]string{rigName: "dr"})
+
 	// Without a rig bead, should fail-safe to not operational.
 	d := &Daemon{
 		config: &Config{
@@ -629,55 +632,6 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 	operational, reason := d.isRigOperational(rigName)
 	if operational || reason != "rig is docked (global)" {
 		t.Errorf("isRigOperational(docked rig) = %v, %q; want false, \"rig is docked (global)\"", operational, reason)
-	}
-}
-
-// TestIsRigOperational_MissingWispConfigLoggedOnce verifies that a missing
-// wisp config - the expected state for any rig that has never been parked or
-// docked - is logged at most once per rig per process, and that the message
-// no longer asserts data loss that did not happen (gt-k07).
-func TestIsRigOperational_MissingWispConfigLoggedOnce(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	rigName := "neverparkedrig"
-	rigPath := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig", ".beads"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	townBeads := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(townBeads, 0755); err != nil {
-		t.Fatal(err)
-	}
-	routesContent := `{"prefix":"np-","path":"neverparkedrig/mayor/rig"}`
-	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var logBuf bytes.Buffer
-	d := &Daemon{
-		config: &Config{
-			TownRoot: tmpDir,
-		},
-		logger: log.New(&logBuf, "", 0),
-		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
-			return &beads.Issue{ID: id, Status: "open"}, nil
-		},
-	}
-
-	// Call twice, simulating repeated patrol-candidate evaluations of the
-	// same rig within one daemon process lifetime.
-	d.isRigOperational(rigName)
-	d.isRigOperational(rigName)
-
-	logged := logBuf.String()
-	count := strings.Count(logged, "no wisp config for "+rigName)
-	if count != 1 {
-		t.Errorf("expected exactly 1 missing-wisp-config log line across 2 calls, got %d; log:\n%s", count, logged)
-	}
-	if strings.Contains(logged, "parked state may have been lost") {
-		t.Error("log message should not assert data loss that did not happen")
 	}
 }
 

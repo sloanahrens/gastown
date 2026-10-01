@@ -10,12 +10,12 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// A rig's operational state is assembled from two layers, and only the
+// A rig's operational state is assembled from two reads, and only the
 // expensive one is memoized.
 //
-// The wisp layer is local and ephemeral - what `gt rig park` writes - and reads
-// as a stat plus a small file, so it is evaluated on every call: parking a rig
-// takes effect on the next evaluation rather than on the next expiry.
+// Parked is the rig's record in mayor/rigs.json, read through the config
+// kernel - a few small files - so it is evaluated on every call: parking a
+// rig takes effect on the next evaluation rather than on the next expiry.
 //
 // The identity bead is global and synced - what `gt rig dock` writes - and
 // reading it costs a bd subprocess. That read is 0.4s on an idle host but
@@ -55,7 +55,6 @@ const (
 	// rigBeadActive is a bead carrying no status label: nothing global says the
 	// rig is stopped.
 	rigBeadActive rigBeadVerdict = iota
-	rigBeadParked
 	rigBeadDocked
 )
 
@@ -110,12 +109,6 @@ type rigBeadStoreResult struct {
 type rigOperationalCache struct {
 	mu      sync.Mutex
 	entries map[string]rigBeadEntry
-	// wispConfigWarned tracks rigs already logged for a missing wisp config, so
-	// that notice stays once per rig per process instead of once per evaluation
-	// (gt-k07). It rides this cache's lock because the same concurrent callers
-	// write it - the field it replaced was documented "heartbeat goroutine only"
-	// while rigPool workers were already calling the function that wrote it.
-	wispConfigWarned map[string]bool
 	// escalations holds one serial queue per rig; see enqueueEscalation.
 	escalations map[string]chan func()
 }
@@ -162,21 +155,6 @@ func (c *rigOperationalCache) store(rigName string, verdict rigBeadVerdict, fail
 		alertOpen: alertWasOpen || result.open,
 	}
 	return result
-}
-
-// markWispConfigWarned reports whether this is the first time rigName's missing
-// wisp config has been seen in this process.
-func (c *rigOperationalCache) markWispConfigWarned(rigName string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.wispConfigWarned == nil {
-		c.wispConfigWarned = make(map[string]bool)
-	}
-	if c.wispConfigWarned[rigName] {
-		return false
-	}
-	c.wispConfigWarned[rigName] = true
-	return true
 }
 
 // escalationQueueDepth bounds how many escalations one rig may have pending.

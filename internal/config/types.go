@@ -461,6 +461,17 @@ type RigEntry struct {
 	LocalRepo   string       `json:"local_repo,omitempty"`
 	AddedAt     time.Time    `json:"added_at"`
 	BeadsConfig *BeadsConfig `json:"beads,omitempty"`
+	// Parked is set while the rig is parked: dispatch and the daemon start
+	// nothing for it. gt rig park and gt rig unpark are its only writers
+	// (gt-y3pgh.4, D5 Q5); everything else reads it through townconfig.
+	Parked *RigParked `json:"parked,omitempty"`
+}
+
+// RigParked records who parked a rig, when, and why.
+type RigParked struct {
+	Since  time.Time `json:"since"`
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
 }
 
 // BeadsConfig represents beads configuration for a rig.
