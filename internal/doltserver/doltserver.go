@@ -54,6 +54,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/util"
@@ -823,7 +824,8 @@ func (h *host) CheckServerReachable(townRoot string) error {
 		if !config.IsRemote() {
 			hint = "\n\nStart with: gt dolt start"
 		}
-		return fmt.Errorf("Dolt server not reachable at %s: %w%s", addr, err, hint)
+		return doltpause.Explain(townRoot, h.clockNow(),
+			fmt.Errorf("Dolt server not reachable at %s: %w%s", addr, err, hint))
 	}
 	return nil
 }
@@ -846,6 +848,12 @@ func (h *host) WaitForReady(townRoot string, timeout time.Duration) error {
 	// If not, there's no Dolt server to wait for.
 	if len(HasServerModeMetadata(townRoot)) == 0 {
 		return nil
+	}
+
+	// A paused server is not coming up on its own; say so now rather than
+	// after the whole timeout (gt-8z769.2).
+	if p := doltpause.Current(townRoot, h.clockNow()); p != nil {
+		return &doltpause.Error{Marker: *p}
 	}
 
 	config := h.DefaultConfig(townRoot)
@@ -882,7 +890,8 @@ func (h *host) WaitForReady(townRoot string, timeout time.Duration) error {
 		}
 	}
 
-	return fmt.Errorf("Dolt server not ready at %s after %v", addr, timeout)
+	return doltpause.Explain(townRoot, h.clockNow(),
+		fmt.Errorf("Dolt server not ready at %s after %v", addr, timeout))
 }
 
 // WaitForReady is (*host).WaitForReady on the real machine.
@@ -2009,8 +2018,13 @@ behavior:
 	return os.WriteFile(configPath, []byte(content), 0600)
 }
 
-// Start starts the Dolt SQL server.
+// Start starts the Dolt SQL server. It refuses while the town's Dolt pause
+// marker holds (gt-8z769.2): the pause owner removes the marker before it
+// brings the server back.
 func (h *host) Start(townRoot string) error {
+	if p := doltpause.Current(townRoot, h.clockNow()); p != nil {
+		return &doltpause.Error{Marker: *p}
+	}
 	config := h.DefaultConfig(townRoot)
 
 	// Ensure daemon directory exists

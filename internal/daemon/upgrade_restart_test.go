@@ -220,6 +220,33 @@ func TestUpgradeWaitsForAPostLandRunUpToTheCap(t *testing.T) {
 	}
 }
 
+// gt-gb4ij follow-up: every install rewrites the marker with a newer commit.
+// The cap clock runs from the first pending marker, not the latest one, or a
+// steady stream of installs holds the old binary forever (observed 2026-09-30:
+// 20+ minutes of post-land runs, a new marker every ~5 minutes).
+func TestUpgradePostLandCapCountsFromTheFirstPendingMarker(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb", "ccc")
+	d.postLandRuns.Add(1)
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+
+	now := time.Now()
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a post-land run before the cap")
+	}
+	// A newer install replaces the marker halfway through the wait.
+	writeMarker(t, d, restartPendingMarker{Commit: "ccc", Repo: "/repo"})
+	if d.checkUpgradeRestart(now.Add(postLandRestartCap / 2)) {
+		t.Fatal("restarted under a post-land run before the cap")
+	}
+	if !d.checkUpgradeRestart(now.Add(postLandRestartCap)) {
+		t.Fatal("a newer marker restarted the cap clock: still waiting at the cap")
+	}
+}
+
 func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)

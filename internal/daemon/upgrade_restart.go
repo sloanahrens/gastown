@@ -280,8 +280,14 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 
 	if d.upgradeWaitCommit != m.Commit {
+		// The wait clock starts with the first pending marker and survives a
+		// newer install replacing it: every install rewrites the marker, so a
+		// per-commit clock never reaches postLandRestartCap (or the stuck
+		// escalation) while landings keep coming.
+		if d.upgradeWaitCommit == "" {
+			d.upgradeWaitSince = now
+		}
 		d.upgradeWaitCommit = m.Commit
-		d.upgradeWaitSince = now
 		d.upgradeWaitEscalated = false
 	}
 
