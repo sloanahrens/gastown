@@ -724,6 +724,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			}
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
+			// The convoy manager polls the events journal (gt-7iwy0.7). Only
+			// here, for a rig whose .beads is untracked: a tracked config.yaml
+			// belongs to the source repo, which commits the key itself, and
+			// gt doctor's events-journal check flags a store that lacks it.
+			if err := beads.EnsureConfigYAMLValue(resolvedBeadsDir, beads.EventsJournalKey, "true"); err != nil {
+				fmt.Printf("  Warning: Could not turn on the events journal in config.yaml: %v\n", err)
+			}
 		}
 		database := doltserver.DatabaseForBeadsDir(resolvedBeadsDir)
 		setPrefix := func(prefix string) error {
