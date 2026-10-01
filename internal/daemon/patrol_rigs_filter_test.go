@@ -1,12 +1,13 @@
 package daemon
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // Regression test for gt-arz:
@@ -14,37 +15,27 @@ import (
 func TestGetPatrolRigs_FiltersNonOperationalRigs(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	registerTestRigs(t, townRoot, map[string]string{"alpha": "al", "beta": "be", "gamma": "ga"})
 
-	// Seed known rigs.
-	mayorDir := filepath.Join(townRoot, "mayor")
-	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
-		t.Fatalf("mkdir mayor dir: %v", err)
-	}
-	rigsJSON := `{"rigs":{"alpha":{},"beta":{},"gamma":{}}}`
-	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0o644); err != nil {
-		t.Fatalf("write rigs.json: %v", err)
-	}
-
-	// Mark beta/gamma as non-operational via wisp status.
-	if err := wisp.NewConfig(townRoot, "beta").Set("status", "parked"); err != nil {
-		t.Fatalf("set beta parked: %v", err)
-	}
-	if err := wisp.NewConfig(townRoot, "gamma").Set("status", "docked"); err != nil {
-		t.Fatalf("set gamma docked: %v", err)
+	// beta is parked in the registry; gamma's identity bead is docked.
+	if _, err := townconfig.Park(townRoot, "beta", config.RigParked{By: "test"}); err != nil {
+		t.Fatalf("park beta: %v", err)
 	}
 
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
 		logger: discardLogger,
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			if strings.HasPrefix(id, "ga-") {
+				return &beads.Issue{ID: id, Labels: []string{"status:docked"}}, nil
+			}
+			return &beads.Issue{ID: id}, nil
+		},
 	}
 
 	got := d.getPatrolRigs("witness")
 	slices.Sort(got)
-	// When Dolt is unavailable, isRigOperational() fails safe and returns false
-	// for all rigs (can't verify docked status). This prevents witnesses from
-	// starting for potentially docked rigs during Dolt outages.
-	want := []string{}
-	if !slices.Equal(got, want) {
-		t.Fatalf("getPatrolRigs() = %v, want %v (all rigs excluded when Dolt unavailable - fail-safe)", got, want)
+	if want := []string{"alpha"}; !slices.Equal(got, want) {
+		t.Fatalf("getPatrolRigs() = %v, want %v", got, want)
 	}
 }

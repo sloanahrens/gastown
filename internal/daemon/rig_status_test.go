@@ -14,7 +14,8 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // rigStatusAlerts records the escalations a test daemon raises and clears.
@@ -115,6 +116,26 @@ var (
 	}
 )
 
+// registerTestRigs writes the kernel files that make rigs (name -> beads
+// prefix) registered and unparked: mayor/town.json and mayor/rigs.json. A rig
+// missing from the registry reads as parked (fail closed, gt-y3pgh.4).
+func registerTestRigs(t *testing.T, townRoot string, rigs map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rc := config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
+	for name, prefix := range rigs {
+		rc.Rigs[name] = config.RigEntry{GitURL: "x", BeadsConfig: &config.BeadsConfig{Prefix: prefix}}
+	}
+	if err := config.WriteConfigJSON(filepath.Join(townRoot, "mayor", "rigs.json"), &rc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // newRigStatusFakeFixture is newRigStatusFixture with the identity-bead read
 // answered in process by show, and the memo's clock a fake: no bd, no PATH,
 // no wall-clock waits.
@@ -129,6 +150,7 @@ func newRigStatusFakeFixture(t *testing.T, show rigShow) *rigStatusFixture {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"tr"}}`), 0o644); err != nil {
 		t.Fatalf("writing rig config.json: %v", err)
 	}
+	registerTestRigs(t, townRoot, map[string]string{rigName: "tr"})
 	f := &rigStatusFixture{
 		townRoot: townRoot,
 		rigName:  rigName,
@@ -304,7 +326,7 @@ func TestIsRigOperational_MemoWindowStartsWhenTheReadAnswers(t *testing.T) {
 }
 
 // TestIsRigOperational_ParkTakesEffectWithoutWaitingForTheMemo covers the layer
-// split: `gt rig park` writes the local wisp layer, which is cheap to read, so
+// split: `gt rig park` writes the registry record, which is cheap to read, so
 // parking a rig must be visible on the next evaluation even though the identity
 // bead read behind it is memoized for a minute. (The dock label is global and
 // read over a subprocess, so that one is bounded by the memo instead.)
@@ -322,7 +344,7 @@ func TestIsRigOperational_ParkTakesEffectWithoutWaitingForTheMemo(t *testing.T) 
 	}
 
 	// Exactly what `gt rig park` does.
-	if err := wisp.NewConfig(f.townRoot, f.rigName).Set("status", "parked"); err != nil {
+	if _, err := townconfig.Park(f.townRoot, f.rigName, config.RigParked{Since: f.clock.Now(), By: "test", Reason: "maintenance"}); err != nil {
 		t.Fatalf("parking rig: %v", err)
 	}
 
@@ -330,8 +352,25 @@ func TestIsRigOperational_ParkTakesEffectWithoutWaitingForTheMemo(t *testing.T) 
 	if operational {
 		t.Error("a rig parked after the memo was filled must read as not operational")
 	}
-	if reason != "rig is parked" {
-		t.Errorf("reason = %q, want the wisp layer's %q", reason, "rig is parked")
+	if !strings.HasPrefix(reason, "parked since") || !strings.Contains(reason, "maintenance") {
+		t.Errorf("reason = %q, want the registry record", reason)
+	}
+}
+
+// TestIsRigOperational_UnreadableRegistryFailsClosed: a registry that does
+// not load parks every rig, and no bead is read for it.
+func TestIsRigOperational_UnreadableRegistryFailsClosed(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+	if err := os.WriteFile(filepath.Join(f.townRoot, "mayor", "rigs.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	operational, reason := f.daemon.isRigOperational(f.rigName)
+	if operational || !strings.Contains(reason, "treated as parked") {
+		t.Errorf("isRigOperational = %v, %q; want not operational, fail closed", operational, reason)
+	}
+	if n := f.showCount(t); n != 0 {
+		t.Errorf("bead reads = %d, want 0 for a rig that reads parked", n)
 	}
 }
 

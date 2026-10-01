@@ -1,13 +1,13 @@
 package cmd
 
 import (
-	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // TestResolveTarget_ParkedRig_InResolveTarget verifies that the parked rig
@@ -23,25 +23,13 @@ import (
 // rig is parked (gt-4owfd.1).
 func TestExecuteSling_ParkedRig(t *testing.T) {
 	t.Parallel()
-	// Set up a temp dir as town root
-	townRoot := t.TempDir()
+	townRoot := parkTown(t)
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
 		t.Fatalf("failed to create .beads: %v", err)
 	}
-
-	// Set up wisp config with parked status
 	rigName := "testrig"
-	configDir := filepath.Join(townRoot, wisp.WispConfigDir, wisp.ConfigSubdir)
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatalf("failed to create wisp config dir: %v", err)
-	}
-	configFile := filepath.Join(configDir, rigName+".json")
-	data, _ := json.Marshal(wisp.ConfigFile{
-		Rig:    rigName,
-		Values: map[string]interface{}{"status": "parked"},
-	})
-	if err := os.WriteFile(configFile, data, 0o644); err != nil {
-		t.Fatalf("failed to write wisp config: %v", err)
+	if err := parkRigs(io.Discard, townRoot, []string{rigName}, config.RigParked{By: "test"}); err != nil {
+		t.Fatalf("parking rig: %v", err)
 	}
 
 	// Try to execute sling to the parked rig

@@ -3,7 +3,8 @@
 // Load reads the town's config files once into an immutable, validated Town:
 // mayor/town.json, mayor/rigs.json, settings/config.json, mayor/daemon.json,
 // settings/daemon.env and the managed Dolt server config
-// .dolt-data/config.yaml. Every file is decoded strictly through
+// .dolt-data/config.yaml, plus any pre-registry park records under
+// .beads-wisp/config (parked.go). Every file is decoded strictly through
 // internal/config's one parser, so an unknown key is an error.
 //
 // A file that does not parse fails the whole load, with one line per broken
@@ -67,6 +68,9 @@ type Town struct {
 	daemon    *config.DaemonPatrolConfig
 	daemonEnv map[string]string
 	dolt      DoltEndpoint
+	// legacyParked holds, per rig, why its pre-registry wisp park record
+	// makes it read as parked (parked.go).
+	legacyParked map[string]error
 }
 
 // Load reads every kernel file under root. The error joins one error per
@@ -99,7 +103,7 @@ func Check(root string) error {
 func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
-	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
+	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
 		if err := step(); err != nil {
 			errs = append(errs, err)
 		}
