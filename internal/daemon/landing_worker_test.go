@@ -292,3 +292,74 @@ func TestLandingLogDirIsPerLanding(t *testing.T) {
 		t.Fatalf("log dir without a LandingID = %q, want /logs/land-9", got)
 	}
 }
+
+// landingWorkerDaemon is a daemon whose landing worker runs without a rig on
+// disk: the identity-bead read is answered in process for the fixture's
+// "testrig" (rig_status_test.go).
+func landingWorkerDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f.daemon.ctx = ctx
+	f.daemon.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		LandingWorker: &LandingWorkerConfig{Enabled: true},
+	}}
+	if ok, why := f.daemon.isRigOperational(f.rigName); !ok {
+		t.Fatalf("fixture rig is not operational (%s); the worker would skip its pass", why)
+	}
+	return f.daemon
+}
+
+// gt-fzwcd: the worker passes at once instead of waiting out an interval, so
+// a daemon restarted for an upgrade resumes landing the moment it is up.
+func TestLandingWorkerPassesAtStart(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	passed := make(chan struct{})
+	pass := func(context.Context) landworker.Report { close(passed); return landworker.Report{} }
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	select {
+	case <-passed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first pass never ran: the worker waited out its interval")
+	}
+}
+
+// gt-fzwcd: the pass that was in flight when the restart went pending is the
+// last thing it waits for, so its end wakes the run loop to restart now
+// rather than at the next heartbeat (up to 3 min).
+func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	pass := func(context.Context) landworker.Report {
+		close(started)
+		<-release
+		return landworker.Report{Landed: 1}
+	}
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	<-started
+	// The heartbeat drains the workers while this pass is in flight.
+	d.upgradeRestartPending.Store(true)
+	close(release)
+	select {
+	case <-d.landingDrained():
+	case <-time.After(30 * time.Second):
+		t.Fatal("a pass that ended with a restart pending did not wake the run loop")
+	}
+}
+
+// A pass ending with no restart pending must stay silent: a wake per pass
+// would run the run loop's restart check over and over.
+func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	pass := func(context.Context) landworker.Report { return landworker.Report{} }
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	select {
+	case <-d.landingDrained():
+		t.Fatal("woke the run loop with no restart pending")
+	case <-time.After(2 * time.Second):
+	}
+}
