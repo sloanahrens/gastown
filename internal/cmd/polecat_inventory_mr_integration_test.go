@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -18,7 +20,7 @@ func (f fakeInventoryIssueReader) Show(id string) (*beads.Issue, error) {
 	return nil, beads.ErrNotFound
 }
 
-// TestPolecatInventoryDanglingMRGate pins the list path's half of gt-wprt: a
+// TestIntegrationPolecatInventoryDanglingMRGate pins the list path's half of gt-wprt: a
 // pointer whose wisp is gone stops reading as idle-pr-open once the work it
 // carried is provably on origin/main, and keeps failing closed when the work
 // did not land, the MR is still in the queue, or nothing can be measured.
@@ -26,7 +28,7 @@ func (f fakeInventoryIssueReader) Show(id string) (*beads.Issue, error) {
 // These are real repositories because the evidence under test is git's: the
 // submitted tip is on the integration branch by ancestry or by a squash merge
 // that leaves no ancestry behind.
-func TestPolecatInventoryDanglingMRGate(t *testing.T) {
+func TestIntegrationPolecatInventoryDanglingMRGate(t *testing.T) {
 	t.Parallel()
 	landedRepo, landedBranch := initOrphanCleanupRepo(t, true)
 	runOrphanCleanupGit(t, landedRepo, "checkout", landedBranch)
