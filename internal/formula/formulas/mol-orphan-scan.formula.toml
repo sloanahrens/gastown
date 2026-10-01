@@ -121,7 +121,7 @@ bd list --status=hooked --include-infra --json --limit=0
 
 **2. For each molecule, check owner session:**
 ```bash
-bd mol show <mol-id>
+bd show <mol-id>
 # Get agent/session info
 ```
 

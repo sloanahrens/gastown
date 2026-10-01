@@ -1043,7 +1043,7 @@ func outputAutonomousDirective(w io.Writer, ctx RoleContext, hookedBead *beads.I
 	if hasMolecule {
 		fmt.Fprintln(w, "2. This bead has an ATTACHED MOLECULE (formula workflow)")
 		fmt.Fprintln(w, "3. Work through molecule steps in order - see CURRENT STEP below")
-		fmt.Fprintln(w, "4. Close each step with `bd close <step-id>`, then check `bd mol current` for next step")
+		fmt.Fprintln(w, "4. Finish each step with `"+cli.Name()+" mol step done <step-id>`; it closes the step and moves you to the next")
 	} else {
 		fmt.Fprintf(w, "2. Then IMMEDIATELY run: `bd show %s`\n", hookedBead.ID)
 		fmt.Fprintln(w, "3. Begin execution - no waiting for user input")
@@ -1614,6 +1614,6 @@ func (p primeTools) pendingEscalations(ctx RoleContext) {
 	fmt.Fprintln(p.w())
 
 	fmt.Fprintln(p.w(), "**Action required:** Review escalations with `gt escalate list`")
-	fmt.Fprintln(p.w(), "Close resolved ones with `bd close <id> --reason \"resolution\"`")
+	fmt.Fprintln(p.w(), "Close resolved ones with `"+cli.Name()+" escalate close <id> --reason \"resolution\"`")
 	fmt.Fprintln(p.w())
 }

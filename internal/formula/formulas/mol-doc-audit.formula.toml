@@ -79,7 +79,7 @@ Must show "nothing to commit, working tree clean".
 rule, no commit is expected. Verify the run comment is on the bead; it is the
 audit's output, and a run with no edits still posts it:
 ```bash
-bd comments {{issue}}    # the `doc-audit run` comment from the audit step
+bd show {{issue}}    # the `doc-audit run` comment from the audit step
 ```
 Then run `gt done --status DEFERRED` (submit step) and skip self-review,
 build-check, and pre-verify: no diff means nothing to review, build, or gate.

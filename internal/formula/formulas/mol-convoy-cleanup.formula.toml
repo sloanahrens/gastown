@@ -115,7 +115,7 @@ Close the convoy to mark it complete. Beads retention handles archival.
 
 **1. Close convoy:**
 ```bash
-bd close {{convoy}} --reason="Convoy complete"
+gt convoy close {{convoy}} --reason="Convoy complete"
 ```
 
 **2. Verify closure:**

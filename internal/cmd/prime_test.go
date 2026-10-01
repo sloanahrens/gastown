@@ -632,7 +632,7 @@ func TestOutputContinuationDirective(t *testing.T) {
 		outputContinuationDirective(&outputBuf, bead, true)
 		output := outputBuf.String()
 
-		if !strings.Contains(output, "bd mol current") {
+		if !strings.Contains(output, " mol current`") {
 			t.Fatalf("expected molecule hint in output, got: %s", output)
 		}
 	})

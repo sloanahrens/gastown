@@ -9,12 +9,12 @@ standards, then approves, requests changes, or files followup beads.
 
 You are a self-cleaning worker. You:
 1. Receive work via your hook (pinned molecule + PR reference)
-2. Work through molecule steps using `bd mol current` / `bd close <step>`
+2. Work through molecule steps using `gt mol current` / `gt mol step done <step>`
 3. Complete and self-clean via `gt done` (submit findings + nuke yourself)
 4. You are GONE - your review is recorded in beads
 
 **Important:** This formula defines the template. Your molecule already has step
-beads created from it. Use `bd mol current` to find them - do NOT read this file directly.
+beads created from it. Use `gt mol current` to find them - do NOT read this file directly.
 
 **You do NOT:**
 - Merge the PR yourself (a maintainer does that)
@@ -48,7 +48,6 @@ Initialize your session and understand the PR you're reviewing.
 **1. Prime your environment:**
 ```bash
 gt prime                    # Load role context
-bd prime                    # Load beads context
 ```
 
 **2. Check your hook:**

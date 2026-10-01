@@ -1,0 +1,51 @@
+# Agent prose that still names a bd mutation because no gt verb does it yet
+# (gt-7iwy0.8). One line per file and canonical bd command:
+#   <file> bd <command> <count>
+# TestAgentProseBdAllowlist fails when a count grows (new bd mutations in
+# agent prose) and when one shrinks (lower it here), so this file only goes
+# down. Route a mutation through a gt verb instead of adding a line.
+.claude/skills/pr-sheriff/skill.md bd create 2
+internal/cmd/prime_output.go bd close 3
+internal/cmd/prime_output.go bd create 2
+internal/formula/formulas/doc-audit-slice.formula.toml bd comments 1
+internal/formula/formulas/doc-audit-slice.formula.toml bd update 1
+internal/formula/formulas/mol-convoy-feed.formula.toml bd comments 1
+internal/formula/formulas/mol-dep-propagate.formula.toml bd dep 1
+internal/formula/formulas/mol-gastown-boot.formula.toml bd mol 1
+internal/formula/formulas/mol-idea-to-plan.formula.toml bd create 3
+internal/formula/formulas/mol-idea-to-plan.formula.toml bd dep 2
+internal/formula/formulas/mol-orphan-scan.formula.toml bd update 3
+internal/formula/formulas/mol-polecat-code-review.formula.toml bd comments 1
+internal/formula/formulas/mol-polecat-code-review.formula.toml bd create 2
+internal/formula/formulas/mol-polecat-code-review.formula.toml bd update 1
+internal/formula/formulas/mol-polecat-review-pr.formula.toml bd create 2
+internal/formula/formulas/mol-polecat-review-pr.formula.toml bd update 1
+internal/formula/formulas/mol-polecat-work-monorepo.formula.toml bd create 1
+internal/formula/formulas/mol-polecat-work-monorepo.formula.toml bd update 3
+internal/formula/formulas/mol-polecat-work.formula.toml bd comments 1
+internal/formula/formulas/mol-polecat-work.formula.toml bd create 1
+internal/formula/formulas/mol-polecat-work.formula.toml bd update 3
+internal/formula/formulas/mol-pr-feedback-patrol.formula.toml bd create 1
+internal/formula/formulas/mol-pr-feedback-patrol.formula.toml bd reopen 1
+internal/formula/formulas/mol-pr-feedback-patrol.formula.toml bd update 1
+internal/templates/commands/bodies/done.md bd close 1
+internal/templates/polecat-CLAUDE.md bd close 5
+internal/templates/polecat-CLAUDE.md bd create 4
+internal/templates/polecat-CLAUDE.md bd update 6
+internal/templates/roles/crew.md.tmpl bd close 2
+internal/templates/roles/crew.md.tmpl bd create 9
+internal/templates/roles/crew.md.tmpl bd dep 2
+internal/templates/roles/crew.md.tmpl bd update 2
+internal/templates/roles/mayor.md.tmpl bd close 1
+internal/templates/roles/mayor.md.tmpl bd create 10
+internal/templates/roles/mayor.md.tmpl bd dep 2
+internal/templates/roles/mayor.md.tmpl bd forget 1
+internal/templates/roles/mayor.md.tmpl bd memories 2
+internal/templates/roles/mayor.md.tmpl bd rename-prefix 1
+internal/templates/roles/polecat.md.tmpl bd close 7
+internal/templates/roles/polecat.md.tmpl bd create 14
+internal/templates/roles/polecat.md.tmpl bd dep 2
+internal/templates/roles/polecat.md.tmpl bd update 8
+internal/templates/townroot/claude.md bd forget 1
+internal/templates/townroot/claude.md bd memories 2
+plugins/tool-updater/run.sh bd version 1

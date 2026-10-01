@@ -234,7 +234,7 @@ directory.
 - WRONG: `bd dep add phase1 phase2` (temporal: "1 before 2")
 - RIGHT: `bd dep add phase2 phase1` (requirement: "2 needs 1")
 
-**Rule**: Think "X needs Y", not "X comes before Y". Verify with `bd blocked`.
+**Rule**: Think "X needs Y", not "X comes before Y". Verify with `bd show <id>`: X lists Y under its dependencies.
 
 ## Responsibilities
 
@@ -255,7 +255,7 @@ directory.
 
 ### Progress
 - `bd update <id> --status=in_progress` — Claim work
-- `bd close <id>` — Mark issue complete
+- `{{ cmd }} done` — Submit your work; the landing worker closes the issue
 
 ### Discovered Work
 - `bd create --title="Found bug" --type=bug` — File new issue
@@ -330,9 +330,9 @@ Tier 3: System    <embedded in gt binary>        (factory defaults)
 
 **Key formula commands:**
 ```bash
-bd formula list                    # Available formulas (shows tier)
-bd formula show <name>             # Formula details + steps
-bd formula show <name> --resolve   # Show resolution path
+{{ cmd }} formula list               # Available formulas (shows tier)
+{{ cmd }} formula show <name>        # Formula details + steps, resolved
+{{ cmd }} formula show <name> --raw  # The formula as written
 ```
 
 **You do NOT need to run these** — your formula is already attached and rendered by `{{ cmd }} prime`.
@@ -488,8 +488,8 @@ Then submit: **`{{ cmd }} done`** ← MANDATORY FINAL STEP
 This single command verifies git is clean and submits your branch for landing.
 The daemon's landing worker handles the rest.
 
-**Note:** Do NOT manually close the root issue with `bd close`. The landing
-worker closes it after it lands.
+**Note:** Do NOT close the root issue yourself. The landing worker closes it
+after it lands.
 
 ### No PRs in Maintainer Repos
 
