@@ -2,8 +2,12 @@ package cmd
 
 import (
 	"maps"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestParseStateLabels(t *testing.T) {
@@ -155,100 +159,36 @@ func TestApplyLabelOperations(t *testing.T) {
 	}
 }
 
-func TestParseAgentBeadLabels(t *testing.T) {
+// The agent-bead label helpers read and write through beads.Client: a
+// missing bead reads as "agent bead not found", and replaceAgentLabel swaps
+// only the labels under its prefix, writing nothing when nothing changes.
+func TestAgentLabelHelpers(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		stdout     []byte
-		stderr     []byte
-		agentBead  string
-		wantLabels []string
-		wantErr    string
-	}{
-		{
-			name:       "valid response with labels",
-			stdout:     []byte(`[{"id":"gt-test","labels":["idle:3","gt:agent"]}]`),
-			stderr:     nil,
-			agentBead:  "gt-test",
-			wantLabels: []string{"idle:3", "gt:agent"},
-			wantErr:    "",
-		},
-		{
-			name:       "valid response with no labels",
-			stdout:     []byte(`[{"id":"gt-test","labels":[]}]`),
-			stderr:     nil,
-			agentBead:  "gt-test",
-			wantLabels: []string{},
-			wantErr:    "",
-		},
-		{
-			name:       "valid response with null labels",
-			stdout:     []byte(`[{"id":"gt-test","labels":null}]`),
-			stderr:     nil,
-			agentBead:  "gt-test",
-			wantLabels: nil,
-			wantErr:    "",
-		},
-		{
-			name:      "empty stdout with stderr",
-			stdout:    []byte{},
-			stderr:    []byte("database mismatch: client expects dolt but daemon has different backend"),
-			agentBead: "gt-test",
-			wantErr:   "database mismatch",
-		},
-		{
-			name:      "empty stdout without stderr",
-			stdout:    []byte{},
-			stderr:    nil,
-			agentBead: "gt-test",
-			wantErr:   "agent bead query returned no output: gt-test",
-		},
-		{
-			name:      "empty array response",
-			stdout:    []byte(`[]`),
-			stderr:    nil,
-			agentBead: "gt-test",
-			wantErr:   "agent bead not found: gt-test",
-		},
-		{
-			name:      "invalid JSON",
-			stdout:    []byte(`{not valid json`),
-			stderr:    nil,
-			agentBead: "gt-test",
-			wantErr:   "parsing agent bead response",
-		},
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "hq-deacon", Labels: []string{"gt:agent", "idle:3", "backoff-until:100"}})
+
+	if _, err := getAllAgentLabels(db, "hq-nobody"); err == nil || !strings.Contains(err.Error(), "agent bead not found: hq-nobody") {
+		t.Fatalf("missing bead err = %v, want agent bead not found", err)
+	}
+	if err := setAgentIdleCycles(db, "hq-deacon", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearAgentBackoffUntil(db, "hq-deacon"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := getAllAgentLabels(db, "hq-deacon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"gt:agent", "idle:0"}; !slices.Equal(got, want) {
+		t.Errorf("labels = %v, want %v", got, want)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			labels, err := parseAgentBeadLabels(tt.stdout, tt.stderr, tt.agentBead)
-
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Errorf("expected error containing %q, got nil", tt.wantErr)
-					return
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-				return
-			}
-
-			if len(labels) != len(tt.wantLabels) {
-				t.Errorf("got %d labels, want %d", len(labels), len(tt.wantLabels))
-				return
-			}
-
-			for i, label := range labels {
-				if label != tt.wantLabels[i] {
-					t.Errorf("labels[%d] = %q, want %q", i, label, tt.wantLabels[i])
-				}
-			}
-		})
+	before, _ := db.Show("hq-deacon")
+	if err := clearAgentBackoffUntil(db, "hq-deacon"); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := db.Show("hq-deacon"); after.UpdatedAt != before.UpdatedAt {
+		t.Errorf("clearing an absent backoff-until wrote the bead (updated %s -> %s)", before.UpdatedAt, after.UpdatedAt)
 	}
 }

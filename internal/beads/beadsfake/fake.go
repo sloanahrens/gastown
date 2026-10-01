@@ -4,7 +4,8 @@
 // integration tier.
 //
 // A Fake is one database: there is no prefix routing between databases, no
-// town, and every issue is issue_type "task". What it models is listed on
+// town, and every issue is issue_type "task", or "event" when created with
+// an EventKind. What it models is listed on
 // each method; anything a test needs beyond that belongs in the contract
 // first.
 package beadsfake
@@ -228,7 +229,8 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			opts.Priority >= 0 && is.Priority != opts.Priority,
 			opts.Parent != "" && is.Parent != opts.Parent,
 			opts.Assignee != "" && is.Assignee != opts.Assignee,
-			opts.NoAssignee && is.Assignee != "":
+			opts.NoAssignee && is.Assignee != "",
+			opts.IssueType != "" && is.Type != opts.IssueType:
 			continue
 		}
 		out = append(out, is)
@@ -426,6 +428,9 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 			Labels:      sortedSet(labels),
 			Ephemeral:   opts.Ephemeral,
 		},
+	}
+	if opts.EventKind != "" {
+		r.issue.Type, r.issue.EventKind, r.issue.Payload = "event", opts.EventKind, opts.EventPayload
 	}
 	f.issues[id] = r
 	f.journalWrite("create", id)

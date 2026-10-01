@@ -142,6 +142,8 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		AcceptanceCriteria: si.AcceptanceCriteria,
 		Metadata:           si.Metadata,
 		CloseReason:        si.CloseReason,
+		EventKind:          si.EventKind,
+		Payload:            si.Payload,
 	}
 	for _, c := range si.Comments {
 		comment, ok := sdkCommentToComment(c)
@@ -251,6 +253,11 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 		f.Labels = []string{opts.Label}
 	} else if opts.Type != "" {
 		f.Labels = []string{"gt:" + opts.Type}
+	}
+
+	if opts.IssueType != "" {
+		t := beadsdk.IssueType(opts.IssueType)
+		f.IssueType = &t
 	}
 
 	if opts.Priority >= 0 {

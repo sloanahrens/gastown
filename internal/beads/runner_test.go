@@ -24,6 +24,7 @@ func TestDefaultRunnerIsRealBD(t *testing.T) {
 		"NewIsolatedWithPort": NewIsolatedWithPort(t.TempDir(), 1),
 		"NewWithBeadsDir":     NewWithBeadsDir(t.TempDir(), t.TempDir()),
 		"NewRigLocal":         NewRigLocal(t.TempDir()),
+		"NewPinned":           NewPinned(filepath.Join(t.TempDir(), ".beads")),
 		"NewPlain":            NewPlain(t.TempDir(), nil),
 		"NewPlainWithRunner":  NewPlainWithRunner(t.TempDir(), nil, nil),
 	} {
@@ -88,6 +89,46 @@ func TestShowSendsPinnedShow(t *testing.T) {
 	}
 	if calls[0].dir != dir || calls[0].plain {
 		t.Errorf("dir/plain = %q/%v", calls[0].dir, calls[0].plain)
+	}
+}
+
+// TestNewPinnedPinsTheGivenBeadsDir: a pinned wrapper runs bd from the
+// beads directory's parent against exactly that directory, for any ID.
+func TestNewPinnedPinsTheGivenBeadsDir(t *testing.T) {
+	t.Parallel()
+	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
+	r := newRecorder(func([]string) reply { return reply{stdout: `[{"id":"hq-1","title":"t","status":"open"}]`} })
+	b := NewPinned(beadsDir)
+	b.exec = r.exec
+	if _, err := b.Show("hq-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update("hq-1", UpdateOptions{AddLabels: []string{"idle:0"}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := r.calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want a show and an update", r.argvs())
+	}
+	for _, c := range calls {
+		if got, _ := lastEnvValue(c.env, "BEADS_DIR"); got != beadsDir {
+			t.Errorf("bd %v BEADS_DIR = %q, want %q", c.args, got, beadsDir)
+		}
+		if c.dir != filepath.Dir(beadsDir) || c.plain {
+			t.Errorf("bd %v dir/plain = %q/%v, want %q/false", c.args, c.dir, c.plain, filepath.Dir(beadsDir))
+		}
+	}
+	if got, _ := lastEnvValue(calls[0].env, "BD_READONLY"); got != "true" {
+		t.Errorf("show BD_READONLY = %q, want true", got)
+	}
+	if got, _ := lastEnvValue(calls[1].env, "BD_DOLT_AUTO_COMMIT"); got != "on" {
+		t.Errorf("update BD_DOLT_AUTO_COMMIT = %q, want on", got)
+	}
+	if got, ok := lastEnvValue(calls[1].env, "BD_READONLY"); ok {
+		t.Errorf("update BD_READONLY = %q, want unset", got)
+	}
+	if !b.noRoute {
+		t.Error("a pinned wrapper must not route IDs to other databases")
 	}
 }
 

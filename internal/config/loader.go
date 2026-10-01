@@ -1736,16 +1736,13 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference is an error, not an empty export: this is the only check an
 	// agent resolved out of settings passes (gt-yih1).
-	if missing := unsetEnvRefs(rc.Env, h.getenv); len(missing) > 0 {
-		name := rc.ResolvedAgent
-		if name == "" {
-			name = rc.Provider
-		}
-		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
-			name, strings.Join(missing, ", "))
+	name := rc.ResolvedAgent
+	if name == "" {
+		name = rc.Provider
 	}
-	for k, v := range expandEnvRefsIn(rc.Env, h.getenv) {
-		resolvedEnv[k] = v
+	secretPrefix, err := mergeAgentEnv(h, townRoot, name, rc.Env, resolvedEnv)
+	if err != nil {
+		return "", err
 	}
 
 	SanitizeAgentEnv(resolvedEnv, envVars)
@@ -1814,6 +1811,7 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 			// process, not child processes).
 			cmd = "exec env " + strings.Join(exports, " ") + " "
 		}
+		cmd = secretPrefix + cmd
 
 		// Insert exec wrapper between env vars and agent command if configured.
 		// Example: exec env VAR=val ... exitbox run --profile=foo -- claude ...
@@ -2020,16 +2018,13 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 	// reads the environment of the process doing the spawning. An unresolved
 	// reference stops the spawn: this is the only check an agent resolved out
 	// of settings passes (gt-yih1).
-	if missing := unsetEnvRefs(rc.Env, h.getenv); len(missing) > 0 {
-		name := agentForProcess
-		if name == "" {
-			name = rc.Provider
-		}
-		return "", fmt.Errorf("agent %q env references %s, which is not set in the environment",
-			name, strings.Join(missing, ", "))
+	name := agentForProcess
+	if name == "" {
+		name = rc.Provider
 	}
-	for k, v := range expandEnvRefsIn(rc.Env, h.getenv) {
-		resolvedEnv[k] = v
+	secretPrefix, err := mergeAgentEnv(h, townRoot, name, rc.Env, resolvedEnv)
+	if err != nil {
+		return "", err
 	}
 
 	SanitizeAgentEnv(resolvedEnv, envVars)
@@ -2088,6 +2083,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 		if len(exports) > 0 {
 			cmd = "exec env " + strings.Join(exports, " ") + " "
 		}
+		cmd = secretPrefix + cmd
 
 		if len(rc.ExecWrapper) > 0 {
 			cmd += strings.Join(rc.ExecWrapper, " ") + " "

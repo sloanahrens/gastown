@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
 
@@ -375,17 +377,55 @@ func TestBackoffWindowResumption(t *testing.T) {
 	}
 }
 
-// awaitSignalTown is a minimal town with an in-process bd that reports the
-// given agent labels and logs every call. showFails lists the 1-based show
-// calls that fail, to model a transient or lasting read failure.
+// awaitSignalTown is a minimal town whose agent bead lives in a shared fake
+// carrying the given labels. showFails lists the 1-based reads of the bead
+// that fail, to model a transient or lasting read failure.
 type awaitSignalTown struct {
 	townRoot, beadsDir string
-	bd                 *inprocBD
+	db                 *agentBeadsRecorder
 	stderr             bytes.Buffer
 	run                awaitSignalRun
 }
 
-func newAwaitSignalTown(t *testing.T, labels string, showFails ...int) *awaitSignalTown {
+// agentBeadsRecorder is a beads.Client that numbers its Show calls, failing
+// the ones in showFails, and records every Update and the database each
+// call was opened on.
+type agentBeadsRecorder struct {
+	beads.Client
+	mu        sync.Mutex
+	shows     int
+	showFails []int
+	updates   []beads.UpdateOptions
+	dirs      []string
+}
+
+func (r *agentBeadsRecorder) Show(id string) (*beads.Issue, error) {
+	r.mu.Lock()
+	r.shows++
+	n := r.shows
+	r.mu.Unlock()
+	if slices.Contains(r.showFails, n) {
+		return nil, fmt.Errorf("show %d failed", n)
+	}
+	return r.Client.Show(id)
+}
+
+func (r *agentBeadsRecorder) Update(id string, opts beads.UpdateOptions) error {
+	r.mu.Lock()
+	r.updates = append(r.updates, opts)
+	r.mu.Unlock()
+	return r.Client.Update(id, opts)
+}
+
+// open is an awaitSignalRun.db that records the beads directory asked for.
+func (r *agentBeadsRecorder) open(beadsDir string) beads.Client {
+	r.mu.Lock()
+	r.dirs = append(r.dirs, beadsDir)
+	r.mu.Unlock()
+	return r
+}
+
+func newAwaitSignalTown(t *testing.T, labels []string, showFails ...int) *awaitSignalTown {
 	t.Helper()
 	townRoot := filepath.Join(t.TempDir(), "gt")
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -397,36 +437,15 @@ func newAwaitSignalTown(t *testing.T, labels string, showFails ...int) *awaitSig
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	metadata := []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	shows := 0
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		switch cmd {
-		case "show":
-			f.mu.Lock()
-			shows++
-			n := shows
-			f.mu.Unlock()
-			for _, fail := range showFails {
-				if n == fail {
-					return bdAnswer{stderr: fmt.Sprintf("show %d failed", n), code: 1}
-				}
-			}
-			return bdOut(`[{"labels":` + labels + `}]`)
-		case "update":
-			return bdOut("")
-		}
-		return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
-	}}
-	w := &awaitSignalTown{townRoot: townRoot, beadsDir: beadsDir, bd: bd}
+	fake := beadsfake.New()
+	fake.Seed(beads.Issue{ID: "hq-deacon", Labels: labels})
+	db := &agentBeadsRecorder{Client: fake, showFails: showFails}
+	w := &awaitSignalTown{townRoot: townRoot, beadsDir: beadsDir, db: db}
 	w.run = awaitSignalRun{
 		agentBead:   "hq-deacon",
 		rig:         awaitSignalRigAny,
 		quiet:       true,
-		bd:          bd.run,
+		db:          db.open,
 		out:         io.Discard,
 		errOut:      &w.stderr,
 		eventRig:    resolveEventRig,
@@ -435,75 +454,38 @@ func newAwaitSignalTown(t *testing.T, labels string, showFails ...int) *awaitSig
 	return w
 }
 
-// idleLabelChanges returns the idle:N values bd updates wrote that differ from
-// initial. The fake's show always returns the initial labels, so other
-// read-modify-write updates (heartbeat, backoff-until) re-send the initial
-// idle label unchanged; only a differing value is an idle write.
-func idleLabelChanges(bd *inprocBD, initial string) []string {
+// idleLabelChanges returns the idle:N labels the run's updates wrote.
+func idleLabelChanges(db *agentBeadsRecorder) []string {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	var idle []string
-	for _, line := range strings.Split(bd.log(), "\n") {
-		if !strings.HasPrefix(line, "update ") {
-			continue
-		}
-		for _, arg := range strings.Fields(line) {
-			if strings.HasPrefix(arg, "--set-labels=idle:") && arg != "--set-labels="+initial {
-				idle = append(idle, strings.TrimPrefix(arg, "--set-labels="))
+	for _, u := range db.updates {
+		for _, l := range u.AddLabels {
+			if strings.HasPrefix(l, "idle:") {
+				idle = append(idle, l)
 			}
 		}
 	}
 	return idle
 }
 
-// TestAwaitSignalPinsBDToTheRigBeads: every bd call await-signal makes is
-// pinned to the agent bead's beads directory and database, reads read-only
-// and writes auto-committed, whatever the session inherited.
-func TestAwaitSignalPinsBDToTheRigBeads(t *testing.T) {
+// TestAwaitSignalOpensTheAgentBeadsDatabase: every read and write
+// await-signal makes goes to the beads directory it was given.
+func TestAwaitSignalOpensTheAgentBeadsDatabase(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:0"]`)
-	var calls []beads.BDCall
-	var mu sync.Mutex
-	inner := w.bd.run
-	w.run.bd = func(ctx context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		mu.Lock()
-		calls = append(calls, c)
-		mu.Unlock()
-		return inner(ctx, c)
-	}
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:0"})
 	w.run.backoff = awaitSignalBackoff{timeout: "1ms", mult: 2}
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("await-signal: %v", err)
 	}
-	if len(calls) == 0 {
-		t.Fatal("bd was not called")
+	if len(w.db.dirs) == 0 {
+		t.Fatal("the agent bead database was never opened")
 	}
-	for _, c := range calls {
-		env := envMap(envSlice(c.Env))
-		if env("BEADS_DIR") != w.beadsDir || env("BEADS_DOLT_SERVER_DATABASE") != "hq" {
-			t.Errorf("bd %v ran with BEADS_DIR=%q DB=%q, want %q and hq", c.Args, env("BEADS_DIR"), env("BEADS_DOLT_SERVER_DATABASE"), w.beadsDir)
-		}
-		switch c.Args[0] {
-		case "show":
-			if env("BD_READONLY") != "true" || env("BD_DOLT_AUTO_COMMIT") != "off" {
-				t.Errorf("read %v not read-only pinned: READONLY=%q AUTO=%q", c.Args, env("BD_READONLY"), env("BD_DOLT_AUTO_COMMIT"))
-			}
-		case "update":
-			if env("BD_READONLY") != "" || env("BD_DOLT_AUTO_COMMIT") != "on" {
-				t.Errorf("write %v not auto-commit pinned: READONLY=%q AUTO=%q", c.Args, env("BD_READONLY"), env("BD_DOLT_AUTO_COMMIT"))
-			}
+	for _, d := range w.db.dirs {
+		if d != w.beadsDir {
+			t.Errorf("opened %q, want %q", d, w.beadsDir)
 		}
 	}
-}
-
-// envSlice turns KEY=VALUE pairs into a map; a later pair wins, as exec's
-// environment does.
-func envSlice(env []string) map[string]string {
-	m := map[string]string{}
-	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			m[k] = v
-		}
-	}
-	return m
 }
 
 // A real event must reset the idle counter inside await-signal. The formula
@@ -511,7 +493,7 @@ func envSlice(env []string) map[string]string {
 // every deacon wait sat at the backoff cap (claude-9jq).
 func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`)
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:5"})
 	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
 	wakeOnSignal(w)
@@ -519,7 +501,7 @@ func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+	if got := idleLabelChanges(w.db); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label updates = %q, want exactly [idle:0]", got)
 	}
 }
@@ -527,13 +509,13 @@ func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
 // Timeouts keep backing off: idle goes up by one, never back to zero.
 func TestRunMoleculeAwaitSignal_TimeoutIncrementsIdle(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`)
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:5"})
 	w.run.backoff = awaitSignalBackoff{base: "1ms", mult: 1}
 
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:6" {
+	if got := idleLabelChanges(w.db); len(got) != 1 || got[0] != "idle:6" {
 		t.Fatalf("idle label updates = %q, want exactly [idle:6]", got)
 	}
 }
@@ -541,7 +523,7 @@ func TestRunMoleculeAwaitSignal_TimeoutIncrementsIdle(t *testing.T) {
 // A signal at idle 0 has nothing to reset, so no extra bd write is spent.
 func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:0"]`)
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:0"})
 	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
 	wakeOnSignal(w)
@@ -549,11 +531,8 @@ func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	// Every update re-sends idle:0 unchanged, so count updates instead. The
-	// fake never reports a backoff-until label, so clearing it is a no-op.
-	data := w.bd.log()
-	if n := strings.Count(string(data), "update "); n != 2 {
-		t.Fatalf("bd updates = %d, want 2 (backoff-until set, heartbeat); an idle reset at idle 0 is a wasted write\n%s", n, data)
+	if got := idleLabelChanges(w.db); len(got) != 0 {
+		t.Fatalf("idle label writes = %q, want none: an idle reset at idle 0 is a wasted write", got)
 	}
 }
 
@@ -569,14 +548,14 @@ func wakeOnSignal(w *awaitSignalTown) {
 // may be high: a real wake must still try to reset it.
 func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 1) // only the initial idle read fails
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:5"}, 1) // only the initial idle read fails
 	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
 	wakeOnSignal(w)
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+	if got := idleLabelChanges(w.db); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label changes = %q, want exactly [idle:0]", got)
 	}
 }
@@ -587,7 +566,7 @@ func TestRunMoleculeAwaitSignal_ResetFailureWarnsUnderQuiet(t *testing.T) {
 	t.Parallel()
 	// Show calls: 1 idle read, 2 backoff-until set, 3 heartbeat, 4 idle
 	// reset. Fail the reset's read so the reset itself fails.
-	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 4)
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:5"}, 4)
 	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 	w.run.quiet = true
 
@@ -599,4 +578,16 @@ func TestRunMoleculeAwaitSignal_ResetFailureWarnsUnderQuiet(t *testing.T) {
 	if !strings.Contains(stderr, "Failed to reset agent bead idle count") {
 		t.Fatalf("stderr = %q, want the reset-failure warning", stderr)
 	}
+}
+
+// envSlice turns KEY=VALUE pairs into a map; a later pair wins, as exec's
+// environment does.
+func envSlice(env []string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
 }

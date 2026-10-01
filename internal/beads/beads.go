@@ -317,6 +317,11 @@ type Issue struct {
 	Labels      []string `json:"labels,omitempty"`
 	Ephemeral   bool     `json:"ephemeral,omitempty"` // Wisp/ephemeral issues, not synced to git
 
+	// Event fields (issue_type "event" only): the namespaced kind and its
+	// JSON payload, as CreateOptions.EventKind and EventPayload set them.
+	EventKind string `json:"event_kind,omitempty"`
+	Payload   string `json:"payload,omitempty"`
+
 	// Content fields (parsed from bd show --json)
 	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
 
@@ -619,6 +624,7 @@ type ListOptions struct {
 	Limit      int    // Max results (0 = unlimited, overrides bd default of 50)
 	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
 	Rig        string // filter merge-request descriptions by rig before hydration
+	IssueType  string // filter by bd issue_type (e.g. "event"); Type is the deprecated label filter
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -633,6 +639,12 @@ type CreateOptions struct {
 	Actor       string // Who is creating this issue (populates created_by)
 	Ephemeral   bool   // Create as ephemeral (wisp) - not synced to git
 	Rig         string // Target rig database (e.g., "gantry"). When set, binds create to the rig's .beads directory.
+
+	// EventKind makes the issue an event (bd's --type=event) of this
+	// namespaced kind (e.g. "wisp.compaction"), carrying EventPayload: an
+	// audit record, not work.
+	EventKind    string
+	EventPayload string
 }
 
 // UpdateOptions specifies options for updating an issue.
@@ -683,6 +695,11 @@ type Beads struct {
 	plainEnv []string
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
+	// accessMode marks a wrapper built by NewPinned: each call runs
+	// read-only or as an auto-committed mutation by its argv, as
+	// beads.Command's pinned modes did, whatever BD_READONLY or
+	// BD_DOLT_AUTO_COMMIT the process inherited.
+	accessMode bool
 
 	// Lazy-cached town root for routing resolution.
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
@@ -820,6 +837,17 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 // would pick.
 func NewRigLocal(workDir string) *Beads {
 	return newBeads(beadsFields{workDir: workDir, noRoute: true})
+}
+
+// NewPinned is NewRigLocal for a resolved beads directory: bd runs from
+// beadsDir's parent with BEADS_DIR=beadsDir, no ID routes elsewhere, and
+// each call is read-only or an auto-committed mutation by its argv. It
+// replaces beads.Command with a pinned mode for callers that already hold
+// the directory.
+func NewPinned(beadsDir string) *Beads {
+	b := newBeads(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true})
+	b.accessMode = true
+	return b
 }
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
@@ -1335,6 +1363,13 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	if machineExempt(args) {
 		runEnv = WithoutMachineEnv(runEnv)
 	}
+	if b.accessMode {
+		if ArgsAreReadOnly(args) {
+			runEnv = forceBDReadOnly(runEnv)
+		} else {
+			runEnv = forceBDMutation(runEnv)
+		}
+	}
 
 	out, err := b.runBdWithRetry(stdinData, runEnv, args)
 	if err != nil {
@@ -1687,6 +1722,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	} else if opts.Type != "" {
 		// Deprecated: convert type to label for backward compatibility
 		args = append(args, "--label=gt:"+opts.Type)
+	}
+	if opts.IssueType != "" {
+		args = append(args, "--type="+opts.IssueType)
 	}
 	if opts.Priority >= 0 {
 		args = append(args, fmt.Sprintf("--priority=%d", opts.Priority))
@@ -2873,7 +2911,8 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return bdForCreate.Create(opts)
 	}
 
-	if b.store != nil && !opts.Ephemeral {
+	// The store path has no event fields; bd writes events.
+	if b.store != nil && !opts.Ephemeral && opts.EventKind == "" {
 		return b.storeCreate(opts)
 	}
 
@@ -2881,6 +2920,12 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 
 	if opts.Title != "" {
 		args = append(args, "--title="+opts.Title)
+	}
+	if opts.EventKind != "" {
+		args = append(args, "--type=event", "--event-category="+opts.EventKind)
+		if opts.EventPayload != "" {
+			args = append(args, "--event-payload="+opts.EventPayload)
+		}
 	}
 	// Labels takes precedence; fall back to deprecated single-label/Type fields.
 	if len(opts.Labels) > 0 {

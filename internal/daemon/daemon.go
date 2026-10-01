@@ -433,6 +433,11 @@ func New(config *Config) (*Daemon, error) {
 		logger.Printf("Refusing to start: %v", err)
 		return nil, fmt.Errorf("refusing to start the daemon: %w", err)
 	}
+	if town, err := townconfig.Load(config.TownRoot); err == nil {
+		if msg := town.LiteralSecretsWarning(); msg != "" {
+			logger.Print(msg)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -486,7 +491,11 @@ func New(config *Config) (*Daemon, error) {
 		// Propagate env vars from daemon.json to this process and all spawned sessions.
 		for k, v := range patrolConfig.Env {
 			processEnv{}.Setenv(k, v)
-			logger.Printf("Set env %s=%s from daemon.json", k, v)
+			if agentconfig.LooksLikeSecret(k, v) {
+				logger.Printf("Set env %s=<redacted> from daemon.json", k)
+			} else {
+				logger.Printf("Set env %s=%s from daemon.json", k, v)
+			}
 		}
 	}
 	doltEnv := agentconfig.ConfiguredDoltEnv(config.TownRoot)

@@ -68,6 +68,9 @@ type Town struct {
 	daemon    *config.DaemonPatrolConfig
 	daemonEnv map[string]string
 	dolt      DoltEndpoint
+	// literalSecrets are the agent env values in settings/config.json that
+	// hold a token in plain text (secrets.go).
+	literalSecrets []config.LiteralSecret
 	// legacyParked holds, per rig, why its pre-registry wisp park record
 	// makes it read as parked (parked.go).
 	legacyParked map[string]error
@@ -183,6 +186,9 @@ func (t *Town) loadSettings() error {
 	}
 	if s.Version > config.CurrentTownSettingsVersion {
 		return fmt.Errorf("%s: %w: got %d, max supported %d", t.path(FileSettings), config.ErrInvalidVersion, s.Version, config.CurrentTownSettingsVersion)
+	}
+	if err := t.checkLiteralSecrets(&s); err != nil {
+		return err
 	}
 	t.settings = &s
 	return nil

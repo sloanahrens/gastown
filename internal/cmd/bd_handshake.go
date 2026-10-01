@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -138,8 +139,12 @@ func checkTownConfig(townRoot string) error {
 	}
 	// Load, not Check: a town-running command needs a whole town, so a root
 	// found by its mayor/ directory alone (no mayor/town.json) is refused.
-	_, err := townconfig.Load(townRoot)
-	return err
+	town, err := townconfig.Load(townRoot)
+	if err != nil {
+		return err
+	}
+	warnLiteralSecretsOnce(os.Stderr, town)
+	return nil
 }
 
 // require is the gate: the town config check first, then the handshake.

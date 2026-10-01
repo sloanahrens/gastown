@@ -670,6 +670,10 @@ Supported keys:
                               the daemon runs CALL dolt_gc('--full') on each
                               database due for it (weekly, or old-gen grew >20%
                               since its last gc), only while the town is quiet
+  secrets.refuse_literals     Refuse to load a settings/config.json whose agent
+                              env holds a literal token (true/false, default:
+                              false = warn). Run 'gt config secrets migrate'
+                              first; setting true refuses while literals remain
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Enable/disable wisp reaper (true/false)
@@ -715,6 +719,7 @@ Supported keys:
   polecat.target_clean_policy When to delete <polecat>/target/ on reuse
                               (per_bead, every_n_beads:<N>, never)
   maintenance.window          Maintenance window start time (HH:MM)
+  secrets.refuse_literals     Literal tokens refused instead of warned (true/false)
 
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Wisp reaper enabled (true/false)
@@ -827,6 +832,22 @@ func configSet(e configCmdEnv, args []string) error {
 	case "maintenance.window":
 		return setMaintenanceConfig(townRoot, key, value)
 
+	case "secrets.refuse_literals":
+		b, err := parseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid value for %s: %w (expected true/false)", key, err)
+		}
+		// Turning refusal on over a literal token would stop the town at its
+		// next start; move the tokens first.
+		if found := config.FindLiteralSecrets(townSettings); b && len(found) > 0 {
+			return fmt.Errorf("refusing to set %s: %s still hold(s) a literal token; run 'gt config secrets migrate' first",
+				key, strings.Join(config.LiteralSecretPaths(found), ", "))
+		}
+		if townSettings.Secrets == nil {
+			townSettings.Secrets = &config.SecretsConfig{}
+		}
+		townSettings.Secrets.RefuseLiterals = b
+
 	case "dolt.port":
 		port, err := strconv.Atoi(value)
 		if err != nil || port < 1024 || port > 65535 {
@@ -845,7 +866,7 @@ func configSet(e configCmdEnv, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -926,6 +947,9 @@ func configGet(e configCmdEnv, args []string) error {
 	case "maintenance.window":
 		return getMaintenanceConfig(e.out, townRoot, key)
 
+	case "secrets.refuse_literals":
+		value = strconv.FormatBool(townSettings.RefusesLiteralSecrets())
+
 	case "dolt.port":
 		ep, ok := config.ResolveDoltEndpoint(townRoot)
 		if !ok {
@@ -938,7 +962,7 @@ func configGet(e configCmdEnv, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	fmt.Fprintln(e.out, value)
