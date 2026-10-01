@@ -30,13 +30,13 @@ type bdCLI interface {
 // process environment).
 type bdOpener func(dir string, env []string) bdCLI
 
-// bd returns the bd client for dir and env: the real bd CLI (or ctx's bd
-// runner), unless the context carries an opener.
+// bd returns the bd client for dir and env: the real bd CLI, unless the
+// context carries an opener.
 func (ctx *CheckContext) bd(dir string, env []string) bdCLI {
 	if ctx != nil && ctx.openBD != nil {
 		return ctx.openBD(dir, env)
 	}
-	return beads.NewPlainWithRunner(dir, env, ctx.bdRunner())
+	return beads.NewPlain(dir, env)
 }
 
 // bdInstalled reports whether checks can run bd: an injected client always
@@ -79,24 +79,53 @@ func environWithPWD(dir string) []string {
 	return (&exec.Cmd{Dir: dir}).Environ()
 }
 
-// beadsAt is beads.New(workDir) whose bd calls go through ctx's runner.
-func (ctx *CheckContext) beadsAt(workDir string) *beads.Beads {
-	return beads.NewWithBeadsDirAndRunner(workDir, "", ctx.bdRunner())
+// doctorBeads is the bead store checks read and repair agent, hook and rig
+// beads through: the shared Client plus the *beads.Beads helpers they call.
+// *beads.Beads implements it; unit tests answer from beadsfake.
+type doctorBeads interface {
+	beads.Client
+	bdRepairer
+	ListAgentBeads() (map[string]*beads.Issue, error)
+	ListAgentBeadsFromWisps() (map[string]*beads.Issue, error)
+	ListWispIDs() (map[string]bool, error)
+	CreateAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error)
+	DetachMolecule(pinnedBeadID string) (*beads.Issue, error)
+	EnsureRigBead(name string, fields *beads.RigFields) (*beads.Issue, error)
+	CreateRigBead(name string, fields *beads.RigFields) (*beads.Issue, error)
 }
 
-// beadsWithDir is beads.NewWithBeadsDir through ctx's runner.
-func (ctx *CheckContext) beadsWithDir(workDir, beadsDir string) *beads.Beads {
-	return beads.NewWithBeadsDirAndRunner(workDir, beadsDir, ctx.bdRunner())
+var _ doctorBeads = (*beads.Beads)(nil)
+
+// beadsSite is where a check opens a bead store: bd's working directory,
+// an explicit .beads ("" resolves workDir's), and whether prefix routing is
+// off (beads.NewRigLocal).
+type beadsSite struct {
+	workDir, beadsDir string
+	rigLocal          bool
 }
 
-// beadsRigLocal is beads.NewRigLocal through ctx's runner.
-func (ctx *CheckContext) beadsRigLocal(dir string) *beads.Beads {
-	return beads.NewRigLocalWithRunner(dir, ctx.bdRunner())
-}
-
-func (ctx *CheckContext) bdRunner() beads.BDRunner {
-	if ctx == nil {
-		return nil
+// openBeadsAt is the store at site: ctx's opener, else bd.
+func (ctx *CheckContext) openBeadsAt(site beadsSite) doctorBeads {
+	if ctx != nil && ctx.openBeads != nil {
+		return ctx.openBeads(site)
 	}
-	return ctx.bdRun
+	if site.rigLocal {
+		return beads.NewRigLocal(site.workDir)
+	}
+	return beads.NewWithBeadsDir(site.workDir, site.beadsDir)
+}
+
+// beadsAt is beads.New(workDir) through ctx's opener.
+func (ctx *CheckContext) beadsAt(workDir string) doctorBeads {
+	return ctx.openBeadsAt(beadsSite{workDir: workDir})
+}
+
+// beadsWithDir is beads.NewWithBeadsDir through ctx's opener.
+func (ctx *CheckContext) beadsWithDir(workDir, beadsDir string) doctorBeads {
+	return ctx.openBeadsAt(beadsSite{workDir: workDir, beadsDir: beadsDir})
+}
+
+// beadsRigLocal is beads.NewRigLocal through ctx's opener.
+func (ctx *CheckContext) beadsRigLocal(dir string) doctorBeads {
+	return ctx.openBeadsAt(beadsSite{workDir: dir, rigLocal: true})
 }
