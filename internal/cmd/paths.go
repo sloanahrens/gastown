@@ -1,24 +1,10 @@
 package cmd
 
-import (
-	"os"
-	"path/filepath"
-)
+import "github.com/steveyegge/gastown/internal/hooks"
 
 // gtDataDir returns the directory used for GT's runtime data files
-// (logs, command usage, cost records, etc.).
-//
-// Resolution order:
-//  1. $GT_HOME/.gt  — when GT_HOME is set, data is kept alongside the GT
-//     workspace rather than in the user's home directory.
-//  2. ~/.gt         — default location when GT_HOME is not set.
+// (logs, command usage, cost records, etc.): hooks.GTDir, $GT_HOME/.gt when
+// GT_HOME is set, else ~/.gt.
 func gtDataDir() string {
-	if h := os.Getenv("GT_HOME"); h != "" {
-		return filepath.Join(h, ".gt")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), ".gt")
-	}
-	return filepath.Join(home, ".gt")
+	return hooks.GTDir()
 }

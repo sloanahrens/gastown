@@ -202,6 +202,17 @@ func FindFromCwdOrError() (string, error) {
 	return processEnv.findFromCwdOrError()
 }
 
+// TownRootFromEnv is the one reader of the town root a process was spawned
+// with (gt-y3pgh.2): GT_TOWN_ROOT (the daemon and tmux global environment),
+// then GT_ROOT (agent sessions). It does not check that the directory is a
+// town; callers that walk up from cwd consult it only when that fails.
+func TownRootFromEnv(getenv func(string) string) string {
+	if root := getenv("GT_TOWN_ROOT"); root != "" {
+		return root
+	}
+	return getenv("GT_ROOT")
+}
+
 func (e procEnv) findFromCwdOrError() (string, error) {
 	cwd, err := e.getwd()
 	if err == nil {
@@ -211,13 +222,11 @@ func (e procEnv) findFromCwdOrError() (string, error) {
 		}
 	}
 
-	// Fallback: try GT_TOWN_ROOT or GT_ROOT env vars (set by shell integration or session manager)
-	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if townRoot := e.getenv(envName); townRoot != "" {
-			// Verify it's actually a workspace
-			if ok, _ := e.isWorkspace(townRoot); ok {
-				return townRoot, nil
-			}
+	// Fallback: the town root the session was spawned with.
+	if townRoot := TownRootFromEnv(e.getenv); townRoot != "" {
+		// Verify it's actually a workspace
+		if ok, _ := e.isWorkspace(townRoot); ok {
+			return townRoot, nil
 		}
 	}
 
@@ -238,8 +247,8 @@ func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
 func (e procEnv) findFromCwdWithFallback() (townRoot string, cwd string, err error) {
 	cwd, err = e.getwd()
 	if err != nil {
-		// Fallback: try GT_TOWN_ROOT env var
-		if townRoot = e.getenv("GT_TOWN_ROOT"); townRoot != "" {
+		// Fallback: the town root the session was spawned with.
+		if townRoot = TownRootFromEnv(e.getenv); townRoot != "" {
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(townRoot, PrimaryMarker)); statErr == nil {
 				return townRoot, "", nil // cwd is gone but townRoot is valid

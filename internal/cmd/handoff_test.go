@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // handoffTestRegistry maps the rig prefixes the handoff tests use.
@@ -384,82 +383,6 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 		}
 		if strings.Contains(cmd, "--continue") {
 			t.Errorf("expected no --continue flag when ContinueSession is false, got: %q", cmd)
-		}
-	})
-}
-
-func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
-	t.Parallel()
-
-	// Create a temp directory that looks like a valid town
-	tmpTown := t.TempDir()
-	mayorDir := filepath.Join(tmpTown, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatalf("creating mayor dir: %v", err)
-	}
-	townJSON := filepath.Join(mayorDir, "town.json")
-	if err := os.WriteFile(townJSON, []byte(`{"name": "test-town"}`), 0644); err != nil {
-		t.Fatalf("creating town.json: %v", err)
-	}
-
-	t.Run("uses GT_TOWN_ROOT when cwd detection fails", func(t *testing.T) {
-		t.Parallel()
-		env := envMap(map[string]string{"GT_TOWN_ROOT": tmpTown, "GT_ROOT": ""})
-
-		result := townRootFromEnv(env)
-		if result != tmpTown {
-			t.Errorf("detectTownRootFromCwd() = %q, want %q (should use GT_TOWN_ROOT fallback)", result, tmpTown)
-		}
-	})
-
-	t.Run("uses GT_ROOT when GT_TOWN_ROOT not set", func(t *testing.T) {
-		t.Parallel()
-		env := envMap(map[string]string{"GT_TOWN_ROOT": "", "GT_ROOT": tmpTown})
-
-		result := townRootFromEnv(env)
-		if result != tmpTown {
-			t.Errorf("detectTownRootFromCwd() = %q, want %q (should use GT_ROOT fallback)", result, tmpTown)
-		}
-	})
-
-	t.Run("prefers GT_TOWN_ROOT over GT_ROOT", func(t *testing.T) {
-		t.Parallel()
-		// Create another temp town for GT_ROOT
-		anotherTown := t.TempDir()
-		anotherMayor := filepath.Join(anotherTown, "mayor")
-		os.MkdirAll(anotherMayor, 0755)
-		os.WriteFile(filepath.Join(anotherMayor, "town.json"), []byte(`{"name": "other-town"}`), 0644)
-
-		env := envMap(map[string]string{"GT_TOWN_ROOT": tmpTown, "GT_ROOT": anotherTown})
-
-		result := townRootFromEnv(env)
-		if result != tmpTown {
-			t.Errorf("detectTownRootFromCwd() = %q, want %q (should prefer GT_TOWN_ROOT)", result, tmpTown)
-		}
-	})
-
-	t.Run("ignores invalid GT_TOWN_ROOT", func(t *testing.T) {
-		t.Parallel()
-		env := envMap(map[string]string{"GT_TOWN_ROOT": "/nonexistent/path/to/town", "GT_ROOT": tmpTown})
-
-		result := townRootFromEnv(env)
-		if result != tmpTown {
-			t.Errorf("detectTownRootFromCwd() = %q, want %q (should skip invalid GT_TOWN_ROOT and use GT_ROOT)", result, tmpTown)
-		}
-	})
-
-	t.Run("uses secondary marker when primary missing", func(t *testing.T) {
-		t.Parallel()
-		// Create a temp town with only mayor/ directory (no town.json)
-		secondaryTown := t.TempDir()
-		mayorOnlyDir := filepath.Join(secondaryTown, workspace.SecondaryMarker)
-		os.MkdirAll(mayorOnlyDir, 0755)
-
-		env := envMap(map[string]string{"GT_TOWN_ROOT": secondaryTown, "GT_ROOT": ""})
-
-		result := townRootFromEnv(env)
-		if result != secondaryTown {
-			t.Errorf("detectTownRootFromCwd() = %q, want %q (should accept secondary marker)", result, secondaryTown)
 		}
 	})
 }

@@ -1,0 +1,60 @@
+# Production reads of GT_ environment variables outside the identity
+# allowlist (gtEnvIdentity in gtenv_guard_test.go), still waiting to move to
+# config (gt-y3pgh.2). One line per file and variable:
+#   <file> <GT_VAR> <count>
+# TestNoNewGTEnvReads fails when a count grows (a new env read of a config
+# fact) and when one shrinks (lower it here), so this file only goes down.
+# Read a new fact from config instead of adding a line.
+internal/beads/bdcmd.go GT_BD_TIMEOUT_SEC 1
+internal/beads/beads.go GT_BD_TIMEOUT_SEC 1
+internal/beads/beads.go GT_TEST_BD_TIMEOUT_SEC 1
+internal/beads/test_container.go GT_TEST_DOLT_INIT_CONCURRENCY 1
+internal/cli/name.go GT_COMMAND 1
+internal/cmd/agents.go GT_TOWN_SOCKET 1
+internal/cmd/capacity_dispatch.go GT_DAEMON 1
+internal/cmd/crew_at.go GT_DEBUG 1
+internal/cmd/done.go GT_DONE_FROM_HANDOFF 1
+internal/cmd/down.go GT_NUKE_ACKNOWLEDGED 1
+internal/cmd/handoff.go GT_AGENT_OVERRIDE 2
+internal/cmd/handoff.go GT_PROCESS_NAMES 2
+internal/cmd/install.go GT_TEST_EXTERNAL_DOLT 1
+internal/cmd/nudge.go GT_TEST_NUDGE_LOG 1
+internal/cmd/polecat.go GT_NUKE_ACKNOWLEDGE_UNPRESERVED 1
+internal/cmd/prime_session.go GT_HOOK_SOURCE 1
+internal/cmd/prime_session.go GT_SESSION_ID 1
+internal/cmd/prime_session.go GT_SESSION_START_CALLER 1
+internal/cmd/prime_session.go GT_SESSION_START_REASON 1
+internal/cmd/root.go GT_STALE_WARNED 1
+internal/cmd/sling_formula.go GT_TEST_NO_NUDGE 1
+internal/cmd/sling_helpers.go GT_TEST_ATTACHED_MOLECULE_LOG 1
+internal/cmd/sling_helpers.go GT_TEST_NO_NUDGE 1
+internal/cmd/sling_helpers.go GT_TEST_SKIP_HOOK_VERIFY 1
+internal/cmd/statusline.go GT_ISSUE 1
+internal/cmd/tap_guard_container_suite.go GT_TEST_DOCKER 1
+internal/cmd/tap_guard_dangerous.go GT_POLECAT_PATH 1
+internal/cmd/tap_guard_mol_patrol.go GT_MAYOR 1
+internal/cmd/tap_guard_polecat_paths.go GT_POLECAT_PATH 1
+internal/cmd/telemetry.go GT_TEST_HERMETIC 1
+internal/cmd/theme.go GT_THEME 1
+internal/config/loader.go GT_ACCOUNT 1
+internal/dispatch/hold.go GT_SEAT_REFILL_HOLD 1
+internal/doltserver/doltserver.go GT_DOLT_AUTO_GC 1
+internal/doltserver/doltserver.go GT_DOLT_EVENT_SCHEDULER 1
+internal/doltserver/doltserver.go GT_DOLT_LOGLEVEL 1
+internal/doltserver/doltserver.go GT_DOLT_PASSWORD 1
+internal/doltserver/doltserver.go GT_DOLT_STATS_ENABLED 1
+internal/doltserver/doltserver.go GT_DOLT_TIME_ZONE 1
+internal/doltserver/doltserver.go GT_DOLT_USER 1
+internal/doltserver/doltserver.go GT_DOLT_WAIT_TIMEOUT 1
+internal/events/events.go GT_TEST_HERMETIC 1
+internal/hooks/config.go GT_HOME 1
+internal/polecat/session_manager.go GT_DEBUG_SESSION 1
+internal/runtime/runtime.go GT_SESSION_ID_ENV 1
+internal/session/registry.go GT_TMUX_SOCKET 1
+internal/specdispatch/lint.go GT_SPEC_TEMPLATE 1
+internal/tmux/tmux.go GT_TOWN_SOCKET 1
+internal/ui/pager.go GT_NO_PAGER 1
+internal/ui/pager.go GT_PAGER 1
+internal/ui/terminal.go GT_AGENT_MODE 1
+internal/ui/terminal.go GT_THEME 1
+internal/workspace/find.go GT_TEST_FORBIDDEN_TOWN_ROOT 1

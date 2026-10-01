@@ -76,7 +76,7 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	// Find town root for heartbeat check
 	townRoot, _, _ := workspace.FindFromCwdWithFallback()
 	if townRoot == "" {
-		townRoot = os.Getenv("GT_TOWN_ROOT")
+		townRoot = workspace.TownRootFromEnv(os.Getenv)
 	}
 	if townRoot == "" {
 		return nil // Can't find workspace — exit quietly

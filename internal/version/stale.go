@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // These variables are set at build time via ldflags in cmd package.
@@ -515,8 +516,8 @@ func GetRepoRootForTown(townRoot string) (string, error) {
 // Crew rigs also contain cmd/gt/main.go but have different HEADs,
 // so we prefer the gastown repo over CWD-based git toplevel detection.
 func GetRepoRoot() (string, error) {
-	// Check if GT_ROOT environment variable is set (agents always have this)
-	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+	// The town root the session was spawned with (agents always have it)
+	if gtRoot := workspace.TownRootFromEnv(os.Getenv); gtRoot != "" {
 		for _, candidate := range townSourceCandidates(gtRoot) {
 			if hasGtSource(candidate) {
 				return candidate, nil
