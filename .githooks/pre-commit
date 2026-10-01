@@ -16,7 +16,7 @@
 # fails closed — internal/refinery/worktree_guard.go refuses to gate a worktree
 # carrying changes it did not create.
 #
-# Work in your own worktree instead: `gt crew` for a persistent human workspace,
+# Work in your own worktree instead: `gt crew add` for a persistent human workspace,
 # or /tmp for scratch files.
 
 worktree_root=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -40,7 +40,7 @@ cat >&2 <<EOF
         git switch -c unused/refinery-rig-\$(date +%Y%m%d)
         git commit -am "wip: moved off the refinery rig worktree"
 
-    Use 'gt crew' for a persistent workspace of your own, or /tmp for scratch.
+    Use 'gt crew add' for a persistent workspace of your own, or /tmp for scratch.
 EOF
 
 exit 0
