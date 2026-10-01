@@ -21,6 +21,7 @@ import (
 // shared production Dolt data dir.
 func TestMain(m *testing.M) {
 	flag.Parse()
+	prepareTestCommandTree() // tests then only read the tree
 	if runtime.GOOS == "windows" {
 		// Concurrent bd processes collide on file locks on Windows.
 		_ = flag.Set("test.parallel", "1")
