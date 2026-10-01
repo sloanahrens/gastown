@@ -270,9 +270,24 @@ func (e primeHookEnv) runtimeStateSearched(name string) string {
 	return ""
 }
 
+// primeHookSessionID is the session ID gt prime --hook read from the
+// runtime's hook payload or environment; "" outside hook mode.
+var primeHookSessionID string
+
 // resolveSessionIDForPrime finds the session ID from available sources.
-// Priority: GT_SESSION_ID env, CLAUDE_SESSION_ID env, persisted file, fallback.
+// Priority: the hook's session ID, GT_SESSION_ID env, CLAUDE_SESSION_ID env,
+// persisted file, fallback.
 func resolveSessionIDForPrime(actor string) string {
+	return resolveSessionIDFor(primeHookSessionID, actor)
+}
+
+// resolveSessionIDFor is resolveSessionIDForPrime for a prime whose hook
+// read session ID hookSessionID ("" outside hook mode).
+func resolveSessionIDFor(hookSessionID, actor string) string {
+	if hookSessionID != "" {
+		return hookSessionID
+	}
+
 	// 1. Try runtime's session ID lookup (checks GT_SESSION_ID_ENV, then CLAUDE_SESSION_ID)
 	if id := runtime.SessionIDFromEnv(); id != "" {
 		return id

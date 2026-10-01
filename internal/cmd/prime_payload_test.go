@@ -639,3 +639,13 @@ func renderSlungWork(ctx RoleContext, bead *beads.Issue) string {
 	_, _ = checkSlungWorkIn(&b, false, ctx, bead)
 	return b.String()
 }
+
+// TestResolveSessionIDFor_PrefersHookSessionID: the session ID a --hook prime
+// read from the runtime is the one its metadata line and session_start event
+// report, without exporting it into the process environment.
+func TestResolveSessionIDFor_PrefersHookSessionID(t *testing.T) {
+	t.Parallel()
+	if got := resolveSessionIDFor("hook-session-1", "gastown/crew/max"); got != "hook-session-1" {
+		t.Fatalf("resolveSessionIDFor = %q, want the hook's session ID", got)
+	}
+}

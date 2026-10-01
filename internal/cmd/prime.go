@@ -443,8 +443,9 @@ func handlePrimeHookMode(townRoot, cwd string) {
 			persistSessionID(cwd, sessionID)
 		}
 	}
-	_ = os.Setenv("GT_SESSION_ID", sessionID)
-	_ = os.Setenv("CLAUDE_SESSION_ID", sessionID) // Legacy compatibility
+	// The rest of this prime reports the hook's session ID (see
+	// resolveSessionIDForPrime).
+	primeHookSessionID = sessionID
 
 	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
 	// WaitForCommand polls for this instead of probing the process tree.
