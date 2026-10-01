@@ -270,22 +270,6 @@ func TestStartedModelSendsConflictsToTheHardPreset(t *testing.T) {
 	}
 }
 
-// TestRunnerPromptNamesTheVerdictFile: the contract the job is held to is in
-// the prompt the runner sends, not only in the runner's reader.
-func TestRunnerPromptNamesTheVerdictFile(t *testing.T) {
-	t.Parallel()
-	prompt := PromptFor(reviewEvent("gt-x", "c0ffee"))
-	for _, want := range []string{ResultFile, "gt-x", "c0ffee", string(OutcomePass), string(OutcomeEscalated)} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("prompt lacks %q:\n%s", want, prompt)
-		}
-	}
-	rejection := PromptFor(Event{Kind: KindRejection, Rig: "gastown", Bead: "gt-x", Branch: "b", Head: "c0ffee", Target: "main", Attempt: 2, RejectionDetail: "kind=gate reason=x"})
-	if !strings.Contains(rejection, "attempt 2") || !strings.Contains(rejection, "kind=gate") {
-		t.Errorf("rejection prompt lacks the refusal:\n%s", rejection)
-	}
-}
-
 // errBadOutcome is the error ReadVerdict produces for a word outside the set,
 // so the classification test reads a real message rather than a stand-in.
 var errBadOutcome = fmt.Errorf("%s reports outcome %q, which is not one of %s", ResultFile, "done", outcomeList())

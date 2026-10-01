@@ -88,6 +88,10 @@ func New() (*Templates, error) {
 
 // RenderRole renders a role context template.
 func (t *Templates) RenderRole(role string, data RoleData) (string, error) {
+	return t.render(role, data)
+}
+
+func (t *Templates) render(role string, data any) (string, error) {
 	templateName := role + ".md.tmpl"
 
 	var buf bytes.Buffer
@@ -96,6 +100,32 @@ func (t *Templates) RenderRole(role string, data RoleData) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+// StewardData is what a steward job's instructions are rendered from: the
+// landing-queue event and the seat the job runs in (gt-9bioi.2).
+type StewardData struct {
+	Kind            string // "review" or "rejection"
+	Rig             string
+	Bead            string
+	Branch          string
+	Head            string // full commit id of the submitted (review) or rejected (rejection) tip
+	Target          string
+	Worker          string // the polecat whose work this is; may be empty
+	Attempt         int    // rejections the bead carries; 0 for a review
+	RejectionDetail string
+	ResultFile      string // the verdict file the job writes
+	Final           bool   // true when no further job runs for this event
+}
+
+// RenderSteward renders the instructions of the steward job d.Kind names.
+func (t *Templates) RenderSteward(d StewardData) (string, error) {
+	switch d.Kind {
+	case "review", "rejection":
+	default:
+		return "", fmt.Errorf("steward job kind %q is neither review nor rejection", d.Kind)
+	}
+	return t.render("steward-"+d.Kind, d)
 }
 
 // RoleNames returns the list of available role templates.

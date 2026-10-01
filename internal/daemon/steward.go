@@ -152,7 +152,12 @@ func (d *Daemon) runSteward() {
 			if !run {
 				continue
 			}
-			if !runner.Start(d.ctx, ev, model, steward.PromptFor(ev)) {
+			prompt, err := steward.PromptFor(ev, model != stewardRoutineAgent(cfg))
+			if err != nil {
+				d.logger.Printf("steward: %s: not started: %v", ev.Bead, err)
+				continue
+			}
+			if !runner.Start(d.ctx, ev, model, prompt) {
 				d.logger.Printf("steward: %s: not started: the concurrency cap (%d) is full or the bead is already running", ev.Bead, runner.MaxJobs)
 				return
 			}
