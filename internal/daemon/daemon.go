@@ -43,7 +43,6 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -160,11 +159,6 @@ type Daemon struct {
 	// restartSeatFn replaces restartSeat, the supervisor's restart executor,
 	// in tests that cannot run the role managers against a fake tmux.
 	restartSeatFn func(supervisor.Seat) error
-
-	// telemetry exports metrics and logs to VictoriaMetrics / VictoriaLogs.
-	// Nil when telemetry is disabled (GT_OTEL_METRICS_URL / GT_OTEL_LOGS_URL not set).
-	otelProvider *telemetry.Provider
-	metrics      *daemonMetrics
 
 	// jsonlPushFailures tracks consecutive git push failures for JSONL backup.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -606,32 +600,6 @@ func New(config *Config) (*Daemon, error) {
 		logger.Printf("Warning: bd not found in PATH, subprocess calls may fail")
 	}
 
-	// Initialize OpenTelemetry (best-effort — telemetry failure never blocks startup).
-	// Activate by setting GT_OTEL_METRICS_URL and/or GT_OTEL_LOGS_URL.
-	otelProvider, otelErr := telemetry.Init(ctx, "gastown-daemon", "")
-	if otelErr != nil {
-		logger.Printf("Warning: telemetry init failed: %v", otelErr)
-	}
-	var dm *daemonMetrics
-	if otelProvider != nil {
-		dm, err = newDaemonMetrics()
-		if err != nil {
-			logger.Printf("Warning: failed to register daemon metrics: %v", err)
-			dm = nil
-		} else {
-			metricsURL := os.Getenv(telemetry.EnvMetricsURL)
-			if metricsURL == "" {
-				metricsURL = telemetry.DefaultMetricsURL
-			}
-			logsURL := os.Getenv(telemetry.EnvLogsURL)
-			if logsURL == "" {
-				logsURL = telemetry.DefaultLogsURL
-			}
-			logger.Printf("Telemetry active (metrics → %s, logs → %s)",
-				metricsURL, logsURL)
-		}
-	}
-
 	d := &Daemon{
 		config:          config,
 		patrolConfig:    patrolConfig,
@@ -644,8 +612,6 @@ func New(config *Config) (*Daemon, error) {
 		gtPath:          gtPath,
 		bdPath:          bdPath,
 		notifier:        newDaemonNotifier(gtPath, config.TownRoot),
-		otelProvider:    otelProvider,
-		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
 	}
 
@@ -1291,7 +1257,6 @@ func (d *Daemon) heartbeat(state *State) {
 // heartbeatWork is the recovery work of one heartbeat, run after the
 // shutdown, E-stop and upgrade-restart guards in heartbeat.
 func (d *Daemon) heartbeatWork(state *State) {
-	d.metrics.recordHeartbeat(d.ctx)
 	d.logger.Println("Heartbeat starting (recovery-focused)")
 
 	// Invalidate the per-tick rigs cache so this heartbeat re-reads from disk.
@@ -1415,24 +1380,12 @@ func (d *Daemon) ensureDoltServerRunning() {
 		}
 	}
 
-	// Update OTel gauges with the latest Dolt health snapshot.
-	if d.metrics != nil {
-		h := doltserver.GetHealthMetrics(d.config.TownRoot)
-		d.metrics.updateDoltHealth(
-			int64(h.Connections),
-			int64(h.MaxConnections),
-			float64(h.QueryLatency.Milliseconds()),
-			h.DiskUsageBytes,
-			h.Healthy,
-		)
-	}
 }
 
 // ensureDoltServerUp brings the Dolt server up and reports a failure to do so.
 //
 // ensureDoltServerRunning is the heartbeat's step 0 and does more than this: it
-// pours the doctor molecule and reads the OTel gauges from state the heartbeat
-// goroutine owns. A patrol cycle running on its own goroutine takes this bare
+// pours the doctor molecule from state the heartbeat goroutine owns. A patrol cycle running on its own goroutine takes this bare
 // bring-up instead of reaching into that state (gt-ox6c).
 func (d *Daemon) ensureDoltServerUp() error {
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {
@@ -2206,16 +2159,6 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 			d.logger.Printf("Warning: failed to stop Dolt server: %v", err)
 		} else {
 			d.logger.Println("Dolt server stopped")
-		}
-	}
-
-	// Flush and stop OTel providers. Bounded so it cannot block shutdown; part
-	// of ShutdownBudget.
-	if d.otelProvider != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), otelShutdownBudget)
-		defer cancel()
-		if err := d.otelProvider.Shutdown(shutCtx); err != nil {
-			d.logger.Printf("Warning: telemetry shutdown: %v", err)
 		}
 	}
 

@@ -32,7 +32,6 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -907,7 +906,6 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 // (worktree, beads, settings) after the directory has been created.
 // Caller MUST hold the polecat lock and have already created polecatDir.
 func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir string) (_ *Polecat, retErr error) {
-	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
 
 	// Pre-check: Verify sufficient disk space before expensive worktree creation.
 	if level, msg, err := m.checkDiskSpace(m.rig.Path); err == nil && level == util.DiskSpaceCritical {
@@ -1073,7 +1071,6 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 // and AllocateAndAdd re-checks existence under it, so a name is either free
 // here or already built (gt-dziey).
 func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retErr error) {
-	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
 	// Acquire per-polecat file lock to prevent concurrent Add/Remove/Repair races
 	fl, err := m.lockPolecat(name)
 	if err != nil {
@@ -1340,7 +1337,6 @@ func (m *Manager) Remove(name string, force bool) error {
 // ZFC #10: Uses cleanup_status from agent bead if available (polecat self-report),
 // falls back to git check for backward compatibility.
 func (m *Manager) RemoveWithOptions(name string, opts RemoveOptions) (retErr error) {
-	defer func() { telemetry.RecordPolecatRemove(context.Background(), name, retErr) }()
 	// Acquire per-polecat file lock to prevent concurrent Remove races
 	fl, err := m.lockPolecat(name)
 	if err != nil {
@@ -1560,7 +1556,6 @@ func activeMRRemovalBlocker(reader IssueReader, fields *beads.AgentFields) strin
 // ReclaimBrokenIdlePolecat removes a structurally broken idle sandbox before any
 // new hook is attached. It deliberately uses the normal non-force removal path.
 func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
-	defer func() { telemetry.RecordPolecatRemove(context.Background(), name, retErr) }()
 
 	fl, err := m.lockPolecat(name)
 	if err != nil {

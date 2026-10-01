@@ -33,7 +33,7 @@ Molecules currently support dependency-based DAG execution, but lack the ability
 2. **Subscription support** — Support Claude Code and other subscription-based access (crucial for cost optimization)
 3. **Automatic pricing data** — Fetch live pricing from OpenRouter; fall back to cached data
 4. **Meta-model routing** — Lightweight heuristic selects model based on cost, quality, and quota
-5. **Local usage tracking** — Record invocations to `~/.gt/usage.jsonl` (OTel additive/optional)
+5. **Local usage tracking** — Record invocations to `~/.gt/usage.jsonl`
 
 ---
 
@@ -46,7 +46,7 @@ Molecules currently support dependency-based DAG execution, but lack the ability
 | **Live Pricing** | Fetch pricing from OpenRouter with 24h local cache |
 | **Static Benchmarks** | Bundle MMLU/SWE scores; override via `~/.gt/models.toml` |
 | **Meta-Model Routing** | Heuristic-only scoring: no LLM calls |
-| **Local Usage Tracking** | `~/.gt/usage.jsonl` always written; OTel is additive |
+| **Local Usage Tracking** | `~/.gt/usage.jsonl` always written |
 | **DAG Compatible** | Works with existing molecule DAG structure |
 | **Backward Compatible** | Existing formulas work without modification |
 
@@ -114,7 +114,7 @@ All implementation stories in this plan must pass these quality gates:
 
 ### US-005: Usage Tracking
 
-**Description**: As a system, I want to track model usage locally so that operators can monitor costs without depending on OTel.
+**Description**: As a system, I want to track model usage locally so that operators can monitor costs.
 
 **Acceptance Criteria**:
 - [x] `internal/models/usage.go` records usage to `~/.gt/usage.jsonl` (always)
@@ -122,7 +122,6 @@ All implementation stories in this plan must pass these quality gates:
 - [x] `LoadUsage(gtDir, since)` reads and filters entries
 - [x] `MonthlyStats(entries, year, month)` aggregates by model
 - [x] `TotalCost(entries)` sums USD cost
-- [x] OTel integration is additive — callers emit OTel events separately if `GT_OTEL_LOGS_URL` is set
 
 ### US-006: Enhanced `gt prime` with Model Info
 
@@ -374,7 +373,7 @@ func MonthlyStats(entries []UsageEntry, year int, month time.Month) map[string]*
 func EstimateCost(model *ModelEntry, tokensIn, tokensOut int) float64
 ```
 
-**OTel integration**: callers that want OTel observability emit an `agent.usage` OTel log event separately (see `docs/otel-data-model.md`). `usage.jsonl` is always written and does not depend on OTel being configured.
+`usage.jsonl` is always written. (GT's OTel export was deleted, gt-s3rec.5.)
 
 ---
 
@@ -574,8 +573,7 @@ Implement `ResolveSession()` using the existing `GT_AGENT` + `AgentPresetInfo` i
 ### Phase 5: Usage Recording at Dispatch (P1)
 
 - [ ] Hook `RecordUsage` into the agent dispatch path
-- [ ] Derive `TokensIn`/`TokensOut` from `agent.usage` OTel events when available, or estimate
-- [ ] OTel: optionally emit `model.route` event when a routing decision is made
+- [ ] Derive `TokensIn`/`TokensOut` from the agent transcript, or estimate
 
 ---
 
@@ -620,7 +618,7 @@ needs = ["previous-step"]
 - Formula steps can specify per-step model constraints
 - Subscription access is detected and preferred over API keys automatically
 - Model pricing is fetched from OpenRouter and cached locally (no API key required)
-- Usage is tracked locally to `~/.gt/usage.jsonl` regardless of OTel configuration
+- Usage is tracked locally to `~/.gt/usage.jsonl`
 - Existing formulas continue to work unchanged
 
 ---

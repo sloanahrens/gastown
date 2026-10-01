@@ -3,7 +3,6 @@ package mail
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // timeNow is a function that returns the current time. It can be overridden in tests.
@@ -681,10 +679,6 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
 	_, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
-	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
-		ID: id,
-		To: m.identity,
-	}, err)
 	if err != nil {
 		if isBdNotFound(err) {
 			return ErrMessageNotFound

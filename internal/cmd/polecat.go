@@ -2883,7 +2883,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	}
 
 	// gt-7kr: destruction left no audit trail — nuke never emitted a feed
-	// event. Best-effort: never fail the nuke over telemetry.
+	// event. Best-effort: never fail the nuke over the feed.
 	reason := "nuked"
 	if opts.Force {
 		reason = "nuked --force"

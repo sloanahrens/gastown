@@ -226,13 +226,13 @@ func TestLoadPatrolConfig_IgnoresLegacyDoltRemotesKey(t *testing.T) {
 	}
 }
 
-// Shutdown no longer pushes Dolt remotes, so its budget is the Dolt server's
-// graceful stop plus the OTel flush and nothing else.
+// Shutdown no longer pushes Dolt remotes or flushes OTel, so its budget is the
+// Dolt server's graceful stop and nothing else.
 func TestShutdownBudget_HasNoRemotePushStep(t *testing.T) {
 	t.Parallel()
-	if ShutdownBudget != doltServerStopBudget+otelShutdownBudget {
-		t.Fatalf("ShutdownBudget = %v, want %v (Dolt stop + OTel flush only)",
-			ShutdownBudget, doltServerStopBudget+otelShutdownBudget)
+	if ShutdownBudget != doltServerStopBudget {
+		t.Fatalf("ShutdownBudget = %v, want %v (Dolt stop only)",
+			ShutdownBudget, doltServerStopBudget)
 	}
 }
 

@@ -63,7 +63,7 @@ func TestInstantiateFormulaOnBead(t *testing.T) {
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-288"}}`)
 
 	extraVars := []string{"branch=polecat/furiosa/gt-abc123"}
-	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, false, extraVars)
+	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, false, extraVars)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestInstantiateFormulaOnBeadSkipCook(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-skip"}}`)
 
-	if _, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-test", "Test", "", townRoot, true, nil); err != nil {
+	if _, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-test", "Test", "", townRoot, true, nil); err != nil {
 		t.Fatalf("InstantiateFormulaOnBead failed: %v", err)
 	}
 
@@ -204,7 +204,7 @@ func TestFormulaOnBeadPassesVariables(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-var"}}`)
 
-	if _, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil); err != nil {
+	if _, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil); err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestInstantiateFormulaOnBead_DirectBondParsesIDMapping(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-mol-fallback"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestInstantiateFormulaOnBead_DirectBondHandlesNonGTIDs(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"oag-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"oag-npeat","id_mapping":{"mol-polecat-work":"oag-wisp-wisp-rsia"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestInstantiateFormulaOnBead_DirectBondCreatesNoOrphanCleanup(t *testing.T)
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake(`{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-clean"}}`)
 
-	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestInstantiateFormulaOnBead_DirectBondParseFailure(t *testing.T) {
 	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
 	bd := formulaBDFake("NOT-JSON-GARBAGE")
 
-	_, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, false, nil)
+	_, err := formulaBDVia(bd.run).instantiate("mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, false, nil)
 	if err == nil {
 		t.Fatal("expected error when bond returns non-JSON, got nil")
 	}

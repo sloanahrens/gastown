@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,17 +13,16 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // runMoleculeBurn burns (destroys) the current molecule attachment.
 func runMoleculeBurn(cmd *cobra.Command, args []string) error {
-	return moleculeBurn(cmd, realMoleculeLifecycleEnv(), args)
+	return moleculeBurn(realMoleculeLifecycleEnv(), args)
 }
 
 // moleculeBurn is gt mol burn in e.
-func moleculeBurn(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (retErr error) {
+func moleculeBurn(e moleculeLifecycleEnv, args []string) (retErr error) {
 	cwd, err := e.getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
@@ -97,14 +95,6 @@ func moleculeBurn(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (re
 	if descErr != nil {
 		style.PrintWarning("closing descendants of %s: %v", moleculeID, descErr)
 	}
-	defer func() {
-		ctx := context.Background()
-		if cmd != nil {
-			ctx = cmd.Context()
-		}
-		telemetry.RecordMolBurn(ctx, moleculeID, childrenClosed, retErr)
-	}()
-
 	// Detach the molecule with audit logging (this "burns" it by removing the attachment)
 	_, err = b.DetachMoleculeWithAudit(handoff.ID, beads.DetachOptions{
 		Operation: "burn",
@@ -237,11 +227,6 @@ func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (
 
 	moleculeID := attachment.AttachedMolecule
 
-	var doneSteps, totalSteps int
-	defer func() {
-		telemetry.RecordMolSquash(cmd.Context(), moleculeID, doneSteps, totalSteps, !e.noDigest, retErr)
-	}()
-
 	// Apply jitter before acquiring any Dolt locks.
 	// Multiple patrol agents (deacon, witness, refinery) squash concurrently at
 	// cycle end, causing exclusive-lock contention. A random pre-sleep
@@ -285,8 +270,6 @@ squashed_at: %s
 		}
 
 		if progress != nil {
-			doneSteps = progress.DoneSteps
-			totalSteps = progress.TotalSteps
 			digestDesc += fmt.Sprintf(`
 ## Execution Summary
 - Steps: %d/%d completed

@@ -24,7 +24,6 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // sessionNudgeLocks serializes nudges to the same session.
@@ -700,7 +699,6 @@ func (t *Tmux) EnsureSessionFreshWithCommandAndEnv(name, workDir, command string
 // KillSession terminates a tmux session. Idempotent: returns nil if the
 // session is already gone or there is no tmux server.
 func (t *Tmux) KillSession(name string) (retErr error) {
-	defer func() { telemetry.RecordSessionStop(context.Background(), name, retErr) }()
 	_, retErr = t.run("kill-session", "-t", name)
 	if retErr == ErrSessionNotFound || retErr == ErrNoServer {
 		retErr = nil
@@ -1405,7 +1403,6 @@ func (t *Tmux) SendKeys(session, keys string) error {
 // The debounceMs parameter controls how long to wait after paste before sending Enter.
 // This prevents race conditions where Enter arrives before paste is processed.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr error) {
-	defer func() { telemetry.RecordPromptSend(context.Background(), session, keys, debounceMs, retErr) }()
 	// Send text using literal mode (-l) to handle special chars. The "--"
 	// terminator stops tmux from parsing leading-dash text as flags (gt-cs0).
 	if _, err := t.run("send-keys", "-t", session, "-l", "--", keys); err != nil {

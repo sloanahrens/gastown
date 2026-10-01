@@ -731,7 +731,7 @@ func TestBurnClosesWispRoot(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol1", nil)
-	if err := moleculeBurn(nil, testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+	if err := moleculeBurn(testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
 		t.Fatalf("burn: %v", err)
 	}
 	if closes := strings.Join(closeLines(bd), "\n"); !strings.Contains(closes, "gt-wisp-mol1") {
@@ -761,7 +761,7 @@ func TestSquashClosesDescendantsAndRoot(t *testing.T) {
 	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol2", map[string]string{
 		"gt-wisp-mol2": `[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]`,
 	})
-	if err := moleculeBurn(nil, testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+	if err := moleculeBurn(testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
 		t.Fatalf("burn: %v", err)
 	}
 	lines := closeLines(bd)

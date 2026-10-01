@@ -231,7 +231,7 @@ or `POST /telemetry` with rate limit event
 **Code**:
 - `internal/config/env.go` — `AgentEnv()` (line ~65): generates 30+ env vars
   including GT_ROLE, GT_RIG, GT_POLECAT, GT_CREW, BD_ACTOR, GIT_AUTHOR_NAME,
-  GT_ROOT, GT_AGENT, GT_SESSION, plus OTEL and credential passthrough
+  GT_ROOT, GT_AGENT, GT_SESSION, plus credential passthrough
 - `internal/config/agents.go` — `builtinPresets` (line ~164): 10 agent presets
   (Claude, Gemini, Codex, Cursor, Auggie, AMP, OpenCode, Copilot, Pi, OMP)
   with 21 fields each (Command, Args, ProcessNames, SessionIDEnv, etc.)
@@ -638,8 +638,6 @@ returns allow/deny with reason
   captures N lines from agent's terminal
 - Used by: idle detection (5 lines), rate limit scanning (30 lines),
   dialog detection, readiness polling, nudge verification
-- `internal/telemetry/recorder.go` — `RecordPaneRead()` (line ~266): OTel event
-  for every capture-pane call
 
 **Flow**: Agent→GT (inferred). GT reads terminal; agent doesn't know.
 
@@ -685,7 +683,7 @@ structured data; no need to scrape terminal
 
 **Code**:
 - `internal/config/env.go` — `AgentEnv()` (line ~65): generates full env map
-  (GT_*, BD_*, GIT_*, CLAUDE_*, OTEL_*, credential passthrough)
+  (GT_*, BD_*, GIT_*, CLAUDE_*, credential passthrough)
 - Three propagation mechanisms:
   1. `tmux.SetEnvironment()` — session-level via `set-environment`
   2. `config.PrependEnv()` — inline `export K=V &&` before command
@@ -706,32 +704,11 @@ structured data; no need to scrape terminal
 
 ---
 
-## 26. Telemetry (OTel integration)
+## 26. Telemetry (OTel integration) — deleted
 
-**What**: GT emits OpenTelemetry metrics and logs for all agent operations.
-
-**Code**:
-- `internal/telemetry/telemetry.go` — `Init()` (line ~104): OTel provider setup,
-  VictoriaMetrics/VictoriaLogs endpoints, 30s export interval
-- `internal/telemetry/recorder.go` — 18 event types:
-  `RecordSessionStart()`, `RecordSessionStop()`, `RecordPromptSend()`,
-  `RecordPaneRead()`, `RecordPrime()`, `RecordAgentStateChange()`,
-  `RecordPolecatSpawn()`, `RecordPolecatRemove()`, `RecordSling()`,
-  `RecordMail()`, `RecordNudge()`, `RecordDone()`, `RecordDaemonRestart()`,
-  `RecordFormulaInstantiate()`, `RecordConvoyCreate()`, `RecordPaneOutput()`,
-  `RecordBDCall()`, `RecordPrimeContext()`
-- 17 OTel Int64Counter metrics (gastown.session.starts.total, etc.)
-- `internal/telemetry/subprocess.go` — `SetProcessOTELAttrs()`: propagates
-  OTEL_RESOURCE_ATTRIBUTES to subprocesses
-
-**Flow**: GT→Metrics backend. Agent operations tracked by GT, not agent.
-
-**Fragility**:
-- OTel export depends on VictoriaMetrics/Logs being available
-- No correlation ID threads through all events (PR #2068 proposed run.id)
-- Agent has no say in what's recorded or how
-
-**API mapping**: `POST /telemetry` — agent pushes its own events with run_id
+GT's OpenTelemetry export (`internal/telemetry`, the daemon's OTel gauges and
+`gt agent-log`) was inert in the town and was deleted (gt-s3rec.5). The
+remaining event record is the `.events.jsonl` feed below.
 
 ---
 
@@ -790,7 +767,7 @@ becomes trivial (no response = dead)
 ## Cross-Cutting Themes
 
 ### Correlation Gap
-No single ID connects: OTel event ↔ conversation transcript ↔ cost entry ↔
+No single ID connects: conversation transcript ↔ cost entry ↔
 session event ↔ bead. `run_id` in the Factory Worker API solves this.
 
 ### Claude Code Coupling
@@ -846,7 +823,7 @@ Proposed: Agent pushes lifecycle events, telemetry, and health — GT never scra
 | 23 | Output capture | tmux capture-pane | Eliminated |
 | 24 | Done/exit signaling | gt done CLI call | `POST /lifecycle` |
 | 25 | Env var injection | 3 propagation mechanisms | `POST /identity` |
-| 26 | OTel telemetry | GT-side recording | `POST /telemetry` |
+| 26 | OTel telemetry | Deleted (gt-s3rec.5) | — |
 | 27 | Event logging | .events.jsonl append | `POST /telemetry` |
 | 28 | Zombie detection | process tree + thresholds | `GET /health` |
 

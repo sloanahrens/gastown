@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 type wispCreateJSON struct {
@@ -389,10 +388,8 @@ func (r *slingRun) runFormula(ctx context.Context, args []string) (err error) {
 	// Step 1: Cook the formula (ensures proto exists)
 	fmt.Fprintf(out, "  Cooking formula...\n")
 	if err := r.cookFormula(formulaName, formulaWorkDir, townRoot); err != nil {
-		telemetry.RecordMolCook(ctx, formulaName, err)
 		return fmt.Errorf("cooking formula: %w", err)
 	}
-	telemetry.RecordMolCook(ctx, formulaName, nil)
 
 	// Step 2: Create wisp instance (ephemeral)
 	fmt.Fprintf(out, "  Creating wisp...\n")
@@ -404,10 +401,8 @@ func (r *slingRun) runFormula(ctx context.Context, args []string) (err error) {
 	// Parse wisp output to get the root ID
 	wispRootID, err = parseWispIDFromJSON(wispOut)
 	if err != nil {
-		telemetry.RecordMolWisp(ctx, formulaName, "", "", err)
 		return fmt.Errorf("parsing wisp output: %w", err)
 	}
-	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, "", nil)
 
 	fmt.Fprintf(out, "%s Wisp created: %s\n", style.Bold.Render("✓"), wispRootID)
 

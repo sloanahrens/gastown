@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -214,16 +213,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
 	slingSteps = newSlingTimer(os.Stderr)
-	defer func() {
-		bead, target := "", ""
-		if len(args) > 0 {
-			bead = args[0]
-		}
-		if len(args) > 1 {
-			target = args[1]
-		}
-		telemetry.RecordSling(ctx, bead, target, retErr)
-	}()
 	// The same boundary as executeSling's: a seat the pool claimed for this
 	// sling stops standing when the command returns. StartSession drops it on
 	// the success path, and the failure paths drop it here — including the ones

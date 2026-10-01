@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -534,9 +533,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 			Rig:         m.rig.Name,
 			AgentName:   polecat,
 			TownRoot:    townRoot,
-			Prompt:      beacon,
-			Issue:       opts.Issue,
-			Topic:       "assigned",
 			SessionName: sessionID,
 		}, m.rig.Path, beacon, opts.Agent)
 		if err != nil {
@@ -561,9 +557,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 		polecatGitBranch = branch
 	}
-	// Generate the GASTA run ID — the root identifier for all telemetry emitted
-	// by this polecat session and its subprocesses (bd, mail, …).
-	runID := uuid.New().String()
 	envVars := config.AgentEnv(config.AgentEnvConfig{
 		Role:             "polecat",
 		Rig:              m.rig.Name,
@@ -577,7 +570,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// BD_DOLT_AUTO_COMMIT, etc. Layer in polecat-session-specific vars.
 	envVars["GT_POLECAT_PATH"] = workDir
 	envVars["GT_TOWN_ROOT"] = townRoot
-	envVars["GT_RUN"] = runID
 	envVars["POLECAT_SLOT"] = fmt.Sprintf("%d", m.polecatSlot(polecat))
 	envVars["GT_PROCESS_NAMES"] = strings.Join(config.AgentRegistryFor(townRoot, m.rig.Path).ResolveProcessNames(runtimeConfig.ResolvedAgent, runtimeConfig.Command, runtimeConfig.Args...), ",")
 	if polecatGitBranch != "" {
@@ -729,18 +721,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Touch initial heartbeat so liveness detection works from the start (gt-qjtq).
 	// Subsequent touches happen on every gt command via persistentPreRun.
 	TouchSessionHeartbeat(townRoot, sessionID)
-
-	// Stream polecat's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
-	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
-		if err := session.ActivateAgentLogging(sessionID, workDir, runID); err != nil {
-			// Non-fatal: observability failure must never block agent startup.
-			debugSession("ActivateAgentLogging", err)
-		}
-	}
-
-	// Record the agent instantiation event (GASTA root span).
-	session.RecordAgentInstantiateFromDir(context.Background(), runID, runtimeConfig.ResolvedAgent,
-		"polecat", polecat, sessionID, m.rig.Name, townRoot, opts.Issue, workDir)
 
 	return nil
 }

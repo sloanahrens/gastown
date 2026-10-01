@@ -2,14 +2,12 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/cli"
@@ -17,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -201,7 +198,7 @@ func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) b
 // isDoneCommand reports whether cmd is the top-level `gt done` command.
 // It must not match subcommands that merely share the name —
 // `gt mol step done` — or they would trip the polecat-only
-// worktree guard and skip telemetry init (gt-lt7).
+// worktree guard (gt-lt7).
 func isDoneCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == "done" &&
 		cmd.Parent() != nil && cmd.Parent() == cmd.Root()
@@ -345,23 +342,6 @@ func checkStaleBinaryWarning() {
 // The caller (main) should call os.Exit with this code.
 func Execute() int {
 	installSessionGate()
-	if !isDoneInvocation(os.Args[1:]) {
-		ctx := context.Background()
-		provider, err := telemetry.Init(ctx, "gastown", Version)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: telemetry init: %v\n", err)
-		}
-		if provider != nil {
-			defer func() {
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				_ = provider.Shutdown(shutdownCtx)
-			}()
-			// Set OTEL_RESOURCE_ATTRIBUTES in the process env so all bd subprocesses
-			// spawned via exec.Command inherit GT context automatically.
-			telemetry.SetProcessOTELAttrs()
-		}
-	}
 
 	strictCompletionCmd(rootCmd)
 	if err := rootCmd.Execute(); err != nil {
@@ -370,11 +350,6 @@ func Execute() int {
 		return exitCodeForError(err)
 	}
 	return 0
-}
-
-func isDoneInvocation(args []string) bool {
-	cmd, _, err := rootCmd.Find(args)
-	return err == nil && isDoneCommand(cmd)
 }
 
 // Command group IDs - used by subcommands to organize help output

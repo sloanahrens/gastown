@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -55,7 +54,6 @@ func (e *bdError) ContainsError(substr string) bool {
 // extraEnv contains additional environment variables to set (e.g., "BD_IDENTITY=...").
 // Returns stdout bytes on success, or a *bdError on failure.
 func runBdCommand(ctx context.Context, run beads.BDRunner, args []string, workDir, beadsDir string, extraEnv ...string) (_ []byte, retErr error) {
-	defer func() { telemetry.RecordMail(ctx, "bd."+firstArg(args), retErr) }()
 
 	// Remove stale dolt-server.pid before spawning bd. A stale PID file causes
 	// bd to connect to port 3307 which may be occupied by a different Dolt server
@@ -131,9 +129,7 @@ func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv 
 			mode = beads.MutationPinned
 		}
 	}
-	env := beads.EnvForSubprocessMode(base, beadsDir, mode)
-	env = append(env, telemetry.OTELEnvForSubprocess()...)
-	return env
+	return beads.EnvForSubprocessMode(base, beadsDir, mode)
 }
 
 // bdReadCtx returns a context with the standard bd read timeout.

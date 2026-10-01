@@ -264,7 +264,7 @@ func TestNewPlainBDCmdWiring(t *testing.T) {
 // TestBDProcessChoosesPlainOnlyForPlainCalls pins the branch runBDProcess
 // takes: a plain call (NewPlain, CommandWithEnv's replacement) gets exactly
 // the caller's environment and process group, and every other call gets the
-// routed build with its detached process group and OTEL variables. Swapping
+// routed build with its detached process group. Swapping
 // or collapsing the branch fails here.
 func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 	t.Parallel()
@@ -280,8 +280,8 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 	if routed.SysProcAttr == nil {
 		t.Error("routed call: not in a detached process group, so it was built as a plain call")
 	}
-	if routed.Dir != "/rig" || len(routed.Env) < len(env) || !reflect.DeepEqual(routed.Env[:len(env)], env) {
-		t.Errorf("routed call: Dir = %q, Env = %q; want /rig and the call's env first", routed.Dir, routed.Env)
+	if routed.Dir != "/rig" || !reflect.DeepEqual(routed.Env, env) {
+		t.Errorf("routed call: Dir = %q, Env = %q; want /rig and exactly the call's env", routed.Dir, routed.Env)
 	}
 }
 

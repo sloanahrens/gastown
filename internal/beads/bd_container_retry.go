@@ -274,8 +274,7 @@ var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 //
 // Outside the container case the loop runs exactly once, so this is the same
 // single invocation callers had before it existed. The last attempt's error is
-// returned unchanged, so an exhausted retry reads as the failure it is, and
-// every attempt is recorded by telemetry in runBdOnce.
+// returned unchanged, so an exhausted retry reads as the failure it is.
 func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
 	if b.plain {
 		return b.runPlain(stdinData, args)

@@ -604,22 +604,6 @@ gt scheduler resume                      # Resume dispatch
 
 Default mode (`max_polecats = -1`) dispatches immediately via `gt sling`. When a limit is set, the daemon dispatches incrementally, respecting capacity. See [Scheduler design](docs/design/scheduler.md).
 
-## Telemetry (OpenTelemetry)
-
-Gas Town emits all agent operations as structured logs and metrics to any OTLP-compatible backend (VictoriaMetrics/VictoriaLogs by default):
-
-```bash
-# Configure OTLP endpoints
-export GT_OTEL_LOGS_URL="http://localhost:9428/insert/jsonline"
-export GT_OTEL_METRICS_URL="http://localhost:8428/api/v1/write"
-```
-
-**Events emitted:** session lifecycle, agent state changes, bd calls with duration, mail operations, sling/nudge/done workflows, polecat spawn/remove, formula instantiation, convoy creation, daemon restarts, and more.
-
-**Metrics include:** `gastown.session.starts.total`, `gastown.bd.calls.total`, `gastown.polecat.spawns.total`, `gastown.done.total`, `gastown.convoy.creates.total`, and others.
-
-See [OTEL data model](docs/otel-data-model.md) and [OTEL architecture](docs/design/otel/) for the complete event schema.
-
 ## Advanced Concepts
 
 ### The Propulsion Principle
@@ -702,7 +686,6 @@ For deeper technical details, see the design docs in `docs/`:
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |
 | Scheduler | [docs/design/scheduler.md](docs/design/scheduler.md) |
-| OTEL data model | [docs/otel-data-model.md](docs/otel-data-model.md) |
 | Witness design | [docs/design/witness-at-team-lead.md](docs/design/witness-at-team-lead.md) |
 | Convoy lifecycle | [docs/design/convoy/](docs/design/convoy/) |
 | Polecat lifecycle | [docs/design/polecat-lifecycle-patrol.md](docs/design/polecat-lifecycle-patrol.md) |

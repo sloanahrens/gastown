@@ -2,13 +2,10 @@
 package beads
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // MoleculeStep represents a parsed step from a molecule definition.
@@ -249,13 +246,13 @@ type InstantiateOptions struct {
 //
 // This function supports two molecule formats (format bridge pattern):
 //
-// 1. New format (child issues): If the molecule proto has child issues,
-//    those children are used as templates. Dependencies are copied from
-//    the template children's DependsOn relationships.
+//  1. New format (child issues): If the molecule proto has child issues,
+//     those children are used as templates. Dependencies are copied from
+//     the template children's DependsOn relationships.
 //
-// 2. Old format (embedded markdown): If the molecule has no children,
-//    steps are parsed from the Description field using ParseMoleculeSteps().
-//    Dependencies are extracted from "Needs:" declarations in the markdown.
+//  2. Old format (embedded markdown): If the molecule has no children,
+//     steps are parsed from the Description field using ParseMoleculeSteps().
+//     Dependencies are extracted from "Needs:" declarations in the markdown.
 //
 // For each step, this creates:
 //   - A child issue with ID "{parent.ID}.{step.Ref}"
@@ -267,7 +264,7 @@ type InstantiateOptions struct {
 //
 // The function is atomic via bd CLI - either all issues are created or none.
 // Returns the created step issues.
-func (b *Beads) InstantiateMolecule(ctx context.Context, mol *Issue, parent *Issue, opts InstantiateOptions) ([]*Issue, error) {
+func (b *Beads) InstantiateMolecule(mol *Issue, parent *Issue, opts InstantiateOptions) ([]*Issue, error) {
 	if mol == nil {
 		return nil, fmt.Errorf("molecule issue is nil")
 	}
@@ -288,15 +285,15 @@ func (b *Beads) InstantiateMolecule(ctx context.Context, mol *Issue, parent *Iss
 
 	if len(templateChildren) > 0 {
 		// NEW FORMAT: Use child issues as templates
-		return b.instantiateFromChildren(ctx, mol, parent, templateChildren, opts)
+		return b.instantiateFromChildren(mol, parent, templateChildren, opts)
 	}
 
 	// OLD FORMAT: Parse steps from molecule description
-	return b.instantiateFromMarkdown(ctx, mol, parent, opts)
+	return b.instantiateFromMarkdown(mol, parent, opts)
 }
 
 // instantiateFromChildren creates steps from template child issues (new format).
-func (b *Beads) instantiateFromChildren(ctx context.Context, mol *Issue, parent *Issue, templates []*Issue, opts InstantiateOptions) ([]*Issue, error) {
+func (b *Beads) instantiateFromChildren(mol *Issue, parent *Issue, templates []*Issue, opts InstantiateOptions) ([]*Issue, error) {
 	var createdIssues []*Issue
 	templateToNew := make(map[string]string) // template ID -> new issue ID
 
@@ -335,7 +332,6 @@ func (b *Beads) instantiateFromChildren(ctx context.Context, mol *Issue, parent 
 			}
 			return nil, fmt.Errorf("creating step from template %q: %w", tmpl.ID, err)
 		}
-		telemetry.RecordBeadCreate(ctx, child.ID, parent.ID, mol.ID)
 
 		createdIssues = append(createdIssues, child)
 		templateToNew[tmpl.ID] = child.ID
@@ -365,7 +361,7 @@ func (b *Beads) instantiateFromChildren(ctx context.Context, mol *Issue, parent 
 }
 
 // instantiateFromMarkdown creates steps from embedded markdown (old format).
-func (b *Beads) instantiateFromMarkdown(ctx context.Context, mol *Issue, parent *Issue, opts InstantiateOptions) ([]*Issue, error) {
+func (b *Beads) instantiateFromMarkdown(mol *Issue, parent *Issue, opts InstantiateOptions) ([]*Issue, error) {
 	// Parse steps from molecule
 	steps, err := ParseMoleculeSteps(mol.Description)
 	if err != nil {
@@ -429,7 +425,6 @@ func (b *Beads) instantiateFromMarkdown(ctx context.Context, mol *Issue, parent 
 			}
 			return nil, fmt.Errorf("creating step %q: %w", step.Ref, err)
 		}
-		telemetry.RecordBeadCreate(ctx, child.ID, parent.ID, mol.ID)
 
 		createdIssues = append(createdIssues, child)
 		stepIssueIDs[step.Ref] = child.ID
