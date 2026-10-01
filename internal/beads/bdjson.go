@@ -15,9 +15,6 @@ type BdJSONOptions struct {
 	// AutoCommit turns bd's Dolt auto-commit on, for sequential calls that
 	// must see one another's writes.
 	AutoCommit bool
-	// Run answers the call in process instead of starting bd; nil is the bd
-	// on PATH.
-	Run BDRunner
 }
 
 // RunBdJSON runs bd in dir and returns its stdout. A failure carries bd's
@@ -51,16 +48,6 @@ func RunBdJSONWith(opts BdJSONOptions, dir string, args ...string) ([]byte, erro
 		bdc.WithAutoCommit()
 	}
 	bdc.Dir(dir).StripBeadsDir().Stderr(&stderr)
-	if opts.Run != nil {
-		out, err := bdc.Via(opts.Run).Output()
-		if err != nil {
-			if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-				return nil, fmt.Errorf("bd %s: %s", args[0], errMsg)
-			}
-			return nil, fmt.Errorf("bd %s: %w", args[0], err)
-		}
-		return out, nil
-	}
 	cmd := bdc.Build()
 	cmd.Dir = dir
 	cmd.Stdout = &stdout

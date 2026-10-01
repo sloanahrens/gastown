@@ -1,15 +1,14 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -307,9 +306,9 @@ func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
 // exactly the under-report that left the mayor asleep with work to dispatch,
 // so the assertion is on the whole 373 rather than on anything smaller.
 //
-// It drives readyIssuesUnlimited through the bd client the patrol uses, with
-// a runner standing in for bd: the read is one machine-mode bd ready --limit
-// 0 (gt-7iwy0.2), not the in-process store it replaced.
+// It drives readyIssuesUnlimited through the board the patrol reads. That the
+// read is one machine-mode bd ready --limit 0 is pinned in internal/beads
+// (TestReadyAll_ReadsWholeBoardInMachineMode).
 func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
@@ -318,27 +317,11 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
 	mkdirTestDir(t, filepath.Join(beadsDir, "dolt"))
 
-	items := make([]string, 373)
-	for i := range items {
-		items[i] = fmt.Sprintf(`{"id":"gt-board-%d","title":"ready bead %d","status":"open","priority":2,"issue_type":"task"}`, i, i)
+	db := beadsfake.New()
+	for i := 0; i < 373; i++ {
+		db.Seed(beads.Issue{ID: fmt.Sprintf("gt-board-%d", i), Title: fmt.Sprintf("ready bead %d", i), Status: "open", Priority: 2})
 	}
-	envelope := `{"schema_version":1,"contract_version":1,"data":[` + strings.Join(items, ",") +
-		`],"pagination":{"returned":373,"truncated":false},"error":null}`
-
-	var mu sync.Mutex
-	var calls []beads.BDCall
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		mu.Lock()
-		calls = append(calls, c)
-		mu.Unlock()
-		if len(c.Args) > 0 && c.Args[0] == "ready" {
-			return []byte(envelope), nil, nil
-		}
-		return nil, nil, nil
-	}
-	board := func(rigPath string) readyBoard {
-		return beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), run)
-	}
+	board := func(string) readyBoard { return db }
 
 	issues, err := readyIssuesUnlimited(rigPath, board)
 	if err != nil {
@@ -346,28 +329,6 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	}
 	if len(issues) != 373 {
 		t.Fatalf("readyIssuesUnlimited returned %d issues, want the whole 373-bead board", len(issues))
-	}
-	if issues[0].ID != "gt-board-0" {
-		t.Errorf("first issue = %q, want gt-board-0 (the board read whole, in order)", issues[0].ID)
-	}
-	var ready *beads.BDCall
-	for i := range calls {
-		if len(calls[i].Args) > 0 && calls[i].Args[0] == "ready" {
-			ready = &calls[i]
-		}
-	}
-	if ready == nil {
-		t.Fatalf("no bd ready call; calls = %v", calls)
-	}
-	if argv := strings.Join(ready.Args, " "); !strings.Contains(argv, "--limit 0") {
-		t.Errorf("bd ready argv %q lacks --limit 0", argv)
-	}
-	machine := false
-	for _, kv := range ready.Env {
-		machine = machine || kv == "BD_MACHINE=1"
-	}
-	if !machine {
-		t.Error("bd ready ran without BD_MACHINE=1")
 	}
 }
 

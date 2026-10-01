@@ -21,7 +21,7 @@ func isTownBDDown(townRoot string) bool {
 // every call fails when a test marked townRoot's bd down.
 func townBeadsNew(townRoot, dir string) *beads.Beads {
 	if isTownBDDown(townRoot) {
-		return beads.NewWithBeadsDirAndRunner(dir, beads.ResolveBeadsDir(dir), beads.UnavailableBD)
+		return beads.NewUnavailable(dir, beads.ResolveBeadsDir(dir))
 	}
 	return beads.New(dir)
 }
@@ -37,14 +37,14 @@ func townRigBD(townRoot string, r *rig.Rig) *rig.Rig {
 
 // downRigIdentityBeads gives r an identity-bead reader whose every call fails.
 func downRigIdentityBeads(r *rig.Rig) {
-	r.IdentityBeads = beads.NewWithBeadsDirAndRunner(r.Path, beads.ResolveBeadsDir(r.Path), beads.UnavailableBD)
+	r.IdentityBeads = beads.NewUnavailable(r.Path, beads.ResolveBeadsDir(r.Path))
 }
 
 // townBeadsWithDir is beads.NewWithBeadsDir(workDir, beadsDir) for the town's
 // bd reads, failing every call when a test marked townRoot's bd down.
 func townBeadsWithDir(townRoot, workDir, beadsDir string) *beads.Beads {
 	if isTownBDDown(townRoot) {
-		return beads.NewWithBeadsDirAndRunner(workDir, beadsDir, beads.UnavailableBD)
+		return beads.NewUnavailable(workDir, beadsDir)
 	}
 	return beads.NewWithBeadsDir(workDir, beadsDir)
 }
