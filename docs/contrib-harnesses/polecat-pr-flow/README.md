@@ -24,14 +24,13 @@ commands into the workflow a polecat actually sees at `gt prime` time.
 mkdir -p ~/gt/<rig>/directives
 cp polecat.md ~/gt/<rig>/directives/polecat.md
 
-# Formula overlay (rig-scoped)
-mkdir -p ~/gt/<rig>/formula-overlays
-cp mol-polecat-work.toml ~/gt/<rig>/formula-overlays/mol-polecat-work.toml
+# Formula overlay (town-wide: there is one overlay dir)
+mkdir -p ~/gt/formula-overlays
+cp mol-polecat-work.toml ~/gt/formula-overlays/mol-polecat-work.toml
 ```
 
-Replace `<rig>` with your rig's name (e.g. `gastown`, `longeye`). For
-town-wide installation, drop the `<rig>/` segment — but this is almost
-never what you want, since different rigs legitimately use different flows.
+Replace `<rig>` with your rig's name (e.g. `gastown`, `longeye`). The overlay
+applies to every rig; a `~/gt/<rig>/formula-overlays/` dir is not read.
 
 ## Verify it's active
 
@@ -41,7 +40,7 @@ gt doctor
 # Expect: overlay-health: N overlay(s) healthy
 
 # Inspect the rendered formula with the overlay applied
-gt formula overlay show mol-polecat-work --rig <rig>
+gt formula overlay show mol-polecat-work
 
 # See the directive text that will be injected at prime time
 gt directive show polecat --rig <rig>

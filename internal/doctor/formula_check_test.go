@@ -111,11 +111,10 @@ func TestFormulaCheck_Fix(t *testing.T) {
 	}
 }
 
-// TestFormulaCheck_Run_HandEditedIsAWarning is the regression test for gt-dt7r:
-// doctor used to report a hand-edited formula as a detail under an OK status,
-// so a town silently running stale formula content still had a clean bill of
-// health. It must be a warning, and --fix must not be the remedy.
-func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
+// TestFormulaCheck_Run_DriftIsAnError: the binary is canonical (gt-fd2cu.3),
+// so a town copy whose hash gt never wrote fails doctor, and --fix replaces it.
+// While it stands, the formula this binary carries reaches nobody (gt-dt7r).
+func TestFormulaCheck_Run_DriftIsAnError(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -134,40 +133,88 @@ func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)
-
-	if result.Status != StatusWarning {
-		t.Errorf("Status = %v, want %v: a hand-edited formula is not a clean town", result.Status, StatusWarning)
+	if result.Status != StatusError {
+		t.Errorf("Status = %v, want %v: a drifted formula fails doctor", result.Status, StatusError)
 	}
-	if !strings.Contains(result.Message, "undelivered") {
-		t.Errorf("Message = %q, want it to say the embedded content is undelivered", result.Message)
+	if !strings.Contains(result.Message, "1 drifted") {
+		t.Errorf("Message = %q, want the drift counted", result.Message)
 	}
-
-	var found bool
-	for _, d := range result.Details {
-		if strings.Contains(d, edited) {
-			found = true
-			if !strings.Contains(d, "NOT delivered") {
-				t.Errorf("detail for %s = %q, want the undelivered wording", edited, d)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("Details do not name %s: %v", edited, result.Details)
-	}
-	if strings.Contains(result.FixHint, "doctor --fix") {
-		t.Errorf("FixHint = %q, want a remedy --fix cannot perform here", result.FixHint)
+	if d := detailFor(result, edited); !strings.Contains(d, "not one gt wrote") {
+		t.Errorf("detail for %s = %q, want the hash finding", edited, d)
 	}
 
-	// --fix must leave the user's edit alone.
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
-	content, err := os.ReadFile(editedPath)
+	embedded, err := formula.GetEmbeddedFormulaContent(edited)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != "# hand-edited\n" {
-		t.Error("Fix() overwrote the hand-edited formula")
+	if content, _ := os.ReadFile(editedPath); string(content) != string(embedded) {
+		t.Error("Fix() left the drifted copy in place")
+	}
+	if after := check.Run(ctx); after.Status != StatusOK {
+		t.Errorf("after fix, Status = %v (%s), want OK", after.Status, after.Message)
+	}
+}
+
+// TestFormulaCheck_Run_FilesGtDoesNotOwnAreErrorsFixNeverDeletes: an orphaned
+// copy of a deleted formula and a hand-written file both fail doctor, and --fix
+// leaves them for an operator to promote or delete.
+func TestFormulaCheck_Run_FilesGtDoesNotOwnAreErrorsFixNeverDeletes(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
+		t.Fatalf("ProvisionFormulas() error: %v", err)
+	}
+	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
+	orphan := "mol-deacon-patrol.formula.toml"
+	handWritten := "mol-polecat-work.formula.toml.bak-20260921-resync"
+	for _, name := range []string{orphan, handWritten} {
+		if err := os.WriteFile(filepath.Join(formulasDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordPath := filepath.Join(formulasDir, ".installed.json")
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Formulas map[string]string `json:"formulas"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	record.Formulas[orphan] = "sha-from-an-older-binary"
+	out, _ := json.Marshal(record)
+	if err := os.WriteFile(recordPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewFormulaCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+	result := check.Run(ctx)
+	if result.Status != StatusError {
+		t.Errorf("Status = %v, want %v", result.Status, StatusError)
+	}
+	if d := detailFor(result, orphan); !strings.Contains(d, "no longer embeds") {
+		t.Errorf("orphan detail = %q", d)
+	}
+	if d := detailFor(result, handWritten); !strings.Contains(d, "promote it into source or delete it") {
+		t.Errorf("hand-written detail = %q", d)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	for _, name := range []string{orphan, handWritten} {
+		if _, err := os.Stat(filepath.Join(formulasDir, name)); err != nil {
+			t.Errorf("Fix() removed %s: %v", name, err)
+		}
+	}
+	if after := check.Run(ctx); after.Status != StatusError {
+		t.Errorf("after fix, Status = %v, want still %v until an operator deletes them", after.Status, StatusError)
 	}
 }
 
@@ -242,8 +289,8 @@ func TestFormulaCheck_Run_SameVersionDivergenceNamesBothSizes(t *testing.T) {
 
 	result := NewFormulaCheck().Run(&CheckContext{TownRoot: tmpDir})
 
-	if result.Status != StatusWarning {
-		t.Fatalf("Status = %v, want %v", result.Status, StatusWarning)
+	if result.Status != StatusError {
+		t.Fatalf("Status = %v, want %v", result.Status, StatusError)
 	}
 	detail := detailFor(result, "mol-polecat-work.formula.toml")
 	if detail == "" {

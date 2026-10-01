@@ -10,9 +10,17 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
-// FormulaCheck verifies that embedded formulas are up-to-date.
-// It detects outdated formulas (binary updated), missing formulas (user deleted),
-// and modified formulas (user customized). Can auto-fix outdated and missing.
+// FormulaCheck verifies the town formulas dir holds exactly what this binary
+// ships. The binary is canonical (gt-fd2cu.3): every file is classified by
+// content hash against the embedded formula and the hash gt recorded when it
+// wrote the file.
+//
+//   - missing, new or outdated copies: warning, --fix writes them.
+//   - drifted copies (a hash gt never wrote): error, --fix replaces them. While
+//     one stands, the formula this binary carries reaches nobody (gt-dt7r).
+//   - files the binary does not embed (orphaned copies of deleted formulas,
+//     hand-written formulas, *.bak copies): error. --fix never deletes; each is
+//     promoted into gastown source or deleted by an operator.
 type FormulaCheck struct {
 	FixableCheck
 }
@@ -23,16 +31,16 @@ func NewFormulaCheck() *FormulaCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "formulas",
-				CheckDescription: "Check embedded formulas are up-to-date",
+				CheckDescription: "Check town formulas match the formulas this binary ships",
 				CheckCategory:    CategoryConfig,
 			},
 		},
 	}
 }
 
-// Run checks if formulas need updating.
+// Run classifies every file in the town formulas dir.
 func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
-	report, err := formula.CheckFormulaHealth(ctx.TownRoot)
+	plan, err := formula.PlanFormulaSync(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -41,98 +49,59 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// All good
-	if report.Outdated == 0 && report.Missing == 0 && report.Modified == 0 && report.New == 0 && report.Untracked == 0 {
+	var details, parts []string
+	addGroup := func(names []string, label, detail string, withVersion bool) {
+		if len(names) == 0 {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", len(names), label))
+		for _, name := range names {
+			line := fmt.Sprintf("  %s: %s", name, detail)
+			if withVersion {
+				line += sameVersionClause(ctx.TownRoot, name)
+			}
+			details = append(details, line)
+		}
+	}
+	addGroup(plan.Updated(), "outdated", "update available", true)
+	addGroup(plan.Reinstalled(), "missing", "missing (will reinstall)", false)
+	addGroup(plan.Installed(), "new", "new formula available", false)
+	addGroup(plan.ReplacedDrift(), "drifted", "hash is not one gt wrote (hand-edited or hand-copied); --fix replaces it with the embedded formula", true)
+	addGroup(plan.Orphaned(), "no longer shipped", "gt wrote it but this binary no longer embeds it; delete it", false)
+	addGroup(plan.Unowned(), "not owned by gt", "not in gastown source and never written by gt; promote it into source or delete it", false)
+
+	if len(parts) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("%d formulas up-to-date", report.OK),
+			Message: fmt.Sprintf("%d formulas match this binary", plan.UpToDate()),
 		}
 	}
 
-	// Build details. A hand-edited copy is reported as its own kind of finding:
-	// it shortens the message instead of lengthening it, and it leaves the
-	// doctor clean only if nobody ever reads it, so say it and say why.
-	//
-	// "modified" is not fixable here — --fix must not overwrite a user's edits
-	// — but it is never benign. While the edited copy stands, the formula
-	// content embedded in this binary reaches nobody (gt-dt7r).
-	var details []string
-	var needsFix bool
-	var modified []string
-
-	for _, f := range report.Formulas {
-		switch f.Status {
-		case "outdated":
-			details = append(details, fmt.Sprintf("  %s: update available%s", f.Name, sameVersionClause(ctx.TownRoot, f.Name)))
-			needsFix = true
-		case "missing":
-			details = append(details, fmt.Sprintf("  %s: missing (will reinstall)", f.Name))
-			needsFix = true
-		case "modified":
-			blocked := "preserving a local edit"
-			if f.EmbeddedHash != f.InstalledHash {
-				blocked = "blocking newer content this binary carries"
-			}
-			details = append(details, fmt.Sprintf("  %s: hand-edited (%s, NOT delivered)%s", f.Name, blocked, sameVersionClause(ctx.TownRoot, f.Name)))
-			modified = append(modified, f.Name)
-		case "new":
-			details = append(details, fmt.Sprintf("  %s: new formula available", f.Name))
-			needsFix = true
-		case "untracked":
-			details = append(details, fmt.Sprintf("  %s: untracked (will update)%s", f.Name, sameVersionClause(ctx.TownRoot, f.Name)))
-			needsFix = true
-		}
+	status := StatusWarning
+	if len(plan.ReplacedDrift())+len(plan.Orphaned())+len(plan.Unowned()) > 0 {
+		status = StatusError
 	}
-
-	// Determine status
-	status := StatusOK
-	if needsFix || len(modified) > 0 {
-		status = StatusWarning
-	}
-
-	// Build message
-	var parts []string
-	if report.Outdated > 0 {
-		parts = append(parts, fmt.Sprintf("%d outdated", report.Outdated))
-	}
-	if report.Missing > 0 {
-		parts = append(parts, fmt.Sprintf("%d missing", report.Missing))
-	}
-	if report.New > 0 {
-		parts = append(parts, fmt.Sprintf("%d new", report.New))
-	}
-	if report.Untracked > 0 {
-		parts = append(parts, fmt.Sprintf("%d untracked", report.Untracked))
-	}
-	if report.Modified > 0 {
-		parts = append(parts, fmt.Sprintf("%d hand-edited, embedded content undelivered", report.Modified))
-	}
-
-	message := fmt.Sprintf("Formulas: %s", strings.Join(parts, ", "))
 
 	result := &CheckResult{
 		Name:    c.Name(),
 		Status:  status,
-		Message: message,
+		Message: fmt.Sprintf("Formulas: %s", strings.Join(parts, ", ")),
 		Details: details,
 	}
-
 	switch {
-	case needsFix && len(modified) > 0:
-		result.FixHint = "Run 'gt doctor --fix' for the rest; 'gt formula sync --dry-run' names the hand-edited ones"
-	case needsFix:
-		result.FixHint = "Run 'gt doctor --fix' to update formulas"
-	case len(modified) > 0:
-		result.FixHint = "Move those edits to an overlay and re-run 'gt formula sync' (see 'gt formula sync --dry-run')"
+	case plan.Changed() > 0 && len(plan.Orphaned())+len(plan.Unowned()) > 0:
+		result.FixHint = "Run 'gt doctor --fix' to write the embedded formulas; delete the files gt does not own from .beads/formulas/ by hand"
+	case plan.Changed() > 0:
+		result.FixHint = "Run 'gt doctor --fix' (or 'gt formula sync') to write the embedded formulas"
+	default:
+		result.FixHint = "Delete the files gt does not own from .beads/formulas/, or promote a still-used one into gastown source"
 	}
-
 	return result
 }
 
-// Fix updates outdated and missing formulas. Hand-edited copies are left alone:
-// overwriting them loses a user's edits, so doctor reports them instead and
-// leaves the choice to `gt formula sync --force` or an overlay.
+// Fix writes every embedded formula whose town copy differs. It never deletes
+// a file the binary does not embed.
 func (c *FormulaCheck) Fix(ctx *CheckContext) error {
 	_, err := formula.UpdateFormulas(ctx.TownRoot)
 	return err

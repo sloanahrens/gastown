@@ -32,33 +32,29 @@ type FormulaOverlay struct {
 	StepOverrides []StepOverride `toml:"step-overrides"`
 }
 
-// LoadFormulaOverlay reads overlay files for the given formula name.
-//
-// It checks two locations:
-//   - Town-level: <townRoot>/formula-overlays/<formulaName>.toml
-//   - Rig-level:  <townRoot>/<rigName>/formula-overlays/<formulaName>.toml
-//
-// If a rig-level overlay exists, it takes full precedence (not merged with town).
-// If neither file exists, returns nil with no error.
-func LoadFormulaOverlay(formulaName, townRoot, rigName string) (*FormulaOverlay, error) {
-	rigPath := filepath.Join(townRoot, rigName, "formula-overlays", formulaName+".toml")
-	townPath := filepath.Join(townRoot, "formula-overlays", formulaName+".toml")
+// OverlayDirName is the one overlay directory, directly under the town root
+// (gt-fd2cu.3). A rig-level <rig>/formula-overlays directory is not read.
+const OverlayDirName = "formula-overlays"
 
-	// Rig-level takes full precedence.
-	if overlay, err := loadOverlayFile(rigPath); err != nil {
-		return nil, fmt.Errorf("loading rig overlay %s: %w", rigPath, err)
-	} else if overlay != nil {
-		return overlay, nil
+// OverlayDir returns the town's one overlay directory.
+func OverlayDir(townRoot string) string {
+	return filepath.Join(townRoot, OverlayDirName)
+}
+
+// OverlayPath returns where the overlay for formulaName lives.
+func OverlayPath(townRoot, formulaName string) string {
+	return filepath.Join(OverlayDir(townRoot), formulaName+".toml")
+}
+
+// LoadFormulaOverlay reads <townRoot>/formula-overlays/<formulaName>.toml.
+// If the file does not exist, returns nil with no error.
+func LoadFormulaOverlay(formulaName, townRoot string) (*FormulaOverlay, error) {
+	path := OverlayPath(townRoot, formulaName)
+	overlay, err := loadOverlayFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("loading overlay %s: %w", path, err)
 	}
-
-	// Fall back to town-level.
-	if overlay, err := loadOverlayFile(townPath); err != nil {
-		return nil, fmt.Errorf("loading town overlay %s: %w", townPath, err)
-	} else if overlay != nil {
-		return overlay, nil
-	}
-
-	return nil, nil
+	return overlay, nil
 }
 
 // loadOverlayFile reads and parses a single overlay TOML file.

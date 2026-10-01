@@ -117,8 +117,9 @@
 // # Embedded Formulas
 //
 // The package includes embedded formula files that can be provisioned
-// to a beads workspace. Use ProvisionFormulas for initial setup and
-// UpdateFormulas for safe updates that preserve user modifications.
+// to a beads workspace. The binary is canonical: ProvisionFormulas and
+// UpdateFormulas write each embedded formula with its content hash, and
+// PlanFormulaSync reports drifted copies and files gt does not own.
 //
 // # Thread Safety
 //

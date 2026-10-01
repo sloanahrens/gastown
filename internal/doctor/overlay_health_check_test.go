@@ -137,12 +137,14 @@ func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
 	assert.Contains(t, result.Message, "malformed")
 }
 
-func TestOverlayHealthCheck_RigLevel(t *testing.T) {
+// TestOverlayHealthCheck_RigLevelDirIsReportedNotRead: there is one overlay
+// dir (gt-fd2cu.3). A rig-level overlay, and any .bak beside it, is reported as
+// unread, and --fix leaves it for an operator.
+func TestOverlayHealthCheck_RigLevelDirIsReportedNotRead(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
-	// Create rig-level overlay with stale step.
 	rigDir := filepath.Join(tmpDir, "testrig", "formula-overlays")
 	require.NoError(t, os.MkdirAll(rigDir, 0o755))
 
@@ -150,13 +152,24 @@ func TestOverlayHealthCheck_RigLevel(t *testing.T) {
 step_id = "old-removed-step"
 mode = "skip"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(rigDir, "mol-polecat-work.toml"), []byte(content), 0o644))
+	overlay := filepath.Join(rigDir, "mol-polecat-work.toml")
+	bak := filepath.Join(rigDir, "mol-polecat-work.toml.pre-x.bak")
+	require.NoError(t, os.WriteFile(overlay, []byte(content), 0o644))
+	require.NoError(t, os.WriteFile(bak, []byte(content), 0o644))
 
 	check := NewOverlayHealthCheck()
-	result := check.Run(&CheckContext{TownRoot: tmpDir})
+	ctx := &CheckContext{TownRoot: tmpDir}
+	result := check.Run(ctx)
 
 	assert.Equal(t, StatusWarning, result.Status)
-	assert.Contains(t, result.Details[0], "old-removed-step")
+	assert.Contains(t, result.Message, "2 rig-level overlay file(s) not read")
+	require.Len(t, result.Details, 2)
+	assert.Contains(t, result.Details[0], overlay)
+	assert.Contains(t, result.Details[1], bak)
+
+	require.NoError(t, check.Fix(ctx))
+	assert.FileExists(t, overlay)
+	assert.FileExists(t, bak)
 }
 
 func TestOverlayHealthCheck_UnknownFormula(t *testing.T) {

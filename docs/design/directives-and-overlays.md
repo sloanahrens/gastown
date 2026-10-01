@@ -63,19 +63,18 @@ operator meant to rename.
 
 ### Level 2: Formula Overlays
 
-Per-formula, per-step overrides at rig or town scope. CSS-like step
+Per-formula, per-step overrides, in one town-wide directory. CSS-like step
 modifications applied post-parse before rendering at prime time.
 
 **File layout:**
 
 ```
-~/gt/formula-overlays/<formula>.toml        # Town-level
-~/gt/<rig>/formula-overlays/<formula>.toml  # Rig-level (full precedence)
+~/gt/formula-overlays/<formula>.toml        # the one overlay dir
 ```
 
-**Precedence:** Rig-level overlays **fully replace** town-level overlays (not
-merged). If a rig overlay exists, the town overlay is completely ignored. This
-prevents conflicting step modifications from merging unpredictably.
+**One dir:** there is no rig-level overlay. A `~/gt/<rig>/formula-overlays/`
+dir is not read, and `gt doctor` (overlay-health) reports any file left there
+(gt-fd2cu.3).
 
 **Implementation:**
 - Loader: `internal/formula/overlay.go` → `LoadFormulaOverlay(formulaName, townRoot, rigName) (*FormulaOverlay, error)`
@@ -158,14 +157,14 @@ gt directive list                         # List all directive files
 ### Overlay Commands
 
 ```bash
-gt formula overlay show <formula> [--rig <rig>]   # Show active overlay with source
-gt formula overlay edit <formula> [--rig <rig>]   # Open in editor (creates file if needed)
-gt formula overlay list                           # List all overlay files
+gt formula overlay show <formula>   # Show the overlay and its path
+gt formula overlay edit <formula>   # Open in editor (creates file if needed)
+gt formula overlay list             # List all overlay files
 ```
 
 The `edit` commands create the directory and file if they don't exist (following
 the `gt hooks override` precedent). The `show` commands display the resolved
-content with source annotation (town vs rig).
+content with its path.
 
 ## gt doctor Integration
 
@@ -176,7 +175,8 @@ gt doctor                    # Runs all checks including overlay health
 ```
 
 **What it checks:**
-- Scans all town-level and rig-level overlay TOML files
+- Scans the overlay TOML files in `~/gt/formula-overlays/`
+- Reports any file in a rig-level `~/gt/<rig>/formula-overlays/` dir as not read
 - Parses each overlay and loads the corresponding embedded formula
 - Validates every `step_id` exists in the current formula version
 - Reports stale step IDs (formula was updated, overlay wasn't)

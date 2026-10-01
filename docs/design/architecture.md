@@ -324,11 +324,11 @@ Per-formula TOML files that modify individual steps. Applied post-parse before
 rendering in `showFormulaStepsFull()`.
 
 ```
-~/gt/formula-overlays/<formula>.toml   # Town-level
-~/gt/<rig>/formula-overlays/<formula>.toml  # Rig-level (full precedence)
+~/gt/formula-overlays/<formula>.toml   # the one overlay dir
 ```
 
-Rig-level overlays fully replace town-level (not merged). Three override modes:
+A rig-level `~/gt/<rig>/formula-overlays/` dir is not read; `gt doctor`
+reports any file left there. Three override modes:
 
 | Mode | Effect |
 |------|--------|
