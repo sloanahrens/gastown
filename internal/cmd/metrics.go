@@ -30,8 +30,10 @@ var metricsCmd = &cobra.Command{
 	Use:     "metrics",
 	GroupID: GroupDiag,
 	Short:   "Show command usage statistics",
-	Long: `Reads ~/.gt/cmd-usage.jsonl and reports which gt commands are used,
-how often, and by whom. Helps identify dead commands before pruning.`,
+	Long: `Reads the command usage logs in ~/.gt (cmd-usage-<day>.jsonl, one per
+day for the last 30 days, plus the unrotated cmd-usage.jsonl if it is still
+there) and reports which gt commands are used, how often, and by whom.
+Helps identify dead commands before pruning.`,
 	RunE: runMetrics,
 }
 
@@ -43,7 +45,7 @@ type usageEntry struct {
 }
 
 func runMetrics(cmd *cobra.Command, args []string) error {
-	entries, err := readUsageLog()
+	entries, err := readUsageLog(gtDataDir())
 	if err != nil {
 		return err
 	}
@@ -69,12 +71,26 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	return showFrequency(entries)
 }
 
-func readUsageLog() ([]usageEntry, error) {
-	f, err := os.Open(logUsagePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("no usage data yet (run some gt commands first)")
+func readUsageLog(dir string) ([]usageEntry, error) {
+	files := usageLogFiles(dir)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no usage data yet (run some gt commands first)")
+	}
+
+	var entries []usageEntry
+	for _, path := range files {
+		fileEntries, err := readUsageFile(path)
+		if err != nil {
+			return nil, err
 		}
+		entries = append(entries, fileEntries...)
+	}
+	return entries, nil
+}
+
+func readUsageFile(path string) ([]usageEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
