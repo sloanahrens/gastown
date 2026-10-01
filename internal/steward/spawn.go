@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,8 +201,21 @@ func (s *AgentSpawner) env(cfg *agentconfig.RuntimeConfig, req SpawnRequest) []s
 			vmap[k] = v
 		}
 	}
-	out := os.Environ()
-	for k, v := range vmap {
+	return mergeEnv(os.Environ(), vmap)
+}
+
+// mergeEnv is base with set applied: an inherited variable the job sets is
+// dropped, not shadowed, because with a duplicate key which value a child
+// sees depends on its libc.
+func mergeEnv(base []string, set map[string]string) []string {
+	var out []string
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, ok := set[k]; !ok {
+			out = append(out, kv)
+		}
+	}
+	for k, v := range set {
 		out = append(out, k+"="+v)
 	}
 	return out
@@ -225,8 +239,11 @@ func (s *AgentSpawner) logf(format string, args ...any) {
 // removal failed, so this is the cleanup of last resort (gt-9bioi.1).
 func PruneJobDirs(g SpawnGit, root string, retention time.Duration, now time.Time) error {
 	entries, err := os.ReadDir(root)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil // no job dirs is not a failure
+	}
+	if err != nil {
+		return fmt.Errorf("reading the job dirs: %w", err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "steward-") {

@@ -298,6 +298,62 @@ func TestStewardScanStartsOneJobPerHead(t *testing.T) {
 	}
 }
 
+// TestStewardScanRetriesAFailedRoutineJobOnHard: a routine job that fails
+// earns one retry on the hard preset, and nothing after that (gt-9bioi.1).
+func TestStewardScanRetriesAFailedRoutineJobOnHard(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := &countingSpawner{result: steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomeFail, Summary: "no"}}}
+	ids := 0
+	runner := &steward.Runner{
+		Ledger:  steward.NewLedger(steward.LedgerPath(townRoot)),
+		Spawn:   sp,
+		WorkDir: t.TempDir(),
+		MaxJobs: steward.DefaultMaxJobs,
+		Timeout: time.Minute,
+		Logf:    func(string, ...any) {},
+		NewID:   func() string { ids++; return strconv.Itoa(ids) },
+	}
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        discardLogger,
+		ctx:           t.Context(),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		stewardRunner: runner,
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
+			if o.Label == land.LabelReadyToLand {
+				return []*beads.Issue{readyBead("gt-x", "c0ffee")}, nil
+			}
+			return nil, nil
+		},
+	}
+	for range 3 {
+		d.runSteward()
+		runner.Wait()
+	}
+	if got := sp.events(); len(got) != 2 {
+		t.Fatalf("three scans started %d job(s), want the routine one and one hard retry", len(got))
+	}
+	jobs, err := runner.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var models []string
+	for _, j := range jobs {
+		if j.Outcome.Failed() {
+			models = append(models, j.Model)
+		}
+	}
+	if len(models) != 2 || models[0] != steward.DefaultRoutineAgent || models[1] != steward.DefaultHardAgent {
+		t.Fatalf("failed jobs ran on %v, want [%s %s]", models, steward.DefaultRoutineAgent, steward.DefaultHardAgent)
+	}
+}
+
 // TestStewardScanNeedsItsPatrol: the tick does nothing while the patrol is
 // off, however the daemon is wired.
 func TestStewardScanNeedsItsPatrol(t *testing.T) {

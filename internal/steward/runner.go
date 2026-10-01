@@ -19,8 +19,8 @@ const (
 	DefaultMaxJobs = 2
 	// DefaultJobTimeout bounds one job, agent session included.
 	DefaultJobTimeout = 45 * time.Minute
-	// DefaultRoutineAgent is Sloan's Q3 call (2026-10-01): routine jobs run
-	// on flash first (gt-9bioi).
+	// DefaultRoutineAgent is the preset routine jobs run on first; a town
+	// overrides it with patrols.steward config.
 	DefaultRoutineAgent = "deepseek-flash"
 	// DefaultHardAgent is the preset a job retries on after a routine
 	// failure, and the one a conflict job starts on.
@@ -279,11 +279,12 @@ func ChooseModel(history []Job, routine, hard string) (string, bool) {
 	if hard == "" {
 		hard = DefaultHardAgent
 	}
-	switch len(history) {
+	jobs := latestRows(history)
+	switch len(jobs) {
 	case 0:
 		return routine, true
 	case 1:
-		job := history[0]
+		job := jobs[0]
 		if job.Outcome.Failed() && job.Model == routine {
 			return hard, true
 		}
@@ -291,12 +292,28 @@ func ChooseModel(history []Job, routine, hard string) (string, bool) {
 	return "", false
 }
 
+// latestRows collapses ledger rows to one per job, its latest, in the order
+// the jobs started: the ledger holds a start row and an end row for each.
+func latestRows(rows []Job) []Job {
+	at := make(map[string]int, len(rows))
+	var out []Job
+	for _, r := range rows {
+		if i, ok := at[r.ID]; ok {
+			out[i] = r
+			continue
+		}
+		at[r.ID] = len(out)
+		out = append(out, r)
+	}
+	return out
+}
+
 // StartedModel is the preset a job runs on when no history exists yet, so a
 // conflict — which the routine model is not trusted to resolve — starts hard
 // (gt-9bioi).
 func StartedModel(ev Event, history []Job, routine, hard string) (string, bool) {
 	model, run := ChooseModel(history, routine, hard)
-	if run && len(history) == 0 && strings.HasPrefix(ev.RejectionDetail, "kind=conflict") {
+	if run && len(latestRows(history)) == 0 && strings.HasPrefix(ev.RejectionDetail, "kind=conflict") {
 		return hard, true
 	}
 	return model, run

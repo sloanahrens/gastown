@@ -126,9 +126,13 @@ func (d *Daemon) runSteward() {
 	for _, j := range jobs {
 		history[j.Key()] = append(history[j.Key()], j)
 	}
-	seen := func(key string) bool { return len(history[key]) > 0 }
-
 	cfg := stewardConfig(d.patrolConfig)
+	// An event is spent once its history allows no further job: a failed
+	// routine job still earns its one retry on the hard preset.
+	seen := func(key string) bool {
+		_, run := steward.ChooseModel(history[key], stewardRoutineAgent(cfg), stewardHardAgent(cfg))
+		return !run
+	}
 	var started []string
 	for _, rigName := range stewardRigs(d.patrolConfig, d.getKnownRigs()) {
 		if d.ctx.Err() != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -213,5 +214,41 @@ func TestPruneJobDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(young); err != nil {
 		t.Errorf("the young job dir was removed: %v", err)
+	}
+}
+
+// TestMergeEnvReplacesInheritedKeys: a variable the job sets appears once,
+// with the job's value, not after the daemon's own copy of it.
+func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
+	t.Parallel()
+	got := mergeEnv([]string{"GT_ROLE=daemon/plugin", "HOME=/h"}, map[string]string{"GT_ROLE": "gastown/steward"})
+	var roles []string
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GT_ROLE=") {
+			roles = append(roles, kv)
+		}
+	}
+	if len(roles) != 1 || roles[0] != "GT_ROLE=gastown/steward" {
+		t.Errorf("GT_ROLE entries = %v, want only the job's", roles)
+	}
+	if !slices.Contains(got, "HOME=/h") {
+		t.Errorf("env %v lost an inherited variable the job does not set", got)
+	}
+}
+
+// TestPruneJobDirsReadErrors: a missing root is no work, but a root that
+// cannot be read is reported.
+func TestPruneJobDirsReadErrors(t *testing.T) {
+	t.Parallel()
+	g := &fakeGit{refs: map[string]bool{}}
+	if err := PruneJobDirs(g, filepath.Join(t.TempDir(), "absent"), time.Hour, testEpoch); err != nil {
+		t.Errorf("missing root: %v, want nil", err)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneJobDirs(g, file, time.Hour, testEpoch); err == nil {
+		t.Error("unreadable root: nil error, want one")
 	}
 }

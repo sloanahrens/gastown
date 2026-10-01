@@ -225,10 +225,10 @@ func TestReadVerdictRejectsUnknownOutcome(t *testing.T) {
 func TestChooseModel(t *testing.T) {
 	t.Parallel()
 	routine, hard := "deepseek-flash", "deepseek-pro"
-	failed := Job{Outcome: OutcomeFail, Model: routine}
-	passed := Job{Outcome: OutcomePass, Model: routine}
-	hardFailed := Job{Outcome: OutcomeFail, Model: hard}
-	timeout := Job{Outcome: OutcomeTimeout, Model: routine}
+	failed := Job{ID: "1", Outcome: OutcomeFail, Model: routine}
+	passed := Job{ID: "1", Outcome: OutcomePass, Model: routine}
+	hardFailed := Job{ID: "2", Outcome: OutcomeFail, Model: hard}
+	timeout := Job{ID: "1", Outcome: OutcomeTimeout, Model: routine}
 
 	model, run := ChooseModel(nil, routine, hard)
 	if !run || model != routine {
@@ -245,6 +245,14 @@ func TestChooseModel(t *testing.T) {
 	}
 	if model, run = ChooseModel([]Job{timeout}, routine, hard); !run || model != hard {
 		t.Errorf("a timeout: %q %v, want %q true", model, run, hard)
+	}
+	// The ledger holds a start row and an end row per job: one job, not two.
+	started := Job{ID: "1", Model: routine}
+	if model, run = ChooseModel([]Job{started, failed}, routine, hard); !run || model != hard {
+		t.Errorf("start+end rows of one failed job: %q %v, want %q true", model, run, hard)
+	}
+	if _, run = ChooseModel([]Job{started}, routine, hard); run {
+		t.Error("a running job earned another run")
 	}
 }
 
