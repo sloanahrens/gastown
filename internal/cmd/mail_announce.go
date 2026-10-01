@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -113,7 +111,7 @@ func readAnnounceChannel(townRoot string, cfg *config.MessagingConfig, channelNa
 	}
 
 	// Query beads for messages with announce_channel=<channel>
-	messages, err := listAnnounceMessages(townRoot, channelName)
+	messages, err := listAnnounceMessages(townBeadsClient(townRoot), channelName)
 	if err != nil {
 		return fmt.Errorf("listing announce messages: %w", err)
 	}
@@ -175,60 +173,25 @@ type announceMessage struct {
 }
 
 // listAnnounceMessages lists messages from an announce channel.
-func listAnnounceMessages(townRoot, channelName string) ([]announceMessage, error) {
-	beadsDir := filepath.Join(townRoot, ".beads")
-
+func listAnnounceMessages(bd beads.Client, channelName string) ([]announceMessage, error) {
 	// Query for messages with label announce_channel:<channel>
 	// Messages are stored with this label when sent via sendToAnnounce()
-	args := []string{"list",
-		"--label", "gt:message",
-		"--label", "announce_channel:" + channelName,
-		"--sort", "-created", // Newest first
-		"--limit", "0", // No limit
-		"--json",
-	}
-
-	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return nil, fmt.Errorf("%s", errMsg)
-		}
+	issues, err := bd.List(beads.ListOptions{Label: "announce_channel:" + channelName, Priority: -1})
+	if err != nil {
 		return nil, err
-	}
-
-	// Parse JSON output
-	var issues []struct {
-		ID          string    `json:"id"`
-		Title       string    `json:"title"`
-		Description string    `json:"description"`
-		Labels      []string  `json:"labels"`
-		CreatedAt   time.Time `json:"created_at"`
-		Priority    int       `json:"priority"`
-	}
-
-	output := strings.TrimSpace(stdout.String())
-	if output == "" || output == "[]" {
-		return nil, nil
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd output: %w", err)
 	}
 
 	// Convert to announceMessage, extracting 'from' from labels
 	var messages []announceMessage
 	for _, issue := range issues {
+		if !beads.HasLabel(issue, "gt:message") {
+			continue
+		}
 		msg := announceMessage{
 			ID:          issue.ID,
 			Title:       issue.Title,
 			Description: issue.Description,
-			Created:     issue.CreatedAt,
+			Created:     parseBdTime(issue.CreatedAt),
 			Priority:    issue.Priority,
 		}
 
@@ -242,6 +205,11 @@ func listAnnounceMessages(townRoot, channelName string) ([]announceMessage, erro
 
 		messages = append(messages, msg)
 	}
+
+	// Newest first
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].Created.After(messages[j].Created)
+	})
 
 	return messages, nil
 }

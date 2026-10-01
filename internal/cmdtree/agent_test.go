@@ -171,6 +171,28 @@ func TestScanGoHints(t *testing.T) {
 	assertRefs(t, refs, "3:bd cook", "6:bd kv list", "7:bd close", "8:bd update x", "14:bd close x")
 }
 
+func TestScanGoHintsCobraHelp(t *testing.T) {
+	t.Parallel()
+	src := "package p\n" +
+		"var c = &cobra.Command{\n" +
+		"\tUse:   \"done <id>\",\n" +
+		"\tShort: \"Close it: bd close x\",\n" +
+		"\tLong: `Closes the step.\n" +
+		"\n" +
+		"1. Closes the step (bd close <id>)\n" +
+		"Running 'bd init' here would orphan a database.\n" +
+		"  bd update x --status=open`,\n" +
+		"\tExample: \"  bd dep add a b\",\n" +
+		"}\n" +
+		"var other = T{Long: \"bd close y\"}\n" +
+		"func init() { c.Long = fmt.Sprintf(\"Next:\\n  bd reopen %s\", x) }\n"
+	refs, err := ScanGoHints("p.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRefs(t, refs, "4:bd close x", "7:bd close", "9:bd update x", "10:bd dep add a b", "13:bd reopen")
+}
+
 func TestAgentFacing(t *testing.T) {
 	t.Parallel()
 	for rel, want := range map[string]bool{

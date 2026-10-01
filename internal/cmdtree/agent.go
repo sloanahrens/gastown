@@ -91,12 +91,17 @@ func ScanGoStrings(file string, src []byte) ([]Ref, error) {
 // printFuncs are the fmt calls whose string arguments ScanGoHints reads.
 var printFuncs = map[string]bool{"Print": true, "Printf": true, "Println": true, "Fprint": true, "Fprintf": true, "Fprintln": true}
 
+// helpFields are the cobra.Command fields gt help prints.
+var helpFields = map[string]bool{"Use": true, "Short": true, "Long": true, "Example": true}
+
 // ScanGoHints returns the invocations gt's commands print as advice: string
 // literals passed to fmt.Print* or fmt.Fprint* (alone or joined with +),
-// read line by line with scanHintLine. Errors (fmt.Errorf), values built
-// with Sprintf, and dry-run output (an if whose condition names a dry-run
-// flag, or a func named dryRun*) describe what gt does, not what an agent
-// should run, and are skipped (gt-7iwy0.9).
+// and cobra help text (Use, Short, Long and Example in a cobra.Command
+// literal or assigned later, including a fmt.Sprintf format; gt-k7u3r),
+// read line by line with scanHintLine. Errors (fmt.Errorf), other values
+// built with Sprintf, and dry-run output (an if whose condition names a
+// dry-run flag, or a func named dryRun*) describe what gt does, not what an
+// agent should run, and are skipped (gt-7iwy0.9).
 func ScanGoHints(file string, src []byte) ([]Ref, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
@@ -104,6 +109,24 @@ func ScanGoHints(file string, src []byte) ([]Ref, error) {
 		return nil, err
 	}
 	var refs []Ref
+	scanLits := func(lits []*ast.BasicLit) {
+		for _, lit := range lits {
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				continue
+			}
+			line := fset.Position(lit.Pos()).Line
+			for i, l := range strings.Split(s, "\n") {
+				// A raw string's lines are physical lines; report each
+				// one where it sits.
+				at := line
+				if strings.HasPrefix(lit.Value, "`") {
+					at += i
+				}
+				refs = append(refs, scanHintLine(file, at, l)...)
+			}
+		}
+	}
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -116,31 +139,55 @@ func ScanGoHints(file string, src []byte) ([]Ref, error) {
 				}
 				return false
 			}
-		case *ast.CallExpr:
-			sel, ok := n.Fun.(*ast.SelectorExpr)
-			if !ok {
+		case *ast.CompositeLit:
+			if !isPkgSel(n.Type, "cobra", "Command") {
 				return true
 			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "fmt" || !printFuncs[sel.Sel.Name] {
+			for _, e := range n.Elts {
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					if key, ok := kv.Key.(*ast.Ident); ok && helpFields[key.Name] {
+						scanLits(helpLiterals(kv.Value))
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && helpFields[sel.Sel.Name] && i < len(n.Rhs) {
+					scanLits(helpLiterals(n.Rhs[i]))
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok || !isPkgSel(sel, "fmt", sel.Sel.Name) || !printFuncs[sel.Sel.Name] {
 				return true
 			}
 			for _, arg := range n.Args {
-				for _, lit := range concatLiterals(arg) {
-					s, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						continue
-					}
-					line := fset.Position(lit.Pos()).Line
-					for _, l := range strings.Split(s, "\n") {
-						refs = append(refs, scanHintLine(file, line, l)...)
-					}
-				}
+				scanLits(concatLiterals(arg))
 			}
 		}
 		return true
 	}
 	ast.Inspect(f, visit)
 	return refs, nil
+}
+
+// isPkgSel reports whether e is the selector pkg.name.
+func isPkgSel(e ast.Expr, pkg, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == pkg
+}
+
+// helpLiterals returns the fixed text of a help field: its literals, or a
+// fmt.Sprintf format's.
+func helpLiterals(e ast.Expr) []*ast.BasicLit {
+	if call, ok := e.(*ast.CallExpr); ok && isPkgSel(call.Fun, "fmt", "Sprintf") && len(call.Args) > 0 {
+		return concatLiterals(call.Args[0])
+	}
+	return concatLiterals(e)
 }
 
 // concatLiterals returns the string literals in e when e is a literal or a
