@@ -88,14 +88,25 @@ func (r *fakeRuntime) calls() int {
 type mapEnv struct {
 	mu   sync.Mutex
 	vars map[string]string
+	// read is every key Getenv was asked for: what `go test` would fold
+	// into a test result's cache key had the process been a test binary.
+	read map[string]bool
 }
 
-func newMapEnv() *mapEnv { return &mapEnv{vars: map[string]string{}} }
+func newMapEnv() *mapEnv { return &mapEnv{vars: map[string]string{}, read: map[string]bool{}} }
 
 func (e *mapEnv) Getenv(key string) string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.read[key] = true
 	return e.vars[key]
+}
+
+// readKeys is the set of keys Getenv was asked for.
+func (e *mapEnv) readKeys() map[string]bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return maps.Clone(e.read)
 }
 
 func (e *mapEnv) Setenv(key, value string) {
@@ -114,7 +125,7 @@ func (e *mapEnv) Unsetenv(key string) {
 func (e *mapEnv) clone() *mapEnv {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return &mapEnv{vars: maps.Clone(e.vars)}
+	return &mapEnv{vars: maps.Clone(e.vars), read: map[string]bool{}}
 }
 
 // syncBuffer is a bytes.Buffer safe to write from an acquire goroutine while

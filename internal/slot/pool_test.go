@@ -297,7 +297,7 @@ func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 	// Slot 1, a different PID than ours as a real child would see it, and
 	// the child's own role — the marker only reaches that role's work
 	// (gt-off9, see reentrantMark.grants).
-	tg.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "gastown/b-child", foreignPID()))
+	armReentrant(tg.env, town, 1, "gastown/b-child", foreignPID())
 	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/b-child", shortWait, pool) })
 	if err != nil {
 		t.Fatalf("reentrant AcquirePool: %v", err)
@@ -327,7 +327,7 @@ func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 	town := t.TempDir()
 	const role = "mango/landing"
 
-	tg.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 0, role, foreignPID()))
+	armReentrant(tg.env, town, 0, role, foreignPID())
 
 	// Sanity check on the hole this closes: with this marker, the ordinary
 	// AcquirePool hands out a reentrant handle that holds nothing at all.
@@ -361,7 +361,7 @@ func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 	// It arms the marker for its own descendants like any other holder, but
 	// names its own role — the part that keeps the marker harmless in the
 	// unrelated processes the daemon spawns while holding (reentrantMark.grants).
-	if got := tg.env.Getenv(ReentrantEnvVar); got != reentrantEnvValue(town, h.Index, role, os.Getpid()) {
+	if got := tg.env.Getenv(reentrantHolderEnvVar); got != reentrantEnvValue(town, h.Index, role, os.Getpid()) {
 		t.Fatalf("marker after AcquirePoolReal = %q, want this hold named by its own role", got)
 	}
 

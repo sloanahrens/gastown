@@ -38,7 +38,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/testpolicy"
 )
 
@@ -339,32 +338,8 @@ func listPackages(tags, patterns []string) ([]string, error) {
 // code.
 func runCached(args []string, out io.Writer) (int, error) {
 	cmd := exec.Command("go", append([]string{"test"}, args...)...)
-	cmd.Env = withoutReentrantMarker(os.Environ())
 	cmd.Stdout, cmd.Stderr = out, os.Stderr
 	return exitCode(cmd.Run())
-}
-
-// withoutReentrantMarker is env with slot.ReentrantEnvVar removed
-// (gt-22hdp.55): the environment runCached hands to `go test`.
-//
-// `gt slot run` marks its own process (and so every child it execs, plain go
-// test included, by ordinary fork/exec inheritance) with
-// "GASTOWN_SLOT_HELD=<lockPath>|<pid>|<role>", and that pid is the wrapper's
-// own, different on every invocation. go test's result cache records every
-// env var a test binary reads as an input to its cache key; an unconverted
-// package whose tests reach internal/slot's default (real-environment) Gate
-// — internal/daemon and internal/witness both do — reads that ever-changing
-// value and can never hit the cache while run under `gt slot run`, costing
-// the packages a full re-run (~40s) every time.
-//
-// Dropping the marker here is safe: no hermetic test in this module execs a
-// real `gt slot run` (confirmed by grep across the tree), so nothing under
-// runCached's `go test` depends on inheriting it to stay reentrant against a
-// real ancestor hold — and even an unrelated, stale marker would only ever
-// name a townRoot these tests' own isolated temp dirs don't match, so
-// dropping it changes no test's observed behavior, only the cache key.
-func withoutReentrantMarker(env []string) []string {
-	return withoutEnv(env, slot.ReentrantEnvVar)
 }
 
 // exitCode is the exit code of a command that ran, or the error when it did

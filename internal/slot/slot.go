@@ -119,7 +119,19 @@ const dockerPSTimeout = 5 * time.Second
 // a wire format between processes: gt slot run's children, the daemon's
 // gate commands, and the tests that exercise inheritance across a real
 // fork all have to spell it.
+//
+// A current holder writes only its town's lock directory here and the
+// "<lockPath>|<pid>|<role>" details in reentrantHolderEnvVar, which a reader
+// looks at only once the lock directory names its own town (gt-22hdp.56).
+// `go test` keys a cached result on every variable the test binary reads,
+// and a test under `gt slot run` acquires in a sandbox town: reading a
+// per-hold pid made every such run a cache miss. A value with a "|" is a
+// marker an older gt wrote, details and all.
 const ReentrantEnvVar = "GASTOWN_SLOT_HELD"
+
+// reentrantHolderEnvVar carries the details of the hold ReentrantEnvVar
+// names.
+const reentrantHolderEnvVar = "GASTOWN_SLOT_HOLDER"
 
 // reentrantMark is a parsed ReentrantEnvVar value.
 type reentrantMark struct {
@@ -144,9 +156,28 @@ func parseReentrantMark(val string) (reentrantMark, bool) {
 	return reentrantMark{lockPath: lockPath, pid: pid, role: role}, true
 }
 
-// reentrantHolder returns the marker this process inherited, if any.
-func (g *Gate) reentrantHolder() (reentrantMark, bool) {
-	return parseReentrantMark(g.env.Getenv(ReentrantEnvVar))
+// reentrantHolder returns the marker this process inherited for townRoot,
+// if any. A marker naming another town is not looked into (see
+// ReentrantEnvVar).
+func (g *Gate) reentrantHolder(townRoot string) (reentrantMark, bool) {
+	held := g.env.Getenv(ReentrantEnvVar)
+	if held == LockDir(townRoot) {
+		return parseReentrantMark(g.env.Getenv(reentrantHolderEnvVar))
+	}
+	return parseReentrantMark(held)
+}
+
+// armReentrant marks env for the descendants of a hold on townRoot's slot
+// index (see ReentrantEnvVar).
+func armReentrant(env procEnv, townRoot string, index int, role string, pid int) {
+	env.Setenv(ReentrantEnvVar, LockDir(townRoot))
+	env.Setenv(reentrantHolderEnvVar, reentrantEnvValue(townRoot, index, role, pid))
+}
+
+// disarmReentrant removes what armReentrant set.
+func disarmReentrant(env procEnv) {
+	env.Unsetenv(ReentrantEnvVar)
+	env.Unsetenv(reentrantHolderEnvVar)
 }
 
 // validAncestor reports whether this marker names a genuine ancestor hold
@@ -198,14 +229,15 @@ func InheritedRole(townRoot string) (string, bool) {
 // InheritedRole is the package-level InheritedRole, reading the gate's
 // environment.
 func (g *Gate) InheritedRole(townRoot string) (string, bool) {
-	m, ok := g.reentrantHolder()
+	m, ok := g.reentrantHolder(townRoot)
 	if !ok || !m.validAncestor(townRoot, g.pid) || m.role == "" {
 		return "", false
 	}
 	return m.role, true
 }
 
-// reentrantEnvValue renders the marker a holder writes for its descendants.
+// reentrantEnvValue renders the details a holder writes for its descendants
+// (reentrantHolderEnvVar).
 func reentrantEnvValue(townRoot string, index int, role string, pid int) string {
 	return SlotLockPath(townRoot, index) + "|" + strconv.Itoa(pid) + "|" + role
 }
@@ -400,7 +432,7 @@ func (h *Handle) release(exitCode *int) error {
 	held := g.clock.Since(h.acquiredAt)
 	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
 	h.unlock()
-	g.env.Unsetenv(ReentrantEnvVar)
+	disarmReentrant(g.env)
 
 	// Telemetry is best-effort and runs after the lock is gone: a caller
 	// blocked on this slot must not be made to wait on a stats write, and a
