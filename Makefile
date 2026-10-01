@@ -101,10 +101,16 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 lint-tools:
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
+# How long `make lint` keeps re-running a lint that another worktree's
+# golangci-lint holds the module lock against, in seconds (gt-uoppq). Each
+# contended attempt still prints the lock line internal/lintlock reads, so a
+# lint still contended at the end exits red with that evidence. 0 = one try.
+LINT_LOCK_WAIT ?= 600
+
 lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
-	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
-	golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	@echo "lint: golangci-lint run --timeout=5m (a contended lint is retried for up to $(LINT_LOCK_WAIT)s while another run holds the module lock)"
+	bash scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
@@ -241,8 +247,8 @@ SHELL_TESTS ?= scripts/test-makefile.sh
 
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
-# lint must not read as red. Plain `make lint` keeps the fast exit that gt
-# done's and the refinery's retry policy reads (internal/lintlock, gt-kqwu).
+# lint must not read as red. Plain `make lint` retries a contended lint for
+# LINT_LOCK_WAIT instead, keeping the lock line internal/lintlock reads (gt-kqwu).
 # A target-specific variable, so it reaches the lint prerequisite.
 gate: LINT_RUNNER_FLAGS := --allow-serial-runners
 # The gate's start, read when make parses the Makefile, so the wall it prints

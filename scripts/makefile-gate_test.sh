@@ -70,10 +70,10 @@ else
   fail "gate prints its wall time" "$out"
 fi
 
-if grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' <<<"$out" && ! dry lint | grep -q -F -- '--allow-serial-runners'; then
-  pass "gate's lint waits on the lint lock; plain make lint keeps the fast contention exit"
+if grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' <<<"$out" && lout=$(dry lint) && ! grep -q -F -- '--allow-serial-runners' <<<"$lout" && grep -q -F 'scripts/lint-lock-wait.sh 600 golangci-lint run --timeout=5m' <<<"$lout"; then
+  pass "gate's lint waits on the lint lock; plain make lint retries a contended lint for LINT_LOCK_WAIT (gt-uoppq)"
 else
-  fail "gate's lint waits on the lint lock; plain make lint keeps the fast contention exit" "$(grep -F 'golangci-lint run' <<<"$out")"
+  fail "gate's lint waits on the lint lock; plain make lint retries a contended lint for LINT_LOCK_WAIT (gt-uoppq)" "$(grep -F 'golangci-lint run' <<<"$out" ${lout:+<<<"$lout"})"
 fi
 
 if grep -q -E 'slot +run' <<<"$out"; then
@@ -299,6 +299,48 @@ if [[ "$rc" != 0 ]] && grep -q -F 'test-slow: FAILED at shell tests' "$TMP/err";
   pass "test-slow shell tests fail: non-zero, names the shell tests"
 else
   fail "test-slow shell tests fail: non-zero, names the shell tests (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
+# scripts/lint-lock-wait.sh against a lint stub that reports the module lock
+# held for its first STUB_CONTEND calls (gt-uoppq).
+cat >"$TMP/contended-lint" <<'STUB'
+#!/usr/bin/env bash
+n=$(( $(wc -l <"$STUB_LOG") ))
+echo "lint" >>"$STUB_LOG"
+if (( n < STUB_CONTEND )); then
+  echo "Error: parallel golangci-lint is running"
+  exit 3
+fi
+[[ -n "${STUB_FINDING:-}" ]] && { echo "x.go:1: finding"; exit 1; }
+exit 0
+STUB
+chmod +x "$TMP/contended-lint"
+lock_wait() {
+  : >"$TMP/calls"
+  local rc=0
+  env "${@:2}" STUB_LOG="$TMP/calls" LINT_LOCK_POLL=0 bash "$ROOT/scripts/lint-lock-wait.sh" "$1" "$TMP/contended-lint" >"$TMP/out" 2>"$TMP/err" || rc=$?
+  echo "$rc"
+}
+
+rc=$(lock_wait 5 STUB_CONTEND=2)
+if [[ "$rc" == 0 ]] && [[ $(wc -l <"$TMP/calls") -eq 3 ]] && grep -q -F 'retrying in 0s' "$TMP/err"; then
+  pass "lint-lock-wait: a lint contended twice is retried and passes"
+else
+  fail "lint-lock-wait: a lint contended twice is retried and passes (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
+fi
+
+rc=$(lock_wait 0 STUB_CONTEND=99)
+if [[ "$rc" == 3 ]] && [[ $(wc -l <"$TMP/calls") -eq 1 ]] && grep -q -F 'parallel golangci-lint is running' "$TMP/out" && grep -q -F 'nothing was linted' "$TMP/err"; then
+  pass "lint-lock-wait: still contended at the wait bound exits with the lint's code and keeps the lock line"
+else
+  fail "lint-lock-wait: still contended at the wait bound exits with the lint's code and keeps the lock line (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
+fi
+
+rc=$(lock_wait 5 STUB_CONTEND=0 STUB_FINDING=1)
+if [[ "$rc" == 1 ]] && [[ $(wc -l <"$TMP/calls") -eq 1 ]] && grep -q -F 'finding' "$TMP/out"; then
+  pass "lint-lock-wait: a lint with findings is never retried"
+else
+  fail "lint-lock-wait: a lint with findings is never retried (rc=$rc)" "$(cat "$TMP/calls" "$TMP/out" "$TMP/err")"
 fi
 
 rc=0
