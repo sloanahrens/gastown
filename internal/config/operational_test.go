@@ -454,3 +454,32 @@ func TestOperationalConfig_RetiredKeysDecode(t *testing.T) {
 		t.Fatalf("retired operational keys must still decode: %v", err)
 	}
 }
+
+// TestDoltThresholds_CommitsPerDayWarn: the default is the D3 target, a
+// positive override wins, and a non-positive one falls back to the default.
+func TestDoltThresholds_CommitsPerDayWarn(t *testing.T) {
+	t.Parallel()
+
+	var op *OperationalConfig
+	if got := op.GetDoltConfig().CommitsPerDayWarnV(); got != DefaultDoltCommitsPerDayWarn {
+		t.Errorf("nil config: got %d, want default %d", got, DefaultDoltCommitsPerDayWarn)
+	}
+	for _, tc := range []struct {
+		set, want int
+	}{{1200, 1200}, {0, DefaultDoltCommitsPerDayWarn}, {-3, DefaultDoltCommitsPerDayWarn}} {
+		set := tc.set
+		op := &OperationalConfig{Dolt: &DoltThresholds{CommitsPerDayWarn: &set}}
+		if got := op.GetDoltConfig().CommitsPerDayWarnV(); got != tc.want {
+			t.Errorf("commits_per_day_warn %d: got %d, want %d", tc.set, got, tc.want)
+		}
+	}
+
+	data := []byte(`{"operational": {"dolt": {"commits_per_day_warn": 800, "max_connections": 1000}}}`)
+	var ts TownSettings
+	if err := DecodeJSONFile("config.json", data, &ts); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := ts.Operational.GetDoltConfig().CommitsPerDayWarnV(); got != 800 {
+		t.Errorf("decoded: got %d, want 800", got)
+	}
+}

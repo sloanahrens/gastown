@@ -61,6 +61,13 @@ const (
 	DefaultContainerGateMaxGateYield    = 30 * time.Minute
 )
 
+// Dolt defaults.
+const (
+	// DefaultDoltCommitsPerDayWarn is the D3 target: a few hundred commits a
+	// day per database once bd commits once per invocation (gt-8z769).
+	DefaultDoltCommitsPerDayWarn = 500
+)
+
 // LoadOperationalConfig loads operational config from a town root.
 // Returns a valid (possibly empty) config — never nil, never errors.
 // Callers can use accessor methods that return defaults for nil sub-configs.
@@ -121,6 +128,24 @@ func (g *ContainerGateThresholds) MaxGateYieldD() time.Duration {
 		}
 	}
 	return DefaultContainerGateMaxGateYield
+}
+
+// GetDoltConfig returns the Dolt thresholds, never nil.
+func (c *OperationalConfig) GetDoltConfig() *DoltThresholds {
+	if c != nil && c.Dolt != nil {
+		return c.Dolt
+	}
+	return &DoltThresholds{}
+}
+
+// CommitsPerDayWarnV returns the configured or default per-database
+// commits-per-day warning threshold. A non-positive value falls back to the
+// default: a zero threshold would warn on every database.
+func (d *DoltThresholds) CommitsPerDayWarnV() int {
+	if d != nil && d.CommitsPerDayWarn != nil && *d.CommitsPerDayWarn > 0 {
+		return *d.CommitsPerDayWarn
+	}
+	return DefaultDoltCommitsPerDayWarn
 }
 
 // GetSessionConfig returns the session thresholds, never nil.
