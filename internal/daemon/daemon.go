@@ -32,7 +32,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/feed"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -60,7 +59,6 @@ type Daemon struct {
 	logger        *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
-	curator       *feed.Curator
 	convoyManager *ConvoyManager
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
@@ -791,14 +789,6 @@ func (d *Daemon) Run() (err error) {
 	defer timer.Stop()
 
 	d.logger.Printf("Daemon running, recovery heartbeat interval %v", d.recoveryHeartbeatInterval())
-
-	// Start feed curator goroutine
-	d.curator = feed.NewCurator(d.config.TownRoot)
-	if err := d.curator.Start(); err != nil {
-		d.logger.Printf("Warning: failed to start feed curator: %v", err)
-	} else {
-		d.logger.Println("Feed curator started")
-	}
 
 	// Start convoy manager (event-driven + periodic stranded scan)
 	// Try opening beads stores eagerly; if Dolt isn't ready yet,
@@ -2140,12 +2130,6 @@ func autoRestartDisabled(val interface{}) bool {
 // shutdown performs graceful shutdown.
 func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return kept for future use
 	d.logger.Println("Daemon shutting down")
-
-	// Stop feed curator
-	if d.curator != nil {
-		d.curator.Stop()
-		d.logger.Println("Feed curator stopped")
-	}
 
 	// Stop convoy manager (also closes beads stores)
 	if d.convoyManager != nil {

@@ -45,56 +45,6 @@ func TestParseDurationOrDefault(t *testing.T) {
 	}
 }
 
-// --- Default*Config functions ---
-
-func TestDefaultFeedCuratorConfig(t *testing.T) {
-	t.Parallel()
-	cfg := DefaultFeedCuratorConfig()
-
-	if cfg == nil {
-		t.Fatal("DefaultFeedCuratorConfig() returned nil")
-	}
-
-	dedupe := ParseDurationOrDefault(cfg.DoneDedupeWindow, 0)
-	if dedupe != 10*time.Second {
-		t.Errorf("DoneDedupeWindow = %v, want 10s", dedupe)
-	}
-	agg := ParseDurationOrDefault(cfg.SlingAggregateWindow, 0)
-	if agg != 30*time.Second {
-		t.Errorf("SlingAggregateWindow = %v, want 30s", agg)
-	}
-	if cfg.MinAggregateCount != 3 {
-		t.Errorf("MinAggregateCount = %d, want 3", cfg.MinAggregateCount)
-	}
-}
-
-// --- JSON serialization round-trips ---
-
-func TestFeedCuratorConfig_JSONRoundTrip(t *testing.T) {
-	t.Parallel()
-	original := &FeedCuratorConfig{
-		DoneDedupeWindow:     "20s",
-		SlingAggregateWindow: "1m",
-		MinAggregateCount:    5,
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var loaded FeedCuratorConfig
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if loaded != *original {
-		t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", loaded, *original)
-	}
-}
-
-// --- TownSettings with/without new config fields ---
-
 // --- Gemini provider defaults ---
 
 func TestGeminiProviderDefaults(t *testing.T) {
@@ -182,60 +132,21 @@ func TestTownSettings_WithoutNewFields_LoadsDefaults(t *testing.T) {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
 	}
 
-	// Fields absent from the JSON should be nil (omitempty → nil pointer)
-	if ts.FeedCurator != nil {
-		t.Errorf("FeedCurator should be nil for legacy config, got %+v", ts.FeedCurator)
-	}
-
 	// Existing fields should still load correctly
 	if ts.DefaultAgent != "claude" {
 		t.Errorf("DefaultAgent = %q, want %q", ts.DefaultAgent, "claude")
 	}
 }
 
-func TestTownSettings_WithNewFields_RoundTrip(t *testing.T) {
+// TestTownSettings_RemovedFeedCuratorKeyStillLoads: towns written before the
+// feed curator was deleted (gt-3vdcx) carry a feed_curator section; strict
+// decoding still accepts it.
+func TestTownSettings_RemovedFeedCuratorKeyStillLoads(t *testing.T) {
 	t.Parallel()
-	// Save TownSettings WITH all new config fields, then reload and verify.
-	tmpDir := t.TempDir()
-	settingsPath := filepath.Join(tmpDir, "config.json")
-
-	original := NewTownSettings()
-	original.FeedCurator = &FeedCuratorConfig{
-		DoneDedupeWindow:     "20s",
-		SlingAggregateWindow: "1m",
-		MinAggregateCount:    5,
-	}
-
-	if err := SaveTownSettings(settingsPath, original); err != nil {
-		t.Fatalf("SaveTownSettings: %v", err)
-	}
-
-	loaded, err := LoadOrCreateTownSettings(settingsPath)
-	if err != nil {
-		t.Fatalf("LoadOrCreateTownSettings: %v", err)
-	}
-
-	// Verify FeedCurator
-	if loaded.FeedCurator == nil {
-		t.Fatal("FeedCurator is nil after round-trip")
-	}
-	if loaded.FeedCurator.DoneDedupeWindow != "20s" {
-		t.Errorf("DoneDedupeWindow = %q, want %q", loaded.FeedCurator.DoneDedupeWindow, "20s")
-	}
-	if loaded.FeedCurator.SlingAggregateWindow != "1m" {
-		t.Errorf("SlingAggregateWindow = %q, want %q", loaded.FeedCurator.SlingAggregateWindow, "1m")
-	}
-	if loaded.FeedCurator.MinAggregateCount != 5 {
-		t.Errorf("MinAggregateCount = %d, want %d", loaded.FeedCurator.MinAggregateCount, 5)
-	}
-}
-
-func TestTownSettings_PartialNewFields(t *testing.T) {
-	t.Parallel()
-	// Only some fields are set; the rest should remain nil.
 	settingsJSON := `{
 		"type": "town-settings",
 		"version": 1,
+		"default_agent": "claude",
 		"feed_curator": {
 			"done_dedupe_window": "25s"
 		}
@@ -251,22 +162,8 @@ func TestTownSettings_PartialNewFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
 	}
-
-	// FeedCurator present with partial fields
-	if ts.FeedCurator == nil {
-		t.Fatal("FeedCurator should not be nil")
-	}
-	if ts.FeedCurator.DoneDedupeWindow != "25s" {
-		t.Errorf("DoneDedupeWindow = %q, want %q", ts.FeedCurator.DoneDedupeWindow, "25s")
-	}
-	// Unset fields within the struct should be zero-value (empty string)
-	if ts.FeedCurator.SlingAggregateWindow != "" {
-		t.Errorf("SlingAggregateWindow = %q, want empty", ts.FeedCurator.SlingAggregateWindow)
-	}
-	// ParseDurationOrDefault should apply fallback for empty fields
-	agg := ParseDurationOrDefault(ts.FeedCurator.SlingAggregateWindow, 30*time.Second)
-	if agg != 30*time.Second {
-		t.Errorf("ParseDurationOrDefault for empty SlingAggregateWindow = %v, want 30s", agg)
+	if ts.DefaultAgent != "claude" {
+		t.Errorf("DefaultAgent = %q, want %q", ts.DefaultAgent, "claude")
 	}
 }
 
@@ -286,72 +183,6 @@ func TestTownSettings_MissingFile_ReturnsDefaults(t *testing.T) {
 	}
 	if ts.Version != CurrentTownSettingsVersion {
 		t.Errorf("Version = %d, want %d", ts.Version, CurrentTownSettingsVersion)
-	}
-	// New config sections should be nil (NewTownSettings doesn't set them)
-	if ts.FeedCurator != nil {
-		t.Errorf("FeedCurator should be nil for defaults")
-	}
-}
-
-// --- omitempty behavior: nil config fields must not appear in JSON ---
-
-func TestTownSettings_OmitemptyNilFields(t *testing.T) {
-	t.Parallel()
-	ts := NewTownSettings()
-
-	data, err := json.MarshalIndent(ts, "", "  ")
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	jsonStr := string(data)
-	for _, key := range []string{"feed_curator"} {
-		if strings.Contains(jsonStr, key) {
-			t.Errorf("JSON should not contain %q when field is nil, got:\n%s", key, jsonStr)
-		}
-	}
-}
-
-func TestTownSettings_OmitemptyEmptyDurations(t *testing.T) {
-	t.Parallel()
-	// When config struct is set but all duration fields are empty,
-	// omitempty on the string fields means they should be absent from JSON.
-	ts := NewTownSettings()
-	ts.FeedCurator = &FeedCuratorConfig{} // all zero values
-
-	data, err := json.MarshalIndent(ts, "", "  ")
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	jsonStr := string(data)
-	// The "feed_curator" key SHOULD appear (pointer is non-nil)
-	if !strings.Contains(jsonStr, "feed_curator") {
-		t.Error("JSON should contain feed_curator when struct is non-nil")
-	}
-	// But individual empty string fields should be omitted
-	for _, key := range []string{"done_dedupe_window", "sling_aggregate_window"} {
-		if strings.Contains(jsonStr, key) {
-			t.Errorf("JSON should not contain %q when field is empty string, got:\n%s", key, jsonStr)
-		}
-	}
-}
-
-func TestFeedCuratorConfig_OmitemptyZeroCount(t *testing.T) {
-	t.Parallel()
-	cfg := &FeedCuratorConfig{
-		DoneDedupeWindow: "10s",
-		// MinAggregateCount=0 should be omitted (omitempty on int)
-	}
-
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	jsonStr := string(data)
-	if strings.Contains(jsonStr, "min_aggregate_count") {
-		t.Errorf("JSON should not contain min_aggregate_count when 0, got: %s", jsonStr)
 	}
 }
 

@@ -69,7 +69,7 @@ func TestGetKeyBinding_SkipsGasTownBindings(t *testing.T) {
 	for _, line := range []string{
 		`bind-key    -T prefix F11     if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt agents menu'" :`,
 		`bind-key    -T prefix F11     run-shell "gt agents menu"`,
-		`bind-key    -T prefix F11     run-shell "gt feed --window"`,
+		`bind-key    -T prefix F11     run-shell "gt rig menu"`,
 	} {
 		tm, _ := keysTmux(line)
 		if got := tm.getKeyBinding("prefix", "F11"); got != "" {
@@ -90,7 +90,7 @@ func TestIsGTBinding_DetectsGasTownBindings(t *testing.T) {
 	t.Parallel()
 	for line, want := range map[string]bool{
 		`bind-key    -T prefix F11     display-message hello`: false,
-		`bind-key    -T prefix F11     if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt feed --window'" "display-message hello"`: true,
+		`bind-key    -T prefix F11     if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt agents menu'" "display-message hello"`: true,
 		`bind-key    -T prefix F11     run-shell "gt rig menu"`: true,
 		``: false,
 	} {
@@ -106,7 +106,7 @@ func TestIsGTBinding_DetectsGasTownBindings(t *testing.T) {
 // original command, which lives on as the if-shell fallback.
 func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 	t.Parallel()
-	bound := `bind-key    -T prefix F11     if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt feed --window'" "display-message custom-user-cmd"`
+	bound := `bind-key    -T prefix F11     if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt agents menu'" "display-message custom-user-cmd"`
 	tm, _ := keysTmux(bound)
 	if !tm.isGTBinding("prefix", "F11") {
 		t.Fatal("expected isGTBinding=true after first configuration")

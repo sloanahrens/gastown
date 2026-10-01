@@ -9,8 +9,8 @@ import (
 )
 
 // The events_prune patrol bounds the town's raw event log (gt-ori5j). Its
-// readers (the feed curator, await-signal, gt feed --follow) want new lines
-// and at most minutes of history; a week covers gt feed --since for humans.
+// reader (await-signal) wants new lines and at most minutes of
+// history; a week covers humans reading the file directly.
 const (
 	defaultEventsPruneInterval = time.Hour
 	defaultEventsPruneMaxAge   = 7 * 24 * time.Hour

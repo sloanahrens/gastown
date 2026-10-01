@@ -53,7 +53,7 @@ func TestCleanupOrphanedSessions_LivenessErrorKillsNothing(t *testing.T) {
 }
 
 // TestZombieStatus_CountsAsRunning pins the rule every IsRunning wrapper
-// (polecat, witness, refinery, feed) uses: unknown counts as running, so a
+// (polecat, witness, refinery) uses: unknown counts as running, so a
 // failed query never leads a caller to start a second agent into the session.
 func TestZombieStatus_CountsAsRunning(t *testing.T) {
 	t.Parallel()

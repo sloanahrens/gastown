@@ -25,7 +25,6 @@ If a group has only one session, prefix+n/p is a no-op.
 
 | Key | Command | Purpose |
 |-----|---------|---------|
-| `C-b a` | `gt feed --window` | Open/switch to activity feed window |
 | `C-b g` | `gt agents menu` | Open agent switcher popup |
 
 ## How Bindings Are Set Up

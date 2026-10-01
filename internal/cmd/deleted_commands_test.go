@@ -70,6 +70,7 @@ var deletedCommands = [][]string{
 	{"costs"},
 	{"seance"},
 	{"mountain"},
+	{"feed"}, // gt-3vdcx: replaced by gt tail
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the
@@ -80,14 +81,14 @@ func TestDeletedCommandsGone(t *testing.T) {
 	// Positive control: the same lookup must find commands that stayed, or a
 	// broken lookup would pass every deleted path vacuously. These are the
 	// survivors of the clusters the deletions thinned.
-	for _, path := range [][]string{{"convoy", "check"}, {"convoy", "close"}, {"dolt", "status"}, {"cycle", "next"}, {"crew", "start"}, {"show"}, {"up"}, {"feed"}} {
+	for _, path := range [][]string{{"convoy", "check"}, {"convoy", "close"}, {"dolt", "status"}, {"cycle", "next"}, {"crew", "start"}, {"show"}, {"up"}, {"tail"}} {
 		if !resolvesExactly(path) {
 			t.Errorf("live command %q does not resolve; the lookup is broken", "gt "+strings.Join(path, " "))
 		}
 	}
 	for _, path := range deletedCommands {
 		if resolvesExactly(path) {
-			t.Errorf("%q resolves in the command tree; it was deleted in gt-638go.6", "gt "+strings.Join(path, " "))
+			t.Errorf("%q resolves in the command tree; it was deleted (see deletedCommands)", "gt "+strings.Join(path, " "))
 		}
 	}
 }

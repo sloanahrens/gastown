@@ -106,7 +106,7 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 		t.Errorf("the still-open waiter hold has held_s set: %+v", second)
 	}
 
-	// The slot_wait event carries the same account for `gt feed --plain`.
+	// The slot_wait event carries the same account in its message.
 	waits := slotEventsOfType(t, townRoot, events.TypeSlotWait)
 	if len(waits) != 2 {
 		t.Fatalf("slot_wait events = %d, want one per grant", len(waits))
@@ -390,9 +390,8 @@ func TestSummarizeWaits(t *testing.T) {
 	}
 }
 
-// TestWaitMessage covers the line `gt feed --plain` prints: the payload's
-// message is what the feed renders, so the facts and the wording describing
-// them have to arrive together.
+// TestWaitMessage covers the slot_wait payload's message line: the facts and
+// the wording describing them have to arrive together.
 func TestWaitMessage(t *testing.T) {
 	t.Parallel()
 	info := waitInfo{

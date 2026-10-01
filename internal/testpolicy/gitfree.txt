@@ -10,7 +10,6 @@ internal/crew
 internal/daemon
 internal/doctor
 internal/doltserver
-internal/feed
 internal/formula
 internal/git
 internal/git/gitfake

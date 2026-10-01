@@ -6,7 +6,7 @@ agent running it handles:
 - Generating convoy summary
 - Archiving convoy state
 - Notifying the overseer (Mayor)
-- Updating activity feed
+- Checking the convoy close in gt tail
 
 ## Contract
 
@@ -155,14 +155,14 @@ EOF
 )"
 ```
 
-**2. Post to activity feed:**
-The convoy closure already creates a feed entry. Verify:
+**2. Check the event stream:**
+The convoy closure is journaled in the town store. Verify:
 ```bash
-gt feed --since 5m
-# Should show convoy completion
+gt tail --kind events --rig hq --since 5m | grep {{convoy}}
+# Should show the convoy's close
 ```
 
-**Exit criteria:** Overseer notified via mail, activity feed updated."""
+**Exit criteria:** Overseer notified via mail, convoy close visible in gt tail."""
 
 [[steps]]
 id = "return-to-kennel"
