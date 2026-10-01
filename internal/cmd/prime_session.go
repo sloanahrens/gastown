@@ -545,17 +545,17 @@ func detectSessionState(ctx RoleContext) SessionState {
 				beadsDir = rigDir
 			}
 		}
-		b := beads.New(beadsDir)
+		b := townBeadsNew(ctx.TownRoot, beadsDir)
 		// Primary: agent bead's hook_bead field (authoritative, set by bd slot set during sling)
 		agentBeadID := buildAgentBeadID(agentID, ctx.Role, ctx.TownRoot)
 		if agentBeadID != "" {
 			agentBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBeadID, ctx.WorkDir)
-			ab := beads.New(agentBeadDir)
+			ab := townBeadsNew(ctx.TownRoot, agentBeadDir)
 			if agentBead, err := ab.Show(agentBeadID); err == nil && agentBead != nil && agentBead.HookBead != "" {
 				// Resolve and verify the target bead exists with active status
 				// (mirrors molecule_status.go and signal_stop.go patterns)
 				hookBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBead.HookBead, ctx.WorkDir)
-				hb := beads.New(hookBeadDir)
+				hb := townBeadsNew(ctx.TownRoot, hookBeadDir)
 				if hookBead, err := hb.Show(agentBead.HookBead); err == nil && hookBead != nil &&
 					(hookBead.Status == beads.StatusHooked || hookBead.Status == "in_progress") {
 					state.State = "autonomous"
@@ -575,7 +575,7 @@ func detectSessionState(ctx RoleContext) SessionState {
 		// Town-level fallback: rig-level agents may have hooked HQ beads
 		// stored in townRoot/.beads. Matches prime.go and molecule_status.go. (gt-dtq7)
 		if !isTownLevelRole(agentID) && ctx.TownRoot != "" {
-			townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
+			townB := townBeadsNew(ctx.TownRoot, filepath.Join(ctx.TownRoot, ".beads"))
 			if townWork, err := listAssignedActiveWork(townB, agentID); err == nil && len(townWork) > 0 {
 				state.State = "autonomous"
 				state.HookedBead = townWork[0].ID

@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -445,19 +443,15 @@ func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFie
 // countActivePolecats counts all running polecat tmux sessions across all rigs.
 // Capacity admission uses polecatCapacitySnapshotForTown instead; active sessions
 // are shown for operator context only.
-func countActivePolecats() int {
+func countActivePolecats(townRoot string) int {
 	reg := townRegistry()
-	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
-	out, err := listCmd.Output()
+	names, err := listTownTmuxSessions(townRoot)
 	if err != nil {
 		return 0
 	}
 
 	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
+	for _, line := range names {
 		identity, err := session.ParseSessionNameWithRegistry(line, reg)
 		if err != nil {
 			continue
