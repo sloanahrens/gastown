@@ -46,6 +46,12 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	if res.Err != nil || res.ExitCode != 3 || !strings.Contains(res.Tail, "landed") || !strings.Contains(res.Tail, "slow tier failed") {
 		t.Fatalf("red run: %+v", res)
 	}
+	// gt-f2voh: the full output stays on disk, under the log root, for the
+	// red-main bead to cite.
+	if full, err := os.ReadFile(res.LogPath); err != nil || !strings.HasPrefix(res.LogPath, filepath.Join(root, "logs")) ||
+		!strings.Contains(string(full), "slow tier failed") {
+		t.Fatalf("full log %q: %q %v", res.LogPath, full, err)
+	}
 	res = run(context.Background(), "test -f marker", landworker.PostLand{BeadID: "gt-a", Commit: commit})
 	if res.Err != nil || res.ExitCode != 0 {
 		t.Fatalf("green run: %+v", res)
