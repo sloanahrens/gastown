@@ -443,7 +443,8 @@ func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 // The constants below build the gt-x748o shape: a Go package whose file gains
 // a comment block and one code line on main, and a polecat checkout cut AFTER
 // that commit. The branch under test is therefore not stale, and the only
-// thing that may explain a revert observation is where the content went.
+// thing that may explain a revert observation is where the content went —
+// within the package, or out of it and into another (gt-bbk1f).
 const (
 	pkgAdditiveSubject = "add the summary line to the reject record"
 	pkgRefactorSubject = "refactor: extract rejectionRequest (gt-test)"
@@ -545,7 +546,9 @@ func rejectionRequest(reason string) request {
 }
 `
 
-	// pkgOtherPackageHelper is the same code landing in a DIFFERENT package.
+	// pkgOtherPackageHelper is the same code landing in a DIFFERENT package,
+	// where the type it builds is named as that package sees it and a comment
+	// joins it: the shape a move across a package boundary leaves (gt-bbk1f).
 	pkgOtherPackageHelper = `package other
 
 // rejectionRequest builds the record a rejection is remembered by.
@@ -688,21 +691,73 @@ func TestIntegrationDetectRevertedMerges_RelocatedBlockIsNotARevert(t *testing.T
 	}
 }
 
-// TestDetectRevertedMerges_CodeLeavingThePackageIsARevert is the fail-closed
-// control for the relocation reading: the same move, one package over, deletes
-// the code from the package that holds the file it was observed on. Where the
-// code went is not visible from here, so the observation stands.
-func TestIntegrationDetectRevertedMerges_CodeLeavingThePackageIsARevert(t *testing.T) {
+// TestDetectRevertedMerges_CodeMovedToAnotherPackageIsNoRevert is the gt-bbk1f
+// incident: the polecat carries a merged change's code out of a file that keeps
+// existing and into another package — the thin cobra slice handing its engine
+// to a leaf package — which rewrites the qualifiers around the code as it lands
+// (request arrives as pkgRequest, the receiver is renamed). The behavior is
+// intact, so the branch must be reported as a relocation and not refused.
+func TestIntegrationDetectRevertedMerges_CodeMovedToAnotherPackageIsNoRevert(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		edits map[string]string
+	}{
+		{
+			name: "into a file the other package already has",
+			edits: map[string]string{
+				"internal/pkg/foo.go":   pkgFooBase,
+				"internal/other/bar.go": pkgOtherPackageHelper,
+			},
+		},
+		{
+			name: "into a file the move itself creates",
+			edits: map[string]string{
+				"internal/pkg/foo.go":      pkgFooBase,
+				"internal/other/helper.go": pkgOtherPackageHelper,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+			commitPolecat(t, s.polecat, tt.edits, pkgRefactorSubject)
+
+			report := detectRevertedMerges(t, s.polecat)
+			if len(report.Reverted) != 0 {
+				t.Fatalf("detectRevertedMerges refused a move to another package: %+v", report.Reverted)
+			}
+			if len(report.Relocated) != 1 {
+				t.Fatalf("detectRevertedMerges reported %d relocations, want 1: %+v", len(report.Relocated), report.Relocated)
+			}
+			wantCommit, err := git.NewGit(s.polecat).Rev("origin/main")
+			if err != nil {
+				t.Fatalf("rev origin/main: %v", err)
+			}
+			if report.Relocated[0].Commit != wantCommit {
+				t.Errorf("relocated commit = %s, want main's additive commit %s", report.Relocated[0].Commit, wantCommit)
+			}
+			if !containsString(report.Relocated[0].Paths, "internal/pkg/foo.go") {
+				t.Errorf("relocated paths %v missing internal/pkg/foo.go", report.Relocated[0].Paths)
+			}
+		})
+	}
+}
+
+// TestDetectRevertedMerges_CodeDeletedOutrightIsARevert is the fail-closed
+// control for that reading: the same edit to the file the commit wrote, with
+// the code carried nowhere. No file in the candidate's tree holds those lines,
+// so the observation stands — a function the branch really deleted is still a
+// revert, however it is compared.
+func TestIntegrationDetectRevertedMerges_CodeDeletedOutrightIsARevert(t *testing.T) {
 	t.Parallel()
 	s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
-	commitPolecat(t, s.polecat, map[string]string{
-		"internal/pkg/foo.go":   pkgFooBase,
-		"internal/other/bar.go": pkgOtherPackageHelper,
-	}, pkgRefactorSubject)
+	commitPolecat(t, s.polecat, map[string]string{"internal/pkg/foo.go": pkgFooBase}, pkgRefactorSubject)
 
 	report := detectRevertedMerges(t, s.polecat)
 	if len(report.Relocated) != 0 {
-		t.Errorf("detectRevertedMerges called a cross-package move a relocation: %+v", report.Relocated)
+		t.Errorf("detectRevertedMerges called a deletion a relocation: %+v", report.Relocated)
 	}
 	if len(report.Reverted) != 1 {
 		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)

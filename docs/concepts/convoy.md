@@ -239,7 +239,7 @@ the operator owns is refused however the sling was asked for (gt-21pl0).
 | `deferred`, `pinned` | status |
 | `operator` | label |
 | a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
-| `needs-sonnet`, `needs-mayor-review` | label |
+| `needs-pro`, `needs-mayor-review` | label |
 | `MAYOR DESIGN DECISION`, `do not redispatch` | notes, design, or a comment |
 | `HOLD RELEASED` | a comment, to lift an earlier comment hold |
 | `MERGE REJECTION` | notes, written by the landing worker when it rejects a branch |
