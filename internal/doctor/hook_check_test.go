@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -96,34 +97,21 @@ func TestHookAttachmentValidCheck_FindRigBeadsDirs(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create town-level .beads (should be excluded)
-	townBeads := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(townBeads, 0755); err != nil {
+	// Only <town>/<rig>/.beads counts: not the town's own .beads, not the
+	// mayor's, not one nested deeper, and not a .beads file.
+	for _, dir := range []string{".beads", "myrig/.beads", "mayor/.beads", "other/crew/x/.beads", "plain"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "plain", ".beads"), nil, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create rig-level .beads
-	rigBeads := filepath.Join(tmpDir, "myrig", ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatal(err)
-	}
+	dirs := NewHookAttachmentValidCheck().findRigBeadsDirs(tmpDir)
 
-	check := NewHookAttachmentValidCheck()
-	dirs := check.findRigBeadsDirs(tmpDir)
-
-	// Should find the rig-level beads but not town-level
-	found := false
-	for _, dir := range dirs {
-		if dir == townBeads {
-			t.Error("findRigBeadsDirs should not include town-level .beads")
-		}
-		if dir == rigBeads {
-			found = true
-		}
-	}
-
-	if !found && len(dirs) > 0 {
-		t.Logf("Found dirs: %v", dirs)
+	if want := []string{filepath.Join(tmpDir, "myrig", ".beads")}; !slices.Equal(dirs, want) {
+		t.Errorf("findRigBeadsDirs = %v, want %v", dirs, want)
 	}
 }
 

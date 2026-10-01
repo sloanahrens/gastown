@@ -3,10 +3,45 @@ package doctor
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// primingCheck is a PrimingCheck that finds gt on PATH.
+func primingCheck() *PrimingCheck {
+	c := NewPrimingCheck()
+	c.lookPath = func(name string) (string, error) { return "/usr/local/bin/" + name, nil }
+	return c
+}
+
+// A town whose PATH has no gt is told so, from the lookup alone.
+func TestPrimingCheck_GTNotInPath(t *testing.T) {
+	t.Parallel()
+	check := NewPrimingCheck()
+	var asked []string
+	check.lookPath = func(name string) (string, error) {
+		asked = append(asked, name)
+		return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	}
+
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+
+	if !slices.Equal(asked, []string{"gt"}) {
+		t.Errorf("looked up %v, want [gt]", asked)
+	}
+	found := false
+	for _, iss := range check.issues {
+		if iss.issueType == "gt_not_in_path" && !iss.fixable {
+			found = true
+		}
+	}
+	if !found || !slices.Contains(result.Details, "gt binary not found in PATH") {
+		t.Errorf("no unfixable gt_not_in_path issue: issues=%v details=%v", check.issues, result.Details)
+	}
+}
 
 func TestPrimingCheck_PolecatNewStructure(t *testing.T) {
 	t.Parallel()
@@ -49,7 +84,7 @@ func TestPrimingCheck_PolecatNewStructure(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -173,7 +208,7 @@ func TestPrimingCheck_FixRemovesBadPolecatBeads(t *testing.T) {
 	}
 
 	// Run priming check and fix
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	_ = check.Run(ctx) // Populate issues
 
@@ -240,7 +275,7 @@ func TestPrimingCheck_AllowsClaudeMdInMayorRig(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -291,7 +326,7 @@ func TestPrimingCheck_AllowsClaudeMdInCrewWorktree(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -342,7 +377,7 @@ func TestPrimingCheck_AllowsClaudeMdInPolecatWorktree(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -387,7 +422,7 @@ func TestPrimingCheck_FixPreservesCustomerClaudeMd(t *testing.T) {
 	}
 
 	// Run priming check and fix
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	_ = check.Run(ctx)
 
@@ -438,7 +473,7 @@ func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -498,20 +533,12 @@ func TestPrimingCheck_NoIssuesWhenCorrectlyConfigured(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
-	// Filter out gt_not_in_path which depends on system PATH
-	var relevantDetails []string
-	for _, d := range result.Details {
-		if !strings.Contains(d, "gt binary not found") {
-			relevantDetails = append(relevantDetails, d)
-		}
-	}
-
-	if len(relevantDetails) > 0 {
-		t.Errorf("expected no priming issues for correctly configured rig, got: %v", relevantDetails)
+	if len(result.Details) > 0 {
+		t.Errorf("expected no priming issues for correctly configured rig, got: %v", result.Details)
 	}
 }
 
@@ -536,7 +563,7 @@ func TestPrimingCheck_DetectsLargeClaudeMd(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -602,7 +629,7 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -689,7 +716,7 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 	}
 
 	// Run priming check and fix
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	_ = check.Run(ctx)
 
@@ -765,7 +792,7 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 	}
 
 	// Run priming check
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -847,7 +874,7 @@ func TestPrimingCheck_FixNoPrimeHook(t *testing.T) {
 	}
 
 	// Run priming check and fix
-	check := NewPrimingCheck()
+	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
 	_ = check.Run(ctx)
 
