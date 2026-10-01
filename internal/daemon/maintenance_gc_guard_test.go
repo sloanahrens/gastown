@@ -495,7 +495,10 @@ func TestMaintenanceGCExternal(t *testing.T) {
 	if ext, _ := mk(&DoltServerConfig{Enabled: true, External: true, Host: "127.0.0.1"}).maintenanceGCExternal(); !ext {
 		t.Error("external-mode server not reported external")
 	}
-	if ext, why := mk(&DoltServerConfig{Enabled: true, Host: "10.0.0.5"}).maintenanceGCExternal(); !ext || !strings.Contains(why, "10.0.0.5") {
+	// The host is the town's endpoint, never the manager's daemon.json copy.
+	remote := mk(&DoltServerConfig{Enabled: true})
+	writeManagedDoltConfig(t, remote.config.TownRoot, "listener:\n  host: 10.0.0.5\n  port: 3307\n")
+	if ext, why := remote.maintenanceGCExternal(); !ext || !strings.Contains(why, "10.0.0.5") {
 		t.Errorf("remote host: external=%v why=%q", ext, why)
 	}
 	for _, h := range []string{"localhost", "127.0.0.1", "::1"} {

@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -516,20 +515,17 @@ func New(config *Config) (*Daemon, error) {
 		if root, err := doltbackup.DefaultRoot(); err == nil {
 			doltServer.backupRoot = root
 		}
-		if doltServer.IsEnabled() {
+		if doltServer.config.Port == 0 {
+			// The endpoint comes from the town's config only (gt-y3pgh.9);
+			// daemon.json's dolt_server port/host are ignored. With no
+			// endpoint there is nothing to manage, and guessing one would
+			// point the daemon at some other server.
+			logger.Printf("Dolt server management disabled: town has no Dolt endpoint (set it with gt config set dolt.port)")
+			doltServer = nil
+		} else if doltServer.IsEnabled() {
 			logger.Printf("Dolt server management enabled (port %d)", doltServer.config.Port)
-			// Propagate Dolt connection info to process env so AgentEnv() passes it to
-			// all spawned agent sessions. Without this, bd in agent sessions
-			// auto-starts rogue Dolt instances or connects to localhost. (GH#2412)
-			applyDoltServerConfigEnv(doltServer.config)
 		}
 	}
-
-	// Propagate Dolt host to process env so bd doesn't fall back to 127.0.0.1
-	// when the server runs on a remote machine. BEADS_DOLT_SERVER_HOST is a
-	// derived alias, not an authority, so stale inherited values are replaced or
-	// removed here.
-	applyConfiguredDoltHostEnv(config.TownRoot, logger.Printf)
 
 	// PATCH-006: Resolve binary paths at startup.
 	gtPath, err := exec.LookPath("gt")
@@ -574,14 +570,6 @@ func New(config *Config) (*Daemon, error) {
 	return d, nil
 }
 
-// envWriter is where the daemon publishes the Dolt endpoint for the
-// subprocesses it starts: the process environment in production (processEnv),
-// a map in tests.
-type envWriter interface {
-	Setenv(key, value string)
-	Unsetenv(key string)
-}
-
 // processEnv writes the daemon's own process environment. It is the one
 // place the daemon does: New publishes the town root, daemon.json's env, the
 // augmented PATH and the Dolt endpoint here so every session, bd and gt it
@@ -597,46 +585,6 @@ func (processEnv) Setenv(key, value string) {
 func (processEnv) Unsetenv(key string) {
 	//testpolicy:allow prod-no-setenv — the daemon process publishes its environment to every child it starts (see processEnv)
 	_ = os.Unsetenv(key)
-}
-
-func applyDoltServerConfigEnv(config *DoltServerConfig) {
-	applyDoltServerConfigEnvTo(processEnv{}, config)
-}
-
-func applyDoltServerConfigEnvTo(env envWriter, config *DoltServerConfig) {
-	if config == nil {
-		return
-	}
-	if config.Port > 0 {
-		portStr := strconv.Itoa(config.Port)
-		env.Setenv("GT_DOLT_PORT", portStr)
-		env.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-		env.Setenv("BEADS_DOLT_PORT", portStr)
-	}
-	if config.Host != "" {
-		env.Setenv("GT_DOLT_HOST", config.Host)
-		env.Setenv("BEADS_DOLT_SERVER_HOST", config.Host)
-	}
-}
-
-func applyConfiguredDoltHostEnv(townRoot string, logf func(format string, v ...interface{})) {
-	applyConfiguredDoltHostEnvTo(processEnv{}, townRoot, logf)
-}
-
-func applyConfiguredDoltHostEnvTo(env envWriter, townRoot string, logf func(format string, v ...interface{})) {
-	ep, ok := agentconfig.ResolveDoltEndpoint(townRoot)
-	if ep.Host != "" {
-		env.Setenv("GT_DOLT_HOST", ep.Host)
-		env.Setenv("BEADS_DOLT_SERVER_HOST", ep.Host)
-		if logf != nil {
-			logf("Set BEADS_DOLT_SERVER_HOST=%s from resolved Dolt host", ep.Host)
-		}
-		return
-	}
-	if ok {
-		env.Unsetenv("GT_DOLT_HOST")
-	}
-	env.Unsetenv("BEADS_DOLT_SERVER_HOST")
 }
 
 func (d *Daemon) cleanupLegacySocketSessions() {

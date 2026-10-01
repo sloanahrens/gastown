@@ -131,16 +131,13 @@ func TestWithBeadsDirEnvUsesTownConfigBeforeMetadataExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	env := withBeadsDirEnvFrom([]string{"GT_DOLT_HOST=stale-host", "GT_DOLT_PORT=4400", "BEADS_DOLT_SERVER_HOST=stale-host", "BEADS_DOLT_SERVER_PORT=9999", "BEADS_DOLT_PORT=9999"}, beadsDir)
+	env := withBeadsDirEnvFrom([]string{"BEADS_DOLT_SERVER_HOST=stale-host", "BEADS_DOLT_SERVER_PORT=9999", "BEADS_DOLT_PORT=9999"}, beadsDir)
 	got := installEnvMap(env)
 	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
 		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want config host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
 		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
-	}
-	if got["GT_DOLT_HOST"] != "127.0.0.2" || got["GT_DOLT_PORT"] != "5507" {
-		t.Fatalf("GT endpoint = %q:%q, want config endpoint in %v", got["GT_DOLT_HOST"], got["GT_DOLT_PORT"], env)
 	}
 }
 
@@ -166,16 +163,13 @@ func TestWithBeadsDirEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	env := withBeadsDirEnvFrom([]string{"GT_DOLT_HOST=stale-host", "BEADS_DOLT_SERVER_HOST=stale-host", "GT_DOLT_PORT=9999"}, beadsDir)
+	env := withBeadsDirEnvFrom([]string{"BEADS_DOLT_SERVER_HOST=stale-host", "BEADS_DOLT_SERVER_PORT=9999"}, beadsDir)
 	got := installEnvMap(env)
-	if _, ok := got["GT_DOLT_HOST"]; ok {
-		t.Fatalf("GT_DOLT_HOST leaked from config without host: %v", env)
-	}
 	if _, ok := got["BEADS_DOLT_SERVER_HOST"]; ok {
 		t.Fatalf("BEADS_DOLT_SERVER_HOST leaked from config without host: %v", env)
 	}
-	if got["GT_DOLT_PORT"] != "5507" || got["BEADS_DOLT_SERVER_PORT"] != "5507" {
-		t.Fatalf("ports = GT:%q server:%q, want 5507 in %v", got["GT_DOLT_PORT"], got["BEADS_DOLT_SERVER_PORT"], env)
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
 	}
 }
 

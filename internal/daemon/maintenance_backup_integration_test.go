@@ -60,11 +60,13 @@ func TestIntegrationNightlyBackupRestores(t *testing.T) {
 	run("INSERT INTO events VALUES (1, 'ignored')")
 	run("INSERT INTO issues VALUES ('gt-2', 'uncommitted')")
 
+	// The daemon reaches the server through the town's endpoint only.
+	town := filepath.Join(tmp, "town")
+	writeManagedDoltConfig(t, town, fmt.Sprintf("listener:\n  port: %d\n", port))
 	var logs bytes.Buffer
 	d := &Daemon{
-		config:     &Config{TownRoot: filepath.Join(tmp, "town")},
-		logger:     log.New(&logs, "", 0),
-		doltServer: &DoltServerManager{config: &DoltServerConfig{Host: "127.0.0.1", Port: port}},
+		config: &Config{TownRoot: town},
+		logger: log.New(&logs, "", 0),
 	}
 	d.maint.backupRoot = func() (string, error) { return backups, nil }
 	d.maint.escalate = func(_ *Daemon, _, msg string) { t.Errorf("escalated: %s", msg) }

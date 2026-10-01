@@ -67,38 +67,27 @@ func TestNewDoltServerManagerPortOnlyManagedConfigClearsStaleHost(t *testing.T) 
 	}
 }
 
-func TestApplyDoltServerConfigEnvUsesNormalizedManagerConfig(t *testing.T) {
+// daemon.json's patrols.dolt_server port and host still load, so a file
+// written before gt-y3pgh.9 keeps the daemon starting, but they are ignored:
+// a town with no endpoint gives the manager none.
+func TestDaemonJSONDoltServerEndpointIsAcceptedAndIgnored(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeManagedDoltConfig(t, townRoot, "listener:\n  host: 127.0.0.2\n  port: 5507\n")
-	env := mapEnv{
-		"GT_DOLT_HOST": "stale-env-host", "GT_DOLT_PORT": "9999",
-		"BEADS_DOLT_SERVER_HOST": "stale-beads-host", "BEADS_DOLT_SERVER_PORT": "9999", "BEADS_DOLT_PORT": "9999",
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	daemonJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"dolt_server":{"enabled":true,"port":9999,"host":"stale-daemon-host"}}}`
+	if err := os.WriteFile(PatrolConfigFile(townRoot), []byte(daemonJSON), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	m := NewDoltServerManager(townRoot, &DoltServerConfig{Enabled: true, Host: "stale-daemon-host", Port: 9999}, func(string, ...interface{}) {})
-	applyDoltServerConfigEnvTo(env, m.config)
-
-	env.assert(t, "GT_DOLT_HOST", "127.0.0.2")
-	env.assert(t, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
-	env.assert(t, "GT_DOLT_PORT", "5507")
-	env.assert(t, "BEADS_DOLT_SERVER_PORT", "5507")
-	env.assert(t, "BEADS_DOLT_PORT", "5507")
-}
-
-func TestApplyConfiguredDoltHostEnvClearsManagedConfigWithoutHost(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	writeManagedDoltConfig(t, townRoot, "listener:\n  port: 5507\n")
-	env := mapEnv{"GT_DOLT_HOST": "stale-env-host", "BEADS_DOLT_SERVER_HOST": "stale-beads-host"}
-
-	applyConfiguredDoltHostEnvTo(env, townRoot, nil)
-
-	if got, ok := env["GT_DOLT_HOST"]; ok {
-		t.Fatalf("GT_DOLT_HOST = %q, want cleared", got)
+	cfg, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		t.Fatalf("ReadPatrolConfig: %v", err)
 	}
-	if got, ok := env["BEADS_DOLT_SERVER_HOST"]; ok {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want cleared", got)
+	m := NewDoltServerManager(townRoot, cfg.Patrols.DoltServer, func(string, ...interface{}) {})
+	if m.config.Port != 0 || m.config.Host != "" {
+		t.Fatalf("manager endpoint = %q:%d, want none (daemon.json values ignored)", m.config.Host, m.config.Port)
 	}
 }
 
@@ -169,21 +158,10 @@ func writeAndReadDaemonAutoGC(t *testing.T, env mapEnv) struct {
 	return parsed.Behavior.AutoGCBehavior
 }
 
-// mapEnv is an in-memory environment: an envWriter for the apply functions
-// and a lookup for the config writer.
+// mapEnv is an in-memory environment: a lookup for the config writer.
 type mapEnv map[string]string
-
-func (e mapEnv) Setenv(key, value string) { e[key] = value }
-func (e mapEnv) Unsetenv(key string)      { delete(e, key) }
 
 func (e mapEnv) lookup(key string) (string, bool) {
 	v, ok := e[key]
 	return v, ok
-}
-
-func (e mapEnv) assert(t *testing.T, key, want string) {
-	t.Helper()
-	if got := e[key]; got != want {
-		t.Fatalf("%s = %q, want %q", key, got, want)
-	}
 }
