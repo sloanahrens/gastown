@@ -38,8 +38,8 @@ func newCrewSubmitHarness(t *testing.T) *submitHarness {
 
 // TestCrewSubmitMarksPushedBranchReadyToLand: a crew branch pushed at HEAD
 // is gated at HEAD, then the bead gets the worker's submission comment, a
-// READY TO LAND block naming exactly that head and the ready label. Nothing
-// is pushed, rebased or closed.
+// READY TO LAND block naming exactly that head and the ready label. The
+// comment is by the crew member. Nothing is pushed, rebased or closed.
 func TestCrewSubmitMarksPushedBranchReadyToLand(t *testing.T) {
 	t.Parallel()
 	h := newCrewSubmitHarness(t)
@@ -67,6 +67,9 @@ func TestCrewSubmitMarksPushedBranchReadyToLand(t *testing.T) {
 	comments, err := h.bd.Comments("bd-source")
 	if err != nil || len(comments) != 1 {
 		t.Fatalf("comments = %v (%v), want one submission comment", comments, err)
+	}
+	if comments[0].Author != h.r.sender {
+		t.Errorf("submission comment by %q, want the crew member %q (gt-0wkug)", comments[0].Author, h.r.sender)
 	}
 	m := crewSubmittedRE.FindStringSubmatch(comments[0].Text)
 	if m == nil || m[1] != crewTestBranch || m[2] != head || m[3] != "main" {

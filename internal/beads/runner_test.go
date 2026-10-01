@@ -466,3 +466,46 @@ func TestPlainWithRunnerAnswersInProcess(t *testing.T) {
 		t.Errorf("call = %+v", got)
 	}
 }
+
+// TestActingAsSetsBDActor: a wrapper made with WithActor or ActingAs runs
+// every bd call, its derived wrappers' and a plain wrapper's included, with
+// exactly one BD_ACTOR, its own, whatever the environment carried (gt-0wkug).
+func TestActingAsSetsBDActor(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(nil)
+	dir := t.TempDir()
+	inherited := []string{"BD_ACTOR=inherited", "PATH=/bin"}
+	b := newBeads(applyOptions(beadsFields{workDir: dir, exec: r.exec}, []Option{WithEnv(inherited), WithActor("crew-a")}))
+	if err := b.AddComment("gt-1", "x"); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	if err := b.ActingAs("crew-b").ForAgentBead().AddComment("gt-1", "y"); err != nil {
+		t.Fatalf("derived AddComment: %v", err)
+	}
+	plain := NewPlain(dir, inherited).ActingAs("crew-c")
+	plain.exec = r.exec
+	if _, err := plain.run("comments", "add", "gt-1", "z"); err != nil {
+		t.Fatalf("plain run: %v", err)
+	}
+	if b.ActingAs("") != b {
+		t.Error("ActingAs(\"\") made a copy instead of returning the wrapper")
+	}
+
+	var actors []string
+	for _, c := range r.calls() {
+		n := 0
+		for _, kv := range c.env {
+			if strings.HasPrefix(kv, "BD_ACTOR=") {
+				n++
+			}
+		}
+		v, _ := lastEnvValue(c.env, "BD_ACTOR")
+		if n != 1 {
+			t.Errorf("call %v carries %d BD_ACTOR entries, want 1", c.args, n)
+		}
+		actors = append(actors, v)
+	}
+	if want := []string{"crew-a", "crew-b", "crew-c"}; !reflect.DeepEqual(actors, want) {
+		t.Errorf("BD_ACTOR per call = %v, want %v", actors, want)
+	}
+}

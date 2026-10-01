@@ -643,7 +643,7 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 		// Also set in the current process so this prime run uses the correct identity.
 		for k, v := range envVars {
 			if identitySet[k] {
-				//testpolicy:allow prod-no-setenv — the repaired identity must reach the bd and gt this run spawns, which inherit the process environment (beads.ConfigureCommand)
+				//testpolicy:allow prod-no-setenv — the repaired GT_* identity must reach the gt children this run spawns (gt mail check --inject, gt escalate), which read it from the environment they inherit; a beads actor option cannot carry it (gt-0wkug)
 				_ = os.Setenv(k, v)
 			}
 		}
