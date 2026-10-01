@@ -1,0 +1,50 @@
+The landing worker rejected this work (attempt {{ .Attempt }}): {{ .RejectionDetail }}
+
+The bead is open, unassigned and labelled `rework`. Settle it by the kind of rejection: hand it back to its polecat, or fix it on the branch yourself when the break is small and mechanical.
+
+{{ template "steward-facts" . }}
+
+## By rejection kind
+
+Read the kind from the latest MERGE REJECTION block (`kind=` above).
+
+- **review** (om findings): re-sling the bead (below), the message holding every finding line from the block verbatim, with its id, severity and file:line. Outcome `resling`.
+- **conflict**, **gate** with a mechanical cause (gofmt, a stale baseline line, a lint or build error of a few lines), or any other few-line break: fix it on the branch (below). Read a gate failure in the block's gate tail, then in `$GT_ROOT/.runtime/landing-logs/{{ .Rig }}/land-*/gate.log` (newest first).
+- **gate** where the author's logic fails a test, or any fix that needs more than a few lines or a design choice: re-sling, the message holding the failing test's output tail. Outcome `resling`.
+- **timeout**: the gate stage outlived its timeout, which says nothing about the work. Requeue the same head: step 4's block and labels, with no push. Outcome `requeued`.
+- **empty**, **not_pushed**, and any kind not listed: the author's intent is unclear. Follow "When you cannot decide".
+
+## Re-sling
+
+```bash
+gt sling {{ .Bead }} {{ .Rig }} --force --stdin <<'EOF'
+Fix every finding below, then gt done:
+<the findings>
+EOF
+```
+
+Done when the sling prints the polecat it spawned.
+
+## Fix on the branch
+
+1. **Merge main.** `git fetch origin {{ .Target }} && git merge --no-edit origin/{{ .Target }}`. On a conflict, resolve every file so both sides' intent survives: port main's change into code the branch moved, and never drop either side. Done when `git diff --name-only --diff-filter=U` prints nothing.
+2. **Repair.** Make the smallest change that removes the rejection's cause. Commit it with a message describing the change and ending `({{ .Bead }})`; a merge you resolved is committed by `git commit --no-edit`.
+3. **Verify.** `make lint`, then `make gate > "$TMPDIR/gate.log" 2>&1`. Both must exit 0 on the commit you will push. A failure you cannot fix in one more attempt is the "cannot decide" case below.
+4. **Push and requeue.** `git push origin HEAD:refs/heads/{{ .Branch }}`, then confirm `git ls-remote origin refs/heads/{{ .Branch }}` prints the sha that `git rev-parse HEAD` prints. Append the block and swap the labels, in this order (the block first, so a bead carrying the label always says what to land):
+
+   ```bash
+   gt bead note {{ .Bead }} "READY TO LAND
+   Branch: {{ .Branch }}
+   Head: $(git rev-parse HEAD)
+   Target: {{ .Target }}
+   Worker: {{ if .Worker }}{{ .Worker }}{{ else }}steward{{ end }}
+   Submitted: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   gt bead update {{ .Bead }} --add-label gt:ready-to-land --remove-label rework --remove-label gt:overseer-reviewed
+   ```
+
+   Done when `bd show {{ .Bead }}` lists `gt:ready-to-land` and the new head.
+5. **Post.** `gt bead comment {{ .Bead }} "STEWARD FIX {{ .Head }} -> <new head>: <what broke, what you changed, lint and gate passed>"`. Outcome `fixed`, or `requeued` when the head did not change.
+
+{{ template "steward-authority" . }}
+
+Outcomes for this job: `fixed`, `requeued`, `resling`, `escalated`, `error`.

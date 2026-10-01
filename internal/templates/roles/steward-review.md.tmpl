@@ -1,0 +1,26 @@
+Polecat work was submitted for landing and no steward job has reviewed this head. Review it the way the overseer does, then post the verdict on the bead. The landing worker still gates the merge; your review catches what its gate cannot and saves a rejection cycle.
+
+{{ template "steward-facts" . }}
+
+## Review
+
+Run these in order, keeping each command's result for the verdict comment.
+
+1. **Merge.** `git fetch origin {{ .Target }} && git merge --no-edit origin/{{ .Target }}`. A conflict ends the review as FAIL naming the conflicting files (`git diff --name-only --diff-filter=U`); run `git merge --abort`. Done when `git merge-base --is-ancestor origin/{{ .Target }} HEAD` succeeds.
+2. **Build and gate.** `go build ./...`, then `make gate > "$TMPDIR/gate.log" 2>&1` (one to two minutes; read the log's tail). A failed package is rerun once alone; a second failure is FAIL with the failing test's output. Done when both exit codes are in hand.
+3. **Attribution.** `git log --format=%B origin/{{ .Target }}..{{ .Head }} | grep -ciE 'co-authored|anthropic|generated with'` must print `0`. Any other number is FAIL.
+4. **Tests.** List the `Test` functions the branch removed and added: `git diff -U0 origin/{{ .Target }}...{{ .Head }} -- '*_test.go' | grep -E '^[-+]func Test'`. A removed name with no added counterpart is FAIL unless the bead says to delete that test; a moved test keeps its name or gets a clear rename.
+5. **Baselines.** For each file in `git ls-files | grep -i baseline`, `git diff --numstat origin/{{ .Target }}...{{ .Head }} -- <file>` must show no more added lines than removed: baselines only shrink. A growing baseline is FAIL.
+
+## Post the verdict
+
+Comment on the bead, then write the verdict file:
+
+- All five steps clean: `gt bead comment {{ .Bead }} "STEWARD REVIEW PASS {{ .Head }}: <build, gate wall time, attribution 0, tests -N/+M, baselines unchanged or shrunk>"`, outcome `pass`.
+- Any step failed: `gt bead comment {{ .Bead }} "STEWARD REVIEW FAIL {{ .Head }}: <step>: <the evidence: file:line, test name, or output tail>"`, outcome `fail`.
+
+The review never changes the branch or the bead's labels. Done when `bd show {{ .Bead }}` lists your comment.
+
+{{ template "steward-authority" . }}
+
+Outcomes for this job: `pass`, `fail`, `escalated`, `error`.
