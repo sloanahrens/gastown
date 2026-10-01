@@ -2,68 +2,10 @@ package slot
 
 import (
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 )
-
-// TestYield_MainBranchTestIsNotYieldedTo (M3): the daemon's main-branch test
-// holds a gate-reserved slot but is not on the merge path, so crew do not
-// yield to it; they still yield to a refinery holding the other reserved slot.
-func TestYield_MainBranchTestIsNotYieldedTo(t *testing.T) {
-	t.Parallel()
-	tg := newTestGate(t)
-	town := t.TempDir()
-	pool := yieldPool()
-	pool.MaxGateYield = 4 * tg.pollInterval
-
-	mbt := tg.mustAcquirePool(t, town, "gastown/main-branch-test", pool)
-	defer release(t, mbt)
-	if mbt.Index != 0 {
-		t.Fatalf("main-branch-test got slot %d, want reserved slot 0", mbt.Index)
-	}
-
-	crew, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if elapsed != 0 {
-		t.Fatalf("crew waited %s behind the main-branch test", elapsed)
-	}
-	release(t, crew)
-	if rep, _ := tg.StatusPoolLocksOnly(town, pool); rep.YieldingToGate {
-		t.Fatalf("status reports yielding to the main-branch test: holder=%+v", rep.GateHolder)
-	}
-
-	ref := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
-	defer release(t, ref)
-	crew, err, elapsed = tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release(t, crew)
-	if elapsed != pool.MaxGateYield {
-		t.Fatalf("crew waited %s beside a refinery gate, want the yield cap %s", elapsed, pool.MaxGateYield)
-	}
-	if rep, _ := tg.StatusPoolLocksOnly(town, pool); !rep.YieldingToGate || rep.GateHolder == nil || rep.GateHolder.Role != "gastown/refinery" {
-		t.Fatalf("status with a refinery gate: yielding=%v holder=%+v", rep.YieldingToGate, rep.GateHolder)
-	}
-}
-
-// TestYield_BatchGateIsYieldedTo (M3): the batch gate is the refinery's own
-// merge path, so it counts like the refinery.
-func TestYield_BatchGateIsYieldedTo(t *testing.T) {
-	t.Parallel()
-	for role, want := range map[string]bool{
-		"gastown/refinery": true, "hm/refinery-batch": true,
-		"gastown/main-branch-test": false, "gastown/crew/sloan": false, "gastown/refinery-impostor-polecat": false,
-	} {
-		if got := IsMergeGateRole(role); got != want {
-			t.Errorf("IsMergeGateRole(%q) = %v, want %v", role, got, want)
-		}
-	}
-}
 
 // TestYield_DefaultCapIsTheConfigDefault (M6): the 30m default is defined once.
 func TestYield_DefaultCapIsTheConfigDefault(t *testing.T) {
@@ -83,14 +25,14 @@ func TestYield_RunningGateReadsOwnerNotFlock(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	// Owner file for reserved slot 1 naming a live refinery, and no flock
+	// Owner file for reserved slot 1 naming a live landing worker, and no flock
 	// file at all: a flock probe would find nothing.
-	if err := atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(town, 1), Owner{Role: "gastown/refinery", PID: tg.pid, AcquiredAt: tg.clk.Now(), Slot: 1}); err != nil {
+	if err := atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(town, 1), Owner{Role: "gastown/landing", PID: tg.pid, AcquiredAt: tg.clk.Now(), Slot: 1}); err != nil {
 		t.Fatal(err)
 	}
 	owner, ok := tg.runningGate(town, pool)
-	if !ok || owner == nil || owner.Role != "gastown/refinery" || owner.Slot != 1 {
-		t.Fatalf("runningGate = %+v, %v; want the refinery on slot 1 from its owner file", owner, ok)
+	if !ok || owner == nil || owner.Role != "gastown/landing" || owner.Slot != 1 {
+		t.Fatalf("runningGate = %+v, %v; want the landing worker on slot 1 from its owner file", owner, ok)
 	}
 
 	// The same owner file whose pid is gone is a dead gate.

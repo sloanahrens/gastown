@@ -502,10 +502,10 @@ func realSlingSeatSpawn() slingSeatSpawn {
 
 // spawn is SpawnPolecatForSling once the town root is known.
 func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-	// Pre-dispatch backpressure (gt-xidg, plan Task 3 / A3): the rig's merge
+	// Pre-dispatch backpressure (gt-xidg, plan Task 3 / A3): the rig's landing
 	// queue is the limit on what the town can absorb, so a sling is refused
-	// while the rig has more ready MRs than merge_queue.max_ready_for_dispatch
-	// allows. It runs before the pool decision below, which costs a tmux round
+	// while the rig has more beads waiting to land than
+	// merge_queue.max_ready_for_dispatch allows. It runs before the pool decision below, which costs a tmux round
 	// trip and may claim a local seat for a polecat that will never spawn.
 	if err := s.backpressure(townRoot, rigName, opts); err != nil {
 		return nil, err

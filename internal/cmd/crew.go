@@ -34,7 +34,7 @@ var crewCmd = &cobra.Command{
 	Long: `Manage crew workers - persistent workspaces for human developers.
 
 CREW VS POLECATS:
-  Polecats: Ephemeral sessions. Witness-managed. Auto-nuked after work.
+  Polecats: Ephemeral sessions. Retired by gt done after work.
   Crew:     Persistent. User-managed. Stays until you remove it.
 
 Crew workers are full git clones (not worktrees) for human developers

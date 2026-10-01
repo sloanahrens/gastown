@@ -17,7 +17,7 @@ func yieldPool() Pool {
 	return Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true}
 }
 
-// TestYield_NonGateWaitsWhileGateHoldsReservedSlot: while the refinery holds a
+// TestYield_NonGateWaitsWhileGateHoldsReservedSlot: while the landing worker holds a
 // gate-reserved slot, a crew suite does not start even though both shared
 // slots are free; it starts on the first pass after the gate releases.
 func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
@@ -26,9 +26,9 @@ func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	if gate.Index != 0 {
-		t.Fatalf("refinery got slot %d, want reserved slot 0", gate.Index)
+		t.Fatalf("landing gate got slot %d, want reserved slot 0", gate.Index)
 	}
 
 	done := goAcquire(func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
@@ -42,7 +42,7 @@ func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
 		}
 		tg.clk.Advance(tg.pollInterval)
 	}
-	if out := tg.probe.String(); !strings.Contains(out, "gate running") || !strings.Contains(out, "gastown/refinery") {
+	if out := tg.probe.String(); !strings.Contains(out, "gate running") || !strings.Contains(out, "gastown/landing") {
 		t.Errorf("wait line = %q, want it to say the gate is running and name it", out)
 	}
 
@@ -61,7 +61,7 @@ func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := hist[len(hist)-1]
-	if last.Role != "gastown/crew/sloan" || last.Reason != WaitReasonGateRunning || last.HolderRole != "gastown/refinery" {
+	if last.Role != "gastown/crew/sloan" || last.Reason != WaitReasonGateRunning || last.HolderRole != "gastown/landing" {
 		t.Fatalf("history entry = %+v, want the crew wait attributed to the running gate", last)
 	}
 }
@@ -79,7 +79,7 @@ func TestYield_GateNeverWaitsOnNonGateHolders(t *testing.T) {
 	defer release(t, a)
 	defer release(t, b)
 
-	for i, role := range []string{"gastown/refinery", "hm/refinery-batch"} {
+	for i, role := range []string{"gastown/landing", "hm/landing"} {
 		h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, role, time.Minute, pool) })
 		if err != nil {
 			t.Fatalf("%s: %v", role, err)
@@ -100,7 +100,7 @@ func TestYield_RunningHolderIsNotPreempted(t *testing.T) {
 	pool := yieldPool()
 
 	crew := tg.mustAcquirePool(t, town, "gastown/crew/sloan", pool)
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
 	rep, err := StatusPoolLocksOnly(town, pool)
@@ -122,7 +122,7 @@ func TestYield_KnobOffRestoresOldBehaviour(t *testing.T) {
 	pool := yieldPool()
 	pool.YieldToGate = false
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
 	if err != nil {
@@ -150,7 +150,7 @@ func TestYield_NoReservedSlotsMeansNoYield(t *testing.T) {
 	town := t.TempDir()
 	pool := Pool{Slots: 3, YieldToGate: true}
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
 	if err != nil {
@@ -171,7 +171,7 @@ func TestYield_LeakedGateHoldIsIgnored(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 	tg.gone[tg.pid] = true
 
@@ -203,7 +203,7 @@ func TestYield_BoundedByMaxGateYield(t *testing.T) {
 	pool := yieldPool()
 	pool.MaxGateYield = 10 * tg.pollInterval
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
 	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
@@ -241,14 +241,14 @@ func TestYield_TimeoutWhileYieldingIsAttributed(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
 	if _, err, _ := tg.run(t, func() (*Handle, error) {
 		return tg.AcquirePool(town, "gastown/crew/sloan", 3*tg.pollInterval, pool)
 	}); err == nil {
 		t.Fatal("crew acquire succeeded inside its timeout while the gate ran")
-	} else if !strings.Contains(err.Error(), "gate running: gastown/refinery") {
+	} else if !strings.Contains(err.Error(), "gate running: gastown/landing") {
 		t.Errorf("timeout error = %q, want the gate it yielded to named (gt-18zj)", err)
 	}
 	hist, err := History(town)
@@ -271,7 +271,7 @@ func TestYield_GateDescendantDoesNotYieldToItsOwnGate(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
 	child := tg.child()
@@ -293,12 +293,12 @@ func TestYield_StatusShowsGateRunning(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rep.YieldingToGate || rep.GateHolder == nil || rep.GateHolder.Role != "gastown/refinery" || rep.GateHolder.Slot != 0 {
+	if !rep.YieldingToGate || rep.GateHolder == nil || rep.GateHolder.Role != "gastown/landing" || rep.GateHolder.Slot != 0 {
 		t.Fatalf("status with a gate running: yielding=%v holder=%+v", rep.YieldingToGate, rep.GateHolder)
 	}
 	if rep.Busy() {
@@ -349,11 +349,11 @@ func TestYield_StaleGateMarkerStillYields(t *testing.T) {
 	pool := yieldPool()
 	pool.MaxGateYield = 4 * tg.pollInterval
 
-	// Inherited from a main-branch-test hold on slot 1 that has since ended.
+	// Inherited from a landing hold on slot 1 that has since ended.
 	child := tg.child()
-	child.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "gastown/main-branch-test", foreignPID()+7))
+	child.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "mango/landing", foreignPID()+7))
 
-	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
 	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
@@ -367,7 +367,7 @@ func TestYield_StaleGateMarkerStillYields(t *testing.T) {
 }
 
 // TestYield_LeftoverIntentFileIsIgnored (gt-22hdp.34): the gate-intent
-// mechanism is gone. An intent measured live held crew for the refinery's
+// mechanism is gone. An intent measured live held crew for the landing worker's
 // whole ~10.5 min MR cycle (only the ~8 min gate needs protection) and chained
 // across back-to-back MRs. Crew yield only to a RUNNING gate now, so a
 // gate-intent file an older gt left in the lock directory must neither delay a
@@ -380,7 +380,7 @@ func TestYield_LeftoverIntentFileIsIgnored(t *testing.T) {
 
 	now := tg.clk.Now().UTC().Format(time.RFC3339Nano)
 	later := tg.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
-	leftover := `{"role":"gastown/refinery","ref":"gt-wisp-rpf","registered_at":"` + now + `","expires_at":"` + later + `"}`
+	leftover := `{"role":"gastown/landing","ref":"gt-wisp-rpf","registered_at":"` + now + `","expires_at":"` + later + `"}`
 	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
 		t.Fatal(err)
 	}

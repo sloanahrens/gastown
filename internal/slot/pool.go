@@ -18,8 +18,8 @@ import (
 )
 
 // Pool describes how many container-gate slots the town hands out and how
-// many of them are reserved for gate-class callers (the refinery, the batch
-// gate, the daemon's main-branch test). One slot per concurrently-running
+// many of them are reserved for gate-class callers (the daemon's landing
+// worker). One slot per concurrently-running
 // container-backed suite: the Docker VM's fixed CPU/memory bound is the
 // reason the count exists at all (see package doc), and the measured
 // per-suite footprint (200-340 MiB of an 8 GiB VM, gt-xtk4) is why the count
@@ -40,7 +40,7 @@ type Pool struct {
 	// slot would lock polecats out entirely).
 	ReservedForGate int
 	// YieldToGate makes a NEW non-gate acquisition wait while any
-	// gate-reserved slot is held by a live process, so a refinery gate never
+	// gate-reserved slot is held by a live process, so a landing gate never
 	// shares the machine with a crew or agent suite that started after it
 	// (gt-22hdp.29: a 7-12 min gate took 24 min beside two crew make-test
 	// runs). A holder that is already running is never preempted, and a gate
@@ -81,22 +81,16 @@ func (p Pool) normalized() Pool {
 	return p
 }
 
-// gateRoleMarkers are the substrings that identify a gate-class caller in
-// the role string recorded by every slot user: the refinery's own gate
-// ("<rig>/refinery"), the batch gate ("<rig>/refinery-batch", mq_batch.go),
-// and the daemon's periodic main-branch test ("<rig>/main-branch-test").
-// Polecat roles are "<rig>/<polecat-name>" and never contain these.
-var gateRoleMarkers = []string{"/refinery", "/main-branch-test"}
+// gateRoleSuffix identifies the one gate-class caller in the role string
+// recorded by every slot user: the daemon's landing worker
+// ("<rig>/landing", landing_worker.go). The refinery and main-branch-test
+// roles that used to share the class are deleted (gt-v4ssj.6, gt-v4ssj.4).
+const gateRoleSuffix = "/landing"
 
 // IsGateRole reports whether role belongs to the gate class that may use
-// reserved slots.
+// reserved slots and that non-gate acquisitions yield to.
 func IsGateRole(role string) bool {
-	for _, m := range gateRoleMarkers {
-		if strings.Contains(role, m) {
-			return true
-		}
-	}
-	return false
+	return strings.HasSuffix(role, gateRoleSuffix)
 }
 
 // candidates returns the slot indices role may take, in the order Acquire
@@ -555,7 +549,7 @@ func (g *Gate) underGateHold(townRoot string) bool {
 	return owner != nil && owner.PID == m.pid
 }
 
-// runningGate reports whether a live merge gate (IsMergeGateRole) holds one of
+// runningGate reports whether a live merge gate (IsGateRole) holds one of
 // pool's gate-reserved slots, and that gate's owner.
 //
 // It reads the slots' owner files and checks the owner's pid, and never
@@ -570,7 +564,7 @@ func (g *Gate) runningGate(townRoot string, pool Pool) (*Owner, bool) {
 	pool = pool.normalized()
 	for i := 0; i < pool.ReservedForGate; i++ {
 		owner := readSlotOwner(townRoot, i)
-		if owner == nil || !IsMergeGateRole(owner.Role) || owner.PID <= 0 || g.ownerGone(owner) {
+		if owner == nil || !IsGateRole(owner.Role) || owner.PID <= 0 || g.ownerGone(owner) {
 			continue
 		}
 		return owner, true
@@ -714,7 +708,7 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	// runningGate).
 	if pool.YieldToGate {
 		for _, st := range rep.Slots {
-			if st.Index < pool.ReservedForGate && st.Held && st.Owner != nil && IsMergeGateRole(st.Owner.Role) && !g.ownerGone(st.Owner) {
+			if st.Index < pool.ReservedForGate && st.Held && st.Owner != nil && IsGateRole(st.Owner.Role) && !g.ownerGone(st.Owner) {
 				rep.YieldingToGate = true
 				rep.GateHolder = st.Owner
 				break
@@ -783,12 +777,4 @@ func (r Report) HeldBy(role string) []SlotState {
 // AllHeld reports whether every slot the report knows about is held.
 func (r Report) AllHeld() bool {
 	return r.Total > 0 && r.HeldCount == r.Total
-}
-
-// IsMergeGateRole reports whether role is on the merge path: the refinery's
-// own gate ("<rig>/refinery") or its batch gate ("<rig>/refinery-batch").
-// Only these are yielded to. The daemon's main-branch test is a gate role for
-// slot reservation but not on the merge path, so crew do not wait on it.
-func IsMergeGateRole(role string) bool {
-	return strings.HasSuffix(role, "/refinery") || strings.HasSuffix(role, "/refinery-batch")
 }

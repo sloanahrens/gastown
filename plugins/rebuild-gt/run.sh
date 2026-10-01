@@ -625,8 +625,8 @@ fi
 # --- Build -------------------------------------------------------------------
 
 # Yield to a running gate (gt-htx3): make build competes for CPU with a gate
-# suite whose tests are load-sensitive, so a rebuild while a refinery, batch,
-# main-branch-test or om-review role holds a container-gate slot is deferred,
+# suite whose tests are load-sensitive, so a rebuild while a landing-worker
+# or om-review role holds a container-gate slot is deferred,
 # and past the starvation threshold it waits for that slot instead.
 #
 # slot_status_lines — the container-gate reading, three lines: the gate-class
@@ -646,7 +646,7 @@ except Exception:
 roles = []
 for s in d.get("slots") or []:
     role = ((s.get("owner") or {}).get("role") or "")
-    if role.endswith(("/refinery", "/refinery-batch", "/main-branch-test", "/om-review")):
+    if role.endswith(("/landing", "/om-review")):
         roles.append(role)
 print(", ".join(roles))
 c = d.get("unwrapped_containers") or []
@@ -691,12 +691,12 @@ reserve_remaining() {
   printf '%s' "$left"
 }
 
-# The town must also have nothing in flight (gt-oqbw): an MR a refinery is
-# mid-merge on is running a gate suite the build would compete with (the
-# install itself no longer restarts anything, claude-7fc). An MR merely ready in the
-# queue is NOT a reason to wait — it consumes nothing, and at this town's
-# merge rate the queue is never empty, so requiring that would leave the
-# install waiting forever. An unreadable Docker status is not a reason either:
+# The town must also have nothing in flight (gt-oqbw): a landing the landing
+# worker is mid-way through is running a gate suite the build would compete
+# with (the install itself no longer restarts anything, claude-7fc). A bead
+# merely waiting to land is NOT a reason to wait — it consumes nothing, and at
+# this town's landing rate the queue is never empty, so requiring that would
+# leave the install waiting forever. An unreadable Docker status is not a reason either:
 # it means the cross-check could not tell, and a VM that is down runs no suite
 # for a build to compete with.
 GATE_READING=$(slot_status_lines)

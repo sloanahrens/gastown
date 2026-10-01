@@ -78,7 +78,7 @@ behind another is visible in 'gt slot status' rather than looking like a hang.
 
 Run this wrapped around any suite that spins Docker/testcontainers, e.g.:
 
-  gt slot run --role gastown/refinery -- make test`,
+  gt slot run --role gastown/crew/sloan -- make test`,
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: false,
 	RunE:               runSlotRun,
@@ -118,7 +118,7 @@ Reaping is the mayor's and the doctor's call, not a polecat's: a polecat's slot
 token is its promise that its own suite cleans up after itself, and reaping
 another holder's containers mid-run would break that suite. The one exception
 is a container whose owner is provably gone: nothing can be using it, so a slot
-acquisition ('gt slot run', gt done's gates, the refinery) that checks docker,
+acquisition ('gt slot run', gt done's gates, the landing worker) that checks docker,
 which it does whenever no slot is held, removes those automatically and logs
 each removal on stderr. Use --dry-run to
 read the verdicts first.
@@ -135,7 +135,7 @@ you mean and that no live test process owns it, then run
 func init() {
 	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it names that holder's role. Omit it to inherit the ancestor's role automatically when nested; naming a different role always contends")
 	slotRunCmd.Flags().DurationVar(&slotRunTimeout, "timeout", 60*time.Minute, "Max time to wait for the slot to free up (0 = wait forever)")
-	slotRunCmd.Flags().IntVar(&slotRunNice, "nice", -1, "CPU niceness for the command (default: 10 for non-gate roles, 0 for refinery/batch/main-branch-test; 0 disables)")
+	slotRunCmd.Flags().IntVar(&slotRunNice, "nice", -1, "CPU niceness for the command (default: 10 for non-gate roles, 0 for the landing worker; 0 disables)")
 
 	slotStatusCmd.Flags().BoolVar(&slotStatusJSON, "json", false, "Output as JSON")
 
@@ -213,7 +213,7 @@ func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, 
 
 	// A polecat's own suite is optional verification where a gate-class holder
 	// is the merge path's critical section, and three concurrent suites
-	// tripled the refinery's gate (gt-93m1) — so non-gate holders run under
+	// tripled the merge gate (gt-93m1) — so non-gate holders run under
 	// nice(1) unless --nice says otherwise.
 	niceness := slotRunNiceness(role, slotRunNice)
 	if niceness > 0 {
@@ -312,7 +312,7 @@ func printSlotMarkers(cmd *cobra.Command, rep slot.Report) {
 // one is doing, never the marker rows that follow them (see printSlotMarkers).
 func printPoolStatusText(cmd *cobra.Command, rep slot.Report) {
 	if rep.Total > 1 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate pool: %d/%d held (%d reserved for the refinery)\n", rep.HeldCount, rep.Total, rep.Reserved)
+		fmt.Fprintf(cmd.OutOrStdout(), "Container-gate pool: %d/%d held (%d reserved for the landing worker)\n", rep.HeldCount, rep.Total, rep.Reserved)
 		for _, st := range rep.Slots {
 			if st.Marker {
 				continue

@@ -11,7 +11,7 @@
     "userPromptSubmitted": [
       {
         "type": "command",
-        "bash": "case \"${GT_ROLE:-}\" in *witness*|*refinery*|deacon*|*boot*) exit 0 ;; *) {{GT_BIN}} mail check --inject ;; esac",
+        "bash": "{{GT_BIN}} mail check --inject",
         "timeoutSec": 10
       }
     ],

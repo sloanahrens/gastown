@@ -158,11 +158,11 @@ func TestPolecatFormulas_CanBeWisped(t *testing.T) {
 	}{
 		{
 			name:         "mol-polecat-code-review",
-			requiredVars: []string{"scope", "issue", "rig"},
+			requiredVars: []string{"scope", "issue"},
 		},
 		{
 			name:         "mol-polecat-review-pr",
-			requiredVars: []string{"pr_url", "issue", "rig"},
+			requiredVars: []string{"pr_url", "issue"},
 		},
 	}
 

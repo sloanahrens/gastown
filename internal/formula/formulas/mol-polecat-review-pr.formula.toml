@@ -310,7 +310,3 @@ required = true
 [vars.issue]
 description = "The tracking issue for this review task"
 required = true
-
-[vars.rig]
-description = "The rig this PR review is for"
-required = true

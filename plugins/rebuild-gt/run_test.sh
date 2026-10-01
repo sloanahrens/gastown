@@ -241,19 +241,19 @@ json.dump(d, open(path, "w"))
 # --- Case 1: a gate-class role holds a slot -> DEFERRED (exit 3), no build,
 # no record: the record would spend the cooldown that the retry needs. ---
 T=$(make_town)
-holder_json "gastown/refinery" > "$T/slot.json"
+holder_json "gastown/landing" > "$T/slot.json"
 rc=$(run_plugin "$T")
 if [ "$rc" != "3" ]; then fail "busy gate: exit $rc, want 3 (deferred): $(cat "$T/run.out")"; else pass "busy gate: exit 3 (deferred)"; fi
-if [ -e "$T/build.marker" ]; then fail "busy gate: make build ran while gastown/refinery held a slot"; else pass "busy gate: no build"; fi
+if [ -e "$T/build.marker" ]; then fail "busy gate: make build ran while gastown/landing held a slot"; else pass "busy gate: no build"; fi
 if grep -q "record-run" "$T/gt.log" 2>/dev/null; then
   fail "busy gate: recorded a run, which would spend the cooldown: $(cat "$T/gt.log")"
 else
   pass "busy gate: no run record, so the next heartbeat retries"
 fi
-if grep -q "gate suite holds a slot (gastown/refinery)" "$T/run.out"; then pass "busy gate: names the holder"; else fail "busy gate: no holder named: $(cat "$T/run.out")"; fi
+if grep -q "gate suite holds a slot (gastown/landing)" "$T/run.out"; then pass "busy gate: names the holder"; else fail "busy gate: no holder named: $(cat "$T/run.out")"; fi
 
 # --- Case 2: every gate-class role suffix defers the rebuild ---
-for role in gastown/refinery-batch gastown/main-branch-test om/om-review; do
+for role in hm/landing om/om-review; do
   T=$(make_town)
   holder_json "$role" > "$T/slot.json"
   rc=$(run_plugin "$T")
@@ -633,7 +633,7 @@ fi
 # Case 20: a block that repeats is counted and named in the log, so the town can
 # see starvation without reading the state file.
 T=$(make_town)
-holder_json "gastown/refinery-batch" > "$T/slot.json"
+holder_json "hm/landing" > "$T/slot.json"
 run_plugin "$T" >/dev/null
 rc=$(run_plugin "$T")
 if grep -q "blocked 0m over 2 run(s)" "$T/run.out"; then
@@ -661,7 +661,7 @@ fi
 # the old code, which read the slot once and went straight to 'gt slot run',
 # slot.log holds a single read (gt-kox0 major).
 T=$(make_town)
-holder_json "gastown/refinery-batch" > "$T/slot.json"
+holder_json "hm/landing" > "$T/slot.json"
 touch "$T/slot.flip"
 age_state "$T" 40
 rc=$(run_plugin "$T" REBUILD_GT_POLL_SECONDS=0)
@@ -700,7 +700,7 @@ fi
 # Case 22: the gate releases, but the acquire still fails — a deferral, not a
 # failure, because the build never started.
 T=$(make_town)
-holder_json "gastown/refinery-batch" > "$T/slot.json"
+holder_json "hm/landing" > "$T/slot.json"
 touch "$T/slot.flip"
 touch "$T/slot_refuse"
 age_state "$T" 40
@@ -720,7 +720,7 @@ fi
 # than waiting forever or failing. The budget is what keeps the plugin inside
 # its own [execution] timeout (gt-kox0).
 T=$(make_town)
-holder_json "gastown/refinery-batch" > "$T/slot.json"
+holder_json "hm/landing" > "$T/slot.json"
 age_state "$T" 40
 rc=$(run_plugin "$T" REBUILD_GT_RESERVE_WAIT=1s REBUILD_GT_POLL_SECONDS=0)
 if [ "$rc" = "3" ] && [ ! -e "$T/build.marker" ] && grep -q "did not get it" "$T/run.out"; then

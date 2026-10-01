@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/cli"
@@ -19,9 +18,9 @@ import (
 // EnsureSettingsForRole provisions all agent-specific configuration for a role.
 // settingsDir is where provider settings (e.g., .claude/settings.json) are installed.
 // workDir is the agent's working directory where slash commands are provisioned.
-// For roles like crew/witness/refinery/polecat, settingsDir is a gastown-managed
+// For crew and polecats, settingsDir is a gastown-managed
 // parent directory (passed via --settings flag), while workDir is the customer repo.
-// For mayor/deacon, settingsDir and workDir are the same.
+// For the mayor, settingsDir and workDir are the same.
 func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.RuntimeConfig) error {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
@@ -207,13 +206,7 @@ func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 		return nil
 	}
 
-	role = strings.ToLower(role)
-	command := "gt prime"
-	// NOTE: session-started nudge to deacon removed — it interrupted
-	// the deacon's await-signal backoff (exponential sleep). The deacon
-	// already wakes on beads activity via bd activity --follow.
-
-	return []string{command}
+	return []string{"gt prime"}
 }
 
 // RunStartupFallback sends the startup fallback commands via tmux.

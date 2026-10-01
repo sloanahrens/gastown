@@ -185,8 +185,8 @@ func (m reentrantMark) grants(townRoot, role string, selfPID int) bool {
 // path instead of contending against the very ancestor it is nested under
 // (see ReentrantEnvVar and gt-off9) — the role-scoping that fast path now
 // requires is otherwise a contract a caller has no way to discharge, since
-// the ancestor's exact role string ("<rig>/refinery-batch",
-// "<rig>/main-branch-test", ...) is assembled deep in Go call paths a
+// the ancestor's exact role string ("<rig>/landing",
+// "<rig>/crew/<name>", ...) is assembled deep in Go call paths a
 // shell-level nested wrap never sees. The second return is false when this
 // process holds no marker, the marker names a different town, or the
 // marker predates roles (an empty role carries no value to hand back, even

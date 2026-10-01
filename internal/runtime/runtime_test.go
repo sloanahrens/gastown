@@ -120,29 +120,6 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 	}
 }
 
-func TestStartupFallbackCommands_PatrolRolesSkipMailInject(t *testing.T) {
-	t.Parallel()
-	rc := &config.RuntimeConfig{
-		Hooks: &config.RuntimeHooksConfig{
-			Provider: "none",
-		},
-	}
-
-	for _, role := range []string{"witness", "refinery", "deacon", "boot", "deacon/boot"} {
-		t.Run(role, func(t *testing.T) {
-			commands := StartupFallbackCommands(role, rc)
-			if commands == nil || len(commands) == 0 {
-				t.Fatal("StartupFallbackCommands() should return commands for patrol role")
-			}
-			for _, cmd := range commands {
-				if contains(cmd, "mail check --inject") {
-					t.Fatalf("patrol role %s should not contain startup mail check: %q", role, cmd)
-				}
-			}
-		})
-	}
-}
-
 func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 	t.Parallel()
 	rc := &config.RuntimeConfig{
@@ -165,21 +142,6 @@ func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
-	t.Parallel()
-	rc := &config.RuntimeConfig{
-		Hooks: &config.RuntimeHooksConfig{
-			Provider: "none",
-		},
-	}
-
-	// Role should be lowercased internally
-	commands := StartupFallbackCommands("POLECAT", rc)
-	if commands == nil {
-		t.Error("StartupFallbackCommands() should handle uppercase role")
 	}
 }
 
