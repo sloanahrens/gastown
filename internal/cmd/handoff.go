@@ -1225,7 +1225,8 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 		case session.RoleMayor:
 			return townRoot + "/mayor", nil
 		case session.RoleOverseer:
-			return townRoot + "/deacon", nil
+			// The overseer is the human operator, working from the town root.
+			return townRoot, nil
 		case session.RolePolecat:
 			return fmt.Sprintf("%s/%s/polecats/%s", townRoot, identity.Rig, identity.Name), nil
 		default:
