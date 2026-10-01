@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // BeadsRuntimeConfig is the Dolt server a .beads directory's metadata.json
@@ -57,6 +59,9 @@ func ReadBeadsRuntimeConfig(beadsDir string) (cfg BeadsRuntimeConfig, ok bool) {
 		port = DefaultPort
 	}
 	database := metadata.DoltDatabase
+	if reg := configpkg.RigDatabaseForBeadsDir(beadsDir); reg != "" {
+		database = reg
+	}
 	if database == "" {
 		database = metadata.Database
 	}

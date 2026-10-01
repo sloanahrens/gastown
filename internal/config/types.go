@@ -491,6 +491,12 @@ type RigEntry struct {
 	// nothing for it. gt rig park and gt rig unpark are its only writers
 	// (gt-y3pgh.4, D5 Q5); everything else reads it through townconfig.
 	Parked *RigParked `json:"parked,omitempty"`
+	// DoltDatabase is the rig's database on the town Dolt server, absorbed
+	// from its .beads/metadata.json (gt-y3pgh.7, D5 Q3). gt config migrate
+	// and gt rig add/adopt write it; gastown reads it here first
+	// (RigDatabaseForBeadsDir) and passes it to bd. metadata.json keeps its
+	// copy because bd reads that file itself.
+	DoltDatabase string `json:"dolt_database,omitempty"`
 }
 
 // RigParked records who parked a rig, when, and why.

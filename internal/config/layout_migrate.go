@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 )
 
@@ -22,6 +23,9 @@ type LayoutStep struct {
 	Host, Key string
 	// Action is what happens to it.
 	Action LayoutAction
+	// Rig and Database are an ActionAbsorb's rig and database name; File
+	// is then the metadata.json it came from (kept, not removed).
+	Rig, Database string
 }
 
 // LayoutAction is a LayoutStep's kind.
@@ -36,6 +40,10 @@ const (
 	// ActionCreate writes an empty rig registry: the town had no
 	// mayor/rigs.json, and the registry section marks the layout.
 	ActionCreate LayoutAction = "create"
+	// ActionAbsorb records a rig's database name, read from its bd
+	// metadata.json, in its registry entry (D5 Q3). metadata.json stays:
+	// bd reads it.
+	ActionAbsorb LayoutAction = "absorb"
 )
 
 func (s LayoutStep) String() string {
@@ -44,6 +52,8 @@ func (s LayoutStep) String() string {
 		return fmt.Sprintf("move %s into %s %q, then remove it", s.File, s.Host, s.Key)
 	case ActionRetire:
 		return fmt.Sprintf("remove %s (%s %q already holds it)", s.File, s.Host, s.Key)
+	case ActionAbsorb:
+		return fmt.Sprintf("record rig %s's dolt_database %q from %s in %s %q", s.Rig, s.Database, s.File, s.Host, s.Key)
 	default:
 		return fmt.Sprintf("write an empty rig registry to %s %q (no %s)", s.Host, s.Key, s.File)
 	}
@@ -132,7 +142,7 @@ func MigrateLayout(townRoot string) ([]LayoutStep, error) {
 		return nil, fmt.Errorf("verifying the migrated files (the old files are kept): %w", err)
 	}
 	for _, step := range st.steps {
-		if step.Action == ActionCreate {
+		if step.Action != ActionMove && step.Action != ActionRetire {
 			continue
 		}
 		p := filepath.Join(townRoot, filepath.FromSlash(step.File))
@@ -184,6 +194,11 @@ func readMigrationState(root string) (*migrationState, error) {
 		step := LayoutStep{File: rel, Host: s.host, Key: s.key}
 		switch {
 		case present && has:
+			if s.key == registryKey {
+				// The section carries the database names an earlier run
+				// absorbed; the leftover file does not.
+				tree, _ = absorbRigDatabases(root, cloneTree(tree), s)
+			}
 			if !reflect.DeepEqual(tree, inHost) {
 				return nil, fmt.Errorf("%s and %s %q both exist and differ: an old gt wrote the file after a partial migration; merge them by hand, then rerun", rel, s.host, s.key)
 			}
@@ -193,6 +208,14 @@ func readMigrationState(root string) (*migrationState, error) {
 			st.legacy[rel] = tree
 			host.top[s.key] = tree
 			step.Action = ActionMove
+			if s.key == registryKey {
+				var absorbed []LayoutStep
+				tree, absorbed = absorbRigDatabases(root, tree, s)
+				st.legacy[rel], host.top[s.key] = tree, tree
+				st.steps = append(st.steps, step)
+				st.steps = append(st.steps, absorbed...)
+				continue
+			}
 		case !has && s.key == registryKey:
 			host.top[s.key] = map[string]any{"version": jsonInt(CurrentRigsVersion), "rigs": map[string]any{}}
 			step.Action = ActionCreate
@@ -335,3 +358,49 @@ func jsonIndent(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") 
 // jsonInt is n as decodeTree reads it, so a built tree compares equal to
 // one read back from disk.
 func jsonInt(n int) json.Number { return json.Number(strconv.Itoa(n)) }
+
+// absorbRigDatabases sets dolt_database on every registry entry in tree (a
+// rigs.json document) that lacks one and whose bd metadata.json names one,
+// and returns the tree and an ActionAbsorb step per rig it set.
+func absorbRigDatabases(root string, tree any, s section) (any, []LayoutStep) {
+	doc, _ := tree.(map[string]any)
+	rigs, _ := doc["rigs"].(map[string]any)
+	names := make([]string, 0, len(rigs))
+	for name := range rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var steps []LayoutStep
+	for _, name := range names {
+		entry, ok := rigs[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		if db, _ := entry["dolt_database"].(string); db != "" {
+			continue
+		}
+		db, from := rigMetadataDatabase(root, name)
+		if db == "" {
+			continue
+		}
+		entry["dolt_database"] = db
+		steps = append(steps, LayoutStep{
+			File: from, Host: s.host, Key: s.key,
+			Action: ActionAbsorb, Rig: name, Database: db,
+		})
+	}
+	return tree, steps
+}
+
+// cloneTree deep-copies a decodeTree value.
+func cloneTree(v any) any {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	out, err := decodeTree(data)
+	if err != nil {
+		return v
+	}
+	return out
+}

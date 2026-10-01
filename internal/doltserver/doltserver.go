@@ -3531,6 +3531,9 @@ func FindOrphanedDatabases(townRoot string) ([]OrphanedDatabase, error) {
 // readExistingDoltDatabase reads the dolt_database field from an existing metadata.json.
 // Returns empty string if the file doesn't exist or can't be read.
 func readExistingDoltDatabase(beadsDir string) string {
+	if db := configpkg.RigDatabaseForBeadsDir(beadsDir); db != "" {
+		return db
+	}
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
@@ -3546,8 +3549,9 @@ func readExistingDoltDatabase(beadsDir string) string {
 	return ""
 }
 
-// DatabaseForBeadsDir returns the dolt_database named by beadsDir's
-// metadata.json, or "" when there is no metadata.json or it names none.
+// DatabaseForBeadsDir returns the database of the rig whose beads directory
+// is beadsDir: the registry's dolt_database (gt-y3pgh.7), else the one
+// beadsDir's metadata.json names, or "" when neither names one.
 //
 // Address a rig's database over SQL by this value rather than by the rig's
 // name: the two differ on upgraded towns (the gastown rig keeps the "gt"
@@ -3912,6 +3916,9 @@ func (h *host) checkWorkspace(townRoot, rigName, beadsDir string, servedDBs map[
 	}
 
 	dbName := metadata.DoltDatabase
+	if reg := configpkg.RigDatabaseForBeadsDir(beadsDir); reg != "" {
+		dbName = reg
+	}
 	if dbName == "" {
 		dbName = rigName
 	}
@@ -4180,6 +4187,18 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 		dbToRig[k] = v
 		rigCanonical[v] = k
 	}
+	// The registry's dolt_database, absorbed from metadata.json by gt config
+	// migrate (gt-y3pgh.7), outranks every inference: it is the rig's
+	// database, and metadata.json is kept equal to it for bd.
+	registryDB := make(map[string]string)
+	if rigs, err := registeredRigs(townRoot); err == nil {
+		for rig, entry := range rigs {
+			if entry.DoltDatabase != "" {
+				registryDB[rig] = entry.DoltDatabase
+				dbToRig[entry.DoltDatabase] = rig
+			}
+		}
+	}
 
 	// Group candidate database names by rig. When routes.jsonl and rigs.json
 	// use different prefixes for the same rig (e.g. "gas" vs "gt" both map to
@@ -4201,6 +4220,7 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 	for rigName, candidates := range rigCandidates {
 		// When multiple databases map to the same rig, choose one effective
 		// DB name. Authority order:
+		//   0. The registry's dolt_database, when that database exists.
 		//   1. The canonical name declared in rigs.json, when that database
 		//      exists — a stale alias left behind by a migration must not win
 		//      just because metadata.json still points at it. (gt-ddb)
@@ -4208,7 +4228,9 @@ func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []erro
 		//      candidates), to avoid oscillating between aliases. (gas-ar0)
 		//   3. The first candidate (alphabetical, from os.ReadDir ordering).
 		dbName := candidates[0]
-		if canonical, ok := rigCanonical[rigName]; ok && slices.Contains(candidates, canonical) {
+		if reg, ok := registryDB[rigName]; ok && slices.Contains(candidates, reg) {
+			dbName = reg
+		} else if canonical, ok := rigCanonical[rigName]; ok && slices.Contains(candidates, canonical) {
 			dbName = canonical
 		} else if len(candidates) > 1 {
 			dbName = pickDBForRig(townRoot, rigName, candidates)

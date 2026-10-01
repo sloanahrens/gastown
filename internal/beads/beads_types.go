@@ -386,6 +386,9 @@ func ensureDatabaseInitialized(beadsDir string) error {
 		if err := json.Unmarshal(data, &meta); err != nil {
 			return nil // Can't parse — assume initialized (backward compat)
 		}
+		if reg := config.RigDatabaseForBeadsDir(beadsDir); reg != "" {
+			meta.DoltDatabase = reg // the registry's name wins (gt-y3pgh.7)
+		}
 		if meta.DoltMode == "server" && meta.DoltDatabase != "" {
 			townRoot := FindTownRoot(filepath.Dir(beadsDir))
 			if townRoot == "" {

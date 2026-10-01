@@ -22,12 +22,19 @@ var bdTargetEnvKeys = []string{
 	"GT_DOLT_DATA",
 }
 
-// DatabaseNameFromMetadata reads the dolt_database field from .beads/metadata.json.
-// Returns empty string if metadata doesn't exist or has no database configured.
+// DatabaseNameFromMetadata is the database beadsDir's workspace uses: the rig
+// registry's dolt_database for a registered rig's beads directory, else the
+// dolt_database field of .beads/metadata.json. Returns empty string when
+// neither names one.
 func DatabaseNameFromMetadata(beadsDir string) string {
 	beadsDir = canonicalBeadsDir(beadsDir)
 	if beadsDir == "" {
 		return ""
+	}
+	// A registered rig's database is the registry's (gt-y3pgh.7);
+	// metadata.json, which bd reads itself, answers for the rest.
+	if db := agentconfig.RigDatabaseForBeadsDir(beadsDir); db != "" {
+		return db
 	}
 	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
 	if err != nil {

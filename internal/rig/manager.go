@@ -852,6 +852,9 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 		BeadsConfig: &config.BeadsConfig{
 			Prefix: opts.BeadsPrefix,
 		},
+		// The database EnsureMetadata just named in metadata.json; the
+		// registry carries it for gastown, metadata.json for bd (gt-y3pgh.7).
+		DoltDatabase: config.RigMetadataDatabase(m.townRoot, opts.Name),
 	}
 
 	// Post-init identity verification (gas-tc4): verify metadata.json points
@@ -1817,6 +1820,9 @@ func (m *Manager) RegisterRig(opts RegisterRigOptions) (*RegisterRigResult, erro
 		BeadsConfig: &config.BeadsConfig{
 			Prefix: result.BeadsPrefix,
 		},
+		// The adopted rig's existing database, from its metadata.json
+		// (gt-y3pgh.7).
+		DoltDatabase: config.RigMetadataDatabase(m.townRoot, opts.Name),
 	}
 
 	return result, nil
