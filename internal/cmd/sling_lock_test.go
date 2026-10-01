@@ -1,18 +1,18 @@
+//go:build !windows
+
+// Advisory flock is a no-op on Windows, so these tests run elsewhere only.
+
 package cmd
 
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestTryAcquireSlingBeadLock_Contention(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -42,9 +42,6 @@ func TestTryAcquireSlingBeadLock_Contention(t *testing.T) {
 }
 
 func TestTryAcquireSlingAssigneeLock_DifferentAgents(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -67,9 +64,6 @@ func TestTryAcquireSlingAssigneeLock_DifferentAgents(t *testing.T) {
 // attempts and takes the lock once the holder lets go. The wait is injected, so
 // the holder's release happens inside the first sleep rather than racing it.
 func TestTryAcquireSlingAssigneeLock_WaitsForTheHolder(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -96,9 +90,6 @@ func TestTryAcquireSlingAssigneeLock_WaitsForTheHolder(t *testing.T) {
 // A holder that never lets go is a stuck sling: the waiter gives up after its
 // bounded retries and says so, rather than blocking the sling forever.
 func TestTryAcquireSlingAssigneeLock_TimesOutOnAStuckHolder(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -124,9 +115,6 @@ func TestTryAcquireSlingAssigneeLock_TimesOutOnAStuckHolder(t *testing.T) {
 }
 
 func TestTryAcquireSlingAssigneeLock_AgentNameSanitization(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -158,9 +146,6 @@ func slingLockFiles(t *testing.T, townRoot string) []string {
 // A released lock takes its sentinel file with it: one file per bead and per
 // assignee ever slung is the unbounded growth gt-10u8 reports.
 func TestSlingLocks_ReleaseRemovesSentinelFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -212,9 +197,6 @@ func TestUnlinkThenUnlock_RemovesTheNameBeforeTheLockDrops(t *testing.T) {
 // A sling killed before its release leaves its sentinel behind. The next sling
 // sweeps it, but never a file whose lock a live sling still holds.
 func TestSweepStaleSlingFlocks_RemovesOnlyUnheld(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
 	t.Parallel()
 
 	townRoot := t.TempDir()

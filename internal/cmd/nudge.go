@@ -426,10 +426,16 @@ func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string
 //   - Session disappears: exit (nothing to deliver to).
 //   - Timeout: exit (queue stays for next input or watcher cycle).
 func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
-	fmt.Fprintf(os.Stderr, "Watching %s for idle (up to %s)...\n", sessionName, idleWatcherTimeout)
-	deadline := time.Now().Add(idleWatcherTimeout)
-	for time.Now().Before(deadline) {
-		clockwork.NewRealClock().Sleep(idleWatcherPollInterval)
+	watchAndDeliverWith(clockwork.NewRealClock(), idleWatcherTimeout, idleWatcherPollInterval, t, townRoot, sessionName)
+}
+
+// watchAndDeliverWith is watchAndDeliver polling every interval for up to
+// timeout on clk.
+func watchAndDeliverWith(clk clockwork.Clock, timeout, interval time.Duration, t *tmux.Tmux, townRoot, sessionName string) {
+	fmt.Fprintf(os.Stderr, "Watching %s for idle (up to %s)...\n", sessionName, timeout)
+	deadline := clk.Now().Add(timeout)
+	for clk.Now().Before(deadline) {
+		clk.Sleep(interval)
 
 		// If queue is already empty, someone else drained it.
 		if nudge.QueueLen(townRoot, sessionName) == 0 {
@@ -445,7 +451,7 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 		// IsIdle to get the consecutive-poll guard (2 polls 200ms apart).
 		// This avoids false positives during inter-tool-call gaps where
 		// the prompt briefly appears while Claude Code is still working.
-		if err := t.WaitForIdle(sessionName, idleWatcherPollInterval); err == nil {
+		if err := t.WaitForIdle(sessionName, interval); err == nil {
 			// Drain atomically claims queued entries (rename-based).
 			// If another process raced and drained first, we get an
 			// empty slice and skip delivery to avoid duplicates.
@@ -468,7 +474,7 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 	}
 	// Timeout — the nudge stays queued for the next watcher or a manual drain.
 	// Say so rather than exit like the success path above (gt-z4gs).
-	fmt.Fprintf(os.Stderr, "idle-watcher: gave up waiting for %s to go idle after %s; nudge stays queued for the next watcher or a manual drain\n", sessionName, idleWatcherTimeout)
+	fmt.Fprintf(os.Stderr, "idle-watcher: gave up waiting for %s to go idle after %s; nudge stays queued for the next watcher or a manual drain\n", sessionName, timeout)
 }
 
 func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
@@ -490,13 +496,54 @@ var validNudgePriorities = map[string]bool{
 	nudge.PriorityUrgent: true,
 }
 
+// validateNudgeFlags rejects an unknown --mode or --priority.
+func validateNudgeFlags(mode, priority string) error {
+	if !validNudgeModes[mode] {
+		return fmt.Errorf("invalid --mode %q: must be one of immediate, queue, wait-idle", mode)
+	}
+	if !validNudgePriorities[priority] {
+		return fmt.Errorf("invalid --priority %q: must be one of normal, urgent", priority)
+	}
+	return nil
+}
+
+// nudgeTargetAndMessage reads the nudge target from args and the message
+// from -m, --stdin (through readStdin) or the second argument.
+func nudgeTargetAndMessage(messageFlag string, stdin bool, readStdin func() ([]byte, error), args []string) (target, message string, err error) {
+	// Normalize trailing slash: the mail system uses "mayor/" and "deacon/"
+	// as canonical addresses, but nudge role shortcuts expect bare names.
+	// Without this, "mayor/" falls through to parseAddress which rejects
+	// the empty second component, silently dropping the nudge.
+	target = strings.TrimSuffix(args[0], "/")
+
+	// Handle --stdin: read message from stdin (avoids shell quoting issues)
+	if stdin {
+		if messageFlag != "" {
+			return "", "", fmt.Errorf("cannot use --stdin with --message/-m")
+		}
+		data, err := readStdin()
+		if err != nil {
+			return "", "", fmt.Errorf("reading stdin: %w", err)
+		}
+		messageFlag = strings.TrimRight(string(data), "\n")
+	}
+
+	// Get message from -m flag or positional arg
+	switch {
+	case messageFlag != "":
+		message = messageFlag
+	case len(args) >= 2:
+		message = args[1]
+	default:
+		return "", "", fmt.Errorf("message required: use -m flag or provide as second argument")
+	}
+	return target, message, nil
+}
+
 func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 	// Validate --mode and --priority before doing anything else.
-	if !validNudgeModes[nudgeModeFlag] {
-		return fmt.Errorf("invalid --mode %q: must be one of immediate, queue, wait-idle", nudgeModeFlag)
-	}
-	if !validNudgePriorities[nudgePriorityFlag] {
-		return fmt.Errorf("invalid --priority %q: must be one of normal, urgent", nudgePriorityFlag)
+	if err := validateNudgeFlags(nudgeModeFlag, nudgePriorityFlag); err != nil {
+		return err
 	}
 
 	// --if-fresh: skip nudge if the caller's tmux session is older than 60s.
@@ -516,34 +563,9 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	target := args[0]
-
-	// Normalize trailing slash: the mail system uses "mayor/" and "deacon/"
-	// as canonical addresses, but nudge role shortcuts expect bare names.
-	// Without this, "mayor/" falls through to parseAddress which rejects
-	// the empty second component, silently dropping the nudge.
-	target = strings.TrimSuffix(target, "/")
-
-	// Handle --stdin: read message from stdin (avoids shell quoting issues)
-	if nudgeStdinFlag {
-		if nudgeMessageFlag != "" {
-			return fmt.Errorf("cannot use --stdin with --message/-m")
-		}
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading stdin: %w", err)
-		}
-		nudgeMessageFlag = strings.TrimRight(string(data), "\n")
-	}
-
-	// Get message from -m flag or positional arg
-	var message string
-	if nudgeMessageFlag != "" {
-		message = nudgeMessageFlag
-	} else if len(args) >= 2 {
-		message = args[1]
-	} else {
-		return fmt.Errorf("message required: use -m flag or provide as second argument")
+	target, message, err := nudgeTargetAndMessage(nudgeMessageFlag, nudgeStdinFlag, func() ([]byte, error) { return io.ReadAll(os.Stdin) }, args)
+	if err != nil {
+		return err
 	}
 
 	// Identify sender for message prefix (needed before channel check)
@@ -616,7 +638,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			// Explicit polecat address (e.g., "vastal/polecats/furiosa").
 			// Bypasses crew-first resolution for short addresses.
 			pcName := strings.TrimPrefix(polecatName, "polecats/")
-			mgr, _, err := getSessionManager(rigName)
+			mgr, err := getSessionManager(rigName)
 			if err != nil {
 				return err
 			}
@@ -629,7 +651,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			if exists, _ := t.HasSession(crewSession); exists {
 				sessionName = crewSession
 			} else {
-				mgr, _, err := getSessionManager(rigName)
+				mgr, err := getSessionManager(rigName)
 				if err != nil {
 					return err
 				}

@@ -284,7 +284,7 @@ func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 	}
 }
 
-// ── New tests for hq-c6u: relocation and the dog kennel (deacon/dogs) ─── //
+// ── New tests for hq-c6u: relocation ─── //
 
 func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 	t.Parallel()
@@ -337,111 +337,6 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 	expectedCorrected := filepath.Join(rigDir, ".repo.git")
 	if bw.correctedBareRepo != expectedCorrected {
 		t.Errorf("expected correctedBareRepo=%q, got %q", expectedCorrected, bw.correctedBareRepo)
-	}
-}
-
-func TestWorktreeGitdirCheck_DogKennel(t *testing.T) {
-	t.Parallel()
-	// Simulate deacon/dogs/<dogname>/<rigname>/.git pointing to stale paths.
-	tmpDir := t.TempDir()
-	rigName := "myrig"
-
-	// Create the rig with .repo.git
-	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, ".repo.git", "worktrees"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create deacon/dogs/alpha/myrig/ with a broken .git file
-	dogWtDir := filepath.Join(tmpDir, "deacon", "dogs", "alpha", rigName)
-	if err := os.MkdirAll(dogWtDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	gitFile := filepath.Join(dogWtDir, ".git")
-	oldPath := "/old/prefix/gt/" + rigName + "/.repo.git/worktrees/myrig1"
-	if err := os.WriteFile(gitFile, []byte("gitdir: "+oldPath+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	check := NewWorktreeGitdirCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	result := check.Run(ctx)
-
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError for broken dog worktree, got %v", result.Status)
-	}
-	if len(result.Details) == 0 {
-		t.Fatal("expected details about broken dog worktree")
-	}
-	// Should mention deacon/dogs path (normalize separators for Windows compatibility)
-	normalizedDetail := filepath.ToSlash(result.Details[0])
-	if !strings.Contains(normalizedDetail, "deacon/dogs/alpha") {
-		t.Errorf("expected deacon/dogs/alpha in detail, got %q", result.Details[0])
-	}
-	// Should identify as relocated (since .repo.git exists at correct location)
-	if !strings.Contains(result.Details[0], "relocated") {
-		t.Errorf("expected 'relocated' in detail, got %q", result.Details[0])
-	}
-}
-
-func TestWorktreeGitdirCheck_DogKennel_MultipleDogs(t *testing.T) {
-	t.Parallel()
-	// Multiple dogs with broken worktrees for the same rig.
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create rig
-	rigDir := filepath.Join(tmpDir, rigName)
-	if err := os.MkdirAll(filepath.Join(rigDir, ".repo.git", "worktrees"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create 3 dogs with broken worktrees
-	for _, dog := range []string{"alpha", "bravo", "charlie"} {
-		dogWtDir := filepath.Join(tmpDir, "deacon", "dogs", dog, rigName)
-		if err := os.MkdirAll(dogWtDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		gitFile := filepath.Join(dogWtDir, ".git")
-		oldPath := "/old/path/" + rigName + "/.repo.git/worktrees/" + rigName + "_" + dog
-		if err := os.WriteFile(gitFile, []byte("gitdir: "+oldPath+"\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	check := NewWorktreeGitdirCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	result := check.Run(ctx)
-
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError, got %v", result.Status)
-	}
-	if !strings.Contains(result.Message, "3 worktree") {
-		t.Errorf("expected 3 broken worktrees, got %q", result.Message)
-	}
-}
-
-func TestWorktreeGitdirCheck_NoDogKennel(t *testing.T) {
-	t.Parallel()
-	// Town with no deacon/dogs should still pass.
-	tmpDir := t.TempDir()
-
-	check := NewWorktreeGitdirCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK for town with no deacon/dogs, got %v", result.Status)
 	}
 }
 

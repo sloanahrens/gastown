@@ -61,10 +61,6 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 		// Town-level agents (hq- prefix)
 		{"hq-mayor", "mayor/"},
 		{"hq-deacon", "deacon/"},
-		// Retired dog agent beads have no mailbox (gt-29q6g)
-		{"hq-dog-alpha", ""},
-		{"hq-dog-my-dog", ""},
-		{"gt-dog-alpha", ""},
 
 		// Rig singletons
 		{"gt-gastown-witness", "gastown/witness"},
@@ -83,7 +79,6 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 		// Invalid
 		{"invalid", ""},
 		{"not-gt-prefix", ""},
-		{"hq-dog", ""},
 		{"", ""},
 	}
 

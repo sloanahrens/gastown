@@ -32,12 +32,18 @@ func sourceRouteContext(currentBeadsDir, routedBeadsDir string) string {
 }
 
 func resolveSubmitSourceIssue(cwd, issueID string) (*submitSourceIssue, error) {
+	return resolveSubmitSourceIssueRun(cwd, issueID, nil)
+}
+
+// resolveSubmitSourceIssueRun is resolveSubmitSourceIssue whose bd calls go to
+// run; nil is the real bd.
+func resolveSubmitSourceIssueRun(cwd, issueID string, run beads.BDRunner) (*submitSourceIssue, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
 		return nil, fmt.Errorf("source_issue is required")
 	}
 
-	sourceBD, currentBeadsDir, routedBeadsDir := routedIssueBeads(cwd, issueID)
+	sourceBD, currentBeadsDir, routedBeadsDir := routedIssueBeadsRun(cwd, issueID, run)
 	issue, err := sourceBD.Show(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("source_issue %s could not be resolved (%s): %w", issueID, sourceRouteContext(currentBeadsDir, routedBeadsDir), err)

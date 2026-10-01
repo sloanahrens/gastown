@@ -454,27 +454,11 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 	}}, nil
 }
 
-// isRetiredDogBeadID reports whether id is an agent bead of the retired dog
-// role (hq-dog-<name>, gt-dog-<name>). Those beads outlive the role, but dogs
-// have no mailbox any more (gt-29q6g), so they map to no address.
-func isRetiredDogBeadID(id string) bool {
-	for _, prefix := range []string{"hq-dog", "gt-dog"} {
-		if id == prefix || strings.HasPrefix(id, prefix+"-") {
-			return true
-		}
-	}
-	return false
-}
-
 // AgentBeadIDToAddress converts an agent bead ID to a mail address.
 // Handles both gt- (rig agents) and hq- (town agents) prefixes:
 //   - hq-mayor → mayor/
 //   - gt-gastown-crew-max → gastown/crew/max
 func AgentBeadIDToAddress(id string) string {
-	if isRetiredDogBeadID(id) {
-		return ""
-	}
-
 	var rest string
 
 	// Handle both gt- (rig agents) and hq- (town agents) prefixes

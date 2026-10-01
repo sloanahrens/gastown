@@ -146,11 +146,6 @@ func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
 		return "", parts[0], "", true
 	}
 
-	// Check for town-level named roles (dog) first
-	if parts[0] == "dog" {
-		return "", "dog", strings.Join(parts[1:], "-"), true
-	}
-
 	// Check for collapsed named agent: prefix-role-name (e.g., ff-polecat-nux)
 	// This happens when prefix == rig, so the rig component was omitted.
 	if isNamedRole(parts[0]) {

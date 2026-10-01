@@ -22,21 +22,6 @@ func (f *fakeSandbox) RemovePolecat(name string) error {
 
 func (f *fakeSandbox) DeleteBranch(branch string) { f.branches = append(f.branches, branch) }
 
-// installRollbackFakes swaps the bead and rig seams the rollback touches for
-// fakes, so no test here reaches bd, git or a polecat manager.
-func installRollbackFakes(t *testing.T, rel *fakeWorkReleaser) *fakeSandbox {
-	t.Helper()
-	sb := &fakeSandbox{}
-	prevRel, prevSandbox, prevSurviving := newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn, survivingWorkForBeadFn
-	newPolecatWorkReleaserFn = func(string, string) polecatWorkReleaser { return rel }
-	openSpawnedPolecatSandboxFn = func(string, string) (spawnedPolecatSandbox, error) { return sb, nil }
-	survivingWorkForBeadFn = func(string, string) (string, error) { return "", nil }
-	t.Cleanup(func() {
-		newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn, survivingWorkForBeadFn = prevRel, prevSandbox, prevSurviving
-	})
-	return sb
-}
-
 // --- cleanupSpawnedPolecatWork: undo only what this sling created -----------
 
 func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {

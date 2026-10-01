@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/config"
@@ -298,16 +300,12 @@ func parseAddress(addr string) (rigName, polecatName string, err error) {
 }
 
 // getSessionManager creates a session manager for the given rig.
-func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error) {
+func getSessionManager(rigName string) (*polecat.SessionManager, error) {
 	_, r, err := getRig(rigName)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
-
-	return polecatMgr, r, nil
+	return polecat.NewSessionManager(tmux.NewTmux(), r), nil
 }
 
 // sessionSeat is a resolved `gt session` address: the <rig>/<name> polecat
@@ -331,15 +329,22 @@ type sessionSeat struct {
 //
 // The seats are the rig's polecats: its polecats/ directories.
 func resolveSessionSeat(args []string) (sessionSeat, error) {
+	return resolveSessionSeatWith(args, getRig)
+}
+
+// resolveSessionSeatWith is resolveSessionSeat with the rig looked up by
+// lookupRig (getRig, which finds the town from cwd, in production).
+func resolveSessionSeatWith(args []string, lookupRig func(rigName string) (string, *rig.Rig, error)) (sessionSeat, error) {
 	rigName, name, err := parseAddress(args[0])
 	if err != nil {
 		return sessionSeat{}, err
 	}
 
-	mgr, r, err := getSessionManager(rigName)
+	_, r, err := lookupRig(rigName)
 	if err != nil {
 		return sessionSeat{}, err
 	}
+	mgr := polecat.NewSessionManager(tmux.NewTmux(), r)
 
 	if mgr.HasPolecat(name) {
 		return sessionSeat{Rig: rigName, Name: name, Mgr: mgr}, nil
@@ -392,7 +397,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	polecatMgr, _, err := getSessionManager(rigName)
+	polecatMgr, err := getSessionManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -710,7 +715,7 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 			if !still {
 				break
 			}
-			time.Sleep(200 * time.Millisecond)
+			clockwork.NewRealClock().Sleep(200 * time.Millisecond)
 		}
 	}
 
@@ -807,23 +812,31 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionHealth(cmd *cobra.Command, args []string) error {
-	sessionName := args[0]
-	if err := sessionHealthArgError(townRegistry(), sessionName); err != nil {
+	return sessionHealth(os.Stdout, townRegistry(), tmux.NewTmux().CheckSessionHealth,
+		args[0], sessionHealthJSON, sessionHealthMaxInactivity)
+}
+
+// sessionHealth reports sessionName's health, probed through check, to out:
+// as JSON when asJSON, else one line. An argument that cannot name a session
+// is an error before check runs.
+func sessionHealth(out io.Writer, reg *session.PrefixRegistry, check func(string, time.Duration) tmux.ZombieStatus,
+	sessionName string, asJSON bool, maxInactivity time.Duration) error {
+	if err := sessionHealthArgError(reg, sessionName); err != nil {
 		return err
 	}
-	status := tmux.NewTmux().CheckSessionHealth(sessionName, sessionHealthMaxInactivity)
-	report := newSessionHealthReport(sessionName, status, sessionHealthMaxInactivity)
+	status := check(sessionName, maxInactivity)
+	report := newSessionHealthReport(sessionName, status, maxInactivity)
 
-	if sessionHealthJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if asJSON {
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
 	}
 
 	if report.Healthy {
-		fmt.Printf("%s: %s\n", sessionName, style.Bold.Render(report.Status))
+		fmt.Fprintf(out, "%s: %s\n", sessionName, style.Bold.Render(report.Status))
 	} else {
-		fmt.Printf("%s: %s\n", sessionName, style.Dim.Render(report.Status))
+		fmt.Fprintf(out, "%s: %s\n", sessionName, style.Dim.Render(report.Status))
 	}
 	return nil
 }

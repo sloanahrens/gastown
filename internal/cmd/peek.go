@@ -93,7 +93,7 @@ func runPeek(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	mgr, _, err := getSessionManager(rigName)
+	mgr, err := getSessionManager(rigName)
 	if err != nil {
 		if !strings.Contains(address, "/") {
 			return fmt.Errorf("not in a rig directory. Use full address format: gt peek <rig>/<polecat>")

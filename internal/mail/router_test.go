@@ -1190,15 +1190,6 @@ func TestAgentBeadToAddress(t *testing.T) {
 			bead: &agentBead{ID: ""},
 			want: "",
 		},
-		{
-			// The dog role is retired (gt-29q6g); its agent beads outlive it.
-			name: "retired dog bead has no address despite its location",
-			bead: &agentBead{
-				ID:          "hq-dog-alpha",
-				Description: "Dog: alpha\n\nrole_type: dog\nrig: town\nlocation: deacon/dogs/alpha",
-			},
-			want: "",
-		},
 	}
 
 	for _, tt := range tests {

@@ -46,17 +46,11 @@ func TestExtractBeadIDFromArgs(t *testing.T) {
 }
 
 func TestBdShowInvocationPinsRoutedMetadataDatabase(t *testing.T) {
+	t.Parallel()
 	townRoot := setupShowInvocationTown(t)
 	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	resolveDir := func(beadID string) string { return resolveBeadDirFromTownRoot(townRoot, beadID) }
 
 	baseEnv := []string{
 		"PATH=/usr/bin",
@@ -100,7 +94,7 @@ func TestBdShowInvocationPinsRoutedMetadataDatabase(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			invocation := newBdShowInvocation(tc.args, baseEnv)
+			invocation := newBdShowInvocation(tc.args, baseEnv, resolveDir)
 			if invocation.Dir != tc.wantDir {
 				t.Fatalf("Dir = %q, want %q", invocation.Dir, tc.wantDir)
 			}

@@ -60,10 +60,6 @@ func TestExtractAgentPrefix(t *testing.T) {
 		{"deacon", "gt-deacon", "gt"},
 		{"bd mayor", "bd-mayor", "bd"},
 
-		// Town-level named (dogs)
-		{"dog", "gt-dog-alpha", "gt"},
-		{"dog hyphen name", "gt-dog-war-boy", "gt"},
-
 		// Per-rig agents
 		{"witness", "gt-gastown-witness", "gt"},
 		{"refinery", "bd-beads-refinery", "bd"},
