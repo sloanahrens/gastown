@@ -56,7 +56,7 @@ type agentBeadScope struct {
 // Agent beads are ephemeral (stored in wisps), but we also check issues for
 // backward compatibility. The wisps list doesn't include type/labels, so wisp
 // IDs are tracked separately for existence checks.
-func loadAgentBeadScope(bd *beads.Beads) agentBeadScope {
+func loadAgentBeadScope(bd doctorBeads) agentBeadScope {
 	scope := agentBeadScope{
 		issues: make(map[string]*beads.Issue),
 		wisps:  make(map[string]bool),
@@ -253,7 +253,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// so they survive wisp GC (GH#2768).
 	// workDir is the rig directory for direct SQL fallback when bd update
 	// fails silently (e.g., legacy prefixes that can't be routed — GH#2127).
-	fixAgentBead := func(bd *beads.Beads, scope agentBeadScope, workDir, id, desc string, fields *beads.AgentFields) error {
+	fixAgentBead := func(bd doctorBeads, scope agentBeadScope, workDir, id, desc string, fields *beads.AgentFields) error {
 		// Check issues table first
 		if issue, exists := scope.issues[id]; exists {
 			// In issues table — ensure it has the gt:agent label.
@@ -415,7 +415,7 @@ func listCrewWorkers(townRoot, rigName string) []string {
 // the label is read back, and a miss is retried through bd pinned to
 // workDir's database, where prefix routing cannot send it elsewhere. There
 // is no SQL fallback (gt-fcxe9.12): a label bd cannot add is an error.
-func ensureAgentLabel(ctx *CheckContext, bd *beads.Beads, workDir, id string) error {
+func ensureAgentLabel(ctx *CheckContext, bd doctorBeads, workDir, id string) error {
 	add := beads.UpdateOptions{AddLabels: []string{"gt:agent"}}
 	routedErr := bd.Update(id, add)
 	if routedErr == nil && verifyLabelAdded(ctx, workDir, id, "gt:agent") {

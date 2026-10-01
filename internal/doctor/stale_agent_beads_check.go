@@ -321,7 +321,7 @@ func (c *StaleAgentBeadsCheck) Fix(ctx *CheckContext) error {
 	var errs []error
 	for _, beadID := range result.Details {
 		// Determine which rig's beads client to use based on bead ID prefix
-		var bd *beads.Beads
+		var bd doctorBeads
 		for prefix, path := range prefixToPath {
 			if strings.HasPrefix(beadID, prefix+"-") {
 				bd = ctx.beadsAt(path)

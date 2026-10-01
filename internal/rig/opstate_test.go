@@ -1,12 +1,12 @@
 package rig
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -44,7 +44,7 @@ func opStateTown(t *testing.T, parked string) string {
 func TestGetOpState_ReadsRegistry(t *testing.T) {
 	t.Parallel()
 	townRoot := opStateTown(t, `{"since":"2026-09-30T00:00:00Z","by":"sloan","reason":"r"}`)
-	state, source := getOpState(townRoot, "testrig", noRigBead)
+	state, source := getOpState(townRoot, "testrig", noRigBead())
 	if state != OpStateParked || source != OpStateSourceRegistry {
 		t.Errorf("GetOpState() = %q, %q; want %q, %q", state, source, OpStateParked, OpStateSourceRegistry)
 	}
@@ -58,7 +58,7 @@ func TestGetOpState_UnreadableParkStateIsParked(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte("{"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := getOpState(townRoot, "testrig", noRigBead); state != OpStateParked {
+	if state, _ := getOpState(townRoot, "testrig", noRigBead()); state != OpStateParked {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateParked)
 	}
 }
@@ -70,7 +70,7 @@ func TestGetOpState_UnreadableParkStateIsParked(t *testing.T) {
 func TestGetOpState_UnparkedRigIsOperational(t *testing.T) {
 	t.Parallel()
 	townRoot := opStateTown(t, "")
-	state, source := getOpState(townRoot, "testrig", noRigBead)
+	state, source := getOpState(townRoot, "testrig", noRigBead())
 	if state != OpStateOperational {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateOperational)
 	}
@@ -87,7 +87,7 @@ func TestGetOpState_WispFileWithoutStatusIsNotParked(t *testing.T) {
 	if err := wisp.NewConfig(townRoot, "testrig").Set("auto_restart", true); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := getOpState(townRoot, "testrig", noRigBead); state != OpStateOperational {
+	if state, _ := getOpState(townRoot, "testrig", noRigBead()); state != OpStateOperational {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateOperational)
 	}
 }
@@ -100,7 +100,7 @@ func TestGetOpState_LegacyWispParkReadsParked(t *testing.T) {
 	if err := wisp.NewConfig(townRoot, "testrig").Set("status", "parked"); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := getOpState(townRoot, "testrig", noRigBead); state != OpStateParked {
+	if state, _ := getOpState(townRoot, "testrig", noRigBead()); state != OpStateParked {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateParked)
 	}
 }
@@ -148,24 +148,15 @@ func TestGetOpState_ReadsIdentityBeadLabel(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"type":"rig","name":"testrig","beads":{"prefix":"tr"}}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			var shown []string
-			run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-				if bdVerb(c.Args) != "show" {
-					return nil, nil, nil
-				}
-				shown = append(shown, c.Args[1])
-				return []byte(`[{"id":"tr-rig-testrig","title":"testrig","status":"open","labels":["` + tt.label + `"]}]`), nil, nil
-			}
+			db := beadsfake.New()
+			db.Seed(beads.Issue{ID: "tr-rig-testrig", Title: "testrig", Labels: []string{tt.label}})
 
-			state, source := getOpState(townRoot, "testrig", run)
+			state, source := getOpState(townRoot, "testrig", db)
 			if state != tt.wantState {
 				t.Errorf("state = %q, want %q", state, tt.wantState)
 			}
 			if tt.wantState != OpStateOperational && source != OpStateSourceGlobal {
 				t.Errorf("source = %q, want %q", source, OpStateSourceGlobal)
-			}
-			if len(shown) != 1 || shown[0] != "tr-rig-testrig" {
-				t.Errorf("bd show calls = %v, want one read of tr-rig-testrig", shown)
 			}
 		})
 	}

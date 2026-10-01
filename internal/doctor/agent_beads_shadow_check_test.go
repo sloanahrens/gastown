@@ -12,7 +12,7 @@ func TestAgentBeadsShadowCheck_ReportsTownDuplicates(t *testing.T) {
 	tmpDir := setupTownDuplicateFixture(t)
 
 	check := NewAgentBeadsShadowCheck()
-	result := check.Run(townDuplicateBD().ctx(tmpDir, ""))
+	result := check.Run(townDuplicateBD(tmpDir).ctx(tmpDir, ""))
 
 	if result.Status != StatusWarning {
 		t.Fatalf("status = %v, want warning; message: %s", result.Status, result.Message)
