@@ -115,6 +115,16 @@ func (h *harness) seedReady(t *testing.T, id string) {
 		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)})
 }
 
+// seedReadyAt seeds a ready bead carrying priority and the submission time
+// the landing worker orders by, so a test can build a queue with a known
+// order.
+func (h *harness) seedReadyAt(t *testing.T, id string, priority int, submitted string) {
+	t.Helper()
+	is := readyIssue(id, priority, submitted, submitted)
+	is.Title, is.Status, is.Type, is.Assignee = "work", "hooked", "task", "gastown/polecats/opal"
+	h.bd.Seed(*is)
+}
+
 func (h *harness) comments(t *testing.T, id string) []string {
 	t.Helper()
 	cs, err := h.bd.Comments(id)
@@ -444,20 +454,82 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestSortOldestFirst(t *testing.T) {
-	t.Parallel()
-	is := []*beads.Issue{
-		{ID: "gt-c", UpdatedAt: "2026-09-30T12:00:00Z"},
-		{ID: "gt-b", UpdatedAt: "2026-09-30T10:00:00Z"},
-		{ID: "gt-a", UpdatedAt: "2026-09-30T12:00:00Z"},
+// readyIssue is a ready-to-land bead submitted at submitted (RFC 3339; "" for
+// a bead submitted before the note carried a time) and last updated at
+// updated. A comment moves updated, never submitted.
+func readyIssue(id string, priority int, submitted, updated string) *beads.Issue {
+	var at time.Time
+	if submitted != "" {
+		var err error
+		if at, err = time.Parse(time.RFC3339, submitted); err != nil {
+			panic(err)
+		}
 	}
-	sortOldestFirst(is)
+	w := land.Work{Branch: branch, Head: noteHead, Target: "main", Worker: "opal", Submitted: at}
+	return &beads.Issue{ID: id, Priority: priority, UpdatedAt: updated, Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)}
+}
+
+func order(is []*beads.Issue) string {
 	var got []string
 	for _, i := range is {
 		got = append(got, i.ID)
 	}
-	if strings.Join(got, ",") != "gt-b,gt-a,gt-c" {
-		t.Fatalf("order %v", got)
+	return strings.Join(got, ",")
+}
+
+// A P1 submitted later lands before a P2 submitted earlier: priority leads,
+// so a throughput fix does not wait behind queued P2 work (gt-t2jhf).
+func TestSortByLandingOrderPutsPriorityFirst(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-p2", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-p1", 1, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-p1,gt-p2" {
+		t.Fatalf("order %s; want the P1 first", got)
+	}
+}
+
+// A comment on a submitted bead moves its last update, never its place in the
+// queue: ordering by last update pushed reviewed work behind work submitted
+// after it (gt-t2jhf).
+func TestSortByLandingOrderIgnoresComments(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-reviewed", 2, "2026-09-30T10:00:00Z", "2026-09-30T13:00:00Z"),
+		readyIssue("gt-unreviewed", 2, "2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-reviewed,gt-unreviewed" {
+		t.Fatalf("order %s; want the comment not to have reordered the queue", got)
+	}
+}
+
+// A bead submitted before the note carried a time is ordered by its last
+// update, the only order it ever had.
+func TestSortByLandingOrderFallsBackToTheLastUpdate(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-newer", 2, "", "2026-09-30T12:00:00Z"),
+		readyIssue("gt-older", 2, "", "2026-09-30T10:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-older,gt-newer" {
+		t.Fatalf("order %s; want the older bead first", got)
+	}
+}
+
+func TestSortByLandingOrderBreaksTiesByID(t *testing.T) {
+	t.Parallel()
+	is := []*beads.Issue{
+		readyIssue("gt-c", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-b", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+		readyIssue("gt-a", 2, "2026-09-30T10:00:00Z", "2026-09-30T10:00:00Z"),
+	}
+	sortByLandingOrder(is)
+	if got := order(is); got != "gt-a,gt-b,gt-c" {
+		t.Fatalf("order %s; want ID order", got)
 	}
 }
 
@@ -571,6 +643,27 @@ func TestPassWithoutDrainLandsEverything(t *testing.T) {
 	h.w.Pass(context.Background())
 	if len(h.lander.calls) != 2 {
 		t.Fatalf("calls=%d, want 2", len(h.lander.calls))
+	}
+}
+
+// The queue the worker walks is priority first: the P1 submitted later is
+// landed before the earlier P2, so the drain that follows pays for the fix
+// that matters first (gt-t2jhf).
+func TestPassLandsHigherPriorityFirst(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-p2", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-p1", 1, "2026-09-30T11:00:00Z")
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != 2 {
+		t.Fatalf("report %v; want both landed", rep)
+	}
+	var landed []string
+	for _, c := range h.lander.calls {
+		landed = append(landed, c.BeadID)
+	}
+	if got := strings.Join(landed, ","); got != "gt-p1,gt-p2" {
+		t.Fatalf("landed %s; want the P1 first", got)
 	}
 }
 

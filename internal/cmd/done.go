@@ -1509,11 +1509,14 @@ func recordSubmittedIntent(r *doneRun) {
 
 // markReadyToLand writes the READY TO LAND block, then the label the landing
 // worker picks by, then reads the bead back. The block goes first so a bead
-// that carries the label always says what to land.
+// that carries the label always says what to land. The block carries the
+// submission time, which is what the landing worker orders the queue by
+// (gt-t2jhf).
 func markReadyToLand(bd beads.Client, w land.Work) error {
 	if bd == nil {
 		return errors.New("no beads client for the work bead")
 	}
+	w.Submitted = time.Now().UTC()
 	if err := bd.AppendNotes(w.BeadID, land.FormatReadyNote(w)); err != nil {
 		return fmt.Errorf("writing the READY TO LAND note: %w", err)
 	}

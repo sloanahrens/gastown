@@ -70,6 +70,9 @@ func TestIntegrationRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *test
 		if got.Branch != want.Branch || got.Head != want.Head || got.Target != want.Target || got.Worker != want.Worker {
 			t.Errorf("landing request = %+v, want %+v", got, want)
 		}
+		if got.Submitted.IsZero() {
+			t.Error("the note carries no submission time; the landing worker orders the queue by it (gt-t2jhf)")
+		}
 	})
 
 	t.Run("supervisor refuses a restart", func(t *testing.T) {

@@ -168,9 +168,9 @@ func (w *Worker) bead(id string) *beadState {
 	return s
 }
 
-// Pass lands every ready bead once, oldest first, then checks WatchTarget for
-// a direct push, and returns what happened. It stops early only when ctx is
-// done.
+// Pass lands every ready bead once, highest priority first and, within a
+// priority, oldest submission first, then checks WatchTarget for a direct
+// push, and returns what happened. It stops early only when ctx is done.
 func (w *Worker) Pass(ctx context.Context) Report {
 	rep := w.landReady(ctx)
 	if !w.draining() {
@@ -210,7 +210,7 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		rep.Failed++
 		return rep
 	}
-	sortOldestFirst(issues)
+	sortByLandingOrder(issues)
 	for _, issue := range issues {
 		if ctx.Err() != nil {
 			return rep
@@ -696,19 +696,39 @@ func (w *Worker) clearIntent(work land.Work) {
 	}
 }
 
-// sortOldestFirst orders beads by last update, then ID, so the bead that has
-// waited longest lands first.
-func sortOldestFirst(issues []*beads.Issue) {
+// sortByLandingOrder orders the ready queue the way the worker lands it:
+// highest priority first, then the bead submitted for landing earliest, then
+// ID. Priority leads because a P1 fix pays for every bead landed ahead of it.
+func sortByLandingOrder(issues []*beads.Issue) {
 	sort.SliceStable(issues, func(i, j int) bool {
 		a, b := issues[i], issues[j]
 		if a == nil || b == nil {
 			return b == nil && a != nil
 		}
-		if a.UpdatedAt != b.UpdatedAt {
-			return a.UpdatedAt < b.UpdatedAt
+		if a.Priority != b.Priority {
+			return a.Priority < b.Priority
+		}
+		as, bs := submittedAt(a), submittedAt(b)
+		if !as.Equal(bs) {
+			return as.Before(bs)
 		}
 		return a.ID < b.ID
 	})
+}
+
+// submittedAt is when issue was submitted for landing: the READY TO LAND
+// block's time, which gt done stamps and no comment moves. A bead submitted
+// before the block carried one falls back to its last update, the only
+// ordering it ever had (gt-t2jhf).
+func submittedAt(issue *beads.Issue) time.Time {
+	if w, ok := land.ParseReadyNote(issue.Notes); ok && !w.Submitted.IsZero() {
+		return w.Submitted
+	}
+	at, err := time.Parse(time.RFC3339, issue.UpdatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }
 
 func short(sha string) string {
