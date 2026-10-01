@@ -124,15 +124,8 @@ func (r *recordedTrackingDeps) AddTypedDependency(issue, dependsOn, depType stri
 	return r.err
 }
 
-func (r *recordedTrackingDeps) RemoveDependency(issue, dependsOn string) error {
-	r.calls = append(r.calls, "remove "+issue+" "+dependsOn)
-	return r.err
-}
-
 // Tracks edges are written through the bd client, with a cross-rig target
-// wrapped as external:<rig>:<id>, and nothing else is tried (gt-7iwy0.2):
-// the old in-process store path is gone, and so is the fallback whose
-// "dep remove --type" bd rejects as an unknown flag.
+// wrapped as external:<rig>:<id>, and nothing else is tried (gt-7iwy0.2).
 func TestTrackingRelationWritesThroughClient(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -147,10 +140,7 @@ func TestTrackingRelationWritesThroughClient(t *testing.T) {
 	if err := addTrackingRelationWith(rec, townRoot, "hq-cv-test", "ag-95s.1"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if err := removeTrackingRelationWith(rec, townRoot, "hq-cv-test", "ag-95s.1"); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	want := []string{"add hq-cv-test external:ag:ag-95s.1 tracks", "remove hq-cv-test external:ag:ag-95s.1"}
+	want := []string{"add hq-cv-test external:ag:ag-95s.1 tracks"}
 	if strings.Join(rec.calls, "|") != strings.Join(want, "|") {
 		t.Errorf("calls = %q, want %q", rec.calls, want)
 	}

@@ -13,7 +13,6 @@ var addTrackingRelationFn = addTrackingRelation
 // trackingDeps is the part of beads.Client that writes tracks edges.
 type trackingDeps interface {
 	AddTypedDependency(issue, dependsOn, depType string) error
-	RemoveDependency(issue, dependsOn string) error
 }
 
 // townTrackingDeps returns the bd client for the town database, where
@@ -51,16 +50,6 @@ func addTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID str
 	targetID := trackingDependsOnID(townRoot, issueID)
 	if err := deps.AddTypedDependency(trackerID, targetID, "tracks"); err != nil {
 		return fmt.Errorf("recording %s tracks %s: %w", trackerID, targetID, err)
-	}
-	return nil
-}
-
-// removeTrackingRelationWith removes the edge through bd dep remove, which
-// takes no --type: a (tracker, target) pair holds one edge.
-func removeTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID string) error {
-	targetID := trackingDependsOnID(townRoot, issueID)
-	if err := deps.RemoveDependency(trackerID, targetID); err != nil {
-		return fmt.Errorf("removing %s tracks %s: %w", trackerID, targetID, err)
 	}
 	return nil
 }
