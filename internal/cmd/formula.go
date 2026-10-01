@@ -791,21 +791,14 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		return fmt.Errorf("refusing to create formula convoy: title %q looks like a CLI flag", convoyTitle)
 	}
 
-	createArgs := []string{
-		"create",
-		"--type=task",
-		"--id=" + convoyID,
-		"--title=" + convoyTitle,
-		"--description=" + description,
-		"--labels=gt:convoy",
-	}
-	if beads.NeedsForceForID(convoyID) {
-		createArgs = append(createArgs, "--force")
-	}
-
-	createCmd := beads.CommandWithEnv(townBeads, nil, createArgs...)
-	createCmd.Stderr = os.Stderr
-	if err := createCmd.Run(); err != nil {
+	townBd := beads.NewPinned(townBeads)
+	rigBd := beads.NewPinned(rigBeadsDir)
+	if _, err := townBd.CreateWithID(convoyID, beads.CreateOptions{
+		Title:       convoyTitle,
+		Description: description,
+		Labels:      []string{"gt:convoy"},
+		Priority:    -1,
+	}); err != nil {
 		return fmt.Errorf("creating convoy bead: %w", err)
 	}
 
@@ -886,22 +879,11 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 			}
 		}
 
-		legArgs := []string{
-			"create",
-			"--type=task",
-			"--id=" + legBeadID,
-			"--title=" + leg.Title,
-			"--description=" + legDesc,
-		}
-		if beads.NeedsForceForID(legBeadID) {
-			legArgs = append(legArgs, "--force")
-		}
-
-		if err := BdCmd(legArgs...).
-			WithAutoCommit().
-			Dir(rigBeadsDir).
-			Stderr(os.Stderr).
-			Run(); err != nil {
+		if _, err := rigBd.CreateWithID(legBeadID, beads.CreateOptions{
+			Title:       leg.Title,
+			Description: legDesc,
+			Priority:    -1,
+		}); err != nil {
 			fmt.Printf("%s Failed to create leg bead for %s: %v\n",
 				style.Dim.Render("Warning:"), leg.ID, err)
 			continue
@@ -938,22 +920,11 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), err)
 		}
 
-		synArgs := []string{
-			"create",
-			"--type=task",
-			"--id=" + synthesisBeadID,
-			"--title=" + f.Synthesis.Title,
-			"--description=" + synDesc,
-		}
-		if beads.NeedsForceForID(synthesisBeadID) {
-			synArgs = append(synArgs, "--force")
-		}
-
-		if err := BdCmd(synArgs...).
-			WithAutoCommit().
-			Dir(rigBeadsDir).
-			Stderr(os.Stderr).
-			Run(); err != nil {
+		if _, err := rigBd.CreateWithID(synthesisBeadID, beads.CreateOptions{
+			Title:       f.Synthesis.Title,
+			Description: synDesc,
+			Priority:    -1,
+		}); err != nil {
 			fmt.Printf("%s Failed to create synthesis bead: %v\n",
 				style.Dim.Render("Warning:"), err)
 		} else {
@@ -962,10 +933,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 
 			// Add dependencies: synthesis depends on all legs
 			for _, legBeadID := range legBeads {
-				_ = BdCmd("dep", "add", synthesisBeadID, legBeadID).
-					WithAutoCommit().
-					Dir(rigBeadsDir).
-					Run()
+				_ = rigBd.AddDependency(synthesisBeadID, legBeadID)
 			}
 
 			fmt.Printf("  %s Created synthesis: %s\n", style.Dim.Render("★"), synthesisBeadID)
@@ -998,9 +966,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 			fmt.Printf("%s Failed to sling leg %s: %v\n",
 				style.Dim.Render("Warning:"), leg.ID, err)
 			// Add comment to bead about failure
-			commentArgs := []string{"comments", "add", legBeadID, fmt.Sprintf("Failed to sling: %v", err)}
-			commentCmd := beads.CommandWithEnv(townBeads, nil, commentArgs...)
-			_ = commentCmd.Run()
+			_ = rigBd.AddComment(legBeadID, fmt.Sprintf("Failed to sling: %v", err))
 			continue
 		}
 
@@ -1064,23 +1030,13 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		return fmt.Errorf("refusing to create workflow: title %q looks like a CLI flag", workflowTitle)
 	}
 
-	createArgs := []string{
-		"create",
-		"--type=task",
-		"--id=" + workflowID,
-		"--title=" + workflowTitle,
-		"--description=" + description,
-		"--labels=gt:convoy,gt:workflow",
-	}
-	if beads.NeedsForceForID(workflowID) {
-		createArgs = append(createArgs, "--force")
-	}
-
-	if err := BdCmd(createArgs...).
-		WithAutoCommit().
-		Dir(townBeads).
-		Stderr(os.Stderr).
-		Run(); err != nil {
+	rigBd := beads.NewPinned(rigBeadsDir)
+	if _, err := beads.NewPinned(townBeads).CreateWithID(workflowID, beads.CreateOptions{
+		Title:       workflowTitle,
+		Description: description,
+		Labels:      []string{"gt:convoy", "gt:workflow"},
+		Priority:    -1,
+	}); err != nil {
 		return fmt.Errorf("creating workflow bead: %w", err)
 	}
 
@@ -1094,25 +1050,14 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
 		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars))
 
-		// Use --body-file=- (stdin) for the description to avoid CLI arg
-		// length limits and quoting issues with large markdown descriptions.
-		stepArgs := []string{
-			"create",
-			"--type=task",
-			"--id=" + stepBeadID,
-			"--title=" + step.Title,
-			"--body-file=-",
+		// The description goes in through Update, which sends it on stdin
+		// (--body-file=-): large markdown would hit CLI arg length limits
+		// and quoting issues as a create argument.
+		_, err := rigBd.CreateWithID(stepBeadID, beads.CreateOptions{Title: step.Title, Priority: -1})
+		if err == nil {
+			err = rigBd.Update(stepBeadID, beads.UpdateOptions{Description: &stepDescription})
 		}
-		if beads.NeedsForceForID(stepBeadID) {
-			stepArgs = append(stepArgs, "--force")
-		}
-
-		if err := BdCmd(stepArgs...).
-			Stdin(strings.NewReader(stepDescription)).
-			WithAutoCommit().
-			Dir(rigBeadsDir).
-			Stderr(os.Stderr).
-			Run(); err != nil {
+		if err != nil {
 			fmt.Printf("%s Failed to create step bead for %s: %v\n",
 				style.Dim.Render("Warning:"), step.ID, err)
 			continue
@@ -1129,10 +1074,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 					style.Dim.Render("Warning:"), step.ID, needID)
 				continue
 			}
-			_ = BdCmd("dep", "add", stepBeadID, depBeadID).
-				WithAutoCommit().
-				Dir(rigBeadsDir).
-				Run()
+			_ = rigBd.AddDependency(stepBeadID, depBeadID)
 		}
 
 		stepBeads[step.ID] = stepBeadID
@@ -1173,10 +1115,8 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		if step.Interactive || hasInteractive {
 			// Interactive step: hook to current session instead of slinging to a polecat.
 			// The user will execute this step in their current crew session.
-			_ = BdCmd("update", stepBeadID, "--status=hooked").
-				WithAutoCommit().
-				Dir(rigBeadsDir).
-				Run()
+			hooked := beads.StatusHooked
+			_ = rigBd.Update(stepBeadID, beads.UpdateOptions{Status: &hooked})
 
 			fmt.Printf("  %s %s: %s (interactive — hooked to current session)\n",
 				style.Bold.Render("⇨"), step.ID, stepBeadID)
@@ -1205,9 +1145,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		if err := slingCmd.Run(); err != nil {
 			fmt.Printf("%s Failed to sling step %s: %v\n",
 				style.Dim.Render("Warning:"), step.ID, err)
-			_ = BdCmd("comments", "add", stepBeadID, fmt.Sprintf("Failed to sling: %v", err)).
-				Dir(townBeads).
-				Run()
+			_ = rigBd.AddComment(stepBeadID, fmt.Sprintf("Failed to sling: %v", err))
 			continue
 		}
 

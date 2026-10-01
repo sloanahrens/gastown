@@ -15,8 +15,7 @@ internal/cmd/done.go BDRunner 1
 internal/cmd/formula_cook.go BdCmd 1
 internal/cmd/formula_cook.go BDRunner 1
 internal/cmd/formula_show_test.go BDRunner 1
-internal/cmd/formula.go argv 3
-internal/cmd/formula.go BdCmd 8
+internal/cmd/formula.go argv 1
 internal/cmd/handoff.go argv 3
 internal/cmd/handoff.go BdCmd 2
 internal/cmd/hook.go BdCmd 2
