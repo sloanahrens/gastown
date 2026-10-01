@@ -384,18 +384,18 @@ func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 	case RoleMayor:
 		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
 		fmt.Fprintln(w, "|------------|----------------|----------------|")
-		fmt.Fprintln(w, "| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintln(w, "| Close/complete a bead | `gt bead close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
 		fmt.Fprintf(w, "| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
 		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
 		fmt.Fprintf(w, "| Kill stuck polecat | `%s polecat nuke <rig>/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c)
 		fmt.Fprintf(w, "| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
 		fmt.Fprintf(w, "| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
-		fmt.Fprintln(w, "| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
+		fmt.Fprintln(w, "| Create issues | `gt bead create \"title\"` | ~~gt issue create~~ (not a command) |")
 
 	case RoleCrew:
 		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
 		fmt.Fprintln(w, "|------------|----------------|----------------|")
-		fmt.Fprintln(w, "| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintln(w, "| Close/complete a bead | `gt bead close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
 		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
 		fmt.Fprintf(w, "| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
 		fmt.Fprintf(w, "| Stop my session | `%s crew stop %s` | ~~gt rig stop~~ (stops rig agents, not crew) |\n", c, ctx.Polecat)
@@ -405,11 +405,11 @@ func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 	case RolePolecat:
 		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
 		fmt.Fprintln(w, "|------------|----------------|----------------|")
-		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~bd close <root-issue>~~ (Refinery closes it) |\n", c)
-		fmt.Fprintln(w, "| Close a sub-issue | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
+		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~gt bead close <root-issue>~~ (Refinery closes it) |\n", c)
+		fmt.Fprintln(w, "| Close a sub-issue | `gt bead close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
 		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
 		fmt.Fprintf(w, "| Check workflow steps | `%s prime` (shows inline checklist) | ~~bd ready~~ (excludes molecule steps) |\n", c)
-		fmt.Fprintln(w, "| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
+		fmt.Fprintln(w, "| Create issues | `gt bead create \"title\"` | ~~gt issue create~~ (not a command) |")
 		fmt.Fprintf(w, "| Escalate blocker | `%s escalate \"desc\" -s HIGH` | ~~waiting for human~~ (never wait) |\n", c)
 
 	}

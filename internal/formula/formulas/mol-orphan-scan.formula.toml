@@ -215,16 +215,15 @@ Resetting or reassigning it re-feeds finished work to a new polecat.
 
 **1. RESET orphans:**
 ```bash
-bd update <issue> --status=open --assignee=""
-# Clears in_progress, ready for dispatch
+gt bead reset <issue>
+# Clears in_progress, ready for dispatch (refuses gt:ready-to-land work)
 ```
 
 **2. REASSIGN orphans:**
 ```bash
 # Back to open with the partial work named; the dispatcher hands it to the
 # next free polecat
-bd update <issue> --status=open --assignee="" \
-  --append-notes "Orphaned with partial work on <branch>; reassign"
+gt bead reset <issue> --reason="Orphaned with partial work on <branch>; reassign"
 ```
 
 **3. RECOVER orphans:**
@@ -232,8 +231,7 @@ bd update <issue> --status=open --assignee="" \
 # For issues with work on branch:
 # - Preserve the branch
 # - Create recovery note
-bd update <issue> --status=open \
-  --note="Recovery: work exists on branch <branch>"
+gt bead reset <issue> --reason="Recovery: work exists on branch <branch>"
 ```
 
 **4. ESCALATE orphans:**

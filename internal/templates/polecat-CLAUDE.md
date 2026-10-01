@@ -29,7 +29,7 @@ run `gt escalate` — but you must attempt it.
 Check mail once at startup. Do not ask about other polecats, work unassigned
 issues, or chase tangents.
 
-File discovered work as beads (`bd create`) but don't fix it yourself.
+File discovered work as beads (`gt bead create`) but don't fix it yourself.
 
 ---
 
@@ -77,22 +77,21 @@ bd show <id>                          # Full issue details (e.g., bd show gt-abc
 bd list --status=open                 # List open issues
 
 # Updating
-bd update <id> --status=in_progress   # Claim work
-bd update <id> --append-notes "..."   # Persist findings (survives session death)
-bd update <id> --design "..."         # Persist structured analysis
-bd close <id>                         # Close issue
-bd close <id> --reason="no-changes: <explanation>"  # Close without code changes
+gt bead claim <id>                    # Claim work
+gt bead note <id> "..."               # Persist findings (survives session death)
+gt bead close <id>                    # Close issue
+gt bead close <id> --reason="no-changes: <explanation>"  # Close without code changes
 
 # Creating
-bd create --title="Found bug" --type=bug --priority=2  # File discovered work
+gt bead create --title="Found bug" --type=bug --priority=2  # File discovered work
 ```
 
 **Valid statuses:** `open`, `in_progress`, `blocked`, `deferred`, `closed`, `pinned`, `hooked`
-(there is NO `done` or `complete` status — use `bd close`)
+(there is NO `done` or `complete` status — use `gt bead close`)
 
 ## Dolt
 
-Beads data lives in **Dolt** on port 3307, and every `bd create`, `bd update`
+Beads data lives in **Dolt** on port 3307, and every `gt bead create`, `gt bead note`
 and `gt mail send` is a permanent Dolt commit: nudge rather than mail unless the
 message must survive session death, file real work only, and close your beads.
 If `bd` hangs or fails, check `gt dolt status`. **Do NOT restart Dolt yourself.**
@@ -109,12 +108,12 @@ the checklist, then `gt done`.
 
 **If your assigned bead has nothing to implement** (already done, can't reproduce, not applicable):
 ```bash
-bd close <id> --reason="no-changes: <brief explanation>"
+gt bead close <id> --reason="no-changes: <brief explanation>"
 gt done
 ```
 **DO NOT** exit without closing the bead: an unclosed bead is reset to `open` and
 redispatched (spawn storms of 6-7 polecats on one bead). Every session ends with
-`gt done` OR an explicit `bd close` on the hook bead.
+`gt done` OR an explicit `gt bead close` on the hook bead.
 
 ---
 
@@ -160,7 +159,7 @@ git diff --stat origin/main...HEAD    # must list only files YOU changed
 | Signal work complete | `gt done` | ~~gt unsling~~ or sitting idle |
 | Message another agent | `gt nudge <target> "msg"` | ~~tmux send-keys~~ (drops Enter) |
 | See formula steps | `gt prime` (inline checklist) | ~~bd mol current~~ (steps not materialized) |
-| File discovered work | `bd create "title"` | Fixing it yourself |
+| File discovered work | `gt bead create "title"` | Fixing it yourself |
 | Ask for help | `gt escalate "HELP: ..." -r "..."` | Sitting idle |
 
 ---
@@ -230,9 +229,9 @@ and decisions exist ONLY in your context window. **Persist to the bead as you wo
 
 ```bash
 # After significant analysis or conclusions:
-bd update <issue-id> --append-notes "Findings: <what you discovered>"
-# For detailed reports:
-bd update <issue-id> --design "<structured findings>"
+gt bead note <issue-id> "Findings: <what you discovered>"
+# For detailed reports, a structured block:
+gt bead note <issue-id> "<structured findings>"
 ```
 
 **Do this early and often.** If your session dies before persisting, the work is lost forever.

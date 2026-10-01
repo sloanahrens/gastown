@@ -671,8 +671,8 @@ func TestCheckCrossRigGuard(t *testing.T) {
 				if !strings.Contains(errMsg, "--force") {
 					t.Errorf("error should mention --force override, got: %v", err)
 				}
-				if !strings.Contains(errMsg, "bd create") {
-					t.Errorf("error should mention bd create, got: %v", err)
+				if !strings.Contains(errMsg, "gt bead create --rig=") {
+					t.Errorf("error should mention gt bead create --rig=, got: %v", err)
 				}
 			}
 		})

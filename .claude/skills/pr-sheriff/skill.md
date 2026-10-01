@@ -152,11 +152,11 @@ clutter the history.
 
 ```bash
 # Ephemeral bead for fix-merge dispatch
-bd new -t task "Fix-merge PR #1234: description" -p 2 -l pr-review \
+gt bead create -t task "Fix-merge PR #1234: description" -p 2 -l pr-review \
   --wisp-type patrol
 
 # vs persistent (avoid for orchestration work)
-bd new -t task "Fix-merge PR #1234: description" -p 2 -l pr-review
+gt bead create -t task "Fix-merge PR #1234: description" -p 2 -l pr-review
 ```
 
 The `--wisp-type patrol` flag marks it as ephemeral orchestration work that
