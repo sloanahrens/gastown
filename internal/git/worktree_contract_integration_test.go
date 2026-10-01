@@ -9,5 +9,6 @@ import (
 )
 
 func TestIntegrationGitfakeWorkTreeContract(t *testing.T) {
+	t.Parallel()
 	gitfake.RunWorkTreeContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }

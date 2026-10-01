@@ -9,5 +9,6 @@ import (
 )
 
 func TestIntegrationGitfakePathContract(t *testing.T) {
+	t.Parallel()
 	gitfake.RunPathContract(t, func(t *testing.T) gitfake.BranchEnv { return &realEnv{} })
 }
