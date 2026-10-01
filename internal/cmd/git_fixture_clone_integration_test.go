@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -10,14 +12,14 @@ import (
 	"testing"
 )
 
-// TestCloneFixtureTreeMatchesCopy pins the clonefile path (gt-22hdp.58)
+// TestIntegrationCloneFixtureTreeMatchesCopy pins the clonefile path (gt-22hdp.58)
 // against the file-by-file copy it replaces on darwin: a clone rewrites only
 // the template's recorded path files, so a record it missed would leave a
 // fixture pointing into the shared template, and every test using that key
 // would share state. The two paths must give the same tree up to the root,
 // the path-bearing git files must name the clone, and the template must come
 // out byte for byte unchanged.
-func TestCloneFixtureTreeMatchesCopy(t *testing.T) {
+func TestIntegrationCloneFixtureTreeMatchesCopy(t *testing.T) {
 	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {

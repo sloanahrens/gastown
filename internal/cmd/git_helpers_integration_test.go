@@ -1,7 +1,9 @@
+//go:build integration
+
 package cmd
 
-// Test helpers shared across this package. They lived in merge-queue test
-// files until those were deleted with the merge queue (gt-v4ssj.6).
+// Git helpers the integration tier shares. The unit tier runs no git
+// (internal/testpolicy realgit.txt), so they live behind the tag.
 
 import (
 	"fmt"
@@ -9,12 +11,63 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/slot"
 )
+
+func testRunGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	// An empty dir runs git in the test process's own cwd — the package
+	// directory inside the real repo — so a stray test would create branches and
+	// objects in the rig's shared ref store.
+	if dir == "" {
+		t.Fatal("testRunGit: empty dir would run git in the test process cwd")
+	}
+	fullArgs := append([]string{"-c", "protocol.file.allow=always"}, args...)
+	cmd := exec.Command("git", fullArgs...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+func setupGitStateRemoteRepo(t *testing.T) string {
+	t.Helper()
+	return cachedGitFixtureStrings(t, "setupGitStateRemoteRepo", func(dir string) []string {
+		return []string{buildSetupGitStateRemoteRepo(t, dir)}
+	})[0]
+}
+
+// buildSetupGitStateRemoteRepo makes setupGitStateRemoteRepo's repos under dir.
+func buildSetupGitStateRemoteRepo(t *testing.T, dir string) string {
+	t.Helper()
+	remote := filepath.Join(dir, "remote.git")
+	repo := filepath.Join(dir, "repo")
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "base\n")
+	runGitCmd(t, repo, "add", "README.md")
+	runGitCmd(t, repo, "commit", "-m", "base")
+	runGitCmd(t, repo, "branch", "-M", "main")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "push", "-u", "origin", "main")
+	runGitCmd(t, repo, "switch", "-c", "integration/test")
+	runGitCmd(t, repo, "push", "-u", "origin", "integration/test")
+	return repo
+}
+
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
 
 func writeMQSubmitTestFile(t *testing.T, dir, name, content string) {
 	t.Helper()
@@ -32,41 +85,6 @@ func runGitForMQSubmitTest(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// contains checks if s contains substr (helper for styled output)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && stringContains(s, substr)))
-}
-
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-// CodeOfErr is CodeOf with the command's own error, so a caller can tell an
-// approve (no error at all) from a request_changes (a SilentExitError).
-func CodeOfErr(t *testing.T, cmd *cobra.Command) (int, error) {
-	t.Helper()
-	err := cmd.Execute()
-	// Execute re-adds the default help command to the root it runs from
-	// (cobra's InitDefaultHelpCmd removes and adds it on every call), which
-	// marks the root unsorted. Sort it again before a parallel test walks
-	// the shared tree (TestCommandTreeWalkIsReadOnlyUnderParallelTests).
-	presortCommandTree(cmd.Root())
-	if err == nil {
-		return 0, nil
-	}
-	if code, ok := IsSilentExit(err); ok {
-		return code, err
-	}
-	t.Errorf("command error: %v", err)
-	return 1, err
 }
 
 // initOrphanCleanupRepo builds a clone whose origin carries a polecat branch,
@@ -133,24 +151,4 @@ func writeOrphanCleanupFile(t *testing.T, dir, name, content string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
-}
-
-// stubNoContainersOnce installs the stub below exactly once per test binary.
-// Installed from a t.Parallel test, the seam's own runningGateContainers var
-// would otherwise be written concurrently — the writes race even though every
-// caller installs the same value.
-var stubNoContainersOnce sync.Once
-
-// stubNoContainers overrides package slot's docker-ps lookup so tests that
-// drive slot.Acquire never shell out to the real docker CLI, which would poll
-// for the full gate timeout whenever any dolt/testcontainers/ryuk container is
-// up on the host (gt-tuiy). See slot.SetContainerListerForTest.
-//
-// It installs once and never restores (gt-k317): every caller wants the same
-// lister, and a per-test restore raced under t.Parallel.
-func stubNoContainers(t *testing.T) {
-	t.Helper()
-	stubNoContainersOnce.Do(func() {
-		slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
-	})
 }
