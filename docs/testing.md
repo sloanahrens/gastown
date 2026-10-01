@@ -329,7 +329,7 @@ The per-package argv fakes that predate `gitfake` (`internal/version/fakegit_tes
 ### No git in a converted package's unit tier
 
 The `no-subprocess` rule lets a unit test run git, because most packages still do. A converted package gives up that exemption by adding its line to `internal/testpolicy/gitfree.txt`. `TestGitFree` then holds it to the `no-git` rule:
-- Its unit-tier tests may not call `exec.Command("git", ...)`, or build a real wrapper with `git.NewGit` or `git.NewGitWithDir` (unqualified `NewGit` inside `internal/git`).
+- Its unit-tier tests may not call `exec.Command("git", ...)`, build a real wrapper with `git.NewGit` or `git.NewGitWithDir`, or call `git.InitSubmodules`, `git.InitSparseCheckout` or `git.EnsureSafeMutationWorkDir` (unqualified inside `internal/git`). Nor may they call a top-level test helper of the same package that does one of those, directly or through another helper.
 - Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, for git reached through production code, which the static rule cannot see. The refusing git exits 1 and records the call, and `HermeticMain` fails the run when any call was recorded, listing each one's directory and arguments under `HERMETIC TRIPWIRE`. So a refused call fails the run even when the code under test tolerated the git error and every test passed (gt-et9zp).
 
 `go test -tags integration` compiles both tiers together, and the integration tier needs real git, so such a package has two TestMains, one per tier:
@@ -342,7 +342,9 @@ func TestMain(m *testing.M) {
 }
 ```
 
-and the same without the option in a `//go:build integration` file. The list only grows: adding a package raises `minGitFree` in `internal/testpolicy/gitfree_test.go` in the same change. An unlisted package is not checked.
+and the same without the option in a `//go:build integration` file. The list only grows: adding a package raises `minGitFree` in `internal/testpolicy/gitfree_test.go` in the same change. An unlisted package is not checked by `TestGitFree`.
+
+Every other package is held to a baseline instead. `TestRealGit` applies the same detection to the unit tier of each package not in `gitfree.txt`, and every test file it flags must be listed in `internal/testpolicy/realgit.txt`. A new file that runs real git fails the test, and so does a listed file that no longer does: delete its line and lower `maxRealGit` in `internal/testpolicy/realgit_test.go` in the same change. A listed file's package must also be in `unconverted.txt`, and `TestPolicy` keeps a package on `unconverted.txt` while `realgit.txt` lists any of its files, so a package whose unit tier runs git never counts as converted. `go test -run 'TestRealGit$' -v ./internal/testpolicy/` logs the real-git files per package and the converted share of test lines; `-seed-realgit` prints the list the tree needs.
 
 ## Converting a package
 
@@ -412,7 +414,7 @@ Common sources of flakes, and their fixes:
 
 ### 5. Take the package off the list
 
-1. Delete the package's line from `internal/testpolicy/unconverted.txt`.
+1. Delete the package's line from `internal/testpolicy/unconverted.txt`. Its files must already be gone from `realgit.txt`.
 2. Lower `maxUnconverted` in `internal/testpolicy/policy_test.go` in the same commit, so the list can only shrink.
 3. Run `go test ./internal/testpolicy/`. It must pass with no violation lines for the package.
 4. Run `grep -c 'testpolicy:allow' internal/<pkg>/*_test.go`. It should total 0.
