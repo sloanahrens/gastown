@@ -2,15 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestWispTypeToCategory(t *testing.T) {
@@ -414,257 +411,156 @@ func TestExtractBeadID(t *testing.T) {
 	}
 }
 
-// weeklyRollupIdempotencyBdStub writes a fake `bd` that mimics the real CLI's
-// default status filter: the closed weekly rollup audit bead is returned ONLY
-// when the list query filters by closed status (or asks for all statuses).
-// The rollup bead is auto-closed right after creation, so a lookup without a
-// status filter never sees it — the exact failure behind gt-9t9 (duplicate
-// weekly rollup sent same day).
-func weeklyRollupIdempotencyBdStub(t *testing.T, rollupID, rollupTitle string) string {
-	t.Helper()
-	binDir := t.TempDir()
-	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
+// compactReportFixture is a compactReportRun over an in-process bd, with the
+// compaction answering an empty result and every mail recorded.
+type compactReportFixture struct {
+	r     compactReportRun
+	bd    *inprocBD
+	mails []string
+}
 
-	bdScript := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> "$BD_ARGS_LOG"
-case "$1" in
-  list)
-    case "$*" in
-      *--status=closed*|*--status=all*|*--all*)
-        printf '%%s\n' '[{"id":"%s","title":"%s","status":"closed"}]'
-        ;;
-      *)
-        printf '[]\n'
-        ;;
-    esac
-    ;;
-  *)
-    echo "unexpected bd command: $*" >&2
-    exit 1
-    ;;
-esac
-`, rollupID, rollupTitle)
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
+func newCompactReportFixture(t *testing.T, now time.Time, answer func(f *inprocBD, cmd string, args []string) bdAnswer) *compactReportFixture {
+	t.Helper()
+	fx := &compactReportFixture{}
+	fx.bd = &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		return answer(f, cmd, args)
+	}}
+	fx.r = compactReportRun{
+		now:     now,
+		workDir: t.TempDir(),
+		bd:      fx.bd.run,
+		compact: func() ([]byte, error) { return []byte(`{"promoted":[],"deleted":[],"skipped":0}`), nil },
+		mail: func(subject, body string) error {
+			fx.mails = append(fx.mails, subject)
+			return nil
+		},
+		out: io.Discard,
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", argsLog)
-	return argsLog
+	return fx
+}
+
+// closedRollupBD mimics bd's default status filter: the closed weekly rollup
+// audit bead is listed ONLY when the query filters by closed status (or asks
+// for all). The rollup bead is auto-closed right after creation, so a lookup
+// without a status filter never sees it — the failure behind gt-9t9.
+func closedRollupBD(rollupTitle string) func(f *inprocBD, cmd string, args []string) bdAnswer {
+	return func(f *inprocBD, cmd string, args []string) bdAnswer {
+		if cmd == "list" && (argsMention(args, "--status=closed") || argsMention(args, "--status=all")) {
+			return bdOut(fmt.Sprintf(`[{"id":"hq-roll","title":%q,"status":"closed"}]`, rollupTitle))
+		}
+		if cmd == "list" {
+			return bdOut("[]")
+		}
+		return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
+	}
 }
 
 func TestRunWeeklyRollupSkipsWhenAlreadySentSameDay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
+	t.Parallel()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	title := "Weekly Compaction Rollup 2026-09-23 to 2026-09-30"
+	fx := newCompactReportFixture(t, now, closedRollupBD(title))
+
+	if err := fx.r.weeklyRollup(); err != nil {
+		t.Fatalf("weeklyRollup: %v", err)
 	}
-
-	now := time.Now().UTC()
-	weekEnd := now.Format("2006-01-02")
-	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
-	title := fmt.Sprintf("Weekly Compaction Rollup %s to %s", weekStart, weekEnd)
-
-	argsLog := weeklyRollupIdempotencyBdStub(t, "hq-roll", title)
-
-	// A `gt` on PATH that records mail; the skip path must never send any.
-	binDir := t.TempDir()
-	mailLog := filepath.Join(t.TempDir(), "mail.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ]; then
-  echo "$*" >> "$MAIL_LOG"
-  exit 0
-fi
-echo "unexpected gt command: $*" >&2
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
+	if len(fx.mails) != 0 {
+		t.Fatalf("mail was sent unexpectedly: %v", fx.mails)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MAIL_LOG", mailLog)
-	resetCompactReportFlags(t)
-
-	if err := runWeeklyRollup(); err != nil {
-		t.Fatalf("runWeeklyRollup: %v", err)
-	}
-
-	assertNoMailSent(t, mailLog)
-	args, err := os.ReadFile(argsLog)
-	if err != nil {
-		t.Fatalf("read bd args: %v", err)
-	}
-	if strings.Contains(string(args), "create") {
-		t.Fatalf("bd create was called despite existing rollup: %s", string(args))
+	if strings.Contains(fx.bd.log(), "create") {
+		t.Fatalf("bd create was called despite existing rollup: %s", fx.bd.log())
 	}
 }
 
+// A rollup already sent yesterday for yesterday's rolling window: today's
+// window is shifted by one day, so an exact title match would miss it and
+// re-send (gt-sqk) — the overlap check must catch it instead.
 func TestRunWeeklyRollupSkipsWhenSentOneDayEarlier(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
+	t.Parallel()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	title := "Weekly Compaction Rollup 2026-09-22 to 2026-09-29"
+	fx := newCompactReportFixture(t, now, closedRollupBD(title))
 
-	// Simulate a rollup already sent yesterday for yesterday's rolling
-	// window. Today's run computes a window shifted by one day, so an exact
-	// title match would miss it and re-send (gt-sqk) — the overlap check
-	// must catch it instead.
-	now := time.Now().UTC()
-	yesterday := now.AddDate(0, 0, -1)
-	priorWeekEnd := yesterday.Format("2006-01-02")
-	priorWeekStart := yesterday.AddDate(0, 0, -7).Format("2006-01-02")
-	title := fmt.Sprintf("Weekly Compaction Rollup %s to %s", priorWeekStart, priorWeekEnd)
-
-	argsLog := weeklyRollupIdempotencyBdStub(t, "hq-roll", title)
-
-	binDir := t.TempDir()
-	mailLog := filepath.Join(t.TempDir(), "mail.log")
-	gtScript := `#!/bin/sh
-if [ "$1" = "mail" ]; then
-  echo "$*" >> "$MAIL_LOG"
-  exit 0
-fi
-echo "unexpected gt command: $*" >&2
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
+	if err := fx.r.weeklyRollup(); err != nil {
+		t.Fatalf("weeklyRollup: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MAIL_LOG", mailLog)
-	resetCompactReportFlags(t)
+	if len(fx.mails) != 0 {
+		t.Fatalf("mail was sent unexpectedly: %v", fx.mails)
+	}
+	if strings.Contains(fx.bd.log(), "create") {
+		t.Fatalf("bd create was called despite an overlapping rollup sent yesterday: %s", fx.bd.log())
+	}
+}
 
-	if err := runWeeklyRollup(); err != nil {
-		t.Fatalf("runWeeklyRollup: %v", err)
+// closeFailsBD lists nothing, creates h25-mrd behind bd's beads.role notice
+// and fails every close.
+func closeFailsBD(f *inprocBD, cmd string, args []string) bdAnswer {
+	switch cmd {
+	case "list":
+		return bdOut("[]")
+	case "create":
+		return bdOut("warning: beads.role not configured (GH#2950).\n  Fix: git config beads.role maintainer\n  Or:  git config beads.role contributor\nh25-mrd\n")
+	case "close":
+		return bdAnswer{stderr: "close failed", code: 1}
 	}
-
-	assertNoMailSent(t, mailLog)
-	args, err := os.ReadFile(argsLog)
-	if err != nil {
-		t.Fatalf("read bd args: %v", err)
-	}
-	if strings.Contains(string(args), "create") {
-		t.Fatalf("bd create was called despite an overlapping rollup sent yesterday: %s", string(args))
-	}
+	return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
 }
 
 func TestRunDailyDigestStopsBeforeMailWhenAuditCloseFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-	// runDailyDigest builds its beads client from the working directory, so
-	// this test needs a sandbox cwd: from the live worktree the harness
-	// refuses that path loudly rather than let the test open production
-	// beads behind a PATH stub (gt-dr664).
-	testutil.ScratchTown(t)
-	mailLog := setupCompactReportCommandStubs(t)
-	resetCompactReportFlags(t)
-	compactReportDate = "2026-05-15"
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), closeFailsBD)
+	fx.r.date = "2026-05-15"
 
-	err := runDailyDigest()
+	err := fx.r.dailyDigest()
 	if err == nil {
 		t.Fatal("want audit bead close error, got nil")
 	}
 	if !strings.Contains(err.Error(), "auto-closing report bead h25-mrd") {
 		t.Fatalf("error = %v, want auto-close failure", err)
 	}
-	assertNoMailSent(t, mailLog)
+	if len(fx.mails) != 0 {
+		t.Fatalf("mail was sent unexpectedly: %v", fx.mails)
+	}
 }
 
 func TestRunWeeklyRollupStopsBeforeMailWhenAuditCloseFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-	mailLog := setupCompactReportCommandStubs(t)
-	resetCompactReportFlags(t)
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), closeFailsBD)
 
-	err := runWeeklyRollup()
+	err := fx.r.weeklyRollup()
 	if err == nil {
 		t.Fatal("want audit bead close error, got nil")
 	}
 	if !strings.Contains(err.Error(), "auto-closing rollup bead h25-mrd") {
 		t.Fatalf("error = %v, want auto-close failure", err)
 	}
-	assertNoMailSent(t, mailLog)
+	if len(fx.mails) != 0 {
+		t.Fatalf("mail was sent unexpectedly: %v", fx.mails)
+	}
 }
 
-func resetCompactReportFlags(t *testing.T) {
-	oldDryRun := compactReportDryRun
-	oldWeekly := compactReportWeekly
-	oldVerbose := compactReportVerbose
-	oldDate := compactReportDate
-	oldJSON := compactReportJSON
-
-	compactReportDryRun = false
-	compactReportWeekly = false
-	compactReportVerbose = false
-	compactReportDate = ""
-	compactReportJSON = false
-
-	t.Cleanup(func() {
-		compactReportDryRun = oldDryRun
-		compactReportWeekly = oldWeekly
-		compactReportVerbose = oldVerbose
-		compactReportDate = oldDate
-		compactReportJSON = oldJSON
+// A digest whose audit bead is recorded and closed is mailed to mayor/.
+func TestRunDailyDigestMailsAfterTheAuditBead(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC), func(f *inprocBD, cmd string, args []string) bdAnswer {
+		switch cmd {
+		case "list":
+			return bdOut("[]")
+		case "create":
+			return bdOut("h25-mrd\n")
+		}
+		return bdOut("")
 	})
-}
 
-func setupCompactReportCommandStubs(t *testing.T) string {
-	t.Helper()
-	binDir := t.TempDir()
-	mailLog := filepath.Join(t.TempDir(), "mail.log")
-
-	bdScript := `#!/bin/sh
-case "$1" in
-  list)
-    printf '[]\n'
-    ;;
-  create)
-    printf 'warning: beads.role not configured (GH#2950).\n  Fix: git config beads.role maintainer\n  Or:  git config beads.role contributor\nh25-mrd\n'
-    ;;
-  close)
-    echo 'close failed' >&2
-    exit 1
-    ;;
-  *)
-    echo "unexpected bd command: $*" >&2
-    exit 1
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("dailyDigest: %v", err)
 	}
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "compact" ]; then
-  printf '{"promoted":[],"deleted":[],"skipped":0}\n'
-  exit 0
-fi
-if [ "$1" = "mail" ]; then
-  echo "$*" >> "$MAIL_LOG"
-  exit 0
-fi
-echo "unexpected gt command: $*" >&2
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
+	if len(fx.mails) != 1 || fx.mails[0] != "Wisp Compaction: 2026-05-15" {
+		t.Fatalf("mails = %v, want the digest for 2026-05-15", fx.mails)
 	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MAIL_LOG", mailLog)
-	return mailLog
-}
-
-func assertNoMailSent(t *testing.T, mailLog string) {
-	t.Helper()
-	data, err := os.ReadFile(mailLog)
-	if os.IsNotExist(err) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("read mail log: %v", err)
-	}
-	if len(data) > 0 {
-		t.Fatalf("mail was sent unexpectedly: %s", string(data))
+	if !fx.bd.logged("close h25-mrd --reason=daily compaction report") {
+		t.Errorf("audit bead not closed; bd log:\n%s", fx.bd.log())
 	}
 }
 

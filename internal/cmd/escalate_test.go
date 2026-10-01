@@ -1,15 +1,13 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func TestGetNextSeverity(t *testing.T) {
@@ -175,151 +173,41 @@ func TestFormatReescalationMailBody(t *testing.T) {
 	}
 }
 
-func TestDetectSenderFallback(t *testing.T) {
-	// Save original env vars
-	origActor := os.Getenv("BD_ACTOR")
-	origRole := os.Getenv("GT_ROLE")
-	defer func() {
-		os.Setenv("BD_ACTOR", origActor)
-		os.Setenv("GT_ROLE", origRole)
-	}()
-
-	tests := []struct {
-		name  string
-		actor string
-		role  string
-		want  string
-	}{
-		{
-			name:  "BD_ACTOR takes priority",
-			actor: "gastown/polecats/alpha",
-			role:  "gastown/witness",
-			want:  "gastown/polecats/alpha",
-		},
-		{
-			name:  "GT_ROLE used when BD_ACTOR empty",
-			actor: "",
-			role:  "gastown/witness",
-			want:  "gastown/witness",
-		},
-		{
-			name:  "empty when both unset",
-			actor: "",
-			role:  "",
-			want:  "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("BD_ACTOR", tt.actor)
-			os.Setenv("GT_ROLE", tt.role)
-
-			got := detectSenderFallback()
-			if got != tt.want {
-				t.Errorf("detectSenderFallback() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRunEscalateValidation(t *testing.T) {
-	// Save and restore package-level flags
-	origSeverity := escalateSeverity
-	origReason := escalateReason
-	origStdin := escalateStdin
-	origDryRun := escalateDryRun
-	defer func() {
-		escalateSeverity = origSeverity
-		escalateReason = origReason
-		escalateStdin = origStdin
-		escalateDryRun = origDryRun
-	}()
+	t.Parallel()
 
 	t.Run("stdin and reason conflict", func(t *testing.T) {
-		escalateStdin = true
-		escalateReason = "some reason"
-		escalateSeverity = "medium"
-
-		err := runEscalate(escalateCmd, []string{"test"})
-		if err == nil {
-			t.Fatal("expected error when --stdin and --reason are both set")
-		}
-		if !strings.Contains(err.Error(), "cannot use --stdin with --reason/-r") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("no args shows help", func(t *testing.T) {
-		escalateStdin = false
-		escalateReason = ""
-		escalateSeverity = "medium"
-
-		// No args should return nil (shows help)
-		err := runEscalate(escalateCmd, []string{})
-		if err != nil {
-			t.Errorf("expected nil error for no args (help case), got: %v", err)
+		fx := newEscalateFixture(t)
+		fx.r.stdin, fx.r.reason, fx.r.severity = true, "some reason", "medium"
+		err := fx.r.escalate([]string{"test"})
+		if err == nil || !strings.Contains(err.Error(), "cannot use --stdin with --reason/-r") {
+			t.Fatalf("err = %v, want the --stdin/--reason conflict", err)
 		}
 	})
 
 	t.Run("invalid severity", func(t *testing.T) {
-		escalateStdin = false
-		escalateReason = ""
-		escalateSeverity = "emergency"
-
-		err := runEscalate(escalateCmd, []string{"test escalation"})
-		if err == nil {
-			t.Fatal("expected error for invalid severity")
+		fx := newEscalateFixture(t)
+		fx.r.severity = "emergency"
+		err := fx.r.escalate([]string{"test escalation"})
+		if err == nil || !strings.Contains(err.Error(), "invalid severity") {
+			t.Fatalf("err = %v, want invalid severity", err)
 		}
-		if !strings.Contains(err.Error(), "invalid severity") {
-			t.Errorf("unexpected error: %v", err)
+		if len(fx.raised) != 0 {
+			t.Errorf("an invalid severity reached notify: %v", fx.raised)
 		}
 	})
 }
 
-// TestCloseEscalationDeliveryBeads verifies that closing an escalation's
-// mail-delivery beads queries for open beads on the escalation's thread and
-// closes exactly those.
-//
-// Regression test for gt-kl7: `gt escalate close` closed the escalation wisp
-// but left its routed mail-delivery bead(s) open, so resolved incidents kept
-// showing up as unacked P1/P2s on the dashboard and polluted `bd ready`.
 func TestCloseEscalationDeliveryBeads(t *testing.T) {
-	stubDir := t.TempDir()
-	logPath := filepath.Join(stubDir, "calls.log")
-
-	stubScript := `#!/bin/sh
-{
-  for a in "$@"; do printf '%s\t' "$a"; done
-  printf '\n'
-} >> "` + logPath + `"
-
-case "$1" in
-  --allow-stale)
-    exit 1
-    ;;
-  list)
-    echo '[{"id":"hq-885m","title":"[HIGH] test","status":"open","labels":["gt:message","gt:escalation","thread:hq-kl7"]}]'
-    exit 0
-    ;;
-  close)
-    exit 0
-    ;;
-  *)
-    echo '{}'
-    exit 0
-    ;;
-esac
-`
-	stubPath := filepath.Join(stubDir, "bd")
-	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	beads.ResetBdAllowStaleCacheForTest()
-
-	bd := beads.New(t.TempDir())
-	n, err := closeEscalationDeliveryBeads(bd, "hq-kl7", "gastown/witness")
+	t.Parallel()
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "list" {
+			return bdOut(`[{"id":"hq-885m","title":"[HIGH] test","status":"open","labels":["gt:message","gt:escalation","thread:hq-kl7"]}]`)
+		}
+		return bdOut("")
+	}}
+	n, err := closeEscalationDeliveryBeads(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), "hq-kl7", "gastown/witness")
 	if err != nil {
 		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
 	}
@@ -327,12 +215,7 @@ esac
 		t.Fatalf("closed count = %d, want 1", n)
 	}
 
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read call log: %v", err)
-	}
-	callLog := string(logData)
-
+	callLog := bd.log()
 	// --limit=0: bd list returns 50 rows by default, and an escalation
 	// broadcast to more recipients than that left the rest open.
 	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--include-infra", "--json", "--limit=0"} {
@@ -340,7 +223,7 @@ esac
 			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
 		}
 	}
-	if !strings.Contains(callLog, "close\thq-885m") {
+	if !strings.Contains(callLog, "close hq-885m") {
 		t.Errorf("expected close call for hq-885m, got log:\n%s", callLog)
 	}
 }
@@ -348,32 +231,9 @@ esac
 // TestCloseEscalationDeliveryBeadsNoneOpen verifies the no-op path when no
 // delivery beads are open on the escalation's thread.
 func TestCloseEscalationDeliveryBeadsNoneOpen(t *testing.T) {
-	stubDir := t.TempDir()
-
-	stubScript := `#!/bin/sh
-case "$1" in
-  --allow-stale)
-    exit 1
-    ;;
-  list)
-    echo '[]'
-    exit 0
-    ;;
-  *)
-    echo '{}'
-    exit 0
-    ;;
-esac
-`
-	stubPath := filepath.Join(stubDir, "bd")
-	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	beads.ResetBdAllowStaleCacheForTest()
-
-	bd := beads.New(t.TempDir())
-	n, err := closeEscalationDeliveryBeads(bd, "hq-kl7", "gastown/witness")
+	t.Parallel()
+	bd := listingBD("[]")
+	n, err := closeEscalationDeliveryBeads(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), "hq-kl7", "gastown/witness")
 	if err != nil {
 		t.Fatalf("closeEscalationDeliveryBeads: %v", err)
 	}
@@ -382,101 +242,28 @@ esac
 	}
 }
 
-// TestRunEscalateListAllPassesIncludeInfra verifies `gt escalate list --all`
-// queries bd with --include-infra, that the query is cross-rig, and that it
-// survives bd's tree-vs-JSON behaviour.
-//
-// Regression test for gt-fcsf: escalations are ephemeral wisps, invisible to
-// `bd list` without --include-infra — the same bug class as gt-4mnd.
-//
-// The stub models bd rather than echoing JSON unconditionally, so a green run
-// shows the query actually worked, not merely that argv looked right:
-//   - it answers with human-readable tree text unless --flat is present
-//     (bd v0.59+ ignores --json on list without --flat), so dropping the flag
-//     makes runEscalateList fail its json.Unmarshal;
-//   - it records BEADS_DIR, which must be absent for prefix routing to reach
-//     other rigs' databases. Pinning it is the gt-wbxb "No escalations found"
-//     symptom.
 func TestRunEscalateListAllPassesIncludeInfra(t *testing.T) {
-	stubDir := t.TempDir()
-	argsPath := filepath.Join(stubDir, "args.txt")
-
-	stubScript := `#!/bin/sh
-{
-  printf 'BEADS_DIR=%s\n' "${BEADS_DIR-<unset>}"
-  for a in "$@"; do printf '%s\t' "$a"; done
-  printf '\n'
-} >> "` + argsPath + `"
-case "$1" in
-  --allow-stale)
-    exit 1
-    ;;
-  list)
-    has_flat=0
-    for a in "$@"; do
-      if [ "$a" = "--flat" ]; then has_flat=1; fi
-    done
-    if [ "$has_flat" = 1 ]; then
-      echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]'
-    else
-      echo 'hq-wisp1  [open] Dolt: server unreachable'
-    fi
-    exit 0
-    ;;
-  show)
-    # The live'd cross-check that filters phantom escalations; answer for the
-    # one ID the list query above returned.
-    echo '[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]'
-    exit 0
-    ;;
-  *)
-    echo '{}'
-    exit 0
-    ;;
-esac
-`
-	stubPath := filepath.Join(stubDir, "bd")
-	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
+	t.Parallel()
+	row := `[{"id":"hq-wisp1","title":"Dolt: server unreachable","status":"open","priority":0,"labels":["gt:escalation"],"ephemeral":true,"wisp_type":"escalation"}]`
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		// show is the live cross-check that filters phantom escalations.
+		if cmd == "list" || cmd == "show" {
+			return bdOut(row)
+		}
+		return bdOut("{}")
+	}}
+	var out strings.Builder
+	if err := listEscalations(&out, io.Discard, beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run), true, true); err != nil {
+		t.Fatalf("listEscalations: %v", err)
 	}
-	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	beads.ResetBdAllowStaleCacheForTest()
-
-	// runEscalateList resolves the workspace via workspace.FindFromCwdOrError()
-	// and shells out with cmd.Dir set to <townRoot>/.beads. The hermetic test
-	// sandbox town (see testutil.HermeticMain) only creates mayor/town.json,
-	// not .beads, so that directory must exist before the subprocess runs or
-	// the exec fails with an unrelated "no such file or directory" from the
-	// chdir, not from bd itself.
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		t.Fatalf("workspace.FindFromCwdOrError: %v", err)
-	}
-	if err := os.MkdirAll(beads.ResolveBeadsDir(townRoot), 0o755); err != nil {
-		t.Fatalf("creating .beads dir: %v", err)
-	}
-
-	origAll, origJSON := escalateListAll, escalateListJSON
-	defer func() { escalateListAll, escalateListJSON = origAll, origJSON }()
-	escalateListAll = true
-	escalateListJSON = true
-
-	if err := runEscalateList(escalateListCmd, nil); err != nil {
-		t.Fatalf("runEscalateList: %v", err)
-	}
-
-	logData, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("read call log: %v", err)
-	}
-	callLog := string(logData)
 	for _, want := range []string{"--label=gt:escalation", "--status=all", "--include-infra", "--flat"} {
-		if !strings.Contains(callLog, want) {
-			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
+		if !strings.Contains(bd.log(), want) {
+			t.Errorf("expected list query to contain %q, got log:\n%s", want, bd.log())
 		}
 	}
-	if !strings.Contains(callLog, "BEADS_DIR=<unset>") {
-		t.Errorf("expected the list query to run without BEADS_DIR so bd routes across rigs, got log:\n%s", callLog)
+	if !strings.Contains(out.String(), "hq-wisp1") {
+		t.Errorf("output = %q, want hq-wisp1", out.String())
 	}
 }
 

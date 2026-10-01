@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -127,37 +129,89 @@ func init() {
 }
 
 func runCompactReport(cmd *cobra.Command, args []string) error {
-	if compactReportWeekly {
-		return runWeeklyRollup()
+	workDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working dir: %w", err)
 	}
-	return runDailyDigest()
+	r := compactReportRun{
+		dryRun:  compactReportDryRun,
+		verbose: compactReportVerbose,
+		date:    compactReportDate,
+		json:    compactReportJSON,
+		now:     time.Now().UTC(),
+		workDir: workDir,
+		compact: func() ([]byte, error) { return exec.Command("gt", "compact", "--json").Output() },
+		mail:    sendMayorMail,
+		out:     os.Stdout,
+	}
+	if compactReportWeekly {
+		return r.weeklyRollup()
+	}
+	return r.dailyDigest()
 }
 
-func runDailyDigest() error {
-	now := time.Now().UTC()
-	dateStr := now.Format("2006-01-02")
-	if compactReportDate != "" {
-		if _, err := time.Parse("2006-01-02", compactReportDate); err != nil {
+// compactReportRun is one gt compact report: its flags, the clock reading it
+// reports for, and the collaborators it reads and writes through. Unit tests
+// build one with an in-process bd and recording compact and mail funcs.
+type compactReportRun struct {
+	dryRun, verbose, json bool
+	date                  string // --date; "" means today
+	now                   time.Time
+	workDir               string
+	// bd answers every bd call; nil runs bd on PATH.
+	bd beads.BDRunner
+	// compact runs `gt compact --json` and returns its output.
+	compact func() ([]byte, error)
+	// mail sends subject and body to mayor/.
+	mail func(subject, body string) error
+	out  io.Writer
+}
+
+// sendMayorMail sends a report to mayor/ through gt mail.
+func sendMayorMail(subject, body string) error {
+	mailCmd := exec.Command("gt", "mail", "send", "mayor/",
+		"-s", subject,
+		"-m", body,
+	)
+	mailCmd.Stdout = os.Stdout
+	mailCmd.Stderr = os.Stderr
+	return mailCmd.Run()
+}
+
+// bdCombinedOutput is bdCommandOutput with bd's stderr appended to stdout,
+// as cmd.CombinedOutput returns it.
+func bdCombinedOutput(run beads.BDRunner, cmd *beads.Cmd) ([]byte, error) {
+	if run == nil {
+		return cmd.CombinedOutput()
+	}
+	out, errOut, err := runPinnedBD(context.Background(), run, cmd)
+	return append(out, errOut...), err
+}
+
+func (r compactReportRun) dailyDigest() error {
+	dateStr := r.now.Format("2006-01-02")
+	if r.date != "" {
+		if _, err := time.Parse("2006-01-02", r.date); err != nil {
 			return fmt.Errorf("invalid date format (use YYYY-MM-DD): %w", err)
 		}
-		dateStr = compactReportDate
+		dateStr = r.date
 	}
 
 	// Idempotency check: see if digest already exists for this date
-	existingID, err := findExistingCompactReport(dateStr)
+	existingID, err := findExistingCompactReport(r.bd, dateStr)
 	if err != nil {
 		// Non-fatal: continue with creation attempt
-		if compactReportVerbose {
+		if r.verbose {
 			fmt.Fprintf(os.Stderr, "warning: idempotency check failed: %v\n", err)
 		}
 	} else if existingID != "" {
-		fmt.Printf("%s Compaction digest already sent for %s (bead: %s)\n",
+		fmt.Fprintf(r.out, "%s Compaction digest already sent for %s (bead: %s)\n",
 			style.Dim.Render("○"), dateStr, existingID)
 		return nil
 	}
 
 	// Run compaction with --json to get results
-	compactOut, err := exec.Command("gt", "compact", "--json").Output()
+	compactOut, err := r.compact()
 	if err != nil {
 		return fmt.Errorf("running compaction: %w", err)
 	}
@@ -168,11 +222,10 @@ func runDailyDigest() error {
 	}
 
 	// Query active wisps for the "Active" column
-	workDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working dir: %w", err)
+	bd := beads.New(r.workDir)
+	if r.bd != nil {
+		bd = beads.NewWithBeadsDirAndRunner(r.workDir, "", r.bd)
 	}
-	bd := beads.New(workDir)
 	activeWisps, err := listReportWisps(bd)
 	if err != nil {
 		return fmt.Errorf("listing active wisps: %w", err)
@@ -184,8 +237,8 @@ func runDailyDigest() error {
 	// Detect anomalies
 	report.Anomalies = detectAnomalies(report)
 
-	if compactReportJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if r.json {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
 	}
@@ -193,26 +246,27 @@ func runDailyDigest() error {
 	// Format as markdown
 	markdown := formatDailyDigest(report)
 
-	if compactReportDryRun {
-		fmt.Printf("%s [DRY RUN] Daily compaction digest for %s:\n\n", style.Dim.Render("[dry-run]"), dateStr)
-		fmt.Println(markdown)
+	if r.dryRun {
+		fmt.Fprintf(r.out, "%s [DRY RUN] Daily compaction digest for %s:\n\n", style.Dim.Render("[dry-run]"), dateStr)
+		fmt.Fprintln(r.out, markdown)
 		return nil
 	}
 
 	// Create permanent event bead for audit trail
-	beadID, err := createCompactReportBead(report, markdown)
+	beadID, err := createCompactReportBead(r.bd, report, markdown)
 	if err != nil {
 		return fmt.Errorf("recording compact report audit bead: %w", err)
 	}
 
-	// Send mail to deacon/, cc mayor/
-	if err := sendCompactDigest(dateStr, markdown); err != nil {
+	// Send to mayor/ only — deacon/ is not a valid mail address (audit bead
+	// serves as the deacon-side record).
+	if err := r.mail(fmt.Sprintf("Wisp Compaction: %s", dateStr), markdown); err != nil {
 		return fmt.Errorf("sending digest: %w", err)
 	}
 
-	fmt.Printf("%s Compaction digest sent for %s\n", style.Success.Render("✓"), dateStr)
+	fmt.Fprintf(r.out, "%s Compaction digest sent for %s\n", style.Success.Render("✓"), dateStr)
 	if beadID != "" {
-		fmt.Printf("  Audit bead: %s\n", beadID)
+		fmt.Fprintf(r.out, "  Audit bead: %s\n", beadID)
 	}
 
 	return nil
@@ -367,23 +421,8 @@ func formatDailyDigest(report *compactReport) string {
 	return sb.String()
 }
 
-// sendCompactDigest sends the daily digest via gt mail send.
-func sendCompactDigest(dateStr, body string) error {
-	subject := fmt.Sprintf("Wisp Compaction: %s", dateStr)
-
-	// Send to mayor/ only — deacon/ is not a valid mail address (audit bead
-	// serves as the deacon-side record).
-	mailCmd := exec.Command("gt", "mail", "send", "mayor/",
-		"-s", subject,
-		"-m", body,
-	)
-	mailCmd.Stdout = os.Stdout
-	mailCmd.Stderr = os.Stderr
-	return mailCmd.Run()
-}
-
 // createCompactReportBead creates a permanent audit bead for the daily digest.
-func createCompactReportBead(report *compactReport, markdown string) (string, error) {
+func createCompactReportBead(run beads.BDRunner, report *compactReport, markdown string) (string, error) {
 	payloadJSON, err := json.Marshal(report)
 	if err != nil {
 		return "", fmt.Errorf("marshaling report payload: %w", err)
@@ -400,8 +439,7 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 		"--silent",
 	}
 
-	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
-	output, err := bdCmd.CombinedOutput()
+	output, err := bdCombinedOutput(run, beads.CommandWithEnv("", nil, bdArgs...))
 	if err != nil {
 		return "", fmt.Errorf("creating report bead: %w\nOutput: %s", err, string(output))
 	}
@@ -415,7 +453,7 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 	// the bead stays open and findExistingCompactReport (filter status=closed)
 	// will never match, causing the digest to re-fire every patrol cycle.
 	closeCmd := beads.CommandWithEnv("", nil, "close", beadID, "--reason=daily compaction report")
-	if out, err := closeCmd.CombinedOutput(); err != nil {
+	if out, err := bdCombinedOutput(run, closeCmd); err != nil {
 		return "", fmt.Errorf("auto-closing report bead %s: %w\nOutput: %s", beadID, err, string(out))
 	}
 
@@ -424,25 +462,24 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 
 // --- Weekly Rollup ---
 
-func runWeeklyRollup() error {
-	now := time.Now().UTC()
-	weekEnd := now.Format("2006-01-02")
-	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
+func (r compactReportRun) weeklyRollup() error {
+	weekEnd := r.now.Format("2006-01-02")
+	weekStart := r.now.AddDate(0, 0, -7).Format("2006-01-02")
 
 	// Idempotency check: see if weekly rollup already exists for this week
-	existingID, err := findExistingWeeklyRollup(weekStart, weekEnd)
+	existingID, err := findExistingWeeklyRollupVia(r.bd, weekStart, weekEnd)
 	if err != nil {
-		if compactReportVerbose {
+		if r.verbose {
 			fmt.Fprintf(os.Stderr, "warning: weekly idempotency check failed: %v\n", err)
 		}
 	} else if existingID != "" {
-		fmt.Printf("%s Weekly rollup already sent for %s to %s (bead: %s)\n",
+		fmt.Fprintf(r.out, "%s Weekly rollup already sent for %s to %s (bead: %s)\n",
 			style.Dim.Render("○"), weekStart, weekEnd, existingID)
 		return nil
 	}
 
 	// Query compaction report event beads from the past week
-	reports, err := queryCompactionReports(weekStart, weekEnd)
+	reports, err := queryCompactionReportsVia(r.bd, weekStart, weekEnd)
 	if err != nil {
 		return fmt.Errorf("querying compaction reports: %w", err)
 	}
@@ -475,55 +512,44 @@ func runWeeklyRollup() error {
 		}
 	}
 
-	if compactReportJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if r.json {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rollup)
 	}
 
 	markdown := formatWeeklyRollup(rollup)
 
-	if compactReportDryRun {
-		fmt.Printf("%s [DRY RUN] Weekly compaction rollup (%s to %s):\n\n",
+	if r.dryRun {
+		fmt.Fprintf(r.out, "%s [DRY RUN] Weekly compaction rollup (%s to %s):\n\n",
 			style.Dim.Render("[dry-run]"), weekStart, weekEnd)
-		fmt.Println(markdown)
+		fmt.Fprintln(r.out, markdown)
 		return nil
 	}
 
 	// Create audit event bead for the weekly rollup (for future idempotency checks)
-	beadID, beadErr := createWeeklyRollupBead(rollup, markdown)
+	beadID, beadErr := createWeeklyRollupBead(r.bd, rollup, markdown)
 	if beadErr != nil {
 		return fmt.Errorf("recording weekly rollup audit bead: %w", beadErr)
 	}
 
 	// Send to mayor/
 	subject := fmt.Sprintf("Weekly Wisp Compaction: %s to %s", weekStart, weekEnd)
-	mailCmd := exec.Command("gt", "mail", "send", "mayor/",
-		"-s", subject,
-		"-m", markdown,
-	)
-	mailCmd.Stdout = os.Stdout
-	mailCmd.Stderr = os.Stderr
-	if err := mailCmd.Run(); err != nil {
+	if err := r.mail(subject, markdown); err != nil {
 		return fmt.Errorf("sending weekly rollup: %w", err)
 	}
 
-	fmt.Printf("%s Weekly compaction rollup sent to mayor/ (%s to %s)\n",
+	fmt.Fprintf(r.out, "%s Weekly compaction rollup sent to mayor/ (%s to %s)\n",
 		style.Success.Render("✓"), weekStart, weekEnd)
 	if beadID != "" {
-		fmt.Printf("  Audit bead: %s\n", beadID)
+		fmt.Fprintf(r.out, "  Audit bead: %s\n", beadID)
 	}
 
 	return nil
 }
 
-// queryCompactionReports queries compaction report event beads in a date range.
-func queryCompactionReports(startDate, endDate string) ([]*compactReport, error) {
-	return queryCompactionReportsVia(nil, startDate, endDate)
-}
-
-// queryCompactionReportsVia is queryCompactionReports with bd answered by
-// run (nil: bd on PATH).
+// queryCompactionReportsVia queries compaction report event beads in a date
+// range, with bd answered by run (nil: bd on PATH).
 func queryCompactionReportsVia(run beads.BDRunner, startDate, endDate string) ([]*compactReport, error) {
 	listCmd := beads.CommandWithEnv("", nil, "list",
 		"--type=event",
@@ -661,7 +687,8 @@ func formatWeeklyRollup(rollup *weeklyRollup) string {
 
 // findExistingCompactReport checks if a compaction digest already exists for the given date.
 // Returns the bead ID if found, empty string if not found.
-func findExistingCompactReport(dateStr string) (string, error) {
+// run answers bd (nil: bd on PATH).
+func findExistingCompactReport(run beads.BDRunner, dateStr string) (string, error) {
 	expectedTitle := fmt.Sprintf("Compaction Report %s", dateStr)
 
 	listCmd := beads.CommandWithEnv("", nil, "list",
@@ -670,7 +697,7 @@ func findExistingCompactReport(dateStr string) (string, error) {
 		"--json",
 		"--limit=50",
 	)
-	listOutput, err := listCmd.Output()
+	listOutput, err := bdCommandOutput(run, listCmd)
 	if err != nil {
 		return "", err
 	}
@@ -695,7 +722,7 @@ func findExistingCompactReport(dateStr string) (string, error) {
 // "Weekly Compaction Rollup 2026-09-01 to 2026-09-08".
 var weeklyRollupTitle = regexp.MustCompile(`^Weekly Compaction Rollup (\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})$`)
 
-// findExistingWeeklyRollup checks if a weekly rollup already covers the given
+// findExistingWeeklyRollupVia checks if a weekly rollup already covers the given
 // window. Returns the bead ID if found, empty string if not found.
 //
 // The window is a rolling (now-7d, now) pair recomputed on every invocation,
@@ -705,12 +732,8 @@ var weeklyRollupTitle = regexp.MustCompile(`^Weekly Compaction Rollup (\d{4}-\d{
 // gt-9t9). Instead, treat any existing rollup whose window overlaps the new
 // one as already covering it — dates are "YYYY-MM-DD" so lexicographic and
 // chronological comparison agree.
-func findExistingWeeklyRollup(weekStart, weekEnd string) (string, error) {
-	return findExistingWeeklyRollupVia(nil, weekStart, weekEnd)
-}
-
-// findExistingWeeklyRollupVia is findExistingWeeklyRollup with bd answered
-// by run (nil: bd on PATH).
+//
+// run answers bd (nil: bd on PATH).
 func findExistingWeeklyRollupVia(run beads.BDRunner, weekStart, weekEnd string) (string, error) {
 	// The rollup audit bead is auto-closed at creation, and bd list defaults
 	// to open issues only — without --status=closed the prior rollup is
@@ -758,7 +781,7 @@ func extractJSONObject(data []byte) []byte {
 }
 
 // createWeeklyRollupBead creates a permanent audit bead for the weekly rollup.
-func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, error) {
+func createWeeklyRollupBead(run beads.BDRunner, rollup *weeklyRollup, markdown string) (string, error) {
 	payloadJSON, err := json.Marshal(rollup)
 	if err != nil {
 		return "", fmt.Errorf("marshaling rollup payload: %w", err)
@@ -775,8 +798,7 @@ func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, erro
 		"--silent",
 	}
 
-	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
-	output, err := bdCmd.CombinedOutput()
+	output, err := bdCombinedOutput(run, beads.CommandWithEnv("", nil, bdArgs...))
 	if err != nil {
 		return "", fmt.Errorf("creating weekly rollup bead: %w\nOutput: %s", err, string(output))
 	}
@@ -789,7 +811,7 @@ func createWeeklyRollupBead(rollup *weeklyRollup, markdown string) (string, erro
 	// Auto-close (audit record, not work). Surface failures so mail is not sent
 	// without a matching audit record for future idempotency checks.
 	closeCmd := beads.CommandWithEnv("", nil, "close", beadID, "--reason=weekly compaction rollup")
-	if out, err := closeCmd.CombinedOutput(); err != nil {
+	if out, err := bdCombinedOutput(run, closeCmd); err != nil {
 		return "", fmt.Errorf("auto-closing rollup bead %s: %w\nOutput: %s", beadID, err, string(out))
 	}
 
