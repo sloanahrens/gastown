@@ -1,5 +1,5 @@
 // Emergency stop (gt estop / gt thaw): stop and resume dispatch and
-// restarts. Running sessions are never signalled (gt-4k3fj.4): the SIGTSTP
+// restarts. Running sessions are never signaled (gt-4k3fj.4): the SIGTSTP
 // freeze this used to send is gone, since tmux SIGCONTs a stopped pane.
 //
 // Original implementation by outdoorsea (PR #3237). Cherry-picked for
@@ -44,7 +44,7 @@ with --rig). While it is present:
     and Kill for a covered seat, whoever asks.
 
 Running sessions are left alone: they finish their current work or go
-idle. Nothing is signalled, frozen or killed. Agents see the E-stop in
+idle. Nothing is signaled, frozen or killed. Agents see the E-stop in
 their mail-check reminder and are told to checkpoint and wait.
 
 To end running sessions as well, use gt kill-all.

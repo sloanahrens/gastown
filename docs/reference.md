@@ -726,7 +726,7 @@ gt down                      # Stop all Gas Town services
 An E-stop (`<town>/ESTOP`, or `<town>/ESTOP.<rig>`) is read in two places
 only: the dispatch hold, which every automatic dispatcher and `gt sling`
 check, and the supervisor's Kill and Restart guard, which every automated
-kill and restart goes through. Nothing is signalled; running sessions
+kill and restart goes through. Nothing is signaled; running sessions
 finish or idle and learn of the stop from their mail-check reminder.
 `gt kill-all` is the explicit way to end them: it sets the E-stop, then
 kills each agent seat through the supervisor (the one kill an E-stop or a

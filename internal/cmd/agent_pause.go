@@ -55,7 +55,7 @@ var agentPauseCmd = &cobra.Command{
 restart or nuke it.
 
 Writes a durable pause marker and syncs the agent bead to
-agent_state=paused. The session is not signalled: it finishes its
+agent_state=paused. The session is not signaled: it finishes its
 current work or idles, and the supervisor refuses to restart or kill it
 while the marker stands.
 

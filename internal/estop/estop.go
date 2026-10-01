@@ -3,7 +3,7 @@
 // The E-stop stops dispatch and restarts, town-wide (a sentinel file ESTOP
 // at the town root) or for one rig (ESTOP.<rig>). It is read in two places
 // only: the dispatch hold (internal/dispatch) and the supervisor's Kill and
-// Restart guard (internal/supervisor). Running sessions are never signalled;
+// Restart guard (internal/supervisor). Running sessions are never signaled;
 // they finish or idle (gt-4k3fj.4). gt kill-all is the explicit way to end
 // them.
 //

@@ -256,8 +256,8 @@ func killWith(t *testing.T, f *fakeServer, kill func(tm *Tmux) error) (*scripted
 	return s, driven(t, clk, processKillGracePeriod, func() error { return kill(tm) })
 }
 
-// signalled returns the pids sent sig, in order.
-func signalled(f *fakeServer, sig string) []string {
+// signaled returns the pids sent sig, in order.
+func signaled(f *fakeServer, sig string) []string {
 	var out []string
 	for _, k := range f.kills() {
 		if s, pid, _ := strings.Cut(k, " "); s == sig {
@@ -280,15 +280,15 @@ func TestKillSessionWithProcesses(t *testing.T) {
 	if f.has("gt-x") {
 		t.Error("session survived KillSessionWithProcesses")
 	}
-	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signalled(f, "TERM"), want) {
-		t.Errorf("TERM order = %v, want %v", signalled(f, "TERM"), want)
+	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signaled(f, "TERM"), want) {
+		t.Errorf("TERM order = %v, want %v", signaled(f, "TERM"), want)
 	}
-	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signalled(f, "KILL"), want) {
-		t.Errorf("KILL order = %v, want %v", signalled(f, "KILL"), want)
+	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signaled(f, "KILL"), want) {
+		t.Errorf("KILL order = %v, want %v", signaled(f, "KILL"), want)
 	}
 	for _, k := range f.kills() {
 		if strings.HasSuffix(k, " "+groupmate) || strings.HasSuffix(k, " "+stranger) {
-			t.Errorf("signalled an unrelated process: %s", k)
+			t.Errorf("signaled an unrelated process: %s", k)
 		}
 	}
 	subs := s.subs()
@@ -304,7 +304,7 @@ func TestKillSessionWithProcesses_NonexistentSession(t *testing.T) {
 		t.Fatalf("KillSessionWithProcesses(missing) = %v, want nil", err)
 	}
 	if len(f.kills()) != 0 {
-		t.Errorf("signalled %v for a missing session", f.kills())
+		t.Errorf("signaled %v for a missing session", f.kills())
 	}
 }
 
@@ -318,18 +318,18 @@ func TestKillSessionWithProcessesExcluding(t *testing.T) {
 		t.Error("session survived")
 	}
 	got := map[string]bool{}
-	for _, p := range signalled(f, "KILL") {
+	for _, p := range signaled(f, "KILL") {
 		got[p] = true
 	}
 	for _, want := range []string{pane, node, claude, reparented} {
 		if !got[want] {
-			t.Errorf("KILL set %v missing %s", signalled(f, "KILL"), want)
+			t.Errorf("KILL set %v missing %s", signaled(f, "KILL"), want)
 		}
 	}
 }
 
 // TestKillSessionWithProcessesExcluding_WithExcludePID: the caller (gt done
-// running inside the session) is never signalled, but the session still goes.
+// running inside the session) is never signaled, but the session still goes.
 func TestKillSessionWithProcessesExcluding_WithExcludePID(t *testing.T) {
 	t.Parallel()
 	f, pane, _, claude, _, _, _ := processTree()
@@ -340,7 +340,7 @@ func TestKillSessionWithProcessesExcluding_WithExcludePID(t *testing.T) {
 	}
 	for _, k := range f.kills() {
 		if strings.HasSuffix(k, " "+pane) || strings.HasSuffix(k, " "+claude) {
-			t.Errorf("signalled an excluded pid: %s", k)
+			t.Errorf("signaled an excluded pid: %s", k)
 		}
 	}
 	if f.has("gt-x") {
@@ -364,8 +364,8 @@ func TestKillPaneProcesses(t *testing.T) {
 	if _, err := killWith(t, f, func(tm *Tmux) error { return tm.KillPaneProcesses("gt-x") }); err != nil {
 		t.Fatalf("KillPaneProcesses: %v", err)
 	}
-	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signalled(f, "TERM"), want) {
-		t.Errorf("TERM order = %v, want %v", signalled(f, "TERM"), want)
+	if want := []string{claude, node, reparented, pane}; !reflect.DeepEqual(signaled(f, "TERM"), want) {
+		t.Errorf("TERM order = %v, want %v", signaled(f, "TERM"), want)
 	}
 	if !f.has("gt-x") {
 		t.Error("KillPaneProcesses must leave the session for the respawn")
@@ -379,8 +379,8 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 	if _, err := killWith(t, f, func(tm *Tmux) error { return tm.KillPaneProcessesExcluding(paneID, nil) }); err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
-	if want := []string{claude, node, pane}; !reflect.DeepEqual(signalled(f, "TERM"), want) {
-		t.Errorf("TERM order = %v, want %v", signalled(f, "TERM"), want)
+	if want := []string{claude, node, pane}; !reflect.DeepEqual(signaled(f, "TERM"), want) {
+		t.Errorf("TERM order = %v, want %v", signaled(f, "TERM"), want)
 	}
 }
 
@@ -393,8 +393,8 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 	if _, err := killWith(t, f, func(tm *Tmux) error { return tm.KillPaneProcessesExcluding(paneID, []string{pane}) }); err != nil {
 		t.Fatalf("KillPaneProcessesExcluding: %v", err)
 	}
-	if want := []string{claude, node}; !reflect.DeepEqual(signalled(f, "TERM"), want) {
-		t.Errorf("TERM = %v, want %v with the pane pid excluded", signalled(f, "TERM"), want)
+	if want := []string{claude, node}; !reflect.DeepEqual(signaled(f, "TERM"), want) {
+		t.Errorf("TERM = %v, want %v with the pane pid excluded", signaled(f, "TERM"), want)
 	}
 }
 
