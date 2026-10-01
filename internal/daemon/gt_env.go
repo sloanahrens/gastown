@@ -13,7 +13,7 @@ const daemonActor = "daemon"
 
 // daemonGTEnv returns base with the agent identity replaced by the daemon's:
 // every identity variable (config.IdentityEnvVars) is dropped and
-// BD_ACTOR=daemon appended. runDaemonRun clears and sets the same variables
+// BD_ACTOR=daemon appended. PublishIdentity clears and sets the same variables
 // process-wide, so in a running daemon this restates what the child inherits;
 // building it here makes a gt child's identity independent of how the daemon
 // was started (gt-kyik6).
@@ -23,4 +23,15 @@ func daemonGTEnv(base []string) []string {
 		return slices.Contains(agentconfig.IdentityEnvVars, k)
 	})
 	return append(env, "BD_ACTOR="+daemonActor)
+}
+
+// PublishIdentity replaces the agent identity the daemon process inherited
+// with its own: every identity variable is unset and BD_ACTOR=daemon set, so
+// nothing the daemon spawns is attributed to the agent session that started
+// it (GH#3006). runDaemonRun calls it before New.
+func PublishIdentity() {
+	for _, k := range agentconfig.IdentityEnvVars {
+		processEnv{}.Unsetenv(k)
+	}
+	processEnv{}.Setenv("BD_ACTOR", daemonActor)
 }

@@ -342,6 +342,7 @@ func checkStaleBinaryWarning() {
 
 	if info.IsStale {
 		staleBinaryWarned = true
+		//testpolicy:allow prod-no-setenv — every gt this one spawns inherits the marker, so a nested gt does not repeat the warning
 		_ = os.Setenv("GT_STALE_WARNED", "1")
 
 		msg := info.Describe("gt binary")

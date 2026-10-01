@@ -1,4 +1,3 @@
 # Packages not yet converted to the unit-test rules (docs/testing.md).
 # This list only shrinks: converting a package deletes its line.
 internal/beads
-internal/cmd

@@ -20,7 +20,7 @@ import (
 
 var freshSetupIntegrationCounter atomic.Int32
 
-func TestFreshInstallRigPolecatHookIntegration(t *testing.T) {
+func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping fresh setup integration test")
 	}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -489,10 +488,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	// 'gt daemon start'), it inherits GT_ROLE/GT_CREW/etc. Any subprocess
 	// that derives sender identity from ambient env vars (e.g. gt mail send)
 	// would then be misattributed to the launching agent. GH#3006.
-	for _, k := range agentconfig.IdentityEnvVars {
-		os.Unsetenv(k)
-	}
-	os.Setenv("BD_ACTOR", daemonRunActor)
+	daemon.PublishIdentity()
 
 	config := daemon.DefaultConfig(townRoot)
 	d, err := daemon.New(config)

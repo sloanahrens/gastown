@@ -45,6 +45,10 @@ const primeExternalToolWaitDelay = time.Second
 // when running in hook mode. Used to provide lighter output on compaction/resume.
 var primeHookSource string
 
+// primeHookSessionID is the session ID handlePrimeHookMode read, which the
+// rest of the run reports (resolveSessionIDForPrime).
+var primeHookSessionID string
+
 // primeHandoffReason stores the reason from the handoff marker (e.g., "compaction").
 // Set by checkHandoffMarker when a marker with a reason field is found.
 var primeHandoffReason string
@@ -457,8 +461,7 @@ func handlePrimeHookMode(townRoot, cwd string) {
 			persistSessionID(cwd, sessionID)
 		}
 	}
-	_ = os.Setenv("GT_SESSION_ID", sessionID)
-	_ = os.Setenv("CLAUDE_SESSION_ID", sessionID) // Legacy compatibility
+	primeHookSessionID = sessionID
 
 	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
 	// WaitForCommand polls for this instead of probing the process tree.
@@ -640,7 +643,8 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 		// Also set in the current process so this prime run uses the correct identity.
 		for k, v := range envVars {
 			if identitySet[k] {
-				os.Setenv(k, v)
+				//testpolicy:allow prod-no-setenv — the repaired identity must reach the bd and gt this run spawns, which inherit the process environment (beads.ConfigureCommand)
+				_ = os.Setenv(k, v)
 			}
 		}
 	}

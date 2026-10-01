@@ -14,7 +14,7 @@ import (
 
 // TestMain runs the integration tests under the hermetic harness (gt-lwi)
 // with a mandatory ephemeral Dolt container. Tests like
-// TestAgentWorktreesStayClean and TestBeadsRoutingFromTownRoot spawn gt/bd
+// TestIntegrationAgentWorktreesStayClean and TestIntegrationBeadsRoutingFromTownRoot spawn gt/bd
 // subprocesses that create databases (e.g., "tr", "hq"); routing to an
 // isolated container (via GT_DOLT_PORT) means those databases are destroyed
 // when the container is terminated — preventing orphan accumulation in the

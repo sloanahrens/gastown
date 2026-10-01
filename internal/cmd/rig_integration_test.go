@@ -349,9 +349,9 @@ esac
 	return logPath
 }
 
-// TestRigAddCreatesCorrectStructure verifies that gt rig add creates
+// TestIntegrationRigAddCreatesCorrectStructure verifies that gt rig add creates
 // the expected directory structure.
-func TestRigAddCreatesCorrectStructure(t *testing.T) {
+func TestIntegrationRigAddCreatesCorrectStructure(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -473,9 +473,9 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 	}
 }
 
-// TestRigAddInitializesBeads verifies that beads is initialized with
+// TestIntegrationRigAddInitializesBeads verifies that beads is initialized with
 // the correct prefix.
-func TestRigAddInitializesBeads(t *testing.T) {
+func TestIntegrationRigAddInitializesBeads(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -542,9 +542,9 @@ func TestRigAddInitializesBeads(t *testing.T) {
 	}
 }
 
-// TestRigAddUpdatesRoutes verifies that routes.jsonl is updated
+// TestIntegrationRigAddUpdatesRoutes verifies that routes.jsonl is updated
 // with the new rig's route.
-func TestRigAddUpdatesRoutes(t *testing.T) {
+func TestIntegrationRigAddUpdatesRoutes(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -613,9 +613,9 @@ func TestRigAddUpdatesRoutes(t *testing.T) {
 	}
 }
 
-// TestRigAddUpdatesRigsJson verifies that rigs.json is updated
+// TestIntegrationRigAddUpdatesRigsJson verifies that rigs.json is updated
 // with the new rig entry.
-func TestRigAddUpdatesRigsJson(t *testing.T) {
+func TestIntegrationRigAddUpdatesRigsJson(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -664,9 +664,9 @@ func TestRigAddUpdatesRigsJson(t *testing.T) {
 	}
 }
 
-// TestRigAddDerivesPrefix verifies that when no prefix is specified,
+// TestIntegrationRigAddDerivesPrefix verifies that when no prefix is specified,
 // one is derived from the rig name.
-func TestRigAddDerivesPrefix(t *testing.T) {
+func TestIntegrationRigAddDerivesPrefix(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -697,9 +697,9 @@ func TestRigAddDerivesPrefix(t *testing.T) {
 	}
 }
 
-// TestRigAddCreatesRigConfig verifies that config.json contains
+// TestIntegrationRigAddCreatesRigConfig verifies that config.json contains
 // the correct rig configuration.
-func TestRigAddCreatesRigConfig(t *testing.T) {
+func TestIntegrationRigAddCreatesRigConfig(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
@@ -755,10 +755,10 @@ func TestRigAddCreatesRigConfig(t *testing.T) {
 	}
 }
 
-// TestRigAddWithUpstreamURL verifies that gt rig add --upstream-url
+// TestIntegrationRigAddWithUpstreamURL verifies that gt rig add --upstream-url
 // configures the upstream remote on both the bare repo and mayor clone,
 // and persists the URL to config.json and rigs.json.
-func TestRigAddWithUpstreamURL(t *testing.T) {
+func TestIntegrationRigAddWithUpstreamURL(t *testing.T) {
 	// bd is mocked, but AddRig still creates the rig's database over SQL.
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
@@ -844,9 +844,9 @@ func TestRigAddWithUpstreamURL(t *testing.T) {
 	})
 }
 
-// TestRigAddRejectsInvalidNames verifies that rig names with invalid
+// TestIntegrationRigAddRejectsInvalidNames verifies that rig names with invalid
 // characters are rejected.
-func TestRigAddRejectsInvalidNames(t *testing.T) {
+func TestIntegrationRigAddRejectsInvalidNames(t *testing.T) {
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	gitURL := createTestGitRepo(t, "validname")
@@ -884,8 +884,8 @@ func TestRigAddRejectsInvalidNames(t *testing.T) {
 	}
 }
 
-// TestAgentBeadIDs verifies the agent bead ID generation functions.
-func TestAgentBeadIDs(t *testing.T) {
+// TestIntegrationAgentBeadIDs verifies the agent bead ID generation functions.
+func TestIntegrationAgentBeadIDs(t *testing.T) {
 	tests := []struct {
 		name     string
 		fn       func() string
@@ -908,7 +908,7 @@ func TestAgentBeadIDs(t *testing.T) {
 	}
 }
 
-// TestAgentWorktreesStayClean verifies that after gt install, gt rig add, and
+// TestIntegrationAgentWorktreesStayClean verifies that after gt install, gt rig add, and
 // agent creation, all agent worktrees have no unexpected Gas Town files.
 //
 // This is a critical invariant: user repos should stay clean. The only allowed
@@ -928,7 +928,7 @@ func TestAgentBeadIDs(t *testing.T) {
 // Tests two scenarios:
 // - Repo WITHOUT tracked .beads/ (clean repo)
 // - Repo WITH tracked .beads/ (simulates beads project)
-func TestAgentWorktreesStayClean(t *testing.T) {
+func TestIntegrationAgentWorktreesStayClean(t *testing.T) {
 	// Skip if bd is not available (required for beads initialization)
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")

@@ -17,7 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-func TestInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
+func TestIntegrationInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "missing-dolt-hq")
 	gtBinary := buildGT(t)
@@ -41,7 +41,7 @@ func TestInstallFailsBeforeMutationWhenDoltMissing(t *testing.T) {
 	}
 }
 
-func TestInstallNoBeadsAllowsMissingDolt(t *testing.T) {
+func TestIntegrationInstallNoBeadsAllowsMissingDolt(t *testing.T) {
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "no-beads-hq")
 	gtBinary := buildGT(t)
@@ -63,7 +63,7 @@ func TestInstallNoBeadsAllowsMissingDolt(t *testing.T) {
 	}
 }
 
-func TestInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *testing.T) {
+func TestIntegrationInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *testing.T) {
 	ln := listenAndHoldTCP(t)
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "port-conflict-hq")
@@ -92,7 +92,7 @@ func TestInstallFailsBeforeMutationWhenDoltPortOccupiedByNonDolt(t *testing.T) {
 	}
 }
 
-func TestPrimeFlagCombinations(t *testing.T) {
+func TestIntegrationPrimeFlagCombinations(t *testing.T) {
 	gtBin := buildGT(t)
 
 	cases := []struct {
@@ -158,8 +158,8 @@ func TestPrimeFlagCombinations(t *testing.T) {
 	}
 }
 
-// TestDryRunSkipsSideEffects tests that --dry-run skips various side effects via CLI.
-func TestDryRunSkipsSideEffects(t *testing.T) {
+// TestIntegrationDryRunSkipsSideEffects tests that --dry-run skips various side effects via CLI.
+func TestIntegrationDryRunSkipsSideEffects(t *testing.T) {
 	gtBin := buildGT(t)
 
 	// Create a temp workspace
@@ -207,7 +207,7 @@ func TestDryRunSkipsSideEffects(t *testing.T) {
 	}
 }
 
-// TestPRWorkflowGuard_Integration exercises the compiled guard end-to-end
+// TestIntegrationPRWorkflowGuard exercises the compiled guard end-to-end
 // (real stdin, real exit code) against gt-pjeh's regression shape: the
 // guard's only filter used to be the hook's "if" field, so a hooks-sync bug
 // that dropped "if" made the guard fire on every Bash call and block all of
@@ -215,7 +215,7 @@ func TestDryRunSkipsSideEffects(t *testing.T) {
 // itself and only block the three real PR-workflow shapes, leaving an
 // unrelated command alone even when fed to the guard directly (as if "if"
 // were missing).
-func TestPRWorkflowGuard_Integration(t *testing.T) {
+func TestIntegrationPRWorkflowGuard(t *testing.T) {
 	bin := buildGT(t)
 	workDir := t.TempDir() // not under /polecats/, /crew/, or /deacon/dogs/
 
@@ -314,7 +314,7 @@ func TestPRWorkflowGuard_Integration(t *testing.T) {
 // drives the compiled binary (gt-fo3h moved every buildGT-dependent test in
 // this package behind the integration tag, so the untagged file keeps only
 // the pure unit tests).
-func TestPRWorkflowGuard_Gt3mp1Regression(t *testing.T) {
+func TestIntegrationPRWorkflowGuard_Gt3mp1Regression(t *testing.T) {
 	bin := buildGT(t)
 	workDir := t.TempDir()
 

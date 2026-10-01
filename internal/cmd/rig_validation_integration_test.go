@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRigAddURLValidation(t *testing.T) {
+func TestIntegrationRigAddURLValidation(t *testing.T) {
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 
