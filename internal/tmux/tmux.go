@@ -3555,7 +3555,7 @@ func (t *Tmux) IsRuntimeRunningChecked(session string, processNames []string) (b
 	if declaredPane, ok, err := t.getEnvironmentOptional(session, "GT_PANE_ID"); err != nil {
 		return false, err
 	} else if ok && declaredPane != "" {
-		running, err := t.checkTargetPaneForRuntimeChecked(session, declaredPane, processNames)
+		running, err := t.checkTargetPaneForRuntimeChecked(declaredPane, processNames)
 		if err != nil {
 			if runtime.GOOS != "windows" {
 				return false, err
@@ -3599,14 +3599,10 @@ func (t *Tmux) IsRuntimeRunningChecked(session string, processNames []string) (b
 	return false, nil
 }
 
-// checkTargetPaneForRuntime checks if a specific pane (by ID, e.g., "%5") is
-// running a matching process. Used by the ZFC path when GT_PANE_ID is declared.
-func (t *Tmux) checkTargetPaneForRuntime(session, paneID string, processNames []string) bool {
-	running, _ := t.checkTargetPaneForRuntimeChecked(session, paneID, processNames)
-	return running
-}
-
-func (t *Tmux) checkTargetPaneForRuntimeChecked(session, paneID string, processNames []string) (bool, error) {
+// checkTargetPaneForRuntimeChecked checks if a specific pane (by ID, e.g.,
+// "%5") is running a matching process. Used by the ZFC path when GT_PANE_ID is
+// declared.
+func (t *Tmux) checkTargetPaneForRuntimeChecked(paneID string, processNames []string) (bool, error) {
 	cmd, err := t.run("display-message", "-t", paneID, "-p", "#{pane_current_command}")
 	if err != nil {
 		return false, err
