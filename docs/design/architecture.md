@@ -230,7 +230,7 @@ Stages 1-3 are automated today. Stages 4-6 run as daemon patrols
 (gt-at0i Reaper DELETE, gt-l8dc Compactor REBASE, gt-emm4 Doctor gc).
 
 These maintenance patrols (`doctor_dog`, `wisp_reaper`, `compactor_dog`,
-`checkpoint_dog`, `jsonl_git_backup`, `dolt_backup`) are imperative Go inside the
+`checkpoint_dog`, `jsonl_git_backup`, `scheduled_maintenance`) are imperative Go inside the
 daemon: a ticker fires and the daemon does the work itself, with no agent
 involved. Jobs that pour a `mol-dog-*` molecule pour it only as an observability
 receipt; nothing picks the molecule up. The `_dog` suffix is historical — the

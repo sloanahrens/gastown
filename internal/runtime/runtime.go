@@ -20,7 +20,11 @@ import (
 // Every runtime is the Claude CLI, so every role gets settings and hooks:
 // there is no provider that skips them (gt-be0z).
 func EnsureSettingsForRole(settingsDir, workDir, role string) error {
-	if err := hooks.InstallForRole(settingsDir, role); err != nil {
+	return ensureSettingsForRole(hooks.EnvHome(), settingsDir, workDir, role)
+}
+
+func ensureSettingsForRole(home hooks.Home, settingsDir, workDir, role string) error {
+	if err := home.InstallForRole(settingsDir, role); err != nil {
 		return err
 	}
 

@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
@@ -327,16 +328,6 @@ type Daemon struct {
 	wispReaperRunning     atomic.Bool
 	checkpointDogRunning  atomic.Bool
 
-	// doltBackupRunning is the single-flight guard for the dolt_backup patrol,
-	// on its own goroutine — same gt-ima2/gt-gxpwc shape as the three above,
-	// converted in the gt-gxpwc rework after crew review found this patrol was
-	// still starved (no persisted last-run or startup catch-up at all).
-	doltBackupRunning atomic.Bool
-
-	// doltBackupCycles tracks the in-flight dolt_backup goroutine, so a caller
-	// can wait for one to finish.
-	doltBackupCycles sync.WaitGroup
-
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
 	goos string
@@ -532,6 +523,9 @@ func New(config *Config) (*Daemon, error) {
 	var doltServer *DoltServerManager
 	if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.DoltServer != nil {
 		doltServer = NewDoltServerManager(config.TownRoot, patrolConfig.Patrols.DoltServer, logger.Printf)
+		if root, err := doltbackup.DefaultRoot(); err == nil {
+			doltServer.backupRoot = root
+		}
 		if doltServer.IsEnabled() {
 			logger.Printf("Dolt server management enabled (port %d)", doltServer.config.Port)
 			// Propagate Dolt connection info to process env so AgentEnv() passes it to
@@ -826,24 +820,6 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Dolt health check ticker started (interval %v)", interval)
 	}
 
-	// Start dedicated Dolt backup ticker if configured.
-	// Runs filesystem backup sync (dolt backup sync) for production databases.
-	// The ticker is a check cadence — due-ness comes from a persisted
-	// last-run time, because a run interval enforced by an in-process ticker
-	// resets on every restart (gt-ima2, gt-gxpwc).
-	var doltBackupTicker *time.Ticker
-	var doltBackupChan <-chan time.Time
-	if d.isPatrolActive("dolt_backup") {
-		interval := doltBackupInterval(d.patrolConfig)
-		doltBackupTicker = time.NewTicker(shortPatrolCheckTick(interval))
-		doltBackupChan = doltBackupTicker.C
-		defer doltBackupTicker.Stop()
-		d.logger.Printf("Dolt backup ticker started (check every %v, run interval %v)",
-			shortPatrolCheckTick(interval), interval)
-		// Catch up at startup (gt-ima2, gt-gxpwc).
-		d.triggerDoltBackup()
-	}
-
 	// Start JSONL git backup ticker if configured.
 	// Exports issues to JSONL, scrubs ephemeral data, pushes to git repo.
 	// The ticker is a check cadence — due-ness comes from a persisted
@@ -1042,14 +1018,6 @@ func (d *Daemon) Run() (err error) {
 			// of the 3-minute general heartbeat.
 			if !d.isShutdownInProgress() {
 				d.ensureDoltServerRunning()
-			}
-
-		case <-doltBackupChan:
-			// Periodic Dolt filesystem backup — syncs production databases to
-			// local backup directory. Fires only when the persisted last run
-			// is a full interval old (gt-ima2, gt-gxpwc).
-			if !d.isShutdownInProgress() {
-				d.triggerDoltBackup()
 			}
 
 		case <-jsonlGitBackupChan:

@@ -859,10 +859,13 @@ func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *te
 	if got, want := string(content), "../../../mayor/rig/.beads\n"; got != want {
 		t.Fatalf("redirect content = %q, want %q", got, want)
 	}
-	for _, file := range []string{"metadata.json", "config.yaml"} {
-		if _, err := os.Stat(filepath.Join(workBeadsDir, file)); !os.IsNotExist(err) {
-			t.Fatalf("%s should have been cleaned, stat err=%v", file, err)
-		}
+	// metadata.json binds bd to the database it names, so it is removed;
+	// config.yaml stays: bd reads config through the redirect (gt-y3pgh.8).
+	if _, err := os.Stat(filepath.Join(workBeadsDir, "metadata.json")); !os.IsNotExist(err) {
+		t.Fatalf("metadata.json should have been cleaned, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workBeadsDir, "config.yaml")); err != nil {
+		t.Fatalf("config.yaml should be kept (bd follows the redirect), stat err=%v", err)
 	}
 }
 

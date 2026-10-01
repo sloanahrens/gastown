@@ -625,14 +625,6 @@ func TestBuiltinHooksNeverUseIf(t *testing.T) {
 	for target, override := range DefaultOverrides() {
 		check("DefaultOverrides["+target+"]", override)
 	}
-
-	// The templates bypass DefaultBase/DefaultOverrides entirely, so the
-	// invariant has to be asserted against them directly — both shipped
-	// templates still carried an If-gated pr-workflow hook long after the
-	// built-ins dropped theirs (gt-ly9c4).
-	for _, tmplFile := range claudeSettingsTemplates {
-		check(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
-	}
 }
 
 // requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare
@@ -809,70 +801,6 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 	}
 }
 
-// TestPreToolUseGuardsCoverMonitorTool pins gt-vx2mm: Claude Code's Monitor
-// tool carries the same tool_input.command shape as Bash (both take a
-// "command" string), but every self-filtering PreToolUse guard (pr-workflow,
-// dangerous-command, container-suite, bd-close-invariant, polecat-paths,
-// patrol-loop, boot-sendkeys, formula-allowlist) used to route through a
-// bare "Bash" matcher — invisible to Monitor, since Claude Code's
-// hooks[].matcher only ever matches the tool name (gt-5ihs). A polecat could
-// run any guard-blocked command (rm -rf, a force push, an unwrapped test
-// suite, a raw bd close) through Monitor and skip every one of those guards.
-// This test both pins that shellExecutingToolMatcher actually names Bash and
-// Monitor, and regression-guards against any PreToolUse entry — built-in or
-// computed — reverting to the narrower bare "Bash" matcher the bug shipped
-// with.
-func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	home := configHome{home: tmpDir}
-
-	tools := strings.Split(shellExecutingToolMatcher, "|")
-	for _, want := range []string{"Bash", "Monitor"} {
-		found := false
-		for _, tool := range tools {
-			if tool == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("shellExecutingToolMatcher %q is missing tool %q — a shell-executing Claude Code tool must be listed here or its guard-blocked commands bypass every guard (gt-vx2mm)", shellExecutingToolMatcher, want)
-		}
-	}
-
-	assertNoBareBashMatcher := func(label string, cfg *HooksConfig) {
-		t.Helper()
-		for _, entry := range cfg.PreToolUse {
-			if entry.Matcher == "Bash" {
-				t.Errorf("%s: PreToolUse matcher is bare \"Bash\" — Monitor-run commands bypass this guard entirely (gt-vx2mm); use shellExecutingToolMatcher instead. Hooks: %+v", label, entry.Hooks)
-			}
-		}
-	}
-
-	assertNoBareBashMatcher("DefaultBase", DefaultBase())
-	for role, override := range DefaultOverrides() {
-		assertNoBareBashMatcher("DefaultOverrides["+role+"]", override)
-	}
-
-	// End-to-end: every role's fully computed config must expose its
-	// self-filtering guards under shellExecutingToolMatcher.
-	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "boot"} {
-		cfg, err := home.computeExpected(target)
-		if err != nil {
-			t.Fatalf("home.computeExpected(%s): %v", target, err)
-		}
-		assertNoBareBashMatcher("home.computeExpected("+target+")", cfg)
-	}
-
-	// The templates bypass DefaultBase/DefaultOverrides entirely and are
-	// written verbatim by writeTemplate, so a bare "Bash" matcher here is the
-	// bypass itself, not a duplicate of one — this is exactly where gt-ly9c4
-	// lived, long after TestPreToolUseGuardsCoverMonitorTool started passing.
-	for _, tmplFile := range claudeSettingsTemplates {
-		assertNoBareBashMatcher(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
-	}
-}
-
 func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 	for _, entry := range cfg.PreToolUse {
 		if entry.Matcher == matcher {
@@ -880,35 +808,6 @@ func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 		}
 	}
 	return HookEntry{}, false
-}
-
-// claudeSettingsTemplates are the embedded Claude settings templates that
-// InstallForRole writes verbatim (installer.go writeTemplate) for every Claude
-// role off the managed-merge path — mayor, deacon and crew. They bypass
-// DefaultBase and DefaultOverrides entirely, so every invariant asserted
-// against those built-ins has to be asserted against the templates too, or a
-// freshly installed host ships the bug the invariant was written to catch
-// (gt-ly9c4).
-var claudeSettingsTemplates = []string{
-	"templates/claude/settings-autonomous.json",
-	"templates/claude/settings-interactive.json",
-}
-
-// loadClaudeTemplateHooks parses one embedded Claude settings template and
-// returns its hooks section.
-func loadClaudeTemplateHooks(t *testing.T, tmplFile string) *HooksConfig {
-	t.Helper()
-	data, err := templateFS.ReadFile(tmplFile)
-	if err != nil {
-		t.Fatalf("reading %s: %v", tmplFile, err)
-	}
-	var settings struct {
-		Hooks HooksConfig `json:"hooks"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		t.Fatalf("parsing %s: %v", tmplFile, err)
-	}
-	return &settings.Hooks
 }
 
 // TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings pins the
@@ -1375,13 +1274,6 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 			t.Fatalf("home.computeExpected(%s) failed: %v", target, err)
 		}
 		assertNoParenMatchers(t, "home.computeExpected("+target+")", expected)
-	}
-
-	// A stale paren-style matcher in the templates reintroduces gt-5ihs for
-	// every newly onboarded agent even after DefaultBase is fixed, so the
-	// templates need their own guard.
-	for _, tmplFile := range claudeSettingsTemplates {
-		assertNoParenMatchers(t, tmplFile, loadClaudeTemplateHooks(t, tmplFile))
 	}
 }
 

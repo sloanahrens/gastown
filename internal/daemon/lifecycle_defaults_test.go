@@ -59,8 +59,8 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 		t.Error("expected jsonl_git_backup scrub to be true")
 	}
 
-	if p.DoltBackup == nil || !p.DoltBackup.Enabled {
-		t.Error("expected dolt_backup to be enabled")
+	if p.DoltBackup != nil {
+		t.Errorf("default config carries the retired dolt_backup key: %s", p.DoltBackup)
 	}
 
 	if p.ScheduledMaintenance == nil || !p.ScheduledMaintenance.Enabled {
@@ -153,7 +153,6 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			CheckpointDog:        &CheckpointDogConfig{Enabled: false},
 			DoctorDog:            &DoctorDogConfig{Enabled: false},
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
-			DoltBackup:           &DoltBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Window: "05:30"},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
@@ -268,7 +267,7 @@ func TestEnsureLifecycleConfigFile_ExistingPartial(t *testing.T) {
 func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 	t.Parallel()
 	// Simulates the actual production daemon.json: has core patrols (deacon,
-	// refinery, witness) and explicitly disabled dolt_backup, but is missing
+	// refinery, witness) and the retired dolt_backup key, but is missing
 	// all data maintenance tickers (wisp_reaper, compactor_dog, doctor_dog,
 	// jsonl_git_backup, scheduled_maintenance).
 	tmpDir := t.TempDir()
@@ -284,7 +283,7 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 			Deacon:     json.RawMessage(`{"enabled":true,"interval":"5m","agent":"deacon"}`),
 			Refinery:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
 			Witness:    json.RawMessage(`{"enabled":true,"interval":"5m","agent":"witness"}`),
-			DoltBackup: &DoltBackupConfig{Enabled: false},
+			DoltBackup: json.RawMessage(`{"enabled":false}`),
 		},
 	}
 	data, _ := json.MarshalIndent(existing, "", "  ")
@@ -314,12 +313,10 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 		t.Errorf("retired witness key not kept verbatim: %s", config.Patrols.Witness)
 	}
 
-	// Explicitly disabled dolt_backup preserved (user intent)
-	if config.Patrols.DoltBackup == nil {
-		t.Fatal("expected dolt_backup config to be preserved")
-	}
-	if config.Patrols.DoltBackup.Enabled {
-		t.Error("expected dolt_backup to remain disabled (user explicitly set false)")
+	// The retired dolt_backup key is kept verbatim (operator data).
+	var backup map[string]any
+	if err := json.Unmarshal(config.Patrols.DoltBackup, &backup); err != nil || backup["enabled"] != false {
+		t.Errorf("retired dolt_backup key not kept verbatim: %s", config.Patrols.DoltBackup)
 	}
 
 	// Missing lifecycle tickers auto-populated with defaults

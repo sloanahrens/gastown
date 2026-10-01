@@ -8,42 +8,32 @@ import (
 	"testing"
 )
 
-func TestInstallForRole_RoleAware(t *testing.T) {
+// Every Claude role's install writes the managed hooks gt hooks sync writes
+// for its key, not a static template (gt-4k3fj.8.3).
+func TestInstallForRole_ClaudeRolesGetManagedHooks(t *testing.T) {
 	t.Parallel()
-	// Claude's only autonomous role, "polecat", is exercised separately
-	// (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks): it routes
-	// through the JSON merge path, not the static template compared here
-	// (gt-8stz).
-	tests := []struct {
-		name     string
-		role     string
-		wantFile string // expected template used
-	}{
-		{"interactive crew", "crew", "settings-interactive.json"},
-		{"interactive mayor", "mayor", "settings-interactive.json"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			err := InstallForRole(dir, tt.role)
-			if err != nil {
+	for _, tt := range []struct{ role, sub, key string }{
+		{"crew", "crew", "gastown/crew"},
+		{"polecat", "polecats", "gastown/polecats"},
+		{"mayor", "mayor", "mayor"},
+	} {
+		t.Run(tt.role, func(t *testing.T) {
+			t.Parallel()
+			home := HomeAt(t.TempDir())
+			dir := filepath.Join(t.TempDir(), "gastown", tt.sub)
+			if err := home.InstallForRole(dir, tt.role); err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
-
-			path := filepath.Join(dir, ".claude", "settings.json")
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				t.Fatal("settings.json not created")
-			}
-
-			// Verify content matches resolved template (with {{GT_BIN}} substituted)
-			got, _ := os.ReadFile(path)
-			want, err := renderTemplate(tt.role)
+			got, err := LoadSettings(filepath.Join(dir, ".claude", "settings.json"))
 			if err != nil {
-				t.Fatalf("resolveAndSubstitute: %v", err)
+				t.Fatalf("LoadSettings: %v", err)
 			}
-			if string(got) != string(want) {
-				t.Errorf("content mismatch: got %d bytes, want %d bytes (from %s)", len(got), len(want), tt.wantFile)
+			want, err := home.ComputeExpected(tt.key)
+			if err != nil {
+				t.Fatalf("ComputeExpected(%s): %v", tt.key, err)
+			}
+			if !HooksEqual(want, &got.Hooks) {
+				t.Errorf("hooks differ from the managed set for %s", tt.key)
 			}
 		})
 	}
@@ -333,159 +323,30 @@ func TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings(t *testing.T
 	}
 }
 
-func TestInstallForRole_SkipsExisting(t *testing.T) {
+// An existing Claude settings file has its hooks replaced by the managed set
+// and keeps every other field (gt-4k3fj.8.3).
+func TestInstallForRole_SyncsExistingKeepsOtherFields(t *testing.T) {
 	t.Parallel()
+	home := HomeAt(t.TempDir())
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")
-	os.MkdirAll(filepath.Dir(hooksPath), 0755)
-	os.WriteFile(hooksPath, []byte("custom"), 0644)
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"model":"custom","hooks":{"Stop":[]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	err := InstallForRole(dir, "crew")
-	if err != nil {
+	if err := home.InstallForRole(dir, "mayor"); err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
 
-	got, _ := os.ReadFile(hooksPath)
-	if string(got) != "custom" {
-		t.Error("existing file was overwritten")
+	data, _ := os.ReadFile(hooksPath)
+	if !strings.Contains(string(data), `"model": "custom"`) {
+		t.Errorf("existing model field was dropped:\n%s", data)
 	}
-}
-
-func TestInstallForRole_UpgradesStaleExportPath(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	hooksPath := filepath.Join(dir, ".claude", "settings.json")
-	os.MkdirAll(filepath.Dir(hooksPath), 0755)
-
-	// Write a stale file with the legacy "export PATH=" pattern
-	os.WriteFile(hooksPath, []byte(`export PATH=/usr/local/bin:$PATH && gt hook`), 0644)
-
-	err := InstallForRole(dir, "crew")
-	if err != nil {
-		t.Fatalf("InstallForRole: %v", err)
-	}
-
-	got, _ := os.ReadFile(hooksPath)
-	if strings.Contains(string(got), "export PATH=") {
-		t.Error("stale export PATH pattern was not upgraded")
-	}
-	// Should now match the current template after placeholder substitution.
-	template, _ := renderTemplate("crew")
-	if string(got) != string(template) {
-		t.Error("upgraded file does not match current template")
-	}
-}
-
-// TestInstallForRole_UpgradesStaleParenMatcher pins the gt-5ihs follow-up
-// (gt-wisp-db27 finding 3): needsUpgrade must recognize a PreToolUse
-// matcher written as a permission-rule pattern (e.g. "Bash(gh pr
-// create*)") as stale, so an agent scaffolded from an old settings.json
-// gets auto-upgraded to the bare-tool-name + "if" layout instead of being
-// left with dead guards forever.
-func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	hooksPath := filepath.Join(dir, ".claude", "settings.json")
-	os.MkdirAll(filepath.Dir(hooksPath), 0755)
-
-	stale := `{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash(gh pr create*)",
-        "hooks": [{"type": "command", "command": "gt tap guard pr-workflow"}]
-      }
-    ]
-  }
-}`
-	os.WriteFile(hooksPath, []byte(stale), 0644)
-
-	if err := InstallForRole(dir, "crew"); err != nil {
-		t.Fatalf("InstallForRole: %v", err)
-	}
-
-	got, err := os.ReadFile(hooksPath)
-	if err != nil {
-		t.Fatalf("read upgraded settings: %v", err)
-	}
-	if hasParenPreToolUseMatcher(got) {
-		t.Error("stale paren-style PreToolUse matcher was not upgraded")
-	}
-}
-
-// TestInstallForRole_UpgradesStaleBareBashMatcher pins gt-ly9c4: the shipped
-// Claude templates wrote their PreToolUse guards on a bare "Bash" matcher, so
-// an agent scaffolded before the fix has a settings.json whose matcher names
-// Bash but not Monitor — invisible to Monitor, which carries the same
-// tool_input.command shape (gt-vx2mm). needsUpgrade's paren check cannot see
-// that shape, so such a file was judged current and never upgraded. Catch it
-// and rewrite from the template.
-func TestInstallForRole_UpgradesStaleBareBashMatcher(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	hooksPath := filepath.Join(dir, ".claude", "settings.json")
-	os.MkdirAll(filepath.Dir(hooksPath), 0755)
-
-	stale := `{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {"type": "command", "command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"},
-          {"type": "command", "command": "gt tap guard dangerous-command"}
-        ]
-      }
-    ]
-  }
-}`
-	os.WriteFile(hooksPath, []byte(stale), 0644)
-
-	if err := InstallForRole(dir, "crew"); err != nil {
-		t.Fatalf("InstallForRole: %v", err)
-	}
-
-	got, err := os.ReadFile(hooksPath)
-	if err != nil {
-		t.Fatalf("read upgraded settings: %v", err)
-	}
-	if hasBareBashPreToolUseMatcher(got) {
-		t.Error("stale bare \"Bash\" PreToolUse matcher was not upgraded (gt-ly9c4)")
-	}
-	if !strings.Contains(string(got), `"Bash|Monitor"`) {
-		t.Errorf("upgraded settings do not match Monitor; got:\n%s", got)
-	}
-	if strings.Contains(string(got), `"if"`) {
-		t.Errorf("upgraded settings still carry an If field (gt-3mp1); got:\n%s", got)
-	}
-}
-
-// TestNeedsUpgradeIgnoresCurrentMatchers guards the other direction: a
-// settings.json that already routes its shell guards through
-// shellExecutingToolMatcher (and a non-Bash matcher such as the Edit|Write
-// family) must NOT be treated as stale, or every install would clobber a
-// customised file.
-func TestNeedsUpgradeIgnoresCurrentMatchers(t *testing.T) {
-	t.Parallel()
-	current := []byte(`{
-  "hooks": {
-    "PreToolUse": [
-      {"matcher": "Bash|Monitor", "hooks": [{"type": "command", "command": "gt tap guard pr-workflow"}]},
-      {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": "gt tap guard polecat-paths"}]}
-    ]
-  }
-}`)
-	if needsUpgrade(current) {
-		t.Error("needsUpgrade flagged an up-to-date settings.json as stale")
-	}
-
-	// A Monitor-only matcher is equally current, and "BashOutput" is a
-	// different tool name — neither may be mistaken for a Bash matcher.
-	for _, matcher := range []string{"Monitor", "BashOutput", "BashOutput|Monitor"} {
-		content := []byte(`{"hooks":{"PreToolUse":[{"matcher":"` + matcher + `","hooks":[{"type":"command","command":"gt tap guard pr-workflow"}]}]}}`)
-		if needsUpgrade(content) {
-			t.Errorf("needsUpgrade flagged matcher %q as a bare-Bash matcher", matcher)
-		}
+	if err := home.CheckManagedClaudeSettings(Target{Path: hooksPath, Key: "mayor"}); err != nil {
+		t.Errorf("after install: %v", err)
 	}
 }
 

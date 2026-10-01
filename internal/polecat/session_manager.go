@@ -453,9 +453,13 @@ func (m *SessionManager) polecatSlot(polecat string) int {
 // pre-seeded trust entry the session stalls on the folder-trust dialog
 // (gt-22r, gt-yy9). Trust seeding is non-fatal — AcceptStartupDialogs remains
 // the in-pane backstop.
-func (m *SessionManager) ensureRuntimeWorkspace(workDir, runtimeConfigDir string, runtimeConfig *config.RuntimeConfig) error {
+// Every start syncs the managed settings and reports hooks:present or
+// hooks:absent for the session (gt-4k3fj.8.3).
+func (m *SessionManager) ensureRuntimeWorkspace(polecat, workDir, runtimeConfigDir string, runtimeConfig *config.RuntimeConfig) error {
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, workDir, "polecat"); err != nil {
+	hooksStatus, err := runtime.SyncSessionSettings(polecatSettingsDir, workDir, "polecat")
+	runtime.ReportHooks(filepath.Dir(m.rig.Path), fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat), m.SessionName(polecat), hooksStatus)
+	if err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 	runtime.SeedWorkspaceTrust(workDir, runtimeConfigDir, runtimeConfig)
@@ -544,7 +548,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	}
 
 	// Prepare the workspace (settings, folder trust) before the session starts.
-	if err := m.ensureRuntimeWorkspace(workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
+	if err := m.ensureRuntimeWorkspace(polecat, workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
 		return err
 	}
 

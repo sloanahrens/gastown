@@ -1,7 +1,6 @@
 package hooks
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,102 +8,12 @@ import (
 	"testing"
 )
 
-// TestInstallForRole_ConcurrentSpawnsProduceValidJSON covers gh#3500: when
-// multiple agents spawn at the same time they all call InstallForRole on
-// the same shared settings file. The previous implementation used
-// os.WriteFile (open with O_TRUNC then write); on the affected platforms an
-// observer between truncate and write saw a partial JSON file that Claude
-// rejected at startup.
-//
-// With atomic writes (temp + rename), the final settings.json is always a
-// well-formed copy of one writer's full output.
-//
-// Uses role "witness": "polecat" no longer takes the writeTemplate path this
-// test targets (gt-8stz).
-//
-// Note: the exact corruption reported in the issue is timing-sensitive and
-// may not reproduce on every filesystem (single-syscall writes ≤ a few KB
-// often serialize at the OS layer on Linux tmpfs). This test asserts the
-// post-condition contract — N concurrent writers leave a valid JSON file
-// matching the template — which is what atomic-via-rename guarantees.
-func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	const concurrency = 64
-
-	// Pre-create the target file with content that differs from the template,
-	// so every writer takes the write path (not the "content equal, skip"
-	// early-return). This forces the truncate+write race that gh#3500
-	// describes when N agents race to install settings.json simultaneously.
-	dotClaude := filepath.Join(dir, ".claude")
-	if err := os.MkdirAll(dotClaude, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	target := filepath.Join(dotClaude, "settings.json")
-	// Seed with the legacy `export PATH=` marker so InstallForRole's
-	// needsUpgrade() check fires for every writer and they all proceed past
-	// the early-return into the racy write path (gh#3500).
-	if err := os.WriteFile(target, []byte(`{"stale":true,"hint":"export PATH=/foo"}`), 0600); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-
-	// Release all goroutines simultaneously to maximize overlap on the
-	// truncate+write window.
-	start := make(chan struct{})
-	var ready, wg sync.WaitGroup
-	errs := make(chan error, concurrency)
-	for i := 0; i < concurrency; i++ {
-		ready.Add(1)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ready.Done()
-			<-start
-			if err := InstallForRole(dir, "witness"); err != nil {
-				errs <- err
-			}
-		}()
-	}
-	ready.Wait()
-	close(start)
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatalf("InstallForRole: %v", err)
-	}
-
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read settings.json: %v", err)
-	}
-
-	// The file must be parseable JSON — corruption from interleaved truncates
-	// would produce a syntax error here.
-	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
-		t.Fatalf("settings.json is not valid JSON after concurrent writes: %v\n--- file contents (%d bytes) ---\n%s", err, len(data), string(data))
-	}
-
-	// And it must match the resolved template byte-for-byte.
-	want, err := renderTemplate("witness")
-	if err != nil {
-		t.Fatalf("resolveAndSubstitute: %v", err)
-	}
-	if string(data) != string(want) {
-		t.Errorf("settings.json content mismatch after concurrent writes: got %d bytes, want %d bytes", len(data), len(want))
-	}
-}
-
-// TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON is the polecat
-// counterpart to TestInstallForRole_ConcurrentSpawnsProduceValidJSON: since
-// gt-8stz, polecat no longer takes the writeTemplate path that test targets
-// (role "witness" above) — it goes through the JSON merge path
-// (SyncManagedClaudeSettings, a read-modify-write over the same shared
-// settings.json every polecat in a rig reads). That path had no concurrency
-// coverage of its own (found reviewing gt-wisp-4nns). This asserts N
-// concurrent polecat installs still leave a valid settings.json that carries
-// the PermissionRequest guard — the atomic rename in SyncManagedClaudeSettings
-// should serialize the writes the same way it does for the template path.
+// TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON covers gh#3500
+// on the JSON merge path every Claude role takes (SyncManagedClaudeSettings,
+// a read-modify-write over the settings.json every polecat in a rig shares;
+// gt-8stz, gt-4k3fj.8.3): N concurrent polecat installs leave a valid
+// settings.json that carries the PermissionRequest guard, because the atomic
+// rename serializes the writes.
 func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 	t.Parallel()
 	home := configHome{home: t.TempDir()}
@@ -163,11 +72,10 @@ func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 	}
 }
 
-// TestInstallForRole_AtomicWriteErrorPropagates covers the error-return
-// branch added in the gh#3500 fix: when the underlying atomic write fails
-// (here: the target path is a non-empty directory, so the final rename
-// fails), the installer must surface the error rather than silently
-// swallowing it.
+// TestInstallForRole_AtomicWriteErrorPropagates: when the settings file
+// cannot be read or written (here: the target path is a non-empty
+// directory), the installer surfaces the error rather than swallowing it
+// (gh#3500).
 func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -179,11 +87,11 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 		t.Fatalf("seed file: %v", err)
 	}
 
-	err := InstallForRole(dir, "witness")
+	err := HomeAt(t.TempDir()).InstallForRole(dir, "mayor")
 	if err == nil {
-		t.Fatal("expected error from read-only directory, got nil")
+		t.Fatal("expected error from a directory in place of settings.json, got nil")
 	}
-	if !strings.Contains(err.Error(), "writing hooks file") {
-		t.Errorf("expected wrapped 'writing hooks file' error, got: %v", err)
+	if !strings.Contains(err.Error(), "installing managed claude settings") {
+		t.Errorf("expected wrapped 'installing managed claude settings' error, got: %v", err)
 	}
 }

@@ -160,7 +160,15 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	if settingsDir == "" {
 		settingsDir = cfg.WorkDir
 	}
-	if err := runtime.EnsureSettingsForRole(settingsDir, cfg.WorkDir, cfg.Role); err != nil {
+	// Every start syncs the managed settings and reports hooks:present or
+	// hooks:absent for the session (gt-4k3fj.8.3).
+	hooksStatus, err := runtime.SyncSessionSettings(settingsDir, cfg.WorkDir, cfg.Role)
+	actor := cfg.Role
+	if cfg.RigName != "" {
+		actor = cfg.RigName + "/" + cfg.Role
+	}
+	runtime.ReportHooks(cfg.TownRoot, actor, cfg.SessionID, hooksStatus)
+	if err != nil {
 		return nil, fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 

@@ -81,9 +81,6 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 	if p.JsonlGitBackup == nil {
 		c.missing = append(c.missing, "jsonl_git_backup")
 	}
-	if p.DoltBackup == nil {
-		c.missing = append(c.missing, "dolt_backup")
-	}
 	if p.ScheduledMaintenance == nil {
 		c.missing = append(c.missing, "scheduled_maintenance")
 	}

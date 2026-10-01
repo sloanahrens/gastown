@@ -13,6 +13,10 @@ import (
 // last gc (maintenance_gc.go). Nothing else in gt runs a manual gc, and
 // nothing rewrites history: flatten is an offline operator procedure
 // (docs/dolt-history-offline.md). Dolt's own auto-GC stays on.
+//
+// Before the gc, the same window takes the nightly backup of every database
+// to ~/gt-backups/dolt (maintenance_backup.go, gt-8z769.5); the gc runs only
+// once that night's backup is on disk.
 
 const (
 	// defaultMaintenanceCheckInterval is how often the daemon checks if it's
@@ -127,7 +131,8 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 }
 
 // runScheduledMaintenance checks if we're in the maintenance window and, once
-// per window, dispatches a gc cycle over every database in the data dir.
+// per window, dispatches a backup-then-gc cycle over every database in the
+// data dir.
 func (d *Daemon) runScheduledMaintenance() {
 	if !d.isPatrolActive("scheduled_maintenance") {
 		return

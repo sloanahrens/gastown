@@ -179,8 +179,8 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// bd auto-enables backup when a git remote exists, then force-adds
 	// .beads/backup/ files (bypassing .gitignore) and commits/pushes them
 	// to the project repo. In Gas Town, Dolt is the persistent data store
-	// and the daemon provides centralized backup patrols (dolt_backup,
-	// jsonl_git_backup), making per-repo backup redundant and harmful —
+	// and the daemon provides centralized backups (the nightly Dolt backup
+	// in scheduled_maintenance, jsonl_git_backup), making per-repo backup redundant and harmful —
 	// it pollutes rig git history on both main and feature branches.
 	// See: https://github.com/steveyegge/beads/issues/2241
 	env["BD_BACKUP_ENABLED"] = "false"

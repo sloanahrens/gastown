@@ -127,15 +127,19 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	if runtimeConfig == nil {
 		runtimeConfig = config.DefaultRuntimeConfig()
 	}
-	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
-	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew"); err != nil {
-		// Non-fatal but log warning - missing settings can cause agents to start without hooks
-		style.PrintWarning("could not ensure settings for %s: %v", name, err)
-	}
-
 	// Check if session exists
 	t := tmux.NewTmux()
 	sessionID := crewSessionName(townRegistry(), r.Name, name)
+
+	// Every start syncs the managed settings and reports hooks:present or
+	// hooks:absent for the session (gt-4k3fj.8.3).
+	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
+	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew")
+	runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", r.Name, name), sessionID, hooksStatus)
+	if err != nil {
+		// Non-fatal but log warning - missing settings can cause agents to start without hooks
+		style.PrintWarning("could not ensure settings for %s: %v", name, err)
+	}
 	if debug {
 		fmt.Printf("[DEBUG] sessionID=%q (r.Name=%q, name=%q)\n", sessionID, r.Name, name)
 	}

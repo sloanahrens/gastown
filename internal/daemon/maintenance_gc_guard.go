@@ -231,6 +231,9 @@ func deferredWindowsMessage(st maintenanceGCState, closed gcDeferral) string {
 	fmt.Fprintf(&b, "scheduled_maintenance: gc deferred for %d consecutive maintenance window(s) — the town was never quiet. "+
 		"Nothing was rewritten.\n", st.ConsecutiveDeferredWindows)
 	b.WriteString("Waiting databases:\n")
+	if len(closed.Databases) == 0 {
+		b.WriteString("  (none reached: the nightly backup itself was deferred)\n")
+	}
 	for _, db := range closed.Databases {
 		fmt.Fprintf(&b, "  %s: %s\n", db.Name, formatBytes(db.Bytes))
 	}

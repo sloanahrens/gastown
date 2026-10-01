@@ -224,7 +224,7 @@ func (dm *dogMol) pourWithRetry(args []string) (string, int, error) {
 // Dolt, and a serialization failure (Error 1213, SQLSTATE 40001), which Dolt
 // reports only after rolling the conflicting transaction back. The dogs pour on
 // independent tickers, so two of them regularly commit in the same second
-// (mol-dog-jsonl against mol-dog-backup or mol-dog-checkpoint) and the loser
+// (mol-dog-jsonl against mol-dog-checkpoint) and the loser
 // used to skip its whole cycle (gt-dvad1). By the backoff the winner has
 // committed, so the repeat does not collide again. A pour killed by
 // its own deadline is excluded even though timeouts are the most common failure

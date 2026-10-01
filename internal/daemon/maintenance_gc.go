@@ -383,9 +383,7 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 	if err := validMaintenanceDBName(db); err != nil {
 		return err
 	}
-	dsn := fmt.Sprintf("root@tcp(%s)/%s?timeout=5s&readTimeout=%s&writeTimeout=30s",
-		net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())), db, maintenanceGCTimeout)
-	conn, err := sql.Open("mysql", dsn)
+	conn, err := sql.Open("mysql", d.maintenanceDSN(db, maintenanceGCTimeout))
 	if err != nil {
 		return err
 	}
@@ -402,6 +400,13 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 		return fmt.Errorf("dolt_gc --full: %w", err)
 	}
 	return nil
+}
+
+// maintenanceDSN is the DSN for one maintenance call on db, whose read timeout
+// matches the call's own bound.
+func (d *Daemon) maintenanceDSN(db string, readTimeout time.Duration) string {
+	return fmt.Sprintf("root@tcp(%s)/%s?timeout=5s&readTimeout=%s&writeTimeout=30s",
+		net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())), db, readTimeout)
 }
 
 // --- the cycle ------------------------------------------------------------------------
@@ -607,8 +612,13 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		res := d.maintenanceGCCycle(databases, dataDir)
-		d.logger.Printf("scheduled_maintenance: gc cycle %s", res.outcome)
+		// Backup first (maintenance_backup.go); the gc only runs once the
+		// night's backup is on disk.
+		res := d.maintenanceBackup(databases)
+		if res.outcome == gcOutcomeCompleted {
+			res = d.maintenanceGCCycle(databases, dataDir)
+		}
+		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
 			d.recordGCDeferral(windowEnd, res.reason, res.pending)
 			return
