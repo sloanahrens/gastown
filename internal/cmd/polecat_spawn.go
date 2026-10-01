@@ -776,6 +776,14 @@ func (s *SpawnedPolecatInfo) noteStartOutcome(startErr error) {
 	if err != nil {
 		return
 	}
+	s.noteStartOutcomeIn(townRoot, startErr)
+}
+
+// noteStartOutcomeIn is noteStartOutcome for the town at townRoot.
+func (s *SpawnedPolecatInfo) noteStartOutcomeIn(townRoot string, startErr error) {
+	if s.HookBead == "" {
+		return
+	}
 	if startErr == nil {
 		dispatch.ClearStartupFailure(townRoot, s.HookBead)
 		return

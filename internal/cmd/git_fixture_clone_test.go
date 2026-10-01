@@ -61,9 +61,8 @@ func TestCloneFixtureTreeMatchesCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if clone == cloneParent {
-		t.Skip("filesystem cannot clonefile; cloneFixtureTree fell back to the copy")
-	}
+	// A filesystem without clonefile falls back to the copy (clone ==
+	// cloneParent); the comparison below still holds, it just proves less.
 	copyRoot := t.TempDir()
 	if err := copyFixtureTree(root, copyRoot); err != nil {
 		t.Fatal(err)

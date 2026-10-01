@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -87,10 +86,6 @@ func TestResolveBeadsDir_WithRedirect(t *testing.T) {
 // This is an end-to-end regression test for the empty convoy bug.
 func TestConvoyCreate_SentinelPlacement(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows — shell stubs")
-	}
-
 	beads.ResetEnsuredDirs()
 
 	townRoot := t.TempDir()

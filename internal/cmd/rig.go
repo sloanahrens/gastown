@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,22 +232,33 @@ var (
 	rigRemoveForce       bool
 )
 
-var (
-	// Test seams for checkUncommittedWork.
-	listPolecatsForWorkCheck = func(r *rig.Rig) ([]*polecat.Polecat, error) {
-		polecatGit := git.NewGit(r.Path)
-		polecatMgr := polecat.NewManager(r, polecatGit, nil) // nil tmux: just listing
-		return polecatMgr.List()
+// uncommittedWorkCheck holds what checkUncommittedWork reads: the rig's
+// polecats, each clone's git status, whether stdin is a terminal, the
+// confirmation prompt and where messages go. realUncommittedWorkCheck wires
+// the real ones; unit tests build one with fakes.
+type uncommittedWorkCheck struct {
+	listPolecats func(r *rig.Rig) ([]*polecat.Polecat, error)
+	workStatus   func(clonePath string) (*git.UncommittedWorkStatus, error)
+	isTerminal   func() bool
+	prompt       func(question string) bool
+	out          io.Writer
+}
+
+func realUncommittedWorkCheck() uncommittedWorkCheck {
+	return uncommittedWorkCheck{
+		listPolecats: func(r *rig.Rig) ([]*polecat.Polecat, error) {
+			polecatGit := git.NewGit(r.Path)
+			polecatMgr := polecat.NewManager(r, polecatGit, nil) // nil tmux: just listing
+			return polecatMgr.List()
+		},
+		workStatus: func(clonePath string) (*git.UncommittedWorkStatus, error) {
+			return git.NewGit(clonePath).CheckUncommittedWork()
+		},
+		isTerminal: func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
+		prompt:     promptYesNo,
+		out:        os.Stdout,
 	}
-	checkPolecatWorkStatus = func(clonePath string) (*git.UncommittedWorkStatus, error) {
-		pGit := git.NewGit(clonePath)
-		return pGit.CheckUncommittedWork()
-	}
-	isStdinTerminal = func() bool {
-		return term.IsTerminal(int(os.Stdin.Fd()))
-	}
-	promptYesNoUnsafeProceed = promptYesNo
-)
+}
 
 func init() {
 	rootCmd.AddCommand(rigCmd)
@@ -288,19 +300,19 @@ func init() {
 
 }
 
-func confirmUnsafeProceed(force bool) bool {
+func (c uncommittedWorkCheck) confirmUnsafeProceed(force bool) bool {
 	// If --force and interactive TTY, prompt.
-	if force && isStdinTerminal() {
-		fmt.Println()
-		return promptYesNoUnsafeProceed("Proceed anyway?")
+	if force && c.isTerminal() {
+		fmt.Fprintln(c.out)
+		return c.prompt("Proceed anyway?")
 	}
 
 	// Otherwise block with hint.
 	if force {
-		fmt.Printf("\n%s requires an interactive terminal. Use %s to skip all checks (DANGER: will lose work!)\n",
+		fmt.Fprintf(c.out, "\n%s requires an interactive terminal. Use %s to skip all checks (DANGER: will lose work!)\n",
 			style.Bold.Render("--force"), style.Bold.Render("--nuclear"))
 	} else {
-		fmt.Printf("\nUse %s to proceed with confirmation, or %s to skip all checks (DANGER: will lose work!)\n",
+		fmt.Fprintf(c.out, "\nUse %s to proceed with confirmation, or %s to skip all checks (DANGER: will lose work!)\n",
 			style.Bold.Render("--force"), style.Bold.Render("--nuclear"))
 	}
 	return false
@@ -313,11 +325,15 @@ func confirmUnsafeProceed(force bool) bool {
 // When force is true but stdin is NOT a TTY, blocks (same as no --force).
 // All user-facing messages are printed internally.
 func checkUncommittedWork(r *rig.Rig, rigName, operation string, force bool) (proceed bool) {
-	polecats, err := listPolecatsForWorkCheck(r)
+	return realUncommittedWorkCheck().check(r, rigName, operation, force)
+}
+
+func (c uncommittedWorkCheck) check(r *rig.Rig, rigName, operation string, force bool) (proceed bool) {
+	polecats, err := c.listPolecats(r)
 	if err != nil {
-		fmt.Printf("%s Could not check polecats for uncommitted work: %v\n",
+		fmt.Fprintf(c.out, "%s Could not check polecats for uncommitted work: %v\n",
 			style.Warning.Render("⚠"), err)
-		return confirmUnsafeProceed(force)
+		return c.confirmUnsafeProceed(force)
 	}
 	if len(polecats) == 0 {
 		return true
@@ -332,7 +348,7 @@ func checkUncommittedWork(r *rig.Rig, rigName, operation string, force bool) (pr
 		err  error
 	}
 	for _, p := range polecats {
-		status, err := checkPolecatWorkStatus(p.ClonePath)
+		status, err := c.workStatus(p.ClonePath)
 		if err != nil {
 			checkErrors = append(checkErrors, struct {
 				name string
@@ -359,20 +375,20 @@ func checkUncommittedWork(r *rig.Rig, rigName, operation string, force bool) (pr
 	}
 
 	if len(problemPolecats) > 0 {
-		fmt.Printf("\n%s Cannot %s %s - polecats have uncommitted work:\n",
+		fmt.Fprintf(c.out, "\n%s Cannot %s %s - polecats have uncommitted work:\n",
 			style.Warning.Render("⚠"), operation, rigName)
 		for _, pp := range problemPolecats {
-			fmt.Printf("  %s: %s\n", style.Bold.Render(pp.name), pp.status.String())
+			fmt.Fprintf(c.out, "  %s: %s\n", style.Bold.Render(pp.name), pp.status.String())
 		}
 	}
 	if len(checkErrors) > 0 {
-		fmt.Printf("\n%s Could not verify uncommitted work for:\n", style.Warning.Render("⚠"))
+		fmt.Fprintf(c.out, "\n%s Could not verify uncommitted work for:\n", style.Warning.Render("⚠"))
 		for _, checkErr := range checkErrors {
-			fmt.Printf("  %s: %v\n", style.Bold.Render(checkErr.name), checkErr.err)
+			fmt.Fprintf(c.out, "  %s: %v\n", style.Bold.Render(checkErr.name), checkErr.err)
 		}
 	}
 
-	return confirmUnsafeProceed(force)
+	return c.confirmUnsafeProceed(force)
 }
 
 func runRigAdd(cmd *cobra.Command, args []string) error {

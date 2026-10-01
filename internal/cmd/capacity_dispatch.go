@@ -745,8 +745,25 @@ func capacityDispatchDeferral(err error) (why string, deferred bool) {
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
+	params, err := schedulerSlingParams(b, townRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
+	result, err := executeSling(params)
+	if err != nil {
+		return nil, fmt.Errorf("sling failed: %w", err)
+	}
+
+	return result, nil
+}
+
+// schedulerSlingParams rebuilds the sling a scheduled bead was queued with,
+// aimed at the target rig's beads database.
+func schedulerSlingParams(b capacity.PendingBead, townRoot string) (SlingParams, error) {
 	if b.Context == nil {
-		return nil, fmt.Errorf("missing sling context for %s", b.ID)
+		return SlingParams{}, fmt.Errorf("missing sling context for %s", b.ID)
 	}
 
 	dp := capacity.ReconstructFromContext(b.Context)
@@ -754,11 +771,11 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 	if dp.RigName != "" {
 		resolved, ok := beads.ResolveRepoAliasBeadsDir(townRoot, dp.RigName)
 		if !ok {
-			return nil, fmt.Errorf("cannot resolve target rig %q beads database for %s", dp.RigName, b.WorkBeadID)
+			return SlingParams{}, fmt.Errorf("cannot resolve target rig %q beads database for %s", dp.RigName, b.WorkBeadID)
 		}
 		targetBeadsDir = resolved
 	}
-	params := SlingParams{
+	return SlingParams{
 		BeadID:           dp.BeadID,
 		RigName:          dp.RigName,
 		FormulaName:      dp.FormulaName,
@@ -779,15 +796,7 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         targetBeadsDir,
-	}
-
-	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
-	result, err := executeSling(params)
-	if err != nil {
-		return nil, fmt.Errorf("sling failed: %w", err)
-	}
-
-	return result, nil
+	}, nil
 }
 
 func validateDryRunDispatchPlan(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {

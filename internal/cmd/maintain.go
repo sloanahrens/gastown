@@ -439,21 +439,32 @@ func maintainCountCommits(config *doltserver.Config, dbName string) (int, error)
 // absence of a backup: `dolt backup` exits 0 with an empty list when none are
 // configured, so a non-zero exit is a real fault (gt-ij15).
 func maintainHasBackup(dataDir, dbName string) (bool, error) {
+	return maintainHasBackupWith(runDoltBackupList, dataDir, dbName)
+}
+
+// runDoltBackupList runs `dolt backup` in dbDir and returns its stdout and stderr.
+func runDoltBackupList(dbDir string) (stdout, stderr []byte, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dbDir := filepath.Join(dataDir, dbName)
 	cmd := exec.CommandContext(ctx, "dolt", "backup")
 	cmd.Dir = dbDir
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
+	return out, errBuf.Bytes(), err
+}
 
-	// stderr is captured for the error path only; the backup list is read from
+// maintainHasBackupWith is maintainHasBackup with the dolt invocation
+// injected, so unit tests answer it without a dolt binary.
+func maintainHasBackupWith(listBackups func(dbDir string) (stdout, stderr []byte, err error), dataDir, dbName string) (bool, error) {
+	dbDir := filepath.Join(dataDir, dbName)
+
+	// stderr is used for the error path only; the backup list is read from
 	// stdout so a diagnostic line cannot be mistaken for a configured backup.
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	output, err := cmd.Output()
+	output, stderr, err := listBackups(dbDir)
 	if err != nil {
-		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+		if detail := strings.TrimSpace(string(stderr)); detail != "" {
 			return false, fmt.Errorf("dolt backup in %s: %w: %s", dbDir, err, detail)
 		}
 		return false, fmt.Errorf("dolt backup in %s: %w", dbDir, err)

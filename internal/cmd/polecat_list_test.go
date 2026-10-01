@@ -369,6 +369,7 @@ func TestPolecatStatusAgreesWithListOnStaleAgentState(t *testing.T) {
 }
 
 func TestFilterPolecatNames(t *testing.T) {
+	t.Parallel()
 	names := []string{"jade", "pearl", "quartz"}
 	if got := filterPolecatNames(names, "pearl"); len(got) != 1 || got[0] != "pearl" {
 		t.Errorf("filterPolecatNames(pearl) = %v, want [pearl]", got)

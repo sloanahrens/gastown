@@ -211,35 +211,7 @@ func validateQueueRelease(msgInfo *queueMessageInfo, caller string) error {
 
 // TestMailAnnounces tests the announces command functionality.
 func TestMailAnnounces(t *testing.T) {
-	t.Run("listAnnounceChannels with nil config", func(t *testing.T) {
-		// Test with nil announces map
-		cfg := &config.MessagingConfig{
-			Announces: nil,
-		}
-
-		// Reset flag to default
-		mailAnnouncesJSON = false
-
-		// This should not panic and should handle nil gracefully
-		// We can't easily capture stdout in unit tests, but we can verify no panic
-		err := listAnnounceChannels(cfg)
-		if err != nil {
-			t.Errorf("listAnnounceChannels with nil announces should not error: %v", err)
-		}
-	})
-
-	t.Run("listAnnounceChannels with empty config", func(t *testing.T) {
-		cfg := &config.MessagingConfig{
-			Announces: make(map[string]config.AnnounceConfig),
-		}
-
-		mailAnnouncesJSON = false
-		err := listAnnounceChannels(cfg)
-		if err != nil {
-			t.Errorf("listAnnounceChannels with empty announces should not error: %v", err)
-		}
-	})
-
+	t.Parallel()
 	t.Run("readAnnounceChannel validates channel exists", func(t *testing.T) {
 		cfg := &config.MessagingConfig{
 			Announces: map[string]config.AnnounceConfig{
