@@ -300,16 +300,12 @@ func parseAddress(addr string) (rigName, polecatName string, err error) {
 }
 
 // getSessionManager creates a session manager for the given rig.
-func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error) {
+func getSessionManager(rigName string) (*polecat.SessionManager, error) {
 	_, r, err := getRig(rigName)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
-
-	return polecatMgr, r, nil
+	return polecat.NewSessionManager(tmux.NewTmux(), r), nil
 }
 
 // sessionSeat is a resolved `gt session` address: the <rig>/<name> polecat
@@ -401,7 +397,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	polecatMgr, _, err := getSessionManager(rigName)
+	polecatMgr, err := getSessionManager(rigName)
 	if err != nil {
 		return err
 	}
