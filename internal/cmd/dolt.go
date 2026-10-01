@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
@@ -458,6 +459,10 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
+
+	if p := doltpause.Current(townRoot, time.Now()); p != nil {
+		fmt.Printf("%s %s\n", style.Bold.Render("⏸"), p.Message())
+	}
 
 	if config.IsRemote() {
 		if running {

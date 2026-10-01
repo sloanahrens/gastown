@@ -51,6 +51,7 @@ Infrastructure checks:
   - town-beads-config        Verify town .beads/config.yaml exists (fixable)
   - dolt-remote-leftovers    Warn on Dolt remotes, git-remote-cache dirs and sync.remote (report only)
   - dolt-commit-rate         Warn when a Dolt database made more commits in 24h than the configured limit
+  - dolt-pause-marker        Warn on a stale or unreadable daemon/dolt.pause marker
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
@@ -278,6 +279,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewIdleTimeoutCheck())         // Verify dolt.idle-timeout: "0" for all rigs
 	d.Register(doctor.NewDoltRemoteLeftoversCheck()) // Warn on Dolt remotes, caches and sync.remote left from remote sync (ADR 0002)
 	d.Register(doctor.NewDoltCommitRateCheck())      // Commits-per-day meter: warn above operational.dolt.commits_per_day_warn (gt-8z769.4)
+	d.Register(doctor.NewDoltPauseCheck())           // Warn on a stale or unreadable daemon/dolt.pause marker (gt-8z769.2)
 	d.Register(doctor.NewRoutesCheck())
 	d.Register(doctor.NewRigRoutesJSONLCheck())
 	d.Register(doctor.NewRoutingModeCheck())
