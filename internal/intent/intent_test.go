@@ -366,3 +366,31 @@ func TestClearLandedLeavesAParkedSeat(t *testing.T) {
 		t.Fatalf("parked seat became %s", rec.EffectiveDesired())
 	}
 }
+
+// Remove deletes the record, so the readers that walk the agents directory
+// stop seeing a seat that is gone (gt-u7voe). It tolerates a record that was
+// never written.
+func TestRemoveDeletesTheRecordAndToleratesAnAbsentOne(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Desired = DesiredPark
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if err := Remove(town, polecat); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(polecat.Path(town)); !os.IsNotExist(err) {
+		t.Fatalf("record still on disk after Remove, stat err=%v", err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil || rec.Held() || rec.EffectiveDesired() != DesiredRun {
+		t.Fatalf("Read after Remove = %+v, %v; want the absent record (run, not held)", rec, err)
+	}
+	if err := Remove(town, polecat); err != nil {
+		t.Fatalf("Remove with no record: %v", err)
+	}
+}

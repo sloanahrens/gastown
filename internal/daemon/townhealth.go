@@ -373,9 +373,27 @@ func (s *healthSources) NeedsHuman(ctx context.Context) (int, time.Time, error) 
 	return total, oldest, nil
 }
 
-// Seats reads every intent record under .runtime/agents. Only seats the
-// daemon is sampling (a liveness sample fresher than the evidence window)
-// carry stall evidence; a frozen seat is listed whatever its sample.
+// seatHome returns the directory a seat's agent lives in, and whether this
+// walk knows that mapping. It tells a seat that exists from a record that
+// outlived one, so the walk drops a record whose seat is gone rather than
+// reporting it dead forever (gt-u7voe).
+//
+// Only the polecat role is mapped: a polecat's directory is created and
+// destroyed with the seat, so its absence is decisive, where a witness or
+// refinery directory belongs to the rig and a rig missing one is a problem
+// this field must not report by dropping the seat.
+func seatHome(townRoot, rig, stem string) (string, bool) {
+	role, name, named := strings.Cut(stem, ".")
+	if !named || rig == "" || role != constants.RolePolecat {
+		return "", false
+	}
+	return filepath.Join(townRoot, rig, "polecats", name), true
+}
+
+// Seats reads every intent record under .runtime/agents, skipping the records
+// of seats whose directory is gone. Only seats the daemon is sampling (a
+// liveness sample fresher than the evidence window) carry stall evidence; a
+// frozen seat is listed whatever its sample.
 func (s *healthSources) Seats() ([]townhealth.Seat, error) {
 	dir := filepath.Join(constants.TownRuntimePath(s.townRoot()), "agents")
 	var out []townhealth.Seat
@@ -394,7 +412,13 @@ func (s *healthSources) Seats() ([]townhealth.Seat, error) {
 		if rig == "." {
 			rig = ""
 		}
-		name := strings.Replace(strings.TrimSuffix(filepath.Base(rel), ".json"), ".", "/", 1)
+		stem := strings.TrimSuffix(filepath.Base(rel), ".json")
+		if home, known := seatHome(s.townRoot(), rig, stem); known {
+			if _, serr := os.Stat(home); serr != nil {
+				return nil // the seat is gone; the record outlived it
+			}
+		}
+		name := strings.Replace(stem, ".", "/", 1)
 		rec, rerr := intent.ReadPath(path)
 		if rerr != nil {
 			return fmt.Errorf("%s: %w", rel, rerr)

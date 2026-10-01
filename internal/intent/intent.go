@@ -315,32 +315,62 @@ func readPath(path string) (Record, error) {
 // lockTimeout bounds the wait for a seat's record lock.
 const lockTimeout = 10 * time.Second
 
-// Update applies fn to the seat's record under an exclusive lock and writes
-// the result atomically. An absent record starts empty; a record that cannot
-// be read or parsed starts as the fail-closed held record, so a mutator that
-// does not deliberately clear the hold keeps it. If fn returns an error
-// nothing is written.
-func Update(townRoot string, s Seat, fn func(*Record) error) (Record, error) {
+// lockRecord takes the seat's exclusive record lock and returns its release.
+// Remove takes it too, so a delete cannot land between a writer's read and its
+// write and be undone by the record that writer puts back.
+func lockRecord(townRoot string, s Seat) (func(), error) {
 	lockPath := s.lockPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		return Record{}, fmt.Errorf("intent lock dir: %w", err)
+		return nil, fmt.Errorf("intent lock dir: %w", err)
 	}
 	fl := flock.New(lockPath)
 	deadline := time.Now().Add(lockTimeout)
 	for {
 		ok, err := fl.TryLock()
 		if err != nil {
-			return Record{}, fmt.Errorf("intent lock %q: %w", lockPath, err)
+			return nil, fmt.Errorf("intent lock %q: %w", lockPath, err)
 		}
 		if ok {
 			break
 		}
 		if time.Now().After(deadline) {
-			return Record{}, fmt.Errorf("intent lock %q: timed out after %s", lockPath, lockTimeout)
+			return nil, fmt.Errorf("intent lock %q: timed out after %s", lockPath, lockTimeout)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	defer func() { _ = fl.Unlock() }()
+	return func() { _ = fl.Unlock() }, nil
+}
+
+// Remove deletes the seat's record, so a seat that is gone leaves nothing
+// behind for the readers that walk the agents directory (gt-u7voe). An absent
+// record is not an error: the paths that end a seat do not all write one
+// first. The lock file stays, empty and outside the agents directory, which
+// holds records alone.
+func Remove(townRoot string, s Seat) error {
+	unlock, err := lockRecord(townRoot, s)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	path := s.Path(townRoot)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing intent record %q: %w", path, err)
+	}
+	return nil
+}
+
+// Update applies fn to the seat's record under an exclusive lock and writes
+// the result atomically. An absent record starts empty; a record that cannot
+// be read or parsed starts as the fail-closed held record, so a mutator that
+// does not deliberately clear the hold keeps it. If fn returns an error
+// nothing is written.
+func Update(townRoot string, s Seat, fn func(*Record) error) (Record, error) {
+	unlock, err := lockRecord(townRoot, s)
+	if err != nil {
+		return Record{}, err
+	}
+	defer unlock()
 
 	path := s.Path(townRoot)
 	rec, _ := readPath(path) // a broken record starts as the held one

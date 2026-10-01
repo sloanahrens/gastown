@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -115,8 +116,14 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 		t.Fatal(err)
 	}
 	writeJSONFile(t, RedMainStatePath(town, "gastown"), landworker.MainState{LastGreen: "aaaa", LastRun: "bbbb"})
+	// A polecat's record names a seat only while its directory is there.
 	seat := func(rig, role, name string, rec intent.Record) {
 		writeJSONFile(t, intent.Seat{Rig: rig, Role: role, Name: name}.Path(town), rec)
+		if role == constants.RolePolecat {
+			if err := os.MkdirAll(filepath.Join(town, rig, "polecats", name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	seat("gastown", "polecat", "opal", intent.Record{Progress: &intent.Progress{SampledAt: now.Add(-time.Minute), ChangedAt: now.Add(-45 * time.Minute)}})
 	seat("gastown", "polecat", "gone", intent.Record{Progress: &intent.Progress{SampledAt: now.Add(-48 * time.Hour)}})
@@ -403,5 +410,67 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	}
 	if r.Landed != nil {
 		t.Errorf("Landed = %d with a rig unread, want nil", *r.Landed)
+	}
+}
+
+// The walk drops the record of a polecat whose directory is gone, so a record
+// that outlived its seat cannot report that seat dead forever (gt-u7voe).
+func TestHealthSourcesSeatsIgnoreRecordsWhosePolecatIsGone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	sampled := func() *intent.Progress {
+		return &intent.Progress{SampledAt: now.Add(-time.Minute), ChangedAt: now.Add(-45 * time.Minute)}
+	}
+	seat := func(rig, role, name string) string {
+		t.Helper()
+		p := intent.Seat{Rig: rig, Role: role, Name: name}.Path(town)
+		writeJSONFile(t, p, intent.Record{Progress: sampled()})
+		return p
+	}
+	removed := seat("gastown", "polecat", "jasper") // record kept, polecat removed
+	seat("gastown", "polecat", "opal")              // record kept, polecat still there
+	seat("", "mayor", "")                           // town-level seat, no polecat directory
+	seat("gastown", "witness", "")                  // rig seat, no polecat directory
+	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "opal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &healthSources{d: &Daemon{config: &Config{TownRoot: town}}, evidence: time.Hour, now: now}
+	got, err := src.Seats()
+	if err != nil {
+		t.Fatalf("Seats: %v", err)
+	}
+	var keys []string
+	for _, s := range got {
+		keys = append(keys, s.Rig+"/"+s.Name)
+	}
+	want := []string{"/mayor", "gastown/polecat/opal", "gastown/witness"}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("Seats = %v, want %v", keys, want)
+	}
+	if _, err := os.Stat(removed); err != nil {
+		t.Fatalf("Seats deleted the record of a removed seat: %v", err)
+	}
+}
+
+func TestSeatHomeMapsPolecatDirectoriesOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		rig, stem string
+		want      string
+		known     bool
+	}{
+		{"gastown", "polecat.opal", "/town/gastown/polecats/opal", true},
+		{"gastown", "witness", "", false},
+		{"gastown", "refinery", "", false},
+		{"gastown", "crew.moss", "", false},
+		{"", "polecat.opal", "", false},
+	}
+	for _, c := range cases {
+		got, known := seatHome("/town", c.rig, c.stem)
+		if got != c.want || known != c.known {
+			t.Errorf("seatHome(%q, %q) = %q, %v; want %q, %v", c.rig, c.stem, got, known, c.want, c.known)
+		}
 	}
 }

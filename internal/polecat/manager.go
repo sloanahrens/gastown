@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1502,7 +1503,11 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 			_ = mayorGit.WorktreePrune()
 		}
 		// Fall back to direct removal if repo base not found
-		return os.RemoveAll(polecatDir)
+		if rmErr := os.RemoveAll(polecatDir); rmErr != nil {
+			return rmErr
+		}
+		m.clearIntentRecord(name)
+		return nil
 	}
 
 	// Try to remove as a worktree first (use force flag for worktree removal too)
@@ -1541,7 +1546,26 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	m.namePool.Release(name)
 	_ = m.namePool.Save()
 
+	m.clearIntentRecord(name)
+
 	return nil
+}
+
+// clearIntentRecord deletes the removed polecat's intent record, which would
+// otherwise keep townhealth reporting the seat as dead forever with no session
+// left to revive (gt-u7voe). It is a no-op while the polecat directory is
+// still on disk: a removal that failed part way left a seat that still needs
+// its record.
+func (m *Manager) clearIntentRecord(name string) {
+	if _, err := os.Stat(m.polecatDir(name)); err == nil {
+		return
+	}
+	seat := intent.Seat{Rig: m.rig.Name, Role: constants.RolePolecat, Name: name}
+	if err := intent.Remove(m.townRoot, seat); err != nil {
+		// The seat itself is already gone; a record that could not be deleted
+		// is worth saying out loud, but not worth failing the removal for.
+		style.PrintWarning("could not remove intent record for %s: %v", name, err)
+	}
 }
 
 // ActiveMRRemovalBlocker returns the pending active-MR reason that should block
