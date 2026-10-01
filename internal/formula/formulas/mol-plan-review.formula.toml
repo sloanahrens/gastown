@@ -1,5 +1,3 @@
-review_only = true  # All legs are analysis-only — no code commits expected (gt-kvf)
-
 description = """
 Parallel implementation plan review via specialized analysts. Reviews a
 generated implementation plan for completeness, sequencing, risk, and scope
@@ -17,10 +15,8 @@ recommendation.
 - **testability**: Can we verify this plan worked?
 
 ## Execution Model
-1. Each leg spawns as a separate polecat
-2. Polecats work in parallel
-3. Each writes their review to a designated output file
-4. Synthesis step combines all findings into a final verdict with must-fix items
+Each leg runs as a polecat in parallel and writes one review file; the
+synthesis step combines them into a final verdict with must-fix items.
 
 ## Output
 A .plan-reviews/<review-id>/ directory containing:
@@ -31,24 +27,24 @@ formula = "mol-plan-review"
 type = "convoy"
 version = 1
 
-[inputs]
-[inputs.plan]
+# Every step is a leg but the one metadata.convoy marks the synthesis.
+[vars.plan]
 description = "The implementation plan to review (file path, bead ID, or inline description)"
 type = "string"
 required = true
 
-[inputs.problem]
+[vars.problem]
 description = "The original problem/feature this plan is solving (for context)"
 type = "string"
 required = true
 
-[inputs.prd_review]
+[vars.prd_review]
 description = "Path to the PRD review output (if available) for context"
 type = "string"
 required = false
 
-[prompts]
-base = """
+[vars.base_prompt]
+default = """
 # Implementation Plan Review Assignment
 
 You are a specialized reviewer participating in a parallel plan review convoy.
@@ -94,19 +90,27 @@ PASS / PASS WITH NOTES / FAIL — one sentence rationale
 Be specific. Reference plan sections or bead IDs where possible.
 """
 
-[output]
-directory = ".plan-reviews/{{.review_id}}"
-leg_pattern = "{{.leg.id}}.md"
-synthesis = "plan-review.md"
+[vars.output_directory]
+default = ".plan-reviews/{{.review_id}}"
+
+[vars.output_leg_pattern]
+default = "{{.leg.id}}.md"
+
+[vars.output_synthesis]
+default = "plan-review.md"
+
+# Analysis only, no commits (gt-kvf)
+[vars.review_only]
+default = "true"
 
 # ============================================================================
 # LEGS
 # ============================================================================
 
-[[legs]]
+[[steps]]
 id = "completeness"
 title = "Plan Completeness"
-focus = "Are all requirements covered? What's missing from the plan?"
+metadata.focus = "Are all requirements covered? What's missing from the plan?"
 description = """
 Verify that the implementation plan covers all stated requirements.
 
@@ -127,10 +131,10 @@ Verify that the implementation plan covers all stated requirements.
 - What will the engineer ask "wasn't this supposed to be part of this?" about?
 """
 
-[[legs]]
+[[steps]]
 id = "sequencing"
 title = "Sequencing and Dependencies"
-focus = "Is the order right? Are dependencies correct?"
+metadata.focus = "Is the order right? Are dependencies correct?"
 description = """
 Verify that the plan's sequencing and dependencies are sound.
 
@@ -152,10 +156,10 @@ Verify that the plan's sequencing and dependencies are sound.
 - Which steps could run in parallel to speed up delivery?
 """
 
-[[legs]]
+[[steps]]
 id = "risk"
 title = "Risk Assessment"
-focus = "What could go wrong? What are the unknowns?"
+metadata.focus = "What could go wrong? What are the unknowns?"
 description = """
 Identify implementation risks, unknowns, and potential failure modes.
 
@@ -179,10 +183,10 @@ Identify implementation risks, unknowns, and potential failure modes.
 - What external factor could block progress entirely?
 """
 
-[[legs]]
+[[steps]]
 id = "scope-creep"
 title = "Scope Discipline"
-focus = "Is there unnecessary work? What can be cut?"
+metadata.focus = "Is there unnecessary work? What can be cut?"
 description = """
 Identify scope creep and opportunities to simplify.
 
@@ -205,10 +209,10 @@ Identify scope creep and opportunities to simplify.
 - What would you cut if the timeline was half as long?
 """
 
-[[legs]]
+[[steps]]
 id = "testability"
 title = "Testability and Verifiability"
-focus = "Can we verify the plan worked?"
+metadata.focus = "Can we verify the plan worked?"
 description = """
 Assess whether the implementation will be verifiable once complete.
 
@@ -234,7 +238,9 @@ Assess whether the implementation will be verifiable once complete.
 # SYNTHESIS
 # ============================================================================
 
-[synthesis]
+[[steps]]
+id = "synthesis"
+metadata.convoy = "synthesis"
 title = "Plan Review Synthesis"
 description = """
 Combine all leg reviews into a consolidated verdict with must-fix items.

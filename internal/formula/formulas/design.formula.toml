@@ -37,26 +37,26 @@ formula = "design"
 type = "convoy"
 version = 1
 
-# Input variables - provided at runtime
-[inputs]
-[inputs.problem]
+# Every step is a leg but the one metadata.convoy marks the synthesis.
+# Inputs: gt formula run --set name=value
+[vars.problem]
 description = "Problem statement or feature request to design"
 type = "string"
 required = true
 
-[inputs.context]
+[vars.context]
 description = "Additional context (existing code, constraints, etc.)"
 type = "string"
 required = false
 
-[inputs.scope]
+[vars.scope]
 description = "Scope hint: 'small' (1 file), 'medium' (package), 'large' (system)"
 type = "string"
 default = "medium"
 
 # Base prompt template - injected into all leg prompts
-[prompts]
-base = """
+[vars.base_prompt]
+default = """
 # Design Analysis Assignment
 
 You are a specialized design analyst participating in a convoy design exploration.
@@ -116,16 +116,20 @@ Be thorough but actionable. Flag decisions needing human input.
 """
 
 # Output configuration
-[output]
-directory = ".designs/{{.review_id}}"
-leg_pattern = "{{.leg.id}}.md"
-synthesis = "design-doc.md"
+[vars.output_directory]
+default = ".designs/{{.review_id}}"
+
+[vars.output_leg_pattern]
+default = "{{.leg.id}}.md"
+
+[vars.output_synthesis]
+default = "design-doc.md"
 
 # Leg definitions - each spawns a parallel polecat
-[[legs]]
+[[steps]]
 id = "api"
 title = "API & Interface Design"
-focus = "Interface design and developer ergonomics"
+metadata.focus = "Interface design and developer ergonomics"
 description = """
 Analyze the interface design for this feature.
 
@@ -146,10 +150,10 @@ Analyze the interface design for this feature.
 **Deliverable:** api-design.md with interface proposals
 """
 
-[[legs]]
+[[steps]]
 id = "data"
 title = "Data Model Design"
-focus = "Data model, storage, and migrations"
+metadata.focus = "Data model, storage, and migrations"
 description = """
 Analyze the data model requirements for this feature.
 
@@ -170,10 +174,10 @@ Analyze the data model requirements for this feature.
 **Deliverable:** data-model.md with schema proposals
 """
 
-[[legs]]
+[[steps]]
 id = "ux"
 title = "User Experience Analysis"
-focus = "User experience and CLI ergonomics"
+metadata.focus = "User experience and CLI ergonomics"
 description = """
 Analyze the user experience implications of this feature.
 
@@ -194,10 +198,10 @@ Analyze the user experience implications of this feature.
 **Deliverable:** ux-analysis.md with UX recommendations
 """
 
-[[legs]]
+[[steps]]
 id = "scale"
 title = "Scalability Analysis"
-focus = "Performance at scale and bottlenecks"
+metadata.focus = "Performance at scale and bottlenecks"
 description = """
 Analyze the scalability implications of this feature.
 
@@ -218,10 +222,10 @@ Analyze the scalability implications of this feature.
 **Deliverable:** scalability.md with performance analysis
 """
 
-[[legs]]
+[[steps]]
 id = "security"
 title = "Security Analysis"
-focus = "Threat model and attack surface"
+metadata.focus = "Threat model and attack surface"
 description = """
 Analyze the security implications of this feature.
 
@@ -242,10 +246,10 @@ Analyze the security implications of this feature.
 **Deliverable:** security.md with threat analysis
 """
 
-[[legs]]
+[[steps]]
 id = "integration"
 title = "Integration Analysis"
-focus = "How it fits existing system"
+metadata.focus = "How it fits existing system"
 description = """
 Analyze how this feature integrates with the existing system.
 
@@ -267,7 +271,9 @@ Analyze how this feature integrates with the existing system.
 """
 
 # Synthesis step - combines all leg outputs
-[synthesis]
+[[steps]]
+id = "synthesis"
+metadata.convoy = "synthesis"
 title = "Design Synthesis"
 description = """
 Combine all dimension analyses into a unified design document.

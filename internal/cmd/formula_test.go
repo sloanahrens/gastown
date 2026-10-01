@@ -219,44 +219,88 @@ func TestResolveFormulaLegAgent_Precedence(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		legAgent     string
-		cliAgent     string
-		formulaAgent string
-		want         string
+		name     string
+		legAgent string
+		cliAgent string
+		want     string
 	}{
-		{"all empty", "", "", "", ""},
-		{"formula only", "", "", "gemini", "gemini"},
-		{"cli only", "", "codex", "", "codex"},
-		{"leg only", "claude-haiku", "", "", "claude-haiku"},
-		{"cli overrides formula", "", "codex", "gemini", "codex"},
-		{"leg overrides cli", "claude-haiku", "codex", "gemini", "claude-haiku"},
-		{"leg overrides formula", "claude-haiku", "", "gemini", "claude-haiku"},
+		{"all empty", "", "", ""},
+		{"cli only", "", "codex", "codex"},
+		{"leg only", "claude-haiku", "", "claude-haiku"},
+		{"leg overrides cli", "claude-haiku", "codex", "claude-haiku"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := resolveFormulaLegAgent(tt.legAgent, tt.cliAgent, tt.formulaAgent)
+			got := resolveFormulaLegAgent(tt.legAgent, tt.cliAgent)
 			if got != tt.want {
-				t.Errorf("resolveFormulaLegAgent(%q, %q, %q) = %q, want %q",
-					tt.legAgent, tt.cliAgent, tt.formulaAgent, got, tt.want)
+				t.Errorf("resolveFormulaLegAgent(%q, %q) = %q, want %q",
+					tt.legAgent, tt.cliAgent, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSubstituteFormulaVars(t *testing.T) {
-	t.Parallel()
+// convoyTree is bd's cooked tree for a convoy formula shaped like design:
+// run settings as vars, two legs and a synthesis step marked in metadata.
+const convoyTree = `{
+  "formula": "design", "type": "convoy", "description": "Design",
+  "vars": [
+    {"name": "base_prompt", "default": "Leg {{.leg.id}}", "value": "Leg {{.leg.id}}"},
+    {"name": "output_directory", "default": ".designs/{{.review_id}}", "value": ".designs/{{.review_id}}"},
+    {"name": "output_leg_pattern", "default": "{{.leg.id}}.md", "value": "{{.leg.id}}.md"},
+    {"name": "output_synthesis", "default": "design-doc.md", "value": "design-doc.md"},
+    {"name": "problem", "required": true, "default": null, "value": "set problem", "provided": true},
+    {"name": "context", "default": null, "value": null},
+    {"name": "review_only", "default": "true", "value": "true"}
+  ],
+  "unresolved_vars": [], "warnings": [],
+  "steps": [
+    {"id": "api", "title": "API", "description": "api body", "needs": [], "children": [],
+     "metadata": {"focus": "Interfaces", "agent": "codex"}},
+    {"id": "data", "title": "Data", "description": "data body", "needs": [], "children": [],
+     "metadata": {"focus": "Storage"}},
+    {"id": "synthesis", "title": "Synthesis", "description": "Combine {{.output.directory}}", "needs": ["api", "data"], "children": [],
+     "metadata": {"convoy": "synthesis"}}
+  ]
+}`
 
-	vars := map[string]interface{}{
-		"problem": "First paragraph.\n\nSecond paragraph.",
-		"context": "existing code",
+// TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings: gt formula run reads a
+// convoy from bd's cooked tree (gt-fd2cu.1.1): the step metadata marks the
+// synthesis and every other step is a leg; prompt, output files and
+// review_only come from vars.
+func TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings(t *testing.T) {
+	t.Parallel()
+	p := convoyPlanFrom(cookedFixture(t, convoyTree))
+
+	want := []convoyLeg{
+		{ID: "api", Title: "API", Focus: "Interfaces", Description: "api body", Agent: "codex", ReviewOnly: true},
+		{ID: "data", Title: "Data", Focus: "Storage", Description: "data body", ReviewOnly: true},
 	}
-	got := substituteFormulaVars("Problem: {{ problem }}\nContext: {{context}}\nKeep: {{review_id}}", vars)
-	want := "Problem: First paragraph.\n\nSecond paragraph.\nContext: existing code\nKeep: {{review_id}}"
-	if got != want {
-		t.Fatalf("substituteFormulaVars() = %q, want %q", got, want)
+	if !reflect.DeepEqual(p.Legs, want) {
+		t.Errorf("legs = %+v, want %+v", p.Legs, want)
+	}
+	if p.Synthesis == nil || p.Synthesis.ID != "synthesis" || !slices.Equal(p.Synthesis.Needs, []string{"api", "data"}) {
+		t.Errorf("synthesis = %+v", p.Synthesis)
+	}
+	if p.BasePrompt != "Leg {{.leg.id}}" || p.OutputDir != ".designs/{{.review_id}}" ||
+		p.LegPattern != "{{.leg.id}}.md" || p.SynthesisFile != "design-doc.md" {
+		t.Errorf("settings = %q %q %q %q", p.BasePrompt, p.OutputDir, p.LegPattern, p.SynthesisFile)
+	}
+}
+
+// TestFormulaRunVars_ResolvedVarsThenUndeclaredSets: the template context has
+// every var bd gave a value and the --set pairs the formula does not declare;
+// a var without a value stays out, so a template reads it as missing.
+func TestFormulaRunVars_ResolvedVarsThenUndeclaredSets(t *testing.T) {
+	t.Parallel()
+	got := formulaRunVars(cookedFixture(t, convoyTree), []string{"problem=set problem", "extra=x"})
+	if got["problem"] != "set problem" || got["extra"] != "x" || got["output_synthesis"] != "design-doc.md" {
+		t.Errorf("vars = %v", got)
+	}
+	if _, ok := got["context"]; ok {
+		t.Errorf("context has no value but is in the context: %v", got)
 	}
 }
 
@@ -277,13 +321,13 @@ func TestWorkflowStepTarget(t *testing.T) {
 
 	tests := []struct {
 		name string
-		step formula.Step
+		step cookedStep
 		want string
 	}{
-		{name: "default rig", step: formula.Step{}, want: "gastown"},
-		{name: "explicit rig", step: formula.Step{Target: "rig"}, want: "gastown"},
-		{name: "mayor", step: formula.Step{Target: "mayor"}, want: "mayor"},
-		{name: "crew path", step: formula.Step{Target: "gastown/crew/alex"}, want: "gastown/crew/alex"},
+		{name: "default rig", step: cookedStep{}, want: "gastown"},
+		{name: "explicit rig", step: cookedStep{Metadata: map[string]any{"target": "rig"}}, want: "gastown"},
+		{name: "mayor", step: cookedStep{Metadata: map[string]any{"target": "mayor"}}, want: "mayor"},
+		{name: "crew path", step: cookedStep{Metadata: map[string]any{"target": "gastown/crew/alex"}}, want: "gastown/crew/alex"},
 	}
 
 	for _, tt := range tests {
@@ -299,8 +343,7 @@ func TestWorkflowStepTarget(t *testing.T) {
 func TestWorkflowStepDescriptionAddsTargetMetadata(t *testing.T) {
 	t.Parallel()
 
-	description := "Line one\n\nLine two"
-	got := workflowStepDescription(formula.Step{Target: "mayor"}, description)
+	got := workflowStepDescription(cookedStep{Description: "Line one\n\nLine two", Metadata: map[string]any{"target": "mayor"}})
 	want := "workflow_target: mayor\n\nLine one\n\nLine two"
 	if got != want {
 		t.Fatalf("workflowStepDescription() = %q, want %q", got, want)
@@ -375,85 +418,6 @@ func TestRenderTemplateUsesGoDotSyntax(t *testing.T) {
 
 	if _, err := renderTemplate("bd show {{issue}}", ctx); err == nil {
 		t.Fatal("renderTemplate() with bare syntax succeeded; want Go template error")
-	}
-}
-
-func TestDesignFormulaOutputUsesReviewID(t *testing.T) {
-	t.Parallel()
-
-	content, err := formula.GetEmbeddedFormulaContent("design")
-	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent(design): %v", err)
-	}
-	f, err := formula.Parse(content)
-	if err != nil {
-		t.Fatalf("Parse(design): %v", err)
-	}
-	if f.Output == nil {
-		t.Fatal("design formula missing output config")
-	}
-
-	got, err := renderTemplate(f.Output.Directory, map[string]interface{}{"review_id": "abc123"})
-	if err != nil {
-		t.Fatalf("render output directory: %v", err)
-	}
-	if got != ".designs/abc123" {
-		t.Fatalf("output directory = %q, want %q", got, ".designs/abc123")
-	}
-}
-
-func TestSynthesisDescriptionRendersOutputContext(t *testing.T) {
-	t.Parallel()
-
-	for _, name := range []string{"design", "mol-prd-review", "mol-plan-review", "code-review"} {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			content, err := formula.GetEmbeddedFormulaContent(name)
-			if err != nil {
-				t.Fatalf("GetEmbeddedFormulaContent(%s): %v", name, err)
-			}
-			f, err := formula.Parse(content)
-			if err != nil {
-				t.Fatalf("Parse(%s): %v", name, err)
-			}
-			if f.Synthesis == nil || f.Output == nil {
-				t.Fatalf("%s missing synthesis or output config", name)
-			}
-
-			ctx := formulaTemplateContext(name, "local files", "abc123", 0, "", nil, nil,
-				map[string]interface{}{
-					"context":    "extra context",
-					"plan":       "test plan",
-					"prd_review": "prd-review.md",
-					"problem":    "test problem",
-					"scope":      "test scope",
-				})
-			addOutputTemplateContext(ctx, ".out/abc123", f.Output.Synthesis)
-
-			got, err := renderTemplate(f.Synthesis.Description, ctx)
-			if err != nil {
-				t.Fatalf("render synthesis description: %v", err)
-			}
-			if strings.Contains(got, "{{.") || strings.Contains(got, "<no value>") {
-				t.Fatalf("synthesis description left template placeholders unrendered: %q", got)
-			}
-			if !strings.Contains(got, ".out/abc123") {
-				t.Fatalf("synthesis description missing rendered output directory: %q", got)
-			}
-			if name == "design" {
-				for _, want := range []string{
-					"All dimension analyses from: .out/abc123/",
-					"A synthesized design at: .out/abc123/design-doc.md",
-					"# Design: test problem",
-				} {
-					if !strings.Contains(got, want) {
-						t.Fatalf("synthesis description missing %q", want)
-					}
-				}
-			}
-		})
 	}
 }
 

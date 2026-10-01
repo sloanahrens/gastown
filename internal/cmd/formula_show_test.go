@@ -3,13 +3,9 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
-	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/formula"
 )
 
 // cookTree is tree as the formula engine's Cook returns it.
@@ -185,26 +181,4 @@ func TestWriteCookedFormulaJSON_IsBdTree(t *testing.T) {
 	if got.Formula != "mol-doc-audit" || len(got.Steps) != 2 || len(got.Steps[1].Children) != 1 {
 		t.Errorf("JSON is not bd's tree: %+v", got)
 	}
-}
-
-// TestParseFormulaFile_ResolvesExtends: gt formula run parses by path and must
-// run the inherited steps too, the steps bd cooks.
-func TestParseFormulaFile_ResolvesExtends(t *testing.T) {
-	t.Parallel()
-	f, err := parseFormulaFile(filepath.Join("..", "formula", "formulas", "mol-doc-audit.formula.toml"))
-	if err != nil {
-		t.Fatalf("parseFormulaFile: %v", err)
-	}
-	want := []string{"load-context", "branch-setup", "audit", "commit-changes", "self-review", "build-check", "pre-verify", "submit-and-exit"}
-	if got := formulaStepIDs(f); !slices.Equal(got, want) {
-		t.Errorf("steps = %v, want %v", got, want)
-	}
-}
-
-func formulaStepIDs(f *formula.Formula) []string {
-	ids := make([]string, 0, len(f.Steps))
-	for _, s := range f.Steps {
-		ids = append(ids, s.ID)
-	}
-	return ids
 }
