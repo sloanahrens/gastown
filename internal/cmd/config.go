@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
@@ -655,9 +657,9 @@ Supported keys:
                               completion (true/false, default: false)
   cli_theme                   CLI color scheme ("dark", "light", "auto")
   default_agent               Default agent preset name
-  dolt.port                   Dolt SQL server port (default: 3307). Set this when
-                              another Gas Town instance is using the same port.
-                              Writes GT_DOLT_PORT to mayor/daemon.json env section.
+  dolt.port                   Dolt SQL server port (gt install writes 3307). Set
+                              this when another Gas Town instance is using the
+                              same port. Writes "dolt" in mayor/town.json.
   scheduler.max_polecats      Dispatch mode: -1 = direct (default), N > 0 = deferred
   scheduler.batch_size        Beads per heartbeat (default: 1)
   scheduler.spawn_delay       Delay between spawns (default: 0s)
@@ -830,22 +832,13 @@ func configSet(e configCmdEnv, args []string) error {
 		if err != nil || port < 1024 || port > 65535 {
 			return fmt.Errorf("invalid value for %s: expected port number 1024-65535", key)
 		}
-		patrolCfg, err := daemon.ReadPatrolConfig(townRoot)
-		if err != nil {
-			return err
+		// The endpoint lives in mayor/town.json (gt-y3pgh.3); gt dolt start
+		// writes the server's config.yaml from it.
+		if err := stampTownDoltPort(filepath.Join(townRoot, workspace.PrimaryMarker), port); err != nil {
+			return fmt.Errorf("saving town.json: %w", err)
 		}
-		if patrolCfg == nil {
-			patrolCfg = &daemon.DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1}
-		}
-		if patrolCfg.Env == nil {
-			patrolCfg.Env = make(map[string]string)
-		}
-		patrolCfg.Env["GT_DOLT_PORT"] = value
-		if err := daemon.SavePatrolConfig(townRoot, patrolCfg); err != nil {
-			return fmt.Errorf("saving daemon.json: %w", err)
-		}
-		fmt.Fprintf(e.out, "Set GT_DOLT_PORT = %s in mayor/daemon.json\n", style.Bold.Render(value))
-		fmt.Fprintf(e.out, "  %s\n", style.Dim.Render("Restart the daemon for the change to take effect: gt daemon restart"))
+		fmt.Fprintf(e.out, "Set dolt.port = %s in mayor/town.json\n", style.Bold.Render(value))
+		fmt.Fprintf(e.out, "  %s\n", style.Dim.Render("Restart Dolt and the daemon for the change to take effect: gt dolt restart && gt daemon restart"))
 		return nil
 
 	default:
@@ -934,17 +927,11 @@ func configGet(e configCmdEnv, args []string) error {
 		return getMaintenanceConfig(e.out, townRoot, key)
 
 	case "dolt.port":
-		patrolCfg, err := daemon.ReadPatrolConfig(townRoot)
-		if err != nil {
-			return err
+		ep, ok := config.ResolveDoltEndpoint(townRoot)
+		if !ok {
+			return doltserver.ErrNoEndpoint
 		}
-		if patrolCfg != nil {
-			if v, ok := patrolCfg.Env["GT_DOLT_PORT"]; ok {
-				fmt.Fprintln(e.out, v)
-				return nil
-			}
-		}
-		fmt.Fprintln(e.out, "3307") // DefaultPort
+		fmt.Fprintln(e.out, ep.Port)
 		return nil
 
 	default:

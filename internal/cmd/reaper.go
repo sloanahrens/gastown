@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -153,34 +152,18 @@ func parseReaperDatabaseList(list string) []string {
 
 func defaultReaperEndpoint() (string, int) {
 	townRoot, _ := findTownRoot()
-	return reaperEndpoint(townRoot, os.Getenv)
+	return reaperEndpoint(townRoot)
 }
 
-// reaperEndpoint resolves the Dolt host and port the reaper talks to from
-// getenv and, when townRoot is not "", the town's Dolt config.
-func reaperEndpoint(townRoot string, getenv func(string) string) (string, int) {
-	host := agentconfig.ResolveDoltHostWithEnv("", getenv)
-	port := 0
-	if p := getenv("GT_DOLT_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			port = v
-		}
+// reaperEndpoint is the town's Dolt host and port (gt-y3pgh.3), with host
+// 127.0.0.1 when the town names none. The port is 0 when there is no town
+// endpoint: the reaper then needs --port and never guesses one.
+func reaperEndpoint(townRoot string) (string, int) {
+	ep, _ := agentconfig.ResolveDoltEndpoint(townRoot)
+	if ep.Host == "" {
+		ep.Host = "127.0.0.1"
 	}
-	if townRoot != "" {
-		if host == "" {
-			host = agentconfig.ResolveDoltHostWithEnv(townRoot, getenv)
-		}
-		if port == 0 {
-			port = agentconfig.ResolveDoltPortWithEnv(townRoot, getenv)
-		}
-	}
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	if port == 0 {
-		port = 3307
-	}
-	return host, port
+	return ep.Host, ep.Port
 }
 
 func waitBeforeReaperDatabase(clk clockwork.Clock, index int, dbDelay string) error {
@@ -869,15 +852,14 @@ it by hand.`,
 
 func init() {
 	// Shared flags
-	// GH#2601: Default host/port from GT/town config for non-localhost setups.
-	// BEADS_DOLT_* aliases are intentionally ignored because they are derived bd
-	// client outputs, not endpoint authority.
+	// GH#2601: Default host/port from the town's Dolt endpoint for
+	// non-localhost setups.
 	defaultHost, defaultPort := defaultReaperEndpoint()
 
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
-		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
-		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
+		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (default: the town's Dolt host)")
+		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (default: the town's Dolt port)")
 		cmd.Flags().BoolVar(&reaperDryRun, "dry-run", false, "Report what would happen without acting")
 	}
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd} {

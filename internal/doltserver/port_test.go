@@ -23,7 +23,7 @@ func TestCheckPortAvailable_InUse(t *testing.T) {
 	if err == nil {
 		t.Fatal("checkPortAvailable(4531) returned nil for in-use port")
 	}
-	for _, want := range []string{"port 4531 is already in use", "Port is held by PID " + strconv.Itoa(holder), "GT_DOLT_PORT"} {
+	for _, want := range []string{"port 4531 is already in use", "Port is held by PID " + strconv.Itoa(holder), "gt config set dolt.port"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks %q", err, want)
 		}

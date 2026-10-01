@@ -638,10 +638,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 				initArgs = append(initArgs, "--database", opts.Name)
 			}
 			initArgs = append(initArgs, "--server")
-			// Always pass --server-port so bd connects to gt's central Dolt
-			// server. Without this, bd auto-starts its own server on a random
+			// Pass the town's port so bd connects to gt's central Dolt
+			// server. Without it, bd auto-starts its own server on a random
 			// port, causing "database not found" errors. (GH #2405)
-			initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
+			initArgs = append(initArgs, bdInitServerPortArgs(m.townRoot)...)
 			// The clone is the user's repo: bd's editor-agent setup would leave
 			// .agents/, .codex/ and .cursor/ untracked in it (gt-22hdp.40).
 			initArgs = append(initArgs, "--skip-agents")
@@ -736,7 +736,15 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		setPrefix := func(prefix string) error {
 			return m.doltDBs().SetIssuePrefix(resolvedBeadsDir, database, prefix)
 		}
-		for _, w := range seedRigDatabaseConfig(beads.NewRigLocalWithRunner(filepath.Dir(resolvedBeadsDir), m.bd), setPrefix, opts.BeadsPrefix) {
+		rigBD := beads.NewRigLocalWithRunner(filepath.Dir(resolvedBeadsDir), m.bd)
+		warnings := seedRigDatabaseConfig(rigBD, setPrefix, opts.BeadsPrefix)
+		// The endpoint goes into an untracked .beads/config.yaml only: a
+		// tracked one belongs to the source repo, like the keys above.
+		if _, err := os.Stat(filepath.Join(rigRootBeadsDir, "redirect")); os.IsNotExist(err) {
+			ep, ok := config.ResolveDoltEndpoint(m.townRoot)
+			warnings = append(warnings, stampRigDoltEndpoint(rigBD, ep, ok)...)
+		}
+		for _, w := range warnings {
 			fmt.Printf("  Warning: %s\n", w)
 		}
 	}
@@ -1243,9 +1251,9 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		initArgs = append(initArgs, "--database", rigName)
 	}
 	initArgs = append(initArgs, "--server")
-	// Always pass --server-port so bd connects to gt's central Dolt server.
-	// Without this, bd auto-starts its own server on a random port. (GH #2405)
-	initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
+	// Pass the town's port so bd connects to gt's central Dolt server.
+	// Without it, bd auto-starts its own server on a random port. (GH #2405)
+	initArgs = append(initArgs, bdInitServerPortArgs(m.townRoot)...)
 	// --force ensures bd 1.0+ persists issue_prefix on existing server-side DBs.
 	initArgs = append(initArgs, "--force")
 	// A rig directory is the user's repo too: bd's editor-agent setup would
@@ -1491,11 +1499,14 @@ func bdSubprocessEnv(base []string, beadsDir, database string) []string {
 	return env
 }
 
-func bdInitServerPort(townRoot string) int {
-	if port := config.ResolveConfiguredDoltPort(townRoot); port > 0 {
-		return port
+// bdInitServerPortArgs is bd init's --server-port for the town's endpoint.
+// A town without an endpoint passes none: bd then uses the endpoint
+// variables its environment carries (gt-y3pgh.3).
+func bdInitServerPortArgs(townRoot string) []string {
+	if port := config.ResolveDoltPort(townRoot); port > 0 {
+		return []string{"--server-port", strconv.Itoa(port)}
 	}
-	return doltserver.DefaultPort
+	return nil
 }
 
 // isStandardBeadHash checks if a string looks like a standard 5-char bead hash.

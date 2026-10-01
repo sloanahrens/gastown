@@ -48,7 +48,6 @@ func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
 	base := []string{
 		"BEADS_DIR=/wrong",
 		"BEADS_DOLT_SERVER_DATABASE=hq",
-		"BEADS_DOLT_SERVER_PORT=9999",
 		"GT_DOLT_HOST=",
 		"GT_DOLT_PORT=",
 		"GT_DOLT_DATA=" + filepath.Join(t.TempDir(), "wrong-data"),

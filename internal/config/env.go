@@ -2,7 +2,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -221,15 +220,9 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// Inject Dolt server endpoint so agents' direct bd invocations connect to
 	// gt's central server instead of auto-starting rogue per-rig servers.
 	// BEADS_DOLT_* values are output aliases only; they are never authoritative.
-	if cfg.TownRoot != "" {
-		if port := ResolveDoltPortWithEnv(cfg.TownRoot, getenv); port > 0 {
-			setDoltPortEnv(env, strconv.Itoa(port))
-		}
-	}
-	if _, ok := env["GT_DOLT_PORT"]; !ok {
-		if v := getenv("GT_DOLT_PORT"); v != "" {
-			setDoltPortEnv(env, v)
-		}
+	// The endpoint comes from the town's config only (gt-y3pgh.3).
+	for k, v := range ConfiguredDoltEnv(cfg.TownRoot) {
+		env[k] = v
 	}
 	// Suppress bd's Dolt auto-start for all Gas Town agents (GH#2930).
 	// Gas Town manages its own Dolt server (gt dolt start/stop). When the
@@ -240,13 +233,6 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// their kennel's .beads/ has no explicit dolt_server_port in metadata.json.
 	if cfg.TownRoot != "" {
 		env["BEADS_DOLT_AUTO_START"] = "0"
-	}
-
-	// Propagate Dolt server host. GT/config host is authoritative; stale Beads
-	// aliases from the parent shell are intentionally ignored.
-	if host := ResolveDoltHostWithEnv(cfg.TownRoot, getenv); host != "" {
-		env["GT_DOLT_HOST"] = host
-		env["BEADS_DOLT_SERVER_HOST"] = host
 	}
 
 	// Pass through cloud API credentials and provider configuration from the parent shell.
@@ -317,180 +303,99 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	return env
 }
 
-func setDoltPortEnv(env map[string]string, port string) {
-	env["GT_DOLT_PORT"] = port
-	env["BEADS_DOLT_SERVER_PORT"] = port
-	env["BEADS_DOLT_PORT"] = port
-}
-
 func clearBDTargetSelectorEnv(env map[string]string) {
 	for _, key := range bdTargetSelectorEnvVars {
 		env[key] = ""
 	}
 }
 
-// ResolveDoltPort determines the Dolt server port for the given town root.
+// ResolveDoltEndpoint is the one resolver for the town's Dolt server endpoint
+// (gt-y3pgh.3). It reads durable config only, never the environment:
 //
-// Resolution order:
-//  1. GT_DOLT_PORT environment variable (explicit operator intent)
-//  2. .dolt-data/config.yaml listener.port
-//  3. mayor/daemon.json env.GT_DOLT_PORT
-//  4. 0 (caller should skip injection — DefaultPort 3307 remains the default)
-func ResolveDoltPort(townRoot string) int {
-	return ResolveDoltPortWithEnv(townRoot, os.Getenv)
-}
-
-// ResolveDoltPortWithEnv is ResolveDoltPort reading the environment through
-// getenv instead of the process's.
-func ResolveDoltPortWithEnv(townRoot string, getenv func(string) string) int {
-	if port := resolveDoltPortFromEnv(getenv); port > 0 {
-		return port
-	}
+//  1. mayor/town.json "dolt" (written by gt install and gt config set dolt.port)
+//  2. .dolt-data/config.yaml listener, for a town whose town.json predates
+//     the field (gt dolt start writes that file from this resolver)
+//
+// ok is false when neither names a port: the town has no endpoint, and the
+// caller must not guess one (no fallback to DefaultPort).
+func ResolveDoltEndpoint(townRoot string) (DoltEndpoint, bool) {
 	if townRoot == "" {
-		return 0
+		return DoltEndpoint{}, false
 	}
-
-	if port := resolveDoltPortFromConfigYAML(townRoot, getenv); port > 0 {
-		return port
+	if town, err := LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json")); err == nil && town.Dolt != nil {
+		return DoltEndpoint{Host: strings.TrimSpace(town.Dolt.Host), Port: town.Dolt.Port}, true
 	}
-
-	if port := resolveDoltPortFromDaemonJSON(townRoot); port > 0 {
-		return port
-	}
-
-	return 0
-}
-
-// ResolveConfiguredDoltPort determines the durable configured Dolt port for
-// initializing a target town. Unlike ResolveDoltPort, it does not consult
-// ambient GT_DOLT_PORT until after the target town's managed config, which may
-// be stale in long-lived agent sessions.
-//
-// Resolution order:
-//  1. .dolt-data/config.yaml listener.port unless GT_DOLT_IGNORE_CONFIG=1
-//  2. GT_DOLT_PORT environment variable
-//  3. mayor/daemon.json env.GT_DOLT_PORT
-//  4. 0 (caller should use its default)
-func ResolveConfiguredDoltPort(townRoot string) int {
-	return resolveConfiguredDoltPort(townRoot, os.Getenv)
-}
-
-// ResolveConfiguredDoltPortWithEnv is ResolveConfiguredDoltPort reading the
-// environment through getenv instead of the process's.
-func ResolveConfiguredDoltPortWithEnv(townRoot string, getenv func(string) string) int {
-	return resolveConfiguredDoltPort(townRoot, getenv)
-}
-
-func resolveConfiguredDoltPort(townRoot string, getenv func(string) string) int {
-	if _, port, ok := managedDoltEndpoint(townRoot, getenv); ok {
-		return port
-	}
-	if port := resolveDoltPortFromEnv(getenv); port > 0 {
-		return port
-	}
-	if port := resolveDoltPortFromDaemonJSON(townRoot); port > 0 {
-		return port
-	}
-	return 0
-}
-
-// ResolveConfiguredDoltHost determines the durable configured Dolt host for
-// initializing a target town. The target town's managed config beats ambient
-// GT_DOLT_HOST, which may describe the caller's current town instead.
-//
-// Resolution order:
-//  1. .dolt-data/config.yaml listener.host unless GT_DOLT_IGNORE_CONFIG=1
-//  2. GT_DOLT_HOST environment variable
-//  3. mayor/daemon.json env.GT_DOLT_HOST
-//  4. "" (caller should use its default)
-func ResolveConfiguredDoltHost(townRoot string) string {
-	return resolveConfiguredDoltHost(townRoot, os.Getenv)
-}
-
-// ResolveConfiguredDoltHostWithEnv is ResolveConfiguredDoltHost reading the
-// environment through getenv instead of the process's.
-func ResolveConfiguredDoltHostWithEnv(townRoot string, getenv func(string) string) string {
-	return resolveConfiguredDoltHost(townRoot, getenv)
-}
-
-func resolveConfiguredDoltHost(townRoot string, getenv func(string) string) string {
-	if host, _, ok := managedDoltEndpoint(townRoot, getenv); ok {
-		return host
-	}
-	if host := strings.TrimSpace(getenv("GT_DOLT_HOST")); host != "" {
-		return host
-	}
-	return resolveDoltHostFromDaemonJSON(townRoot)
-}
-
-// ManagedDoltEndpoint reads the target town's managed Dolt config.yaml without
-// falling back to ambient environment. The boolean reports whether the managed
-// config exists and is not disabled by GT_DOLT_IGNORE_CONFIG.
-func ManagedDoltEndpoint(townRoot string) (host string, port int, ok bool) {
-	return managedDoltEndpoint(townRoot, os.Getenv)
-}
-
-func managedDoltEndpoint(townRoot string, getenv func(string) string) (host string, port int, ok bool) {
-	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
-		return "", 0, false
-	}
-	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(filepath.Join(townRoot, ".dolt-data", "config.yaml")) //nolint:gosec // G304: managed file under the town root
 	if err != nil {
-		return "", 0, false
+		return DoltEndpoint{}, false
 	}
-	return parseHostFromConfigYAML(data), parsePortFromConfigYAML(data), true
+	port := parsePortFromConfigYAML(data)
+	if port <= 0 {
+		return DoltEndpoint{}, false
+	}
+	return DoltEndpoint{Host: parseHostFromConfigYAML(data), Port: port}, true
 }
 
-// NormalizeConfiguredDoltEnv strips inherited Dolt endpoint env at target-town
-// boundaries and injects the target town's managed endpoint when present.
+// ResolveDoltPort is ResolveDoltEndpoint's port, or 0 when the town has no
+// endpoint.
+func ResolveDoltPort(townRoot string) int {
+	ep, _ := ResolveDoltEndpoint(townRoot)
+	return ep.Port
+}
+
+// ResolveDoltHost is ResolveDoltEndpoint's host, or "" (the local machine).
+func ResolveDoltHost(townRoot string) string {
+	ep, _ := ResolveDoltEndpoint(townRoot)
+	return ep.Host
+}
+
+// NormalizeConfiguredDoltEnv replaces the Dolt endpoint variables in base
+// with the town's endpoint. When the town has no endpoint base is returned
+// unchanged.
 func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
-	return normalizeConfiguredDoltEnv(base, townRoot, os.Getenv)
-}
-
-// NormalizeConfiguredDoltEnvWithEnv is NormalizeConfiguredDoltEnv reading the
-// environment through getenv instead of the process's.
-func NormalizeConfiguredDoltEnvWithEnv(base []string, townRoot string, getenv func(string) string) []string {
-	return normalizeConfiguredDoltEnv(base, townRoot, getenv)
-}
-
-func normalizeConfiguredDoltEnv(base []string, townRoot string, getenv func(string) string) []string {
-	host, port, ok := managedDoltEndpoint(townRoot, getenv)
+	ep, ok := ResolveDoltEndpoint(townRoot)
 	if !ok {
 		return base
 	}
 	base = stripDoltEndpointEnv(base)
-	if host != "" {
-		base = append(base, "GT_DOLT_HOST="+host)
-	}
-	if port > 0 {
-		base = append(base, "GT_DOLT_PORT="+strconv.Itoa(port))
+	for _, key := range DoltEndpointEnvKeys {
+		if v := doltEndpointEnvValue(ep, key); v != "" {
+			base = append(base, key+"="+v)
+		}
 	}
 	return base
 }
 
-// DoltEndpointEnvKeys are the environment variables that name a Dolt
-// endpoint. A target-town startup boundary unsets all of them before
-// exporting ConfiguredDoltEnv.
+// DoltEndpointEnvKeys are the environment variables gt exports to name the
+// Dolt endpoint for its children (bd reads the BEADS_ ones). gt itself never
+// reads them. A startup boundary unsets all of them before exporting
+// ConfiguredDoltEnv.
 var DoltEndpointEnvKeys = []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
 
-// ConfiguredDoltEnv returns the Dolt endpoint variables a target-town startup
-// boundary (gt up, the daemon) exports to the children it spawns: the endpoint
-// keys of NormalizeConfiguredDoltEnv applied to the current process
-// environment. The caller unsets DoltEndpointEnvKeys and then sets these.
+// ConfiguredDoltEnv returns the Dolt endpoint variables a startup boundary
+// (gt up, the daemon) exports to the children it spawns, from the town's
+// endpoint. It is empty when the town has no endpoint.
 func ConfiguredDoltEnv(townRoot string) map[string]string {
-	return configuredDoltEnv(os.Environ(), townRoot, os.Getenv)
-}
-
-func configuredDoltEnv(environ []string, townRoot string, getenv func(string) string) map[string]string {
 	env := make(map[string]string)
-	for _, entry := range normalizeConfiguredDoltEnv(environ, townRoot, getenv) {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok && isDoltEndpointEnvKey(key) {
-			env[key] = value
+	ep, ok := ResolveDoltEndpoint(townRoot)
+	if !ok {
+		return env
+	}
+	for _, key := range DoltEndpointEnvKeys {
+		if v := doltEndpointEnvValue(ep, key); v != "" {
+			env[key] = v
 		}
 	}
 	return env
+}
+
+func doltEndpointEnvValue(ep DoltEndpoint, key string) string {
+	switch key {
+	case "GT_DOLT_HOST", "BEADS_DOLT_SERVER_HOST":
+		return ep.Host
+	default:
+		return strconv.Itoa(ep.Port)
+	}
 }
 
 func stripDoltEndpointEnv(env []string) []string {
@@ -518,111 +423,6 @@ func isDoltEndpointEnvKey(key string) bool {
 		}
 	}
 	return false
-}
-
-func resolveDoltPort(townRoot string) int {
-	return ResolveDoltPort(townRoot)
-}
-
-func resolveDoltPortFromEnv(getenv func(string) string) int {
-	if p := getenv("GT_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	return 0
-}
-
-func resolveDoltPortFromConfigYAML(townRoot string, getenv func(string) string) int {
-	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
-		return 0
-	}
-	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return 0
-	}
-	return parsePortFromConfigYAML(data)
-}
-
-func resolveDoltPortFromDaemonJSON(townRoot string) int {
-	if townRoot == "" {
-		return 0
-	}
-	daemonJSONPath := filepath.Join(townRoot, "mayor", "daemon.json")
-	data, err := os.ReadFile(daemonJSONPath)
-	if err != nil {
-		return 0
-	}
-	var daemonEnv struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(data, &daemonEnv); err != nil {
-		return 0
-	}
-	if v, ok := daemonEnv.Env["GT_DOLT_PORT"]; ok {
-		if port, err := strconv.Atoi(v); err == nil && port > 0 {
-			return port
-		}
-	}
-	return 0
-}
-
-// ResolveDoltHost determines the Dolt server host for the given town root.
-// BEADS_DOLT_* aliases are derived outputs and are intentionally ignored.
-//
-// Resolution order:
-//  1. GT_DOLT_HOST environment variable (explicit operator intent)
-//  2. .dolt-data/config.yaml listener.host unless GT_DOLT_IGNORE_CONFIG=1
-//  3. mayor/daemon.json env.GT_DOLT_HOST
-//  4. "" (caller should use its default localhost behavior)
-func ResolveDoltHost(townRoot string) string {
-	return ResolveDoltHostWithEnv(townRoot, os.Getenv)
-}
-
-// ResolveDoltHostWithEnv is ResolveDoltHost reading the environment through
-// getenv instead of the process's.
-func ResolveDoltHostWithEnv(townRoot string, getenv func(string) string) string {
-	if host := strings.TrimSpace(getenv("GT_DOLT_HOST")); host != "" {
-		return host
-	}
-	if townRoot == "" {
-		return ""
-	}
-	if host := resolveDoltHostFromConfigYAML(townRoot, getenv); host != "" {
-		return host
-	}
-	return resolveDoltHostFromDaemonJSON(townRoot)
-}
-
-func resolveDoltHostFromConfigYAML(townRoot string, getenv func(string) string) string {
-	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
-		return ""
-	}
-	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
-	}
-	return parseHostFromConfigYAML(data)
-}
-
-func resolveDoltHostFromDaemonJSON(townRoot string) string {
-	if townRoot == "" {
-		return ""
-	}
-	daemonJSONPath := filepath.Join(townRoot, "mayor", "daemon.json")
-	data, err := os.ReadFile(daemonJSONPath)
-	if err != nil {
-		return ""
-	}
-	var daemonEnv struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(data, &daemonEnv); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(daemonEnv.Env["GT_DOLT_HOST"])
 }
 
 // parsePortFromConfigYAML extracts the listener port from a Dolt config.yaml

@@ -43,6 +43,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -424,6 +425,13 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 		h.refusedGitLog = log
 	}
 
+	// gt reads the Dolt endpoint from the town's config, never from
+	// GT_DOLT_PORT (gt-y3pgh.3), so the sandbox town carries the port the
+	// harness chose: the container's, or the poisoned one.
+	if err := stampSandboxDoltPort(h.TownRoot, getenv(host.env, "GT_DOLT_PORT")); err != nil {
+		return nil, err
+	}
+
 	h.TmuxSocket = host.isolateTmuxSocket()
 
 	// The env scrub above only reaches resolvers that consult it. Probe them
@@ -739,6 +747,20 @@ func writeSandboxTown(root string) error {
 	return nil
 }
 
+// stampSandboxDoltPort writes port as the sandbox town's Dolt endpoint in
+// its mayor/town.json. A port that is not one (unset, say) stamps the
+// poisoned port: a sandbox town never falls through to a real server.
+func stampSandboxDoltPort(root, port string) error {
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		port = poisonDoltPort
+	}
+	town := `{"type":"town","version":2,"name":"hermetic-sandbox","dolt":{"port":` + port + `}}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o644); err != nil {
+		return fmt.Errorf("writing sandbox town.json: %w", err)
+	}
+	return nil
+}
+
 // HermeticTest applies the hermetic env treatment to a single test: scrubs
 // GT_*/BD_*/BEADS_* variables, redirects HOME/CLAUDE_CONFIG_DIR/GT_TOWN_ROOT
 // into a per-test sandbox town, and poisons the Dolt port vars. Everything is
@@ -813,6 +835,9 @@ func (h *harnessHost) hermeticTest(t testing.TB) string {
 		_ = h.env.Setenv("GT_DOLT_PORT", poisonDoltPort)
 		_ = h.env.Setenv("BEADS_DOLT_PORT", poisonDoltPort)
 	}
+	if err := stampSandboxDoltPort(town, getenv(h.env, "GT_DOLT_PORT")); err != nil {
+		t.Fatal(err)
+	}
 	if realRoot != "" {
 		if err := h.assertLiveTownRefused(startDir); err != nil {
 			t.Fatal(err)
@@ -833,6 +858,9 @@ func ScratchTown(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := writeSandboxTown(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := stampSandboxDoltPort(root, os.Getenv("GT_DOLT_PORT")); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(root)

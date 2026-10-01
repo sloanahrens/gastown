@@ -35,16 +35,25 @@ func testDoltServerDaemon(t *testing.T) *Daemon {
 		t.Skip("no shared Dolt container: container-backed tests are opt-in (" + testutil.DockerTestsEnv + "=1)")
 	}
 
-	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
+	// gt reads the endpoint from the town's config only (gt-y3pgh.3), so
+	// the daemon gets a town whose endpoint is the container.
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: "+containerPort+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
 
 	// Refuse to run against anything but the package's ephemeral container.
 	// d.doltServerPort() falls back to doltserver.DefaultPort (3307) — the
-	// live production town — whenever GT_DOLT_PORT hasn't propagated to this
-	// process. Silently proceeding in that case would let every test below
-	// create and drop databases on production instead of the disposable
-	// container.
+	// live production town — when the town names no endpoint. Silently
+	// proceeding in that case would let every test below create and drop
+	// databases on production instead of the disposable container.
 	if port := d.doltServerPort(); strconv.Itoa(port) != containerPort {
-		t.Fatalf("refusing to run: Dolt port resolved to %d (production default is %d), want ephemeral container port %s (GT_DOLT_PORT not propagated?)",
+		t.Fatalf("refusing to run: Dolt port resolved to %d (production default is %d), want ephemeral container port %s (town endpoint not read?)",
 			port, doltserver.DefaultPort, containerPort)
 	}
 

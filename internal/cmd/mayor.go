@@ -381,7 +381,7 @@ func restartMayor(mgr mayorStopper, sup *supervisor.Supervisor, actor string, st
 // for the Mayor (it cannot operate without database access).
 // Daemon failures are non-fatal (warned but do not block).
 func ensureMayorInfra(townRoot string) error {
-	// Load daemon.json env vars (e.g., GT_DOLT_PORT) so Dolt uses the right port.
+	// Load daemon.json env vars (e.g., GT_DOLT_LOGLEVEL) for the Dolt start below.
 	if patrolCfg := daemon.LoadPatrolConfig(townRoot); patrolCfg != nil {
 		for k, v := range patrolCfg.Env {
 			os.Setenv(k, v)

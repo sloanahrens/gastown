@@ -328,12 +328,9 @@ func TestBdSubprocessEnv_FiltersStaleBdTargetEnv(t *testing.T) {
 		"BEADS_DIR=/wrong",
 		"BEADS_DB=/wrong.db",
 		"BEADS_DOLT_SERVER_DATABASE=wrong",
-		"BEADS_DOLT_SERVER_HOST=wrong-host",
-		"BEADS_DOLT_SERVER_PORT=9999",
-		"BEADS_DOLT_PORT=9999",
 	}, beadsDir, true, nil)
 
-	if envContains(got, "BEADS_DIR=/wrong") || envContains(got, "BEADS_DB=/wrong.db") || envContains(got, "BEADS_DOLT_SERVER_DATABASE=wrong") || envContains(got, "BEADS_DOLT_SERVER_HOST=wrong-host") || envContains(got, "BEADS_DOLT_SERVER_PORT=9999") || envContains(got, "BEADS_DOLT_PORT=9999") {
+	if envContains(got, "BEADS_DIR=/wrong") || envContains(got, "BEADS_DB=/wrong.db") || envContains(got, "BEADS_DOLT_SERVER_DATABASE=wrong") {
 		t.Fatalf("stale bd target env was not filtered: %v", got)
 	}
 	if !envContains(got, "BEADS_DIR="+beadsDir) {
@@ -505,8 +502,10 @@ func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
 	if !envContains(got, "BEADS_NO_AUTO_IMPORT=1") {
 		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %v", got)
 	}
-	if !envContains(got, "BEADS_DOLT_SERVER_HOST=127.0.0.2") || !envContains(got, "BEADS_DOLT_SERVER_PORT=5507") || !envContains(got, "BEADS_DOLT_PORT=5507") {
-		t.Fatalf("expected GT_DOLT host/port fallback for routed command, got %v", got)
+	// Outside a town the inherited bd endpoint passes through; GT_DOLT_* is
+	// never translated (gt-y3pgh.3).
+	if !envContains(got, "BEADS_DOLT_SERVER_HOST=wrong-host") || !envContains(got, "BEADS_DOLT_SERVER_PORT=9999") || envContains(got, "BEADS_DOLT_SERVER_PORT=5507") {
+		t.Fatalf("expected the inherited bd endpoint for routed command, got %v", got)
 	}
 }
 

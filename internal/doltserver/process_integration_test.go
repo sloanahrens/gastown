@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // The unit tier runs the adapter on a fakeHost, whose process table stands in
@@ -27,14 +29,11 @@ import (
 // TestMain runs the helper body before the harness starts.
 const portHolderHelperEnv = "DOLTSERVER_TEST_PORT_HOLDER"
 
-// realHostOnPort is the real machine with GT_DOLT_PORT set to port for this
-// adapter alone.
+// realHostOnPort is the real machine with every town's Dolt endpoint at port
+// for this adapter alone.
 func realHostOnPort(port int) *host {
-	return &host{lookupEnv: func(key string) (string, bool) {
-		if key == "GT_DOLT_PORT" {
-			return strconv.Itoa(port), true
-		}
-		return os.LookupEnv(key)
+	return &host{doltEndpoint: func(string) (configpkg.DoltEndpoint, bool) {
+		return configpkg.DoltEndpoint{Port: port}, true
 	}}
 }
 

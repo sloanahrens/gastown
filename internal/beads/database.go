@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -85,7 +86,7 @@ func isBDTargetEnv(entry string) bool {
 func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	if beadsDir == "" {
-		return addResolvedDoltConnectionEnv(env, "")
+		return addResolvedDoltConnectionEnv(env, base, "")
 	}
 	beadsDir = canonicalBeadsDir(beadsDir)
 	env = append(env, "BEADS_DIR="+beadsDir)
@@ -93,7 +94,7 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	if dbEnv := DatabaseEnv(beadsDir); dbEnv != "" {
 		env = append(env, dbEnv)
 	}
-	return addResolvedDoltConnectionEnv(env, beadsDir)
+	return addResolvedDoltConnectionEnv(env, base, beadsDir)
 }
 
 // BuildRoutingBDEnv returns env for a bd subprocess that intentionally relies on
@@ -103,7 +104,7 @@ func BuildRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	fallbackBeadsDir = canonicalBeadsDir(fallbackBeadsDir)
 	env = append(env, doltTargetEnvFromBeadsDir(fallbackBeadsDir)...)
-	return addResolvedDoltConnectionEnv(env, fallbackBeadsDir)
+	return addResolvedDoltConnectionEnv(env, base, fallbackBeadsDir)
 }
 
 // BuildReadOnlyPinnedBDEnv returns env for a read-only bd subprocess pinned to
@@ -353,58 +354,51 @@ func envKeyHasPrefix(keyName, prefix string) bool {
 	return strings.HasPrefix(keyName, prefix)
 }
 
-func addResolvedDoltConnectionEnv(env []string, beadsDir string) []string {
-	gtHost := envValue(env, "GT_DOLT_HOST")
-	gtPort := envValue(env, "GT_DOLT_PORT")
-	// GT_DOLT_DATA is intentionally not translated to BEADS_DOLT_DATA_DIR here:
-	// data-dir env selects direct-mode storage and can override metadata routing.
-	if gtHost != "" {
-		env = StripEnvKey(env, "BEADS_DOLT_SERVER_HOST")
-		env = append(env, "BEADS_DOLT_SERVER_HOST="+gtHost)
-	}
-	if gtPort != "" {
-		env = StripEnvKey(env, "BEADS_DOLT_SERVER_PORT")
-		env = StripEnvKey(env, "BEADS_DOLT_PORT")
-		env = append(env, "BEADS_DOLT_SERVER_PORT="+gtPort, "BEADS_DOLT_PORT="+gtPort)
-	}
-	if beadsDir == "" {
-		return env
-	}
-	townRoot := FindTownRoot(filepath.Dir(beadsDir))
-	if townRoot == "" {
-		return env
-	}
-	managedHost, managedPort, hasManagedConfig := agentconfig.ManagedDoltEndpoint(townRoot)
-	if envValue(env, "BEADS_DOLT_SERVER_HOST") == "" {
-		if hasManagedConfig {
-			if managedHost != "" {
-				env = append(env, "BEADS_DOLT_SERVER_HOST="+managedHost)
+// bdEndpointEnvKeys are the variables bd reads to find its Dolt server.
+var bdEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+
+// addResolvedDoltConnectionEnv sets bd's endpoint variables in env. When
+// beadsDir is in a town that names a Dolt endpoint, that endpoint wins
+// (gt-y3pgh.3). Otherwise the endpoint variables in base, the caller's
+// inherited environment, pass through unread, so bd meets the server its
+// parent was given; with none, env keeps what the beads directory's
+// metadata.json says. gt never reads GT_DOLT_* or BEADS_DOLT_* values.
+func addResolvedDoltConnectionEnv(env, base []string, beadsDir string) []string {
+	if townRoot := FindTownRoot(filepath.Dir(beadsDir)); beadsDir != "" && townRoot != "" {
+		if ep, ok := agentconfig.ResolveDoltEndpoint(townRoot); ok {
+			env = stripEnvKeys(env, bdEndpointEnvKeys...)
+			if ep.Host != "" {
+				env = append(env, "BEADS_DOLT_SERVER_HOST="+ep.Host)
 			}
-		} else if host := agentconfig.ResolveDoltHost(townRoot); host != "" {
-			env = append(env, "BEADS_DOLT_SERVER_HOST="+host)
+			port := strconv.Itoa(ep.Port)
+			return append(env, "BEADS_DOLT_SERVER_PORT="+port, "BEADS_DOLT_PORT="+port)
 		}
 	}
-	if envValue(env, "BEADS_DOLT_SERVER_PORT") == "" && envValue(env, "BEADS_DOLT_PORT") == "" {
-		if hasManagedConfig {
-			if managedPort > 0 {
-				portStr := strconv.Itoa(managedPort)
-				env = append(env, "BEADS_DOLT_SERVER_PORT="+portStr, "BEADS_DOLT_PORT="+portStr)
-			}
-		} else if port := agentconfig.ResolveDoltPort(townRoot); port > 0 {
-			portStr := strconv.Itoa(port)
-			env = append(env, "BEADS_DOLT_SERVER_PORT="+portStr, "BEADS_DOLT_PORT="+portStr)
+	inherited := map[string]string{}
+	for _, entry := range base {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" {
+			continue
+		}
+		if i := slices.IndexFunc(bdEndpointEnvKeys, func(want string) bool { return envKeyMatches(key, want) }); i >= 0 {
+			inherited[bdEndpointEnvKeys[i]] = value
+		}
+	}
+	if len(inherited) == 0 {
+		return env
+	}
+	env = stripEnvKeys(env, bdEndpointEnvKeys...)
+	for _, key := range bdEndpointEnvKeys {
+		if value, ok := inherited[key]; ok {
+			env = append(env, key+"="+value)
 		}
 	}
 	return env
 }
 
-func envValue(env []string, key string) string {
-	var value string
-	for _, entry := range env {
-		keyName, v, ok := strings.Cut(entry, "=")
-		if ok && envKeyMatches(keyName, key) {
-			value = v
-		}
+func stripEnvKeys(env []string, keys ...string) []string {
+	for _, key := range keys {
+		env = StripEnvKey(env, key)
 	}
-	return value
+	return env
 }

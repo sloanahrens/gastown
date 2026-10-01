@@ -502,14 +502,12 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 		host = "127.0.0.1"
 	}
 	if port == 0 {
-		// Use the same port resolution as Start/Stop/Status: config.yaml takes
-		// precedence over GT_DOLT_PORT env var, which takes precedence over
-		// daemon.json, which falls back to DefaultPort (3307). This ensures
-		// the doctor probes the same port that the server actually uses.
+		// The town's endpoint, the port Start/Stop/Status use (gt-y3pgh.3).
+		// A town without one has nothing to probe.
 		port = doltserver.DefaultConfigWithEnv(townRoot, c.lookupEnv).Port
 	}
 	if port == 0 {
-		port = doltserver.DefaultPort
+		return "", false
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port)), true
 }

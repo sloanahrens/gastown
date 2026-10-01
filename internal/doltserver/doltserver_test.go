@@ -1933,11 +1933,8 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 // refused" errors reported by community users after gt dolt fix-metadata.
 func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost()
+	f := newFakeHost().townPort(DefaultPort)
 	h := f.host()
-	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
-	// the hermetic harness poisons it, so clear it.
-	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -1973,7 +1970,7 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatalf("parsing metadata: %v", err)
 	}
 
-	// Port should now be the default (3307), not the stale 13729
+	// Port should now be the town's (3307), not the stale 13729
 	wantPort := float64(DefaultPort)
 	if meta["dolt_server_port"] != wantPort {
 		t.Errorf("dolt_server_port = %v, want %v", meta["dolt_server_port"], wantPort)
@@ -2565,11 +2562,8 @@ func TestListDatabases_MixedContent(t *testing.T) {
 
 func TestGetConnectionString(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost()
+	f := newFakeHost().townPort(DefaultPort)
 	h := f.host()
-	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
-	// the hermetic harness poisons it, so clear it.
-	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
 	s := h.GetConnectionString(townRoot)
 	if s != "root@tcp(127.0.0.1:3307)/" {
@@ -2579,11 +2573,8 @@ func TestGetConnectionString(t *testing.T) {
 
 func TestGetConnectionStringForRig(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost()
+	f := newFakeHost().townPort(DefaultPort)
 	h := f.host()
-	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
-	// the hermetic harness poisons it, so clear it.
-	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
 	s := h.GetConnectionStringForRig(townRoot, "hq")
 	if s != "root@tcp(127.0.0.1:3307)/hq" {
@@ -4150,24 +4141,31 @@ func TestHostPort(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_EnvVarOverrides(t *testing.T) {
+// The endpoint is the town's config, never GT_DOLT_HOST/GT_DOLT_PORT; the
+// other settings still come from their variables (gt-y3pgh.3).
+func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
 	h := f.host()
 	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 4407\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	f.setenv("GT_DOLT_HOST", "10.0.0.5")
 	f.setenv("GT_DOLT_PORT", "13306")
+	f.setenv("GT_DOLT_IGNORE_CONFIG", "1")
 	f.setenv("GT_DOLT_USER", "myuser")
 	f.setenv("GT_DOLT_PASSWORD", "mypass")
 
 	config := h.DefaultConfig(townRoot)
 
-	if config.Host != "10.0.0.5" {
-		t.Errorf("Host = %q, want %q", config.Host, "10.0.0.5")
-	}
-	if config.Port != 13306 {
-		t.Errorf("Port = %d, want %d", config.Port, 13306)
+	if config.Host != "127.0.0.2" || config.Port != 4407 {
+		t.Errorf("endpoint = %s:%d, want the town's 127.0.0.2:4407", config.Host, config.Port)
 	}
 	if config.User != "myuser" {
 		t.Errorf("User = %q, want %q", config.User, "myuser")
@@ -4177,56 +4175,26 @@ func TestDefaultConfig_EnvVarOverrides(t *testing.T) {
 	}
 }
 
-// DefaultConfigWithEnv reads the variables it is given, not the process's.
+// DefaultConfigWithEnv reads the variables it is given, not the process's,
+// and a town without an endpoint gets port 0, never DefaultPort.
 func TestDefaultConfigWithEnv(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{"GT_DOLT_PORT": "13306", "GT_DOLT_USER": "myuser"}
 	config := DefaultConfigWithEnv(t.TempDir(), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if config.Port != 13306 || config.User != "myuser" {
-		t.Errorf("Port, User = %d, %q; want 13306, myuser", config.Port, config.User)
-	}
-	if got := DefaultConfigWithEnv(t.TempDir(), func(string) (string, bool) { return "", false }).Port; got != DefaultPort {
-		t.Errorf("Port with no GT_DOLT_PORT = %d, want %d", got, DefaultPort)
+	if config.Port != 0 || config.User != "myuser" {
+		t.Errorf("Port, User = %d, %q; want 0, myuser", config.Port, config.User)
 	}
 }
 
-func TestDefaultConfig_EnvVarPartialOverride(t *testing.T) {
+// Start refuses a town without an endpoint rather than guessing a port.
+func TestStartRefusesTownWithoutEndpoint(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
-	h := f.host()
-	townRoot := t.TempDir()
-
-	// Only override host, rest should keep defaults
-	f.setenv("GT_DOLT_HOST", "remote.host")
-	f.setenv("GT_DOLT_PORT", "")
-
-	config := h.DefaultConfig(townRoot)
-
-	if config.Host != "remote.host" {
-		t.Errorf("Host = %q, want %q", config.Host, "remote.host")
+	if err := f.host().Start(t.TempDir()); !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("Start = %v, want ErrNoEndpoint", err)
 	}
-	if config.Port != DefaultPort {
-		t.Errorf("Port = %d, want %d", config.Port, DefaultPort)
-	}
-	if config.User != DefaultUser {
-		t.Errorf("User = %q, want %q", config.User, DefaultUser)
-	}
-	if config.Password != "" {
-		t.Errorf("Password = %q, want empty", config.Password)
-	}
-}
-
-func TestDefaultConfig_InvalidPortIgnored(t *testing.T) {
-	t.Parallel()
-	f := newFakeHost()
-	h := f.host()
-	townRoot := t.TempDir()
-
-	f.setenv("GT_DOLT_PORT", "not-a-number")
-
-	config := h.DefaultConfig(townRoot)
-	if config.Port != DefaultPort {
-		t.Errorf("Port = %d, want default %d when env var is invalid", config.Port, DefaultPort)
+	if len(f.commands()) != 0 {
+		t.Errorf("Start ran %q before refusing", f.commands())
 	}
 }
 
@@ -4235,9 +4203,6 @@ func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
 	f := newFakeHost()
 	h := f.host()
 	townRoot := t.TempDir()
-	f.setenv("GT_DOLT_IGNORE_CONFIG", "")
-	f.setenv("GT_DOLT_HOST", "")
-	f.setenv("GT_DOLT_PORT", "")
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -4262,12 +4227,12 @@ func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_DaemonJSONFallbackWithoutConfigOrEnv(t *testing.T) {
+// daemon.json's env block names no endpoint (gt-y3pgh.3).
+func TestDefaultConfig_DaemonJSONEnvIsNotAnEndpoint(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
 	h := f.host()
 	townRoot := t.TempDir()
-	f.setenv("GT_DOLT_PORT", "")
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		t.Fatal(err)
@@ -4276,30 +4241,8 @@ func TestDefaultConfig_DaemonJSONFallbackWithoutConfigOrEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := h.DefaultConfig(townRoot)
-	if config.Port != 5507 {
-		t.Errorf("Port = %d, want daemon.json port 5507", config.Port)
-	}
-}
-
-func TestDefaultConfig_IgnoreConfigUsesEnvPort(t *testing.T) {
-	t.Parallel()
-	f := newFakeHost()
-	h := f.host()
-	townRoot := t.TempDir()
-	dataDir := filepath.Join(townRoot, ".dolt-data")
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: 4407\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	f.setenv("GT_DOLT_IGNORE_CONFIG", "1")
-	f.setenv("GT_DOLT_PORT", "5507")
-
-	config := h.DefaultConfig(townRoot)
-	if config.Port != 5507 {
-		t.Errorf("Port = %d, want env port 5507 when config ignored", config.Port)
+	if config := h.DefaultConfig(townRoot); config.Port != 0 {
+		t.Errorf("Port = %d, want 0 (no endpoint)", config.Port)
 	}
 }
 
@@ -4308,7 +4251,6 @@ func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
 	f := newFakeHost()
 	h := f.host()
 	townRoot := t.TempDir()
-	f.setenv("GT_DOLT_PORT", "")
 
 	config := h.DefaultConfig(townRoot)
 	if config.EventScheduler != "OFF" {
@@ -4497,6 +4439,19 @@ func TestWaitForReady_TimeoutWhenNoServer(t *testing.T) {
 	}
 	if f.slept < 400*time.Millisecond || f.slept > 500*time.Millisecond {
 		t.Errorf("WaitForReady waited %v, want close to the 500ms timeout and not past it", f.slept)
+	}
+}
+
+// A server-mode town without an endpoint has no address to wait for: it
+// answers at once instead of spending the timeout (gt-y3pgh.3).
+func TestWaitForReady_NoEndpoint(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	if err := f.host().WaitForReady(serverModeTown(t), 500*time.Millisecond); !errors.Is(err, ErrNoEndpoint) {
+		t.Errorf("WaitForReady = %v, want ErrNoEndpoint", err)
+	}
+	if f.slept != 0 {
+		t.Errorf("WaitForReady slept %v", f.slept)
 	}
 }
 

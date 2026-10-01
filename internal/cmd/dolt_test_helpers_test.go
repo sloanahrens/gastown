@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -74,5 +75,23 @@ func bridgeDoltPidToTown(t *testing.T, townRoot string) {
 	townPidPath := filepath.Join(daemonDir, "dolt.pid")
 	if err := os.WriteFile(townPidPath, []byte(pid+"\n"), 0644); err != nil { //nolint:gosec
 		t.Fatalf("bridgeDoltPidToTown: write PID file: %v", err)
+	}
+
+	// gt finds the server through the town's endpoint, never GT_DOLT_PORT
+	// (gt-y3pgh.3): give a town without one the test server's port, the
+	// listener gt dolt start would have written.
+	if _, ok := config.ResolveDoltEndpoint(townRoot); ok {
+		return
+	}
+	port := os.Getenv("GT_DOLT_PORT")
+	if port == "" {
+		t.Fatal("bridgeDoltPidToTown: no test Dolt server port in GT_DOLT_PORT")
+	}
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("bridgeDoltPidToTown: mkdir .dolt-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: "+port+"\n"), 0600); err != nil {
+		t.Fatalf("bridgeDoltPidToTown: write config.yaml: %v", err)
 	}
 }

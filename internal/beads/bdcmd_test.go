@@ -697,9 +697,18 @@ func TestBdCmd_WithBeadsDir_OverridesInherited(t *testing.T) {
 	}
 }
 
+// In a town, the town's endpoint overrides the inherited one (gt-y3pgh.3).
 func TestBdCmd_WithBeadsDir_OverridesInheritedDoltTarget(t *testing.T) {
 	t.Parallel()
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"host":"127.0.0.1","port":3307}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(townJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(townRoot, "rig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir beads dir: %v", err)
 	}
@@ -773,14 +782,13 @@ func TestBdCmd_DefaultStripsTargetEnvAndSuppressesSideEffects(t *testing.T) {
 			"PATH=/usr/bin",
 			"BEADS_DIR=/wrong",
 			"BEADS_DOLT_SERVER_DATABASE=hq",
-			"BEADS_DOLT_SERVER_HOST=wrong-host",
 			"BD_EXPORT_AUTO=true",
 		},
 		stderr: os.Stderr,
 	}
 	cmd := bdc.Build()
 	envMap := parseEnv(cmd.Env)
-	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_HOST"} {
+	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
 		if value, ok := envMap[key]; ok {
 			t.Fatalf("%s should be stripped for unpinned BdCmd, got %q in %v", key, value, cmd.Env)
 		}
@@ -856,7 +864,6 @@ func TestBdCmd_WithRoutingDoesNotPinBeadsDir(t *testing.T) {
 			"PATH=/usr/bin",
 			"BEADS_DIR=/wrong",
 			"BEADS_DOLT_SERVER_DATABASE=hq",
-			"BEADS_DOLT_SERVER_HOST=wrong-host",
 		},
 		stderr: os.Stderr,
 	}

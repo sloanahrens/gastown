@@ -16,7 +16,7 @@ func patrolCheck(t *testing.T, up bool) *DoltServerPatrolCheck {
 	c.lookupEnv = func(string) (string, bool) { return "", false }
 	c.dial = func(addr string) error {
 		if !strings.HasSuffix(addr, ":3307") {
-			t.Errorf("dialed %q, want the default port 3307", addr)
+			t.Errorf("dialed %q, want the town's port 3307", addr)
 		}
 		if up {
 			return nil
@@ -24,6 +24,20 @@ func patrolCheck(t *testing.T, up bool) *DoltServerPatrolCheck {
 		return errors.New("connection refused")
 	}
 	return c
+}
+
+// endpointTown is a town whose Dolt endpoint is port 3307.
+func endpointTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	dir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("listener:\n  port: 3307\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
 }
 
 // writeDaemonConfig writes a mayor/daemon.json with the given patrols JSON body.
@@ -41,7 +55,7 @@ func writeDaemonConfig(t *testing.T, townRoot, patrolsJSON string) {
 
 func TestDoltServerPatrolCheck_DoltUp(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
+	townRoot := endpointTown(t)
 	check := patrolCheck(t, true)
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
@@ -52,7 +66,7 @@ func TestDoltServerPatrolCheck_DoltUp(t *testing.T) {
 
 func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
+	townRoot := endpointTown(t)
 	// No dolt_server key in daemon.json → patrol not enabled.
 	writeDaemonConfig(t, townRoot, `{"doctor_dog":{"enabled":true}}`)
 
@@ -69,7 +83,7 @@ func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 
 func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
+	townRoot := endpointTown(t)
 	// dolt_server patrol present and enabled → daemon will detect/recover.
 	writeDaemonConfig(t, townRoot, `{"dolt_server":{"enabled":true}}`)
 
@@ -83,7 +97,7 @@ func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
 
 func TestDoltServerPatrolCheck_DownNoConfig(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
+	townRoot := endpointTown(t)
 	// No mayor/daemon.json at all → patrol not enabled.
 
 	check := patrolCheck(t, false) // Dolt unreachable

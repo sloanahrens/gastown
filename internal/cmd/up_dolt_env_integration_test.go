@@ -26,7 +26,6 @@ func TestIntegrationUpApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
 	t.Setenv("GT_DOLT_HOST", "stale-host")
 	t.Setenv("GT_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
@@ -41,8 +40,11 @@ func TestIntegrationUpApplyConfiguredDoltEnvConfigBeatsStaleEnv(t *testing.T) {
 	if got := os.Getenv("GT_DOLT_PORT"); got != "5507" {
 		t.Fatalf("GT_DOLT_PORT = %q, want 5507", got)
 	}
-	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want cleared", got)
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.2", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_PORT"); got != "5507" {
+		t.Fatalf("BEADS_DOLT_PORT = %q, want 5507", got)
 	}
 }
 
@@ -55,10 +57,12 @@ func TestIntegrationUpApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
 	t.Setenv("GT_DOLT_HOST", "stale-host")
 	t.Setenv("GT_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	// applyConfiguredDoltEnv sets these too; t.Setenv restores them.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
 
 	applyConfiguredDoltEnv(townRoot)
 
@@ -89,7 +93,7 @@ func TestIntegrationWaitForDoltReady_ServerListening(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", port))
+	writeTownDoltPort(t, townRoot, port)
 
 	start := time.Now()
 	waitForDoltReady(townRoot)
@@ -124,7 +128,7 @@ func TestIntegrationWaitForDoltReady_GracefulDegradation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", freePort))
+	writeTownDoltPort(t, townRoot, freePort)
 
 	// WaitForReady with short timeout should fail when nothing is listening
 	err = doltserver.WaitForReady(townRoot, 200*time.Millisecond)
@@ -154,7 +158,7 @@ func TestIntegrationWaitForDoltReady_WrapperTimesOutAndContinues(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", port))
+	writeTownDoltPort(t, townRoot, port)
 
 	// Verify the error path fires when nothing listens.
 	err = doltserver.WaitForReady(townRoot, 200*time.Millisecond)
@@ -164,5 +168,18 @@ func TestIntegrationWaitForDoltReady_WrapperTimesOutAndContinues(t *testing.T) {
 	// Confirm error message is actionable.
 	if err.Error() == "" {
 		t.Error("expected non-empty error message from WaitForReady timeout")
+	}
+}
+
+// writeTownDoltPort gives the town at townRoot the Dolt endpoint port, the
+// only place gt reads it from (gt-y3pgh.3).
+func writeTownDoltPort(t *testing.T, townRoot string, port int) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(fmt.Sprintf("listener:\n  port: %d\n", port)), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
