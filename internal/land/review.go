@@ -71,11 +71,6 @@ func (SkipReviewer) Review(context.Context, string, string, string) (Verdict, er
 // held the serial queue the whole time (gt-b4w3y).
 const DefaultOMTimeout = 5 * time.Minute
 
-// DefaultOMAttempts is how many times Review runs om when OMReviewer.Attempts
-// is zero: a stalled or failed run is retried once, because a provider stall
-// is usually over by the second request.
-const DefaultOMAttempts = 2
-
 // omUnsetEnv is removed from om's environment. om drops CLAUDE_CONFIG_DIR
 // itself, and a value inherited from the caller makes its backend probe
 // report a false "Not logged in".
@@ -103,6 +98,9 @@ func OMThreshold(dir string) (float64, error) {
 	return *cfg.Threshold, nil
 }
 
+// ErrOMTimeout is an om attempt that outlived its timeout.
+var ErrOMTimeout = errors.New("om review timed out")
+
 // OMReviewer runs `om review -C <dir> --base <base> --head <head> --out <file>`.
 // om exits 0 for approve, 1 for request_changes and 2 for an execution error.
 // The exit code decides; the verdict file must agree with it and supplies the
@@ -116,34 +114,16 @@ type OMReviewer struct {
 	Out io.Writer
 	// Timeout bounds each attempt; 0 means DefaultOMTimeout.
 	Timeout time.Duration
-	// Attempts is how many times om runs before Review gives up on an
-	// execution error or timeout (a verdict is never retried); 0 means
-	// DefaultOMAttempts.
-	Attempts int
 
 	run runFunc // nil means realRun
 }
 
-// Review runs om and returns its verdict, retrying a run that produced none
-// (timeout, execution error, missing or malformed verdict) up to Attempts
-// times. The error names every attempt's failure.
+// Review runs om once and returns its verdict. A run that produces none
+// (timeout, execution error, missing or malformed verdict) is not retried:
+// it fails, and the landing goes to a human who reviews instead (Sloan
+// 2026-10-01).
 func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict, error) {
-	attempts := r.Attempts
-	if attempts <= 0 {
-		attempts = DefaultOMAttempts
-	}
-	var errs []string
-	for i := 1; i <= attempts; i++ {
-		v, err := r.reviewOnce(ctx, dir, base, head)
-		if err == nil {
-			return v, nil
-		}
-		errs = append(errs, fmt.Sprintf("attempt %d: %v", i, err))
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	return Verdict{}, errors.New(strings.Join(errs, "; "))
+	return r.reviewOnce(ctx, dir, base, head)
 }
 
 // reviewOnce runs om once, bounded by Timeout, and returns its verdict.
@@ -183,6 +163,9 @@ func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Ver
 	defer cancel()
 	argv := []string{path, "review", "-C", dir, "--base", base, "--head", head, "--out", outPath}
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
+	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return Verdict{}, fmt.Errorf("%w after %s", ErrOMTimeout, timeout)
+	}
 	if runErr != nil {
 		return Verdict{}, fmt.Errorf("om review did not run: %w", runErr)
 	}

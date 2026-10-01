@@ -104,40 +104,32 @@ func hangThenOM(t *testing.T, hangs int, calls *int) runFunc {
 	}
 }
 
-// TestOMReviewerRetriesAStalledRun: a run that hangs past its attempt bound is
-// killed and om runs again; the second run's verdict is the review (gt-b4w3y).
-func TestOMReviewerRetriesAStalledRun(t *testing.T) {
+// TestOMReviewerRunsOnce: om is never retried. A run that hangs past its
+// timeout is killed and reported as ErrOMTimeout; a run that fails fast is
+// reported too; either way om ran once (Sloan 2026-10-01).
+func TestOMReviewerRunsOnce(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	r := OMReviewer{OutDir: t.TempDir(), Timeout: 20 * time.Millisecond}
 	r.run = hangThenOM(t, 1, &calls)
-	v, err := r.Review(context.Background(), "/wt", "a", "b")
-	if err != nil || v.Verdict != VerdictApprove {
-		t.Fatalf("Review = %+v, %v; want approve after one retry", v, err)
-	}
-	if calls != 2 {
-		t.Fatalf("om ran %d times, want 2", calls)
-	}
-}
-
-// TestOMReviewerGivesUpAfterAttempts: two stalls are reported, naming both
-// attempts, and om is not run a third time.
-func TestOMReviewerGivesUpAfterAttempts(t *testing.T) {
-	t.Parallel()
-	calls := 0
-	r := OMReviewer{OutDir: t.TempDir(), Timeout: 20 * time.Millisecond}
-	r.run = hangThenOM(t, 3, &calls)
 	_, err := r.Review(context.Background(), "/wt", "a", "b")
-	if err == nil {
-		t.Fatal("Review succeeded; want an error after two stalled attempts")
+	if !errors.Is(err, ErrOMTimeout) {
+		t.Fatalf("Review error = %v, want ErrOMTimeout", err)
 	}
-	if calls != DefaultOMAttempts {
-		t.Fatalf("om ran %d times, want %d", calls, DefaultOMAttempts)
+	if calls != 1 {
+		t.Fatalf("om ran %d times after a timeout, want 1", calls)
 	}
-	for _, want := range []string{"attempt 1:", "attempt 2:", "deadline exceeded"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err, want)
-		}
+
+	calls = 0
+	r.run = func(context.Context, string, []string, []string, io.Writer) (int, error) {
+		calls++
+		return 2, nil
+	}
+	if _, err := r.Review(context.Background(), "/wt", "a", "b"); err == nil || errors.Is(err, ErrOMTimeout) {
+		t.Fatalf("Review error = %v, want an execution error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("om ran %d times after an execution error, want 1", calls)
 	}
 }
 

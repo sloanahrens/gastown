@@ -89,6 +89,11 @@ type Lander struct {
 	// own retries) to gt:needs-human, instead of stopping as an *InfraError
 	// that the next pass would retry and pay om for again (gt-b5ugw).
 	ReviewErrorRejects bool
+	// ReviewErrorLandsLabels names labels whose beads land a green tree with
+	// om_verdict error when om returns no verdict, whatever
+	// ReviewErrorRejects says: the red-main owner's reverts, so an om outage
+	// never keeps main red (gt-b5ugw review).
+	ReviewErrorLandsLabels []string
 	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
 	// flake policy's rerun (flake.go). nil means a red gate is final.
 	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
@@ -339,7 +344,16 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
-		rej := &Rejection{Kind: RejectTimeout, Rework: true, GateTail: gateRes.FailureTail(),
+		if step.Name == "lint" {
+			// A slow lint is almost always one waiting on golangci-lint's
+			// module lock behind another run: not a verdict on the tree. The
+			// next pass retries it (gt-b5ugw review).
+			return Result{}, &InfraError{Stage: "gate", Err: fmt.Errorf("lint stage (%s) did not finish within its %s timeout; nothing was judged", step.Command, step.Timeout)}
+		}
+		// A test stage over its bound may be a hang in the work or a loaded
+		// host; the author cannot tell which by editing, so it goes to a
+		// human rather than back as rework (gt-b5ugw review).
+		rej := &Rejection{Kind: RejectTimeout, Rework: false, GateTail: gateRes.FailureTail(),
 			Reason: fmt.Sprintf("gate stage %s (%s) did not finish within its %s timeout on the merged tree", step.Name, step.Command, step.Timeout)}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
@@ -387,7 +401,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		if ctx.Err() != nil || (!l.ReviewErrorLands && !l.ReviewErrorRejects) {
 			return Result{}, &InfraError{Stage: "review", Err: reviewErr}
 		}
-		if !l.ReviewErrorLands {
+		if !l.ReviewErrorLands && !l.landsUnreviewed(issue) {
 			rej := &Rejection{Kind: RejectReview, Rework: false,
 				Reason: "om review returned no verdict on a green merged tree, so it does not land unreviewed: " + reviewErrorReason(reviewErr)}
 			return Result{}, l.reject(issue, w, rej, nil)
@@ -624,6 +638,17 @@ func hasAutoSaveCommits(g Repo, base, head string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// landsUnreviewed reports whether issue carries one of
+// ReviewErrorLandsLabels.
+func (l *Lander) landsUnreviewed(issue *beads.Issue) bool {
+	for _, label := range l.ReviewErrorLandsLabels {
+		if beads.HasLabel(issue, label) {
+			return true
+		}
+	}
+	return false
 }
 
 // stageTimes is one line naming each gate stage's wall time and, when om

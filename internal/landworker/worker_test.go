@@ -218,6 +218,24 @@ func TestPassHumanRejectionLeavesNoReworkComment(t *testing.T) {
 	}
 }
 
+// TestPassHumanRejectionEscalates: a rejection left for a human is raised to
+// the operator once, naming the bead and the reason (Sloan 2026-10-01).
+func TestPassHumanRejectionEscalates(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	got := make(chan string, 2)
+	h.w.Escalate = func(beadID, message string) { got <- beadID + ": " + message }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om review returned no verdict", Rework: false}
+	}
+	h.w.Pass(context.Background())
+	// Bounded by the test binary's timeout: a missing escalation hangs here.
+	if msg := <-got; !strings.HasPrefix(msg, "gt-abc: ") || !strings.Contains(msg, "no verdict") || !strings.Contains(msg, "review") {
+		t.Fatalf("escalation %q; want the bead, the kind and the reason", msg)
+	}
+}
+
 func TestPassRejectionWithRecordErrorBacksOff(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
