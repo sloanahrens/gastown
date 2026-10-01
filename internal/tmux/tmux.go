@@ -4909,9 +4909,8 @@ func sessionPrefixPatternFor(townRoot string) string {
 // SetCycleBindings sets up C-b n/p to cycle through related sessions.
 // The gt cycle command automatically detects the session type and cycles
 // within the appropriate group:
-// - Town sessions: Mayor ↔ Deacon
 // - Crew sessions: All crew members in the same rig
-// - Rig ops sessions: Witness + Refinery + Polecats in the same rig
+// - Polecat sessions: All polecats in the same rig
 //
 // IMPORTANT: These bindings are conditional - they only run gt cycle for
 // Gas Town sessions (those matching a registered rig prefix or "hq-").
