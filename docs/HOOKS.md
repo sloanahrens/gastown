@@ -51,7 +51,11 @@ interpreters, `curl -o`, redirections, `cd` and `git -C` targets — are blocked
 when they name a town path outside it, its polecat directory, or its rig's
 `.repo.git`. `$HOME/.local/bin`, the `gt`/`bd` install directory shared by all
 agents, is denied to every write (gt-tnts5). Reads stay allowed anywhere; an
-unresolvable target is blocked.
+unresolvable target is blocked, as is a write target reached through a variable
+the command line itself assigns or sets from `command -v` — including one
+reached inside an interpreter's `-c` payload. A command keeps that rule
+wherever a construct puts it: a subshell, a brace group and a `case` body are
+read through, not skipped (gt-tt8sg).
 
 The `polecats` override denies permission prompts nobody can answer
 (`gt tap guard permission-request`, gt-8stz); attended roles carry no entry.
