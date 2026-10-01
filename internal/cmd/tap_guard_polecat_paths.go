@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -52,6 +53,15 @@ import (
 //     -c/-e payload treated as targets. Heredoc bodies are data on stdin, so a
 //     commit message or mail body that merely *mentions* a sibling worktree
 //     must not trip the guard.
+//  6. Expand a variable only against an environment the command line has not
+//     already replaced. The guard sees the session's environment; the shell
+//     that runs the command sees that environment plus whatever the line
+//     assigns. Under rule 3 a name the guard cannot look up is denied, but a
+//     name it *can* look up may hold a different value there — gt-tt8sg:
+//     `path=$(command -v bd) ... rm "$path"` deleted the production bd, because
+//     zsh exports a PATH-shaped `path` the guard read as an ordinary path
+//     outside the town. A write target reached through a name this line assigns
+//     (or sets from command -v/which/type) is denied as the indirection it is.
 //
 // What this guard deliberately does not attempt: reading file contents (a
 // script written inside the worktree and then executed can still reach
@@ -105,6 +115,12 @@ against the session cwd, symlink-resolved component by component the way the
 kernel resolves them (a dangling link is judged by the target a write through
 it creates), and compared by whole path components. A target that cannot be
 resolved is DENIED — the guard fails closed rather than guessing.
+
+A write target reached indirectly is DENIED as well (gt-tt8sg): the value of a
+variable the command line assigns itself, of one set from command -v / which /
+type, or of a command substitution is not a value this process can know —
+path=$(command -v bd) ... rm "$path" deleted the production bd binary through
+exactly that gap. Write the literal path.
 
 Exit codes:
   0 - Operation allowed (also: not a polecat session, nothing to guard)
@@ -174,6 +190,7 @@ type polecatPathScope struct {
 	cwd          string // canonical directory relative targets resolve against
 	scratch      []string
 	protectedBin []string // shared host binary dirs no polecat may write to (gt-tnts5)
+	vars         commandVars
 	proc         guardProcess
 }
 
@@ -240,6 +257,12 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	// worktree cannot trip the guard. A heredoc still counts as uncheckable
 	// *input* when its reader is an interpreter (see below).
 	stripped := stripHeredocBodies(command)
+	// What this command line assigns shadows the guard's environment for the
+	// whole line, substitutions included (rule 6), so it is collected once here
+	// and inherited by the recursive calls below.
+	if s.vars.assigned == nil {
+		s.vars = scanCommandVars(stripped)
+	}
 	// A heredoc that matters here has a body, which means the command spans
 	// more than one line: the shared pattern also matches a bit-shift
 	// expression inside an unquoted -c payload ("x << n"), and those are code,
@@ -248,7 +271,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 
 	segments := splitShellSegments(shellTokenize(stripped))
 	for _, segment := range segments {
-		word, args := segmentCommandWord(segment)
+		word, args := segmentCommandWord(trimShellKeywords(segment))
 		if word == "" {
 			continue
 		}
@@ -258,11 +281,11 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			if heredoc {
 				return "a script fed to " + base + " on stdin (heredoc) cannot be inspected — write the script inside your worktree and run that file instead"
 			}
-			if reason := s.checkBashArgs(args, base); reason != "" {
+			if reason := s.checkBashArgs(args, base, false); reason != "" {
 				return reason
 			}
 		case isWriteCapableCommand(base, args):
-			if reason := s.checkBashArgs(args, base); reason != "" {
+			if reason := s.checkBashArgs(args, base, true); reason != "" {
 				return reason
 			}
 			if base == "ln" {
@@ -275,14 +298,14 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			// lands: a polecat that walks into a sibling worktree (or the
 			// mayor/deacon/settings trees) is one careless relative write away
 			// from corrupting them.
-			if reason := s.checkBashArgs(args, base); reason != "" {
+			if reason := s.checkBashArgs(args, base, false); reason != "" {
 				return reason
 			}
 		case base == "git":
 			// "git -C <dir>" runs git in another tree — the one way to reach a
 			// sibling worktree without naming a path anywhere else in the line.
 			for _, dir := range gitDashCDirs(args) {
-				if reason := s.checkBashTarget(dir, "git -C"); reason != "" {
+				if reason := s.checkBashTarget(dir, "git -C", false); reason != "" {
 					return reason
 				}
 			}
@@ -290,7 +313,7 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	}
 
 	for _, target := range redirectTargets(command) {
-		if reason := s.checkBashTarget(target, "redirection"); reason != "" {
+		if reason := s.checkBashTarget(target, "redirection", true); reason != "" {
 			return reason
 		}
 	}
@@ -307,10 +330,11 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 // list is checked rather than a per-command model of which argument is the
 // destination: cp/mv/ln/rsync/tee each take different shapes, and a path-shaped
 // argument is a write destination in all of them (or a read the guard has no
-// reason to block once it resolves outside the town).
-func (s polecatPathScope) checkBashArgs(args []string, command string) string {
+// reason to block once it resolves outside the town). destructive marks the
+// write-capable commands and redirections, whose targets rule 6 also judges.
+func (s polecatPathScope) checkBashArgs(args []string, command string, destructive bool) string {
 	for _, arg := range args {
-		if reason := s.checkBashTarget(arg, command); reason != "" {
+		if reason := s.checkBashTarget(arg, command, destructive); reason != "" {
 			return reason
 		}
 	}
@@ -321,13 +345,52 @@ func (s polecatPathScope) checkBashArgs(args []string, command string) string {
 // town-internal paths are denied: a path outside the town (/dev/null, /tmp,
 // /etc/..., a URL, another project entirely) is not this guard's business, and
 // allowing them is what keeps ordinary commands from being blocked.
-func (s polecatPathScope) checkBashTarget(raw, context string) string {
-	for _, candidate := range bashPathCandidates(raw) {
+func (s polecatPathScope) checkBashTarget(raw, context string, destructive bool) string {
+	candidates := bashPathCandidates(raw)
+	if destructive {
+		for _, candidate := range candidates {
+			if reason := s.checkBashIndirection(candidate, context); reason != "" {
+				return reason
+			}
+		}
+	}
+	for _, candidate := range candidates {
 		if reason := s.checkBashPathFrom(candidate, s.cwd, context); reason != "" {
 			return reason
 		}
 	}
 	return ""
+}
+
+// checkBashIndirection denies a write target that names its destination through
+// a value this process cannot know (rule 6, gt-tt8sg). It runs only for
+// write-capable commands and redirections: a read through an unknowable path is
+// not a hazard, so it stays allowed (see TestPolecatPathGuardBashUnresolvableReadIsAllowed).
+//
+// Like the per-argument check above, this cannot tell a destination from a
+// source or a payload — `cp "$src" "$dst"` is two candidates — so it over-blocks
+// rather than under-blocks: `body=hi; curl -d "$body" https://x` is denied along
+// with the incident's `rm "$path"`. The reason names the rewrite, which is the
+// model's to make; guessing which operand the shell would really write to is
+// the one thing this guard must not do.
+func (s polecatPathScope) checkBashIndirection(candidate, context string) string {
+	if strings.Contains(candidate, "$(") || strings.Contains(candidate, "`") {
+		return destructiveTargetReason(context, candidate, "a command substitution has no value until it runs")
+	}
+	for _, name := range shellVarNames(candidate) {
+		if s.vars.lookup[name] {
+			return destructiveTargetReason(context, candidate, "$"+name+" is set from a command lookup (command -v, which, type)")
+		}
+		if s.vars.assigned[name] {
+			return destructiveTargetReason(context, candidate, "$"+name+" is assigned by this same command line")
+		}
+	}
+	return ""
+}
+
+// destructiveTargetReason is one line the model can act on: it names the rewrite.
+func destructiveTargetReason(context, candidate, detail string) string {
+	return fmt.Sprintf("%s target %q: unresolvable destructive target; write the literal path (%s, so this guard cannot tell what would be deleted or overwritten).", context, candidate, detail)
 }
 
 // checkBashPathFrom decides one path, resolved against base, by the Bash rule:
@@ -1018,6 +1081,111 @@ func isWithinPath(target, root string) bool {
 	return strings.HasPrefix(target, root+string(filepath.Separator))
 }
 
+// commandVars is what one command line does to shell variables. The guard
+// expands a target's variable from its OWN environment, which is stale the
+// moment the line assigns that name itself (rule 6, gt-tt8sg), so the names a
+// line assigns are collected before any target is judged.
+type commandVars struct {
+	assigned map[string]bool // `NAME=...`, `for NAME in ...`, `read NAME` in this line
+	lookup   map[string]bool // subset: the value is a command -v/which/type result
+}
+
+// lookupAssignmentPattern matches `NAME=$(command -v ...)`, `NAME=`which ...``
+// and their `command -v`/`type` spellings with or without quotes. It is matched
+// against the raw line rather than the tokens because an unquoted substitution
+// is split across tokens (`path=$(command`, `-v`, `$bin)`).
+var lookupAssignmentPattern = regexp.MustCompile("([A-Za-z_][A-Za-z0-9_]*)=[\"']?(?:\\$\\(|`)\\s*(?:command\\s+-v|which|type)\\b")
+
+// scanCommandVars collects the variable names a command line assigns. It reads
+// the tokenised line so a "NAME=" inside a commit message or a quoted argument
+// is not mistaken for an assignment, and strips heredoc bodies first for the
+// same reason (they are data on stdin).
+func scanCommandVars(command string) commandVars {
+	vars := commandVars{assigned: map[string]bool{}, lookup: map[string]bool{}}
+	tokens := shellTokenize(stripHeredocBodies(command))
+	for i, token := range tokens {
+		if isEnvAssignment(token) {
+			name, _, _ := strings.Cut(token, "=")
+			vars.assigned[name] = true
+			continue
+		}
+		switch token {
+		case "for", "select":
+			if i+1 < len(tokens) && isShellVarName(tokens[i+1]) {
+				vars.assigned[tokens[i+1]] = true
+			}
+		case "read":
+			// `read [-r] NAME` takes its names from the words after its flags.
+			for j := i + 1; j < len(tokens) && !shellCommandSeparators[tokens[j]]; j++ {
+				if isShellVarName(tokens[j]) {
+					vars.assigned[tokens[j]] = true
+					break
+				}
+			}
+		}
+	}
+	for _, match := range lookupAssignmentPattern.FindAllStringSubmatch(command, -1) {
+		vars.lookup[match[1]] = true
+		vars.assigned[match[1]] = true
+	}
+	return vars
+}
+
+// shellVarNames returns the variable names a word references, in $NAME and
+// ${NAME} form. `$?`, `$$` and positional `$1` are not names and are skipped —
+// they are never destinations a caller meant to name indirectly.
+func shellVarNames(word string) []string {
+	var names []string
+	for i := 0; i < len(word); i++ {
+		if word[i] != '$' || i+1 >= len(word) {
+			continue
+		}
+		if word[i+1] == '{' {
+			end := strings.IndexByte(word[i+2:], '}')
+			if end < 0 {
+				break
+			}
+			if name := word[i+2 : i+2+end]; isShellVarName(name) {
+				names = append(names, name)
+			}
+			i += 2 + end
+			continue
+		}
+		j := i + 1
+		for j < len(word) && isShellVarNameChar(word[j]) {
+			j++
+		}
+		if name := word[i+1 : j]; isShellVarName(name) {
+			names = append(names, name)
+			i = j - 1
+		}
+	}
+	return names
+}
+
+// isShellVarName reports whether name is a variable name a shell could assign:
+// a letter or underscore, then letters, digits and underscores. `$1` is
+// therefore not a name.
+func isShellVarName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if c := name[0]; c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if !isShellVarNameChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isShellVarNameChar reports whether b may appear anywhere in a variable name.
+func isShellVarNameChar(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
 // interpreterCommands execute a program supplied on their command line or on
 // stdin, so neither their arguments nor their payload can be reasoned about as
 // plain paths (gt-hmaf: the previous attempt whitelisted python/ruby/perl/node
@@ -1037,7 +1205,7 @@ var writeCommands = map[string]bool{
 	"cp": true, "mv": true, "rm": true, "rmdir": true, "mkdir": true,
 	"touch": true, "ln": true, "tee": true, "dd": true, "truncate": true,
 	"shred": true, "install": true, "rsync": true, "chmod": true,
-	"chown": true, "chgrp": true, "curl": true, "wget": true,
+	"chown": true, "chgrp": true, "chflags": true, "curl": true, "wget": true,
 }
 
 func isInterpreterCommand(base string) bool {
@@ -1228,6 +1396,24 @@ func splitShellSegments(tokens []string) [][]string {
 		segments = append(segments, current)
 	}
 	return segments
+}
+
+// shellCommandKeywords introduce a command instead of being one. A segment that
+// opens with one reports the keyword as its command word, which hides whatever
+// follows: `for f in a b; do rm -rf <a sibling worktree>; done` named no
+// write-capable command at all, so the guard never looked at the rm.
+var shellCommandKeywords = map[string]bool{
+	"do": true, "then": true, "else": true, "elif": true,
+	"if": true, "while": true, "until": true,
+}
+
+// trimShellKeywords drops the control keywords in front of a segment, so the
+// command word behind them is the one judged.
+func trimShellKeywords(segment []string) []string {
+	for len(segment) > 0 && shellCommandKeywords[segment[0]] {
+		segment = segment[1:]
+	}
+	return segment
 }
 
 // segmentCommandWord returns a segment's command word and its arguments,
