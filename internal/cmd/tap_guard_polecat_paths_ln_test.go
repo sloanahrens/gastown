@@ -12,6 +12,7 @@ import (
 // in, not the session cwd, so a link planted in scratch that points into the
 // town must be refused at creation.
 func TestPolecatPathGuardLnSymlinkText(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	tmp := polecatSymlinkTownTmp(t, p)
 	town, err := filepath.EvalSymlinks(p.town)

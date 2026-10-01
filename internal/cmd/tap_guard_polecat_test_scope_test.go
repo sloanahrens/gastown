@@ -57,7 +57,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 	blocked := 0
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, matched := evaluatePolecatTestScope(tt.command)
+			reason, matched := evaluatePolecatTestScope(tt.command, "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked=%v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
@@ -72,25 +72,28 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 	}
 }
 
+// runContainerSuiteGuard runs the container-suite guard on input as proc's
+// session and returns its verdict and stderr.
+func runContainerSuiteGuard(input string, proc guardProcess) (string, error) {
+	var stderr strings.Builder
+	err := tapGuardContainerSuite(strings.NewReader(input), &stderr, proc)
+	return stderr.String(), err
+}
+
 // A polecat that runs the suite gets the scope rule's answer (iterate with
 // -run), never the container-suite rule's "run it wrapped" line: that advice
 // is what sent zircon, coral and lapis into full 77-package runs beside the
 // refinery's gate, doubling its wall time (gt-v6se). The wrapped form is then
 // blocked too.
 func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
-	t.Setenv(dockerTestsEnv, "")
+	t.Parallel()
 	bare := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
 	wrapped := `{"tool_name":"Bash","tool_input":{"command":"gt slot run --role gastown/zircon -- GOFLAGS=-p=8 make test"}}`
 
-	t.Setenv("GT_POLECAT", "zircon")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/zircon")
+	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "zircon", "GT_ROLE": "gastown/polecats/zircon"}, "")
 	wholeRepo := `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`
 	for name, input := range map[string]string{"bare": bare, "wrapped": wrapped, "go test whole repo": wholeRepo} {
-		var err error
-		stderr := captureStderr(t, func() {
-			withStdin(t, input, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-		})
+		stderr, err := runContainerSuiteGuard(input, proc)
 		if err == nil {
 			t.Errorf("%s: polecat make test was allowed", name)
 		}
@@ -106,16 +109,11 @@ func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 // Through the real hook entry point: a polecat is blocked, the refinery (which
 // must run whole packages) and crew are not.
 func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
-	t.Setenv(dockerTestsEnv, "")
+	t.Parallel()
 	cmd := `{"tool_name":"Bash","tool_input":{"command":"gt slot run --role gastown/flint -- go test ./internal/polecat/ -count=1"}}`
 
-	t.Setenv("GT_POLECAT", "flint")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/flint")
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, cmd, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	})
+	polecat := fakeGuardProcess(map[string]string{"GT_POLECAT": "flint", "GT_ROLE": "gastown/polecats/flint"}, "")
+	stderr, err := runContainerSuiteGuard(cmd, polecat)
 	if err == nil {
 		t.Error("polecat whole heavy package run was allowed")
 	}
@@ -123,27 +121,16 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 		t.Errorf("block message must name the rule and the -run alternative, got: %s", stderr)
 	}
 
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
-	// chdir to a neutral dir so the guard's cwd-based polecat fallback
-	// (isPolecatContext) does not fire from a polecat worktree — the refinery
-	// must be allowed regardless of where the suite is run from (gt-tmde).
-	// The guard also reads the cwd (deliberately — see TestIsPolecatContext),
-	// and a polecat worktree's package dir contains "/polecats/", which no
-	// t.Setenv can clear. Escape it the way the crew case below does, or this
-	// sub-case reads red in every polecat's own gate (gt-3008).
-	t.Chdir(t.TempDir())
-	withStdin(t, cmd, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	if err != nil {
+	// The refinery must be allowed regardless of where the suite is run from
+	// (gt-tmde); its cwd here is neutral so the guard's cwd-based polecat
+	// fallback (isPolecatContext) does not decide it (gt-3008).
+	refinery := fakeGuardProcess(map[string]string{"GT_REFINERY": "1", "GT_ROLE": "gastown/refinery"}, "/tmp/neutral")
+	if _, err := runContainerSuiteGuard(cmd, refinery); err != nil {
 		t.Errorf("refinery whole-package run must be allowed, got %v", err)
 	}
 
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/crew")
-	t.Chdir(t.TempDir())
-	withStdin(t, cmd, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	if err != nil {
+	crew := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew"}, "/tmp/neutral")
+	if _, err := runContainerSuiteGuard(cmd, crew); err != nil {
 		t.Errorf("crew whole-package run must be allowed, got %v", err)
 	}
 }
@@ -152,7 +139,7 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 // carries), from GT_POLECAT, and from a polecats/ cwd — and not fire for
 // other roles.
 func TestIsPolecatContext(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Parallel()
 	cases := []struct {
 		name, polecat, role string
 		want                bool
@@ -166,11 +153,13 @@ func TestIsPolecatContext(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("GT_POLECAT", c.polecat)
-			t.Setenv("GT_ROLE", c.role)
-			if got := isPolecatContext(); got != c.want {
+			proc := fakeGuardProcess(map[string]string{"GT_POLECAT": c.polecat, "GT_ROLE": c.role}, "/tmp/neutral")
+			if got := isPolecatContext(proc); got != c.want {
 				t.Errorf("isPolecatContext() = %v, want %v", got, c.want)
 			}
 		})
+	}
+	if !isPolecatContext(fakeGuardProcess(nil, "/town/gastown/polecats/topaz/gastown")) {
+		t.Error("isPolecatContext() = false from a polecats/ cwd, want true")
 	}
 }

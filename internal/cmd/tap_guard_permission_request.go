@@ -75,7 +75,14 @@ type permissionRequestOutput struct {
 }
 
 func runTapGuardPermissionRequest(cmd *cobra.Command, args []string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardPermissionRequest(os.Stdin, os.Stdout, realGuardProcess(), defaultParkedPromptMailer)
+}
+
+// tapGuardPermissionRequest is the permission-request guard: it reads the
+// hook payload from stdin and the session from proc, escalates through
+// mailer, and writes its decision to stdout.
+func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProcess, mailer parkedPromptMailer) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
 		// Nothing to judge. The harness's own prompt flow proceeds, which is
 		// what an empty payload leaves us no grounds to change.
@@ -85,12 +92,12 @@ func runTapGuardPermissionRequest(cmd *cobra.Command, args []string) error {
 	if err := json.Unmarshal(input, &hook); err != nil {
 		return nil
 	}
-	if !unattendedPromptSession(hook.Cwd) {
+	if !unattendedPromptSession(hook.Cwd, proc.getenv) {
 		return nil
 	}
 
-	escalation := escalateParkedPromptOnce(hook)
-	writePermissionRequestDenial(hook, escalation)
+	escalation := escalateParkedPromptOnce(hook, proc.tempDir(), mailer)
+	writePermissionRequestDenial(stdout, hook, escalation)
 	return nil
 }
 
@@ -103,12 +110,13 @@ func runTapGuardPermissionRequest(cmd *cobra.Command, args []string) error {
 //
 // A role in the environment decides on its own: a crew member working inside a
 // polecat worktree still has a person at the pane, and a stale polecat marker
-// from a parent process must not deny their prompt.
-func unattendedPromptSession(cwd string) bool {
-	if role := strings.TrimSpace(os.Getenv("GT_ROLE")); role != "" {
+// from a parent process must not deny their prompt. getenv reads the session's
+// environment.
+func unattendedPromptSession(cwd string, getenv func(string) string) bool {
+	if role := strings.TrimSpace(getenv("GT_ROLE")); role != "" {
 		return unattendedPromptRole(role)
 	}
-	if os.Getenv("GT_POLECAT") != "" {
+	if getenv("GT_POLECAT") != "" {
 		return true
 	}
 	return cwd != "" && strings.Contains(cwd, "/polecats/")
@@ -243,7 +251,7 @@ func segmentsGlobRemoval(segments [][]string) bool {
 // guard does. Escalation runs first so the message can state its real outcome;
 // that escalation is bounded, so a slow Dolt cannot cost the model its failure
 // signal.
-func writePermissionRequestDenial(hook permissionRequestInput, escalation string) {
+func writePermissionRequestDenial(stdout io.Writer, hook permissionRequestInput, escalation string) {
 	var out permissionRequestOutput
 	out.HookSpecificOutput.HookEventName = "PermissionRequest"
 	out.HookSpecificOutput.Decision.Behavior = "deny"
@@ -252,7 +260,7 @@ func writePermissionRequestDenial(hook permissionRequestInput, escalation string
 	if err != nil {
 		return
 	}
-	fmt.Fprintln(os.Stdout, string(encoded))
+	fmt.Fprintln(stdout, string(encoded))
 }
 
 // escalateParkedPromptOnce mails the mayor that a prompt parked this session,
@@ -261,10 +269,10 @@ func writePermissionRequestDenial(hook permissionRequestInput, escalation string
 // attempt. Each failure path returns its own sentence rather than "" so a
 // silent bookkeeping or delivery failure is never indistinguishable from a
 // deny that carries no escalation note at all (gt-8stz review,
-// finding 4ce05cf3cf09).
-func escalateParkedPromptOnce(hook permissionRequestInput) string {
+// finding 4ce05cf3cf09). The marker lives in tempDir; mailer sends the mail.
+func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, mailer parkedPromptMailer) string {
 	shape := promptShape(hook)
-	marker := promptEscalationMarker(hook, shape)
+	marker := promptEscalationMarker(hook, shape, tempDir)
 	if _, err := os.Stat(marker); err == nil {
 		return " This call was already reported once this session."
 	}
@@ -273,7 +281,7 @@ func escalateParkedPromptOnce(hook permissionRequestInput) string {
 	}
 	subject := fmt.Sprintf("Parked prompt denied: %s", shape)
 	body := promptEscalationBody(hook, shape)
-	if !parkedPromptMailer(subject, body) {
+	if !mailer(subject, body) {
 		return " Escalating to the mayor failed; mail the witness if this call is required."
 	}
 	return " The mayor has been notified."
@@ -305,8 +313,9 @@ func promptShape(hook permissionRequestInput) string {
 // shape (gt-8stz review, finding 8de95c69660d). The cwd is stable for one
 // session and distinct across polecats, so it is the first fallback; a
 // process-local key is the last resort when even that is empty, which trades
-// per-session dedup for never colliding with another session.
-func promptEscalationMarker(hook permissionRequestInput, shape string) string {
+// per-session dedup for never colliding with another session. The marker lives
+// in tempDir (the session's $TMPDIR).
+func promptEscalationMarker(hook permissionRequestInput, shape, tempDir string) string {
 	key := hook.SessionID
 	if key == "" {
 		if hook.Cwd != "" {
@@ -316,7 +325,7 @@ func promptEscalationMarker(hook permissionRequestInput, shape string) string {
 		}
 	}
 	sum := sha256.Sum256([]byte(key + "\x00" + hook.ToolName + "\x00" + shape))
-	return filepath.Join(os.TempDir(), fmt.Sprintf("gt-parked-prompt-%x", sum[:8]))
+	return filepath.Join(tempDir, fmt.Sprintf("gt-parked-prompt-%x", sum[:8]))
 }
 
 // secretLikeToken matches a run of base64/hex/url-safe characters long enough
@@ -381,11 +390,11 @@ legitimate, steer the worker to a formulation that does not ask.`,
 		shape, session, cwdClass(hook.Cwd), preview, hash[:8])
 }
 
-// parkedPromptMailer delivers the escalation mail. A package-level var so
-// tests can substitute a fake and verify escalateParkedPromptOnce reaches the
-// send call without ever touching the town's mail store (gt-8stz review,
-// finding d1058e444298).
-var parkedPromptMailer = defaultParkedPromptMailer
+// parkedPromptMailer delivers the escalation mail and reports whether it was
+// sent. A parameter so tests can pass a fake and verify
+// escalateParkedPromptOnce reaches the send call without ever touching the
+// town's mail store (gt-8stz review, finding d1058e444298).
+type parkedPromptMailer func(subject, body string) bool
 
 // defaultParkedPromptMailer sends the escalation through the town's mail
 // router, bounded so a slow or hung Dolt cannot hold the hook open.

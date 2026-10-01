@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 
@@ -25,17 +25,17 @@ var heavyTestPackages = map[string]bool{
 // isPolecatContext reports whether the current process runs as a polecat —
 // the only role this rule applies to. The refinery MUST run whole packages
 // (that is its job) and crew are operators.
-func isPolecatContext() bool {
-	if os.Getenv("GT_POLECAT") != "" {
+func isPolecatContext(proc guardProcess) bool {
+	if proc.getenv("GT_POLECAT") != "" {
 		return true
 	}
 	// GT_ROLE is the signal every spawn carries ("gastown/polecats/topaz");
 	// GT_POLECAT is set by AgentEnv alongside it but a hook that inherited
 	// only the role must still recognize the polecat.
-	if role := os.Getenv("GT_ROLE"); strings.Contains(role, "/polecats/") || role == "polecat" {
+	if role := proc.getenv("GT_ROLE"); strings.Contains(role, "/polecats/") || role == "polecat" {
 		return true
 	}
-	cwd, err := os.Getwd()
+	cwd, err := proc.getwd()
 	return err == nil && strings.Contains(cwd, "/polecats/")
 }
 
@@ -43,13 +43,14 @@ func isPolecatContext() bool {
 // targets the whole repo, or (b) names a heavy package with no -run filter.
 // Wrapping in gt slot run does not exempt it: the slot protects Docker, not
 // the host's CPU. A -run filter on any number of packages is allowed — the
-// cost of a filtered run is the compile, seconds not minutes.
-func evaluatePolecatTestScope(command string) (reason string, matched []string) {
+// cost of a filtered run is the compile, seconds not minutes. cwd is the
+// invocation's working directory ("" when unknown).
+func evaluatePolecatTestScope(command, cwd string) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(command))
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluatePolecatTestScopeSegment(segment); r != "" {
+			if r, m := evaluatePolecatTestScopeSegment(segment, cwd); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -57,10 +58,10 @@ func evaluatePolecatTestScope(command string) (reason string, matched []string) 
 		}
 		segment = append(segment, tok)
 	}
-	return evaluatePolecatTestScopeSegment(segment)
+	return evaluatePolecatTestScopeSegment(segment, cwd)
 }
 
-func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []string) {
+func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string, matched []string) {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
@@ -85,7 +86,6 @@ func evaluatePolecatTestScopeSegment(tokens []string) (reason string, matched []
 		}
 	}
 	pkgArgs := goTestPackageArgs(rest)
-	cwd, _ := os.Getwd()
 	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, cwd)
 	if wholeRepo {
 		return "polecat 'go test' of the whole repo", nil
@@ -161,16 +161,16 @@ func dedupeSorted(pkgs []string) []string {
 	return out
 }
 
-func printPolecatTestScopeBlock(reason, command string, matched []string) {
-	fmt.Fprintln(os.Stderr, style.Bold.Render("❌ TEST SCOPE (polecat)"))
-	fmt.Fprintf(os.Stderr, "  %s\n", reason)
+func printPolecatTestScopeBlock(w io.Writer, reason, command string, matched []string) {
+	fmt.Fprintln(w, style.Bold.Render("❌ TEST SCOPE (polecat)"))
+	fmt.Fprintf(w, "  %s\n", reason)
 	if len(matched) > 0 {
-		fmt.Fprintf(os.Stderr, "  packages: %s\n", strings.Join(matched, " "))
+		fmt.Fprintf(w, "  packages: %s\n", strings.Join(matched, " "))
 	}
-	fmt.Fprintf(os.Stderr, "  command:  %s\n", command)
-	fmt.Fprintln(os.Stderr, "  Whole-package runs of internal/cmd, daemon, polecat or refinery take 3-10 minutes")
-	fmt.Fprintln(os.Stderr, "  each and there is no need for one: the refinery runs the full suite once per")
-	fmt.Fprintln(os.Stderr, "  submission (gt done covers the light changed packages). Iterate on what you touched:")
-	fmt.Fprintln(os.Stderr, "    go test ./internal/<pkg>/ -run 'TestOne|TestTwo'")
-	fmt.Fprintln(os.Stderr, "  (gt-pxlg)")
+	fmt.Fprintf(w, "  command:  %s\n", command)
+	fmt.Fprintln(w, "  Whole-package runs of internal/cmd, daemon, polecat or refinery take 3-10 minutes")
+	fmt.Fprintln(w, "  each and there is no need for one: the refinery runs the full suite once per")
+	fmt.Fprintln(w, "  submission (gt done covers the light changed packages). Iterate on what you touched:")
+	fmt.Fprintln(w, "    go test ./internal/<pkg>/ -run 'TestOne|TestTwo'")
+	fmt.Fprintln(w, "  (gt-pxlg)")
 }

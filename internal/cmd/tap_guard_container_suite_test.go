@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +11,7 @@ import (
 )
 
 func TestEvaluateContainerSuiteCommand(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -68,7 +67,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateContainerSuiteCommand(tt.command)
+			reason, _ := evaluateContainerSuiteCommand(tt.command, "", "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
@@ -238,12 +237,12 @@ func TestCwdPackagePath_OutsideModule(t *testing.T) {
 	})
 }
 
-// The cwd form of the container rule, end to end through os.Getwd(): the same
+// The cwd form of the container rule, end to end from the invocation's cwd: the same
 // package reached as "go test ." must be judged exactly as "go test
 // ./internal/beads" is. The polecat cwd is the one attempt 2's guard let
 // through (gt-1lko).
 func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
-	t.Setenv(dockerTestsEnv, "")
+	t.Parallel()
 	tests := []struct {
 		name    string
 		relDir  string
@@ -266,8 +265,8 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 			root := fakeModule(t, layout)
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					t.Chdir(filepath.Join(root, filepath.FromSlash(tt.relDir)))
-					reason, _ := evaluateContainerSuiteCommand(tt.command)
+					cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
+					reason, _ := evaluateContainerSuiteCommand(tt.command, cwd, "")
 					if got := reason != ""; got != tt.blocked {
 						t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
 							tt.command, tt.relDir, got, reason, tt.blocked)
@@ -311,6 +310,7 @@ func TestCwdHeavyPackages(t *testing.T) {
 // and the -run filter is the alternative it points at. The refinery layout is
 // where the guard runs, so it is where the resolution is pinned.
 func TestEvaluatePolecatTestScope_CwdStyle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		relDir  string
@@ -334,8 +334,8 @@ func TestEvaluatePolecatTestScope_CwdStyle(t *testing.T) {
 			root := fakeModule(t, layout)
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					t.Chdir(filepath.Join(root, filepath.FromSlash(tt.relDir)))
-					reason, matched := evaluatePolecatTestScope(tt.command)
+					cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
+					reason, matched := evaluatePolecatTestScope(tt.command, cwd)
 					if got := reason != ""; got != tt.blocked {
 						t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q, matched %v), want %v",
 							tt.command, tt.relDir, got, reason, matched, tt.blocked)
@@ -379,21 +379,21 @@ func TestCwdPackagePath_ActualCheckout(t *testing.T) {
 // decides one decides the other, or a polecat cd-s into the package and runs
 // the same tests the argument form blocks.
 func TestCwdAndArgumentFormsAgree(t *testing.T) {
+	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
 	for _, relDir := range []string{"internal", "internal/beads", "internal/beads/sub", "internal/cmd", "internal/cmd/sub", "internal/style", "cmd/gt", "."} {
 		t.Run(relDir, func(t *testing.T) {
 			cwd := filepath.Join(root, filepath.FromSlash(relDir))
-			t.Chdir(cwd)
 
-			argForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test ./" + relDir)
-			cwdForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test .")
+			argForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test ./"+relDir, cwd, "")
+			cwdForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test .", cwd, "")
 			if (argForm != "") != (cwdForm != "") {
 				t.Errorf("container guard: ./%s blocked by argument form = %v (reason %q), by cwd form = %v (reason %q)",
 					relDir, argForm != "", argForm, cwdForm != "", cwdForm)
 			}
 
-			argReason, _ := evaluatePolecatTestScope("go test ./" + relDir)
-			scopeReason, _ := evaluatePolecatTestScope("go test .")
+			argReason, _ := evaluatePolecatTestScope("go test ./"+relDir, cwd)
+			scopeReason, _ := evaluatePolecatTestScope("go test .", cwd)
 			if (argReason != "") != (scopeReason != "") {
 				t.Errorf("polecat scope rule: ./%s blocked by argument form = %v, by cwd form = %v", relDir, argReason != "", scopeReason != "")
 			}
@@ -406,20 +406,12 @@ func TestCwdAndArgumentFormsAgree(t *testing.T) {
 // polecat worktree cwd is enough even with no env vars set, since a hook's
 // ambient environment can't always be relied on to carry GT_POLECAT.
 func TestIsPolecatOrRefineryContext_CwdFallback(t *testing.T) {
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "")
-	t.Chdir(t.TempDir())
-	if isPolecatOrRefineryContext() {
+	t.Parallel()
+	if isPolecatOrRefineryContext(fakeGuardProcess(nil, "/tmp/neutral")) {
 		t.Fatal("expected neutral tmp dir cwd to not trigger the polecat-path fallback")
 	}
 
-	polecatDir := t.TempDir() + "/gastown/polecats/topaz"
-	if err := os.MkdirAll(polecatDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	t.Chdir(polecatDir)
-	if !isPolecatOrRefineryContext() {
+	if !isPolecatOrRefineryContext(fakeGuardProcess(nil, "/tmp/gastown/polecats/topaz")) {
 		t.Error("expected a cwd under /polecats/ to be treated as polecat context even with no env vars set")
 	}
 }
@@ -429,18 +421,13 @@ func TestIsPolecatOrRefineryContext_CwdFallback(t *testing.T) {
 // must actually exit non-nil (blocking) end-to-end, not just when its
 // internal evaluator is called directly.
 func TestRunTapGuardContainerSuite_BlockedInPolecatContext(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "topaz",
+		"GT_ROLE":    "gastown/polecats/topaz",
+	}, "")
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"GT_TEST_DOCKER=1 go test ./internal/beads/..."}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
-	})
+	err := tapGuardContainerSuite(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected bare go test on a container-backed package with the switch on to be blocked for a polecat, got nil error")
 	}
@@ -450,22 +437,12 @@ func TestRunTapGuardContainerSuite_BlockedInPolecatContext(t *testing.T) {
 // "false positive gone" leg: the same command that gets blocked for a
 // polecat must be allowed for a role this guard doesn't cover (e.g. crew).
 func TestRunTapGuardContainerSuite_AllowedOutsidePolecatOrRefineryContext(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
-	// Chdir off the polecat worktree this test binary happens to run from —
-	// otherwise the cwd-path fallback (see TestIsPolecatOrRefineryContext_CwdFallback)
-	// would make this a polecat context regardless of env vars.
-	t.Chdir(t.TempDir())
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/crew")
-
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_ROLE": "gastown/crew",
+	}, "")
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"go test ./internal/beads/..."}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
-	})
+	err := tapGuardContainerSuite(strings.NewReader(hookInput), io.Discard, proc)
 	if err != nil {
 		t.Errorf("expected non-polecat/refinery context to be allowed, got error: %v", err)
 	}
@@ -475,18 +452,13 @@ func TestRunTapGuardContainerSuite_AllowedOutsidePolecatOrRefineryContext(t *tes
 // exact same target package, wrapped in gt slot run, must be allowed even
 // under a polecat context.
 func TestRunTapGuardContainerSuite_WrappedAllowed(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "topaz",
+		"GT_ROLE":    "gastown/polecats/topaz",
+	}, "")
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"gt slot run --role gastown/polecats/topaz -- go test ./internal/beads/..."}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
-	})
+	err := tapGuardContainerSuite(strings.NewReader(hookInput), io.Discard, proc)
 	if err != nil {
 		t.Errorf("expected gt-slot-run-wrapped command to be allowed, got error: %v", err)
 	}
@@ -496,18 +468,13 @@ func TestRunTapGuardContainerSuite_WrappedAllowed(t *testing.T) {
 // unaffected input still passes" leg: a polecat running tests scoped to a
 // package with no Docker footprint must not be blocked.
 func TestRunTapGuardContainerSuite_NonContainerPackageAllowed(t *testing.T) {
-	// The guard reads the opt-in from its own environment; `make test`
-	// exports it, so pin it off or the "switch off" cases flip under the gate.
-	t.Setenv(dockerTestsEnv, "")
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "topaz",
+		"GT_ROLE":    "gastown/polecats/topaz",
+	}, "")
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"go test ./internal/style/..."}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil)
-	})
+	err := tapGuardContainerSuite(strings.NewReader(hookInput), io.Discard, proc)
 	if err != nil {
 		t.Errorf("expected non-container package to be allowed, got error: %v", err)
 	}
@@ -525,53 +492,20 @@ func TestDockerTestsEnvMatchesTestutil(t *testing.T) {
 // An opt-in already exported in the session environment reaches the test
 // process without appearing in the command, so the guard reads its own env.
 func TestEvaluateContainerSuiteCommand_EnvOptIn(t *testing.T) {
-	t.Setenv(dockerTestsEnv, "1")
-	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason == "" {
+	t.Parallel()
+	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/...", "", "1"); reason == "" {
 		t.Error("bare go test on a container package with the opt-in exported in the environment was allowed")
 	}
-	t.Setenv(dockerTestsEnv, "")
-	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/..."); reason != "" {
+	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/...", "", ""); reason != "" {
 		t.Errorf("bare go test with the opt-in unset was blocked: %s", reason)
 	}
-}
-
-// containerSuiteBlockCommand extracts the "Run it wrapped instead:" line from
-// a block message printed by printContainerSuiteBlock.
-func containerSuiteBlockCommand(t *testing.T, block string) string {
-	t.Helper()
-	const marker = "Run it wrapped instead:"
-	for _, line := range strings.Split(block, "\n") {
-		if i := strings.Index(line, marker); i >= 0 {
-			return strings.TrimSpace(line[i+len(marker):])
-		}
-	}
-	t.Fatalf("no %q line in block:\n%s", marker, block)
-	return ""
-}
-
-// stubRecorder writes a PATH directory whose 'gt', 'go' and 'make' are shell
-// scripts recording their argv (NUL-separated, program basename first) into
-// the file named by the returned env assignment. The go/make stubs are there
-// so that a wrap which leaks an unwrapped tail records that leak instead of
-// starting a real suite.
-func stubRecorder(t *testing.T, dir string) (envAssign, logPath string) {
-	t.Helper()
-	logPath = filepath.Join(dir, "argv.log")
-	for _, name := range []string{"gt", "go", "make"} {
-		// t.TempDir() paths carry no shell metacharacters, so the path needs
-		// no quoting beyond the single quotes that keep it one word.
-		script := "#!/bin/sh\nprintf '%s\\0' \"${0##*/}\" \"$@\" >> '" + logPath + "'\nexit 0\n"
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
-			t.Fatalf("write %s stub: %v", name, err)
-		}
-	}
-	return "GT_OTVB_STUB_LOG=" + logPath, logPath
 }
 
 // TestContainerSuiteWrapRole pins the two readings of the --role argument: the
 // caller's own role when the hook carries one (so the printed line is
 // runnable verbatim), and the formula's placeholder when it does not.
 func TestContainerSuiteWrapRole(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name   string
 		gtRole string
@@ -584,8 +518,7 @@ func TestContainerSuiteWrapRole(t *testing.T) {
 		{"role needing quoting", "gastown/po lecats", "<rig>/<you>"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.gtRole)
-			if got := containerSuiteWrapRole(); got != tt.want {
+			if got := containerSuiteWrapRole(tt.gtRole); got != tt.want {
 				t.Errorf("containerSuiteWrapRole() with GT_ROLE=%q = %q, want %q", tt.gtRole, got, tt.want)
 			}
 		})
@@ -599,20 +532,20 @@ func TestContainerSuiteWrapRole(t *testing.T) {
 // local polecats hit this refusal on 2026-09-17 and improvised around it —
 // granite's spiral to a direct main push started here.
 func TestRunTapGuardContainerSuite_RefusalNamesTheSanctionedPaths(t *testing.T) {
-	t.Setenv(dockerTestsEnv, "1")
-	t.Setenv("GT_POLECAT", "granite")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/granite")
+	t.Parallel()
 	// A neutral cwd: the guard also reads the working directory, and a
 	// polecat worktree's path contains "/polecats/" (gt-3008).
-	t.Chdir(t.TempDir())
+	proc := fakeGuardProcess(map[string]string{
+		dockerTestsEnv: "1",
+		"GT_POLECAT":   "granite",
+		"GT_ROLE":      "gastown/polecats/granite",
+	}, t.TempDir())
 
 	command := "go test ./internal/beads/..."
 	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(command) + `}}`
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, input, func() { err = runTapGuardContainerSuite(tapGuardContainerSuiteCmd, nil) })
-	})
+	var buf strings.Builder
+	err := tapGuardContainerSuite(strings.NewReader(input), &buf, proc)
+	stderr := buf.String()
 	if err == nil {
 		t.Fatalf("bare container-package run was allowed through the hook: %s", stderr)
 	}

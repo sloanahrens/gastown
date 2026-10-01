@@ -35,12 +35,16 @@ func payloadInput(t *testing.T, raw string) permissionRequestInput {
 	return hook
 }
 
-// asPolecat marks the process env as an autonomous polecat session, which is
-// what makes the guard deny rather than leave the prompt standing.
-func asPolecat(t *testing.T) {
-	t.Helper()
-	t.Setenv("GT_ROLE", "gastown/polecats/obsidian")
-	t.Setenv("GT_POLECAT", "obsidian")
+// polecatEnv is an autonomous polecat session's environment, which is what
+// makes the guard deny rather than leave the prompt standing.
+var polecatEnv = map[string]string{
+	"GT_ROLE":    "gastown/polecats/obsidian",
+	"GT_POLECAT": "obsidian",
+}
+
+// envGetter reads env the way os.Getenv reads the process environment.
+func envGetter(env map[string]string) func(string) string {
+	return func(key string) string { return env[key] }
 }
 
 // TestPermissionRequestDeniesForAutonomousSession pins the decision the bead
@@ -48,6 +52,7 @@ func asPolecat(t *testing.T) {
 // message carries a retry formulation that will not ask again (gt-8stz). The
 // count assertion fails a version that denies nothing or denies everything.
 func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		command      string
@@ -71,9 +76,8 @@ func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			asPolecat(t)
 			hook := payloadInput(t, bashPermissionPayload(tt.command))
-			if !unattendedPromptSession(hook.Cwd) {
+			if !unattendedPromptSession(hook.Cwd, envGetter(polecatEnv)) {
 				t.Fatalf("polecat session not recognised as unattended")
 			}
 			message := promptDeniedMessage(hook, "")
@@ -94,17 +98,16 @@ func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
 // the bead's requirement: a session with a person at the pane keeps its
 // prompt, so the guard reports no decision for every attended role.
 func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
+	t.Parallel()
 	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
 			if unattendedPromptRole(role) {
 				t.Errorf("attended role %q is treated as unattended — its prompt would be denied", role)
 			}
-			t.Setenv("GT_ROLE", role)
-			t.Setenv("GT_POLECAT", "")
 			hook := payloadInput(t, bashPermissionPayload("mkdir -p /tmp/x && cd /tmp/x && touch f"))
 			hook.Cwd = "/Users/sloan/gt/gastown/crew"
-			if unattendedPromptSession(hook.Cwd) {
+			if unattendedPromptSession(hook.Cwd, envGetter(map[string]string{"GT_ROLE": role})) {
 				t.Errorf("attended role %q treated as unattended — its prompt would be denied", role)
 			}
 		})
@@ -115,17 +118,16 @@ func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
 // environment decides, so a crew member working inside a polecat worktree — or
 // a session that inherited a polecat marker from a parent — keeps its prompt.
 func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
-	t.Setenv("GT_POLECAT", "obsidian")
-	t.Setenv("GT_ROLE", "gastown/crew/sloan")
-	if unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig") {
+	t.Parallel()
+	crewWithMarker := envGetter(map[string]string{"GT_POLECAT": "obsidian", "GT_ROLE": "gastown/crew/sloan"})
+	if unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig", crewWithMarker) {
 		t.Error("a crew role was overridden by a polecat marker or by the payload cwd")
 	}
-	t.Setenv("GT_ROLE", "")
-	if !unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig") {
+	markerOnly := envGetter(map[string]string{"GT_POLECAT": "obsidian"})
+	if !unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig", markerOnly) {
 		t.Error("a polecat worktree cwd is unattended when no role says otherwise")
 	}
-	t.Setenv("GT_POLECAT", "")
-	if unattendedPromptSession("/Users/sloan/gt/gastown/crew") {
+	if unattendedPromptSession("/Users/sloan/gt/gastown/crew", envGetter(nil)) {
 		t.Error("a crew directory with no polecat signal is unattended")
 	}
 }
@@ -165,11 +167,11 @@ func TestPermissionRequestHoldsForUnparsablePayload(t *testing.T) {
 // the decision off hookSpecificOutput, and a wrong shape parks the session
 // silently rather than failing loudly.
 func TestPermissionRequestDenialShape(t *testing.T) {
-	asPolecat(t)
+	t.Parallel()
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
-	out := captureStdout(t, func() {
-		writePermissionRequestDenial(hook, " Escalation: recorded.")
-	})
+	var buf strings.Builder
+	writePermissionRequestDenial(&buf, hook, " Escalation: recorded.")
+	out := buf.String()
 
 	var decoded struct {
 		HookSpecificOutput struct {
@@ -194,42 +196,38 @@ func TestPermissionRequestDenialShape(t *testing.T) {
 	}
 }
 
-// fakeParkedPromptMailer substitutes for parkedPromptMailer so a test can
-// verify escalateParkedPromptOnce reaches (or does not reach) the send call
-// without ever touching the town's real mail store (gt-8stz review, finding
-// d1058e444298). Restored automatically at test cleanup.
-func fakeParkedPromptMailer(t *testing.T, result bool) *[]string {
-	t.Helper()
+// fakeParkedPromptMailer is a parkedPromptMailer that records each send and
+// answers result, so a test can verify escalateParkedPromptOnce reaches (or
+// does not reach) the send call without ever touching the town's real mail
+// store (gt-8stz review, finding d1058e444298).
+func fakeParkedPromptMailer(result bool) (parkedPromptMailer, *[]string) {
 	var sent []string
-	orig := parkedPromptMailer
-	parkedPromptMailer = func(subject, body string) bool {
+	return func(subject, body string) bool {
 		sent = append(sent, subject+"\n"+body)
 		return result
-	}
-	t.Cleanup(func() { parkedPromptMailer = orig })
-	return &sent
+	}, &sent
 }
 
 // TestPermissionRequestEscalatesOncePerShape keeps the escalation off the Dolt
 // churn path: one report per session and shape, however often the agent
 // retries the denied call.
 func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	asPolecat(t)
-	sent := fakeParkedPromptMailer(t, true)
+	t.Parallel()
+	tmp := t.TempDir()
+	mailer, sent := fakeParkedPromptMailer(true)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	first := escalateParkedPromptOnce(hook)
+	first := escalateParkedPromptOnce(hook, tmp, mailer)
 	if strings.Contains(first, "already reported") {
 		t.Fatalf("first call reported itself as a repeat: %q", first)
 	}
-	if _, err := os.Stat(promptEscalationMarker(hook, promptShape(hook))); err != nil {
+	if _, err := os.Stat(promptEscalationMarker(hook, promptShape(hook), tmp)); err != nil {
 		t.Fatalf("no marker written for the first call: %v", err)
 	}
 	if len(*sent) != 1 {
 		t.Fatalf("fake mailer received %d sends, want 1: %v", len(*sent), *sent)
 	}
-	if second := escalateParkedPromptOnce(hook); !strings.Contains(second, "already reported") {
+	if second := escalateParkedPromptOnce(hook, tmp, mailer); !strings.Contains(second, "already reported") {
 		t.Errorf("second call did not reuse the marker: %q", second)
 	}
 	if len(*sent) != 1 {
@@ -238,7 +236,7 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	// A different shape in the same session is a different incident.
 	other := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 	other.ToolInput.Command = `rm -rf /tmp/x/*`
-	if got := escalateParkedPromptOnce(other); strings.Contains(got, "already reported") {
+	if got := escalateParkedPromptOnce(other, tmp, mailer); strings.Contains(got, "already reported") {
 		t.Errorf("second shape was suppressed by the first shape's marker: %q", got)
 	}
 	if len(*sent) != 2 {
@@ -250,12 +248,11 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 // distinction the review asked for: a mailer failure must not read like no
 // escalation was attempted at all (gt-8stz review, finding 4ce05cf3cf09).
 func TestPermissionRequestEscalationMailerFailure(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	asPolecat(t)
-	fakeParkedPromptMailer(t, false)
+	t.Parallel()
+	mailer, _ := fakeParkedPromptMailer(false)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	got := escalateParkedPromptOnce(hook)
+	got := escalateParkedPromptOnce(hook, t.TempDir(), mailer)
 	if !strings.Contains(got, "Escalating to the mayor failed") {
 		t.Errorf("mailer failure did not surface a distinct message: %q", got)
 	}
@@ -291,7 +288,7 @@ func TestPermissionRequestEscalationMarkerSessionFallback(t *testing.T) {
 	shape := "bash cd-compound-write"
 	a := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/alpha/gastown", ToolName: "Bash"}
 	b := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/beta/gastown", ToolName: "Bash"}
-	if promptEscalationMarker(a, shape) == promptEscalationMarker(b, shape) {
+	if promptEscalationMarker(a, shape, "/tmp") == promptEscalationMarker(b, shape, "/tmp") {
 		t.Error("two sessions with no session_id but different cwds collapsed onto one marker")
 	}
 }
@@ -320,7 +317,7 @@ func TestPermissionRequestShapeLabels(t *testing.T) {
 // shell command like Bash, so its denial names the command and steers the retry
 // by command shape rather than falling to the non-shell wording.
 func TestPermissionRequestTreatsMonitorAsShell(t *testing.T) {
-	asPolecat(t)
+	t.Parallel()
 	raw := strings.Replace(bashPermissionPayload("cd /tmp/w && touch f"), `"tool_name":"Bash"`, `"tool_name":"Monitor"`, 1)
 	hook := payloadInput(t, raw)
 	if hook.ToolName != "Monitor" {
