@@ -49,7 +49,7 @@ const (
 type Event struct {
 	Timestamp time.Time `json:"timestamp"`
 	Type      EventType `json:"type"`
-	Agent     string    `json:"agent"`            // e.g., "gastown/crew/max" or "gastown/polecats/Toast"
+	Agent     string    `json:"agent"`             // e.g., "gastown/crew/max" or "gastown/polecats/Toast"
 	Context   string    `json:"context,omitempty"` // Additional context (issue ID, error message, etc.)
 }
 

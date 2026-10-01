@@ -27,19 +27,19 @@ const (
 
 // Table provides styled table rendering.
 type Table struct {
-	columns    []Column
-	rows       [][]string
-	headerSep  bool
-	indent     string
+	columns     []Column
+	rows        [][]string
+	headerSep   bool
+	indent      string
 	headerStyle lipgloss.Style
 }
 
 // NewTable creates a new table with the given columns.
 func NewTable(columns ...Column) *Table {
 	return &Table{
-		columns:    columns,
-		headerSep:  true,
-		indent:     "  ",
+		columns:     columns,
+		headerSep:   true,
+		indent:      "  ",
 		headerStyle: Bold,
 	}
 }
@@ -156,4 +156,3 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 func stripAnsi(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
-

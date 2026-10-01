@@ -173,4 +173,3 @@ func (f *Formula) UsedTemplateVariables() []string {
 
 	return ExtractTemplateVariables(allText.String())
 }
-
