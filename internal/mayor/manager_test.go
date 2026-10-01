@@ -6,6 +6,7 @@ import (
 )
 
 func TestNewManager(t *testing.T) {
+	t.Parallel()
 	m := NewManager("/tmp/test-town")
 	if m == nil {
 		t.Fatal("NewManager returned nil")
@@ -16,6 +17,7 @@ func TestNewManager(t *testing.T) {
 }
 
 func TestManager_mayorDir(t *testing.T) {
+	t.Parallel()
 	m := NewManager("/tmp/test-town")
 	got := m.mayorDir()
 	want := filepath.Join("/tmp/test-town", "mayor")
@@ -25,6 +27,7 @@ func TestManager_mayorDir(t *testing.T) {
 }
 
 func TestSessionName_ReturnsConsistentValue(t *testing.T) {
+	t.Parallel()
 	name := SessionName()
 	if name == "" {
 		t.Error("SessionName() returned empty string")
@@ -36,6 +39,7 @@ func TestSessionName_ReturnsConsistentValue(t *testing.T) {
 }
 
 func TestManager_SessionName_MatchesPackageFunc(t *testing.T) {
+	t.Parallel()
 	m := NewManager("/tmp/test-town")
 	if m.SessionName() != SessionName() {
 		t.Errorf("Manager.SessionName() = %q, SessionName() = %q — should match",
@@ -44,6 +48,7 @@ func TestManager_SessionName_MatchesPackageFunc(t *testing.T) {
 }
 
 func TestManager_Errors(t *testing.T) {
+	t.Parallel()
 	if ErrNotRunning.Error() != "mayor not running" {
 		t.Errorf("ErrNotRunning = %q", ErrNotRunning)
 	}

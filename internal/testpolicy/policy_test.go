@@ -16,7 +16,7 @@ var seed = flag.Bool("seed", false, "print the unconverted.txt a fresh checkout 
 // ratchet was added (Ruling R11). The list only shrinks: converting a
 // package deletes its line from unconverted.txt AND lowers maxUnconverted
 // here, in the same change. It must never grow.
-const maxUnconverted = 3
+const maxUnconverted = 2
 
 // maxOverBudget is the number of entries overbudget.txt holds (Ruling R25):
 // packages that meet every rule but still exceed the converted-package time
@@ -26,8 +26,8 @@ const maxUnconverted = 3
 const maxOverBudget = 0
 
 // TestPolicy applies the unit-test rules to every package not listed in
-// unconverted.txt, and fails a listed package that already passes, so the
-// list can only shrink.
+// unconverted.txt, and fails a listed package that already passes them and
+// has no file left in realgit.txt, so the list can only shrink.
 func TestPolicy(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -53,6 +53,14 @@ func TestPolicy(t *testing.T) {
 	if !*seed && len(originallyListed) > maxUnconverted {
 		t.Errorf("unconverted.txt has %d entries, want at most %d: the list only shrinks — converting a package deletes its line here AND lowers maxUnconverted in policy_test.go", len(originallyListed), maxUnconverted)
 	}
+	realGit, err := ReadList("realgit.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGitPkgs := map[string]bool{}
+	for f := range realGit {
+		realGitPkgs[filepath.ToSlash(filepath.Dir(f))] = true
+	}
 	dirs, err := PackageDirs(root)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +81,7 @@ func TestPolicy(t *testing.T) {
 		delete(unconverted, rel)
 		switch {
 		case *seed:
-		case listed && len(vs) == 0:
+		case listed && len(vs) == 0 && !realGitPkgs[rel]:
 			t.Errorf("%s is in unconverted.txt but passes every rule: delete its line (if it still exceeds the time budget, list it in overbudget.txt with the bead tracking that)", rel)
 		case !listed:
 			for _, v := range vs {
