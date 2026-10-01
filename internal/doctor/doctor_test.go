@@ -593,3 +593,40 @@ func TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible(t *testing.T) {
 		t.Errorf("verbose summary must show all details, got:\n%s", buf.String())
 	}
 }
+
+// TestPrintSummaryOnly_VerboseDetailsLabeledByCheck verifies that --verbose
+// prints each check's details under that check's name instead of one
+// unlabeled block after the SKIPPED list (gt-l2alj).
+func TestPrintSummaryOnly_VerboseDetailsLabeledByCheck(t *testing.T) {
+	t.Parallel()
+	r := NewReport()
+	r.Add(&CheckResult{Name: "alpha-check", Status: StatusWarning, Message: "a", Details: []string{"alpha-detail"}})
+	r.Add(&CheckResult{Name: "no-details", Status: StatusError, Message: "b"})
+	r.Add(&CheckResult{Name: "beta-check", Status: StatusSkipped, Message: "c", Details: []string{"beta-detail-1", "beta-detail-2"}})
+	r.Add(&CheckResult{Name: "ok-check", Status: StatusOK, Details: []string{"ok-detail"}})
+
+	var buf bytes.Buffer
+	r.PrintSummaryOnly(&buf, true, 0)
+	out := buf.String()
+
+	_, section, ok := strings.Cut(out, "DETAILS\n")
+	if !ok {
+		t.Fatalf("verbose summary has no DETAILS section:\n%s", out)
+	}
+	lines := strings.Split(strings.TrimRight(section, "\n"), "\n")
+	var got []string
+	for _, l := range lines {
+		got = append(got, strings.TrimLeft(strings.TrimSpace(l), ui.TreeLast))
+	}
+	want := []string{"alpha-check", "alpha-detail", "beta-check", "beta-detail-1", "beta-detail-2"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("DETAILS section = %q, want %q\nfull output:\n%s", got, want, out)
+	}
+
+	// Non-verbose output has no DETAILS section.
+	buf.Reset()
+	r.PrintSummaryOnly(&buf, false, 0)
+	if strings.Contains(buf.String(), "DETAILS") || strings.Contains(buf.String(), "alpha-detail") {
+		t.Errorf("non-verbose summary changed:\n%s", buf.String())
+	}
+}
