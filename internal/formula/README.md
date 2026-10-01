@@ -248,19 +248,16 @@ deps := f.GetDependencies("build")  // Returns ["test"]
 The package embeds common formulas for Gas Town workflows:
 
 ```go
-// Provision embedded formulas to a beads workspace
+// The binary is canonical: sync writes every embedded formula whose disk hash
+// differs (hand-edited copies included) and records the hash it wrote.
 count, err := formula.ProvisionFormulas("/path/to/workspace")
-
-// Check formula health (outdated, modified, etc.)
-report, err := formula.CheckFormulaHealth("/path/to/workspace")
-
-// Classify every formula without writing anything (dry run)
-dryRun, err := formula.PlanFormulaSync("/path/to/workspace")
-
-// Sync, preserving hand-edited copies; SyncOptions{Force: true} overwrites
-// them instead, backing each displaced copy up first.
 plan, err := formula.UpdateFormulas("/path/to/workspace")
-plan.Installed(); plan.Updated(); plan.SkippedModified(); plan.Superseded()
+
+// Classify every file by hash without writing anything (gt doctor uses this)
+dryRun, err := formula.PlanFormulaSync("/path/to/workspace")
+plan.Installed(); plan.Updated(); plan.ReplacedDrift()
+plan.Orphaned() // gt wrote it, the binary no longer embeds it
+plan.Unowned()  // gt never wrote it and the binary does not embed it
 ```
 
 ## Testing
