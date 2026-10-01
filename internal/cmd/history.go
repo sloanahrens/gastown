@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -131,7 +131,7 @@ type historyQuerier interface {
 }
 
 // doltQuerier reads history facts from a live Dolt server.
-type doltQuerier struct{ db *sql.DB }
+type doltQuerier struct{ db *beadsql.DB }
 
 // snapshotSlack is how much later than a row's own timestamp its commit may be
 // dated before the gap counts as a missing snapshot rather than the same write.
@@ -345,19 +345,14 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		ReadTimeout:  "30s",
 		WriteTimeout: "30s",
 	})
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return fmt.Errorf("connecting to database %s: %w", dbName, err)
-	}
-	defer db.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var dummy int
-	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&dummy); err != nil {
-		return fmt.Errorf("database %q not reachable: %w", dbName, err)
+	db, err := beadsql.Open(ctx, dsn, dbName)
+	if err != nil {
+		return fmt.Errorf("database %q not readable: %w", dbName, err)
 	}
+	defer db.Close()
 
 	report, err := buildHistoryReport(ctx, doltQuerier{db: db}, dbName, beadID)
 	if err != nil {
