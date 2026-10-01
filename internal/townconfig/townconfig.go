@@ -7,6 +7,12 @@
 // .beads-wisp/config (parked.go). Every file is decoded strictly through
 // internal/config's one parser, so an unknown key is an error.
 //
+// On the two-file layout (gt config migrate, internal/config/layout.go)
+// mayor/rigs.json and mayor/daemon.json are sections of mayor/town.json and
+// settings/config.json. The kernel reads them through the same paths: the
+// config loaders follow a retired file to its section, so both layouts
+// load, and gt doctor's config-layout check warns until the town moves.
+//
 // A file that does not parse fails the whole load, with one line per broken
 // file naming the file and position. Nothing falls back to compiled
 // defaults and there is no last-known-good copy: the town does not start

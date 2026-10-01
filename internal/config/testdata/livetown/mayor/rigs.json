@@ -31,6 +31,11 @@
       "beads": {
         "repo": "",
         "prefix": "ma"
+      },
+      "parked": {
+        "since": "2026-09-29T12:00:00-05:00",
+        "by": "operator",
+        "reason": "fixture: parked while the town is down"
       }
     },
     "om": {

@@ -41,6 +41,15 @@ func WriteConfigJSON[T any](path string, v *T, perm os.FileMode) error {
 // result. When mutate returns an error nothing is written. A file that does
 // not parse is never written.
 func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error) error {
+	// A retired file of the two-file layout is written in its host
+	// (layout.go). The check repeats under the file's lock: gt config
+	// migrate holds that lock while it moves the file, and a writer that
+	// waited on it must follow the file to its new place.
+	if host, key, ok, _, err := sectionFor(path); err != nil {
+		return err
+	} else if ok {
+		return updateSection(host, key, mutate)
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
@@ -48,6 +57,13 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 	unlock, err := lockConfigFile(path)
 	if err != nil {
 		return err
+	}
+	if host, key, ok, _, err := sectionFor(path); err != nil || ok {
+		unlock()
+		if err != nil {
+			return err
+		}
+		return updateSection(host, key, mutate)
 	}
 	defer unlock()
 

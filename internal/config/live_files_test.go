@@ -10,7 +10,9 @@ import (
 
 // liveTown holds scrubbed copies of the operator town's config files as they
 // stood on 2026-09-29 (tokens, emails, usernames and home paths replaced;
-// mayor/daemon.json as of 2026-10-01, which holds none of those), less
+// mayor/daemon.json as of 2026-10-01, which holds none of those; town.json's
+// dolt endpoint and a rig park record in rigs.json added 2026-10-01 with
+// fake values, matching the live files' key shapes), less
 // the patrols.quota_resume key gt-638go.2 deleted from the schema and the
 // merge_queue.post_merge_command/post_merge_timeout keys gt-6zf1o deleted and
 // the refinery-era merge_queue keys gt-5nlvq deleted (batch_*,
