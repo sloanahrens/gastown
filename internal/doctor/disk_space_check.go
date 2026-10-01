@@ -11,6 +11,9 @@ import (
 // polecat session death, lost commits, and broken mail delivery.
 type DiskSpaceCheck struct {
 	BaseCheck
+	// diskSpace measures the filesystem holding a path; nil is
+	// util.GetDiskSpace (statfs, and diskutil on macOS APFS).
+	diskSpace func(path string) (*util.DiskSpaceInfo, error)
 }
 
 // NewDiskSpaceCheck creates a new disk space check.
@@ -26,7 +29,11 @@ func NewDiskSpaceCheck() *DiskSpaceCheck {
 
 // Run checks disk space at the town root.
 func (c *DiskSpaceCheck) Run(ctx *CheckContext) *CheckResult {
-	info, err := util.GetDiskSpace(ctx.TownRoot)
+	diskSpace := c.diskSpace
+	if diskSpace == nil {
+		diskSpace = util.GetDiskSpace
+	}
+	info, err := diskSpace(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -35,7 +42,7 @@ func (c *DiskSpaceCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	level, msg, _ := util.CheckDiskSpace(ctx.TownRoot)
+	level, msg := info.Level()
 
 	switch level {
 	case util.DiskSpaceCritical:

@@ -20,6 +20,8 @@ import (
 type PrimingCheck struct {
 	FixableCheck
 	issues []primingIssue
+	// lookPath finds gt on PATH; nil is exec.LookPath.
+	lookPath func(string) (string, error)
 }
 
 type primingIssue struct {
@@ -50,7 +52,11 @@ func (c *PrimingCheck) Run(ctx *CheckContext) *CheckResult {
 	var details []string
 
 	// Check 1: gt binary in PATH
-	if err := exec.Command("which", "gt").Run(); err != nil {
+	lookPath := c.lookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	if _, err := lookPath("gt"); err != nil {
 		c.issues = append(c.issues, primingIssue{
 			location:    "system",
 			issueType:   "gt_not_in_path",

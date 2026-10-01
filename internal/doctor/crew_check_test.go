@@ -62,7 +62,7 @@ func TestCrewChecks_IgnoreOperatorWorktrees(t *testing.T) {
 	townRoot, rigDir := crewWithOperatorWorktree(t)
 	ctx := &CheckContext{TownRoot: townRoot}
 
-	for _, check := range []Check{NewPrimingCheck(), NewStaleBeadsRedirectCheck()} {
+	for _, check := range []Check{primingCheck(), NewStaleBeadsRedirectCheck()} {
 		result := check.Run(ctx)
 		for _, d := range result.Details {
 			if strings.Contains(d, "sloan-topic") {
