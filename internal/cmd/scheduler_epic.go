@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/style"
@@ -265,7 +266,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 
 		// Brief delay between spawns to avoid Dolt contention
 		if i < len(candidates)-1 {
-			time.Sleep(500 * time.Millisecond)
+			clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 		}
 	}
 

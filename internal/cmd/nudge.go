@@ -638,7 +638,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			// Explicit polecat address (e.g., "vastal/polecats/furiosa").
 			// Bypasses crew-first resolution for short addresses.
 			pcName := strings.TrimPrefix(polecatName, "polecats/")
-			mgr, _, err := getSessionManager(rigName)
+			mgr, err := getSessionManager(rigName)
 			if err != nil {
 				return err
 			}
@@ -651,7 +651,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			if exists, _ := t.HasSession(crewSession); exists {
 				sessionName = crewSession
 			} else {
-				mgr, _, err := getSessionManager(rigName)
+				mgr, err := getSessionManager(rigName)
 				if err != nil {
 					return err
 				}

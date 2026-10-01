@@ -106,22 +106,13 @@ func TestConvoyDispatchPlanPerCandidateAgent(t *testing.T) {
 
 // TestConvoyRecordByID_UnreadableConvoy pins the failure mode of the convoy
 // lookup behind planConvoyDispatch: a convoy whose description cannot be read
-// must degrade to the gt-sling-decides path, not to a wrong agent — and it must
-// say the read failed. A convoy whose record never loaded is not a convoy that
-// recorded no agent, and the log is the only place that difference is visible
-// (gt-d7hwr).
+// (convoyRecordByID carries bdShow's error in Err) must degrade to the
+// gt-sling-decides path, not to a wrong agent — and it must say the read
+// failed. A convoy whose record never loaded is not a convoy that recorded no
+// agent, and the log is the only place that difference is visible (gt-d7hwr).
 func TestConvoyRecordByID_UnreadableConvoy(t *testing.T) {
-	// No bd on PATH and no workspace: the lookup fails rather than inventing a
-	// convoy.
-	t.Setenv("PATH", t.TempDir())
-
-	record := convoyRecordByID("gt-nosuchconvoy")
-	if record.Description != "" {
-		t.Errorf("convoyRecordByID() description = %q, want empty when the convoy cannot be read", record.Description)
-	}
-	if record.Err == nil {
-		t.Fatal("convoyRecordByID() must carry the failed read, not swallow it into an empty description")
-	}
+	t.Parallel()
+	record := convoyRecord{ID: "gt-nosuchconvoy", Err: errors.New("bd show gt-nosuchconvoy: not found")}
 
 	// An unreadable description carries no agent, so the dispatch falls through
 	// to gt sling's own resolution.

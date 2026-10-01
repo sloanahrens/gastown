@@ -21,7 +21,7 @@ func execBdShow(args []string) error {
 	}
 
 	invocation := currentBdShowInvocation(args)
-	bdPath, err = prepareBdShowExec(bdPath, invocation)
+	bdPath, err = prepareBdShowExec(bdPath, invocation, os.Getwd, os.Chdir)
 	if err != nil {
 		return err
 	}
@@ -29,16 +29,19 @@ func execBdShow(args []string) error {
 	return syscall.Exec(bdPath, invocation.ExecArgs, invocation.Env)
 }
 
-func prepareBdShowExec(bdPath string, invocation bdShowInvocation) (string, error) {
+// prepareBdShowExec anchors a relative bdPath to the working directory (read
+// through getwd), then moves into the invocation's directory through chdir, so
+// the exec that follows finds both.
+func prepareBdShowExec(bdPath string, invocation bdShowInvocation, getwd func() (string, error), chdir func(string) error) (string, error) {
 	if !filepath.IsAbs(bdPath) {
-		abs, err := filepath.Abs(bdPath)
+		wd, err := getwd()
 		if err != nil {
 			return "", fmt.Errorf("resolve bd path %q: %w", bdPath, err)
 		}
-		bdPath = abs
+		bdPath = filepath.Join(wd, bdPath)
 	}
 	if invocation.Dir != "" {
-		if err := os.Chdir(invocation.Dir); err != nil {
+		if err := chdir(invocation.Dir); err != nil {
 			return "", fmt.Errorf("chdir %s: %w", invocation.Dir, err)
 		}
 	}

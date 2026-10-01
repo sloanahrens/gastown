@@ -1,9 +1,8 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
-	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -171,36 +170,14 @@ func TestSessionHealthReportJSONContract(t *testing.T) {
 // and treats a non-zero exit as "health unavailable". Only an argument that can
 // never name a session (a rig/name address) is rejected.
 func TestRunSessionHealthJSONSessionDead(t *testing.T) {
-	oldJSON := sessionHealthJSON
-	oldMaxInactivity := sessionHealthMaxInactivity
-	oldStdout := os.Stdout
-	t.Cleanup(func() {
-		sessionHealthJSON = oldJSON
-		sessionHealthMaxInactivity = oldMaxInactivity
-		os.Stdout = oldStdout
-	})
-
-	sessionHealthJSON = true
-	sessionHealthMaxInactivity = 0
-	r, w, err := os.Pipe()
+	t.Parallel()
+	var out bytes.Buffer
+	dead := func(string, time.Duration) tmux.ZombieStatus { return tmux.SessionDead }
+	err := sessionHealth(&out, session.NewPrefixRegistry(), dead, "gt-session-health-test-nonexistent", true, 0)
 	if err != nil {
-		t.Fatalf("os.Pipe failed: %v", err)
+		t.Fatalf("sessionHealth failed: %v", err)
 	}
-	os.Stdout = w
-
-	err = runSessionHealth(sessionHealthCmd, []string{"gt-session-health-test-nonexistent"})
-	if closeErr := w.Close(); closeErr != nil {
-		t.Fatalf("closing pipe writer: %v", closeErr)
-	}
-	os.Stdout = oldStdout
-	if err != nil {
-		t.Fatalf("runSessionHealth failed: %v", err)
-	}
-
-	data, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("reading stdout pipe: %v", err)
-	}
+	data := out.Bytes()
 
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(data, &parsed); err != nil {
@@ -291,47 +268,32 @@ func TestSessionHealthArgErrorAcceptsSessionNames(t *testing.T) {
 // The wiring, not just the validator: runSessionHealth must return the
 // argument error before probing tmux, in both output modes.
 func TestRunSessionHealthRejectsRigNameAddress(t *testing.T) {
+	t.Parallel()
 	for _, asJSON := range []bool{false, true} {
 		name := "text"
 		if asJSON {
 			name = "json"
 		}
 		t.Run(name, func(t *testing.T) {
-			oldJSON := sessionHealthJSON
-			oldStdout := os.Stdout
-			t.Cleanup(func() {
-				sessionHealthJSON = oldJSON
-				os.Stdout = oldStdout
-			})
-			sessionHealthJSON = asJSON
-
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("os.Pipe failed: %v", err)
-			}
-			os.Stdout = w
-
-			err = runSessionHealth(sessionHealthCmd, []string{"gastown/witness"})
-			if closeErr := w.Close(); closeErr != nil {
-				t.Fatalf("closing pipe writer: %v", closeErr)
-			}
-			os.Stdout = oldStdout
+			var out bytes.Buffer
+			probed := false
+			check := func(string, time.Duration) tmux.ZombieStatus { probed = true; return tmux.SessionDead }
+			err := sessionHealth(&out, session.NewPrefixRegistry(), check, "gastown/witness", asJSON, 0)
 
 			if err == nil {
-				t.Fatal("runSessionHealth(gastown/witness) = nil, want error")
+				t.Fatal("sessionHealth(gastown/witness) = nil, want error")
 			}
 			if !strings.Contains(err.Error(), "tmux session name") {
 				t.Errorf("error %q does not explain the expected argument form", err)
 			}
+			if probed {
+				t.Error("sessionHealth probed tmux before rejecting the argument")
+			}
 
 			// The defect was the emitted payload, not just the exit code: a
 			// session-dead/healthy:false report must not be printed at all.
-			out, readErr := io.ReadAll(r)
-			if readErr != nil {
-				t.Fatalf("reading stdout pipe: %v", readErr)
-			}
-			if len(out) != 0 {
-				t.Errorf("runSessionHealth(gastown/witness) wrote %q to stdout, want nothing", string(out))
+			if out.Len() != 0 {
+				t.Errorf("sessionHealth(gastown/witness) wrote %q to stdout, want nothing", out.String())
 			}
 		})
 	}

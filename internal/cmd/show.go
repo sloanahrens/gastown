@@ -101,10 +101,12 @@ type bdShowInvocation struct {
 	CommandArgs []string
 }
 
-func newBdShowInvocation(args []string, environ []string) bdShowInvocation {
+// newBdShowInvocation builds the bd show for args in environ, run in the
+// directory resolveDir names for the bead (resolveBeadDir in production).
+func newBdShowInvocation(args []string, environ []string, resolveDir func(beadID string) string) bdShowInvocation {
 	dir := ""
 	if beadID := extractBeadIDFromArgs(args); beadID != "" {
-		if resolved := resolveBeadDir(beadID); resolved != "" && resolved != "." {
+		if resolved := resolveDir(beadID); resolved != "" && resolved != "." {
 			dir = resolved
 		}
 	}
@@ -127,5 +129,5 @@ func newBdShowInvocation(args []string, environ []string) bdShowInvocation {
 }
 
 func currentBdShowInvocation(args []string) bdShowInvocation {
-	return newBdShowInvocation(args, os.Environ())
+	return newBdShowInvocation(args, os.Environ(), resolveBeadDir)
 }

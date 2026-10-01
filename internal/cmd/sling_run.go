@@ -315,11 +315,14 @@ func (d *slingDeps) orphanMolecule(info *beadInfo) bool {
 // 'database is read only' errors; the Dolt server handles commits.
 func setBDAutoCommitOff() (restore func()) {
 	prev := os.Getenv("BD_DOLT_AUTO_COMMIT")
+	//testpolicy:allow prod-no-setenv — every bd this process runs inherits its environment; scoped, and restored below; tests reach it only through slingDeps
 	_ = os.Setenv("BD_DOLT_AUTO_COMMIT", "off")
 	return func() {
 		if prev == "" {
+			//testpolicy:allow prod-no-setenv — removes the scoped override above, which the caller did not have
 			_ = os.Unsetenv("BD_DOLT_AUTO_COMMIT")
 		} else {
+			//testpolicy:allow prod-no-setenv — restores the value the scoped override above replaced
 			_ = os.Setenv("BD_DOLT_AUTO_COMMIT", prev)
 		}
 	}
