@@ -292,18 +292,6 @@ var treeWideGuards = []treeWideGuard{
 		},
 		judges: goFile,
 	},
-	{
-		pkg:     "internal/dispatch",
-		tests:   []string{"TestHoldFileName_MatchesSeatRefillPlugin"},
-		judges:  func(rel string) bool { return rel == "plugins/seat-refill/run.sh" },
-		removal: true,
-	},
-	{
-		pkg:     "internal/plugin",
-		tests:   []string{"TestRebuildGTRunsOnTheDaemonPath"},
-		judges:  func(rel string) bool { return strings.HasPrefix(rel, "plugins/rebuild-gt/") },
-		removal: true,
-	},
 }
 
 // treeWideGuard is one guard package's inputs: the test functions to run and

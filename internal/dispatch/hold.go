@@ -14,10 +14,12 @@ import (
 )
 
 // HoldFileName is the operator's town-wide dispatch hold: a file at the town
-// root whose existence parks automatic dispatch. It is the file the
-// seat-refill plugin already honors (plugins/seat-refill/run.sh), so one
-// `touch` stops both the nudges that ask for a sling and the code paths that
-// sling on their own.
+// root whose existence parks automatic dispatch. Every reader of it — spec
+// dispatch, the convoy feeders, the scheduler, scheduled_slings and the
+// daemon's dispatch step — reads this constant, so one `touch` stops both the
+// nudges that ask for a sling and the code paths that sling on their own. The
+// name predates the Go readers, from the deleted seat-refill plugin
+// (gt-4k3fj.8.6); an operator's hand brake is on disk under it.
 const HoldFileName = "seat-refill.hold"
 
 // HoldFilePath returns the operator hold file for a town.

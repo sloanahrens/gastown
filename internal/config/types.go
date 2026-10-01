@@ -3,7 +3,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1430,167 +1429,21 @@ type PolecatPool struct {
 	// OverflowAgent. Zero leaves the seat uncapped.
 	MaxOverflow int `json:"max_overflow,omitempty"`
 
-	// The keys below are the seat-refill plugin's dispatch policy
-	// (plugins/seat-refill/run.sh), which the plugin reads from here so a
-	// policy change is one edit in the file its neighbors live in
-	// (gt-y3pgh.12). A GT_SEAT_REFILL_* variable still overrides for the
-	// plugin's own tests. Absent means the DefaultSeatRefill* value.
-	//
-	// MaxPriority is the lowest priority number the plugin dispatches; a bead
-	// numbered higher is left for the operator. Default 2 (P0-P2).
-	MaxPriority *int `json:"max_priority,omitempty"`
-	// TopCandidates is how many candidate beads a nudge names. Default 3.
-	TopCandidates *int `json:"top_candidates,omitempty"`
-	// EmptySeconds is how long a seat must sit empty with work ready before a
-	// nudge fires. Default 300 (5m).
-	EmptySeconds *int `json:"empty_seconds,omitempty"`
-	// NudgeSeconds is the shortest gap between two nudges about one empty
-	// episode. Default 900 (15m).
-	NudgeSeconds *int `json:"nudge_seconds,omitempty"`
-	// DispatchEmptySeconds delays a direct sling until the seat has been empty
-	// this long. Default 0: fill at once.
-	DispatchEmptySeconds *int `json:"dispatch_empty_seconds,omitempty"`
-	// ProMax caps the pro seat, a class of work that reaches a seat only by
-	// carrying ProLabel. Default 1; 0 drops the seat.
-	ProMax *int `json:"pro_max,omitempty"`
-	// ProAgent is the agent the pro seat runs. Default "deepseek-pro".
-	ProAgent string `json:"pro_agent,omitempty"`
-	// ProLabel is the label a bead carries to reach the pro seat, and the one
-	// the other seats leave alone. Default "needs-pro".
-	ProLabel string `json:"pro_label,omitempty"`
-	// Mode is how an empty seat is filled: "sling" dispatches the bead
-	// directly, "nudge" asks the mayor instead. Default "sling".
-	Mode string `json:"mode,omitempty"`
-}
-
-// Defaults for PolecatPool's seat-refill policy keys. Each equals the value
-// plugins/seat-refill/run.sh dispatched on before the keys existed.
-const (
-	DefaultSeatRefillMaxPriority          = 2
-	DefaultSeatRefillTopCandidates        = 3
-	DefaultSeatRefillEmptySeconds         = 300
-	DefaultSeatRefillNudgeSeconds         = 900
-	DefaultSeatRefillDispatchEmptySeconds = 0
-	DefaultSeatRefillProMax               = 1
-	DefaultSeatRefillProAgent             = "deepseek-pro"
-	DefaultSeatRefillProLabel             = "needs-pro"
-	DefaultSeatRefillMode                 = "sling"
-)
-
-// intOr returns *v, or def when v is nil.
-func intOr(v *int, def int) int {
-	if v == nil {
-		return def
-	}
-	return *v
-}
-
-// GetMaxPriority returns the dispatch ceiling, or its default.
-func (p *PolecatPool) GetMaxPriority() int {
-	if p == nil {
-		return DefaultSeatRefillMaxPriority
-	}
-	return intOr(p.MaxPriority, DefaultSeatRefillMaxPriority)
-}
-
-// GetTopCandidates returns how many candidates a nudge names, or its default.
-func (p *PolecatPool) GetTopCandidates() int {
-	if p == nil {
-		return DefaultSeatRefillTopCandidates
-	}
-	return intOr(p.TopCandidates, DefaultSeatRefillTopCandidates)
-}
-
-// GetEmptySeconds returns the empty-for threshold, or its default.
-func (p *PolecatPool) GetEmptySeconds() int {
-	if p == nil {
-		return DefaultSeatRefillEmptySeconds
-	}
-	return intOr(p.EmptySeconds, DefaultSeatRefillEmptySeconds)
-}
-
-// GetNudgeSeconds returns the repeat cap between nudges, or its default.
-func (p *PolecatPool) GetNudgeSeconds() int {
-	if p == nil {
-		return DefaultSeatRefillNudgeSeconds
-	}
-	return intOr(p.NudgeSeconds, DefaultSeatRefillNudgeSeconds)
-}
-
-// GetDispatchEmptySeconds returns the delay before a direct sling, or its
-// default.
-func (p *PolecatPool) GetDispatchEmptySeconds() int {
-	if p == nil {
-		return DefaultSeatRefillDispatchEmptySeconds
-	}
-	return intOr(p.DispatchEmptySeconds, DefaultSeatRefillDispatchEmptySeconds)
-}
-
-// GetProMax returns the pro seat's cap, or its default.
-func (p *PolecatPool) GetProMax() int {
-	if p == nil {
-		return DefaultSeatRefillProMax
-	}
-	return intOr(p.ProMax, DefaultSeatRefillProMax)
-}
-
-// GetProAgent returns the pro seat's agent, or its default.
-func (p *PolecatPool) GetProAgent() string {
-	if p == nil || p.ProAgent == "" {
-		return DefaultSeatRefillProAgent
-	}
-	return p.ProAgent
-}
-
-// GetProLabel returns the pro seat's bead selector, or its default.
-func (p *PolecatPool) GetProLabel() string {
-	if p == nil || p.ProLabel == "" {
-		return DefaultSeatRefillProLabel
-	}
-	return p.ProLabel
-}
-
-// GetMode returns how an empty seat is filled, or its default.
-func (p *PolecatPool) GetMode() string {
-	if p == nil || p.Mode == "" {
-		return DefaultSeatRefillMode
-	}
-	return p.Mode
-}
-
-// Validate reports the seat-refill policy values the plugin cannot act on: a
-// count below zero, or a nudge naming no candidates. gt config set refuses a
-// value it rejects, and the config kernel checks the same method at load, so a
-// hand-edited settings/config.json stops the daemon instead of dispatching on
-// a value the plugin would silently ignore.
-func (p *PolecatPool) Validate() error {
-	if p == nil {
-		return nil
-	}
-	var errs []error
-	for _, k := range []struct {
-		key string
-		v   *int
-	}{
-		{"max_priority", p.MaxPriority},
-		{"empty_seconds", p.EmptySeconds},
-		{"nudge_seconds", p.NudgeSeconds},
-		{"dispatch_empty_seconds", p.DispatchEmptySeconds},
-		{"pro_max", p.ProMax},
-	} {
-		if k.v != nil && *k.v < 0 {
-			errs = append(errs, fmt.Errorf("polecat_pool.%s = %d: must be >= 0", k.key, *k.v))
-		}
-	}
-	if p.TopCandidates != nil && *p.TopCandidates < 1 {
-		errs = append(errs, fmt.Errorf("polecat_pool.top_candidates = %d: must be >= 1", *p.TopCandidates))
-	}
-	switch p.GetMode() {
-	case "sling", "nudge":
-	default:
-		errs = append(errs, fmt.Errorf("polecat_pool.mode = %q: must be sling or nudge", p.Mode))
-	}
-	return errors.Join(errs...)
+	// The keys below were the seat-refill plugin's dispatch policy
+	// (gt-y3pgh.12). seat-refill is deleted, folded into the spec dispatcher
+	// and the daemon's idle-seat check (gt-4k3fj.8.6), so nothing reads them.
+	// They are declared so a settings file that still carries them decodes
+	// under strict decoding, and kept verbatim so a rewrite does not drop
+	// operator data. Delete the keys from settings/config.json by hand.
+	MaxPriority          json.RawMessage `json:"max_priority,omitempty"`
+	TopCandidates        json.RawMessage `json:"top_candidates,omitempty"`
+	EmptySeconds         json.RawMessage `json:"empty_seconds,omitempty"`
+	NudgeSeconds         json.RawMessage `json:"nudge_seconds,omitempty"`
+	DispatchEmptySeconds json.RawMessage `json:"dispatch_empty_seconds,omitempty"`
+	ProMax               json.RawMessage `json:"pro_max,omitempty"`
+	ProAgent             json.RawMessage `json:"pro_agent,omitempty"`
+	ProLabel             json.RawMessage `json:"pro_label,omitempty"`
+	Mode                 json.RawMessage `json:"mode,omitempty"`
 }
 
 // MinSpawnGapD returns the parsed MinSpawnGap, or zero when unset/invalid.

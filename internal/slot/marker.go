@@ -15,8 +15,8 @@ import (
 )
 
 // An in-flight marker is a named flock outside the pool: visible to the same
-// readers as a slot hold (gt slot status, the dashboard's Gate panel,
-// plugins/rebuild-gt) without occupying a pool slot or counting toward
+// readers as a slot hold (gt slot status, the dashboard's Gate panel)
+// without occupying a pool slot or counting toward
 // Acquire's admission. AcquireMarker's refusal of a second same-named holder
 // is the point — two reviews of one diff must not both bill the backend
 // (gt-97cm). Crash safety and the owner file's display-only role are the

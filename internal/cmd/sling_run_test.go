@@ -32,8 +32,8 @@ func TestSlingRefusesPolecatsByRole(t *testing.T) {
 		{"mayor with stale GT_POLECAT", map[string]string{"GT_ROLE": "mayor", "GT_POLECAT": "Toast"}, false},
 		{"crew", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, false},
 		// gt-vsc9w: the daemon runs script plugins with GT_ROLE=daemon/plugin.
-		// seat-refill's direct dispatch slings from there; read as rig
-		// "daemon", polecat "plugin", every one of its slings was refused.
+		// A plugin dispatching from there read as rig "daemon", polecat
+		// "plugin", so every one of its slings was refused.
 		{"daemon plugin runner", map[string]string{"GT_ROLE": "daemon/plugin"}, false},
 		{"daemon job actor", map[string]string{"GT_ROLE": "daemon/spec-dispatch"}, false},
 	}
@@ -863,9 +863,9 @@ func TestSlingBatchGetsTheResolvedRequest(t *testing.T) {
 }
 
 // TestSlingRefusalSilencesUsage (gt-fudap): a refusal prints its own reason and
-// remediation, not cobra's usage block. seat-refill keeps only the last line of
-// a failed sling (plugins/seat-refill/run.sh), and the usage block was the whole
-// of what its log showed; the last line must instead carry the remediation.
+// remediation, not cobra's usage block. The last line was all a dispatcher log
+// kept of a failed sling, and the usage block was the whole of it; the last line
+// must instead carry the remediation.
 func TestSlingRefusalSilencesUsage(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)

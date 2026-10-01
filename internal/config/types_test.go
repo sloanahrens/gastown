@@ -169,11 +169,12 @@ func TestTownSettings_DisabledPatrols_OmitemptyWhenNil(t *testing.T) {
 
 // --- PolecatPool knobs ---
 
-// TestTownSettings_RetiredLocalPoolKeysStillLoad: the live town config still
-// carries the retired local-model seat (local_agent, max_local, idle_fill,
-// D4). It must decode under strict decoding, keep the live seat (overflow_agent,
+// TestTownSettings_RetiredPoolKeysStillLoad: the live town config still
+// carries the retired local-model seat (local_agent, max_local, idle_fill, D4)
+// and the retired seat-refill policy (max_priority and the rest, gt-4k3fj.8.6).
+// It must decode under strict decoding, keep the live seat (overflow_agent,
 // max_overflow, min_spawn_gap), and write the retired keys back verbatim.
-func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
+func TestTownSettings_RetiredPoolKeysStillLoad(t *testing.T) {
 	t.Parallel()
 	settingsJSON := `{
 		"type": "town-settings",
@@ -183,6 +184,8 @@ func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 			"local_agent": "local-coder-polecat",
 			"max_local": 0,
 			"idle_fill": true,
+			"max_priority": 2,
+			"mode": "sling",
 			"min_spawn_gap": "4m",
 			"overflow_agent": "deepseek-flash",
 			"max_overflow": 3
@@ -212,7 +215,10 @@ func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"local_agent": "local-coder-polecat"`, `"max_local": 0`, `"idle_fill": true`} {
+	for _, want := range []string{
+		`"local_agent": "local-coder-polecat"`, `"max_local": 0`, `"idle_fill": true`,
+		`"max_priority": 2`, `"mode": "sling"`,
+	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("saved settings dropped retired key %s:\n%s", want, raw)
 		}

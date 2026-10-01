@@ -78,17 +78,17 @@ func TestOperatorHold_EmptyTownRoot_AllowsDispatch(t *testing.T) {
 	}
 }
 
-// The hold file is the seat-refill plugin's; this pins that Go and the shell
-// read the same path, so neither can drift to a name the other ignores.
-func TestHoldFileName_MatchesSeatRefillPlugin(t *testing.T) {
+// TestHoldFileName_IsTheOperatorHandBrakeName pins the literal. It used to be
+// pinned against plugins/seat-refill/run.sh, the last shell reader of the
+// name; that plugin is deleted (gt-4k3fj.8.6) and every remaining reader —
+// spec dispatch, the convoy feeders, the scheduler, scheduled_slings and the
+// daemon's dispatch step — reads this constant. An operator's hand brake is
+// on disk under this name, so a rename would silently lift every hold in the
+// town.
+func TestHoldFileName_IsTheOperatorHandBrakeName(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "seat-refill", "run.sh"))
-	if err != nil {
-		t.Fatalf("read seat-refill run.sh: %v", err)
-	}
-	want := `$TOWN_ROOT/` + HoldFileName
-	if !strings.Contains(string(data), want) {
-		t.Errorf("plugins/seat-refill/run.sh does not default its hold file to %s", want)
+	if HoldFileName != "seat-refill.hold" {
+		t.Errorf("HoldFileName = %q, want seat-refill.hold", HoldFileName)
 	}
 }
 

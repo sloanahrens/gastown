@@ -193,9 +193,6 @@ func (t *Town) loadSettings() error {
 	if s.Version > config.CurrentTownSettingsVersion {
 		return fmt.Errorf("%s: %w: got %d, max supported %d", t.path(FileSettings), config.ErrInvalidVersion, s.Version, config.CurrentTownSettingsVersion)
 	}
-	if err := s.PolecatPool.Validate(); err != nil {
-		return oneLine(t.path(FileSettings), err)
-	}
 	if err := t.checkLiteralSecrets(&s); err != nil {
 		return err
 	}

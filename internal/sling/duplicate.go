@@ -131,10 +131,9 @@ func DecideDuplicates(beadID string, matches []DuplicateMatch) DuplicateDecision
 		b.WriteString("  Two beads describing one defect from different vantage points share no\n")
 		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n\n")
 		writeMatchList(&b, blocking)
-		// One line, and the report's last: seat-refill logs only the last line
-		// of a failed sling (plugins/seat-refill/run.sh), so it has to carry
-		// both the reason and the remediation or the dispatcher log is blank
-		// again (gt-fudap).
+		// One line, and the report's last: a dispatcher log keeps only the last
+		// line of a failed sling, so it has to carry both the reason and the
+		// remediation or the log is blank again (gt-fudap).
 		fmt.Fprintf(&b, "\nRefusing to sling %s: %d live bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
 			beadID, len(blocking), beadID)
 	} else {

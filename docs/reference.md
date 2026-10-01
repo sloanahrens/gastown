@@ -200,33 +200,6 @@ migration's commit does not fsync through to the host disk. Set `GT_TEST_DOLT_TM
 instead, for a Docker runtime that cannot mount tmpfs there. Measurements:
 `docs/plans/2026-09-24-test-suite-concurrency-design.md`.
 
-### Seat Refill (`polecat_pool`)
-
-The seat-refill plugin's dispatch policy lives in the town's
-`settings/config.json`, under `polecat_pool`, beside the seats it fills:
-`max_priority` is the ceiling on a candidate bead's number, `empty_seconds` and
-`nudge_seconds` are the nudge cadence, `top_candidates` and
-`dispatch_empty_seconds` tune what a nudge says and when a direct sling waits,
-and `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and `mode`
-chooses between filling an empty seat directly and nudging the mayor about it.
-`gt config get --help` lists the keys with their defaults; `gt config get
-polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
-config set polecat_pool.<key> <value>`.
-
-A value the plugin cannot act on is refused rather than ignored: `gt config set`
-rejects it at the write, and the daemon refuses to start from a file carrying
-one, naming the file and the key.
-
-A `GT_SEAT_REFILL_*` variable overrides the file. That is a test seam
-(`plugins/seat-refill/run_test.sh` drives the plugin through it), the same way
-the plugin's timeouts and paths are overridable; it is not the operator's
-switch. `settings/daemon.env` is for secrets and process environment (below),
-and the `daemon.env` map in `settings/config.json` is the ambient environment
-the daemon exports to every session it spawns. A dispatch policy put in either
-place is invisible to `gt config`, unvalidated, and applied to every session
-rather than to the plugin that reads it — which is how raising the ceiling to P3
-took two tries (gt-y3pgh.12).
-
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with
@@ -609,9 +582,9 @@ gt config agent remove <name>     # Remove custom agent (built-ins protected)
 gt config default-agent [name]    # Get or set town default agent
 
 # Town settings by dot-notation key (gt config get --help lists the keys)
-gt config get polecat_pool.max_priority     # Effective value: the file's, else
-                                            # the default
-gt config set polecat_pool.max_priority 3   # Refused if the value cannot work
+gt config get scheduler.max_polecats   # Effective value: the file's, else the
+                                       # default
+gt config set scheduler.max_polecats 5 # Refused if the value cannot work
 ```
 
 **Built-in agents**: `claude`, `groq-compound` (the Claude CLI over Groq). Every

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tool-updater/run.sh — Upgrade beads (bd) and dolt via Homebrew.
 #
-# gt is managed separately via rebuild-gt (builds from source).
+# gt is managed separately by the daemon's rebuild_gt job, which builds it
+# from source (internal/daemon/rebuild_gt.go).
 # This plugin handles the Homebrew-installed tools on a weekly cadence.
 
 set -euo pipefail

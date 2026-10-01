@@ -78,7 +78,7 @@ checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, the convoy
 bookkeeping ("tracked by", "checking convoy"), clearAlerts lines, a polecat
 agent bead's own status writes, and a townhealth line that repeats the last
 one shown but for the age and the exec-tax reading it carries. Landings,
-rejections, escalations, upgrade restarts, seat-refill runs and bead
+rejections, escalations, upgrade restarts, plugin runs and bead
 create/close/status changes always show, and a hidden line that reports a
 failure shows anyway. --all (or --verbose) shows everything.
 

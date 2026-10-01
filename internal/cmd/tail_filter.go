@@ -11,7 +11,7 @@ import (
 
 // Hiding is by pattern on what the town does every few seconds, so anything
 // the patterns do not name (landings, rejections, escalations, upgrade
-// restarts, seat-refill dispatches, bead create/close/status changes) shows.
+// restarts, plugin dispatches, bead create/close/status changes) shows.
 
 // tailRoutineDaemon matches the daemon.log lines that say "ran, nothing
 // happened": the heartbeat, plugin handler skips, the patrols a config leaves

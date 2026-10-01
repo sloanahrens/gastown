@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -190,6 +191,13 @@ type Daemon struct {
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
+
+	// rebuildGTStaleFn reads binary staleness for the rebuild_gt job (see
+	// rebuild_gt.go); nil is version.CheckStaleBinaryFresh, which shells out
+	// to git. rebuildGTGateFn reads the container-gate picture; nil is the
+	// slot package, which shells out to docker. Tests answer both.
+	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
+	rebuildGTGateFn  func() (busy string, reservable bool)
 
 	// lastDoltWarningTime is when Dolt health warnings were last reported.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -385,6 +393,12 @@ type Daemon struct {
 	// gitHygieneRunning is the git_hygiene patrol's single-flight guard
 	// (git_hygiene.go).
 	gitHygieneRunning atomic.Bool
+
+	// rebuildGTRunning is the rebuild_gt job's single-flight guard, and
+	// rebuildGTBlock is how long the current "due and not installed" episode
+	// has run (rebuild_gt.go).
+	rebuildGTRunning atomic.Bool
+	rebuildGTBlock   rebuildGTBlock
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
@@ -1295,6 +1309,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Clean merged and orphaned branches and gc the rig repos when due
 	// (was the git-hygiene plugin, gt-4k3fj.8.5).
 	{name: "git-hygiene", run: (*Daemon).triggerGitHygiene},
+
+	// Bring the installed gt binary in force from main when it falls behind
+	// (was the rebuild-gt plugin, gt-4k3fj.8.6). lifecycle: the install makes
+	// the daemon restart, which the town E-stop holds.
+	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
 
 	// Compute the town health report and write the one health file gt
 	// status --line reads (gt-s3rec.2). Last, so it sees this tick's Dolt

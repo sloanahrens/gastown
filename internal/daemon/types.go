@@ -304,6 +304,10 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		if config.Patrols.GitHygiene != nil {
 			return config.Patrols.GitHygiene.Enabled
 		}
+	case "rebuild_gt":
+		if config.Patrols.RebuildGT != nil {
+			return config.Patrols.RebuildGT.Enabled
+		}
 	}
 	return true // Default: enabled
 }
