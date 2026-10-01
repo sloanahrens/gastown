@@ -2,6 +2,8 @@ package land
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,6 +111,142 @@ func defuseMarkers(line string) string {
 // attempt counter the formula and the deacon use.
 func CountRejections(notes string) int {
 	return strings.Count(notes, MergeRejectionNoteMarker+" (attempt")
+}
+
+// rejectionBlockRE finds a rejection block's header. The marker must open a
+// line: findings, reasons and gate tails are agent-supplied text, and a
+// marker quoted inside one of them is content, not a block (gt-9bioi.1).
+var rejectionBlockRE = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(MergeRejectionNoteMarker) + ` \(attempt [0-9]+\): `)
+
+// rejectionFindingRE reads one finding line of a rejection block: the
+// "- id:X sev:Y path:line — title" FormatRejectionNote writes. The path is
+// greedy up to the last colon, because it may contain none and the line
+// number is what follows the last one.
+var rejectionFindingRE = regexp.MustCompile(`^- id:(\S+) sev:(\S+) (.*):(\d+) — (.*)$`)
+
+// ParseRejectionNote reads the last MERGE REJECTION block in notes, the one
+// the live attempt wrote (a resubmission appends a new block, as with
+// ParseReadyNote). ok is false when notes holds no block whose header parses.
+//
+// A reader that needs only which attempt a bead is on, or what the last
+// refusal said, reads this rather than re-splitting the notes: the format is
+// FormatRejectionNote's, and a second parser drifts from it (gt-9bioi.1).
+func ParseRejectionNote(notes string) (RejectionNote, bool) {
+	blocks := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	if len(blocks) == 0 {
+		return RejectionNote{}, false
+	}
+	lines := strings.Split(notes[blocks[len(blocks)-1][0]:], "\n")
+	var n RejectionNote
+	attempt, kind, reason, ok := parseRejectionHeader(lines[0])
+	if !ok {
+		return RejectionNote{}, false
+	}
+	n.Attempt, n.Kind, n.Reason = attempt, kind, reason
+	// Only the first occurrence of each field is read: the block runs to the
+	// end of the notes, so later prose belongs to no rejection field.
+	seen := map[string]bool{}
+	inTail := false
+	var tail []string
+	for _, line := range lines[1:] {
+		if inTail {
+			if strings.HasPrefix(line, "  | ") {
+				tail = append(tail, strings.TrimPrefix(line, "  | "))
+				continue
+			}
+			inTail = false
+		}
+		if strings.HasPrefix(line, "  | ") {
+			inTail = true
+			tail = append(tail, strings.TrimPrefix(line, "  | "))
+			continue
+		}
+		if f, ok := parseFindingLine(line); ok {
+			n.Findings = append(n.Findings, f)
+			continue
+		}
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if seen[key] {
+			continue
+		}
+		switch key {
+		case "branch":
+			n.Branch, seen[key] = strings.TrimPrefix(value, "refs/heads/"), true
+		case "target":
+			n.Target, seen[key] = value, true
+		case "mr":
+			n.MR, seen[key] = value, true
+		case "head":
+			n.Head, seen[key] = value, true
+		case "score":
+			if score, err := strconv.ParseFloat(value, 64); err == nil {
+				n.Receipt = &Receipt{Score: score}
+			}
+			seen[key] = true
+		case "unresolved":
+			if n.Receipt == nil {
+				n.Receipt = &Receipt{}
+			}
+			for _, id := range strings.Split(value, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					n.Receipt.Unresolved = append(n.Receipt.Unresolved, id)
+				}
+			}
+			seen[key] = true
+		case "conflicting":
+			for _, f := range strings.Split(value, ",") {
+				if f = strings.TrimSpace(f); f != "" {
+					n.Conflicting = append(n.Conflicting, f)
+				}
+			}
+			seen[key] = true
+		}
+	}
+	if len(tail) > 0 {
+		n.GateTail = strings.Join(tail, "\n")
+	}
+	return n, true
+}
+
+// parseRejectionHeader reads the "MERGE REJECTION (attempt N): kind - reason"
+// line. The class is dropped unless it is one word: the reason is free text
+// and its first word is not a class (the rule gt-1jig's readers use).
+func parseRejectionHeader(header string) (attempt int, kind, reason string, ok bool) {
+	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(header), MergeRejectionNoteMarker))
+	num, after, found := strings.Cut(strings.TrimPrefix(rest, "(attempt "), ")")
+	if !found {
+		return 0, "", "", false
+	}
+	attempt, err := strconv.Atoi(strings.TrimSpace(num))
+	if err != nil || attempt < 1 {
+		return 0, "", "", false
+	}
+	reason = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(after), ":"))
+	if class, text, found := strings.Cut(reason, " - "); found {
+		class = strings.ToLower(strings.TrimSpace(class))
+		if class != "" && !strings.ContainsAny(class, " \t") {
+			kind, reason = class, strings.TrimSpace(text)
+		}
+	}
+	return attempt, kind, reason, true
+}
+
+// parseFindingLine reads one "- id:… sev:… path:line — title" line.
+func parseFindingLine(line string) (Finding, bool) {
+	m := rejectionFindingRE.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil {
+		return Finding{}, false
+	}
+	lineNo, err := strconv.Atoi(m[4])
+	if err != nil {
+		return Finding{}, false
+	}
+	return Finding{ID: m[1], Severity: m[2], Path: m[3], Line: lineNo, Title: m[5]}, true
 }
 
 // EmptyMerge is one empty-merge refusal's evidence (gt-j5cc).
