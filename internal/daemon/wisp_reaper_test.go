@@ -194,8 +194,7 @@ func TestWispReaperAutoCloseKnob(t *testing.T) {
 	}
 }
 
-// With no server, no GT_DOLT_HOST (the hermetic harness scrubs GT_* and
-// BEADS_*) and no town config, the host is the local default.
+// With no town endpoint the host is the local default.
 func TestDoltServerHostDefaultsToLocalhost(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}

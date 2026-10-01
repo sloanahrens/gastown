@@ -358,6 +358,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One Dolt endpoint source in the daemon** (gt-y3pgh.9) — the daemon's
+  Dolt server manager, wisp reaper, compactor and maintenance gc take the
+  endpoint from `config.ResolveDoltEndpoint` only. `patrols.dolt_server.port`
+  and `.host` in `daemon.json` still load but are ignored, the reaper no
+  longer falls back to 3307 when the town names no endpoint, and a
+  `dolt_server` block in a town without an endpoint leaves the server
+  unmanaged. gt no longer exports `GT_DOLT_HOST`/`GT_DOLT_PORT` to its
+  children: nothing read them. bd still gets `BEADS_DOLT_*`.
+
 - **The Dolt endpoint is config, never environment** (gt-y3pgh.3, D5 Q3,
   G3-05) — the town's endpoint is `"dolt": {"host", "port"}` in
   `mayor/town.json`, written by `gt install` and `gt config set dolt.port`

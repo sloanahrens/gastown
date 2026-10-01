@@ -367,10 +367,11 @@ func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
 }
 
 // DoltEndpointEnvKeys are the environment variables gt exports to name the
-// Dolt endpoint for its children (bd reads the BEADS_ ones). gt itself never
-// reads them. A startup boundary unsets all of them before exporting
-// ConfiguredDoltEnv.
-var DoltEndpointEnvKeys = []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
+// Dolt endpoint for the bd it starts. gt itself never reads them. A startup
+// boundary unsets all of them before exporting ConfiguredDoltEnv.
+// GT_DOLT_HOST and GT_DOLT_PORT are not exported: nothing reads them
+// (gt-y3pgh.9).
+var DoltEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
 
 // ConfiguredDoltEnv returns the Dolt endpoint variables a startup boundary
 // (gt up, the daemon) exports to the children it spawns, from the town's
@@ -391,7 +392,7 @@ func ConfiguredDoltEnv(townRoot string) map[string]string {
 
 func doltEndpointEnvValue(ep DoltEndpoint, key string) string {
 	switch key {
-	case "GT_DOLT_HOST", "BEADS_DOLT_SERVER_HOST":
+	case "BEADS_DOLT_SERVER_HOST":
 		return ep.Host
 	default:
 		return strconv.Itoa(ep.Port)

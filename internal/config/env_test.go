@@ -888,7 +888,7 @@ func TestAgentEnv_IgnoresInheritedDoltEndpoint(t *testing.T) {
 	getenv := envOf("GT_DOLT_PORT", "13307", "GT_DOLT_HOST", "127.0.0.2",
 		"BEADS_DOLT_SERVER_PORT", "88888", "BEADS_DOLT_PORT", "99999", "BEADS_DOLT_SERVER_HOST", "stale-host")
 	env := AgentEnv(AgentEnvConfig{Getenv: getenv, Role: "polecat", Rig: "myrig", AgentName: "Toast", TownRoot: t.TempDir()})
-	for _, key := range DoltEndpointEnvKeys {
+	for _, key := range append([]string{"GT_DOLT_HOST", "GT_DOLT_PORT"}, DoltEndpointEnvKeys...) {
 		assertNotSet(t, env, key)
 	}
 }
@@ -1039,9 +1039,11 @@ func TestNormalizeConfiguredDoltEnv_TownEndpointReplacesStaleEnv(t *testing.T) {
 		"BEADS_DOLT_PORT=9999",
 		"KEEP=1",
 	}, root))
+	// GT_DOLT_* is no longer exported (gt-y3pgh.9), so a stale inherited
+	// value passes through untouched: nothing reads it.
 	want := map[string]string{
-		"GT_DOLT_HOST": "127.0.0.2", "BEADS_DOLT_SERVER_HOST": "127.0.0.2",
-		"GT_DOLT_PORT": "5507", "BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507",
+		"GT_DOLT_HOST": "stale-host", "BEADS_DOLT_SERVER_HOST": "127.0.0.2",
+		"GT_DOLT_PORT": "9999", "BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507",
 		"KEEP": "1",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1052,8 +1054,8 @@ func TestNormalizeConfiguredDoltEnv_TownEndpointReplacesStaleEnv(t *testing.T) {
 func TestNormalizeConfiguredDoltEnv_EndpointWithoutHostClearsStaleHost(t *testing.T) {
 	t.Parallel()
 	root := writeDoltTown(t, "", "listener:\n  port: 5507\n")
-	got := envSliceMap(NormalizeConfiguredDoltEnv([]string{"GT_DOLT_HOST=stale-host", "BEADS_DOLT_SERVER_HOST=stale-host", "GT_DOLT_PORT=9999"}, root))
-	want := map[string]string{"GT_DOLT_PORT": "5507", "BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507"}
+	got := envSliceMap(NormalizeConfiguredDoltEnv([]string{"BEADS_DOLT_SERVER_HOST=stale-host", "BEADS_DOLT_PORT=9999"}, root))
+	want := map[string]string{"BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NormalizeConfiguredDoltEnv = %v, want %v", got, want)
 	}
@@ -1070,7 +1072,7 @@ func TestNormalizeConfiguredDoltEnv_NoEndpointLeavesBase(t *testing.T) {
 func TestConfiguredDoltEnv(t *testing.T) {
 	t.Parallel()
 	got := ConfiguredDoltEnv(writeDoltTown(t, "", "listener:\n  port: 5507\n"))
-	want := map[string]string{"GT_DOLT_PORT": "5507", "BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507"}
+	want := map[string]string{"BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConfiguredDoltEnv = %v, want %v", got, want)
 	}
@@ -1123,9 +1125,9 @@ func TestAgentEnv_InjectsDoltPort(t *testing.T) {
 			cfg := tc.cfg
 			cfg.Getenv = getenv
 			env := AgentEnv(cfg)
-			assertEnv(t, env, "GT_DOLT_HOST", "127.0.0.2")
 			assertEnv(t, env, "BEADS_DOLT_SERVER_HOST", "127.0.0.2")
-			assertEnv(t, env, "GT_DOLT_PORT", "3307")
+			assertNotSet(t, env, "GT_DOLT_HOST")
+			assertNotSet(t, env, "GT_DOLT_PORT")
 			assertEnv(t, env, "BEADS_DOLT_SERVER_PORT", "3307")
 			assertEnv(t, env, "BEADS_DOLT_PORT", "3307")
 		})

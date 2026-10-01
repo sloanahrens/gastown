@@ -48,10 +48,9 @@ func testDoltServerDaemon(t *testing.T) *Daemon {
 	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
 
 	// Refuse to run against anything but the package's ephemeral container.
-	// d.doltServerPort() falls back to doltserver.DefaultPort (3307) — the
-	// live production town — when the town names no endpoint. Silently
-	// proceeding in that case would let every test below create and drop
-	// databases on production instead of the disposable container.
+	// d.doltServerPort() is 0 when the town names no endpoint; a port that
+	// is not the container's would let every test below create and drop
+	// databases on some other server instead of the disposable container.
 	if port := d.doltServerPort(); strconv.Itoa(port) != containerPort {
 		t.Fatalf("refusing to run: Dolt port resolved to %d (production default is %d), want ephemeral container port %s (town endpoint not read?)",
 			port, doltserver.DefaultPort, containerPort)

@@ -106,10 +106,11 @@ type DoltServerConfig struct {
 	// External indicates the server is externally managed (daemon monitors only).
 	External bool `json:"external,omitempty"`
 
-	// Port is the MySQL protocol port (default 3306).
-	Port int `json:"port,omitempty"`
-
-	// Host is the bind/connect address (default 127.0.0.1).
+	// Port and Host are the town's Dolt endpoint, filled from
+	// config.ResolveDoltEndpoint when the daemon builds its server manager.
+	// daemon.json may still carry them, but the values there are ignored
+	// (gt-y3pgh.9): mayor/town.json "dolt" is the one source.
+	Port int    `json:"port,omitempty"`
 	Host string `json:"host,omitempty"`
 
 	// User is the MySQL user name (default root).
