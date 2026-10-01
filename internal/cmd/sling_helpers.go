@@ -661,11 +661,7 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	if townRoot != "" {
 		updateDir = resolveBeadDirFromTownRoot(townRoot, beadID)
 	}
-	if err := BdCmd("update", beadID, "--description="+newDesc).
-		Dir(updateDir).
-		StripBeadsDir().
-		WithAutoCommit().
-		Run(); err != nil {
+	if err := pinnedBd(updateDir).Update(beadID, beads.UpdateOptions{Description: &newDesc}); err != nil {
 		return fmt.Errorf("updating bead description: %w", err)
 	}
 

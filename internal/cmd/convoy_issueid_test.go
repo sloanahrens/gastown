@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -52,8 +53,8 @@ func TestConvoyCreate_RejectsNonBeadIDTarget(t *testing.T) {
 	if !strings.Contains(err.Error(), `"om-gate coverage: om"`) {
 		t.Fatalf("error should name the offending target, got: %v", err)
 	}
-	if strings.Contains(fx.bd.log(), "create ") {
-		t.Fatalf("convoy was created before the target was refused:\n%s", fx.bd.log())
+	if all, _ := fx.town.List(beads.ListOptions{Status: "all", Priority: -1}); len(all) != 0 {
+		t.Fatalf("convoy was created before the target was refused: %v", all)
 	}
 }
 

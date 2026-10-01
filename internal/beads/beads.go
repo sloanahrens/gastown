@@ -635,6 +635,9 @@ type ListOptions struct {
 
 // CreateOptions specifies options for creating an issue.
 type CreateOptions struct {
+	// ID is the new issue's ID; "" lets bd mint one. An ID whose prefix bd
+	// would not read as the database's (NeedsForceForID) is forced.
+	ID          string
 	Title       string
 	Type        string   // Deprecated: use Labels instead. Was "task", "bug", "feature", "epic".
 	Label       string   // Deprecated: use Labels instead. Backward-compatible single-label form.
@@ -3013,6 +3016,12 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 
 	args := []string{"create", "--json"}
 
+	if opts.ID != "" {
+		args = append(args, "--id="+opts.ID)
+		if NeedsForceForID(opts.ID) {
+			args = append(args, "--force")
+		}
+	}
 	if opts.Title != "" {
 		args = append(args, "--title="+opts.Title)
 	}

@@ -27,6 +27,16 @@ func slingGenerateShortID() string {
 type slingConvoyTown struct {
 	root string
 	bd   beads.BDRunner // nil is the bd on PATH
+	// db is the town database; nil is bd pinned to the town's .beads.
+	db beads.Client
+}
+
+// townDB is the town database.
+func (c slingConvoyTown) townDB() beads.Client {
+	if c.db != nil {
+		return c.db
+	}
+	return beads.NewPinned(c.beadsDir())
 }
 
 func (c slingConvoyTown) beadsDir() string { return filepath.Join(c.root, ".beads") }
@@ -168,22 +178,16 @@ func (c slingConvoyTown) createAutoConvoy(beadID, beadTitle string, owned bool, 
 		Formula:    strings.TrimSpace(formula),
 	})
 
-	createArgs := []string{
-		"create",
-		"--type=task",
-		"--id=" + convoyID,
-		"--title=" + convoyTitle,
-		"--description=" + description,
-		"--labels=" + convoyLabels(owned),
-	}
-	if beads.NeedsForceForID(convoyID) {
-		createArgs = append(createArgs, "--force")
-	}
-
-	// Use BdCmd with WithAutoCommit to ensure convoy is persisted even when
-	// gt sling has set BD_DOLT_AUTO_COMMIT=off globally (gt-9xum2 root cause fix).
-	if out, err := BdCmd(createArgs...).Dir(c.beadsDir()).WithAutoCommit().Via(c.bd).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("creating convoy: %w\noutput: %s", err, out)
+	// The pinned client auto-commits, so the convoy is persisted even when
+	// gt sling has set BD_DOLT_AUTO_COMMIT=off globally (gt-9xum2).
+	if _, err := c.townDB().Create(beads.CreateOptions{
+		ID:          convoyID,
+		Title:       convoyTitle,
+		Description: description,
+		Labels:      convoyLabels(owned),
+		Priority:    -1,
+	}); err != nil {
+		return "", fmt.Errorf("creating convoy: %w", err)
 	}
 
 	// Add tracking relation: convoy tracks the issue.

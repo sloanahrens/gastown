@@ -398,6 +398,12 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 	f.tick()
 	f.seq++
 	id := fmt.Sprintf("%s-f%d", f.prefix, f.seq)
+	if opts.ID != "" {
+		if _, taken := f.issues[opts.ID]; taken {
+			return nil, fmt.Errorf("issue %s already exists", opts.ID)
+		}
+		id = opts.ID
+	}
 	var deps []edge
 	if opts.Parent != "" {
 		p, ok := f.issues[opts.Parent]
