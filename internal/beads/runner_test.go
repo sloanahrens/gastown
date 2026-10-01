@@ -139,7 +139,7 @@ func TestWrapErrorMapsNotFoundAndGuard(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(func(args []string) reply {
 		if args[0] == "show" {
-			return reply{stderr: "Error: no issue found matching \"gt-x\"", err: exitError{1}}
+			return reply{stderr: "Error: no issue found matching \"gt-x\"", err: exitError{bdNotFoundExit}}
 		}
 		return reply{stderr: "guard not held", err: exitError{bdGuardNotHeldExit}}
 	})
@@ -181,7 +181,7 @@ func TestPlainRunsExactlyWhatItIsGiven(t *testing.T) {
 func TestPlainErrorKeepsOutput(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(func([]string) reply {
-		return reply{stdout: "partial\n", stderr: "Error: issue gt-9 not found\n", err: exitError{1}}
+		return reply{stdout: "partial\n", stderr: "Error: issue gt-9 not found\n", err: exitError{bdNotFoundExit}}
 	})
 	b := NewPlain(t.TempDir(), nil)
 	b.exec = r.exec
@@ -194,10 +194,10 @@ func TestPlainErrorKeepsOutput(t *testing.T) {
 		t.Errorf("Output = %q", cliErr.Output())
 	}
 	if !errors.Is(err, ErrNotFound) {
-		t.Error("not-found stderr does not unwrap to ErrNotFound")
+		t.Error("not-found exit does not unwrap to ErrNotFound")
 	}
 	var code interface{ ExitCode() int }
-	if !errors.As(err, &code) || code.ExitCode() != 1 {
+	if !errors.As(err, &code) || code.ExitCode() != bdNotFoundExit {
 		t.Error("exit status lost")
 	}
 }

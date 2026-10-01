@@ -2004,35 +2004,6 @@ func TestIsBeadsRepo(t *testing.T) {
 	}
 }
 
-// TestWrapError tests error wrapping.
-// ZFC: Only test ErrNotFound detection. ErrNotARepo and ErrSyncConflict
-// were removed as per ZFC - agents should handle those errors directly.
-func TestWrapError(t *testing.T) {
-	b := New("/test")
-
-	tests := []struct {
-		stderr  string
-		wantErr error
-		wantNil bool
-	}{
-		{"Issue not found: gt-xyz", ErrNotFound, false},
-		{"Issue gt-xyz not found", ErrNotFound, false},
-	}
-
-	for _, tt := range tests {
-		err := b.wrapError(nil, nil, tt.stderr, []string{"test"})
-		if tt.wantNil {
-			if err != nil {
-				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)
-			}
-		} else {
-			if err != tt.wantErr {
-				t.Errorf("wrapError(%q) = %v, want %v", tt.stderr, err, tt.wantErr)
-			}
-		}
-	}
-}
-
 // TestNormalizeBugTitle tests title normalization for duplicate detection.
 func TestNormalizeBugTitle(t *testing.T) {
 	tests := []struct {

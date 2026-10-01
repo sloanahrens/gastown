@@ -25,44 +25,29 @@ var infrastructureFailures = []string{
 	"Error: not found",
 }
 
-func TestBDReportedNotFound(t *testing.T) {
+func TestBDSaidNotFound(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		exit   int
 		stdout string
-		stderr string
 		want   bool
 	}{
-		{"machine exit 20", 20, "", "", true},
-		{"envelope kind", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"not_found","message":"issue gt-x not found"}}`, "", true},
-		// bd 461b0f0's comments add and dep add report an unknown id as the
-		// catch-all kind, not not_found; the resolver sentence still decides.
-		{"envelope internal kind with resolver sentence", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"resolving dependency ID gt-nosuch: resolving issue ID gt-nosuch: no issue found matching \"gt-nosuch\""}}`, "", true},
-		{"envelope internal kind without sentence", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"table not found: issues"}}`, "", false},
-		{"envelope other kind", 25, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"database not found: gastown"}}`, "", false},
-		{"legacy show --json", 1, `{"error": "no issues found matching the provided IDs", "schema_version": 1}`, "Issue gt-x not found\nHint: this ID may have never existed", true},
-		{"legacy stderr sentence", 1, "", "Issue gt-zz not found\nHint: ...", true},
-		{"error prefix", 1, "", "Error: issue gt-nope not found\n", true},
-		{"quoted id", 1, "", "Error: issue 'gt-nope' not found", true},
-		{"issue not found colon", 1, "", "Error: issue not found: gt-nope", true},
-		{"resolver", 1, "", `Error: no issue found matching "gt-nope"`, true},
-		{"wisp", 1, "", "Error: wisp gt-wisp-9 not found", true},
-		{"no issue found colon", 1, "", "Error: no issue found: tr-rig-testrig", true},
-		{"legacy json other error", 1, `{"error": "database not found: gastown"}`, "", false},
-		{"guard exit", 13, "", "guard not held", false},
+		{"machine exit 20", 20, "", true},
+		{"envelope kind", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"not_found","message":"issue gt-x not found"}}`, true},
+		// The not-found sentence under another kind is not absence: bd
+		// types an unknown id as not_found (be-2bc).
+		{"envelope internal kind with resolver sentence", 1, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"resolving issue ID gt-nosuch: no issue found matching \"gt-nosuch\""}}`, false},
+		{"envelope other kind", 25, `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"store_unavailable","message":"database not found: gastown"}}`, false},
+		{"legacy json error", 1, `{"error": "no issues found matching the provided IDs", "schema_version": 1}`, false},
+		{"guard exit", 13, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := BDReportedNotFound(tc.exit, []byte(tc.stdout), []byte(tc.stderr)); got != tc.want {
-				t.Fatalf("BDReportedNotFound(%d, %q, %q) = %v, want %v", tc.exit, tc.stdout, tc.stderr, got, tc.want)
+			if got := bdSaidNotFound(tc.exit, []byte(tc.stdout)); got != tc.want {
+				t.Fatalf("bdSaidNotFound(%d, %q) = %v, want %v", tc.exit, tc.stdout, got, tc.want)
 			}
 		})
-	}
-	for _, stderr := range infrastructureFailures {
-		if BDReportedNotFound(1, nil, []byte(stderr)) {
-			t.Errorf("infrastructure failure %q classified as not found", stderr)
-		}
 	}
 }
 
@@ -101,9 +86,6 @@ func TestWrapErrorTypedExits(t *testing.T) {
 			t.Errorf("exit %d = %v, want ErrUnavailable and not ErrNotFound", code, err)
 		}
 	}
-	if err := b.wrapError(codedExit(1), []byte(`{"error": "no issues found matching the provided IDs"}`), "", []string{"show", "gt-x", "--json"}); !errors.Is(err, ErrNotFound) {
-		t.Errorf("legacy JSON not-found = %v, want ErrNotFound", err)
-	}
 	if err := b.wrapError(&exec.Error{Name: "bd", Err: exec.ErrNotFound}, nil, "", []string{"show"}); !errors.Is(err, ErrNotInstalled) || errors.Is(err, ErrNotFound) {
 		t.Errorf("missing bd = %v, want ErrNotInstalled only", err)
 	}
@@ -120,7 +102,7 @@ func TestCLIErrorUnwrapUsesClassifier(t *testing.T) {
 			t.Errorf("CLIError %q does not unwrap to ErrUnavailable", stderr)
 		}
 	}
-	err := error(&CLIError{Args: []string{"show"}, Stderr: []byte("Error: issue gt-9 not found\n"), Err: codedExit(1)})
+	err := error(&CLIError{Args: []string{"show"}, Stderr: []byte("Error: issue gt-9 not found\n"), Err: codedExit(bdNotFoundExit)})
 	if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnavailable) {
 		t.Errorf("bd not-found CLIError: Is(NotFound)=%v Is(Unavailable)=%v", errors.Is(err, ErrNotFound), errors.Is(err, ErrUnavailable))
 	}
