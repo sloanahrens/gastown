@@ -14,9 +14,9 @@ import (
 // beadsfake). The container-backed tests live in the integration tier, whose
 // TestMain (testmain_integration_test.go) starts the Dolt container.
 //
-// The unit tier still starts gt, and lsof, ps and ss through the Dolt server
-// manager's port and process probes (testutil.AllowTools, a baseline that
-// only shrinks).
+// The unit tier starts no external tool: Dolt server manager tests answer its
+// probes and alert mail through the manager's seams (identityCheckFn,
+// notifier and the rest), and the harness refuses any tool they miss.
 func TestMain(m *testing.M) {
-	os.Exit(runDaemonTests(m, nil, testutil.WithoutGit(), testutil.AllowTools("gt", "lsof", "ps", "ss")))
+	os.Exit(runDaemonTests(m, nil, testutil.WithoutGit()))
 }

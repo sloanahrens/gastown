@@ -5,9 +5,10 @@ run:
   tests: false
   # Leave the module-wide flock ($TMPDIR/golangci-lint.lock) failing fast:
   # golangci-lint's 5s "parallel golangci-lint is running" exit is the evidence
-  # internal/lintlock attributes a contended lint from, and the gate and gt done
-  # wait that out and retry. run.allow-serial-runners would make a contended
-  # lint block silently instead — it prints neither that line nor its own
+  # internal/lintlock attributes a contended lint from, and gt done, the refinery
+  # and make lint (scripts/lint-lock-wait.sh) wait that out and retry.
+  # run.allow-serial-runners would make a contended lint block silently
+  # instead — it prints neither that line nor its own
   # timeout, because run.timeout's clock starts only once the lock is held — so
   # the gate would read a lint it killed at its budget as one that had run
   # (gt-kqwu).
