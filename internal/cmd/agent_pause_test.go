@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/townstatus"
 )
 
 // TestCheckPauseGatedOnlyAllowsPolecat pins the whitelist (gt-ahik, om
@@ -62,7 +63,7 @@ func TestPauseTargetCoordinatesMatchStatus(t *testing.T) {
 			}
 			role, name := target.roleAndName()
 
-			statusRig, statusRole, statusName, ok := agentMarkerTriple(address)
+			statusRig, statusRole, statusName, ok := townstatus.MarkerTriple(address)
 			if !ok {
 				t.Fatalf("gt status does not recognize %q as a marker-backed agent", address)
 			}
