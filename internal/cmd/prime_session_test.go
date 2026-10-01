@@ -290,3 +290,32 @@ func TestAgentRePrimeIsNotASecondSessionStart(t *testing.T) {
 		t.Error("the agent's own `gt prime --hook` recorded a second session_start for one session")
 	}
 }
+
+// TestSessionIDForPrime pins the order prime resolves its session ID in: the
+// ID this run's hook read wins (gt prime --hook no longer publishes it into
+// the process environment), then the runtime's env, then the persisted file,
+// then the actor-and-pid fallback.
+func TestSessionIDForPrime(t *testing.T) {
+	t.Parallel()
+	none := func() string { return "" }
+	is := func(id string) func() string { return func() string { return id } }
+	tests := []struct {
+		name               string
+		hookID             string
+		fromEnv, persisted func() string
+		want               string
+	}{
+		{name: "hook ID wins over env and file", hookID: "hook-id", fromEnv: is("env-id"), persisted: is("file-id"), want: "hook-id"},
+		{name: "env without a hook ID", fromEnv: is("env-id"), persisted: is("file-id"), want: "env-id"},
+		{name: "persisted file without env", fromEnv: none, persisted: is("file-id"), want: "file-id"},
+		{name: "fallback names actor and pid", fromEnv: none, persisted: none, want: "gastown/crew/den-42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sessionIDForPrime(tt.hookID, tt.fromEnv, tt.persisted, "gastown/crew/den", 42); got != tt.want {
+				t.Fatalf("sessionIDForPrime = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -656,18 +656,11 @@ func lockPoolDecision(townRoot string) (*flock.Flock, error) {
 // poolBeadLookup reads the type and labels the sling guards need. A var so
 // tests can drive them without a live database.
 var poolBeadLookup = func(townRoot, beadID string) (poolBead, error) {
-	out, err := bdShowBeadOutputFromTownRoot(townRoot, beadID)
+	issue, err := showBead(townRoot, beadID)
 	if err != nil {
 		return poolBead{}, err
 	}
-	var issues []beads.Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return poolBead{}, fmt.Errorf("parsing bead %s: %w", beadID, err)
-	}
-	if len(issues) == 0 {
-		return poolBead{}, fmt.Errorf("bead %s not found", beadID)
-	}
-	return poolBead{ID: issues[0].ID, Type: issues[0].Type, Labels: issues[0].Labels}, nil
+	return poolBead{ID: issue.ID, Type: issue.Type, Labels: issue.Labels}, nil
 }
 
 // poolBeadLabelAdd attaches a label to a bead. A var so tests can watch the

@@ -126,6 +126,7 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 		if actor == "" {
 			return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
 		}
+		//testpolicy:allow prod-no-setenv — bd attributes the submission to the BD_ACTOR it inherits, and beads.Client takes no actor to pass instead
 		if err := os.Setenv("BD_ACTOR", actor); err != nil {
 			return fmt.Errorf("setting BD_ACTOR for bd: %w", err)
 		}

@@ -4186,6 +4186,35 @@ func TestDefaultConfigWithEnv(t *testing.T) {
 	}
 }
 
+// A host withEnv reads the given variables over its own environment, both
+// for its config and for the sql-server it starts, so a caller can hand Start
+// daemon.json's env without writing the process environment.
+func TestHostWithEnvOverlaysConfigAndServerEnv(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().setenv("GT_DOLT_USER", "base-user").setenv("GT_DOLT_LOGLEVEL", "error").townPort(4551)
+	h := f.host().withEnv(map[string]string{"GT_DOLT_LOGLEVEL": "debug"})
+
+	config := h.DefaultConfig(t.TempDir())
+	if config.LogLevel != "debug" || config.User != "base-user" {
+		t.Errorf("LogLevel, User = %q, %q; want debug (overlay), base-user (host)", config.LogLevel, config.User)
+	}
+	if got := f.host().DefaultConfig(t.TempDir()).LogLevel; got != "error" {
+		t.Errorf("the overlay leaked into the host it was made from: LogLevel = %q", got)
+	}
+
+	_ = h.Start(t.TempDir())
+	if len(f.started) == 0 {
+		t.Fatal("Start started no sql-server")
+	}
+	env := f.started[0].Env
+	if !slices.Contains(env, "GT_DOLT_LOGLEVEL=debug") || !slices.Contains(env, "GT_DOLT_USER=base-user") {
+		t.Errorf("sql-server env = %v, want the overlay over the host's environment", env)
+	}
+	if i, j := slices.Index(env, "GT_DOLT_LOGLEVEL=error"), slices.Index(env, "GT_DOLT_LOGLEVEL=debug"); i > j {
+		t.Errorf("sql-server env = %v, want the overlay after (winning over) the host's value", env)
+	}
+}
+
 // Start refuses a town without an endpoint rather than guessing a port.
 func TestStartRefusesTownWithoutEndpoint(t *testing.T) {
 	t.Parallel()

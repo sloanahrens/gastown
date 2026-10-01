@@ -2,7 +2,7 @@
 
 // Package cmd contains integration tests for beads db initialization after clone.
 //
-// Run with: go test -tags=integration ./internal/cmd -run TestBeadsDbInitAfterClone -v
+// Run with: go test -tags=integration ./internal/cmd -run TestIntegrationBeadsDbInitAfterClone -v
 //
 // Bug: GitHub Issue #72
 // When a repo with tracked .beads/ is added as a rig, the database doesn't exist
@@ -123,9 +123,9 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 	removeDBFiles(t, beadsDir)
 }
 
-// TestBeadsDbInitAfterClone tests that when a tracked beads repo is added as a rig,
+// TestIntegrationBeadsDbInitAfterClone tests that when a tracked beads repo is added as a rig,
 // the beads database is properly initialized even though database files don't exist.
-func TestBeadsDbInitAfterClone(t *testing.T) {
+func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 	// Skip if bd is not available
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")

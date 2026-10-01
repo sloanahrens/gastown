@@ -118,8 +118,8 @@ func initBeadsDB(t *testing.T, dir string) {
 	}
 }
 
-// TestHookSlot_BasicHook verifies that a bead can be hooked to an agent.
-func TestHookSlot_BasicHook(t *testing.T) {
+// TestIntegrationHookSlot_BasicHook verifies that a bead can be hooked to an agent.
+func TestIntegrationHookSlot_BasicHook(t *testing.T) {
 	// Skip if bd is not available
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
@@ -174,8 +174,8 @@ func TestHookSlot_BasicHook(t *testing.T) {
 	}
 }
 
-// TestHookSlot_Singleton verifies that only one bead can be hooked per agent.
-func TestHookSlot_Singleton(t *testing.T) {
+// TestIntegrationHookSlot_Singleton verifies that only one bead can be hooked per agent.
+func TestIntegrationHookSlot_Singleton(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
@@ -248,8 +248,8 @@ func TestHookSlot_Singleton(t *testing.T) {
 	}
 }
 
-// TestHookSlot_Unhook verifies that a bead can be unhooked by changing status.
-func TestHookSlot_Unhook(t *testing.T) {
+// TestIntegrationHookSlot_Unhook verifies that a bead can be unhooked by changing status.
+func TestIntegrationHookSlot_Unhook(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
@@ -304,8 +304,8 @@ func TestHookSlot_Unhook(t *testing.T) {
 	}
 }
 
-// TestHookSlot_DifferentAgents verifies that different agents can have different hooks.
-func TestHookSlot_DifferentAgents(t *testing.T) {
+// TestIntegrationHookSlot_DifferentAgents verifies that different agents can have different hooks.
+func TestIntegrationHookSlot_DifferentAgents(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
@@ -395,8 +395,8 @@ func TestHookSlot_DifferentAgents(t *testing.T) {
 	}
 }
 
-// TestHookSlot_HookPersistence verifies that hooks persist across beads object recreation.
-func TestHookSlot_HookPersistence(t *testing.T) {
+// TestIntegrationHookSlot_HookPersistence verifies that hooks persist across beads object recreation.
+func TestIntegrationHookSlot_HookPersistence(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
@@ -450,8 +450,8 @@ func TestHookSlot_HookPersistence(t *testing.T) {
 	}
 }
 
-// TestHookSlot_StatusTransitions tests valid status transitions for hooked beads.
-func TestHookSlot_StatusTransitions(t *testing.T) {
+// TestIntegrationHookSlot_StatusTransitions tests valid status transitions for hooked beads.
+func TestIntegrationHookSlot_StatusTransitions(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
