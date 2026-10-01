@@ -19,6 +19,11 @@ git add <files>
 git commit -m "<type>: <description>"
 ```
 
+Before `gt done`, tick the acceptance criteria your work satisfies: rewrite
+the bead's acceptance criteria with `- [x]` on those lines (`bd show <issue-id>`
+prints them). The landing worker rejects a bead with any `- [ ]` left, so
+`gt done` refuses first and lists each unchecked line.
+
 A commit message is your description and the bead id, nothing more: NO
 Co-Authored-By trailer, no AI attribution anywhere. `gt done` strips the
 trailers it finds and refuses a commit whose subject line is itself one.

@@ -434,20 +434,26 @@ func ProtectedIssueLabel(label string) bool {
 	}
 }
 
-// HasUncheckedCriteria checks if an issue has acceptance criteria with unchecked items.
-// Returns the count of unchecked items (0 means all checked or no criteria).
-func HasUncheckedCriteria(issue *Issue) int {
+// UncheckedCriteria returns the issue's unchecked acceptance criteria, one
+// trimmed "- [ ] ..." line each, in order. Empty means all checked or none.
+func UncheckedCriteria(issue *Issue) []string {
 	if issue == nil || issue.AcceptanceCriteria == "" {
-		return 0
+		return nil
 	}
-	count := 0
+	var lines []string
 	for _, line := range strings.Split(issue.AcceptanceCriteria, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- [ ] ") {
-			count++
+			lines = append(lines, trimmed)
 		}
 	}
-	return count
+	return lines
+}
+
+// HasUncheckedCriteria checks if an issue has acceptance criteria with unchecked items.
+// Returns the count of unchecked items (0 means all checked or no criteria).
+func HasUncheckedCriteria(issue *Issue) int {
+	return len(UncheckedCriteria(issue))
 }
 
 // IsAgentBead checks if an issue is an agent bead by checking for the gt:agent

@@ -1215,6 +1215,11 @@ func submitForLanding(r *doneRun) error {
 	if r.issueID == "" {
 		return fmt.Errorf("cannot determine source issue from branch '%s'; use --issue to specify", r.branch)
 	}
+	// Before the rebase and the gate, which take minutes: unchecked criteria
+	// are the landing worker's policy rejection, after the session retires.
+	if err := refuseUncheckedCriteria(r.issueID, sub.sourceIssue); err != nil {
+		return err
+	}
 
 	if err := rebaseOntoTarget(repo, baseRef); err != nil {
 		return err

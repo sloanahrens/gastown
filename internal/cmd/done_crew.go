@@ -235,6 +235,9 @@ func submitCrewForLanding(r *doneRun) error {
 	if ahead == 0 {
 		return fmt.Errorf("nothing to land: %s has no commits ahead of %s", r.branch, baseRef)
 	}
+	if err := refuseUncheckedCriteria(r.issueID, issue); err != nil {
+		return err
+	}
 
 	head, err := repo.Rev("HEAD")
 	if err != nil {
