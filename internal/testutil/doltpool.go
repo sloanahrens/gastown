@@ -102,8 +102,10 @@ const (
 	// leaseStore is an in-process store (OpenTestStore). It prefers a
 	// database already migrated, since a store open migrates.
 	leaseStore doltLeaseKind = iota
-	// leaseInit is an isolated bd init. It needs an empty database, since bd
-	// init records a project identity and a prefix.
+	// leaseInit is an isolated bd init. It needs a database without an
+	// identity, since bd init records a project identity and a prefix: a
+	// template database (doltpool_template.go), or an empty store database
+	// when every template one is leased.
 	leaseInit
 	// leaseSQL is a plain SQL database (TakePooledSQLDatabase).
 	leaseSQL
@@ -148,6 +150,7 @@ type doltDBPool struct {
 	port   int
 	base   string
 	stores []*doltPoolEntry
+	inits  []*doltPoolEntry // bd init databases cloned from the template (doltpool_template.go)
 	sql    []*doltPoolEntry
 	names  map[string]bool
 	freed  chan struct{} // closed, and replaced, whenever a lease ends
@@ -213,7 +216,13 @@ func newDoltDBPool(port, stores, sqlDBs int) (*doltDBPool, error) {
 }
 
 func (p *doltDBPool) all() []*doltPoolEntry {
-	return append(append([]*doltPoolEntry{}, p.stores...), p.sql...)
+	return append(p.beadsEntries(), p.sql...)
+}
+
+// beadsEntries returns the entries a bd init can lease: the template
+// databases and the store databases.
+func (p *doltDBPool) beadsEntries() []*doltPoolEntry {
+	return append(append([]*doltPoolEntry{}, p.inits...), p.stores...)
 }
 
 // create creates every database of the pool on its server and records each
@@ -227,7 +236,7 @@ func (p *doltDBPool) create() error {
 	p.reset = func(e *doltPoolEntry, commit string) error {
 		return resetDoltDatabase(db, e.name, commit, p.sessionWait)
 	}
-	entries := p.all()
+	entries := append(append([]*doltPoolEntry{}, p.stores...), p.sql...)
 	for i, e := range entries {
 		ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
 		_, err := db.ExecContext(ctx, "CREATE DATABASE `"+e.name+"`")
@@ -240,6 +249,11 @@ func (p *doltDBPool) create() error {
 			return fmt.Errorf("dolt test pool: create database %d of %d (%s): %w", i+1, len(entries), e.name, err)
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
+	defer cancel()
+	if err := p.createInits(ctx); err != nil {
+		return fmt.Errorf("dolt test pool: %w", err)
+	}
 	return nil
 }
 
@@ -251,6 +265,7 @@ func createDoltPool(port int) error {
 	if err != nil {
 		return err
 	}
+	p.addInits(doltPoolInits)
 	// The guard at teardown allows the image's own databases and the pool's,
 	// nothing else; a fresh container holding anything more means the image
 	// changed under doltImageDatabases, and the guard would misjudge it.
@@ -356,7 +371,7 @@ func (p *doltDBPool) acquire(kind doltLeaseKind, owner, ownerDir string) (*doltP
 // still marked leased so no other caller takes them before they are reset.
 func (p *doltDBPool) staleLocked() []*doltPoolEntry {
 	var stale []*doltPoolEntry
-	for _, e := range p.stores {
+	for _, e := range p.beadsEntries() {
 		if !e.leased || e.ownerDir == "" || e.broken != nil {
 			continue
 		}
@@ -376,6 +391,11 @@ func (p *doltDBPool) staleLocked() []*doltPoolEntry {
 func (p *doltDBPool) pickLocked(kind doltLeaseKind) *doltPoolEntry {
 	if kind == leaseSQL {
 		return firstFree(p.sql, func(*doltPoolEntry) bool { return true })
+	}
+	if kind == leaseInit {
+		if e := firstFree(p.inits, func(*doltPoolEntry) bool { return true }); e != nil {
+			return e
+		}
 	}
 	wantMigrated := kind == leaseStore
 	if e := firstFree(p.stores, func(e *doltPoolEntry) bool { return e.migrated == wantMigrated }); e != nil {
@@ -469,6 +489,9 @@ func (p *doltDBPool) exhausted(kind doltLeaseKind) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entries, knob := p.stores, "doltPoolStores"
+	if kind == leaseInit {
+		entries, knob = p.beadsEntries(), "doltPoolInits or doltPoolStores"
+	}
 	if kind == leaseSQL {
 		entries, knob = p.sql, "doltPoolSQLDatabases"
 	}
@@ -721,21 +744,21 @@ func releaseDoltPool() error {
 	catalogErr := checkDoltPoolCatalog(p)
 	p.mu.Lock()
 	var stuck []string
-	for _, e := range p.stores {
+	for _, e := range p.beadsEntries() {
 		if e.leased && e.ownerDir != "" {
 			if _, err := os.Stat(e.ownerDir); err == nil {
 				stuck = append(stuck, e.owner)
 			}
 		}
 	}
-	fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d leases (%d of a returned database), at most %d at once, of %d store and %d SQL databases\n",
-		p.leases, p.reuses, p.peak, len(p.stores), len(p.sql))
+	fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d leases (%d of a returned database), at most %d at once, of %d bd init, %d store and %d SQL databases\n",
+		p.leases, p.reuses, p.peak, len(p.inits), len(p.stores), len(p.sql))
 	if len(stuck) > 0 {
 		sort.Strings(stuck)
 		fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d bd init leases never ended, because their directory outlived the test: %s\n",
 			len(stuck), strings.Join(stuck, ", "))
 	}
-	if total := len(p.stores) + len(p.sql); p.peak*4 >= total*3 {
+	if total := len(p.inits) + len(p.stores) + len(p.sql); p.peak*4 >= total*3 {
 		fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: tests held %d of its %d databases at once; raise doltPoolStores before leases start waiting\n", p.peak, total)
 	}
 	errs := append([]error{catalogErr}, p.reclaimErrs...)
