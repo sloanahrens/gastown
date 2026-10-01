@@ -1016,12 +1016,12 @@ func (f formulaBD) beadCmd(beadID, formulaWorkDir, townRoot string, args ...stri
 //   - extraVars: additional --var values supplied by the user
 //
 // Returns the spawned molecule root ID while leaving the base bead as the hook target.
-func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (*FormulaOnBeadResult, error) {
-	return realFormulaBD().instantiate(ctx, formulaName, beadID, title, hookWorkDir, townRoot, skipCook, extraVars)
+func InstantiateFormulaOnBead(_ context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (*FormulaOnBeadResult, error) {
+	return realFormulaBD().instantiate(formulaName, beadID, title, hookWorkDir, townRoot, skipCook, extraVars)
 }
 
 // instantiate is InstantiateFormulaOnBead with bd reached through f.
-func (f formulaBD) instantiate(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
+func (f formulaBD) instantiate(formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
 	// Route bd mutations to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 

@@ -18,11 +18,11 @@ import (
 
 // runMoleculeBurn burns (destroys) the current molecule attachment.
 func runMoleculeBurn(cmd *cobra.Command, args []string) error {
-	return moleculeBurn(cmd, realMoleculeLifecycleEnv(), args)
+	return moleculeBurn(realMoleculeLifecycleEnv(), args)
 }
 
 // moleculeBurn is gt mol burn in e.
-func moleculeBurn(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (retErr error) {
+func moleculeBurn(e moleculeLifecycleEnv, args []string) (retErr error) {
 	cwd, err := e.getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
