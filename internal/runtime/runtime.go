@@ -98,7 +98,7 @@ func sessionIDFrom(getenv func(string) string) string {
 	}
 	// Use the current agent's session ID env var from its preset
 	if agentName := getenv("GT_AGENT"); agentName != "" {
-		townRoot := getenv("GT_ROOT")
+		townRoot := workspace.TownRootFromEnv(getenv)
 		rigPath := ""
 		if rig := getenv("GT_RIG"); rig != "" && townRoot != "" {
 			rigPath = filepath.Join(townRoot, rig)

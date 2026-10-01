@@ -24,6 +24,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // sessionNudgeLocks serializes nudges to the same session.
@@ -2097,14 +2098,14 @@ func (t *Tmux) SessionAgentRegistry(session, townRootHint string) *config.AgentR
 
 // sessionScope returns the town root and rig path of a session from its
 // GT_ROOT and GT_RIG. The town root falls back to townRootHint, then the
-// process GT_ROOT; rigPath is empty for town-level sessions.
+// process's own town root; rigPath is empty for town-level sessions.
 func (t *Tmux) sessionScope(session, townRootHint string) (townRoot, rigPath string) {
 	townRoot, _ = t.GetEnvironment(session, "GT_ROOT")
 	if townRoot == "" {
 		townRoot = townRootHint
 	}
 	if townRoot == "" {
-		townRoot = t.env("GT_ROOT")
+		townRoot = townRootFrom(t.env)
 	}
 	if rig, _ := t.GetEnvironment(session, "GT_RIG"); rig != "" && townRoot != "" {
 		rigPath = filepath.Join(townRoot, rig)
@@ -4764,13 +4765,9 @@ func (t *Tmux) sessionPrefixPattern() string {
 	return sessionPrefixPatternFor(townRootFrom(t.env))
 }
 
-// townRootFrom resolves the town root the bindings read rig prefixes from:
-// GT_ROOT, then GT_TOWN_ROOT.
+// townRootFrom resolves the town root the bindings read rig prefixes from.
 func townRootFrom(getenv func(string) string) string {
-	if root := getenv("GT_ROOT"); root != "" {
-		return root
-	}
-	return getenv("GT_TOWN_ROOT")
+	return workspace.TownRootFromEnv(getenv)
 }
 
 // sessionPrefixPatternFor builds the session-name pattern for townRoot's rigs

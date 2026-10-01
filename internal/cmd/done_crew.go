@@ -111,7 +111,7 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 	// crew clone); the session's town root still routes its beads.
 	townRoot, _ := workspace.Find(cwd)
 	if townRoot == "" {
-		townRoot = firstNonEmpty(getenv("GT_TOWN_ROOT"), getenv("GT_ROOT"))
+		townRoot = workspace.TownRootFromEnv(getenv)
 	}
 	if townRoot == "" {
 		return fmt.Errorf("gt done: not in a Gas Town workspace and GT_TOWN_ROOT is unset")

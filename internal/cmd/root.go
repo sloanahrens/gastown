@@ -105,7 +105,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	if BuiltProperly == "" && Build == "dev" && runtime.GOOS == "darwin" && !testing.Testing() {
 		fmt.Fprintln(os.Stderr, "ERROR: This binary was built with 'go build' directly.")
 		fmt.Fprintln(os.Stderr, "       macOS will SIGKILL unsigned binaries. Use 'make build' instead.")
-		if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+		if gtRoot := workspace.TownRootFromEnv(os.Getenv); gtRoot != "" {
 			fmt.Fprintf(os.Stderr, "       Run from: %s\n", gtRoot)
 		}
 		os.Exit(1)

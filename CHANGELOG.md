@@ -358,6 +358,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One town-root reader** (gt-y3pgh.2, G3-22) — `workspace.TownRootFromEnv`
+  is the only code that reads the town root from the environment:
+  `GT_TOWN_ROOT`, then `GT_ROOT`. Walking up from the working directory
+  still comes first wherever it did. Before, the tmux bindings, `gt done`,
+  `gt handoff`, `gt rig quick-add`, the polecat stop hook, the runtime
+  session-id lookup and `gt stale` each read one or both names in their own
+  order. A `GT_TOWN_ROOT` that names no town no longer falls through to
+  `GT_ROOT`.
+
 - **The cost tier is config only** (gt-y3pgh.2) — `GT_COST_TIER` no longer
   overrides an agent's model or effort. The tier lives in
   `settings/config.json` (`cost_tier`, `role_agents`, `role_effort`), written

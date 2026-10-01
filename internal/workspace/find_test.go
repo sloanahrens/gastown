@@ -331,7 +331,8 @@ func TestFindFromCwdOrError(t *testing.T) {
 		{"cwd inside a town", cwdIn(town, nil), town, ""},
 		{"cwd outside, GT_TOWN_ROOT", cwdIn(other, map[string]string{"GT_TOWN_ROOT": town}), town, ""},
 		{"cwd outside, GT_ROOT", cwdIn(other, map[string]string{"GT_ROOT": town}), town, ""},
-		{"GT_TOWN_ROOT not a workspace falls through to GT_ROOT", cwdIn(other, map[string]string{"GT_TOWN_ROOT": notTown, "GT_ROOT": town}), town, ""},
+		// One reader (TownRootFromEnv): GT_TOWN_ROOT wins, and a non-workspace there is not found.
+		{"GT_TOWN_ROOT not a workspace does not fall through", cwdIn(other, map[string]string{"GT_TOWN_ROOT": notTown, "GT_ROOT": town}), "", ErrNotFound.Error()},
 		{"env names a non-workspace", cwdIn(other, map[string]string{"GT_TOWN_ROOT": notTown}), "", ErrNotFound.Error()},
 		{"no cwd, env fallback", envWith(map[string]string{"GT_TOWN_ROOT": town}), town, ""},
 		{"no cwd, no env", envWith(nil), "", "getting current directory"},
@@ -403,4 +404,23 @@ func TestGetTownName(t *testing.T) {
 		}
 	}()
 	MustGetTownName(t.TempDir())
+}
+
+func TestTownRootFromEnv(t *testing.T) {
+	t.Parallel()
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"GT_TOWN_ROOT wins", map[string]string{"GT_TOWN_ROOT": "/a", "GT_ROOT": "/b"}, "/a"},
+		{"GT_ROOT when GT_TOWN_ROOT unset", map[string]string{"GT_ROOT": "/b"}, "/b"},
+		{"neither", nil, ""},
+	}
+	for _, tc := range cases {
+		if got := TownRootFromEnv(env(tc.env)); got != tc.want {
+			t.Errorf("%s: TownRootFromEnv = %q, want %q", tc.name, got, tc.want)
+		}
+	}
 }

@@ -151,11 +151,12 @@ func TestSessionPrefixPattern_WithTownRoot(t *testing.T) {
 func TestSessionPrefixPattern_FallsBackToGTTownRoot(t *testing.T) {
 	t.Parallel()
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a", "GT_TOWN_ROOT": "/b"})); got != "/a" {
-		t.Errorf("GT_ROOT set: town root = %q, want /a", got)
+	// workspace.TownRootFromEnv is the one reader: GT_TOWN_ROOT, then GT_ROOT.
+	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a", "GT_TOWN_ROOT": "/b"})); got != "/b" {
+		t.Errorf("both set: town root = %q, want GT_TOWN_ROOT /b", got)
 	}
-	if got := townRootFrom(env(map[string]string{"GT_TOWN_ROOT": "/b"})); got != "/b" {
-		t.Errorf("GT_ROOT unset: town root = %q, want the GT_TOWN_ROOT fallback /b", got)
+	if got := townRootFrom(env(map[string]string{"GT_ROOT": "/a"})); got != "/a" {
+		t.Errorf("GT_TOWN_ROOT unset: town root = %q, want the GT_ROOT fallback /a", got)
 	}
 	if got := townRootFrom(env(nil)); got != "" {
 		t.Errorf("neither set: town root = %q, want empty", got)
