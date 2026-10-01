@@ -292,11 +292,11 @@ func BuildPrefixRegistryFromFile(path string) (*PrefixRegistry, error) {
 // gt = default rig, bd = beads, hq = town-level HQ services, gthq = gastown HQ.
 var LegacyPrefixes = []string{"gt", "bd", "hq", "gthq"}
 
-// HasKnownPrefix returns true if s starts with a registered or legacy prefix
-// followed by "-". Use this instead of hand-rolling prefix checks so that
-// all call-sites agree on what constitutes a valid prefix.
-func HasKnownPrefix(s string) bool {
-	if DefaultRegistry().HasPrefix(s) {
+// HasKnownPrefix returns true if s starts with one of r's prefixes or a legacy
+// prefix, followed by "-". Use this instead of hand-rolling prefix checks so
+// that all call-sites agree on what constitutes a valid prefix.
+func (r *PrefixRegistry) HasKnownPrefix(s string) bool {
+	if r.HasPrefix(s) {
 		return true
 	}
 	for _, p := range LegacyPrefixes {
@@ -317,12 +317,6 @@ func (r *PrefixRegistry) HasPrefix(sess string) bool {
 		}
 	}
 	return false
-}
-
-// IsKnownSession returns true if the session name belongs to Gas Town.
-// Checks for HQ prefix and registered rig prefixes from the default registry.
-func IsKnownSession(sess string) bool {
-	return DefaultRegistry().IsKnownSession(sess)
 }
 
 // IsKnownSession returns true if the session name has the HQ prefix or one of

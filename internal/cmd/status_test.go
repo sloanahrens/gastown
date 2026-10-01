@@ -63,7 +63,7 @@ func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 		"bd-hook": {ID: "bd-hook", Title: "Pinned"},
 	}
 
-	agents := discoverRigAgents(map[string]bool{}, r, []string{"max"}, allAgentBeads, allHookBeads, nil, true)
+	agents := discoverRigAgents(cmdTestRegistry(), map[string]bool{}, r, []string{"max"}, allAgentBeads, allHookBeads, nil, true)
 	if len(agents) != 1 {
 		t.Fatalf("discoverRigAgents() returned %d agents, want 1", len(agents))
 	}
@@ -119,10 +119,10 @@ func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
 	// allSessions has the crew session but marked as zombie (false).
 	// This simulates a tmux session that exists but whose agent process has died.
 	allSessions := map[string]bool{
-		crewSessionName("gastown", "max"): false, // zombie: tmux exists, agent dead
+		crewSessionName(cmdTestRegistry(), "gastown", "max"): false, // zombie: tmux exists, agent dead
 	}
 
-	agents := discoverRigAgents(allSessions, r, []string{"max"}, nil, nil, nil, true)
+	agents := discoverRigAgents(cmdTestRegistry(), allSessions, r, []string{"max"}, nil, nil, nil, true)
 	for _, a := range agents {
 		if a.Role == "crew" {
 			if a.Running {
@@ -150,7 +150,7 @@ func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
 	// Empty sessions map - no tmux sessions exist at all
 	allSessions := map[string]bool{}
 
-	agents := discoverRigAgents(allSessions, r, []string{"max"}, nil, nil, nil, true)
+	agents := discoverRigAgents(cmdTestRegistry(), allSessions, r, []string{"max"}, nil, nil, nil, true)
 	for _, a := range agents {
 		if a.Role == "crew" {
 			if a.Running {

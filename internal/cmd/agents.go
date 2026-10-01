@@ -666,7 +666,7 @@ func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*Collis
 	// Filter to Gas Town sessions
 	var gtSessions []string
 	for _, s := range sessions {
-		if session.IsKnownSession(s) {
+		if reg.IsKnownSession(s) {
 			gtSessions = append(gtSessions, s)
 		}
 	}

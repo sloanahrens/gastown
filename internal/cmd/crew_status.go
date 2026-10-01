@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -32,6 +33,7 @@ type CrewStatusItem struct {
 }
 
 func runCrewStatus(cmd *cobra.Command, args []string) error {
+	reg := townRegistry()
 	// Parse rig/name format before getting manager (e.g., "beads/emma" -> rig=beads, name=emma)
 	var targetName string
 	if len(args) > 0 {
@@ -61,7 +63,7 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, r := range rigs {
-			rigItems, err := listCrewStatusItems(r, t)
+			rigItems, err := listCrewStatusItems(reg, r, t)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to list crew workers in %s: %v\n", r.Name, err)
 				continue
@@ -94,7 +96,7 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		items = append(items, buildCrewStatusItems(r, workers, t)...)
+		items = append(items, buildCrewStatusItems(reg, r, workers, t)...)
 	}
 
 	if len(items) == 0 {
@@ -145,20 +147,20 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func listCrewStatusItems(r *rig.Rig, t *tmux.Tmux) ([]CrewStatusItem, error) {
+func listCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, t *tmux.Tmux) ([]CrewStatusItem, error) {
 	crewMgr := crew.NewManager(r, git.NewGit(r.Path))
 	workers, err := crewMgr.List()
 	if err != nil {
 		return nil, fmt.Errorf("listing crew workers: %w", err)
 	}
-	return buildCrewStatusItems(r, workers, t), nil
+	return buildCrewStatusItems(reg, r, workers, t), nil
 }
 
-func buildCrewStatusItems(r *rig.Rig, workers []*crew.CrewWorker, t *tmux.Tmux) []CrewStatusItem {
+func buildCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, workers []*crew.CrewWorker, t *tmux.Tmux) []CrewStatusItem {
 	items := make([]CrewStatusItem, 0, len(workers))
 
 	for _, w := range workers {
-		sessionID := crewSessionName(r.Name, w.Name)
+		sessionID := crewSessionName(reg, r.Name, w.Name)
 		hasSession, _ := t.HasSession(sessionID)
 
 		// Git status

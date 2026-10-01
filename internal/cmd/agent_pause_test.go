@@ -56,7 +56,7 @@ func TestPauseTargetCoordinatesMatchStatus(t *testing.T) {
 	t.Parallel()
 	for _, address := range agentPauseAddresses {
 		t.Run(address, func(t *testing.T) {
-			target, err := parseAgentAddr(address)
+			target, err := parseAgentAddr(cmdTestRegistry(), address)
 			if err != nil {
 				t.Fatalf("parseAgentAddr(%q): %v", address, err)
 			}
@@ -84,7 +84,7 @@ func TestPauseDisplayAddressIsCanonical(t *testing.T) {
 	const townRoot = "/town"
 	for _, address := range agentPauseAddresses {
 		t.Run(address, func(t *testing.T) {
-			target, err := parseAgentAddr(address)
+			target, err := parseAgentAddr(cmdTestRegistry(), address)
 			if err != nil {
 				t.Fatalf("parseAgentAddr(%q): %v", address, err)
 			}

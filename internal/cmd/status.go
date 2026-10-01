@@ -492,12 +492,12 @@ func runStatusWatch(_ *cobra.Command, _ []string) error {
 			fmt.Fprintf(&buf, "%s\n\n", header)
 		}
 
-		status, err := gatherStatus()
+		status, err := gatherStatus(townRegistry())
 		usedCache := false
 
 		// On error, retry once before giving up.
 		if err != nil {
-			status, err = gatherStatus()
+			status, err = gatherStatus(townRegistry())
 		}
 
 		if err == nil {
@@ -508,7 +508,7 @@ func runStatusWatch(_ *cobra.Command, _ []string) error {
 			if running == 0 && cachedStatus != nil &&
 				countRunningAgents(*cachedStatus) > 0 {
 				// Retry once to confirm.
-				retry, retryErr := gatherStatus()
+				retry, retryErr := gatherStatus(townRegistry())
 				if retryErr == nil &&
 					countRunningAgents(retry) > 0 {
 					status = retry
@@ -585,7 +585,7 @@ func countRunningAgents(s TownStatus) int {
 }
 
 func runStatusOnce(_ *cobra.Command, _ []string) error {
-	status, err := gatherStatus()
+	status, err := gatherStatus(townRegistry())
 	if err != nil {
 		return err
 	}
@@ -595,7 +595,7 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 	return outputStatusText(os.Stdout, status)
 }
 
-func gatherStatus() (TownStatus, error) {
+func gatherStatus(reg *session.PrefixRegistry) (TownStatus, error) {
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -650,7 +650,7 @@ func gatherStatus() (TownStatus, error) {
 		var sessionMu sync.Mutex
 		var sessionWg sync.WaitGroup
 		for _, s := range sessions {
-			if session.IsKnownSession(s) {
+			if reg.IsKnownSession(s) {
 				sessionWg.Add(1)
 				go func(name string) {
 					defer sessionWg.Done()
@@ -918,7 +918,7 @@ func gatherStatus() (TownStatus, error) {
 			rigWg.Add(1)
 			go func() {
 				defer rigWg.Done()
-				rs.Agents = discoverRigAgents(allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailRouter, fast)
+				rs.Agents = discoverRigAgents(reg, allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailRouter, fast)
 			}()
 
 			rigWg.Wait()
@@ -1637,7 +1637,7 @@ type agentDef struct {
 // allSessions is a preloaded map of tmux sessions for O(1) lookup.
 // allAgentBeads is a preloaded map of agent beads for O(1) lookup.
 // allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
+func discoverRigAgents(reg *session.PrefixRegistry, allSessions map[string]bool, r *rig.Rig, crews []string, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
 	// Build list of all agents to discover
 	var defs []agentDef
 	townRoot := filepath.Dir(r.Path)
@@ -1648,7 +1648,7 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 		defs = append(defs, agentDef{
 			name:    name,
 			address: r.Name + "/" + name,
-			session: session.PolecatSessionName(session.PrefixFor(r.Name), name),
+			session: session.PolecatSessionName(reg.PrefixForRig(r.Name), name),
 			role:    constants.RolePolecat,
 			beadID:  beads.PolecatBeadIDWithPrefix(prefix, r.Name, name),
 		})
@@ -1659,7 +1659,7 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 		defs = append(defs, agentDef{
 			name:    name,
 			address: r.Name + "/crew/" + name,
-			session: crewSessionName(r.Name, name),
+			session: crewSessionName(reg, r.Name, name),
 			role:    constants.RoleCrew,
 			beadID:  beads.CrewBeadIDWithPrefix(prefix, r.Name, name),
 		})

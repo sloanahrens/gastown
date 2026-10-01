@@ -40,14 +40,8 @@ func generateShortIDFromReader(r io.Reader) string {
 // prefixes reg holds. Issue IDs have the format: prefix-id (e.g., gt-abc,
 // bd-xyz, hq-123).
 func looksLikeIssueID(reg *session.PrefixRegistry, s string) bool {
-	// Registry prefixes and the legacy fallbacks, as session.HasKnownPrefix.
-	if reg.HasPrefix(s) {
+	if reg.HasKnownPrefix(s) {
 		return true
-	}
-	for _, p := range session.LegacyPrefixes {
-		if strings.HasPrefix(s, p+"-") {
-			return true
-		}
 	}
 	// Pattern check: 2-3 lowercase letters followed by hyphen.
 	// Covers unregistered short rig prefixes (e.g., nx, rpk).

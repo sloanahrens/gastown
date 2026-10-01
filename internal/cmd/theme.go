@@ -100,7 +100,7 @@ func runTheme(cmd *cobra.Command, args []string) error {
 	}
 
 	// Determine current rig
-	rigName := detectCurrentRig()
+	rigName := detectCurrentRig(townRegistry())
 	if rigName == "" {
 		rigName = "unknown"
 	}
@@ -136,6 +136,7 @@ func runTheme(cmd *cobra.Command, args []string) error {
 
 func runThemeApply(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
+	reg := townRegistry()
 	townRoot, _ := workspace.FindFromCwd()
 
 	// Get all sessions
@@ -145,12 +146,12 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 	}
 
 	// Determine current rig
-	rigName := detectCurrentRig()
+	rigName := detectCurrentRig(reg)
 
 	// Apply to matching sessions
 	applied := 0
 	for _, sess := range sessions {
-		if !session.IsKnownSession(sess) {
+		if !reg.IsKnownSession(sess) {
 			continue
 		}
 
@@ -158,7 +159,7 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 		var theme *tmux.Theme
 		var rig, worker, role string
 
-		identity, err := session.ParseSessionName(sess)
+		identity, err := session.ParseSessionNameWithRegistry(sess, reg)
 		if err != nil {
 			continue
 		}
@@ -220,15 +221,15 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 }
 
 // detectCurrentRig determines the rig from environment or cwd.
-func detectCurrentRig() string {
+func detectCurrentRig(reg *session.PrefixRegistry) string {
 	// Try environment first (GT_RIG is set in tmux sessions)
 	if rig := os.Getenv("GT_RIG"); rig != "" {
 		return rig
 	}
 
 	// Try to extract from tmux session name
-	if sessName := detectCurrentSession(); sessName != "" {
-		if identity, err := session.ParseSessionName(sessName); err == nil && identity.Rig != "" {
+	if sessName := detectCurrentSession(reg); sessName != "" {
+		if identity, err := session.ParseSessionNameWithRegistry(sessName, reg); err == nil && identity.Rig != "" {
 			return identity.Rig
 		}
 	}
@@ -438,7 +439,7 @@ func detectTerminalBackground() bool {
 }
 
 // detectCurrentSession tries to find the tmux session name from env.
-func detectCurrentSession() string {
+func detectCurrentSession(reg *session.PrefixRegistry) string {
 	// Try to build session name from GT env vars
 	role := os.Getenv("GT_ROLE")
 	rig := os.Getenv("GT_RIG")
@@ -450,11 +451,11 @@ func detectCurrentSession() string {
 		if polecat != "" {
 			parsedRole, _, _ := parseRoleString(role)
 			if role == "" || parsedRole == RolePolecat {
-				return session.PolecatSessionName(session.PrefixFor(rig), polecat)
+				return session.PolecatSessionName(reg.PrefixForRig(rig), polecat)
 			}
 		}
 		if crew != "" {
-			return session.CrewSessionName(session.PrefixFor(rig), crew)
+			return session.CrewSessionName(reg.PrefixForRig(rig), crew)
 		}
 	}
 

@@ -60,8 +60,8 @@ func getCrewManager(rigName string) (*crew.Manager, *rig.Rig, error) {
 }
 
 // crewSessionName generates the tmux session name for a crew worker.
-func crewSessionName(rigName, crewName string) string {
-	return session.CrewSessionName(session.PrefixFor(rigName), crewName)
+func crewSessionName(reg *session.PrefixRegistry, rigName, crewName string) string {
+	return session.CrewSessionName(reg.PrefixForRig(rigName), crewName)
 }
 
 // crewDetection holds the result of detecting crew workspace from cwd.

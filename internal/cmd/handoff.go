@@ -95,6 +95,7 @@ func init() {
 }
 
 func runHandoff(cmd *cobra.Command, args []string) error {
+	reg := townRegistry()
 	// Handle --stdin: read message body from stdin (avoids shell quoting issues)
 	if handoffStdin {
 		if handoffMessage != "" {
@@ -244,7 +245,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// User specified a role to hand off
-			targetSession, err = resolveRoleToSession(arg)
+			targetSession, err = resolveRoleToSession(reg, arg)
 			if err != nil {
 				return fmt.Errorf("resolving role: %w", err)
 			}
@@ -252,7 +253,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the restart command
-	restartCmd, err := buildRestartCommand(townRegistry(), targetSession)
+	restartCmd, err := buildRestartCommand(reg, targetSession)
 	if err != nil {
 		return err
 	}
@@ -261,7 +262,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// Remote sessions live on the town socket, so use townTmux for their operations.
 	if targetSession != currentSession {
 		// Update tmux session env before respawn (not during dry-run — see below)
-		updateSessionEnvForHandoff(townTmux, targetSession)
+		updateSessionEnvForHandoff(reg, townTmux, targetSession)
 		return handoffRemoteSession(townTmux, targetSession, restartCmd)
 	}
 
@@ -273,7 +274,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Handing off %s...\n", style.Bold.Render("🤝"), currentSession)
 
 	// Resolve agent identity once for both success and failure paths.
-	agent := sessionToGTRole(currentSession)
+	agent := sessionToGTRole(reg, currentSession)
 	if agent == "" {
 		agent = currentSession
 	}
@@ -293,7 +294,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
-	updateSessionEnvForHandoff(t, currentSession)
+	updateSessionEnvForHandoff(reg, t, currentSession)
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
@@ -427,6 +428,7 @@ func runHandoffAuto() error {
 // The successor session starts via SessionStart hook (gt prime --hook),
 // finds the hooked work, and continues from where we left off.
 func runHandoffCycle() error {
+	reg := townRegistry()
 	// Build subject
 	subject := handoffSubject
 	if subject == "" {
@@ -488,7 +490,7 @@ func runHandoffCycle() error {
 	// the next session to find an empty hook and lose all context.
 	beadID, err := sendHandoffMail(subject, message)
 	if err != nil {
-		agent := sessionToGTRole(currentSession)
+		agent := sessionToGTRole(reg, currentSession)
 		if agent == "" {
 			agent = currentSession
 		}
@@ -513,7 +515,7 @@ func runHandoffCycle() error {
 
 	// Log cycle event AFTER persistence succeeds.
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-		agent := sessionToGTRole(currentSession)
+		agent := sessionToGTRole(reg, currentSession)
 		if agent == "" {
 			agent = currentSession
 		}
@@ -526,7 +528,7 @@ func runHandoffCycle() error {
 	// Using --continue would resume the same over-threshold conversation,
 	// causing PreCompact to fire again and loop indefinitely.
 	restartCmd, err := buildRestartCommandWithOpts(currentSession, buildRestartCommandOpts{
-		Registry:        townRegistry(),
+		Registry:        reg,
 		ContinueSession: false,
 	})
 	if err != nil {
@@ -538,7 +540,7 @@ func runHandoffCycle() error {
 
 	// Refresh the tmux session env, which liveness checks read, so it names the
 	// agent the pane is about to run (gt-di8p).
-	updateSessionEnvForHandoff(t, currentSession)
+	updateSessionEnvForHandoff(reg, t, currentSession)
 
 	// Respawn pane — this atomically kills current process and starts fresh
 	return respawnOwnPane(t, currentSession, pane, restartCmd)
@@ -552,7 +554,7 @@ func getCurrentTmuxSession() (string, error) {
 	// the town socket returns an arbitrary session (often hq-boot) instead of
 	// the caller's actual session.
 	if role := os.Getenv("GT_ROLE"); role != "" {
-		resolved, err := resolveRoleToSession(role)
+		resolved, err := resolveRoleToSession(townRegistry(), role)
 		if err == nil && resolved != "" {
 			return resolved, nil
 		}
@@ -575,10 +577,10 @@ func getCurrentTmuxSession() (string, error) {
 //   - Direct session names (passed through)
 //
 // For role shortcuts that need context (crew), it auto-detects from environment.
-func resolveRoleToSession(role string) (string, error) {
+func resolveRoleToSession(reg *session.PrefixRegistry, role string) (string, error) {
 	// First, check if it's a path format (contains /)
 	if strings.Contains(role, "/") {
-		return resolvePathToSession(role)
+		return resolvePathToSession(reg, role)
 	}
 
 	switch strings.ToLower(role) {
@@ -600,7 +602,7 @@ func resolveRoleToSession(role string) (string, error) {
 		if rig == "" || crewName == "" {
 			return "", fmt.Errorf("cannot determine crew identity - run from crew directory or specify GT_RIG/GT_CREW")
 		}
-		return session.CrewSessionName(session.PrefixFor(rig), crewName), nil
+		return session.CrewSessionName(reg.PrefixForRig(rig), crewName), nil
 
 	default:
 		// Assume it's a direct session name (e.g., gt-gastown-crew-max)
@@ -613,7 +615,7 @@ func resolveRoleToSession(role string) (string, error) {
 //   - <rig>/crew/<name> -> gt-<rig>-crew-<name>
 //   - <rig>/polecats/<name> -> gt-<rig>-<name> (explicit polecat)
 //   - <rig>/<name> -> gt-<rig>-<name> (polecat shorthand, if name isn't a known role)
-func resolvePathToSession(path string) (string, error) {
+func resolvePathToSession(reg *session.PrefixRegistry, path string) (string, error) {
 	parts := strings.Split(path, "/")
 	for _, part := range parts {
 		if !safeAgentPathSegment(part) {
@@ -625,14 +627,14 @@ func resolvePathToSession(path string) (string, error) {
 	if len(parts) == 3 && parts[1] == constants.RoleCrew {
 		rig := parts[0]
 		name := parts[2]
-		return session.CrewSessionName(session.PrefixFor(rig), name), nil
+		return session.CrewSessionName(reg.PrefixForRig(rig), name), nil
 	}
 
 	// Handle <rig>/polecats/<name> format (explicit polecat path)
 	if len(parts) == 3 && parts[1] == "polecats" {
 		rig := parts[0]
 		name := strings.ToLower(parts[2]) // normalize polecat name
-		return session.PolecatSessionName(session.PrefixFor(rig), name), nil
+		return session.PolecatSessionName(reg.PrefixForRig(rig), name), nil
 	}
 
 	// Handle <rig>/<role-or-polecat> format
@@ -657,11 +659,11 @@ func resolvePathToSession(path string) (string, error) {
 			if townRoot != "" {
 				crewPath := filepath.Join(townRoot, rig, "crew", second)
 				if info, err := os.Stat(crewPath); err == nil && info.IsDir() {
-					return session.CrewSessionName(session.PrefixFor(rig), second), nil
+					return session.CrewSessionName(reg.PrefixForRig(rig), second), nil
 				}
 			}
 			// Not a crew member - treat as polecat name (e.g., gastown/nux)
-			return session.PolecatSessionName(session.PrefixFor(rig), secondLower), nil
+			return session.PolecatSessionName(reg.PrefixForRig(rig), secondLower), nil
 		}
 	}
 
@@ -1015,7 +1017,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 //
 // Every caller that respawns a pane from buildRestartCommand must call this
 // too, or the session env keeps naming the agent the pane no longer runs.
-func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
+func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string) {
 	// Resolve current agent using the same priority as buildRestartCommandWithOpts
 	currentAgent := os.Getenv("GT_AGENT")
 	if currentAgent == "" {
@@ -1025,7 +1027,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
 	}
 
 	townRoot := detectTownRootFromCwd()
-	identity, identityErr := session.ParseSessionName(sessionName)
+	identity, identityErr := session.ParseSessionNameWithRegistry(sessionName, reg)
 	role := ""
 	agentName := ""
 	rigPath := ""
@@ -1144,9 +1146,9 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 }
 
 // sessionToGTRole converts a session name to a GT_ROLE value.
-// Uses session.ParseSessionName for consistent parsing across the codebase.
-func sessionToGTRole(sessionName string) string {
-	identity, err := session.ParseSessionName(sessionName)
+// Uses session.ParseSessionNameWithRegistry for consistent parsing across the codebase.
+func sessionToGTRole(reg *session.PrefixRegistry, sessionName string) string {
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return ""
 	}

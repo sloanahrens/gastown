@@ -941,6 +941,7 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Session Health Check\n\n", style.Bold.Render("🔍"))
 
 	t := tmux.NewTmux()
+	reg := townRegistry()
 	totalChecked := 0
 	totalHealthy := 0
 	totalCrashed := 0
@@ -960,7 +961,7 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			polecatName := entry.Name()
-			sessionName := session.PolecatSessionName(session.PrefixFor(r.Name), polecatName)
+			sessionName := session.PolecatSessionName(reg.PrefixForRig(r.Name), polecatName)
 			totalChecked++
 
 			// Check if session exists

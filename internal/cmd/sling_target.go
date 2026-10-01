@@ -19,14 +19,15 @@ var resolveTargetAgentFn = resolveTargetAgent
 
 // resolveTargetAgent converts a target spec to agent ID, pane, and hook root.
 func resolveTargetAgent(target string) (agentID string, pane string, hookRoot string, err error) {
+	reg := townRegistry()
 	// First resolve to session name
-	sessionName, err := resolveRoleToSession(target)
+	sessionName, err := resolveRoleToSession(reg, target)
 	if err != nil {
 		return "", "", "", err
 	}
 
 	// Convert session name to agent ID format (this doesn't require tmux)
-	agentID = sessionToAgentID(sessionName)
+	agentID = sessionToAgentID(reg, sessionName)
 
 	// Get the pane for that session
 	pane, err = getSessionPane(sessionName)
@@ -45,9 +46,9 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 }
 
 // sessionToAgentID converts a session name to agent ID format.
-// Uses session.ParseSessionName for consistent parsing across the codebase.
-func sessionToAgentID(sessionName string) string {
-	identity, err := session.ParseSessionName(sessionName)
+// Uses session.ParseSessionNameWithRegistry for consistent parsing across the codebase.
+func sessionToAgentID(reg *session.PrefixRegistry, sessionName string) string {
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		// Fallback for unparseable sessions
 		return sessionName
