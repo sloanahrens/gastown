@@ -161,7 +161,7 @@ func syncedTown(t *testing.T) (townRoot, formulasDir string) {
 	return townRoot, filepath.Join(townRoot, ".beads", "formulas")
 }
 
-func writeFile(t *testing.T, path string, data []byte) {
+func writeTownFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
@@ -232,10 +232,10 @@ func TestSyncFormulas_ClassifiesEveryFileByHash(t *testing.T) {
 	// update: disk is what gt last wrote; the binary has moved on.
 	const outdated = "mol-polecat-code-review.formula.toml"
 	oldContent := []byte("formula = \"older\"\n")
-	writeFile(t, filepath.Join(formulasDir, outdated), oldContent)
+	writeTownFile(t, filepath.Join(formulasDir, outdated), oldContent)
 	// replace-drift: hand-edited after gt wrote it.
 	handEdit := append(append([]byte{}, embeddedWork...), []byte("\n# hand edit\n")...)
-	writeFile(t, filepath.Join(formulasDir, workFormula), handEdit)
+	writeTownFile(t, filepath.Join(formulasDir, workFormula), handEdit)
 	// reinstall: gt wrote it, someone deleted it.
 	const deleted = "code-review.formula.toml"
 	if err := os.Remove(filepath.Join(formulasDir, deleted)); err != nil {
@@ -243,12 +243,12 @@ func TestSyncFormulas_ClassifiesEveryFileByHash(t *testing.T) {
 	}
 	// orphaned: gt wrote it, the binary no longer embeds it.
 	const orphan = "mol-witness-patrol.formula.toml"
-	writeFile(t, filepath.Join(formulasDir, orphan), []byte("formula = \"retired\"\n"))
+	writeTownFile(t, filepath.Join(formulasDir, orphan), []byte("formula = \"retired\"\n"))
 	// unowned: hand-written formula, a .bak copy, a backup dir.
 	const handWritten = "my-own.formula.toml"
 	const bak = workFormula + ".bak-20260921-resync"
-	writeFile(t, filepath.Join(formulasDir, handWritten), []byte("formula = \"mine\"\n"))
-	writeFile(t, filepath.Join(formulasDir, bak), []byte("old"))
+	writeTownFile(t, filepath.Join(formulasDir, handWritten), []byte("formula = \"mine\"\n"))
+	writeTownFile(t, filepath.Join(formulasDir, bak), []byte("old"))
 	if err := os.Mkdir(filepath.Join(formulasDir, ".bak-20260922-drift"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -343,8 +343,8 @@ func TestSyncFormulas_UnrecordedCopyThatDiffersIsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(formulasDir, workFormula), []byte("formula = \"hand copy\"\n"))
-	writeFile(t, filepath.Join(formulasDir, "shiny.formula.toml"), mustEmbedded(t, "shiny"))
+	writeTownFile(t, filepath.Join(formulasDir, workFormula), []byte("formula = \"hand copy\"\n"))
+	writeTownFile(t, filepath.Join(formulasDir, "shiny.formula.toml"), mustEmbedded(t, "shiny"))
 
 	plan, err := PlanFormulaSync(townRoot)
 	if err != nil {
