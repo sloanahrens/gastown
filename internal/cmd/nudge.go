@@ -8,12 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/session"
@@ -138,27 +133,6 @@ func newNudgeDelivery(t *tmux.Tmux, townRoot string) *deliver.Delivery {
 	return d
 }
 
-// deliverNudge routes a nudge to sessionName by the --mode, --priority and
-// --force flags (deliver.Delivery.Deliver).
-func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
-	// Test hook: when GT_TEST_NUDGE_LOG is set, log the nudge instead of
-	// delivering through real tmux/queue transport. Prevents test-suite
-	// runs from delivering "test" messages to live agents (mayor reported
-	// recurring synthetic nudges traced to nudge_test.go invocations).
-	// Mirrors the pattern in sling_helpers.go's nudgeWitness.
-	if logPath := os.Getenv("GT_TEST_NUDGE_LOG"); logPath != "" {
-		entry := fmt.Sprintf("nudge:%s:%s:%s\n", sessionName, sender, message)
-		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			_, _ = f.WriteString(entry)
-			_ = f.Close()
-		}
-		return nil
-	}
-
-	townRoot, _ := workspace.FindFromCwd()
-	return newNudgeDelivery(t, townRoot).Deliver(context.Background(), sessionName, message, sender)
-}
-
 // immediateTurnProbeWindow is how long immediate mode watches the pane for a
 // reaction before reporting that the target did not start a turn. Var so tests
 // can shorten it.
@@ -270,16 +244,6 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
-	// Identify sender for message prefix (needed before channel check)
-	sender := nudgeSender(GetRole())
-
-	// Handle channel syntax: channel:<name>
-	if strings.HasPrefix(target, "channel:") {
-		channelName := strings.TrimPrefix(target, "channel:")
-		return runNudgeChannel(channelName, message, sender)
-	}
-
-	// Check DND status for target (unless force flag or channel target)
 	townRoot, _ := workspace.FindFromCwd()
 	if townRoot != "" {
 		// Initialize tmux socket and prefix registry so NewTmux() connects
@@ -288,357 +252,84 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// through to the sentinel socket and fails to find sessions.
 		_ = session.InitRegistry(townRoot)
 	}
-	if townRoot != "" && !nudgeForceFlag {
-		shouldSend, level, _ := shouldNudgeTarget(townRegistry(), townRoot, target, nudgeForceFlag)
-		if !shouldSend {
+	cwd, _ := os.Getwd()
+	sender := deliver.Sender(cwd, townRoot, os.Getenv)
+
+	skipped := false
+	town := &deliver.Town{
+		Delivery: newNudgeDelivery(tmux.NewTmux(), townRoot),
+		Registry: townRegistry(),
+		Skipped: func(_, level string) {
+			skipped = true
 			fmt.Printf("%s Target has DND enabled (%s) - nudge skipped\n", style.Dim.Render("○"), level)
 			fmt.Printf("  Use %s to override\n", style.Bold.Render("--force"))
-			return nil
-		}
+		},
 	}
 
-	t := tmux.NewTmux()
-
-	// Expand role shortcuts to session names
-	// These shortcuts let users type "mayor" instead of "gt-mayor"
-	if target == constants.RoleMayor {
-		target = session.MayorSessionName()
+	if channel, ok := strings.CutPrefix(target, "channel:"); ok {
+		return runNudgeChannel(town, channel, message, sender)
 	}
-
-	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, "deacon/") {
-		return fmt.Errorf("invalid town target %q", target)
+	if err := town.Nudge(context.Background(), target, message, sender); err != nil {
+		return err
 	}
-
-	// Check if target is rig/polecat format or raw session name
-	if strings.Contains(target, "/") {
-		// Parse rig/polecat format
-		rigName, polecatName, err := parseAddress(target)
-		if err != nil {
-			return err
-		}
-
-		var sessionName string
-
-		// Check if this is a crew address (polecatName starts with "crew/")
-		if strings.HasPrefix(polecatName, "crew/") {
-			// Extract crew name and use crew session naming
-			crewName := strings.TrimPrefix(polecatName, "crew/")
-			sessionName = crewSessionName(townRegistry(), rigName, crewName)
-		} else if strings.HasPrefix(polecatName, "polecats/") {
-			// Explicit polecat address (e.g., "vastal/polecats/furiosa").
-			// Bypasses crew-first resolution for short addresses.
-			pcName := strings.TrimPrefix(polecatName, "polecats/")
-			mgr, err := getSessionManager(rigName)
-			if err != nil {
-				return err
-			}
-			sessionName = mgr.SessionName(pcName)
-		} else {
-			// Short address (e.g., "gastown/holden") - could be crew or polecat.
-			// Try crew first (matches mail system's addressToSessionIDs pattern),
-			// then fall back to polecat.
-			crewSession := crewSessionName(townRegistry(), rigName, polecatName)
-			if exists, _ := t.HasSession(crewSession); exists {
-				sessionName = crewSession
-			} else {
-				mgr, err := getSessionManager(rigName)
-				if err != nil {
-					return err
-				}
-				sessionName = mgr.SessionName(polecatName)
-			}
-		}
-
-		// For queue/wait-idle modes, verify session exists before enqueuing.
-		// Without this, queue mode silently succeeds for nonexistent sessions —
-		// the file is written but never drained.
-		if nudgeModeFlag != NudgeModeImmediate {
-			exists, err := t.HasSession(sessionName)
-			if err != nil {
-				return fmt.Errorf("checking session: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
-			}
-		}
-
-		// Send nudge using the configured delivery mode
-		if err := deliverNudge(t, sessionName, message, sender); err != nil {
-			return fmt.Errorf("nudging session: %w", err)
-		}
-
-		fmt.Printf("%s Nudged %s/%s (%s)\n", style.Bold.Render("✓"), rigName, polecatName, nudgeModeFlag)
-
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
-	} else {
-		// Raw session name (legacy)
-		exists, err := t.HasSession(target)
-		if err != nil {
-			return fmt.Errorf("checking session: %w", err)
-		}
-		if !exists {
-			return fmt.Errorf("session %q not found", target)
-		}
-
-		if err := deliverNudge(t, target, message, sender); err != nil {
-			return fmt.Errorf("nudging session: %w", err)
-		}
-
-		fmt.Printf("✓ Nudged %s (%s)\n", target, nudgeModeFlag)
-
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+	if !skipped {
+		fmt.Printf("%s Nudged %s (%s)\n", style.Bold.Render("✓"), target, nudgeModeFlag)
 	}
-
 	return nil
 }
 
-// nudgeSender is the sender a nudge from the caller's role is attributed to:
-// "unknown" when the role cannot be read.
-func nudgeSender(roleInfo RoleInfo, err error) string {
-	if err != nil {
-		return "unknown"
-	}
-	switch roleInfo.Role {
-	case RoleMayor:
-		return constants.RoleMayor
-	case RoleCrew:
-		return fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
-	case RolePolecat:
-		return fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
-	default:
-		return string(roleInfo.Role)
-	}
-}
-
-// runNudgeChannel nudges all members of a named channel.
-// Routes each target through deliverNudge so --mode is respected.
-func runNudgeChannel(channelName, message, sender string) error {
-	// Find town root
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("cannot find town root: %w", err)
-	}
-
-	// Load messaging config
-	msgConfigPath := config.MessagingConfigPath(townRoot)
-	msgConfig, err := config.LoadMessagingConfig(msgConfigPath)
-	if err != nil {
-		return fmt.Errorf("loading messaging config: %w", err)
-	}
-
-	// Look up channel
-	patterns, ok := msgConfig.NudgeChannels[channelName]
-	if !ok {
-		return fmt.Errorf("nudge channel %q not found in messaging config", channelName)
-	}
-
-	if len(patterns) == 0 {
-		return fmt.Errorf("nudge channel %q has no members", channelName)
-	}
-
-	// Get all running sessions for pattern matching
-	reg := townRegistry()
-	agents, err := getAgentSessions(reg, true)
-	if err != nil {
-		return fmt.Errorf("listing sessions: %w", err)
-	}
-
-	// Resolve patterns to session names
-	var targets []string
-	seenTargets := make(map[string]bool)
-
-	for _, pattern := range patterns {
-		resolved := resolveNudgePattern(pattern, agents)
-		for _, sessionName := range resolved {
-			if !seenTargets[sessionName] {
-				seenTargets[sessionName] = true
-				targets = append(targets, sessionName)
-			}
+// runNudgeChannel nudges all running members of a named channel through
+// town, printing each member's outcome and a summary.
+func runNudgeChannel(town *deliver.Town, channel, message, sender string) error {
+	town.Skipped = nil
+	town.Member = func(m deliver.ChannelMember) {
+		switch {
+		case m.DND != "":
+			fmt.Printf("  %s %s (DND: %s)\n", style.Dim.Render("○"), m.Session, m.DND)
+		case m.Err != nil:
+			fmt.Printf("  %s %s\n", style.ErrorPrefix, m.Session)
+		default:
+			fmt.Printf("  %s %s\n", style.SuccessPrefix, m.Session)
 		}
 	}
 
-	if len(targets) == 0 {
-		fmt.Printf("%s No sessions match channel %q patterns\n", style.WarningPrefix, channelName)
+	fmt.Printf("Nudging channel %q (mode=%s)...\n\n", channel, nudgeModeFlag)
+	members, err := town.NudgeChannel(context.Background(), channel, message, sender)
+	if members == nil {
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s No sessions match channel %q patterns\n", style.WarningPrefix, channel)
 		return nil
 	}
-
-	// Send nudges via deliverNudge (respects --mode flag)
-	t := tmux.NewTmux()
-	var succeeded, failed, skipped int
-	var failures []string
-
-	fmt.Printf("Nudging channel %q (%d target(s), mode=%s)...\n\n", channelName, len(targets), nudgeModeFlag)
-
-	for i, sessionName := range targets {
-		// Check DND status before nudging each target
-		// Convert session name back to address format for DND lookup
-		targetAddr := sessionNameToAddress(reg, sessionName)
-		if targetAddr != "" {
-			if shouldSend, level, _ := shouldNudgeTarget(reg, townRoot, targetAddr, false); !shouldSend {
-				skipped++
-				fmt.Printf("  %s %s (DND: %s)\n", style.Dim.Render("○"), sessionName, level)
-				continue
-			}
-		}
-
-		if err := deliverNudge(t, sessionName, message, sender); err != nil {
-			failed++
-			failures = append(failures, fmt.Sprintf("%s: %v", sessionName, err))
-			fmt.Printf("  %s %s\n", style.ErrorPrefix, sessionName)
-		} else {
-			succeeded++
-			fmt.Printf("  %s %s\n", style.SuccessPrefix, sessionName)
-		}
-
-		// Small delay between nudges
-		if i < len(targets)-1 {
-			clockwork.NewRealClock().Sleep(100 * time.Millisecond)
-		}
-	}
-
 	fmt.Println()
 
-	// Log nudge event
-	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", "channel:"+channelName, message))
-
-	if failed > 0 {
-		summary := fmt.Sprintf("Channel nudge complete: %d succeeded, %d failed", succeeded, failed)
-		if skipped > 0 {
-			summary += fmt.Sprintf(", %d skipped (DND)", skipped)
+	var succeeded, skipped int
+	var failures []string
+	for _, m := range members {
+		switch {
+		case m.DND != "":
+			skipped++
+		case m.Err != nil:
+			failures = append(failures, fmt.Sprintf("%s: %v", m.Session, m.Err))
+		default:
+			succeeded++
 		}
+	}
+	summary := fmt.Sprintf("Channel nudge complete: %d target(s) nudged", succeeded)
+	if len(failures) > 0 {
+		summary = fmt.Sprintf("Channel nudge complete: %d succeeded, %d failed", succeeded, len(failures))
+	}
+	if skipped > 0 {
+		summary += fmt.Sprintf(", %d skipped (DND)", skipped)
+	}
+	if err != nil {
 		fmt.Printf("%s %s\n", style.WarningPrefix, summary)
 		for _, f := range failures {
 			fmt.Printf("  %s\n", style.Dim.Render(f))
 		}
-		return fmt.Errorf("%d nudge(s) failed", failed)
-	}
-
-	summary := fmt.Sprintf("Channel nudge complete: %d target(s) nudged", succeeded)
-	if skipped > 0 {
-		summary += fmt.Sprintf(", %d skipped (DND)", skipped)
+		return err
 	}
 	fmt.Printf("%s %s\n", style.SuccessPrefix, summary)
 	return nil
-}
-
-// resolveNudgePattern resolves a nudge channel pattern to session names.
-// Patterns can be:
-//   - Literal: "gastown/crew/max" → gt-crew-max
-//   - Wildcard: "gastown/polecats/*" → all polecat sessions in gastown
-//   - Role: "*/crew/*" → all crew sessions
-//   - Special: "mayor" → hq-mayor
-func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
-	var results []string
-
-	// Handle special cases
-	if pattern == constants.RoleMayor {
-		return []string{session.MayorSessionName()}
-	}
-
-	// Parse pattern
-	if !strings.Contains(pattern, "/") {
-		// Unknown pattern format
-		return nil
-	}
-
-	parts := strings.SplitN(pattern, "/", 2)
-	rigPattern := parts[0]
-	targetPattern := parts[1]
-
-	for _, agent := range agents {
-		// Match rig pattern
-		if rigPattern != "*" && rigPattern != agent.Rig {
-			continue
-		}
-
-		// Match target pattern
-		if strings.HasPrefix(targetPattern, "polecats/") {
-			// polecats/* or polecats/<name>
-			if agent.Type != AgentPolecat {
-				continue
-			}
-			suffix := strings.TrimPrefix(targetPattern, "polecats/")
-			if suffix != "*" && suffix != agent.AgentName {
-				continue
-			}
-		} else if strings.HasPrefix(targetPattern, "crew/") {
-			// crew/* or crew/<name>
-			if agent.Type != AgentCrew {
-				continue
-			}
-			suffix := strings.TrimPrefix(targetPattern, "crew/")
-			if suffix != "*" && suffix != agent.AgentName {
-				continue
-			}
-		} else {
-			// Assume it's a polecat name (legacy short format)
-			if agent.Type != AgentPolecat || agent.AgentName != targetPattern {
-				continue
-			}
-		}
-
-		results = append(results, agent.Name)
-	}
-
-	return results
-}
-
-// shouldNudgeTarget checks if a nudge should be sent based on the target's notification level.
-// Returns (shouldSend bool, level string, err error).
-// If force is true, always returns true.
-// If the agent bead cannot be found, returns true (fail-open for backward compatibility).
-func shouldNudgeTarget(reg *session.PrefixRegistry, townRoot, targetAddress string, force bool) (bool, string, error) { //nolint:unparam // error return kept for future use
-	if force {
-		return true, "", nil
-	}
-
-	// Try to determine agent bead ID from address
-	agentBeadID := deliver.AgentBeadID(reg, targetAddress)
-	if agentBeadID == "" {
-		// Can't determine agent bead, allow the nudge
-		return true, "", nil
-	}
-
-	bd := beads.New(townRoot)
-	level, err := bd.GetAgentNotificationLevel(agentBeadID)
-	if err != nil {
-		// Agent bead might not exist, allow the nudge
-		return true, "", nil
-	}
-
-	// Allow nudge if level is not muted
-	return level != beads.NotifyMuted, level, nil
-}
-
-// sessionNameToAddress converts a tmux session name back to a mail address
-// for DND lookup. Returns empty string if the format is unrecognized.
-// Examples:
-//   - "gt-gastown-crew-max" -> "gastown/crew/max"
-//   - "gt-gastown-alpha" -> "gastown/alpha"
-//   - "hq-mayor" -> "mayor"
-func sessionNameToAddress(reg *session.PrefixRegistry, sessionName string) string {
-	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
-	if err != nil {
-		return ""
-	}
-
-	// Use short address format: rig/name (not rig/polecats/name)
-	switch identity.Role {
-	case session.RoleMayor:
-		return constants.RoleMayor
-	case session.RoleCrew:
-		return fmt.Sprintf("%s/crew/%s", identity.Rig, identity.Name)
-	case session.RolePolecat:
-		return fmt.Sprintf("%s/%s", identity.Rig, identity.Name)
-	default:
-		return ""
-	}
 }

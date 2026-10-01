@@ -21,9 +21,8 @@ type Nudger interface {
 // the sender resolve from Dir and Env's identity variables, delivery waits
 // for the target to go idle and falls back to its queue, and a context that
 // ends mid-delivery stops it and is reported as the context's error, where
-// the CLI killed the gt process.
-//
-// Channel targets (channel:<name>) are refused; they need gt nudge.
+// the CLI killed the gt process. Channel targets (channel:<name>) reach every
+// running member of the town's nudge channel.
 type TownNudger struct {
 	// Dir is the directory the nudge is sent from; empty means the caller's
 	// working directory.

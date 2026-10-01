@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -50,7 +51,7 @@ func mailExpiredNudge(ev nudge.ExpiryEvent) {
 // that owned the session when its name parses, else the mayor, who owns
 // town-level routing for a session no rig claims.
 func expiredNudgeMailTarget(reg *session.PrefixRegistry, sessionName string) string {
-	if addr := sessionNameToAddress(reg, sessionName); addr != "" {
+	if addr := deliver.SessionAddress(reg, sessionName); addr != "" {
 		return addr
 	}
 	return constants.RoleMayor

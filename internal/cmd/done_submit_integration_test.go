@@ -65,7 +65,6 @@ func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branc
 	resetDoneFlagsForTest(t)
 	useDoneGate(t, gate)
 	townRoot := routedSourceTestTownRoot(workDir)
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
 	t.Setenv("GT_TOWN_ROOT", townRoot)
 	t.Setenv("GT_ROOT", townRoot)
 	t.Setenv("GT_ROLE", "gastown/polecats/refuge")

@@ -50,6 +50,7 @@ const (
 // Tmux is the part of *tmux.Tmux nudge delivery drives.
 type Tmux interface {
 	HasSession(name string) (bool, error)
+	ListSessions() ([]string, error)
 	IsBusy(target string) bool
 	WaitForIdle(session string, timeout time.Duration) error
 	NudgeSessionWithOpts(session, message string, opts tmux.NudgeOpts) error
