@@ -1,11 +1,12 @@
 package cmd
 
 import (
-	"path/filepath"
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -31,19 +32,9 @@ func TestNudgeHelpUsesTownRootMessagingConfig(t *testing.T) {
 }
 
 func TestNudgeStdinConflict(t *testing.T) {
-	// Save and restore package-level flags
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	defer func() {
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-	}()
-
+	t.Parallel()
 	// When both --stdin and --message are set, runNudge should return an error
-	nudgeStdinFlag = true
-	nudgeMessageFlag = "some message"
-
-	err := runNudge(nudgeCmd, []string{"gastown/alpha"})
+	_, _, err := nudgeTargetAndMessage("some message", true, func() ([]byte, error) { t.Fatal("stdin read"); return nil, nil }, []string{"gastown/alpha"})
 	if err == nil {
 		t.Fatal("expected error when --stdin and --message are both set")
 	}
@@ -186,21 +177,7 @@ func TestSessionNameToAddress(t *testing.T) {
 }
 
 func TestNudgeInvalidMode(t *testing.T) {
-	// Save and restore package-level flags
-	origMode := nudgeModeFlag
-	origPriority := nudgePriorityFlag
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	defer func() {
-		nudgeModeFlag = origMode
-		nudgePriorityFlag = origPriority
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-	}()
-
-	nudgeStdinFlag = false
-	nudgeMessageFlag = "test"
-
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mode    string
@@ -212,9 +189,8 @@ func TestNudgeInvalidMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nudgeModeFlag = tt.mode
-			nudgePriorityFlag = "normal"
-			err := runNudge(nudgeCmd, []string{"gastown/alpha", "hello"})
+			t.Parallel()
+			err := validateNudgeFlags(tt.mode, "normal")
 			if err == nil {
 				t.Fatal("expected error for invalid mode")
 			}
@@ -226,22 +202,7 @@ func TestNudgeInvalidMode(t *testing.T) {
 }
 
 func TestNudgeInvalidPriority(t *testing.T) {
-	// Save and restore package-level flags
-	origMode := nudgeModeFlag
-	origPriority := nudgePriorityFlag
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	defer func() {
-		nudgeModeFlag = origMode
-		nudgePriorityFlag = origPriority
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-	}()
-
-	nudgeStdinFlag = false
-	nudgeMessageFlag = "test"
-	nudgeModeFlag = NudgeModeImmediate
-
+	t.Parallel()
 	tests := []struct {
 		name     string
 		priority string
@@ -253,8 +214,8 @@ func TestNudgeInvalidPriority(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nudgePriorityFlag = tt.priority
-			err := runNudge(nudgeCmd, []string{"gastown/alpha", "hello"})
+			t.Parallel()
+			err := validateNudgeFlags(NudgeModeImmediate, tt.priority)
 			if err == nil {
 				t.Fatal("expected error for invalid priority")
 			}
@@ -266,42 +227,13 @@ func TestNudgeInvalidPriority(t *testing.T) {
 }
 
 func TestNudgeValidModesAccepted(t *testing.T) {
-	// Verify all valid modes pass the validation check (they'll fail later
-	// on tmux operations, but should NOT fail on mode validation).
-	origMode := nudgeModeFlag
-	origPriority := nudgePriorityFlag
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	origTimeout := waitIdleTimeout
-	defer func() {
-		nudgeModeFlag = origMode
-		nudgePriorityFlag = origPriority
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-		waitIdleTimeout = origTimeout
-	}()
-
-	// Route nudge transport to a log file so the test doesn't deliver "test"
-	// messages to live agents (mayor reported recurring synthetic nudges).
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
-
-	// Shorten wait-idle timeout to avoid 15s test delay
-	waitIdleTimeout = 200 * time.Millisecond
-
-	nudgeStdinFlag = false
-	nudgeMessageFlag = "test"
-	nudgePriorityFlag = "normal"
-
+	t.Parallel()
 	for _, mode := range []string{NudgeModeImmediate, NudgeModeQueue, NudgeModeWaitIdle} {
-		t.Run(mode, func(t *testing.T) {
-			nudgeModeFlag = mode
-			err := runNudge(nudgeCmd, []string{"gastown/alpha", "hello"})
-			// The error should NOT be about invalid mode — it will fail on
-			// tmux or workspace, which is fine.
-			if err != nil && strings.Contains(err.Error(), "invalid --mode") {
-				t.Errorf("valid mode %q was rejected: %v", mode, err)
+		for _, priority := range []string{"normal", "urgent"} {
+			if err := validateNudgeFlags(mode, priority); err != nil {
+				t.Errorf("valid mode %q priority %q was rejected: %v", mode, priority, err)
 			}
-		})
+		}
 	}
 }
 
@@ -463,76 +395,38 @@ func TestIdleWatcherPollInterval(t *testing.T) {
 }
 
 func TestNudgeTrailingSlashNormalization(t *testing.T) {
+	t.Parallel()
 	// The mail system uses "mayor/" and "deacon/" as canonical addresses.
 	// runNudge must strip the trailing slash so these match the role shortcuts.
 	// Without normalization, "mayor/" falls through to parseAddress which
 	// rejects it ("invalid address format"), silently dropping the nudge.
-	origMode := nudgeModeFlag
-	origPriority := nudgePriorityFlag
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	origTimeout := waitIdleTimeout
-	defer func() {
-		nudgeModeFlag = origMode
-		nudgePriorityFlag = origPriority
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-		waitIdleTimeout = origTimeout
-	}()
-
-	// Route nudge transport to a log file so this test doesn't deliver to
-	// the real mayor/deacon/witness/refinery sessions on host.
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
-
-	waitIdleTimeout = 200 * time.Millisecond
-	nudgeStdinFlag = false
-	nudgeMessageFlag = "test"
-	nudgePriorityFlag = "normal"
-	nudgeModeFlag = NudgeModeImmediate
-
 	for _, target := range []string{"mayor/", "deacon/", "witness/", "refinery/"} {
-		t.Run(target, func(t *testing.T) {
-			err := runNudge(nudgeCmd, []string{target, "hello"})
-			// Will fail on tmux/session lookup, but must NOT fail on address parsing.
-			if err != nil && strings.Contains(err.Error(), "invalid address format") {
-				t.Errorf("trailing-slash target %q was rejected as invalid address: %v", target, err)
-			}
-		})
+		got, message, err := nudgeTargetAndMessage("", false, func() ([]byte, error) { t.Fatal("stdin read"); return nil, nil }, []string{target, "hello"})
+		if err != nil {
+			t.Fatalf("nudgeTargetAndMessage(%q): %v", target, err)
+		}
+		if want := strings.TrimSuffix(target, "/"); got != want || message != "hello" {
+			t.Errorf("target %q -> (%q, %q), want (%q, hello)", target, got, message, want)
+		}
 	}
 }
 
 func TestIdleWatcherExitsOnEmptyQueue(t *testing.T) {
-	// watchAndDeliver should exit immediately when queue is empty
-	// (someone else drained it). We test this by calling with a
-	// temp dir that has no queue files.
-	origTimeout := idleWatcherTimeout
-	origInterval := idleWatcherPollInterval
-	defer func() {
-		idleWatcherTimeout = origTimeout
-		idleWatcherPollInterval = origInterval
-	}()
-
-	// Very short timeout so test doesn't hang
-	idleWatcherTimeout = 500 * time.Millisecond
-	idleWatcherPollInterval = 50 * time.Millisecond
-
-	tmpDir := t.TempDir()
-
-	// watchAndDeliver checks QueueLen first — with no queue files,
-	// it should exit immediately. We verify it doesn't block.
+	t.Parallel()
+	// watchAndDeliver should exit after its first poll when the queue is
+	// empty (someone else drained it). A nil Tmux is safe: QueueLen returns 0
+	// before the session is consulted.
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
 	done := make(chan struct{})
 	go func() {
-		// Use a nil-safe Tmux — QueueLen returns 0 before IsIdle is called.
-		watchAndDeliver(nil, tmpDir, "test-session")
+		watchAndDeliverWith(clk, time.Minute, time.Second, nil, t.TempDir(), "test-session")
 		close(done)
 	}()
-
-	select {
-	case <-done:
-		// Good — exited because queue was empty
-	case <-time.After(2 * time.Second):
-		t.Fatal("watchAndDeliver did not exit within 2s for empty queue")
+	if err := clk.BlockUntilContext(context.Background(), 1); err != nil {
+		t.Fatal(err)
 	}
+	clk.Advance(time.Second) // one poll, not the whole minute
+	<-done
 }
 
 func TestQueueLen(t *testing.T) {
