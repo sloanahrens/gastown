@@ -47,13 +47,29 @@ func (e *bdError) ContainsError(substr string) bool {
 	return strings.Contains(e.Stderr, substr)
 }
 
+// bdCall is one bd invocation as a bdRunner sees it: the argv after "bd",
+// the working directory and the whole environment.
+type bdCall struct {
+	Dir  string
+	Env  []string
+	Args []string
+}
+
+// bdRunner runs one bd invocation under ctx. Mail keeps its own raw bd
+// runner rather than beads' typed client: every mail call carries a
+// caller's deadline (bdReadCtx, bdWriteCtx), so a hung bd cannot pin the
+// sender or the reader, and runs in its own process group so the deadline
+// kills bd's children too. A failure that should read as a bd exit status
+// implements interface{ ExitCode() int }.
+type bdRunner func(ctx context.Context, c bdCall) (stdout, stderr []byte, err error)
+
 // runBdCommand executes a bd command with a context timeout and proper environment setup.
 // ctx controls the deadline/timeout for the subprocess.
 // workDir is the directory to run the command in.
 // beadsDir is the BEADS_DIR environment variable value.
 // extraEnv contains additional environment variables to set (e.g., "BD_IDENTITY=...").
 // Returns stdout bytes on success, or a *bdError on failure.
-func runBdCommand(ctx context.Context, run beads.BDRunner, args []string, workDir, beadsDir string, extraEnv ...string) (_ []byte, retErr error) {
+func runBdCommand(ctx context.Context, run bdRunner, args []string, workDir, beadsDir string, extraEnv ...string) (_ []byte, retErr error) {
 
 	// Remove stale dolt-server.pid before spawning bd. A stale PID file causes
 	// bd to connect to port 3307 which may be occupied by a different Dolt server
@@ -72,7 +88,7 @@ func runBdCommand(ctx context.Context, run beads.BDRunner, args []string, workDi
 	// cmd.Environ() carries PWD=workDir, which bd's own file discovery reads.
 	env := bdSubprocessEnv(beads.CommandContextWithEnv(ctx, workDir, nil).Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
-	stdout, stderr, runErr := run(ctx, beads.BDCall{Dir: workDir, Env: env, Args: args})
+	stdout, stderr, runErr := run(ctx, bdCall{Dir: workDir, Env: env, Args: args})
 
 	// If bd doesn't support --flat (< v0.59), retry without it.
 	// Same fallback pattern as beads.Run. (GH#2746)
@@ -83,7 +99,7 @@ func runBdCommand(ctx context.Context, run beads.BDRunner, args []string, workDi
 				retryArgs = append(retryArgs, a)
 			}
 		}
-		stdout, stderr, runErr = run(ctx, beads.BDCall{Dir: workDir, Env: env, Args: retryArgs})
+		stdout, stderr, runErr = run(ctx, bdCall{Dir: workDir, Env: env, Args: retryArgs})
 	}
 
 	if runErr != nil {
@@ -96,9 +112,9 @@ func runBdCommand(ctx context.Context, run beads.BDRunner, args []string, workDi
 	return stdout, nil
 }
 
-// runBdProcess is the real beads.BDRunner: bd on PATH, in its own detached
+// runBdProcess is the real bdRunner: bd on PATH, in its own detached
 // process group, with exactly the environment c carries.
-func runBdProcess(ctx context.Context, c beads.BDCall) ([]byte, []byte, error) {
+func runBdProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 	cmd := beads.CommandContextWithEnv(ctx, c.Dir, c.Env, c.Args...)
 	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout, stderr bytes.Buffer
