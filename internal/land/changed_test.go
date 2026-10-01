@@ -28,7 +28,22 @@ func TestChangedPackages(t *testing.T) {
 	}{
 		{"empty diff", "", nil},
 		{"one modified go file", "M\tinternal/land/gate.go\n", []string{"internal/land"}},
-		{"test file counts", "M\tinternal/land/gate_test.go\n", []string{"internal/land"}},
+		{"test file adds the test policy package", "M\tinternal/land/gate_test.go\n", []string{"internal/land", "internal/testpolicy"}},
+		{"added test file adds the test policy package", "A\tinternal/cmd/new_test.go\n", []string{"internal/cmd", "internal/testpolicy"}},
+		{
+			"rename to a test file adds the test policy package",
+			"R090\tinternal/land/a.go\tinternal/land/a_test.go\n",
+			[]string{"internal/land", "internal/testpolicy"},
+		},
+		{
+			"rename away from a test file does not",
+			"R090\tinternal/land/a_test.go\tinternal/land/a.go\n",
+			[]string{"internal/land"},
+		},
+		{"deleted test file in a surviving package does not", "D\tinternal/land/old_test.go\n", []string{"internal/land"}},
+		{"test file in the test policy package names it once", "M\tinternal/testpolicy/scan_test.go\n", []string{"internal/testpolicy"}},
+		{"no test file leaves the test policy package out", "M\tinternal/land/gate.go\nM\tinternal/cmd/done.go\n", []string{"internal/cmd", "internal/land"}},
+		{"a testdata file is not a test file", "A\tinternal/land/testdata/x_test.go.txt\n", []string{"internal/land"}},
 		{
 			"two files one package, sorted and deduplicated",
 			"M\tinternal/land/gate.go\nA\tinternal/cmd/done.go\nM\tinternal/land/changed.go\n",
