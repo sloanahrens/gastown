@@ -1,0 +1,122 @@
+package steward
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
+)
+
+// readyIssue is a bead gt done submitted: the ready label and a READY TO
+// LAND block, exactly as done_submit writes them.
+func readyIssue(id, head string) *beads.Issue {
+	return &beads.Issue{
+		ID:       id,
+		Status:   "open",
+		Assignee: "gastown/polecats/emerald",
+		Labels:   []string{land.LabelReadyToLand},
+		Notes:    land.FormatReadyNote(land.Work{Branch: "polecat/emerald/" + id, Head: head, Target: "main", Worker: "emerald"}),
+	}
+}
+
+// rejectedIssue is a bead the landing worker refused: rework swapped in for
+// the ready label, and the MERGE REJECTION block Land writes.
+func rejectedIssue(id, head string, note land.RejectionNote) *beads.Issue {
+	note.Head = head
+	return &beads.Issue{
+		ID:       id,
+		Status:   "open",
+		Assignee: "",
+		Labels:   []string{land.LabelRework},
+		Notes:    land.FormatRejectionNote(note),
+	}
+}
+
+func never(string) bool { return false }
+
+func TestDetectReview(t *testing.T) {
+	t.Parallel()
+	issue := readyIssue("gt-x", "c0ffee")
+	ev, ok := Detect(issue, "gastown", never)
+	if !ok {
+		t.Fatal("no event for a submitted bead")
+	}
+	if ev.Kind != KindReview || ev.Bead != "gt-x" || ev.Head != "c0ffee" || ev.Branch != "polecat/emerald/gt-x" ||
+		ev.Target != "main" || ev.Rig != "gastown" || ev.Worker != "emerald" {
+		t.Fatalf("event = %+v", ev)
+	}
+	// The same head is one job, however many scans see it.
+	if _, ok := Detect(issue, "gastown", func(key string) bool { return key == ev.Key() }); ok {
+		t.Error("a head a job already handled raised a second event")
+	}
+	// A new head on the same bead is a new job.
+	resubmitted := readyIssue("gt-x", "feed")
+	if ev2, ok := Detect(resubmitted, "gastown", func(key string) bool { return key == ev.Key() }); !ok || ev2.Head != "feed" {
+		t.Fatalf("resubmission event = %+v ok=%v", ev2, ok)
+	}
+}
+
+func TestDetectRejection(t *testing.T) {
+	t.Parallel()
+	issue := rejectedIssue("gt-x", "c0ffee", land.RejectionNote{
+		Attempt: 2, Kind: "review", Reason: "om requested changes",
+		Branch: "polecat/emerald/gt-x", Target: "main", MR: "gt-x",
+		Findings: []land.Finding{{ID: "abc", Severity: "major", Path: "a.go", Line: 4, Title: "bad"}},
+	})
+	ev, ok := Detect(issue, "gastown", never)
+	if !ok {
+		t.Fatal("no event for a rejected bead")
+	}
+	if ev.Kind != KindRejection || ev.Head != "c0ffee" || ev.Attempt != 2 || ev.Target != "main" {
+		t.Fatalf("event = %+v", ev)
+	}
+	for _, want := range []string{"kind=review", "reason=om requested changes", "findings=abc:a.go"} {
+		if !strings.Contains(ev.RejectionDetail, want) {
+			t.Errorf("rejection detail %q lacks %q", ev.RejectionDetail, want)
+		}
+	}
+	if _, ok := Detect(issue, "gastown", func(key string) bool { return key == ev.Key() }); ok {
+		t.Error("a rejected head a job already handled raised a second event")
+	}
+}
+
+// TestDetectSkips is everything a scan must leave alone.
+func TestDetectSkips(t *testing.T) {
+	t.Parallel()
+	crew := readyIssue("gt-x", "c0ffee")
+	crew.Assignee = "gastown/crew/sloan"
+	human := rejectedIssue("gt-x", "c0ffee", land.RejectionNote{Attempt: 1, Kind: "policy", Reason: "no_merge"})
+	human.Labels = append(human.Labels, land.LabelNeedsHuman)
+	noready := &beads.Issue{ID: "gt-x", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: "no block here"}
+	nolabel := &beads.Issue{ID: "gt-x", Status: "open", Notes: readyIssue("gt-x", "c0ffee").Notes}
+	nohead := rejectedIssue("gt-x", "", land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "make test exit 2"})
+
+	for name, issue := range map[string]*beads.Issue{
+		"nil": issueNil(), "crew-assigned": crew, "needs-human": human,
+		"ready label without a READY TO LAND block": noready,
+		"a READY TO LAND block without the label":   nolabel,
+		"a rejection without a head":                nohead,
+	} {
+		if ev, ok := Detect(issue, "gastown", never); ok {
+			t.Errorf("%s raised %+v", name, ev)
+		}
+	}
+}
+
+func issueNil() *beads.Issue { return nil }
+
+func TestCrewAssigned(t *testing.T) {
+	t.Parallel()
+	for assignee, want := range map[string]bool{
+		"gastown/crew/sloan":     true,
+		"gastown/crew/":          true,
+		"gastown/polecats/emera": false,
+		"":                       false,
+		"mayor":                  false,
+	} {
+		if got := CrewAssigned(assignee); got != want {
+			t.Errorf("CrewAssigned(%q) = %v, want %v", assignee, got, want)
+		}
+	}
+}

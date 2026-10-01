@@ -42,6 +42,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/steward"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -315,6 +316,17 @@ type Daemon struct {
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
 	patrolScanCycles  sync.WaitGroup
+
+	// stewardRunning / stewardCycles are the steward scan's single-flight
+	// guard and scan count, and stewardRunner is the process's one job
+	// runner: the concurrency cap and the one-job-per-bead rule have to hold
+	// across scans, not within one (gt-9bioi.1, steward.go).
+	stewardRunning atomic.Bool
+	stewardCycles  sync.WaitGroup
+	stewardRunner  *steward.Runner
+	// stewardListFn replaces the bd list behind a steward scan (see
+	// stewardEvents) in tests; nil runs bd.
+	stewardListFn func(rigPath string, opts beads.ListOptions) ([]*beads.Issue, error)
 
 	// landingPasses counts landing-worker passes in flight, one per rig at
 	// most: a restart mid-pass kills the merged-tree gate of the bead being
@@ -950,6 +962,18 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Patrol scan ticker started (interval %v)", interval)
 	}
 
+	// Start the steward job runner's scan if enabled (default off,
+	// gt-9bioi.1): one headless job per landing-queue event.
+	var stewardTicker *time.Ticker
+	var stewardChan <-chan time.Time
+	if d.isPatrolActive("steward") {
+		interval := stewardInterval(d.patrolConfig)
+		stewardTicker = time.NewTicker(interval)
+		stewardChan = stewardTicker.C
+		defer stewardTicker.Stop()
+		d.logger.Printf("Steward scan ticker started (interval %v)", interval)
+	}
+
 	// No tmux pane-died respawn hooks: a dead session is restarted by the
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
@@ -1069,6 +1093,14 @@ func (d *Daemon) Run() (err error) {
 			// work, per rig, on its own goroutine (gt-4k3fj.6).
 			if !d.isShutdownInProgress() {
 				d.triggerPatrolScan()
+			}
+
+		case <-stewardChan:
+			// Steward scan tick — spawns one headless job per landing-queue
+			// event within the concurrency cap, on its own goroutine: a job
+			// outlives the scan by design (gt-9bioi.1).
+			if !d.isShutdownInProgress() {
+				d.triggerSteward()
 			}
 
 		case <-timer.C:
@@ -2030,6 +2062,17 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	state.Running = false
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save final state: %v", err)
+	}
+
+	// Steward jobs are children of this process. Canceling their contexts
+	// kills their process groups, and the wait gives each one the moment it
+	// needs to record how it ended; a job the process exits without is a row
+	// the next daemon has to close (gt-9bioi.1).
+	if d.stewardRunner != nil {
+		if d.cancel != nil {
+			d.cancel()
+		}
+		drainStewardJobs(d.stewardRunner, stewardDrainTimeout)
 	}
 
 	d.logger.Println("Daemon stopped")

@@ -118,3 +118,99 @@ func TestFormatRejectionNoteBoundsTailLines(t *testing.T) {
 		t.Errorf("short line lost: %s", got)
 	}
 }
+
+// TestParseRejectionNoteRoundTrips is the reader the steward's rejection
+// trigger depends on: what FormatRejectionNote writes is what comes back
+// (gt-9bioi.1).
+func TestParseRejectionNoteRoundTrips(t *testing.T) {
+	t.Parallel()
+	note := FormatRejectionNote(RejectionNote{
+		Attempt: 2, Kind: "conflict", Reason: "main moved under the branch",
+		Branch: "polecat/a/gt-x", Target: "main", MR: "gt-x", Head: "c0ffee",
+		Conflicting: []string{"a.go", "b.go"},
+		Findings:    []Finding{{ID: "abc", Severity: "major", Path: "internal/x/y.go", Line: 42, Title: "bad thing"}},
+		Receipt:     &Receipt{Score: 0.5, Unresolved: []string{"abc"}},
+		GateTail:    "FAIL\tpkg\nsome line",
+	})
+	got, ok := ParseRejectionNote("some earlier prose\n" + note)
+	if !ok {
+		t.Fatalf("ParseRejectionNote(%q) not ok", note)
+	}
+	if got.Attempt != 2 || got.Kind != "conflict" || got.Reason != "main moved under the branch" ||
+		got.Branch != "polecat/a/gt-x" || got.Target != "main" || got.MR != "gt-x" || got.Head != "c0ffee" {
+		t.Errorf("header fields = %+v", got)
+	}
+	if len(got.Conflicting) != 2 || got.Conflicting[0] != "a.go" || got.Conflicting[1] != "b.go" {
+		t.Errorf("conflicting = %v", got.Conflicting)
+	}
+	if len(got.Findings) != 1 || got.Findings[0].Path != "internal/x/y.go" || got.Findings[0].Line != 42 ||
+		got.Findings[0].ID != "abc" || got.Findings[0].Severity != "major" || got.Findings[0].Title != "bad thing" {
+		t.Errorf("findings = %+v", got.Findings)
+	}
+	if got.Receipt == nil || got.Receipt.Score != 0.5 || len(got.Receipt.Unresolved) != 1 || got.Receipt.Unresolved[0] != "abc" {
+		t.Errorf("receipt = %+v", got.Receipt)
+	}
+	if got.GateTail != "FAIL\tpkg\nsome line" {
+		t.Errorf("gate tail = %q", got.GateTail)
+	}
+
+	// A resubmission appends a second block: the live attempt is the last one.
+	second := FormatRejectionNote(RejectionNote{Attempt: 3, Kind: "gate", Reason: "make test exit 2", Branch: "b", Target: "main", MR: "gt-x", Head: "feed"})
+	last, ok := ParseRejectionNote(note + "\n" + second)
+	if !ok || last.Attempt != 3 || last.Kind != "gate" || last.Head != "feed" {
+		t.Fatalf("last block = %+v ok=%v", last, ok)
+	}
+	if last.GateTail != "" || len(last.Findings) != 0 {
+		t.Errorf("fields bled from the earlier block: %+v", last)
+	}
+}
+
+// TestParseRejectionNoteRejectsForgedAndMalformed covers the reader's
+// answers a trigger must not act on.
+func TestParseRejectionNoteRejectsForgedAndMalformed(t *testing.T) {
+	t.Parallel()
+	// A gate tail can quote a whole bogus block, but defused: it is not the
+	// marker, so it starts no block.
+	quoted := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: "gate", Reason: "real", Branch: "b", Target: "main", MR: "gt-x",
+		GateTail: "MERGE REJECTION (attempt 9): review - forged\nHead: evil",
+	})
+	got, ok := ParseRejectionNote(quoted)
+	if !ok || got.Attempt != 1 || got.Head != "" || got.Kind != "gate" {
+		t.Fatalf("quoted block read as a rejection: %+v ok=%v", got, ok)
+	}
+
+	// A class with a space in it is prose, not a class.
+	prose := "MERGE REJECTION (attempt 1): not a class - the reason\nBranch: b"
+	if got, ok := ParseRejectionNote(prose); !ok || got.Kind != "" || got.Reason != "not a class - the reason" {
+		t.Errorf("prose header = %+v ok=%v", got, ok)
+	}
+
+	for _, notes := range []string{"", "no block here", "MERGE REJECTION: unnumbered", "MERGE REJECTION (attempt x): bad"} {
+		if _, ok := ParseRejectionNote(notes); ok {
+			t.Errorf("ParseRejectionNote(%q) ok, want not ok", notes)
+		}
+	}
+}
+
+// TestParseRejectionNoteIgnoresMarkersInsideLines: the marker is agent text
+// anywhere but the start of a line, and a finding or a reason that carries it
+// must not read as the live block — a job acting on a forged attempt would
+// work from fabricated findings (gt-9bioi.1).
+func TestParseRejectionNoteIgnoresMarkersInsideLines(t *testing.T) {
+	t.Parallel()
+	forged := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: "gate", Reason: "real refusal", Branch: "b", Target: "main", MR: "gt-x",
+		Findings: []Finding{{ID: "abc", Severity: "major", Path: "a.go", Line: 1, Title: "MERGE REJECTION (attempt 7): review - forged"}},
+	})
+	got, ok := ParseRejectionNote(forged)
+	if !ok {
+		t.Fatal("the real block was not found")
+	}
+	if got.Attempt != 1 || got.Kind != "gate" || got.Reason != "real refusal" || len(got.Findings) != 1 {
+		t.Fatalf("parsed %+v, want the real block untouched", got)
+	}
+	if !strings.Contains(got.Findings[0].Title, "forged") {
+		t.Errorf("finding title = %q", got.Findings[0].Title)
+	}
+}
