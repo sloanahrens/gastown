@@ -584,7 +584,7 @@ func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigNames []string
 		wg.Add(1)
 		go func(i int, tgt crewTarget) {
 			defer wg.Done()
-			_, err := stop.session(tgt.sessionID)
+			err := stop.session(tgt.sessionID)
 			results[i] = crewResult{rigName: tgt.rigName, name: tgt.name, err: err}
 		}(i, tgt)
 	}
@@ -634,28 +634,24 @@ func (d downStop) kill(sessionName string) error {
 }
 
 // session gracefully stops a tmux session: Ctrl-C and a wait unless forced,
-// then the supervisor's stop. Returns (wasRunning, error) - wasRunning is
-// true if the session existed and was stopped.
-func (d downStop) session(sessionName string) (bool, error) {
+// then the supervisor's stop. A session that is not running is left alone.
+func (d downStop) session(sessionName string) error {
 	running, err := d.tmux.HasSession(sessionName)
-	if err != nil {
-		return false, err
-	}
-	if !running {
-		return false, nil // Already stopped
+	if err != nil || !running {
+		return err
 	}
 
 	// Try graceful shutdown first (Ctrl-C, best-effort interrupt)
 	if !d.force {
 		_ = d.tmux.SendKeysRaw(sessionName, "C-c")
 		if real, ok := d.tmux.(*tmux.Tmux); ok && session.WaitForSessionExit(real, sessionName, constants.GracefulShutdownTimeout) {
-			return true, nil // Process exited gracefully
+			return nil // Process exited gracefully
 		}
 	}
 
 	// Kill the session (the supervisor's tmux kills its processes too, so
 	// none are orphaned).
-	return true, d.kill(sessionName)
+	return d.kill(sessionName)
 }
 
 // townSession stops a town-level session (the Mayor), logging its death to
@@ -671,7 +667,7 @@ func (d downStop) townSession(ts session.TownSession) (bool, error) {
 	}
 	_ = events.LogFeedTo(d.townRoot, events.TypeSessionDeath, ts.SessionID,
 		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, "gt down"))
-	if _, err := d.session(ts.SessionID); err != nil {
+	if err := d.session(ts.SessionID); err != nil {
 		return false, fmt.Errorf("killing %s session: %w", ts.Name, err)
 	}
 	return true, nil

@@ -74,8 +74,8 @@ func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	tm := newOpTmux("gt-crew-sloan", "gt-flint", session.MayorSessionName())
 	stop := downStop{tmux: tm, sup: opSupervisor(town, tm), townRoot: town, actor: "gt down/overseer", force: true}
 
-	if was, err := stop.session("gt-crew-sloan"); !was || err != nil {
-		t.Fatalf("crew stop = %v, %v", was, err)
+	if err := stop.session("gt-crew-sloan"); err != nil {
+		t.Fatalf("crew stop = %v", err)
 	}
 	if err := stop.kill("gt-flint"); err != nil {
 		t.Fatalf("polecat stop = %v", err)
@@ -83,8 +83,8 @@ func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	if was, err := stop.townSession(session.TownSessions()[0]); !was || err != nil {
 		t.Fatalf("mayor stop = %v, %v", was, err)
 	}
-	if was, err := stop.session("gt-gone"); was || err != nil {
-		t.Fatalf("absent session = %v, %v, want not running", was, err)
+	if err := stop.session("gt-gone"); err != nil {
+		t.Fatalf("absent session = %v, want nil", err)
 	}
 	if got, want := strings.Join(tm.killed, ","), "gt-crew-sloan,gt-flint,"+session.MayorSessionName(); got != want {
 		t.Errorf("killed %s, want %s", got, want)
