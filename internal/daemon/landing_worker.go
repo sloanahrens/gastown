@@ -445,7 +445,9 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 			_ = g.WorktreeRemove(dir, true)
 			_ = g.WorktreePrune()
 		}()
-		// Named "test" so WithSlot holds the container slot around it.
+		// Named "test" so WithSlot holds the container slot around it. The
+		// role is gate-class (slot.IsGateRole): this run is the red-main
+		// detector, so it takes reserved slots and crew yield to it.
 		cg := land.WithSlot(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, gtPath, rigName+"/post-land")
 		cg.LogDir = filepath.Join(logRoot, filepath.Base(parent))
 		rctx, cancel := context.WithTimeout(ctx, timeout)

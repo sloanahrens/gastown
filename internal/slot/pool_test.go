@@ -412,8 +412,8 @@ func TestPool_NormalizedAndCandidates(t *testing.T) {
 		}
 	}
 	for role, want := range map[string]bool{
-		"gastown/landing": true, "hm/landing": true,
-		"gastown/refinery": false, "hm/main-branch-test": false,
+		"gastown/landing": true, "hm/landing": true, "gastown/post-land": true,
+		"gastown/refinery": false, "hm/main-branch-test": false, "gastown/post-land-impostor": false,
 		"gastown/amber": false, "gastown/landing-impostor-polecat": false, "pid-1234": false,
 	} {
 		if IsGateRole(role) != want {
