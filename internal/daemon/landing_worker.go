@@ -263,6 +263,16 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if d.upgradeRestartPending.Load() {
 				d.signalLandingDrained()
 			}
+			// A pass that did work may have left beads behind it: anything
+			// submitted while it ran. Pass again at once rather than idle them
+			// for a whole interval; only an idle pass waits. Skipped or
+			// failed-only passes wait too, so a broken queue cannot spin.
+			if rep.Landed+rep.Rejected+rep.Repaired > 0 && !d.upgradeRestartPending.Load() {
+				if d.ctx.Err() != nil {
+					return
+				}
+				continue
+			}
 		}
 		select {
 		case <-d.ctx.Done():

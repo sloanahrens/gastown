@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -370,5 +371,54 @@ func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) 
 	case <-d.landingDrained():
 		t.Fatal("woke the run loop with no restart pending")
 	default:
+	}
+}
+
+// A pass that landed something is followed at once by another, so a bead
+// submitted while it ran is not idled for a whole interval.
+func TestLandingWorkerPassesAgainAtOnceAfterABusyPass(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	second, hold := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	var calls atomic.Int32
+	pass := func(context.Context) landworker.Report {
+		if calls.Add(1) == 2 {
+			close(second)
+			<-hold
+			return landworker.Report{}
+		}
+		return landworker.Report{Landed: 1}
+	}
+	// The interval is an hour: a worker that waited it out after the busy
+	// first pass would never start the second, and the test binary's timeout
+	// reports that with every stack.
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	<-second
+}
+
+// A pass that only skipped or failed waits the interval: re-passing at once
+// would spin on a queue that cannot land.
+func TestLandingWorkerWaitsAfterAFailedOnlyPass(t *testing.T) {
+	t.Parallel()
+	d := landingWorkerDaemon(t)
+	first := make(chan struct{})
+	var calls atomic.Int32
+	pass := func(context.Context) landworker.Report {
+		if calls.Add(1) == 1 {
+			close(first)
+		}
+		return landworker.Report{Failed: 1, Skipped: 1}
+	}
+	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	<-first
+	// The loop is now in its hour-long wait or about to enter it; it can only
+	// pass again if it skipped the wait, which it does within one scheduling
+	// round. Yield a few rounds, then check nothing ran a second pass.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("passes = %d after a failed-only pass, want 1 (it must wait the interval)", n)
 	}
 }
