@@ -565,6 +565,52 @@ func rejectionRequest(reason string) pkgRequest {
 }
 `
 
+	// pkgFooWithVerdictLiteral is main's additive commit when the change is a
+	// block: three code lines in the literal, enough for a move to another
+	// package to be read as one (gt-s5eou).
+	pkgFooWithVerdictLiteral = `package pkg
+
+type request struct {
+	ID            string
+	FailureType   string
+	ErrorMsg      string
+	AttemptNumber int
+	Summary       string
+}
+
+func Reject(reason string) request {
+	return request{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		// A manual reject carries no verdict to build a Receipt from, so the
+		// deacon falls back to the plain attempt-count redispatch.
+		Summary:   reason,
+		Verdict:   verdictFor(reason),
+		Retryable: !isFatal(reason),
+	}
+}
+`
+
+	// pkgOtherVerdictHelper is that block in a DIFFERENT package, the type it
+	// builds named as that package sees it.
+	pkgOtherVerdictHelper = `package other
+
+// rejectionRequest builds the record a rejection is remembered by.
+func rejectionRequest(reason string) pkgRequest {
+	return pkgRequest{
+		ID:            "mr-1",
+		FailureType:   "editorial",
+		ErrorMsg:      reason,
+		AttemptNumber: 1,
+		Summary:       reason,
+		Verdict:       verdictFor(reason),
+		Retryable:     !isFatal(reason),
+	}
+}
+`
+
 	// pkgOtherBase is the sibling package's unchanged content.
 	pkgOtherBase = `package other
 
@@ -613,6 +659,13 @@ func newPackageRelocationScenario(t *testing.T, key, additiveFoo string) scenari
 
 func buildPackageRelocationScenario(t *testing.T, dir, additiveFoo string) scenarioPaths {
 	t.Helper()
+	return buildPackageScenarioFrom(t, dir, pkgFooBase, additiveFoo)
+}
+
+// buildPackageScenarioFrom is the scenario with foo.go's base content named, for
+// the changes whose before-state is not pkgFooBase.
+func buildPackageScenarioFrom(t *testing.T, dir, baseFoo, additiveFoo string) scenarioPaths {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")
@@ -622,7 +675,7 @@ func buildPackageRelocationScenario(t *testing.T, dir, additiveFoo string) scena
 	runGitCmd(t, "", "clone", remote, seed)
 	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
 	runGitCmd(t, seed, "config", "user.name", "Seed")
-	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/foo.go"), pkgFooBase)
+	writeTestFileAt(t, filepath.Join(seed, "internal/pkg/foo.go"), baseFoo)
 	writeTestFileAt(t, filepath.Join(seed, "internal/other/bar.go"), pkgOtherBase)
 	runGitCmd(t, seed, "add", "-A")
 	runGitCmd(t, seed, "commit", "-m", "base")
@@ -707,21 +760,21 @@ func TestIntegrationDetectRevertedMerges_CodeMovedToAnotherPackageIsNoRevert(t *
 			name: "into a file the other package already has",
 			edits: map[string]string{
 				"internal/pkg/foo.go":   pkgFooBase,
-				"internal/other/bar.go": pkgOtherPackageHelper,
+				"internal/other/bar.go": pkgOtherVerdictHelper,
 			},
 		},
 		{
 			name: "into a file the move itself creates",
 			edits: map[string]string{
 				"internal/pkg/foo.go":      pkgFooBase,
-				"internal/other/helper.go": pkgOtherPackageHelper,
+				"internal/other/helper.go": pkgOtherVerdictHelper,
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+			s := newPackageRelocationScenario(t, "verdict-literal", pkgFooWithVerdictLiteral)
 			commitPolecat(t, s.polecat, tt.edits, pkgRefactorSubject)
 
 			report := detectRevertedMerges(t, s.polecat)
@@ -742,6 +795,88 @@ func TestIntegrationDetectRevertedMerges_CodeMovedToAnotherPackageIsNoRevert(t *
 				t.Errorf("relocated paths %v missing internal/pkg/foo.go", report.Relocated[0].Paths)
 			}
 		})
+	}
+}
+
+// The constants below are the gt-s5eou shape: main's commit fixes a lock leak
+// by turning one statement into the same statement with a keyword in front, and
+// a stale branch turns it back.
+const (
+	pkgUnlockSubject = "store: release the lock on every path out of put"
+
+	pkgLockBefore = `package pkg
+
+func (s *store) put(k string) {
+	s.mu.Lock()
+	s.items[k] = true
+	s.mu.Unlock()
+}
+`
+
+	pkgLockFixed = `package pkg
+
+func (s *store) put(k string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items[k] = true
+}
+`
+
+	// pkgUnrelatedUnlock is a file the stale branch's own work wrote, in another
+	// package, that holds the line the fix replaced with its keyword stripped.
+	pkgUnrelatedUnlock = `package other
+
+func release(x *guard) {
+	x.Unlock()
+}
+`
+)
+
+// TestDetectRevertedMerges_UndoingAOneLineFixBesideAnUnrelatedFileIsARevert is
+// the gt-s5eou incident: the polecat reverts mu.Unlock() to defer mu.Unlock()'s
+// predecessor while writing an unrelated file that holds x.Unlock(). The fix
+// must not be read as moved to that file.
+func TestIntegrationDetectRevertedMerges_UndoingAOneLineFixBesideAnUnrelatedFileIsARevert(t *testing.T) {
+	t.Parallel()
+	p := cachedGitFixtureStrings(t, "packageRelocation/unlock-fix", func(dir string) []string {
+		sp := buildPackageScenarioFrom(t, dir, pkgLockBefore, pkgLockFixed)
+		return []string{sp.seed, sp.polecat}
+	})
+	commitPolecat(t, p[1], map[string]string{
+		"internal/pkg/foo.go":       pkgLockBefore,
+		"internal/other/release.go": pkgUnrelatedUnlock,
+	}, pkgUnlockSubject)
+
+	report := detectRevertedMerges(t, p[1])
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges read an undone one-line fix as a relocation: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
+	}
+	if !containsString(report.Reverted[0].Paths, "internal/pkg/foo.go") {
+		t.Errorf("reverted paths %v missing internal/pkg/foo.go", report.Reverted[0].Paths)
+	}
+}
+
+// TestDetectRevertedMerges_OneLineCopiedToAnotherPackageIsARevert is the
+// threshold's edge: main's change is a single code line, and another package
+// holds it — the same code the move test above carries, one line of it. A line
+// that small turns up in any unrelated file, so it excuses nothing (gt-s5eou).
+func TestIntegrationDetectRevertedMerges_OneLineCopiedToAnotherPackageIsARevert(t *testing.T) {
+	t.Parallel()
+	s := newPackageRelocationScenario(t, "summary-literal", pkgFooWithSummaryLiteral)
+	commitPolecat(t, s.polecat, map[string]string{
+		"internal/pkg/foo.go":      pkgFooBase,
+		"internal/other/helper.go": pkgOtherPackageHelper,
+	}, pkgRefactorSubject)
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges excused a one-line change by a copy in another package: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
 	}
 }
 
