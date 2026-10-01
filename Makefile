@@ -1,4 +1,4 @@
-.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit exec-tax-preflight
+.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -273,7 +273,18 @@ gate: LINT_RUNNER_FLAGS := --allow-serial-runners
 # The gate's start, read when make parses the Makefile, so the wall it prints
 # includes lint.
 gate: GATE_START := $(shell date +%s)
-gate: exec-tax-preflight lint
+gate: gate-lint gate-test
+
+# The gate's two stages, which the landing worker runs one at a time, each
+# under its own timeout, and om review only after both pass (gt-b5ugw). make
+# gate is the two in order, unchanged in effect.
+gate-lint: LINT_RUNNER_FLAGS := --allow-serial-runners
+gate-lint: exec-tax-preflight lint
+
+# gate-test is build plus the unit tier. Run on its own, its wall starts here;
+# under make gate it inherits the gate's start, so the wall includes lint.
+gate-test: GATE_START ?= $(shell date +%s)
+gate-test:
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
 	@# -o into a temp dir: `go build ./...` over a module with one main

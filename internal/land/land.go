@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -85,6 +84,11 @@ type Lander struct {
 	// as "error:<reason>", so om infrastructure never blocks the queue. When
 	// false, such a landing stops with an *InfraError instead.
 	ReviewErrorLands bool
+	// ReviewErrorRejects, when ReviewErrorLands is false, rejects a green
+	// merged tree whose om review produced no verdict (after the reviewer's
+	// own retries) to gt:needs-human, instead of stopping as an *InfraError
+	// that the next pass would retry and pay om for again (gt-b5ugw).
+	ReviewErrorRejects bool
 	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
 	// flake policy's rerun (flake.go). nil means a red gate is final.
 	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
@@ -120,6 +124,8 @@ const (
 	RejectEmpty     RejectionKind = "empty"
 	RejectPolicy    RejectionKind = "policy"
 	RejectNotPushed RejectionKind = "not_pushed"
+	// RejectTimeout is a gate stage that outlived its own timeout (gt-b5ugw).
+	RejectTimeout RejectionKind = "timeout"
 )
 
 // Rejection is a landing refused because of the work itself. Land has
@@ -325,9 +331,18 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "patch-id", Err: err}
 	}
 
-	l.logf("%s: merged %s onto %s/%s (%s) as %s; gating the merged tree with om review beside it", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
-	gateRes, verdict, reviewErr := l.gateAndReview(ctx, dir, base, merged)
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, Verdict: verdict}
+	l.logf("%s: merged %s onto %s/%s (%s) as %s; gating the merged tree, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
+	// The gate's stages (lint, then tests) run in order, and om only after
+	// they pass: om is the costly stage, and work that fails lint or tests
+	// never pays for it (gt-b5ugw).
+	gateRes := l.Gate.Run(ctx, dir)
+	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes}
+	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
+		rej := &Rejection{Kind: RejectTimeout, Rework: true, GateTail: gateRes.FailureTail(),
+			Reason: fmt.Sprintf("gate stage %s (%s) did not finish within its %s timeout on the merged tree", step.Name, step.Command, step.Timeout)}
+		return Result{}, l.reject(issue, w, rej, nil)
+	}
 	if gateRes.Err != nil {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
@@ -342,18 +357,28 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
 				tail = fv.rerun.FailureTail()
 			}
+			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
-			return Result{}, l.reject(issue, w, rej, reviewFindings(verdict, reviewErr))
+			return Result{}, l.reject(issue, w, rej, nil)
 		}
 		res.Rerun, res.Flaky = fv.rerun, fv.flakes
 		l.logf("%s: the failed package(s) passed their rerun; landing with %d flake(s) filed", w.BeadID, len(fv.flakes))
 	}
+	reviewStart := time.Now()
+	verdict, reviewErr := l.Reviewer.Review(ctx, dir, base, merged)
+	l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))
+	res.Verdict = verdict
 	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped {
 		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
 	}
 	if reviewErr != nil {
-		if !l.ReviewErrorLands || ctx.Err() != nil {
+		if ctx.Err() != nil || (!l.ReviewErrorLands && !l.ReviewErrorRejects) {
 			return Result{}, &InfraError{Stage: "review", Err: reviewErr}
+		}
+		if !l.ReviewErrorLands {
+			rej := &Rejection{Kind: RejectReview, Rework: false,
+				Reason: "om review returned no verdict on a green merged tree, so it does not land unreviewed: " + reviewErrorReason(reviewErr)}
+			return Result{}, l.reject(issue, w, rej, nil)
 		}
 		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr)}
 		res.Verdict = verdict
@@ -589,25 +614,23 @@ func hasAutoSaveCommits(g Repo, base, head string) (bool, error) {
 	return false, nil
 }
 
-// gateAndReview runs the gate and om on the same tree and range at once.
-func (l *Lander) gateAndReview(ctx context.Context, dir, base, merged string) (GateResult, Verdict, error) {
-	var (
-		wg        sync.WaitGroup
-		gateRes   GateResult
-		verdict   Verdict
-		reviewErr error
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		gateRes = l.Gate.Run(ctx, dir)
-	}()
-	go func() {
-		defer wg.Done()
-		verdict, reviewErr = l.Reviewer.Review(ctx, dir, base, merged)
-	}()
-	wg.Wait()
-	return gateRes, verdict, reviewErr
+// stageTimes is one line naming each gate stage's wall time and, when om
+// ran, its own: "stages: lint 18s, gate 92s, om 2m31s".
+func stageTimes(g GateResult, om time.Duration) string {
+	parts := make([]string, 0, len(g.Steps)+1)
+	for _, st := range g.Steps {
+		t := st.Elapsed.Round(time.Second).String()
+		if st.TimedOut {
+			t += " (timed out)"
+		} else if st.ExitCode != 0 {
+			t += fmt.Sprintf(" (exit %d)", st.ExitCode)
+		}
+		parts = append(parts, st.Name+" "+t)
+	}
+	if om > 0 {
+		parts = append(parts, "om "+om.Round(time.Second).String())
+	}
+	return "stages: " + strings.Join(parts, ", ")
 }
 
 // reviewErrorReason is err on one bounded line, for the recorded verdict.
@@ -617,15 +640,6 @@ func reviewErrorReason(err error) string {
 		reason = reason[:200] + "..."
 	}
 	return reason
-}
-
-// reviewFindings is the verdict to carry onto a gate rejection: om's
-// findings travel with it when om also asked for changes.
-func reviewFindings(v Verdict, err error) *Verdict {
-	if err != nil || v.Verdict != VerdictRequestChanges {
-		return nil
-	}
-	return &v
 }
 
 // reject writes rej to the work bead and returns it.

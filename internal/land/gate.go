@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lintlock"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Gate runs the checks a tree must pass. It is the one seam both sides of a
@@ -62,6 +63,10 @@ type StepResult struct {
 	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
 	// landing says why where it is recorded.
 	Warnings []string
+	// TimedOut is true when the step's own Timeout killed it.
+	TimedOut bool
+	// Timeout is the step's own bound, for the rejection that names it.
+	Timeout time.Duration
 }
 
 // FailedTest is one failing top-level test in `go test` output.
@@ -116,6 +121,15 @@ func (r GateResult) Warnings() []string {
 	return out
 }
 
+// TimedOutStep is the step whose own timeout stopped the gate, if one did.
+func (r GateResult) TimedOutStep() (StepResult, bool) {
+	if len(r.Steps) == 0 {
+		return StepResult{}, false
+	}
+	last := r.Steps[len(r.Steps)-1]
+	return last, last.TimedOut
+}
+
 // FailureTail is the output tail of the step that stopped the gate, or "".
 func (r GateResult) FailureTail() string {
 	if r.Passed || len(r.Steps) == 0 {
@@ -140,6 +154,11 @@ type Step struct {
 	// step's argv used to be wrapped in a second `gt` process for. See
 	// WithSlot, which marks the step that needs it.
 	SlotRole string
+	// Timeout bounds this step alone (its lint-lock retries included); 0
+	// means only ctx bounds it. A step that outlives it is killed with its
+	// whole process group and reported TimedOut, a verdict rather than an
+	// infrastructure error (gt-b5ugw).
+	Timeout time.Duration
 }
 
 // runFunc runs argv in dir with env added, writing combined output to out.
@@ -258,13 +277,52 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 // step under the slot and nothing else. A configured gate that needs a slot
 // holds it itself.
 func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
-	if mq != nil && strings.TrimSpace(mq.Gate) != "" {
-		return CommandGate{Steps: []Step{{Name: "gate", Command: strings.TrimSpace(mq.Gate), LockRetry: true}}}
+	cmd := ""
+	if mq != nil {
+		cmd = strings.TrimSpace(mq.Gate)
 	}
-	if hasMakeTarget(dir, "gate") {
-		return CommandGate{Steps: []Step{{Name: "gate", Command: "make gate", LockRetry: true}}}
+	if cmd == "" && hasMakeTarget(dir, "gate") {
+		cmd = "make gate"
+	}
+	if cmd == "make gate" && hasMakeTarget(dir, "gate-lint") && hasMakeTarget(dir, "gate-test") {
+		// make gate's two stages, run one at a time so each has its own
+		// timeout and a lint failure stops the landing before the tests
+		// (gt-b5ugw).
+		return CommandGate{Steps: []Step{
+			{Name: "lint", Command: "make gate-lint", LockRetry: true},
+			{Name: "gate", Command: "make gate-test"},
+		}}
+	}
+	if cmd != "" {
+		return CommandGate{Steps: []Step{{Name: "gate", Command: cmd, LockRetry: true}}}
 	}
 	return CommandGate{Steps: []Step{{Name: "test", Command: "make test", LockRetry: true}}}
+}
+
+// UnitTier reports whether g is make gate's unit tier (containers off), in
+// one step or in its two stages, rather than a gate that may run containers.
+func (g CommandGate) UnitTier() bool {
+	if len(g.Steps) == 0 {
+		return false
+	}
+	c := g.Steps[len(g.Steps)-1].Command
+	return c == "make gate" || c == "make gate-test"
+}
+
+// WithTimeouts returns g with the step named "lint" bounded by lint and every
+// other step by test. A zero leaves that step bounded only by its context.
+func WithTimeouts(g CommandGate, lint, test time.Duration) CommandGate {
+	steps := make([]Step, len(g.Steps))
+	copy(steps, g.Steps)
+	for i := range steps {
+		if steps[i].Name == "lint" {
+			steps[i].Timeout = lint
+		} else {
+			steps[i].Timeout = test
+		}
+	}
+	g.Steps = steps
+	return g
 }
 
 // hasMakeTarget reports whether dir's Makefile defines target.
@@ -395,82 +453,106 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 	}
 	var res GateResult
 	for _, s := range g.Steps {
-		release, err := g.takeSlot(ctx, s.SlotRole)
-		if err != nil {
-			res.Err = fmt.Errorf("gate step %s (%s) could not take the container-gate slot: %w", s.Name, s.Command, err)
-			return res
-		}
-		argv := []string{"sh", "-c", s.Command}
-		var buf bytes.Buffer
-		start := time.Now()
-		attempt := func() (int, error) {
-			buf.Reset()
-			writers := []io.Writer{&buf}
-			if g.Out != nil {
-				writers = append(writers, g.Out)
-			}
-			if g.LogDir != "" {
-				f, err := os.OpenFile(filepath.Join(g.LogDir, s.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-				if err != nil {
-					return -1, fmt.Errorf("opening %s log: %w", s.Name, err)
-				}
-				defer func() { _ = f.Close() }()
-				writers = append(writers, f)
-			}
-			return run(ctx, dir, s.Env, argv, io.MultiWriter(writers...))
-		}
-		var code int
-		if s.LockRetry {
-			lintlock.RetryWithDelays(ctx, g.lockDelays, func() lintlock.Attempt {
-				code, err = attempt()
-				switch {
-				case err != nil:
-					return lintlock.Attempt{Err: err, Output: buf.String()}
-				case code != 0:
-					return lintlock.Attempt{Err: fmt.Errorf("exit %d", code), Output: buf.String()}
-				}
-				return lintlock.Attempt{Output: buf.String()}
-			}, func(n, of int, wait time.Duration) {
-				if g.Out != nil {
-					_, _ = fmt.Fprintf(g.Out, "%s: golangci-lint held by another run; retry %d/%d in %s\n", s.Name, n, of, wait)
-				}
-			})
-		} else {
-			code, err = attempt()
-		}
-		out := buf.String()
-		pkgs, tests := parseGoTestOutput(out)
-		res.Steps = append(res.Steps, StepResult{
-			Name:           s.Name,
-			Command:        s.Command,
-			ExitCode:       code,
-			Elapsed:        time.Since(start),
-			Tail:           lastLines(out, gateTailLines),
-			Packages:       pkgs,
-			FailedTests:    tests,
-			BudgetOverruns: parseBudgetOverruns(out),
-			Warnings:       parseWarnings(out),
-		})
-		if err != nil {
-			// The step never ran, so there is no exit status for the hold to
-			// carry: release it open-ended rather than inventing one.
-			release(nil)
-			res.Err = fmt.Errorf("gate step %s (%s) did not run: %w", s.Name, s.Command, err)
-			return res
-		}
-		release(&code)
-		if code != 0 && s.LockRetry && lintlock.Unfinished(out) {
-			// Still contended (or stopped at its own timeout) after every
-			// retry: nothing was linted, so this is not a verdict on the tree.
-			res.Err = fmt.Errorf("gate step %s never finished: golangci-lint's module lock stayed held or it hit its own timeout; nothing was linted", s.Name)
-			return res
-		}
-		if code != 0 {
+		if !g.runStep(ctx, dir, run, s, &res) {
 			return res
 		}
 	}
 	res.Passed = true
 	return res
+}
+
+// runStep runs one step under its own timeout, appends its result to res, and
+// reports whether the gate goes on to the next step.
+func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s Step, res *GateResult) bool {
+	ctx := parent
+	if s.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(parent, s.Timeout)
+		defer cancel()
+	}
+	release, err := g.takeSlot(ctx, s.SlotRole)
+	if err != nil {
+		res.Err = fmt.Errorf("gate step %s (%s) could not take the container-gate slot: %w", s.Name, s.Command, err)
+		return false
+	}
+	argv := []string{"sh", "-c", s.Command}
+	var buf bytes.Buffer
+	start := time.Now()
+	attempt := func() (int, error) {
+		buf.Reset()
+		writers := []io.Writer{&buf}
+		if g.Out != nil {
+			writers = append(writers, g.Out)
+		}
+		if g.LogDir != "" {
+			f, err := os.OpenFile(filepath.Join(g.LogDir, s.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			if err != nil {
+				return -1, fmt.Errorf("opening %s log: %w", s.Name, err)
+			}
+			defer func() { _ = f.Close() }()
+			writers = append(writers, f)
+		}
+		return run(ctx, dir, s.Env, argv, io.MultiWriter(writers...))
+	}
+	var code int
+	if s.LockRetry {
+		lintlock.RetryWithDelays(ctx, g.lockDelays, func() lintlock.Attempt {
+			code, err = attempt()
+			switch {
+			case err != nil:
+				return lintlock.Attempt{Err: err, Output: buf.String()}
+			case code != 0:
+				return lintlock.Attempt{Err: fmt.Errorf("exit %d", code), Output: buf.String()}
+			}
+			return lintlock.Attempt{Output: buf.String()}
+		}, func(n, of int, wait time.Duration) {
+			if g.Out != nil {
+				_, _ = fmt.Fprintf(g.Out, "%s: golangci-lint held by another run; retry %d/%d in %s\n", s.Name, n, of, wait)
+			}
+		})
+	} else {
+		code, err = attempt()
+	}
+	out := buf.String()
+	pkgs, tests := parseGoTestOutput(out)
+	res.Steps = append(res.Steps, StepResult{
+		Name:           s.Name,
+		Command:        s.Command,
+		ExitCode:       code,
+		Elapsed:        time.Since(start),
+		Tail:           lastLines(out, gateTailLines),
+		Packages:       pkgs,
+		FailedTests:    tests,
+		BudgetOverruns: parseBudgetOverruns(out),
+		Warnings:       parseWarnings(out),
+	})
+	if s.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+		// Its own timeout, not the landing's: the step was killed, and that
+		// is the verdict on this stage (gt-b5ugw).
+		last := &res.Steps[len(res.Steps)-1]
+		last.TimedOut, last.Timeout, last.ExitCode = true, s.Timeout, -1
+		killed := -1
+		release(&killed)
+		return false
+	}
+	if err != nil {
+		// The step never ran, so there is no exit status for the hold to
+		// carry: release it open-ended rather than inventing one.
+		release(nil)
+		res.Err = fmt.Errorf("gate step %s (%s) did not run: %w", s.Name, s.Command, err)
+		return false
+	}
+	release(&code)
+	if code != 0 && s.LockRetry && lintlock.Unfinished(out) {
+		// Still contended (or stopped at its own timeout) after every
+		// retry: nothing was linted, so this is not a verdict on the tree.
+		res.Err = fmt.Errorf("gate step %s never finished: golangci-lint's module lock stayed held or it hit its own timeout; nothing was linted", s.Name)
+		return false
+	}
+	if code != 0 {
+		return false
+	}
+	return true
 }
 
 // packageLineRE matches go test's per-package summary lines:
@@ -560,6 +642,9 @@ func lastLines(s string, n int) string {
 func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer) (int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: gate commands come from the rig's own config
 	cmd.Dir = dir
+	// Its own process group, so a step's timeout kills make and the test
+	// binaries under it, not only the shell (gt-b5ugw).
+	util.SetProcessGroup(cmd)
 	cmd.Env = mergeEnv(os.Environ(), env)
 	cmd.Stdout = out
 	cmd.Stderr = out

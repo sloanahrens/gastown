@@ -350,15 +350,17 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Route:    "daemon",
 		Gate: rigLandGate{
 			townRoot: townRoot, rig: rigName, logRoot: d.landingLogRoot(rigName),
+			lintTimeout: landingWorkerDuration(cfg.LintTimeoutStr, defaultLandLintTimeout),
+			testTimeout: landingWorkerDuration(cfg.TestTimeoutStr, defaultLandTestTimeout),
 		},
-		Rerun:            landRerun(townRoot, rigName, d.landingLogRoot(rigName)),
-		GateBeads:        landworker.GateBeads{Rig: rigName, Beads: bd},
-		Reviewer:         reviewer,
-		Beads:            bd,
-		Landings:         landings,
-		Out:              out,
-		RangeChecks:      []land.RangeCheck{land.AttributionCheck},
-		ReviewErrorLands: true,
+		Rerun:              landRerun(townRoot, rigName, d.landingLogRoot(rigName)),
+		GateBeads:          landworker.GateBeads{Rig: rigName, Beads: bd},
+		Reviewer:           reviewer,
+		Beads:              bd,
+		Landings:           landings,
+		Out:                out,
+		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
+		ReviewErrorRejects: true,
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
@@ -426,11 +428,22 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 // The verdict is the exit code; nothing reads the output for it.
 type rigLandGate struct {
 	townRoot, rig, logRoot string
+	// lintTimeout and testTimeout bound the gate's stages (gt-b5ugw).
+	lintTimeout, testTimeout time.Duration
 }
+
+// Stage defaults for patrols.landing_worker lint_timeout and test_timeout:
+// several times the measured walls (lint ~20s, build and unit tier 75-100s on
+// 2026-10-01), so load does not trip them and a hang is cut short (gt-b5ugw).
+const (
+	defaultLandLintTimeout = 2 * time.Minute
+	defaultLandTestTimeout = 6 * time.Minute
+)
 
 func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	mq := rig.ResolveMergeQueueConfig(g.townRoot, g.rig)
-	cg := land.WithSlot(land.LandGate(dir, mq), g.townRoot, g.rig+"/landing")
+	cg := land.WithTimeouts(land.LandGate(dir, mq), g.lintTimeout, g.testTimeout)
+	cg = land.WithSlot(cg, g.townRoot, g.rig+"/landing")
 	cg.LogDir = landingLogDir(ctx, g.logRoot, dir)
 	return cg.Run(ctx, dir)
 }
@@ -455,7 +468,7 @@ func landRerun(townRoot, rigName, logRoot string) func(context.Context, string, 
 	return func(ctx context.Context, dir string, pkgs []string) land.GateResult {
 		mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
 		gate := land.LandGate(dir, mq)
-		cmd, err := rerunCommand(gate.Steps[0].Command != "make gate", pkgs...)
+		cmd, err := rerunCommand(!gate.UnitTier(), pkgs...)
 		if err != nil {
 			return land.GateResult{Err: err}
 		}

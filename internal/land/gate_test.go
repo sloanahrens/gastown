@@ -492,3 +492,71 @@ func TestRigGatePresubmitPrecedence(t *testing.T) {
 		t.Fatalf("LandGate = %+v; want make gate", lg.Steps)
 	}
 }
+
+// TestCommandGateStepTimeoutIsAVerdict: a step that outlives its own timeout
+// is killed and reported TimedOut, the steps after it never start, and that
+// is a verdict on the tree rather than an infrastructure error (gt-b5ugw).
+func TestCommandGateStepTimeoutIsAVerdict(t *testing.T) {
+	t.Parallel()
+	var ran []string
+	g := CommandGate{Steps: []Step{
+		{Name: "lint", Command: "make gate-lint", Timeout: 20 * time.Millisecond},
+		{Name: "gate", Command: "make gate-test", Timeout: time.Hour},
+	}}
+	g.run = func(ctx context.Context, _ string, _, argv []string, _ io.Writer) (int, error) {
+		ran = append(ran, argv[len(argv)-1])
+		<-ctx.Done()
+		return -1, ctx.Err()
+	}
+	res := g.Run(context.Background(), "/w")
+	step, timedOut := res.TimedOutStep()
+	if res.Passed || res.Err != nil || !timedOut || step.Name != "lint" || step.Timeout != 20*time.Millisecond {
+		t.Fatalf("gate = %+v, want the lint step timed out with no infrastructure error", res)
+	}
+	if !reflect.DeepEqual(ran, []string{"make gate-lint"}) {
+		t.Errorf("ran %v, want only the lint stage", ran)
+	}
+}
+
+// TestCommandGateStepTimeoutLeavesFastStepsAlone: a step under its timeout
+// passes as before.
+func TestCommandGateStepTimeoutLeavesFastStepsAlone(t *testing.T) {
+	t.Parallel()
+	s := &scriptedRun{answers: map[string]scriptedAnswer{}}
+	g := CommandGate{Steps: []Step{
+		{Name: "lint", Command: "make gate-lint", Timeout: time.Minute},
+		{Name: "gate", Command: "make gate-test", Timeout: time.Minute},
+	}}
+	g.run = s.run
+	res := g.Run(context.Background(), "/w")
+	if _, timedOut := res.TimedOutStep(); !res.Passed || timedOut || len(s.calls) != 2 {
+		t.Fatalf("gate = %+v after %d call(s), want both stages passed", res, len(s.calls))
+	}
+}
+
+// TestLandGateSplitsMakeGateIntoStages: a tree whose Makefile has gate-lint
+// and gate-test gates in those two stages, lint first; WithTimeouts bounds
+// each; the unit tier is still recognized for the flake rerun (gt-b5ugw).
+func TestLandGateSplitsMakeGateIntoStages(t *testing.T) {
+	t.Parallel()
+	dir := writeMakefile(t, "lint:\n\ttrue\ngate-lint: lint\ngate-test:\n\ttrue\ngate: gate-lint gate-test\n")
+	for _, mq := range []*config.MergeQueueConfig{nil, {Gate: "make gate"}} {
+		g := WithTimeouts(LandGate(dir, mq), time.Minute, 5*time.Minute)
+		if len(g.Steps) != 2 || g.Steps[0].Command != "make gate-lint" || g.Steps[1].Command != "make gate-test" {
+			t.Fatalf("mq %+v: steps = %+v, want gate-lint then gate-test", mq, g.Steps)
+		}
+		if g.Steps[0].Timeout != time.Minute || g.Steps[1].Timeout != 5*time.Minute || !g.Steps[0].LockRetry {
+			t.Errorf("mq %+v: steps = %+v, want lint 1m with lock retry, tests 5m", mq, g.Steps)
+		}
+		if !g.UnitTier() {
+			t.Errorf("mq %+v: the split make gate is not read as the unit tier", mq)
+		}
+		if WithSlot(g, "/town", "r").Steps[1].SlotRole != "" {
+			t.Errorf("mq %+v: the unit tier took the container slot", mq)
+		}
+	}
+	// A rig's own gate command is one step, whatever the Makefile offers.
+	if g := LandGate(dir, &config.MergeQueueConfig{Gate: "make test"}); len(g.Steps) != 1 || g.UnitTier() {
+		t.Errorf("custom gate: steps = %+v unit=%v, want one step, not the unit tier", g.Steps, g.UnitTier())
+	}
+}
