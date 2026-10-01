@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -31,24 +30,24 @@ func writeInstallTown(t *testing.T, townJSON, configYAML string) string {
 	return townDir
 }
 
-func TestBuildBdInitArgs_TownEndpointWithoutReinit(t *testing.T) {
+func TestBuildBdInitOptions_TownEndpointWithoutReinit(t *testing.T) {
 	t.Parallel()
 	townDir := writeInstallTown(t, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":4400}}`, "listener:\n  port: 5500\n")
 
-	args := buildBdInitArgs(townDir)
+	opts := buildBdInitOptions(townDir)
 
-	want := []string{"init", "--prefix", "hq", "--server", "--server-port", "4400"}
-	if !slices.Equal(args, want) {
-		t.Fatalf("buildBdInitArgs = %v, want %v (town.json port, no reinit flag)", args, want)
+	want := beads.InitOptions{Prefix: "hq", ServerPort: 4400}
+	if opts != want {
+		t.Fatalf("buildBdInitOptions = %+v, want %+v (town.json port, no reinit flag)", opts, want)
 	}
 }
 
-func TestBuildBdInitArgs_ConfigYAMLWithoutTownJSONEndpoint(t *testing.T) {
+func TestBuildBdInitOptions_ConfigYAMLWithoutTownJSONEndpoint(t *testing.T) {
 	t.Parallel()
 	townDir := writeInstallTown(t, "", "listener:\n  host: 127.0.0.2\n  port: 5500\n")
 
-	if args := buildBdInitArgs(townDir); args[len(args)-1] != "5500" {
-		t.Fatalf("buildBdInitArgs = %v, want port 5500 from config.yaml", args)
+	if opts := buildBdInitOptions(townDir); opts.ServerPort != 5500 {
+		t.Fatalf("buildBdInitOptions = %+v, want port 5500 from config.yaml", opts)
 	}
 	if cfg := bdInitDoltConfig(townDir); cfg.Host != "127.0.0.2" {
 		t.Fatalf("bdInitDoltConfig host = %q, want 127.0.0.2 from config.yaml", cfg.Host)
@@ -57,7 +56,7 @@ func TestBuildBdInitArgs_ConfigYAMLWithoutTownJSONEndpoint(t *testing.T) {
 
 // Neither transient running state nor a default makes an endpoint: a town
 // without one passes bd no port (gt-y3pgh.3).
-func TestBuildBdInitArgs_NoEndpointPassesNoPort(t *testing.T) {
+func TestBuildBdInitOptions_NoEndpointPassesNoPort(t *testing.T) {
 	t.Parallel()
 	townDir := t.TempDir()
 	daemonDir := filepath.Join(townDir, "daemon")
@@ -68,8 +67,8 @@ func TestBuildBdInitArgs_NoEndpointPassesNoPort(t *testing.T) {
 		t.Fatalf("write state: %v", err)
 	}
 
-	if args := buildBdInitArgs(townDir); slices.Contains(args, "--server-port") {
-		t.Fatalf("buildBdInitArgs = %v, want no --server-port", args)
+	if opts := buildBdInitOptions(townDir); opts.ServerPort != 0 {
+		t.Fatalf("buildBdInitOptions = %+v, want no server port", opts)
 	}
 }
 

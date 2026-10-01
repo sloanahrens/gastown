@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/mail"
-	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townlog"
@@ -127,14 +125,13 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 		prefix := beads.GetPrefixForRig(townRoot, r.Name)
 		agentBeadID := beads.CrewBeadIDWithPrefix(prefix, r.Name, name)
 
+		rigBd := beads.NewPlain(r.Path, nil)
 		if crewPurge {
 			// --purge: DELETE the agent bead entirely (obliterate)
-			deleteArgs := []string{"delete", agentBeadID, "--force"}
-			deleteCmd := beads.CommandWithEnv(r.Path, nil, deleteArgs...)
-			if output, err := deleteCmd.CombinedOutput(); err != nil {
+			if err := rigBd.DeleteIssues(agentBeadID); err != nil {
 				// Non-fatal: bead might not exist
-				if !strings.Contains(string(output), "no issue found") &&
-					!strings.Contains(string(output), "not found") {
+				if output := bdErrOutput(err); !strings.Contains(output, "no issue found") &&
+					!strings.Contains(output, "not found") {
 					style.PrintWarning("could not delete agent bead %s: %v", agentBeadID, err)
 				}
 			} else {
@@ -143,22 +140,14 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 
 			// Unassign any beads assigned to this crew member
 			agentAddr := fmt.Sprintf("%s/crew/%s", r.Name, name)
-			// Machine mode ignores --format=id and prints full issues, so read ids from --json.
-			unassignArgs := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + agentAddr, "--json"})
-			unassignCmd := beads.CommandWithEnv(r.Path, nil, unassignArgs...)
-			if output, err := unassignCmd.Output(); err == nil {
-				var assigned []struct {
-					ID string `json:"id"`
-				}
-				if json.Unmarshal(output, &assigned) == nil {
-					for _, issue := range assigned {
-						if issue.ID == "" {
-							continue
-						}
-						updateCmd := beads.CommandWithEnv(r.Path, nil, "update", issue.ID, "--unassign")
-						if _, err := updateCmd.CombinedOutput(); err == nil {
-							fmt.Printf("Unassigned: %s\n", issue.ID)
-						}
+			if assigned, err := rigBd.List(beads.ListOptions{Assignee: agentAddr, Priority: -1}); err == nil {
+				unassigned := ""
+				for _, issue := range assigned {
+					if issue.ID == "" {
+						continue
+					}
+					if rigBd.Update(issue.ID, beads.UpdateOptions{Assignee: &unassigned}) == nil {
+						fmt.Printf("Unassigned: %s\n", issue.ID)
 					}
 				}
 			}
@@ -171,15 +160,10 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// Default: CLOSE the agent bead (preserves CV history)
-			closeArgs := []string{"close", agentBeadID, "--reason=Crew workspace removed"}
-			if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
-				closeArgs = append(closeArgs, "--session="+sessionID)
-			}
-			closeCmd := beads.CommandWithEnv(r.Path, nil, closeArgs...)
-			if output, err := closeCmd.CombinedOutput(); err != nil {
+			if err := rigBd.CloseWithReason("Crew workspace removed", agentBeadID); err != nil {
 				// Non-fatal: bead might not exist or already be closed
-				if !strings.Contains(string(output), "no issue found") &&
-					!strings.Contains(string(output), "already closed") {
+				if output := bdErrOutput(err); !strings.Contains(output, "no issue found") &&
+					!strings.Contains(output, "already closed") {
 					style.PrintWarning("could not close agent bead %s: %v", agentBeadID, err)
 				}
 			} else {

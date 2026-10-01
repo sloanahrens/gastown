@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -376,15 +375,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 
 		// Set beads routing mode to explicit (required by gt doctor).
-		routingCmd := beads.CommandWithEnv(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")), "config", "set", "routing.mode", "explicit")
-		if out, err := routingCmd.CombinedOutput(); err != nil {
-			fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), strings.TrimSpace(string(out)))
+		townBd := beads.NewPlain(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")))
+		if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
+			fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
 		}
 
 		// The convoy manager polls the events journal (gt-7iwy0.7).
-		journalCmd := beads.CommandWithEnv(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")), "config", "set", beads.EventsJournalKey, "true")
-		if out, err := journalCmd.CombinedOutput(); err != nil {
-			fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), strings.TrimSpace(string(out)))
+		if err := townBd.ConfigSet(beads.EventsJournalKey, "true"); err != nil {
+			fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
 		}
 	}
 
@@ -648,16 +646,12 @@ func stampTownDoltPort(townPath string, port int) error {
 	})
 }
 
-// buildBdInitArgs returns the arguments for `bd init` including the
+// buildBdInitOptions returns the `bd init` options for the town, with the
 // --server-port from the town's Dolt endpoint.
 // A town without an endpoint passes no port.
-func buildBdInitArgs(townPath string) []string {
+func buildBdInitOptions(townPath string) beads.InitOptions {
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
-	args := []string{"init", "--prefix", "hq", "--server"}
-	if port := bdInitDoltConfig(townPath).Port; port > 0 {
-		args = append(args, "--server-port", strconv.Itoa(port))
-	}
-	return args
+	return beads.InitOptions{Prefix: "hq", ServerPort: bdInitDoltConfig(townPath).Port}
 }
 
 // bdInitDoltConfig is the town's Dolt server config, endpoint included
@@ -698,16 +692,14 @@ func initTownBeads(townPath string) error {
 	// Dolt is the only backend since bd v0.51.0; no --backend flag needed.
 	// Filter inherited BEADS_DIR so bd init targets this town, not a parent .beads.
 	// Always pass --server-port so bd connects to the town's Dolt server.
-	bdInitArgs := buildBdInitArgs(townPath)
-	cmd := beads.CommandWithEnv(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads")), bdInitArgs...)
-
-	output, err := cmd.CombinedOutput()
+	err := beads.NewPlain(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads"))).InitDatabase(buildBdInitOptions(townPath))
 	if err != nil {
+		output := bdErrOutput(err)
 		// Check if beads is already initialized
-		if strings.Contains(string(output), "already initialized") {
+		if strings.Contains(output, "already initialized") {
 			// Already initialized - still need to ensure fingerprint exists
 		} else {
-			return fmt.Errorf("bd init failed: %s", strings.TrimSpace(string(output)))
+			return fmt.Errorf("bd init failed: %s", output)
 		}
 	}
 
@@ -794,10 +786,8 @@ func ensureCustomTypes(beadsPath string) error {
 		{"types.custom", constants.BeadsCustomTypes},
 		{"types.infra", constants.BeadsInfraTypes},
 	} {
-		cmd := beads.CommandWithEnv(beadsPath, nil, "config", "set", cfg.key, cfg.value)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("bd config set %s: %s", cfg.key, strings.TrimSpace(string(output)))
+		if err := beads.NewPlain(beadsPath, nil).ConfigSet(cfg.key, cfg.value); err != nil {
+			return fmt.Errorf("bd config set %s: %s", cfg.key, bdErrOutput(err))
 		}
 	}
 	return nil
@@ -883,10 +873,8 @@ func ensureBeadsCustomTypes(workDir string, types []string) error {
 		{"types.custom", strings.Join(types, ",")},
 		{"types.infra", constants.BeadsInfraTypes},
 	} {
-		cmd := beads.CommandWithEnv(workDir, nil, "config", "set", cfg.key, cfg.value)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("bd config set %s failed: %s", cfg.key, strings.TrimSpace(string(output)))
+		if err := beads.NewPlain(workDir, nil).ConfigSet(cfg.key, cfg.value); err != nil {
+			return fmt.Errorf("bd config set %s failed: %s", cfg.key, bdErrOutput(err))
 		}
 	}
 	return nil

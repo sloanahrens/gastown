@@ -10,7 +10,6 @@ internal/cmd/beads_routing_integration_test.go argv 2
 internal/cmd/convoy_bd.go BDRunner 1
 internal/cmd/convoy.go BdCmd 4
 internal/cmd/convoy.go BDRunner 1
-internal/cmd/crew_lifecycle.go argv 4
 internal/cmd/done_open_source_consumers_integration_test.go argv 1
 internal/cmd/done.go BDRunner 1
 internal/cmd/formula_cook.go BdCmd 1
@@ -23,12 +22,7 @@ internal/cmd/handoff.go BdCmd 2
 internal/cmd/hook.go BdCmd 2
 internal/cmd/hook.go BDRunner 1
 internal/cmd/install_integration_test.go argv 4
-internal/cmd/install.go argv 5
-internal/cmd/mail_announce.go argv 1
-internal/cmd/mail_channel.go argv 1
-internal/cmd/mail_queue.go argv 4
 internal/cmd/molecule_lifecycle.go BDRunner 1
-internal/cmd/molecule_step.go argv 3
 internal/cmd/polecat_identity_reconcile.go BDRunner 1
 internal/cmd/polecat_identity.go argv 1
 internal/cmd/prime_molecule.go argv 1
