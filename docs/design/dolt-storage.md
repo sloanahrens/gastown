@@ -333,6 +333,17 @@ Per database, `daemon/maintenance_state.json` (atomic write) records
 `reclaimed_bytes`. If the size cannot be re-measured after a gc, no run is
 recorded, so the next window gc's that database again.
 
+Before any gc, the same cycle takes the night's backup (gt-8z769.5): per
+database, under its own pause marker, `CALL dolt_backup('sync-url',
+'file://~/gt-backups/dolt/<date>.partial/<db>')` through the running server,
+then a `backup.json` manifest and a rename to `<date>`; rotation keeps seven
+nights. A Dolt backup is the server's consistent snapshot of every branch and
+the working set, dolt_ignored tables included, so the server never stops. The
+backup comes first because the gc is the step that has correlated with a Dolt
+panic: a failed backup escalates and skips that night's gc. A night already on
+disk is not taken again when a deferred gc retries. Restore:
+`docs/dolt-restore.md`.
+
 Due databases run smallest first, one at a time, each bounded by 10 minutes.
 Before each database the patrol re-checks a quiet-window guard: the daemon's
 upgrade-idle predicate, no container-gate slot or in-flight marker held by
@@ -350,7 +361,7 @@ Around each database's gc the patrol also:
   failure fails the run. A marker the daemon cannot remove, or one left by a
   daemon that died mid-gc, lapses at its until.
 - takes the write side of the daemon's Dolt-task lock (non-blocking). The
-  daemon's own Dolt tasks (dolt_backup, wisp_reaper,
+  daemon's own Dolt tasks (wisp_reaper, doctor_dog,
   jsonl_git_backup, the compactor_dog cycle) take the read side and skip
   their tick with `<task>: skipped: gc in flight`; a task in flight makes the
   gc defer with `daemon Dolt task in flight`. Nothing blocks the select loop.
@@ -597,10 +608,12 @@ Gas Town does not push, pull or fetch Dolt remotes (ADR 0002,
 the compactor-dog and dolt-archive plugins are all gone. Nothing syncs
 `refs/dolt/data` any more.
 
-The backup is local: `dolt_backup` syncs each production database to a
-filesystem backup, a nightly filesystem copy of `~/gt/.dolt-data` (planned
-under epic gt-8z769) becomes the disaster-recovery copy, and the JSONL export
-committed to each repo is the human-readable current state.
+The backup is local: scheduled_maintenance takes a nightly backup of every
+database in `~/gt/.dolt-data` into `~/gt-backups/dolt/<date>/` before its gc,
+keeping seven nights (gt-8z769.5; restore procedure in `docs/dolt-restore.md`),
+and the JSONL export committed to each repo is the human-readable current
+state. The 15-minute `dolt_backup` patrol (`dolt backup sync` into
+`<town>/.dolt-backup` plus an iCloud rsync) is retired.
 
 Why: a git-protocol remote kept a full second copy of history on disk
 (`.dolt/git-remote-cache`, 456 MB of the gt database's 775 MB on 2026-09-29),

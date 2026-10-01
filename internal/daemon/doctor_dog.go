@@ -2,13 +2,12 @@ package daemon
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
@@ -22,9 +21,10 @@ const (
 // Default advisory thresholds — used for recommendations in the report.
 // These are defaults; override via DoctorDogConfig fields.
 const (
-	defaultDoctorDogLatencyAlertMs     = 5000.0
-	defaultDoctorDogOrphanAlertCount   = 20
-	defaultDoctorDogBackupStaleSeconds = 3600.0
+	defaultDoctorDogLatencyAlertMs   = 5000.0
+	defaultDoctorDogOrphanAlertCount = 20
+	// The backup is nightly (scheduled_maintenance, gt-8z769.5).
+	defaultDoctorDogBackupStaleSeconds = float64(doltbackup.StaleAfter / time.Second)
 )
 
 // doctorDogThresholds returns the effective thresholds, using config overrides or defaults.
@@ -82,7 +82,7 @@ type doctorProbes struct {
 	databases func() ([]string, error)
 	// orphans counts databases no rig references (gt dolt cleanup's set).
 	orphans func() (int, error)
-	// backupAge is the age of db's backup directory; false when it has none.
+	// backupAge is the age of db's newest nightly backup; false when it has none.
 	backupAge func(db string) (time.Duration, bool)
 	// reap removes gate-container debris (gt slot reap).
 	reap func() (slot.ReapReport, error)
@@ -148,8 +148,8 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 		}
 	}
 
-	// Only served databases: .dolt-backup keeps directories for databases
-	// long since dropped, and judging those would trip on every run.
+	// Only served databases: old nights hold databases long since dropped,
+	// and judging those would trip on every run.
 	if dbs, err := p.databases(); err != nil {
 		r.findings = append(r.findings, fmt.Sprintf("database list unavailable: %v", err))
 	} else {
@@ -199,11 +199,15 @@ func doctorDogProbes(townRoot string) doctorProbes {
 			return len(o), err
 		},
 		backupAge: func(db string) (time.Duration, bool) {
-			info, err := os.Stat(filepath.Join(townRoot, ".dolt-backup", db))
-			if err != nil || !info.IsDir() {
+			root, err := doltbackup.DefaultRoot()
+			if err != nil {
 				return 0, false
 			}
-			return time.Since(info.ModTime()), true
+			b, ok, err := doltbackup.LastFor(root, db)
+			if err != nil || !ok {
+				return 0, false
+			}
+			return b.Age(time.Now()), true
 		},
 		reap: func() (slot.ReapReport, error) { return slot.Reap(townRoot, slot.ReapOptions{}) },
 	}

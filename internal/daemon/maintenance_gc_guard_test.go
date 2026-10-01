@@ -183,7 +183,7 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
 
-	release, ok := d.tryDoltTask("dolt_backup")
+	release, ok := d.tryDoltTask("doctor_dog")
 	if !ok {
 		t.Fatal("a task could not take the read side with no gc running")
 	}
@@ -213,7 +213,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 	var taskRan []bool
 	d.maint.gcExec = func(_ context.Context, d *Daemon, db string) error {
 		f.gcCalls = append(f.gcCalls, db)
-		for _, name := range []string{"dolt_backup", "wisp_reaper", "jsonl_git_backup", "compactor_dog"} {
+		for _, name := range []string{"doctor_dog", "wisp_reaper", "jsonl_git_backup", "compactor_dog"} {
 			release, ok := d.tryDoltTask(name)
 			taskRan = append(taskRan, ok)
 			if ok {
@@ -230,11 +230,11 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 			t.Errorf("task %d took the lock while a gc held it", i)
 		}
 	}
-	if !strings.Contains(logs.String(), "dolt_backup: skipped: gc in flight") {
+	if !strings.Contains(logs.String(), "doctor_dog: skipped: gc in flight") {
 		t.Errorf("skip not logged:\n%s", logs.String())
 	}
 	// The gc released the write side.
-	if release, ok := d.tryDoltTask("dolt_backup"); !ok {
+	if release, ok := d.tryDoltTask("doctor_dog"); !ok {
 		t.Error("lock still held after the gc returned")
 	} else {
 		release()
@@ -314,35 +314,6 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 	awaitCompactorDogIdle(t, d)
 	if n := count(); n != 1 {
 		t.Errorf("after the gc: %d cycle(s), want 1", n)
-	}
-}
-
-// syncDoltBackups skips before pouring its molecule or touching the data dir
-// while a gc holds the write side. The backup patrol runs only on macOS; on
-// every other OS it returns before the guard, which the test asserts instead.
-func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
-	t.Parallel()
-	d, logs := gcTestDaemon(t)
-	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		DoltBackup: &DoltBackupConfig{Enabled: true},
-	}}
-	var bdCalls []string
-	d.dogPourBdFn = func(args ...string) (string, error) {
-		bdCalls = append(bdCalls, strings.Join(args, " "))
-		return "", errors.New("fake bd: unavailable")
-	}
-	d.doltMaintMu.Lock()
-	d.syncDoltBackups()
-	d.doltMaintMu.Unlock()
-
-	if skipped := strings.Contains(logs.String(), "dolt_backup: skipped: gc in flight"); skipped != (runtime.GOOS == "darwin") {
-		t.Errorf("skip logged = %v on %s, want it exactly on darwin:\n%s", skipped, runtime.GOOS, logs.String())
-	}
-	if len(bdCalls) != 0 {
-		t.Errorf("dolt_backup poured its molecule while a gc held the lock: %v", bdCalls)
-	}
-	if strings.Contains(logs.String(), "data dir") {
-		t.Errorf("dolt_backup reached its data dir while a gc held the lock:\n%s", logs.String())
 	}
 }
 

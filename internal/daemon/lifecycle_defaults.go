@@ -9,8 +9,8 @@ package daemon
 //   - Checkpoint Dog: every 10m, auto-commit dirty polecat worktrees
 //   - Doctor Dog (health): every 5m
 //   - JSONL Git Backup: every 15m
-//   - Dolt Filesystem Backup: every 15m
-//   - Scheduled Maintenance (GC): window 03:00; dolt_gc --full weekly, or on old-gen growth >20%
+//   - Scheduled Maintenance: window 03:00; nightly backup to ~/gt-backups/dolt (7 kept),
+//     then dolt_gc --full weekly, or on old-gen growth >20%
 //   - Main Branch Test: every 30m, 10m timeout per rig
 //   - Dolt Remotes: every 15m, pushes databases that have a configured remote
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
@@ -47,10 +47,6 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "15m",
 				Scrub:       &scrub,
-			},
-			DoltBackup: &DoltBackupConfig{
-				Enabled:     true,
-				IntervalStr: "15m",
 			},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{
 				Enabled: true,
@@ -102,10 +98,6 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.JsonlGitBackup == nil {
 		p.JsonlGitBackup = d.JsonlGitBackup
-		changed = true
-	}
-	if p.DoltBackup == nil {
-		p.DoltBackup = d.DoltBackup
 		changed = true
 	}
 	if p.ScheduledMaintenance == nil {

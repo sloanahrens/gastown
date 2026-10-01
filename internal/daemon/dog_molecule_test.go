@@ -1017,7 +1017,6 @@ func TestDiscoverStepsMapsStepsByFormulaTitle(t *testing.T) {
 		want    []string
 	}{
 		{formula: "mol-dog-compactor", want: []string{"inspect", "monitor", "report"}},
-		{formula: "mol-dog-backup", want: []string{"sync", "offsite", "report"}},
 		{formula: "mol-dog-jsonl", want: []string{"export", "verify", "push", "report"}},
 	}
 
@@ -1244,7 +1243,6 @@ func TestDaemonDogCallSitesUseRealStepIDs(t *testing.T) {
 		"MolDogCompactor":     constants.MolDogCompactor,
 		"MolDogCheckpoint":    constants.MolDogCheckpoint,
 		"MolDogDoctor":        constants.MolDogDoctor,
-		"MolDogBackup":        constants.MolDogBackup,
 		"MolDogMayorDispatch": constants.MolDogMayorDispatch,
 	}
 

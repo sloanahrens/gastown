@@ -856,7 +856,7 @@ func TestAgentEnv_DisablesBdBackup(t *testing.T) {
 	t.Parallel()
 	// Verify AgentEnv always includes BD_BACKUP_ENABLED=false regardless of role.
 	// In Gas Town, Dolt is the persistent data store and the daemon provides
-	// centralized backup patrols (dolt_backup, jsonl_git_backup). bd's per-repo
+	// centralized backups (nightly Dolt backup, jsonl_git_backup). bd's per-repo
 	// auto-backup is redundant and pollutes rig git history via git add -f.
 	// See: https://github.com/steveyegge/beads/issues/2241
 	roles := []struct {

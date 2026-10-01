@@ -199,8 +199,8 @@ func TestPatrolsConfig_DoltRemotesKeyIsOpaqueRetiredData(t *testing.T) {
 	}
 }
 
-// A daemon.json written before the removal still carries a dolt_remotes
-// block. It must load cleanly, with its other patrols intact.
+// A daemon.json written before the removals still carries dolt_remotes and
+// dolt_backup blocks. It must load cleanly, keeping them verbatim.
 func TestLoadPatrolConfig_IgnoresLegacyDoltRemotesKey(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -212,7 +212,7 @@ func TestLoadPatrolConfig_IgnoresLegacyDoltRemotesKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := LoadPatrolConfig(town)
-	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.DoltBackup == nil || !cfg.Patrols.DoltBackup.Enabled {
+	if cfg == nil || cfg.Patrols == nil || string(cfg.Patrols.DoltBackup) != `{"enabled":true}` {
 		t.Fatalf("legacy config with dolt_remotes failed to load: %+v", cfg)
 	}
 }

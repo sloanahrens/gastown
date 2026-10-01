@@ -27,8 +27,8 @@ Gets production data off this machine. Two layers:
 
 JSONL is the last-resort recovery layer. Always maintain it regardless of
 whether the git push works. There is no Dolt push: Dolt remote sync was
-removed (ADR 0002), and the Dolt data directory is backed up at the
-filesystem level instead.
+removed (ADR 0002), and the Dolt databases are backed up nightly by the
+daemon's scheduled_maintenance window instead (`docs/dolt-restore.md`).
 
 ## Config
 

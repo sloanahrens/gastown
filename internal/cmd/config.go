@@ -1127,7 +1127,8 @@ func setLifecycleConfig(townRoot, key, value string) error {
 		}
 		patrolConfig.Patrols.DoctorDog.IntervalStr = value
 
-	// Backup (controls both JSONL and Dolt backup)
+	// Backup (the JSONL git backup; the nightly Dolt backup belongs to
+	// scheduled_maintenance and has no switch of its own, gt-8z769.5)
 	case "lifecycle.backup.enabled":
 		b, err := parseBool(value)
 		if err != nil {
@@ -1137,10 +1138,6 @@ func setLifecycleConfig(townRoot, key, value string) error {
 			patrolConfig.Patrols.JsonlGitBackup = &daemon.JsonlGitBackupConfig{}
 		}
 		patrolConfig.Patrols.JsonlGitBackup.Enabled = b
-		if patrolConfig.Patrols.DoltBackup == nil {
-			patrolConfig.Patrols.DoltBackup = &daemon.DoltBackupConfig{}
-		}
-		patrolConfig.Patrols.DoltBackup.Enabled = b
 
 	case "lifecycle.backup.interval":
 		if _, err := time.ParseDuration(value); err != nil {
@@ -1150,10 +1147,6 @@ func setLifecycleConfig(townRoot, key, value string) error {
 			patrolConfig.Patrols.JsonlGitBackup = &daemon.JsonlGitBackupConfig{Enabled: true}
 		}
 		patrolConfig.Patrols.JsonlGitBackup.IntervalStr = value
-		if patrolConfig.Patrols.DoltBackup == nil {
-			patrolConfig.Patrols.DoltBackup = &daemon.DoltBackupConfig{Enabled: true}
-		}
-		patrolConfig.Patrols.DoltBackup.IntervalStr = value
 
 	default:
 		return fmt.Errorf("unknown lifecycle key: %q\n\nSupported lifecycle keys:\n  lifecycle.reaper.enabled\n  lifecycle.reaper.interval\n  lifecycle.reaper.delete_age\n  lifecycle.compactor.enabled\n  lifecycle.compactor.interval\n  lifecycle.compactor.threshold\n  lifecycle.doctor.enabled\n  lifecycle.doctor.interval\n  lifecycle.backup.enabled\n  lifecycle.backup.interval", key)
@@ -1237,10 +1230,8 @@ func getLifecycleConfig(townRoot, key string) error {
 
 	// Backup
 	case "lifecycle.backup.enabled":
-		jsonlEnabled := patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.JsonlGitBackup != nil && patrolConfig.Patrols.JsonlGitBackup.Enabled
-		doltEnabled := patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.DoltBackup != nil && patrolConfig.Patrols.DoltBackup.Enabled
-		if jsonlEnabled || doltEnabled {
-			value = fmt.Sprintf("jsonl=%v dolt=%v", jsonlEnabled, doltEnabled)
+		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.JsonlGitBackup != nil {
+			value = strconv.FormatBool(patrolConfig.Patrols.JsonlGitBackup.Enabled)
 		} else {
 			value = "false (not configured)"
 		}

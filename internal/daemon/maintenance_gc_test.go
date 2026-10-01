@@ -200,6 +200,12 @@ type gcFakes struct {
 	resumes     int
 	pauseFails  bool
 
+	// The nightly backup: backupRoot is a temp dir, backupCalls the
+	// databases copied, backupErr a failure per database.
+	backupRoot  string
+	backupCalls []string
+	backupErr   map[string]error
+
 	// The pause marker: events records "write <db>", "gc <db>" and
 	// "remove" in order; marker is the one on "disk".
 	events       []string
@@ -212,7 +218,8 @@ type gcFakes struct {
 
 func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 	t.Helper()
-	f := &gcFakes{sizes: map[string]gcMeasure{}, shrinkTo: map[string]gcMeasure{}, gcErr: map[string]error{}, quietUntil: -1}
+	f := &gcFakes{sizes: map[string]gcMeasure{}, shrinkTo: map[string]gcMeasure{}, gcErr: map[string]error{}, quietUntil: -1,
+		backupRoot: t.TempDir(), backupErr: map[string]error{}}
 
 	// Discovery returns the databases the fake sizes know about.
 	d.maint.gcDatabases = func(string) ([]string, error) {
@@ -272,6 +279,19 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 			f.sizes[db] = s
 		}
 		return nil
+	}
+	d.maint.backupRoot = func() (string, error) { return f.backupRoot, nil }
+	d.maint.backupExec = func(_ context.Context, _ *Daemon, db, dest string) error {
+		f.backupCalls = append(f.backupCalls, db)
+		f.events = append(f.events, "backup "+db)
+		if f.marker == nil {
+			t.Errorf("backup of %s ran with no pause marker written", db)
+		}
+		if err := f.backupErr[db]; err != nil {
+			return err
+		}
+		// What the server's sync-url leaves behind.
+		return os.MkdirAll(dest, 0o755)
 	}
 	d.maint.quiet = func(*Daemon) (bool, string) {
 		f.quietCalls++

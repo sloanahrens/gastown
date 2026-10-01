@@ -64,7 +64,8 @@ one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
    rebase fails on a concurrent commit, and a flatten is only safe against
    concurrent writes because Dolt merges the in-flight transaction.
 2. Take a backup (copy the database directory while the server is stopped;
-   the daemon's `dolt_backup` patrol also keeps a filesystem backup).
+   the nightly backups under `~/gt-backups/dolt` are the other copy, see
+   `docs/dolt-restore.md`).
 3. Record row counts for every table so you can verify afterwards:
 
    ```sql
