@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -140,6 +142,9 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 		}},
 		townHealthSources: func(s *healthSources) {
 			s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
+			// The real probe writes and execs programs; the unit tier runs
+			// no external tool, so a test that computes health answers it.
+			s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
 			s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
 			s.slots = func() (slot.Report, error) {
 				return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
@@ -215,6 +220,60 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// The exec-tax line the daemon logs is its field's state changing, and a
+// beat that reports the same state says nothing (gt-2ycne.1).
+func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	median := 9 * time.Millisecond
+	d.townHealthSources = func(s *healthSources) {
+		s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
+		s.execTax = func(context.Context) (time.Duration, error) { return median, nil }
+	}
+
+	// Every beat logs the health line itself; only the exec-tax line is
+	// conditional, so the test reads that one out of the log.
+	taxLines := func() []string {
+		var out []string
+		for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+			if strings.Contains(l, "exec-tax") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	d.writeTownHealth()
+	if got := taxLines(); len(got) != 0 {
+		t.Errorf("first beat logged %q, want nothing: there is no baseline to change from", got)
+	}
+	d.writeTownHealth()
+	if got := taxLines(); len(got) != 0 {
+		t.Errorf("an unchanged beat logged %q, want nothing (one line per change, not per beat)", got)
+	}
+	median = 180 * time.Millisecond
+	d.writeTownHealth()
+	if got := logs.String(); !strings.Contains(got, "180ms") || !strings.Contains(got, "gt-2ycne.1") {
+		t.Errorf("the transition to taxed logged %q, want the median and the bead", got)
+	}
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healthField(t, r, "exec-tax"); got.Verdict != townhealth.Red || r.ExecTaxMS == nil || *r.ExecTaxMS != 180 {
+		t.Errorf("exec-tax = %+v with ExecTaxMS %v, want RED and 180", got, r.ExecTaxMS)
+	}
+
+	logs.Reset()
+	median = 9 * time.Millisecond
+	d.writeTownHealth()
+	if got := logs.String(); !strings.Contains(got, "clear") {
+		t.Errorf("the transition back to clear logged %q, want the clear line", got)
+	}
+}
+
 // The second report checks the heartbeat count against the first: the
 // daemon field becomes LIVE once there is a baseline.
 func TestWriteTownHealth_HeartbeatAdvanceIsLiveAfterTheFirstTick(t *testing.T) {
@@ -286,6 +345,7 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	}
 	d.townHealthSources = func(s *healthSources) {
 		s.ping = func() (time.Duration, error) { return 0, errors.New("connection refused") }
+		s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
 		s.backupRoot = func() (string, error) { return "", errors.New("no home") }
 		s.slots = func() (slot.Report, error) { return slot.Report{}, nil }
 	}

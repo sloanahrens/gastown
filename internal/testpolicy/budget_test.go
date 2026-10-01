@@ -174,6 +174,78 @@ func TestWatchBudgetFailWholePackageInterleaved(t *testing.T) {
 	}
 }
 
+// TestIdleJudged is the gate's "packages mostly waiting, not computing"
+// check (gt-2ycne.1): the landing gates of 2026-10-01 ran 483-920 s with
+// packages at 41 s of wall for 5 ms of CPU, which no per-package budget line
+// says.
+func TestIdleJudged(t *testing.T) {
+	t.Parallel()
+	pkg := func(name string, wall, cpu time.Duration) PkgTime {
+		return PkgTime{Package: name, Wall: wall, CPU: CPUTime{User: cpu}, Measured: true}
+	}
+	tests := []struct {
+		name    string
+		times   []PkgTime
+		want    IdleReport
+		topName string
+	}{
+		{
+			name:  "a waiting host",
+			times: []PkgTime{pkg("internal/shell", 41*time.Second, 5*time.Millisecond), pkg("internal/mail", 38*time.Second, 12*time.Millisecond), pkg("internal/nudge", 12*time.Second, 4*time.Second)},
+			want:  IdleReport{Packages: 3, Wall: 38 * time.Second, CPU: 12 * time.Millisecond, Waiting: true},
+			// The top is by wall time, most first.
+			topName: "internal/shell",
+		},
+		{
+			name:  "a computing host",
+			times: []PkgTime{pkg("internal/a", 30*time.Second, 20*time.Second), pkg("internal/b", 25*time.Second, 20*time.Second), pkg("internal/c", 30*time.Second, 40*time.Second)},
+			want:  IdleReport{Packages: 3, Wall: 30 * time.Second, CPU: 20 * time.Second},
+		},
+		{
+			name:  "fast packages wait less than IdleWall",
+			times: []PkgTime{pkg("internal/a", 2*time.Second, time.Millisecond), pkg("internal/b", 3*time.Second, time.Millisecond), pkg("internal/c", 12*time.Second, time.Millisecond)},
+			// The median is the middle package by wall: 3 s, under IdleWall.
+			want: IdleReport{Packages: 3, Wall: 3 * time.Second, CPU: time.Millisecond},
+		},
+		{
+			name:  "no measurement, no verdict",
+			times: []PkgTime{{Package: "internal/a", Wall: 90 * time.Second}},
+			want:  IdleReport{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IdleJudged(tt.times)
+			if got.Packages != tt.want.Packages || got.Wall != tt.want.Wall || got.CPU != tt.want.CPU || got.Waiting != tt.want.Waiting {
+				t.Fatalf("IdleJudged = %+v, want %+v", got, tt.want)
+			}
+			if tt.topName != "" && (len(got.Top) == 0 || got.Top[0].Package != tt.topName) {
+				t.Errorf("Top = %+v, want %s first", got.Top, tt.topName)
+			}
+		})
+	}
+}
+
+// TestIdleJudgedTopIsBounded checks the report names at most IdleTop
+// packages, worst first: it is one warning line, not a table.
+func TestIdleJudgedTopIsBounded(t *testing.T) {
+	t.Parallel()
+	var times []PkgTime
+	for i := 0; i < IdleTop+3; i++ {
+		times = append(times, PkgTime{Package: string(rune('a' + i)), Wall: time.Duration(30+i) * time.Second, Measured: true})
+	}
+	got := IdleJudged(times)
+	if len(got.Top) != IdleTop {
+		t.Fatalf("Top = %d packages, want %d", len(got.Top), IdleTop)
+	}
+	for i := 1; i < len(got.Top); i++ {
+		if got.Top[i-1].Wall < got.Top[i].Wall {
+			t.Errorf("Top = %+v, want the longest wall first", got.Top)
+		}
+	}
+}
+
 func TestEnforceBudget(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

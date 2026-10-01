@@ -57,6 +57,11 @@ type StepResult struct {
 	// a "BUDGET:" line (over the user-CPU budget, or CPU time unrecorded).
 	// A "BUDGET (reported only ...)" line fails nothing and is not one.
 	BudgetOverruns []BudgetOverrun
+	// Warnings are the step's "gate: WARNING" lines, in order. They name a
+	// host condition that slowed the gate without failing it (the exec-tax
+	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
+	// landing says why where it is recorded.
+	Warnings []string
 }
 
 // FailedTest is one failing top-level test in `go test` output.
@@ -97,6 +102,16 @@ func (r GateResult) Summary() string {
 		out = "pass (" + out + ")"
 	default:
 		out = "fail (" + out + ")"
+	}
+	return out
+}
+
+// Warnings are every step's "gate: WARNING" lines, in step order. A warning
+// is the gate's own account of the host it ran on and fails nothing.
+func (r GateResult) Warnings() []string {
+	var out []string
+	for _, s := range r.Steps {
+		out = append(out, s.Warnings...)
 	}
 	return out
 }
@@ -434,6 +449,7 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 			Packages:       pkgs,
 			FailedTests:    tests,
 			BudgetOverruns: parseBudgetOverruns(out),
+			Warnings:       parseWarnings(out),
 		})
 		if err != nil {
 			// The step never ran, so there is no exit status for the hold to
@@ -503,6 +519,21 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 // budgetLineRE matches the budget runner's failing lines, "BUDGET: <pkg>
 // used ..." and "BUDGET: <pkg> passed but its CPU time was not recorded".
 var budgetLineRE = regexp.MustCompile(`^BUDGET: (\S+) `)
+
+// warningLineRE matches a step's own warnings, "gate: WARNING <text>". The
+// text after the marker is kept whole; a step that warns in another shape is
+// not a warning this reads.
+var warningLineRE = regexp.MustCompile(`^gate: WARNING (\S.*)$`)
+
+func parseWarnings(out string) []string {
+	var warns []string
+	for _, line := range strings.Split(out, "\n") {
+		if m := warningLineRE.FindStringSubmatch(line); m != nil {
+			warns = append(warns, strings.TrimSpace(m[1]))
+		}
+	}
+	return warns
+}
 
 func parseBudgetOverruns(out string) []BudgetOverrun {
 	var over []BudgetOverrun

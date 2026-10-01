@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/exectax"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -27,6 +28,9 @@ import (
 const (
 	townHealthTimeout   = 2 * time.Minute
 	townHealthBDTimeout = 30 * time.Second
+	// execTaxProbeTimeout bounds the probe's ten execs, so a hung exec is
+	// an UNKNOWN field rather than a heartbeat that never finishes.
+	execTaxProbeTimeout = 30 * time.Second
 )
 
 // writeTownHealth is the heartbeat's last step (gt-s3rec.2): it computes the
@@ -48,6 +52,13 @@ func (d *Daemon) writeTownHealth() {
 	ctx, cancel := context.WithTimeout(context.Background(), townHealthTimeout)
 	defer cancel()
 	r := townhealth.Compute(ctx, src.inputs(d.clk().Now(), th, d.lastTownHealth))
+	// One line per change of the exec-tax verdict, not one per beat: the
+	// tax is a property of the daemon's context, and a daemon that has it
+	// is restarted, not repeated (gt-2ycne.1).
+	prev, now := execTaxState(d.lastTownHealth, th), execTaxState(&r, th)
+	if line := exectax.Transition(prev, now); line != "" {
+		d.logger.Println(line)
+	}
 	d.lastTownHealth = &r
 	if err := townhealth.Write(d.config.TownRoot, r); err != nil {
 		d.logger.Printf("townhealth: writing %s: %v", townhealth.Path(d.config.TownRoot), err)
@@ -67,15 +78,25 @@ type healthSources struct {
 	now      time.Time
 
 	ping       func() (time.Duration, error)
+	execTax    func(ctx context.Context) (time.Duration, error)
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
+}
+
+// execTaxState is what a report said about the exec tax, for the transition
+// log. A nil report, or one from before the probe measured, is unknown.
+func execTaxState(r *townhealth.Report, th townhealth.Thresholds) exectax.State {
+	if r == nil {
+		return exectax.State{}
+	}
+	return exectax.StateOf(r.ExecTaxMS, th.ExecTax.Red)
 }
 
 func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *townhealth.Report) townhealth.Inputs {
 	s.now = now
 	return townhealth.Inputs{
 		Now: now, Thresholds: th, Prev: prev,
-		Dolt: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
+		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
 		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s,
 	}
 }
@@ -90,6 +111,22 @@ func (s *healthSources) Ping(ctx context.Context) (time.Duration, error) {
 		return s.ping()
 	}
 	return doltserver.MeasureQueryLatency(s.townRoot())
+}
+
+// ExecTax measures the daemon's own process tree, which is where the landing
+// gate runs: a daemon whose tree pays a macOS scan per new executable makes
+// every landing's gate pay it too (gt-2ycne.1).
+func (s *healthSources) ExecTax(ctx context.Context) (time.Duration, error) {
+	if s.execTax != nil {
+		return s.execTax(ctx)
+	}
+	ctx, cancel := context.WithTimeout(ctx, execTaxProbeTimeout)
+	defer cancel()
+	res, err := exectax.Probe(ctx, exectax.Options{})
+	if err != nil {
+		return 0, err
+	}
+	return res.Median, nil
 }
 
 func (s *healthSources) Heartbeat() (townhealth.HeartbeatRecord, error) {
