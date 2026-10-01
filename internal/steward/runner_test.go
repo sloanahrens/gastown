@@ -291,3 +291,219 @@ func TestRunnerPromptNamesTheVerdictFile(t *testing.T) {
 var errBadOutcome = fmt.Errorf("%s reports outcome %q, which is not one of %s", ResultFile, "done", outcomeList())
 
 var errNoWorktree = errors.New("worktree at c0ffee: no such commit")
+
+// shutdownSpawner is a job the daemon's shutdown kills: it runs until its
+// context ends and reports the kill the way AgentSpawner does, as a run error
+// rather than a timeout.
+type shutdownSpawner struct{ started chan struct{} }
+
+func (s shutdownSpawner) Spawn(ctx context.Context, _ SpawnRequest) SpawnResult {
+	close(s.started)
+	<-ctx.Done()
+	return SpawnResult{ExitCode: -1, Err: errors.New("signal: killed"), VerdictErr: errors.New("no verdict")}
+}
+
+// TestRunnerShutdownRecordsInterrupted: a job the daemon's shutdown kills is
+// not a failed attempt. Recorded as an error it would spend the routine run,
+// and at merge-cadence restarts most events would end with no real attempt
+// (gt-9bioi.5).
+func TestRunnerShutdownRecordsInterrupted(t *testing.T) {
+	t.Parallel()
+	sp := shutdownSpawner{started: make(chan struct{})}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	ctx, cancel := context.WithCancel(context.Background())
+	if !r.Start(ctx, reviewEvent("gt-x", "aaaa"), DefaultRoutineAgent, "p") {
+		t.Fatal("job did not start")
+	}
+	<-sp.started
+	cancel()
+	r.Wait()
+	jobs, err := r.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := jobs[len(jobs)-1]
+	if end.Outcome != OutcomeInterrupted || end.Ended.IsZero() {
+		t.Fatalf("outcome row = %+v, want interrupted", end)
+	}
+	if end.Outcome.Failed() {
+		t.Error("an interrupted job reads as a failure")
+	}
+}
+
+// TestRunnerTimeoutIsNotInterrupted: the job's own timeout still records a
+// timeout while the daemon is up.
+func TestRunnerTimeoutIsNotInterrupted(t *testing.T) {
+	t.Parallel()
+	sp := &fakeSpawner{block: make(chan struct{})}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	r.Timeout = 20 * time.Millisecond
+	if !r.Start(context.Background(), reviewEvent("gt-x", "aaaa"), DefaultRoutineAgent, "p") {
+		t.Fatal("job did not start")
+	}
+	r.Wait()
+	jobs, _ := r.Ledger.Read()
+	if got := jobs[len(jobs)-1].Outcome; got != OutcomeTimeout {
+		t.Fatalf("outcome = %q, want timeout", got)
+	}
+}
+
+// TestChooseModelIgnoresInterruptedJobs: restarts are not attempts. A routine
+// job interrupted twice still gets its routine run, and the hard retry after
+// a real failure (gt-9bioi.5).
+func TestChooseModelIgnoresInterruptedJobs(t *testing.T) {
+	t.Parallel()
+	routine, hard := "deepseek-flash", "deepseek-pro"
+	cut := func(id string) []Job {
+		return []Job{{ID: id, Model: routine}, {ID: id, Model: routine, Outcome: OutcomeInterrupted}}
+	}
+	history := append(cut("1"), cut("2")...)
+	if model, run := ChooseModel(history, routine, hard); !run || model != routine {
+		t.Fatalf("two interrupted jobs: %q %v, want %q true", model, run, routine)
+	}
+	history = append(history, Job{ID: "3", Model: routine, Outcome: OutcomeFail})
+	if model, run := ChooseModel(history, routine, hard); !run || model != hard {
+		t.Fatalf("interrupted twice then failed: %q %v, want the hard retry %q", model, run, hard)
+	}
+	history = append(history, Job{ID: "4", Model: hard}, Job{ID: "4", Model: hard, Outcome: OutcomeInterrupted})
+	if model, run := ChooseModel(history, routine, hard); !run || model != hard {
+		t.Fatalf("hard job interrupted: %q %v, want the hard retry again", model, run)
+	}
+	history = append(history, Job{ID: "5", Model: hard, Outcome: OutcomeFail})
+	if _, run := ChooseModel(history, routine, hard); run {
+		t.Fatal("a failed hard retry earned another job")
+	}
+	// A conflict starts hard, and a restart does not change that.
+	ev := Event{Kind: KindRejection, RejectionDetail: "kind=conflict"}
+	if model, run := StartedModel(ev, cut("1"), routine, hard); !run || model != hard {
+		t.Fatalf("interrupted conflict job: %q %v, want %q true", model, run, hard)
+	}
+}
+
+// TestVerdictCannotReportInterrupted: only the runner knows a job was cut
+// short, so a verdict file claiming it is as invalid as any other unknown word.
+func TestVerdictCannotReportInterrupted(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ResultFile)
+	if err := os.WriteFile(path, []byte(`{"outcome":"interrupted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadVerdict(path); err == nil {
+		t.Fatal("ReadVerdict accepted interrupted")
+	}
+}
+
+// groupSpawner reports a process group the way AgentSpawner does, signals
+// started once the report returned, then holds the job until release is
+// closed.
+type groupSpawner struct {
+	pgid    int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g groupSpawner) Spawn(_ context.Context, req SpawnRequest) SpawnResult {
+	err := req.Started(g.pgid)
+	if g.started != nil {
+		close(g.started)
+	}
+	if err != nil {
+		return SpawnResult{ExitCode: -1, Err: err}
+	}
+	<-g.release
+	return SpawnResult{Verdict: &Result{Outcome: OutcomePass}}
+}
+
+// TestRunnerRecordsTheProcessGroup: the row that outlives the daemon names
+// the group, and it supersedes the start row rather than doubling the job.
+func TestRunnerRecordsTheProcessGroup(t *testing.T) {
+	t.Parallel()
+	sp := groupSpawner{pgid: 4242, started: make(chan struct{}), release: make(chan struct{})}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	if !r.Start(context.Background(), reviewEvent("gt-x", "aaaa"), DefaultRoutineAgent, "p") {
+		t.Fatal("job did not start")
+	}
+	// Bounded by the test binary's timeout: Started has returned, so the
+	// row naming the group is written.
+	<-sp.started
+	active, _ := r.Ledger.Active()
+	if len(active) != 1 || active[0].Pgid != 4242 {
+		t.Fatalf("active = %+v, want one job carrying its group", active)
+	}
+	if got := r.Running(); len(got) != 1 || got[0].Pgid != 4242 {
+		t.Errorf("running = %+v, want the group on the in-flight job", got)
+	}
+	close(sp.release)
+	r.Wait()
+	if active, _ = r.Ledger.Active(); len(active) != 0 {
+		t.Errorf("active after the job ended = %+v", active)
+	}
+}
+
+// TestRunnerStartsNothingBesideALiveOrphan: a previous daemon's job whose
+// group survives the kill may still push to the bead's branch, so the bead
+// gets no second job until the group is gone (gt-9bioi.5).
+func TestRunnerStartsNothingBesideALiveOrphan(t *testing.T) {
+	t.Parallel()
+	sp := &fakeSpawner{write: &Result{Outcome: OutcomePass}}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	orphan := Job{ID: "steward-old", Event: KindReview, Bead: "gt-x", Rig: "gastown", Head: "aaaa", Started: testEpoch, Pgid: 4242}
+	if err := r.Ledger.Append(orphan); err != nil {
+		t.Fatal(err)
+	}
+	alive := true
+	var killed []int
+	r.Kill = func(pgid int) error {
+		killed = append(killed, pgid)
+		if alive {
+			return errors.New("operation not permitted")
+		}
+		return nil
+	}
+	n, err := r.ReapOrphans()
+	if err == nil || n != 0 {
+		t.Fatalf("ReapOrphans = %d, %v; want 0 and an error for the live group", n, err)
+	}
+	if !r.RunningBead("gt-x") {
+		t.Error("the bead is not busy beside a live orphan")
+	}
+	if r.Start(context.Background(), reviewEvent("gt-x", "bbbb"), DefaultRoutineAgent, "p") {
+		t.Fatal("a second job started beside the orphan")
+	}
+	if !r.Start(context.Background(), reviewEvent("gt-y", "cccc"), DefaultRoutineAgent, "p") {
+		t.Error("an unrelated bead was held up")
+	}
+	r.Wait()
+
+	alive = false
+	if n, err = r.ReapOrphans(); err != nil || n != 1 {
+		t.Fatalf("ReapOrphans after the group died = %d, %v; want 1, nil", n, err)
+	}
+	if len(killed) != 2 || killed[0] != 4242 || killed[1] != 4242 {
+		t.Errorf("killed %v, want group 4242 twice", killed)
+	}
+	if r.RunningBead("gt-x") {
+		t.Error("the bead is still busy after the orphan closed")
+	}
+	if !r.Start(context.Background(), reviewEvent("gt-x", "bbbb"), DefaultRoutineAgent, "p") {
+		t.Error("the bead got no job once the orphan was gone")
+	}
+	r.Wait()
+}
+
+// TestReapOrphansSparesRunningJobs: the per-scan reap must not read the
+// runner's own in-flight job as an orphan.
+func TestReapOrphansSparesRunningJobs(t *testing.T) {
+	t.Parallel()
+	sp := groupSpawner{pgid: 4242, release: make(chan struct{})}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	r.Kill = func(pgid int) error { t.Errorf("killed group %d of a running job", pgid); return nil }
+	if !r.Start(context.Background(), reviewEvent("gt-x", "aaaa"), DefaultRoutineAgent, "p") {
+		t.Fatal("job did not start")
+	}
+	if n, err := r.ReapOrphans(); err != nil || n != 0 {
+		t.Fatalf("ReapOrphans = %d, %v; want 0, nil", n, err)
+	}
+	close(sp.release)
+	r.Wait()
+}

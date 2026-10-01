@@ -116,6 +116,8 @@ func (d *Daemon) runSteward() {
 	if runner == nil {
 		return
 	}
+	// A group that survived the startup reap may be gone by now.
+	d.reapStewardOrphans(runner)
 	ledger := steward.NewLedger(steward.LedgerPath(townRoot))
 	jobs, err := ledger.Read()
 	if err != nil {
@@ -210,14 +212,7 @@ func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
 		return nil
 	}
 	ledger := steward.NewLedger(steward.LedgerPath(townRoot))
-	// A job is a child of this process: a row with no end time is one whose
-	// daemon died, so the ledger starts each process with no job running.
-	if n, err := ledger.CloseRunning(steward.OutcomeError, "the daemon restarted while the job was running", d.clk().Now()); err != nil {
-		d.logger.Printf("steward: closing jobs left running by a previous daemon: %v", err)
-	} else if n > 0 {
-		d.logger.Printf("steward: closed %d job(s) left running by a previous daemon", n)
-	}
-	d.stewardRunner = &steward.Runner{
+	runner := &steward.Runner{
 		Ledger:   ledger,
 		WorkDir:  root,
 		MaxJobs:  stewardMaxJobs(cfg),
@@ -225,9 +220,28 @@ func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
 		Logf:     d.logger.Printf,
 		SpawnFor: d.stewardSpawnerFor(),
 	}
-	d.logger.Printf("steward: runner started (work root %s, max jobs %d, job timeout %s)", root, d.stewardRunner.MaxJobs, d.stewardRunner.Timeout)
+	d.reapStewardOrphans(runner)
+	d.stewardRunnerMu.Lock()
+	d.stewardRunner = runner
+	d.stewardRunnerMu.Unlock()
+	d.logger.Printf("steward: runner started (work root %s, max jobs %d, job timeout %s)", root, runner.MaxJobs, runner.Timeout)
 	d.pruneStewardWorktrees(root, townRoot)
 	return d.stewardRunner
+}
+
+// reapStewardOrphans closes the ledger's running jobs this process did not
+// start. A job is a child of the daemon in a group of its own, so one whose
+// daemon died may be running still: the runner kills its group before it
+// closes the row, and a group it cannot kill keeps its bead busy until a
+// later scan manages it (gt-9bioi.5).
+func (d *Daemon) reapStewardOrphans(runner *steward.Runner) {
+	n, err := runner.ReapOrphans()
+	if err != nil {
+		d.logger.Printf("steward: jobs left running by a previous daemon, still alive: %v", err)
+	}
+	if n > 0 {
+		d.logger.Printf("steward: closed %d job(s) left running by a previous daemon", n)
+	}
 }
 
 // pruneStewardWorktrees removes job worktrees a job failed to remove, once

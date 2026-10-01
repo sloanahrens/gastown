@@ -324,6 +324,9 @@ type Daemon struct {
 	stewardRunning atomic.Bool
 	stewardCycles  sync.WaitGroup
 	stewardRunner  *steward.Runner
+	// stewardRunnerMu guards stewardRunner's assignment against the upgrade
+	// idleness check, which reads it from another goroutine (gt-9bioi.5).
+	stewardRunnerMu sync.Mutex
 	// stewardListFn replaces the bd list behind a steward scan (see
 	// stewardEvents) in tests; nil runs bd.
 	stewardListFn func(rigPath string, opts beads.ListOptions) ([]*beads.Issue, error)

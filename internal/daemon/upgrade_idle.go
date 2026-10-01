@@ -13,9 +13,10 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings, mayor dispatch or patrol watchdog run, no landing-worker pass, no
-// scheduled_maintenance gc cycle, and no install holding install-gt.lock. The Dolt goroutines are not
-// counted: they are short or restartable.
+// slings, mayor dispatch or patrol watchdog run, no steward scan or job, no
+// landing-worker pass, no scheduled_maintenance gc cycle, and no install
+// holding install-gt.lock. The Dolt goroutines are not counted: they are
+// short or restartable.
 func (d *Daemon) isIdleForUpgrade() bool {
 	if d.maintenanceGCRunning.Load() {
 		return false
@@ -38,7 +39,10 @@ func (d *Daemon) daemonWorkIdle() bool {
 	}
 	if d.scheduledSlingsRunning.Load() || d.mayorDispatchRunning.Load() ||
 		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() ||
-		d.landingPasses.Load() > 0 {
+		d.landingPasses.Load() > 0 || d.stewardRunning.Load() {
+		return false
+	}
+	if d.stewardJobsRunning() {
 		return false
 	}
 	// Checked last: it is the only check that touches the filesystem.
@@ -46,6 +50,17 @@ func (d *Daemon) daemonWorkIdle() bool {
 		return false
 	}
 	return true
+}
+
+// stewardJobsRunning reports whether a steward job is in flight. A restart
+// kills the job, and while that no longer spends the event's retry, the agent
+// has done a session's work for nothing: at merge-cadence upgrades a job
+// would rarely live long enough to finish (gt-9bioi.5).
+func (d *Daemon) stewardJobsRunning() bool {
+	d.stewardRunnerMu.Lock()
+	runner := d.stewardRunner
+	d.stewardRunnerMu.Unlock()
+	return runner != nil && len(runner.Running()) > 0
 }
 
 // installLockPath is scripts/install-gt.sh's lock:

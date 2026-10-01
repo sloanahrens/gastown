@@ -2,6 +2,7 @@ package steward
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,7 +140,7 @@ func TestLedgerCloseRunning(t *testing.T) {
 	if len(active) != 1 || active[0].ID != "steward-1" {
 		t.Fatalf("active = %+v, want only the running job", active)
 	}
-	n, err := l.CloseRunning(OutcomeError, "the daemon restarted", testEpoch.Add(time.Hour))
+	n, err := l.CloseRunning(func(int) error { return nil }, testEpoch.Add(time.Hour))
 	if err != nil || n != 1 {
 		t.Fatalf("CloseRunning = %d, %v; want 1, nil", n, err)
 	}
@@ -155,8 +156,104 @@ func TestLedgerCloseRunning(t *testing.T) {
 		t.Fatalf("ledger has %d rows, want 3 (two starts, one completion)", len(jobs))
 	}
 	last := jobs[2]
-	if last.ID != "steward-1" || last.Outcome != OutcomeError || last.Ended.IsZero() {
+	if last.ID != "steward-1" || last.Outcome != OutcomeInterrupted || last.Ended.IsZero() {
 		t.Errorf("closed row = %+v", last)
+	}
+}
+
+// TestLedgerCloseRunningKillsTheGroupFirst: a job runs in a process group of
+// its own, so one whose daemon died may still be running. Closing its row
+// without killing the group lets the retry run beside it, and both can push
+// (gt-9bioi.5).
+func TestLedgerCloseRunningKillsTheGroupFirst(t *testing.T) {
+	t.Parallel()
+	l := NewLedger(filepath.Join(t.TempDir(), "jobs.jsonl"))
+	job := testJob("steward-1", "review", "gt-x", "aaaa")
+	if err := l.Append(job); err != nil {
+		t.Fatal(err)
+	}
+	job.Pgid = 4242 // the second row, written when the process started
+	if err := l.Append(job); err != nil {
+		t.Fatal(err)
+	}
+	var killed []int
+	kill := func(pgid int) error {
+		// The row is still open while the group dies: a crash between the
+		// two leaves a row the next daemon kills again, never the reverse.
+		if active, _ := l.Active(); len(active) != 1 {
+			t.Errorf("the row closed before its group was killed: %+v", active)
+		}
+		killed = append(killed, pgid)
+		return nil
+	}
+	n, err := l.CloseRunning(kill, testEpoch.Add(time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("CloseRunning = %d, %v; want 1, nil (one job, two rows)", n, err)
+	}
+	if len(killed) != 1 || killed[0] != 4242 {
+		t.Fatalf("killed groups = %v, want [4242]", killed)
+	}
+	jobs, _ := l.Read()
+	last := jobs[len(jobs)-1]
+	if last.Outcome != OutcomeInterrupted || last.Pgid != 4242 || last.Ended.IsZero() {
+		t.Errorf("closed row = %+v", last)
+	}
+	if active, _ := l.Active(); len(active) != 0 {
+		t.Errorf("still active after closing: %+v", active)
+	}
+}
+
+// TestLedgerCloseRunningLeavesAGroupItCannotKill: a job whose group survives
+// the kill may still be pushing, so its row stays open and its bead stays
+// busy.
+func TestLedgerCloseRunningLeavesAGroupItCannotKill(t *testing.T) {
+	t.Parallel()
+	l := NewLedger(filepath.Join(t.TempDir(), "jobs.jsonl"))
+	stuck := testJob("steward-1", "review", "gt-x", "aaaa")
+	stuck.Pgid = 4242
+	// A row from before the field, or from before the process started: there
+	// is no group to kill, and it still has to close.
+	old := testJob("steward-2", "review", "gt-y", "bbbb")
+	for _, j := range []Job{stuck, old} {
+		if err := l.Append(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kill := func(int) error { return errors.New("operation not permitted") }
+	n, err := l.CloseRunning(kill, testEpoch.Add(time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "steward-1") {
+		t.Fatalf("err = %v, want one naming the job it could not clear", err)
+	}
+	if n != 1 {
+		t.Errorf("closed %d, want only the row with no group", n)
+	}
+	active, _ := l.Active()
+	if len(active) != 1 || active[0].ID != "steward-1" {
+		t.Fatalf("active = %+v, want the stuck job to stay open", active)
+	}
+	// Once the group is gone a later pass closes it.
+	n, err = l.CloseRunning(func(int) error { return nil }, testEpoch.Add(2*time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("second pass = %d, %v; want 1, nil", n, err)
+	}
+}
+
+// TestLedgerCloseOrphansSparesOwnJobs: a running daemon reaps the jobs a
+// predecessor left, never its own.
+func TestLedgerCloseOrphansSparesOwnJobs(t *testing.T) {
+	t.Parallel()
+	l := NewLedger(filepath.Join(t.TempDir(), "jobs.jsonl"))
+	mine, theirs := testJob("steward-1", "review", "gt-x", "aaaa"), testJob("steward-2", "review", "gt-y", "bbbb")
+	mine.Pgid, theirs.Pgid = 11, 22
+	for _, j := range []Job{mine, theirs} {
+		if err := l.Append(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var killed []int
+	n, err := l.CloseOrphans(func(pgid int) error { killed = append(killed, pgid); return nil }, map[string]bool{"steward-1": true}, testEpoch)
+	if err != nil || n != 1 || len(killed) != 1 || killed[0] != 22 {
+		t.Fatalf("CloseOrphans = %d, %v, killed %v; want 1, nil, [22]", n, err, killed)
 	}
 }
 

@@ -1,13 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/gofrs/flock"
+
+	"github.com/steveyegge/gastown/internal/steward"
 )
 
 func idleTestDaemon(t *testing.T) *Daemon {
@@ -15,6 +19,32 @@ func idleTestDaemon(t *testing.T) *Daemon {
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(io.Discard, "", 0),
 	}
+}
+
+// holdSpawner keeps a steward job running until release is closed.
+type holdSpawner struct{ release chan struct{} }
+
+func (h holdSpawner) Spawn(_ context.Context, _ steward.SpawnRequest) steward.SpawnResult {
+	<-h.release
+	return steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass}}
+}
+
+// startStewardJob gives d a runner with one job in flight and returns the
+// function that lets it finish.
+func startStewardJob(t *testing.T, d *Daemon) (release func()) {
+	t.Helper()
+	hold := holdSpawner{release: make(chan struct{})}
+	d.stewardRunner = &steward.Runner{
+		Ledger:  steward.NewLedger(steward.LedgerPath(d.config.TownRoot)),
+		Spawn:   hold,
+		WorkDir: t.TempDir(),
+	}
+	ev := steward.Event{Kind: steward.KindReview, Rig: "gastown", Bead: "gt-x", Head: "c0ffee"}
+	if !d.stewardRunner.Start(context.Background(), ev, "m", "p") {
+		t.Fatal("the steward job did not start")
+	}
+	var once sync.Once
+	return func() { once.Do(func() { close(hold.release) }) }
 }
 
 func TestIsIdleForUpgrade(t *testing.T) {
@@ -44,6 +74,17 @@ func TestIsIdleForUpgrade(t *testing.T) {
 			d.landingPasses.Add(1)
 			d.landingPasses.Add(-1)
 		}, true},
+		// gt-9bioi.5: a restart kills the job's agent, so upgrades wait.
+		{"steward job running", func(t *testing.T, d *Daemon) {
+			release := startStewardJob(t, d)
+			t.Cleanup(release)
+		}, false},
+		{"steward job finished", func(t *testing.T, d *Daemon) {
+			release := startStewardJob(t, d)
+			release()
+			d.stewardRunner.Wait()
+		}, true},
+		{"steward scan in flight", func(_ *testing.T, d *Daemon) { d.stewardRunning.Store(true) }, false},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
 			writeInstallLock(t, d)
 		}, true},
