@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -325,9 +323,7 @@ func noRigBeadEnv(townRoot string, out, errOut io.Writer) rigCmdEnv {
 	env.findRig = func(rigName string) (string, *rig.Rig, error) {
 		path, r, err := find(rigName)
 		if r != nil {
-			r.BDRunner = func(context.Context, beads.BDCall) ([]byte, []byte, error) {
-				return nil, nil, errors.New("no rig bead")
-			}
+			r.BDRunner = beads.UnavailableBD
 		}
 		return path, r, err
 	}

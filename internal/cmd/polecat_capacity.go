@@ -315,7 +315,7 @@ func configuredRigMaxPolecats(townRoot, rigName string) int {
 	// Built the same way rig.Manager.loadRig builds it (name, path, beads
 	// config), which is the identity `gt rig config show` resolves the three
 	// config layers against.
-	r := &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName), Config: entry.BeadsConfig, BDRunner: townBDRunner(townRoot)}
+	r := townRigBD(townRoot, &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName), Config: entry.BeadsConfig})
 	if cap := r.GetIntConfig("max_polecats"); cap > 0 {
 		return cap
 	}
