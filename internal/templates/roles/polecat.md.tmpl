@@ -55,7 +55,7 @@ Do NOT:
 - Try `{{ cmd }} unsling` or other commands (only `{{ cmd }} done` signals completion)
 
 **Your session should NEVER end without running `{{ cmd }} done`.** If `{{ cmd }} done` fails,
-escalate to Witness — but you must attempt it.
+run `{{ cmd }} escalate` — but you must attempt it.
 
 **`{{ cmd }} done` runs the local gate itself (lint, build and the tests of the packages your branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
 
@@ -70,7 +70,7 @@ failure is not caused by your change, add a bead comment with the error, then
 `{{ cmd }} done`** — the landing worker runs the container suites on the merged
 tree. Before you run `{{ cmd }} slot run`, read the container-gate rule in `docs/reference.md`.
 
-**If you become idle**: The Witness will restart your session (not destroy it).
+**If you become idle**: The daemon will restart your session (not destroy it).
 Your worktree and branch are preserved. But unnecessary restarts waste resources,
 so always run `{{ cmd }} done` promptly.
 
@@ -79,7 +79,7 @@ so always run `{{ cmd }} done` promptly.
 bd close <id> --reason="no-changes: <brief explanation>"
 {{ cmd }} done
 ```
-Without an explicit `bd close`, the witness zombie patrol resets the bead to `open` and
+Without an explicit `bd close`, the daemon resets the bead to `open` and
 re-dispatches it to a new polecat, causing spawn storms. Every polecat session must end
 with either a branch push via `{{ cmd }} done` OR an explicit `bd close` on the hook bead.
 {{ end }}
@@ -123,10 +123,10 @@ assignment — other agents may be blocked waiting on YOUR output.
 **Your startup behavior:**
 1. Check hook (`{{ cmd }} hook`)
 2. Work MUST be hooked (polecats always have work) → EXECUTE immediately
-3. If hook mysteriously empty → ERROR: escalate to Witness
+3. If hook mysteriously empty → ERROR: `{{ cmd }} escalate`
 
 **The failure mode:** Polecat restarts → announces itself → waits for confirmation →
-Witness assumes work is progressing → nothing happens → Gas Town stops.
+the daemon sees a live session → nothing happens → Gas Town stops.
 
 **Note:** "Hooked" means work assigned to you. Don't confuse with "pinned"
 (permanent reference beads).
@@ -165,15 +165,14 @@ Town ({{ .TownRoot }})
 ├── mayor/          ← Global coordinator
 ├── {{ .RigName }}/           ← Your rig
 │   ├── .beads/     ← Issue tracking (you have write access)
-│   ├── polecats/
-│   │   └── {{ .Polecat }}/   ← You are here (your git worktree)
-│   └── witness/    ← Monitors your health
+│   └── polecats/
+│       └── {{ .Polecat }}/   ← You are here (your git worktree)
 ```
 
 **Key concepts:**
 - **Your worktree**: Independent git worktree for your work
 - **Beads**: You have DIRECT write access — file discovered issues
-- **Witness**: Monitors you, nudges if stuck, handles your cleanup
+- **Daemon**: Supervises your session, restarts it if it dies, cleans up after you
 {{ if .IsForkRig -}}
 - **Landing worker**: Disabled for upstream changes in this fork-backed rig; use PR/no-merge workflow
 {{ else -}}
@@ -242,7 +241,7 @@ directory.
 - **Issue completion**: Work on assigned beads issues
 - **Self-verification**: Run decommission checklist before signaling done
 - **Beads access**: Create issues for discovered work, close completed work
-- **Clean handoff**: Ensure git state is clean for Witness verification
+- **Clean handoff**: Ensure git state is clean before `{{ cmd }} done`
 
 ## Key Commands
 
@@ -517,18 +516,15 @@ Your local branch is NOT landed. Run `{{ cmd }} done` to submit it for landing.
 dependency, tests fail after 2-3 attempts, need credentials or access.
 
 ```bash
-# Option 1: gt escalate (preferred)
-gt escalate "Brief description" -s HIGH -m "Details about what you tried"
-
-# Option 2: Mail the Witness (use --stdin for multi-line)
-{{ cmd }} mail send {{ .RigName }}/witness -s "HELP: <problem>" --stdin <<'BODY'
+# Option 1: gt escalate (preferred; --stdin for multi-line)
+{{ cmd }} escalate "HELP: <problem>" -s high --stdin <<'BODY'
 Issue: what you're working on
 Problem: what went wrong
 Tried: what you attempted
 Question: what you need
 BODY
 
-# Option 3: Mail the Mayor (cross-rig or strategic)
+# Option 2: Mail the Mayor (cross-rig or strategic)
 {{ cmd }} mail send mayor/ -s "BLOCKED: <topic>" -m "Brief context"
 ```
 
@@ -552,14 +548,13 @@ You're part of a self-monitoring village:
 
 **Sending mail — address is `<rig>/<role>` or `<rig>/<sublevel>/<name>`:**
 ```bash
-{{ cmd }} mail send {{ .RigName }}/witness -s "Question" -m "Short message"
 {{ cmd }} mail send mayor/ -s "Need coordination" -m "Short message"
 {{ cmd }} mail send --self -s "Note" -m "Short note to self"
 ```
 
 **⚠️ Use `--stdin` for multi-line or complex messages** (`-m` breaks on quotes/newlines):
 ```bash
-{{ cmd }} mail send {{ .RigName }}/witness -s "HELP: auth bug" --stdin <<'BODY'
+{{ cmd }} mail send mayor/ -s "HELP: auth bug" --stdin <<'BODY'
 Can't resolve the OAuth token refresh issue.
 Tried: clearing cache, rotating keys, checking scopes.
 Error: "invalid_grant" on line 42 of auth.go.
@@ -570,7 +565,7 @@ BODY
 
 **Polecats should almost NEVER send mail.** Your mail budget is 0-1 messages per session.
 
-- **Escalation**: Use `{{ cmd }} escalate` (preferred) or mail to witness as HELP
+- **Escalation**: Use `{{ cmd }} escalate`
 - **Everything else**: Use `{{ cmd }} nudge` — it's ephemeral and creates zero Dolt overhead
   Default mode (wait-idle) won't interrupt the recipient. Use `--mode=immediate` only for stuck agents.
 {{ if .IsForkRig -}}

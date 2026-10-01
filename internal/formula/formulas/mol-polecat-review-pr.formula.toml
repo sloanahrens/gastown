@@ -17,7 +17,7 @@ You are a self-cleaning worker. You:
 beads created from it. Use `bd mol current` to find them - do NOT read this file directly.
 
 **You do NOT:**
-- Merge the PR yourself (maintainer or Refinery does that)
+- Merge the PR yourself (a maintainer does that)
 - Push to the PR branch (it's external)
 - Wait for contributor response (you're done after review)
 
@@ -35,9 +35,9 @@ beads created from it. Use `bd mol current` to find them - do NOT read this file
 | PR is stale/unmergeable | Note in review, request rebase |
 | Tests fail | Note in review, request fixes |
 | Major issues found | File followup beads, request changes |
-| Unclear requirements | Mail Witness for guidance |"""
+| Unclear requirements | `gt escalate` for guidance |"""
 formula = "mol-polecat-review-pr"
-version = 1
+version = 2
 
 [[steps]]
 id = "load-context"
@@ -68,12 +68,12 @@ PR_URL=$(cat <<'GT_PR_URL_EOF'
 GT_PR_URL_EOF
 )
 case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
-[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; gt escalate"
 ```
 
 The PR URL is free text from the bead. Every `gh` command reads `"$PR_URL"`,
 quoted; the URL never appears on a command line as a template value. On STOP,
-run no `gh` command and mail Witness.
+run no `gh` command and `gt escalate`.
 
 **4. Fetch the PR:**
 ```bash
@@ -110,7 +110,7 @@ PR_URL=$(cat <<'GT_PR_URL_EOF'
 GT_PR_URL_EOF
 )
 case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
-[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; gt escalate"
 gh pr diff "$PR_URL"
 ```
 
@@ -153,7 +153,7 @@ PR_URL=$(cat <<'GT_PR_URL_EOF'
 GT_PR_URL_EOF
 )
 case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
-[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; gt escalate"
 gh pr checks "$PR_URL"
 ```
 
@@ -183,8 +183,8 @@ Make your review decision.
 | Clean code, tests pass, good scope | APPROVE |
 | Minor issues, easily fixed | REQUEST_CHANGES (with specific feedback) |
 | Major issues, needs rework | REQUEST_CHANGES (with detailed explanation) |
-| Unclear requirements or scope | NEEDS_DISCUSSION (mail Witness) |
-| Security concern | BLOCK (mail Witness immediately) |
+| Unclear requirements or scope | NEEDS_DISCUSSION (`gt escalate`) |
+| Security concern | BLOCK (`gt escalate -s high` immediately) |
 
 **1. If APPROVE:**
 The PR is ready to merge. Note any minor suggestions as comments
@@ -204,7 +204,7 @@ GT_PR_URL_EOF
 { printf 'PR: %s\nIssue: {{issue}}\n' "$PR_URL"; cat <<'BODY'
 Question: <what needs clarification>
 BODY
-} | gt mail send {{rig}}/witness -s "PR review needs discussion" --stdin
+} | gt escalate "PR review needs discussion" --related {{issue}} --stdin
 ```
 
 **4. If BLOCK (security):**
@@ -212,7 +212,7 @@ BODY
 { printf 'PR: %s\nIssue: {{issue}}\n' "$PR_URL"; cat <<'BODY'
 Concern: <security issue found>
 BODY
-} | gt mail send {{rig}}/witness -s "SECURITY: PR blocked" --stdin
+} | gt escalate "SECURITY: PR blocked" -s high --related {{issue}} --stdin
 ```
 
 **Exit criteria:** You've made a clear decision with rationale."""
@@ -232,7 +232,7 @@ PR_URL=$(cat <<'GT_PR_URL_EOF'
 GT_PR_URL_EOF
 )
 case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
-[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; gt escalate"
 
 # For APPROVE:
 gh pr review "$PR_URL" --approve --body "LGTM. <brief summary of what's good>"

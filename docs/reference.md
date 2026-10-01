@@ -49,7 +49,7 @@ town-level Gas Town beads.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_branch` | `string` | `"main"` | Default branch for the rig. Auto-detected from remote during `gt rig add`. Used as the merge target by the Refinery and as the base for polecats when no integration branch is active. |
+| `default_branch` | `string` | `"main"` | Default branch for the rig. Auto-detected from remote during `gt rig add`. Used as the landing target and as the base for polecats when no integration branch is active. |
 
 ### Settings (`settings/config.json`)
 
@@ -63,8 +63,7 @@ town-level Gas Town beads.
       "fg": "#eeeeee"
     },
     "role_themes": {
-      "witness": "rust",
-      "refinery": "plum",
+      "polecat": "rust",
       "crew": "none"
     }
   },
@@ -96,7 +95,7 @@ gate-command call site in `gt` reads all three through one resolver
 | `name` | `string` | auto-assigned by rig name | Use a named built-in palette theme |
 | `custom.bg` | `string` | unset | Custom tmux background color |
 | `custom.fg` | `string` | unset | Custom tmux foreground color |
-| `role_themes` | `map[string]string` | unset | Per-role overrides for `witness`, `refinery`, `crew`, `polecat`; use `"none"` to disable theming for a role |
+| `role_themes` | `map[string]string` | unset | Per-role overrides for `crew`, `polecat`; use `"none"` to disable theming for a role |
 
 Theme resolution:
 - No `theme` config: auto-assign a built-in palette theme by rig name
@@ -118,17 +117,16 @@ Town-level role defaults live in `mayor/config.json` under:
     },
     "role_defaults": {
       "mayor": "forest",
-      "deacon": "plum",
-      "witness": "rust",
+      "polecat": "rust",
       "crew": "none"
     }
   }
 }
 ```
 
-`role_defaults` supports `mayor`, `deacon`, `witness`, `refinery`, `crew`, and `polecat`.
+`role_defaults` supports `mayor`, `crew`, and `polecat`.
 
-**Merge queue fields:**
+**Landing and gate fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -177,7 +175,7 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `origin/<branch>` is at HEAD and HEAD is ahead of the target, runs `make presubmit`
 (skip it with `--pre-verified` when you already ran it), then writes the comment
 `Submitted for landing: <branch> @ <sha> onto <target>`, the READY TO LAND block and the
-`gt:ready-to-land` label. It pushes nothing, rebases nothing and signals no Witness.
+`gt:ready-to-land` label. It pushes nothing and rebases nothing.
 `BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
 `--pre-verified`.
 
@@ -338,9 +336,9 @@ with = "macro-formula"
 
 ```
 1. Work through formula checklist (shown inline by gt prime)
-2. Submit to merge queue via gt done
-3. gt done preserves branch/MR metadata and exits the session
-4. Witness/refinery cleanup handles any retired sandbox state
+2. gt done gates and pushes the branch and marks the bead ready to land
+3. gt done exits the session
+4. The daemon's landing worker lands the branch and closes the bead
 ```
 
 ### Session Cycling
@@ -362,7 +360,7 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `GT_ROLE` | Agent role type | `mayor`, `witness`, `polecat`, `crew` |
+| `GT_ROLE` | Agent role type | `mayor`, `polecat`, `crew` |
 | `GT_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
 | `GIT_AUTHOR_NAME` | Commit attribution (same as BD_ACTOR) | `gastown/polecats/toast` |
@@ -372,7 +370,7 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose | Roles |
 |----------|---------|-------|
-| `GT_RIG` | Rig name | witness, refinery, polecat, crew |
+| `GT_RIG` | Rig name | polecat, crew |
 | `GT_POLECAT` | Polecat worker name | polecat only |
 | `GT_CREW` | Crew worker name | crew only |
 | `BEADS_AGENT_NAME` | Agent name for beads operations | polecat, crew |
@@ -390,10 +388,6 @@ These are set in tmux session environment when agents are spawned.
 | Role | Key Variables |
 |------|---------------|
 | **Mayor** | `GT_ROLE=mayor`, `BD_ACTOR=mayor` |
-| **Deacon** | `GT_ROLE=deacon`, `BD_ACTOR=deacon` |
-| **Boot** | `GT_ROLE=deacon/boot`, `BD_ACTOR=deacon-boot` |
-| **Witness** | `GT_ROLE=witness`, `GT_RIG=<rig>`, `BD_ACTOR=<rig>/witness` |
-| **Refinery** | `GT_ROLE=refinery`, `GT_RIG=<rig>`, `BD_ACTOR=<rig>/refinery` |
 | **Polecat** | `GT_ROLE=polecat`, `GT_RIG=<rig>`, `GT_POLECAT=<name>`, `BD_ACTOR=<rig>/polecats/<name>` |
 | **Crew** | `GT_ROLE=crew`, `GT_RIG=<rig>`, `GT_CREW=<name>`, `BD_ACTOR=<rig>/crew/<name>` |
 
@@ -419,22 +413,11 @@ Understanding this hierarchy is essential for proper configuration.
 | Role | Working Directory | Notes |
 |------|-------------------|-------|
 | **Mayor** | `~/gt/mayor/` | Town-level coordinator, isolated from rigs |
-| **Deacon** | `~/gt/deacon/` | Background supervisor daemon |
-| **Witness** | `~/gt/<rig>/witness/` | No git clone, monitors polecats only |
-| **Refinery** | `~/gt/<rig>/refinery/rig/` | Worktree on main branch |
 | **Crew** | `~/gt/<rig>/crew/<name>/rig/` | Persistent human workspace clone |
 | **Polecat** | `~/gt/<rig>/polecats/<name>/rig/` | Polecat worktree (ephemeral sandbox) |
 
 Note: The per-rig `<rig>/mayor/rig/` directory is NOT a working directory—it's
 a git clone that holds the canonical `.beads/` database for that rig.
-
-`<rig>/refinery/rig/` is the Refinery's, and only the Refinery's: it stages each
-merge request on that tree, runs the gates against it, and pushes the result. An
-edit or a staged file there is read by the next gate as if it were part of the
-MR, and the Refinery refuses to merge at all while tracked changes it did not
-create sit in the tree (`internal/refinery/worktree_guard.go`). Take the work to
-your own clone — `gt crew` — or to `/tmp`; the pre-commit hook in `.githooks/`
-warns if you commit there.
 
 ### Settings File Locations
 
@@ -444,12 +427,9 @@ Claude Code via the `--settings` flag. This keeps customer repos clean:
 ```
 ~/gt/
 ├── mayor/.claude/settings.json              # Mayor settings (cwd = settings dir)
-├── deacon/.claude/settings.json             # Deacon settings (cwd = settings dir)
 └── <rig>/
     ├── crew/.claude/settings.json           # Shared by all crew members
-    ├── polecats/.claude/settings.json       # Shared by all polecats
-    ├── witness/.claude/settings.json        # Witness settings
-    └── refinery/.claude/settings.json       # Refinery settings
+    └── polecats/.claude/settings.json       # Shared by all polecats
 ```
 
 The `--settings` flag loads these as a separate priority tier that merges
@@ -472,7 +452,7 @@ via the SessionStart hook. No per-directory CLAUDE.md or AGENTS.md files are cre
 
 Gas Town no longer uses git sparse checkout to hide customer repo files. Customer
 repositories can have their own `.claude/` directory and `CLAUDE.md` — these are
-preserved in all worktrees (crew, polecats, refinery, mayor/rig).
+preserved in all worktrees (crew, polecats, mayor/rig).
 
 Gas Town's context comes from the town-root `CLAUDE.md` identity anchor
 (picked up by all agents via Claude Code's upward directory traversal),
@@ -510,7 +490,7 @@ Gas Town uses two settings templates based on role type:
 | Type | Roles | Key Difference |
 |------|-------|----------------|
 | **Interactive** | Mayor, Crew | Mail injected on `UserPromptSubmit` hook |
-| **Autonomous** | Polecat, Witness, Refinery, Deacon | Mail injected on `SessionStart` hook |
+| **Autonomous** | Polecat | Mail injected on `SessionStart` hook |
 
 Autonomous agents may start without user input, so they need mail checked
 at session start. Interactive agents wait for user prompts.
@@ -686,7 +666,7 @@ gt sling <bead> <rig>                    # Auto-convoy for dashboard visibility
 Agent overrides:
 
 - `gt sling <bead> <rig> --agent <alias>` honours a `polecat_pool` seat or refuses the sling; a seat that is full never spends on the other agent instead.
-- `gt mayor start|attach|restart --agent <alias>` and `gt deacon start|attach|restart --agent <alias>` do the same.
+- `gt mayor start|attach|restart --agent <alias>` does the same.
 - `gt crew start <name> --agent <alias>` and `gt crew at <name> --agent <alias>` override the crew worker runtime.
 
 ### Communication
@@ -735,39 +715,9 @@ Never use raw `tmux send-keys` - it doesn't handle Claude's input correctly.
 ### Emergency
 
 ```bash
-gt stop --all                # Kill all sessions
-gt stop --rig <name>         # Kill rig sessions
+gt estop                     # Freeze all agent work
+gt down                      # Stop all Gas Town services
 ```
-
-### Health Check
-
-```bash
-gt deacon health-check <agent>   # Send health check ping, track response
-gt deacon health-state           # Show health check state for all agents
-```
-
-### Merge Queue (MQ)
-
-```bash
-gt mq list [rig]             # Show the merge queue
-gt mq next [rig]             # Show highest-priority merge request
-gt mq submit                 # Submit current branch to merge queue
-gt mq status <id>            # Show detailed merge request status
-gt mq retry <id>             # Retry a failed merge request
-gt mq reject <id>            # Reject a merge request
-```
-
-#### Integration Branch Commands
-
-```bash
-gt mq integration create <epic-id>              # Create integration branch
-gt mq integration create <epic-id> --branch "feat/{title}"  # Custom template
-gt mq integration create <epic-id> --base-branch develop   # Non-main base
-gt mq integration status <epic-id>              # Show branch status
-gt mq integration status <epic-id> --json       # JSON output
-```
-
-See [Integration Branches](concepts/integration-branches.md) for the full workflow.
 
 ## Beads Commands (bd)
 
@@ -798,40 +748,6 @@ bd history <id> --events     # Change events, which a flatten preserves
 
 Check the floor before concluding that a field never changed before it, and
 read `--events` for the span the commit snapshots lost.
-
-## Patrol Agents
-
-Deacon, Witness, and Refinery run continuous patrol loops using wisps:
-
-| Agent | Patrol Molecule | Responsibility |
-|-------|-----------------|----------------|
-| **Deacon** | `mol-deacon-patrol` | Agent lifecycle, plugin execution, health checks |
-| **Witness** | `mol-witness-patrol` | Monitor polecats, nudge stuck workers |
-| **Refinery** | `mol-refinery-patrol` | Process merge queue, review MRs, check integration branches |
-
-```
-1. gt patrol new               # Create root-only wisp
-2. gt prime                    # Shows patrol checklist inline
-3. Work through each step
-4. gt patrol report --summary "..."  # Close + start next cycle
-```
-
-## Plugin Molecules
-
-Plugins are molecules with specific labels:
-
-```json
-{
-  "id": "mol-security-scan",
-  "labels": ["template", "plugin", "witness", "tier:haiku"]
-}
-```
-
-Patrol molecules bond plugins dynamically:
-
-```bash
-bd mol bond mol-security-scan $PATROL_ID --var scope="$SCOPE"
-```
 
 ## Formula Invocation Patterns
 

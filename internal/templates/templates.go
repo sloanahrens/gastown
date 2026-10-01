@@ -1,4 +1,4 @@
-// Package templates provides embedded templates for role contexts and messages.
+// Package templates provides embedded templates for role contexts.
 package templates
 
 import (
@@ -41,7 +41,7 @@ var templateFuncs = template.FuncMap{
 	"cmd": CmdName, // {{ cmd }} returns the CLI command name
 }
 
-//go:embed roles/*.md.tmpl messages/*.md.tmpl
+//go:embed roles/*.md.tmpl
 var templateFS embed.FS
 
 //go:embed launchd/*.plist systemd/*.service
@@ -50,70 +50,25 @@ var supervisorFS embed.FS
 //go:embed polecat-CLAUDE.md
 var polecatCLAUDEmd string
 
-// Templates manages role and message templates.
+// Templates manages role templates.
 type Templates struct {
-	roleTemplates    *template.Template
-	messageTemplates *template.Template
+	roleTemplates *template.Template
 }
 
 // RoleData contains information for rendering role contexts.
 type RoleData struct {
-	Role          string   // mayor, polecat, crew
-	RigName       string   // e.g., "greenplace"
-	TownRoot      string   // e.g., "/Users/steve/ai"
-	TownName      string   // e.g., "ai" - the town identifier for session names
-	WorkDir       string   // current working directory
-	DefaultBranch string   // default branch for merges (e.g., "main", "develop")
-	IsForkRig     bool     // true when rig config has upstream_url
-	UpstreamURL   string   // redacted upstream URL for display only
-	Polecat       string   // polecat name (for polecat role)
-	Polecats      []string // list of polecats (for witness role)
-	BeadsDir      string   // BEADS_DIR path
-	IssuePrefix   string   // beads issue prefix
-	MayorSession  string   // e.g., "gt-ai-mayor" - dynamic mayor session name
-}
-
-// SpawnData contains information for spawn assignment messages.
-type SpawnData struct {
-	Issue       string
-	Title       string
-	Priority    int
-	Description string
-	Branch      string
-	RigName     string
-	Polecat     string
-}
-
-// NudgeData contains information for nudge messages.
-type NudgeData struct {
-	Polecat    string
-	Reason     string
-	NudgeCount int
-	MaxNudges  int
-	Issue      string
-	Status     string
-}
-
-// EscalationData contains information for escalation messages.
-type EscalationData struct {
-	Polecat     string
-	Issue       string
-	Reason      string
-	NudgeCount  int
-	LastStatus  string
-	Suggestions []string
-}
-
-// HandoffData contains information for session handoff messages.
-type HandoffData struct {
-	Role        string
-	CurrentWork string
-	Status      string
-	NextSteps   []string
-	Notes       string
-	PendingMail int
-	GitBranch   string
-	GitDirty    bool
+	Role          string // mayor, polecat, crew
+	RigName       string // e.g., "greenplace"
+	TownRoot      string // e.g., "/Users/steve/ai"
+	TownName      string // e.g., "ai" - the town identifier for session names
+	WorkDir       string // current working directory
+	DefaultBranch string // default branch for merges (e.g., "main", "develop")
+	IsForkRig     bool   // true when rig config has upstream_url
+	UpstreamURL   string // redacted upstream URL for display only
+	Polecat       string // polecat name (for polecat role)
+	BeadsDir      string // BEADS_DIR path
+	IssuePrefix   string // beads issue prefix
+	MayorSession  string // e.g., "gt-ai-mayor" - dynamic mayor session name
 }
 
 // SupervisorData contains information for rendering supervisor templates.
@@ -145,13 +100,6 @@ func New() (*Templates, error) {
 	}
 	t.roleTemplates = roleTempl
 
-	// Parse message templates with custom functions
-	msgTempl, err := template.New("").Funcs(templateFuncs).ParseFS(templateFS, "messages/*.md.tmpl")
-	if err != nil {
-		return nil, fmt.Errorf("parsing message templates: %w", err)
-	}
-	t.messageTemplates = msgTempl
-
 	return t, nil
 }
 
@@ -167,26 +115,9 @@ func (t *Templates) RenderRole(role string, data RoleData) (string, error) {
 	return buf.String(), nil
 }
 
-// RenderMessage renders a message template.
-func (t *Templates) RenderMessage(name string, data interface{}) (string, error) {
-	templateName := name + ".md.tmpl"
-
-	var buf bytes.Buffer
-	if err := t.messageTemplates.ExecuteTemplate(&buf, templateName, data); err != nil {
-		return "", fmt.Errorf("rendering message template %s: %w", templateName, err)
-	}
-
-	return buf.String(), nil
-}
-
 // RoleNames returns the list of available role templates.
 func (t *Templates) RoleNames() []string {
 	return []string{"mayor", "polecat", "crew"}
-}
-
-// MessageNames returns the list of available message templates.
-func (t *Templates) MessageNames() []string {
-	return []string{"spawn", "nudge", "escalation", "handoff"}
 }
 
 // PolecatLifecycleMarker is a unique string present in the polecat CLAUDE.md

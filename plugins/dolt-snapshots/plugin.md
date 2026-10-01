@@ -57,7 +57,7 @@ Branches are writable copies of the database at snapshot time. Unlike tags,
 you can commit to them — making them useful for:
 
 - **Dry-run convoy work** — test bulk operations without touching main
-- **Isolated convoy writes** — agents write to branch, refinery merges
+- **Isolated convoy writes** — agents write to a branch that is merged afterwards
 - **What-if analysis** — test theories without risk
 - **Parallel convoy isolation** — two convoys write to separate branches
 
@@ -90,7 +90,7 @@ and reads routes.jsonl to discover rig databases.
 
 In `--watch` mode, the binary tails `~/.events.jsonl` and runs a snapshot cycle
 immediately (<1s) when convoy events are detected. This is much faster than the
-~60s deacon patrol polling approach — critical for `convoy.launched` where agents
+~60s patrol polling approach — critical for `convoy.launched` where agents
 start writing to databases immediately.
 
 ```bash

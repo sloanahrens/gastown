@@ -3600,7 +3600,7 @@ Before signaling completion:
 2. git add <files> (stage code changes)
 3. git commit -m "..." (commit code)
 4. git push (push to remote)
-5. ` + "`gt done`" + ` (submit to merge queue and exit)
+5. ` + "`gt done`" + ` (submit for landing and exit)
 
 **Polecats MUST call ` + "`gt done`" + ` - this submits work and exits the session.**
 `

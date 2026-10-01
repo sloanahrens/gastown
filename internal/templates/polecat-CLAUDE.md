@@ -18,7 +18,7 @@ Do NOT sit idle, say "work complete" without running it, try `gt unsling`
 (only `gt done` signals completion), or wait for approval.
 
 **Your session should NEVER end without running `gt done`.** If `gt done` fails,
-escalate to Witness — but you must attempt it.
+run `gt escalate` — but you must attempt it.
 
 ---
 
@@ -52,7 +52,6 @@ formula checklist (from `mol-polecat-work`, shown inline at prime time) and sign
 
 **Your mail address:** `{{rig}}/polecats/{{name}}`
 **Your rig:** {{rig}}
-**Your Witness:** `{{rig}}/witness`
 
 ## Polecat Contract
 
@@ -133,8 +132,8 @@ whose subject line is itself one.
 
 **The subject says what the fix does and ends with `(gt-xxxx)`.** A bead title
 states the problem, so one copied into the subject reads as if the commit
-introduced it: bead title "Witness git-push guard removed" ships as `fix:
-reinstate the Witness git-push guard (gt-8ki9)`.
+introduced it: bead title "formula sync never removes dropped formulas" ships
+as `fix: formula sync reports town copies the binary dropped (gt-zggoh)`.
 
 **Integrating with the remote: `git rebase`, never `git reset`.**
 
@@ -162,21 +161,22 @@ git diff --stat origin/main...HEAD    # must list only files YOU changed
 | Message another agent | `gt nudge <target> "msg"` | ~~tmux send-keys~~ (drops Enter) |
 | See formula steps | `gt prime` (inline checklist) | ~~bd mol current~~ (steps not materialized) |
 | File discovered work | `bd create "title"` | Fixing it yourself |
-| Ask Witness for help | `gt mail send {{rig}}/witness -s "HELP" -m "..."` | ~~gt nudge witness~~ |
+| Ask for help | `gt escalate "HELP: ..." -r "..."` | Sitting idle |
 
 ---
 
 ## When to Ask for Help
 
-Mail your Witness (`{{rig}}/witness`) when requirements are unclear, you are
-stuck for >15 minutes, tests fail for reasons you can't find, or you need a
-decision you can't make:
+Escalate when requirements are unclear, you are stuck for >15 minutes, tests
+fail for reasons you can't find, or you need a decision you can't make:
 
 ```bash
-gt mail send {{rig}}/witness -s "HELP: <problem>" -m "Issue: ...
+gt escalate "HELP: <problem>" --stdin <<'BODY'
+Issue: ...
 Problem: ...
 Tried: ...
-Question: ..."
+Question: ...
+BODY
 ```
 
 ---
@@ -221,7 +221,7 @@ it. Work is NOT landed until `gt done` has marked it ready.
 
 > See [Polecat Lifecycle](docs/concepts/polecat-lifecycle.md) for the full three-layer architecture.
 
-**You own your session cadence.** The Witness monitors but doesn't force recycles.
+**You own your session cadence.** The daemon supervises but doesn't force recycles.
 
 ### Persist Findings (Session Survival)
 

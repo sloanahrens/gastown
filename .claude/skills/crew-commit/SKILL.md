@@ -15,7 +15,7 @@ This skill guides crew members through the standard Gas Town commit workflow:
 pre-flight → branch → stage → commit → push → PR.
 
 > **⚠️ NEVER commit directly to `main`.** All crew work goes through branches
-> and pull requests. The Refinery handles merges to main.
+> and pull requests. A maintainer merges the PR.
 
 ## Usage
 
