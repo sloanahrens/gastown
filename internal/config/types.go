@@ -4,7 +4,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -699,12 +698,6 @@ func (rc *RuntimeConfig) BuildCommand() string {
 // If prompt is provided, it overrides the config's InitialPrompt.
 // Claude takes the prompt as a positional argument.
 func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
-	return rc.buildCommandWithPrompt(prompt, os.Stderr)
-}
-
-// buildCommandWithPrompt is BuildCommandWithPrompt writing its dropped-prompt
-// warning to warn.
-func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) string {
 	resolved := normalizeRuntimeConfig(rc)
 	base := resolved.BuildCommand()
 
@@ -724,12 +717,6 @@ func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) s
 
 // BuildArgsWithPrompt returns the runtime command and args suitable for exec.
 func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
-	return rc.buildArgsWithPrompt(prompt, os.Stderr)
-}
-
-// buildArgsWithPrompt is BuildArgsWithPrompt writing its dropped-prompt
-// warning to warn.
-func (rc *RuntimeConfig) buildArgsWithPrompt(prompt string, warn io.Writer) []string {
 	resolved := normalizeRuntimeConfig(rc)
 	args := append([]string{resolved.Command}, resolved.Args...)
 

@@ -2116,7 +2116,7 @@ func (t *Tmux) sessionScope(session, townRootHint string) (townRoot, rigPath str
 // (nudge delivery step 5). Claude Code reads a mid-tool-call Escape as an
 // operator interrupt (gt-cyyg). An unidentified harness fails safe: custom
 // town agents went unidentified and were interrupted for weeks (claude-9a8).
-func escapeAllowed(agentName string, preset *config.AgentPresetInfo, ok bool) bool {
+func escapeAllowed(preset *config.AgentPresetInfo, ok bool) bool {
 	if !ok || preset == nil {
 		return false
 	}
@@ -2126,8 +2126,8 @@ func escapeAllowed(agentName string, preset *config.AgentPresetInfo, ok bool) bo
 // escapeSafe is the single Escape gate for nudge delivery: identity first
 // (no pane capture for Claude sessions), then the busy scrape.
 func (t *Tmux) escapeSafe(target, session, townRootHint string) bool {
-	agent, preset, ok := t.SessionAgentPreset(session, townRootHint)
-	return escapeAllowed(agent, preset, ok) && t.shouldSendEscape(target)
+	_, preset, ok := t.SessionAgentPreset(session, townRootHint)
+	return escapeAllowed(preset, ok) && t.shouldSendEscape(target)
 }
 
 // NudgeSessionWithOpts is like NudgeSession but accepts delivery options.
@@ -2767,7 +2767,7 @@ func (t *Tmux) findAgentPaneByScan(session string) (string, error) {
 		paneCmd := parts[1]
 		panePID := parts[2]
 
-		if t.matchesPaneRuntime(session, paneCmd, panePID, processNames) {
+		if t.matchesPaneRuntime(paneCmd, panePID, processNames) {
 			return paneID, nil
 		}
 	}
@@ -3588,7 +3588,7 @@ func (t *Tmux) IsRuntimeRunningChecked(session string, processNames []string) (b
 			continue
 		}
 		cmd, pid := parts[0], parts[1]
-		running, err := t.matchesPaneRuntimeChecked(session, cmd, pid, processNames)
+		running, err := t.matchesPaneRuntimeChecked(cmd, pid, processNames)
 		if err != nil {
 			return false, err
 		}
@@ -3611,7 +3611,7 @@ func (t *Tmux) checkTargetPaneForRuntimeChecked(session, paneID string, processN
 	if err != nil {
 		return false, err
 	}
-	if running, err := t.matchesPaneRuntimeChecked(session, strings.TrimSpace(cmd), "", processNames); err != nil {
+	if running, err := t.matchesPaneRuntimeChecked(strings.TrimSpace(cmd), "", processNames); err != nil {
 		return false, err
 	} else if running {
 		return true, nil
@@ -3620,7 +3620,7 @@ func (t *Tmux) checkTargetPaneForRuntimeChecked(session, paneID string, processN
 	if err != nil {
 		return false, err
 	}
-	return t.matchesPaneRuntimeChecked(session, strings.TrimSpace(cmd), strings.TrimSpace(pid), processNames)
+	return t.matchesPaneRuntimeChecked(strings.TrimSpace(cmd), strings.TrimSpace(pid), processNames)
 }
 
 // checkPaneForRuntime checks if the first window's pane is running a matching process.
@@ -3634,7 +3634,7 @@ func (t *Tmux) checkPaneForRuntimeChecked(session string, processNames []string)
 	if err != nil {
 		return false, err
 	}
-	if running, err := t.matchesPaneRuntimeChecked(session, cmd, "", processNames); err != nil {
+	if running, err := t.matchesPaneRuntimeChecked(cmd, "", processNames); err != nil {
 		return false, err
 	} else if running {
 		return true, nil
@@ -3643,7 +3643,7 @@ func (t *Tmux) checkPaneForRuntimeChecked(session string, processNames []string)
 	if err != nil {
 		return false, err
 	}
-	return t.matchesPaneRuntimeChecked(session, cmd, pid, processNames)
+	return t.matchesPaneRuntimeChecked(cmd, pid, processNames)
 }
 
 func (t *Tmux) getEnvironmentOptional(session, key string) (string, bool, error) {
@@ -3666,12 +3666,12 @@ func isMissingEnvironmentError(err error, key string) bool {
 }
 
 // matchesPaneRuntime checks if a pane with the given command and PID is running a matching process.
-func (t *Tmux) matchesPaneRuntime(session, cmd, pid string, processNames []string) bool {
-	running, _ := t.matchesPaneRuntimeChecked(session, cmd, pid, processNames)
+func (t *Tmux) matchesPaneRuntime(cmd, pid string, processNames []string) bool {
+	running, _ := t.matchesPaneRuntimeChecked(cmd, pid, processNames)
 	return running
 }
 
-func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames []string) (bool, error) {
+func (t *Tmux) matchesPaneRuntimeChecked(cmd, pid string, processNames []string) (bool, error) {
 	names := processNames
 	if len(names) == 0 {
 		return false, nil

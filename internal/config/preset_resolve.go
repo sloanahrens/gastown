@@ -90,7 +90,7 @@ func (r *AgentRegistry) presetTable() map[string]*AgentPresetInfo {
 // harnessPresetName names the preset for a command line. The command is
 // authoritative (basename, gt- prefix and wrappers such as `env -u X claude`
 // unwrapped); provider is the fallback. Anything else is Claude: the Claude CLI
-// is the only runtime (D4), so an unrecognised command is a wrapper script that
+// is the only runtime (D4), so an unrecognized command is a wrapper script that
 // execs it (a claude-deepseek-* backend wrapper) and an unknown provider names
 // a backend, not a harness.
 func harnessPresetName(command string, args []string, provider string, presets map[string]*AgentPresetInfo) string {
