@@ -33,32 +33,33 @@ func (s *fakeHoldStorage) GetIssueComments(_ context.Context, _ string) ([]*bead
 
 const rejectedNotes = "MERGE REJECTION (attempt 1): tests fail - see review\nBranch: polecat/x/gt-r+abc"
 
-// TestFeedHold_MergeRejection pins gt-ghyfx: a bead the refinery rejected and
-// reopened is the deacon's to redispatch, so the convoy feeders' hold names it.
-func TestFeedHold_MergeRejection(t *testing.T) {
+// TestFeedHold_MergeRejectionIsFlaggedNotHeld pins gt-et7ho: a bead the
+// landing worker rejected is ready rework, so the feeders see the rejection
+// but no hold; any other hold on the same record still applies.
+func TestFeedHold_MergeRejectionIsFlaggedNotHeld(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
+		"gt-r":   {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
+		"gt-rpr": {ID: "gt-rpr", Status: beadsdk.StatusOpen, Labels: []string{"needs-pro"}, Notes: rejectedNotes},
 	}}
-	hold := FeedHold(context.Background(), store, "gt-r", nil)
-	if !hold.MergeRejection || hold.Unreadable {
-		t.Fatalf("want a merge-rejection hold, got %+v", hold)
+	if hold := FeedHold(ctx, store, "gt-r", nil); hold != (Hold{MergeRejection: true}) {
+		t.Errorf("rejected record: want the rejection flagged with no hold, got %+v", hold)
 	}
-	if !strings.Contains(hold.Reason, "merge rejection") {
-		t.Errorf("reason should name the merge rejection, got %q", hold.Reason)
+	if hold := FeedHold(ctx, store, "gt-rpr", nil); hold.Reason != "label needs-pro" || !hold.MergeRejection {
+		t.Errorf("rejected record with a routing label: want the label hold and the flag, got %+v", hold)
 	}
 }
 
-// TestDispatchHoldReason_MergeRejectionIsNotAHold pins the other side of
-// gt-ghyfx: the deacon's RECOVERED_BEAD redispatch gates on DispatchHoldReason
-// and exists to redispatch rejected beads, so the marker must not hold there.
+// TestDispatchHoldReason_MergeRejectionIsNotAHold: every dispatcher's hold
+// rule leaves a rejected bead free to dispatch.
 func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
 	}}
 	if reason := DispatchHoldReason(context.Background(), store, "gt-r", nil); reason != "" {
-		t.Errorf("deacon path must not hold a rejected bead, got %q", reason)
+		t.Errorf("a rejected bead must not be held, got %q", reason)
 	}
 }
 
@@ -94,10 +95,10 @@ func TestFeedHold_Verdicts(t *testing.T) {
 	}
 }
 
-// TestFeedNextReadyIssue_SkipsRejectedFeedsSibling is the case gt-ghyfx asks
-// for on the event-driven feed: a sibling close event must not re-sling a bead
-// the refinery rejected, while a fresh sibling still feeds.
-func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
+// TestFeedNextReadyIssue_FeedsRejectedAsRework is the event-driven feed's half
+// of gt-et7ho: a sibling close event feeds a bead the landing worker rejected
+// like any other ready bead, and one feed dispatches one issue.
+func TestFeedNextReadyIssue_FeedsRejectedAsRework(t *testing.T) {
 	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -105,8 +106,8 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	convoy := &beadsdk.Issue{ID: "test-convoyr", Title: "Convoy", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}
-	// Priority 1 sorts the rejected bead first, so skipping it is what lets
-	// the sibling feed.
+	// Priority 1 sorts the rejected bead first, so the feed reaches it before
+	// the sibling.
 	rejected := &beadsdk.Issue{ID: "test-rejected1", Title: "Rejected", Status: beadsdk.StatusOpen, Priority: 1, IssueType: beadsdk.TypeTask, Notes: rejectedNotes, CreatedAt: now, UpdatedAt: now}
 	fresh := &beadsdk.Issue{ID: "test-fresh1", Title: "Fresh", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}
 	for _, iss := range []*beadsdk.Issue{convoy, rejected, fresh} {
@@ -132,20 +133,16 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 		t.Fatalf("gt stub was not called (no log file): %v; log: %v", err, *logMsgs)
 	}
 	got := string(data)
-	if strings.Contains(got, "test-rejected1") {
-		t.Errorf("rejected bead was slung by the event feed: %q", got)
+	if !strings.Contains(got, "sling test-rejected1 testrig") {
+		t.Errorf("expected the rejected bead to be slung as rework, got %q", got)
 	}
-	if !strings.Contains(got, "sling test-fresh1 testrig") {
-		t.Errorf("expected the fresh sibling to be slung, got %q", got)
+	if strings.Contains(got, "test-fresh1") {
+		t.Errorf("one feed dispatches one issue, but the sibling was slung too: %q", got)
 	}
-	found := false
 	for _, m := range *logMsgs {
-		if strings.Contains(m, "test-rejected1") && strings.Contains(m, "merge rejection") {
-			found = true
+		if strings.Contains(m, "test-rejected1") && strings.Contains(m, "not dispatched") {
+			t.Errorf("rejected bead was held: %q", m)
 		}
-	}
-	if !found {
-		t.Errorf("expected a log line naming the merge rejection on test-rejected1, got %v", *logMsgs)
 	}
 }
 

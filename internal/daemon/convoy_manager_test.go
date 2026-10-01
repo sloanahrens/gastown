@@ -1703,7 +1703,10 @@ func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
 	}
 }
 
-func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
+// TestFeedFirstReady_RejectionMarker_FeedsAsRework pins gt-et7ho: a bead the
+// landing worker rejected is fed like any ready bead, its rejected branch on
+// origin notwithstanding, because nothing else redispatches it.
+func TestFeedFirstReady_RejectionMarker_FeedsAsRework(t *testing.T) {
 	t.Parallel()
 
 	store, cleanup := newMemStore(t)
@@ -1747,6 +1750,9 @@ func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	}
 
 	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return []string{"polecat/x/gt-rejected1+abc"}, nil
+	}
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1759,22 +1765,13 @@ func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	data := mustArgvLog(t, gtf, "sling")
 	logContent := string(data)
 
-	if strings.Contains(logContent, "gt-rejected1") {
-		t.Errorf("rejected bead should not be slung by the daemon (deacon owns redispatch), got: %q", logContent)
+	if !strings.Contains(logContent, "gt-rejected1") {
+		t.Errorf("expected the rejected bead to be slung as rework, got: %q", logContent)
 	}
-	if !strings.Contains(logContent, "gt-fresh2") {
-		t.Errorf("expected the never-rejected bead to be slung, got: %q", logContent)
-	}
-
-	deferred := false
 	for _, l := range logged {
-		if strings.Contains(l, "gt-rejected1") && strings.Contains(l, "rejection marker") {
-			deferred = true
-			break
+		if strings.Contains(l, "gt-rejected1") && (strings.Contains(l, "skipping") || strings.Contains(l, "not dispatched")) {
+			t.Errorf("rejected bead was skipped: %q", l)
 		}
-	}
-	if !deferred {
-		t.Errorf("expected a rejection-marker skip log for gt-rejected1, got: %v", logged)
 	}
 }
 
@@ -1811,13 +1808,14 @@ func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
 	// The Unknown verdict (no store for the rig) must be logged explicitly,
 	// not folded silently into the same path as a confirmed-clean record
 	// (gt-udrrw, gt-jj29p).
-	assertLogged(t, logged, "gt-issue1", "could not confirm rejection-marker state")
+	assertLogged(t, logged, "gt-issue1", "could not confirm hold state")
 }
 
 // TestFeedHold_Verdicts pins the stranded scan's read of a bead's record: a
 // rig with no open store reports no store (the fail-open gap the store alert
-// owns), a read failure is an unreadable hold, a present marker is a merge
-// rejection, and a clean record holds nothing (gt-udrrw, gt-ghyfx).
+// owns), a read failure is an unreadable hold, a present marker flags a merge
+// rejection without holding, and a clean record holds nothing (gt-udrrw,
+// gt-et7ho).
 func TestFeedHold_Verdicts(t *testing.T) {
 	t.Parallel()
 
@@ -1841,14 +1839,14 @@ func TestFeedHold_Verdicts(t *testing.T) {
 	if hold, ok := m.feedHold("gt", "gt-clean"); !ok || hold != (convoy.Hold{}) {
 		t.Errorf("clean record: want no hold, got %+v ok=%v", hold, ok)
 	}
-	if hold, ok := m.feedHold("gt", "gt-rejected"); !ok || !hold.MergeRejection {
-		t.Errorf("rejected record: want a merge-rejection hold, got %+v ok=%v", hold, ok)
+	if hold, ok := m.feedHold("gt", "gt-rejected"); !ok || hold != (convoy.Hold{MergeRejection: true}) {
+		t.Errorf("rejected record: want the rejection flagged with no hold, got %+v ok=%v", hold, ok)
 	}
 }
 
 // TestFeedFirstReady_RejectionMarker_HermeticStore is the stranded-scan half
-// of gt-ghyfx without a real store: the rejected bead defers to the deacon with
-// the same log it always had, and the fresh sibling feeds.
+// of gt-et7ho without a real store or an origin branch: the rejected bead is
+// the first ready issue and is the one slung.
 func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 	t.Parallel()
 
@@ -1871,23 +1869,20 @@ func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 	})
 
 	data := mustArgvLog(t, gtf, "sling")
-	if strings.Contains(string(data), "gt-rejected1") {
-		t.Errorf("rejected bead was slung: %q", data)
+	if !strings.Contains(string(data), "gt-rejected1") {
+		t.Errorf("expected gt-rejected1 to be slung as rework, got %q", data)
 	}
-	if !strings.Contains(string(data), "gt-fresh2") {
-		t.Errorf("expected gt-fresh2 to be slung, got %q", data)
+	if strings.Contains(string(data), "gt-fresh2") {
+		t.Errorf("one feed dispatches one issue, but gt-fresh2 was slung too: %q", data)
 	}
-	assertLogged(t, logged, "gt-rejected1", "rejection marker, deferring to deacon")
+	assertLogged(t, logged, "gt-rejected1", "feeding gt-rejected1")
 }
 
-// TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate pins the one
-// behaviour gt-ghyfx changes in the stranded scan. The rejection gate used to
-// read an unreadable record as "proceeding as clear" and leave the skip to the
-// later hold check; it now holds the bead at the gate, because a rejection
-// cannot be ruled out. The bead was never fed either way; what changes is that
-// the gate says so, and the dead-holder and surviving-branch checks do not run
-// on a record nobody could read.
-func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T) {
+// TestFeedFirstReady_UnreadableRecord_FailsClosedAtHoldGate pins gt-ghyfx: an
+// unreadable record holds the bead at the hold gate, because a hold cannot be
+// ruled out, and the dead-holder and surviving-branch checks do not run on a
+// record nobody could read.
+func TestFeedFirstReady_UnreadableRecord_FailsClosedAtHoldGate(t *testing.T) {
 	t.Parallel()
 
 	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
@@ -1904,10 +1899,10 @@ func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T
 	if data := argvLog(gtf, "sling"); len(data) > 0 {
 		t.Errorf("unreadable record was fed: %q", data)
 	}
-	assertLogged(t, logged, "gt-unreadable", "cannot rule out a merge rejection (fail-closed)")
+	assertLogged(t, logged, "gt-unreadable", "cannot rule out a hold (fail-closed)")
 	for _, l := range logged {
 		if strings.Contains(l, "proceeding as clear") || strings.Contains(l, "surviving branch") {
-			t.Errorf("unreadable record went past the rejection gate: %q", l)
+			t.Errorf("unreadable record went past the hold gate: %q", l)
 		}
 	}
 }
