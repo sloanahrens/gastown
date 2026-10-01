@@ -65,5 +65,5 @@ func printSessionNudges() {
 // writeSessionNudges drains sessionName's queued nudges and writes them to
 // stderr as a system-reminder block, or nothing when the queue is empty.
 func writeSessionNudges(stderr io.Writer, townRoot, sessionName string) {
-	fmt.Fprint(stderr, nudge.FormatForInjection(drainNudgesFor(stderr, townRoot, sessionName)))
+	_, _ = fmt.Fprint(stderr, nudge.FormatForInjection(drainNudgesFor(stderr, townRoot, sessionName)))
 }
