@@ -789,8 +789,12 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Settings are passed to Claude Code via --settings flag.
 	townRoot := filepath.Dir(m.rig.Path)
 	runtimeConfig := config.ResolveWorkerAgentConfig(name, townRoot, m.rig.Path)
+	// Every start syncs the managed settings and reports hooks:present or
+	// hooks:absent for the session (gt-4k3fj.8.3).
 	crewSettingsDir := config.RoleSettingsDir("crew", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig); err != nil {
+	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig)
+	runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", m.rig.Name, name), m.SessionName(name), hooksStatus)
+	if err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 

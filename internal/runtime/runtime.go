@@ -22,6 +22,10 @@ import (
 // parent directory (passed via --settings flag), while workDir is the customer repo.
 // For the mayor, settingsDir and workDir are the same.
 func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.RuntimeConfig) error {
+	return ensureSettingsForRole(hooks.EnvHome(), settingsDir, workDir, role, rc)
+}
+
+func ensureSettingsForRole(home hooks.Home, settingsDir, workDir, role string, rc *config.RuntimeConfig) error {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
 	}
@@ -38,13 +42,7 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	// 1. Provider-specific settings via generic installer.
 	// Settings-dir support comes from the registry rc was resolved against
 	// (gt-rg4f1); a hand-built rc falls back to the built-in preset.
-	useSettingsDir := false
-	if rc.Hooks.UseSettingsDir != nil {
-		useSettingsDir = *rc.Hooks.UseSettingsDir
-	} else if preset := config.GetAgentPresetByName(provider); preset != nil {
-		useSettingsDir = preset.HooksUseSettingsDir
-	}
-	if err := hooks.InstallForRole(provider, settingsDir, workDir, role, rc.Hooks.Dir, rc.Hooks.SettingsFile, rc.Command, useSettingsDir); err != nil {
+	if err := home.InstallForRole(provider, settingsDir, workDir, role, rc.Hooks.Dir, rc.Hooks.SettingsFile, rc.Command, hooksUseSettingsDir(rc.Hooks)); err != nil {
 		return err
 	}
 	if provider == "gemini" {
@@ -65,6 +63,19 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	}
 
 	return nil
+}
+
+// hooksUseSettingsDir reports whether the provider's settings file lives in
+// the gastown-managed settings dir (passed with --settings) rather than the
+// work dir.
+func hooksUseSettingsDir(h *config.RuntimeHooksConfig) bool {
+	if h.UseSettingsDir != nil {
+		return *h.UseSettingsDir
+	}
+	if preset := config.GetAgentPresetByName(h.Provider); preset != nil {
+		return preset.HooksUseSettingsDir
+	}
+	return false
 }
 
 func ensureGeminiContextFile(workDir string) error {

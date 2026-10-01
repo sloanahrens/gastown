@@ -19,10 +19,10 @@ import (
 var allowedPresetLookups = map[string]bool{
 	"cmd/config.go#configAgentList": true,
 	// configAgentGet checks town custom agents before this built-in lookup.
-	"cmd/config.go#configAgentGet":             true,
-	"runtime/runtime.go#EnsureSettingsForRole": true,
-	"crew/manager.go#buildResumeArgs":          true,
-	"crew/manager.go#launchSession":            true,
+	"cmd/config.go#configAgentGet":           true,
+	"runtime/runtime.go#hooksUseSettingsDir": true,
+	"crew/manager.go#buildResumeArgs":        true,
+	"crew/manager.go#launchSession":          true,
 	// ensureAgentReady wants the readiness settings of a registry preset; an
 	// agent defined only in settings/config.json deliberately falls back to a
 	// fixed delay.

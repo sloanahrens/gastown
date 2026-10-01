@@ -8,42 +8,32 @@ import (
 	"testing"
 )
 
-func TestInstallForRole_RoleAware(t *testing.T) {
+// Every Claude role's install writes the managed hooks gt hooks sync writes
+// for its key, not a static template (gt-4k3fj.8.3).
+func TestInstallForRole_ClaudeRolesGetManagedHooks(t *testing.T) {
 	t.Parallel()
-	// Claude's only autonomous role, "polecat", is exercised separately
-	// (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks): it routes
-	// through the JSON merge path, not the static template compared here
-	// (gt-8stz).
-	tests := []struct {
-		name     string
-		role     string
-		wantFile string // expected template used
-	}{
-		{"interactive crew", "crew", "settings-interactive.json"},
-		{"interactive mayor", "mayor", "settings-interactive.json"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			err := InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true)
-			if err != nil {
+	for _, tt := range []struct{ role, sub, key string }{
+		{"crew", "crew", "gastown/crew"},
+		{"polecat", "polecats", "gastown/polecats"},
+		{"mayor", "mayor", "mayor"},
+	} {
+		t.Run(tt.role, func(t *testing.T) {
+			t.Parallel()
+			home := HomeAt(t.TempDir())
+			dir := filepath.Join(t.TempDir(), "gastown", tt.sub)
+			if err := home.InstallForRole("claude", dir, dir, tt.role, ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
-
-			path := filepath.Join(dir, ".claude", "settings.json")
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				t.Fatal("settings.json not created")
-			}
-
-			// Verify content matches resolved template (with {{GT_BIN}} substituted)
-			got, _ := os.ReadFile(path)
-			want, err := resolveAndSubstitute("claude", tt.wantFile, tt.role)
+			got, err := LoadSettings(filepath.Join(dir, ".claude", "settings.json"))
 			if err != nil {
-				t.Fatalf("resolveAndSubstitute: %v", err)
+				t.Fatalf("LoadSettings: %v", err)
 			}
-			if string(got) != string(want) {
-				t.Errorf("content mismatch: got %d bytes, want %d bytes (from %s)", len(got), len(want), tt.wantFile)
+			want, err := home.ComputeExpected(tt.key)
+			if err != nil {
+				t.Fatalf("ComputeExpected(%s): %v", tt.key, err)
+			}
+			if !HooksEqual(want, &got.Hooks) {
+				t.Errorf("hooks differ from the managed set for %s", tt.key)
 			}
 		})
 	}
@@ -408,21 +398,30 @@ func TestOpenCodeTemplateUsesHookPrime(t *testing.T) {
 	}
 }
 
-func TestInstallForRole_SkipsExisting(t *testing.T) {
+// An existing Claude settings file has its hooks replaced by the managed set
+// and keeps every other field (gt-4k3fj.8.3).
+func TestInstallForRole_SyncsExistingKeepsOtherFields(t *testing.T) {
 	t.Parallel()
+	home := HomeAt(t.TempDir())
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")
-	os.MkdirAll(filepath.Dir(hooksPath), 0755)
-	os.WriteFile(hooksPath, []byte("custom"), 0644)
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, []byte(`{"model":"custom","hooks":{"Stop":[]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", "claude", true)
-	if err != nil {
+	if err := home.InstallForRole("claude", dir, dir, "mayor", ".claude", "settings.json", "claude", true); err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
 
-	got, _ := os.ReadFile(hooksPath)
-	if string(got) != "custom" {
-		t.Error("existing file was overwritten")
+	data, _ := os.ReadFile(hooksPath)
+	if !strings.Contains(string(data), `"model": "custom"`) {
+		t.Errorf("existing model field was dropped:\n%s", data)
+	}
+	if err := home.CheckManagedClaudeSettings(Target{Path: hooksPath, Key: "mayor"}); err != nil {
+		t.Errorf("after install: %v", err)
 	}
 }
 
