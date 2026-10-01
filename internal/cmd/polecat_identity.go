@@ -667,10 +667,13 @@ func runPolecatIdentityRemove(cmd *cobra.Command, args []string) error {
 			hookBead = fields.HookBead
 		}
 		if hookBead != "" {
-			// Check if hooked bead is still open
-			hookedIssue, _ := bd.Show(hookBead)
-			if hookedIssue != nil && hookedIssue.Status != "closed" {
-				reasons = append(reasons, fmt.Sprintf("has work on hook (%s)", hookBead))
+			// Same classifier as the recovery report and the nuke gate, so a
+			// reference to a closed, submitted, or no-longer-assigned bead
+			// stops blocking here for the same reason it stops there. An
+			// unreadable reference still blocks (gt-eqiid).
+			disposition := hookBeadSafeForCleanup(bd, hookBead)
+			if !disposition.Safe {
+				reasons = append(reasons, disposition.Blocker)
 			}
 		}
 

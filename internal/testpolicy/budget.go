@@ -74,6 +74,16 @@ type SlowRun struct {
 	CPU     CPUTime
 }
 
+// PkgTime is one judged package's measurement.
+type PkgTime struct {
+	Package string
+	// Wall is the package's test wall time; CPU is what its test process
+	// tree used, zero and Measured false when it passed unmeasured.
+	Wall     time.Duration
+	CPU      CPUTime
+	Measured bool
+}
+
 // BudgetResult is what one budget run found.
 type BudgetResult struct {
 	// Over are the packages that fail the budget.
@@ -83,6 +93,77 @@ type BudgetResult struct {
 	Tracked []TrackedRun
 	// SlowWall are the judged packages over the budget in wall time only.
 	SlowWall []SlowRun
+	// Judged is every judged package that ran, for the gate's idle check
+	// (IdleJudged): a gate whose packages wait rather than compute names
+	// the host, which no single package's measurement can (gt-2ycne.1).
+	Judged []PkgTime
+}
+
+// IdleTop is how many packages the idle report names.
+const IdleTop = 5
+
+// IdleRatioFactor and IdleWall are the gate's idle check: judged packages
+// whose median waited IdleRatioFactor times its CPU time for over IdleWall of
+// wall were waiting on the host, not computing, and the gate's wall time
+// reads as a verdict on the tree when it is not one (gt-2ycne.1).
+const (
+	IdleRatioFactor = 10
+	IdleWall        = 20 * time.Second
+)
+
+// IdleReport is what one run's judged packages say about the host.
+type IdleReport struct {
+	// Packages is how many packages the medians are over: the judged ones
+	// that ran with a CPU measurement. An unmeasured package's CPU is
+	// unknown, not zero, so it takes no part.
+	Packages int
+	// Wall and CPU are those packages' medians, taken one field at a time.
+	Wall, CPU time.Duration
+	// Waiting reports whether the median package waited on the host.
+	Waiting bool
+	// Top are the measured judged packages with the most wall time, most
+	// first, at most IdleTop of them.
+	Top []PkgTime
+}
+
+// IdleJudged judges a run's judged packages. Waiting is true when the median
+// measured package ran over IdleWall of wall and over IdleRatioFactor times
+// its own CPU time: the time was spent waiting (a scan per executable, a
+// throttled process, a lock), and the run's wall time is evidence about the
+// host rather than about the tests.
+func IdleJudged(times []PkgTime) IdleReport {
+	measured := make([]PkgTime, 0, len(times))
+	for _, p := range times {
+		if p.Measured {
+			measured = append(measured, p)
+		}
+	}
+	rep := IdleReport{Packages: len(measured)}
+	if len(measured) == 0 {
+		return rep
+	}
+	walls := make([]time.Duration, len(measured))
+	cpus := make([]time.Duration, len(measured))
+	for i, p := range measured {
+		walls[i] = p.Wall
+		cpus[i] = p.CPU.User + p.CPU.Sys
+	}
+	rep.Wall, rep.CPU = medianDuration(walls), medianDuration(cpus)
+	rep.Waiting = rep.Wall > IdleWall && rep.Wall > IdleRatioFactor*rep.CPU
+	sort.SliceStable(measured, func(i, j int) bool { return measured[i].Wall > measured[j].Wall })
+	if len(measured) > IdleTop {
+		measured = measured[:IdleTop]
+	}
+	rep.Top = measured
+	return rep
+}
+
+// medianDuration returns the middle value (the lower middle for an even
+// count).
+func medianDuration(ds []time.Duration) time.Duration {
+	s := append([]time.Duration(nil), ds...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[(len(s)-1)/2]
 }
 
 // WatchBudgetTracked is WatchBudget that also exempts the packages in tracked
@@ -156,6 +237,7 @@ func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt m
 			continue
 		}
 		c, measured := cpu(pkg)
+		res.Judged = append(res.Judged, PkgTime{Package: pkg, Wall: d, CPU: c, Measured: measured})
 		// A failed package may never have run a binary (a build failure);
 		// it already fails the run, so a missing measurement adds nothing.
 		unmeasured := !measured && ev.Action == "pass"

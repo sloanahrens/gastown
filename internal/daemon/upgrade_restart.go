@@ -21,13 +21,16 @@ var ErrRestartForUpgrade = errors.New("daemon: restart for upgrade")
 const upgradeStuckAfter = 30 * time.Minute
 
 // postLandRestartCap is how long a pending upgrade restart waits for an
-// in-flight post-landing run (gt-gb4ij). The post-landing check takes minutes, so a
-// run that has started is usually worth its verdict; past the cap the daemon
-// restarts anyway, and the landing worker's first pass after the start runs
-// the untested tip again (Worker.watchTarget). The cap is not in
+// in-flight post-landing run (gt-gb4ij). Past the cap the daemon restarts
+// anyway, and the landing worker's first pass after the start runs the
+// untested tip again (Worker.watchTarget), so a cut run costs only time.
+// Short on purpose (gt-8p8h7): the drain starts no landing pass while it waits,
+// and every landing's install requests a restart, so a 20m cap left the
+// queue idle ~8 min after landings for a shell-test run worth less than
+// the landings it held up. The cap is not in
 // isIdleForUpgrade: it needs the marker's wait time, and the gc cycle's quiet
 // check already sees the run through its gate-class container slot.
-const postLandRestartCap = 20 * time.Minute
+const postLandRestartCap = 2 * time.Minute
 
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds

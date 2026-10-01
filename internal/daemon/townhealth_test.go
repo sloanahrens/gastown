@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,12 +22,22 @@ import (
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
-// labelBeads answers a List by its label filter and records the env of
-// every client opened.
+// beadRead is one List call: the label asked for and the options it carried,
+// so a test can check which bead plane the daemon read.
+type beadRead struct {
+	label string
+	opts  beads.ListOptions
+}
+
+// labelBeads answers a List the way bd does, out of the plane the options
+// name: Ephemeral reads the wisps table alone, IncludeInfra reads wisps and
+// issues together, and a bare read sees the issues table.
 type labelBeads struct {
-	byLabel map[string][]*beads.Issue
-	failFor string
-	opened  int
+	issuesByLabel map[string][]*beads.Issue
+	wispsByLabel  map[string][]*beads.Issue
+	failFor       string
+	opened        int
+	reads         []beadRead
 }
 
 func (b *labelBeads) open([]string) workBeadReader { b.opened++; return b }
@@ -33,10 +45,35 @@ func (b *labelBeads) Show(id string) (*beads.Issue, error) {
 	return nil, errors.New("not used")
 }
 func (b *labelBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	b.reads = append(b.reads, beadRead{label: opts.Label, opts: opts})
 	if opts.Label == b.failFor {
 		return nil, errors.New("bd: timed out")
 	}
-	return b.byLabel[opts.Label], nil
+	switch {
+	case opts.Ephemeral:
+		return b.wispsByLabel[opts.Label], nil
+	case opts.IncludeInfra:
+		both := append([]*beads.Issue{}, b.issuesByLabel[opts.Label]...)
+		return append(both, b.wispsByLabel[opts.Label]...), nil
+	default:
+		return b.issuesByLabel[opts.Label], nil
+	}
+}
+
+// read returns the List call that asked for label. A label read once is the
+// common case; the last call wins if a test reads it twice.
+func (b *labelBeads) read(t *testing.T, label string) beadRead {
+	t.Helper()
+	var found *beadRead
+	for i := range b.reads {
+		if b.reads[i].label == label {
+			found = &b.reads[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no read of %s among %+v", label, b.reads)
+	}
+	return *found
 }
 
 func writeJSONFile(t *testing.T, path string, v any) {
@@ -85,11 +122,16 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 	seat("gastown", "polecat", "gone", intent.Record{Progress: &intent.Progress{SampledAt: now.Add(-48 * time.Hour)}})
 	seat("", "mayor", "", intent.Record{Frozen: true})
 
-	bd := &labelBeads{byLabel: map[string][]*beads.Issue{
-		"gt:ready-to-land": {{ID: "gt-1", Status: "open"}, {ID: "gt-2", Status: "closed"}},
-		"gt:needs-human":   {{ID: "gt-3", Status: "open", CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
-		"gt:escalation":    {{ID: "hq-9", Status: "open", CreatedAt: now.Add(-90 * time.Minute).Format(time.RFC3339)}},
-	}}
+	bd := &labelBeads{
+		issuesByLabel: map[string][]*beads.Issue{
+			"gt:ready-to-land": {{ID: "gt-1", Status: "open"}, {ID: "gt-2", Status: "closed"}},
+			"gt:needs-human":   {{ID: "gt-3", Status: "open", CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
+		},
+		wispsByLabel: map[string][]*beads.Issue{
+			// Escalations are filed as ephemeral wisps.
+			"gt:escalation": {{ID: "hq-9", Status: "open", Labels: []string{"gt:escalation"}, CreatedAt: now.Add(-90 * time.Minute).Format(time.RFC3339)}},
+		},
+	}
 	d := &Daemon{
 		config:        &Config{TownRoot: town},
 		logger:        log.New(io.Discard, "", 0),
@@ -100,6 +142,9 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 		}},
 		townHealthSources: func(s *healthSources) {
 			s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
+			// The real probe writes and execs programs; the unit tier runs
+			// no external tool, so a test that computes health answers it.
+			s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
 			s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
 			s.slots = func() (slot.Report, error) {
 				return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
@@ -175,6 +220,60 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// The exec-tax line the daemon logs is its field's state changing, and a
+// beat that reports the same state says nothing (gt-2ycne.1).
+func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	median := 9 * time.Millisecond
+	d.townHealthSources = func(s *healthSources) {
+		s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
+		s.execTax = func(context.Context) (time.Duration, error) { return median, nil }
+	}
+
+	// Every beat logs the health line itself; only the exec-tax line is
+	// conditional, so the test reads that one out of the log.
+	taxLines := func() []string {
+		var out []string
+		for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+			if strings.Contains(l, "exec-tax") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	d.writeTownHealth()
+	if got := taxLines(); len(got) != 0 {
+		t.Errorf("first beat logged %q, want nothing: there is no baseline to change from", got)
+	}
+	d.writeTownHealth()
+	if got := taxLines(); len(got) != 0 {
+		t.Errorf("an unchanged beat logged %q, want nothing (one line per change, not per beat)", got)
+	}
+	median = 180 * time.Millisecond
+	d.writeTownHealth()
+	if got := logs.String(); !strings.Contains(got, "180ms") || !strings.Contains(got, "gt-2ycne.1") {
+		t.Errorf("the transition to taxed logged %q, want the median and the bead", got)
+	}
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healthField(t, r, "exec-tax"); got.Verdict != townhealth.Red || r.ExecTaxMS == nil || *r.ExecTaxMS != 180 {
+		t.Errorf("exec-tax = %+v with ExecTaxMS %v, want RED and 180", got, r.ExecTaxMS)
+	}
+
+	logs.Reset()
+	median = 9 * time.Millisecond
+	d.writeTownHealth()
+	if got := logs.String(); !strings.Contains(got, "clear") {
+		t.Errorf("the transition back to clear logged %q, want the clear line", got)
+	}
+}
+
 // The second report checks the heartbeat count against the first: the
 // daemon field becomes LIVE once there is a baseline.
 func TestWriteTownHealth_HeartbeatAdvanceIsLiveAfterTheFirstTick(t *testing.T) {
@@ -195,6 +294,47 @@ func TestWriteTownHealth_HeartbeatAdvanceIsLiveAfterTheFirstTick(t *testing.T) {
 	}
 }
 
+// TestWriteTownHealth_EscalationReadsTheSetEscalateListShows pins the health
+// field to the set `gt escalate list` displays, over the two ways the two
+// readers disagreed: a delivery carrier is not an escalation, and an
+// escalation outside the wisps table is one (gt-9k2bx).
+func TestWriteTownHealth_EscalationReadsTheSetEscalateListShows(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, bd := healthTown(t, now)
+	// The mail carriers routed for an escalation carry gt:escalation so ack and
+	// close can find them, and they stay open long after the escalation is
+	// done. This one is two days old; counting it is what made the status line
+	// read oldest_2d while `gt escalate list` showed nothing older than a day.
+	bd.wispsByLabel["gt:escalation"] = append(bd.wispsByLabel["gt:escalation"], &beads.Issue{
+		ID: "hq-wisp-msg", Status: "open", Labels: []string{"gt:escalation", "gt:message"},
+		CreatedAt: now.Add(-48 * time.Hour).Format(time.RFC3339),
+	})
+	// An escalation outside the wisps table, which a wisps-only query misses.
+	bd.issuesByLabel["gt:escalation"] = []*beads.Issue{{
+		ID: "hq-esc", Status: "open", Labels: []string{"gt:escalation"},
+		CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
+	}}
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// hq-esc at 2h, not hq-wisp-msg at 48h (a carrier) and not the 90m wisp
+	// alone (the issues-plane escalation counts).
+	if got := healthField(t, r, "escalation"); got.Value != "oldest 2h" || got.Verdict != townhealth.Degraded {
+		t.Errorf("escalation = %+v, want DEGRADED oldest 2h — the carriers `gt escalate list` filters must not count", got)
+	}
+
+	read := bd.read(t, "gt:escalation")
+	if read.opts.Ephemeral || !read.opts.IncludeInfra {
+		t.Errorf("escalation read used Ephemeral=%v IncludeInfra=%v, want the both-plane read `gt escalate list` runs",
+			read.opts.Ephemeral, read.opts.IncludeInfra)
+	}
+}
+
 func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -205,6 +345,7 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	}
 	d.townHealthSources = func(s *healthSources) {
 		s.ping = func() (time.Duration, error) { return 0, errors.New("connection refused") }
+		s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
 		s.backupRoot = func() (string, error) { return "", errors.New("no home") }
 		s.slots = func() (slot.Report, error) { return slot.Report{}, nil }
 	}

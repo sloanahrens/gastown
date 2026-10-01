@@ -79,7 +79,9 @@ func commandsDir(workspacePath string) string {
 }
 
 // Provision writes the commands into workspacePath/.claude/commands/.
-// An existing command file is left alone (no overwrite).
+// The embedded body is canonical: a copy on disk that differs from the template
+// is replaced, so a workspace provisioned before a template edit does not keep
+// the old body (gt-4czhp).
 func Provision(workspacePath string) error {
 	dir := commandsDir(workspacePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -89,14 +91,15 @@ func Provision(workspacePath string) error {
 	for _, cmd := range Commands {
 		path := filepath.Join(dir, cmd.Name+".md")
 
-		// Don't overwrite existing
-		if _, err := os.Stat(path); err == nil {
-			continue
-		}
-
 		content, err := BuildCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("building %s: %w", cmd.Name, err)
+		}
+
+		// A copy already matching the template is left alone, so provisioning
+		// an up-to-date workspace rewrites nothing.
+		if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+			continue
 		}
 
 		if err := os.WriteFile(path, []byte(content), 0644); err != nil {

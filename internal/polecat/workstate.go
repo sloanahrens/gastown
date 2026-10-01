@@ -8,6 +8,14 @@ const (
 	WorkstateVerdictPendingMR     = "PENDING_MR"
 	WorkstateVerdictNeedsRecovery = "NEEDS_RECOVERY"
 	WorkstateVerdictNeedsMQSubmit = "NEEDS_MQ_SUBMIT"
+	// WorkstateVerdictSubmitted means the polecat's work is submitted for
+	// landing and the landing worker owns it until it lands. Like PENDING_MR it
+	// is a hands-off verdict: nothing to recover, nothing to restart, and the
+	// seat is not reusable until the landing releases the assignment. It is
+	// separate from PENDING_MR because there need not be a merge request at all
+	// (a direct-to-main landing carries none), and reporting an MR that does
+	// not exist sends a reader looking for one (gt-eqiid).
+	WorkstateVerdictSubmitted = "SUBMITTED"
 )
 
 // CleanupStatusSourceRecorded is the provenance tag for a cleanup_status
@@ -46,8 +54,13 @@ const (
 // WorkstateInput contains the lifecycle, git, and merge-queue facts needed to
 // classify a polecat consistently across list, recovery, witness, and capacity.
 type WorkstateInput struct {
-	State                          State
-	HookBead                       string
+	State    State
+	HookBead string
+	// HookBeadSubmitted reports that the hook reference names work submitted
+	// for landing (HookBeadDisposition.Submitted). The hook is still set — by
+	// design, the landing worker needs it — so without this the classifier
+	// reads a submitted seat as a seat still holding work.
+	HookBeadSubmitted              bool
 	CleanupStatus                  CleanupStatus
 	IgnoreCleanupStatus            bool
 	PartialSpawnWithoutDurableHook bool
@@ -179,6 +192,36 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		}
 	}
 
+	// Submitted work is the landing worker's, not a recovery case (gt-eqiid).
+	// The hook stays on the ready-to-land bead until the landing takes it —
+	// which is why the hook-still-set predicate below would otherwise fire on
+	// every correctly finished polecat — and StateSubmitted is not a stall.
+	//
+	// A live WORKING session outranks it: a polecat still typing on a
+	// ready-to-land bead is working, and SUBMITTED would advertise it as
+	// hands-off.
+	//
+	// A failed push or merge request outranks it too, so the arm is skipped and
+	// the predicate checks below name the failure. push_failed and mr_failed
+	// mean gt done never got the branch to the landing worker: the seat is
+	// waiting on nothing, and reporting it hands-off would bury the very
+	// failure the check exists to surface. The PENDING_MR arm above tests the
+	// same two facts for the same reason.
+	if in.State != StateWorking && !in.PushFailed && !in.MRFailed &&
+		(in.HookBeadSubmitted || in.State == StateSubmitted) {
+		d := WorkstateDisposition{
+			Verdict:              WorkstateVerdictSubmitted,
+			Reason:               "submitted-for-landing",
+			ReuseStatus:          "idle-submitted",
+			CountsTowardCapacity: true,
+		}
+		// Report-only: landing reads the pushed branch, so a worktree the probe
+		// found dirty does not change the verdict, but a reader should not have
+		// to re-probe to see it (gt-d9z9z).
+		d.Blockers = append(d.Blockers, liveGitRiskBlockers(in)...)
+		return d
+	}
+
 	// StateDone (agent_state=done, seen before a polecat's own idle transition
 	// lands) falls through to the real predicate checks below instead of
 	// bailing out here — otherwise a merged/clean polecat gets NEEDS_RECOVERY
@@ -208,9 +251,22 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		// the state blocker so a reviewer can tell whether the work is
 		// preserved without re-probing by hand (gt-d9z9z). Report-only:
 		// verdict, reason and capacity stay decided by the lifecycle state.
-		// A WORKING seat is skipped — a live session's dirty tree is expected
-		// and no recovery decision hangs on it.
+		//
+		// push_failed/mr_failed are named here too: this branch refuses on the
+		// state, and "lifecycle_state=submitted" alone does not tell a reader
+		// that gt done's push never reached the remote. The SUBMITTED arm above
+		// declines exactly those two facts, so a seat carrying them lands here
+		// and has to say why (gt-eqiid).
+		//
+		// A WORKING seat is skipped entirely — a live session's dirty tree is
+		// expected, and a failure flag can only be stale before gt done runs.
 		if verdict != WorkstateVerdictWorking {
+			if in.PushFailed {
+				d.Blockers = append(d.Blockers, "push_failed=true")
+			}
+			if in.MRFailed {
+				d.Blockers = append(d.Blockers, "mr_failed=true")
+			}
 			d.Blockers = append(d.Blockers, liveGitRiskBlockers(in)...)
 		}
 		return d
@@ -228,7 +284,10 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		capacityBlocked = capacityBlocked || countsTowardCapacity
 	}
 
-	if in.HookBead != "" && !in.PartialSpawnWithoutDurableHook {
+	// A submitted hook is set by design — the landing worker needs it — so it
+	// is never hook-still-set, even on the paths that reach this predicate with
+	// the flag set (a submitted seat whose push or MR failed, above).
+	if in.HookBead != "" && !in.PartialSpawnWithoutDurableHook && !in.HookBeadSubmitted {
 		block("hook-still-set", "has work on hook ("+in.HookBead+")", true)
 	}
 	if in.PushFailed {
@@ -490,10 +549,13 @@ func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpaw
 // it unset is a claim of its own — "no live probe was attempted" — and keeps
 // the recorded cleanup_status authoritative for git-derived verdicts.
 type WorkstateFacts struct {
-	State                          State
-	HookBead                       string
-	HookBeadSafe                   bool
-	HookBeadTerminal               bool
+	State            State
+	HookBead         string
+	HookBeadSafe     bool
+	HookBeadTerminal bool
+	// HookBeadSubmitted comes from ClassifyHookBead on the same lookup that
+	// produced HookBeadTerminal — see WorkstateInput.HookBeadSubmitted.
+	HookBeadSubmitted              bool
 	PartialSpawnWithoutDurableHook bool
 	WorktreeStructurallyMissing    bool
 	// AgentBeadRead marks that the caller successfully read the polecat's
@@ -573,6 +635,7 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 
 	input := WorkstateInput{
 		State:                          f.State,
+		HookBeadSubmitted:              f.HookBeadSubmitted,
 		CleanupStatus:                  f.CleanupStatus,
 		PartialSpawnWithoutDurableHook: f.PartialSpawnWithoutDurableHook,
 		PushFailed:                     f.PushFailed,

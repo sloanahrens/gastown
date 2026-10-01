@@ -168,6 +168,10 @@ type ConvoyManager struct {
 	// hold is logged once per state change rather than on every scan.
 	holdLatch dispatch.HoldLatch
 
+	// waitingLog logs "N tracked issues, 0 ready" once per convoy and count,
+	// not every scan: it was two thirds of all daemon log lines.
+	waitingLog logLatch
+
 	// stores maps store names to beads stores for event polling.
 	// Key "hq" is the town-level store (used for convoy lookups).
 	// Other keys are rig names (e.g., "gastown", "beads", "shippercrm").
@@ -975,6 +979,8 @@ func (m *ConvoyManager) scan() {
 	// Successful scan: clear recovery mode so the ticker returns to normal interval.
 	m.recoveryMode.Store(false)
 
+	waiting := map[string]bool{}
+	defer m.waitingLog.keepOnly(waiting)
 	for _, c := range stranded {
 		select {
 		case <-m.ctx.Done():
@@ -1005,7 +1011,8 @@ func (m *ConvoyManager) scan() {
 			// (a) all tracked issues are closed → convoy should auto-close
 			// (b) issues are blocked/in-progress → needs agent review
 			// Run convoy check to handle case (a); it's a no-op for (b).
-			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
+			waiting[c.ID] = true
+			m.waitingLog.logf(m.logger, c.ID, "Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
 			m.checkConvoyCompletion(c.ID)
 		}
 	}

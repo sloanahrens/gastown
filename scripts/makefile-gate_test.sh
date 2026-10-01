@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
 # `make gate`, `make test-slow` and `make test-integration` are the test
-# tiers (`make test` only chains them), the gate runs lint, build and the unit
+# tiers (`make test` only chains them), the gate runs the exec-tax preflight
+# (a warning fails nothing, gt-2ycne.1), lint, build and the unit
 # tier over every package in that order (no slow tier since gt-ik4a1.9),
 # test-slow runs the gate and then the shell tests, neither starts a container
 # or takes the container-gate slot, and the integration tier runs every
@@ -42,22 +43,26 @@ fi
 
 lint=$(line_of "$out" "golangci-lint run")
 build=$(line_of "$out" "go build ./...")
-unit=$(line_of "$out" "internal/testpolicy/cmd/budget")
+unit=$(line_of "$out" "go test -timeout 20m ./...")
 shell=$(line_of "$out" "scripts/test-makefile.sh")
 if [[ -n "$lint" && -n "$build" && -n "$unit" && "$lint" -lt "$build" && "$build" -lt "$unit" ]]; then
-  pass "gate runs lint, then go build ./..., then the budget runner"
+  pass "gate runs lint, then go build ./..., then the cached unit tier"
 else
-  fail "gate runs lint, then go build ./..., then the budget runner (lines: lint=$lint build=$build unit=$unit)" "$out"
+  fail "gate runs lint, then go build ./..., then the cached unit tier (lines: lint=$lint build=$build unit=$unit)" "$out"
 fi
 if [[ -z "$shell" ]]; then
   pass "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow"
 else
   fail "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow" "$out"
 fi
-if grep -q -F 'cmd/budget -fast-tier -- -timeout 20m ./...' <<<"$out" && ! grep -q -E -- '-slow( |=)|slow\.txt' <<<"$out"; then
-  pass "gate runs the unit tier over every package, warning on one over testpolicy.FastTierMaxWall"
+# gt-s1vff: the gate's unit tier is plain go test, so the test result cache
+# reruns only the packages a landing can affect; the budget runner's -exec
+# wrapper bypassed the cache and reran every test on every landing. Budgets
+# stay enforced by make tier-check (the hourly sweep), not the landing path.
+if grep -q -F 'go test -timeout 20m ./...' <<<"$out" && ! grep -q -F 'cmd/budget' <<<"$out" && ! grep -q -E -- '-count[= ]1|-exec' <<<"$out" && ! grep -q -E -- '-slow( |=)|slow\.txt' <<<"$out"; then
+  pass "gate runs the unit tier over every package through the test cache (no budget -exec, no -count=1)"
 else
-  fail "gate runs the unit tier over every package, warning on one over testpolicy.FastTierMaxWall" "$out"
+  fail "gate runs the unit tier over every package through the test cache (no budget -exec, no -count=1)" "$out"
 fi
 if ! grep -q -F -- '-strict-wall' <<<"$out" && tout=$(dry tier-check) && grep -q -F 'cmd/budget -fast-tier -strict-wall -- -timeout 20m ./...' <<<"$tout" && ! grep -q -E 'golangci-lint|go build|slot +run' <<<"$tout"; then
   pass "gate only warns on wall time; make tier-check runs the unit tier with -strict-wall and no lint or build (gt-z7qtk)"
@@ -82,7 +87,7 @@ else
   pass "gate never takes the container-gate slot"
 fi
 
-if grep -q -F 'GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget' <<<"$out"; then
+if grep -q -F 'GT_TEST_DOCKER=0 go test -timeout 20m ./...' <<<"$out"; then
   pass "gate writes the container opt-in off where the unit tier starts"
 else
   fail "gate writes the container opt-in off where the unit tier starts" "$out"
@@ -101,10 +106,10 @@ else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- '-fast-tier -- -timeout 20m ./...' <<<"$out"; then
-  pass "gate carries one -timeout, on the budget runner (the one gate definition)"
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'go test -timeout 20m ./...' <<<"$out"; then
+  pass "gate carries one -timeout, on the unit tier's go test (the one gate definition)"
 else
-  fail "gate carries one -timeout, on the budget runner (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
+  fail "gate carries one -timeout, on the unit tier's go test (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
 fi
 
 echo "deleted entry points"
@@ -144,9 +149,9 @@ if sout=$(dry test-slow); then
 else
   fail "make -n test-slow exits 0" "$sout"
 fi
-sgate=$(line_of "$sout" "internal/testpolicy/cmd/budget")
+sgate=$(line_of "$sout" "go test -timeout 20m ./...")
 sshell=$(line_of "$sout" "GT_TEST_DOCKER=0 bash scripts/test-makefile.sh")
-if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'cmd/budget -fast-tier -- -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
+if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'go test -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
   pass "test-slow runs the gate, then the shell tests, containers off, no slot"
 else
   fail "test-slow runs the gate, then the shell tests, containers off, no slot (lines: gate=$sgate shell=$sshell)" "$sout"
@@ -198,15 +203,15 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 # The go stub logs each call with the container opt-in it saw, and fails the
-# subcommand named in STUB_GO_FAIL (build, run or test).
+# subcommand named in STUB_GO_FAIL (build or test).
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
-if [[ "$1" == run && -n "${STUB_GO_INTERRUPT:-}" ]]; then
+if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
   # Signal the recipe shell (the parent), then wait to be killed.
   kill -TERM "$PPID"
   sleep 20
-  echo "go run survived the interrupt" >>"$STUB_LOG"
+  echo "go test survived the interrupt" >>"$STUB_LOG"
 fi
 [[ "$1" == "${STUB_GO_FAIL:-}" ]] && exit 1
 exit 0
@@ -222,7 +227,18 @@ echo "shell-tests" >>"$STUB_LOG"
 [[ -n "${STUB_SHELL_FAIL:-}" ]] && exit 1
 exit 0
 STUB
-chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint"
+# The exec-tax preflight, which the real gate reaches through `go run`: the
+# go stub would swallow that call, so every case below points
+# EXEC_TAX_PREFLIGHT at this stub. It warns only when EXEC_TAX_WARN is set,
+# and exits 0 either way.
+cat >"$TMP/preflight.sh" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n "${EXEC_TAX_WARN:-}" ]]; then
+  echo "gate: WARNING exec tax 180 ms/exec in this process tree: a fresh executable here waits on a macOS scan or a throttled process, and the unit tier builds one per package (see gt-2ycne.1)" >&2
+fi
+exit 0
+STUB
+chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh"
 
 # run_gate [make flags] -- VAR=value... runs the real gate recipe against the
 # stubs, with an inherited GT_TEST_DOCKER=1 the recipe must override, and
@@ -237,32 +253,41 @@ run_gate() {
   : >"$TMP/calls"
   local rc=0
   env "$@" STUB_LOG="$TMP/calls" GT_TEST_DOCKER=1 PATH="$TMP/bin:$PATH" \
-    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" EXEC_TAX_PREFLIGHT="$TMP/preflight.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
   echo "$rc"
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
+if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
   pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
   fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
+# The preflight's warning path: a taxed host says so, and the gate still
+# passes. -o lint so the real docs-lint runs once, in the green case above.
+rc=$(run_gate -o lint -- EXEC_TAX_WARN=1)
+if [[ "$rc" == 0 ]] && grep -q -F 'gate: WARNING exec tax 180 ms/exec' "$TMP/err" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "a taxed host: the gate warns on the exec tax and still passes (gt-2ycne.1)"
+else
+  fail "a taxed host: the gate warns on the exec tax and still passes (gt-2ycne.1) (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
 rc=$(run_gate -o docs-lint -- STUB_LINT_FAIL=1)
-if [[ "$rc" != 0 ]] && grep -q -E '^golangci-lint run' "$TMP/calls" && ! grep -q -E '^go (build|run)' "$TMP/calls"; then
+if [[ "$rc" != 0 ]] && grep -q -E '^golangci-lint run' "$TMP/calls" && ! grep -q -E '^go (build|test)' "$TMP/calls"; then
   pass "lint fails: non-zero, nothing built or tested"
 else
   fail "lint fails: non-zero, nothing built or tested (rc=$rc)" "$(cat "$TMP/calls")"
 fi
 
 rc=$(run_gate -o lint -- STUB_GO_FAIL=build)
-if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at build' "$TMP/err" && ! grep -q -E '^go run' "$TMP/calls"; then
+if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at build' "$TMP/err" && ! grep -q -E '^go test' "$TMP/calls"; then
   pass "build fails: non-zero, names the build stage, unit tier never starts"
 else
   fail "build fails: non-zero, names the build stage, unit tier never starts (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
-rc=$(run_gate -o lint -- STUB_GO_FAIL=run)
+rc=$(run_gate -o lint -- STUB_GO_FAIL=test)
 if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier (Go suite' "$TMP/err" && ! grep -q -F 'gate: PASSED' "$TMP/err"; then
   pass "Go suite fails: non-zero, names the Go half"
 else
@@ -281,13 +306,13 @@ else
 fi
 
 rc=$(TARGET=test-slow run_gate -o lint)
-if [[ "$rc" == 0 ]] && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -F 'test-slow: PASSED' "$TMP/err"; then
+if [[ "$rc" == 0 ]] && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -F 'test-slow: PASSED' "$TMP/err"; then
   pass "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0"
 else
   fail "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
-rc=$(TARGET=test-slow run_gate -o lint -- STUB_GO_FAIL=run)
+rc=$(TARGET=test-slow run_gate -o lint -- STUB_GO_FAIL=test)
 if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier (Go suite' "$TMP/err" && ! grep -q -F 'test-slow: PASSED' "$TMP/err"; then
   pass "test-slow Go suite fails: non-zero, the gate names the Go half"
 else

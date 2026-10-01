@@ -181,16 +181,18 @@ func flakyTests(step StepResult, pkgs []string) []FailedTest {
 	return out
 }
 
-// gateRecord is the gate line of a landing record: the gate's summary, and
-// for a landing the flake policy let through, the rerun and the flakes.
+// gateRecord is the gate line of a landing record: the gate's summary, the
+// warnings it printed about the host it ran on (a slow landing is explained
+// where it is recorded), and for a landing the flake policy let through, the
+// rerun and the flakes.
 func gateRecord(res Result) string {
-	out := res.Gate.Summary()
+	parts := append([]string{res.Gate.Summary()}, res.Gate.Warnings()...)
 	if res.Rerun == nil {
-		return out
+		return strings.Join(parts, "; ")
 	}
 	names := make([]string, 0, len(res.Flaky))
 	for _, f := range res.Flaky {
 		names = append(names, fmt.Sprintf("%s %s [%s]", f.Package, f.Test, f.BeadID))
 	}
-	return fmt.Sprintf("%s; rerun of the failed package(s) %s; flaky: %s", out, res.Rerun.Summary(), strings.Join(names, ", "))
+	return fmt.Sprintf("%s; rerun of the failed package(s) %s; flaky: %s", strings.Join(parts, "; "), res.Rerun.Summary(), strings.Join(names, ", "))
 }

@@ -604,12 +604,23 @@ func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
 func filterEscalationRecords(issues []*Issue) []*Issue {
 	filtered := issues[:0]
 	for _, issue := range issues {
-		if HasLabel(issue, "gt:message") {
-			continue
+		if IsEscalationRecord(issue) {
+			filtered = append(filtered, issue)
 		}
-		filtered = append(filtered, issue)
 	}
 	return filtered
+}
+
+// IsEscalationRecord reports whether issue is an escalation rather than one of
+// the mail carriers routed for it.
+//
+// A carrier carries gt:escalation so ack and close can find it (see
+// mail.Router.buildLabels), and outlives the escalation it delivered.
+// filterEscalationRecords and the town-health escalation field share this
+// predicate so `gt status --line` and `gt escalate list` agree on the age of
+// the oldest open escalation (gt-9k2bx).
+func IsEscalationRecord(issue *Issue) bool {
+	return issue != nil && HasLabel(issue, "gt:escalation") && !HasLabel(issue, "gt:message")
 }
 
 // ListStaleEscalations returns escalations older than the given threshold.

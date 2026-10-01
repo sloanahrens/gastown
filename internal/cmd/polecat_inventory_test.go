@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,116 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 			item := buildPolecatInventoryItem("gastown", tt.polecatName, tt.fields, tt.activeWork, sessions, polecatInventoryEnv{})
 			if item.State != tt.wantState || item.Issue != tt.wantIssue || item.Disposition.Verdict != tt.wantVerdict || item.Disposition.Reusable != tt.wantReusable || item.Disposition.NeedsRecovery != tt.wantRecovery || item.Disposition.CountsTowardCapacity != tt.wantCapacity {
 				t.Fatalf("item = %+v disposition=%+v", item, item.Disposition)
+			}
+		})
+	}
+}
+
+// TestBuildPolecatInventoryItemResolvesHookBead is the `gt polecat list` half
+// of gt-eqiid. The list used to stamp every hook_bead "status=unverified"
+// without looking it up, so a reference that outlived its work (flint/garnet on
+// gt-2xqtj, granite on gt-gyw5w — all status=deferred) showed up as recovery
+// work in the same rig whose check-recovery reported it safe. The two paths
+// have to read one policy.
+//
+// The nil-source case is not an oversight: the counts-only capacity projection
+// passes no source on purpose, and it keeps the fail-closed wording it had
+// before it could resolve anything.
+func TestBuildPolecatInventoryItemResolvesHookBead(t *testing.T) {
+	t.Parallel()
+	fields := func(hookBead string) *beads.AgentFields {
+		return &beads.AgentFields{
+			AgentState:    string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean),
+			HookBead:      hookBead,
+		}
+	}
+
+	tests := []struct {
+		name         string
+		hookBead     string
+		source       polecat.IssueReader
+		wantVerdict  string
+		wantReusable bool
+		wantRecovery bool
+		wantBlocker  string
+	}{
+		{
+			// The reported false positive, at the list path.
+			name:         "a deferred hook reference clears",
+			hookBead:     "gt-2xqtj",
+			source:       fakeIssueShower{issue: &beads.Issue{ID: "gt-2xqtj", Status: string(beads.StatusDeferred)}},
+			wantVerdict:  polecat.WorkstateVerdictSafeToNuke,
+			wantReusable: true,
+		},
+		{
+			name:         "a blocked hook reference clears",
+			hookBead:     "gt-gyw5w",
+			source:       fakeIssueShower{issue: &beads.Issue{ID: "gt-gyw5w", Status: string(beads.StatusBlocked)}},
+			wantVerdict:  polecat.WorkstateVerdictSafeToNuke,
+			wantReusable: true,
+		},
+		{
+			name:         "a live hook reference still blocks",
+			hookBead:     "gt-work",
+			source:       fakeIssueShower{issue: &beads.Issue{ID: "gt-work", Status: string(beads.IssueStatusHooked)}},
+			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
+			wantRecovery: true,
+			wantBlocker:  "hook_bead=gt-work status=hooked",
+		},
+		{
+			name:         "a submitted hook reference is left to the landing worker",
+			hookBead:     "gt-acdfp",
+			source:       fakeIssueShower{issue: &beads.Issue{ID: "gt-acdfp", Status: string(beads.IssueStatusHooked), Labels: []string{"gt:ready-to-land"}}},
+			wantVerdict:  polecat.WorkstateVerdictSubmitted,
+			wantReusable: false,
+		},
+		{
+			name:         "a lookup error still fails closed",
+			hookBead:     "gt-work",
+			source:       fakeIssueShower{err: errors.New("bd exploded")},
+			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
+			wantRecovery: true,
+			wantBlocker:  "status=lookup_error",
+		},
+		{
+			name:         "an unmodeled status still fails closed",
+			hookBead:     "gt-mystery",
+			source:       fakeIssueShower{issue: &beads.Issue{ID: "gt-mystery", Status: "quarantined"}},
+			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
+			wantRecovery: true,
+			wantBlocker:  "status=quarantined",
+		},
+		{
+			// The capacity projection's shape: no source, so no lookup and the
+			// same "unverified" refusal this path has always reported.
+			name:         "no issue source keeps the fail-closed unverified refusal",
+			hookBead:     "gt-old",
+			source:       nil,
+			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
+			wantRecovery: true,
+			wantBlocker:  "hook_bead=gt-old status=unverified",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			item := buildPolecatInventoryItem(
+				"gastown", "seat", fields(tt.hookBead), nil,
+				newPolecatSessionSet(polecatTestRegistry(), nil),
+				polecatInventoryEnv{IssueSource: tt.source},
+			)
+			if item.Disposition.Verdict != tt.wantVerdict ||
+				item.Disposition.Reusable != tt.wantReusable ||
+				item.Disposition.NeedsRecovery != tt.wantRecovery {
+				t.Fatalf("disposition = %+v, want verdict=%s reusable=%v needs_recovery=%v",
+					item.Disposition, tt.wantVerdict, tt.wantReusable, tt.wantRecovery)
+			}
+			if tt.wantBlocker != "" && !slices.ContainsFunc(item.Disposition.Blockers, func(b string) bool {
+				return strings.Contains(b, tt.wantBlocker)
+			}) {
+				t.Fatalf("Blockers = %v, want %q among them", item.Disposition.Blockers, tt.wantBlocker)
 			}
 		})
 	}
