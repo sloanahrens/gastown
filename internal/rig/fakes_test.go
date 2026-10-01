@@ -1,10 +1,8 @@
 package rig
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -28,7 +26,8 @@ func testManager(root string, cfg *config.RigsConfig) (*Manager, *gitfake.Fake, 
 		config:    cfg,
 		git:       f.Open(root),
 		openRepo:  func(gitDir, workDir string) Repo { return f.OpenWithDir(gitDir, workDir) },
-		bd:        bd.run,
+		openBD:    bd.open,
+		openLocal: bd.openLocal,
 		env:       []string{},
 		bdVersion: func() (deps.BeadsStatus, string) { return deps.BeadsOK, "1.2.3" },
 		dolt:      newFakeDolt(),
@@ -53,52 +52,80 @@ func remoteRepo(t *testing.T, f *gitfake.Fake, dir string, files map[string]stri
 	return dir
 }
 
-// bdReply is one answer of the fake bd: what it printed and how it exited.
-type bdReply struct {
-	stdout, stderr string
-	code           int  // exit status; 0 is success
-	missing        bool // no bd on PATH at all
+// bdCall is one bd call the manager made: the directory and environment
+// it ran with, the verb ("init", "config get", "config set", "migrate"),
+// the config key and value, and init's options.
+type bdCall struct {
+	Dir  string
+	Env  []string
+	Verb string
+	Args []string
+	Init beads.InitOptions
 }
 
-// fakeBD answers a Manager's bd calls in process through the BDRunner seam,
-// in place of a bd stub on PATH (which no parallel test may put there), and
-// records every call. answer, when set, answers every call but the
-// --allow-stale probe; otherwise show finds nothing, create returns the
-// created bead, and everything else succeeds silently. A successful init
-// marks the database's types configured, as a database gt set up would be,
-// so CreateAgentBead's EnsureCustomTypes (which runs bd itself, outside the
-// seam) has nothing to do.
+// argv is the call as bd's argv reads, init's options aside.
+func (c bdCall) argv() string { return strings.Join(append([]string{c.Verb}, c.Args...), " ") }
+
+// fakeBD is rig setup's bd in memory, recording every call. fail, when set,
+// fails a call with the error it returns; config answers config get. A
+// successful init marks the database's types configured, as a database gt
+// set up would be, so CreateAgentBead's EnsureCustomTypes (which runs bd
+// itself) has nothing to do.
 type fakeBD struct {
 	mu     sync.Mutex
-	answer func(c beads.BDCall) bdReply
-	calls  []beads.BDCall
+	fail   func(c bdCall) error
+	config map[string]string
+	calls  []bdCall
 }
 
-// bdExit is a bd exit status, matched through ExitCode() like
-// *exec.ExitError.
-type bdExit int
+func (b *fakeBD) open(dir string, env []string) rigBD { return fakeBDAt{b, dir, env} }
 
-func (e bdExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
-func (e bdExit) ExitCode() int { return int(e) }
+func (b *fakeBD) openLocal(dir string) configSetter { return fakeBDAt{b, dir, nil} }
 
-// bdVerb is the subcommand of a bd argv, past its global flags.
-func bdVerb(args []string) string {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return a
+func (b *fakeBD) call(c bdCall) (string, error) {
+	b.mu.Lock()
+	c.Env = slices.Clone(c.Env)
+	b.calls = append(b.calls, c)
+	fail := b.fail
+	value := b.config[strings.Join(c.Args, " ")]
+	b.mu.Unlock()
+	if fail != nil {
+		if err := fail(c); err != nil {
+			return "", err
 		}
 	}
-	return ""
+	return value, nil
 }
 
-// flagValue is the value of --name=value in args.
-func flagValue(args []string, name string) string {
-	for _, a := range args {
-		if v, ok := strings.CutPrefix(a, "--"+name+"="); ok {
-			return v
-		}
+// fakeBDAt is fakeBD at one directory and environment.
+type fakeBDAt struct {
+	b   *fakeBD
+	dir string
+	env []string
+}
+
+func (f fakeBDAt) InitDatabase(opts beads.InitOptions) error {
+	if _, err := f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "init", Init: opts}); err != nil {
+		return err
 	}
-	return ""
+	if dir, ok := envValue(f.env, "BEADS_DIR"); ok {
+		_ = os.WriteFile(filepath.Join(dir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0o644)
+	}
+	return nil
+}
+
+func (f fakeBDAt) ConfigGet(key string) (string, error) {
+	return f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "config get", Args: []string{key}})
+}
+
+func (f fakeBDAt) ConfigSet(key, value string) error {
+	_, err := f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "config set", Args: []string{key, value}})
+	return err
+}
+
+func (f fakeBDAt) MigrateRepoID() error {
+	_, err := f.b.call(bdCall{Dir: f.dir, Env: f.env, Verb: "migrate"})
+	return err
 }
 
 // envValue is key's value in env, the last one winning as in a process.
@@ -112,59 +139,27 @@ func envValue(env []string, key string) (string, bool) {
 	return value, found
 }
 
-func (b *fakeBD) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	verb := bdVerb(c.Args)
-	if verb == "version" {
-		return nil, nil, nil // the --allow-stale probe: answering nothing keeps argv unprefixed
-	}
-	b.mu.Lock()
-	b.calls = append(b.calls, beads.BDCall{Dir: c.Dir, Env: slices.Clone(c.Env), Args: slices.Clone(c.Args)})
-	answer := b.answer
-	b.mu.Unlock()
-	var r bdReply
-	switch {
-	case answer != nil:
-		r = answer(c)
-	case verb == "show":
-		r.stdout = "[]"
-	case verb == "list" && slices.Contains(c.Args, "--json"):
-		r.stdout = "[]"
-	case verb == "create":
-		r.stdout = fmt.Sprintf(`{"id":%q,"title":%q,"description":"","issue_type":"agent"}`, flagValue(c.Args, "id"), flagValue(c.Args, "title"))
-	}
-	if r.missing {
-		return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
-	}
-	if r.code != 0 {
-		return []byte(r.stdout), []byte(r.stderr), bdExit(r.code)
-	}
-	if dir, ok := envValue(c.Env, "BEADS_DIR"); ok && verb == "init" {
-		_ = os.WriteFile(filepath.Join(dir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0o644)
-	}
-	return []byte(r.stdout), []byte(r.stderr), nil
-}
-
-// recorded returns every call but the --allow-stale probe.
-func (b *fakeBD) recorded() []beads.BDCall {
+// recorded returns every call.
+func (b *fakeBD) recorded() []bdCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return slices.Clone(b.calls)
 }
 
-// argvs returns every recorded call's argv joined with spaces.
+// argvs returns every recorded call's argv.
 func (b *fakeBD) argvs() []string {
 	var out []string
 	for _, c := range b.recorded() {
-		out = append(out, strings.Join(c.Args, " "))
+		out = append(out, c.argv())
 	}
 	return out
 }
 
-// withVerb returns the recorded calls of one subcommand.
-func (b *fakeBD) withVerb(verb string) []beads.BDCall {
-	var out []beads.BDCall
+// withVerb returns the recorded calls whose verb starts with verb.
+func (b *fakeBD) withVerb(verb string) []bdCall {
+	var out []bdCall
 	for _, c := range b.recorded() {
-		if bdVerb(c.Args) == verb {
+		if strings.HasPrefix(c.Verb, verb) {
 			out = append(out, c)
 		}
 	}

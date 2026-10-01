@@ -27,8 +27,4 @@ internal/mail/router.go BDRunner 1
 internal/plugin/recording.go argv 1
 internal/polecat/fakes_test.go BDRunner 1
 internal/polecat/manager.go BDRunner 1
-internal/rig/bd.go argv 1
-internal/rig/manager.go BDRunner 1
-internal/rig/opstate.go BDRunner 1
-internal/rig/types.go BDRunner 1
 internal/testutil/cmd.go argv 2
