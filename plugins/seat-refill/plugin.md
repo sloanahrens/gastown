@@ -38,8 +38,13 @@ failure; any other sling failure, including a timeout, is an error, and if every
 sling in a run fails the run exits nonzero (escalates) and names each bead and
 why. Every `gt` call, slings included, is bounded under one run budget inside the
 plugin's 3m timeout (gt-d6rse). A seat fills at once unless
-`GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS` is set. The sonnet seat takes only
-`needs-sonnet` beads, and the other seats leave those alone.
+`GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS` is set. The pro seat takes only
+`needs-pro` beads, and the other seats leave those alone.
+
+Every bead the pro seat dispatches is recorded as it is slung: a log line plus
+one low-severity escalation naming the bead (source `plugin:seat-refill`, keyed
+on the bead id and the dispatch time). A record that cannot be written logs a
+warning and never fails the dispatch, which has already happened.
 
 Candidates skip: `gt:ready-to-land` and `gt:needs-human` beads, `in_progress`
 or assigned beads (crew included), epics, molecules and agent beads (type
@@ -77,12 +82,12 @@ settings:
 - `overflow` — `overflow_agent`, capped at `max_overflow` when set. An
   unset or zero `max_overflow` leaves the overflow seat **uncapped**, so it is
   never empty and never watched.
-- `sonnet` — `claude-sonnet`, capped at one. This third class is not
-  expressible in `polecat_pool` today: a sonnet polecat reaches a seat only
-  through an explicit `gt sling --agent claude-sonnet`, so nothing counts it
-  (gt-xmsqb). Until that bead gives the pool N tiers, the mayor's interim
-  policy — hold itself to one live sonnet — is modeled here. Set the knob to
-  zero when the policy changes.
+- `pro` — `deepseek-pro`, capped at one. This third class is not expressible
+  in `polecat_pool` today: a pro polecat reaches a seat only through an
+  explicit `gt sling --agent deepseek-pro`, so nothing counts it (gt-xmsqb).
+  Until that bead gives the pool N tiers, the interim policy — hold itself to
+  one live pro — is modeled here. Set the knob to zero when the policy
+  changes.
 
 A `max_local` of zero means the local tier is **closed**, which is a decision
 rather than an empty seat, so it is not watched either.
@@ -111,9 +116,9 @@ backlog is a nudge the mayor learns to ignore. The types are narrower than the
 board — `docs` and `chore` beads are real work but are not in the bead's list,
 and the mayor's own patrol still surfaces them.
 
-The `sonnet` seat is the exception: its emptiness is only news when work
-*asks* for it, so it fires only on a bead carrying the `needs-sonnet` label
-(gt-tq6l). Without one, an empty sonnet seat is the resting state.
+The `pro` seat is the exception: its emptiness is only news when work *asks*
+for it, so it fires only on a bead carrying the `needs-pro` label (gt-tq6l).
+Without one, an empty pro seat is the resting state.
 
 ## When it fires
 

@@ -3798,14 +3798,14 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 			wantReason: "status pinned",
 		},
 		{
-			id:         "gt-holdsonnet",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-sonnet"}},
-			wantReason: "label needs-sonnet",
+			id:         "gt-holdpro",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-pro"}},
+			wantReason: "label needs-pro",
 		},
 		{
-			id:         "gt-holdsonnetcaps",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-SONNET"}},
-			wantReason: "label NEEDS-SONNET",
+			id:         "gt-holdprocaps",
+			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-PRO"}},
+			wantReason: "label NEEDS-PRO",
 		},
 		{
 			id:         "gt-holdmayor",

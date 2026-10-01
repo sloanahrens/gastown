@@ -86,11 +86,13 @@ SH
 }
 
 # --- Fake town ------------------------------------------------------------
-# Four gt calls, each backed by a fixture file so a case is pure data:
+# The gt calls the plugin makes, each backed by a fixture file so a case is
+# pure data:
 #   polecat list --all --json   $TEST_STATE/polecats.json   (absent -> [])
 #   rig list --json             $TEST_STATE/rigs.json
 #   ready --rig <rig> --json    $TEST_STATE/ready/<rig>.json
 #   nudge <target> <message>    appends to $TEST_STATE/nudge.log
+#   escalate <desc> ...         appends to $TEST_STATE/escalate.log
 write_fake_gt() {
   local bin_dir="$1"
 
@@ -160,6 +162,15 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  escalate)
+    shift
+    printf 'ESCALATE|%s\n' "$*" >> "$TEST_STATE/escalate.log"
+    if [ -f "$TEST_STATE/escalate_fails" ]; then
+      echo "gt: could not reach the town store" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
   nudge)
     shift
     target="${1:-}"
@@ -194,7 +205,7 @@ setup_case() {
   TEST_STATE="$CASE_DIR/state"
   mkdir -p "$TEST_STATE/ready" "$TEST_STATE/bin"
 
-  unset GT_SEAT_REFILL_SONNET_MAX GT_SEAT_REFILL_SONNET_AGENT GT_SEAT_REFILL_SONNET_LABEL
+  unset GT_SEAT_REFILL_PRO_MAX GT_SEAT_REFILL_PRO_AGENT GT_SEAT_REFILL_PRO_LABEL
   unset GT_SEAT_REFILL_EMPTY_SECONDS GT_SEAT_REFILL_NUDGE_SECONDS GT_SEAT_REFILL_MAYOR
   unset GT_SEAT_REFILL_DRY_RUN GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS
   unset GT_SEAT_REFILL_CLAIM_TTL GT_SEAT_REFILL_TOP_CANDIDATES GT_SEAT_REFILL_MAX_PRIORITY
@@ -220,6 +231,7 @@ JSON
 JSON
   : > "$TEST_STATE/nudge.log"
   : > "$TEST_STATE/sling.log"
+  : > "$TEST_STATE/escalate.log"
   : > "$TEST_STATE/unexpected.log"
 
   write_fake_gt "$TEST_STATE/bin"
@@ -242,6 +254,7 @@ run_plugin() {
 }
 
 slings() { grep -c 'SLING' "$TEST_STATE/sling.log" || true; }
+escalations() { grep -c 'ESCALATE' "$TEST_STATE/escalate.log" || true; }
 nudges() { grep -c 'NUDGE' "$TEST_STATE/nudge.log" || true; }
 nudges_of() { grep -c "$1" "$TEST_STATE/nudge.log" || true; }
 
@@ -381,7 +394,7 @@ setup_case
 cat > "$CASE_DIR/settings.json" <<'JSON'
 {"type":"town-settings","polecat_pool":{"local_agent":"local-coder-polecat","max_local":0,"overflow_agent":"deepseek-flash"}}
 JSON
-export GT_SEAT_REFILL_SONNET_MAX=0
+export GT_SEAT_REFILL_PRO_MAX=0
 write_polecats "$LIVE_NONE"
 ready_bug gastown
 run_plugin 8000000
@@ -391,7 +404,7 @@ assert_eq "$(nudges)" "0" \
   "uncapped: a closed local tier and an uncapped overflow mean no seat can be empty"
 assert_contains "$TEST_STATE/stdout.log" "[plugin-result skipped]" "uncapped: skipped, not a failure"
 
-# --- Case 12: the sonnet seat fires only on work that asks for it ----------
+# --- Case 12: the pro seat fires only on work that asks for it ------------
 setup_case
 write_polecats "$LIVE_NONE"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
@@ -401,16 +414,16 @@ cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 JSON
 run_plugin 9000000
 run_plugin 9000600
-assert_eq "$(nudges_of 'seat sonnet')" "0" \
-  "sonnet seat: an empty sonnet seat with no needs-sonnet work is silent"
+assert_eq "$(nudges_of 'seat pro')" "0" \
+  "pro seat: an empty pro seat with no needs-pro work is silent"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[
-  {"id":"gt-hard","title":"Design work","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+  {"id":"gt-hard","title":"Design work","status":"open","priority":1,"issue_type":"task","labels":["needs-pro"]}
 ]}],"summary":{},"town_root":"/town"}
 JSON
 run_plugin 9001200
-assert_eq "$(nudges_of 'seat sonnet')" "1" \
-  "sonnet seat: a needs-sonnet bead fires the sonnet seat"
+assert_eq "$(nudges_of 'seat pro')" "1" \
+  "pro seat: a needs-pro bead fires the pro seat"
 
 # --- Case 13: a live claim holds its seat ---------------------------------
 setup_case
@@ -535,7 +548,7 @@ assert_eq "$(nudges)" "1" \
 
 # === Direct dispatch (gt-qvs0b) and candidate selection (gt-inu1y) ==========
 # Mode sling is the default: no mayor, the plugin slings itself.
-direct_case() { setup_case; unset GT_SEAT_REFILL_MODE; export GT_SEAT_REFILL_SONNET_MAX=0; }
+direct_case() { setup_case; unset GT_SEAT_REFILL_MODE; export GT_SEAT_REFILL_PRO_MAX=0; }
 
 # --- Case 20: an empty seat is filled at once, mayor never contacted -------
 direct_case
@@ -547,6 +560,7 @@ assert_eq "$EXIT" "0" "direct: exits 0 with the mayor down"
 assert_eq "$(slings)" "1" "direct: one sling for the one empty seat"
 assert_contains "$TEST_STATE/sling.log" "SLING|gt-bug1 gastown --agent local-coder-polecat"   "direct: slings the bead into the rig on the seat's agent"
 assert_eq "$(nudges)" "0" "direct: no nudge to the mayor"
+assert_eq "$(escalations)" "0" "direct: an ordinary seat's dispatch files no record"
 
 # --- Case 21: both seats empty take distinct beads, best first -------------
 direct_case
@@ -624,26 +638,32 @@ assert_contains "$TEST_STATE/stdout.log" "would dispatch" "dry run: summary says
 assert_not_contains "$TEST_STATE/stdout.log" "dispatched 1" "dry run: never says dispatched"
 assert_eq "$([ -e "$GT_SEAT_REFILL_STATE" ] && echo yes || echo no)" "no" "dry run: no state written"
 
-# --- Case 25: sonnet seat takes only needs-sonnet work, others skip it -----
+# --- Case 25: the pro seat takes only needs-pro work, others skip it ------
 direct_case
-unset GT_SEAT_REFILL_SONNET_MAX
+unset GT_SEAT_REFILL_PRO_MAX
 write_polecats "$LIVE_BOTH"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[
-  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-pro"]}
 ]}],"summary":{},"town_root":"/town"}
 JSON
 run_plugin 25000000
-assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent claude-sonnet" "sonnet: needs-sonnet bead to the sonnet seat"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent deepseek-pro" "pro: needs-pro bead to the pro seat"
+assert_eq "$(escalations)" "1" "pro: the dispatch files exactly one record"
+assert_contains "$TEST_STATE/escalate.log" "seat-refill: pro seat dispatched gt-hard" "pro: the record names the bead"
+assert_contains "$TEST_STATE/escalate.log" "--severity low" "pro: the record is low severity"
+assert_contains "$TEST_STATE/escalate.log" "--fingerprint seat-refill:pro:gt-hard:25000000" \
+  "pro: the record is keyed per bead and dispatch time"
 direct_case
 write_polecats "$LIVE_NONE"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[
-  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-sonnet"]}
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-pro"]}
 ]}],"summary":{},"town_root":"/town"}
 JSON
 run_plugin 25000001
-assert_eq "$(slings)" "0" "sonnet: local/overflow seats leave needs-sonnet work alone"
+assert_eq "$(slings)" "0" "pro: local/overflow seats leave needs-pro work alone"
+assert_eq "$(escalations)" "0" "pro: nothing dispatched, so no record"
 
 # --- Case 26: a refused sling is logged, not escalated ---------------------
 direct_case
@@ -725,17 +745,18 @@ GT_SEAT_REFILL_MODE=bogus run_plugin 33000000
 assert_eq "$EXIT" "1" "bad mode: exits nonzero"
 assert_contains "$TEST_STATE/stderr.log" "GT_SEAT_REFILL_MODE" "bad mode: names the knob"
 
-# --- Case 34: needs-sonnet label matches case-insensitively ----------------
+# --- Case 34: needs-pro label matches case-insensitively -------------------
 direct_case
-unset GT_SEAT_REFILL_SONNET_MAX
+unset GT_SEAT_REFILL_PRO_MAX
 write_polecats "$LIVE_BOTH"
 cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
 {"sources":[{"name":"gastown","issues":[
-  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["Needs-Sonnet"]}
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["Needs-Pro"]}
 ]}],"summary":{},"town_root":"/town"}
 JSON
 run_plugin 34000000
-assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent claude-sonnet" "sonnet label: case-insensitive"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent deepseek-pro" "pro label: case-insensitive"
+assert_eq "$(escalations)" "1" "pro label: the dispatch is recorded too"
 
 # --- Case 35: a wedged pool read is named ----------------------------------
 direct_case
@@ -744,6 +765,23 @@ printf 'polecat list' > "$TEST_STATE/timeout_expires"
 run_plugin 35000000
 assert_eq "$EXIT" "1" "pool wedge: exits nonzero"
 assert_contains "$TEST_STATE/stderr.log" "gt polecat list --all --json timed out" "pool wedge: named (gt-d6rse)"
+
+# --- Case 36: a record that cannot be written never fails the dispatch -----
+direct_case
+unset GT_SEAT_REFILL_PRO_MAX
+write_polecats "$LIVE_BOTH"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["needs-pro"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+touch "$TEST_STATE/escalate_fails"
+run_plugin 36000000
+assert_eq "$EXIT" "0" "pro record failure: the run still exits 0"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent deepseek-pro" \
+  "pro record failure: the bead is already slung and stays slung"
+assert_contains "$TEST_STATE/stdout.log" "could not record pro dispatch of gt-hard" \
+  "pro record failure: named as a warning"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
