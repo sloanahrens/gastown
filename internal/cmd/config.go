@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -675,6 +676,9 @@ Supported keys:
                               false = warn). Run 'gt config secrets migrate'
                               first; setting true refuses while literals remain
 
+  Seat refill (the seat-refill plugin's dispatch policy, in settings/config.json):
+` + polecatPoolKeyHelp + `
+
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Enable/disable wisp reaper (true/false)
   lifecycle.reaper.interval    Reaper check interval (default: 30m)
@@ -721,6 +725,9 @@ Supported keys:
   maintenance.window          Maintenance window start time (HH:MM)
   secrets.refuse_literals     Literal tokens refused instead of warned (true/false)
 
+  Seat refill (the seat-refill plugin's dispatch policy, in settings/config.json):
+` + polecatPoolKeyHelp + `
+
   Lifecycle (Dolt data maintenance):
   lifecycle.reaper.enabled     Wisp reaper enabled (true/false)
   lifecycle.reaper.interval    Reaper check interval
@@ -740,6 +747,109 @@ Examples:
   gt config get lifecycle.reaper.delete_age`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigGet,
+}
+
+// polecatPoolKeyHelp is the one copy of the polecat_pool knob list that
+// gt config get, set and their unknown-key error print.
+const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for the seat-refill plugin's
+                              dispatch: a bead numbered higher is left for the
+                              operator (default: 2)
+  polecat_pool.top_candidates  Candidate beads a nudge names (default: 3)
+  polecat_pool.empty_seconds   How long an empty seat waits with work ready
+                              before a nudge (default: 300)
+  polecat_pool.nudge_seconds   Shortest gap between two nudges about one empty
+                              episode; 0 removes the cap (default: 900)
+  polecat_pool.dispatch_empty_seconds
+                              Delay before the plugin slings into an empty seat
+                              (default: 0: fill at once)
+  polecat_pool.pro_max         Cap on the pro seat; 0 drops it (default: 1)
+  polecat_pool.pro_agent       Agent the pro seat runs (default: deepseek-pro)
+  polecat_pool.pro_label       Label a bead carries to reach the pro seat, and
+                              the one the other seats leave alone (default:
+                              needs-pro)
+  polecat_pool.mode            How an empty seat is filled: "sling" dispatches
+                              the bead, "nudge" asks the mayor (default: sling)`
+
+// polecatPoolIntKeys and polecatPoolStringKeys are gt config's view of
+// PolecatPool's seat-refill policy: one row per key, with the accessor that
+// reads its effective value and the setter gt config set writes.
+var (
+	polecatPoolIntKeys = []struct {
+		key string
+		get func(*config.PolecatPool) int
+		set func(*config.PolecatPool, int)
+	}{
+		{"max_priority", (*config.PolecatPool).GetMaxPriority, func(p *config.PolecatPool, v int) { p.MaxPriority = &v }},
+		{"top_candidates", (*config.PolecatPool).GetTopCandidates, func(p *config.PolecatPool, v int) { p.TopCandidates = &v }},
+		{"empty_seconds", (*config.PolecatPool).GetEmptySeconds, func(p *config.PolecatPool, v int) { p.EmptySeconds = &v }},
+		{"nudge_seconds", (*config.PolecatPool).GetNudgeSeconds, func(p *config.PolecatPool, v int) { p.NudgeSeconds = &v }},
+		{"dispatch_empty_seconds", (*config.PolecatPool).GetDispatchEmptySeconds, func(p *config.PolecatPool, v int) { p.DispatchEmptySeconds = &v }},
+		{"pro_max", (*config.PolecatPool).GetProMax, func(p *config.PolecatPool, v int) { p.ProMax = &v }},
+	}
+	polecatPoolStringKeys = []struct {
+		key string
+		get func(*config.PolecatPool) string
+		set func(*config.PolecatPool, string)
+	}{
+		{"pro_agent", (*config.PolecatPool).GetProAgent, func(p *config.PolecatPool, v string) { p.ProAgent = v }},
+		{"pro_label", (*config.PolecatPool).GetProLabel, func(p *config.PolecatPool, v string) { p.ProLabel = v }},
+		{"mode", (*config.PolecatPool).GetMode, func(p *config.PolecatPool, v string) { p.Mode = v }},
+	}
+)
+
+// polecatPoolValue returns key's effective value (the configured one, else the
+// default), and whether key names one of the knobs.
+func polecatPoolValue(pool *config.PolecatPool, key string) (string, bool) {
+	sub, ok := strings.CutPrefix(key, "polecat_pool.")
+	if !ok {
+		return "", false
+	}
+	for _, k := range polecatPoolIntKeys {
+		if k.key == sub {
+			return strconv.Itoa(k.get(pool)), true
+		}
+	}
+	for _, k := range polecatPoolStringKeys {
+		if k.key == sub {
+			return k.get(pool), true
+		}
+	}
+	return "", false
+}
+
+// errNotAPolecatPoolKey: key does not name one of the knobs above, so there is
+// nothing to write and the caller reports an unknown config key.
+var errNotAPolecatPoolKey = errors.New("not a polecat_pool key")
+
+// setPolecatPoolValue writes key's knob. A value PolecatPool.Validate refuses
+// is returned as is, so gt config set cannot write a file the daemon would then
+// decline to start from.
+func setPolecatPoolValue(settings *config.TownSettings, key, value string) error {
+	sub, ok := strings.CutPrefix(key, "polecat_pool.")
+	if !ok {
+		return errNotAPolecatPoolKey
+	}
+	if settings.PolecatPool == nil {
+		settings.PolecatPool = &config.PolecatPool{}
+	}
+	for _, k := range polecatPoolIntKeys {
+		if k.key != sub {
+			continue
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid value for %s: %w (expected integer)", key, err)
+		}
+		k.set(settings.PolecatPool, n)
+		return settings.PolecatPool.Validate()
+	}
+	for _, k := range polecatPoolStringKeys {
+		if k.key == sub {
+			k.set(settings.PolecatPool, value)
+			return settings.PolecatPool.Validate()
+		}
+	}
+	return errNotAPolecatPoolKey
 }
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
@@ -866,7 +976,13 @@ func configSet(e configCmdEnv, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		err := setPolecatPoolValue(townSettings, key, value)
+		if errors.Is(err, errNotAPolecatPoolKey) {
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -962,7 +1078,11 @@ func configGet(e configCmdEnv, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		poolValue, handled := polecatPoolValue(townSettings.PolecatPool, key)
+		if !handled {
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+		}
+		value = poolValue
 	}
 
 	fmt.Fprintln(e.out, value)

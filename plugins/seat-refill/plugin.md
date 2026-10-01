@@ -1,6 +1,6 @@
 +++
 name = "seat-refill"
-description = "Slings the top eligible ready bead into an empty polecat pool seat (mayor-free); GT_SEAT_REFILL_MODE=nudge restores the mayor nudge"
+description = "Slings the top eligible ready bead into an empty polecat pool seat (mayor-free); mode nudge restores the mayor nudge"
 version = 1
 
 [gate]
@@ -21,9 +21,9 @@ severity = "medium"
 # Seat Refill
 
 Fills an empty polecat seat by slinging the best eligible ready bead into it
-(see Direct dispatch below); with `GT_SEAT_REFILL_MODE=nudge` it instead nudges
-the mayor when a seat has been empty for five minutes and there is work a sling
-could take. The daemon heartbeat runs `run.sh` in-process; no agent reads this
+(see Direct dispatch below); with `polecat_pool.mode` set to `nudge` it instead
+nudges the mayor when a seat has been empty for five minutes and there is work a
+sling could take. The daemon heartbeat runs `run.sh` in-process; no agent reads this
 file. A nonzero exit is logged and escalated by the daemon.
 
 ## Direct dispatch (default, gt-qvs0b)
@@ -38,8 +38,8 @@ failure; any other sling failure, including a timeout, is an error, and if every
 sling in a run fails the run exits nonzero (escalates) and names each bead and
 why. Every `gt` call, slings included, is bounded under one run budget inside the
 plugin's 3m timeout (gt-d6rse). A seat fills at once unless
-`GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS` is set. The pro seat takes only
-`needs-pro` beads, and the other seats leave those alone.
+`polecat_pool.dispatch_empty_seconds` says otherwise. The pro seat takes only
+`pro_label` beads (default `needs-pro`), and the other seats leave those alone.
 
 Every bead the pro seat dispatches is recorded as it is slung: a log line plus
 one low-severity escalation naming the bead (source `plugin:seat-refill`, keyed
@@ -52,7 +52,7 @@ whitelist), the `operator` label, and any bead named by a live polecat session
 or an in-flight pool claim (gt-inu1y).
 
 `GT_SEAT_REFILL_DRY_RUN=1` logs `DRY-RUN: would sling ...` and neither slings
-nor writes state. `GT_SEAT_REFILL_MODE=nudge` restores the mayor nudge below;
+nor writes state. `polecat_pool.mode` `nudge` restores the mayor nudge below;
 in that mode a mayor that `gt mayor status --running` reports down skips the run rather than failing it.
 The hold file, ESTOP, parked rigs and seat caps apply in both modes. The prose
 below describes nudge mode.
@@ -82,12 +82,11 @@ settings:
 - `overflow` — `overflow_agent`, capped at `max_overflow` when set. An
   unset or zero `max_overflow` leaves the overflow seat **uncapped**, so it is
   never empty and never watched.
-- `pro` — `deepseek-pro`, capped at one. This third class is not expressible
-  in `polecat_pool` today: a pro polecat reaches a seat only through an
-  explicit `gt sling --agent deepseek-pro`, so nothing counts it (gt-xmsqb).
-  Until that bead gives the pool N tiers, the interim policy — hold itself to
-  one live pro — is modeled here. Set the knob to zero when the policy
-  changes.
+- `pro` — `pro_agent`, capped at `pro_max`, taking only beads carrying
+  `pro_label`. The pool's own accounting has no tier for this class, so a pro
+  session reaches a seat only through an explicit `gt sling --agent <pro>`
+  and nothing else counts it (gt-xmsqb); the seat is modeled here, and
+  `pro_max` 0 drops it.
 
 A `max_local` of zero means the local tier is **closed**, which is a decision
 rather than an empty seat, so it is not watched either.
@@ -111,14 +110,14 @@ Two further exclusions, both shared with the daemon's dispatch check
 parked or docked rig is not a dispatch target at all, so its backlog is not a
 reason to nudge.
 
-The priority ceiling is the town directive's: a nudge that leads with a P3
-backlog is a nudge the mayor learns to ignore. The types are narrower than the
-board — `docs` and `chore` beads are real work but are not in the bead's list,
-and the mayor's own patrol still surfaces them.
+The priority ceiling is `max_priority` (default P2): a nudge that leads with a
+P3 backlog is a nudge the mayor learns to ignore. The types are narrower than
+the board — `docs` and `chore` beads are real work but are not in the bead's
+list, and the mayor's own patrol still surfaces them.
 
 The `pro` seat is the exception: its emptiness is only news when work *asks*
-for it, so it fires only on a bead carrying the `needs-pro` label (gt-tq6l).
-Without one, an empty pro seat is the resting state.
+for it, so it fires only on a bead carrying `pro_label` (gt-tq6l). Without one,
+an empty pro seat is the resting state.
 
 ## When it fires
 
@@ -167,9 +166,9 @@ an E-stop: `gt sling` refuses a rig the town or its own ESTOP covers.
 cooldown runs whenever that cooldown has elapsed. To stop it for longer than a
 hold, change this file's gate type to `manual` and run `gt plugin sync`.
 
-Before changing what fires, read the seat and threshold inputs first: every
-input in `run.sh` is overridable by environment variable so `run_test.sh` can
-drive them without a town, and those defaults are the live behavior.
+Before changing what fires, read "Seat Refill" in `docs/reference.md`: the seats
+and thresholds are `polecat_pool` keys there, and a `GT_SEAT_REFILL_*` variable
+overrides the file for `run_test.sh` alone.
 
 ## Boundaries
 

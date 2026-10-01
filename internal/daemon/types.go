@@ -145,6 +145,14 @@ func PatrolConfigFile(townRoot string) string {
 	return filepath.Join(townRoot, constants.RoleMayor, "daemon.json")
 }
 
+// PatrolConfigSource names the file the patrol config was read from: on the
+// two-file layout mayor/daemon.json is settings/config.json's "daemon"
+// section, so a startup line that names mayor/daemon.json reports to the
+// operator a file whose edit the daemon did not read (gt-y3pgh.12).
+func PatrolConfigSource(townRoot string) string {
+	return agentconfig.SourcePath(PatrolConfigFile(townRoot))
+}
+
 // LoadPatrolConfig loads patrol configuration from mayor/daemon.json.
 // Returns nil if the file doesn't exist or can't be parsed.
 //

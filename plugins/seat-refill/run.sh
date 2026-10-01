@@ -54,6 +54,10 @@ int_or_default() {
   esac
 }
 
+str_or_default() {
+  if [ -n "${1:-}" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi
+}
+
 TOWN_ROOT="${GT_TOWN_ROOT:-}"
 [ -n "$TOWN_ROOT" ] || fail "GT_TOWN_ROOT is unset; cannot read the pool config or reach the mayor"
 [ -d "$TOWN_ROOT" ] || fail "town root $TOWN_ROOT is not a directory"
@@ -66,29 +70,19 @@ HOLD_FILE="$TOWN_ROOT/seat-refill.hold"
 MAYOR_TARGET="${GT_SEAT_REFILL_MAYOR:-mayor}"
 
 NOW="${GT_SEAT_REFILL_NOW:-$(date +%s)}"
-# How long a seat must sit empty before it is worth a nudge, and how often one
-# empty episode may be nudged about. 5m is the bead's threshold; the 15m repeat
-# keeps a long-empty seat from producing a nudge every heartbeat.
-EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_EMPTY_SECONDS:-}" 300)
-NUDGE_SECONDS=$(int_or_default "${GT_SEAT_REFILL_NUDGE_SECONDS:-}" 900)
-MAX_PRIORITY=$(int_or_default "${GT_SEAT_REFILL_MAX_PRIORITY:-}" 2)
-TOP_CANDIDATES=$(int_or_default "${GT_SEAT_REFILL_TOP_CANDIDATES:-}" 3)
-PRO_MAX=$(int_or_default "${GT_SEAT_REFILL_PRO_MAX:-}" 1)
-PRO_AGENT="${GT_SEAT_REFILL_PRO_AGENT:-deepseek-pro}"
-PRO_LABEL="${GT_SEAT_REFILL_PRO_LABEL:-needs-pro}"
+# The claim TTL stays here rather than in the town settings: it mirrors the
+# pool's own poolSeatClaimTTL (internal/cmd/sling_pool.go), and a config knob
+# that drifted from the ledger would count a claim the pool has released.
 CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
 # sling (default): fill an empty seat directly, no mayor involved (gt-qvs0b).
-# nudge: the old behavior, ask the mayor. GT_SEAT_REFILL_DRY_RUN=1 decides and
-# logs what it would sling, and neither slings nor writes state.
-MODE="${GT_SEAT_REFILL_MODE:-sling}"
+# nudge: the old behavior, ask the mayor. The mode is polecat_pool.mode in the
+# town settings, read below with the rest of the policy; GT_SEAT_REFILL_DRY_RUN=1
+# decides and logs what it would sling, and neither slings nor writes state.
 DRY_RUN="${GT_SEAT_REFILL_DRY_RUN:-}"
 SLING_BOUND=$(int_or_default "${GT_SEAT_REFILL_SLING_BOUND:-}" 120)
 # The record a pro dispatch writes is small and local, so it gets a short cap
 # of its own: a wedged `gt escalate` must not eat the sling budget beside it.
 ESCALATE_BOUND=$(int_or_default "${GT_SEAT_REFILL_ESCALATE_BOUND:-}" 20)
-# Seconds a seat must sit empty before a direct sling; 0 fills at once.
-DISPATCH_EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS:-}" 0)
-case "$MODE" in sling|nudge) ;; *) fail "GT_SEAT_REFILL_MODE must be sling or nudge, got $MODE" ;; esac
 
 # --- Run budget ----------------------------------------------------------
 # The plugin's [execution] timeout is 3m. Every gt call is bounded by the
@@ -136,11 +130,10 @@ fi
 # A seat is one capped agent class, held as name|agent|cap|selector. The pool
 # config is the source: local_agent admits max_local sessions, overflow_agent
 # admits max_overflow. A third class — deepseek-pro, which reaches a seat only
-# through an explicit `gt sling --agent deepseek-pro` — is not expressible in
-# polecat_pool today (gt-xmsqb), so the mayor's policy of holding itself to one
-# live pro is modeled here as a seat of its own. Set
-# GT_SEAT_REFILL_PRO_MAX=0 to drop it when that policy changes, or when
-# gt-xmsqb gives the pool N tiers for this to read instead.
+# through an explicit `gt sling --agent deepseek-pro` — is not expressible as a
+# tier of the pool today (gt-xmsqb), so the mayor's policy of holding itself to
+# one live pro is modeled here as a seat of its own, its cap, agent and bead
+# selector taken from the pro_* keys below.
 
 # The pro seat's name, as it appears in state, logs and escalations. It is the
 # only seat whose dispatches are recorded one by one (gt-hpu8h).
@@ -158,6 +151,30 @@ LOCAL_AGENT=$(read_config local_agent '""')
 MAX_LOCAL=$(read_config max_local 0)
 OVERFLOW_AGENT=$(read_config overflow_agent '""')
 MAX_OVERFLOW=$(read_config max_overflow 0)
+
+# --- Dispatch policy -----------------------------------------------------
+# The town settings are the source, beside the seats an operator already edits;
+# a GT_SEAT_REFILL_* variable overrides both the file and the default, so
+# run_test.sh drives the policy without a town (gt-y3pgh.12). The defaults are
+# internal/config's DefaultSeatRefill* values, pinned by
+# TestPolecatPool_SeatRefillDefaultsMatchPlugin. A value the plugin cannot act
+# on is refused before it reaches these lines — gt config set rejects it at the
+# write and the daemon refuses to start from a file carrying one
+# (PolecatPool.Validate) — and int_or_default keeps a hand-edited outlier out
+# of the arithmetic below. max_priority is the ceiling on a candidate's number:
+# a bead numbered higher is left for the operator. empty_seconds is how long a
+# seat waits before a nudge is worth sending, nudge_seconds the shortest gap
+# between two nudges about one empty episode.
+MAX_PRIORITY=$(int_or_default "${GT_SEAT_REFILL_MAX_PRIORITY:-}" "$(read_config max_priority 2)")
+TOP_CANDIDATES=$(int_or_default "${GT_SEAT_REFILL_TOP_CANDIDATES:-}" "$(read_config top_candidates 3)")
+EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_EMPTY_SECONDS:-}" "$(read_config empty_seconds 300)")
+NUDGE_SECONDS=$(int_or_default "${GT_SEAT_REFILL_NUDGE_SECONDS:-}" "$(read_config nudge_seconds 900)")
+DISPATCH_EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS:-}" "$(read_config dispatch_empty_seconds 0)")
+PRO_MAX=$(int_or_default "${GT_SEAT_REFILL_PRO_MAX:-}" "$(read_config pro_max 1)")
+PRO_AGENT=$(str_or_default "${GT_SEAT_REFILL_PRO_AGENT:-}" "$(read_config pro_agent '"deepseek-pro"')")
+PRO_LABEL=$(str_or_default "${GT_SEAT_REFILL_PRO_LABEL:-}" "$(read_config pro_label '"needs-pro"')")
+MODE=$(str_or_default "${GT_SEAT_REFILL_MODE:-}" "$(read_config mode '"sling"')")
+case "$MODE" in sling|nudge) ;; *) fail "mode must be sling or nudge (polecat_pool.mode, or GT_SEAT_REFILL_MODE for a test), got $MODE" ;; esac
 
 [ "$LOCAL_AGENT" != "null" ] || LOCAL_AGENT=""
 [ "$OVERFLOW_AGENT" != "null" ] || OVERFLOW_AGENT=""

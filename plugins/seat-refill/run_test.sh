@@ -743,7 +743,7 @@ setup_case
 write_polecats "$LIVE_NONE"
 GT_SEAT_REFILL_MODE=bogus run_plugin 33000000
 assert_eq "$EXIT" "1" "bad mode: exits nonzero"
-assert_contains "$TEST_STATE/stderr.log" "GT_SEAT_REFILL_MODE" "bad mode: names the knob"
+assert_contains "$TEST_STATE/stderr.log" "mode must be sling or nudge" "bad mode: names the knob"
 
 # --- Case 34: needs-pro label matches case-insensitively -------------------
 direct_case
@@ -782,6 +782,81 @@ assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent deepseek-
   "pro record failure: the bead is already slung and stays slung"
 assert_contains "$TEST_STATE/stdout.log" "could not record pro dispatch of gt-hard" \
   "pro record failure: named as a warning"
+
+# === Dispatch policy from the town settings (gt-y3pgh.12) ==================
+# The policy keys live in polecat_pool, beside the seats; a GT_SEAT_REFILL_*
+# variable still overrides both the file and the default, for run_test.sh.
+
+# write_pool <json>: rewrites the case's settings file with this polecat_pool.
+write_pool() {
+  printf '{"type":"town-settings","polecat_pool":%s}\n' "$1" > "$GT_SEAT_REFILL_CONFIG"
+}
+
+# --- Case 37: max_priority in the file decides what is dispatched ----------
+# The ceiling is the knob an operator raises to reach a deeper backlog, and it
+# had to be an env var in the daemon config's env map before (gt-y3pgh.12).
+setup_case
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"max_priority":0}'
+write_polecats "$LIVE_NONE"
+ready_bug gastown   # a P1 bug: above the ceiling in the file
+run_plugin 37000000
+run_plugin 37000300
+assert_eq "$(nudges)" "0" "config ceiling: a P1 bead is not dispatched at P0"
+assert_contains "$TEST_STATE/stdout.log" "0 candidate(s)" "config ceiling: the seat sees no candidate"
+
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"max_priority":1}'
+run_plugin 37000600
+assert_eq "$(nudges)" "1" "config ceiling: raising it to P1 in the file reaches the same bead"
+
+# --- Case 38: an env var still overrides the file -------------------------
+# The case fixtures drive the policy through GT_SEAT_REFILL_*; the override must
+# win over the file rather than be ignored.
+setup_case
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"max_priority":0}'
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+GT_SEAT_REFILL_MAX_PRIORITY=2 run_plugin 38000000
+GT_SEAT_REFILL_MAX_PRIORITY=2 run_plugin 38000300
+assert_eq "$(nudges)" "1" "env override: GT_SEAT_REFILL_MAX_PRIORITY beats the file's 0"
+
+# --- Case 39: the pro seat's cap, agent and label come from the file -------
+direct_case
+unset GT_SEAT_REFILL_PRO_MAX
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"pro_agent":"deepseek-reasoner","pro_label":"hard"}'
+write_polecats "$LIVE_BOTH"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-hard","title":"x","status":"open","priority":1,"issue_type":"task","labels":["hard"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 39000000
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-hard gastown --agent deepseek-reasoner" \
+  "pro config: the file's pro_agent takes the bead the file's pro_label marks"
+
+# --- Case 40: pro_max 0 in the file drops the pro seat --------------------
+direct_case
+unset GT_SEAT_REFILL_PRO_MAX
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"pro_max":0}'
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 40000000
+assert_eq "$(slings)" "1" "pro_max 0: the local seat still fills"
+assert_not_contains "$TEST_STATE/sling.log" "--agent deepseek-pro" "pro_max 0: nothing runs on the pro seat"
+
+# --- Case 41: mode in the file decides sling or nudge ---------------------
+setup_case
+unset GT_SEAT_REFILL_MODE
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"mode":"nudge"}'
+run_plugin 41000000
+run_plugin 41000300
+assert_eq "$(nudges)" "1" "config mode: nudge in the file asks the mayor"
+assert_eq "$(slings)" "0" "config mode: nudge in the file slings nothing"
+
+write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"mode":"sling"}'
+run_plugin 41000600
+assert_eq "$(slings)" "1" "config mode: sling in the file dispatches the bead"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

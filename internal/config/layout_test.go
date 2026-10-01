@@ -188,6 +188,31 @@ func migratedTown(t *testing.T) string {
 	return root
 }
 
+// TestSourcePathNamesTheFileThatHoldsTheContent: a caller that reports which
+// file it read must name the host, not the retired path, or the daemon's
+// startup line sends an operator to a file nothing reads (gt-y3pgh.12).
+func TestSourcePathNamesTheFileThatHoldsTheContent(t *testing.T) {
+	t.Parallel()
+
+	twoFile := migratedTown(t)
+	daemonPath := DaemonPatrolConfigPath(twoFile)
+	got := SourcePath(daemonPath)
+	if !strings.HasPrefix(got, filepath.Join(twoFile, "settings", "config.json")) ||
+		!strings.Contains(got, `section "daemon"`) {
+		t.Errorf("SourcePath(%s) = %q, want the settings host and its daemon section", daemonPath, got)
+	}
+	fiveFile := fiveFileTown(t)
+	if got, want := SourcePath(DaemonPatrolConfigPath(fiveFile)), DaemonPatrolConfigPath(fiveFile); got != want {
+		t.Errorf("SourcePath on the five-file layout = %q, want the retired path itself", got)
+	}
+	if got := SourcePath(TownSettingsPath(twoFile)); got != TownSettingsPath(twoFile) {
+		t.Errorf("SourcePath(settings/config.json) = %q, want the path itself", got)
+	}
+	if got := SourcePath(DaemonPatrolConfigPath(filepath.Join(t.TempDir(), "empty"))); !strings.HasSuffix(got, "daemon.json") {
+		t.Errorf("SourcePath with no hosts = %q, want the path itself", got)
+	}
+}
+
 func TestWritesFollowRetiredFilesToTheirSections(t *testing.T) {
 	t.Parallel()
 	root := migratedTown(t)

@@ -144,6 +144,20 @@ func sectionLabel(host, key string) string {
 	return fmt.Sprintf("%s (section %q)", host, key)
 }
 
+// SourcePath names the file path's content is read from, for a log line that
+// has to report the file it read: the host when a retired file's content lives
+// in a section of it (settings/config.json for mayor/daemon.json on the
+// two-file layout), path itself otherwise. A host that cannot be read as a
+// JSON object falls back to path; the loaders refuse that host and name it,
+// and this names a file rather than judging one.
+func SourcePath(path string) string {
+	host, key, ok, _, err := sectionFor(path)
+	if err != nil || !ok {
+		return path
+	}
+	return sectionLabel(host, key)
+}
+
 // readConfigFile returns the content of a config file, following a retired
 // file to its host section, and the name to report in errors. An absent
 // file is an error satisfying os.IsNotExist.

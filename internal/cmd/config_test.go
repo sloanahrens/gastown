@@ -731,6 +731,68 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 	})
 }
 
+// gt config reads and writes the seat-refill dispatch policy through the same
+// keys the plugin reads: get reports the effective value (the file's, else the
+// default), and set refuses a value the plugin cannot act on (gt-y3pgh.12).
+func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+
+	// Get before anything is set: the default, not an empty string.
+	var stdout bytes.Buffer
+	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.max_priority"}); err != nil {
+		t.Fatalf("configGet polecat_pool.max_priority: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "2" {
+		t.Errorf("polecat_pool.max_priority = %q, want the default 2", got)
+	}
+	stdout.Reset()
+	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.pro_label"}); err != nil {
+		t.Fatalf("configGet polecat_pool.pro_label: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "needs-pro" {
+		t.Errorf("polecat_pool.pro_label = %q, want the default needs-pro", got)
+	}
+
+	// Set the ceiling the 2026-10-01 incident had to reach through an env var.
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_priority", "3"}); err != nil {
+		t.Fatalf("configSet polecat_pool.max_priority: %v", err)
+	}
+	loaded, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if got := loaded.PolecatPool.GetMaxPriority(); got != 3 {
+		t.Errorf("saved max_priority = %d, want 3", got)
+	}
+	stdout.Reset()
+	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.max_priority"}); err != nil {
+		t.Fatalf("configGet after set: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "3" {
+		t.Errorf("polecat_pool.max_priority after set = %q, want 3", got)
+	}
+
+	// A value the plugin cannot act on never reaches the file.
+	err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_priority", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "polecat_pool.max_priority") {
+		t.Errorf("configSet max_priority -1 = %v, want a refusal naming the key", err)
+	}
+	err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.top_candidates", "0"})
+	if err == nil || !strings.Contains(err.Error(), "polecat_pool.top_candidates") {
+		t.Errorf("configSet top_candidates 0 = %v, want a refusal naming the key", err)
+	}
+	err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_priority", "high"})
+	if err == nil || !strings.Contains(err.Error(), "expected integer") {
+		t.Errorf("configSet max_priority high = %v, want an integer refusal", err)
+	}
+
+	// A knob that is not one of the pool's keys is still an unknown key.
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_bogus", "1"}); err == nil {
+		t.Error("configSet polecat_pool.max_bogus = nil, want an unknown-key error")
+	}
+}
+
 func TestParseBool(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

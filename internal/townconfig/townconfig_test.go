@@ -214,6 +214,34 @@ func TestTwoBrokenFilesGiveTwoLines(t *testing.T) {
 	}
 }
 
+// TestRefusedPoolPolicyFailsClosedAtLoad: a seat-refill policy value the
+// plugin cannot act on is refused at load, with one line naming the file and
+// the key, so a hand-edited settings/config.json stops the daemon instead of
+// dispatching on a value the plugin would ignore (gt-y3pgh.12).
+func TestRefusedPoolPolicyFailsClosedAtLoad(t *testing.T) {
+	t.Parallel()
+	root := copyLiveTown(t)
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"overflow_agent":"deepseek-flash","max_overflow":2,"max_priority":-1}}`)
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("Load with max_priority -1 = nil, want a refusal")
+	}
+	if msg := err.Error(); strings.Contains(msg, "\n") ||
+		!strings.Contains(msg, filepath.Join(root, FileSettings)) ||
+		!strings.Contains(msg, "polecat_pool.max_priority") {
+		t.Errorf("refusal %q must be one line naming settings/config.json and the key", msg)
+	}
+	if err := Check(root); err == nil {
+		t.Error("Check = nil for a refused policy value")
+	}
+
+	// The keys are optional: the same polecat_pool without them loads.
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"overflow_agent":"deepseek-flash","max_overflow":2}}`)
+	if _, err := Load(root); err != nil {
+		t.Fatalf("Load without the policy keys = %v", err)
+	}
+}
+
 func TestAccessorsReturnCopies(t *testing.T) {
 	t.Parallel()
 	town, err := Load(liveTown)
