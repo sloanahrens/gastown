@@ -407,7 +407,7 @@ func TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure(t *testing.T) {
 	h.run.createWisp = func(string, string, string, []string) ([]byte, error) {
 		return nil, errors.New("missing required vars")
 	}
-	h.run.rollbackArtifacts = func(s *SpawnedPolecatInfo, id, dir, _ string) {
+	h.run.rollbackArtifacts = func(s *SpawnedPolecatInfo, _, id, dir, _ string) {
 		h.record("rollback %s bead=%q dir=%s", s.PolecatName, id, dir)
 	}
 

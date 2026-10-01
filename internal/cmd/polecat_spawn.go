@@ -61,6 +61,13 @@ type SpawnedPolecatInfo struct {
 	account string
 	agent   string
 
+	// townRoot is the town this spawn belongs to, recorded by its spawner. It
+	// is what startSession and noteStartOutcome read the workspace from: the
+	// daemon's convoy feeder starts sessions in process, and a session started
+	// against whichever town the daemon's cwd names is the wrong town. Empty
+	// falls back to the cwd, which is what a test-built spawn has.
+	townRoot string
+
 	// originalHold is the work bead's status and assignee before this sling
 	// touched it; nil when unknown. A rollback that finds the bead's work
 	// surviving hands it back to this holder instead of releasing it.
@@ -117,6 +124,20 @@ type SlingSpawnOptions struct {
 	// name, or the sling is refused; the pool never substitutes another
 	// polecat (gt-2w4f9). Empty lets the pool choose.
 	Name string
+	// Steps times the spawn path's stages (gt-llg8). Nil falls back to this
+	// process's timer; the daemon passes its own so the lines reach its log
+	// tagged with what it was feeding.
+	Steps func(name string)
+}
+
+// step records the end of one spawn stage on the timer this spawn was handed,
+// or on this process's timer when it was handed none.
+func (o SlingSpawnOptions) step(name string) {
+	if o.Steps != nil {
+		o.Steps(name)
+		return
+	}
+	slingSteps.Step(name)
 }
 
 func effectivePolecatDirCap(configured int) int {
@@ -209,7 +230,7 @@ func reuseIdlePolecatForSling(
 	opts SlingSpawnOptions,
 	recordRespawn func(),
 ) (*SpawnedPolecatInfo, error) {
-	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName), rigName, opts, recordRespawn)
+	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName, opts.step), rigName, opts, recordRespawn)
 }
 
 // idleReuseEnv is what the idle-reuse path reads and writes besides the polecat
@@ -227,7 +248,7 @@ type idleReuseEnv struct {
 	step              func(name string)
 }
 
-func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleReuseEnv {
+func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
 			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
@@ -238,7 +259,7 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string) idleRe
 		logSpawn: func(rigName, polecatName string) {
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 		},
-		step: func(name string) { slingSteps.step(name) },
+		step: step,
 	}
 }
 
@@ -465,7 +486,14 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
 	}
-	return realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+	spawnInfo, err := realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+	if err != nil {
+		return nil, err
+	}
+	// Record the town on the spawn: the session is started later and, on the
+	// daemon's in-process path, from a process whose cwd is not this town.
+	spawnInfo.townRoot = townRoot
+	return spawnInfo, nil
 }
 
 // slingSeatSpawn is the front of SpawnPolecatForSling: the rig's backpressure,
@@ -576,7 +604,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		return nil, fmt.Errorf("admission control: %w", err)
 	}
 
-	if _, err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
+	if err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
 		return nil, err
 	}
 
@@ -594,7 +622,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		}
 		defer admission.Release()
 	}
-	slingSteps.step("admission")
+	opts.step("admission")
 
 	// Per-bead respawn circuit breaker (clown show #22):
 	// Track how many times this bead has been slung. Block after N attempts
@@ -686,7 +714,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		return nil, fmt.Errorf("allocating and creating polecat: %w", err)
 	}
 	fmt.Printf("Created polecat: %s\n", polecatName)
-	slingSteps.step("allocate")
+	opts.step("allocate")
 
 	// Get polecat object for path info
 	polecatObj, err := polecatMgr.Get(polecatName)
@@ -707,7 +735,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
 	sessionName := polecatSessMgr.SessionName(polecatName)
 
-	slingSteps.step("worktree")
+	opts.step("worktree")
 	fmt.Printf("%s Polecat %s spawned (session start deferred)\n", style.Bold.Render("✓"), polecatName)
 
 	// Log spawn event to activity feed
@@ -753,11 +781,20 @@ func (s *SpawnedPolecatInfo) noteStartOutcome(startErr error) {
 	if s.HookBead == "" {
 		return
 	}
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := s.town()
 	if err != nil {
 		return
 	}
 	s.noteStartOutcomeIn(townRoot, startErr)
+}
+
+// town is the town this spawn belongs to: the one its spawner recorded, or the
+// cwd's when the record has none.
+func (s *SpawnedPolecatInfo) town() (string, error) {
+	if s.townRoot != "" {
+		return s.townRoot, nil
+	}
+	return workspace.FindFromCwdOrError()
 }
 
 // noteStartOutcomeIn is noteStartOutcome for the town at townRoot.
@@ -786,7 +823,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 		return s.Pane, nil
 	}
 
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := s.town()
 	if err != nil {
 		return "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}

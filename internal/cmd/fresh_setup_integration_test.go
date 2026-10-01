@@ -95,7 +95,7 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	}
 
 	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main", "", "")
+		convoyID, err := createAutoConvoy(hqPath, issue.ID, issue.Title, false, "mr", "main", "", "")
 		if err != nil {
 			t.Fatalf("create auto convoy: %v", err)
 		}
@@ -103,7 +103,7 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 			t.Fatalf("convoy ID %q does not use hq-cv- prefix", convoyID)
 		}
 		runFreshSetupCmd(t, hqPath, env, "bd", "show", convoyID)
-		if got := isTrackedByConvoy(issue.ID); got != convoyID {
+		if got := isTrackedByConvoy(hqPath, issue.ID); got != convoyID {
 			t.Fatalf("isTrackedByConvoy(%s) = %q, want %q", issue.ID, got, convoyID)
 		}
 	})

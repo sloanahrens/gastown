@@ -77,12 +77,13 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	_ = d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "ruby"))
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: gt.run}
 	_ = r.sling(t.Context(), "gt-run1", docAuditEntry)
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", time.Minute, nil, nil, nil)
-	m.execCmd = gt.run
-	_, _, _ = m.runGt(pollutedEnv(), "sling", "gt-issue1")
 
+	// The convoy feeder's dispatch is the one gt the daemon used to run that no
+	// longer runs at all: it goes through the in-process engine (gt-638go.7),
+	// and the bd and tmux calls that engine makes inherit this process's
+	// environment — which PublishIdentity already gives the daemon's identity.
 	calls := gt.recorded()
-	want := []string{"scheduler run", "spec dispatch", "daemon dispatch-check", "session restart", "sling gt-run1", "sling gt-issue1"}
+	want := []string{"scheduler run", "spec dispatch", "daemon dispatch-check", "session restart", "sling gt-run1"}
 	if len(calls) != len(want) {
 		t.Fatalf("recorded %d gt calls, want %d: %+v", len(calls), len(want), calls)
 	}

@@ -50,12 +50,19 @@ func (c slingConvoyTown) convoys() convoyops.Town {
 	return town
 }
 
-// isTrackedByConvoy checks if an issue is already being tracked by a convoy.
-// Returns the convoy ID if tracked, empty string otherwise.
-func isTrackedByConvoy(beadID string) string {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return ""
+// isTrackedByConvoy checks if an issue is already being tracked by a convoy in
+// the town at townRoot. Returns the convoy ID if tracked, empty string
+// otherwise.
+//
+// The town root is a parameter, not the cwd: the daemon's convoy feeder calls
+// this in process, and a reader that resolves the town from the cwd reads
+// whichever town the daemon happened to be started in.
+func isTrackedByConvoy(townRoot, beadID string) string {
+	if townRoot == "" {
+		var err error
+		if townRoot, err = workspace.FindFromCwd(); err != nil {
+			return ""
+		}
 	}
 	return slingConvoyTown{root: townRoot}.trackingConvoy(beadID)
 }
@@ -153,10 +160,15 @@ type ConvoyInfo struct {
 // re-dispatching this bead after a failed sling re-uses the same agent and
 // formula instead of the rig default (gt-yg24, gt-4lor).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (_ string, retErr error) {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return "", fmt.Errorf("finding town root: %w", err)
+func createAutoConvoy(townRoot, beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (_ string, retErr error) {
+	// The town root is a parameter, not the cwd: the daemon's convoy feeder
+	// calls this in process, and a convoy written to whichever town the daemon
+	// was started in is a convoy its own feeder never reads.
+	if townRoot == "" {
+		var err error
+		if townRoot, err = workspace.FindFromCwd(); err != nil {
+			return "", fmt.Errorf("finding town root: %w", err)
+		}
 	}
 	return slingConvoyTown{root: townRoot}.createAutoConvoy(beadID, beadTitle, owned, mergeStrategy, baseBranch, agent, formula)
 }

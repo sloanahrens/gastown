@@ -453,7 +453,7 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 	// before dispatch (gt-7evi4). Fail that burn so the sling stops before any
 	// bd call, and record the rollback instead of running the real one.
 	rollbacks := 0
-	h.run.rollbackArtifacts = func(*SpawnedPolecatInfo, string, string, string) { rollbacks++ }
+	h.run.rollbackArtifacts = func(*SpawnedPolecatInfo, string, string, string, string) { rollbacks++ }
 	h.run.burnWisp = func(string, string) error { return errors.New("stop before bd") }
 	admissions := 0
 	h.run.admitPolecat = func(townRootArg, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
