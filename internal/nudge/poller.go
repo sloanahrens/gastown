@@ -9,7 +9,10 @@
 //
 // Lifecycle: StartPoller() → background loop → StopPoller() (or session death).
 // A PID file at <townRoot>/.runtime/nudge_poller/<session>.pid allows Stop()
-// to clean up even if the original manager has been replaced.
+// to clean up even if the original manager has been replaced. It holds a
+// procid.ID (pid plus kernel start token), never a bare pid: a recycled pid
+// would make a dead poller look alive, and StopPoller would SIGTERM whatever
+// process got the number (deep review G1-05).
 package nudge
 
 import (
@@ -17,11 +20,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -45,23 +48,42 @@ func pollerPidFile(townRoot, session string) string {
 	return filepath.Join(pollerPidDir(townRoot), safe+".pid")
 }
 
+// pollerProcs holds the process operations the pid file depends on, so tests
+// can script a process table (including a recycled pid) instead of probing
+// real processes.
+type pollerProcs struct {
+	token     func(pid int) (string, bool)
+	terminate func(pid int) error
+}
+
+// osPollerProcs reads and signals real processes.
+var osPollerProcs = pollerProcs{token: procid.StartToken, terminate: sigterm}
+
+func sigterm(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGTERM)
+}
+
 // StartPoller launches a background `gt nudge-poller <session>` process.
 // The process is detached (Setpgid) so it survives the caller's exit.
 // Returns the PID of the launched process, or an error.
 func StartPoller(townRoot, session string) (int, error) {
-	return startPoller(townRoot, session, os.Executable)
+	return osPollerProcs.startPoller(townRoot, session, os.Executable)
 }
 
 // startPoller is StartPoller with the binary lookup injected, so tests can
 // hand it a path without exec'ing anything.
-func startPoller(townRoot, session string, executable func() (string, error)) (int, error) {
+func (pp pollerProcs) startPoller(townRoot, session string, executable func() (string, error)) (int, error) {
 	pidDir := pollerPidDir(townRoot)
 	if err := os.MkdirAll(pidDir, 0755); err != nil {
 		return 0, fmt.Errorf("creating poller pid dir: %w", err)
 	}
 
 	// Check if a poller is already running for this session.
-	if pid, alive := pollerAlive(townRoot, session); alive {
+	if pid, alive := pp.pollerAlive(townRoot, session); alive {
 		return pid, nil // already running
 	}
 
@@ -86,10 +108,13 @@ func startPoller(townRoot, session string, executable func() (string, error)) (i
 
 	pid := cmd.Process.Pid
 
-	// Write PID file for later cleanup.
-	pidPath := pollerPidFile(townRoot, session)
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
+	// Record the poller's identity for later cleanup. Without a start token
+	// nothing could ever match the record, so none is written.
+	token, ok := pp.token(pid)
+	if !ok || token == "" {
 		// Non-fatal — the process is running, we just can't track it.
+		fmt.Fprintf(os.Stderr, "Warning: cannot read start time of poller (pid %d); not tracking it\n", pid)
+	} else if err := os.WriteFile(pollerPidFile(townRoot, session), []byte(procid.ID{PID: pid, Start: token}.String()), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write poller PID file: %v\n", err)
 	}
 
@@ -110,36 +135,21 @@ func buildPollerCommand(gtBin, townRoot, session string) *exec.Cmd {
 
 // StopPoller terminates the nudge-poller for a session, if running.
 func StopPoller(townRoot, session string) error {
+	return osPollerProcs.stopPoller(townRoot, session)
+}
+
+func (pp pollerProcs) stopPoller(townRoot, session string) error {
 	pidPath := pollerPidFile(townRoot, session)
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // no poller to stop
-		}
-		return fmt.Errorf("reading poller PID file: %w", err)
-	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		_ = os.Remove(pidPath)
-		return nil // corrupt PID file, clean up
-	}
-
-	if !pollerProcessAlive(pid) {
-		// Process already dead.
-		_ = os.Remove(pidPath)
-		return nil
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(pidPath)
+	pid, alive := pp.pollerAlive(townRoot, session)
+	if !alive {
+		// No record, or one that no longer names our poller (dead, pid
+		// reused, or a bare pid from before records carried a start time).
+		// pollerAlive has already removed a stale file.
 		return nil
 	}
 
 	// Send SIGTERM for graceful shutdown.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := pp.terminate(pid); err != nil {
 		_ = os.Remove(pidPath)
 		return fmt.Errorf("sending SIGTERM to poller (pid %d): %w", pid, err)
 	}
@@ -149,8 +159,10 @@ func StopPoller(townRoot, session string) error {
 }
 
 // pollerAlive checks if a poller is running for the given session.
-// Returns the PID and whether the process is alive.
-func pollerAlive(townRoot, session string) (int, bool) {
+// Returns the PID and whether the process is alive. A record that does not
+// name the same live process (missing start time, dead pid, or a pid reused by
+// another process) is stale: it is removed and reported not alive.
+func (pp pollerProcs) pollerAlive(townRoot, session string) (int, bool) {
 	pidPath := pollerPidFile(townRoot, session)
 
 	data, err := os.ReadFile(pidPath)
@@ -158,16 +170,11 @@ func pollerAlive(townRoot, session string) (int, bool) {
 		return 0, false
 	}
 
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, false
-	}
-
-	if !pollerProcessAlive(pid) {
-		// Stale PID file — clean up.
+	id, err := procid.Parse(string(data))
+	if err != nil || !id.Running(pp.token) {
 		_ = os.Remove(pidPath)
 		return 0, false
 	}
 
-	return pid, true
+	return id.PID, true
 }

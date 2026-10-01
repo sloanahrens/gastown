@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // ContainerRuntime is the Docker surface the gate needs: the gate-container
@@ -229,13 +231,13 @@ type ownerProbe struct {
 	// deleting the pid's containers (see processGone).
 	gone func(pid int) bool
 	// startToken reads a live pid's start time; ok is false when it cannot
-	// be read (see processStartToken).
+	// be read (see procid.StartToken).
 	startToken func(pid int) (string, bool)
 }
 
 // hostOwnerProbe is the real probe.
 func hostOwnerProbe() ownerProbe {
-	return ownerProbe{hostname: os.Hostname, gone: processGone, startToken: processStartToken}
+	return ownerProbe{hostname: os.Hostname, gone: processGone, startToken: procid.StartToken}
 }
 
 // Gate is the container-gate slot with its collaborators injected: the Docker

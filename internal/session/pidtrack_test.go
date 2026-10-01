@@ -1,35 +1,24 @@
 package session
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // fakeProcs scripts the processes a pidTracker sees: live maps a running PID
-// to its start time, and terminated records the PIDs sent SIGTERM.
+// to its current start token, and terminated records the PIDs sent SIGTERM.
 type fakeProcs struct {
 	live       map[int]string
-	startErr   error
 	terminated []int
 }
 
 func (f *fakeProcs) tracker() pidTracker {
 	return pidTracker{
-		startTime: func(pid int) (string, error) {
-			if f.startErr != nil {
-				return "", f.startErr
-			}
+		token: func(pid int) (string, bool) {
 			start, ok := f.live[pid]
-			if !ok {
-				return "", os.ErrNotExist
-			}
-			return start, nil
-		},
-		alive: func(pid int) bool {
-			_, ok := f.live[pid]
-			return ok
+			return start, ok
 		},
 		terminate: func(pid int) error {
 			f.terminated = append(f.terminated, pid)
@@ -58,7 +47,7 @@ func exists(path string) bool {
 func TestTrackPID_RecordsStartTime(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	procs := &fakeProcs{live: map[int]string{12345: "Mon Jan  1 00:00:00 2026"}}
+	procs := &fakeProcs{live: map[int]string{12345: "1700000000.5"}}
 
 	if err := procs.tracker().track(townRoot, "gt-myrig-witness", 12345); err != nil {
 		t.Fatalf("track() error = %v", err)
@@ -68,26 +57,22 @@ func TestTrackPID_RecordsStartTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading PID file: %v", err)
 	}
-	if got := string(data); got != "12345|Mon Jan  1 00:00:00 2026\n" {
+	if got := string(data); got != "12345|1700000000.5\n" {
 		t.Errorf("PID file content = %q, want start-time tracked format", got)
 	}
 }
 
-func TestTrackPID_PIDOnlyWhenStartTimeUnknown(t *testing.T) {
+// G1-21: a bare-PID record could never be verified, so track writes none.
+func TestTrackPID_NoRecordWhenStartTimeUnknown(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	procs := &fakeProcs{startErr: errors.New("ps not available")}
+	procs := &fakeProcs{}
 
-	if err := procs.tracker().track(townRoot, "gt-test", 99); err != nil {
-		t.Fatalf("track() error = %v", err)
+	if err := procs.tracker().track(townRoot, "gt-test", 99); err == nil {
+		t.Fatal("track() succeeded for a process with no readable start time")
 	}
-
-	data, err := os.ReadFile(pidFile(townRoot, "gt-test"))
-	if err != nil {
-		t.Fatalf("reading PID file: %v", err)
-	}
-	if got := string(data); got != "99\n" {
-		t.Errorf("PID file content = %q, want %q", got, "99\n")
+	if exists(pidFile(townRoot, "gt-test")) {
+		t.Error("track() wrote an unverifiable bare-PID record")
 	}
 }
 
@@ -116,19 +101,18 @@ func TestKillTrackedPIDs_NoPidsDir(t *testing.T) {
 func TestKillTrackedPIDs_KillsLiveMatchingProcess(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	withStart := writePIDFile(t, townRoot, "gt-a.pid", "100|start-a\n")
-	pidOnly := writePIDFile(t, townRoot, "gt-b.pid", "200\n")
-	procs := &fakeProcs{live: map[int]string{100: "start-a", 200: "start-b"}}
+	path := writePIDFile(t, townRoot, "gt-a.pid", "100|start-a\n")
+	procs := &fakeProcs{live: map[int]string{100: "start-a"}}
 
 	killed, errs := procs.tracker().killTracked(townRoot)
-	if killed != 2 || len(errs) != 0 {
-		t.Errorf("killTracked() = %d, %v; want 2, none", killed, errs)
+	if killed != 1 || len(errs) != 0 {
+		t.Errorf("killTracked() = %d, %v; want 1, none", killed, errs)
 	}
-	if len(procs.terminated) != 2 {
-		t.Errorf("terminated = %v, want PIDs 100 and 200", procs.terminated)
+	if len(procs.terminated) != 1 || procs.terminated[0] != 100 {
+		t.Errorf("terminated = %v, want PID 100", procs.terminated)
 	}
-	if exists(withStart) || exists(pidOnly) {
-		t.Error("PID files should be removed after the kill")
+	if exists(path) {
+		t.Error("PID file should be removed after the kill")
 	}
 }
 
@@ -141,6 +125,8 @@ func TestKillTrackedPIDs_CleansUpWithoutKilling(t *testing.T) {
 	}{
 		{"dead process", "gt-dead.pid", "4194305|start\n"},
 		{"corrupt file", "gt-corrupt.pid", "not-a-number\n"},
+		// The recycled pid: 300 is live, but its start token says it is
+		// a later process than the one tracked.
 		{"pid reused", "gt-reused.pid", "300|old-start\n"},
 	}
 	for _, tt := range tests {
@@ -179,21 +165,23 @@ func TestKillTrackedPIDs_SkipsNonPidFiles(t *testing.T) {
 	}
 }
 
-func TestKillTrackedPIDs_PreservesFileOnLookupError(t *testing.T) {
+// G1-21: a bare PID (written by an older gt when ps failed) whose number is
+// live again is never signaled: nothing proves it is the tracked process.
+func TestKillTrackedPIDs_RefusesBarePID(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	path := writePIDFile(t, townRoot, "gt-err-lookup.pid", "100|some-start-time\n")
-	procs := &fakeProcs{live: map[int]string{100: ""}, startErr: errors.New("ps not available")}
+	path := writePIDFile(t, townRoot, "gt-bare.pid", "200\n")
+	procs := &fakeProcs{live: map[int]string{200: "start-b"}}
 
 	killed, errs := procs.tracker().killTracked(townRoot)
-	if killed != 0 {
-		t.Errorf("killed = %d, want 0 (lookup error should skip kill)", killed)
+	if killed != 0 || len(procs.terminated) != 0 {
+		t.Errorf("killTracked() killed %d, terminated %v; want nothing signaled", killed, procs.terminated)
 	}
-	if len(errs) != 1 {
-		t.Errorf("errs = %v, want 1 entry for lookup error", errs)
+	if len(errs) != 1 || !strings.Contains(errs[0], "no start time") {
+		t.Errorf("errs = %v, want one entry naming the missing start time", errs)
 	}
-	if !exists(path) {
-		t.Error("PID file should be preserved when start-time lookup fails")
+	if exists(path) {
+		t.Error("unverifiable PID file should be removed")
 	}
 }
 
