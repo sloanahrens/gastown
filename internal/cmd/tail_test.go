@@ -38,15 +38,15 @@ func TestMergeTail_OrdersByTimeStably(t *testing.T) {
 func TestRenderTailLine(t *testing.T) {
 	t.Parallel()
 	l := tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: "events", Text: "close gt-1\nforged line\tx\x1b[31m"}
-	got := renderTailLine(l, tailTestLoc)
+	got := renderTailLine(l, tailTestLoc, "")
 	want := "2026-09-30T09:05:06-05:00 gastown events close gt-1 forged line x [31m"
 	if got != want {
 		t.Fatalf("render =\n%q\nwant\n%q", got, want)
 	}
-	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Text: "x"}, tailTestLoc); got != "2026-09-30T09:05:06-05:00 - - x" {
+	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Text: "x"}, tailTestLoc, ""); got != "2026-09-30T09:05:06-05:00 - - x" {
 		t.Fatalf("empty rig/kind render = %q", got)
 	}
-	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "a b", Kind: "events", Text: "x"}, tailTestLoc); got != "2026-09-30T09:05:06-05:00 a_b events x" {
+	if got := renderTailLine(tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "a b", Kind: "events", Text: "x"}, tailTestLoc, ""); got != "2026-09-30T09:05:06-05:00 a_b events x" {
 		t.Fatalf("spaced rig render = %q", got)
 	}
 }

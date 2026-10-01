@@ -4214,3 +4214,43 @@ func TestPollEvents_RigCloseFindsConvoyTrackingItExternally(t *testing.T) {
 		t.Errorf("convoys checked = %v, want [hq-cv-ext]; logs:\n%s", checked, strings.Join(logged, "\n"))
 	}
 }
+
+// TestFeedFirstReady_SkipLinesLogOncePerState: a convoy whose ready issues
+// all stay skipped for hours logs "no dispatchable issues" and each skip when
+// the state starts, not on every scan (gt tail was two thirds these lines).
+// A scan that no longer reaches the skip ends its state, so it logs on return.
+func TestFeedFirstReady_SkipLinesLogOncePerState(t *testing.T) {
+	t.Parallel()
+
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gt/.beads"}`+"\n")
+	gtf := newFakeCLI(cliBySub(map[string]cliReply{"sling": {stderr: "always fail\n", code: 1}}))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, nil, nil, nil)
+	c := strandedConvoyInfo{ID: "hq-cv1", ReadyCount: 1, ReadyIssues: []string{"gt-fail1"}}
+	count := func() (n int) {
+		for _, l := range logged {
+			if strings.Contains(l, "no dispatchable issues") {
+				n++
+			}
+		}
+		return n
+	}
+
+	for i := 0; i < 3; i++ {
+		m.feedFirstReady(c)
+		m.skipLog.endPass()
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("three scans of the same skipped convoy logged %d times, want 1: %v", n, logged)
+	}
+
+	m.skipLog.endPass() // a scan that did not reach the convoy
+	m.feedFirstReady(c)
+	if n := count(); n != 2 {
+		t.Fatalf("a recurring skip logged %d times in all, want 2: %v", n, logged)
+	}
+}

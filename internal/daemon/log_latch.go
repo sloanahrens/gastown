@@ -15,6 +15,7 @@ import (
 type logLatch struct {
 	mu   sync.Mutex
 	last map[string]string
+	seen map[string]bool
 }
 
 // logf logs format/args through logger unless key's last logged line is the
@@ -27,6 +28,10 @@ func (l *logLatch) logf(logger func(format string, args ...interface{}), key, fo
 	}
 	same := l.last[key] == line
 	l.last[key] = line
+	if l.seen == nil {
+		l.seen = map[string]bool{}
+	}
+	l.seen[key] = true
 	l.mu.Unlock()
 	if !same {
 		logger("%s", line)
@@ -37,6 +42,21 @@ func (l *logLatch) logf(logger func(format string, args ...interface{}), key, fo
 func (l *logLatch) forget(key string) {
 	l.mu.Lock()
 	delete(l.last, key)
+	l.mu.Unlock()
+}
+
+// endPass forgets every key logf did not touch since the last endPass: a
+// state the pass no longer reached has ended, so it logs again if it recurs.
+// It serves a periodic scan whose keys are only known as it runs; keepOnly
+// takes the set up front.
+func (l *logLatch) endPass() {
+	l.mu.Lock()
+	for k := range l.last {
+		if !l.seen[k] {
+			delete(l.last, k)
+		}
+	}
+	l.seen = nil
 	l.mu.Unlock()
 }
 

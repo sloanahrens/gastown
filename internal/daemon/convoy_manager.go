@@ -173,6 +173,13 @@ type ConvoyManager struct {
 	// not every scan: it was two thirds of all daemon log lines.
 	waitingLog logLatch
 
+	// skipLog logs the per-scan "skipping this issue" lines once per state: a
+	// bead held for the deacon, a surviving branch, or a convoy with nothing
+	// dispatchable stays that way for hours, and every scan repeated its
+	// lines. Keyed per convoy and issue; a key a scan stops reaching is
+	// forgotten (endPass), so the skip logs again if it recurs.
+	skipLog logLatch
+
 	// stores maps store names to beads stores for event polling.
 	// Key "hq" is the town-level store (used for convoy lookups).
 	// Other keys are rig names (e.g., "gastown", "beads", "shippercrm").
@@ -990,6 +997,7 @@ func (m *ConvoyManager) scan() {
 
 	waiting := map[string]bool{}
 	defer m.waitingLog.keepOnly(waiting)
+	defer m.skipLog.endPass()
 	for _, c := range stranded {
 		select {
 		case <-m.ctx.Done():
@@ -1136,7 +1144,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// to the deacon, which applies cooldown/escalation gating and
 			// resumes on the surviving branch. The stranded scan must defer
 			// to it rather than race it with a fresh sling (gt-qw4u).
-			m.logger("Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
+			m.skipLog.logf(m.logger, c.ID+"|"+issueID, "Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
 			continue
 		case hold.Unreadable:
 			// A record the store holds but cannot hand back could carry a
@@ -1171,7 +1179,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// the convoy able to progress on its other ready issues while a
 			// human or the deacon decides; the deacon's redispatch passes
 			// --force explicitly when a live holder really is wanted.
-			m.logger("Convoy %s: %s has surviving branch %s on origin — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
+			m.skipLog.logf(m.logger, c.ID+"|"+issueID, "Convoy %s: %s has surviving branch %s on origin — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
 				c.ID, issueID, branch, issueID, rig, branch)
 			continue
 		}
@@ -1263,7 +1271,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		return // Successfully dispatched one issue
 	}
 
-	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+	m.skipLog.logf(m.logger, c.ID, "Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
 }
 
 // convoyOpen reports whether the convoy is still open, so the feeder can skip
@@ -1547,7 +1555,7 @@ func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (fe
 	m.clearDeadHolderAlert(originKey, "origin branch state now readable")
 
 	if matches := polecat.MatchSurvivingBranches(origin.branches, issueID); len(matches) > 0 {
-		m.logger("Convoy: %s has surviving branch %s on origin (dead holder %s) — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
+		m.skipLog.logf(m.logger, "dead-holder|"+issueID, "Convoy: %s has surviving branch %s on origin (dead holder %s) — work preserved, skipping feed (resume with: gt sling %s %s --branch %s)",
 			issueID, matches[0], assignee, issueID, rig, matches[0])
 		m.clearDeadHolderAlert(issueKey, "surviving branch found on origin")
 		return false, ""

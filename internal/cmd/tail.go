@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -31,6 +32,9 @@ var (
 	tailFollow   bool
 	tailKind     string
 	tailInterval time.Duration
+	tailAll      bool
+	tailVerbose  bool
+	tailISO      bool
 )
 
 // tailMinInterval keeps --follow from spawning bd per rig in a tight loop.
@@ -47,9 +51,19 @@ merged from three read-only sources:
   landings  each rig's landings file (.runtime/landings/<rig>.jsonl)
   daemon    daemon/daemon.log, plus its rotated backups for --since
 
-Every line is "<local time with zone> <rig> <kind> <text>", so the first
-three fields can be cut or grepped by position. The daemon's rig column is
-"town".
+Every line is "<local time> <rig> <kind> <text>", so the first three fields
+can be cut or grepped by position. The time is HH:MM:SS in local time; --iso
+prints RFC3339 with the date and zone. The daemon's rig column is "town".
+
+The default view hides what the town does every few seconds: wisp events
+(gt-wisp-*, hq-wisp-*) and their "close detected" lines, and the daemon's
+heartbeat, plugin-handler skips, and the checkpoint, jsonl-backup and
+patrol-scan routine lines. Landings, rejections, escalations, upgrade
+restarts, seat-refill runs and bead create/close/status changes always show.
+--all (or --verbose) shows everything.
+
+With -f the daemon and landings lines print first and each store's journal
+joins as its bd read finishes, so the backlog is not ordered across sources.
 
 gt tail only reads. It computes no verdict and exits 0 whatever it shows:
 the town's health is gt status. A source that cannot be read says so in one
@@ -72,6 +86,9 @@ func init() {
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "Keep polling every source and print new lines as they appear")
 	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon")
 	tailCmd.Flags().DurationVar(&tailInterval, "interval", 3*time.Second, "Poll interval with --follow")
+	tailCmd.Flags().BoolVar(&tailAll, "all", false, "Show routine lines too: wisp events, heartbeats, handler skips, dog and patrol-scan chatter")
+	tailCmd.Flags().BoolVar(&tailVerbose, "verbose", false, "Same as --all")
+	tailCmd.Flags().BoolVar(&tailISO, "iso", false, "Print each time as RFC3339 with the date and zone, not HH:MM:SS")
 	rootCmd.AddCommand(tailCmd)
 }
 
@@ -107,7 +124,20 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		defer ticker.Stop()
 		tick = ticker.C
 	}
-	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, loc)
+	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, newTailView(loc, tailAll || tailVerbose, tailISO))
+}
+
+// newTailView is the view the flags select: the routine lines hidden unless
+// all, the time as HH:MM:SS unless iso.
+func newTailView(loc *time.Location, all, iso bool) tailView {
+	v := tailView{Loc: loc, Layout: tailClockLayout, Show: tailVisible}
+	if all {
+		v.Show = nil
+	}
+	if iso {
+		v.Layout = time.RFC3339
+	}
+	return v
 }
 
 // tailOptions selects gt tail's sources.
@@ -195,29 +225,84 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 	return sources, preface, nil
 }
 
-// runTailStream polls every source once and prints the merged batch; with
-// follow it polls again on each tick until ctx ends. Each batch is sorted on
+// tailView is how the stream is shown: the zone and layout of each line's
+// time (RFC3339 when Layout is empty) and which lines print (all when Show is
+// nil).
+type tailView struct {
+	Loc    *time.Location
+	Layout string
+	Show   func(tailLine) bool
+}
+
+// tailClockLayout is the default time column: the day is the operator's own.
+const tailClockLayout = "15:04:05"
+
+// pollTailSources polls every source at once and returns each one's batch in
+// source order, so a store's bd call does not wait on the one before it. The
+// callback runs as each source finishes, and the sources the daemon and the
+// landings file answer from disk finish first.
+func pollTailSources(sources []tailSource, done func(i int, lines []tailLine)) [][]tailLine {
+	out := make([][]tailLine, len(sources))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, s := range sources {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lines := s.Poll()
+			mu.Lock()
+			defer mu.Unlock()
+			out[i] = lines
+			if done != nil {
+				done(i, lines)
+			}
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// runTailStream polls every source and prints the merged batch; with follow
+// it polls again on each tick until ctx ends. The sources are polled
+// concurrently. The first poll of a follow prints each source's backlog as it
+// arrives, so the daemon and landings lines show at once and the journals
+// join when their bd reads finish; every other batch is merged and sorted on
 // its own, so a line that reaches a source late prints after lines already
 // shown. A failed write (a closed pipe) ends the stream with its error.
-func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, loc *time.Location) error {
+func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, view tailView) error {
 	bw := bufio.NewWriter(w)
-	emit := func(extra []tailLine) error {
-		batches := [][]tailLine{extra}
-		for _, s := range sources {
-			batches = append(batches, s.Poll())
-		}
-		for _, l := range mergeTail(batches...) {
-			if _, err := bw.WriteString(renderTailLine(l, loc) + "\n"); err != nil {
+	show := func(lines []tailLine) error {
+		for _, l := range mergeTail(lines) {
+			if view.Show != nil && !view.Show(l) {
+				continue
+			}
+			if _, err := bw.WriteString(renderTailLine(l, view.Loc, view.Layout) + "\n"); err != nil {
 				return err
 			}
 		}
 		return bw.Flush()
 	}
-	if err := emit(preface); err != nil {
-		return err
+	emit := func(extra []tailLine) error {
+		all := extra
+		for _, b := range pollTailSources(sources, nil) {
+			all = append(all, b...)
+		}
+		return show(all)
 	}
 	if !follow {
-		return nil
+		return emit(preface)
+	}
+	if err := show(preface); err != nil {
+		return err
+	}
+	var writeErr error
+	pollTailSources(sources, func(_ int, lines []tailLine) {
+		if writeErr == nil {
+			writeErr = show(lines)
+		}
+	})
+	if writeErr != nil {
+		return writeErr
 	}
 	for {
 		select {
@@ -271,11 +356,15 @@ func mergeTail(batches ...[]tailLine) []tailLine {
 	return out
 }
 
-// renderTailLine formats one line in loc. Rig and kind are single tokens and
-// the text has no control characters, so every record is exactly one line
-// and the first three fields can be cut or grepped by position.
-func renderTailLine(l tailLine, loc *time.Location) string {
-	return l.At.In(loc).Format(time.RFC3339) + " " + tailToken(l.Rig) + " " + tailToken(l.Kind) + " " + tailText(l.Text)
+// renderTailLine formats one line in loc, its time in layout (RFC3339 when
+// empty). Rig and kind are single tokens and the text has no control
+// characters, so every record is exactly one line and the first three fields
+// can be cut or grepped by position.
+func renderTailLine(l tailLine, loc *time.Location, layout string) string {
+	if layout == "" {
+		layout = time.RFC3339
+	}
+	return l.At.In(loc).Format(layout) + " " + tailToken(l.Rig) + " " + tailToken(l.Kind) + " " + tailText(l.Text)
 }
 
 func tailToken(s string) string {
