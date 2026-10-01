@@ -393,15 +393,21 @@ func TestVerdictCannotReportInterrupted(t *testing.T) {
 	}
 }
 
-// groupSpawner reports a process group the way AgentSpawner does, then holds
-// the job until release is closed.
+// groupSpawner reports a process group the way AgentSpawner does, signals
+// started once the report returned, then holds the job until release is
+// closed.
 type groupSpawner struct {
 	pgid    int
+	started chan struct{}
 	release chan struct{}
 }
 
 func (g groupSpawner) Spawn(_ context.Context, req SpawnRequest) SpawnResult {
-	if err := req.Started(g.pgid); err != nil {
+	err := req.Started(g.pgid)
+	if g.started != nil {
+		close(g.started)
+	}
+	if err != nil {
 		return SpawnResult{ExitCode: -1, Err: err}
 	}
 	<-g.release
@@ -412,20 +418,15 @@ func (g groupSpawner) Spawn(_ context.Context, req SpawnRequest) SpawnResult {
 // the group, and it supersedes the start row rather than doubling the job.
 func TestRunnerRecordsTheProcessGroup(t *testing.T) {
 	t.Parallel()
-	sp := groupSpawner{pgid: 4242, release: make(chan struct{})}
+	sp := groupSpawner{pgid: 4242, started: make(chan struct{}), release: make(chan struct{})}
 	r := testRunner(t, sp, DefaultMaxJobs)
 	if !r.Start(context.Background(), reviewEvent("gt-x", "aaaa"), DefaultRoutineAgent, "p") {
 		t.Fatal("job did not start")
 	}
-	var active []Job
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		active, _ = r.Ledger.Active()
-		if len(active) == 1 && active[0].Pgid == 4242 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Bounded by the test binary's timeout: Started has returned, so the
+	// row naming the group is written.
+	<-sp.started
+	active, _ := r.Ledger.Active()
 	if len(active) != 1 || active[0].Pgid != 4242 {
 		t.Fatalf("active = %+v, want one job carrying its group", active)
 	}
