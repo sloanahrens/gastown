@@ -613,10 +613,13 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 
 **Pre-flight: Tick the acceptance criteria your work satisfies.**
 The landing worker rejects a bead with any `- [ ]` acceptance line left, after
-your session has retired. `bd show {{issue}}` prints the criteria; rewrite them
-with `- [x]` on each line your work satisfies. `gt done` refuses first and
-lists each unchecked line. Exit criterion: `bd show {{issue}}` shows no
-`- [ ]` line.
+your session has retired. `gt done` refuses first and lists each unchecked
+line. `bd show {{issue}}` prints the current criteria; resend the whole block
+with `- [x]` on each line your work satisfies:
+```bash
+gt bead update {{issue}} --acceptance="<the block, those lines ticked>"
+```
+Exit criterion: `bd show {{issue}}` shows no `- [ ]` line.
 
 **Pre-flight: Is your bead's title still true?**
 Every later reader sees a bead's title before the diff, and the title outlives

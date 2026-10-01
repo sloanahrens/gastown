@@ -43,12 +43,14 @@ func TestSubmitRefusesUncheckedCriteriaNamingEach(t *testing.T) {
 	if err == nil {
 		t.Fatal("submit succeeded with unchecked acceptance criteria")
 	}
+	// A refusal an agent cannot act on sends it back to bd for the write
+	// (gt-n623a): the tick command has to be one it can run as printed.
 	for _, want := range []string{
 		"bd-source has 2 unchecked acceptance criteria",
 		"- [ ] tests for refuse and pass paths",
 		"- [ ] make lint && make gate pass",
 		"bd show bd-source",
-		"--acceptance",
+		`gt bead update bd-source --acceptance="`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q lacks %q", err, want)

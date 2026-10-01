@@ -24,7 +24,8 @@ func refuseUncheckedCriteria(issueID string, issue *beads.Issue) error {
 	for _, line := range unchecked {
 		fmt.Fprintf(&b, "  %s\n", line)
 	}
-	fmt.Fprintf(&b, "Tick each one your work satisfies: rewrite the bead's acceptance criteria (bd show %s prints them; the --acceptance flag of the bd update verb takes the full text) with '- [x]' on those lines.\n", issueID)
+	fmt.Fprintf(&b, "Tick each one your work satisfies: bd show %s prints the criteria; resend the whole block with '- [x]' on each satisfied line:\n", issueID)
+	fmt.Fprintf(&b, "  gt bead update %s --acceptance=\"<the block, those lines ticked>\"\n", issueID)
 	fmt.Fprintf(&b, "Then run gt done again. A criterion the work does not satisfy is unfinished work: finish it, or gt escalate.")
 	return fmt.Errorf("%s", b.String())
 }

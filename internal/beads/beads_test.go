@@ -1810,6 +1810,53 @@ func TestUpdateOptions(t *testing.T) {
 	}
 }
 
+// TestUpdateAcceptanceGoesThroughArgv: the criteria block is multiline and
+// lands on bd's --acceptance as one argv element, unlike Description's
+// --body-file=- (gt-n623a). A block quoted into the update path is the only
+// way a polecat can tick a box, so a mangled or stdin-routed block fails here.
+func TestUpdateAcceptanceGoesThroughArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script bd stub")
+	}
+
+	ResetBdAllowStaleCacheForTest()
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+	stdinPath := filepath.Join(stubDir, "stdin.txt")
+	stubPath := filepath.Join(stubDir, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+for a in "$@"; do
+  printf '%%s\n' "$a" >> %q
+done
+cat > %q
+exit 0
+`, argsPath, stdinPath)
+	if err := os.WriteFile(stubPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	criteria := "- [x] gt done refuses\n- [ ] unit tests pass"
+	if err := New(t.TempDir()).Update("gt-test", UpdateOptions{Acceptance: &criteria}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	if got, want := string(argsData), "update\ngt-test\n--acceptance="+criteria+"\n"; got != want {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+	if stdinData, err := os.ReadFile(stdinPath); err == nil && len(stdinData) > 0 {
+		t.Fatalf("acceptance was written to stdin: %q", stdinData)
+	}
+}
+
 func TestUpdateDescriptionUsesBodyFileStdin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script bd stub")

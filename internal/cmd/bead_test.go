@@ -89,6 +89,15 @@ func TestBeadNoteAndUpdate(t *testing.T) {
 	if got.Notes != "first\nsecond" || got.Title != title || got.Priority != 1 || !reflect.DeepEqual(got.Labels, []string{"l1"}) {
 		t.Errorf("after note and update: notes %q title %q priority %d labels %v", got.Notes, got.Title, got.Priority, got.Labels)
 	}
+	// gt-n623a: ticking a box has no other route, and a wrong block would
+	// leave the landing worker the sole judge.
+	criteria := "- [x] gt done refuses\n- [ ] unit tests pass"
+	if err := v.update(is.ID, beads.UpdateOptions{Acceptance: &criteria}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustShowBead(t, fake, is.ID).AcceptanceCriteria; got != criteria {
+		t.Errorf("acceptance criteria = %q, want %q", got, criteria)
+	}
 	if err := v.update(is.ID, beads.UpdateOptions{}); err == nil {
 		t.Error("an empty update succeeded")
 	}

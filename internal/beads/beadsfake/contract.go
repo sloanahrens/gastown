@@ -311,6 +311,11 @@ func contractUpdateFields(t *testing.T, s *scope) {
 	if d := s.mustShow(t, is.ID).Description; d != "" {
 		t.Errorf("description after clearing = %q", d)
 	}
+	criteria := "- [x] the refusal names the verb\n- [ ] make lint && make gate pass"
+	mustDo(t, "acceptance", s.Update(is.ID, beads.UpdateOptions{Acceptance: &criteria}))
+	if got := s.mustShow(t, is.ID).AcceptanceCriteria; got != criteria {
+		t.Errorf("acceptance criteria = %q, want %q", got, criteria)
+	}
 	mustDo(t, "hooked", s.Update(is.ID, beads.UpdateOptions{Status: ptr(beads.StatusHooked)}))
 	if st := s.mustShow(t, is.ID).Status; st != beads.StatusHooked {
 		t.Errorf("status = %q, want hooked", st)

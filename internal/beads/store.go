@@ -528,6 +528,9 @@ func (b *Beads) storeUpdate(id string, opts UpdateOptions) error {
 	if opts.Assignee != nil {
 		updates["assignee"] = *opts.Assignee
 	}
+	if opts.Acceptance != nil {
+		updates["acceptance_criteria"] = *opts.Acceptance
+	}
 
 	actor := b.getActor()
 
