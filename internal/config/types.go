@@ -1116,8 +1116,8 @@ type MergeQueueConfig struct {
 	Editorial *EditorialConfig `json:"editorial,omitempty"`
 
 	// PostLandCommand runs once per landing, after the push and the record,
-	// in a throwaway worktree at the landed commit (the slow test tier, e.g.
-	// "make test-slow"). The landing worker runs it asynchronously, one at a
+	// in a throwaway worktree at the landed commit (e.g. "make test-slow":
+	// the gate, then the shell tests). The landing worker runs it asynchronously, one at a
 	// time per rig, coalescing landings that finish while one runs; a red
 	// run comments on the landed bead and never reverts the landing
 	// (gt-v4ssj.2). Empty disables it. Read only from the rig's own

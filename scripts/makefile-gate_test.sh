@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
 # `make gate`, `make test-slow` and `make test-integration` are the test
-# tiers (`make test` only chains them), the gate runs lint, build and the fast
-# tier in that order, skipping the packages in internal/testpolicy/slow.txt
-# that test-slow runs (gt-z862q), neither starts a container or takes the
-# container-gate slot, and the integration tier runs every Docker-backed
-# package listed in internal/testpolicy/docker.txt.
+# tiers (`make test` only chains them), the gate runs lint, build and the unit
+# tier over every package in that order (no slow tier since gt-ik4a1.9),
+# test-slow runs the gate and then the shell tests, neither starts a container
+# or takes the container-gate slot, and the integration tier runs every
+# Docker-backed package listed in internal/testpolicy/docker.txt.
 #
 # The recipe shape is read through `make -n`, which prints recipes without
 # running them. That only holds while no gate recipe line references $(MAKE):
@@ -50,19 +50,19 @@ else
   fail "gate runs lint, then go build ./..., then the budget runner (lines: lint=$lint build=$build unit=$unit)" "$out"
 fi
 if [[ -z "$shell" ]]; then
-  pass "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier"
+  pass "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow"
 else
-  fail "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier" "$out"
+  fail "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow" "$out"
 fi
-if grep -q -F 'cmd/budget -fast-tier -slow internal/testpolicy/slow.txt --' <<<"$out"; then
-  pass "gate runs the fast tier: skips slow.txt, warns on a package over testpolicy.FastTierMaxWall"
+if grep -q -F 'cmd/budget -fast-tier -- -timeout 20m ./...' <<<"$out" && ! grep -q -E -- '-slow( |=)|slow\.txt' <<<"$out"; then
+  pass "gate runs the unit tier over every package, warning on one over testpolicy.FastTierMaxWall"
 else
-  fail "gate runs the fast tier: skips slow.txt, warns on a package over testpolicy.FastTierMaxWall" "$out"
+  fail "gate runs the unit tier over every package, warning on one over testpolicy.FastTierMaxWall" "$out"
 fi
-if ! grep -q -F -- '-strict-wall' <<<"$out" && tout=$(dry tier-check) && grep -q -F 'cmd/budget -fast-tier -strict-wall -slow internal/testpolicy/slow.txt --' <<<"$tout" && ! grep -q -E 'golangci-lint|go build|slot +run' <<<"$tout"; then
-  pass "gate only warns on wall time; make tier-check runs the fast tier with -strict-wall and no lint or build (gt-z7qtk)"
+if ! grep -q -F -- '-strict-wall' <<<"$out" && tout=$(dry tier-check) && grep -q -F 'cmd/budget -fast-tier -strict-wall -- -timeout 20m ./...' <<<"$tout" && ! grep -q -E 'golangci-lint|go build|slot +run' <<<"$tout"; then
+  pass "gate only warns on wall time; make tier-check runs the unit tier with -strict-wall and no lint or build (gt-z7qtk)"
 else
-  fail "gate only warns on wall time; make tier-check runs the fast tier with -strict-wall and no lint or build (gt-z7qtk)" "${tout:-}"
+  fail "gate only warns on wall time; make tier-check runs the unit tier with -strict-wall and no lint or build (gt-z7qtk)" "${tout:-}"
 fi
 if grep -q -E 'gate: PASSED in \$\{wall\}s wall' <<<"$out"; then
   pass "gate prints its wall time"
@@ -101,7 +101,7 @@ else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'slow.txt -- -timeout 20m ./...' <<<"$out"; then
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- '-fast-tier -- -timeout 20m ./...' <<<"$out"; then
   pass "gate carries one -timeout, on the budget runner (the one gate definition)"
 else
   fail "gate carries one -timeout, on the budget runner (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
@@ -117,10 +117,15 @@ for t in test-changed; do
     pass "make $t is gone"
   fi
 done
-if [[ "$(grep -E '^test:' "$ROOT/Makefile")" == "test: gate test-slow test-integration" ]] && ! awk '/^test:/{f=1;next} /^[^\t]/{f=0} f' "$ROOT/Makefile" | grep -q .; then
-  pass "make test only chains gate, test-slow and test-integration, with no recipe of its own"
+if [[ "$(grep -E '^test:' "$ROOT/Makefile")" == "test: test-slow test-integration" ]] && ! awk '/^test:/{f=1;next} /^[^\t]/{f=0} f' "$ROOT/Makefile" | grep -q .; then
+  pass "make test only chains test-slow (the gate, then the shell tests) and test-integration, with no recipe of its own"
 else
-  fail "make test only chains gate, test-slow and test-integration, with no recipe of its own" "$(grep -A3 -E '^test:' "$ROOT/Makefile")"
+  fail "make test only chains test-slow (the gate, then the shell tests) and test-integration, with no recipe of its own" "$(grep -A3 -E '^test:' "$ROOT/Makefile")"
+fi
+if [[ ! -e "$ROOT/internal/testpolicy/slow.txt" ]] && ! grep -q -E 'SLOW_(LIST|PKGS)|slow\.txt' "$ROOT/Makefile"; then
+  pass "the slow tier is gone: no slow.txt, and the Makefile names none (gt-ik4a1.9)"
+else
+  fail "the slow tier is gone: no slow.txt, and the Makefile names none (gt-ik4a1.9)" "$(grep -n -E 'SLOW_(LIST|PKGS)|slow\.txt' "$ROOT/Makefile")"
 fi
 if grep -q -E '(^|[^A-Za-z_])PKGS *\?=' "$ROOT/Makefile"; then
   fail "no PKGS default for a changed-package gate"
@@ -139,18 +144,12 @@ if sout=$(dry test-slow); then
 else
   fail "make -n test-slow exits 0" "$sout"
 fi
-missing=""
-while IFS= read -r pkg; do
-  pkg="${pkg%%#*}"
-  pkg="$(echo "$pkg" | awk '{print $1}')"
-  [[ -z "$pkg" ]] && continue
-  grep -q -E "\./$pkg( |$)" <<<"$sout" || missing="$missing $pkg"
-  grep -q -E "\./$pkg( |$)" <<<"$out" && missing="$missing (gate runs $pkg)"
-done <"$ROOT/internal/testpolicy/slow.txt"
-if [[ -z "$missing" ]] && grep -q -F 'GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./internal/' <<<"$sout" && grep -q -F 'GT_TEST_DOCKER=0 bash scripts/test-makefile.sh' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
-  pass "test-slow runs every slow.txt package and the shell tests, containers off, no slot"
+sgate=$(line_of "$sout" "internal/testpolicy/cmd/budget")
+sshell=$(line_of "$sout" "GT_TEST_DOCKER=0 bash scripts/test-makefile.sh")
+if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'cmd/budget -fast-tier -- -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
+  pass "test-slow runs the gate, then the shell tests, containers off, no slot"
 else
-  fail "test-slow runs every slow.txt package and the shell tests, containers off, no slot;$missing" "$sout"
+  fail "test-slow runs the gate, then the shell tests, containers off, no slot (lines: gate=$sgate shell=$sshell)" "$sout"
 fi
 
 echo "test-integration"
@@ -281,21 +280,21 @@ else
   fail "interrupted gate: non-zero, and the trap stopped the running suite (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
-rc=$(TARGET=test-slow run_gate)
-if [[ "$rc" == 0 ]] && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'test-slow: PASSED in [0-9]+s wall' "$TMP/err"; then
+rc=$(TARGET=test-slow run_gate -o lint)
+if [[ "$rc" == 0 ]] && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -F 'test-slow: PASSED' "$TMP/err"; then
   pass "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0"
 else
   fail "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
-rc=$(TARGET=test-slow run_gate -- STUB_GO_FAIL=run)
-if [[ "$rc" != 0 ]] && grep -q -F 'test-slow: FAILED at Go suite' "$TMP/err" && grep -q -x 'shell-tests' "$TMP/calls"; then
-  pass "test-slow Go suite fails: non-zero, names it, the shell tests still run"
+rc=$(TARGET=test-slow run_gate -o lint -- STUB_GO_FAIL=run)
+if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier (Go suite' "$TMP/err" && ! grep -q -F 'test-slow: PASSED' "$TMP/err"; then
+  pass "test-slow Go suite fails: non-zero, the gate names the Go half"
 else
-  fail "test-slow Go suite fails: non-zero, names it, the shell tests still run (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "test-slow Go suite fails: non-zero, the gate names the Go half (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
-rc=$(TARGET=test-slow run_gate -- STUB_SHELL_FAIL=1)
+rc=$(TARGET=test-slow run_gate -o lint -- STUB_SHELL_FAIL=1)
 if [[ "$rc" != 0 ]] && grep -q -F 'test-slow: FAILED at shell tests' "$TMP/err"; then
   pass "test-slow shell tests fail: non-zero, names the shell tests"
 else

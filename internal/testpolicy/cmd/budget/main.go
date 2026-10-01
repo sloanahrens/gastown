@@ -58,9 +58,8 @@ func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
-	fastTier := flag.Bool("fast-tier", false, "run the fast tier (make gate): leave out the packages in -slow, and warn about any package that ran longer than testpolicy.FastTierMaxWall of wall time")
+	fastTier := flag.Bool("fast-tier", false, "check the unit tier's wall time (make gate): warn about any package that ran longer than testpolicy.FastTierMaxWall")
 	strictWall := flag.Bool("strict-wall", false, "with -fast-tier, fail a package over testpolicy.FastTierMaxWall of wall time instead of warning (make tier-check)")
-	slowList := flag.String("slow", "internal/testpolicy/slow.txt", "the slow tier's packages, which -fast-tier leaves out; `make test-slow` runs them")
 	flag.Parse()
 
 	exempt, err := testpolicy.ReadList(*list)
@@ -97,13 +96,6 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
-	if *fastTier {
-		slow, err := testpolicy.ReadSlowList(*slowList)
-		if err != nil {
-			return fail(err)
-		}
-		pkgs = withoutSlow(pkgs, slow)
-	}
 	judged, cached := testpolicy.PartitionPackages(pkgs, module, exempt)
 	if len(pkgs) == 0 {
 		// Nothing matched: let go test say so, in one budgeted run over
@@ -115,7 +107,7 @@ func run() int {
 	}
 
 	// Both halves print plain go test text; a copy of its package summary
-	// lines feeds the fast tier's wall check after the run.
+	// lines feeds the -fast-tier wall check after the run.
 	var summary bytes.Buffer
 	probe := &summaryLines{w: &summary}
 	out := io.Writer(os.Stdout)
@@ -162,7 +154,7 @@ func run() int {
 		code = 1
 	}
 	if *fastTier && !interrupted(code) {
-		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *slowList, *strictWall); code == 0 {
+		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *strictWall); code == 0 {
 			code = c
 		}
 	}
@@ -200,7 +192,7 @@ func reportOver(w io.Writer, over []testpolicy.Overrun, budget time.Duration, en
 // closed either way: a run whose output yields no wall time and no cached
 // package, or a summary line it cannot read, returns 1, because silence there
 // would read as every package being fast.
-func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList string, strictWall bool) int {
+func checkFastTier(probe *summaryLines, summary io.Reader, ran int, strictWall bool) int {
 	if err := probe.Flush(); err != nil {
 		fmt.Fprintln(os.Stderr, "TIER: reading package summaries:", err)
 		return 1
@@ -224,30 +216,13 @@ func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList str
 		if strictWall {
 			note = "failing: make tier-check judges wall time"
 		}
-		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s (%s). Make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
-			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, note, o.Package, slowList)
+		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the unit tier's %s per package (%s). Make its tests faster: there is no slow tier to move it to (gt-ik4a1.9)\n",
+			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, note)
 		if strictWall {
 			code = 1
 		}
 	}
 	return code
-}
-
-// withoutSlow is pkgs (import paths) minus the slow-tier packages, which are
-// named relative to module. A slow package's subpackages stay: the list names
-// packages, not trees.
-func withoutSlow(pkgs []string, slow []testpolicy.SlowEntry) []string {
-	skip := make(map[string]bool, len(slow))
-	for _, e := range slow {
-		skip[module+"/"+e.Package] = true
-	}
-	var kept []string
-	for _, p := range pkgs {
-		if !skip[p] {
-			kept = append(kept, p)
-		}
-	}
-	return kept
 }
 
 // maxSummaryLine bounds the partial line summaryLines holds. A package

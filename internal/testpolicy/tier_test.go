@@ -1,8 +1,6 @@
 package testpolicy
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -63,69 +61,5 @@ func TestWallOverruns(t *testing.T) {
 	want := []PackageWall{{"d", 40 * time.Second}, {"b", 16 * time.Second}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("WallOverruns = %v, want %v", got, want)
-	}
-}
-
-func TestParseSlowList(t *testing.T) {
-	t.Parallel()
-	in := "# header\n\ninternal/cmd 301s # spawns git and bd\ninternal/git 43.3s # 1900 git execs\n"
-	got, err := ParseSlowList(strings.NewReader(in))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []SlowEntry{
-		{Package: "internal/cmd", Wall: 301 * time.Second, Why: "spawns git and bd", Line: 3},
-		{Package: "internal/git", Wall: 43300 * time.Millisecond, Why: "1900 git execs", Line: 4},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ParseSlowList = %+v, want %+v", got, want)
-	}
-}
-
-func TestParseSlowList_Rejects(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct{ name, in, want string }{
-		{"no wall", "internal/cmd # slow\n", "measured wall"},
-		{"no justification", "internal/cmd 301s\n", "why it is slow"},
-		{"empty justification", "internal/cmd 301s #  \n", "why it is slow"},
-		{"bad wall", "internal/cmd slow # why\n", "not a measured wall time"},
-		{"duplicate", "internal/cmd 301s # a\ninternal/cmd 300s # b\n", "listed twice"},
-	} {
-		_, err := ParseSlowList(strings.NewReader(tc.in))
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: ParseSlowList(%q) error = %v, want one containing %q", tc.name, tc.in, err, tc.want)
-		}
-	}
-}
-
-// TestSlowListNamesPackages checks the checked-in slow.txt parses and names
-// only Go package directories that exist.
-func TestSlowListNamesPackages(t *testing.T) {
-	t.Parallel()
-	entries, err := ReadSlowList("slow.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("slow.txt lists no package")
-	}
-	root := filepath.Join("..", "..")
-	for _, e := range entries {
-		// The list's cut-off and the gate's limit are one number: a package
-		// measured under FastTierMaxWall belongs in the fast tier.
-		if e.Wall < FastTierMaxWall {
-			t.Errorf("slow.txt:%d: %s measured %s, under the tier boundary FastTierMaxWall (%s): it belongs in the fast tier", e.Line, e.Package, e.Wall, FastTierMaxWall)
-		}
-		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(e.Package), "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) == 0 {
-			if _, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(e.Package))); statErr != nil {
-				t.Errorf("slow.txt:%d: %s does not exist", e.Line, e.Package)
-			} else {
-				t.Errorf("slow.txt:%d: %s is not a Go package directory", e.Line, e.Package)
-			}
-		}
 	}
 }
