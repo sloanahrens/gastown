@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -85,7 +85,8 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 
 	// List unclaimed messages in the queue
 	// Queue messages have queue:<name> label and no claimed-by label
-	messages, err := listUnclaimedQueueMessages(beadsDir, queueName)
+	queueClient := queueBd(beadsDir, caller)
+	messages, err := listUnclaimedQueueMessages(queueClient, queueName)
 	if err != nil {
 		return fmt.Errorf("listing queue messages: %w", err)
 	}
@@ -105,12 +106,12 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 		candidate := &messages[i]
 
 		// Attempt to claim: add claimed-by and claimed-at labels
-		if err := claimQueueMessage(beadsDir, candidate.ID, caller); err != nil {
+		if err := claimQueueMessage(queueClient, candidate.ID, caller, time.Now()); err != nil {
 			return fmt.Errorf("claiming message: %w", err)
 		}
 
 		// Post-claim verification: re-read and confirm we won the race
-		info, err := getQueueMessageInfo(beadsDir, candidate.ID)
+		info, err := getQueueMessageInfo(queueClient, candidate.ID)
 		if err != nil {
 			return fmt.Errorf("verifying claim: %w", err)
 		}
@@ -127,7 +128,7 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 		}
 
 		// Another worker claimed it first — remove our stale labels and try next
-		if releaseErr := releaseQueueMessage(beadsDir, candidate.ID, caller); releaseErr != nil {
+		if releaseErr := releaseQueueMessage(queueClient, candidate.ID); releaseErr != nil {
 			style.PrintWarning("could not release stale claim on %s: %v", candidate.ID, releaseErr)
 		}
 	}
@@ -169,58 +170,31 @@ type queueMessage struct {
 	ClaimedAt   *time.Time
 }
 
+// queueBd is the bd client for queue messages in beadsDir, attributing
+// writes to actor.
+func queueBd(beadsDir, actor string) beads.Client {
+	return beads.NewPlain("", append(os.Environ(), "BEADS_DIR="+beadsDir, "BD_ACTOR="+actor))
+}
+
 // listUnclaimedQueueMessages lists unclaimed messages in a queue.
 // Unclaimed messages have queue:<name> label but no claimed-by label.
-func listUnclaimedQueueMessages(beadsDir, queueName string) ([]queueMessage, error) {
-	// Use bd list to find messages with queue:<name> label and status=open
-	args := []string{"list",
-		"--label", "queue:" + queueName,
-		"--status", "open",
-		"--label", "gt:message",
-		"--json",
-		"--limit", "0",
-	}
-
-	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return nil, fmt.Errorf("%s", errMsg)
-		}
+func listUnclaimedQueueMessages(bd beads.Client, queueName string) ([]queueMessage, error) {
+	issues, err := bd.List(beads.ListOptions{Label: "queue:" + queueName, Status: "open", Priority: -1})
+	if err != nil {
 		return nil, err
-	}
-
-	// Parse JSON output
-	var issues []struct {
-		ID          string    `json:"id"`
-		Title       string    `json:"title"`
-		Description string    `json:"description"`
-		Labels      []string  `json:"labels"`
-		CreatedAt   time.Time `json:"created_at"`
-		Priority    int       `json:"priority"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		// If no messages, bd might output empty or error
-		if strings.TrimSpace(stdout.String()) == "" || strings.TrimSpace(stdout.String()) == "[]" {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("parsing bd output: %w", err)
 	}
 
 	// Convert to queueMessage, filtering out already claimed messages
 	var messages []queueMessage
 	for _, issue := range issues {
+		if !beads.HasLabel(issue, "gt:message") {
+			continue
+		}
 		msg := queueMessage{
 			ID:          issue.ID,
 			Title:       issue.Title,
 			Description: issue.Description,
-			Created:     issue.CreatedAt,
+			Created:     parseBdTime(issue.CreatedAt),
 			Priority:    issue.Priority,
 		}
 
@@ -252,32 +226,18 @@ func listUnclaimedQueueMessages(beadsDir, queueName string) ([]queueMessage, err
 	return messages, nil
 }
 
+// parseBdTime parses a bd timestamp, zero when it does not parse.
+func parseBdTime(ts string) time.Time {
+	t, _ := time.Parse(time.RFC3339, ts)
+	return t
+}
+
 // claimQueueMessage claims a message by adding claimed-by and claimed-at labels.
-func claimQueueMessage(beadsDir, messageID, claimant string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	args := []string{"label", "add", messageID,
+func claimQueueMessage(bd beads.Client, messageID, claimant string, now time.Time) error {
+	return bd.Update(messageID, beads.UpdateOptions{AddLabels: []string{
 		"claimed-by:" + claimant,
-		"claimed-at:" + now,
-	}
-
-	cmd := beads.CommandWithEnv("", append(os.Environ(),
-		"BEADS_DIR="+beadsDir,
-		"BD_ACTOR="+claimant,
-	), args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
-		}
-		return err
-	}
-
-	return nil
+		"claimed-at:" + now.UTC().Format(time.RFC3339),
+	}})
 }
 
 // runMailRelease releases a claimed queue message back to its queue.
@@ -296,7 +256,8 @@ func runMailRelease(cmd *cobra.Command, args []string) error {
 	caller := detectSender()
 
 	// Get message details to verify ownership and find queue
-	msgInfo, err := getQueueMessageInfo(beadsDir, messageID)
+	queueClient := queueBd(beadsDir, caller)
+	msgInfo, err := getQueueMessageInfo(queueClient, messageID)
 	if err != nil {
 		return fmt.Errorf("getting message: %w", err)
 	}
@@ -315,7 +276,7 @@ func runMailRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	// Release the message: remove claimed-by and claimed-at labels
-	if err := releaseQueueMessage(beadsDir, messageID, caller); err != nil {
+	if err := releaseQueueMessage(queueClient, messageID); err != nil {
 		return fmt.Errorf("releasing message: %w", err)
 	}
 
@@ -337,43 +298,15 @@ type queueMessageInfo struct {
 }
 
 // getQueueMessageInfo retrieves information about a queue message.
-func getQueueMessageInfo(beadsDir, messageID string) (*queueMessageInfo, error) {
-	args := []string{"show", messageID, "--json"}
-
-	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if strings.Contains(errMsg, "not found") {
-			return nil, fmt.Errorf("message not found: %s", messageID)
-		}
-		if errMsg != "" {
-			return nil, fmt.Errorf("%s", errMsg)
-		}
+func getQueueMessageInfo(bd beads.Client, messageID string) (*queueMessageInfo, error) {
+	issue, err := bd.Show(messageID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, fmt.Errorf("message not found: %s", messageID)
+	}
+	if err != nil {
 		return nil, err
 	}
 
-	// Parse JSON output - bd show --json returns an array
-	var issues []struct {
-		ID     string   `json:"id"`
-		Title  string   `json:"title"`
-		Labels []string `json:"labels"`
-		Status string   `json:"status"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return nil, fmt.Errorf("parsing message: %w", err)
-	}
-
-	if len(issues) == 0 {
-		return nil, fmt.Errorf("message not found: %s", messageID)
-	}
-
-	issue := issues[0]
 	info := &queueMessageInfo{
 		ID:     issue.ID,
 		Title:  issue.Title,
@@ -399,9 +332,9 @@ func getQueueMessageInfo(beadsDir, messageID string) (*queueMessageInfo, error) 
 // releaseQueueMessage releases a claimed message by removing claim labels.
 // Both claimed-by and claimed-at are removed in a single bd command to prevent
 // orphaned labels if the process crashes between separate removal steps.
-func releaseQueueMessage(beadsDir, messageID, actor string) error {
+func releaseQueueMessage(bd beads.Client, messageID string) error {
 	// Get current message info to find the exact claim labels
-	info, err := getQueueMessageInfo(beadsDir, messageID)
+	info, err := getQueueMessageInfo(bd, messageID)
 	if err != nil {
 		return err
 	}
@@ -419,23 +352,10 @@ func releaseQueueMessage(beadsDir, messageID, actor string) error {
 		return nil
 	}
 
-	// Remove all claim labels in a single bd command
-	args := append([]string{"label", "remove", messageID}, labelsToRemove...)
-	cmd := beads.CommandWithEnv("", append(os.Environ(),
-		"BEADS_DIR="+beadsDir,
-		"BD_ACTOR="+actor,
-	), args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" && !strings.Contains(errMsg, "does not have label") {
-			return fmt.Errorf("%s", errMsg)
-		}
+	err = bd.Update(messageID, beads.UpdateOptions{RemoveLabels: labelsToRemove})
+	if err != nil && !strings.Contains(bdErrOutput(err), "does not have label") {
+		return err
 	}
-
 	return nil
 }
 

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,11 +180,7 @@ func registerCustomTypes(workDir string) error {
 	} {
 		if err := beads.NewPlain(workDir, nil).ConfigSet(cfg.key, cfg.value); err != nil {
 			// Check for common expected errors
-			outStr := err.Error()
-			var cliErr *beads.CLIError
-			if errors.As(err, &cliErr) {
-				outStr = cliErr.Output()
-			}
+			outStr := bdErrOutput(err)
 			if strings.Contains(outStr, "not initialized") ||
 				strings.Contains(outStr, "no such file") {
 				return nil // DB not initialized, skip silently

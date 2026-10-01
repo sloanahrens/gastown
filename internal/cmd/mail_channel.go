@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -218,7 +216,7 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 	}
 
 	// Query messages for this channel
-	messages, err := listChannelMessages(townRoot, channelName)
+	messages, err := listChannelMessages(townBeadsClient(townRoot), channelName)
 	if err != nil {
 		return fmt.Errorf("listing channel messages: %w", err)
 	}
@@ -486,57 +484,23 @@ type channelMessage struct {
 }
 
 // listChannelMessages lists messages from a beads-native channel.
-func listChannelMessages(townRoot, channelName string) ([]channelMessage, error) {
-	beadsDir := filepath.Join(townRoot, ".beads")
-
+func listChannelMessages(bd beads.Client, channelName string) ([]channelMessage, error) {
 	// Query for messages with label channel:<name>
-	args := []string{"list",
-		"--label", "gt:message",
-		"--label", "channel:" + channelName,
-		"--sort", "-created",
-		"--limit", "0",
-		"--json",
-	}
-
-	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return nil, fmt.Errorf("%s", errMsg)
-		}
+	issues, err := bd.List(beads.ListOptions{Label: "channel:" + channelName, Priority: -1})
+	if err != nil {
 		return nil, err
-	}
-
-	var issues []struct {
-		ID          string    `json:"id"`
-		Title       string    `json:"title"`
-		Description string    `json:"description"`
-		Labels      []string  `json:"labels"`
-		CreatedAt   time.Time `json:"created_at"`
-		Priority    int       `json:"priority"`
-	}
-
-	output := strings.TrimSpace(stdout.String())
-	if output == "" || output == "[]" {
-		return nil, nil
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd output: %w", err)
 	}
 
 	var messages []channelMessage
 	for _, issue := range issues {
+		if !beads.HasLabel(issue, "gt:message") {
+			continue
+		}
 		msg := channelMessage{
 			ID:       issue.ID,
 			Title:    issue.Title,
 			Body:     issue.Description,
-			Created:  issue.CreatedAt,
+			Created:  parseBdTime(issue.CreatedAt),
 			Priority: issue.Priority,
 		}
 

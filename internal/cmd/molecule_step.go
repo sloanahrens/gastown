@@ -294,9 +294,8 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 	}
 
 	// Pin the next step bead
-	pinCmd := beads.CommandWithEnv(gitRoot, nil, "update", nextStep.ID, "--status=pinned", "--assignee="+agentID)
-	pinCmd.Stderr = os.Stderr
-	if err := pinCmd.Run(); err != nil {
+	pinned := beads.StatusPinned
+	if err := beads.NewPlain(gitRoot, nil).Update(nextStep.ID, beads.UpdateOptions{Status: &pinned, Assignee: &agentID}); err != nil {
 		return fmt.Errorf("pinning next step: %w", err)
 	}
 
@@ -384,10 +383,10 @@ func handleParallelSteps(cwd, townRoot, _ string, steps []*beads.Issue, dryRun b
 		return fmt.Errorf("finding git root: %w", err)
 	}
 
+	rootBd := beads.NewPlain(gitRoot, nil)
+	inProgress := string(beads.StatusInProgress)
 	for _, step := range steps {
-		markCmd := beads.CommandWithEnv(gitRoot, nil, "update", step.ID, "--status=in_progress")
-		markCmd.Stderr = os.Stderr
-		if err := markCmd.Run(); err != nil {
+		if err := rootBd.Update(step.ID, beads.UpdateOptions{Status: &inProgress}); err != nil {
 			style.PrintWarning("could not mark step %s as in_progress: %v", step.ID, err)
 		}
 	}
@@ -478,9 +477,8 @@ func handleMoleculeComplete(cwd, townRoot, moleculeID string, dryRun bool) error
 		})
 		if err == nil && len(pinnedBeads) > 0 {
 			// Unpin by setting status to open
-			unpinCmd := beads.CommandWithEnv(gitRoot, nil, "update", pinnedBeads[0].ID, "--status=open")
-			unpinCmd.Stderr = os.Stderr
-			if err := unpinCmd.Run(); err != nil {
+			open := string(beads.StatusOpen)
+			if err := beads.NewPlain(gitRoot, nil).Update(pinnedBeads[0].ID, beads.UpdateOptions{Status: &open}); err != nil {
 				style.PrintWarning("could not unpin bead: %v", err)
 			} else {
 				fmt.Printf("%s Work unpinned\n", style.Bold.Render("✓"))
