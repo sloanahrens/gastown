@@ -186,6 +186,15 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// townRegistry returns the session prefix registry persistentPreRun loaded for
+// this invocation. It is the one place command code reads the process-wide
+// registry: command entry points call it and hand the registry down, and every
+// helper below them takes it as a parameter, so unit tests pass their own and
+// never depend on session.DefaultRegistry().
+func townRegistry() *session.PrefixRegistry {
+	return session.DefaultRegistry()
+}
+
 func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		if exemptions[c.Name()] {

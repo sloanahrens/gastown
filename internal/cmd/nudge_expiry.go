@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -23,7 +24,7 @@ func init() {
 // A session name that does not parse has no agent address to reach, so the
 // notice goes to the mayor, who owns town-level routing (gt-oexm).
 func mailExpiredNudge(ev nudge.ExpiryEvent) {
-	to := expiredNudgeMailTarget(ev.Session)
+	to := expiredNudgeMailTarget(townRegistry(), ev.Session)
 
 	router := mail.NewRouter(ev.TownRoot)
 	msg := &mail.Message{
@@ -47,8 +48,8 @@ func mailExpiredNudge(ev nudge.ExpiryEvent) {
 // expiredNudgeMailTarget picks the mailbox for an expiry notice: the agent
 // that owned the session when its name parses, else the mayor, who owns
 // town-level routing for a session no rig claims.
-func expiredNudgeMailTarget(session string) string {
-	if addr := sessionNameToAddress(session); addr != "" {
+func expiredNudgeMailTarget(reg *session.PrefixRegistry, sessionName string) string {
+	if addr := sessionNameToAddress(reg, sessionName); addr != "" {
 		return addr
 	}
 	return constants.RoleMayor

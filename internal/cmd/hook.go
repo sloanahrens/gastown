@@ -465,7 +465,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 
 	var target string
 	if len(args) > 0 {
-		target = normalizeHookShowTarget(args[0])
+		target = normalizeHookShowTarget(townRegistry(), args[0])
 	} else {
 		// Auto-detect current agent from context
 		agentID, _, _, err := resolveSelfTarget()
@@ -586,7 +586,7 @@ func ensureCurrentHookWorktreeIntegrity() error {
 //   - "mayor" -> "mayor"
 //
 // If resolution fails, it returns the original target unchanged.
-func normalizeHookShowTarget(target string) string {
+func normalizeHookShowTarget(reg *session.PrefixRegistry, target string) string {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return target
@@ -599,7 +599,7 @@ func normalizeHookShowTarget(target string) string {
 	// the resulting tmux session back to a canonical assignee address.
 	// This keeps "hook show" target parsing aligned with sling/hook behavior.
 	if sessionName, err := resolveRoleToSession(target); err == nil && sessionName != "" {
-		if addr, ok := sessionNameToCanonicalAddress(sessionName, target); ok {
+		if addr, ok := sessionNameToCanonicalAddress(reg, sessionName, target); ok {
 			return addr
 		}
 	}
@@ -640,15 +640,15 @@ func normalizeHookShowTarget(target string) string {
 // assignee address (e.g., "gastown/polecats/toast").
 //
 // targetHint is the original user input and is used to seed a temporary
-// prefix→rig mapping for deterministic parsing in tests or minimal
-// environments where the global session registry is not initialized.
-func sessionNameToCanonicalAddress(sessionName, targetHint string) (string, bool) {
-	if identity, err := session.ParseSessionName(sessionName); err == nil {
+// prefix→rig mapping for deterministic parsing when reg does not know the
+// target's rig (an uninitialized town registry, or a test's empty one).
+func sessionNameToCanonicalAddress(reg *session.PrefixRegistry, sessionName, targetHint string) (string, bool) {
+	if identity, err := session.ParseSessionNameWithRegistry(sessionName, reg); err == nil {
 		return canonicalAssigneeAddress(identity), true
 	}
 
 	registry := session.NewPrefixRegistry()
-	for rig, prefix := range session.DefaultRegistry().AllRigs() {
+	for rig, prefix := range reg.AllRigs() {
 		registry.Register(prefix, rig)
 	}
 	parts := strings.Split(strings.TrimSpace(targetHint), "/")

@@ -177,7 +177,7 @@ func TestSessionNameToAddress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sessionNameToAddressIn(nudgeTestRegistry(), tt.sessionName)
+			got := sessionNameToAddress(nudgeTestRegistry(), tt.sessionName)
 			if got != tt.expected {
 				t.Errorf("sessionNameToAddress(%q) = %q, want %q", tt.sessionName, got, tt.expected)
 			}

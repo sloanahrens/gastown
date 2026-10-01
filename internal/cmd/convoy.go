@@ -36,14 +36,10 @@ func generateShortIDFromReader(r io.Reader) string {
 	return string(b)
 }
 
-// looksLikeIssueID checks if a string looks like a beads issue ID.
-// Issue IDs have the format: prefix-id (e.g., gt-abc, bd-xyz, hq-123).
-func looksLikeIssueID(s string) bool {
-	return looksLikeIssueIDIn(session.DefaultRegistry(), s)
-}
-
-// looksLikeIssueIDIn is looksLikeIssueID against the prefixes reg holds.
-func looksLikeIssueIDIn(reg *session.PrefixRegistry, s string) bool {
+// looksLikeIssueID checks if a string looks like a beads issue ID against the
+// prefixes reg holds. Issue IDs have the format: prefix-id (e.g., gt-abc,
+// bd-xyz, hq-123).
+func looksLikeIssueID(reg *session.PrefixRegistry, s string) bool {
 	// Registry prefixes and the legacy fallbacks, as session.HasKnownPrefix.
 	if reg.HasPrefix(s) {
 		return true
@@ -552,7 +548,7 @@ func (c convoyCLI) create(opts convoyCreateOptions, args []string) error {
 		// coverage: om"). The shape check keeps such a name in the name
 		// position; folding it into the tracked set recorded the convoy's own
 		// title as a phantom issue (gt-gsky).
-		if looksLikeIssueID(name) && beads.IsBeadIDToken(name) {
+		if looksLikeIssueID(townRegistry(), name) && beads.IsBeadIDToken(name) {
 			trackedIssues = args
 			name = fmt.Sprintf("Tracking %s", args[0])
 			if town, townErr := c.town(); townErr == nil {

@@ -461,7 +461,7 @@ func runCrewRestart(cmd *cobra.Command, args []string) error {
 // If crewRig is set, only restarts crew in that rig.
 func runCrewRestartAll() error {
 	// Get all agent sessions (including polecats to find crew)
-	agents, err := getAgentSessions(true)
+	agents, err := getAgentSessions(townRegistry(), true)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -663,7 +663,7 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 // If crewRig is set, only stops crew in that rig.
 func runCrewStopAll() error {
 	// Get all agent sessions (including polecats to find crew)
-	agents, err := getAgentSessions(true)
+	agents, err := getAgentSessions(townRegistry(), true)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}

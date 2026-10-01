@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -161,8 +160,9 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		rigStatuses[rigName] = &rigStatus{}
 	}
 
+	reg := townRegistry()
 	for _, s := range sessions {
-		agent := categorizeSession(session.DefaultRegistry(), s)
+		agent := categorizeSession(reg, s)
 		if agent == nil {
 			continue
 		}

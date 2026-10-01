@@ -311,7 +311,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 
 	if len(args) > 0 {
 		// Explicit target provided
-		target = normalizeHookShowTarget(args[0])
+		target = normalizeHookShowTarget(townRegistry(), args[0])
 		callerCtx := detectRole(cwd, townRoot)
 		validationRole = callerCtx.Role
 	} else {
