@@ -56,6 +56,16 @@ import (
 // the candidate's own tree instead: content that survives at a path the
 // candidate added is a move (git's rename rule, and git's rename threshold),
 // and a package the candidate no longer holds at all is a retirement.
+//
+// A fifth shape crosses the package boundary, and none of the readings above
+// sees it. The thin cobra slice that hands its engine to internal/<leaf>/
+// deletes functions from a file that keeps existing — so the package the path
+// belongs to no longer holds them — and their code arrives in a file written
+// from several, not in a whole file carried across (the fourth shape's
+// question). Crossing the boundary also rewrites the qualifiers around the
+// code: params.BeadID lands as opts.BeadID, a local type arrives exported. So
+// a removed hunk is read as moved when one file the candidate's own work wrote
+// holds its lines with those qualifiers compared away (gt-bbk1f).
 
 // revertScanCommits bounds how far back through target's history the check
 // looks. A candidate can only revert commits merged after its checkout was
@@ -81,12 +91,13 @@ type RevertReport struct {
 	Reverted []RevertedMerge
 
 	// Relocated are changes the candidate moves instead of undoing: every line
-	// of code the target commit added still exists in the package at the
-	// candidate tip, at a new position or in a sibling file (gt-x748o), or the
-	// path the target commit wrote has been carried to a path the candidate
-	// added (gt-mdyds). Either way the behavior those lines carry survives the
-	// submission. These are reported for the operator's benefit and are not a
-	// reason to refuse.
+	// of code the target commit added still exists at the candidate tip, at a
+	// new position or in a sibling file (gt-x748o), in a file the candidate's
+	// own work wrote anywhere in the tree with the qualifiers the move rewrote
+	// compared away (gt-bbk1f), or the path the target commit wrote has been
+	// carried to a path the candidate added (gt-mdyds). Either way the behavior
+	// those lines carry survives the submission. These are reported for the
+	// operator's benefit and are not a reason to refuse.
 	Relocated []RevertedMerge
 }
 
@@ -131,9 +142,12 @@ var _ RevertReader = (*Git)(nil)
 // path would be reported for every historical change to it, when in fact
 // merging such a candidate leaves target's copy alone.
 //
-// Each detection is then classified against the rest of the path's package: an
-// observation whose added code survives there is a relocation, and every
-// observation is one or the other (gt-x748o).
+// Each detection is then classified against the rest of the tree: an
+// observation whose added code survives elsewhere is a relocation, and every
+// observation is one or the other (gt-x748o, gt-bbk1f). The search starts with
+// the path's own package — a Go package is one directory — and, when the code
+// is not there, asks every file the candidate's own work wrote, wherever it
+// is, comparing lines with the qualifiers a move rewrites taken out.
 //
 // A path headTreeRef no longer has is classified against its tree rather than
 // its package: content carried to a path headTreeRef added is a relocation
@@ -166,7 +180,7 @@ func DetectRevertedMerges(g RevertReader, target, headTreeRef string) (RevertRep
 	var report RevertReport
 	revertedAt := make(map[string]int)  // commit -> index in report.Reverted
 	relocatedAt := make(map[string]int) // commit -> index in report.Relocated
-	content := newPackageContent(g, baseBlobs, targetBlobs, headBlobs)
+	content := newCandidateContent(g, baseBlobs, targetBlobs, headBlobs)
 
 	for _, ch := range changes {
 		// preImage is the content the commit started from ("" if it created the
@@ -298,28 +312,37 @@ func multisetContains(have, want map[string]int) bool {
 	return true
 }
 
-// packageContent reads, per directory, the lines the tree under search holds
-// in that directory's files. A relocation can land in any file of the package
-// — the code leaving the path it was observed on is the move — so the search
-// covers the directory rather than that one path. A Go package is one
-// directory; a subdirectory is a different package, and code there does not
-// mean the change survived. Only a whole file carries that meaning across the
-// boundary, and changeRenamed is where it does.
-type packageContent struct {
+// candidateContent reads the tree under search in the two shapes the
+// relocation readings need, each indexed once for the whole scan: the lines
+// each directory of the tree holds (a move within a package lands in one of
+// its files, whatever file that is), and — for the move that leaves the
+// package altogether — the lines of each file the candidate's own work wrote.
+//
+// A Go package is one directory; a subdirectory is a different package, so the
+// per-directory reading stops at the boundary by construction. Only a whole
+// file carries that meaning across it as a file, and changeRenamed is where it
+// does; the code inside a file that crossed is read by changeMoved's second
+// reading instead.
+type candidateContent struct {
 	g         RevertReader
 	blobs     map[string]string          // path -> blob sha, from the tree under search
+	base      map[string]string          // path -> blob sha, from the merge base
 	additions []string                   // paths the tree under search has and the target did not, sorted
 	counts    map[string]int             // blob sha -> how many lines it holds, read once
 	lines     map[string]map[string]bool // directory -> set of its lines, as changeMoved compares them
+	moved     map[string]map[string]bool // path -> set of its lines with qualifiers stripped
+	written   []string                   // paths the candidate's own work wrote, sorted; nil until read
 }
 
-func newPackageContent(g RevertReader, baseBlobs, targetBlobs, headBlobs map[string]string) *packageContent {
-	return &packageContent{
+func newCandidateContent(g RevertReader, baseBlobs, targetBlobs, headBlobs map[string]string) *candidateContent {
+	return &candidateContent{
 		g:         g,
 		blobs:     headBlobs,
+		base:      baseBlobs,
 		additions: candidateAdditions(baseBlobs, targetBlobs, headBlobs),
 		counts:    map[string]int{},
 		lines:     map[string]map[string]bool{},
+		moved:     map[string]map[string]bool{},
 	}
 }
 
@@ -345,7 +368,7 @@ func candidateAdditions(baseBlobs, targetBlobs, headBlobs map[string]string) []s
 // packageRetired reports whether the tree under search holds no file in
 // filePath's directory: the package is gone from the candidate, rather than one
 // file missing from a package that survives it.
-func (p *packageContent) packageRetired(filePath string) bool {
+func (p *candidateContent) packageRetired(filePath string) bool {
 	dir := path.Dir(filePath)
 	for candidate := range p.blobs {
 		if path.Dir(candidate) == dir {
@@ -356,8 +379,24 @@ func (p *packageContent) packageRetired(filePath string) bool {
 }
 
 // changeMoved reports whether every line of code the change from preImage to
-// postImage added at filePath still exists in filePath's package at the tree
-// under search — content that moved rather than content that was deleted.
+// postImage added at filePath still exists at the tree under search — content
+// that moved rather than content that was deleted.
+//
+// Two readings, the second the first widened. A move within the path's own
+// package lands in a file that package holds, so the directory is asked first
+// (gt-x748o). A move OUT of the package — the thin cobra slice handing its
+// engine to a leaf package, internal/cmd/<x>.go into internal/<leaf>/ — leaves
+// nothing there, and is asked of every file the candidate's own work wrote,
+// anywhere in the tree (gt-bbk1f).
+//
+// The two are compared differently, because what a move preserves differs.
+// Within a package the lines arrive as they were (at most re-indented, which
+// squashLine already forgives), so a bag of them gathered from the package's
+// files answers. Across a package boundary the move rewrites the qualifiers
+// around the code — params.BeadID leaves as opts.BeadID — so the lines are
+// compared with those gone (moveLine), and must be found together in ONE file:
+// a line that survived on its own somewhere in the tree is not the block that
+// arrived somewhere else.
 //
 // Comment lines are not evidence of anything: moving code re-wraps and
 // rewrites the prose around it, so a move cannot be required to reproduce them
@@ -365,20 +404,35 @@ func (p *packageContent) packageRetired(filePath string) bool {
 // and the second edge is the deliberate one: a change whose added lines are
 // all comments has no code to find and is never excused, and a move that also
 // rewrote its code keeps its classification as a revert.
-func (p *packageContent) changeMoved(filePath, preImage, postImage string) (bool, error) {
+func (p *candidateContent) changeMoved(filePath, preImage, postImage string) (bool, error) {
 	added, err := addedLines(p.g, preImage, postImage)
 	if err != nil {
 		return false, err
 	}
-	dir := path.Dir(filePath)
-	code := 0
+	var code []string // the change's added lines, whitespace squashed
 	for line := range added {
 		squashed := squashLine(line)
 		if squashed == "" || isComment(squashed) {
 			continue
 		}
-		code++
-		found, err := p.hasLine(dir, squashed)
+		code = append(code, squashed)
+	}
+	if len(code) == 0 {
+		return false, nil
+	}
+	inPackage, err := p.survivesInPackage(filePath, code)
+	if err != nil || inPackage {
+		return inPackage, err
+	}
+	return p.survivesInWrittenFile(filePath, code)
+}
+
+// survivesInPackage reports whether every line in code is held by a file
+// directly in filePath's directory at the tree under search.
+func (p *candidateContent) survivesInPackage(filePath string, code []string) (bool, error) {
+	dir := path.Dir(filePath)
+	for _, line := range code {
+		found, err := p.hasLine(dir, line)
 		if err != nil {
 			return false, err
 		}
@@ -386,12 +440,78 @@ func (p *packageContent) changeMoved(filePath, preImage, postImage string) (bool
 			return false, nil
 		}
 	}
-	return code > 0, nil
+	return true, nil
+}
+
+// survivesInWrittenFile reports whether one file the candidate's own work
+// wrote elsewhere in the tree holds a copy of every line in code, each
+// compared with the qualifiers a move rewrites taken out (moveLine).
+func (p *candidateContent) survivesInWrittenFile(filePath string, code []string) (bool, error) {
+	for _, dest := range p.writtenPaths() {
+		if dest == filePath {
+			continue
+		}
+		lines, err := p.movedLines(dest)
+		if err != nil {
+			return false, err
+		}
+		holds := true
+		for _, line := range code {
+			if !lines[moveLine(line)] {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// writtenPaths returns the paths the candidate's own work wrote: the tree under
+// search holds them with content the merge base does not have. A path the
+// candidate left alone — including one the target moved on past a stale
+// checkout without the candidate touching it — carries the content it started
+// from, so nothing the candidate moved can have landed on it. That is also
+// what keeps the deletion of a block boilerplate repeats from being answered by
+// a file nobody wrote, where those lines have always been.
+func (p *candidateContent) writtenPaths() []string {
+	if p.written == nil {
+		p.written = []string{}
+		for filePath, blob := range p.blobs {
+			if p.base[filePath] != blob {
+				p.written = append(p.written, filePath)
+			}
+		}
+		sort.Strings(p.written)
+	}
+	return p.written
+}
+
+// movedLines indexes the lines of one written file with moveLine, once for the
+// whole scan.
+func (p *candidateContent) movedLines(filePath string) (map[string]bool, error) {
+	if lines, read := p.moved[filePath]; read {
+		return lines, nil
+	}
+	content, err := p.g.BlobContent(p.blobs[filePath])
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", filePath, err)
+	}
+	lines := make(map[string]bool)
+	for _, line := range strings.Split(content, "\n") {
+		if moved := moveLine(line); moved != "" {
+			lines[moved] = true
+		}
+	}
+	p.moved[filePath] = lines
+	return lines, nil
 }
 
 // hasLine reports whether any file directly in dir holds a line that squashLine
 // reduces to squashed.
-func (p *packageContent) hasLine(dir, squashed string) (bool, error) {
+func (p *candidateContent) hasLine(dir, squashed string) (bool, error) {
 	lines, ok := p.lines[dir]
 	if !ok {
 		var err error
@@ -405,7 +525,7 @@ func (p *packageContent) hasLine(dir, squashed string) (bool, error) {
 
 // readDir indexes the lines of every file directly in dir at the tree under
 // search, once per directory for the whole scan.
-func (p *packageContent) readDir(dir string) (map[string]bool, error) {
+func (p *candidateContent) readDir(dir string) (map[string]bool, error) {
 	lines := make(map[string]bool)
 	for filePath, blob := range p.blobs {
 		if path.Dir(filePath) != dir {
@@ -435,7 +555,7 @@ func (p *packageContent) readDir(dir string) (map[string]bool, error) {
 // and this is git's rename, whatever directory it lands in (gt-mdyds).
 //
 // blob is the content the path held in the tree the candidate deleted it from.
-func (p *packageContent) changeRenamed(filePath, blob string) (bool, error) {
+func (p *candidateContent) changeRenamed(filePath, blob string) (bool, error) {
 	source, err := p.lineCount(blob)
 	if err != nil || source == 0 {
 		return false, err
@@ -483,7 +603,7 @@ func blobsRenamed(g RevertReader, oldBlob, newBlob string, oldLines, newLines in
 
 // lineCount returns how many lines a blob holds, reading each blob once for the
 // whole scan.
-func (p *packageContent) lineCount(blob string) (int, error) {
+func (p *candidateContent) lineCount(blob string) (int, error) {
 	if n, read := p.counts[blob]; read {
 		return n, nil
 	}
@@ -542,6 +662,92 @@ func addedLines(g RevertReader, preImage, postImage string) (map[string]int, err
 // keep its original spacing.
 func squashLine(line string) string {
 	return strings.Join(strings.Fields(line), "")
+}
+
+// moveLine reduces a line to what a move OUT of its package preserves: the
+// squashLine reduction, with every selector chain collapsed to the name it
+// ends on. Crossing a package boundary rewrites what stands in front of the
+// dot — a local variable or receiver renamed on the way (params.BeadID leaves
+// as opts.BeadID), a package's own type arriving exported, a symbol the new
+// package reaches for gaining that package's name, and the reverse for the one
+// it left (gt-bbk1f).
+func moveLine(line string) string {
+	return stripQualifiers(squashLine(line))
+}
+
+// stripQualifiers rewrites every identifier chain (a.b.c) to the name it ends
+// on, leaving string literals and runes alone: a path, a format string or a
+// shell command carries meaning a chain of selectors does not, and rewriting
+// text inside one would compare two different strings as equal. A number does
+// not start an identifier, so a float is not a chain: 1.5 stays 1.5.
+func stripQualifiers(line string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		if c := line[i]; c == '"' || c == '`' || c == '\'' {
+			end := literalEnd(line, i)
+			b.WriteString(line[i:end])
+			i = end
+			continue
+		}
+		name := identifierAt(line, i)
+		if name == "" {
+			b.WriteByte(line[i])
+			i++
+			continue
+		}
+		last, end := name, i+len(name)
+		for end < len(line) && line[end] == '.' {
+			next := identifierAt(line, end+1)
+			if next == "" {
+				break
+			}
+			last, end = next, end+1+len(next)
+		}
+		b.WriteString(last)
+		i = end
+	}
+	return b.String()
+}
+
+// identifierAt returns the identifier starting at i, or "" when i does not
+// start one. Only ASCII: an identifier in another script does not start one
+// here, so its bytes pass through untouched, which costs a match rather than
+// inventing one.
+func identifierAt(s string, i int) string {
+	if i >= len(s) || !isIdentStart(s[i]) {
+		return ""
+	}
+	j := i + 1
+	for j < len(s) && isIdentChar(s[j]) {
+		j++
+	}
+	return s[i:j]
+}
+
+// literalEnd returns the index just past the string literal or rune starting
+// at i. A backquoted string has no escapes; the others take a backslash, which
+// is what keeps the quote it escapes from ending the literal.
+func literalEnd(s string, i int) int {
+	quote := s[i]
+	for j := i + 1; j < len(s); {
+		switch {
+		case s[j] == '\\' && quote != '`':
+			j += 2
+		case s[j] == quote:
+			return j + 1
+		default:
+			j++
+		}
+	}
+	return len(s)
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentChar(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
 }
 
 // commentMarkers are the prefixes that start a comment line in the languages
