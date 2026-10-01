@@ -1858,7 +1858,7 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 // clearDoneCheckpoints removes done-cp:* labels from the agent bead. gt done
 // no longer writes them (its push is idempotent under a lease), but agent
 // beads from earlier runs still carry them.
-func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
+func clearDoneCheckpoints(bd beads.Client, agentBeadID string) {
 	if agentBeadID == "" {
 		return
 	}
@@ -1901,14 +1901,44 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 }
 
 // doneStateEnv is what updateAgentStateOnDone reads beyond its arguments:
-// the environment, bd, and the HEAD that review evidence is checked against.
-// The zero value is the real process: os.Getenv, bd on PATH, and git in the
-// process's working directory. A test passes an env map and an in-process
-// bd, so it needs no PATH stub, t.Setenv or chdir and can run in parallel.
+// the environment, the bead stores, and the HEAD that review evidence is
+// checked against. The zero value is the real process: os.Getenv, bd on
+// PATH, and git in the process's working directory. A test passes an env map
+// and beadsfake stores, so it needs no PATH stub, t.Setenv or chdir and can
+// run in parallel.
 type doneStateEnv struct {
-	getenv     func(string) string
-	bd         beads.BDRunner
+	getenv func(string) string
+	// routed opens a store at dir that routes each ID by its prefix; nil is
+	// beads.NewWithBeadsDir.
+	routed func(dir string) beads.Client
+	// source opens the database a hooked bead routes to; nil is
+	// openSourceStore.
+	source sourceStoreOpener
+	// purge removes the closed wisps of the store at dir; nil is bd purge.
+	purge      func(dir, townRoot string)
 	reviewHead func() (string, error)
+}
+
+func (e doneStateEnv) routedAt(dir string) beads.Client {
+	if e.routed == nil {
+		return beads.NewWithBeadsDir(dir, "")
+	}
+	return e.routed(dir)
+}
+
+func (e doneStateEnv) sourceOpener() sourceStoreOpener {
+	if e.source == nil {
+		return openSourceStore
+	}
+	return e.source
+}
+
+func (e doneStateEnv) purgeClosedWisps(dir, townRoot string) {
+	if e.purge == nil {
+		purgeClosedEphemeralBeads(beads.NewWithBeadsDir(dir, ""), townRoot)
+		return
+	}
+	e.purge(dir, townRoot)
 }
 
 func (e doneStateEnv) lookup() func(string) string {
@@ -1979,11 +2009,11 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	default:
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
 	}
-	bd := beads.NewWithBeadsDirAndRunner(beadsPath, "", e.bd)
+	bd := e.routedAt(beadsPath)
 	// agentBd resolves agent beads dual-scope: their canonical (rig-local)
 	// database first, with a town fallback for legacy beads created before
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
-	agentBd := bd.ForAgentBead()
+	agentBd := beads.ForAgentBead(bd)
 
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
@@ -2011,10 +2041,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		// DEFERRED exits preserve the bead: work is paused, not done. The bead
 		// stays open/in_progress so it can be resumed on the next session.
 		// Exception: workflow step beads (*-wfs-*) are always closed — see above.
-		hookBd, _, _ := routedIssueBeadsRun(beadsPath, hookedBeadID, e.bd)
-		if hookBd == nil {
-			hookBd = bd
-		}
+		hookBd, _, _ := routedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
 		if hookedBead, err := hookBd.Show(hookedBeadID); err == nil && !beads.IssueStatus(hookedBead.Status).IsTerminal() {
 			// Guard: never close a rig identity bead. Polecats dispatched with the
 			// rig bead as their hook (via mol-polecat-work) must not close permanent
@@ -2106,7 +2133,7 @@ doneStateUpdate:
 	// is a wisp that gets reaped, it can't verify it was closed and flags the
 	// polecat as crashed. Clearing hook_bead prevents this false positive.
 	emptyHook := ""
-	if err := agentBd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
+	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
 	}
 
@@ -2114,7 +2141,7 @@ doneStateUpdate:
 	// Without this, closed wisps from mol-polecat-work steps etc. accumulate
 	// across sessions and pollute bd ready/list output (hq-6161m).
 	// Best-effort: failures are non-fatal since the work is already done.
-	purgeClosedEphemeralBeads(bd, townRoot)
+	e.purgeClosedWisps(beadsPath, townRoot)
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
 	// for audit purposes.
@@ -2122,8 +2149,8 @@ doneStateUpdate:
 	if exitType != ExitCompleted {
 		doneState = "stuck"
 	}
-	// Use UpdateAgentState to sync both column and description (gt-ulom).
-	if err := agentBd.UpdateAgentState(agentBeadID, doneState); err != nil {
+	// agent_state lives in the description (gt-ulom).
+	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, beads.AgentFieldUpdates{AgentState: &doneState}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
 	}
 

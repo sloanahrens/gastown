@@ -35,13 +35,16 @@ const docAuditTree = `{
 
 // fakeCook is bd's formula engine in memory. Cook prints out, or fails with
 // bd's message msg when msg is set; Bond answers through bond (n counts the
-// bonds from 1), or prints bondOut when bond is nil. Every call is recorded
-// with the site it ran at.
+// bonds from 1), or prints bondOut when bond is nil; Wisp prints wispOut or
+// fails as Cook does. Every call is recorded with the site it ran at.
 type fakeCook struct {
 	out     []byte
 	msg     string
 	bond    func(n int) ([]byte, error)
 	bondOut []byte
+	// show answers formula show; nil fails every one as not found.
+	show    func(formula string) []byte
+	wispOut []byte
 
 	mu    sync.Mutex
 	calls []formulaCall
@@ -118,6 +121,22 @@ func (e fakeCookAt) Bond(proto, beadID string, vars []string) ([]byte, error) {
 		return e.f.bond(n)
 	}
 	return e.f.bondOut, nil
+}
+
+func (e fakeCookAt) FormulaShow(formula string) ([]byte, error) {
+	e.f.record(e.site, "formula show "+formula, nil)
+	if e.f.show == nil {
+		return nil, errors.New("formula not found: " + formula)
+	}
+	return e.f.show(formula), nil
+}
+
+func (e fakeCookAt) Wisp(formula string, vars []string) ([]byte, error) {
+	e.f.record(e.site, "mol wisp "+formula+" --json", vars)
+	if e.f.msg != "" {
+		return nil, errors.New(e.f.msg)
+	}
+	return e.f.wispOut, nil
 }
 
 // polecatChecklistRun answers bd cook with a work formula the size of

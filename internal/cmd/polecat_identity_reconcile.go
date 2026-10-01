@@ -60,7 +60,7 @@ row, so its fields must never be merged in by severity or recency (gt-1361).`,
 		if err != nil {
 			return err
 		}
-		return runReconcile(os.Stdout, nil, townRoot, id, polecatIdentityReconcileApply, polecatIdentityReconcileDeleteOnly)
+		return runReconcile(os.Stdout, reconcileStores{}, townRoot, id, polecatIdentityReconcileApply, polecatIdentityReconcileDeleteOnly)
 	},
 }
 
@@ -106,16 +106,49 @@ func resolveReconcileID(townRoot, rawID, arg string) (string, error) {
 	}
 }
 
-// runReconcile is the testable core of `gt polecat identity reconcile`. run
-// answers its bd calls; nil runs the real bd.
-func runReconcile(out io.Writer, run beads.BDRunner, townRoot, id string, apply, deleteOnly bool) error {
+// reconcileStore is one database as reconcile reads and writes it, with no
+// prefix routing. *beads.Beads from beads.NewRigLocal implements it.
+type reconcileStore interface {
+	GetAgentBeadInStoreOnly(id string) (*beads.Issue, *beads.AgentFields, error)
+	UpdateAgentDescriptionFields(id string, updates beads.AgentFieldUpdates) error
+	DeleteLegacyAgentBead(id string) error
+}
+
+// reconcileStores opens the databases reconcile works in. The zero value is
+// bd; unit tests answer from fakes.
+type reconcileStores struct {
+	// local opens the database of dir alone; nil is beads.NewRigLocal.
+	local func(dir string) reconcileStore
+	// exists reports whether ref is a bead, routing by prefix from the
+	// town; nil is a bd show from townRoot.
+	exists func(townRoot, ref string) bool
+}
+
+func (s reconcileStores) localAt(dir string) reconcileStore {
+	if s.local == nil {
+		return beads.NewRigLocal(dir)
+	}
+	return s.local(dir)
+}
+
+func (s reconcileStores) beadExists(townRoot, ref string) bool {
+	if s.exists == nil {
+		_, err := beads.NewWithBeadsDir(townRoot, "").Show(ref)
+		return err == nil
+	}
+	return s.exists(townRoot, ref)
+}
+
+// runReconcile is the testable core of `gt polecat identity reconcile`, in
+// the databases stores opens.
+func runReconcile(out io.Writer, stores reconcileStores, townRoot, id string, apply, deleteOnly bool) error {
 	townBeadsDir := beads.GetTownBeadsPath(townRoot)
 	rigBeadsDir := beads.ResolveBeadsDirForID(townBeadsDir, id)
 	if beads.ResolveBeadsDir(rigBeadsDir) == beads.ResolveBeadsDir(townBeadsDir) {
 		return fmt.Errorf("%s routes to the town database; nothing to reconcile", id)
 	}
-	rigBd := beads.NewRigLocalWithRunner(filepath.Dir(rigBeadsDir), run)
-	townBd := beads.NewRigLocalWithRunner(townRoot, run)
+	rigBd := stores.localAt(filepath.Dir(rigBeadsDir))
+	townBd := stores.localAt(townRoot)
 
 	// GetAgentBeadInStoreOnly, never GetAgentBead/Show: bd's own per-ID
 	// commands (show, delete) fall back to routes.jsonl prefix routing
@@ -158,10 +191,7 @@ func runReconcile(out io.Writer, run beads.BDRunner, townRoot, id string, apply,
 
 	var updates beads.AgentFieldUpdates
 	if !deleteOnly {
-		exists := func(ref string) bool {
-			_, err := beads.NewWithBeadsDirAndRunner(townRoot, "", run).Show(ref)
-			return err == nil
-		}
+		exists := func(ref string) bool { return stores.beadExists(townRoot, ref) }
 		var rows []beads.ReconcileRow
 		updates, rows = beads.MergeLegacyAgentBead(rigIssue, townIssue, exists)
 

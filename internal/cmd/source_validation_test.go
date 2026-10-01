@@ -1,15 +1,13 @@
 package cmd
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestRoutedIssueBeadsUsesTownRoutesForCustomPrefix(t *testing.T) {
@@ -35,64 +33,39 @@ func TestSourceRouteContextNamesCurrentAndRoutedDB(t *testing.T) {
 	}
 }
 
-// submitSourceBD answers bd the way the two stores in a routed town do: the
-// current rig's store holds a mirror of bd-source, the owner's store the real
-// one (or nothing, when ownerMissing). Every call is recorded as
-// "<BEADS_DIR>\t<args>".
-type submitSourceBD struct {
+// submitSourceStores are the two stores in a routed town: the current rig's
+// holds a mirror of bd-source, the owner's the real one (or nothing, when
+// ownerMissing). open opens them by beads directory.
+type submitSourceStores struct {
+	current, owner                 *beadsfake.Fake
 	currentBeadsDir, ownerBeadsDir string
-	ownerMissing                   bool
-
-	mu    sync.Mutex
-	calls []string
 }
 
-type submitSourceBDExit int
-
-func (e submitSourceBDExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
-func (e submitSourceBDExit) ExitCode() int { return int(e) }
-
-func (f *submitSourceBD) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	args := c.Args
-	if len(args) > 0 && args[0] == "--allow-stale" {
-		args = args[1:]
+func newSubmitSourceStores(currentBeadsDir, ownerBeadsDir string, ownerMissing bool) *submitSourceStores {
+	s := &submitSourceStores{current: beadsfake.New(), owner: beadsfake.New(), currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir}
+	s.current.Seed(beads.Issue{ID: "bd-source", Title: "current mirror", Status: "open", Priority: 1, Type: "task"})
+	if !ownerMissing {
+		s.owner.Seed(beads.Issue{ID: "bd-source", Title: "owner source", Status: "open", Priority: 1, Type: "task"})
 	}
-	beadsDir := ""
-	for _, kv := range c.Env {
-		if v, ok := strings.CutPrefix(kv, "BEADS_DIR="); ok {
-			beadsDir = v
-		}
-	}
-	f.mu.Lock()
-	f.calls = append(f.calls, beadsDir+"\t"+strings.Join(args, " "))
-	f.mu.Unlock()
-	switch {
-	case len(args) >= 2 && args[0] == "show" && args[1] == "bd-source":
-		switch {
-		case beadsDir == f.currentBeadsDir:
-			return []byte(`[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task"}]`), nil, nil
-		case beadsDir == f.ownerBeadsDir && !f.ownerMissing:
-			return []byte(`[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task"}]`), nil, nil
-		}
-		return nil, []byte("Issue not found in " + beadsDir), submitSourceBDExit(1)
-	case len(args) >= 1 && args[0] == "close":
-		return nil, nil, nil
-	}
-	return nil, []byte("unexpected bd command: " + strings.Join(args, " ")), submitSourceBDExit(1)
+	return s
 }
 
-func (f *submitSourceBD) log() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return strings.Join(f.calls, "\n") + "\n"
+func (s *submitSourceStores) open(_, beadsDir string) beads.Client {
+	switch beadsDir {
+	case s.currentBeadsDir:
+		return s.current
+	case s.ownerBeadsDir:
+		return s.owner
+	}
+	return beadsfake.New()
 }
 
 func TestResolveSubmitSourceIssueIgnoresCurrentRigMirror(t *testing.T) {
 	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir}
+	stores := newSubmitSourceStores(currentBeadsDir, ownerBeadsDir, false)
 
-	source, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
+	source, err := resolveSubmitSourceIssueIn(workDir, "bd-source", stores.open)
 	if err != nil {
 		t.Fatalf("resolveSubmitSourceIssue: %v", err)
 	}
@@ -107,9 +80,9 @@ func TestResolveSubmitSourceIssueIgnoresCurrentRigMirror(t *testing.T) {
 func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
 	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir, ownerMissing: true}
+	stores := newSubmitSourceStores(currentBeadsDir, ownerBeadsDir, true)
 
-	_, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
+	_, err := resolveSubmitSourceIssueIn(workDir, "bd-source", stores.open)
 	if err == nil {
 		t.Fatal("resolveSubmitSourceIssue succeeded, want routed owner lookup failure")
 	}
@@ -124,9 +97,9 @@ func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
 func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir}
+	stores := newSubmitSourceStores(currentBeadsDir, ownerBeadsDir, false)
 
-	source, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
+	source, err := resolveSubmitSourceIssueIn(workDir, "bd-source", stores.open)
 	if err != nil {
 		t.Fatalf("resolveSubmitSourceIssue: %v", err)
 	}
@@ -137,10 +110,12 @@ func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 		t.Fatalf("routed source close: %v", err)
 	}
 
-	log := bd.log()
-	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
-	assertBDLogContains(t, log, ownerBeadsDir, "close bd-source")
-	assertBDLogNotContains(t, log, currentBeadsDir, "close bd-source")
+	if is, err := stores.owner.Show("bd-source"); err != nil || is.Status != "closed" {
+		t.Errorf("owner bd-source = %+v, %v; want closed", is, err)
+	}
+	if is, err := stores.current.Show("bd-source"); err != nil || is.Status != "open" {
+		t.Errorf("current-rig mirror = %+v, %v; want untouched", is, err)
+	}
 }
 
 func setupRoutedSourceTestTown(t *testing.T) (workDir, currentBeadsDir, ownerBeadsDir string) {

@@ -66,12 +66,12 @@ func moleculeBurn(e moleculeLifecycleEnv, args []string) (retErr error) {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.NewWithBeadsDirAndRunner(workDir, "", e.bd)
+	b := e.storeAt(workDir)
 
 	// Find agent's pinned bead (handoff bead)
 	role := extractRoleFromIdentity(target)
 
-	handoff, err := b.FindHandoffBead(role)
+	handoff, err := beads.FindHandoffBead(b, role)
 	if err != nil {
 		return fmt.Errorf("finding handoff bead: %w", err)
 	}
@@ -204,12 +204,12 @@ func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.NewWithBeadsDirAndRunner(workDir, "", e.bd)
+	b := e.storeAt(workDir)
 
 	// Find agent's pinned bead (handoff bead)
 	role := extractRoleFromIdentity(target)
 
-	handoff, err := b.FindHandoffBead(role)
+	handoff, err := beads.FindHandoffBead(b, role)
 	if err != nil {
 		return fmt.Errorf("finding handoff bead: %w", err)
 	}
@@ -575,19 +575,36 @@ func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, err
 // moleculeLifecycleEnv is what gt mol burn and squash read from the process
 // and their flags: the cwd, the town, the environment role detection reads,
 // the local beads workspace, how bd is reached, and where output goes.
-// realMoleculeLifecycleEnv is the running gt's; tests give a town and an
-// in-process bd, so they need no stub on PATH, chdir, Setenv or flag globals.
+// realMoleculeLifecycleEnv is the running gt's; tests give a town and a
+// beadsfake store, so they need no stub on PATH, chdir, Setenv or flag
+// globals.
 type moleculeLifecycleEnv struct {
 	getwd        func() (string, error)
 	findTown     func() (string, error)
 	getenv       func(string) string
 	beadsWorkDir func() (string, error)
-	bd           beads.BDRunner
-	out, errOut  io.Writer
-	json         bool
-	jitter       string
-	noDigest     bool
-	summary      string
+	// store opens the bead store at the beads workspace; nil is bd, routing
+	// by prefix.
+	store       func(workDir string) moleculeStore
+	out, errOut io.Writer
+	json        bool
+	jitter      string
+	noDigest    bool
+	summary     string
+}
+
+// moleculeStore is the store gt mol burn and squash work in: the shared
+// Client and the audited molecule detach. *beads.Beads implements it.
+type moleculeStore interface {
+	beads.Client
+	DetachMoleculeWithAudit(id string, opts beads.DetachOptions) (*beads.Issue, error)
+}
+
+func (e moleculeLifecycleEnv) storeAt(workDir string) moleculeStore {
+	if e.store == nil {
+		return beads.NewWithBeadsDir(workDir, "")
+	}
+	return e.store(workDir)
 }
 
 func realMoleculeLifecycleEnv() moleculeLifecycleEnv {
