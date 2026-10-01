@@ -179,7 +179,7 @@ func (d *Delivery) Deliver(ctx context.Context, sessionName, message, sender str
 		}
 		// Delivery succeeded; now check the target actually acted on it.
 		if warning := d.consumptionWarning(sessionName, ModeImmediate); warning != "" {
-			fmt.Fprint(d.Stderr, warning)
+			fmt.Fprintf(d.Stderr, "%s", warning)
 		}
 		return nil
 	}
@@ -310,7 +310,7 @@ func (d *Delivery) waitIdle(ctx context.Context, sessionName, message, sender st
 				// gap immediate mode closed for gt-eigw). Warn rather than
 				// let a false idle-read report a silent success.
 				if warning := d.consumptionWarning(sessionName, ModeWaitIdle); warning != "" {
-					fmt.Fprint(d.Stderr, warning)
+					fmt.Fprintf(d.Stderr, "%s", warning)
 				}
 			}
 			return deliverErr
@@ -417,7 +417,7 @@ func (d *Delivery) Watch(ctx context.Context, sessionName string) {
 				// Same false-idle gap as the direct-delivery path above: the
 				// watcher's own WaitForIdle read the target as idle, but that
 				// does not mean the target acted on what it was just handed.
-				fmt.Fprint(d.Stderr, "idle-watcher: "+warning)
+				fmt.Fprintf(d.Stderr, "idle-watcher: %s", warning)
 			}
 			return
 		}
