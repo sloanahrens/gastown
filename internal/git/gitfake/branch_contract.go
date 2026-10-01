@@ -105,6 +105,7 @@ func newWtFixture(t *testing.T, env BranchEnv) (*fixture, BranchRepo) {
 // correct it to what git does, then make the fake copy it.
 func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	t.Run("TopLevel and GitDir for a clone, a subdirectory and a linked worktree", func(t *testing.T) {
+		t.Parallel()
 		env := newEnv(t)
 		fx, g := newWtFixture(t, env)
 		top, err := g.TopLevel()
@@ -146,6 +147,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("config set and get", func(t *testing.T) {
+		t.Parallel()
 		_, g := newWtFixture(t, newEnv(t))
 		if v, err := g.ConfigGet("beads.role"); err != nil || v != "" {
 			t.Errorf("unset key = %q, %v", v, err)
@@ -159,6 +161,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("refs, branches and the default branch", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		for ref, want := range map[string]bool{
 			"refs/remotes/origin/main": true, "origin/" + fixtureBranch: true, "main": true,
@@ -217,6 +220,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("fetch, push and remote listings", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		env := fx.env.(BranchEnv)
 		later := env.Commit(t, fx.origin, "polecat/x", "x", map[string]string{"x.txt": "x\n"})
@@ -268,6 +272,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("lease-guarded remote delete, fetch --prune and gc", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		if _, err := g.Rev("origin/" + fixtureBranch); err != nil {
 			t.Fatalf("clone has no origin/%s: %v", fixtureBranch, err)
@@ -316,6 +321,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("worktrees: add from a ref, add existing, list, move, remove", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		a := filepath.Join(fx.root, "wts", "a")
 		if err := g.WorktreeAddFromRef(a, "polecat/a", "origin/main"); err != nil {
@@ -368,6 +374,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("checkout, reset and clean keep untracked files as git does", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		writeFile(t, filepath.Join(fx.clone, ".gitignore"), "ignored.txt\n")
 		fx.env.(BranchEnv).CommitWorktree(t, fx.clone, "ignore")
@@ -445,6 +452,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("stashes count on their own branch", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		env := fx.env.(BranchEnv)
 		writeFile(t, filepath.Join(fx.clone, "a.txt"), "stash me\n")
@@ -464,6 +472,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("history queries: Cherry, FirstParentContains, CountCommitsBehind", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		env := fx.env.(BranchEnv)
 		replay := env.Commit(t, fx.origin, "main", "replay b", map[string]string{"b.txt": "work\n"})
@@ -487,6 +496,7 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 	})
 
 	t.Run("preservation verdicts", func(t *testing.T) {
+		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))
 		env := fx.env.(BranchEnv)
 		wtPath := filepath.Join(fx.root, "pc")
