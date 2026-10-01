@@ -1,13 +1,13 @@
-package cmd
+package slot
 
 import (
 	"strings"
 	"testing"
 )
 
-// TestSlotRunNiceness covers gt-93m1: gate-class holders keep normal CPU
+// TestRunNiceness covers gt-93m1: gate-class holders keep normal CPU
 // priority, everyone else is niced, and --nice overrides both.
-func TestSlotRunNiceness(t *testing.T) {
+func TestRunNiceness(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		role string
@@ -24,8 +24,8 @@ func TestSlotRunNiceness(t *testing.T) {
 		{"gastown/landing", 7, 7},
 	}
 	for _, c := range cases {
-		if got := slotRunNiceness(c.role, c.flag); got != c.want {
-			t.Errorf("slotRunNiceness(%q, %d) = %d, want %d", c.role, c.flag, got, c.want)
+		if got := runNiceness(c.role, c.flag); got != c.want {
+			t.Errorf("runNiceness(%q, %d) = %d, want %d", c.role, c.flag, got, c.want)
 		}
 	}
 }

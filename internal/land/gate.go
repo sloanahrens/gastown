@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // Gate runs the checks a tree must pass. It is the one seam both sides of a
@@ -119,10 +120,11 @@ type Step struct {
 	// gt done and the refinery already share). Retries need ctx to carry a
 	// deadline; without one the first attempt is final.
 	LockRetry bool
-	// Wrap, when set, rewrites the argv before it runs. Land's caller uses
-	// it to hold the container slot around the test step
-	// (`gt slot run --role <r> --`) until the suite is Docker-free.
-	Wrap func(argv []string) []string
+	// SlotRole, when set, runs this step with the town's container-gate slot
+	// held in process for that role (see CommandGate.TownRoot): the hold the
+	// step's argv used to be wrapped in a second `gt` process for. See
+	// WithSlot, which marks the step that needs it.
+	SlotRole string
 }
 
 // runFunc runs argv in dir with env added, writing combined output to out.
@@ -137,9 +139,17 @@ type CommandGate struct {
 	LogDir string
 	// Out, when set, streams every step's output as it runs.
 	Out io.Writer
+	// TownRoot is the town whose container-gate slot a step with SlotRole
+	// holds. It is read only for such a step, and a step with a SlotRole and
+	// no TownRoot is an error rather than a silent unguarded run.
+	TownRoot string
 
 	run        runFunc         // nil means realRun
 	lockDelays []time.Duration // nil means lintlock.RetryDelay
+	// holdSlot takes the container-gate slot a step with SlotRole runs under
+	// and returns the release to call when the step has ended, with its exit
+	// status (nil when the step never ran). nil means the town's real slot.
+	holdSlot func(ctx context.Context, townRoot, role string) (release func(exitCode *int), err error)
 }
 
 // GoGate is the Go rigs' default gate: `make lint`, `go build ./...`,
@@ -229,8 +239,9 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 // LandGate is the gate Land runs on the merged tree, one command from the
 // rig's settings: merge_queue.gate when set, else `make gate` when the
 // Makefile has that target, else `make test`. Only the `make test` fallback
-// needs the container slot; its step is named "test", so WithSlot wraps it
-// and nothing else. A configured gate that needs a slot wraps itself.
+// needs the container slot; its step is named "test", so WithSlot puts that
+// step under the slot and nothing else. A configured gate that needs a slot
+// holds it itself.
 func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
 	if mq != nil && strings.TrimSpace(mq.Gate) != "" {
 		return CommandGate{Steps: []Step{{Name: "gate", Command: strings.TrimSpace(mq.Gate), LockRetry: true}}}
@@ -260,21 +271,94 @@ func optsIntoContainers(cmd string) bool {
 }
 
 // WithSlot returns g with its test step run under the town's container-gate
-// slot (`gt slot run --role <role> -- ...`). Land's caller must use it for the
-// full tier until the suite is Docker-free: the container tests start only
-// under a held slot.
-func WithSlot(g CommandGate, gtPath, role string) CommandGate {
+// slot. Land's caller must use it for the full tier until the suite is
+// Docker-free: the container tests start only under a held slot.
+//
+// The hold is taken here, in this process (holdTownSlot), rather than by
+// wrapping the step's argv in `gt slot run`: the gate spawns the step itself,
+// with this process's writers and its own kill-on-deadline, so the slot and
+// the command it guards stay in one place (gt-638go.12).
+func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 	steps := make([]Step, len(g.Steps))
 	copy(steps, g.Steps)
 	for i := range steps {
 		if steps[i].Name == "test" {
-			steps[i].Wrap = func(argv []string) []string {
-				return append([]string{gtPath, "slot", "run", "--role", role, "--"}, argv...)
-			}
+			steps[i].SlotRole = role
 		}
 	}
 	g.Steps = steps
+	g.TownRoot = townRoot
 	return g
+}
+
+// takeSlot holds the container-gate slot a step runs under, returning the
+// release to call when the step has ended. A step with no SlotRole gets a
+// no-op release, so callers call what they are handed without asking.
+func (g CommandGate) takeSlot(ctx context.Context, role string) (func(exitCode *int), error) {
+	if role == "" {
+		return func(*int) {}, nil
+	}
+	if g.TownRoot == "" {
+		return nil, fmt.Errorf("gate step holds the container-gate slot as %q with no TownRoot to hold it in", role)
+	}
+	hold := g.holdSlot
+	if hold == nil {
+		hold = holdTownSlot
+	}
+	return hold(ctx, g.TownRoot, role)
+}
+
+// holdTownSlot is the real container-gate hold: the town's pool, and a wait
+// capped by the gate's own deadline so a canceled landing does not sit on a
+// slot for the slot's full default first.
+//
+// It always locks for real (slot.AcquirePoolReal) instead of taking the
+// reentrant fast path: its caller is the daemon's landing worker, which
+// outlives every hold it takes, so a marker naming that very role may be
+// inherited from a predecessor process whose flock is long gone (gt-off9).
+func holdTownSlot(ctx context.Context, townRoot, role string) (func(exitCode *int), error) {
+	timeout, err := slotWaitTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h, err := slot.AcquirePoolReal(townRoot, role, timeout, slot.PoolForTown(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	return func(exitCode *int) {
+		if exitCode == nil {
+			_ = h.Release()
+			return
+		}
+		_ = h.ReleaseWithExit(*exitCode)
+	}, nil
+}
+
+// slotWaitTimeout is how long a gate step waits for the container-gate slot:
+// the slot's own default, capped by ctx's remaining time when it has a
+// deadline. The result is always positive — slot.Acquire reads a timeout <= 0
+// as "wait forever", which an expired context must not turn into.
+//
+// The wait itself does not observe cancellation between polls; a caller that
+// must stop waiting is bounded by this cap and by Acquire's own polling
+// against a pool whose holder has died.
+func slotWaitTimeout(ctx context.Context) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	timeout := slot.DefaultRunTimeout
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return timeout, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	if remaining < timeout {
+		timeout = remaining
+	}
+	return timeout, nil
 }
 
 // Run runs each step in dir and stops at the first that does not exit zero.
@@ -296,10 +380,12 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 	}
 	var res GateResult
 	for _, s := range g.Steps {
-		argv := []string{"sh", "-c", s.Command}
-		if s.Wrap != nil {
-			argv = s.Wrap(argv)
+		release, err := g.takeSlot(ctx, s.SlotRole)
+		if err != nil {
+			res.Err = fmt.Errorf("gate step %s (%s) could not take the container-gate slot: %w", s.Name, s.Command, err)
+			return res
 		}
+		argv := []string{"sh", "-c", s.Command}
 		var buf bytes.Buffer
 		start := time.Now()
 		attempt := func() (int, error) {
@@ -319,7 +405,6 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 			return run(ctx, dir, s.Env, argv, io.MultiWriter(writers...))
 		}
 		var code int
-		var err error
 		if s.LockRetry {
 			lintlock.RetryWithDelays(ctx, g.lockDelays, func() lintlock.Attempt {
 				code, err = attempt()
@@ -351,9 +436,13 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 			BudgetOverruns: parseBudgetOverruns(out),
 		})
 		if err != nil {
+			// The step never ran, so there is no exit status for the hold to
+			// carry: release it open-ended rather than inventing one.
+			release(nil)
 			res.Err = fmt.Errorf("gate step %s (%s) did not run: %w", s.Name, s.Command, err)
 			return res
 		}
+		release(&code)
 		if code != 0 && s.LockRetry && lintlock.Unfinished(out) {
 			// Still contended (or stopped at its own timeout) after every
 			// retry: nothing was linted, so this is not a verdict on the tree.
