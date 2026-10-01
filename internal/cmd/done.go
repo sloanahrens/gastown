@@ -2328,7 +2328,12 @@ func findAssignedBeadsForAgent(workDir, agentID string) []string {
 	return nil
 }
 
-func queryAssignedBeads(bd *beads.Beads, agentID string) []*beads.Issue {
+// issueLister is the slice of *beads.Beads queryAssignedBeads reads.
+type issueLister interface {
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+}
+
+func queryAssignedBeads(bd issueLister, agentID string) []*beads.Issue {
 	hooked, err := bd.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
 		Assignee: agentID,
@@ -2368,7 +2373,7 @@ func assignedIssueIDs(assigned []*beads.Issue) []string {
 // branch guard and the hook fallback silently no-op'd (same class of bug as
 // gt-pftz in the close path). Hooked wins over in_progress when both exist.
 // Returns empty string if no assignment bead is found.
-func findHookedBeadForAgent(bd *beads.Beads, agentID string) string {
+func findHookedBeadForAgent(bd issueLister, agentID string) string {
 	issueID, _ := selectAssignedIssue("", assignedIssueIDs(queryAssignedBeads(bd, agentID)))
 	return issueID
 }
