@@ -25,8 +25,9 @@ type deliveryTmux struct {
 
 	mu          sync.Mutex
 	waits       int
-	idleOnWait  int   // the WaitForIdle call (1-based) on which the target goes idle; 0 never
-	submitErr   error // returned by NudgeSessionWithOpts after the text is sent
+	idleOnWait  int         // the WaitForIdle call (1-based) on which the target goes idle; 0 never
+	onWait      func(n int) // called with each WaitForIdle call's number (1-based)
+	submitErr   error       // returned by NudgeSessionWithOpts after the text is sent
 	consumption tmux.InputConsumption
 	agent       string
 	preset      *config.AgentPresetInfo
@@ -55,8 +56,11 @@ func (f *deliveryTmux) WaitForIdle(session string, timeout time.Duration) error 
 	}
 	f.mu.Lock()
 	f.waits++
-	becomeIdle := f.idleOnWait != 0 && f.waits == f.idleOnWait
+	n, becomeIdle, onWait := f.waits, f.idleOnWait != 0 && f.waits == f.idleOnWait, f.onWait
 	f.mu.Unlock()
+	if onWait != nil {
+		onWait(n)
+	}
 	if becomeIdle {
 		f.SetIdle(session, true)
 	}

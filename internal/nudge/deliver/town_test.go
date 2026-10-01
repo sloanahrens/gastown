@@ -185,24 +185,32 @@ func TestDeliveryStopsWhenContextEndsWhileWaitingForIdle(t *testing.T) {
 	}
 }
 
-// TestDeliveryStopsWhenContextEndsWhileWatching: a deadline inside the
-// post-queue watch ends it and reports the deadline, leaving the nudge queued
-// for the poller, as a killed `gt nudge` did.
+// TestDeliveryStopsWhenContextEndsWhileWatching: a context that ends inside
+// the post-queue watch ends it and is reported, leaving the nudge queued for
+// the poller, as a killed `gt nudge` did.
 func TestDeliveryStopsWhenContextEndsWhileWatching(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // busy
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ft.onWait = func(n int) {
+		if n == 2 { // the watcher's first poll; the first wait was wait-idle's
+			cancel()
+		}
+	}
 	town := t.TempDir()
 	d := testDelivery(ft, town, &pollerLog{}, &bytes.Buffer{})
 	d.WatchTimeout = time.Hour
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
-	defer cancel()
 
 	err := d.Deliver(ctx, deliveryTarget, "m", "mayor")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Deliver = %v, want context.DeadlineExceeded", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Deliver = %v, want context.Canceled", err)
 	}
 	if n := nudge.QueueLen(town, deliveryTarget); n != 1 {
 		t.Errorf("queue = %d, want the nudge left queued", n)
+	}
+	if got := ft.Sent(deliveryTarget); len(got) != 0 {
+		t.Errorf("sent = %q, want nothing", got)
 	}
 }
 
