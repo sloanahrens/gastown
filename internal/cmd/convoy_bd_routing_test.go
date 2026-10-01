@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // convoyCLIFixture is a convoyCLI over a temp town with an in-process bd.
@@ -16,6 +19,7 @@ type convoyCLIFixture struct {
 	c       convoyCLI
 	root    string
 	bd      *inprocBD
+	town    *beadsfake.Fake
 	rec     *callsBD
 	out     *bytes.Buffer
 	ensured []string // beads dirs the convoy types were registered in
@@ -31,20 +35,31 @@ func newConvoyCLIFixture(t *testing.T, answer func(f *inprocBD, cmd string, args
 		f.logLine(cmd + " " + strings.Join(args, " "))
 		return answer(f, cmd, args)
 	}}
-	fx := &convoyCLIFixture{root: root, bd: bd, rec: &callsBD{bd: bd}, out: &bytes.Buffer{}}
+	fx := &convoyCLIFixture{root: root, bd: bd, town: beadsfake.New(beadsfake.WithPrefix("hq")), rec: &callsBD{bd: bd}, out: &bytes.Buffer{}}
 	fx.c = convoyCLI{
 		townRoot: func() (string, error) { return root, nil },
 		bd:       fx.rec.run,
-		out:      fx.out,
-		warn:     io.Discard,
-		entropy:  strings.NewReader("abcde"),
-		sender:   func() string { return "mayor/" },
+		townDB: func(townBeads string) beads.Client {
+			if townBeads != root {
+				t.Errorf("town database opened at %q, want the town root %q", townBeads, root)
+			}
+			return fx.town
+		},
+		out:     fx.out,
+		warn:    io.Discard,
+		entropy: strings.NewReader("abcde"),
+		sender:  func() string { return "mayor/" },
 		ensureTypes: func(beadsDir string) error {
 			fx.ensured = append(fx.ensured, beadsDir)
 			return nil
 		},
 	}
 	return fx
+}
+
+// seedConvoy stores the convoy hq-cv-test in the town database.
+func (fx *convoyCLIFixture) seedConvoy(status string) {
+	fx.town.Seed(beads.Issue{ID: "hq-cv-test", Title: "Test Convoy", Status: status, Labels: []string{"gt:convoy"}})
 }
 
 // assertAllPinnedToTown fails unless every bd call ran from the town root
@@ -146,16 +161,11 @@ func TestConvoyCreate_UsesTrackingHelper(t *testing.T) {
 	if err := fx.c.create(convoyCreateOptions{}, []string{"test-convoy", "mo-2sh.1"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if !strings.Contains(fx.bd.log(), "create --type=task --id=hq-cv-pqrst --title=test-convoy") {
-		t.Errorf("convoy hq-cv-pqrst not created; bd log:\n%s", fx.bd.log())
+	if c, err := fx.town.Show("hq-cv-pqrst"); err != nil || c.Title != "test-convoy" || strings.Join(c.Labels, ",") != "gt:convoy" {
+		t.Errorf("convoy hq-cv-pqrst not created as test-convoy/gt:convoy: %+v, %v", c, err)
 	}
 	if !fx.bd.logged("dep add hq-cv-pqrst mo-2sh.1 --type=tracks") {
 		t.Errorf("tracks edge not recorded; bd log:\n%s", fx.bd.log())
-	}
-	for _, c := range fx.rec.recorded() {
-		if len(c.Args) > 0 && c.Args[0] == "create" && callEnv(c, "BEADS_DIR") != filepath.Join(fx.root, ".beads") {
-			t.Errorf("create BEADS_DIR = %q, want the town database", callEnv(c, "BEADS_DIR"))
-		}
 	}
 }
 
@@ -179,11 +189,12 @@ func TestConvoyCreate_RegistersTypesInTownBeadsDir(t *testing.T) {
 func TestConvoyAdd_UsesTrackingHelper(t *testing.T) {
 	t.Parallel()
 	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+	fx.seedConvoy("open")
 
 	if err := fx.c.add([]string{"hq-cv-test", "ag-95s.1", "ag-95s.2"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	for _, want := range []string{"show hq-cv-test --json", "dep add hq-cv-test ag-95s.1 --type=tracks", "dep add hq-cv-test ag-95s.2 --type=tracks"} {
+	for _, want := range []string{"dep add hq-cv-test ag-95s.1 --type=tracks", "dep add hq-cv-test ag-95s.2 --type=tracks"} {
 		if !fx.bd.logged(want) {
 			t.Errorf("missing bd call %q; bd log:\n%s", want, fx.bd.log())
 		}
@@ -195,6 +206,7 @@ func TestConvoyAdd_UsesTrackingHelper(t *testing.T) {
 func TestConvoyAdd_ReportsOnlyIssuesActuallyAdded(t *testing.T) {
 	t.Parallel()
 	fx := newConvoyCLIFixture(t, convoyWriteBD("ag-95s.2"))
+	fx.seedConvoy("open")
 
 	if err := fx.c.add([]string{"hq-cv-test", "ag-95s.1", "ag-95s.2", "ag-95s.3"}); err != nil {
 		t.Fatalf("add: %v", err)
@@ -208,5 +220,31 @@ func TestConvoyAdd_ReportsOnlyIssuesActuallyAdded(t *testing.T) {
 	}
 	if strings.Contains(out, "ag-95s.2") {
 		t.Errorf("output must not list the failed issue ag-95s.2, got:\n%s", out)
+	}
+}
+
+// TestConvoyAdd_ReopensAClosedConvoy: adding to a closed convoy reopens it
+// and forgets its completion notice, so the new work is reported when done.
+func TestConvoyAdd_ReopensAClosedConvoy(t *testing.T) {
+	t.Parallel()
+	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+	desc := beads.SetConvoyFields(&beads.Issue{}, &beads.ConvoyFields{Owner: "mayor/", CompletionNotifiedAt: "2026-09-30T00:00:00Z"})
+	fx.town.Seed(beads.Issue{ID: "hq-cv-test", Title: "Test Convoy", Status: "closed", Description: desc, Labels: []string{"gt:convoy"}})
+
+	if err := fx.c.add([]string{"hq-cv-test", "ag-95s.1"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	got, err := fx.town.Show("hq-cv-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" {
+		t.Errorf("status = %q, want reopened", got.Status)
+	}
+	if f := beads.ParseConvoyFields(got); f == nil || f.CompletionNotifiedAt != "" || f.Owner != "mayor/" {
+		t.Errorf("convoy fields after reopen = %+v, want the notice cleared and the owner kept", f)
+	}
+	if !strings.Contains(fx.out.String(), "Reopened convoy hq-cv-test") {
+		t.Errorf("output:\n%s", fx.out.String())
 	}
 }

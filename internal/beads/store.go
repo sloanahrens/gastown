@@ -454,6 +454,7 @@ func (b *Beads) storeCreate(opts CreateOptions) (*Issue, error) {
 	defer cancel()
 
 	sdkIssue := &beadsdk.Issue{
+		ID:          opts.ID,
 		Title:       opts.Title,
 		Description: opts.Description,
 		Priority:    opts.Priority,
