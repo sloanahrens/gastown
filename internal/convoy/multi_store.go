@@ -24,9 +24,10 @@ type StoreResolver struct {
 	townRoot string
 
 	// open, when set, opens a store the map does not hold yet and is remembered
-	// in opened. A caller that holds only the town store — gt close, which runs
-	// once per bead — reaches a rig's beads this way without paying for every
-	// rig's connection on each invocation (gt-tq6l).
+	// in opened. A caller that holds only the town store — the stranded check,
+	// which opens the town store and then resolves tracked issues across rigs —
+	// reaches a rig's beads this way without paying for every rig's connection
+	// on each invocation (gt-tq6l).
 	open func(name string) (beadsdk.Storage, error)
 
 	// opened names the stores open produced, so Close can release them.

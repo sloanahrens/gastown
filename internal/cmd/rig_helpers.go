@@ -99,8 +99,8 @@ func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName strin
 
 // IsRigParkedOrDocked checks if a rig is parked or docked. Returns
 // (blocked, reason) with reason "parked" or "docked". This is the single
-// entry point for all dispatch paths (sling, convoy launch, convoy stage) to
-// check rig availability.
+// entry point for all dispatch paths (sling, polecat spawn, the daemon,
+// gt spec) to check rig availability.
 //
 // Parked is the rig's record in mayor/rigs.json, read through the config
 // kernel, and fails closed: a rig whose park state cannot be read is parked

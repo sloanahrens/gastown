@@ -94,6 +94,42 @@ func TestDeletedCommandsGone(t *testing.T) {
 	}
 }
 
+// TestExemptMapsNameLiveCommands (gt-0qh8z) pins the two pre-run exemption maps
+// to the command tree. isCommandOrAncestorExempt matches a name against the
+// command's own name and each ancestor's, so an entry no command carries
+// exempts nothing: it is dead weight, and it quietly claims a command is still
+// there. D7 deleted 39 commands and left dnd, upgrade and run-migration behind
+// in beadsExemptCommands; witness and refinery (D4, D2) and git-init went
+// stale in the same way. Drop the entry in the same change that deletes the
+// command.
+func TestExemptMapsNameLiveCommands(t *testing.T) {
+	t.Parallel()
+	live := map[string]bool{}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		live[c.Name()] = true
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(rootCmd)
+
+	maps := []struct {
+		name    string
+		exempts map[string]bool
+	}{
+		{"beadsExemptCommands", beadsExemptCommands},
+		{"branchCheckExemptCommands", branchCheckExemptCommands},
+	}
+	for _, m := range maps {
+		for name := range m.exempts {
+			if !live[name] {
+				t.Errorf("%s exempts %q, a name no command carries; the command it guarded is gone", m.name, name)
+			}
+		}
+	}
+}
+
 // resolvesExactly reports whether path names a command in rootCmd, as opposed
 // to Find stopping on a parent or the root.
 func resolvesExactly(path []string) bool {
