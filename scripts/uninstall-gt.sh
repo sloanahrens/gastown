@@ -200,7 +200,10 @@ clear_immutable() {
 
 FAILED=0
 REMOVED=0
-for name in gt bd; do
+# The two names are quoted so the command-tree lint
+# (internal/cmd/command_tree_lint_test.go) does not read this list as one
+# invocation — it treats a bare "gt"/"bd" word on a script line as a command.
+for name in "gt" "bd"; do
   target="$BIN_DIR/$name"
   if [ ! -e "$target" ] && [ ! -L "$target" ]; then
     echo "uninstall-gt: not present: $target"
