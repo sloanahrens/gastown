@@ -26,7 +26,7 @@ func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
 	t.Parallel()
 	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
 	db := twoConvoyDB(t)
-	town := testTown(townBeads, db, &gtScript{})
+	town := testTown(townBeads, db, &noticeScript{})
 
 	var out bytes.Buffer
 	town.Out = &out
@@ -48,7 +48,7 @@ func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
 func TestCheckAll_CancelledContextStopsBeforeTheFirstConvoy(t *testing.T) {
 	t.Parallel()
 	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
-	town := testTown(townBeads, twoConvoyDB(t), &gtScript{})
+	town := testTown(townBeads, twoConvoyDB(t), &noticeScript{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -67,7 +67,7 @@ func TestChecker_CancelledContextRunsNoCheck(t *testing.T) {
 	cancel()
 	// The town has no convoy: a check that ran would fail with "not found",
 	// not with the context's error.
-	err := testTown(t.TempDir(), townDB(), &gtScript{}).Checker()(ctx, "hq-cv-x")
+	err := testTown(t.TempDir(), townDB(), &noticeScript{}).Checker()(ctx, "hq-cv-x")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Checker on a cancelled context: err = %v, want context.Canceled", err)
 	}
