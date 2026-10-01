@@ -80,6 +80,7 @@ type overlayFile struct {
 	FormulaName string
 	Overlay     *formula.FormulaOverlay
 	ParseErr    error    // non-nil if TOML parsing failed
+	CookErr     error    // non-nil if bd could not cook the formula: step IDs unverified
 	StaleIDs    []string // step IDs that don't match any formula step
 }
 
@@ -116,13 +117,18 @@ func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
 		}
 	}
 
-	var malformed, stale, ok int
+	var malformed, stale, unverified, ok int
 	var details []string
 
 	for _, f := range files {
 		if f.ParseErr != nil {
 			malformed++
 			details = append(details, fmt.Sprintf("%s: malformed TOML: %v", f.Path, f.ParseErr))
+			continue
+		}
+		if f.CookErr != nil {
+			unverified++
+			details = append(details, fmt.Sprintf("%s: step IDs not verified, bd cannot cook %s: %v", f.Path, f.FormulaName, f.CookErr))
 			continue
 		}
 		if len(f.StaleIDs) > 0 {
@@ -151,6 +157,18 @@ func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
 			Message: fmt.Sprintf("%d overlay(s) with stale step IDs", stale),
 			Details: details,
 			FixHint: "Run 'gt doctor --fix' to remove stale step overrides",
+		}
+	}
+
+	// An overlay whose formula bd cannot cook proves nothing about its step
+	// IDs, so it never counts as healthy.
+	if unverified > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkipped,
+			Message: fmt.Sprintf("%d overlay(s) not verified", unverified),
+			Details: details,
+			FixHint: "Run 'bd formula lint <town>/.beads/formulas' and fix the formula bd cannot cook",
 		}
 	}
 
@@ -278,7 +296,8 @@ func (c *OverlayHealthCheck) scanOverlayDir(townRoot, dir string) []overlayFile 
 		// inherited or expanded step.
 		ids, err := c.stepIDs(townRoot, formulaName)
 		if err != nil {
-			// bd cannot cook the formula: skip validation.
+			// bd cannot cook the formula: the step IDs stay unverified.
+			of.CookErr = err
 			results = append(results, of)
 			continue
 		}

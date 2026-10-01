@@ -144,6 +144,10 @@ Agent precedence (highest to lowest):
   2. --agent CLI flag
   3. Rig/town default agent (fallback)
 
+There is no formula-level agent: bd's strict decode rejects a top-level
+agent key, so set metadata.agent per leg or pass --agent (it applies to
+workflow steps too).
+
 Examples:
   gt formula run shiny                    # Run formula in current rig
   gt formula run                          # Run default formula from rig config

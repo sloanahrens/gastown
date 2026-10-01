@@ -340,8 +340,10 @@ reports any file left there. Three override modes:
 bd applies the overlay: gt points `BD_FORMULA_OVERLAY_DIR` at the town's
 overlay dir on every cook and bond, so prime renders and pour creates the same
 text (gt-fd2cu.1). `internal/formula/overlay.go` (`LoadFormulaOverlay`) only
-serves `gt formula overlay` and `gt doctor`, which validates overlay step IDs
-against current formula definitions and can auto-fix stale references.
+serves `gt formula overlay` and `gt doctor`. The doctor's overlay-health
+check validates overlay step IDs against the formula as bd cooks it, reports
+an overlay whose formula bd cannot cook as not verified, and can auto-fix
+stale references.
 
 See [directives-and-overlays.md](directives-and-overlays.md) for the full
 reference with examples and design rationale.

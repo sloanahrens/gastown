@@ -108,8 +108,14 @@ func checkCookedConvoy(t *testing.T, name string, f *cookedFormula) {
 		t.Errorf("%s: type %s, %d legs, synthesis %v, base prompt %d chars", name, f.Type, len(p.Legs), p.Synthesis != nil, len(p.BasePrompt))
 		return
 	}
-	if len(p.Synthesis.Needs) != len(p.Legs) {
-		t.Errorf("%s: synthesis needs %v, want every leg", name, p.Synthesis.Needs)
+	// bd cooks the synthesis step's depends_on into its needs: exactly the
+	// leg ids, in order (gt formula run wires its bead to every leg itself).
+	var legIDs []string
+	for _, leg := range p.Legs {
+		legIDs = append(legIDs, leg.ID)
+	}
+	if !slices.Equal(p.Synthesis.Needs, legIDs) {
+		t.Errorf("%s: real bd cooked synthesis needs %v, want the legs %v", name, p.Synthesis.Needs, legIDs)
 	}
 	wantReviewOnly := name == "mol-plan-review" || name == "mol-prd-review" // gt-kvf
 	for _, leg := range p.Legs {

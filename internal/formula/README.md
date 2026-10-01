@@ -27,6 +27,9 @@ use the places it accepts:
   leg (`metadata.focus`, `metadata.agent`, `metadata.review_only`). The vars
   `base_prompt`, `output_directory`, `output_leg_pattern`, `output_synthesis`
   and `review_only` are the run settings; `--set` overrides any of them.
+- There is no formula-level `agent` (bd rejects the top-level key): set
+  `metadata.agent` on a leg, or pass `gt formula run --agent`, which also
+  applies to workflow steps.
 
 ```toml
 formula = "design"

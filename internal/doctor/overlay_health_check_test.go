@@ -149,6 +149,33 @@ description = "Override for non-existent formula"
 	assert.Contains(t, result.Details[0], "some-step")
 }
 
+// TestOverlayHealthCheck_UncookableFormulaFailsClosed: an overlay on a shipped
+// formula bd cannot cook has unverified step IDs, so the check reports it as
+// not verified (never healthy) and --fix leaves the file alone.
+func TestOverlayHealthCheck_UncookableFormulaFailsClosed(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	setupRigsJSON(t, tmpDir, []string{"testrig"})
+
+	overlayDir := filepath.Join(tmpDir, "formula-overlays")
+	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
+	content := "[[step-overrides]]\nstep_id = \"synthesis\"\nmode = \"skip\"\n"
+	overlayPath := filepath.Join(overlayDir, "code-review.toml")
+	require.NoError(t, os.WriteFile(overlayPath, []byte(content), 0o644))
+
+	check := overlayCheckWithSteps(polecatWorkSteps) // code-review does not cook
+	ctx := &CheckContext{TownRoot: tmpDir}
+	result := check.Run(ctx)
+	assert.Equal(t, StatusSkipped, result.Status)
+	require.NotEmpty(t, result.Details)
+	assert.Contains(t, result.Details[0], "bd cannot cook code-review")
+
+	require.NoError(t, check.Fix(ctx))
+	data, err := os.ReadFile(overlayPath)
+	require.NoError(t, err)
+	assert.Equal(t, content, string(data))
+}
+
 func TestOverlayHealthCheck_Fix_RemovesStaleEntries(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
