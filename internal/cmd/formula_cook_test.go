@@ -13,21 +13,21 @@ import (
 func TestCookForRender_CooksInRigDirWithTownOverlay(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	fake := &fakeCook{out: cookTreeJSON(docAuditTree)}
-	if _, err := (formulaCooker{run: fake.run}).cookForRender("mol-doc-audit", town, "gastown", []string{"issue=gt-1"}); err != nil {
+	fake := &fakeCook{out: cookTree(docAuditTree)}
+	if _, err := (formulaCooker{open: fake.open}).cookForRender("mol-doc-audit", town, "gastown", []string{"issue=gt-1"}); err != nil {
 		t.Fatalf("cookForRender: %v", err)
 	}
 	if len(fake.calls) != 1 {
 		t.Fatalf("bd calls = %d, want 1", len(fake.calls))
 	}
 	c := fake.calls[0]
-	if got := strings.Join(c.Args, " "); got != "cook mol-doc-audit --var issue=gt-1" {
-		t.Errorf("argv = %q", got)
+	if c.argv != "cook mol-doc-audit --var issue=gt-1" {
+		t.Errorf("argv = %q", c.argv)
 	}
-	if want := filepath.Join(town, "gastown"); c.Dir != want {
-		t.Errorf("dir = %q, want %q", c.Dir, want)
+	if want := (formulaSite{dir: filepath.Join(town, "gastown"), townRoot: town}); c.site != want {
+		t.Errorf("site = %+v, want %+v", c.site, want)
 	}
-	env := envSlice(c.Env)
+	env := envSlice(formulaEnv(c.site.townRoot))
 	if env["GT_ROOT"] != town {
 		t.Errorf("GT_ROOT = %q, want %q", env["GT_ROOT"], town)
 	}
@@ -40,8 +40,8 @@ func TestCookForRender_CooksInRigDirWithTownOverlay(t *testing.T) {
 // with one line naming the formula and bd's message.
 func TestCookForRender_FailureIsOneLine(t *testing.T) {
 	t.Parallel()
-	fake := &fakeCook{kind: "invalid_args", msg: "invalid formula x.toml: line 7: steps.acceptance: unknown key\nsecond line"}
-	_, err := (formulaCooker{run: fake.run}).cookForRender("shiny", "", "", nil)
+	fake := &fakeCook{msg: "invalid formula x.toml: line 7: steps.acceptance: unknown key\nsecond line"}
+	_, err := (formulaCooker{open: fake.open}).cookForRender("shiny", "", "", nil)
 	if err == nil {
 		t.Fatal("cook failure must be an error")
 	}

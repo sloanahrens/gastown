@@ -91,9 +91,9 @@ func TestPrimeChecklist_FormulaEditedAfterPourDoesNotChangeChecklist(t *testing.
 	if err := f.Close(ids[0]); err != nil {
 		t.Fatal(err)
 	}
-	edited := &fakeCook{out: cookTreeJSON(`{"formula": "mol-polecat-work", "type": "workflow", "steps": [` +
+	edited := &fakeCook{out: cookTree(`{"formula": "mol-polecat-work", "type": "workflow", "steps": [` +
 		`{"id": "new", "title": "EDITED STEP", "description": "EDITED BODY", "children": []}]}`)}
-	ctx := RoleContext{Role: RolePolecat, formulaRun: edited.run, molecules: f}
+	ctx := RoleContext{Role: RolePolecat, formulaOpen: edited.open, molecules: f}
 	att := &beads.AttachmentFields{AttachedFormula: "mol-polecat-work", AttachedMolecule: mol}
 
 	var buf bytes.Buffer
@@ -130,9 +130,9 @@ func TestPrimeChecklist_FormulaEditedAfterPourDoesNotChangeChecklist(t *testing.
 func TestShowChecklist_UnreadableMoleculeRendersNothing(t *testing.T) {
 	t.Parallel()
 	f := unreadableChildren{beadsfake.New()}
-	cook := &fakeCook{out: cookTreeJSON(docAuditTree)}
+	cook := &fakeCook{out: cookTree(docAuditTree)}
 	var buf bytes.Buffer
-	RoleContext{formulaRun: cook.run, molecules: f}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "mol-doc-audit", AttachedMolecule: "gt-wisp-gone"})
+	RoleContext{formulaOpen: cook.open, molecules: f}.showChecklist(&buf, &beads.AttachmentFields{AttachedFormula: "mol-doc-audit", AttachedMolecule: "gt-wisp-gone"})
 	if buf.Len() != 0 || len(cook.calls) != 0 {
 		t.Fatalf("unreadable molecule rendered %q after %d cooks", buf.String(), len(cook.calls))
 	}
