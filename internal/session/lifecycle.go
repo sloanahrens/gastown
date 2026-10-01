@@ -2,7 +2,6 @@
 package session
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,13 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -117,12 +113,6 @@ type StartResult struct {
 	// Callers may need this for role-specific post-startup steps
 	// (e.g., handling fallback nudges, legacy fallback).
 	RuntimeConfig *config.RuntimeConfig
-
-	// RunID is the GASTA run identifier (GT_RUN) generated for this session.
-	// All telemetry events emitted within the session carry this ID, enabling
-	// waterfall correlation across prompts, BD calls, mail operations, and
-	// agent conversation events.
-	RunID string
 }
 
 // StartSession creates a tmux session following the standard Gas Town lifecycle.
@@ -145,12 +135,6 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	if err := bdgate.Require(); err != nil {
 		return nil, err
 	}
-	// Generate the GASTA run ID — the root identifier for all telemetry emitted
-	// by this agent session and its subprocesses (bd, mail, …).
-	runID := uuid.New().String()
-	ctx := telemetry.WithRunID(context.Background(), runID)
-
-	defer func() { telemetry.RecordSessionStart(ctx, cfg.SessionID, cfg.Role, retErr) }()
 	if cfg.SessionID == "" {
 		return nil, fmt.Errorf("SessionID is required")
 	}
@@ -217,7 +201,6 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		SessionName:      cfg.SessionID,
 	})
 	envVars = MergeRuntimeLivenessEnv(envVars, runtimeConfig)
-	envVars["GT_RUN"] = runID
 	for k, v := range cfg.ExtraEnv {
 		envVars[k] = v
 	}
@@ -304,53 +287,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		_ = TrackSessionPID(cfg.TownRoot, cfg.SessionID, t)
 	}
 
-	// 14. Stream agent conversation events to VictoriaLogs (opt-in).
-	// Reads ~/.claude/projects/<hash>/<session>.jsonl and emits agent.event logs.
-	// Non-fatal: observability failures must never block agent startup.
-	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
-		if err := ActivateAgentLogging(cfg.SessionID, cfg.WorkDir, runID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: agent log watcher setup failed for %s: %v\n", cfg.SessionID, err)
-		}
-	}
-
-	// Record the agent instantiation event (GASTA root span).
-	// Done after session creation so we only emit on success.
-	RecordAgentInstantiateFromDir(ctx, runID, runtimeConfig.ResolvedAgent,
-		cfg.Role, cfg.AgentName, cfg.SessionID, cfg.RigName, cfg.TownRoot, "", cfg.WorkDir)
-
-	return &StartResult{RuntimeConfig: runtimeConfig, RunID: runID}, nil
-}
-
-// RecordAgentInstantiateFromDir resolves the git branch/commit from workDir and
-// emits the agent.instantiate root telemetry event. resolvedAgent defaults to
-// "claudecode" when empty. Use this instead of calling telemetry.RecordAgentInstantiate
-// directly to avoid duplicating the agentType/git-lookup boilerplate.
-func RecordAgentInstantiateFromDir(ctx context.Context, runID, resolvedAgent, role, agentName, sessionID, rigName, townRoot, issueID, workDir string) {
-	agentType := resolvedAgent
-	if agentType == "" {
-		agentType = "claudecode"
-	}
-	branch, commit := "", ""
-	if g := git.NewGit(workDir); g != nil {
-		if b, err := g.CurrentBranch(); err == nil {
-			branch = b
-		}
-		if c, err := g.Rev("HEAD"); err == nil {
-			commit = c
-		}
-	}
-	telemetry.RecordAgentInstantiate(ctx, telemetry.AgentInstantiateInfo{
-		RunID:     runID,
-		AgentType: agentType,
-		Role:      role,
-		AgentName: agentName,
-		SessionID: sessionID,
-		RigName:   rigName,
-		TownRoot:  townRoot,
-		IssueID:   issueID,
-		GitBranch: branch,
-		GitCommit: commit,
-	})
+	return &StartResult{RuntimeConfig: runtimeConfig}, nil
 }
 
 // StopSession stops a tmux session with optional graceful shutdown.
@@ -370,10 +307,6 @@ func StopSession(t *tmux.Tmux, sessionID string, graceful bool) error {
 		_ = t.SendKeysRaw(sessionID, "C-c")
 		WaitForSessionExit(t, sessionID, constants.GracefulShutdownTimeout)
 	}
-
-	// Kill any detached agent-log watcher for this session before tearing down
-	// the tmux session, to avoid orphan processes accumulating over time.
-	DeactivateAgentLogging(sessionID)
 
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
@@ -498,7 +431,6 @@ func buildCommand(cfg SessionConfig, prompt string) (string, error) {
 		Rig:       cfg.RigName,
 		AgentName: cfg.AgentName,
 		TownRoot:  cfg.TownRoot,
-		Prompt:    prompt,
 	}, cfg.RigPath, prompt, cfg.AgentOverride)
 }
 

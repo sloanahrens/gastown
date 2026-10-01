@@ -2,7 +2,6 @@
 package beads
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"github.com/gofrs/flock"
 
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // lockAgentBead acquires an exclusive file lock for a specific agent bead ID.
@@ -421,7 +419,6 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 // Resolves the concrete target DB first so the update hits the correct database
 // when the agent bead routes to a different beads dir via routes.jsonl.
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
-	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
 	target := b.agentBeadTarget()
 	return target.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
 }

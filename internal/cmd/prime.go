@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -135,7 +134,6 @@ func init() {
 type RoleContext = RoleInfo
 
 func runPrime(cmd *cobra.Command, args []string) (retErr error) {
-	defer func() { telemetry.RecordPrime(context.Background(), os.Getenv("GT_ROLE"), primeHookMode, retErr) }()
 	if err := validatePrimeFlags(); err != nil {
 		return err
 	}
@@ -212,10 +210,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
-	// P0: Fetch work context once — used for both OTel attribution and output.
-	// injectWorkContext sets GT_WORK_RIG/BEAD/MOL in the current process env and
-	// in the tmux session env so all subsequent subprocesses (bd, mail, …) carry
-	// the correct work attribution until the next gt prime overwrites it.
+	// P0: Fetch work context once.
 	hookedBead, hookErr := findAgentWork(ctx)
 	if hookErr != nil {
 		// Cross-rig / unresolvable hook bead (gt-el4): the agent bead names a
@@ -240,7 +235,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "Your work may still be assigned. Do NOT close any beads.\n")
 		fmt.Fprintf(os.Stderr, "Escalate to witness/mayor and wait for resolution.\n\n")
 	}
-	injectWorkContext(ctx, hookedBead)
 
 	// Static role text (template + CONTEXT.md) goes into the role's
 	// system-prompt file for the NEXT spawn; the runtime passes it back via
@@ -256,9 +250,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	includeStatic := !staticDelivered
-	// Log the rendered role context to OTEL so operators can see exactly what
-	// context each agent started with. Only emitted when GT_OTEL_LOGS_URL is set.
-	telemetry.RecordPrimeContext(context.Background(), staticText, os.Getenv("GT_ROLE"), primeHookMode)
 
 	hasSlungWork := hookedBead != nil
 	explain(hasSlungWork, "Autonomous mode: hooked/in-progress work detected")
@@ -580,7 +571,7 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 	})
 
 	// Only inject identity-related vars that are missing, not the full AgentEnv
-	// output (which includes Dolt ports, OTEL config, etc. that may have been
+	// output (which includes Dolt ports, cost tier, etc. that may have been
 	// intentionally overridden per-session).
 	identitySet := make(map[string]bool, len(config.IdentityEnvVars))
 	for _, k := range config.IdentityEnvVars {
@@ -1491,71 +1482,6 @@ func worktreeBeadsNeedsCleanup(workDir string) bool {
 		}
 	}
 	return false
-}
-
-// injectWorkContext extracts the current work context (rig, bead, molecule) from the
-// hooked bead and persists it in two places so all subsequent subprocesses carry it:
-//
-//  1. Current process env (GT_WORK_RIG/BEAD/MOL via os.Setenv) — inherited by bd, mail,
-//     and any other subprocess spawned from this gt prime invocation.
-//
-//  2. Tmux session env (via tmux set-environment) — inherited by future processes
-//     spawned in the session after a handoff or compaction (e.g. new Claude Code instance).
-//
-// These values are then read by telemetry.RecordPrime (defer in runPrime) and by
-// telemetry.buildGTResourceAttrs which injects them into OTEL_RESOURCE_ATTRIBUTES for
-// bd subprocesses launched from the Go SDK.
-//
-// When hookedBead is nil (no work on hook), the vars are cleared so stale context
-// from a previous prime cycle does not leak into the current one.
-// No-op in dry-run mode.
-func injectWorkContext(ctx RoleContext, hookedBead *beads.Issue) {
-	if primeDryRun || !telemetry.IsActive() {
-		return
-	}
-	workRig := ""
-	workBead := ""
-	workMol := ""
-	if hookedBead != nil {
-		workRig = ctx.Rig
-		workBead = hookedBead.ID
-		if attachment := beads.ParseAttachmentFields(hookedBead); attachment != nil {
-			workMol = attachment.AttachedMolecule
-		}
-	}
-	_ = os.Setenv("GT_WORK_RIG", workRig)
-	_ = os.Setenv("GT_WORK_BEAD", workBead)
-	_ = os.Setenv("GT_WORK_MOL", workMol)
-	setTmuxWorkContext(workRig, workBead, workMol)
-}
-
-// setTmuxWorkContext writes GT_WORK_RIG, GT_WORK_BEAD, GT_WORK_MOL into the current
-// tmux session environment. Future processes spawned in the session (e.g. a new
-// Claude Code instance after handoff/compaction) will inherit these values automatically.
-// Empty values unset the variable in the session env to prevent stale context leaking
-// across prime cycles. No-op when not running inside a tmux session.
-func setTmuxWorkContext(workRig, workBead, workMol string) {
-	if os.Getenv("TMUX") == "" {
-		return
-	}
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
-	if err != nil {
-		return
-	}
-	session := strings.TrimSpace(string(out))
-	if session == "" {
-		return
-	}
-	setOrUnset := func(key, value string) {
-		if value != "" {
-			_ = exec.Command("tmux", "set-environment", "-t", session, key, value).Run()
-		} else {
-			_ = exec.Command("tmux", "set-environment", "-u", "-t", session, key).Run()
-		}
-	}
-	setOrUnset("GT_WORK_RIG", workRig)
-	setOrUnset("GT_WORK_BEAD", workBead)
-	setOrUnset("GT_WORK_MOL", workMol)
 }
 
 // checkPendingEscalations queries for open escalation beads and displays them prominently.

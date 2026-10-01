@@ -26,7 +26,6 @@ import (
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -1023,7 +1022,6 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 
 // instantiate is InstantiateFormulaOnBead with bd reached through f.
 func (f formulaBD) instantiate(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
-	defer func() { telemetry.RecordFormulaInstantiate(ctx, formulaName, beadID, retErr) }()
 	// Route bd mutations to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 
@@ -1046,15 +1044,12 @@ func (f formulaBD) instantiate(ctx context.Context, formulaName, beadID, title, 
 				if retryErr := f.beadCmd(beadID, formulaWorkDir, townRoot, "cook", resolvedFormula).
 					WithAutoCommit().
 					Run(); retryErr != nil {
-					telemetry.RecordMolCook(ctx, formulaName, retryErr)
 					return nil, fmt.Errorf("cooking formula %s: %w (embedded retry: %v)", formulaName, err, retryErr)
 				}
 			} else {
-				telemetry.RecordMolCook(ctx, formulaName, err)
 				return nil, fmt.Errorf("cooking formula %s: %w", formulaName, err)
 			}
 		}
-		telemetry.RecordMolCook(ctx, formulaName, nil)
 	}
 
 	formulaVars, err := formulaVarsForBead(formulaName, beadID, title, townRoot, extraVars)
@@ -1065,7 +1060,6 @@ func (f formulaBD) instantiate(ctx context.Context, formulaName, beadID, title, 
 	if err != nil {
 		return nil, fmt.Errorf("bonding formula %s to bead %s: %w", formulaName, beadID, err)
 	}
-	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, beadID, nil)
 
 	return &FormulaOnBeadResult{
 		WispRootID:  wispRootID,

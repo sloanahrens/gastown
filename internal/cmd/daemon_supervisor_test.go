@@ -981,8 +981,8 @@ func TestRestartDaemon_WaitForRestartIgnoresPidZero(t *testing.T) {
 
 // waitForRestart's budget (restartWaitBudget = daemon.ShutdownBudget +
 // daemonStartupMargin) must outlast the outgoing daemon's own bounded
-// shutdown stages (the Dolt server's own graceful-stop wait, 30s + OTel's
-// 5s) plus the incoming daemon's startup
+// shutdown stage (the Dolt server's own graceful-stop wait, 30s) plus the
+// incoming daemon's startup
 // preflight — the exact gap the original 10s budget (100 attempts) did not
 // cover (gt-oqbw). This simulates a restart that is genuinely slow,
 // not stuck: the lock keeps naming the outgoing PID for slowAttempts of

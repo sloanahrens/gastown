@@ -13,7 +13,6 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // SetStore configures an in-process beadsdk.Storage for this Mailbox.
@@ -124,10 +123,6 @@ func (m *Mailbox) storeCloseInDir(id string) error {
 	// gt-ovem: mayor/deacon assignees carry a trailing slash that ambient
 	// actor resolution (BD_ACTOR/git user.name) doesn't.
 	err := m.store.CloseIssue(ctx, id, "", m.identity, sessionID)
-	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
-		ID: id,
-		To: m.identity,
-	}, err)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return ErrMessageNotFound

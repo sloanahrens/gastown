@@ -192,7 +192,6 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			TownRoot:         townRoot,
 			RuntimeConfigDir: claudeConfigDir,
 			Agent:            crewAgentOverride,
-			Topic:            "start",
 			SessionName:      sessionID,
 		})
 		// Merge liveness-critical env vars (GT_AGENT, GT_PROCESS_NAMES) so that
@@ -237,8 +236,6 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			Rig:         r.Name,
 			AgentName:   name,
 			TownRoot:    townRoot,
-			Prompt:      beacon,
-			Topic:       "start",
 			SessionName: sessionID,
 		}, r.Path, beacon, crewAgentOverride)
 		if err != nil {
@@ -282,7 +279,6 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 				TownRoot:         townRoot,
 				RuntimeConfigDir: claudeConfigDir,
 				Agent:            crewAgentOverride,
-				Topic:            "restart",
 				SessionName:      sessionID,
 			})
 			restartEnv = session.MergeRuntimeLivenessEnv(restartEnv, runtimeConfig)
@@ -312,8 +308,6 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 				Rig:         r.Name,
 				AgentName:   name,
 				TownRoot:    townRoot,
-				Prompt:      beacon,
-				Topic:       "restart",
 				SessionName: sessionID,
 			}, r.Path, beacon, crewAgentOverride)
 			if err != nil {

@@ -22,7 +22,6 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1292,7 +1291,7 @@ func SubprocessFailureError(ctx context.Context, timeout time.Duration, err erro
 
 // newBDCmd builds a bd subprocess with the wiring every run path shares: bd on
 // PATH, a detached process group, the caller's working directory and
-// environment (plus OTEL vars), and captured stdout/stderr. stdinData, when
+// environment, and captured stdout/stderr. stdinData, when
 // non-nil, is piped to bd's stdin.
 //
 // Building the command in one place keeps the pinned (run/runWithStdin) and
@@ -1302,7 +1301,7 @@ func newBDCmd(ctx context.Context, workDir string, env []string, stdinData []byt
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = workDir
-	cmd.Env = append(append([]string{}, env...), telemetry.OTELEnvForSubprocess()...)
+	cmd.Env = append([]string{}, env...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if stdinData != nil {
@@ -1374,16 +1373,9 @@ func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
 
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
-// attempt here means the --flat handling and the telemetry record stay per
-// invocation, so a retried command reports each attempt rather than one
-// inflated one.
-func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ []byte, retErr error) {
-	start := time.Now()
-	// Declare buffers before defer so the closure captures them after cmd.Run.
+// attempt here keeps the --flat handling per invocation.
+func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
-	defer func() {
-		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
-	}()
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.

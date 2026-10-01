@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
-	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -142,7 +140,6 @@ type ConvoyInfo struct {
 // formula instead of the rig default (gt-yg24, gt-4lor).
 // Returns the created convoy ID.
 func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (_ string, retErr error) {
-	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return "", fmt.Errorf("finding town root: %w", err)

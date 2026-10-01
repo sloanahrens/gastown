@@ -850,8 +850,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 			Rig:         m.rig.Name,
 			AgentName:   name,
 			TownRoot:    townRoot,
-			Prompt:      beacon,
-			Topic:       topic,
 			SessionName: m.SessionName(name),
 		}, m.rig.Path, beacon, opts.AgentOverride)
 		if err != nil {

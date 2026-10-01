@@ -2353,8 +2353,8 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 }
 
 // BuildStartupCommandFromConfig builds a startup command from a complete AgentEnvConfig.
-// Use this (instead of Build*StartupCommand helpers) when you need full OTEL context:
-// Issue (gt.issue), Topic (gt.topic), SessionName (gt.session), etc.
+// Use this (instead of Build*StartupCommand helpers) when you need a field the
+// helpers do not set, such as SessionName.
 // The rigPath, prompt, and agentOverride are passed through directly.
 func BuildStartupCommandFromConfig(cfg AgentEnvConfig, rigPath, prompt, agentOverride string) (string, error) {
 	return buildStartupCommandFromConfig(processHost, cfg, rigPath, prompt, agentOverride)
@@ -2382,7 +2382,6 @@ func buildAgentStartupCommand(h host, role, rig, townRoot, rigPath, prompt strin
 		Role:     role,
 		Rig:      rig,
 		TownRoot: townRoot,
-		Prompt:   prompt,
 		Getenv:   h.getenv,
 	})
 	return buildStartupCommand(h, envVars, rigPath, prompt)
@@ -2398,7 +2397,6 @@ func buildAgentStartupCommandWithAgentOverride(h host, role, rig, townRoot, rigP
 		Role:     role,
 		Rig:      rig,
 		TownRoot: townRoot,
-		Prompt:   prompt,
 		Getenv:   h.getenv,
 	})
 	return buildStartupCommandWithAgentOverride(h, envVars, rigPath, prompt, agentOverride)
@@ -2416,7 +2414,6 @@ func BuildPolecatStartupCommand(rigName, polecatName, rigPath, prompt string) (s
 		Rig:       rigName,
 		AgentName: polecatName,
 		TownRoot:  townRoot,
-		Prompt:    prompt,
 	})
 	return BuildStartupCommand(envVars, rigPath, prompt)
 }
@@ -2432,7 +2429,6 @@ func BuildPolecatStartupCommandWithAgentOverride(rigName, polecatName, rigPath, 
 		Rig:       rigName,
 		AgentName: polecatName,
 		TownRoot:  townRoot,
-		Prompt:    prompt,
 	})
 	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
 }
@@ -2449,7 +2445,6 @@ func BuildCrewStartupCommand(rigName, crewName, rigPath, prompt string) (string,
 		Rig:       rigName,
 		AgentName: crewName,
 		TownRoot:  townRoot,
-		Prompt:    prompt,
 	})
 	return BuildStartupCommand(envVars, rigPath, prompt)
 }
@@ -2465,7 +2460,6 @@ func BuildCrewStartupCommandWithAgentOverride(rigName, crewName, rigPath, prompt
 		Rig:       rigName,
 		AgentName: crewName,
 		TownRoot:  townRoot,
-		Prompt:    prompt,
 	})
 	return BuildStartupCommandWithAgentOverride(envVars, rigPath, prompt, agentOverride)
 }

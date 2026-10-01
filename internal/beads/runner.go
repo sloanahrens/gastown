@@ -18,8 +18,7 @@ type bdCall struct {
 	// stdin is piped to bd when non-nil.
 	stdin []byte
 	// plain marks a call built the way CommandWithEnv builds one: the
-	// caller's environment as given, bd in the caller's process group, no
-	// OTEL variables added.
+	// caller's environment as given, bd in the caller's process group.
 	plain bool
 }
 

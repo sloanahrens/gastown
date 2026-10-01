@@ -6,7 +6,7 @@ import (
 )
 
 // gtDataDir returns the directory used for GT's runtime data files
-// (logs, telemetry, cost records, etc.).
+// (logs, command usage, cost records, etc.).
 //
 // Resolution order:
 //  1. $GT_HOME/.gt  — when GT_HOME is set, data is kept alongside the GT
