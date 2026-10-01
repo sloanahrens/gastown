@@ -5,7 +5,9 @@
 # agent prose) and when one shrinks (lower it here), so this file only goes
 # down. Route a mutation through a gt verb (gt bead ...) instead of adding a
 # line. What remains waits on an allowlist decision, not a verb: the remember
-# family (memories, forget) and bd version in the tool updater.
+# family (memories, forget, and the kv reads gt prime's memory index points
+# at) and bd version in the tool updater.
+internal/cmd/memory_index.go bd kv 3
 internal/templates/roles/mayor.md.tmpl bd forget 1
 internal/templates/roles/mayor.md.tmpl bd memories 2
 internal/templates/townroot/claude.md bd forget 1
