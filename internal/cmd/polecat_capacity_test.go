@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -353,64 +351,6 @@ func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *test
 	}
 }
 
-func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
-	t.Parallel()
-	out := captureTo(func(w io.Writer) {
-		printDryRunPlanTo(w, capacity.DispatchPlan{
-			ToDispatch: []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-one", TargetRig: "gastown"}},
-			Skipped:    2,
-			Reason:     "capacity",
-		}, polecatCapacitySnapshot{
-			Max:             2,
-			Working:         1,
-			RecoveryBlocked: 1,
-			Reservations:    0,
-			ReusableIdle:    3,
-			Parked:          4,
-			PendingMR:       2,
-			Free:            0,
-		}, 5)
-	})
-	for _, want := range []string{"0 free of 2", "working: 1", "recovery_blocked: 1", "reusable_idle: 3", "parked: 4", "pending_mr: 2"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("dry-run output %q missing %q", out, want)
-		}
-	}
-}
-
-func TestPrintDryRunPlanValidationReasonNotCapacity(t *testing.T) {
-	t.Parallel()
-	out := captureTo(func(w io.Writer) {
-		printDryRunPlanTo(w, capacity.DispatchPlan{
-			Skipped: 2,
-			Reason:  "validation",
-		}, polecatCapacitySnapshot{Max: 2, Free: 2}, 5)
-	})
-	if !strings.Contains(out, "validation failed for 2 candidate") {
-		t.Fatalf("dry-run output %q missing validation reason", out)
-	}
-	if strings.Contains(out, "No capacity") {
-		t.Fatalf("dry-run output %q should not report capacity for validation failures", out)
-	}
-}
-
-func TestPrintDispatchNoOpReportsExplicitReason(t *testing.T) {
-	t.Parallel()
-	out := captureTo(func(w io.Writer) {
-		printDispatchNoOpTo(w, capacity.DispatchReport{Reason: "none"}, polecatCapacitySnapshot{})
-	})
-	if !strings.Contains(out, "No ready beads scheduled for dispatch") {
-		t.Fatalf("none output = %q", out)
-	}
-
-	out = captureTo(func(w io.Writer) {
-		printDispatchNoOpTo(w, capacity.DispatchReport{Reason: "validation", Skipped: 1}, polecatCapacitySnapshot{})
-	})
-	if !strings.Contains(out, "No dispatchable beads") || !strings.Contains(out, "validation") {
-		t.Fatalf("validation output = %q", out)
-	}
-}
-
 func TestResolveTargetRigPassesHeldAdmissionToSpawn(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
@@ -661,11 +601,4 @@ func TestAcquirePolecatAdmissionRigCapBindsUnderTownCap(t *testing.T) {
 		t.Fatalf("hm admission while gastown is at its rig cap: %v", err)
 	}
 	defer other.Release()
-}
-
-// captureTo returns what write wrote.
-func captureTo(write func(w io.Writer)) string {
-	var b strings.Builder
-	write(&b)
-	return b.String()
 }

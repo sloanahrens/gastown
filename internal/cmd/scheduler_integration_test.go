@@ -13,6 +13,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/schedulerrun"
 )
 
 // schedulerTestCounter generates unique prefixes for each test to isolate Dolt
@@ -308,15 +310,27 @@ func createSlingContext(t *testing.T, hqPath string, fields *capacity.SlingConte
 	return ctxBead.ID
 }
 
+// runSchedulerDispatch performs one in-process scheduler dispatch pass the way
+// `gt scheduler run` and the daemon heartbeat do, and reports how many beads
+// were dispatched.
+func runSchedulerDispatch(townRoot string, batch int) (int, error) {
+	report, err := schedulerrun.Run(context.Background(), schedulerrun.Options{
+		TownRoot:      townRoot,
+		Actor:         "test",
+		BatchOverride: batch,
+	}, schedulerDeps())
+	return report.Dispatched, err
+}
+
 // findSlingContext finds an open sling context for a work bead by scanning all
-// rig beads dirs under townRoot. Mirrors production's listAllSlingContexts since
-// sling contexts now live in the target rig's beads dir, not HQ (see dee628d3).
+// rig beads dirs under townRoot, through the same reader the dispatcher uses:
+// sling contexts live in the target rig's beads dir, not HQ (see dee628d3).
 // Returns nil if none found.
 func findSlingContext(t *testing.T, hqPath, workBeadID string) *capacity.SlingContextFields {
 	t.Helper()
-	contexts, err := listAllSlingContexts(hqPath)
+	contexts, err := schedulerrun.ListAllSlingContexts(hqPath)
 	if err != nil {
-		t.Fatalf("listAllSlingContexts: %v", err)
+		t.Fatalf("ListAllSlingContexts: %v", err)
 	}
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
@@ -380,7 +394,7 @@ func checkSchedulerCircuitBreakerExclusion(t *testing.T, hqPath, rigPath, gtBina
 		WorkBeadID:       beadID,
 		TargetRig:        "testrig",
 		EnqueuedAt:       "2025-01-01T00:00:00Z",
-		DispatchFailures: maxDispatchFailures, // 3
+		DispatchFailures: schedulerrun.MaxDispatchFailures,
 		LastFailure:      "simulated failure",
 	})
 
@@ -581,9 +595,9 @@ func TestIntegrationSchedulerBlockedStatusReporting(t *testing.T) {
 		t.Fatalf("unblocked queued bead %s not found in scheduler list", blockedID)
 	}
 	contextCount := 0
-	contexts, err := listAllSlingContexts(hqPath)
+	contexts, err := schedulerrun.ListAllSlingContexts(hqPath)
 	if err != nil {
-		t.Fatalf("listAllSlingContexts: %v", err)
+		t.Fatalf("ListAllSlingContexts: %v", err)
 	}
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
@@ -805,9 +819,9 @@ func TestIntegrationSchedulerSlingContextIdempotency(t *testing.T) {
 	// Verify: only one sling context exists across all rig dirs
 	// (sling contexts live in the target rig's beads dir per dee628d3).
 	count := 0
-	contexts, err := listAllSlingContexts(hqPath)
+	contexts, err := schedulerrun.ListAllSlingContexts(hqPath)
 	if err != nil {
-		t.Fatalf("listAllSlingContexts: %v", err)
+		t.Fatalf("ListAllSlingContexts: %v", err)
 	}
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.Description)
@@ -1529,9 +1543,9 @@ func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testi
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", beads.DatabaseNameFromMetadata(filepath.Join(hqPath, ".beads")))
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(hqPath, ".wrong-dolt-data"))
 
-	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	dispatched, err := runSchedulerDispatch(hqPath, 1)
 	if err != nil {
-		t.Fatalf("dispatchScheduledWork: %v", err)
+		t.Fatalf("scheduler dispatch: %v", err)
 	}
 	if dispatched != 1 {
 		t.Fatalf("dispatched = %d, want 1", dispatched)
@@ -1592,9 +1606,9 @@ func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *test
 	t.Setenv("BD_DB", filepath.Join(hqPath, "wrong.bd"))
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(hqPath, ".wrong-dolt-data"))
 
-	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	dispatched, err := runSchedulerDispatch(hqPath, 1)
 	if err != nil {
-		t.Fatalf("dispatchScheduledWork: %v", err)
+		t.Fatalf("scheduler dispatch: %v", err)
 	}
 	if dispatched != 1 {
 		t.Fatalf("dispatched = %d, want 1", dispatched)
@@ -1644,9 +1658,9 @@ func TestIntegrationSchedulerDispatchFailureRecordedInContextSourceDB(t *testing
 		return nil, fmt.Errorf("forced spawn failure")
 	}
 
-	dispatched, err := dispatchScheduledWork(hqPath, "test", 1, false)
+	dispatched, err := runSchedulerDispatch(hqPath, 1)
 	if err != nil {
-		t.Fatalf("dispatchScheduledWork: %v", err)
+		t.Fatalf("scheduler dispatch: %v", err)
 	}
 	if dispatched != 0 {
 		t.Fatalf("dispatched = %d, want 0", dispatched)
