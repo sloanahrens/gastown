@@ -40,11 +40,11 @@ type Rig struct {
 	// HasMayor indicates if the rig has a mayor clone.
 	HasMayor bool `json:"has_mayor"`
 
-	// BDRunner, when set, answers the bd calls this Rig makes itself (the
-	// rig identity bead read behind the config lookups) in process instead
-	// of the bd on PATH. Nil is the real bd. Tests of code that holds a Rig
-	// set it; production leaves it nil.
-	BDRunner beads.BDRunner `json:"-"`
+	// IdentityBeads, when set, answers the reads this Rig makes itself (the
+	// rig identity bead behind the config lookups) instead of bd. Nil is
+	// bd in the rig's own database. Tests of code that holds a Rig set it;
+	// production leaves it nil.
+	IdentityBeads beads.Client `json:"-"`
 }
 
 // AgentDirs are the standard agent directories in a rig.

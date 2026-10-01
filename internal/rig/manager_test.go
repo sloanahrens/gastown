@@ -2,8 +2,10 @@ package rig
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -510,11 +512,11 @@ func TestInitBeadsWritesConfigOnFailure(t *testing.T) {
 	beadsDir := filepath.Join(rigPath, ".beads")
 
 	manager, _, bd := testManager("", nil)
-	bd.answer = func(c beads.BDCall) bdReply {
-		if bdVerb(c.Args) == "init" {
-			return bdReply{stderr: "bd init failed", code: 1}
+	bd.fail = func(c bdCall) error {
+		if c.Verb == "init" {
+			return errors.New("bd init failed")
 		}
-		return bdReply{}
+		return nil
 	}
 	if err := manager.InitBeads(rigPath, "gt", "testrig"); err != nil {
 		t.Fatalf("initBeads: %v", err)
@@ -594,18 +596,18 @@ func TestInitBeadsPassesCanonicalDatabase(t *testing.T) {
 	}
 
 	calls := bd.recorded()
-	if len(calls) == 0 || !strings.HasPrefix(strings.Join(calls[0].Args, " "), "init --prefix xx --database my_project --server") {
+	if len(calls) == 0 || calls[0].Verb != "init" || calls[0].Init.Prefix != "xx" || calls[0].Init.Database != "my_project" {
 		t.Fatalf("bd init did not use canonical database; calls:\n%s", strings.Join(bd.argvs(), "\n"))
 	}
 	for _, c := range calls {
 		if db, _ := envValue(c.Env, "BEADS_DOLT_SERVER_DATABASE"); db != "my_project" {
-			t.Errorf("bd %s: BEADS_DOLT_SERVER_DATABASE = %q, want my_project", strings.Join(c.Args, " "), db)
+			t.Errorf("bd %s: BEADS_DOLT_SERVER_DATABASE = %q, want my_project", c.argv(), db)
 		}
 		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != filepath.Join(rigPath, ".beads") {
-			t.Errorf("bd %s: BEADS_DIR = %q, want the rig's .beads", strings.Join(c.Args, " "), dir)
+			t.Errorf("bd %s: BEADS_DIR = %q, want the rig's .beads", c.argv(), dir)
 		}
 		if db, ok := envValue(c.Env, "BEADS_DB"); ok {
-			t.Errorf("bd %s: stale BEADS_DB %q leaked", strings.Join(c.Args, " "), db)
+			t.Errorf("bd %s: stale BEADS_DB %q leaked", c.argv(), db)
 		}
 	}
 }
@@ -737,7 +739,7 @@ func TestBdSubprocessEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
 
 // bd init gets the town's port; a town without an endpoint passes none
 // rather than a guessed default (gt-y3pgh.3).
-func TestBdInitServerPortArgs(t *testing.T) {
+func TestBdInitServerPort(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
@@ -747,11 +749,11 @@ func TestBdInitServerPortArgs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  port: 5507\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if got := bdInitServerPortArgs(townRoot); !slices.Equal(got, []string{"--server-port", "5507"}) {
-		t.Fatalf("bdInitServerPortArgs() = %v, want --server-port 5507", got)
+	if got := bdInitServerPort(townRoot); got != 5507 {
+		t.Fatalf("bdInitServerPort() = %d, want 5507", got)
 	}
-	if got := bdInitServerPortArgs(t.TempDir()); got != nil {
-		t.Fatalf("bdInitServerPortArgs(no endpoint) = %v, want none", got)
+	if got := bdInitServerPort(t.TempDir()); got != 0 {
+		t.Fatalf("bdInitServerPort(no endpoint) = %d, want none", got)
 	}
 }
 
@@ -1636,19 +1638,17 @@ func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
 	}
 
 	mayorRig := filepath.Join(root, "testrip", "mayor", "rig")
-	var sourceInit []string
+	var sourceInit *beads.InitOptions
 	for _, c := range bd.withVerb("init") {
 		if c.Dir == mayorRig {
-			sourceInit = c.Args
+			sourceInit = &c.Init
 		}
 	}
 	if sourceInit == nil {
 		t.Fatalf("no bd init in the mayor clone; calls:\n%s", strings.Join(bd.argvs(), "\n"))
 	}
-	for _, flag := range []string{"--reinit-local", "--discard-remote", "--destroy-token=DESTROY-gt"} {
-		if !slices.Contains(sourceInit, flag) {
-			t.Errorf("bd init missing %s: %q", flag, sourceInit)
-		}
+	if !sourceInit.ReinitLocal || !sourceInit.DiscardRemote || sourceInit.DestroyToken != "DESTROY-gt" || !sourceInit.SkipAgents {
+		t.Errorf("bd init options = %+v, want reinit-local, discard-remote, destroy token DESTROY-gt, skip-agents", *sourceInit)
 	}
 }
 
@@ -1674,18 +1674,17 @@ func TestAddRig_TrackedBeadsWithoutSyncRemote_NoReinitFlags(t *testing.T) {
 		t.Fatalf("no bd init ran; calls:\n%s", strings.Join(bd.argvs(), "\n"))
 	}
 	for _, c := range inits {
-		for _, flag := range []string{"--reinit-local", "--discard-remote"} {
-			if slices.Contains(c.Args, flag) {
-				t.Errorf("bd init should NOT have %s without sync.remote; got %q", flag, c.Args)
-			}
+		if c.Init.ReinitLocal || c.Init.DiscardRemote {
+			t.Errorf("bd init should NOT reinit or discard the remote without sync.remote; got %+v", c.Init)
 		}
 	}
 }
 
 // setupIdentityRig creates a rig directory with a server-mode metadata.json
 // pointing at the rig-named database, matching the state gt rig add leaves
-// behind after EnsureMetadata, and a manager whose bd answers with answer.
-func setupIdentityRig(t *testing.T, rigName string, answer func(beads.BDCall) bdReply) (*Manager, string) {
+// behind after EnsureMetadata, and a manager whose bd config get of
+// issue_prefix answers value, or fails with err when it is set.
+func setupIdentityRig(t *testing.T, rigName, value string, err error) (*Manager, string) {
 	t.Helper()
 	root, rigsConfig := setupTestTown(t)
 	rigPath := filepath.Join(root, rigName)
@@ -1698,7 +1697,8 @@ func setupIdentityRig(t *testing.T, rigName string, answer func(beads.BDCall) bd
 		t.Fatalf("write metadata.json: %v", err)
 	}
 	manager, _, bd := testManager(root, rigsConfig)
-	bd.answer = answer
+	bd.config = map[string]string{"issue_prefix": value}
+	bd.fail = func(bdCall) error { return err }
 	return manager, rigPath
 }
 
@@ -1711,31 +1711,10 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 	t.Parallel()
 	const rigName = "gastown"
 	const prefix = "gt"
-	configGet := func(r bdReply) func(beads.BDCall) bdReply {
-		return func(c beads.BDCall) bdReply {
-			if strings.Join(c.Args, " ") == "config get issue_prefix" {
-				return r
-			}
-			return bdReply{}
-		}
-	}
 
 	t.Run("healthy database round-trips", func(t *testing.T) {
 		t.Parallel()
-		manager, rigPath := setupIdentityRig(t, rigName, configGet(bdReply{stdout: "gt\n"}))
-		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
-			t.Errorf("verifyRigIdentity = %v, want nil", err)
-		}
-	})
-
-	t.Run("machine mode value round-trips", func(t *testing.T) {
-		t.Parallel()
-		// Machine mode prints the value inside an envelope, with bd's
-		// diagnostics on stderr; neither may reach the prefix comparison.
-		manager, rigPath := setupIdentityRig(t, rigName, configGet(bdReply{
-			stdout: `{"schema_version":1,"contract_version":1,"data":{"key":"issue_prefix","value":"gt"},"pagination":null,"error":null}` + "\n",
-			stderr: "Note: using routed database\n",
-		}))
+		manager, rigPath := setupIdentityRig(t, rigName, "gt", nil)
 		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
 			t.Errorf("verifyRigIdentity = %v, want nil", err)
 		}
@@ -1743,9 +1722,8 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 
 	t.Run("uninitialized database fails round-trip", func(t *testing.T) {
 		t.Parallel()
-		manager, rigPath := setupIdentityRig(t, rigName, func(beads.BDCall) bdReply {
-			return bdReply{stderr: "Error: database not initialized: issue_prefix missing\n", code: 1}
-		})
+		manager, rigPath := setupIdentityRig(t, rigName, "", &beads.CLIError{
+			Args: []string{"config", "get", "issue_prefix"}, Stderr: []byte("Error: database not initialized: issue_prefix missing\n"), Err: errors.New("exit status 1")})
 		err := manager.VerifyRigIdentity(rigPath, rigName, prefix)
 		if err == nil {
 			t.Fatal("verifyRigIdentity = nil, want round-trip error for uninitialized database")
@@ -1760,7 +1738,7 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 
 	t.Run("wrong prefix fails round-trip", func(t *testing.T) {
 		t.Parallel()
-		manager, rigPath := setupIdentityRig(t, rigName, configGet(bdReply{stdout: "other\n"}))
+		manager, rigPath := setupIdentityRig(t, rigName, "other", nil)
 		err := manager.VerifyRigIdentity(rigPath, rigName, prefix)
 		if err == nil {
 			t.Fatal("verifyRigIdentity = nil, want error for prefix mismatch")
@@ -1772,7 +1750,7 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 
 	t.Run("missing bd skips round-trip", func(t *testing.T) {
 		t.Parallel()
-		manager, rigPath := setupIdentityRig(t, rigName, func(beads.BDCall) bdReply { return bdReply{missing: true} })
+		manager, rigPath := setupIdentityRig(t, rigName, "", &exec.Error{Name: "bd", Err: exec.ErrNotFound})
 		if err := manager.VerifyRigIdentity(rigPath, rigName, prefix); err != nil {
 			t.Errorf("verifyRigIdentity = %v, want nil when bd is not installed", err)
 		}
@@ -1780,7 +1758,7 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 
 	t.Run("empty prefix skips round-trip", func(t *testing.T) {
 		t.Parallel()
-		manager, rigPath := setupIdentityRig(t, rigName, func(beads.BDCall) bdReply { return bdReply{code: 1} })
+		manager, rigPath := setupIdentityRig(t, rigName, "", errors.New("exit status 1"))
 		if err := manager.VerifyRigIdentity(rigPath, rigName, ""); err != nil {
 			t.Errorf("verifyRigIdentity = %v, want nil when no prefix is expected", err)
 		}
