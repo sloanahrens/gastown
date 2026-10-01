@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
 )
 
@@ -271,5 +273,22 @@ func TestFileMainStateRoundTrips(t *testing.T) {
 	}
 	if st, err := f.Load(); err != nil || st != want {
 		t.Fatalf("loaded %+v %v; want %+v", st, err, want)
+	}
+}
+
+// TestLandingLogDirIsPerLanding is gt-2ycne.2's log half: every landing
+// checks out at the same <work root>/wt, so a log directory named from the
+// worktree path would put every landing's gate.log in one place. It is named
+// by the landing's ID; a context without one keeps the old path-derived name.
+func TestLandingLogDirIsPerLanding(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join("/work", "gastown", "wt")
+	a := landingLogDir(land.WithLandingID(context.Background(), "land-111"), "/logs", dir)
+	b := landingLogDir(land.WithLandingID(context.Background(), "land-222"), "/logs", dir)
+	if a != filepath.Join("/logs", "land-111") || b != filepath.Join("/logs", "land-222") {
+		t.Fatalf("log dirs = %q, %q; want /logs/land-111 and /logs/land-222", a, b)
+	}
+	if got := landingLogDir(context.Background(), "/logs", filepath.Join("/work", "gastown", "land-9", "wt")); got != filepath.Join("/logs", "land-9") {
+		t.Fatalf("log dir without a LandingID = %q, want /logs/land-9", got)
 	}
 }
