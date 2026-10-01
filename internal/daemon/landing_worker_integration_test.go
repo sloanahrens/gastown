@@ -59,6 +59,44 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	}
 }
 
+// TestIntegrationPostLandRunFetchesADirectPush is gt-p2rs0: a commit pushed
+// straight to origin is not in the rig's bare repository, so the post-land
+// run must fetch it before it adds a worktree there ("invalid reference").
+func TestIntegrationPostLandRunFetchesADirectPush(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	origin, seed, bare := filepath.Join(root, "origin.git"), filepath.Join(root, "seed"), filepath.Join(root, ".repo.git")
+	lwGit(t, root, "init", "-q", "--bare", "-b", "main", origin)
+	lwGit(t, root, "clone", "-q", origin, seed)
+	lwGit(t, seed, "config", "core.hooksPath", "/dev/null")
+	lwGit(t, seed, "checkout", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lwGit(t, seed, "add", ".")
+	lwGit(t, seed, "commit", "-q", "-m", "seed")
+	lwGit(t, seed, "push", "-q", "origin", "main")
+	from := lwGit(t, seed, "rev-parse", "HEAD")
+	lwGit(t, root, "clone", "-q", "--bare", origin, bare)
+	if err := os.WriteFile(filepath.Join(seed, "pushed.txt"), []byte("direct\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lwGit(t, seed, "add", ".")
+	lwGit(t, seed, "commit", "-q", "-m", "direct push")
+	lwGit(t, seed, "push", "-q", "origin", "main")
+	pushed := lwGit(t, seed, "rev-parse", "HEAD")
+	stub := filepath.Join(root, "gt")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), stub, "gastown", time.Minute)
+
+	res := run(context.Background(), "cat pushed.txt", landworker.PostLand{Commit: pushed, Target: "main", Direct: true, From: from})
+	if res.Err != nil || res.ExitCode != 0 || !strings.Contains(res.Tail, "direct") {
+		t.Fatalf("post-land run at the direct push: %+v", res)
+	}
+}
+
 func lwGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
