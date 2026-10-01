@@ -323,15 +323,16 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
-	// CRITICAL: Mail must persist to Dolt BEFORE logging to town.log.
-	// If Dolt is down, we must NOT log a false handoff to town.log.
+	// CRITICAL: Mail must persist to Dolt BEFORE logging the handoff event.
+	// If Dolt is down, we must NOT log a handoff that did not happen.
 	beadID, err := sendHandoffMail(handoffSubject, handoffMessage)
 	if err != nil {
 		// Handoff persistence failure is fatal — do not silently continue.
 		// A silent failure causes the next session to find an empty hook,
 		// losing all handoff context.
 		if townRoot, trErr := workspace.FindFromCwd(); trErr == nil && townRoot != "" {
-			_ = LogHandoffNoPersist(townRoot, agent, handoffSubject, err)
+			_ = events.LogFeedTo(townRoot, events.TypeHandoffNoPersist, agent,
+				events.HandoffFailedPayload(handoffSubject, err))
 		}
 		fmt.Fprintf(os.Stderr, "The session was NOT respawned. Fix the issue and retry 'gt handoff'.\n")
 		return fmt.Errorf("handoff mail failed to persist (Dolt may be down): %w", err)
@@ -339,10 +340,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Sent handoff mail %s (auto-hooked)\n", style.Bold.Render("📬"), beadID)
 
 	// Log handoff event AFTER Dolt persistence succeeds.
-	// Previously this logged BEFORE sendHandoffMail, causing false entries
-	// in town.log when Dolt was down.
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-		_ = LogHandoff(townRoot, agent, handoffSubject)
 		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(handoffSubject, true))
 	}
 
@@ -523,7 +521,8 @@ func runHandoffCycle() error {
 			agent = currentSession
 		}
 		if townRoot, trErr := workspace.FindFromCwd(); trErr == nil && townRoot != "" {
-			_ = LogHandoffNoPersist(townRoot, agent, subject, err)
+			_ = events.LogFeedTo(townRoot, events.TypeHandoffNoPersist, agent,
+				events.HandoffFailedPayload(subject, err))
 		}
 		fmt.Fprintf(os.Stderr, "The session was NOT respawned. Fix the issue and retry.\n")
 		return fmt.Errorf("handoff --cycle: mail failed to persist: %w", err)
@@ -547,7 +546,6 @@ func runHandoffCycle() error {
 		if agent == "" {
 			agent = currentSession
 		}
-		_ = LogHandoff(townRoot, agent, subject)
 		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(subject, true))
 	}
 

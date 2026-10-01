@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -627,12 +626,11 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 			style.SuccessPrefix,
 			r.Name, name)
 
-		// Log kill event to town log
+		// Log kill event
 		townRoot, _ := workspace.Find(r.Path)
 		if townRoot != "" {
 			agent := fmt.Sprintf("%s/crew/%s", r.Name, name)
-			logger := townlog.NewLogger(townRoot)
-			_ = logger.Log(townlog.EventKill, agent, "gt crew stop")
+			_ = logSessionKill(townRoot, agent, r.Name, name, "gt crew stop")
 		}
 
 		// Log captured output (truncated)
@@ -721,9 +719,8 @@ func runCrewStopAll() error {
 		succeeded++
 		fmt.Printf("  %s %s\n", style.SuccessPrefix, agentName)
 
-		// Log kill event to town log
-		logger := townlog.NewLogger(townRoot)
-		_ = logger.Log(townlog.EventKill, agentName, "gt crew stop --all")
+		// Log kill event
+		_ = logSessionKill(townRoot, agentName, agent.Rig, agent.AgentName, "gt crew stop --all")
 
 		// Log captured output (truncated)
 		if len(output) > 200 {

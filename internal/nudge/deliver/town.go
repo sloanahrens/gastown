@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/townlog"
 )
 
 // Town delivers nudges by target address inside one town: it is `gt nudge
@@ -29,8 +28,8 @@ type Town struct {
 	// NotificationLevel reads the notification level of an agent bead (DND);
 	// nil reads it with bd from the town root.
 	NotificationLevel func(townRoot, agentBeadID string) (string, error)
-	// Log records a delivered nudge in town.log and the event feed; nil
-	// writes both under the town root.
+	// Log records a delivered nudge in the town's event feed; nil writes it
+	// under the town root.
 	Log func(townRoot, sender, rig, target, message string)
 	// RigExists reports whether rig is one of the town's rigs; nil reads
 	// mayor/rigs.json.
@@ -124,7 +123,6 @@ func (n *Town) log(townRoot, sender, rig, target, message string) {
 		n.Log(townRoot, sender, rig, target, message)
 		return
 	}
-	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, target, strings.TrimSpace(message))
 	_ = events.LogFeedTo(townRoot, events.TypeNudge, sender, events.NudgePayload(rig, target, message))
 }
 

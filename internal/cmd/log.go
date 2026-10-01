@@ -1,16 +1,17 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -33,26 +34,54 @@ var (
 	prunedWorktreePath  string
 )
 
+// lifecycleEventTypes are the event types gt log shows: the agent lifecycle
+// vocabulary the retired townlog carried (gt-i057g). The events log holds every
+// type the town emits — slot telemetry, scheduler dispatches, refinery merges —
+// and gt log stays scoped to these so it remains the lifecycle view operators
+// read it as rather than becoming a firehose.
+var lifecycleEventTypes = map[string]bool{
+	events.TypeSpawn:            true,
+	events.TypeWake:             true,
+	events.TypeNudge:            true,
+	events.TypeHandoff:          true,
+	events.TypeHandoffNoPersist: true,
+	events.TypeDone:             true,
+	events.TypeKill:             true,
+	events.TypeSessionDeath:     true,
+}
+
+// logTypeAliases maps filter values that do not name their event type to the
+// type that records them. A crash is one kind of session death. Every other
+// documented value is spelled the same as its type and needs no entry.
+var logTypeAliases = map[string]string{
+	"crash":             events.TypeSessionDeath,
+	"handoff-NOPERSIST": events.TypeHandoffNoPersist,
+	"handoff-nopersist": events.TypeHandoffNoPersist,
+}
+
 var logCmd = &cobra.Command{
 	Use:     "log",
 	GroupID: GroupDiag,
 	Short:   "View town activity log",
 	Long: `View the centralized log of Gas Town agent lifecycle events.
 
+The log is the town's events log (~/gt/.events.jsonl); gt log renders its
+lifecycle events.
+
 Events logged include:
   spawn   - new agent created
-  wake    - agent resumed
-  nudge   - message injected into agent
+  wake    - agent session resumed by gt session start or restart
+  nudge   - message delivered to an agent
   handoff - agent handed off to fresh session
   done    - agent finished work
-  crash   - agent exited unexpectedly
-  kill    - agent killed intentionally
+  crash   - agent session ended unexpectedly (shown as session_death)
+  kill    - agent session stopped on purpose
 
 Examples:
   gt log                     # Show last 20 events
   gt log -n 50               # Show last 50 events
   gt log --type spawn        # Show only spawn events
-  gt log --agent greenplace/    # Show events for gastown rig
+  gt log --agent greenplace/    # Show events whose actor is in that rig
   gt log --since 1h          # Show events from last hour
   gt log -f                  # Follow log (like tail -f)`,
 	RunE: runLog,
@@ -60,15 +89,16 @@ Examples:
 
 var logCrashCmd = &cobra.Command{
 	Use:   "crash",
-	Short: "Record a crash event (called by tmux pane-died hook)",
-	Long: `Record a crash event to the town log.
+	Short: "Record a session exit (called by tmux pane-died hook)",
+	Long: `Record an agent session exit as an event.
 
-This command is called automatically by tmux when a pane exits unexpectedly.
-It's not typically run manually.
+This command is called automatically by tmux when a pane exits. It's not
+typically run manually.
 
-The exit code determines if this was a crash or expected exit:
-  - Exit code 0: Expected exit (logged as 'done' if no other done was recorded)
-  - Exit code non-zero: Crash (logged as 'crash')
+The exit code determines how the exit is recorded:
+  - Exit code 0: Expected exit, recorded for gt log but kept out of the feed
+  - Exit code 130: Ctrl+C, recorded for gt log but kept out of the feed
+  - Exit code non-zero: Crash, recorded as a feed-visible session death
 
 Examples:
   gt log crash --agent greenplace/Toast --session gt-greenplace-Toast --exit-code 1`,
@@ -96,7 +126,7 @@ Examples:
 func init() {
 	logCmd.Flags().IntVarP(&logTail, "tail", "n", 20, "Number of events to show")
 	logCmd.Flags().StringVarP(&logType, "type", "t", "", "Filter by event type (spawn,wake,nudge,handoff,done,crash,kill)")
-	logCmd.Flags().StringVarP(&logAgent, "agent", "a", "", "Filter by agent prefix (e.g., gastown/, greenplace/crew/max)")
+	logCmd.Flags().StringVarP(&logAgent, "agent", "a", "", "Filter by actor prefix (e.g., gastown/, greenplace/crew/max)")
 	logCmd.Flags().StringVar(&logSince, "since", "", "Show events since duration (e.g., 1h, 30m, 24h)")
 	logCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log output (like tail -f)")
 
@@ -117,220 +147,258 @@ func init() {
 	rootCmd.AddCommand(logCmd)
 }
 
+// logQuery is one gt log view: which type, actor and time window to show, and
+// how many of the newest matches to keep.
+type logQuery struct {
+	Type  string
+	Actor string
+	Since time.Time
+	Tail  int
+}
+
 func runLog(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	logPath := fmt.Sprintf("%s/logs/town.log", townRoot)
+	eventsPath := filepath.Join(townRoot, events.EventsFile)
 
-	// If following, use tail -f
 	if logFollow {
-		return followLog(logPath)
+		return followLog(eventsPath)
 	}
 
-	// Check if log file exists
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		fmt.Printf("%s No log file yet (no events recorded)\n", style.Dim.Render("○"))
+	if _, err := os.Stat(eventsPath); os.IsNotExist(err) {
+		fmt.Printf("%s No events recorded yet\n", style.Dim.Render("○"))
 		return nil
 	}
 
-	// Read events
-	events, err := townlog.ReadEvents(townRoot)
+	raw, err := events.Read(townRoot)
 	if err != nil {
 		return fmt.Errorf("reading events: %w", err)
 	}
-
-	if len(events) == 0 {
+	if len(raw) == 0 {
 		fmt.Printf("%s No events in log\n", style.Dim.Render("○"))
 		return nil
 	}
 
-	// Build filter
-	filter := townlog.Filter{}
-
-	if logType != "" {
-		filter.Type = townlog.EventType(logType)
+	query, err := buildLogQuery()
+	if err != nil {
+		return err
 	}
 
-	if logAgent != "" {
-		filter.Agent = logAgent
+	selected := filterLogEvents(raw, query)
+	if len(selected) == 0 {
+		fmt.Printf("%s No events match filter\n", style.Dim.Render("○"))
+		return nil
+	}
+
+	writeLogEvents(os.Stdout, selected)
+	return nil
+}
+
+// buildLogQuery turns the command's flags into a query.
+func buildLogQuery() (logQuery, error) {
+	query := logQuery{
+		Type:  logType,
+		Actor: logAgent,
+		Tail:  logTail,
 	}
 
 	if logSince != "" {
 		duration, err := time.ParseDuration(logSince)
 		if err != nil {
-			return fmt.Errorf("invalid --since duration: %w", err)
+			return logQuery{}, fmt.Errorf("invalid --since duration: %w", err)
 		}
-		filter.Since = time.Now().Add(-duration)
+		query.Since = time.Now().Add(-duration)
 	}
 
-	// Apply filter
-	events = townlog.FilterEvents(events, filter)
-
-	// Apply tail limit
-	if logTail > 0 && len(events) > logTail {
-		events = events[len(events)-logTail:]
-	}
-
-	if len(events) == 0 {
-		fmt.Printf("%s No events match filter\n", style.Dim.Render("○"))
-		return nil
-	}
-
-	// Print events
-	for _, e := range events {
-		printEvent(e)
-	}
-
-	return nil
+	return query, nil
 }
 
-// followLog uses tail -f to follow the log file.
-func followLog(logPath string) error {
-	// Check if log file exists, create empty if not
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		// Create logs directory and empty file
-		if err := os.MkdirAll(fmt.Sprintf("%s", logPath[:len(logPath)-len("town.log")-1]), 0755); err != nil {
-			return fmt.Errorf("creating logs directory: %w", err)
-		}
-		if _, err := os.Create(logPath); err != nil {
-			return fmt.Errorf("creating log file: %w", err)
-		}
+// filterLogEvents applies a query to events, newest last. Events outside the
+// lifecycle vocabulary are dropped first: they are not gt log's subject, and
+// applying --type to them would suggest they are.
+func filterLogEvents(raw []events.Event, query logQuery) []events.Event {
+	wantType := query.Type
+	if alias, ok := logTypeAliases[wantType]; ok {
+		wantType = alias
 	}
 
-	fmt.Printf("%s Following %s (Ctrl+C to stop)\n\n", style.Dim.Render("○"), logPath)
+	var selected []events.Event
+	for _, e := range raw {
+		if !lifecycleEventTypes[e.Type] {
+			continue
+		}
+		if wantType != "" && e.Type != wantType {
+			continue
+		}
+		if query.Actor != "" && !strings.HasPrefix(e.Actor, query.Actor) {
+			continue
+		}
+		if !query.Since.IsZero() && eventTime(e).Before(query.Since) {
+			continue
+		}
+		selected = append(selected, e)
+	}
 
-	tailCmd := exec.Command("tail", "-f", logPath)
-	tailCmd.Stdout = os.Stdout
-	tailCmd.Stderr = os.Stderr
-
-	return tailCmd.Run()
+	if query.Tail > 0 && len(selected) > query.Tail {
+		selected = selected[len(selected)-query.Tail:]
+	}
+	return selected
 }
 
-// printEvent prints a single event with styling.
-func printEvent(e townlog.Event) {
-	ts := e.Timestamp.Format("2006-01-02 15:04:05")
+// writeLogEvents prints one line per event.
+func writeLogEvents(w io.Writer, evs []events.Event) {
+	for _, e := range evs {
+		fmt.Fprintln(w, renderEventLine(e))
+	}
+}
 
-	// Color-code event types
+// followLog streams the events file, printing each new lifecycle event as it
+// lands. It uses events.Tail rather than `tail -f` so it survives the daemon's
+// prune rotating the file out from under it (claude-9jq).
+func followLog(eventsPath string) error {
+	tail, err := events.OpenTail(eventsPath)
+	if err != nil {
+		return err
+	}
+	defer tail.Close() //nolint:errcheck // read-only
+
+	fmt.Printf("%s Following %s (Ctrl+C to stop)\n\n", style.Dim.Render("○"), eventsPath)
+
+	ticker := time.NewTicker(eventsPollInterval)
+	defer ticker.Stop()
+
+	for {
+		lines, err := tail.Poll()
+		if err != nil {
+			return err
+		}
+		for _, line := range lines {
+			if rendered, ok := renderRawEventLine(line); ok {
+				fmt.Println(rendered)
+			}
+		}
+		<-ticker.C
+	}
+}
+
+// renderRawEventLine renders one line of the events file, reporting false when
+// the line is not a lifecycle event or is not a complete event at all.
+func renderRawEventLine(line string) (string, bool) {
+	var event events.Event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &event); err != nil {
+		return "", false
+	}
+	if !lifecycleEventTypes[event.Type] {
+		return "", false
+	}
+	return renderEventLine(event), true
+}
+
+// renderEventLine formats an event as an operator-readable line, keeping the
+// phrasing the retired townlog used for the lifecycle types (gt-i057g):
+// 2025-12-26 15:30:45 [spawn] gt spawned for gastown/shale
+func renderEventLine(e events.Event) string {
+	ts := eventTime(e).Format("2006-01-02 15:04:05")
+
 	var typeStr string
 	switch e.Type {
-	case townlog.EventSpawn:
+	case events.TypeSpawn:
 		typeStr = style.Success.Render("[spawn]")
-	case townlog.EventWake:
+	case events.TypeWake:
 		typeStr = style.Bold.Render("[wake]")
-	case townlog.EventNudge:
+	case events.TypeNudge:
 		typeStr = style.Dim.Render("[nudge]")
-	case townlog.EventHandoff:
+	case events.TypeHandoff:
 		typeStr = style.Bold.Render("[handoff]")
-	case townlog.EventHandoffNoPersist:
+	case events.TypeHandoffNoPersist:
 		typeStr = style.Error.Render("[handoff-NOPERSIST]")
-	case townlog.EventDone:
+	case events.TypeDone:
 		typeStr = style.Success.Render("[done]")
-	case townlog.EventCrash:
-		typeStr = style.Error.Render("[crash]")
-	case townlog.EventKill:
+	case events.TypeKill:
 		typeStr = style.Warning.Render("[kill]")
-	case townlog.EventCallback:
-		typeStr = style.Bold.Render("[callback]")
-	case townlog.EventPatrolStarted:
-		typeStr = style.Bold.Render("[patrol_started]")
-	case townlog.EventPolecatChecked:
-		typeStr = style.Dim.Render("[polecat_checked]")
-	case townlog.EventPolecatNudged:
-		typeStr = style.Warning.Render("[polecat_nudged]")
-	case townlog.EventEscalationSent:
-		typeStr = style.Error.Render("[escalation_sent]")
-	case townlog.EventPatrolComplete:
-		typeStr = style.Success.Render("[patrol_complete]")
+	case events.TypeSessionDeath:
+		typeStr = style.Error.Render("[session_death]")
 	default:
 		typeStr = fmt.Sprintf("[%s]", e.Type)
 	}
 
-	detail := formatEventDetail(e)
-	fmt.Printf("%s %s %s %s\n", style.Dim.Render(ts), typeStr, e.Agent, detail)
+	return fmt.Sprintf("%s %s %s %s", style.Dim.Render(ts), typeStr, e.Actor, eventDetail(e))
 }
 
-// formatEventDetail returns a human-readable detail string for an event.
-func formatEventDetail(e townlog.Event) string {
+// eventDetail renders the human-readable tail of an event line from its
+// payload.
+func eventDetail(e events.Event) string {
 	switch e.Type {
-	case townlog.EventSpawn:
-		if e.Context != "" {
-			return fmt.Sprintf("spawned for %s", e.Context)
+	case events.TypeSpawn:
+		rig, polecat := payloadString(e, "rig"), payloadString(e, "polecat")
+		if rig != "" && polecat != "" {
+			return fmt.Sprintf("spawned for %s/%s", rig, polecat)
 		}
 		return "spawned"
-	case townlog.EventWake:
-		if e.Context != "" {
-			return fmt.Sprintf("resumed (%s)", e.Context)
+	case events.TypeWake:
+		if context := payloadString(e, "context"); context != "" {
+			return fmt.Sprintf("resumed (%s)", context)
 		}
 		return "resumed"
-	case townlog.EventNudge:
-		if e.Context != "" {
-			return fmt.Sprintf("nudged with %q", truncateStr(e.Context, 40))
+	case events.TypeNudge:
+		message := truncateStr(payloadString(e, "reason"), 40)
+		if target := payloadString(e, "target"); target != "" {
+			return fmt.Sprintf("nudged %s with %q", target, message)
 		}
-		return "nudged"
-	case townlog.EventHandoff:
-		if e.Context != "" {
-			return fmt.Sprintf("handed off (%s)", e.Context)
+		return fmt.Sprintf("nudged with %q", message)
+	case events.TypeHandoff:
+		if subject := payloadString(e, "subject"); subject != "" {
+			return fmt.Sprintf("handed off (%s)", subject)
 		}
 		return "handed off"
-	case townlog.EventHandoffNoPersist:
-		if e.Context != "" {
-			return fmt.Sprintf("handoff FAILED (%s)", e.Context)
+	case events.TypeHandoffNoPersist:
+		detail := payloadString(e, "subject")
+		if errText := payloadString(e, "error"); errText != "" {
+			if detail != "" {
+				return fmt.Sprintf("handoff FAILED (%s): %s", detail, errText)
+			}
+			return fmt.Sprintf("handoff FAILED: %s", errText)
 		}
-		return "handoff FAILED (no persist)"
-	case townlog.EventDone:
-		if e.Context != "" {
-			return fmt.Sprintf("completed %s", e.Context)
+		if detail != "" {
+			return fmt.Sprintf("handoff FAILED (%s)", detail)
+		}
+		return "handoff FAILED"
+	case events.TypeDone:
+		if bead := payloadString(e, "bead"); bead != "" {
+			return fmt.Sprintf("completed %s", bead)
 		}
 		return "completed work"
-	case townlog.EventCrash:
-		if e.Context != "" {
-			return fmt.Sprintf("exited unexpectedly (%s)", e.Context)
-		}
-		return "exited unexpectedly"
-	case townlog.EventKill:
-		if e.Context != "" {
-			return fmt.Sprintf("killed (%s)", e.Context)
+	case events.TypeKill:
+		if reason := payloadString(e, "reason"); reason != "" {
+			return fmt.Sprintf("killed (%s)", reason)
 		}
 		return "killed"
-	case townlog.EventCallback:
-		if e.Context != "" {
-			return fmt.Sprintf("callback: %s", e.Context)
+	case events.TypeSessionDeath:
+		if reason := payloadString(e, "reason"); reason != "" {
+			return fmt.Sprintf("exited (%s)", reason)
 		}
-		return "callback processed"
-	case townlog.EventPatrolStarted:
-		if e.Context != "" {
-			return fmt.Sprintf("started patrol (%s)", e.Context)
-		}
-		return "started patrol"
-	case townlog.EventPolecatChecked:
-		if e.Context != "" {
-			return fmt.Sprintf("checked %s", e.Context)
-		}
-		return "checked polecat"
-	case townlog.EventPolecatNudged:
-		if e.Context != "" {
-			return fmt.Sprintf("nudged (%s)", e.Context)
-		}
-		return "nudged polecat"
-	case townlog.EventEscalationSent:
-		if e.Context != "" {
-			return fmt.Sprintf("escalated (%s)", e.Context)
-		}
-		return "escalated"
-	case townlog.EventPatrolComplete:
-		if e.Context != "" {
-			return fmt.Sprintf("patrol complete (%s)", e.Context)
-		}
-		return "patrol complete"
+		return "exited"
 	default:
-		if e.Context != "" {
-			return fmt.Sprintf("%s (%s)", e.Type, e.Context)
-		}
-		return string(e.Type)
+		return e.Type
 	}
+}
+
+// payloadString reads a string field from an event payload.
+func payloadString(e events.Event, key string) string {
+	s, _ := e.Payload[key].(string)
+	return s
+}
+
+// eventTime is an event's timestamp, or the zero time when it cannot be read.
+func eventTime(e events.Event) time.Time {
+	ts, err := time.Parse(time.RFC3339, e.Timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.Local()
 }
 
 func truncateStr(s string, maxLen int) string {
@@ -358,60 +426,38 @@ func runLogCrash(cmd *cobra.Command, args []string) error {
 	return logCrash(townRoot, crashAgent, crashSession, crashExitCode)
 }
 
-// logCrash records a session exit in townRoot's town log, and a crash as a
-// feed-visible session death.
+// logCrash records a session exit from townRoot's pane-died hook.
+//
+// The exit class picks the visibility rather than the type. A crash is what the
+// feed is for. A clean or interrupted exit is a session ending the way it was
+// supposed to, and the hook fires on every one of them — putting those on the
+// feed would append a session death beside every gt done. They are audit-only,
+// which still leaves them in the log gt log reads.
 func logCrash(townRoot, crashAgent, crashSession string, crashExitCode int) error {
-	// Determine event type based on exit code
-	var eventType townlog.EventType
-	var context string
+	var reason, visibility string
 
-	if crashExitCode == 0 {
-		// Exit code 0 = normal exit
-		// Could be handoff, done, or user quit - we log as "done" if no prior done event
-		// The Witness can analyze further if needed
-		eventType = townlog.EventDone
-		context = "exited normally"
-	} else if crashExitCode == 130 {
-		// Exit code 130 = Ctrl+C (SIGINT)
-		// This is typically intentional user interrupt
-		eventType = townlog.EventKill
-		context = fmt.Sprintf("interrupted (exit %d)", crashExitCode)
-	} else {
-		// Non-zero exit = crash
-		eventType = townlog.EventCrash
-		context = fmt.Sprintf("exit code %d", crashExitCode)
-		if crashSession != "" {
-			context += fmt.Sprintf(" (session: %s)", crashSession)
-		}
+	switch {
+	case crashExitCode == 0:
+		reason = "exited normally"
+		visibility = events.VisibilityAudit
+	case crashExitCode == 130:
+		reason = fmt.Sprintf("interrupted (exit %d)", crashExitCode)
+		visibility = events.VisibilityAudit
+	default:
+		reason = fmt.Sprintf("crashed with exit code %d", crashExitCode)
+		visibility = events.VisibilityFeed
 	}
 
-	// Log the event
-	logger := townlog.NewLogger(townRoot)
-	if err := logger.Log(eventType, crashAgent, context); err != nil {
-		return fmt.Errorf("logging event: %w", err)
-	}
-	if eventType == townlog.EventCrash {
-		logCrashFeedEvent(townRoot, crashAgent, crashSession, crashExitCode)
+	if crashSession == "" {
+		crashSession = "unknown"
 	}
 
-	return nil
-}
-
-func logCrashFeedEvent(townRoot, agent, session string, exitCode int) {
-	if townRoot == "" {
-		return
-	}
-	if session == "" {
-		session = "unknown"
-	}
-
-	reason := fmt.Sprintf("crashed with exit code %d", exitCode)
-	payload := events.SessionDeathPayload(session, agent, reason, "gt log crash")
-	payload["exit_code"] = exitCode
-	// LogFeedTo (not the ambient LogFeed) since we already have townRoot: the
-	// ambient variant resolves from cwd and is a hard no-op under go test
-	// (events.write, gt-x9o/gt-lwi), regardless of any chdir here.
-	_ = events.LogFeedTo(townRoot, events.TypeSessionDeath, agent, payload)
+	payload := events.SessionDeathPayload(crashSession, crashAgent, reason, "gt log crash")
+	payload["exit_code"] = crashExitCode
+	// LogTo (not the ambient Log) since we already have townRoot: the ambient
+	// variant resolves from cwd and is a hard no-op under go test
+	// (events.writeVia, gt-x9o/gt-lwi), regardless of any chdir here.
+	return events.LogTo(townRoot, events.TypeSessionDeath, crashAgent, payload, visibility)
 }
 
 // runLogPruneWorktree handles "gt log prune-worktree", called by bash-executed
@@ -436,71 +482,15 @@ func logPruneWorktree(townRoot, actor, kind, owner, path string) error {
 	return events.LogFeedTo(townRoot, events.TypeWorktreePrune, actor, payload)
 }
 
-// LogEvent is a helper that logs an event from anywhere in the codebase.
-// It finds the town root and logs the event.
-func LogEvent(eventType townlog.EventType, agent, context string) error {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return err // Silently fail if not in a workspace
-	}
-	if townRoot == "" {
-		return nil
-	}
-
-	logger := townlog.NewLogger(townRoot)
-	return logger.Log(eventType, agent, context)
+// logSessionWake records an explicit agent-session resume. `gt session start`
+// and `gt session restart` are the callers; the context is what each of them
+// knew — the hooked issue, or who asked for the restart (gt-tcrgb, gt-i057g).
+func logSessionWake(townRoot, agent, rig, context string) error {
+	return events.LogFeedTo(townRoot, events.TypeWake, agent, events.WakePayload(rig, context))
 }
 
-// LogEventWithRoot logs an event when the town root is already known.
-func LogEventWithRoot(townRoot string, eventType townlog.EventType, agent, context string) error {
-	logger := townlog.NewLogger(townRoot)
-	return logger.Log(eventType, agent, context)
-}
-
-// Convenience functions for common events
-
-// LogSpawn logs a spawn event.
-func LogSpawn(townRoot, agent, issueID string) error {
-	return LogEventWithRoot(townRoot, townlog.EventSpawn, agent, issueID)
-}
-
-// LogWake logs a wake event.
-func LogWake(townRoot, agent, context string) error {
-	return LogEventWithRoot(townRoot, townlog.EventWake, agent, context)
-}
-
-// LogNudge logs a nudge event.
-func LogNudge(townRoot, agent, message string) error {
-	return LogEventWithRoot(townRoot, townlog.EventNudge, agent, strings.TrimSpace(message))
-}
-
-// LogHandoff logs a handoff event.
-func LogHandoff(townRoot, agent, context string) error {
-	return LogEventWithRoot(townRoot, townlog.EventHandoff, agent, context)
-}
-
-// LogHandoffNoPersist logs a failed handoff where Dolt persistence failed.
-// Creates a distinct marker in town.log so crash recovery can identify
-// handoffs that were attempted but never persisted to Dolt.
-func LogHandoffNoPersist(townRoot, agent, context string, persistErr error) error {
-	msg := context
-	if persistErr != nil {
-		msg = fmt.Sprintf("%s — error: %v", context, persistErr)
-	}
-	return LogEventWithRoot(townRoot, townlog.EventHandoffNoPersist, agent, msg)
-}
-
-// LogDone logs a done event.
-func LogDone(townRoot, agent, issueID string) error {
-	return LogEventWithRoot(townRoot, townlog.EventDone, agent, issueID)
-}
-
-// LogCrash logs a crash event.
-func LogCrash(townRoot, agent, reason string) error {
-	return LogEventWithRoot(townRoot, townlog.EventCrash, agent, reason)
-}
-
-// LogKill logs a kill event.
-func LogKill(townRoot, agent, reason string) error {
-	return LogEventWithRoot(townRoot, townlog.EventKill, agent, reason)
+// logSessionKill records an agent session stopped on purpose, by `gt session
+// stop` or `gt crew stop` (gt-i057g).
+func logSessionKill(townRoot, agent, rig, target, reason string) error {
+	return events.LogFeedTo(townRoot, events.TypeKill, agent, events.KillPayload(rig, target, reason))
 }
