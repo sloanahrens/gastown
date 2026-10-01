@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,17 +9,23 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
 // OverlayHealthCheck verifies that formula overlay files reference valid step IDs.
-// It scans the one overlay dir, <townRoot>/formula-overlays, loads the referenced
-// formula from the embedded binary, resolves its extends and compose, and checks that every step_id in the overlay
-// matches a real step in the formula. Fix mode removes stale step-override entries.
+// It scans the one overlay dir, <townRoot>/formula-overlays, and checks that every
+// step_id in an overlay names a step of the formula as bd cooks it (extends,
+// expansions and aspects applied), for a formula this binary ships. Fix mode
+// removes stale step-override entries.
 // A rig-level <rig>/formula-overlays dir is not read (gt-fd2cu.3), so one that
 // still holds overlays is reported for an operator to move or delete.
 type OverlayHealthCheck struct {
 	FixableCheck
+
+	// stepIDs is every step id of formula name as bd cooks it in townRoot;
+	// cookedStepIDs (the bd on PATH) by default.
+	stepIDs func(townRoot, name string) ([]string, error)
 }
 
 // NewOverlayHealthCheck creates a new overlay health check.
@@ -31,7 +38,40 @@ func NewOverlayHealthCheck() *OverlayHealthCheck {
 				CheckCategory:    CategoryConfig,
 			},
 		},
+		stepIDs: cookedStepIDs,
 	}
+}
+
+// cookedStepIDs cooks formula name with the bd on PATH from the town root
+// (GT_ROOT the town, no overlay applied) and returns every step id in the
+// tree, children included. bd is the one formula engine (gt-fd2cu.1.1).
+func cookedStepIDs(townRoot, name string) ([]string, error) {
+	env := beads.StripEnvKey(beads.StripEnvKey(os.Environ(), "GT_ROOT"), "BD_FORMULA_OVERLAY_DIR")
+	env = append(env, "GT_ROOT="+townRoot)
+	out, err := beads.NewPinned(filepath.Join(townRoot, ".beads"), beads.WithWorkDir(townRoot), beads.WithEnv(env)).Cook(name, nil)
+	if err != nil {
+		return nil, err
+	}
+	type step struct {
+		ID       string `json:"id"`
+		Children []step `json:"children"`
+	}
+	var tree struct {
+		Steps []step `json:"steps"`
+	}
+	if err := json.Unmarshal(out, &tree); err != nil {
+		return nil, fmt.Errorf("cook %s: bd printed no step tree: %w", name, err)
+	}
+	var ids []string
+	var walk func([]step)
+	walk = func(steps []step) {
+		for _, s := range steps {
+			ids = append(ids, s.ID)
+			walk(s.Children)
+		}
+	}
+	walk(tree.Steps)
+	return ids, nil
 }
 
 // overlayFile represents a discovered overlay file with its parsed contents.
@@ -165,7 +205,7 @@ func (c *OverlayHealthCheck) Fix(ctx *CheckContext) error {
 
 // scanOverlays discovers and validates the overlay files in the one overlay dir.
 func (c *OverlayHealthCheck) scanOverlays(townRoot string) []overlayFile {
-	return scanOverlayDir(formula.OverlayDir(townRoot))
+	return c.scanOverlayDir(townRoot, formula.OverlayDir(townRoot))
 }
 
 // unreadRigOverlayFiles lists every file under a registered rig's
@@ -187,8 +227,8 @@ func unreadRigOverlayFiles(townRoot string) []string {
 }
 
 // scanOverlayDir reads all .toml files in a formula-overlays directory,
-// parses each one, and validates step IDs against the embedded formula.
-func scanOverlayDir(dir string) []overlayFile {
+// parses each one, and validates step IDs against the cooked formula.
+func (c *OverlayHealthCheck) scanOverlayDir(townRoot, dir string) []overlayFile {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil // directory doesn't exist — that's fine
@@ -224,9 +264,8 @@ func scanOverlayDir(dir string) []overlayFile {
 		}
 		of.Overlay = &overlay
 
-		// Load the embedded formula to get valid step IDs.
-		embeddedContent, err := formula.GetEmbeddedFormulaContent(formulaName)
-		if err != nil {
+		// A formula this binary does not ship has no valid step IDs.
+		if _, err := formula.GetEmbeddedFormulaContent(formulaName); err != nil {
 			// Formula not found in embedded binary — all step IDs are stale.
 			for _, so := range overlay.StepOverrides {
 				of.StaleIDs = append(of.StaleIDs, so.StepID)
@@ -235,21 +274,16 @@ func scanOverlayDir(dir string) []overlayFile {
 			continue
 		}
 
-		f, err := formula.Parse(embeddedContent)
-		if err == nil {
-			// Overlays apply to the resolved formula (gt prime resolves before
-			// applying them), so an overlay may target an inherited step.
-			f, err = formula.Resolve(f, nil)
-		}
+		// Overlays apply to the cooked formula, so an overlay may target an
+		// inherited or expanded step.
+		ids, err := c.stepIDs(townRoot, formulaName)
 		if err != nil {
-			// Embedded formula can't be parsed or resolved — skip validation.
+			// bd cannot cook the formula: skip validation.
 			results = append(results, of)
 			continue
 		}
-
-		// Build set of valid IDs from the formula.
-		validIDs := make(map[string]bool)
-		for _, id := range f.GetAllIDs() {
+		validIDs := make(map[string]bool, len(ids))
+		for _, id := range ids {
 			validIDs[id] = true
 		}
 

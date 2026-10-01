@@ -1,11 +1,11 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +23,7 @@ func TestOverlayHealthCheck_NoOverlays(t *testing.T) {
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	result := check.Run(&CheckContext{TownRoot: tmpDir})
 
 	assert.Equal(t, StatusOK, result.Status)
@@ -39,14 +39,10 @@ func TestOverlayHealthCheck_HealthyOverlay(t *testing.T) {
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
 
-	// Get valid step IDs from the embedded formula.
-	validIDs := getEmbeddedFormulaStepIDs(t, "mol-polecat-work")
-	require.NotEmpty(t, validIDs, "embedded formula must have step IDs")
-
-	content := "[[step-overrides]]\nstep_id = " + quote(validIDs[0]) + "\nmode = \"append\"\ndescription = \"Extra instructions\"\n"
+	content := "[[step-overrides]]\nstep_id = \"load-context\"" + "\nmode = \"append\"\ndescription = \"Extra instructions\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	result := check.Run(&CheckContext{TownRoot: tmpDir})
 
 	assert.Equal(t, StatusOK, result.Status)
@@ -68,7 +64,7 @@ description = "This won't match anything"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	result := check.Run(&CheckContext{TownRoot: tmpDir})
 
 	assert.Equal(t, StatusWarning, result.Status)
@@ -76,48 +72,6 @@ description = "This won't match anything"
 	require.NotEmpty(t, result.Details)
 	assert.Contains(t, result.Details[0], "nonexistent-step-from-old-binary")
 	assert.NotEmpty(t, result.FixHint)
-}
-
-// TestOverlayHealthCheck_InheritedStep guards gt-0z1lt: mol-doc-audit carries
-// only its delta, so load-context (inherited from mol-polecat-work) and audit
-// (from its doc-audit-slice expansion) are not in its file. Overlays apply to
-// the resolved formula, so both are valid targets, and --fix must not delete
-// the overlay. implement is replaced by the expansion, so it is stale.
-func TestOverlayHealthCheck_InheritedStep(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	setupRigsJSON(t, tmpDir, []string{"testrig"})
-
-	overlayDir := filepath.Join(tmpDir, "formula-overlays")
-	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
-	require.NotContains(t, getEmbeddedFormulaStepIDs(t, "mol-doc-audit"), "load-context",
-		"test premise: load-context is inherited, not in mol-doc-audit's own file")
-
-	content := `[[step-overrides]]
-step_id = "load-context"
-mode = "append"
-description = "Extra context"
-
-[[step-overrides]]
-step_id = "audit"
-mode = "append"
-description = "Extra audit rule"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-doc-audit.toml"), []byte(content), 0o644))
-
-	check := NewOverlayHealthCheck()
-	result := check.Run(&CheckContext{TownRoot: tmpDir})
-	assert.Equal(t, StatusOK, result.Status, "details: %v", result.Details)
-
-	stale := `[[step-overrides]]
-step_id = "implement"
-mode = "skip"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-doc-audit.toml"), []byte(stale), 0o644))
-	result = check.Run(&CheckContext{TownRoot: tmpDir})
-	assert.Equal(t, StatusWarning, result.Status)
-	require.NotEmpty(t, result.Details)
-	assert.Contains(t, result.Details[0], "implement")
 }
 
 func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
@@ -130,7 +84,7 @@ func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte("[[invalid"), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	result := check.Run(&CheckContext{TownRoot: tmpDir})
 
 	assert.Equal(t, StatusError, result.Status)
@@ -157,7 +111,7 @@ mode = "skip"
 	require.NoError(t, os.WriteFile(overlay, []byte(content), 0o644))
 	require.NoError(t, os.WriteFile(bak, []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
@@ -187,7 +141,7 @@ description = "Override for non-existent formula"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "nonexistent-formula.toml"), []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	result := check.Run(&CheckContext{TownRoot: tmpDir})
 
 	// All step IDs should be reported as stale since the formula doesn't exist.
@@ -203,17 +157,13 @@ func TestOverlayHealthCheck_Fix_RemovesStaleEntries(t *testing.T) {
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
 
-	// Get a valid step ID.
-	validIDs := getEmbeddedFormulaStepIDs(t, "mol-polecat-work")
-	require.NotEmpty(t, validIDs)
-
 	// Create overlay with one valid and one stale override.
-	content := "[[step-overrides]]\nstep_id = " + quote(validIDs[0]) + "\nmode = \"append\"\ndescription = \"Keep this\"\n\n" +
+	content := "[[step-overrides]]\nstep_id = \"load-context\"" + "\nmode = \"append\"\ndescription = \"Keep this\"\n\n" +
 		"[[step-overrides]]\nstep_id = \"ghost-step\"\nmode = \"skip\"\n"
 	overlayPath := filepath.Join(overlayDir, "mol-polecat-work.toml")
 	require.NoError(t, os.WriteFile(overlayPath, []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	// Verify it's warning before fix.
@@ -253,7 +203,7 @@ description = "Also stale"
 	overlayPath := filepath.Join(overlayDir, "mol-polecat-work.toml")
 	require.NoError(t, os.WriteFile(overlayPath, []byte(content), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	require.NoError(t, check.Fix(ctx))
@@ -278,7 +228,7 @@ func TestOverlayHealthCheck_Fix_SkipsMalformed(t *testing.T) {
 	overlayPath := filepath.Join(overlayDir, "mol-polecat-work.toml")
 	require.NoError(t, os.WriteFile(overlayPath, []byte("[[invalid"), 0o644))
 
-	check := NewOverlayHealthCheck()
+	check := overlayCheckWithSteps(polecatWorkSteps)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	// Fix should not error — just skips malformed files.
@@ -292,15 +242,19 @@ func TestOverlayHealthCheck_Fix_SkipsMalformed(t *testing.T) {
 
 // --- helpers ---
 
-func getEmbeddedFormulaStepIDs(t *testing.T, name string) []string {
-	t.Helper()
-	data, err := formula.GetEmbeddedFormulaContent(name)
-	require.NoError(t, err)
-	f, err := formula.Parse(data)
-	require.NoError(t, err)
-	return f.GetAllIDs()
-}
+// polecatWorkSteps is bd's cooked step ids for mol-polecat-work.
+var polecatWorkSteps = map[string][]string{"mol-polecat-work": {"load-context", "branch-setup", "implement"}}
 
-func quote(s string) string {
-	return `"` + s + `"`
+// overlayCheckWithSteps is the check with bd's cook answered from steps: a
+// formula not in it fails to cook.
+func overlayCheckWithSteps(steps map[string][]string) *OverlayHealthCheck {
+	c := NewOverlayHealthCheck()
+	c.stepIDs = func(_, name string) ([]string, error) {
+		ids, ok := steps[name]
+		if !ok {
+			return nil, errors.New("bd cannot cook " + name)
+		}
+		return ids, nil
+	}
+	return c
 }

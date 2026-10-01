@@ -348,11 +348,11 @@ func TestFormulaCheck_Run_BumpedVersionOverrideOmitsSizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := formula.Parse(data)
+	version, err := formulaVersion(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	from, to := fmt.Sprintf("version = %d", f.Version), fmt.Sprintf("version = %d", f.Version+1)
+	from, to := fmt.Sprintf("version = %d", version), fmt.Sprintf("version = %d", version+1)
 	edited := strings.Replace(string(data), from, to, 1)
 	if !strings.Contains(edited, to) {
 		t.Fatalf("version bump %q did not apply; the formula's version line moved", from)

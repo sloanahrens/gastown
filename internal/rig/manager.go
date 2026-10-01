@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -141,11 +140,12 @@ type Manager struct {
 
 	// Test seams (docs/testing.md, "Seams for external tools"); the zero
 	// values are production.
-	openRepo  func(gitDir, workDir string) Repo // nil: git.NewGitWithDir
-	bd        beads.BDRunner                    // nil: the bd on PATH
-	env       []string                          // bd's base environment; nil: os.Environ()
-	bdVersion func() (deps.BeadsStatus, string) // nil: deps.CheckBeads
-	dolt      doltDatabases                     // nil: the town's Dolt server
+	openRepo  func(gitDir, workDir string) Repo    // nil: git.NewGitWithDir
+	openBD    func(dir string, env []string) rigBD // nil: beads.NewPlain
+	openLocal func(dir string) configSetter        // nil: beads.NewRigLocal
+	env       []string                             // bd's base environment; nil: os.Environ()
+	bdVersion func() (deps.BeadsStatus, string)    // nil: deps.CheckBeads
+	dolt      doltDatabases                        // nil: the town's Dolt server
 }
 
 // NewManager creates a new rig manager.
@@ -631,33 +631,27 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// database and set issue_prefix. Always ensure issue_prefix is set afterward.
 		sourceBdEnv := bdSubprocessEnv(m.environ(), sourceBeadsDir, opts.Name)
 		if !bdDatabaseExists(sourceBeadsDir) {
-			initArgs := []string{"init"}
-			if opts.BeadsPrefix != "" {
-				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
+			// --server with the town's port: bd connects to gt's central Dolt
+			// server instead of auto-starting its own on a random port, which
+			// causes "database not found" errors (GH #2405). The clone is
+			// the user's repo: bd's editor-agent setup would leave .agents/,
+			// .codex/ and .cursor/ untracked in it (gt-22hdp.40). If the
+			// cloned repo's config.yaml has sync.remote, bd init blocks
+			// waiting for interactive confirmation (stdin is /dev/null here),
+			// so the reinit flags bypass that safety check (GH #3873).
+			initOpts := beads.InitOptions{
+				Prefix:     opts.BeadsPrefix,
+				Database:   opts.Name,
+				ServerPort: bdInitServerPort(m.townRoot),
+				SkipAgents: true,
 			}
-			if opts.Name != "" {
-				initArgs = append(initArgs, "--database", opts.Name)
-			}
-			initArgs = append(initArgs, "--server")
-			// Pass the town's port so bd connects to gt's central Dolt
-			// server. Without it, bd auto-starts its own server on a random
-			// port, causing "database not found" errors. (GH #2405)
-			initArgs = append(initArgs, bdInitServerPortArgs(m.townRoot)...)
-			// The clone is the user's repo: bd's editor-agent setup would leave
-			// .agents/, .codex/ and .cursor/ untracked in it (gt-22hdp.40).
-			initArgs = append(initArgs, "--skip-agents")
-			// If the cloned repo's config.yaml has sync.remote, bd init blocks
-			// waiting for interactive confirmation (stdin is /dev/null here).
-			// Pass explicit flags to bypass the safety check. (GH #3873)
 			if beadsConfigHasSyncRemote(sourceBeadsConfig) {
-				initArgs = append(initArgs,
-					"--reinit-local",
-					"--discard-remote",
-					"--destroy-token=DESTROY-"+opts.BeadsPrefix,
-				)
+				initOpts.ReinitLocal = true
+				initOpts.DiscardRemote = true
+				initOpts.DestroyToken = "DESTROY-" + opts.BeadsPrefix
 			}
-			if output, err := m.combinedBD(mayorRigPath, sourceBdEnv, initArgs...); err != nil {
-				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, strings.TrimSpace(string(output)))
+			if err := m.bdIn(mayorRigPath, sourceBdEnv).InitDatabase(initOpts); err != nil {
+				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, bdErrOutput(err))
 			}
 			// Drop orphan databases created by bd init (gh#3562, gt-sv1h).
 			// See dropRigOrphanDBs for naming details across bd versions.
@@ -737,7 +731,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		setPrefix := func(prefix string) error {
 			return m.doltDBs().SetIssuePrefix(resolvedBeadsDir, database, prefix)
 		}
-		rigBD := beads.NewRigLocalWithRunner(filepath.Dir(resolvedBeadsDir), m.bd)
+		rigBD := m.rigLocalBD(filepath.Dir(resolvedBeadsDir))
 		warnings := seedRigDatabaseConfig(rigBD, setPrefix, opts.BeadsPrefix)
 		// The endpoint goes into an untracked .beads/config.yaml only: a
 		// tracked one belongs to the source repo, like the keys above.
@@ -1006,16 +1000,14 @@ func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefi
 	if prefix == "" {
 		return nil // No expected prefix to verify against
 	}
-	// Parse stdout alone: bd's stderr diagnostics are not part of the value.
-	stdout, stderr, err := m.runBD(rigPath, bdSubprocessEnv(m.environ(), resolvedBeadsDir, ""), "config", "get", "issue_prefix")
+	got, err := m.bdIn(rigPath, bdSubprocessEnv(m.environ(), resolvedBeadsDir, "")).ConfigGet("issue_prefix")
 	if errors.Is(err, exec.ErrNotFound) {
 		return nil // bd not installed — rig add already tolerates this elsewhere
 	}
 	if err != nil {
 		return fmt.Errorf("round-trip verification failed: bd cannot read issue_prefix from database %q: %v (%s)",
-			rigName, err, strings.TrimSpace(string(stderr)+string(stdout)))
+			rigName, err, bdErrOutput(err))
 	}
-	got := beads.ParseConfigOutput(stdout)
 	if got != prefix {
 		return fmt.Errorf("round-trip verification failed: database %q reports issue_prefix %q, expected %q",
 			rigName, got, prefix)
@@ -1252,24 +1244,19 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 
 	// Run bd init if available (Dolt is the only backend since bd v0.51.0).
 	// --server tells bd to set dolt_mode=server in metadata.json so bd
-	// connects to the centralized Dolt sql-server instead of embedded mode.
-	initArgs := []string{"init"}
-	if prefix != "" {
-		initArgs = append(initArgs, "--prefix", prefix)
-	}
-	if rigName != "" {
-		initArgs = append(initArgs, "--database", rigName)
-	}
-	initArgs = append(initArgs, "--server")
-	// Pass the town's port so bd connects to gt's central Dolt server.
-	// Without it, bd auto-starts its own server on a random port. (GH #2405)
-	initArgs = append(initArgs, bdInitServerPortArgs(m.townRoot)...)
-	// --force ensures bd 1.0+ persists issue_prefix on existing server-side DBs.
-	initArgs = append(initArgs, "--force")
-	// A rig directory is the user's repo too: bd's editor-agent setup would
+	// connects to the centralized Dolt sql-server instead of embedded mode,
+	// on the town's port rather than one bd auto-starts (GH #2405). --force
+	// ensures bd 1.0+ persists issue_prefix on existing server-side DBs. A
+	// rig directory is the user's repo too: bd's editor-agent setup would
 	// leave .agents/, .codex/ and .cursor/ untracked in it (gt-22hdp.40).
-	initArgs = append(initArgs, "--skip-agents")
-	_, bdInitErr := m.combinedBD(rigPath, filteredEnv, initArgs...)
+	bd := m.bdIn(rigPath, filteredEnv)
+	bdInitErr := bd.InitDatabase(beads.InitOptions{
+		Prefix:     prefix,
+		Database:   rigName,
+		ServerPort: bdInitServerPort(m.townRoot),
+		Force:      true,
+		SkipAgents: true,
+	})
 	if bdInitErr != nil {
 		// bd might not be installed or failed — the shared helper below will
 		// create config.yaml with the required defaults as a fallback.
@@ -1283,15 +1270,15 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			{"types.infra", constants.BeadsInfraTypes},
 		} {
 			// Ignore errors - older beads versions don't need this
-			_, _ = m.combinedBD(rigPath, filteredEnv, "config", "set", cfg.key, cfg.value)
+			_ = bd.ConfigSet(cfg.key, cfg.value)
 		}
 
 		// Explicitly set issue_prefix config (bd init --prefix may not persist it in newer versions).
 		// Without this, bd create and gt sling fail with "issue_prefix config is missing".
 		// bd >= 1.0.0 rejects this with "cannot be set via 'bd config set'" because init persists
 		// it directly; treat that as already-set rather than a failure.
-		if prefixOutput, prefixErr := m.combinedBD(rigPath, filteredEnv, "config", "set", "issue_prefix", prefix); prefixErr != nil {
-			out := strings.TrimSpace(string(prefixOutput))
+		if prefixErr := bd.ConfigSet("issue_prefix", prefix); prefixErr != nil {
+			out := bdErrOutput(prefixErr)
 			if !strings.Contains(out, "cannot be set via") {
 				return fmt.Errorf("bd config set issue_prefix failed: %s", out)
 			}
@@ -1326,9 +1313,8 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// Ensure database has repository fingerprint (GH #25).
 	// This is idempotent - safe on both new and legacy (pre-0.17.5) databases.
 	// Without fingerprint, the bd daemon fails to start silently.
-	migrateOutput, migrateErr := m.combinedBD(rigPath, filteredEnv, "migrate", "--update-repo-id")
-	if migrateErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: migrate --update-repo-id failed: %v\nOutput: %s\n", migrateErr, strings.TrimSpace(string(migrateOutput)))
+	if migrateErr := m.bdIn(rigPath, filteredEnv).MigrateRepoID(); migrateErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: migrate --update-repo-id failed: %v\nOutput: %s\n", migrateErr, bdErrOutput(migrateErr))
 	}
 
 	// Ensure .local_version file exists with current bd version string.
@@ -1509,14 +1495,14 @@ func bdSubprocessEnv(base []string, beadsDir, database string) []string {
 	return env
 }
 
-// bdInitServerPortArgs is bd init's --server-port for the town's endpoint.
-// A town without an endpoint passes none: bd then uses the endpoint
+// bdInitServerPort is bd init's --server-port for the town's endpoint. A
+// town without an endpoint passes none (0): bd then uses the endpoint
 // variables its environment carries (gt-y3pgh.3).
-func bdInitServerPortArgs(townRoot string) []string {
+func bdInitServerPort(townRoot string) int {
 	if port := config.ResolveDoltPort(townRoot); port > 0 {
-		return []string{"--server-port", strconv.Itoa(port)}
+		return port
 	}
-	return nil
+	return 0
 }
 
 // isStandardBeadHash checks if a string looks like a standard 5-char bead hash.
