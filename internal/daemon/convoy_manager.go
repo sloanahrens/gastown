@@ -1701,7 +1701,7 @@ func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 func (m *ConvoyManager) runGt(env []string, args ...string) (stdout, stderr []byte, err error) {
 	cmd := exec.CommandContext(m.ctx, m.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init, args built internally
 	cmd.Dir = m.townRoot
-	cmd.Env = env
+	cmd.Env = daemonGTEnv(env)
 	util.SetProcessGroup(cmd)
 	return runWith(m.execCmd, cmd)
 }

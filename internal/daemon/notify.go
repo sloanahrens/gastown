@@ -20,22 +20,22 @@ func (d *Daemon) notify() notify.Notifier {
 	return newDaemonNotifier(d.gtPath, townRoot)
 }
 
-// newDaemonNotifier runs gt from the town root as the daemon: BD_ACTOR=daemon
+// newDaemonNotifier runs gt from the town root as the daemon: daemonGTEnv
 // identifies the daemon rather than the overseer as the actor of what gt
-// writes (runDaemonRun also sets it process-wide).
+// writes.
 func newDaemonNotifier(gtPath, townRoot string) notify.Notifier {
 	return &notify.CLI{
 		Bin: gtPath,
 		Dir: townRoot,
-		Env: func() []string { return append(os.Environ(), "BD_ACTOR=daemon") },
+		Env: func() []string { return daemonGTEnv(os.Environ()) },
 	}
 }
 
 // notify returns the Notifier the Dolt server manager sends its alerts
-// through: gt run from the town root with the daemon's environment.
+// through: gt from PATH run from the town root as the daemon.
 func (m *DoltServerManager) notify() notify.Notifier {
 	if m.notifier != nil {
 		return m.notifier
 	}
-	return &notify.CLI{Dir: m.townRoot}
+	return &notify.CLI{Dir: m.townRoot, Env: func() []string { return daemonGTEnv(os.Environ()) }}
 }

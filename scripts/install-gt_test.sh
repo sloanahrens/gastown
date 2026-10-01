@@ -18,6 +18,7 @@ write_template() {
   cat > "$1/gt.tmpl" <<'STUB'
 #!/usr/bin/env bash
 C="__COMMIT__"
+[ -z "${T_WORLD:-}" ] || echo "${BD_ACTOR:-}" >> "$T_WORLD/actors.log"
 case "$1 ${2:-}" in
   "stale --json")
     [ -e "$T_WORLD/lockout_$C" ] && chmod a-w "$T_WORLD/bin"
@@ -103,10 +104,13 @@ MAKE
   echo "$t"
 }
 
-# run_install T ARGS... -> exit code; output in $T/run.out
+# run_install T ARGS... -> exit code; output in $T/run.out. The run carries
+# no identity unless CALLER_ACTOR names one as BD_ACTOR.
 run_install() {
   local t="$1" rc=0; shift
-  ( export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
+  ( unset BD_ACTOR GT_ROLE
+    if [ -n "${CALLER_ACTOR:-}" ]; then export BD_ACTOR="$CALLER_ACTOR"; fi
+    export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
@@ -117,6 +121,9 @@ run_install() {
 last_receipt() {
   tail -1 "$1/daemon/install-receipts.jsonl" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]))' "$2" 2>/dev/null || echo "NO-RECEIPT"
 }
+
+# actors T -> the distinct BD_ACTOR values the gt stub ran with, one line
+actors() { sort -u "$1/actors.log" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
@@ -129,6 +136,7 @@ T=$(make_world)
 C2_FULL=$(git -C "$T/origin.git" rev-parse main)
 rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
 [ "$rc" = "0" ] && pass "happy: exit 0" || fail "happy: exit $rc: $(cat "$T/run.out")"
+[ "$(actors "$T")" = "installer" ] && pass "happy: every gt ran as BD_ACTOR=installer" || fail "happy: gt actors '$(actors "$T")'"
 [ "$(reported "$T")" = "$(cat "$T/c2")" ] && pass "happy: c2 in force" || fail "happy: in force is $(reported "$T")"
 grep -q "C=\"$(cat "$T/c1")\"" "$T/bin/gt.prev" && pass "happy: gt.prev is the c1 binary" || fail "happy: gt.prev missing or wrong"
 [ "$(git -C "$T/rig" rev-parse HEAD)" = "$C2_FULL" ] && pass "happy: rig fast-forwarded" || fail "happy: rig HEAD not at c2"
@@ -414,6 +422,14 @@ if immutable_supported; then
 else
   echo "  SKIP: OS immutable-flag enforcement unavailable on this host (needs BSD chflags, or chattr with CAP_LINUX_IMMUTABLE) — gt-aigsx rollback check not run"
 fi
+
+# --- Case 17: a caller that already names an actor (rebuild-gt runs as the
+# daemon) keeps it for every gt the install runs (gt-kyik6). ---
+T=$(make_world)
+rc=$(CALLER_ACTOR=daemon run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt)
+[ "$rc" = "0" ] && [ "$(actors "$T")" = "daemon" ] \
+  && pass "caller actor: every gt ran as BD_ACTOR=daemon" \
+  || fail "caller actor: rc=$rc gt actors '$(actors "$T")'"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"

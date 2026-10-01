@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -177,6 +178,7 @@ func (d *Daemon) readDispatchCheck() (*dispatchCheckResult, error) {
 
 	cmd := exec.CommandContext(ctx, d.gtPath, "daemon", "dispatch-check", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
+	cmd.Env = daemonGTEnv(os.Environ())
 
 	stdout, stderr, err := d.runCmd(cmd)
 	if err != nil {

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"slices"
 	"testing"
 	"time"
 
@@ -21,9 +20,6 @@ func TestDaemonNotifierDefaultsToGtAsDaemon(t *testing.T) {
 	if cli.Bin != "/usr/local/bin/gt" || cli.Dir != "/town" {
 		t.Errorf("CLI = %+v, want the resolved gt run from the town root", cli)
 	}
-	if env := cli.Env(); !slices.Contains(env, "BD_ACTOR=daemon") {
-		t.Errorf("env lacks BD_ACTOR=daemon")
-	}
 }
 
 func TestDoltServerManagerNotifierKeepsAnInjectedOne(t *testing.T) {
@@ -37,8 +33,8 @@ func TestDoltServerManagerNotifierKeepsAnInjectedOne(t *testing.T) {
 
 // TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot pins the
 // invocation the Dolt crash, crash-loop, unhealthy and read-only alert mails
-// always used: gt from PATH, run from the town root, with the daemon's own
-// environment.
+// always used: gt from PATH, run from the town root, as the daemon
+// (TestDaemonNotifiersRunGtAsTheDaemon checks the env).
 func TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{townRoot: "/town"}
@@ -46,8 +42,8 @@ func TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot(t *testing.T) {
 	if !ok {
 		t.Fatalf("notify() = %T, want *notify.CLI", m.notify())
 	}
-	if cli.Dir != "/town" || cli.Bin != "" || cli.Env != nil {
-		t.Fatalf("CLI = %+v, want gt from PATH run from /town with the inherited env", cli)
+	if cli.Dir != "/town" || cli.Bin != "" {
+		t.Fatalf("CLI = %+v, want gt from PATH run from /town", cli)
 	}
 }
 

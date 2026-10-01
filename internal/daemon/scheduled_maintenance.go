@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -102,6 +103,7 @@ func maintenanceMode(config *DaemonPatrolConfig) string {
 func runGtMaintain(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, gtPath, "maintain", "--force", "--threshold", strconv.Itoa(threshold))
 	cmd.Dir = dir
+	cmd.Env = daemonGTEnv(os.Environ())
 	util.SetDetachedProcessGroup(cmd)
 	return cmd.CombinedOutput()
 }

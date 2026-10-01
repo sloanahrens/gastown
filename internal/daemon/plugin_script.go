@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -233,13 +232,12 @@ func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plug
 
 	cmd := exec.CommandContext(ctx, "bash", "run.sh") //nolint:gosec // G204: fixed argv, plugin dir from the scanner
 	cmd.Dir = p.Path
-	cmd.Env = append(slices.Clone(env.environ),
+	cmd.Env = append(daemonGTEnv(env.environ),
 		"GT_ROOT="+townRoot,
 		"GT_TOWN_ROOT="+townRoot,
 		"GT_PLUGIN_NAME="+p.Name,
 		"GT_PLUGIN_RUNNER=daemon",
 		"GT_ROLE=daemon/plugin",
-		"BD_ACTOR=daemon",
 	)
 	// A dog runs inside the town's tmux server and reaches it through $TMUX;
 	// the daemon is outside any session, so a bare `tmux` in the script would

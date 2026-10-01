@@ -89,6 +89,10 @@ DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: no town found (set
 RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/gastown/mayor/rig}"
 LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-300}"
 GT="$BIN_DIR/gt"
+# Every gt this script runs is the installer's unless the caller already named
+# an actor (rebuild-gt runs as the daemon), so the usage log and escalations
+# never read "unknown" (gt-kyik6).
+export BD_ACTOR="${BD_ACTOR:-installer}"
 START=$(date +%s)
 log() { echo "[install-gt] $*"; }
 

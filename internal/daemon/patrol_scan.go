@@ -501,8 +501,9 @@ func (d *Daemon) restartPolecatSession(seat supervisor.Seat) error {
 	cmd := exec.CommandContext(ctx, d.gtPath, "session", "restart", seat.Rig+"/"+seat.Name, //nolint:gosec // G204: gtPath resolved at daemon init
 		"--force", "--requested-by", patrolscan.Actor)
 	cmd.Dir = d.config.TownRoot
+	cmd.Env = daemonGTEnv(os.Environ())
 	util.SetProcessGroup(cmd)
-	out, err := cmd.CombinedOutput()
+	out, err := d.combinedOutput(cmd)
 	if err != nil {
 		return fmt.Errorf("gt session restart %s/%s: %w: %s", seat.Rig, seat.Name, err, lastLine(string(out)))
 	}
