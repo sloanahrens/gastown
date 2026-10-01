@@ -546,8 +546,7 @@ func resolveDoneAgentIdentity(getenv func(string) string, cwd, townRoot, rigName
 	}
 	// Only a named detection contributes a log actor. ActorString degrades to
 	// the literal "unknown" for a RoleUnknown context, which would otherwise
-	// replace the already-validated BD_ACTOR sender on the "[done]" townlog line
-	// and the feed event.
+	// replace the already-validated BD_ACTOR sender on the "[done]" event.
 	if roleInfo.Role == RoleUnknown {
 		return ctx, ""
 	}
@@ -1558,11 +1557,8 @@ func reportDone(r *doneRun, exitType string) error {
 	// directory so it still resolves if the worktree is already gone.
 	selfReportCleanupStatus(r.g, r.branch, beads.New(filepath.Join(r.townRoot, r.rigName)).ForAgentBead(), r.agentBeadID, doneCleanupStatus)
 
-	if err := LogDone(r.townRoot, r.sender, r.issueID); err != nil {
-		style.PrintWarning("could not log done event: %v", err)
-	}
 	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
-		style.PrintWarning("could not log feed event: %v", err)
+		style.PrintWarning("could not log done event: %v", err)
 	}
 
 	// Update agent bead state (ZFC: self-report completion).
