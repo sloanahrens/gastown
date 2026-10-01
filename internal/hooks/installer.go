@@ -23,11 +23,9 @@ import (
 var templateFS embed.FS
 
 // InstallForRole provisions hook/settings files for an agent based on its preset config.
-// It creates the file if it does not exist, or overwrites if the existing file contains
-// known stale patterns (e.g., legacy "export PATH=" format). Otherwise it does not
-// overwrite — this is the safe path for session startup, where Claude's settings.json
-// may have been customized by syncTarget (base + role overrides merge) and must not
-// be clobbered.
+// A Claude settings file is synced to the managed hooks (see below). Any other
+// file is created if it does not exist, or overwritten if it contains known
+// stale patterns (e.g., legacy "export PATH=" format), and otherwise left alone.
 //
 // For explicit sync operations that should update stale files, use SyncForRole.
 //
@@ -38,7 +36,7 @@ var templateFS embed.FS
 //   - role: the Gas Town role (e.g., "polecat", "crew", "mayor").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
 //   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     boot/polecat settings-sync path, which must not apply to non-Claude agents.
+//     Claude settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -49,8 +47,9 @@ var templateFS embed.FS
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
 //
-// For boot/polecat on Claude, install goes through the JSON merge path
-// (SyncManagedClaudeSettings) and fails closed: an unparseable hooks-base.json,
+// For Claude, every role's install goes through the JSON merge path
+// (SyncManagedClaudeSettings), writing what gt hooks sync writes while keeping
+// non-hook settings fields, and fails closed: an unparseable hooks-base.json,
 // hooks-override file, or existing settings.json aborts the install with an
 // error naming the file, rather than silently falling back to a template that
 // may be missing hooks a rig-scoped override added. See gt-8stz.
@@ -64,29 +63,14 @@ func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDi
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	// Boot and polecat settings are managed through the JSON merge path
-	// so their role overrides are kept in sync rather than frozen at first
-	// install; the needsUpgrade heuristic below has no way to detect a hook
-	// type added in code (gt-8stz REOPENED).
-	if (provider == "claude" || command == "claude") && (role == "boot" || role == "polecat") && isSettingsFile(hooksFile) {
-		// DefaultOverrides keys the polecat entry "polecats" (plural); role is
-		// singular everywhere else. ComputeExpected resolves Key literally, so
-		// this must be normalized or the merge silently drops the override.
-		key := role
-		if role == "polecat" {
-			key = "polecats"
-			// Polecat settings are shared per rig (config.RoleSettingsDir joins
-			// rigPath + "polecats"), and DiscoverTargets/GetApplicableOverrides
-			// manage the file under the rig-scoped key "<rig>/polecats" so that
-			// ~/.gt/hooks-overrides/<rig>__polecats.json is applied. Using the
-			// bare "polecats" key here skips that override, so every polecat
-			// spawn (this call site) would silently drop rig-scoped hooks the
-			// next sync had put in, then gt hooks sync would put them back —
-			// the file would flip on every spawn/sync cycle.
-			if rig := filepath.Base(filepath.Dir(settingsDir)); rig != "." && rig != string(filepath.Separator) && rig != "" {
-				key = rig + "/polecats"
-			}
-		}
+	// Claude settings are managed through the JSON merge path for every
+	// role, so each session start writes what gt hooks sync writes rather
+	// than a template frozen at first install; the needsUpgrade heuristic
+	// below has no way to detect a hook type added in code (gt-8stz,
+	// gt-4k3fj.8.3). The key is the one gt hooks sync manages the file
+	// under, so rig-scoped overrides survive a spawn (ManagedTargetKey).
+	if (provider == "claude" || command == "claude") && isSettingsFile(hooksFile) {
+		key := ManagedTargetKey(role, settingsDir)
 		if _, err := h.syncManagedClaudeSettings(Target{
 			Path:     targetPath,
 			Key:      key,

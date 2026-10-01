@@ -1131,7 +1131,7 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 // entry, or the session stalls on the folder-trust dialog.
 func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) {
 	t.Parallel()
-	rigPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "gastown") // the town root is the test's own
 	configDir := t.TempDir()
 	workDir := t.TempDir() // fresh worktree: no trust entry exists anywhere
 
@@ -1143,7 +1143,7 @@ func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) 
 	m := newTestSessionManager(r)
 
 	rc := &config.RuntimeConfig{Command: "claude"}
-	if err := m.ensureRuntimeWorkspace(workDir, configDir, rc); err != nil {
+	if err := m.ensureRuntimeWorkspace("Toast", workDir, configDir, rc); err != nil {
 		t.Fatalf("ensureRuntimeWorkspace: %v", err)
 	}
 
