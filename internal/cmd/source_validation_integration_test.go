@@ -72,7 +72,7 @@ if [ "$1" = "update" ]; then
   exit 0
 fi
 if [ "$1" = "show" ] && [ "$2" = "gt-gastown-polecat-refuge" ]; then
-  echo '[{"id":"gt-gastown-polecat-refuge","title":"Polecat refuge","status":"open","issue_type":"agent","labels":["gt:agent","done-intent:COMPLETED:1738972800"]}]'
+  echo '[{"id":"gt-gastown-polecat-refuge","title":"Polecat refuge","status":"open","issue_type":"agent","labels":["gt:agent"]}]'
   exit 0
 fi
 labels='[]'

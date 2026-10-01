@@ -430,7 +430,7 @@ func TestLabelsForAgentBeadReusePreservesOnlySafetyStop(t *testing.T) {
 		"gt:agent",
 		"heartbeat:123",
 		"idle:2",
-		"done-intent:COMPLETED:123",
+		"backoff-until:123",
 		"safety_stop:hq-vmrwr",
 		"safety_stop:hq-vmrwr",
 		"safety_stop:hq-other",

@@ -6,7 +6,7 @@
 // Motivation: a mayor/operator freeze (SIGSTOP) of a misbehaving agent
 // is indistinguishable from a stuck agent. The stuck-agent dog respawned
 // a parked flint 20 minutes after the mayor froze it, and the witness
-// patrol restarted parked agents via the done-intent-dead path. gt-ahik.
+// patrol restarted parked agents. gt-ahik.
 //
 // Single source of truth: the marker file, .runtime/agents/<rig>/
 // <role>.<name>.json — cheap, readable from shell, no Dolt dependency.
