@@ -2800,7 +2800,8 @@ func parseReadyMolOutput(out []byte) ([]*Issue, error) {
 	return issues, nil
 }
 
-// ReadyForMol returns ready steps within a specific molecule.
+// ReadyForMol returns ready steps within a specific molecule. The molecule's
+// own issue is never one of them.
 // Delegates to bd ready --mol which uses beads' canonical blocking semantics
 // (blocked_issues_cache), handling all blocking types, transitive propagation,
 // and conditional-blocks resolution.
@@ -2817,7 +2818,27 @@ func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
 		return nil, err
 	}
 
-	return parseReadyMolOutput(out)
+	issues, err := parseReadyMolOutput(out)
+	if err != nil {
+		return nil, err
+	}
+	return withoutMoleculeRoot(issues, moleculeID), nil
+}
+
+// withoutMoleculeRoot drops the molecule's own issue from a ready-step list.
+// bd ready --mol counts the root wisp among its own ready steps, and a walker
+// that keeps it reads the root as a second ready step and continues to it
+// instead of the next one, so the molecule never advances (gt-mejma). The
+// store path never sees the root: its parent filter excludes it.
+func withoutMoleculeRoot(steps []*Issue, moleculeID string) []*Issue {
+	kept := make([]*Issue, 0, len(steps))
+	for _, step := range steps {
+		if step.ID == moleculeID {
+			continue
+		}
+		kept = append(kept, step)
+	}
+	return kept
 }
 
 // ReadyWithType returns ready issues filtered by label.
