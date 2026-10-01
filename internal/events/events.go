@@ -1,7 +1,6 @@
 // Package events provides event logging for the gt activity feed.
 //
-// Events are written to ~/gt/.events.jsonl (raw audit log) and later
-// curated by the feed daemon into ~/.feed.jsonl (user-facing).
+// Events are written to ~/gt/.events.jsonl (raw audit log).
 package events
 
 import (

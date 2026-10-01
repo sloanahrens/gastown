@@ -260,7 +260,7 @@ func NewTmux() *Tmux {
 // binary that has not opted out with AllowLiveTmuxEnv.
 //
 // GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
-// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
+// so that "gt agents menu" invoked from a personal terminal still
 // target the correct town server even when InitRegistry was not called.
 //
 // That fallback is meant for an interactive CLI process, not a `go test`
@@ -2232,7 +2232,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// Use the resolved target (session:window.pane) rather than the bare
 	// session name. resize-window on a bare session name resizes the
 	// session's *active* window — in a multi-window session (e.g. one with a
-	// `gt feed -w` window open and focused) that is not the agent's window,
+	// second window open and focused) that is not the agent's window,
 	// so the agent's pane never receives SIGWINCH and stays idle despite the
 	// delivered nudge. Targeting the resolved pane wakes the correct window.
 	t.WakePaneIfDetached(target)
@@ -4543,9 +4543,6 @@ func (t *Tmux) ConfigureGasTownSession(session string, theme *Theme, rig, worker
 	if err := t.SetMailClickBinding(session); err != nil {
 		return fmt.Errorf("setting mail click binding: %w", err)
 	}
-	if err := t.SetFeedBinding(session); err != nil {
-		return fmt.Errorf("setting feed binding: %w", err)
-	}
 	if err := t.SetAgentsBinding(session); err != nil {
 		return fmt.Errorf("setting agents binding: %w", err)
 	}
@@ -4750,10 +4747,10 @@ func (t *Tmux) lookupKeyBinding(table, key string) string {
 // EnsureBindingsOnSocket calls, preserving the user's original fallback.
 //
 // Two forms are recognized:
-//  1. Guarded form (set by SetAgentsBinding/SetFeedBinding): uses if-shell
+//  1. Guarded form (set by SetAgentsBinding): uses if-shell
 //     with a "gt " command — detects both old and new guarded bindings.
 //  2. Unguarded form (set by EnsureBindingsOnSocket): direct run-shell
-//     invoking "gt agents menu" or "gt feed --window".
+//     invoking "gt agents menu" or "gt rig menu".
 func (t *Tmux) isGTBinding(table, key string) bool {
 	output := t.lookupKeyBinding(table, key)
 	if output == "" {
@@ -4765,7 +4762,6 @@ func (t *Tmux) isGTBinding(table, key string) bool {
 	}
 	// Unguarded form: direct GT commands set by EnsureBindingsOnSocket.
 	return strings.Contains(output, "gt agents menu") ||
-		strings.Contains(output, "gt feed --window") ||
 		strings.Contains(output, "gt rig menu")
 }
 
@@ -4824,7 +4820,7 @@ func (t *Tmux) getKeyBinding(table, key string) string {
 		return ""
 	}
 	if strings.Contains(output, "gt agents menu") ||
-		strings.Contains(output, "gt feed --window") {
+		strings.Contains(output, "gt rig menu") {
 		return ""
 	}
 
@@ -4970,36 +4966,6 @@ func (t *Tmux) SetCycleBindings(session string) error {
 	return nil
 }
 
-// SetFeedBinding configures C-b a to jump to the activity feed window.
-// This creates the feed window if it doesn't exist, or switches to it if it does.
-// Uses `gt feed --window` which handles both creation and switching.
-//
-// IMPORTANT: This binding is conditional - it only runs for Gas Town sessions
-// (those matching a registered rig prefix or "hq-"). For non-GT sessions, the
-// user's original binding is preserved. If no prior binding existed, the key
-// press is silently ignored.
-// See: https://github.com/steveyegge/gastown/issues/13
-// See: https://github.com/steveyegge/gastown/issues/1548
-func (t *Tmux) SetFeedBinding(session string) error {
-	pattern := t.sessionPrefixPattern()
-	// Skip if already configured with the current rig prefix pattern.
-	// Must re-bind if the pattern is stale (e.g., after gt rig add adds a new prefix).
-	if t.isGTBinding("prefix", "a") && t.isGTBindingCurrent("prefix", "a", pattern) {
-		return nil
-	}
-	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", pattern)
-	fallback := t.getKeyBinding("prefix", "a")
-	if fallback == "" {
-		// No prior binding — do nothing in non-GT sessions
-		fallback = ":"
-	}
-	_, err := t.run("bind-key", "-T", "prefix", "a",
-		"if-shell", ifShell,
-		"run-shell 'gt feed --window'",
-		fallback)
-	return err
-}
-
 // SetAgentsBinding configures C-b g to open the agent switcher popup menu.
 // This runs `gt agents menu` which displays a tmux popup with all Gas Town agents.
 //
@@ -5047,7 +5013,7 @@ func (t *Tmux) SetRigMenuBinding(session string) error {
 	return err
 }
 
-// EnsureBindingsOnSocket sets the gt agents menu and feed keybindings on a
+// EnsureBindingsOnSocket sets the gt agents menu and rig menu keybindings on a
 // specific tmux socket. This is used during gt up to ensure the bindings work
 // even when the user is on a different socket than the town socket.
 //
@@ -5058,7 +5024,7 @@ func (t *Tmux) SetRigMenuBinding(session string) error {
 // workspace.FindFromCwd fails and InitRegistry is never called).
 // Pass "" for test-socket use where InitRegistry is already called.
 //
-// Unlike SetAgentsBinding/SetFeedBinding (called during gt prime), this method:
+// Unlike SetAgentsBinding (called during gt prime), this method:
 //   - Targets a specific socket regardless of the Tmux instance's default
 //   - Skips the session-name guard when there is no pre-existing user binding,
 //     since the user may be in a personal session (not matching GT prefixes)
@@ -5069,13 +5035,11 @@ func EnsureBindingsOnSocket(socket, townSocket string) error {
 	t := NewTmuxWithSocket(socket)
 
 	// Build the command strings, optionally prefixed with GT_TOWN_SOCKET so
-	// gt agents menu / gt feed can find the right tmux server even when called
+	// gt agents menu can find the right tmux server even when called
 	// from a non-town directory.
 	agentsCmd := "gt agents menu"
-	feedCmd := "gt feed --window"
 	if townSocket != "" {
 		agentsCmd = fmt.Sprintf("GT_TOWN_SOCKET=%s gt agents menu", townSocket)
-		feedCmd = fmt.Sprintf("GT_TOWN_SOCKET=%s gt feed --window", townSocket)
 	}
 
 	// Agents binding (prefix + g)
@@ -5094,21 +5058,6 @@ func EnsureBindingsOnSocket(socket, townSocket string) error {
 			_, _ = t.run("bind-key", "-T", "prefix", "g",
 				"if-shell", ifShell,
 				"run-shell '"+agentsCmd+"'",
-				fallback)
-		}
-	}
-
-	// Feed binding (prefix + a)
-	if !t.isGTBinding("prefix", "a") {
-		ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
-		fallback := t.getKeyBinding("prefix", "a")
-		if fallback == "" || fallback == ":" {
-			_, _ = t.run("bind-key", "-T", "prefix", "a",
-				"run-shell", feedCmd)
-		} else {
-			_, _ = t.run("bind-key", "-T", "prefix", "a",
-				"if-shell", ifShell,
-				"run-shell '"+feedCmd+"'",
 				fallback)
 		}
 	}

@@ -91,8 +91,11 @@ type TownSettings struct {
 	// Default: "gastown.local"
 	AgentEmailDomain string `json:"agent_email_domain,omitempty"`
 
-	// FeedCurator configures event deduplication and aggregation windows.
-	FeedCurator *FeedCuratorConfig `json:"feed_curator,omitempty"`
+	// FeedCurator is retired with the daemon feed curator (gt-3vdcx): nothing
+	// reads it. It is declared so a settings file that still carries it
+	// decodes under strict decoding, and kept verbatim so a rewrite does not
+	// drop operator data. Delete the key from settings/config.json by hand.
+	FeedCurator json.RawMessage `json:"feed_curator,omitempty"`
 
 	// Convoy configures convoy behavior settings.
 	Convoy *ConvoyConfig `json:"convoy,omitempty"`
@@ -141,28 +144,6 @@ func NewTownSettings() *TownSettings {
 		DefaultAgent: "claude",
 		Agents:       make(map[string]*RuntimeConfig),
 		RoleAgents:   make(map[string]string),
-	}
-}
-
-// FeedCuratorConfig configures event deduplication and aggregation windows.
-type FeedCuratorConfig struct {
-	// DoneDedupeWindow is the time window for deduplicating repeated done events.
-	// Default: "10s".
-	DoneDedupeWindow string `json:"done_dedupe_window,omitempty"`
-	// SlingAggregateWindow is the time window for aggregating sling events.
-	// Default: "30s".
-	SlingAggregateWindow string `json:"sling_aggregate_window,omitempty"`
-	// MinAggregateCount is the minimum number of events to trigger aggregation.
-	// Default: 3.
-	MinAggregateCount int `json:"min_aggregate_count,omitempty"`
-}
-
-// DefaultFeedCuratorConfig returns a FeedCuratorConfig with sensible defaults.
-func DefaultFeedCuratorConfig() *FeedCuratorConfig {
-	return &FeedCuratorConfig{
-		DoneDedupeWindow:     "10s",
-		SlingAggregateWindow: "30s",
-		MinAggregateCount:    3,
 	}
 }
 

@@ -46,7 +46,7 @@ including SIGKILL, so the lock itself needs no reclaim path.
 
 The wait is measured, not silent (gt-dc81): 'gt slot run' prints how long it
 waited, every grant and release writes a slot_wait / slot_hold event to the
-town's events log ('gt feed --plain' renders them), and 'gt slot status'
+town's events log (~/gt/.events.jsonl), and 'gt slot status'
 reports the recent acquisitions with their wait durations and the reason each
 one waited — so the question "is the gate constricting the town?" can be
 answered from the status output instead of from panes.
@@ -74,7 +74,7 @@ process death).
 
 The acquire line reports how long this invocation waited and the release is
 recorded with the command's exit status (gt-dc81), so a suite that queues
-behind another is visible in 'gt feed' rather than looking like a hang.
+behind another is visible in 'gt slot status' rather than looking like a hang.
 
 Run this wrapped around any suite that spins Docker/testcontainers, e.g.:
 

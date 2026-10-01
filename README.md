@@ -484,8 +484,8 @@ gt sling <bead-id> <rig> --agent cursor   # Override runtime for this sling/spaw
 gt mayor attach             # Start Mayor session
 gt mayor start --agent auggie           # Run Mayor with a specific agent alias
 gt prime                    # Context recovery (run inside existing session)
-gt feed                     # Real-time activity feed
-gt feed --since 1h          # Events from the last hour
+gt tail -f                  # Follow what the town is doing
+gt tail --since 1h          # The last hour, then exit
 ```
 
 **Built-in agent presets**: `claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`, `pi`, `omp`
@@ -536,16 +536,16 @@ bd mol list                 # List active instances
 
 Gas Town includes built-in formulas for common workflows. See `internal/formula/formulas/` for available recipes.
 
-## Activity Feed
+## Activity Stream
 
-`gt feed` prints the town's event stream (`~/gt/.events.jsonl`) as plain text, one line per event: creates, completions, slings, nudges, merges, and patrol activity.
+`gt tail` prints one time-ordered, plain-text stream of what the town is doing, merged from each store's bd events journal, each rig's landings file, and the daemon log.
 
 ```bash
-gt feed                      # Recent events (follows when stdout is a terminal)
-gt feed --since 1h           # Events from last hour
-gt feed --follow             # Stream new events
-gt feed --rig greenplace     # Filter to one rig
-gt feed --window             # Open in dedicated tmux window
+gt tail                      # The last 15 minutes, then exit
+gt tail -f                   # The last 15 minutes, then follow
+gt tail --since 1h           # Events from the last hour
+gt tail --rig greenplace     # One rig
+gt tail --kind landings      # One source
 ```
 
 ## Monitoring & Health
@@ -672,7 +672,7 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 - **Use convoys for coordination** - They provide visibility across agents
 - **Leverage hooks for persistence** - Your work won't disappear
 - **Create formulas for repeated tasks** - Save time with Beads recipes
-- **Use `gt feed` for live monitoring** - Watch agent activity and catch stuck agents early
+- **Use `gt tail -f` for live monitoring** - Watch agent activity and catch stuck agents early
 - **Let the Mayor orchestrate** - It knows how to manage agents
 
 ## Design Documentation

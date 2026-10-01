@@ -45,7 +45,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -1032,8 +1031,8 @@ func explainedByRig(name string, rigs map[string]bool) bool {
 
 // isAtomicWriteTemp reports whether name is a transient atomic-write temp
 // file: bd's JSONL export at .beads/.~issues.jsonl.<random>, or a plain
-// write-temp-then-rename sibling like .feed.jsonl.truncate.tmp or the
-// daemon's .events.jsonl.prune.tmp. Town tooling
+// write-temp-then-rename sibling like the daemon's
+// .events.jsonl.prune.tmp. Town tooling
 // routinely writes via create-tmp-then-rename, so any concurrent invocation
 // by any agent during a test window creates and then removes one of these —
 // indistinguishable from the .lock churn already tolerated below (gt-wdr,
@@ -1056,12 +1055,11 @@ func isAtomicWriteTemp(name string) bool {
 // replacement, before renaming it over the target. Every writer must be
 // listed: an unlisted one gets its crash residue reported as a leak (exactly
 // the bug this map replaced: hardcoding a single ".tmp" sibling per file
-// missed the curator's ".truncate.tmp"). Suffixes are the producers' own
+// missed a second writer's suffix). Suffixes are the producers' own
 // exported constants rather than re-typed literals, so a renamed suffix
 // breaks the build here instead of silently going stale.
 var atomicWriteTemps = map[string][]string{
 	events.EventsFile: {events.PruneTempSuffix},
-	feed.FeedFile:     {feed.TruncateTempSuffix},
 }
 
 // atomicTempPrefixes are CreateTemp patterns that produce temps on the
@@ -1085,7 +1083,7 @@ var atomicTempPrefixes = []string{
 func atomicTempLeak(base string) bool {
 	for file, suffixes := range atomicWriteTemps {
 		for _, suffix := range suffixes {
-			if base == file+suffix { // e.g. .feed.jsonl.truncate.tmp
+			if base == file+suffix { // e.g. .events.jsonl.prune.tmp
 				return true
 			}
 		}

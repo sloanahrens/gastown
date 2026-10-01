@@ -722,8 +722,8 @@ remaining event record is the `.events.jsonl` feed below.
 - Event types (lines ~36-77): sling, handoff, done, hook, unhook, spawn, kill,
   boot, halt, session_start, session_end, session_death, mass_death,
   patrol_*, merge_*, scheduler_*
-- `internal/tui/feed/events.go` — `GtEventsSource` (line ~216): tails .events.jsonl
-  for TUI feed display
+- `internal/cmd/molecule_await_signal.go` — tails .events.jsonl for
+  `gt mol step await-signal` (the gt feed reader was deleted, gt-3vdcx)
 
 **Flow**: GT→File. Events from GT operations, not agent-reported.
 

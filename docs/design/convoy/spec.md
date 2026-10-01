@@ -221,7 +221,6 @@ removed as unnecessary redundancy.
 - [x] Opens beads store at daemon startup (nil if unavailable)
 - [x] Passes resolved `gtPath`/`bdPath` to ConvoyManager
 - [x] Passes `logger.Printf` for daemon log integration
-- [x] Starts after feed curator
 - [x] Stops before beads store is closed (correct shutdown order)
 - [x] Stop completes within bounded time (no hang)
 

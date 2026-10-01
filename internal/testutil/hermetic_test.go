@@ -12,7 +12,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -169,10 +168,10 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 	town := makeFakeTown(t)
 	snap := snapshotTown(town)
 
-	// A write-temp-then-rename sibling of a live target (the feed curator's
-	// .feed.jsonl truncate rotation, gt-hotx): same class as bd's .~ prefix
-	// and .lock churn.
-	writeFile(t, filepath.Join(town, feed.FeedFile+feed.TruncateTempSuffix), "")
+	// A write-temp-then-rename sibling of a live target (the daemon's
+	// .events.jsonl prune rotation): same class as bd's .~ prefix and .lock
+	// churn.
+	writeFile(t, filepath.Join(town, events.EventsFile+events.PruneTempSuffix), "")
 	// A real leak at the town root must still be caught.
 	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
 
@@ -184,7 +183,7 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 		t.Errorf("real leak not detected: %v", leaks)
 	}
 	joined := strings.Join(leaks, "\n")
-	if strings.Contains(joined, ".truncate.tmp") {
+	if strings.Contains(joined, events.PruneTempSuffix) {
 		t.Errorf("atomic-write temp flagged as leak: %v", leaks)
 	}
 }
@@ -253,33 +252,6 @@ func TestTripwire_FailsClosedOnUnclaimedTmpInWatchedSubdir(t *testing.T) {
 	}
 	if !strings.Contains(leaks[0], "scratch.tmp") {
 		t.Errorf("unclaimed .tmp not detected: %v", leaks)
-	}
-}
-
-// A hard crash (SIGKILL) mid-rotation leaves the producer's temp file in the
-// watched town surface, the expected state for the feed curator's truncate
-// rotation. The next rotation removes the residue; the tripwire tolerates it
-// in the meantime, and its reporting pass is the intended signal that a crash
-// happened.
-func TestTripwire_ToleratesFeedCuratorTruncateResidue(t *testing.T) {
-	t.Parallel()
-	town := makeFakeTown(t)
-	snap := snapshotTown(town)
-
-	writeFile(t, filepath.Join(town, feed.FeedFile+feed.TruncateTempSuffix), "")
-	// A real leak must still be caught alongside the crash residue.
-	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
-
-	leaks := snap.diff()
-	if len(leaks) != 1 {
-		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
-	}
-	if !strings.Contains(leaks[0], "scratch.txt") {
-		t.Errorf("real leak not detected: %v", leaks)
-	}
-	joined := strings.Join(leaks, "\n")
-	if strings.Contains(joined, feed.TruncateTempSuffix) {
-		t.Errorf("feed curator truncate residue flagged as leak: %v", leaks)
 	}
 }
 

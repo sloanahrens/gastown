@@ -209,7 +209,7 @@ func TestNudgeSession_WithStoredPaneID(t *testing.T) {
 // TestNudgeSession_WakesAgentWindowNotActiveWindow is a regression test for a
 // missed-wake bug in multi-window sessions: the SIGWINCH resize dance must
 // target the agent's pane, not the bare session (whose active window may be
-// another one, e.g. a focused gt feed -w window).
+// another one, e.g. a second focused window).
 func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 	t.Parallel()
 	f, pane, name := nudgeFixture(t)

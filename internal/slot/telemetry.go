@@ -519,9 +519,9 @@ func waitOutcome(info waitInfo) string {
 	return "granted"
 }
 
-// waitMessage is the human line gt feed --plain prints. It is carried in the
-// payload rather than derived in internal/feed so the facts and the
-// wording that describes them have one owner.
+// waitMessage is the human line the slot_wait event carries. It is built
+// here, beside the facts, so the facts and the wording that describes them
+// have one owner.
 func waitMessage(role string, slot int, info waitInfo) string {
 	waited := info.Waited.Round(time.Second)
 	if info.TimedOut {
