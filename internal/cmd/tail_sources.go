@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,9 +42,9 @@ type tailJournal interface {
 }
 
 // tailBDJournal is the production tailJournal: the journal through
-// beads.EventsTail, and the events-journal key read with gt's own
-// BD_EVENTS_JOURNAL=1 override cleared, so the answer is the store's config
-// (as the daemon's startup check reads it), not gt's environment.
+// beads.EventsTail, and the events-journal key read with any inherited
+// BD_EVENTS_JOURNAL cleared, so the answer is the store's config (as the
+// daemon's startup check reads it), not the caller's environment.
 type tailBDJournal struct {
 	*beads.Beads
 	dir string
@@ -101,15 +100,14 @@ func (s *eventsSource) Poll() []tailLine {
 	backlog := !s.backlogDone
 	if !s.configChecked {
 		s.configChecked = true
-		// The journal is off in production until the paired install turns it
-		// on. gt's own bd calls journal regardless (BD_EVENTS_JOURNAL=1), so
-		// the journal is read anyway; the operator is told it is partial.
-		v, err := s.journal.ConfigGet("events-journal")
+		// A store whose config leaves the journal off journals nothing
+		// (gt-7iwy0.7); the journal is read anyway and the operator told.
+		v, err := s.journal.ConfigGet(beads.EventsJournalKey)
 		switch {
 		case err != nil:
-			out = append(out, s.line(now, "cannot read events-journal config (%v): the journal may hold only mutations made through gt", err))
-		case !journalOn(v):
-			out = append(out, s.line(now, "journal off in config (events-journal=%s): only mutations made through gt are journaled", strings.TrimSpace(v)))
+			out = append(out, s.line(now, "cannot read events-journal config (%v): the journal may be off", err))
+		case !beads.EventsJournalOn(v):
+			out = append(out, s.line(now, "journal off in config (events-journal=%s): nothing is journaled", strings.TrimSpace(v)))
 		}
 	}
 	size := s.pageSize
@@ -167,12 +165,6 @@ func (s *eventsSource) Poll() []tailLine {
 			return out
 		}
 	}
-}
-
-// journalOn reads an events-journal value as bd's config does: a boolean.
-func journalOn(v string) bool {
-	on, err := strconv.ParseBool(strings.TrimSpace(v))
-	return err == nil && on
 }
 
 // parseJournalTS reads a journal record's ts. bd writes RFC3339 in UTC; the

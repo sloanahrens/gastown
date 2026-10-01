@@ -127,16 +127,10 @@ func (c *RuntimeGitignoreCheck) Run(ctx *CheckContext) *CheckResult {
 	rigs := c.findRigs(ctx.TownRoot)
 	for _, rig := range rigs {
 		// Check crew members
-		crewPath := filepath.Join(rig, "crew")
-		if crewEntries, err := os.ReadDir(crewPath); err == nil {
-			for _, crew := range crewEntries {
-				if crew.IsDir() && !strings.HasPrefix(crew.Name(), ".") {
-					crewGitignore := filepath.Join(crewPath, crew.Name(), ".gitignore")
-					if !c.containsPattern(crewGitignore, ".runtime") {
-						relPath, _ := filepath.Rel(ctx.TownRoot, filepath.Join(crewPath, crew.Name()))
-						issues = append(issues, fmt.Sprintf("%s .gitignore missing .runtime/ pattern", relPath))
-					}
-				}
+		for _, crewPath := range crewCloneDirs(filepath.Join(rig, "crew")) {
+			if !c.containsPattern(filepath.Join(crewPath, ".gitignore"), ".runtime") {
+				relPath, _ := filepath.Rel(ctx.TownRoot, crewPath)
+				issues = append(issues, fmt.Sprintf("%s .gitignore missing .runtime/ pattern", relPath))
 			}
 		}
 	}

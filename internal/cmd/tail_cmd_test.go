@@ -37,7 +37,7 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 		return tailLine{At: at(ts), Rig: rig, Kind: tailKindEvents, Text: text}
 	}
 	gastownEvents := &scriptedTailSource{batches: [][]tailLine{{
-		ev("2026-09-30T14:00:00Z", "gastown", "journal off in config (events-journal=false): only mutations made through gt are journaled"),
+		ev("2026-09-30T14:00:00Z", "gastown", "journal off in config (events-journal=false): nothing is journaled"),
 		ev("2026-09-30T13:50:00Z", "gastown", "update gt-1 status=in_progress actor=gastown/polecats/opal seq=2"),
 		ev("2026-09-30T13:52:00Z", "gastown", "close gt-1 status=closed actor=gastown/polecats/opal seq=3"),
 	}}}

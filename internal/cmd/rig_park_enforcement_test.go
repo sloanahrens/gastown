@@ -41,11 +41,20 @@ func TestParkAndUnparkRigs(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := unparkRigs(&out, town, []string{"testrig"}); err != nil {
+	var journaled []string
+	journal := func(rigName string) (bool, error) {
+		journaled = append(journaled, rigName)
+		return true, nil
+	}
+	if err := unparkRigs(&out, town, []string{"testrig", "otherrig"}, journal); err != nil {
 		t.Fatalf("unparkRigs = %v", err)
 	}
 	if IsRigParked(town, "testrig") {
 		t.Error("testrig still parked after unpark")
+	}
+	// Only the rig that was parked has its events journal turned on (gt-7iwy0.7).
+	if len(journaled) != 1 || journaled[0] != "testrig" || !strings.Contains(out.String(), "events journal") {
+		t.Errorf("journal turned on for %v; output %q", journaled, out.String())
 	}
 
 	out.Reset()

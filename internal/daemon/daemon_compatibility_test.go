@@ -71,8 +71,8 @@ func probesFor(fakes map[string]*fakeStoreProbe) func(string, string) (storeProb
 // level from schema_migrations via bd sql, the events journal via a
 // one-record tail, and the journal setting via bd config get. A level other
 // than bd's, a failed read, or a journal bd cannot tail refuses; a journal
-// switched off in config.yaml is only reported, because gastown's own bd
-// calls journal regardless (BD_EVENTS_JOURNAL=1).
+// switched off in config.yaml is only reported; gt doctor --check
+// events-journal is the check that fails on it (gt-7iwy0.7).
 func TestCheckBeadsStoreCompatibility_ReadsThroughBD(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

@@ -54,8 +54,7 @@ three fields can be cut or grepped by position. The daemon's rig column is
 gt tail only reads. It computes no verdict and exits 0 whatever it shows:
 the town's health is gt status. A source that cannot be read says so in one
 line and the stream continues. A store whose config leaves the events
-journal off says so once: only mutations made through gt are journaled
-there.
+journal off says so once: nothing is journaled there.
 
 Examples:
   gt tail                           # the last 15 minutes, then exit

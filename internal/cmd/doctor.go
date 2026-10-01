@@ -72,7 +72,6 @@ Clone divergence checks:
 
 Crew workspace checks:
   - crew-state               Validate crew worker state.json files (fixable)
-  - crew-worktrees           Detect stale cross-rig worktrees (fixable)
 
 Migration checks (fixable):
   - sparse-checkout          Detect legacy sparse checkout across all rigs
@@ -271,6 +270,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewUnusedDirectiveCheck())
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewRigNameMismatchCheck())
+	d.Register(doctor.NewEventsJournalCheck())      // Convoy polling needs the events journal on in every store (gt-7iwy0.7)
 	d.Register(doctor.NewRigConfigSyncCheck())      // Check all registered rigs have config.json
 	d.Register(doctor.NewStaleDoltPortCheck())      // Check for stale Dolt port files
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
@@ -339,7 +339,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Crew workspace checks
 	d.Register(doctor.NewCrewStateCheck())
-	d.Register(doctor.NewCrewWorktreeCheck())
 	d.Register(doctor.NewCommandsCheck())
 
 	// Lifecycle config checks

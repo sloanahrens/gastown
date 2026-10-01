@@ -49,7 +49,6 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `clone-divergence` | Cleanup | cadence | Detects emergency divergence between git clones; cheap git plumbing, and divergence compounds the longer it's unnoticed. |
 | `crash-reports` | Cleanup | cadence | Cheap directory scan for recent crash reports; a crash is actionable within minutes, not just at gc/shutdown. |
 | `crew-state` | Cleanup | cadence | Cheap state.json read per crew worker; crew state drifts as often as crew members act, worth catching fast. |
-| `crew-worktrees` | Cleanup | cadence | Cheap directory scan for stale cross-rig worktrees; same drift profile as orphan-sessions/orphan-processes. |
 | `dolt-orphan-servers` | Cleanup | cadence | Cheap process scan for abandoned test dolt sql-server instances that otherwise leak until a human notices. |
 | `dolt-orphaned-databases` | Cleanup | cadence | Cheap `SHOW DATABASES` scan; orphan DBs are the same class the daemon's `doctor_dog` job already patrols for slot-debris. |
 | `jsonl-bloat` | Cleanup | cadence | Cheap file-size/staleness comparison; bloat is progressive and best caught early. |
@@ -103,6 +102,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `prefix-conflict` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `prefix-mismatch` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `rig-config-sync` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
+| `events-journal` | Config | occasional | Fails a store whose config.yaml leaves the bd events journal off (gt-7iwy0.7): convoy polling misses closes made with bd directly. One `bd config get` per store; the key changes only at install, rig add, un-park or by hand. |
 | `rig-name-mismatch` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `rig-routes-jsonl` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `rig-settings` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |

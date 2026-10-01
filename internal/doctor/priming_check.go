@@ -246,26 +246,17 @@ func (c *PrimingCheck) checkRigPriming(townRoot string) []primingIssue {
 		}
 
 		// Check crew PRIME.md (shared settings, individual worktrees)
-		crewDir := filepath.Join(rigPath, "crew")
-		if dirExists(crewDir) {
-			crewEntries, _ := os.ReadDir(crewDir)
-			for _, crewEntry := range crewEntries {
-				if !crewEntry.IsDir() || crewEntry.Name() == ".claude" {
-					continue
-				}
-				crewPath := filepath.Join(crewDir, crewEntry.Name())
-
-				// Check if beads redirect is set up (crew should redirect to rig)
-				beadsDir := beads.ResolveBeadsDir(crewPath)
-				primeMdPath := filepath.Join(beadsDir, "PRIME.md")
-				if !fileExists(primeMdPath) {
-					issues = append(issues, primingIssue{
-						location:    fmt.Sprintf("%s/crew/%s", rigName, crewEntry.Name()),
-						issueType:   "missing_prime_md",
-						description: "Missing PRIME.md (Gas Town context fallback)",
-						fixable:     true,
-					})
-				}
+		for _, crewPath := range crewCloneDirs(filepath.Join(rigPath, "crew")) {
+			// Check if beads redirect is set up (crew should redirect to rig)
+			beadsDir := beads.ResolveBeadsDir(crewPath)
+			primeMdPath := filepath.Join(beadsDir, "PRIME.md")
+			if !fileExists(primeMdPath) {
+				issues = append(issues, primingIssue{
+					location:    fmt.Sprintf("%s/crew/%s", rigName, filepath.Base(crewPath)),
+					issueType:   "missing_prime_md",
+					description: "Missing PRIME.md (Gas Town context fallback)",
+					fixable:     true,
+				})
 			}
 		}
 

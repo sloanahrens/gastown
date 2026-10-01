@@ -85,7 +85,7 @@ func TestEventsSource_JournalOffBacklogPagingAndFollow(t *testing.T) {
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, pageSize: 2}
 	got := s.Poll()
 	want := []string{
-		"gastown events journal off in config (events-journal=false): only mutations made through gt are journaled",
+		"gastown events journal off in config (events-journal=false): nothing is journaled",
 		"gastown events update gt-1 status=in_progress actor=gastown/polecats/opal seq=2",
 		"gastown events close gt-1 status=closed actor=gastown/polecats/opal seq=3",
 		"gastown events delete gt-2 seq=4 ts=not-a-time",
@@ -122,7 +122,7 @@ func TestEventsSource_UnreadableConfigSaysSoOnce(t *testing.T) {
 	t.Parallel()
 	j := &fakeTailJournal{configErr: errors.New("boom")}
 	s := &eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"hq events cannot read events-journal config (boom): the journal may hold only mutations made through gt"}) {
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"hq events cannot read events-journal config (boom): the journal may be off"}) {
 		t.Fatalf("got %q", got)
 	}
 	if got := s.Poll(); len(got) != 0 {
@@ -391,7 +391,7 @@ func TestEventsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
 	}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
 	want := []string{
-		"gastown events journal off in config (events-journal=false): only mutations made through gt are journaled",
+		"gastown events journal off in config (events-journal=false): nothing is journaled",
 		"gastown events read failed: bd events tail: exit status 25",
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
