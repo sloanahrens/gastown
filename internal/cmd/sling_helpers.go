@@ -1240,7 +1240,7 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 // When the formula cannot be loaded, vars are returned unchanged and bd reports
 // the real problem — a gt-side load failure must not block a bond bd can do.
 func backfillFormulaDefaultVars(formulaName string, vars []string, townRoot, rigName string) ([]string, error) {
-	f, err := loadFormulaForVarDefaults(formulaName, townRoot, rigName)
+	_, f, err := loadResolvedFormula(formulaName, townRoot, rigName)
 	if err != nil {
 		return vars, nil
 	}
@@ -1283,26 +1283,6 @@ func backfillFormulaDefaultVars(formulaName string, vars []string, townRoot, rig
 			formulaName, strings.Join(missing, ", "))
 	}
 	return vars, nil
-}
-
-// loadFormulaForVarDefaults loads formulaName with its variable declarations:
-// content through the three-tier resolution (rig > town > embedded), parsed, with
-// extends resolved so a child that declares no vars still inherits the parent's
-// defaults (e.g. mol-polecat-work-monorepo-tdd).
-func loadFormulaForVarDefaults(formulaName, townRoot, rigName string) (*formula.Formula, error) {
-	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
-	if err != nil {
-		return nil, fmt.Errorf("loading formula %s: %w", formulaName, err)
-	}
-	f, err := formula.Parse(content)
-	if err != nil {
-		return nil, fmt.Errorf("parsing formula %s: %w", formulaName, err)
-	}
-	resolved, err := formula.Resolve(f, formulaSearchPaths(townRoot, rigName))
-	if err != nil {
-		return nil, fmt.Errorf("resolving formula %s: %w", formulaName, err)
-	}
-	return resolved, nil
 }
 
 // formulaSearchPaths lists the on-disk directories an extends parent may live in,

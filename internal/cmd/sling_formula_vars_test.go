@@ -3,8 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"strings"
 	"testing"
 
@@ -247,47 +245,4 @@ func assertEveryDeclaredVarResolved(t *testing.T, formulaName, townRoot, rigName
 			t.Errorf("formula %s uses {{%s}} but no --var was passed for it", formulaName, used)
 		}
 	}
-}
-
-// TestLoadResolvedFormulaMatchesVarDefaultsLoader proves loadResolvedFormula
-// gives backfillFormulaDefaultVars the same inputs as the loader it replaces
-// (gt-sbgr2): for every embedded formula, the same declared vars and the same
-// placeholders.
-func TestLoadResolvedFormulaMatchesVarDefaultsLoader(t *testing.T) {
-	t.Parallel()
-	entries, err := os.ReadDir(filepath.Join("..", "formula", "formulas"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checked, loaded := 0, 0
-	for _, entry := range entries {
-		name, ok := strings.CutSuffix(entry.Name(), ".formula.toml")
-		if !ok {
-			continue
-		}
-		checked++
-		old, oldErr := loadFormulaForVarDefaults(name, "", "")
-		_, resolved, newErr := loadResolvedFormula(name, "", "")
-		if (oldErr == nil) != (newErr == nil) {
-			t.Errorf("%s: old err %v, new err %v", name, oldErr, newErr)
-			continue
-		}
-		if oldErr != nil {
-			continue
-		}
-		loaded++
-		if !reflect.DeepEqual(old.Vars, resolved.Vars) {
-			t.Errorf("%s: vars differ:\nold %v\nnew %v", name, old.Vars, resolved.Vars)
-		}
-		oldUsed, newUsed := old.UsedTemplateVariables(), resolved.UsedTemplateVariables()
-		sort.Strings(oldUsed)
-		sort.Strings(newUsed)
-		if !reflect.DeepEqual(oldUsed, newUsed) {
-			t.Errorf("%s: placeholders differ:\nold %v\nnew %v", name, oldUsed, newUsed)
-		}
-	}
-	if loaded == 0 {
-		t.Fatal("no embedded formula loaded")
-	}
-	t.Logf("checked %d embedded formulas, %d loaded", checked, loaded)
 }
