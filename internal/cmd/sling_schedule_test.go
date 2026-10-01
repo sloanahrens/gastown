@@ -101,6 +101,7 @@ func TestResolveFormula(t *testing.T) {
 	t.Run("system default mol-polecat-work", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
+		useFailingTownBD(t, tmpDir)
 		rigName := "testrig"
 		_ = os.MkdirAll(filepath.Join(tmpDir, rigName), 0o755)
 		got := resolveFormula("", false, tmpDir, rigName)
@@ -112,6 +113,7 @@ func TestResolveFormula(t *testing.T) {
 	t.Run("wisp layer overrides system default", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
+		useFailingTownBD(t, tmpDir)
 		rigName := "testrig"
 		_ = os.MkdirAll(filepath.Join(tmpDir, rigName), 0o755)
 
@@ -129,6 +131,7 @@ func TestResolveFormula(t *testing.T) {
 	t.Run("explicit flag overrides wisp layer", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
+		useFailingTownBD(t, tmpDir)
 		rigName := "testrig"
 		_ = os.MkdirAll(filepath.Join(tmpDir, rigName), 0o755)
 

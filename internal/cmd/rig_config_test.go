@@ -314,6 +314,21 @@ func TestRigConfigSet_UnknownKeyGuesses(t *testing.T) {
 // TestRigConfigShow_DisplaysTypedValue covers the reporting symptom: a cap of one
 // must display as 1, including for a legacy wisp file that already holds the bool
 // the old inference wrote.
+// noRigBeadEnv is townRigCmdEnv whose rigs read their identity bead through a
+// bd that has none, instead of starting bd.
+func noRigBeadEnv(townRoot string, out, errOut io.Writer) rigCmdEnv {
+	env := townRigCmdEnv(townRoot, out, errOut)
+	find := env.findRig
+	env.findRig = func(rigName string) (string, *rig.Rig, error) {
+		path, r, err := find(rigName)
+		if r != nil {
+			downRigIdentityBeads(r)
+		}
+		return path, r, err
+	}
+	return env
+}
+
 func TestRigConfigShow_DisplaysTypedValue(t *testing.T) {
 	t.Parallel()
 	t.Run("set through the CLI", func(t *testing.T) {
@@ -321,7 +336,7 @@ func TestRigConfigShow_DisplaysTypedValue(t *testing.T) {
 		setWispValue(t, townRoot, rigName, "max_polecats", "1")
 
 		var stdout bytes.Buffer
-		if err := rigConfigShow(townRigCmdEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
+		if err := rigConfigShow(noRigBeadEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
 			t.Fatalf("rigConfigShow: %v", err)
 		}
 		out := stdout.String()
@@ -345,7 +360,7 @@ func TestRigConfigShow_DisplaysTypedValue(t *testing.T) {
 		}
 
 		var stdout bytes.Buffer
-		if err := rigConfigShow(townRigCmdEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
+		if err := rigConfigShow(noRigBeadEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
 			t.Fatalf("rigConfigShow: %v", err)
 		}
 		out := stdout.String()

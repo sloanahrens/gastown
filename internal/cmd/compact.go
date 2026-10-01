@@ -138,7 +138,7 @@ func loadTTLConfigWithRole(townRoot, rigName string) map[string]time.Duration {
 // and applies them as overrides.
 func applyRigBeadTTLOverrides(ttls map[string]time.Duration, townRoot, rigName string) {
 	beadsDir := beads.ResolveBeadsDir(townRoot)
-	bd := beads.NewWithBeadsDir(townRoot, beadsDir)
+	bd := townBeadsWithDir(townRoot, townRoot, beadsDir)
 
 	rigBeadID := beads.RigBeadIDWithPrefix("gt", rigName)
 	issue, err := bd.Show(rigBeadID)
