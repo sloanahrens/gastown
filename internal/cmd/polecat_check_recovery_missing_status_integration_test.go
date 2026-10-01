@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -11,7 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// TestCheckRecoveryMissingCleanupStatusEscape is the cmd-level test for the
+// TestIntegrationCheckRecoveryMissingCleanupStatusEscape is the cmd-level test for the
 // gt-ui2x escape (gt-2ugv): a polecat whose agent bead was read but never
 // recorded a cleanup_status may clear check-recovery's verdict once a live
 // probe of its worktree and the bead's own facts prove nothing is at risk.
@@ -21,7 +23,7 @@ import (
 // witness read the verdict from. So this drives checkRecoveryForPolecat itself
 // with a real worktree and an in-process bd, and pins both sides: the escape
 // clears the missing status, and every other blocker still holds.
-func TestCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
+func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 	t.Parallel()
 
 	const (

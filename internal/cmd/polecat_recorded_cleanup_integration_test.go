@@ -1,0 +1,205 @@
+//go:build integration
+
+package cmd
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
+)
+
+// initInventoryGitWorktree builds a real one-commit repo so the list path's
+// live probe has something to measure, the same way a polecat worktree does.
+func initInventoryGitWorktree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "polecat/topaz"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "initial"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit is the
+// claude-41j.1 D9 end-to-end table for the list path against real
+// worktrees: the recorded cleanup_status is a hint, the verdict re-derives
+// from a live probe of the worktree, and both are tagged with where they
+// came from. TestPolecatListReuseVerdictRedrivesFromProbe holds the same
+// verdicts over canned probe results.
+func TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
+	t.Parallel()
+	cleanWorktree := initInventoryGitWorktree(t)
+
+	dirtyWorktree := initInventoryGitWorktree(t)
+	dirtyPath := filepath.Join(dirtyWorktree, "uncommitted.txt")
+	if err := os.WriteFile(dirtyPath, []byte("work in progress\n"), 0644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	// A leftover polecat directory: it exists, but it is not a worktree of its
+	// own — it sits inside the rig's repository. Probing it must report the
+	// probe as failed, not the rig root's branch and dirt as the polecat's.
+	rigRoot := initInventoryGitWorktree(t)
+	if err := os.WriteFile(filepath.Join(rigRoot, "rig-dirt.txt"), []byte("churn\n"), 0644); err != nil {
+		t.Fatalf("write rig dirt: %v", err)
+	}
+	leftoverDir := filepath.Join(rigRoot, "polecats", "peridot", "gastown")
+	if err := os.MkdirAll(leftoverDir, 0755); err != nil {
+		t.Fatalf("mkdir leftover: %v", err)
+	}
+
+	tests := []struct {
+		name             string
+		worktreePath     string
+		cleanupStatus    string
+		wantReusable     bool
+		wantVerdict      string
+		wantReason       string
+		wantGitStateSrc  string
+		wantGitReasonHas string
+		wantBlockerHas   string
+	}{
+		{
+			// The 2026-09-10 01:14 incident: the self-report said has_stash ten
+			// minutes after the stash was dropped, and it was the only thing
+			// consulted. Live git now decides, and the stale hint loses.
+			name:            "stale recorded has_stash with a clean live worktree is reusable",
+			worktreePath:    cleanWorktree,
+			cleanupStatus:   string(polecat.CleanupStash),
+			wantReusable:    true,
+			wantVerdict:     polecat.WorkstateVerdictSafeToNuke,
+			wantReason:      "reusable",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+		},
+		{
+			name:            "recorded clean cannot rescue a dirty live worktree",
+			worktreePath:    dirtyWorktree,
+			cleanupStatus:   string(polecat.CleanupClean),
+			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:      "git-dirty",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+		},
+		{
+			name:             "a failed live probe fails closed with git_state=unknown",
+			worktreePath:     filepath.Join(t.TempDir(), "gone"),
+			cleanupStatus:    string(polecat.CleanupClean),
+			wantVerdict:      polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:       "git-check-failed",
+			wantGitStateSrc:  polecat.GitStateSourceUnknown,
+			wantGitReasonHas: "git_state=unknown",
+		},
+		{
+			name:             "a directory that is not its own worktree is unmeasurable, not clean",
+			worktreePath:     leftoverDir,
+			cleanupStatus:    string(polecat.CleanupClean),
+			wantVerdict:      polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:       "git-check-failed",
+			wantGitStateSrc:  polecat.GitStateSourceUnknown,
+			wantGitReasonHas: "not a git worktree root",
+		},
+		{
+			name:            "no probe target leaves the recorded hint authoritative",
+			worktreePath:    "",
+			cleanupStatus:   string(polecat.CleanupStash),
+			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:      "cleanup-has_stash",
+			wantGitStateSrc: polecat.GitStateSourceRecorded,
+		},
+		{
+			// gt-ui2x acceptance case: a seat whose cleanup_status was never
+			// self-reported (gt done crashed before writing it, or the seat
+			// predates the field) must become reusable once the agent bead was
+			// actually read (buildPolecatInventoryItem sets AgentBeadRead from
+			// fields != nil) and a live probe confirms the worktree clean —
+			// not stay blocked forever with no path out.
+			name:            "missing cleanup_status with a clean live worktree is reusable",
+			worktreePath:    cleanWorktree,
+			cleanupStatus:   "",
+			wantReusable:    true,
+			wantVerdict:     polecat.WorkstateVerdictSafeToNuke,
+			wantReason:      "reusable",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+		},
+		{
+			// The companion negative case: missing cleanup_status must not
+			// become a blanket clearance — a live probe that finds real dirt
+			// still blocks, exactly like every other status. gitSafe is false
+			// here, so ResolveIgnoreCleanupStatus's agentBeadRead branch never
+			// fires and the missing-status blocker (checked first in
+			// decideWorkstate) sets the reported reason; the dirty git fact is
+			// still a second, independent blocker (see item.Disposition.Blockers).
+			name:            "missing cleanup_status with a dirty live worktree still blocks",
+			worktreePath:    dirtyWorktree,
+			cleanupStatus:   "",
+			wantVerdict:     polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:      "cleanup-unknown",
+			wantGitStateSrc: polecat.GitStateSourceLive,
+			wantBlockerHas:  "git_state=has_uncommitted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := buildPolecatInventoryItem(
+				"gastown",
+				"topaz",
+				&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: tt.cleanupStatus, Branch: "polecat/topaz"},
+				nil,
+				polecatSessionSet{},
+				polecatInventoryEnv{WorktreePath: tt.worktreePath},
+			)
+
+			if item.Disposition.Reusable != tt.wantReusable {
+				t.Fatalf("Reusable = %v, want %v (disposition %+v)", item.Disposition.Reusable, tt.wantReusable, item.Disposition)
+			}
+			if item.Disposition.Verdict != tt.wantVerdict || item.Disposition.Reason != tt.wantReason {
+				t.Fatalf("verdict/reason = %s/%s, want %s/%s", item.Disposition.Verdict, item.Disposition.Reason, tt.wantVerdict, tt.wantReason)
+			}
+			if item.GitStateSource != tt.wantGitStateSrc {
+				t.Fatalf("GitStateSource = %q, want %q", item.GitStateSource, tt.wantGitStateSrc)
+			}
+			if item.CleanupStatusSource != polecat.CleanupStatusSourceRecorded {
+				t.Fatalf("CleanupStatusSource = %q, want %q", item.CleanupStatusSource, polecat.CleanupStatusSourceRecorded)
+			}
+			if tt.wantGitReasonHas != "" && !strings.Contains(item.GitStateReason, tt.wantGitReasonHas) {
+				t.Fatalf("GitStateReason = %q, want it to mention %q", item.GitStateReason, tt.wantGitReasonHas)
+			}
+			if item.GitStateSource == polecat.GitStateSourceLive && item.Branch != "polecat/topaz" {
+				t.Fatalf("Branch = %q, want the live branch polecat/topaz", item.Branch)
+			}
+			if tt.wantBlockerHas != "" {
+				found := false
+				for _, b := range item.Disposition.Blockers {
+					if strings.Contains(b, tt.wantBlockerHas) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("Blockers = %v, want one containing %q", item.Disposition.Blockers, tt.wantBlockerHas)
+				}
+			}
+		})
+	}
+}

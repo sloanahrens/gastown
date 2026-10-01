@@ -90,6 +90,9 @@ type polecatInventoryEnv struct {
 	// irreversible action, read git.BranchPreservationStatusLocal — it states
 	// where that boundary falls.
 	GitProbeLocalOnly bool
+	// probe measures WorktreePath; nil means probePolecatWorktree. Tests set
+	// it to canned states so the verdict runs without a repository.
+	probe func(worktreePath string, localOnly bool) polecat.LiveGitState
 	// ActiveMRSource resolves the ids the active_mr policy looks up (the MR
 	// itself and its source issue). Nil — the zero value, and what the capacity
 	// path passes — leaves the policy reading the same fail-closed
@@ -303,7 +306,11 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// input when no probe target is available; the source label records which
 	// of the two actually fed the decision.
 	if env.WorktreePath != "" {
-		live := probePolecatWorktree(env.WorktreePath, env.GitProbeLocalOnly)
+		probe := env.probe
+		if probe == nil {
+			probe = probePolecatWorktree
+		}
+		live := probe(env.WorktreePath, env.GitProbeLocalOnly)
 		live.ApplyFacts(&facts)
 		if live.Branch != "" {
 			// A live branch supersedes the recorded one, the same way live git

@@ -1471,10 +1471,22 @@ func warnHandoffGitStatus() {
 	warnHandoffGitStatusIn(os.Stderr, cwd)
 }
 
+// handoffGit is the part of *git.Git the handoff's workspace checks read.
+type handoffGit interface {
+	IsRepo() bool
+	CurrentBranch() (string, error)
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
+	RecentCommits(n int) (string, error)
+}
+
 // warnHandoffGitStatusIn writes warnHandoffGitStatus's warning for the
 // repository at dir to w.
 func warnHandoffGitStatusIn(w io.Writer, dir string) {
-	g := git.NewGit(dir)
+	warnHandoffGitStatusWith(w, git.NewGit(dir))
+}
+
+// warnHandoffGitStatusWith is warnHandoffGitStatusIn over g.
+func warnHandoffGitStatusWith(w io.Writer, g handoffGit) {
 	if !g.IsRepo() {
 		return
 	}
@@ -1657,7 +1669,11 @@ func collectGitState() string {
 
 // collectGitStateIn is collectGitState for the repository at dir.
 func collectGitStateIn(dir string) string {
-	g := git.NewGit(dir)
+	return collectGitStateWith(git.NewGit(dir))
+}
+
+// collectGitStateWith is collectGitStateIn over g.
+func collectGitStateWith(g handoffGit) string {
 	if !g.IsRepo() {
 		return ""
 	}

@@ -1,68 +1,41 @@
 package cmd
 
 import (
-	"bytes"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // gt-csng: the polecat-side pre-work duplicate check.
 
-// gitRootFixture seeds a throwaway git repo whose origin/main carries a fresh
-// commit, and returns its root; the caller removes it.
-func gitRootFixture(t *testing.T) string {
-	t.Helper()
-	return cachedGitFixtureStrings(t, "gitRootFixture", func(root string) []string {
-		return []string{buildGitRootFixture(t, root)}
-	})[0]
+const (
+	dupesOriginCall = "git:rev-parse --verify --quiet origin/main"
+	dupesLogPrefix  = "git:log origin/main --since=1 day --name-only --pretty=format:%h%x09%s -- "
+	dupesSharedFile = "cmd/gt/hermetic_main_test.go"
+	// dupesSharedLog is what git log prints for one fresh origin/main commit
+	// touching dupesSharedFile.
+	dupesSharedLog = "abc1234\tTestRunPrimeExternalTools_BoundsSlowMailCheck: fix the slow-mail bound (gt-abc)\n" + dupesSharedFile + "\n"
+)
+
+// dupesRunner answers the check's two git calls: origin/main resolves unless
+// noOrigin, the log for dupesSharedFile names the fresh commit, and the log
+// for any other single path is empty. Any other call fails, as git outside
+// a repository does.
+func dupesRunner(noOrigin bool, otherPaths ...string) *fakePrimeRunner {
+	answers := map[string]string{dupesLogPrefix + dupesSharedFile: dupesSharedLog}
+	if !noOrigin {
+		answers[dupesOriginCall] = ""
+	}
+	for _, p := range otherPaths {
+		answers[dupesLogPrefix+p] = ""
+	}
+	return &fakePrimeRunner{answers: answers}
 }
 
-// buildGitRootFixture makes gitRootFixture's repos under root.
-func buildGitRootFixture(t *testing.T, root string) string {
-	t.Helper()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q")
-	run("config", "user.email", "t@t")
-	run("config", "user.name", "t")
-	f := filepath.Join(root, "cmd", "gt", "hermetic_main_test.go")
-	if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(f, []byte("package gt\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "-A")
-	run("commit", "-q", "-m", "TestRunPrimeExternalTools_BoundsSlowMailCheck: fix the slow-mail bound (gt-abc)")
-	run("update-ref", "refs/remotes/origin/main", "HEAD")
-	return root
-}
-
-// realGitPrimeTools runs prime's git calls for real but on a fake clock that
-// is never advanced, so primeExternalToolTimeout cannot fire on a slow host:
-// what these tests check is the check's reading of git, not its deadline
-// (TestCheckHookedPathDupes_BoundsSlowGitLog covers that). Output collects in
-// the returned buffer.
-func realGitPrimeTools() (primeTools, *bytes.Buffer) {
-	var out bytes.Buffer
-	return primeTools{clock: clockwork.NewFakeClockAt(primeTestEpoch), out: &out}, &out
-}
-
-// hookedPathDupesOutput runs the check on real git and returns what it printed.
-func hookedPathDupesOutput(ctx RoleContext, bead *beads.Issue, skip ...bool) string {
-	p, out := realGitPrimeTools()
+// hookedPathDupesOutput runs the check over f and returns what it printed.
+func hookedPathDupesOutput(f *fakePrimeRunner, ctx RoleContext, bead *beads.Issue, skip ...bool) string {
+	p, _, out := newFakePrimeTools(f)
 	p.skipDupes = len(skip) > 0 && skip[0]
 	p.hookedPathDupes(ctx, bead)
 	return out.String()
@@ -70,9 +43,9 @@ func hookedPathDupesOutput(ctx RoleContext, bead *beads.Issue, skip ...bool) str
 
 func TestDupesRecentLog(t *testing.T) {
 	t.Parallel()
-	root := gitRootFixture(t)
-	p, _ := realGitPrimeTools()
-	commits, err := p.dupesRecentLog(root, []string{"cmd/gt/hermetic_main_test.go"})
+	f := dupesRunner(false, "internal/cmd/never_touched.go")
+	p, _, _ := newFakePrimeTools(f)
+	commits, err := p.dupesRecentLog("/work", []string{dupesSharedFile})
 	if err != nil {
 		t.Fatalf("dupesRecentLog: %v", err)
 	}
@@ -80,11 +53,11 @@ func TestDupesRecentLog(t *testing.T) {
 		t.Fatalf("commits = %d, want 1: %+v", len(commits), commits)
 	}
 	c := commits[0]
-	if len(c.Hash) < 7 {
-		t.Errorf("hash = %q, want a git hash", c.Hash)
+	if c.Hash != "abc1234" {
+		t.Errorf("hash = %q, want abc1234", c.Hash)
 	}
-	if !c.Files["cmd/gt/hermetic_main_test.go"] {
-		t.Errorf("Files = %v, want cmd/gt/hermetic_main_test.go", c.Files)
+	if !c.Files[dupesSharedFile] {
+		t.Errorf("Files = %v, want %s", c.Files, dupesSharedFile)
 	}
 	want := "TestRunPrimeExternalTools_BoundsSlowMailCheck: fix the slow-mail bound (gt-abc)"
 	if c.Subject != want {
@@ -92,23 +65,55 @@ func TestDupesRecentLog(t *testing.T) {
 	}
 
 	// A path the history never touches returns nothing, no error.
-	if commits, err := p.dupesRecentLog(root, []string{"internal/cmd/never_touched.go"}); err != nil || len(commits) != 0 {
+	if commits, err := p.dupesRecentLog("/work", []string{"internal/cmd/never_touched.go"}); err != nil || len(commits) != 0 {
 		t.Errorf("untouched path: commits=%v err=%v, want empty/nil", commits, err)
+	}
+
+	// Without origin/main the log is never read.
+	f = dupesRunner(true)
+	p, _, _ = newFakePrimeTools(f)
+	if _, err := p.dupesRecentLog("/work", []string{dupesSharedFile}); err == nil {
+		t.Errorf("no origin/main: want an error")
+	}
+	if f.called(dupesLogPrefix + dupesSharedFile) {
+		t.Errorf("git log ran without origin/main: %v", f.callLines())
+	}
+}
+
+func TestDupesRecentLogParsesSeveralCommits(t *testing.T) {
+	t.Parallel()
+	f := &fakePrimeRunner{answers: map[string]string{
+		dupesOriginCall:              "",
+		dupesLogPrefix + "a.go b.go": "1111111\tfirst\na.go\nb.go\n\n2222222\tsecond\n./b.go\n",
+	}}
+	p, _, _ := newFakePrimeTools(f)
+	commits, err := p.dupesRecentLog("/work", []string{"a.go", "b.go"})
+	if err != nil {
+		t.Fatalf("dupesRecentLog: %v", err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("commits = %+v, want 2", commits)
+	}
+	if !commits[0].Files["a.go"] || !commits[0].Files["b.go"] || commits[0].Subject != "first" {
+		t.Errorf("first commit = %+v", commits[0])
+	}
+	if !commits[1].Files["b.go"] || commits[1].Hash != "2222222" {
+		t.Errorf("second commit = %+v, want b.go normalized from ./b.go", commits[1])
 	}
 }
 
 func TestCheckHookedPathDupes(t *testing.T) {
 	t.Parallel()
+	shared := &beads.Issue{
+		ID:    "gt-3vr",
+		Title: "Fix the slow-mail bound",
+		Description: dupesSharedFile + " fails in " +
+			"TestRunPrimeExternalTools_BoundsSlowMailCheck.",
+	}
 	t.Run("warns when a shared file was recently changed", func(t *testing.T) {
-		root := gitRootFixture(t)
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
-			&beads.Issue{
-				ID:    "gt-3vr",
-				Title: "Fix the slow-mail bound",
-				Description: "cmd/gt/hermetic_main_test.go fails in " +
-					"TestRunPrimeExternalTools_BoundsSlowMailCheck.",
-			})
-		if !strings.Contains(out, "cmd/gt/hermetic_main_test.go") {
+		t.Parallel()
+		out := hookedPathDupesOutput(dupesRunner(false), RoleContext{Role: RolePolecat, WorkDir: "/work"}, shared)
+		if !strings.Contains(out, dupesSharedFile) {
 			t.Fatalf("output missing the shared file:\n%s", out)
 		}
 		if !strings.Contains(out, "test name your bead names") {
@@ -119,9 +124,21 @@ func TestCheckHookedPathDupes(t *testing.T) {
 		}
 	})
 
+	t.Run("no stronger line without a shared test name", func(t *testing.T) {
+		t.Parallel()
+		out := hookedPathDupesOutput(dupesRunner(false), RoleContext{Role: RolePolecat, WorkDir: "/work"},
+			&beads.Issue{ID: "gt-x", Title: "x", Description: dupesSharedFile + "."})
+		if !strings.Contains(out, "check before duplicating this work") {
+			t.Fatalf("output missing the header:\n%s", out)
+		}
+		if strings.Contains(out, "test name your bead names") {
+			t.Fatalf("stronger line without a shared test name:\n%s", out)
+		}
+	})
+
 	t.Run("silent when no overlap", func(t *testing.T) {
-		root := gitRootFixture(t)
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
+		t.Parallel()
+		out := hookedPathDupesOutput(dupesRunner(false, "internal/cmd/never_touched.go"), RoleContext{Role: RolePolecat, WorkDir: "/work"},
 			&beads.Issue{
 				ID:          "gt-rl0",
 				Title:       "Some unrelated bead",
@@ -133,65 +150,42 @@ func TestCheckHookedPathDupes(t *testing.T) {
 	})
 
 	t.Run("silent when the bead names no paths", func(t *testing.T) {
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat},
+		t.Parallel()
+		f := dupesRunner(false)
+		out := hookedPathDupesOutput(f, RoleContext{Role: RolePolecat},
 			&beads.Issue{ID: "gt-x", Title: "No paths here", Description: "Just prose."})
-		if strings.TrimSpace(out) != "" {
-			t.Fatalf("expected silence, got:\n%s", out)
+		if strings.TrimSpace(out) != "" || len(f.callLines()) != 0 {
+			t.Fatalf("expected silence and no git, got %v:\n%s", f.callLines(), out)
 		}
 	})
 
-	t.Run("skipped in continuation mode", func(t *testing.T) {
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
-			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."}, true)
-		if strings.TrimSpace(out) != "" {
-			t.Fatalf("continuation mode must skip the check, got:\n%s", out)
-		}
-	})
-
-	t.Run("non-polecat is skipped", func(t *testing.T) {
-		out := hookedPathDupesOutput(RoleContext{Role: RoleCrew, WorkDir: t.TempDir()},
-			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		if strings.TrimSpace(out) != "" {
-			t.Fatalf("non-polecat must skip the check, got:\n%s", out)
-		}
-	})
-
-	t.Run("skipped in dry-run", func(t *testing.T) {
-		// The fixture is one the check WOULD warn on, so silence here is the
-		// dry-run gate and not an absent overlap.
-		root := gitRootFixture(t)
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
-			&beads.Issue{
-				ID:          "gt-x",
-				Title:       "Fix the slow-mail bound",
-				Description: "cmd/gt/hermetic_main_test.go fails in TestRunPrimeExternalTools_BoundsSlowMailCheck.",
-			}, true)
-		if strings.TrimSpace(out) != "" {
-			t.Fatalf("dry-run must skip the check, got:\n%s", out)
-		}
-	})
-
-	t.Run("silent outside a git repo", func(t *testing.T) {
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
-			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		if strings.TrimSpace(out) != "" {
-			t.Fatalf("a workdir outside a repo must not be reported on, got:\n%s", out)
-		}
-	})
+	// Each gate below is checked with a bead and history the check WOULD
+	// warn on, so silence is the gate and not an absent overlap.
+	for _, tc := range []struct {
+		name string
+		role Role
+		skip bool
+	}{
+		{name: "skipped in continuation mode or dry-run", role: RolePolecat, skip: true},
+		{name: "non-polecat is skipped", role: RoleCrew},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := dupesRunner(false)
+			out := hookedPathDupesOutput(f, RoleContext{Role: tc.role, WorkDir: "/work"}, shared, tc.skip)
+			if strings.TrimSpace(out) != "" || len(f.callLines()) != 0 {
+				t.Fatalf("the check must not run, got calls %v:\n%s", f.callLines(), out)
+			}
+		})
+	}
 
 	t.Run("silent when the repo has no origin/main", func(t *testing.T) {
-		// Fail-closed: a worktree whose remote branch is not fetched yet is
-		// exactly the case a warning would be least trustworthy in, so the
-		// check must say nothing rather than guess.
-		root := gitRootFixture(t)
-		drop := exec.Command("git", "update-ref", "-d", "refs/remotes/origin/main")
-		drop.Dir = root
-		if out, err := drop.CombinedOutput(); err != nil {
-			t.Fatalf("drop origin/main: %v\n%s", err, out)
-		}
-
-		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
-			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
+		t.Parallel()
+		// Fail-closed: a worktree whose remote branch is not fetched yet (or
+		// a workdir outside any repository, where the same rev-parse fails)
+		// is exactly the case a warning would be least trustworthy in, so
+		// the check must say nothing rather than guess.
+		out := hookedPathDupesOutput(dupesRunner(true), RoleContext{Role: RolePolecat, WorkDir: "/work"}, shared)
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("no origin/main must fail closed, got:\n%s", out)
 		}
