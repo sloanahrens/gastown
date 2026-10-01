@@ -414,7 +414,7 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 	// list actually names the normalized, quoted identity 'gastown/max' —
 	// simulating a real DB where a message is never assigned to the raw,
 	// un-normalized address, so a query for the raw address returns nothing.
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		if c.Args[0] != "sql" {
 			return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 		}
@@ -431,6 +431,7 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 
 	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
 	r.bd = bd.run
+	r.town = noTownBeads{}
 	// "gastown/crew/max" is the raw GGT address form (as discoverRigAgents
 	// builds it); it must be normalized to "gastown/max" before querying.
 	summaries, err := r.BatchMailSummaries([]string{"gastown/crew/max", "mayor/"})
@@ -496,7 +497,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	// an ID; the old code passed --id msg-* with --ephemeral, which bd
 	// rejected with a prefix mismatch (the fix: sendToSingle no longer
 	// passes --id to bd create).
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		args := c.Args
 		switch {
 		case args[0] == "config" || args[0] == "init":
@@ -528,6 +529,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 
 	r := NewRouter(senderDir, testPrefixRegistry())
 	r.bd = bd.run
+	r.town = noTownBeads{}
 	msg := &Message{
 		From:           "barnaby/crew/tom",
 		To:             "barnaby/troy",
@@ -578,7 +580,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 	// an ID; the old code passed --id msg-* with --ephemeral, which bd
 	// rejected with a prefix mismatch (the fix: sendToSingle no longer
 	// passes --id to bd create).
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		args := c.Args
 		switch {
 		case args[0] == "config" || args[0] == "init":
@@ -610,6 +612,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 
 	r := NewRouter(senderDir, testPrefixRegistry())
 	r.bd = bd.run
+	r.town = noTownBeads{}
 	// Built as a plain struct literal with no ThreadID set, matching how
 	// system notices like RECOVERED_BEAD are constructed in production.
 	msg := &Message{
@@ -1615,6 +1618,7 @@ func TestValidateRecipientFilesystemFallback(t *testing.T) {
 	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 	// No agent beads: every bd query fails as it does with no database.
 	r.bd = noBeadsDatabase
+	r.town = noTownBeads{}
 
 	tests := []struct {
 		name     string
@@ -1674,6 +1678,7 @@ func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
 	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 	// No agent beads: every bd query fails as it does with no database.
 	r.bd = noBeadsDatabase
+	r.town = noTownBeads{}
 
 	for _, identity := range []string{"sfn1_fast/arch", "sfn1_fast/crew/arch"} {
 		t.Run(identity, func(t *testing.T) {
@@ -1779,6 +1784,7 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 	r := &Router{
 		// No agent bead mutes the session: bd has no database.
 		bd:                noBeadsDatabase,
+		town:              noTownBeads{},
 		workDir:           t.TempDir(),
 		townRoot:          townRoot,
 		tmux:              fake,
@@ -1832,6 +1838,7 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 	r := &Router{
 		// No agent bead mutes the session: bd has no database.
 		bd:       noBeadsDatabase,
+		town:     noTownBeads{},
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -1892,6 +1899,7 @@ func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
 	r := &Router{
 		// No agent bead mutes the session: bd has no database.
 		bd:       noBeadsDatabase,
+		town:     noTownBeads{},
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -1939,6 +1947,7 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 	r := &Router{
 		// No agent bead mutes the session: bd has no database.
 		bd:       noBeadsDatabase,
+		town:     noTownBeads{},
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -1988,6 +1997,7 @@ func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) 
 	r := &Router{
 		// No agent bead mutes the session: bd has no database.
 		bd:       noBeadsDatabase,
+		town:     noTownBeads{},
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2356,5 +2366,42 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 	pending, _ := nudge.Pending(townRoot, "gt-gastown-crew-bob")
 	if pending != 0 {
 		t.Errorf("reply_reminder_delay=0s should disable reminders, got %d pending", pending)
+	}
+}
+
+// mutedTown is a town whose agent beads in muted are muted.
+type mutedTown struct {
+	noTownBeads
+	muted map[string]bool
+}
+
+func (m mutedTown) GetAgentNotificationLevel(id string) (string, error) {
+	if m.muted[id] {
+		return beads.NotifyMuted, nil
+	}
+	return "", beads.ErrNotFound
+}
+
+// TestNotifyRecipient_MutedSessionIsSkipped: a session whose agent bead is
+// muted is neither probed nor nudged.
+func TestNotifyRecipient_MutedSessionIsSkipped(t *testing.T) {
+	t.Parallel()
+	sessionName := "gt-crew-mutedtest"
+	fake := newFakeNotifyTmux(sessionName)
+	r := &Router{
+		bd:       noBeadsDatabase,
+		town:     mutedTown{muted: map[string]bool{sessionName: true}},
+		workDir:  t.TempDir(),
+		townRoot: t.TempDir(),
+		tmux:     fake,
+	}
+	if err := r.notifyRecipient(&Message{From: "gastown/crew/sender", To: "gastown/crew/mutedtest", Subject: "quiet"}); err != nil {
+		t.Fatalf("notifyRecipient: %v", err)
+	}
+	if got := fake.nudgesTo(sessionName); len(got) != 0 {
+		t.Errorf("muted session got nudges %q", got)
+	}
+	if len(fake.queried) != 0 {
+		t.Errorf("muted session was probed: %v", fake.queried)
 	}
 }

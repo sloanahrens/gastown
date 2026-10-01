@@ -41,7 +41,7 @@ type Mailbox struct {
 	legacy   bool   // true = use JSONL files, false = use beads
 
 	// bd runs bd for the beads-mode methods; nil is the bd on PATH.
-	bd beads.BDRunner
+	bd bdRunner
 
 	// store is an optional in-process beadsdk.Storage. When set, beads-mode
 	// methods bypass the bd subprocess and use the store directly.
@@ -432,7 +432,7 @@ type issueBatchRow struct {
 // regardless of len(identities), unlike queryIssueMessagesByAssignee/
 // queryIssueMessagesByCC which issue one bd list call per identity. Used by
 // Router.BatchMailSummaries (see gt-978i).
-func queryIssueMessagesBatch(run beads.BDRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
+func queryIssueMessagesBatch(run bdRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
 	if len(identities) == 0 {
 		return nil, nil
 	}
