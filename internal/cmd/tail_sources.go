@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -104,11 +103,11 @@ func (s *eventsSource) Poll() []tailLine {
 		// The journal is off in production until the paired install turns it
 		// on. gt's own bd calls journal regardless (BD_EVENTS_JOURNAL=1), so
 		// the journal is read anyway; the operator is told it is partial.
-		v, err := s.journal.ConfigGet("events-journal")
+		v, err := s.journal.ConfigGet(beads.EventsJournalKey)
 		switch {
 		case err != nil:
 			out = append(out, s.line(now, "cannot read events-journal config (%v): the journal may hold only mutations made through gt", err))
-		case !journalOn(v):
+		case !beads.EventsJournalOn(v):
 			out = append(out, s.line(now, "journal off in config (events-journal=%s): only mutations made through gt are journaled", strings.TrimSpace(v)))
 		}
 	}
@@ -167,12 +166,6 @@ func (s *eventsSource) Poll() []tailLine {
 			return out
 		}
 	}
-}
-
-// journalOn reads an events-journal value as bd's config does: a boolean.
-func journalOn(v string) bool {
-	on, err := strconv.ParseBool(strings.TrimSpace(v))
-	return err == nil && on
 }
 
 // parseJournalTS reads a journal record's ts. bd writes RFC3339 in UTC; the

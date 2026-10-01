@@ -380,6 +380,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if out, err := routingCmd.CombinedOutput(); err != nil {
 			fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), strings.TrimSpace(string(out)))
 		}
+
+		// The convoy manager polls the events journal (gt-7iwy0.7).
+		journalCmd := beads.CommandWithEnv(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")), "config", "set", beads.EventsJournalKey, "true")
+		if out, err := journalCmd.CombinedOutput(); err != nil {
+			fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), strings.TrimSpace(string(out)))
+		}
 	}
 
 	// Detect and save overseer identity

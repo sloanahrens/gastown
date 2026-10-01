@@ -39,6 +39,7 @@ func TestSeedRigDatabaseConfigGoesThroughBd(t *testing.T) {
 	want := [][2]string{
 		{"types.custom", constants.BeadsCustomTypes},
 		{"types.infra", constants.BeadsInfraTypes},
+		{"events-journal", "true"},
 	}
 	if !reflect.DeepEqual(bd.set, want) {
 		t.Errorf("bd config set calls = %v, want %v", bd.set, want)

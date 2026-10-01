@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -90,7 +93,23 @@ func runRigUnpark(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return unparkRigs(os.Stdout, townRoot, args)
+	return unparkRigs(os.Stdout, townRoot, args, bdRigEventsJournal(townRoot))
+}
+
+// rigJournalEnsurer turns the events journal on in a rig's store and
+// reports whether it had to write config.yaml.
+type rigJournalEnsurer func(rigName string) (bool, error)
+
+// bdRigEventsJournal is the production rigJournalEnsurer: bd pinned to the
+// rig's beads dir, reading the store's own config (gt-7iwy0.7).
+func bdRigEventsJournal(townRoot string) rigJournalEnsurer {
+	return func(rigName string) (bool, error) {
+		dir := doltserver.FindRigBeadsDir(townRoot, rigName)
+		if dir == "" {
+			return false, fmt.Errorf("no beads directory for rig %s", rigName)
+		}
+		return beads.EnsureEventsJournal(beads.NewPlain(filepath.Dir(dir), beads.EventsJournalProbeEnv(os.Environ(), dir)))
+	}
 }
 
 // parkRigs writes rec as each rig's park record.
@@ -111,8 +130,10 @@ func parkRigs(w io.Writer, townRoot string, rigNames []string, rec config.RigPar
 	return nil
 }
 
-// unparkRigs clears each rig's park record.
-func unparkRigs(w io.Writer, townRoot string, rigNames []string) error {
+// unparkRigs clears each rig's park record and turns the rig store's events
+// journal on, which the convoy manager polls. A rig whose journal cannot be
+// turned on stays unparked with a warning; gt doctor fails it until fixed.
+func unparkRigs(w io.Writer, townRoot string, rigNames []string, journal rigJournalEnsurer) error {
 	failed := 0
 	for _, rigName := range rigNames {
 		was, err := townconfig.Unpark(townRoot, rigName)
@@ -126,6 +147,11 @@ func unparkRigs(w io.Writer, townRoot string, rigNames []string) error {
 			continue
 		}
 		fmt.Fprintf(w, "%s Rig %s unparked\n", style.Success.Render("✓"), rigName)
+		if wrote, err := journal(rigName); err != nil {
+			fmt.Fprintf(w, "%s %s: could not turn on the events journal: %v\n", style.Warning.Render("⚠"), rigName, err)
+		} else if wrote {
+			fmt.Fprintf(w, "  Turned on the events journal (%s in .beads/config.yaml; commit it where tracked)\n", beads.EventsJournalKey)
+		}
 		fmt.Fprintf(w, "  Use '%s' to start agents now\n", style.Dim.Render("gt rig start "+rigName))
 	}
 	if failed > 0 {

@@ -3,6 +3,7 @@ package rig
 import (
 	"fmt"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -14,8 +15,8 @@ type configSetter interface {
 // seedRigDatabaseConfig writes the new rig database's config through bd,
 // never with SQL against bd's config table (gt-fcxe9.12, ADR 0001).
 // issue_prefix goes through setPrefix because bd refuses
-// "bd config set issue_prefix"; the custom and infra types go through
-// "bd config set". Each failure comes back as a warning naming its key.
+// "bd config set issue_prefix"; the custom and infra types and the events
+// journal go through "bd config set". Each failure comes back as a warning naming its key.
 func seedRigDatabaseConfig(bd configSetter, setPrefix func(prefix string) error, prefix string) []string {
 	var warnings []string
 	if err := setPrefix(prefix); err != nil {
@@ -24,6 +25,8 @@ func seedRigDatabaseConfig(bd configSetter, setPrefix func(prefix string) error,
 	for _, kv := range [][2]string{
 		{"types.custom", constants.BeadsCustomTypes},
 		{"types.infra", constants.BeadsInfraTypes},
+		// The convoy manager polls the events journal (gt-7iwy0.7).
+		{beads.EventsJournalKey, "true"},
 	} {
 		if err := bd.ConfigSet(kv[0], kv[1]); err != nil {
 			warnings = append(warnings, fmt.Sprintf("could not set %s in rig database: %v", kv[0], err))
