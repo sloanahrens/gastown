@@ -45,29 +45,9 @@ var realGitFuncs = map[string]bool{
 // followed, and neither is git that production code runs (WithoutGit
 // catches that at run time).
 func GitFreeFindings(dir string) (vs []Violation, withoutGit bool, err error) {
-	entries, err := os.ReadDir(dir)
+	fset, files, err := unitTierTestFiles(dir)
 	if err != nil {
 		return nil, false, err
-	}
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		ok, err := build.Default.MatchFile(dir, name)
-		if err != nil {
-			return nil, false, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
-		}
-		if !ok {
-			continue
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
-		if err != nil {
-			return nil, false, err
-		}
-		files = append(files, f)
 	}
 	var direct []Violation
 	for _, f := range files {
@@ -116,6 +96,36 @@ func GitFreeFindings(dir string) (vs []Violation, withoutGit bool, err error) {
 		return vs[i].Pos.Column < vs[j].Pos.Column
 	})
 	return vs, withoutGit, nil
+}
+
+// unitTierTestFiles parses dir's test files that build with no extra tags:
+// its unit tier.
+func unitTierTestFiles(dir string) (*token.FileSet, []*ast.File, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		ok, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
+		}
+		if !ok {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, f)
+	}
+	return fset, files, nil
 }
 
 // helperKey names a top-level function of one package clause: package foo

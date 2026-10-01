@@ -48,6 +48,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -161,6 +162,9 @@ type Hermetic struct {
 	// refusedGitLog is where WithoutGit's refusing git records calls; ""
 	// without WithoutGit.
 	refusedGitLog string
+	// goroutines were running when the tests started; Finish fails the run
+	// on any other goroutine still running (unittier).
+	goroutines unittier.Goroutines
 }
 
 type hermeticConfig struct {
@@ -444,6 +448,7 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 		}
 	}
 
+	h.goroutines = unittier.Snapshot()
 	return h, nil
 }
 
@@ -471,13 +476,15 @@ func (h *harnessHost) isolateTmuxSocket() string {
 // Finish tears down the sandbox. It returns the exit code for os.Exit: the
 // m.Run() code, forced to 1 when the shared Dolt container's catalog guard
 // finds a database created or dropped while tests ran (ErrDoltCatalogChanged),
-// when the container fails to terminate, or when WithoutGit's refusing git was
-// started.
+// when the container fails to terminate, when WithoutGit's refusing git was
+// started, or, in the unit tier, when a goroutine outlived the tests.
 func (h *Hermetic) Finish(code int) int {
 	host := h.host
 	if host == nil {
 		host = processHost()
 	}
+	// First, before the teardown below starts or stops anything.
+	code = h.goroutines.Check(code, host.stderr)
 	// No-op when no container was started; also covers containers started
 	// lazily by tests via RequireDoltContainer.
 	if err := host.terminateDolt(); errors.Is(err, ErrDoltCatalogChanged) {
