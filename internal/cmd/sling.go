@@ -1300,12 +1300,11 @@ func rawWorkflowFieldValues(info *beadInfo) (noMerge, reviewOnly bool, attachedA
 }
 
 func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
-	return restoreRollbackRawWorkflowFieldsVia(nil, beadID, townRoot, hookWorkDir, info, originalInfo)
+	return slingStores{}.restoreRawWorkflowFields(beadID, townRoot, hookWorkDir, info, originalInfo)
 }
 
-// restoreRollbackRawWorkflowFieldsVia is restoreRollbackRawWorkflowFields
-// with bd answered by run (nil: bd on PATH).
-func restoreRollbackRawWorkflowFieldsVia(run beads.BDRunner, beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
+// restoreRawWorkflowFields is restoreRollbackRawWorkflowFields in s.
+func (s slingStores) restoreRawWorkflowFields(beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
 	if info == nil {
 		return false, nil
 	}
@@ -1329,12 +1328,7 @@ func restoreRollbackRawWorkflowFieldsVia(run beads.BDRunner, beadID, townRoot, h
 		return false, nil
 	}
 	updateDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-	if err := BdCmd("update", beadID, "--description="+newDesc).
-		Dir(updateDir).
-		StripBeadsDir().
-		WithAutoCommit().
-		Via(run).
-		Run(); err != nil {
+	if err := s.pinnedAt(updateDir).Update(beadID, beads.UpdateOptions{Description: &newDesc}); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -1,107 +1,63 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// mutableBead is one bead held by an in-process bd: show reads it, update
-// writes --description, --status and --assignee, as the mutable shell stub
-// these tests replaced did through files.
-type mutableBead struct {
-	mu                         sync.Mutex
-	id, desc, status, assignee string
-}
-
-func (m *mutableBead) description() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.desc
-}
-
-func (m *mutableBead) setDescription(d string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.desc = d
-}
-
-// mutableBD is an in-process bd over one bead. Every call is logged as
-// "<cmd> <args...>"; sql answers nothing, and any other command succeeds
-// silently.
-func mutableBD(b *mutableBead) *inprocBD {
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		switch cmd {
-		case "show":
-			b.mu.Lock()
-			defer b.mu.Unlock()
-			out, _ := json.Marshal([]map[string]any{{
-				"id": b.id, "title": "Test issue", "status": b.status,
-				"assignee": b.assignee, "description": b.desc, "dependencies": []any{},
-			}})
-			return bdOut(string(out))
-		case "update":
-			b.mu.Lock()
-			defer b.mu.Unlock()
-			for _, a := range args {
-				switch {
-				case strings.HasPrefix(a, "--description="):
-					b.desc = strings.TrimPrefix(a, "--description=")
-				case strings.HasPrefix(a, "--status="):
-					b.status = strings.TrimPrefix(a, "--status=")
-				case strings.HasPrefix(a, "--assignee="):
-					b.assignee = strings.TrimPrefix(a, "--assignee=")
-				}
-			}
-		}
-		return bdOut("")
-	}}
-}
-
-// rollbackFixture is a slingRollback over a temp town with an in-process bd
-// and in-memory work release and sandbox. Nothing it does starts a process
-// or reads the cwd, the environment or a package global.
+// rollbackFixture is a slingRollback over a temp town with fake work and
+// town databases and in-memory work release and sandbox. Nothing it does
+// starts a process or reads the cwd, the environment or a package global.
 type rollbackFixture struct {
 	r     slingRollback
-	bd    *inprocBD
+	work  *beadsfake.Fake
 	town  *beadsfake.Fake
 	rel   *fakeWorkReleaser
 	sb    *fakeSandbox
 	seats int
 }
 
-func newRollbackFixture(t *testing.T, bd *inprocBD, rel *fakeWorkReleaser) *rollbackFixture {
+// newRollbackFixture builds a fixture whose work database holds bead (nil:
+// an open gt-abc).
+func newRollbackFixture(t *testing.T, bead *beads.Issue, rel *fakeWorkReleaser) *rollbackFixture {
 	t.Helper()
-	if bd == nil {
-		bd = mutableBD(&mutableBead{id: "gt-abc", status: "open"})
+	if bead == nil {
+		bead = &beads.Issue{ID: "gt-abc"}
 	}
 	if rel == nil {
 		rel = &fakeWorkReleaser{beads: map[string][2]string{}}
 	}
-	f := &rollbackFixture{bd: bd, town: beadsfake.New(beadsfake.WithPrefix("hq")), rel: rel, sb: &fakeSandbox{}}
+	f := &rollbackFixture{work: beadsfake.New(), town: beadsfake.New(beadsfake.WithPrefix("hq")), rel: rel, sb: &fakeSandbox{}}
+	f.work.Seed(*bead)
 	townRoot := t.TempDir()
-	run := bd.run
+	stores := fakeSlingStores(f.work)
 	f.r = slingRollback{
 		townRoot:         townRoot,
-		bd:               run,
+		stores:           stores,
 		townBeads:        f.town,
-		getBeadInfo:      func(id string) (*beadInfo, error) { return getBeadInfoVia(run, townRoot, id) },
+		getBeadInfo:      func(id string) (*beadInfo, error) { return stores.beadInfo(townRoot, id) },
 		collectMolecules: collectExistingMolecules,
-		burnMolecules: func(m []string, id, tr string) error {
-			return burnExistingMoleculesVia(run, m, id, tr)
-		},
-		releaseSeat:   func() { f.seats++ },
-		newReleaser:   func(string, string) polecatWorkReleaser { return f.rel },
-		survivingWork: func(string, string) (string, error) { return "", nil },
-		openSandbox:   func(string, string) (spawnedPolecatSandbox, error) { return f.sb, nil },
+		burnMolecules:    stores.burnMolecules,
+		releaseSeat:      func() { f.seats++ },
+		newReleaser:      func(string, string) polecatWorkReleaser { return f.rel },
+		survivingWork:    func(string, string) (string, error) { return "", nil },
+		openSandbox:      func(string, string) (spawnedPolecatSandbox, error) { return f.sb, nil },
 	}
 	return f
+}
+
+// desc is id's description in the work database.
+func (f *rollbackFixture) desc(t *testing.T, id string) string {
+	t.Helper()
+	is, err := f.work.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return is.Description
 }
 
 const rawReviewDesc = "attached_at: 2026-06-30T12:00:00Z\nno_merge: true\nreview_only: true\ndispatched_by: mayor/\n\nKeep this body."
@@ -110,12 +66,11 @@ const rawReviewDesc = "attached_at: 2026-06-30T12:00:00Z\nno_merge: true\nreview
 // no_merge/review_only marks behind, and keeps the rest of the description.
 func TestSlingRollbackClearsRawReviewOnlyMetadata(t *testing.T) {
 	t.Parallel()
-	bead := &mutableBead{id: "gt-rawrollback", status: "open", desc: rawReviewDesc}
-	f := newRollbackFixture(t, mutableBD(bead), nil)
+	f := newRollbackFixture(t, &beads.Issue{ID: "gt-rawrollback", Description: rawReviewDesc}, nil)
 
 	f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "toast"}, "gt-rawrollback", "", "")
 
-	desc := bead.description()
+	desc := f.desc(t, "gt-rawrollback")
 	assertNoRawReviewMetadata(t, desc)
 	for _, keep := range []string{"dispatched_by: mayor/", "Keep this body."} {
 		if !strings.Contains(desc, keep) {
@@ -151,14 +106,13 @@ func TestSlingRollbackBurnsAttachedMolecules(t *testing.T) {
 func TestSlingRollbackKeepsMetadataWhenMoleculeBurnFails(t *testing.T) {
 	t.Parallel()
 	initial := "attached_molecule: gt-wisp-stale\n" + rawReviewDesc
-	bead := &mutableBead{id: "gt-rawrollback", status: "open", desc: initial}
-	f := newRollbackFixture(t, mutableBD(bead), nil)
+	f := newRollbackFixture(t, &beads.Issue{ID: "gt-rawrollback", Description: initial}, nil)
 	f.r.collectMolecules = func(*beadInfo) []string { return []string{"gt-wisp-stale"} }
 	f.r.burnMolecules = func([]string, string, string) error { return errors.New("forced burn failure") }
 
 	f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "toast"}, "gt-rawrollback", "", "")
 
-	desc := bead.description()
+	desc := f.desc(t, "gt-rawrollback")
 	if !strings.Contains(desc, "attached_molecule: gt-wisp-stale") {
 		t.Fatalf("rollback hid the attached molecule after a failed burn:\n%s", desc)
 	}
@@ -170,17 +124,16 @@ func TestSlingRollbackKeepsMetadataWhenMoleculeBurnFails(t *testing.T) {
 // left, without bringing the molecule back.
 func TestSlingRollbackClearsRawMetadataAfterMoleculeBurnSucceeds(t *testing.T) {
 	t.Parallel()
-	bead := &mutableBead{id: "gt-rawrollback", status: "open", desc: "attached_molecule: gt-wisp-stale\n" + rawReviewDesc}
-	f := newRollbackFixture(t, mutableBD(bead), nil)
+	f := newRollbackFixture(t, &beads.Issue{ID: "gt-rawrollback", Description: "attached_molecule: gt-wisp-stale\n" + rawReviewDesc}, nil)
 	f.r.collectMolecules = func(*beadInfo) []string { return []string{"gt-wisp-stale"} }
 	f.r.burnMolecules = func(m []string, _, _ string) error {
-		bead.setDescription(rawReviewDesc) // the burn detached the molecule
-		return nil
+		desc := rawReviewDesc // the burn detached the molecule
+		return f.work.Update("gt-rawrollback", beads.UpdateOptions{Description: &desc})
 	}
 
 	f.r.rollback(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "toast"}, "gt-rawrollback", "", "")
 
-	desc := bead.description()
+	desc := f.desc(t, "gt-rawrollback")
 	assertNoRawReviewMetadata(t, desc)
 	if strings.Contains(desc, "attached_molecule: gt-wisp-stale") || !strings.Contains(desc, "Keep this body.") {
 		t.Fatalf("description after rollback:\n%s", desc)

@@ -7,12 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func assertNoRawReviewMetadata(t *testing.T, desc string) {
@@ -126,43 +126,62 @@ func TestExtractIssueID(t *testing.T) {
 	}
 }
 
-// TestGetBeadInfoViaReadsRoutedBeadFromRigDatabase: a rig-prefixed bead is
-// read from the rig's database its route names, not the town's, and the
-// issue fields survive the parse.
-func TestGetBeadInfoViaReadsRoutedBeadFromRigDatabase(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	beadID := "gt-new123"
-	rigBeadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-	for _, dir := range []string{filepath.Join(townRoot, ".beads"), rigBeadsDir} {
+// rigTown is a temp town whose routes send gt- to the gastown rig, with
+// the town and rig .beads directories on disk.
+func rigTown(t *testing.T) (townRoot, rigBeadsDir string) {
+	t.Helper()
+	townRoot = t.TempDir()
+	rigBeadsDir = filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
+	for _, dir := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "mayor", "rig"), rigBeadsDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
 	writeTestRoutes(t, townRoot, []beads.Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}, {Prefix: "hq-", Path: "."}})
+	return townRoot, rigBeadsDir
+}
 
-	var mu sync.Mutex
-	var showDirs []string
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		beadsDir := envSlice(c.Env)["BEADS_DIR"]
-		mu.Lock()
-		showDirs = append(showDirs, beadsDir)
-		mu.Unlock()
-		if beadsDir != rigBeadsDir {
-			return nil, []byte("wrong database: " + beadsDir), inprocBDExit(1)
-		}
-		return []byte(`[{"id":"gt-new123","title":"Routed bead","status":"open","assignee":"","description":"body","issue_type":"bug","labels":["x"],"dependencies":[{"id":"gt-wisp-old","status":"open"}]}]`), nil, nil
+// rigOnlyStores answers the pinned store of the gastown rig's .beads from
+// rig, every other pinned store from an empty database, and routed reads
+// from routed. opened records each pinned beads directory.
+func rigOnlyStores(rig, routed *beadsfake.Fake, opened *[]string) slingStores {
+	return slingStores{
+		pinned: func(beadsDir string) slingStore {
+			*opened = append(*opened, beadsDir)
+			if strings.HasSuffix(filepath.ToSlash(beadsDir), "gastown/mayor/rig/.beads") {
+				return slingFake{rig}
+			}
+			return slingFake{beadsfake.New()}
+		},
+		routed: func(string) slingStore { return slingFake{routed} },
 	}
+}
 
-	info, err := getBeadInfoVia(run, townRoot, beadID)
+// TestBeadInfoReadsRoutedBeadFromRigDatabase: a rig-prefixed bead is read
+// from the rig's database its route names, not the town's, and the issue
+// fields survive the read.
+func TestBeadInfoReadsRoutedBeadFromRigDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := rigTown(t)
+	rig := beadsfake.New()
+	rig.Seed(
+		beads.Issue{ID: "gt-new123", Title: "Routed bead", Description: "body", Type: "bug", Labels: []string{"x"}},
+		beads.Issue{ID: "gt-wisp-old"},
+	)
+	if err := rig.AddDependency("gt-new123", "gt-wisp-old"); err != nil {
+		t.Fatal(err)
+	}
+	var opened []string
+
+	info, err := rigOnlyStores(rig, beadsfake.New(), &opened).beadInfo(townRoot, "gt-new123")
 	if err != nil {
-		t.Fatalf("getBeadInfoVia: %v (show BEADS_DIRs %q)", err, showDirs)
+		t.Fatalf("beadInfo: %v (pinned %q)", err, opened)
 	}
 	if info.Title != "Routed bead" || info.IssueType != "bug" || len(info.Labels) != 1 || len(info.Dependencies) != 1 {
 		t.Fatalf("info = %+v, want routed issue fields preserved", info)
 	}
-	if len(showDirs) != 1 || showDirs[0] != rigBeadsDir {
-		t.Fatalf("bd show BEADS_DIRs = %q, want one show against %q", showDirs, rigBeadsDir)
+	if len(opened) != 1 {
+		t.Fatalf("pinned stores opened = %q, want only the rig's", opened)
 	}
 }
 
@@ -185,50 +204,23 @@ func TestSlingRejectsBeadMissingFromTargetRigBeforeSpawn(t *testing.T) {
 }
 
 // TestTargetRigDatabaseAllowsRouteResolvedGtBead: a gt- bead whose id also
-// reads like an hq one is checked in the target rig's own database, pinned to
-// that rig's Dolt database name, and found there.
+// reads like an hq one is checked in the target rig's own database and found
+// there; a bead only the town holds is refused.
 func TestTargetRigDatabaseAllowsRouteResolvedGtBead(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	for _, dir := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "mayor", "rig"), filepath.Join(rigDir, ".beads")} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	writeTestRoutes(t, townRoot, []beads.Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}, {Prefix: "hq-", Path: "."}})
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"dolt_database":"gastown","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0644); err != nil {
-		t.Fatalf("write rig metadata: %v", err)
-	}
+	townRoot, _ := rigTown(t)
+	rig := beadsfake.New()
+	rig.Seed(beads.Issue{ID: "gt-hq-oy83-cleanup", Title: "Route issue"})
+	town := beadsfake.New(beadsfake.WithPrefix("hq"))
+	town.Seed(beads.Issue{ID: "hq-r2405", Title: "HQ-owned issue"})
+	var opened []string
+	stores := rigOnlyStores(rig, town, &opened)
 
-	var mu sync.Mutex
-	var calls []beads.BDCall
-	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-		mu.Lock()
-		calls = append(calls, c)
-		mu.Unlock()
-		return []byte(`[{"title":"Route issue","status":"open","assignee":"","description":""}]`), nil, nil
+	if err := stores.verifyInTargetRig("gt-hq-oy83-cleanup", "gastown", townRoot); err != nil {
+		t.Fatalf("verifyBeadExistsInTargetRigDatabase: %v (pinned %q)", err, opened)
 	}
-
-	if err := verifyBeadExistsInTargetRigDatabaseVia(run, "gt-hq-oy83-cleanup", "gastown", townRoot); err != nil {
-		t.Fatalf("verifyBeadExistsInTargetRigDatabase: %v", err)
-	}
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %d, want one direct show", len(calls))
-	}
-	c := calls[0]
-	if !strings.Contains(strings.Join(c.Args, " "), "show gt-hq-oy83-cleanup --json") {
-		t.Fatalf("bd args = %q, want route-resolved show", c.Args)
-	}
-	if c.Dir != rigDir {
-		t.Fatalf("bd cwd = %q, want %q", c.Dir, rigDir)
-	}
-	env := envSlice(c.Env)
-	if want := filepath.Join(rigDir, ".beads"); env["BEADS_DIR"] != want {
-		t.Fatalf("BEADS_DIR = %q, want %q", env["BEADS_DIR"], want)
-	}
-	if env["BEADS_DOLT_SERVER_DATABASE"] != "gastown" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gastown", env["BEADS_DOLT_SERVER_DATABASE"])
+	if err := stores.verifyInTargetRig("hq-r2405", "gastown", townRoot); err == nil || !strings.Contains(err.Error(), "not present in target rig") {
+		t.Fatalf("verify of a town-only bead = %v, want not present in target rig", err)
 	}
 }
 
@@ -380,7 +372,8 @@ func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
 		"",
 		"Keep this body.",
 	}, "\n")
-	bead := &mutableBead{id: "gt-rawrollback", status: "hooked", desc: current}
+	work := beadsfake.New()
+	work.Seed(beads.Issue{ID: "gt-rawrollback", Status: "hooked", Description: current})
 	townRoot := t.TempDir()
 	original := &beadInfo{Description: strings.Join([]string{
 		"no_merge: true",
@@ -388,12 +381,13 @@ func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
 		"Original body.",
 	}, "\n")}
 
-	restored, err := restoreRollbackRawWorkflowFieldsVia(mutableBD(bead).run, "gt-rawrollback", townRoot, filepath.Join(townRoot, "gastown", "polecats", "toast"), &beadInfo{Description: current}, original)
+	restored, err := fakeSlingStores(work).restoreRawWorkflowFields("gt-rawrollback", townRoot, filepath.Join(townRoot, "gastown", "polecats", "toast"), &beadInfo{Description: current}, original)
 	if err != nil || !restored {
 		t.Fatalf("restoreRollbackRawWorkflowFields = %v, %v; want restored", restored, err)
 	}
 
-	desc := bead.description()
+	shown, _ := work.Show("gt-rawrollback")
+	desc := shown.Description
 	fields := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
 	if fields == nil || !fields.NoMerge || fields.ReviewOnly {
 		t.Fatalf("rollback did not restore original workflow values: %+v\n%s", fields, desc)

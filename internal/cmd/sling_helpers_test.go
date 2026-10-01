@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -114,18 +115,15 @@ func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
 // whose rows are deduplicated in order.
 func TestCollectExistingMoleculeDepsReadsCanonicalWispEdges(t *testing.T) {
 	t.Parallel()
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		if cmd == "sql" && len(args) > 0 &&
-			strings.Contains(args[len(args)-1], "wisp_dependencies") &&
-			strings.Contains(args[len(args)-1], "depends_on_issue_id") &&
-			strings.Contains(args[len(args)-1], "depends_on_wisp_id") {
-			return bdOut(`[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]`)
+	db := beadsfake.New()
+	db.OnSQL(func(query string) ([][]string, error) {
+		if !strings.Contains(query, "wisp_dependencies") || !strings.Contains(query, "depends_on_issue_id") || !strings.Contains(query, "depends_on_wisp_id") {
+			return nil, fmt.Errorf("unexpected query %q", query)
 		}
-		return bdAnswer{stderr: "unexpected query", code: 1}
-	}}
+		return [][]string{{"issue_id"}, {"gt-wisp-live"}, {"gt-wisp-live"}, {"gt-wisp-other"}}, nil
+	})
 
-	got, err := collectExistingMoleculeDepsVia(bd.run, "gt-work", t.TempDir())
+	got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
 	if err != nil {
 		t.Fatalf("collectExistingMoleculeDeps: %v", err)
 	}

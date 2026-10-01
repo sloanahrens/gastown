@@ -18,7 +18,8 @@ import (
 type slingRollback struct {
 	townRoot string
 	townErr  error // set when the cwd is not in a town
-	bd       beads.BDRunner
+	// stores opens the work bead's databases; the zero value is bd.
+	stores slingStores
 	// townBeads is the town database an auto-convoy is closed in; nil is
 	// bd pinned to the town's .beads.
 	townBeads beads.Client
@@ -66,7 +67,7 @@ func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkD
 				fmt.Printf("  %s Could not inspect bead %s for stale molecules: %v\n", style.Dim.Render("Warning:"), beadID, infoErr)
 			} else {
 				existingMolecules := s.collectMolecules(info)
-				if depMolecules, depErr := collectExistingMoleculeDepsVia(s.bd, beadID, townRoot); depErr != nil {
+				if depMolecules, depErr := s.stores.moleculeDeps(beadID, townRoot); depErr != nil {
 					fmt.Printf("  %s Could not inspect canonical molecule bonds for %s: %v\n", style.Dim.Render("Warning:"), beadID, depErr)
 				} else {
 					existingMolecules = appendUniqueMolecules(existingMolecules, depMolecules...)
@@ -87,7 +88,7 @@ func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkD
 					}
 				}
 				if canClearWorkflowFields {
-					if cleared, clearErr := restoreRollbackRawWorkflowFieldsVia(s.bd, beadID, townRoot, hookWorkDir, info, nil); clearErr != nil {
+					if cleared, clearErr := s.stores.restoreRawWorkflowFields(beadID, townRoot, hookWorkDir, info, nil); clearErr != nil {
 						fmt.Printf("  %s Could not clear raw workflow metadata from %s: %v\n", style.Dim.Render("Warning:"), beadID, clearErr)
 					} else if cleared {
 						fmt.Printf("  %s Cleared raw workflow metadata from %s\n", style.Dim.Render("○"), beadID)
