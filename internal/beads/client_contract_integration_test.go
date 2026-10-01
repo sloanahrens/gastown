@@ -81,6 +81,14 @@ func TestIntegrationClientContract(t *testing.T) {
 			return l.db
 		})
 	})
+	t.Run("actor", func(t *testing.T) {
+		t.Parallel()
+		// The isolated client strips the inherited BD_ACTOR, so the actor
+		// bd records can only come from ActingAs (gt-0wkug).
+		beadsfake.RunActorContract(t, func(t *testing.T, actor string) beads.Client {
+			return newDB(t, t.TempDir()).ActingAs(actor)
+		})
+	})
 	t.Run("admin", func(t *testing.T) {
 		t.Parallel()
 		beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })

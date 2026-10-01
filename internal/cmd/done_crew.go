@@ -126,10 +126,6 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 		if actor == "" {
 			return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
 		}
-		//testpolicy:allow prod-no-setenv — bd attributes the submission to the BD_ACTOR it inherits, and beads.Client takes no actor to pass instead
-		if err := os.Setenv("BD_ACTOR", actor); err != nil {
-			return fmt.Errorf("setting BD_ACTOR for bd: %w", err)
-		}
 	}
 
 	branch, err := g.CurrentBranch()
@@ -180,7 +176,9 @@ func runDoneCrew(exitType string, getenv func(string) string) error {
 			if err != nil {
 				return nil, nil, err
 			}
-			return info.Issue, info.BD, nil
+			// bd records the submission's label and notes as written by
+			// actor, which is git user.name when the shell has no BD_ACTOR.
+			return info.Issue, info.BD.ActingAs(actor), nil
 		},
 		localGate: doneLocalGate,
 		sleep:     time.Sleep,
@@ -252,7 +250,7 @@ func submitCrewForLanding(r *doneRun) error {
 	}
 
 	comment := fmt.Sprintf("Submitted for landing: %s @ %s onto %s", land.NoteField(r.branch), head, land.NoteField(target))
-	if err := bd.AddComment(r.issueID, comment); err != nil {
+	if err := bd.AddCommentAs(r.issueID, r.sender, comment); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("could not record the submission on %s", r.issueID), err)
 	}
 	// Worker names a polecat seat whose intent record the landing worker

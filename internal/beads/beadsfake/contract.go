@@ -33,6 +33,28 @@ func RunClientContract(t *testing.T, newClient func(t *testing.T) beads.Client) 
 	}
 }
 
+// RunActorContract checks that a client made to act as an actor (the fake's
+// WithActor, *beads.Beads' ActingAs) records that actor as the creator of
+// issues and the author of comments, whatever the process environment says
+// (gt-0wkug). newClient returns a client acting as actor.
+func RunActorContract(t *testing.T, newClient func(t *testing.T, actor string) beads.Client) {
+	t.Helper()
+	t.Run("actor", func(t *testing.T) {
+		t.Parallel()
+		actor := "contract-actor"
+		s := newScope(t, newClient(t, actor))
+		is := s.mustCreate(t, beads.CreateOptions{Title: "acted", Priority: -1})
+		if by := s.mustShow(t, is.ID).CreatedBy; by != actor {
+			t.Errorf("CreatedBy = %q, want %s", by, actor)
+		}
+		mustDo(t, "comment", s.AddComment(is.ID, "hello"))
+		got, err := s.Comments(is.ID)
+		if err != nil || len(got) != 1 || got[0].Author != actor {
+			t.Errorf("Comments = %+v, %v; want one by %s", got, err, actor)
+		}
+	})
+}
+
 type contractCase struct {
 	name string
 	run  func(t *testing.T, s *scope)
