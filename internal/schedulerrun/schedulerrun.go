@@ -2,11 +2,11 @@
 // sling contexts, decides which of their work beads are ready, and runs one
 // capacity-controlled dispatch cycle.
 //
-// The command `gt scheduler run`, the manual trigger an operator types, and
-// the daemon heartbeat's dispatch tick both call Run, so the two run the same
-// code in the same process. Package cmd keeps what this package cannot own:
-// cobra flag parsing, the sling itself, and the polecat-capacity probe. Those
-// arrive through Deps.
+// `gt scheduler run` and the daemon heartbeat's dispatch tick call Run, so the
+// operator's manual trigger and the automatic one run the same code, each in
+// its own process. Package cmd keeps what this package cannot own: cobra flag
+// parsing, the sling itself, and the polecat-capacity probe. Those arrive
+// through Deps.
 package schedulerrun
 
 import (
@@ -60,8 +60,8 @@ type Options struct {
 	Out, ErrOut io.Writer
 }
 
-// Deps are the collaborators package cmd still owns. Every field is required
-// for a run that dispatches; a dry run uses only Seats.
+// Deps are the collaborators package cmd still owns. Sling and Seats are
+// required for a run that dispatches; a dry run needs only Seats.
 type Deps struct {
 	// Sling dispatches one ready bead: it hooks the work, spawns the polecat
 	// and starts its session (package cmd's executeSling). A refusal that
@@ -111,7 +111,7 @@ func (d *Deferral) Error() string {
 func (d *Deferral) Unwrap() error { return d.Err }
 
 // Seats is the polecat seat picture: how many seats the town's polecat pool
-// has, how many are taken, and by what.
+// has, how many are taken, and by what. Free is what the plan admits.
 type Seats struct {
 	Max             int
 	Working         int
@@ -121,7 +121,6 @@ type Seats struct {
 	PendingMR       int
 	Reservations    int
 	Free            int
-	ActiveSessions  int
 }
 
 // Report is what one run did.

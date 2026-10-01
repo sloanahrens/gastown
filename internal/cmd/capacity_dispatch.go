@@ -78,7 +78,6 @@ func schedulerSeats(townRoot string, clean bool) (schedulerrun.Seats, error) {
 		PendingMR:       snapshot.PendingMR,
 		Reservations:    snapshot.Reservations,
 		Free:            snapshot.Free,
-		ActiveSessions:  snapshot.ActiveSessions,
 	}, nil
 }
 
