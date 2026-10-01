@@ -578,7 +578,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// Get polecat manager (with tmux for session-aware allocation)
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
+	polecatMgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
 
 	// Pre-spawn Dolt health check (gt-94llt7): verify Dolt is reachable before
 	// allocating a polecat. Prevents orphaned polecats when Dolt is down.
@@ -837,7 +837,12 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// Start session
 	t := tmux.NewTmux()
+	// A start over a dead session is a Respawn and a failed startup's kill a
+	// Cleanup, both through the supervisor (gt-4k3fj.4.1).
+	sup := operatorSupervisor(filepath.Dir(r.Path))
+	actor := operatorActor("gt sling")
 	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
+	polecatSessMgr.SetHooks(polecatSessionHooks(sup, townRegistry(), s.RigName, "sling", actor))
 
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
 	startOpts := polecat.SessionStartOptions{
@@ -893,8 +898,11 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
 	pane, err := getSessionPane(s.SessionName)
 	if err != nil {
-		// Session likely died — clean up the tmux session so it doesn't block re-sling
-		_ = t.KillSession(s.SessionName)
+		// Session likely died — clean up the tmux session so it doesn't block
+		// re-sling. A rollback of a session this spawn created: the
+		// supervisor's Cleanup, logged and never refused.
+		_ = sup.Cleanup(supervisor.SeatIn(townRegistry(), s.RigName, constants.RolePolecat, s.PolecatName),
+			"sling: session died during startup", actor)
 		return "", fmt.Errorf("getting pane for %s (session likely died during startup): %w", s.SessionName, err)
 	}
 

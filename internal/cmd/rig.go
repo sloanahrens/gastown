@@ -1423,8 +1423,9 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 	var errors []string
 
 	// 1. Stop all polecat sessions
+	// An operator stop: the supervisor's Stop, logged (gt-4k3fj.4.1).
 	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
+	polecatMgr := supervisedPolecatSessions(t, r, "rig shutdown", operatorActor("gt rig shutdown"))
 	infos, err := polecatMgr.ListPolecats()
 	if err == nil && len(infos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
@@ -1673,8 +1674,9 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 		var errors []string
 
 		// 1. Stop all polecat sessions
+		// An operator stop: the supervisor's Stop, logged (gt-4k3fj.4.1).
 		t := tmux.NewTmux()
-		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
+		polecatMgr := supervisedPolecatSessions(t, r, "rig stop", operatorActor("gt rig stop"))
 		infos, err := polecatMgr.ListPolecats()
 		if err == nil && len(infos) > 0 {
 			fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))

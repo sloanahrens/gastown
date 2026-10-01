@@ -74,15 +74,39 @@ type SessionManager struct {
 	// prefixes resolves the rig's session prefix; nil gives
 	// session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
-	// stopKill ends a session in Stop; nil kills it through tmux. gt down
-	// sets it to the supervisor's operator stop (gt-4k3fj.4.1).
-	stopKill func(sessionID string) error
+	// hooks route the kills and replacements through the supervisor
+	// (gt-4k3fj.4.1); a nil hook goes straight to tmux.
+	hooks SessionHooks
 }
 
-// SetStopKill routes the kill in Stop through fn (the supervisor's logged
-// operator stop) instead of straight to tmux.
-func (m *SessionManager) SetStopKill(fn func(sessionID string) error) {
-	m.stopKill = fn
+// SessionHooks route a SessionManager's kills through the supervisor
+// (gt-4k3fj.4.1). Each nil hook kills straight through tmux.
+type SessionHooks struct {
+	// Stop ends a session in Stop: the supervisor's logged operator stop,
+	// set by the operator verbs that end a polecat (gt down, gt session
+	// stop, gt polecat nuke).
+	Stop func(sessionID string) error
+	// Cleanup ends a session Start just created and is abandoning because
+	// its startup failed: the supervisor's unrefused, logged cleanup.
+	Cleanup func(polecat, reason string) error
+	// Respawn runs Start's replacement of a session whose agent exited, so
+	// an e-stop, a park or a gt down in progress refuses it.
+	Respawn func(polecat, reason string, run func() error) error
+}
+
+// SetHooks routes Stop's kill, Start's startup-failure kills and Start's
+// replacement of a dead session through h.
+func (m *SessionManager) SetHooks(h SessionHooks) {
+	m.hooks = h
+}
+
+// cleanup kills a session Start created and is abandoning.
+func (m *SessionManager) cleanup(polecat, sessionID, reason string) {
+	if m.hooks.Cleanup != nil {
+		_ = m.hooks.Cleanup(polecat, reason)
+		return
+	}
+	_ = m.tmux.KillSessionWithProcesses(sessionID)
 }
 
 // sessionTmux is the tmux surface a SessionManager drives. *tmux.Tmux
@@ -478,11 +502,22 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		if alive {
 			return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 		}
-		if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
-			return fmt.Errorf("killing stale session %s: %w", sessionID, err)
+		replace := func() error {
+			if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
+				return fmt.Errorf("killing stale session %s: %w", sessionID, err)
+			}
+			return m.launch(polecat, sessionID, opts)
 		}
+		if m.hooks.Respawn == nil {
+			return replace()
+		}
+		return m.hooks.Respawn(polecat, "polecat start: replace a session whose agent exited", replace)
 	}
+	return m.launch(polecat, sessionID, opts)
+}
 
+// launch creates the polecat's session and starts its agent.
+func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOptions) error {
 	// Determine working directory
 	workDir := opts.WorkDir
 	if workDir == "" {
@@ -629,7 +664,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear
 	debugSession("AcceptStartupDialogs", m.tmux.AcceptStartupDialogs(sessionID))
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
-		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
 	}
 
@@ -638,7 +673,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
 	debugSession("WaitForRuntimeReady", m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
 	if err := m.tmux.CheckStartupBlocked(sessionID); err != nil {
-		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		m.cleanup(polecat, sessionID, "polecat start: startup blocked")
 		return fmt.Errorf("startup blocked: %w", err)
 	}
 
@@ -694,7 +729,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
-	running, err = m.tmux.HasSession(sessionID)
+	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("verifying session: %w", err)
 	}
@@ -704,7 +739,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// AgentUnknown (a failed liveness query) is not evidence the startup
 	// failed; only a confirmed unhealthy status kills the new session.
 	if status := m.tmux.CheckSessionHealth(sessionID, 0); status != tmux.SessionHealthy && status != tmux.AgentUnknown {
-		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		m.cleanup(polecat, sessionID, "polecat start: unhealthy during startup")
 		return fmt.Errorf("session %s unhealthy during startup: %s", sessionID, status)
 	}
 
@@ -713,7 +748,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// polecats running non-Claude agents (e.g., opencode). Fail fast.
 	gtAgent, _ := m.tmux.GetEnvironment(sessionID, "GT_AGENT")
 	if gtAgent == "" {
-		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		m.cleanup(polecat, sessionID, "polecat start: GT_AGENT not set")
 		return fmt.Errorf("GT_AGENT not set in session %s (command=%q); "+
 			"witness patrol will misidentify this polecat as a zombie and auto-nuke it. "+
 			"Ensure RuntimeConfig.ResolvedAgent is set during agent config resolution",
@@ -764,8 +799,8 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		}
 	}
 
-	if m.stopKill != nil {
-		if err := m.stopKill(sessionID); err != nil {
+	if m.hooks.Stop != nil {
+		if err := m.hooks.Stop(sessionID); err != nil {
 			return fmt.Errorf("killing session: %w", err)
 		}
 		return nil

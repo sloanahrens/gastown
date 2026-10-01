@@ -238,6 +238,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 	go func() {
 		defer startupWg.Done()
 		mayorMgr := mayor.NewManager(townRoot)
+		// Replacing a dead Mayor session is a Respawn (gt-4k3fj.4.1).
+		superviseMayor(mayorMgr, operatorSupervisor(townRoot), operatorActor("gt up"))
 		if err := mayorMgr.Start(""); err != nil {
 			if errors.Is(err, mayor.ErrAlreadyRunning) {
 				mayorResult = agentStartResult{name: "Mayor", ok: true, detail: mayorMgr.SessionName()}
@@ -714,7 +716,9 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 	if err != nil {
 		return []string{}, map[string]error{}
 	}
-	polecatMgr := polecat.NewSessionManager(tmux.NewTmux(), r, townRegistry())
+	// A start over a dead session is a Respawn, which an e-stop refuses
+	// (gt-4k3fj.4.1).
+	polecatMgr := supervisedPolecatSessions(tmux.NewTmux(), r, "gt up", operatorActor("gt up"))
 	start := func(polecatName string) error {
 		return polecatMgr.Start(polecatName, polecat.SessionStartOptions{})
 	}

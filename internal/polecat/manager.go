@@ -196,6 +196,30 @@ type Manager struct {
 	// prefixes maps the rig to its session prefix; nil gives
 	// session.DefaultPrefix.
 	prefixes *session.PrefixRegistry
+	// cleanupKill ends a polecat's session in the allocation, reuse and
+	// repair paths; nil kills it through tmux (see SetCleanup).
+	cleanupKill func(name, reason string) error
+}
+
+// SetCleanup routes the session kills the manager does as housekeeping
+// through fn: the supervisor's logged Cleanup (gt-4k3fj.4.1). They are a
+// lingering session of a name being handed out again, an idle session of a
+// polecat being reused or repaired for new work, and an orphan session whose
+// polecat directory is gone. Each clears the way for a dispatch the caller
+// already decided on (gt sling, which an e-stop refuses up front), and none
+// ends a seat's running work, so they are Cleanup (logged, unrefused) rather
+// than a refusable Kill.
+func (m *Manager) SetCleanup(fn func(name, reason string) error) {
+	m.cleanupKill = fn
+}
+
+// killSession ends the session of the rig's polecat name through the cleanup
+// hook, or through tmux without one.
+func (m *Manager) killSession(name, reason string) error {
+	if m.cleanupKill != nil {
+		return m.cleanupKill(name, reason)
+	}
+	return m.tmux.KillSessionWithProcesses(m.sessionName(name))
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the
@@ -825,9 +849,8 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 
 	// Kill any lingering tmux session for this name (gt-pqf9x)
 	if m.tmux != nil {
-		sessionName := m.sessionName(name)
-		if alive, _ := m.tmux.HasSession(sessionName); alive {
-			_ = m.tmux.KillSessionWithProcesses(sessionName)
+		if alive, _ := m.tmux.HasSession(m.sessionName(name)); alive {
+			_ = m.killSession(name, "polecat allocate: lingering session of a reallocated name")
 		}
 	}
 
@@ -897,7 +920,7 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 	sessionName := m.sessionName(name)
 	if m.tmux != nil {
 		if alive, _ := m.tmux.HasSession(sessionName); alive {
-			_ = m.tmux.KillSessionWithProcesses(sessionName)
+			_ = m.killSession(name, "polecat add: lingering session of a reallocated name")
 		}
 	}
 	RemoveSessionHeartbeat(m.townRoot, sessionName)
@@ -1729,9 +1752,8 @@ func (m *Manager) AllocateName() (string, error) {
 	// lingers (race between cleanup and allocation). This extra check ensures
 	// no stale session blocks the new polecat's session creation.
 	if m.tmux != nil {
-		sessionName := m.sessionName(name)
-		if alive, _ := m.tmux.HasSession(sessionName); alive {
-			_ = m.tmux.KillSessionWithProcesses(sessionName)
+		if alive, _ := m.tmux.HasSession(m.sessionName(name)); alive {
+			_ = m.killSession(name, "polecat reserve: lingering session of a reallocated name")
 		}
 	}
 
@@ -2391,7 +2413,7 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 	if err != nil || !running {
 		return nil
 	}
-	if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
+	if err := m.killSession(name, "polecat "+action+": clear the existing session"); err != nil {
 		return fmt.Errorf("killing existing session %s for %s: %w", sessionName, action, err)
 	}
 
@@ -2489,7 +2511,7 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 			sessionName := m.sessionName(name)
 			if !dirSet[name] {
 				// Orphan: session exists but no directory
-				_ = m.tmux.KillSessionWithProcesses(sessionName)
+				_ = m.killSession(name, "polecat reconcile: orphan session without a directory")
 				RemoveSessionHeartbeat(townRoot, sessionName)
 			}
 		}
