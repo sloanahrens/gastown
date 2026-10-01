@@ -91,7 +91,7 @@ func TestConvoyCreate_InvalidMergeFlag(t *testing.T) {
 // nor --from-epic is refused before it touches bd.
 func TestConvoyCreate_NoArgsNoFlag(t *testing.T) {
 	t.Parallel()
-	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+	fx := newConvoyCLIFixture(t, "")
 
 	err := fx.c.create(convoyCreateOptions{}, []string{})
 	if err == nil {
@@ -100,8 +100,8 @@ func TestConvoyCreate_NoArgsNoFlag(t *testing.T) {
 	if !strings.Contains(err.Error(), "at least one argument") {
 		t.Errorf("error should mention missing args, got: %s", err)
 	}
-	if calls := fx.rec.recorded(); len(calls) != 0 {
-		t.Errorf("bd ran before the arguments were refused: %+v", calls)
+	if all, _ := fx.town.List(beads.ListOptions{Status: "all", Priority: -1}); len(all) != 0 {
+		t.Errorf("a convoy was written before the arguments were refused: %v", all)
 	}
 }
 

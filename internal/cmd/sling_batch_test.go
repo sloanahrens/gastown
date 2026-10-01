@@ -186,26 +186,14 @@ func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
 	}
 }
 
-// autoConvoyBD is an in-process bd that logs every call as
-// "<cmd> <args...>" and fails `bd dep` when depFails is set.
-func autoConvoyBD(depFails bool) *inprocBD {
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		f.logLine(cmd + " " + strings.Join(args, " "))
-		if cmd == "dep" && depFails {
-			return bdAnswer{stderr: "cross-rig dep refused", code: 1}
-		}
-		return bdOut("")
-	}}
-}
-
-// newAutoConvoyTown is a temp town with a .beads dir and an in-process bd.
-func newAutoConvoyTown(t *testing.T, bd *inprocBD) slingConvoyTown {
+// newAutoConvoyTown is a temp town with a .beads dir and a fake database.
+func newAutoConvoyTown(t *testing.T) slingConvoyTown {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
-	return slingConvoyTown{root: root, bd: bd.run, db: beadsfake.New(beadsfake.WithPrefix("hq"))}
+	return slingConvoyTown{root: root, db: beadsfake.New(beadsfake.WithPrefix("hq"))}
 }
 
 // createdConvoy is the convoy createAutoConvoy wrote in town's database.
@@ -216,19 +204,6 @@ func createdConvoy(t *testing.T, town slingConvoyTown, id string) *beads.Issue {
 		t.Fatalf("convoy %s not in the town database: %v", id, err)
 	}
 	return is
-}
-
-// loggedWith is the first logged bd call that starts with prefix, or "". A
-// call's multi-line argument (a description) stays in the one entry.
-func loggedWith(f *inprocBD, prefix string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, line := range f.lines {
-		if strings.HasPrefix(line, prefix) {
-			return line
-		}
-	}
-	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -269,8 +244,9 @@ func TestSlingGenerateShortID_Unique(t *testing.T) {
 // "Work: <title>" with an hq-cv-* ID, and then tracks the bead.
 func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
 	t.Parallel()
-	bd := autoConvoyBD(false)
-	town := newAutoConvoyTown(t, bd)
+	town := newAutoConvoyTown(t)
+	db := town.db.(*beadsfake.Fake)
+	db.Seed(beads.Issue{ID: "gt-aaa", Title: "Fix the widget", Status: "open"})
 
 	convoyID, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "", "", "")
 	if err != nil {
@@ -282,8 +258,8 @@ func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
 	if c := createdConvoy(t, town, convoyID); c.Title != "Work: Fix the widget" || strings.Join(c.Labels, ",") != "gt:convoy" {
 		t.Errorf("convoy = title %q labels %v", c.Title, c.Labels)
 	}
-	if !bd.logged("dep add " + convoyID + " gt-aaa --type=tracks") {
-		t.Errorf("convoy does not track gt-aaa; bd log:\n%s", bd.log())
+	if deps, err := db.DepList(convoyID, "tracks"); err != nil || len(deps) != 1 || deps[0].ID != "gt-aaa" {
+		t.Errorf("convoy tracks %+v (%v), want gt-aaa", deps, err)
 	}
 }
 
@@ -293,8 +269,7 @@ func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
 // instead of quietly falling back to the rig default.
 func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
 	t.Parallel()
-	bd := autoConvoyBD(false)
-	town := newAutoConvoyTown(t, bd)
+	town := newAutoConvoyTown(t)
 	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
@@ -309,7 +284,7 @@ func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
 
 	// No agent requested: nothing recorded, so feeders fall back to the rig
 	// default (and log it) rather than pinning a stray value.
-	other := newAutoConvoyTown(t, autoConvoyBD(false))
+	other := newAutoConvoyTown(t)
 	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
@@ -325,8 +300,7 @@ func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
 // re-uses it instead of quietly falling back to the rig default formula.
 func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
 	t.Parallel()
-	bd := autoConvoyBD(false)
-	town := newAutoConvoyTown(t, bd)
+	town := newAutoConvoyTown(t)
 	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "", " mol-doc-audit ")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
@@ -337,7 +311,7 @@ func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
 
 	// No formula requested: nothing recorded, so feeders fall back to
 	// gt sling's own resolution rather than pinning a stray value.
-	other := newAutoConvoyTown(t, autoConvoyBD(false))
+	other := newAutoConvoyTown(t)
 	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
@@ -351,7 +325,7 @@ func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
 // label next to gt:convoy.
 func TestCreateAutoConvoy_OwnedLabel(t *testing.T) {
 	t.Parallel()
-	town := newAutoConvoyTown(t, autoConvoyBD(false))
+	town := newAutoConvoyTown(t)
 	id, err := town.createAutoConvoy("gt-aaa", "My task", true, "local", "", "", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
@@ -368,14 +342,10 @@ func TestCreateAutoConvoy_OwnedLabel(t *testing.T) {
 // cross-rig routing from bd dep add.
 func TestCreateAutoConvoy_DepFailIsNonFatal(t *testing.T) {
 	t.Parallel()
-	bd := autoConvoyBD(true)
-	town := newAutoConvoyTown(t, bd)
+	town := newAutoConvoyTown(t) // gt-aaa is not in the town database: the dep add fails
 	convoyID, err := town.createAutoConvoy("gt-aaa", "My task", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
-	}
-	if loggedWith(bd, "dep add ") == "" {
-		t.Errorf("expected a dep add attempt:\n%s", bd.log())
 	}
 	if status := createdConvoy(t, town, convoyID).Status; status != "open" {
 		t.Errorf("convoy status %q: a failed dep add must not close it", status)
@@ -572,7 +542,7 @@ func TestBatchSling_SliceAliasingInCrossRigGuard(t *testing.T) {
 // and down (what a convoy tracks) with tracked, the same rows for every ID.
 func convoyScanTown(t *testing.T, trackers, tracked []string, convoys ...beads.Issue) slingConvoyTown {
 	t.Helper()
-	town := newAutoConvoyTown(t, autoConvoyBD(false))
+	town := newAutoConvoyTown(t)
 	db := town.db.(*beadsfake.Fake)
 	for _, cv := range convoys {
 		if cv.Type == "" {
