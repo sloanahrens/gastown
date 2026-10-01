@@ -103,3 +103,27 @@ func TestWorkFromBeadNeedsLabelAndBlock(t *testing.T) {
 		t.Fatalf("WorkFromBead = %+v, want %+v", w, sampleWork())
 	}
 }
+
+// TestOverseerReviewedNeedsTheLabelAndTheHead: the review counts only with
+// the label and a note naming the exact head submitted (gt-g8t3m).
+func TestOverseerReviewedNeedsTheLabelAndTheHead(t *testing.T) {
+	t.Parallel()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	note := "READY TO LAND\nHead: x\n" + OverseerReviewedMarker + " " + head + "\n"
+	for _, tc := range []struct {
+		name  string
+		issue *beads.Issue
+		want  bool
+	}{
+		{"label and note", &beads.Issue{Labels: []string{LabelOverseerReviewed}, Notes: note}, true},
+		{"note without label", &beads.Issue{Notes: note}, false},
+		{"label without note", &beads.Issue{Labels: []string{LabelOverseerReviewed}, Notes: "READY TO LAND"}, false},
+		{"review of another head", &beads.Issue{Labels: []string{LabelOverseerReviewed}, Notes: OverseerReviewedMarker + " " + head[:39] + "0"}, false},
+		{"short sha", &beads.Issue{Labels: []string{LabelOverseerReviewed}, Notes: OverseerReviewedMarker + " " + head[:8]}, false},
+		{"no bead", nil, false},
+	} {
+		if got := OverseerReviewed(tc.issue, head); got != tc.want {
+			t.Errorf("%s: OverseerReviewed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

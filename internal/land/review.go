@@ -23,6 +23,10 @@ const (
 	// VerdictErrorPrefix opens the recorded verdict of a landing whose om
 	// review could not run and that landed anyway (Lander.ReviewErrorLands).
 	VerdictErrorPrefix = "error:"
+	// VerdictOverseerPrefix opens the recorded verdict of a landing whose
+	// head the overseer reviewed in place of om (gt-g8t3m), followed by the
+	// short head sha the review covered.
+	VerdictOverseerPrefix = "overseer:"
 )
 
 // Verdict is om's decision on one range.

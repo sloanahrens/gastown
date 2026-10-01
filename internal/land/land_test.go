@@ -593,6 +593,55 @@ func TestLandStageTimeoutRejects(t *testing.T) {
 	}
 }
 
+// TestLandOverseerReviewedHeadSkipsOM: a bead whose exact head the overseer
+// reviewed lands after the gate without om, recording the overseer's verdict;
+// a review of another head runs om as usual (gt-g8t3m).
+func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.AppendNotes("gt-abc", OverseerReviewedMarker+" "+f.work.Head); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{LabelOverseerReviewed}}); err != nil {
+		t.Fatal(err)
+	}
+	gated := false
+	f.gate.fn = func(string) GateResult {
+		gated = true
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "gate"}}}
+	}
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran on a head the overseer reviewed")
+		return Verdict{}, errors.New("unreachable")
+	}
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if !gated {
+		t.Error("the gate did not run: an overseer review skips om only")
+	}
+	if !strings.HasPrefix(res.Verdict.Verdict, VerdictOverseerPrefix) || f.originMain() != res.LandedCommit {
+		t.Fatalf("verdict %q landed=%v, want overseer:<sha> and a landing", res.Verdict.Verdict, f.originMain() == res.LandedCommit)
+	}
+
+	other := newLandFixture(t)
+	if err := other.bd.AppendNotes("gt-abc", OverseerReviewedMarker+" 1111111111111111111111111111111111111111"); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{LabelOverseerReviewed}}); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := false
+	other.review.fn = func(string) (Verdict, error) { reviewed = true; return Verdict{Verdict: VerdictApprove}, nil }
+	if _, err := other.lander().Land(context.Background(), other.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if !reviewed {
+		t.Error("om did not run although the overseer reviewed a different head")
+	}
+}
+
 // TestLandLintTimeoutIsInfra: a lint stage over its timeout is waiting on
 // the lint lock, not judging the tree: nothing is written to the bead and the
 // next pass retries (gt-b5ugw review).
