@@ -2108,6 +2108,18 @@ func (g *Git) MergeNoFF(branch, message string) error {
 	return err
 }
 
+// RevertNoEdit commits the revert of commit onto HEAD with git's default
+// message. mainline is the parent a merge commit is reverted against (1 for
+// the side it was merged into); 0 for a commit with one parent.
+func (g *Git) RevertNoEdit(commit string, mainline int) error {
+	args := []string{"revert", "--no-edit"}
+	if mainline > 0 {
+		args = append(args, "-m", strconv.Itoa(mainline))
+	}
+	_, err := g.run(append(args, commit)...)
+	return err
+}
+
 // MergeFFOnly performs a fast-forward-only merge of the given ref into the current branch.
 // This ensures what you tested is exactly what lands — no merge commits are created.
 // Returns an error if the merge cannot be performed as a fast-forward.
