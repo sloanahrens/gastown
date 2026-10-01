@@ -2,8 +2,6 @@
 package polecat
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // debugSession logs non-fatal errors during session startup when GT_DEBUG_SESSION=1.
@@ -77,6 +74,9 @@ type SessionManager struct {
 	// hooks route the kills and replacements through the supervisor
 	// (gt-4k3fj.4.1); a nil hook goes straight to tmux.
 	hooks SessionHooks
+	// beadsAt opens the beads database at a resolved bd work dir; nil
+	// runs bd there as a plain call bounded by BdCommandTimeout.
+	beadsAt func(dir string) beads.Client
 }
 
 // SessionHooks route a SessionManager's kills through the supervisor
@@ -990,30 +990,23 @@ func (m *SessionManager) resolveBeadsDir(issueID, fallbackDir string) string {
 // This must be called before starting a session to avoid CPU spin loops
 // from agents retrying work on invalid issues.
 func (m *SessionManager) validateIssue(issueID, workDir string) error {
-	bdWorkDir := m.resolveBeadsDir(issueID, workDir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer cancel()
-	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "show", issueID, "--json")
-	util.SetDetachedProcessGroup(cmd.Cmd)
-	output, err := cmd.Output()
+	issue, err := m.beadsFor(issueID, workDir).Show(issueID)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
 	}
-
-	var issues []struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(output, &issues); err != nil {
-		return fmt.Errorf("parsing issue: %w", err)
-	}
-	if len(issues) == 0 {
-		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
-	}
-	if beads.IssueStatus(issues[0].Status).IsTerminal() {
-		return fmt.Errorf("%w: %s has terminal status %s", ErrIssueInvalid, issueID, issues[0].Status)
+	if beads.IssueStatus(issue.Status).IsTerminal() {
+		return fmt.Errorf("%w: %s has terminal status %s", ErrIssueInvalid, issueID, issue.Status)
 	}
 	return nil
+}
+
+// beadsFor opens the database issueID resolves to from fallbackDir.
+func (m *SessionManager) beadsFor(issueID, fallbackDir string) beads.Client {
+	dir := m.resolveBeadsDir(issueID, fallbackDir)
+	if m.beadsAt != nil {
+		return m.beadsAt(dir)
+	}
+	return beads.NewPlain(dir, nil).WithTimeout(constants.BdCommandTimeout)
 }
 
 // verifyStartupNudgeDelivery checks if the polecat started working after the
@@ -1100,16 +1093,10 @@ func verifyStartupNudge(tm startupNudgeTmux, clk clockwork.Clock, townRoot, sess
 	}
 }
 
-// hookIssue pins an issue to a polecat's hook using bd update.
+// hookIssue pins an issue to a polecat's hook.
 func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
-	bdWorkDir := m.resolveBeadsDir(issueID, workDir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer cancel()
-	cmd := beads.CommandContextWithEnv(ctx, bdWorkDir, nil, "update", issueID, "--status=hooked", "--assignee="+agentID)
-	util.SetDetachedProcessGroup(cmd.Cmd)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	status := string(beads.StatusHooked)
+	if err := m.beadsFor(issueID, workDir).Update(issueID, beads.UpdateOptions{Status: &status, Assignee: &agentID}); err != nil {
 		return fmt.Errorf("bd update failed: %w", err)
 	}
 	fmt.Printf("✓ Hooked issue %s to %s\n", issueID, agentID)

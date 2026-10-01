@@ -5,7 +5,6 @@ package convoy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -659,22 +658,15 @@ func rigForIssue(townRoot, issueID string) string {
 
 // fetchCrossRigBeadStatus fetches fresh status for beads that live in other rigs.
 // Groups IDs by prefix, resolves each prefix to its rig directory via routes,
-// and runs `bd show --json <ids>` per rig. Pattern from batchFetchBeadInfoByIDs
+// and shows each rig's IDs in one batch. Pattern from batchFetchBeadInfoByIDs
 // in capacity_dispatch.go.
 func fetchCrossRigBeadStatus(townRoot string, ids []string) map[string]*beadsdk.Issue {
-	return fetchCrossRigBeadStatusWith(townRoot, ids, bdShowIn)
+	return fetchCrossRigBeadStatusWith(townRoot, ids, func(rigPath string) beads.Client { return beads.NewPlain(rigPath, nil) })
 }
 
-// bdShowIn runs bd with args in rigPath and returns its stdout.
-func bdShowIn(rigPath string, args []string) ([]byte, error) {
-	cmd := beads.CommandWithEnv(rigPath, nil, args...)
-	util.SetDetachedProcessGroup(cmd.Cmd)
-	return cmd.Output()
-}
-
-// fetchCrossRigBeadStatusWith is fetchCrossRigBeadStatus with each rig's bd
-// show run by show.
-func fetchCrossRigBeadStatusWith(townRoot string, ids []string, show func(rigPath string, args []string) ([]byte, error)) map[string]*beadsdk.Issue {
+// fetchCrossRigBeadStatusWith is fetchCrossRigBeadStatus with each rig's
+// database opened by open.
+func fetchCrossRigBeadStatusWith(townRoot string, ids []string, open func(rigPath string) beads.Client) map[string]*beadsdk.Issue {
 	result := make(map[string]*beadsdk.Issue)
 	if len(ids) == 0 {
 		return result
@@ -695,23 +687,12 @@ func fetchCrossRigBeadStatusWith(townRoot string, ids []string, show func(rigPat
 			continue
 		}
 
-		out, err := show(rigPath, append([]string{"show", "--json"}, prefixIDs...))
+		items, err := open(rigPath).ShowMultiple(prefixIDs)
 		if err != nil {
 			continue
 		}
-
-		var items []struct {
-			ID       string `json:"id"`
-			Status   string `json:"status"`
-			Assignee string `json:"assignee"`
-			Priority int    `json:"priority"`
-			Type     string `json:"issue_type"`
-		}
-		if err := json.Unmarshal(out, &items); err != nil {
-			continue
-		}
-		for _, item := range items {
-			result[item.ID] = &beadsdk.Issue{
+		for id, item := range items {
+			result[id] = &beadsdk.Issue{
 				ID:        item.ID,
 				Status:    beadsdk.Status(item.Status),
 				Assignee:  item.Assignee,
