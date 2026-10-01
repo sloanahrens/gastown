@@ -905,6 +905,13 @@ func findAgentWork(ctx RoleContext) (*beads.Issue, error) {
 // findAgentWorkWithAttempts is findAgentWork with an explicit retry budget.
 // Read-only callers (gt prime --step) pass 1 to avoid the ~15 s backoff.
 func findAgentWorkWithAttempts(ctx RoleContext, maxAttempts int) (*beads.Issue, error) {
+	return retryAgentWork(ctx, maxAttempts, clockwork.NewRealClock(), findAgentWorkOnce)
+}
+
+// retryAgentWork runs once up to maxAttempts times, sleeping on clock
+// between attempts with a doubling backoff from 500ms; a single attempt
+// never sleeps.
+func retryAgentWork(ctx RoleContext, maxAttempts int, clock clockwork.Clock, once func(RoleContext, string) (*beads.Issue, error)) (*beads.Issue, error) {
 	agentID := getAgentIdentity(ctx)
 	if agentID == "" {
 		return nil, nil
@@ -914,11 +921,11 @@ func findAgentWorkWithAttempts(ctx RoleContext, maxAttempts int) (*beads.Issue, 
 	backoff := 500 * time.Millisecond
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			clockwork.NewRealClock().Sleep(backoff)
+			clock.Sleep(backoff)
 			backoff *= 2
 		}
 
-		result, err := findAgentWorkOnce(ctx, agentID)
+		result, err := once(ctx, agentID)
 		if result != nil {
 			return result, nil
 		}
