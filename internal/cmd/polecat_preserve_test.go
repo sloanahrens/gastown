@@ -173,7 +173,7 @@ func TestPreserveFailureBlockerRequiresForceAndAcknowledgement(t *testing.T) {
 			}
 			// The operator has to be able to see both what happened and how to
 			// get out of it, without re-reading the source.
-			for _, want := range []string{EnvNukeAcknowledgeUnpreserved, "NOT deleted"} {
+			for _, want := range []string{NukeAcknowledgeUnpreservedFlag, "NOT deleted"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q must mention %q", err, want)
 				}

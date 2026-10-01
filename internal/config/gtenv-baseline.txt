@@ -13,12 +13,10 @@ internal/cli/name.go GT_COMMAND 1
 internal/cmd/agents.go GT_TOWN_SOCKET 1
 internal/cmd/capacity_dispatch.go GT_DAEMON 1
 internal/cmd/done.go GT_DONE_FROM_HANDOFF 1
-internal/cmd/down.go GT_NUKE_ACKNOWLEDGED 1
 internal/cmd/handoff.go GT_AGENT_OVERRIDE 2
 internal/cmd/handoff.go GT_PROCESS_NAMES 2
 internal/cmd/install.go GT_TEST_EXTERNAL_DOLT 1
 internal/cmd/nudge.go GT_TEST_NUDGE_LOG 1
-internal/cmd/polecat.go GT_NUKE_ACKNOWLEDGE_UNPRESERVED 1
 internal/cmd/prime_session.go GT_HOOK_SOURCE 1
 internal/cmd/prime_session.go GT_SESSION_ID 1
 internal/cmd/prime_session.go GT_SESSION_START_CALLER 1
