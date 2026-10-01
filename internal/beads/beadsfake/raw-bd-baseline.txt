@@ -24,7 +24,6 @@ internal/cmd/install_integration_test.go argv 4
 internal/cmd/molecule_lifecycle.go BDRunner 1
 internal/cmd/polecat_identity_reconcile.go BDRunner 1
 internal/cmd/polecat_identity.go argv 1
-internal/cmd/prime_molecule.go argv 1
 internal/cmd/prime.go argv 1
 internal/cmd/role.go BDRunner 1
 internal/cmd/scheduler_epic.go BdCmd 1

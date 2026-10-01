@@ -36,6 +36,9 @@ type RoleInfo struct {
 	// formulaRun answers the bd cook prime renders formulas with; nil is the
 	// bd on PATH. Tests set it so prime never starts bd.
 	formulaRun beads.BDRunner
+	// molecules reads poured molecules for prime's checklist; nil is the
+	// rig's beads. Tests set it to a beadsfake.
+	molecules beads.Client
 }
 
 // formulaCooker is the bd cook this role's prime renders formulas with.

@@ -119,9 +119,9 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeExplain, "explain", false,
 		"Show why each section was included")
 	primeCmd.Flags().IntVar(&primeStep, "step", 0,
-		"Print the title and full body of formula step N (1-based) and exit; use with --formula, else the hooked formula")
+		"Print the title and full body of step N (1-based) of the hooked molecule, or of --formula, and exit")
 	primeCmd.Flags().StringVar(&primeFormula, "formula", "",
-		"Formula name for --step (default: the hooked bead's attached formula)")
+		"Formula name for --step (default: the hooked bead's poured molecule)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -303,24 +303,42 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 }
 
 // runPrimeStep implements `gt prime --step N [--formula NAME]`: print one
-// formula step in full. It reads the hook (to find the attached formula) but
+// step in full. It reads the hook (to find the poured molecule) but
 // performs none of the session side effects of a normal prime.
 func runPrimeStep(ctx RoleContext) error {
 	hookedBead, _ := findAgentWorkWithAttempts(ctx, 1)
-	name := primeStepFormulaName(hookedBead, primeFormula)
-	if name == "" {
-		return fmt.Errorf("no formula to read: pass --formula <name>")
-	}
-	f, err := ctx.formulaCooker().cookForRender(name, ctx.TownRoot, ctx.Rig, primeStepVars(hookedBead, name))
+	c, err := ctx.primeStepChecklist(hookedBead, primeFormula)
 	if err != nil {
 		return err
 	}
-	out, err := renderFormulaStep(name, f, primeStep)
+	out, err := renderFormulaStep(c.name, c.steps, primeStep)
 	if err != nil {
 		return err
 	}
 	fmt.Print(out)
 	return nil
+}
+
+// primeStepChecklist is the checklist `gt prime --step` reads: the hooked
+// bead's poured molecule when --formula is absent or names it (or its
+// formula), else the named formula cooked.
+func (r RoleInfo) primeStepChecklist(hookedBead *beads.Issue, explicit string) (primeChecklist, error) {
+	if hookedBead != nil {
+		att := beads.ParseAttachmentFields(hookedBead)
+		if att != nil && att.AttachedMolecule != "" &&
+			(explicit == "" || explicit == att.AttachedFormula || explicit == att.AttachedMolecule) {
+			return r.attachmentChecklist(att)
+		}
+	}
+	name := primeStepFormulaName(hookedBead, explicit)
+	if name == "" {
+		return primeChecklist{}, fmt.Errorf("no formula to read: pass --formula <name>")
+	}
+	f, err := r.formulaCooker().cookForRender(name, r.TownRoot, r.Rig, primeStepVars(hookedBead, name))
+	if err != nil {
+		return primeChecklist{}, err
+	}
+	return primeChecklist{name: name, steps: f.checklist()}, nil
 }
 
 func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
@@ -1209,7 +1227,8 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 		return outputRalphLoopDirective(w, ctx, attachment)
 	}
 
-	// Show inline formula steps from the embedded binary (root-only: no child wisps to query).
+	// The poured molecule's steps are the checklist; a formula with no
+	// molecule is cooked.
 	if attachment.AttachedFormula != "" {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
 			fmt.Fprintf(w, "%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
@@ -1217,7 +1236,7 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 			fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
 			return nil
 		}
-		ctx.formulaCooker().showStepsFull(w, attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		ctx.showChecklist(w, attachment)
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
 		fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
@@ -1225,8 +1244,8 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 		return nil
 	}
 
-	// Legacy path: no formula name stored, fall back to bd mol current
-	showMoleculeExecutionPrompt(w, ctx.WorkDir, attachment.AttachedMolecule)
+	// No formula name stored: the molecule alone is the checklist.
+	ctx.showChecklist(w, attachment)
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
 	fmt.Fprintln(w, "The base bead is just a container. The molecule steps define your workflow.")
@@ -1259,12 +1278,12 @@ func outputRalphLoopDirectiveWithPluginCheck(w io.Writer, ctx RoleContext, attac
 
 func renderRalphLoopPrompt(ctx RoleContext, attachment *beads.AttachmentFields) (string, error) {
 	var sb strings.Builder
-	if attachment.AttachedFormula != "" {
-		rendered, err := ctx.formulaCooker().renderStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+	if attachment.AttachedFormula != "" || attachment.AttachedMolecule != "" {
+		c, err := ctx.attachmentChecklist(attachment)
 		if err != nil {
 			return "", err
 		}
-		sb.WriteString(rendered)
+		sb.WriteString(renderFormulaStepsFull(c.name, c.steps))
 	}
 	if attachment.AttachedArgs != "" {
 		if sb.Len() > 0 {
