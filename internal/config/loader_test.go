@@ -2969,7 +2969,7 @@ func TestFillRuntimeDefaultsPresetMerging(t *testing.T) {
 //  1. Set role_agents.mayor to each agent (claude, gemini, codex, kiro, cursor, auggie, amp, opencode)
 //  2. Run: gt start
 //  3. Verify mayor starts with correct agent config
-//  4. Run: GT_NUKE_ACKNOWLEDGED=1 gt down --nuke
+//  4. Run: gt down --nuke --nuke-acknowledged
 //  5. Repeat for all built-in agents
 func TestRoleAgentConfigWithCustomAgent(t *testing.T) {
 	t.Parallel()

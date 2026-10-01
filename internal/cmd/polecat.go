@@ -149,6 +149,7 @@ var (
 	polecatNukeAll                       bool
 	polecatNukeDryRun                    bool
 	polecatNukeForce                     bool
+	polecatNukeAcknowledgeUnpreserved    bool
 	polecatCheckRecoveryJSON             bool
 	polecatCheckRecoveryReconcileCleanup bool
 	polecatCheckRecoveryBatchJSON        bool
@@ -201,8 +202,8 @@ PRESERVATION: before deleting anything, nuke pushes the polecat's branch to
 origin (falling back to <branch>-<sha7> when the plain push is rejected as
 non-fast-forward) and refuses to proceed unless a remote ref is confirmed to
 contain the branch tip. --force alone does not override that refusal: it takes
---force AND GT_NUKE_ACKNOWLEDGE_UNPRESERVED=1 to delete a branch whose only
-copy is local.
+--force AND --acknowledge-unpreserved to delete a branch whose only copy is
+local.
 
 Examples:
   gt polecat nuke greenplace/Toast
@@ -384,6 +385,7 @@ func init() {
 	polecatNukeCmd.Flags().BoolVar(&polecatNukeAll, "all", false, "Nuke all polecats in the rig")
 	polecatNukeCmd.Flags().BoolVar(&polecatNukeDryRun, "dry-run", false, "Show what would be nuked without doing it")
 	polecatNukeCmd.Flags().BoolVarP(&polecatNukeForce, "force", "f", false, "Force nuke, bypassing all safety checks (LOSES WORK)")
+	polecatNukeCmd.Flags().BoolVar(&polecatNukeAcknowledgeUnpreserved, "acknowledge-unpreserved", false, "With --force, delete a branch whose only copy is local (LOSES WORK)")
 
 	// Check-recovery flags
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryJSON, "json", false, "Output as JSON")
@@ -2494,7 +2496,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 
 		if err := nukePolecatFullWithOptions(p.polecatName, p.rigName, p.mgr, p.r, nukePolecatOptions{
 			Force:                  polecatNukeForce,
-			AcknowledgeUnpreserved: nukeAcknowledgesUnpreserved(),
+			AcknowledgeUnpreserved: polecatNukeAcknowledgeUnpreserved,
 			PurgeClosedEphemerals:  !batchPurge,
 		}); err != nil {
 			nukeErrors = append(nukeErrors, fmt.Sprintf("%s/%s: %v", p.rigName, p.polecatName, err))
@@ -2570,21 +2572,15 @@ type nukePolecatOptions struct {
 	// with Force, to delete a polecat whose branch tip could not be shown to
 	// exist on the remote. Force alone is NOT enough: an unpreserved branch
 	// looks exactly like a routine nuke from the outside, so the operator has
-	// to name the loss. See EnvNukeAcknowledgeUnpreserved.
+	// to name the loss. See NukeAcknowledgeUnpreservedFlag.
 	AcknowledgeUnpreserved bool
 }
 
-// EnvNukeAcknowledgeUnpreserved is the env var that makes
-// nukePolecatOptions.AcknowledgeUnpreserved true on the command line. It is
-// deliberately an env var rather than a flag so that it cannot be reached by
-// repeating a previous --force invocation.
-const EnvNukeAcknowledgeUnpreserved = "GT_NUKE_ACKNOWLEDGE_UNPRESERVED"
-
-// nukeAcknowledgesUnpreserved reports whether the operator has explicitly
-// accepted losing an unpreserved branch.
-func nukeAcknowledgesUnpreserved() bool {
-	return os.Getenv(EnvNukeAcknowledgeUnpreserved) == "1"
-}
+// NukeAcknowledgeUnpreservedFlag is the flag that makes
+// nukePolecatOptions.AcknowledgeUnpreserved true on the command line. It is a
+// separate flag from --force so that repeating a previous --force invocation
+// cannot reach it.
+const NukeAcknowledgeUnpreservedFlag = "--acknowledge-unpreserved"
 
 // preserveOutcome is the result of the pre-nuke self-preserve push.
 type preserveOutcome struct {
@@ -2674,7 +2670,7 @@ func refSuffixSHA(sha string) string {
 
 // preserveFailureBlocker decides whether a nuke may proceed after its
 // self-preserve push failed. It returns nil only for an explicit override:
-// --force AND the acknowledgement env var. Anything else is a hard stop, so a
+// --force AND the acknowledgement flag. Anything else is a hard stop, so a
 // failed preserve can never be mistaken for a successful one.
 func preserveFailureBlocker(rigName, polecatName string, force, acknowledged bool, cause error) error {
 	if cause == nil {
@@ -2683,11 +2679,11 @@ func preserveFailureBlocker(rigName, polecatName string, force, acknowledged boo
 	if force && acknowledged {
 		return nil
 	}
-	remediation := fmt.Sprintf("  Push %s/%s by hand, or re-run with:\n    %s=1 %s",
-		rigName, polecatName, EnvNukeAcknowledgeUnpreserved, "gt polecat nuke "+rigName+"/"+polecatName+" --force")
+	remediation := fmt.Sprintf("  Push %s/%s by hand, or re-run with:\n    gt polecat nuke %s/%s --force %s",
+		rigName, polecatName, rigName, polecatName, NukeAcknowledgeUnpreservedFlag)
 	if force {
 		remediation = fmt.Sprintf("  The %s override is required as well as --force.\n%s",
-			EnvNukeAcknowledgeUnpreserved, remediation)
+			NukeAcknowledgeUnpreservedFlag, remediation)
 	}
 	return fmt.Errorf("refusing to nuke %s/%s: %v\n"+
 		"  The worktree and local branch were NOT deleted.\n%s",
@@ -2795,9 +2791,9 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				return blocker
 			}
 			if preserveErr != nil {
-				fmt.Printf("  %s %v\n  %s proceeding under --force with %s set — %s will be deleted with no remote copy\n",
+				fmt.Printf("  %s %v\n  %s proceeding under --force with %s — %s will be deleted with no remote copy\n",
 					style.Error.Render("✗"), preserveErr, style.Warning.Render("⚠"),
-					EnvNukeAcknowledgeUnpreserved, branchToDelete)
+					NukeAcknowledgeUnpreservedFlag, branchToDelete)
 			}
 		}
 	}
@@ -2863,8 +2859,8 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		case preservedRef != "":
 			fmt.Printf("  %s remote ref %s preserved for refinery merge\n", style.Dim.Render("○"), preservedRef)
 		case opts.AcknowledgeUnpreserved:
-			fmt.Printf("  %s %s deleted with no remote copy (%s set)\n",
-				style.Warning.Render("⚠"), branchToDelete, EnvNukeAcknowledgeUnpreserved)
+			fmt.Printf("  %s %s deleted with no remote copy (%s)\n",
+				style.Warning.Render("⚠"), branchToDelete, NukeAcknowledgeUnpreservedFlag)
 		default:
 			fmt.Printf("  %s %s had no remote copy to report\n",
 				style.Warning.Render("⚠"), branchToDelete)
@@ -3253,8 +3249,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 				}
 				fmt.Printf("Nuking %s...\n", info.Name)
 				if err := nukePolecatFullWithOptions(info.Name, rigName, mgr, r, nukePolecatOptions{
-					AcknowledgeUnpreserved: nukeAcknowledgesUnpreserved(),
-					PurgeClosedEphemerals:  !batchPurge,
+					PurgeClosedEphemerals: !batchPurge,
 				}); err != nil {
 					fmt.Printf("  %s (%v)\n", style.Error.Render("failed"), err)
 				} else {

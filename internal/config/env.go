@@ -235,71 +235,104 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		env["BEADS_DOLT_AUTO_START"] = "0"
 	}
 
-	// Pass through cloud API credentials and provider configuration from the parent shell.
-	// Only variables explicitly listed here are forwarded; all others are blocked for isolation.
-	for _, key := range []string{
-		// Anthropic API (direct)
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
-		// ANTHROPIC_BASE_URL intentionally excluded — agents that need a custom
-		// base URL (MiniMax, Groq, etc.) get it from their agent config's Env
-		// block, not from the parent process. Passthrough caused cross-provider
-		// contamination: a MiniMax deacon's base URL leaked into Claude polecats.
-		"ANTHROPIC_CUSTOM_HEADERS",
-
-		// Model selection
-		"ANTHROPIC_MODEL",
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-		"ANTHROPIC_DEFAULT_SONNET_MODEL",
-		"ANTHROPIC_DEFAULT_OPUS_MODEL",
-		"CLAUDE_CODE_SUBAGENT_MODEL",
-
-		// AWS Bedrock
-		"CLAUDE_CODE_USE_BEDROCK",
-		"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
-		"AWS_ACCESS_KEY_ID",
-		"AWS_SECRET_ACCESS_KEY",
-		"AWS_SESSION_TOKEN",
-		"AWS_REGION",
-		"AWS_PROFILE",
-		"AWS_BEARER_TOKEN_BEDROCK",
-		"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
-
-		// Microsoft Foundry
-		"CLAUDE_CODE_USE_FOUNDRY",
-		"CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
-		"ANTHROPIC_FOUNDRY_API_KEY",
-		"ANTHROPIC_FOUNDRY_BASE_URL",
-		"ANTHROPIC_FOUNDRY_RESOURCE",
-
-		// Google Vertex AI
-		"CLAUDE_CODE_USE_VERTEX",
-		"CLAUDE_CODE_SKIP_VERTEX_AUTH",
-		"GOOGLE_APPLICATION_CREDENTIALS",
-		"GOOGLE_CLOUD_PROJECT",
-		"VERTEX_PROJECT",
-		"VERTEX_LOCATION",
-		"VERTEX_REGION_CLAUDE_3_5_HAIKU",
-		"VERTEX_REGION_CLAUDE_3_7_SONNET",
-		"VERTEX_REGION_CLAUDE_4_0_OPUS",
-		"VERTEX_REGION_CLAUDE_4_0_SONNET",
-		"VERTEX_REGION_CLAUDE_4_1_OPUS",
-
-		// Proxy / network
-		"HTTP_PROXY",
-		"HTTPS_PROXY",
-		"NO_PROXY",
-
-		// mTLS
-		"CLAUDE_CODE_CLIENT_CERT",
-		"CLAUDE_CODE_CLIENT_KEY",
-		"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
-	} {
-		if val := getenv(key); val != "" {
-			env[key] = val
-		}
+	for k, v := range ProviderPassthroughEnv(getenv) {
+		env[k] = v
 	}
 
+	return env
+}
+
+// providerPassthroughEnvVars are the provider settings forwarded from the
+// spawning process. Only variables listed here are forwarded; all others are
+// blocked for isolation. None of them holds a credential: a forwarded value
+// lands in tmux new-session -e and the exec env of the startup command, which
+// ps and tmux's pane_start_command show (G3-18).
+var providerPassthroughEnvVars = []string{
+	// ANTHROPIC_BASE_URL intentionally excluded — agents that need a custom
+	// base URL (MiniMax, Groq, etc.) get it from their agent config's Env
+	// block, not from the parent process. Passthrough caused cross-provider
+	// contamination: a MiniMax deacon's base URL leaked into Claude polecats.
+
+	// Model selection
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL",
+
+	// AWS Bedrock
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+	"AWS_REGION",
+	"AWS_PROFILE",
+	"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+
+	// Microsoft Foundry
+	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+	"ANTHROPIC_FOUNDRY_BASE_URL",
+	"ANTHROPIC_FOUNDRY_RESOURCE",
+
+	// Google Vertex AI
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH",
+	"GOOGLE_APPLICATION_CREDENTIALS", // a file path, not the key
+	"GOOGLE_CLOUD_PROJECT",
+	"VERTEX_PROJECT",
+	"VERTEX_LOCATION",
+	"VERTEX_REGION_CLAUDE_3_5_HAIKU",
+	"VERTEX_REGION_CLAUDE_3_7_SONNET",
+	"VERTEX_REGION_CLAUDE_4_0_OPUS",
+	"VERTEX_REGION_CLAUDE_4_0_SONNET",
+	"VERTEX_REGION_CLAUDE_4_1_OPUS",
+
+	// Proxy / network (a URL carrying user:password@ is not forwarded)
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"NO_PROXY",
+
+	// mTLS (file paths; the key's passphrase is not forwarded)
+	"CLAUDE_CODE_CLIENT_CERT",
+	"CLAUDE_CODE_CLIENT_KEY",
+}
+
+// unforwardedCredentialEnvVars were forwarded from the spawning process until
+// gt-y3pgh.10 and no longer are: their values are credentials, and a
+// forwarded value reaches argv. Nothing in the town relies on them (agents
+// that need a token name it as a ${VAR} reference to settings/daemon.env,
+// which the startup command reads when it runs). A session still sees them
+// when the tmux server's own environment carries them.
+var unforwardedCredentialEnvVars = []string{
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_CUSTOM_HEADERS",
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+	"AWS_BEARER_TOKEN_BEDROCK",
+	"ANTHROPIC_FOUNDRY_API_KEY",
+	"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+}
+
+// UnforwardedCredentialEnvVars names the credentials no spawn path takes from
+// the spawning process (gt-y3pgh.10).
+func UnforwardedCredentialEnvVars() []string {
+	return append([]string(nil), unforwardedCredentialEnvVars...)
+}
+
+// ProviderPassthroughEnv is the provider settings getenv sets that a spawned
+// agent inherits from the spawning process. It never holds a credential, so
+// every spawn path (tmux -e, the startup command's exec env, handoff's
+// respawn command) may carry its values on a command line.
+func ProviderPassthroughEnv(getenv func(string) string) map[string]string {
+	env := make(map[string]string)
+	for _, key := range providerPassthroughEnvVars {
+		val := getenv(key)
+		if val == "" || (strings.HasSuffix(key, "_PROXY") && strings.Contains(val, "@")) {
+			continue
+		}
+		env[key] = val
+	}
 	return env
 }
 

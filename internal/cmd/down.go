@@ -79,6 +79,7 @@ var (
 	downForce    bool
 	downAll      bool
 	downNuke     bool
+	downNukeAck  bool
 	downDryRun   bool
 	downPolecats bool
 )
@@ -89,6 +90,7 @@ func init() {
 	downCmd.Flags().BoolVarP(&downPolecats, "polecats", "p", false, "Also stop all polecat sessions")
 	downCmd.Flags().BoolVarP(&downAll, "all", "a", false, "Full shutdown with orphan cleanup and verification")
 	downCmd.Flags().BoolVar(&downNuke, "nuke", false, "Kill the shared tmux server (default socket) and all its sessions")
+	downCmd.Flags().BoolVar(&downNukeAck, "nuke-acknowledged", false, "Confirm --nuke: kill every session on this town's tmux socket, custom windows included")
 	downCmd.Flags().BoolVar(&downDryRun, "dry-run", false, "Preview what would be stopped without taking action")
 	rootCmd.AddCommand(downCmd)
 }
@@ -383,13 +385,13 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 		if downDryRun {
 			printDownStatus("Tmux server", true, fmt.Sprintf("would kill (socket: %s)", socketLabel))
-		} else if os.Getenv("GT_NUKE_ACKNOWLEDGED") == "" {
+		} else if !downNukeAck {
 			fmt.Println()
 			fmt.Printf("%s The --nuke flag kills this town's tmux server (socket: %s).\n",
 				style.Bold.Render("⚠ BLOCKED:"), socketLabel)
 			fmt.Printf("This will destroy all tmux sessions on this socket, including any custom windows you opened.\n")
 			fmt.Println()
-			fmt.Printf("To proceed, run with: %s\n", style.Bold.Render("GT_NUKE_ACKNOWLEDGED=1 gt down --nuke"))
+			fmt.Printf("To proceed, run with: %s\n", style.Bold.Render("gt down --nuke --nuke-acknowledged"))
 			allOK = false
 		} else {
 			if err := t.KillServer(); err != nil {

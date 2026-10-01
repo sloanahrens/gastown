@@ -537,9 +537,8 @@ func (c *AccountsConfig) GetDefaultAccount() *Account {
 
 // ResolveAccountConfigDir resolves the CLAUDE_CONFIG_DIR for account selection.
 // Priority order:
-//  1. GT_ACCOUNT environment variable
-//  2. accountFlag (from --account command flag)
-//  3. Default account from config
+//  1. accountFlag (from --account command flag)
+//  2. Default account from config
 //
 // Returns empty string if no account configured or resolved.
 // Returns the handle that was resolved as second value.
@@ -551,16 +550,7 @@ func ResolveAccountConfigDir(accountsPath, accountFlag string) (configDir, handl
 		return "", "", nil
 	}
 
-	// Priority 1: GT_ACCOUNT env var
-	if envAccount := os.Getenv("GT_ACCOUNT"); envAccount != "" {
-		acct := cfg.GetAccount(envAccount)
-		if acct == nil {
-			return "", "", fmt.Errorf("GT_ACCOUNT '%s' not found in accounts config", envAccount)
-		}
-		return expandPath(acct.ConfigDir), envAccount, nil
-	}
-
-	// Priority 2: --account flag
+	// Priority 1: --account flag
 	if accountFlag != "" {
 		acct := cfg.GetAccount(accountFlag)
 		if acct == nil {
@@ -569,7 +559,7 @@ func ResolveAccountConfigDir(accountsPath, accountFlag string) (configDir, handl
 		return expandPath(acct.ConfigDir), accountFlag, nil
 	}
 
-	// Priority 3: Default account
+	// Priority 2: Default account
 	if cfg.Default != "" {
 		acct := cfg.GetDefaultAccount()
 		if acct != nil {

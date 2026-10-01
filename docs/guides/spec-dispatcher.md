@@ -22,8 +22,8 @@ Exit 0 means clean. Exit 1 means refused. Exit 2 means the spec needs planning:
 label `needs-planning`, a Size that says planning, or more than six
 acceptance items.
 
-The template path is `$GT_SPEC_TEMPLATE`, else the file above, else the five
-sections built in. `/workorder` runs `gt spec lint <id>` after filing when
+The template path is daemon.json `patrols.spec_dispatch.template`, else the
+file above, else the five sections built in. `/workorder` runs `gt spec lint <id>` after filing when
 `gt spec lint --help` succeeds, so both read one shape.
 
 ## `gt spec dispatch`

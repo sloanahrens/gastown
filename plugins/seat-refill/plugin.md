@@ -124,12 +124,8 @@ to sling while it exists and log why (`internal/dispatch`):
 - `gt scheduler run`, whether the daemon heartbeat or a person runs it
 - the `scheduled_slings` patrol
 
-`GT_SEAT_REFILL_HOLD` relocates the file for all of them. Each process reads
-it from its own environment (the daemon,
-seat-refill, a shell running `gt scheduler run`), so set it the same way
-everywhere or not at all: a process without it still watches
-`<town-root>/seat-refill.hold`. A rig's
-`ESTOP.<rig>` holds only that rig's dispatch. An explicit `gt sling` typed by
+The file is always `<town-root>/seat-refill.hold`. A rig's `ESTOP.<rig>`
+holds only that rig's dispatch. An explicit `gt sling` typed by
 the operator or the mayor still works through the hold file, but not through
 an E-stop: `gt sling` refuses a rig the town or its own ESTOP covers.
 

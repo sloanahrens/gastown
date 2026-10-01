@@ -68,7 +68,7 @@ var specLintCmd = &cobra.Command{
 	Use:   "lint <bead-id>",
 	Short: "Check a bead against the spec template; one line, exit 0 when clean",
 	Long: `Check a bead against the spec template (~/.claude/docs/agents/spec-template.md,
-or $GT_SPEC_TEMPLATE) — the same lint the spec dispatcher runs before it
+or daemon.json patrols.spec_dispatch.template) — the same lint the spec dispatcher runs before it
 allocates a seat:
 
   - type feature
@@ -118,7 +118,7 @@ The operator hold file and ESTOP stop the tick.`,
 }
 
 func init() {
-	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default $GT_SPEC_TEMPLATE or ~/.claude/docs/agents/spec-template.md)")
+	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.json patrols.spec_dispatch.template, else ~/.claude/docs/agents/spec-template.md)")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -172,7 +172,7 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
 	path := specLintTemplate
 	if path == "" {
-		path = specdispatch.DefaultTemplatePath()
+		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := showSpec(townRoot, args[0])
 	return specLint(cmd.OutOrStdout(), args[0], spec, err, path)
@@ -484,6 +484,27 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 	return r
 }
 
+// loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
+func loadSpecDispatchConfig(townRoot string) *config.SpecDispatchConfig {
+	if townRoot == "" {
+		return nil
+	}
+	if pc := daemon.LoadPatrolConfig(townRoot); pc != nil && pc.Patrols != nil {
+		return pc.Patrols.SpecDispatch
+	}
+	return nil
+}
+
+// specTemplatePath is the one resolver for the spec template path: the
+// spec_dispatch template field, else the operator's default file. Lint and
+// dispatch both use it so they check one shape.
+func specTemplatePath(sd *config.SpecDispatchConfig) string {
+	if sd != nil && sd.Template != "" {
+		return sd.Template
+	}
+	return specdispatch.DefaultTemplatePath()
+}
+
 func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -493,19 +514,11 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
-	var sd *config.SpecDispatchConfig
-	if pc := daemon.LoadPatrolConfig(townRoot); pc != nil && pc.Patrols != nil {
-		sd = pc.Patrols.SpecDispatch
-	}
-	tmplPath := specdispatch.DefaultTemplatePath()
+	sd := loadSpecDispatchConfig(townRoot)
+	tmplPath := specTemplatePath(sd)
 	perTick := defaultSpecMaxPerTick
-	if sd != nil {
-		if sd.Template != "" {
-			tmplPath = sd.Template
-		}
-		if sd.MaxPerTick > 0 {
-			perTick = sd.MaxPerTick
-		}
+	if sd != nil && sd.MaxPerTick > 0 {
+		perTick = sd.MaxPerTick
 	}
 	if slingActor == "" {
 		slingActor = specDispatchActor
