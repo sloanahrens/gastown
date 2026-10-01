@@ -207,6 +207,59 @@ func TestLoadOperationalConfig_WithConfig(t *testing.T) {
 	}
 }
 
+// The health notify command is the operator's pager (gt-s3rec.3), so it has
+// to survive the strict decode of settings/config.json and come back through
+// the one accessor the daemon reads.
+func TestLoadOperationalConfig_HealthNotifyCommand(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town-settings","version":1,
+		"operational":{"health":{"notify_command":"terminal-notifier -title Gastown","dolt_latency_red":"300ms"}}}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	health := LoadOperationalConfig(dir).GetHealthSettings()
+	if health == nil {
+		t.Fatal("the health block did not decode")
+	}
+	if got := health.NotifyCommand; got != "terminal-notifier -title Gastown" {
+		t.Errorf("NotifyCommand = %q, want the configured command", got)
+	}
+	th, _, err := health.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if th.DoltLatency.Red != 300*time.Millisecond {
+		t.Errorf("DoltLatency.Red = %v, want the threshold beside the command", th.DoltLatency.Red)
+	}
+}
+
+// A town that never configured a pager reports none, rather than a compiled
+// default that would page a command nobody chose.
+func TestLoadOperationalConfig_NoHealthBlockHasNoNotifyCommand(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"),
+		[]byte(`{"type":"town-settings","version":1}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if health := LoadOperationalConfig(dir).GetHealthSettings(); health != nil {
+		t.Errorf("GetHealthSettings() = %+v, want nil for a town with no health block", health)
+	}
+}
+
 func TestMailThresholds_Defaults(t *testing.T) {
 	t.Parallel()
 

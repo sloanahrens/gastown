@@ -113,6 +113,14 @@ type Daemon struct {
 	// ping, backup root, slot status) in tests; nil probes for real.
 	townHealthSources func(s *healthSources)
 
+	// notifyRun runs the operator's health notify command with its argv (see
+	// runNotifyCommand); nil execs it. Tests record the argv.
+	notifyRun func(ctx context.Context, argv []string) error
+
+	// openNoticeBeads opens the client the health-transition notice bead is
+	// created through (see noticeBeads); nil is bd against the town database.
+	openNoticeBeads func() notifyBeadWriter
+
 	// prefixRegistryFn replaces the process-wide rig-prefix registry (see
 	// prefixRegistry) in tests; nil reads session.DefaultRegistry().
 	prefixRegistryFn func() *session.PrefixRegistry

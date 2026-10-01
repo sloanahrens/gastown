@@ -36,6 +36,10 @@ var NonDispatchableBeadTypes = []string{
 	"event",
 }
 
+// LabelTownHealth labels the daemon's record of one crossing of the town
+// health signal (gt-s3rec.3): a notice the operator is told about, not work.
+const LabelTownHealth = "gt:townhealth"
+
 // NonDispatchableBeadLabels are the "gt:" labels that mark a bead as a member
 // of a runtime family, regardless of the issue_type it carries. An escalation
 // waits on the mayor or the operator, a message on its recipient, an agent
@@ -58,6 +62,7 @@ var NonDispatchableBeadLabels = []string{
 	"gt:rig",
 	"gt:role",
 	"gt:standing-orders",
+	LabelTownHealth,
 	"gt:wisp",
 }
 
