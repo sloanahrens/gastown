@@ -23,7 +23,7 @@ var moleculeStepDoneCmd = &cobra.Command{
 
 This command handles the step-to-step transition for polecats:
 
-1. Closes the completed step (bd close <step-id>)
+1. Closes the completed step (gt bead close <step-id>)
 2. Extracts the molecule ID from the step
 3. Finds the next ready step (dependency-aware)
 4. If next step exists:
@@ -35,7 +35,7 @@ This command handles the step-to-step transition for polecats:
    - Exits the session
 
 IMPORTANT: This is the canonical way to complete molecule steps. Do NOT manually
-close steps with 'bd close' - it skips the auto-continuation logic.
+close steps with 'gt bead close' or 'bd close' - they skip the auto-continuation logic.
 
 Example:
   gt mol step done gt-abc.1    # Complete step 1 of molecule gt-abc`,
