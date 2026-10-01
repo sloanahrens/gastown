@@ -340,6 +340,9 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	if !activeWorkEvidence.BlocksCleanup && fields != nil {
 		activeWorkEvidence = assessPolecatAgentStateWork(beads.AgentState(strings.TrimSpace(fields.AgentState)))
+		if activeWorkEvidence.CountsTowardCapacity && !running && !spawning && agentStateOutlivesWork(fields, env) {
+			activeWorkEvidence = polecatActiveWorkEvidence{}
+		}
 	}
 
 	if activeWorkEvidence.BlocksCleanup {
@@ -937,6 +940,25 @@ func assessPolecatAgentStateWork(state beads.AgentState) polecatActiveWorkEviden
 		}
 	}
 	return polecatActiveWorkEvidence{}
+}
+
+// agentStateOutlivesWork reports whether an active agent_state (working,
+// running, patrolling, or spawning past its grace) is a record that outlived
+// its work: no session is up, no live bead is assigned to the seat, and the
+// hook reference the agent bead still carries names nothing at risk. A session
+// that died without gt done leaves the state behind, and reading it as live
+// work makes the seat a stall the witness may restart, raising a session on
+// debris (gt-is9jb, the agent_state counterpart of gt-eqiid).
+//
+// It answers from the same ClassifyHookBead the hook-reference check reads, so
+// the two cannot disagree about what a hook names. Without an issue source the
+// hook cannot be read, so the state keeps counting: the counts-only capacity
+// projection stays fail-closed, as it is for hook references.
+func agentStateOutlivesWork(fields *beads.AgentFields, env polecatInventoryEnv) bool {
+	if env.IssueSource == nil {
+		return false
+	}
+	return hookBeadDispositionForInventory(env.IssueSource, strings.TrimSpace(fields.HookBead)).Safe
 }
 
 func polecatActiveWorkLookupError(err error) polecatActiveWorkEvidence {
