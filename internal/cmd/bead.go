@@ -30,7 +30,7 @@ Read with 'gt show' or 'bd show'; write with these:
 
   gt bead create "title" --type=bug    File a bead (--rig <rig> files in another rig)
   gt bead note <id> "findings"         Append to the bead's notes
-  gt bead update <id> --title=...      Edit title, priority or labels
+  gt bead update <id> --title=...      Edit title, priority, labels, acceptance
   gt bead claim <id>                   Claim a bead (in_progress, assigned to you)
   gt bead reset <id> --reason=...      Return an orphaned claim to open
   gt bead comment <id> "text"          Add a comment
@@ -56,6 +56,7 @@ var (
 	beadUpdatePriority    int
 	beadUpdateAddLabels   []string
 	beadUpdateRemoveLabel []string
+	beadUpdateAcceptance  string
 
 	beadResetReason string
 	beadCloseReason string
@@ -109,15 +110,20 @@ Example:
 
 var beadUpdateCmd = &cobra.Command{
 	Use:   "update <id>",
-	Short: "Edit a bead's title, priority or labels",
-	Long: `Edit a bead's title, priority or labels.
+	Short: "Edit a bead's title, priority, labels or acceptance criteria",
+	Long: `Edit a bead's title, priority, labels or acceptance criteria.
 
 Status moves through the other verbs: claim, reset, close, reopen. Notes
 append through 'gt bead note'.
 
+--acceptance takes the whole criteria block, replacing what the bead had:
+bd show prints the current text, and you resend it with '- [x]' on each line
+your work satisfies. gt done refuses a submit while any '- [ ]' line is left.
+
 Examples:
   gt bead update gt-abc --title="DISPROVEN: <claim>; <what shipped>"
-  gt bead update gt-abc --add-label=needs-review --priority=1`,
+  gt bead update gt-abc --add-label=needs-review --priority=1
+  gt bead update gt-abc --acceptance="- [x] the refusal names the verb"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var opts beads.UpdateOptions
@@ -126,6 +132,9 @@ Examples:
 		}
 		if cmd.Flags().Changed("priority") {
 			opts.Priority = &beadUpdatePriority
+		}
+		if cmd.Flags().Changed("acceptance") {
+			opts.Acceptance = &beadUpdateAcceptance
 		}
 		opts.AddLabels = beadUpdateAddLabels
 		opts.RemoveLabels = beadUpdateRemoveLabel
@@ -243,6 +252,7 @@ func init() {
 	f.IntVarP(&beadUpdatePriority, "priority", "p", 0, "New priority 0-4")
 	f.StringArrayVar(&beadUpdateAddLabels, "add-label", nil, "Label to add (repeatable)")
 	f.StringArrayVar(&beadUpdateRemoveLabel, "remove-label", nil, "Label to remove (repeatable)")
+	f.StringVar(&beadUpdateAcceptance, "acceptance", "", "New acceptance criteria, the whole block")
 
 	beadResetCmd.Flags().StringVar(&beadResetReason, "reason", "", "Why: appended to the bead's notes")
 	beadCloseCmd.Flags().StringVarP(&beadCloseReason, "reason", "r", "", "Close reason")
@@ -343,8 +353,9 @@ func (v *beadVerbs) note(id, text string) error {
 }
 
 func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {
-	if opts.Title == nil && opts.Priority == nil && len(opts.AddLabels) == 0 && len(opts.RemoveLabels) == 0 {
-		return fmt.Errorf("nothing to update: give --title, --priority, --add-label or --remove-label")
+	if opts.Title == nil && opts.Priority == nil && opts.Acceptance == nil &&
+		len(opts.AddLabels) == 0 && len(opts.RemoveLabels) == 0 {
+		return fmt.Errorf("nothing to update: give --title, --priority, --acceptance, --add-label or --remove-label")
 	}
 	if opts.Title != nil && strings.TrimSpace(*opts.Title) == "" {
 		return fmt.Errorf("--title is empty")

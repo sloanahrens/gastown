@@ -613,6 +613,9 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	if opts.Assignee != nil {
 		is.Assignee = *opts.Assignee
 	}
+	if opts.Acceptance != nil {
+		is.AcceptanceCriteria = *opts.Acceptance
+	}
 	switch {
 	case len(opts.SetLabels) > 0:
 		is.Labels = sortedSet(opts.SetLabels)

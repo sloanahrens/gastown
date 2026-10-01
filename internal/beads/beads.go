@@ -681,6 +681,11 @@ type UpdateOptions struct {
 	RemoveLabels []string // Labels to remove
 	SetLabels    []string // Labels to set (replaces all existing)
 
+	// Acceptance replaces the acceptance criteria block, bd's own
+	// --acceptance semantics: ticking one line means resending the block
+	// with '- [x]' on it (gt-n623a).
+	Acceptance *string
+
 	// Force passes bd's --force, overriding the two fences a plain update
 	// enforces: Assignee overwriting another actor's live in_progress claim,
 	// and Status moving a bead to closed past open children or a live
@@ -3491,6 +3496,9 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 	}
 	if opts.Assignee != nil {
 		args = append(args, "--assignee="+*opts.Assignee)
+	}
+	if opts.Acceptance != nil {
+		args = append(args, "--acceptance="+*opts.Acceptance)
 	}
 	// Label operations: set-labels replaces all, otherwise use add/remove
 	if len(opts.SetLabels) > 0 {
