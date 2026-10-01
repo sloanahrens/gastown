@@ -375,6 +375,12 @@ func ResolveConfiguredDoltPort(townRoot string) int {
 	return resolveConfiguredDoltPort(townRoot, os.Getenv)
 }
 
+// ResolveConfiguredDoltPortWithEnv is ResolveConfiguredDoltPort reading the
+// environment through getenv instead of the process's.
+func ResolveConfiguredDoltPortWithEnv(townRoot string, getenv func(string) string) int {
+	return resolveConfiguredDoltPort(townRoot, getenv)
+}
+
 func resolveConfiguredDoltPort(townRoot string, getenv func(string) string) int {
 	if _, port, ok := managedDoltEndpoint(townRoot, getenv); ok {
 		return port
@@ -399,6 +405,12 @@ func resolveConfiguredDoltPort(townRoot string, getenv func(string) string) int 
 //  4. "" (caller should use its default)
 func ResolveConfiguredDoltHost(townRoot string) string {
 	return resolveConfiguredDoltHost(townRoot, os.Getenv)
+}
+
+// ResolveConfiguredDoltHostWithEnv is ResolveConfiguredDoltHost reading the
+// environment through getenv instead of the process's.
+func ResolveConfiguredDoltHostWithEnv(townRoot string, getenv func(string) string) string {
+	return resolveConfiguredDoltHost(townRoot, getenv)
 }
 
 func resolveConfiguredDoltHost(townRoot string, getenv func(string) string) string {
@@ -434,6 +446,12 @@ func managedDoltEndpoint(townRoot string, getenv func(string) string) (host stri
 // boundaries and injects the target town's managed endpoint when present.
 func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
 	return normalizeConfiguredDoltEnv(base, townRoot, os.Getenv)
+}
+
+// NormalizeConfiguredDoltEnvWithEnv is NormalizeConfiguredDoltEnv reading the
+// environment through getenv instead of the process's.
+func NormalizeConfiguredDoltEnvWithEnv(base []string, townRoot string, getenv func(string) string) []string {
+	return normalizeConfiguredDoltEnv(base, townRoot, getenv)
 }
 
 func normalizeConfiguredDoltEnv(base []string, townRoot string, getenv func(string) string) []string {

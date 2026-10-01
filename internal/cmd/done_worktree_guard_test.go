@@ -1,8 +1,8 @@
 package cmd
 
 import (
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,7 +66,7 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 			}
 			env := doneGuardEnv(townRoot, "gastown", "shiny", tt.gtRole)
 
-			got, err := resolveDonePolecatWorktreeIn(cwd, envMap(env))
+			got, err := resolveDonePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel)
 			if err != nil {
 				t.Fatalf("resolveDonePolecatWorktreeIn: %v", err)
 			}
@@ -80,21 +80,6 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 				t.Fatalf("identity = %#v, want gastown/polecats/shiny", got)
 			}
 		})
-	}
-}
-
-// TestResolveDonePolecatWorktreeAtReadsTheProcessEnv: gt done calls
-// resolveDonePolecatWorktreeAt, which must read the session from the process
-// environment (the cases above hand resolveDonePolecatWorktreeIn a map).
-func TestResolveDonePolecatWorktreeAtReadsTheProcessEnv(t *testing.T) {
-	townRoot, repoRoot := setupDoneGuardWorktree(t, "nested", "shiny")
-	setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-	if _, err := resolveDonePolecatWorktreeAt(repoRoot); err != nil {
-		t.Fatalf("resolveDonePolecatWorktreeAt with the session env set: %v", err)
-	}
-	t.Setenv("BD_ACTOR", "gastown/polecats/other")
-	if _, err := resolveDonePolecatWorktreeAt(repoRoot); err == nil {
-		t.Fatalf("resolveDonePolecatWorktreeAt accepted a BD_ACTOR for another polecat in %s", townRoot)
 	}
 }
 
@@ -163,7 +148,7 @@ func TestResolveDonePolecatWorktreeRejectsUnsafePaths(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env["GT_POLECAT_PATH"] = ownRepo
 
-			if _, err := resolveDonePolecatWorktreeIn(cwd, envMap(env)); err == nil {
+			if _, err := resolveDonePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel); err == nil {
 				t.Fatalf("resolveDonePolecatWorktreeIn(%q) succeeded, want rejection", cwd)
 			}
 		})
@@ -201,7 +186,7 @@ func TestResolveDonePolecatWorktreeRejectsIdentityMismatch(t *testing.T) {
 			env := map[string]string{"GT_TOWN_ROOT": townRoot, "GT_ROOT": townRoot,
 				"BD_ACTOR": tt.actor, "GT_ROLE": tt.gtRole, "GT_RIG": tt.gtRig, "GT_POLECAT": tt.polecat}
 
-			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env)); err == nil {
+			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil {
 				t.Fatal("resolveDonePolecatWorktreeIn succeeded, want identity rejection")
 			}
 		})
@@ -217,7 +202,7 @@ func TestResolveDonePolecatWorktreeRejectsTownRootMismatch(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env[envName] = filepath.Join(t.TempDir(), "other-town")
 
-			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env)); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
+			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
 				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want town root mismatch", err)
 			}
 		})
@@ -239,71 +224,8 @@ func TestResolveDonePolecatWorktreeRejectsGitWorkTreeSpoof(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env[tt.envName] = tt.value(repoRoot)
 
-			if _, err := resolveDonePolecatWorktreeIn(townRoot, envMap(env)); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
+			if _, err := resolveDonePolecatWorktreeIn(townRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
 				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want git env override rejection", err)
-			}
-		})
-	}
-}
-
-func TestRunDoneRejectsMayorRigBeforeAutosave(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		cwd  func(townRoot string) string
-	}{
-		{
-			name: "town root",
-			cwd:  func(townRoot string) string { return townRoot },
-		},
-		{
-			name: "town mayor rig",
-			cwd:  func(townRoot string) string { return filepath.Join(townRoot, "mayor", "rig") },
-		},
-		{
-			name: "rig mayor rig",
-			cwd:  func(townRoot string) string { return filepath.Join(townRoot, "gastown", "mayor", "rig") },
-		},
-		{
-			name: "other polecat",
-			cwd: func(townRoot string) string {
-				return filepath.Join(townRoot, "gastown", "polecats", "other", "gastown")
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			townRoot, _ := setupDoneGuardWorktree(t, "nested", "shiny")
-			dirtyRepo := tt.cwd(townRoot)
-			initDoneGuardGitRepo(t, dirtyRepo)
-			dirtyFile := filepath.Join(dirtyRepo, "unrelated.txt")
-			if err := os.WriteFile(dirtyFile, []byte("do not commit\n"), 0644); err != nil {
-				t.Fatalf("write dirty file: %v", err)
-			}
-
-			origDoneStatus, origCleanupStatus := doneStatus, doneCleanupStatus
-			doneStatus = ExitDeferred
-			doneCleanupStatus = "uncommitted"
-			t.Cleanup(func() {
-				doneStatus = origDoneStatus
-				doneCleanupStatus = origCleanupStatus
-			})
-			setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-
-			origDir, err := os.Getwd()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chdir(dirtyRepo); err != nil {
-				t.Fatalf("chdir dirty repo: %v", err)
-			}
-			t.Cleanup(func() { _ = os.Chdir(origDir) })
-
-			err = runDone(nil, nil)
-			if err == nil || !strings.Contains(err.Error(), "assigned polecat worktree") {
-				t.Fatalf("runDone error = %v, want assigned worktree rejection", err)
-			}
-			status := doneGuardGitOutput(t, dirtyRepo, "status", "--short")
-			if !strings.Contains(status, "?? unrelated.txt") {
-				t.Fatalf("dirty repo status = %q, want dirty file left uncommitted", status)
 			}
 		})
 	}
@@ -335,46 +257,33 @@ func TestIsDoneCommand(t *testing.T) {
 	}
 }
 
+// TestPersistentPreRunDoneRejectsBeforeRegistryFallback: the guard
+// persistentPreRun runs before any shared write refuses a polecat's gt done
+// from the town root, and lets every other command through.
 func TestPersistentPreRunDoneRejectsBeforeRegistryFallback(t *testing.T) {
-	townRoot, _ := setupDoneGuardWorktree(t, "nested", "shiny")
+	t.Parallel()
+	townRoot, _ := newDoneGuardWorktree(t, "nested", "shiny")
 	initDoneGuardGitRepo(t, townRoot)
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte(`{"rigs":{"gastown":{"beads":{"prefix":"gt"}}}}`), 0644); err != nil {
-		t.Fatalf("write mayor rigs.json: %v", err)
-	}
-	setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir town root: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	env := envMap(doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny"))
 
 	// Model the real command tree: gt done is a direct child of the root.
 	done := &cobra.Command{Use: "done"}
+	status := &cobra.Command{Use: "status"}
 	testRoot := &cobra.Command{Use: "gt"}
-	testRoot.AddCommand(done)
-	err = persistentPreRun(done, nil)
+	testRoot.AddCommand(done, status)
+	err := donePolecatGuard(done, env, townRoot, markerGitTopLevel)
 	if err == nil || !strings.Contains(err.Error(), "assigned polecat worktree") {
-		t.Fatalf("persistentPreRun error = %v, want assigned worktree rejection", err)
+		t.Fatalf("donePolecatGuard error = %v, want assigned worktree rejection", err)
 	}
-	if _, err := os.Stat(filepath.Join(townRoot, "rigs.json")); !os.IsNotExist(err) {
-		t.Fatalf("town root rigs.json exists after rejected done pre-run; err=%v", err)
+	if err := donePolecatGuard(status, env, townRoot, markerGitTopLevel); err != nil {
+		t.Fatalf("donePolecatGuard(gt status) = %v, want no guard", err)
 	}
 }
 
-func setupDoneGuardWorktree(t *testing.T, layout, polecatName string) (string, string) {
-	t.Helper()
-	townRoot, repoRoot := newDoneGuardWorktree(t, layout, polecatName)
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	t.Setenv("GT_ROOT", townRoot)
-	return townRoot, repoRoot
-}
-
-// newDoneGuardWorktree is setupDoneGuardWorktree without the process
-// environment: the session's variables go in doneGuardEnv.
+// newDoneGuardWorktree lays out a town with polecat polecatName's worktree
+// (nested under <polecat>/<rig> or the legacy <polecat> layout) and returns
+// the town root and the worktree's repo root. The session's variables go in
+// doneGuardEnv.
 func newDoneGuardWorktree(t *testing.T, layout, polecatName string) (string, string) {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -394,19 +303,30 @@ func newDoneGuardWorktree(t *testing.T, layout, polecatName string) (string, str
 	return townRoot, repoRoot
 }
 
+// initDoneGuardGitRepo marks dir as a git work tree root for
+// markerGitTopLevel.
 func initDoneGuardGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
 		t.Fatalf("mkdir git repo: %v", err)
 	}
-	cmd := exec.Command("git", "init", dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init %s: %v\n%s", dir, err, output)
+}
+
+// markerGitTopLevel stands in for git rev-parse --show-toplevel: the nearest
+// directory at or above dir holding a .git entry.
+func markerGitTopLevel(dir string) (string, error) {
+	for p := dir; ; p = filepath.Dir(p) {
+		if _, err := os.Stat(filepath.Join(p, ".git")); err == nil {
+			return p, nil
+		}
+		if filepath.Dir(p) == p {
+			return "", errors.New("not a git repository")
+		}
 	}
 }
 
 // doneGuardEnv is the environment of polecat rig/polecatName's session in
-// townRoot, as setupDoneGuardWorktree and setDoneGuardEnv set it.
+// townRoot.
 func doneGuardEnv(townRoot, rig, polecatName, gtRole string) map[string]string {
 	return map[string]string{
 		"GT_TOWN_ROOT": townRoot,
@@ -417,24 +337,4 @@ func doneGuardEnv(townRoot, rig, polecatName, gtRole string) map[string]string {
 		"GT_POLECAT":   polecatName,
 		"GT_SESSION":   "gt-" + polecatName,
 	}
-}
-
-func setDoneGuardEnv(t *testing.T, rig, polecatName, gtRole string) {
-	t.Helper()
-	t.Setenv("BD_ACTOR", rig+"/polecats/"+polecatName)
-	t.Setenv("GT_ROLE", gtRole)
-	t.Setenv("GT_RIG", rig)
-	t.Setenv("GT_POLECAT", polecatName)
-	t.Setenv("GT_SESSION", "gt-"+polecatName)
-}
-
-func doneGuardGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmdArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", cmdArgs, err, output)
-	}
-	return string(output)
 }

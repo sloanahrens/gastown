@@ -55,12 +55,8 @@ const (
 	doltSocketDialAttempts = 3
 )
 
-// doltSocketDial performs the connect. Declared as a var so the retry policy
-// above can be asserted deterministically (attempt count on timeout vs.
-// refusal) without inducing real scheduler starvation in a test.
-var doltSocketDial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout(network, addr, timeout)
-}
+// doltSocketDialer performs one connect; net.DialTimeout in production.
+type doltSocketDialer func(network, addr string, timeout time.Duration) (net.Conn, error)
 
 // doltSocketPathForPort derives Dolt's default unix socket path for a port.
 // Mirrors the path-derivation logic already in this package (see
@@ -77,7 +73,7 @@ func doltSocketPathForPort(port int) string {
 // connections) or "" if nothing is listening there.
 //
 // Separated from path derivation so tests can point the probe at a temp-dir
-// socket and assert its retry policy directly, without a real Dolt server.
+// socket directly, without a real Dolt server.
 func probeDoltSocket(p string) string {
 	info, err := os.Stat(p)
 	if err != nil {
@@ -86,8 +82,17 @@ func probeDoltSocket(p string) string {
 	if info.Mode()&os.ModeSocket == 0 {
 		return ""
 	}
+	return dialDoltSocket(net.DialTimeout, p)
+}
+
+// dialDoltSocket returns p once dial connects to it, retrying a connect that
+// timed out, or "" once one is refused or the attempts run out. The dialer is
+// a parameter so the retry policy can be asserted deterministically (attempt
+// count on timeout vs. refusal) without inducing real scheduler starvation in
+// a test.
+func dialDoltSocket(dial doltSocketDialer, p string) string {
 	for attempt := 0; attempt < doltSocketDialAttempts; attempt++ {
-		conn, err := doltSocketDial("unix", p, doltSocketDialTimeout)
+		conn, err := dial("unix", p, doltSocketDialTimeout)
 		if err == nil {
 			_ = conn.Close()
 			return p
@@ -105,10 +110,7 @@ func probeDoltSocket(p string) string {
 // localDoltSocketPath returns Dolt's default unix socket path for a given
 // port if a unix socket is currently accepting connections at that path;
 // otherwise returns "".
-//
-// Declared as a var (not const) so unit tests can swap it for a temp-dir
-// socket without depending on a real Dolt server.
-var localDoltSocketPath = func(port int) string {
+func localDoltSocketPath(port int) string {
 	return probeDoltSocket(doltSocketPathForPort(port))
 }
 
@@ -147,7 +149,13 @@ func formatDoltDSN(user, network, address, dbName string, opts dsnOpts) string {
 // (Windows, no Dolt running, custom socket path). No behavior change for
 // setups without a local Dolt.
 func buildDoltDSN(user string, port int, dbName string, opts dsnOpts) string {
-	if sock := localDoltSocketPath(port); sock != "" {
+	return buildDoltDSNVia(localDoltSocketPath, user, port, dbName, opts)
+}
+
+// buildDoltDSNVia is buildDoltDSN with the live socket for a port found by
+// socketFor ("" when none).
+func buildDoltDSNVia(socketFor func(port int) string, user string, port int, dbName string, opts dsnOpts) string {
+	if sock := socketFor(port); sock != "" {
 		return formatDoltDSN(user, "unix", sock, dbName, opts)
 	}
 	return formatDoltDSN(user, "tcp", fmt.Sprintf("127.0.0.1:%d", port), dbName, opts)
@@ -157,8 +165,14 @@ func buildDoltDSN(user string, port int, dbName string, opts dsnOpts) string {
 // and host from a *doltserver.Config (matches the maintain.go /
 // dolt_flatten.go / dolt_rebase.go callsite pattern).
 func buildDoltDSNFromConfig(c *doltserver.Config, dbName string, opts dsnOpts) string {
+	return buildDoltDSNFromConfigVia(localDoltSocketPath, c, dbName, opts)
+}
+
+// buildDoltDSNFromConfigVia is buildDoltDSNFromConfig with the live socket for
+// a port found by socketFor ("" when none).
+func buildDoltDSNFromConfigVia(socketFor func(port int) string, c *doltserver.Config, dbName string, opts dsnOpts) string {
 	if !c.IsRemote() {
-		if sock := localDoltSocketPath(c.Port); sock != "" {
+		if sock := socketFor(c.Port); sock != "" {
 			return formatDoltDSN(c.User, "unix", sock, dbName, opts)
 		}
 	}

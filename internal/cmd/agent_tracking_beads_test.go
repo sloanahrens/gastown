@@ -1,26 +1,24 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir(t *testing.T) {
-	// os.Getwd after Chdir returns the physical path, so a symlinked TempDir
-	// (macOS /var -> /private/var) would break path expectations built from it.
-	tmp, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve temp dir: %v", err)
-	}
-	townRoot := filepath.Join(tmp, "gt")
-	townBeads := filepath.Join(townRoot, ".beads")
-	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")
+// agentTrackingTown lays out a town whose refinery rig worktree redirects
+// its .beads to the rig's mayor clone, and returns the town root, the town
+// beads, the rig worktree and the rig beads it redirects to.
+func agentTrackingTown(t *testing.T) (townRoot, townBeads, rigWorkDir, rigBeads string) {
+	t.Helper()
+	townRoot = filepath.Join(t.TempDir(), "gt")
+	townBeads = filepath.Join(townRoot, ".beads")
+	rigWorkDir = filepath.Join(townRoot, "gastown", "refinery", "rig")
 	rigRedirect := filepath.Join(rigWorkDir, ".beads")
-	rigBeads := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-
+	rigBeads = filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
 	for _, dir := range []string{townBeads, rigRedirect, rigBeads} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
@@ -29,158 +27,90 @@ func TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir(t *testin
 	if err := os.WriteFile(filepath.Join(rigRedirect, "redirect"), []byte("../../mayor/rig/.beads"), 0o644); err != nil {
 		t.Fatalf("write rig redirect: %v", err)
 	}
-	t.Setenv("BEADS_DIR", townBeads)
+	return townRoot, townBeads, rigWorkDir, rigBeads
+}
 
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(rigWorkDir); err != nil {
-		t.Fatalf("chdir rig work dir: %v", err)
-	}
+func TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir(t *testing.T) {
+	t.Parallel()
+	townRoot, townBeads, rigWorkDir, rigBeads := agentTrackingTown(t)
 
-	gotWorkDir, err := findCwdBeadsWorkDir()
-	if err != nil {
-		t.Fatalf("findCwdBeadsWorkDir() error = %v", err)
-	}
-	if gotWorkDir != rigWorkDir {
-		t.Fatalf("findCwdBeadsWorkDir() = %q, want %q", gotWorkDir, rigWorkDir)
+	gotWorkDir, err := findBeadsWorkDirFrom(rigWorkDir)
+	if err != nil || gotWorkDir != rigWorkDir {
+		t.Fatalf("findBeadsWorkDirFrom() = %q, %v; want %q", gotWorkDir, err, rigWorkDir)
 	}
 
-	gotBeadsDir, err := resolveAgentTrackingBeadsDir()
-	if err != nil {
-		t.Fatalf("resolveAgentTrackingBeadsDir() error = %v", err)
-	}
-	if gotBeadsDir != rigBeads {
-		t.Fatalf("resolveAgentTrackingBeadsDir() = %q, want %q", gotBeadsDir, rigBeads)
+	gotBeadsDir, err := resolveAgentTrackingBeadsDirFrom(rigWorkDir, townBeads)
+	if err != nil || gotBeadsDir != rigBeads {
+		t.Fatalf("resolveAgentTrackingBeadsDirFrom() = %q, %v; want %q", gotBeadsDir, err, rigBeads)
 	}
 
-	gotLocalWorkDir, err := findLocalBeadsDir()
-	if err != nil {
-		t.Fatalf("findLocalBeadsDir() error = %v", err)
-	}
-	if gotLocalWorkDir != townRoot {
-		t.Fatalf("findLocalBeadsDir() = %q, want env parent %q", gotLocalWorkDir, townRoot)
+	// The project-work resolver keeps the inherited BEADS_DIR first.
+	gotLocalWorkDir, err := localBeadsWorkDir(rigWorkDir, townBeads)
+	if err != nil || gotLocalWorkDir != townRoot {
+		t.Fatalf("localBeadsWorkDir() = %q, %v; want env parent %q", gotLocalWorkDir, err, townRoot)
 	}
 }
 
-func TestRunAgentStateUsesCwdRigBeadsDirWhenBeadsDirPointsTown(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell fake bd")
+// TestResolveAgentTrackingBeadsDirFallsBackToBeadsDir: with no .beads above
+// the cwd, the inherited BEADS_DIR is the database.
+func TestResolveAgentTrackingBeadsDirFallsBackToBeadsDir(t *testing.T) {
+	t.Parallel()
+	_, townBeads, _, _ := agentTrackingTown(t)
+	got, err := resolveAgentTrackingBeadsDirFrom(t.TempDir(), townBeads)
+	if err != nil || got != townBeads {
+		t.Fatalf("resolveAgentTrackingBeadsDirFrom() = %q, %v; want %q", got, err, townBeads)
 	}
+}
 
-	// See TestResolveAgentTrackingBeadsDirPrefersCwdRigRedirectOverBeadsDir:
-	// canonicalize so Getwd-derived paths match expectations on macOS.
-	tmp, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve temp dir: %v", err)
-	}
-	townRoot := filepath.Join(tmp, "gt")
-	townBeads := filepath.Join(townRoot, ".beads")
-	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")
-	rigRedirect := filepath.Join(rigWorkDir, ".beads")
-	rigBeads := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-
-	for _, dir := range []string{townBeads, rigRedirect, rigBeads} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(rigRedirect, "redirect"), []byte("../../mayor/rig/.beads"), 0o644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
+// TestModifyAgentStatePinsTheRigDatabase: the read and the write of an agent
+// state change both run against the rig database the cwd resolved to, the
+// read pinned read-only and the write pinned as a mutation.
+func TestModifyAgentStatePinsTheRigDatabase(t *testing.T) {
+	t.Parallel()
+	_, townBeads, rigWorkDir, rigBeads := agentTrackingTown(t)
 	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
 	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), metadata, 0o644); err != nil {
 		t.Fatalf("write rig metadata: %v", err)
 	}
-
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	logPath := filepath.Join(tmp, "bd.log")
-	bdScript := `#!/bin/sh
-printf 'cmd=%s BEADS_DIR=%s DB=%s READONLY=%s AUTO=%s\n' "$1" "${BEADS_DIR-}" "${BEADS_DOLT_SERVER_DATABASE-}" "${BD_READONLY-}" "${BD_DOLT_AUTO_COMMIT-}" >> "$BD_LOG"
-case "$1" in
-  show)
-    printf '[{"labels":["gt:agent","idle:2"]}]\n'
-    ;;
-  update)
-    ;;
-  *)
-    printf 'unexpected bd command: %s\n' "$1" >&2
-    exit 1
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("BEADS_DIR", townBeads)
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "town")
-	t.Setenv("BD_READONLY", "true")
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-
-	oldWd, err := os.Getwd()
+	beadsDir, err := resolveAgentTrackingBeadsDirFrom(rigWorkDir, townBeads)
 	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(rigWorkDir); err != nil {
-		t.Fatalf("chdir rig work dir: %v", err)
+		t.Fatal(err)
 	}
 
-	oldSet := agentStateSet
-	oldIncr := agentStateIncr
-	oldDel := agentStateDel
-	oldJSON := agentStateJSON
-	t.Cleanup(func() {
-		agentStateSet = oldSet
-		agentStateIncr = oldIncr
-		agentStateDel = oldDel
-		agentStateJSON = oldJSON
-	})
-	agentStateSet = []string{"idle=0"}
-	agentStateIncr = ""
-	agentStateDel = nil
-	agentStateJSON = false
-
-	if err := runAgentState(nil, []string{"gt-gastown-refinery"}); err != nil {
-		t.Fatalf("runAgentState() error = %v", err)
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "show" {
+			return bdOut(`[{"labels":["gt:agent","idle:2"]}]`)
+		}
+		return bdOut("")
+	}}
+	rec := &callsBD{bd: bd}
+	if err := modifyAgentState(rec.run, io.Discard, "gt-gastown-refinery", beadsDir, agentLabelOps{set: []string{"idle=0"}}, time.Unix(1700000000, 0)); err != nil {
+		t.Fatalf("modifyAgentState() error = %v", err)
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
+	calls := rec.recorded()
+	if len(calls) != 2 {
+		t.Fatalf("bd calls = %d, want a show and an update; log:\n%s", len(calls), bd.log())
 	}
-	log := strings.TrimSpace(string(data))
-	if log == "" {
-		t.Fatal("fake bd was not invoked")
+	for _, c := range calls {
+		if got := callEnv(c, "BEADS_DIR"); got != rigBeads {
+			t.Errorf("bd %v BEADS_DIR = %q, want rig beads %q", c.Args, got, rigBeads)
+		}
+		if got := callEnv(c, "BEADS_DOLT_SERVER_DATABASE"); got != "rigdb" {
+			t.Errorf("bd %v database = %q, want rigdb", c.Args, got)
+		}
 	}
-
-	for _, line := range strings.Split(log, "\n") {
-		if !strings.Contains(line, "BEADS_DIR="+rigBeads) {
-			t.Fatalf("bd call was not pinned to rig beads %q: %s\nfull log:\n%s", rigBeads, line, log)
-		}
-		if strings.Contains(line, "BEADS_DIR="+townBeads) {
-			t.Fatalf("bd call used inherited town BEADS_DIR %q: %s\nfull log:\n%s", townBeads, line, log)
-		}
-		if !strings.Contains(line, "DB=rigdb") || strings.Contains(line, "DB=town") {
-			t.Fatalf("bd call was not pinned to rig database: %s\nfull log:\n%s", line, log)
-		}
-		if strings.Contains(line, "cmd=show") {
-			if !strings.Contains(line, "READONLY=true") || !strings.Contains(line, "AUTO=off") {
-				t.Fatalf("bd read was not read-only pinned: %s\nfull log:\n%s", line, log)
-			}
-		}
-		if strings.Contains(line, "cmd=update") {
-			if !strings.Contains(line, "READONLY= ") || !strings.Contains(line, "AUTO=on") {
-				t.Fatalf("bd mutation was not mutation pinned: %s\nfull log:\n%s", line, log)
-			}
+	if got := callEnv(calls[0], "BD_READONLY"); got != "true" {
+		t.Errorf("bd show BD_READONLY = %q, want true", got)
+	}
+	if got := callEnv(calls[1], "BD_DOLT_AUTO_COMMIT"); got != "on" {
+		t.Errorf("bd update BD_DOLT_AUTO_COMMIT = %q, want on", got)
+	}
+	update := strings.Join(calls[1].Args, " ")
+	for _, want := range []string{"update gt-gastown-refinery", "--set-labels=gt:agent", "--set-labels=idle:0", "--set-labels=heartbeat:1700000000"} {
+		if !strings.Contains(update, want) {
+			t.Errorf("update %q lacks %q", update, want)
 		}
 	}
 }

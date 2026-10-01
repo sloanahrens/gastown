@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
@@ -292,40 +293,47 @@ func TestValidChannelName(t *testing.T) {
 	}
 }
 
+// awaitEventTestEpoch is the fake clock's start for the polling tests.
+var awaitEventTestEpoch = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+// waitForEventFilesAsync runs waitForEventFiles on clk in the background.
+func waitForEventFilesAsync(ctx context.Context, clk clockwork.Clock, dir string, yieldAfter time.Duration) <-chan *AwaitEventResult {
+	done := make(chan *AwaitEventResult, 1)
+	go func() {
+		result, err := waitForEventFiles(ctx, clk, dir, yieldAfter)
+		if err != nil {
+			result = &AwaitEventResult{Reason: "error: " + err.Error()}
+		}
+		done <- result
+	}()
+	return done
+}
+
 func TestWaitForEventFilesPolling(t *testing.T) {
 	t.Parallel()
 	// Test that polling picks up events written after the wait starts.
 	dir := t.TempDir()
+	clk := clockwork.NewFakeClockAt(awaitEventTestEpoch)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	// Write an event after a short delay in a goroutine
-	go func() {
-		time.Sleep(800 * time.Millisecond) // longer than one poll interval (500ms)
-		content := `{"type":"DELAYED_EVENT","channel":"test"}`
-		os.WriteFile(filepath.Join(dir, "delayed.event"), []byte(content), 0644)
-	}()
-
-	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0)
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	done := waitForEventFilesAsync(ctx, clk, dir, 0)
+	if err := clk.BlockUntilContext(ctx, 1); err != nil { // the poll ticker
+		t.Fatal(err)
 	}
+	content := `{"type":"DELAYED_EVENT","channel":"test"}`
+	if err := os.WriteFile(filepath.Join(dir, "delayed.event"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(500 * time.Millisecond) // one poll interval
+
+	result := <-done
 	if result.Reason != "event" {
-		t.Fatalf("expected reason 'event', got %q (elapsed: %v)", result.Reason, elapsed)
+		t.Fatalf("expected reason 'event', got %q", result.Reason)
 	}
 	if len(result.Events) != 1 {
 		t.Errorf("expected 1 event, got %d", len(result.Events))
-	}
-	// Should have taken at least 800ms (the delay) but less than 5s (timeout)
-	if elapsed < 700*time.Millisecond {
-		t.Errorf("polling returned too quickly (%v), event was delayed 800ms", elapsed)
-	}
-	if elapsed > 3*time.Second {
-		t.Errorf("polling took too long (%v), expected ~1-1.5s", elapsed)
 	}
 }
 
@@ -339,7 +347,7 @@ func TestWaitForEventFilesWithPending(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -359,7 +367,7 @@ func TestWaitForEventFilesTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -373,7 +381,7 @@ func TestWaitForEventFilesNoDeadline(t *testing.T) {
 	// With a context that has no deadline, should return timeout immediately.
 	dir := t.TempDir()
 
-	result, err := waitForEventFiles(context.Background(), dir, 0)
+	result, err := waitForEventFiles(context.Background(), clockwork.NewRealClock(), dir, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -394,7 +402,7 @@ func TestWaitForEventFilesTimeoutWithPolling(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -449,7 +457,7 @@ func TestWaitForEventFilesContextYield(t *testing.T) {
 	yieldAfter := 600 * time.Millisecond
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, yieldAfter)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -477,16 +485,18 @@ func TestWaitForEventFilesContextYieldEventWins(t *testing.T) {
 	defer cancel()
 
 	yieldAfter := 5 * time.Second // yield interval is long — event arrives first
+	clk := clockwork.NewFakeClockAt(awaitEventTestEpoch)
 
-	go func() {
-		time.Sleep(800 * time.Millisecond)
-		os.WriteFile(filepath.Join(dir, "early.event"), []byte(`{"type":"MERGE_READY"}`), 0644)
-	}()
-
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	done := waitForEventFilesAsync(ctx, clk, dir, yieldAfter)
+	if err := clk.BlockUntilContext(ctx, 2); err != nil { // the yield timer and the poll ticker
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "early.event"), []byte(`{"type":"MERGE_READY"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(500 * time.Millisecond)
+
+	result := <-done
 	if result.Reason != "event" {
 		t.Errorf("expected reason 'event' (event arrived before yield), got %q", result.Reason)
 	}
@@ -507,7 +517,7 @@ func TestWaitForEventFilesContextYieldTimeoutWins(t *testing.T) {
 
 	yieldAfter := 5 * time.Second
 
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, yieldAfter)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -527,7 +537,7 @@ func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0) // zero = no yield
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0) // zero = no yield
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -681,46 +691,24 @@ func TestEventFileStruct(t *testing.T) {
 	}
 }
 
-// setupAwaitEventVars saves the await-event flag globals, installs the given
-// values, and restores the originals on cleanup.
-func setupAwaitEventVars(t *testing.T, channel, rig, timeout string, cleanup bool) {
-	t.Helper()
-	oldChannel := awaitEventChannel
-	oldRig := awaitEventRig
-	oldTimeout := awaitEventTimeout
-	oldBackoffBase := awaitEventBackoffBase
-	oldBackoffMax := awaitEventBackoffMax
-	oldQuiet := awaitEventQuiet
-	oldAgentBead := awaitEventAgentBead
-	oldCleanup := awaitEventCleanup
-	oldContextCheck := awaitEventContextCheckInterval
-	oldJSON := moleculeJSON
-	t.Cleanup(func() {
-		awaitEventChannel = oldChannel
-		awaitEventRig = oldRig
-		awaitEventTimeout = oldTimeout
-		awaitEventBackoffBase = oldBackoffBase
-		awaitEventBackoffMax = oldBackoffMax
-		awaitEventQuiet = oldQuiet
-		awaitEventAgentBead = oldAgentBead
-		awaitEventCleanup = oldCleanup
-		awaitEventContextCheckInterval = oldContextCheck
-		moleculeJSON = oldJSON
-	})
-	awaitEventChannel = channel
-	awaitEventRig = rig
-	awaitEventTimeout = timeout
-	awaitEventBackoffBase = ""
-	awaitEventBackoffMax = ""
-	awaitEventQuiet = true
-	awaitEventAgentBead = ""
-	awaitEventCleanup = cleanup
-	awaitEventContextCheckInterval = ""
-	moleculeJSON = false
+// newTestAwaitEvent is an await-event on channel in the town at root, with
+// --rig rig and GT_RIG gtRig, whose cwd is the town root.
+func newTestAwaitEvent(root, channel, rig, gtRig, timeout string, cleanup bool) awaitEventRun {
+	return awaitEventRun{
+		channel: channel,
+		rig:     rig,
+		quiet:   true,
+		cleanup: cleanup,
+		backoff: awaitSignalBackoff{timeout: timeout, mult: awaitEventBackoffMult},
+		out:     io.Discard,
+		eventRig: func(townRoot, explicit string) string {
+			return resolveEventRigWith(envMap(map[string]string{"GT_RIG": gtRig}), root, townRoot, explicit)
+		},
+		drainNudges: func(string) []nudge.QueuedNudge { return nil },
+	}
 }
 
-// makeTestTownRoot creates a temp town root with the workspace marker and
-// chdirs into it.
+// makeTestTownRoot creates a temp town root with the workspace marker.
 func makeTestTownRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -730,13 +718,12 @@ func makeTestTownRoot(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	t.Chdir(root)
 	return root
 }
 
 func TestAwaitEventPerRigChannelConsumesOnlyOwnRig(t *testing.T) {
+	t.Parallel()
 	root := makeTestTownRoot(t)
-	t.Setenv("GT_RIG", "")
 
 	// Pre-populate events for two rigs on the per-rig refinery channel.
 	if _, err := channelevents.EmitToTown(root, "refinery", "riga", "MQ_SUBMIT", nil); err != nil {
@@ -746,8 +733,7 @@ func TestAwaitEventPerRigChannelConsumesOnlyOwnRig(t *testing.T) {
 		t.Fatalf("emit rigb: %v", err)
 	}
 
-	setupAwaitEventVars(t, "refinery", "riga", "2s", true)
-	if err := runMoleculeAwaitEvent(nil, nil); err != nil {
+	if err := newTestAwaitEvent(root, "refinery", "riga", "", "2s", true).run(root); err != nil {
 		t.Fatalf("runMoleculeAwaitEvent: %v", err)
 	}
 
@@ -771,11 +757,10 @@ func TestAwaitEventPerRigChannelConsumesOnlyOwnRig(t *testing.T) {
 }
 
 func TestAwaitEventPerRigChannelRequiresRigContext(t *testing.T) {
-	makeTestTownRoot(t)
-	t.Setenv("GT_RIG", "")
+	t.Parallel()
+	root := makeTestTownRoot(t)
 
-	setupAwaitEventVars(t, "refinery", "", "100ms", false)
-	err := runMoleculeAwaitEvent(nil, nil)
+	err := newTestAwaitEvent(root, "refinery", "", "", "100ms", false).run(root)
 	if err == nil {
 		t.Fatal("expected error awaiting on per-rig channel without rig context")
 	}
@@ -785,15 +770,14 @@ func TestAwaitEventPerRigChannelRequiresRigContext(t *testing.T) {
 }
 
 func TestAwaitEventPerRigChannelUsesGTRigEnv(t *testing.T) {
+	t.Parallel()
 	root := makeTestTownRoot(t)
-	t.Setenv("GT_RIG", "envrig")
 
 	if _, err := channelevents.EmitToTown(root, "witness", "envrig", "POLECAT_DONE", nil); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
 
-	setupAwaitEventVars(t, "witness", "", "2s", true)
-	if err := runMoleculeAwaitEvent(nil, nil); err != nil {
+	if err := newTestAwaitEvent(root, "witness", "", "envrig", "2s", true).run(root); err != nil {
 		t.Fatalf("runMoleculeAwaitEvent: %v", err)
 	}
 
@@ -807,24 +791,23 @@ func TestAwaitEventPerRigChannelUsesGTRigEnv(t *testing.T) {
 }
 
 func TestResolveEventRig(t *testing.T) {
+	t.Parallel()
 	root := makeTestTownRoot(t)
+	noEnv := envMap(nil)
+	gtRig := envMap(map[string]string{"GT_RIG": "fromenv"})
 
-	t.Setenv("GT_RIG", "")
-	if got := resolveEventRig(root, "explicit"); got != "explicit" {
+	if got := resolveEventRigWith(noEnv, root, root, "explicit"); got != "explicit" {
 		t.Errorf("explicit flag: got %q, want explicit", got)
 	}
-
-	t.Setenv("GT_RIG", "fromenv")
-	if got := resolveEventRig(root, ""); got != "fromenv" {
+	if got := resolveEventRigWith(gtRig, root, root, ""); got != "fromenv" {
 		t.Errorf("GT_RIG env: got %q, want fromenv", got)
 	}
-	if got := resolveEventRig(root, "explicit"); got != "explicit" {
+	if got := resolveEventRigWith(gtRig, root, root, "explicit"); got != "explicit" {
 		t.Errorf("flag beats env: got %q, want explicit", got)
 	}
 
 	// No flag, no env, cwd is the town root (no rig component) -> "".
-	t.Setenv("GT_RIG", "")
-	if got := resolveEventRig(root, ""); got != "" {
+	if got := resolveEventRigWith(noEnv, root, root, ""); got != "" {
 		t.Errorf("town root cwd: got %q, want empty", got)
 	}
 
@@ -834,17 +817,12 @@ func TestResolveEventRig(t *testing.T) {
 		t.Fatal(err)
 	}
 	rigDir := filepath.Join(root, "myrig", "refinery")
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(rigDir)
-	if got := resolveEventRig(root, ""); got != "myrig" {
+	if got := resolveEventRigWith(noEnv, rigDir, root, ""); got != "myrig" {
 		t.Errorf("rig cwd: got %q, want myrig", got)
 	}
 
 	// cwd inside a town-level dir (not a registered rig) -> "".
-	t.Chdir(filepath.Join(root, "mayor"))
-	if got := resolveEventRig(root, ""); got != "" {
+	if got := resolveEventRigWith(noEnv, filepath.Join(root, "mayor"), root, ""); got != "" {
 		t.Errorf("non-rig cwd: got %q, want empty", got)
 	}
 }

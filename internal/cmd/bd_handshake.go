@@ -61,28 +61,42 @@ var bdHandshakeNotTownRunning = map[string]string{
 // bdHandshakeTimeout bounds the handshake's two bd calls.
 const bdHandshakeTimeout = 30 * time.Second
 
-var (
-	// bdHandshakeCheck runs the handshake against the bd on PATH from the
-	// town root. Tests replace it; nothing else should.
-	bdHandshakeCheck = defaultBDHandshakeCheck
+// townStartGate is the startup gate for town-running commands and agent
+// session starts: the town config files must parse (checked on every call,
+// so a file broken while the daemon runs stops its next session start), then
+// the bd handshake must pass. A pass of the handshake is remembered for the
+// life of the gate; a refusal is not: the daemon starts sessions for hours,
+// and once the operator installs the right bd or Dolt recovers, the next
+// session start must see it.
+type townStartGate struct {
+	// townRoot finds the town the command runs in ("" outside one).
+	townRoot func() string
+	// config reports a town config file under townRoot that does not parse.
+	config func(townRoot string) error
+	// handshake runs the bd handshake against townRoot's database.
+	handshake func(ctx context.Context, townRoot string) (*deps.BDHandshake, error)
 
-	// bdHandshakePassed remembers a pass for the life of the process. A
-	// refusal is not remembered: the daemon starts sessions for hours, and
-	// once the operator installs the right bd or Dolt recovers, the next
-	// session start must see it.
-	bdHandshakeMu     sync.Mutex
-	bdHandshakePassed bool
-)
+	mu     sync.Mutex
+	passed bool
+}
 
-func defaultBDHandshakeCheck(ctx context.Context) (*deps.BDHandshake, error) {
+// processTownStartGate is the gate of this process: the cwd's town (or
+// GT_TOWN_ROOT / GT_ROOT), its config files, and the bd on PATH.
+var processTownStartGate = &townStartGate{
+	townRoot:  detectTownRootFromCwd,
+	config:    checkTownConfig,
+	handshake: runBDHandshake,
+}
+
+// runBDHandshake runs the handshake against the bd on PATH from townRoot.
+func runBDHandshake(ctx context.Context, townRoot string) (*deps.BDHandshake, error) {
 	// Read the town's own database level, never whatever beads database the
 	// current directory happens to resolve to.
-	dir := detectTownRootFromCwd()
-	if dir == "" {
+	if townRoot == "" {
 		return nil, fmt.Errorf("%w: not in a Gas Town workspace, so the town database's schema level cannot be read", deps.ErrBDHandshake)
 	}
 	path, _ := exec.LookPath("bd")
-	return deps.CheckBDHandshake(ctx, path, deps.NewBDProcessRunner(dir))
+	return deps.CheckBDHandshake(ctx, path, deps.NewBDProcessRunner(townRoot))
 }
 
 // requiresBDHandshake reports whether cmd is a town-running command.
@@ -90,57 +104,50 @@ func requiresBDHandshake(cmd *cobra.Command) bool {
 	return cmd != nil && bdHandshakeGatedCommands[cmd.CommandPath()]
 }
 
-// requireBDHandshake returns the handshake's refusal, if any. A pass is
-// cached for the process; a refusal is re-checked on the next call.
-func requireBDHandshake() error {
-	bdHandshakeMu.Lock()
-	defer bdHandshakeMu.Unlock()
-	if bdHandshakePassed {
+// gateTownCommand runs gate for a town-running cmd and passes every other
+// command through.
+func gateTownCommand(cmd *cobra.Command, gate *townStartGate) error {
+	if !requiresBDHandshake(cmd) {
+		return nil
+	}
+	return gate.require()
+}
+
+// requireHandshake returns the handshake's refusal, if any. A pass is
+// cached; a refusal is re-checked on the next call.
+func (g *townStartGate) requireHandshake() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.passed {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bdHandshakeTimeout)
 	defer cancel()
-	if _, err := bdHandshakeCheck(ctx); err != nil {
+	if _, err := g.handshake(ctx, g.townRoot()); err != nil {
 		return err
 	}
-	bdHandshakePassed = true
+	g.passed = true
 	return nil
 }
 
-// townConfigCheck reports a town config file that does not parse. Tests
-// replace it; nothing else should.
-var townConfigCheck = defaultTownConfigCheck
-
-// defaultTownConfigCheck checks the config files of the town the working
-// directory (or GT_TOWN_ROOT / GT_ROOT) belongs to. Outside a town it
-// refuses: files it cannot find are not files that parse.
-func defaultTownConfigCheck() error {
-	dir := detectTownRootFromCwd()
-	if dir == "" {
+// checkTownConfig checks the config files of the town at townRoot. Outside a
+// town ("") it refuses: files it cannot find are not files that parse.
+func checkTownConfig(townRoot string) error {
+	if townRoot == "" {
 		return errors.New("not in a Gas Town workspace, so the town config files cannot be checked")
 	}
 	// Load, not Check: a town-running command needs a whole town, so a root
 	// found by its mayor/ directory alone (no mayor/town.json) is refused.
-	_, err := townconfig.Load(dir)
+	_, err := townconfig.Load(townRoot)
 	return err
 }
 
-// requireTownStart is the startup gate for town-running commands and agent
-// session starts: the town config files must parse (checked on every call,
-// so a file broken while the daemon runs stops its next session start), then
-// the bd handshake must pass (a pass is cached).
-func requireTownStart() error {
-	if err := townConfigCheck(); err != nil {
+// require is the gate: the town config check first, then the handshake.
+func (g *townStartGate) require() error {
+	if err := g.config(g.townRoot()); err != nil {
 		return err
 	}
-	return requireBDHandshake()
-}
-
-// resetBDHandshakeCache forgets a cached pass (tests).
-func resetBDHandshakeCache() {
-	bdHandshakeMu.Lock()
-	defer bdHandshakeMu.Unlock()
-	bdHandshakePassed = false
+	return g.requireHandshake()
 }
 
 // installSessionGate makes every agent-session start in this process run the
@@ -149,5 +156,5 @@ func resetBDHandshakeCache() {
 // name, and the daemon's own restarts. Only Execute installs it, so package
 // tests that call Start directly run ungated.
 func installSessionGate() {
-	bdgate.Set(requireTownStart)
+	bdgate.Set(processTownStartGate.require)
 }

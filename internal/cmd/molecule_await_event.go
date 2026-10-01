@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
@@ -299,7 +300,7 @@ func (r awaitEventRun) run(townRoot string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, eventDir, contextCheckInterval)
+	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), eventDir, contextCheckInterval)
 	if err != nil {
 		return fmt.Errorf("event watch failed: %w", err)
 	}
@@ -462,7 +463,7 @@ func (bo awaitSignalBackoff) eventTimeout(idleCycles int) (time.Duration, error)
 // after the given wall-clock duration. This allows the caller (a patrol agent) to
 // assess context usage before re-entering the wait, preventing unbounded context
 // accumulation during long idle periods.
-func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter time.Duration) (*AwaitEventResult, error) {
+func waitForEventFiles(ctx context.Context, clk clockwork.Clock, eventDir string, contextCheckAfter time.Duration) (*AwaitEventResult, error) {
 	// Check for already-pending events
 	events, err := readPendingEvents(eventDir)
 	if err != nil {
@@ -490,15 +491,15 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 	// the timer case never fires and existing behavior is preserved.
 	var contextYieldC <-chan time.Time
 	if contextCheckAfter > 0 {
-		t := time.NewTimer(contextCheckAfter)
+		t := clk.NewTimer(contextCheckAfter)
 		defer t.Stop()
-		contextYieldC = t.C
+		contextYieldC = t.Chan()
 	}
 
 	// Poll with 500ms interval until event appears or timeout.
 	// This is cross-platform (no inotifywait dependency) and the 500ms
 	// latency is acceptable for the event-driven patrol use case.
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := clk.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -527,7 +528,7 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 				}, nil
 			}
 			return &AwaitEventResult{Reason: "context-yield"}, nil
-		case <-ticker.C:
+		case <-ticker.Chan():
 			// Run readPendingEvents in a goroutine so ctx.Done() can
 			// always interrupt the wait. Without this, a slow/stuck
 			// read (e.g., stalled filesystem, sleeping laptop) would

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	gtconfig "github.com/steveyegge/gastown/internal/config"
@@ -404,7 +406,7 @@ func runDoltRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Brief pause to let port be released
-	time.Sleep(500 * time.Millisecond)
+	clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 
 	// Step 3: Check for databases before starting
 	databases, _ := doltserver.ListDatabases(townRoot)

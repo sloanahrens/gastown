@@ -954,12 +954,10 @@ func (f *fakeDoneSessionKiller) KillSessionWithProcessesExcluding(name string, e
 }
 
 func TestRetirePolecatSessionAfterDoneUsesPIDExclusion(t *testing.T) {
+	t.Parallel()
 	fake := &fakeDoneSessionKiller{}
-	old := newDoneSessionKiller
-	newDoneSessionKiller = func() doneSessionKiller { return fake }
-	t.Cleanup(func() { newDoneSessionKiller = old })
 
-	if err := retirePolecatSessionAfterDone(cmdTestRegistry(), "gastown", "nitro", 12345); err != nil {
+	if err := retirePolecatSessionAfterDone(fake, cmdTestRegistry(), "gastown", "nitro", 12345); err != nil {
 		t.Fatalf("retirePolecatSessionAfterDone: %v", err)
 	}
 	if fake.calls != 1 {
@@ -975,10 +973,8 @@ func TestRetirePolecatSessionAfterDoneUsesPIDExclusion(t *testing.T) {
 }
 
 func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
+	t.Parallel()
 	fake := &fakeDoneSessionKiller{}
-	old := newDoneSessionKiller
-	newDoneSessionKiller = func() doneSessionKiller { return fake }
-	t.Cleanup(func() { newDoneSessionKiller = old })
 
 	for _, tt := range []struct {
 		name        string
@@ -991,7 +987,7 @@ func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
 		{"missing pid", "gastown", "nitro", 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := retirePolecatSessionAfterDone(cmdTestRegistry(), tt.rigName, tt.polecatName, tt.pid); err != nil {
+			if err := retirePolecatSessionAfterDone(fake, cmdTestRegistry(), tt.rigName, tt.polecatName, tt.pid); err != nil {
 				t.Fatalf("retirePolecatSessionAfterDone: %v", err)
 			}
 		})
@@ -1006,6 +1002,7 @@ func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
 // together (gt-5g3e). The reverse direction matters too: the exits that still
 // leave work recoverable from the live session must keep it.
 func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		exitType    string
@@ -1022,11 +1019,8 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeDoneSessionKiller{}
-			old := newDoneSessionKiller
-			newDoneSessionKiller = func() doneSessionKiller { return fake }
-			t.Cleanup(func() { newDoneSessionKiller = old })
 
-			retired := retirePolecatSessionAfterFinalExit(cmdTestRegistry(), tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(fake, cmdTestRegistry(), tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
@@ -1141,16 +1135,14 @@ func TestCleanupStatusFromWorkState(t *testing.T) {
 // or cwd detection can no longer make gt done complete without recording
 // anything.
 func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
+	t.Parallel()
 	t.Run("undetectable environment still names the polecat", func(t *testing.T) {
 		// Neither GT_ROLE nor a recognizable working directory: role detection
 		// can contribute nothing.
-		t.Setenv("GT_ROLE", "")
-		t.Setenv("GT_RIG", "")
-		t.Setenv("GT_POLECAT", "")
-		t.Setenv("GT_CREW", "")
+		noEnv := func(string) string { return "" }
 		notATown := t.TempDir()
 
-		ctx, actor := resolveDoneAgentIdentity(notATown, notATown, "gastown", "flint")
+		ctx, actor := resolveDoneAgentIdentity(noEnv, notATown, notATown, "gastown", "flint")
 		if actor != "" {
 			t.Errorf("actor = %q, want empty: ActorString degrades to \"unknown\" for an undetected role, and that must not replace the validated sender on the \"[done]\" log line", actor)
 		}
@@ -1165,18 +1157,10 @@ func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
 	})
 
 	t.Run("detected identity wins and supplies the log actor", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "polecat")
-		t.Setenv("GT_RIG", "gastown")
-		t.Setenv("GT_POLECAT", "flint")
-		// GT_CREW is read before GT_POLECAT when GetRoleWithContext fills a
-		// simple role's identity from env. TestDeriveSessionName (costs_test.go)
-		// leaves GT_CREW=max in the process env — its subtests unset GT_* on
-		// entry but their cleanup only re-sets values that were non-empty when
-		// saved, so keys a subtest cleared are never restored to empty. Clearing
-		// it here keeps this test's result independent of what ran before it.
-		t.Setenv("GT_CREW", "")
+		env := map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "flint"}
+		getenv := func(k string) string { return env[k] }
 
-		ctx, actor := resolveDoneAgentIdentity(t.TempDir(), t.TempDir(), "ignored-rig", "ignored-polecat")
+		ctx, actor := resolveDoneAgentIdentity(getenv, t.TempDir(), t.TempDir(), "ignored-rig", "ignored-polecat")
 		if actor != "gastown/polecats/flint" {
 			t.Errorf("actor = %q, want %q", actor, "gastown/polecats/flint")
 		}

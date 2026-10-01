@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -344,7 +346,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		fmt.Println("Cleaning up orphaned Claude processes...")
 		cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
 
-		time.Sleep(500 * time.Millisecond)
+		clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 		respawned := verifyShutdown(townRegistry(), t, townRoot)
 		if len(respawned) > 0 {
 			fmt.Println()
@@ -788,7 +790,7 @@ func stopIdleMonitors(pids []int) int {
 			continue
 		}
 		// Brief wait for graceful exit
-		time.Sleep(200 * time.Millisecond)
+		clockwork.NewRealClock().Sleep(200 * time.Millisecond)
 		if !isProcessRunning(pid) {
 			stopped++
 			continue
@@ -868,7 +870,7 @@ func stopOrphanDoltServers(pids []int) int {
 		}
 		// Wait up to 3s for Dolt to flush and exit
 		for i := 0; i < 6; i++ {
-			time.Sleep(500 * time.Millisecond)
+			clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 			if !isProcessRunning(pid) {
 				break
 			}
