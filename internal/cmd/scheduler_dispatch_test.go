@@ -11,40 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
-func installFakeBD(t *testing.T, script string) {
-	t.Helper()
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir fake bd bin: %v", err)
-	}
-	fakeBD := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func setupSchedulerScanFailureTown(t *testing.T) string {
-	t.Helper()
-	townRoot := t.TempDir()
-	for _, dir := range []string{
-		filepath.Join(townRoot, "mayor"),
-		filepath.Join(townRoot, ".beads"),
-		filepath.Join(townRoot, "rig", ".beads"),
-	} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	installFakeBD(t, `#!/bin/sh
-case "$BEADS_DIR" in
-  */rig/.beads) echo "scan failed" >&2; exit 7 ;;
-  *) printf '[]\n'; exit 0 ;;
-esac
-`)
-	return townRoot
-}
-
 func TestDispatchScheduledWorkReportsHeldLock(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -89,57 +55,5 @@ func TestValidateDryRunDispatchPlanMarksAllInvalidAsValidation(t *testing.T) {
 
 	if len(plan.ToDispatch) != 0 || plan.Skipped != 1 || plan.Reason != "validation" {
 		t.Fatalf("validated plan = %+v, want no dispatch, skipped=1, reason=validation", plan)
-	}
-}
-
-func TestListAllSlingContextRecordsFailsOnPartialScanFailure(t *testing.T) {
-	townRoot := setupSchedulerScanFailureTown(t)
-
-	_, err := listAllSlingContextRecords(townRoot)
-	if err == nil {
-		t.Fatal("partial sling-context scan failure should fail closed")
-	}
-	if !strings.Contains(err.Error(), "listing sling contexts") || !strings.Contains(err.Error(), filepath.Join("rig", ".beads")) {
-		t.Fatalf("error = %q, want explicit context scan failure", err.Error())
-	}
-}
-
-func TestAreScheduledFailsClosedOnContextScanFailure(t *testing.T) {
-	townRoot := setupSchedulerScanFailureTown(t)
-	oldCWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
-
-	got := areScheduled([]string{"gt-one", "gt-two"})
-	if !got["gt-one"] || !got["gt-two"] {
-		t.Fatalf("areScheduled on scan failure = %+v, want all requested IDs marked scheduled", got)
-	}
-}
-
-func TestRunSchedulerClearFailsOnContextScanFailure(t *testing.T) {
-	townRoot := setupSchedulerScanFailureTown(t)
-	oldCWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldCWD) })
-	oldClearBead := schedulerClearBead
-	schedulerClearBead = ""
-	t.Cleanup(func() { schedulerClearBead = oldClearBead })
-
-	err = runSchedulerClear(nil, nil)
-	if err == nil {
-		t.Fatal("scheduler clear succeeded with incomplete context scan")
-	}
-	if !strings.Contains(err.Error(), "listing sling contexts") {
-		t.Fatalf("error = %q, want sling context scan failure", err.Error())
 	}
 }

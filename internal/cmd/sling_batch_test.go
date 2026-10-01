@@ -290,49 +290,6 @@ func TestSlingGenerateShortID_Unique(t *testing.T) {
 // createAutoConvoy tests
 // ---------------------------------------------------------------------------
 
-// setupTownWithBdStub creates a minimal town workspace and installs a bd
-// shell stub that logs all commands. Returns townRoot and logPath.
-func setupTownWithBdStub(t *testing.T, bdScript string) (townRoot, logPath string) {
-	t.Helper()
-
-	townRoot = t.TempDir()
-	// os.Getwd() after the os.Chdir below returns the kernel-resolved path
-	// on macOS (where the temp dir is a /private symlink) — resolve upfront
-	// so callers' comparisons agree with what code under test actually sees.
-	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
-		townRoot = resolved
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath = filepath.Join(townRoot, "bd.log")
-
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	return townRoot, logPath
-}
-
 // TestCreateAutoConvoy_BasicSuccess: the auto-convoy is created as
 // "Work: <title>" with an hq-cv-* ID, and then tracks the bead.
 func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {

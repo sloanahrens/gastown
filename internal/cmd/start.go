@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -216,7 +217,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 	shutdownMsg := "[SHUTDOWN] Gas Town is shutting down. Please save your state and update your handoff bead, then type /exit or wait to be terminated."
 	for _, sess := range gtSessions {
 		// Small delay then send the message
-		time.Sleep(constants.ShutdownNotifyDelay)
+		clockwork.NewRealClock().Sleep(constants.ShutdownNotifyDelay)
 		_ = t.SendKeys(sess, shutdownMsg) // best-effort notification
 	}
 
@@ -233,7 +234,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 		if remaining < 5 {
 			sleepTime = remaining
 		}
-		time.Sleep(time.Duration(sleepTime) * time.Second)
+		clockwork.NewRealClock().Sleep(time.Duration(sleepTime) * time.Second)
 	}
 
 	// Phase 4: Kill sessions in correct order

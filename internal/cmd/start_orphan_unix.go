@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -52,7 +53,7 @@ func cleanupOrphanedClaude(graceSecs int) {
 	// Wait for grace period
 	fmt.Printf("  %s Waiting %d seconds for processes to terminate gracefully...\n",
 		style.Dim.Render("⏳"), graceSecs)
-	time.Sleep(time.Duration(graceSecs) * time.Second)
+	clockwork.NewRealClock().Sleep(time.Duration(graceSecs) * time.Second)
 
 	// Check which processes are still alive and send SIGKILL
 	var killedCount, alreadyDeadCount int

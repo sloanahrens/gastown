@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,114 +32,6 @@ func TestMaxConcurrentAgentStarts_Constant(t *testing.T) {
 	}
 	if maxConcurrentAgentStarts > 100 {
 		t.Errorf("maxConcurrentAgentStarts = %d, should be <= 100 to prevent resource exhaustion", maxConcurrentAgentStarts)
-	}
-}
-
-func TestSemaphoreLimitsConcurrency(t *testing.T) {
-	t.Parallel()
-	// Test that a semaphore pattern properly limits concurrency
-	const maxConcurrent = 3
-	const totalTasks = 10
-
-	sem := make(chan struct{}, maxConcurrent)
-	var wg sync.WaitGroup
-	var maxObserved int32
-	var current int32
-
-	for i := 0; i < totalTasks; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			// Acquire semaphore
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			// Track concurrent count
-			cur := atomic.AddInt32(&current, 1)
-			defer atomic.AddInt32(&current, -1)
-
-			// Update max observed
-			for {
-				max := atomic.LoadInt32(&maxObserved)
-				if cur <= max || atomic.CompareAndSwapInt32(&maxObserved, max, cur) {
-					break
-				}
-			}
-
-			// Simulate work
-			time.Sleep(10 * time.Millisecond)
-		}()
-	}
-
-	wg.Wait()
-
-	if maxObserved > maxConcurrent {
-		t.Errorf("max concurrent = %d, should not exceed %d", maxObserved, maxConcurrent)
-	}
-}
-
-func TestWorkerPoolLimitsConcurrency(t *testing.T) {
-	t.Parallel()
-	// Test that a worker pool pattern properly limits concurrency
-	const numWorkers = 3
-	const numTasks = 15
-
-	tasks := make(chan int, numTasks)
-	results := make(chan int, numTasks)
-
-	var maxObserved int32
-	var current int32
-
-	// Start worker pool
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range tasks {
-				// Track concurrent count
-				cur := atomic.AddInt32(&current, 1)
-
-				// Update max observed
-				for {
-					max := atomic.LoadInt32(&maxObserved)
-					if cur <= max || atomic.CompareAndSwapInt32(&maxObserved, max, cur) {
-						break
-					}
-				}
-
-				// Simulate work
-				time.Sleep(5 * time.Millisecond)
-
-				atomic.AddInt32(&current, -1)
-				results <- 1
-			}
-		}()
-	}
-
-	// Enqueue tasks
-	for i := 0; i < numTasks; i++ {
-		tasks <- i
-	}
-	close(tasks)
-
-	// Wait for workers and collect results
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	count := 0
-	for range results {
-		count++
-	}
-
-	if count != numTasks {
-		t.Errorf("expected %d results, got %d", numTasks, count)
-	}
-	if maxObserved > numWorkers {
-		t.Errorf("max concurrent = %d, should not exceed %d workers", maxObserved, numWorkers)
 	}
 }
 

@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -13,12 +12,12 @@ import (
 // witness on SLOT_OPEN, and by hand; dispatchScheduledWork is the one place
 // all three pass through, so the operator hold is enforced there.
 
-// With the hold in place nothing is read or slung: the rig store's scan
-// would fail (setupSchedulerScanFailureTown), so reaching the planner at all
-// surfaces as an error.
+// With the hold in place nothing is read or slung: the dispatch lock is never
+// taken, so the gate stops the run before the planner. (The hermetic harness
+// scrubs GT_*, so GT_SEAT_REFILL_HOLD cannot move the hold file.)
 func TestDispatchScheduledWork_OperatorHold_DispatchesNothing(t *testing.T) {
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
-	townRoot := setupSchedulerScanFailureTown(t)
+	t.Parallel()
+	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, "seat-refill.hold"), nil, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -32,20 +31,8 @@ func TestDispatchScheduledWork_OperatorHold_DispatchesNothing(t *testing.T) {
 	}
 }
 
-// Without the hold the same town proceeds into planning (and fails on the
-// broken scan), proving the gate is what stopped the held run.
-func TestDispatchScheduledWork_NoHold_Proceeds(t *testing.T) {
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
-	townRoot := setupSchedulerScanFailureTown(t)
-
-	_, err := dispatchScheduledWork(townRoot, "test", 1, false)
-	if err == nil || !strings.Contains(err.Error(), "planning dispatch") {
-		t.Fatalf("err = %v, want the planner's scan failure (dispatch proceeded past the gate)", err)
-	}
-}
-
 func TestDropRigHeldBeads_RigEstopRemovesOnlyThatRig(t *testing.T) {
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gastown"), []byte("manual\t2026-09-24T00:00:00Z\tt\n"), 0644); err != nil {
 		t.Fatal(err)

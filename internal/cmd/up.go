@@ -164,6 +164,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// The daemon does this too, but gt up starts services before the daemon.
 	if patrolCfg := daemon.LoadPatrolConfig(townRoot); patrolCfg != nil {
 		for k, v := range patrolCfg.Env {
+			//testpolicy:allow prod-no-setenv — gt up publishes its environment to every server and agent it starts
 			os.Setenv(k, v)
 		}
 	}
@@ -299,12 +300,18 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// Dolt server runs on a remote machine (e.g., mini2 over Tailscale).
 		doltCfg := doltserver.DefaultConfig(townRoot)
 		portStr := fmt.Sprintf("%d", doltCfg.Port)
-		os.Setenv("GT_DOLT_PORT", portStr)
-		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-		os.Setenv("BEADS_DOLT_PORT", portStr)
+		publish := map[string]string{
+			"GT_DOLT_PORT":           portStr,
+			"BEADS_DOLT_SERVER_PORT": portStr,
+			"BEADS_DOLT_PORT":        portStr,
+		}
 		if doltCfg.Host != "" {
-			os.Setenv("GT_DOLT_HOST", doltCfg.Host)
-			os.Setenv("BEADS_DOLT_SERVER_HOST", doltCfg.Host)
+			publish["GT_DOLT_HOST"] = doltCfg.Host
+			publish["BEADS_DOLT_SERVER_HOST"] = doltCfg.Host
+		}
+		for k, v := range publish {
+			//testpolicy:allow prod-no-setenv — gt up publishes its environment to every server and agent it starts
+			os.Setenv(k, v)
 		}
 	}
 
@@ -391,9 +398,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 func applyConfiguredDoltEnv(townRoot string) {
 	doltEnv := config.ConfiguredDoltEnv(townRoot)
 	for _, key := range config.DoltEndpointEnvKeys {
+		//testpolicy:allow prod-no-setenv — gt up publishes its environment to every server and agent it starts
 		_ = os.Unsetenv(key)
 	}
 	for key, value := range doltEnv {
+		//testpolicy:allow prod-no-setenv — gt up publishes its environment to every server and agent it starts
 		_ = os.Setenv(key, value)
 	}
 }
@@ -700,6 +709,32 @@ func parseCrewStartupPreference(pref string, available []string) []string {
 // startPolecatsWithWork starts polecats that have pinned beads (work attached).
 // Returns list of started polecat names and map of errors.
 func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error) {
+	// Get polecat session manager
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return []string{}, map[string]error{}
+	}
+	polecatMgr := polecat.NewSessionManager(tmux.NewTmux(), r)
+	start := func(polecatName string) error {
+		return polecatMgr.Start(polecatName, polecat.SessionStartOptions{})
+	}
+	return startPolecatsWithWorkUsing(townRoot, rigName, polecatHasPinnedWork, start)
+}
+
+// polecatHasPinnedWork reports whether agentID has a pinned bead in the store
+// at polecatPath.
+func polecatHasPinnedWork(polecatPath, agentID string) bool {
+	pinnedBeads, err := beads.New(polecatPath).List(beads.ListOptions{
+		Status:   beads.StatusPinned,
+		Assignee: agentID,
+		Priority: -1,
+	})
+	return err == nil && len(pinnedBeads) > 0
+}
+
+// startPolecatsWithWorkUsing is startPolecatsWithWork with the pinned-work
+// check and the session start passed in.
+func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) bool, start func(polecatName string) error) ([]string, map[string]error) {
 	started := []string{}
 	errors := map[string]error{}
 
@@ -712,14 +747,6 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 		// No polecats directory
 		return started, errors
 	}
-
-	// Get polecat session manager
-	_, r, err := getRig(rigName)
-	if err != nil {
-		return started, errors
-	}
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewSessionManager(t, r)
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -744,19 +771,12 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 
 		// Check if this polecat has a pinned bead (work attached)
 		agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		b := beads.New(polecatPath)
-		pinnedBeads, err := b.List(beads.ListOptions{
-			Status:   beads.StatusPinned,
-			Assignee: agentID,
-			Priority: -1,
-		})
-		if err != nil || len(pinnedBeads) == 0 {
-			// No pinned beads - skip
+		if !hasWork(polecatPath, agentID) {
 			continue
 		}
 
 		// This polecat has work - start it using SessionManager
-		if err := polecatMgr.Start(polecatName, polecat.SessionStartOptions{}); err != nil {
+		if err := start(polecatName); err != nil {
 			if err == polecat.ErrSessionRunning {
 				started = append(started, polecatName)
 			} else {

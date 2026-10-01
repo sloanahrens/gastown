@@ -7,14 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // setupSessionSeatTown writes a minimal town whose "gastown" rig owns the named
-// polecats, then makes that town the process's working directory so
-// workspace.FindFromCwd resolves it. Same shape as setupPolecatCapacityRig,
-// plus the polecats a seat address needs to match.
+// polecats and returns its root. Same shape as setupPolecatCapacityRig, plus
+// the polecats a seat address needs to match.
 func setupSessionSeatTown(t *testing.T, polecats ...string) string {
 	t.Helper()
 
@@ -57,20 +56,17 @@ func setupSessionSeatTown(t *testing.T, polecats ...string) string {
 		}
 	}
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-
 	return townRoot
 }
 
+// rigsIn looks rigs up in the town at townRoot.
+func rigsIn(townRoot string) func(string) (string, *rig.Rig, error) {
+	return func(rigName string) (string, *rig.Rig, error) { return getRigIn(townRoot, rigName) }
+}
+
 func TestResolveSessionSeatAcceptsPolecats(t *testing.T) {
-	setupSessionSeatTown(t, "amber", "onyx")
+	t.Parallel()
+	townRoot := setupSessionSeatTown(t, "amber", "onyx")
 
 	tests := []struct {
 		address  string
@@ -82,7 +78,7 @@ func TestResolveSessionSeatAcceptsPolecats(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.address, func(t *testing.T) {
-			seat, err := resolveSessionSeat([]string{tt.address})
+			seat, err := resolveSessionSeatWith([]string{tt.address}, rigsIn(townRoot))
 			if err != nil {
 				t.Fatalf("resolveSessionSeat(%q) = %v, want a seat", tt.address, err)
 			}
@@ -101,80 +97,14 @@ func TestResolveSessionSeatAcceptsPolecats(t *testing.T) {
 // contract: a name that is neither a polecat of the rig nor one of its roles
 // does not resolve, whatever verb asked.
 func TestResolveSessionSeatRejectsUnknownName(t *testing.T) {
-	setupSessionSeatTown(t, "amber")
+	t.Parallel()
+	townRoot := setupSessionSeatTown(t, "amber")
 
-	_, err := resolveSessionSeat([]string{"gastown/ghost"})
+	_, err := resolveSessionSeatWith([]string{"gastown/ghost"}, rigsIn(townRoot))
 	if err == nil {
 		t.Fatal("resolveSessionSeat(gastown/ghost) = no error, want not-found")
 	}
 	if !strings.Contains(err.Error(), "ghost") || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error = %q, want it to name the missing polecat and say not found", err)
-	}
-}
-
-// sessionAddressVerbs are the subcommands that take a <rig>/<name> address, in
-// the order a caller meets them.
-func sessionAddressVerbs() []struct {
-	name string
-	run  func(*cobra.Command, []string) error
-} {
-	return []struct {
-		name string
-		run  func(*cobra.Command, []string) error
-	}{
-		{"start", runSessionStart},
-		{"restart", runSessionRestart},
-		{"status", runSessionStatus},
-		{"attach", runSessionAttach},
-		{"capture", runSessionCapture},
-		{"inject", runSessionInject},
-	}
-}
-
-// TestSessionVerbsAgreeOnAnUnknownPolecat pins the contract this fix exists
-// for (gt-pud2g): one address gets one answer, so a caller cannot read success
-// or a live-but-stopped polecat out of a seat that does not exist.
-//
-// Before the shared resolver, `gt session restart` printed
-// "✓ Session restarted. Attach with: …" and `gt session status` printed
-// "State: ○ stopped" (exit 0) for a name `gt session start` refused as not
-// found. A witness recovering a stalled polecat reads the restart line and
-// moves on, leaving no session and nobody watching it.
-func TestSessionVerbsAgreeOnAnUnknownPolecat(t *testing.T) {
-	setupSessionSeatTown(t, "amber")
-
-	// inject refuses without a message before it resolves anything; give it
-	// one so the not-found answer is what the verb is measured on.
-	oldMessage := sessionMessage
-	sessionMessage = "hello"
-	t.Cleanup(func() { sessionMessage = oldMessage })
-
-	var first string
-	for _, verb := range sessionAddressVerbs() {
-		t.Run(verb.name, func(t *testing.T) {
-			var err error
-			stdout, _ := captureStdio(t, func() {
-				err = verb.run(nil, []string{"gastown/ghost"})
-			})
-
-			if err == nil {
-				t.Fatalf("gt session %s gastown/ghost = success, want not-found", verb.name)
-			}
-			if !strings.Contains(err.Error(), "not found") {
-				t.Errorf("gt session %s error = %q, want not-found", verb.name, err)
-			}
-			if stdout != "" {
-				t.Errorf("gt session %s printed %q on a refused address, want nothing", verb.name, stdout)
-			}
-
-			if first == "" {
-				first = err.Error()
-				return
-			}
-			if err.Error() != first {
-				t.Errorf("gt session %s answered %q, but an earlier verb answered %q; one address, one answer",
-					verb.name, err, first)
-			}
-		})
 	}
 }

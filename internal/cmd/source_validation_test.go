@@ -1,14 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestRoutedIssueBeadsUsesTownRoutesForCustomPrefix(t *testing.T) {
@@ -34,11 +35,64 @@ func TestSourceRouteContextNamesCurrentAndRoutedDB(t *testing.T) {
 	}
 }
 
-func TestResolveSubmitSourceIssueIgnoresCurrentRigMirror(t *testing.T) {
-	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	installSubmitSourceBDStub(t, currentBeadsDir, ownerBeadsDir, false)
+// submitSourceBD answers bd the way the two stores in a routed town do: the
+// current rig's store holds a mirror of bd-source, the owner's store the real
+// one (or nothing, when ownerMissing). Every call is recorded as
+// "<BEADS_DIR>\t<args>".
+type submitSourceBD struct {
+	currentBeadsDir, ownerBeadsDir string
+	ownerMissing                   bool
 
-	source, err := resolveSubmitSourceIssue(workDir, "bd-source")
+	mu    sync.Mutex
+	calls []string
+}
+
+type submitSourceBDExit int
+
+func (e submitSourceBDExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e submitSourceBDExit) ExitCode() int { return int(e) }
+
+func (f *submitSourceBD) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+	args := c.Args
+	if len(args) > 0 && args[0] == "--allow-stale" {
+		args = args[1:]
+	}
+	beadsDir := ""
+	for _, kv := range c.Env {
+		if v, ok := strings.CutPrefix(kv, "BEADS_DIR="); ok {
+			beadsDir = v
+		}
+	}
+	f.mu.Lock()
+	f.calls = append(f.calls, beadsDir+"\t"+strings.Join(args, " "))
+	f.mu.Unlock()
+	switch {
+	case len(args) >= 2 && args[0] == "show" && args[1] == "bd-source":
+		switch {
+		case beadsDir == f.currentBeadsDir:
+			return []byte(`[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task"}]`), nil, nil
+		case beadsDir == f.ownerBeadsDir && !f.ownerMissing:
+			return []byte(`[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task"}]`), nil, nil
+		}
+		return nil, []byte("Issue not found in " + beadsDir), submitSourceBDExit(1)
+	case len(args) >= 1 && args[0] == "close":
+		return nil, nil, nil
+	}
+	return nil, []byte("unexpected bd command: " + strings.Join(args, " ")), submitSourceBDExit(1)
+}
+
+func (f *submitSourceBD) log() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return strings.Join(f.calls, "\n") + "\n"
+}
+
+func TestResolveSubmitSourceIssueIgnoresCurrentRigMirror(t *testing.T) {
+	t.Parallel()
+	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
+	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir}
+
+	source, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
 	if err != nil {
 		t.Fatalf("resolveSubmitSourceIssue: %v", err)
 	}
@@ -51,10 +105,11 @@ func TestResolveSubmitSourceIssueIgnoresCurrentRigMirror(t *testing.T) {
 }
 
 func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
+	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	installSubmitSourceBDStub(t, currentBeadsDir, ownerBeadsDir, true)
+	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir, ownerMissing: true}
 
-	_, err := resolveSubmitSourceIssue(workDir, "bd-source")
+	_, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
 	if err == nil {
 		t.Fatal("resolveSubmitSourceIssue succeeded, want routed owner lookup failure")
 	}
@@ -67,10 +122,11 @@ func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
 }
 
 func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
+	t.Parallel()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	bd := &submitSourceBD{currentBeadsDir: currentBeadsDir, ownerBeadsDir: ownerBeadsDir}
 
-	source, err := resolveSubmitSourceIssue(workDir, "bd-source")
+	source, err := resolveSubmitSourceIssueRun(workDir, "bd-source", bd.run)
 	if err != nil {
 		t.Fatalf("resolveSubmitSourceIssue: %v", err)
 	}
@@ -81,7 +137,7 @@ func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 		t.Fatalf("routed source close: %v", err)
 	}
 
-	log := readSubmitSourceBDLog(t, logPath)
+	log := bd.log()
 	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
 	assertBDLogContains(t, log, ownerBeadsDir, "close bd-source")
 	assertBDLogNotContains(t, log, currentBeadsDir, "close bd-source")
@@ -130,178 +186,6 @@ func setupRoutedSourceTestTown(t *testing.T) (workDir, currentBeadsDir, ownerBea
 
 func routedSourceTestTownRoot(workDir string) string {
 	return filepath.Clean(filepath.Join(workDir, "..", "..", "..", ".."))
-}
-
-func setupRoutedSubmitCommandTown(t *testing.T, workDir string) {
-	t.Helper()
-	townRoot := routedSourceTestTownRoot(workDir)
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	if err := config.SaveRigsConfig(rigsPath, &config.RigsConfig{
-		Version: config.CurrentRigsVersion,
-		Rigs: map[string]config.RigEntry{
-			"gastown": {GitURL: "file://test-gastown"},
-		},
-	}); err != nil {
-		t.Fatalf("save rigs config: %v", err)
-	}
-}
-
-func setupRoutedSubmitGitRepo(t *testing.T, workDir string, pushBranch bool) string {
-	t.Helper()
-	remote := t.TempDir()
-	runGitForMQSubmitTest(t, remote, "init", "--bare")
-	runGitForMQSubmitTest(t, workDir, "init")
-	runGitForMQSubmitTest(t, workDir, "config", "user.email", "test@example.com")
-	runGitForMQSubmitTest(t, workDir, "config", "user.name", "Test User")
-	runGitForMQSubmitTest(t, workDir, "remote", "add", "origin", remote)
-	writeMQSubmitTestFile(t, workDir, ".gitignore", ".beads/\n.runtime/\n")
-	writeMQSubmitTestFile(t, workDir, "file.txt", "main\n")
-	runGitForMQSubmitTest(t, workDir, "add", ".gitignore", "file.txt")
-	runGitForMQSubmitTest(t, workDir, "commit", "-m", "main")
-	runGitForMQSubmitTest(t, workDir, "branch", "-M", "main")
-	runGitForMQSubmitTest(t, workDir, "push", "-u", "origin", "main")
-	branch := "feature/routed-submit"
-	runGitForMQSubmitTest(t, workDir, "checkout", "-b", branch)
-	writeMQSubmitTestFile(t, workDir, "file.txt", "feature\n")
-	runGitForMQSubmitTest(t, workDir, "commit", "-am", "feature")
-	if pushBranch {
-		runGitForMQSubmitTest(t, workDir, "push", "origin", branch)
-	}
-	return branch
-}
-
-func installSubmitSourceBDStub(t *testing.T, currentBeadsDir, ownerBeadsDir string, ownerMissing bool) {
-	t.Helper()
-	binDir := t.TempDir()
-	ownerCase := fmt.Sprintf(`
-if [ "$BEADS_DIR" = %q ]; then
-  echo '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task"}]'
-  exit 0
-fi`, ownerBeadsDir)
-	if ownerMissing {
-		ownerCase = fmt.Sprintf(`
-if [ "$BEADS_DIR" = %q ]; then
-  echo "Issue not found in owner" >&2
-  exit 1
-fi`, ownerBeadsDir)
-	}
-	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-if [ "$1" = "version" ]; then
-  echo "bd stub"
-  exit 0
-fi
-if [ "$1" = "show" ] && [ "$2" = "bd-source" ]; then
-  if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task"}]'
-    exit 0
-  fi
-%s
-  echo "Issue not found in $BEADS_DIR" >&2
-  exit 1
-fi
-echo "unexpected bd command: $*" >&2
-exit 1
-`, currentBeadsDir, ownerCase)
-	path := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	beads.ResetBdAllowStaleCacheForTest()
-}
-
-func installSubmitSourceBDRecorder(t *testing.T, currentBeadsDir, ownerBeadsDir string) string {
-	t.Helper()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "--allow-stale" ]; then
-  shift
-fi
-if [ "$1" = "version" ]; then
-  echo "bd stub"
-  exit 0
-fi
-printf '%%s\t%%s\n' "$BEADS_DIR" "$*" >> %q
-if [ "$1" = "update" ]; then
-  if [ -n "$GT_TEST_BD_UPDATE_FAILS" ]; then
-    echo "Error: database not found: gastown" >&2
-    exit 1
-  fi
-  case "$*" in *--add-label=gt:ready-to-land*) : > %q.ready ;; esac
-  exit 0
-fi
-if [ "$1" = "show" ] && [ "$2" = "gt-gastown-polecat-refuge" ]; then
-  echo '[{"id":"gt-gastown-polecat-refuge","title":"Polecat refuge","status":"open","issue_type":"agent","labels":["gt:agent","done-intent:COMPLETED:1738972800"]}]'
-  exit 0
-fi
-labels='[]'
-if [ -e %q.ready ]; then labels='["gt:ready-to-land"]'; fi
-if [ "$1" = "show" ] && [ "$2" = "bd-source" ]; then
-  if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
-    exit 0
-  fi
-  if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
-    exit 0
-  fi
-  echo "Issue not found in $BEADS_DIR" >&2
-  exit 1
-fi
-if [ "$1" = "show" ] && [ "$2" = "gt-mr" ]; then
-  echo '[{"id":"gt-mr","title":"Merge: bd-source","status":"open","priority":1,"issue_type":"task","labels":["gt:merge-request"],"description":"branch: feature/routed-submit\\ntarget: main\\nsource_issue: bd-source\\nrig: gastown"}]'
-  exit 0
-fi
-if [ "$1" = "list" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "sql" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "create" ]; then
-  if [ -n "$GT_TEST_BD_CREATE_FAILS" ]; then
-    echo "Error: database not found: gastown" >&2
-    exit 1
-  fi
-  echo '{"id":"gt-mr","title":"Merge: bd-source","status":"open","priority":1,"issue_type":"task","labels":["gt:merge-request"]}'
-  exit 0
-fi
-if [ "$1" = "comments" ] && [ "$2" = "add" ]; then
-  exit 0
-fi
-if [ "$1" = "close" ]; then
-  if [ -n "$GT_TEST_BD_CLOSE_FAILS" ]; then
-    echo "Error: database not found: gastown" >&2
-    exit 1
-  fi
-  exit 0
-fi
-echo "unexpected bd command: $*" >&2
-exit 1
-`, logPath, logPath, logPath, currentBeadsDir, ownerBeadsDir)
-	path := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd recorder: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-	return logPath
-}
-
-func readSubmitSourceBDLog(t *testing.T, logPath string) string {
-	t.Helper()
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd recorder log: %v", err)
-	}
-	return string(log)
 }
 
 func assertBDLogContains(t *testing.T, log, beadsDir, args string) {

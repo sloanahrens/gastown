@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,50 +132,18 @@ func TestClearParkedSession(t *testing.T) {
 // session creation, so an unskipped polecat lands in the error map — that is
 // the control proving this test can see a start being attempted.
 func TestStartPolecatsWithWorkSkipsParkedPolecat(t *testing.T) {
-	townRoot := setupTestTownForDotDir(t)
+	t.Parallel()
+	townRoot := t.TempDir()
 	rigName := "gastown"
 	rigPath := filepath.Join(townRoot, rigName)
-
-	addRigEntry(t, townRoot, rigName)
 
 	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "garnet"), 0755); err != nil {
 		t.Fatalf("mkdir polecat: %v", err)
 	}
-
-	binDir := t.TempDir()
-	writeScript(t, binDir, "bd", `#!/bin/sh
-cmd="$1"
-case "$cmd" in
-  list)
-    echo '[{"id":"gt-1","status":"pinned"}]'
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`)
-	writeScript(t, binDir, "tmux", `#!/bin/sh
-case "$1" in
-  has-session)
-    echo "can't find session" 1>&2
-    exit 1
-    ;;
-  *)
-    echo "tmux: refused by test" 1>&2
-    exit 1
-    ;;
-esac
-`)
-	t.Setenv("PATH", fmt.Sprintf("%s:%s", binDir, os.Getenv("PATH")))
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir town root: %v", err)
+	hasWork := func(string, string) bool { return true }
+	refused := func(string) error { return errors.New("tmux: refused by test") }
+	startPolecatsWithWork := func(townRoot, rigName string) ([]string, map[string]error) {
+		return startPolecatsWithWorkUsing(townRoot, rigName, hasWork, refused)
 	}
 
 	// Control: unparked, the polecat is started and the failure reaches the

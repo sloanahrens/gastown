@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
@@ -1648,7 +1649,7 @@ func hookBeadWithRetryVia(run beads.BDRunner, verify func(beadID string) (*beadI
 			if attempt < maxRetries {
 				backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
 				fmt.Printf("%s Hook attempt %d failed, retrying in %v...\n", style.Warning.Render("⚠"), attempt, backoff)
-				time.Sleep(backoff)
+				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
 			return fmt.Errorf("hooking bead after %d attempts: %w", maxRetries, err)
@@ -1664,7 +1665,7 @@ func hookBeadWithRetryVia(run beads.BDRunner, verify func(beadID string) (*beadI
 			if attempt < maxRetries {
 				backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
 				fmt.Printf("%s Hook verification failed, retrying in %v...\n", style.Warning.Render("⚠"), backoff)
-				time.Sleep(backoff)
+				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
 			return fmt.Errorf("verifying hook after %d attempts: %w", maxRetries, lastErr)
@@ -1676,7 +1677,7 @@ func hookBeadWithRetryVia(run beads.BDRunner, verify func(beadID string) (*beadI
 			if attempt < maxRetries {
 				backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
 				fmt.Printf("%s %v, retrying in %v...\n", style.Warning.Render("⚠"), lastErr, backoff)
-				time.Sleep(backoff)
+				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
 			return fmt.Errorf("hook failed after %d attempts: %w", maxRetries, lastErr)

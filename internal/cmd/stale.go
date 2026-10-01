@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func runStale(cmd *cobra.Command, args []string) error {
 		return outputStaleJSON(output)
 	}
 
-	return outputStaleText(output)
+	return outputStaleText(os.Stdout, output)
 }
 
 func staleQuietExitCode(info *version.StaleBinaryInfo) int {
@@ -128,37 +129,37 @@ func outputStaleJSON(output StaleOutput) error {
 	return enc.Encode(output)
 }
 
-func outputStaleText(output StaleOutput) error {
+func outputStaleText(w io.Writer, output StaleOutput) error {
 	if output.Skipped {
-		fmt.Printf("%s Binary staleness check skipped\n", style.Dim.Render("•"))
-		fmt.Printf("  %s\n", output.SkipReason)
-		fmt.Printf("  Binary: %s\n", version.ShortCommit(output.BinaryCommit))
+		fmt.Fprintf(w, "%s Binary staleness check skipped\n", style.Dim.Render("•"))
+		fmt.Fprintf(w, "  %s\n", output.SkipReason)
+		fmt.Fprintf(w, "  Binary: %s\n", version.ShortCommit(output.BinaryCommit))
 		return nil
 	}
 	if output.Stale {
-		fmt.Printf("%s Binary is stale\n", style.Warning.Render("⚠"))
-		fmt.Printf("  Binary:   %s\n", version.ShortCommit(output.BinaryCommit))
-		fmt.Printf("  Build ref (%s): %s\n", output.CompareRef, version.ShortCommit(output.RepoCommit))
+		fmt.Fprintf(w, "%s Binary is stale\n", style.Warning.Render("⚠"))
+		fmt.Fprintf(w, "  Binary:   %s\n", version.ShortCommit(output.BinaryCommit))
+		fmt.Fprintf(w, "  Build ref (%s): %s\n", output.CompareRef, version.ShortCommit(output.RepoCommit))
 		if output.CommitsBehind > 0 {
-			fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind %s)", output.CommitsBehind, output.CompareRef)))
+			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind %s)", output.CommitsBehind, output.CompareRef)))
 		}
 		if !output.Forward {
-			fmt.Printf("  %s %s is NOT a descendant of binary commit (diverged or older)\n", style.Error.Render("✗"), output.CompareRef)
+			fmt.Fprintf(w, "  %s %s is NOT a descendant of binary commit (diverged or older)\n", style.Error.Render("✗"), output.CompareRef)
 		}
 		if !output.OnMainBranch {
-			fmt.Printf("  %s source worktree is not on a build branch (compared against %s)\n", style.Warning.Render("⚠"), output.CompareRef)
+			fmt.Fprintf(w, "  %s source worktree is not on a build branch (compared against %s)\n", style.Warning.Render("⚠"), output.CompareRef)
 		}
 		if output.SafeToRebuild {
-			fmt.Printf("\n  Safe to rebuild: run 'make install'\n")
+			fmt.Fprintf(w, "\n  Safe to rebuild: run 'make install'\n")
 		} else {
-			fmt.Printf("\n  %s NOT safe for automated rebuild (forward=%v, build_branch=%v)\n",
+			fmt.Fprintf(w, "\n  %s NOT safe for automated rebuild (forward=%v, build_branch=%v)\n",
 				style.Error.Render("✗"), output.Forward, output.OnMainBranch)
 		}
 	} else {
-		fmt.Printf("%s Binary is fresh\n", style.Success.Render("✓"))
-		fmt.Printf("  Commit: %s\n", version.ShortCommit(output.BinaryCommit))
+		fmt.Fprintf(w, "%s Binary is fresh\n", style.Success.Render("✓"))
+		fmt.Fprintf(w, "  Commit: %s\n", version.ShortCommit(output.BinaryCommit))
 		if output.CompareRef != "" {
-			fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(compared against %s)", output.CompareRef)))
+			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(compared against %s)", output.CompareRef)))
 		}
 	}
 	return nil

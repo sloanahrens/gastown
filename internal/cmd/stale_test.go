@@ -17,6 +17,7 @@ import (
 // persistentPreRun is not tripped. Run targeted (`-run TestOutputStaleText`)
 // to avoid sibling tests that do execute commands.
 func TestOutputStaleText(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		output  StaleOutput
@@ -109,8 +110,9 @@ func TestOutputStaleText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var err error
-			out := captureStdout(t, func() { err = outputStaleText(tt.output) })
+			var buf strings.Builder
+			err := outputStaleText(&buf, tt.output)
+			out := buf.String()
 			if err != nil {
 				t.Fatalf("outputStaleText returned error: %v", err)
 			}

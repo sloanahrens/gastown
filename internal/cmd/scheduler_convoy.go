@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
@@ -390,7 +391,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 
 		// Brief delay between spawns to avoid Dolt contention
 		if i < len(jobs)-1 {
-			time.Sleep(500 * time.Millisecond)
+			clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 		}
 	}
 
