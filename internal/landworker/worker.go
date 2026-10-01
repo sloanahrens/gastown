@@ -97,8 +97,16 @@ type Worker struct {
 	// LandTimeout bounds one landing (gate included); 0 means
 	// DefaultLandTimeout.
 	LandTimeout time.Duration
-	Logf        func(format string, args ...any)
-	Now         func() time.Time
+	// Draining, when set and true, stops the worker from starting anything
+	// new: the landing in flight finishes, no further ready bead is claimed
+	// and the watch is skipped. The daemon sets it while an upgrade restart
+	// is pending, so the restart finds an idle moment (gt-nxvpe).
+	Draining func() bool
+	// Active is told which bead is being landed (and "" when it ends), so
+	// the daemon can say what a pending restart is waiting for.
+	Active func(beadID string)
+	Logf   func(format string, args ...any)
+	Now    func() time.Time
 
 	state map[string]*beadState
 	// pendingRepair holds landings whose record was left incomplete; the
@@ -165,8 +173,14 @@ func (w *Worker) bead(id string) *beadState {
 // done.
 func (w *Worker) Pass(ctx context.Context) Report {
 	rep := w.landReady(ctx)
-	w.watchTarget(ctx)
+	if !w.draining() {
+		w.watchTarget(ctx)
+	}
 	return rep
+}
+
+func (w *Worker) draining() bool {
+	return w.Draining != nil && w.Draining()
 }
 
 func (w *Worker) landReady(ctx context.Context) Report {
@@ -199,6 +213,10 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	sortOldestFirst(issues)
 	for _, issue := range issues {
 		if ctx.Err() != nil {
+			return rep
+		}
+		// Checked before each claim, never mid-landing.
+		if w.draining() {
 			return rep
 		}
 		if issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() || !beads.HasLabel(issue, land.LabelReadyToLand) {
@@ -265,6 +283,10 @@ func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
 
 // process resolves what to land for issue and lands it.
 func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
+	if w.Active != nil {
+		w.Active(issue.ID)
+		defer w.Active("")
+	}
 	work, ok := w.resolveWork(issue)
 	if !ok {
 		w.waitForHuman(issue.ID, "no-request", fmt.Sprintf("Landing worker: %s carries %s but neither a READY TO LAND block nor a \"Submitted for landing: <branch> @ <sha>\" comment says what to land. Leaving the label for a human.", issue.ID, land.LabelReadyToLand))

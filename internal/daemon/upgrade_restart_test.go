@@ -555,3 +555,69 @@ func TestExitForUpgradeIfRequested(t *testing.T) {
 		})
 	}
 }
+
+// gt-nxvpe: a pending restart drains the landing workers and fires at the
+// first moment no pass is in flight.
+func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+
+	// No marker: passes continue back to back.
+	if d.upgradeRestartPending.Load() {
+		t.Fatal("drain on with no marker")
+	}
+	d.checkUpgradeRestart(time.Now())
+	if d.upgradeRestartPending.Load() {
+		t.Fatal("drain on with no marker")
+	}
+
+	d.landingPasses.Add(1)
+	d.landingBeads.Store("gastown", "gt-x")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+	now := time.Now()
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a landing pass")
+	}
+	if !d.upgradeRestartPending.Load() {
+		t.Fatal("pending restart must drain the landing workers")
+	}
+	if d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
+		t.Fatal("restarted under a landing pass")
+	}
+	if got := strings.Count(logs.String(), "waiting for landing pass gt-x"); got != 1 {
+		t.Fatalf("wait line logged %d times, want once per state change:\n%s", got, logs.String())
+	}
+	if got := strings.Count(logs.String(), "upgrade-restart: draining: no new landing pass until restart"); got != 1 {
+		t.Fatalf("draining line logged %d times:\n%s", got, logs.String())
+	}
+
+	// The pass ends: restart at once.
+	d.landingBeads.Delete("gastown")
+	d.landingPasses.Add(-1)
+	if !d.checkUpgradeRestart(now.Add(4 * time.Minute)) {
+		t.Fatal("must restart once no pass is in flight")
+	}
+}
+
+func TestUpgradeDrainEndsWhenMarkerIsGone(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	d.landingPasses.Add(1)
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+	d.checkUpgradeRestart(time.Now())
+	if err := os.Remove(restartMarkerPath(d.config.TownRoot)); err != nil {
+		t.Fatal(err)
+	}
+	d.checkUpgradeRestart(time.Now())
+	if d.upgradeRestartPending.Load() {
+		t.Fatal("drain must end with the marker")
+	}
+}

@@ -520,3 +520,68 @@ func TestPassOMRejectionCommentCarriesTheVerdict(t *testing.T) {
 		}
 	}
 }
+
+// gt-nxvpe: while the daemon drains for an upgrade restart, a pass claims
+// nothing new.
+func TestPassDrainingStartsNoLanding(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-a")
+	h.w.Draining = func() bool { return true }
+	h.w.Pass(context.Background())
+	if len(h.lander.calls) != 0 {
+		t.Fatalf("landed while draining: %v", h.lander.calls)
+	}
+	if h.remote.tipCalls != 0 {
+		t.Fatalf("watched the target while draining: %d tip reads", h.remote.tipCalls)
+	}
+}
+
+// The landing in flight finishes; the next ready bead is not claimed.
+func TestPassDrainFinishesCurrentLandingOnly(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-a")
+	h.seedReady(t, "gt-b")
+	draining := false
+	h.w.Draining = func() bool { return draining }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		draining = true // the restart marker appears mid-landing
+		return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}, nil
+	}
+	rep := h.w.Pass(context.Background())
+	if len(h.lander.calls) != 1 || rep.Landed != 1 {
+		t.Fatalf("calls=%d landed=%d, want exactly the in-flight landing", len(h.lander.calls), rep.Landed)
+	}
+	// After the restart the next pass resumes.
+	draining = false
+	h.w.Pass(context.Background())
+	if len(h.lander.calls) != 2 {
+		t.Fatalf("calls=%d, want the second bead landed once draining ends", len(h.lander.calls))
+	}
+}
+
+// No restart pending: passes land back to back.
+func TestPassWithoutDrainLandsEverything(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-a")
+	h.seedReady(t, "gt-b")
+	h.w.Draining = func() bool { return false }
+	h.w.Pass(context.Background())
+	if len(h.lander.calls) != 2 {
+		t.Fatalf("calls=%d, want 2", len(h.lander.calls))
+	}
+}
+
+func TestPassReportsActiveBead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-a")
+	var seen []string
+	h.w.Active = func(id string) { seen = append(seen, id) }
+	h.w.Pass(context.Background())
+	if strings.Join(seen, ",") != "gt-a," {
+		t.Fatalf("Active calls = %q, want gt-a then cleared", seen)
+	}
+}
