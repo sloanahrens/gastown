@@ -399,7 +399,7 @@ func TestArgsAreReadOnlyForMailCommands(t *testing.T) {
 // the real subprocess against an ambient environment that disagrees).
 func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(beads.BDCall) (string, string, int) { return "[]\n", "", 0 }}
+	bd := &bdScript{answer: func(bdCall) (string, string, int) { return "[]\n", "", 0 }}
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -445,7 +445,7 @@ func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 // bd's stderr.
 func TestRunBdCommandRetriesWithoutFlatAndMapsErrors(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		for _, a := range c.Args {
 			if a == "--flat" {
 				return "", "Error: unknown flag: --flat", 1
