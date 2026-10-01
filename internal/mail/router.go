@@ -45,13 +45,32 @@ type Router struct {
 	prefixes *session.PrefixRegistry
 	// bd runs bd for the router and the mailboxes it opens; nil is the bd
 	// on PATH.
-	bd beads.BDRunner
+	bd bdRunner
+	// town answers the router's reads of the town's channel and agent
+	// beads; nil is bd in the town root.
+	town townBeads
 
 	// IdleNotifyTimeout controls how long to wait for a session to become
 	// idle before falling back to a queued nudge. Zero uses the default.
 	IdleNotifyTimeout time.Duration
 
 	notifyWg sync.WaitGroup // tracks in-flight async notifications
+}
+
+// townBeads is what the router reads from the town's beads (channel beads
+// and agents' notification levels), plus channel retention. *beads.Beads implements it.
+type townBeads interface {
+	GetChannelBead(name string) (*beads.Issue, *beads.ChannelFields, error)
+	GetAgentNotificationLevel(id string) (string, error)
+	EnforceChannelRetention(name string) error
+}
+
+// townBeads is r.town, or bd in the town root.
+func (r *Router) townBeads() townBeads {
+	if r.town != nil {
+		return r.town
+	}
+	return beads.NewWithBeadsDir(r.townRoot, "")
 }
 
 // notifyTmux is the tmux surface notifyRecipient drives. *tmux.Tmux
@@ -1382,8 +1401,8 @@ func (r *Router) sendToChannel(msg *Message) error {
 	if r.townRoot == "" {
 		return fmt.Errorf("town root not set, cannot send to channel: %s", channelName)
 	}
-	b := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
-	_, fields, err := b.GetChannelBead(channelName)
+	town := r.townBeads()
+	_, fields, err := town.GetChannelBead(channelName)
 	if err != nil {
 		return fmt.Errorf("getting channel %s: %w", channelName, err)
 	}
@@ -1453,7 +1472,7 @@ func (r *Router) sendToChannel(msg *Message) error {
 	}
 
 	// Enforce channel retention policy (on-write cleanup)
-	_ = b.EnforceChannelRetention(channelName)
+	_ = town.EnforceChannelRetention(channelName)
 
 	// Fan-out delivery: send a copy to each subscriber's inbox
 	if len(fields.Subscribers) > 0 {
@@ -1857,8 +1876,7 @@ func (r *Router) isSessionMuted(sessionID string) bool {
 	if r.townRoot == "" || sessionID == "" || sessionID == session.OverseerSessionName() {
 		return false
 	}
-	bd := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
-	level, err := bd.GetAgentNotificationLevel(sessionID)
+	level, err := r.townBeads().GetAgentNotificationLevel(sessionID)
 	if err != nil {
 		return false
 	}
@@ -2010,8 +2028,7 @@ func (r *Router) isRecipientMuted(address string) bool {
 		return false // Can't determine agent bead, allow notification
 	}
 
-	bd := beads.NewWithBeadsDirAndRunner(r.townRoot, "", r.bd)
-	level, err := bd.GetAgentNotificationLevel(agentBeadID)
+	level, err := r.townBeads().GetAgentNotificationLevel(agentBeadID)
 	if err != nil {
 		return false // Agent bead might not exist, allow notification
 	}

@@ -95,6 +95,7 @@ func (e *realEnv) OpenWithDir(gitDir, workDir string) gitfake.Repo {
 }
 
 func TestIntegrationGitfakeRepoContract(t *testing.T) {
+	t.Parallel()
 	gitfake.RunRepoContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }
 
@@ -116,5 +117,6 @@ func (e *realEnv) Stash(t testing.TB, dir, message string) {
 func (e *realEnv) OpenBranchRepo(dir string) gitfake.BranchRepo { return git.NewGit(dir) }
 
 func TestIntegrationGitfakeBranchContract(t *testing.T) {
+	t.Parallel()
 	gitfake.RunBranchContract(t, func(t *testing.T) gitfake.BranchEnv { return &realEnv{} })
 }

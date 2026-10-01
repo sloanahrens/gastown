@@ -204,8 +204,8 @@ func newTestManager(r *rig.Rig, w *world, tm sessionProbe, bd *fakeBd) *Manager 
 	var run beads.BDRunner
 	if bd != nil {
 		run = bd.run
-		if r.BDRunner == nil {
-			r.BDRunner = run
+		if r.IdentityBeads == nil {
+			r.IdentityBeads = beads.NewWithBeadsDirAndRunner(r.Path, beads.ResolveBeadsDir(r.Path), run)
 		}
 		markTypesConfigured(beads.ResolveBeadsDir(r.Path))
 	}

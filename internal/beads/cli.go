@@ -101,6 +101,12 @@ type InitOptions struct {
 	ServerPort   int    // --server-port, when non-zero
 	Force        bool   // --force: re-initialize over an existing database
 	DestroyToken string // --destroy-token, the confirmation --force requires
+	// SkipAgents (--skip-agents) leaves out bd's editor-agent setup files.
+	SkipAgents bool
+	// ReinitLocal and DiscardRemote (--reinit-local --discard-remote) let
+	// bd init proceed over a config naming a sync remote without prompting.
+	ReinitLocal   bool
+	DiscardRemote bool
 }
 
 // InitDatabase runs bd init --server with opts.
@@ -119,10 +125,26 @@ func (b *Beads) InitDatabase(opts InitOptions) error {
 	if opts.Force {
 		args = append(args, "--force")
 	}
+	if opts.SkipAgents {
+		args = append(args, "--skip-agents")
+	}
+	if opts.ReinitLocal {
+		args = append(args, "--reinit-local")
+	}
+	if opts.DiscardRemote {
+		args = append(args, "--discard-remote")
+	}
 	if opts.DestroyToken != "" {
 		args = append(args, "--destroy-token="+opts.DestroyToken)
 	}
 	_, err := b.run(args...)
+	return err
+}
+
+// MigrateRepoID stamps the database with its repository fingerprint (bd
+// migrate --update-repo-id). It is idempotent.
+func (b *Beads) MigrateRepoID() error {
+	_, err := b.run("migrate", "--update-repo-id")
 	return err
 }
 

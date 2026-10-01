@@ -9,5 +9,6 @@ import (
 )
 
 func TestIntegrationGitfakeCrewContract(t *testing.T) {
+	t.Parallel()
 	gitfake.RunCrewContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }

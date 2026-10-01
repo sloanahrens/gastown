@@ -37,6 +37,7 @@ var (
 // make the fake copy it.
 func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	t.Run("Clone checks out the remote's HEAD branch with origin set, and clones an empty repository", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		dest := filepath.Join(fx.root, "crew", "dave")
 		g := fx.env.Open(fx.root).(CrewRepo)
@@ -81,6 +82,7 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("AddRemote, SetRemoteURL and Remotes manage remotes; a push URL survives set-url", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		c := fx.env.Open(fx.clone).(CrewRepo)
 		up := filepath.Join(fx.root, "upstream.git")
@@ -112,6 +114,7 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("CreateBranch makes a branch at HEAD; Checkout switches to it", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		c := fx.env.Open(fx.clone).(CrewRepo)
 		if err := c.CreateBranch("crew/dave"); err != nil {
@@ -135,6 +138,7 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("HasUncommittedChanges sees edits and new files", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		c := fx.env.Open(fx.clone).(CrewRepo)
 		if dirty, err := c.HasUncommittedChanges(); err != nil || dirty {
@@ -149,6 +153,7 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 	})
 
 	t.Run("Pull fast-forwards to the remote's HEAD branch and refuses a divergence", func(t *testing.T) {
+		t.Parallel()
 		fx := newFixture(t, newEnv(t))
 		c := fx.env.Open(fx.clone).(CrewRepo)
 		next := fx.env.Commit(t, fx.origin, "main", "next", map[string]string{"n.txt": "n\n"})

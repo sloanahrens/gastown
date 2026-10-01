@@ -86,7 +86,7 @@ func AcknowledgeDeliveryBead(workDir, beadsDir, beadID, recipientIdentity string
 }
 
 // acknowledgeDeliveryBead is AcknowledgeDeliveryBead with bd run by run.
-func acknowledgeDeliveryBead(run beads.BDRunner, workDir, beadsDir, beadID, recipientIdentity string) error {
+func acknowledgeDeliveryBead(run bdRunner, workDir, beadsDir, beadID, recipientIdentity string) error {
 	beadsDir = routedBeadsDirForID(beadsDir, beadID)
 	existingLabels, readErr := readBeadLabelsShared(run, workDir, beadsDir, beadID)
 	if readErr != nil {
@@ -134,7 +134,7 @@ func deliveryPendingRemovalNeeded(labels []string) bool {
 	return hasPending && hasAcked
 }
 
-func removeDeliveryPendingLabel(run beads.BDRunner, workDir, beadsDir, beadID string) error {
+func removeDeliveryPendingLabel(run bdRunner, workDir, beadsDir, beadID string) error {
 	args := []string{"label", "remove", beadID, DeliveryLabelPending}
 	ctx, cancel := bdWriteCtx()
 	_, err := runBdCommand(ctx, run, args, workDir, beadsDir)
@@ -191,7 +191,7 @@ func routedBeadsDirForID(currentBeadsDir, beadID string) string {
 
 // readBeadLabelsShared reads the labels for a bead, returning an error on failure
 // instead of silently swallowing it.
-func readBeadLabelsShared(run beads.BDRunner, workDir, beadsDir, id string) ([]string, error) {
+func readBeadLabelsShared(run bdRunner, workDir, beadsDir, id string) ([]string, error) {
 	args := []string{"show", id, "--json"}
 	ctx, cancel := bdReadCtx()
 	defer cancel()

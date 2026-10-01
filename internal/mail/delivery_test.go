@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestParseDeliveryLabels_CrashAndRetryStates(t *testing.T) {
@@ -246,7 +244,7 @@ func TestAcknowledgeDeliveryBeadConvergesPendingLabel(t *testing.T) {
 	// bd keeps the bead's labels in labelsPath: show lists them, label add
 	// appends one it lacks, label remove drops one or fails when it is not
 	// there.
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		args := c.Args
 		data, _ := os.ReadFile(labelsPath)
 		var labels []string
