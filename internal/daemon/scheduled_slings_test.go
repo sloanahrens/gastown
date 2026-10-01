@@ -3,11 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
-	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestScheduledSlingEntry_Validate(t *testing.T) {
@@ -68,42 +69,6 @@ func TestDecideScheduledSling(t *testing.T) {
 	}
 }
 
-func TestParseScheduledBeads(t *testing.T) {
-	t.Parallel()
-	data := []byte(`[{"id":"gt-abc","status":"closed","created_at":"2026-09-12T10:00:00Z","labels":["scheduled:doc-audit"]},
-	                 {"id":"gt-def","status":"open","created_at":"2026-09-19T10:00:00-05:00"}]`)
-	got, err := parseScheduledBeads(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0].ID != "gt-abc" || got[1].Status != "open" {
-		t.Fatalf("parsed %+v", got)
-	}
-	if !got[1].CreatedAt.Equal(time.Date(2026, 9, 19, 15, 0, 0, 0, time.UTC)) {
-		t.Errorf("created_at not parsed with offset: %v", got[1].CreatedAt)
-	}
-	if _, err := parseScheduledBeads([]byte(`not json`)); err == nil {
-		t.Error("expected error on bad json")
-	}
-	empty, err := parseScheduledBeads([]byte(`[]`))
-	if err != nil || len(empty) != 0 {
-		t.Errorf("empty list: %v %v", empty, err)
-	}
-}
-
-func TestParseCreatedBeadID(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{`{"id":"gt-new1","title":"x"}`, `[{"id":"gt-new1","title":"x"}]`} {
-		id, err := parseCreatedBeadID([]byte(in))
-		if err != nil || id != "gt-new1" {
-			t.Errorf("%s: id=%q err=%v", in, id, err)
-		}
-	}
-	if _, err := parseCreatedBeadID([]byte(`{}`)); err == nil {
-		t.Error("expected error when id is missing")
-	}
-}
-
 func TestIsPatrolEnabled_ScheduledSlingsIsOptIn(t *testing.T) {
 	t.Parallel()
 	if IsPatrolEnabled(nil, "scheduled_slings") {
@@ -123,11 +88,7 @@ func TestParseScheduledBeads_FractionalSecondTimestamp(t *testing.T) {
 	// bd/Dolt can emit RFC3339Nano, which encoding/json's strict RFC3339
 	// time.Time unmarshaller rejects — one such row used to fail the whole list
 	// and feed the spurious-escalation path.
-	data := []byte(`[{"id":"gt-nano","status":"closed","created_at":"2026-09-12T10:00:00.123456789Z"}]`)
-	got, err := parseScheduledBeads(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := scheduledBeadsOf([]*beads.Issue{{ID: "gt-nano", Status: "closed", CreatedAt: "2026-09-12T10:00:00.123456789Z"}})
 	want := time.Date(2026, 9, 12, 10, 0, 0, 123456789, time.UTC)
 	if len(got) != 1 || !got[0].CreatedAt.Equal(want) {
 		t.Fatalf("parsed %+v, want created_at %v", got, want)
@@ -341,73 +302,69 @@ func TestExecScheduledRunner_SlingArgv(t *testing.T) {
 	}
 }
 
-// TestExecScheduledSlingRunner_ListBeadsArgvContract runs the real argv through
-// a bd that models the two behaviours the patrol depends on: bd v0.59+ needs
-// --flat for --json to emit JSON at all, and bd's default list filter hides
-// closed issues. Dropping either makes the newest completed run invisible and
-// the interval guard meaningless — the two integration bugs that unit tests
-// over hand-crafted JSON could not see.
-func TestExecScheduledSlingRunner_ListBeadsArgvContract(t *testing.T) {
+// TestExecScheduledSlingRunner_ListsClosedRunsInTheRigDatabase: the run
+// list includes closed runs, read from the rig's own database. Without the
+// closed ones the newest completed run is invisible and the interval guard is
+// defeated.
+func TestExecScheduledSlingRunner_ListsClosedRunsInTheRigDatabase(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	rigDir := filepath.Join(townRoot, "gastown")
-	payload := `[{"id":"gt-done","status":"closed","close_reason":"audit complete","created_at":"2026-09-12T10:00:00.5Z"},` +
-		`{"id":"gt-open","status":"open","created_at":"2026-09-11T10:00:00Z"}]`
-	bd := newFakeCLI(func(args []string) cliReply {
-		if len(args) == 0 || args[0] != "list" {
-			return cliReply{}
-		}
-		// bd v0.59+: without --flat, --json still prints human-readable tree text.
-		if !slices.Contains(args, "--flat") {
-			return cliReply{stdout: "gt-done  [closed] doc-audit 2026-09-12\n"}
-		}
-		if slices.Contains(args, "--all") {
-			return cliReply{stdout: payload}
-		}
-		// bd's default filter excludes closed issues.
-		return cliReply{stdout: `[{"id":"gt-open","status":"open","created_at":"2026-09-11T10:00:00Z"}]`}
-	})
-	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: bd.run}
-	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
+	label := scheduledSlingLabel(docAuditEntry)
+	rig := beadsfake.New()
+	rig.Seed(
+		beads.Issue{ID: "gt-done", Status: "closed", CloseReason: "audit complete", CreatedAt: "2026-09-12T10:00:00.5Z", Labels: []string{label}},
+		beads.Issue{ID: "gt-open", CreatedAt: "2026-09-11T10:00:00Z", Labels: []string{label}},
+		beads.Issue{ID: "gt-other", Labels: []string{"scheduled:other"}},
+	)
+	var opened []string
+	r := &execScheduledSlingRunner{townRoot: t.TempDir(), gtPath: "gt", open: func(name string) beads.Client {
+		opened = append(opened, name)
+		return rig
+	}}
+
+	got, err := r.listBeads(context.Background(), "gastown", label)
 	if err != nil {
 		t.Fatalf("listBeads: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("listBeads returned %d beads, want 2 — the closed run is invisible, so the interval guard is defeated: %+v", len(got), got)
+	byID := map[string]scheduledBead{}
+	for _, b := range got {
+		byID[b.ID] = b
 	}
-	if !got[0].CreatedAt.Equal(time.Date(2026, 9, 12, 10, 0, 0, 500000000, time.UTC)) {
-		t.Errorf("closed run created_at = %v", got[0].CreatedAt)
+	if len(got) != 2 || byID["gt-open"].Status != "open" {
+		t.Fatalf("listBeads = %+v, want the open and the closed run only", got)
 	}
-	if got[0].Status != "closed" || got[0].CloseReason != "audit complete" {
-		t.Errorf("closed run = %+v", got[0])
+	done := byID["gt-done"]
+	if done.Status != "closed" || done.CloseReason != "audit complete" || !done.CreatedAt.Equal(time.Date(2026, 9, 12, 10, 0, 0, 500000000, time.UTC)) {
+		t.Errorf("closed run = %+v", done)
 	}
-
-	calls := bd.recorded()
-	if len(calls) != 1 {
-		t.Fatalf("bd calls = %+v, want one list", calls)
-	}
-	for _, want := range []string{"--json", "--flat", "--all", "--label"} {
-		if !slices.Contains(calls[0].args, want) {
-			t.Errorf("bd argv is missing %q: %q", want, calls[0].args)
-		}
-	}
-	// The rig dir is the cwd, so bd's cwd routing lands on the rig database.
-	if calls[0].dir != rigDir {
-		t.Errorf("bd ran in %q, want the rig dir %q", calls[0].dir, rigDir)
+	if strings.Join(opened, ",") != "gastown" {
+		t.Errorf("databases opened = %q, want the gastown rig's", opened)
 	}
 }
 
-// TestExecScheduledSlingRunnerListBeadsRejectsProse: prose from a --json list
-// is a failed read. Read as "no runs", it re-dispatched on every tick (B5-05).
-func TestExecScheduledSlingRunnerListBeadsRejectsProse(t *testing.T) {
+// TestExecScheduledSlingRunner_CreatesAndClosesRunBeads: a run bead is
+// created labeled, at the entry's priority and with its description, and a
+// failed run is closed with its reason.
+func TestExecScheduledSlingRunner_CreatesAndClosesRunBeads(t *testing.T) {
 	t.Parallel()
-	bd := newFakeCLI(func([]string) cliReply { return cliReply{stdout: "No issues found.\n"} })
-	r := &execScheduledSlingRunner{townRoot: t.TempDir(), bdPath: "bd", gtPath: "gt", execCmd: bd.run}
-	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
-	if err == nil {
-		t.Fatalf("listBeads on prose = %v, nil; want an error", got)
+	rig := beadsfake.New()
+	r := &execScheduledSlingRunner{townRoot: t.TempDir(), gtPath: "gt", open: func(string) beads.Client { return rig }}
+	ctx := context.Background()
+
+	id, err := r.createBead(ctx, "gastown", "doc audit", "scheduled:doc-audit", "run body", 3)
+	if err != nil {
+		t.Fatalf("createBead: %v", err)
 	}
-	if !strings.Contains(err.Error(), "No issues found.") {
-		t.Errorf("error %q does not name the output", err)
+	if err := r.closeBead(ctx, "gastown", id, scheduledSlingFailureMarker+"boom"); err != nil {
+		t.Fatalf("closeBead: %v", err)
+	}
+	is, err := rig.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if is.Title != "doc audit" || is.Priority != 3 || is.Description != "run body" || strings.Join(is.Labels, ",") != "scheduled:doc-audit" {
+		t.Errorf("created run bead = %+v", is)
+	}
+	if is.Status != "closed" || is.CloseReason != scheduledSlingFailureMarker+"boom" {
+		t.Errorf("closed run bead: status %q reason %q", is.Status, is.CloseReason)
 	}
 }

@@ -766,6 +766,11 @@ func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, 
 
 // AddComment appends a comment authored by the fake's actor.
 func (f *Fake) AddComment(id, text string) error {
+	return f.AddCommentAs(id, f.actor, text)
+}
+
+// AddCommentAs appends a comment recorded as written by author.
+func (f *Fake) AddCommentAs(id, author, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.issues[id]
@@ -776,7 +781,7 @@ func (f *Fake) AddComment(id, text string) error {
 	r.comments = append(r.comments, beads.Comment{
 		ID:        fmt.Sprintf("c%d", len(r.comments)+1),
 		IssueID:   id,
-		Author:    f.actor,
+		Author:    author,
 		Text:      text,
 		CreatedAt: f.now(),
 	})

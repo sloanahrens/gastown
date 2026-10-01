@@ -30,7 +30,9 @@ type PostLandResult struct {
 	Tail     string
 	// Packages are the Go packages the run reported as ok or FAIL.
 	Packages []land.PackageResult
-	Err      error
+	// LogPath is the run's full output on disk, "" when none was kept.
+	LogPath string
+	Err     error
 }
 
 // PostLandTrigger starts the post-landing command for a landing.
@@ -142,15 +144,24 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 	}
 	p.logf("running %q at %s (%s)", cmd, short(pl.Commit), pl.by())
 	res := p.Run(ctx, cmd, pl)
+	if ctx.Err() != nil {
+		// A run the daemon cut short is no verdict, and a killed run must
+		// not read as red main (gt-f2voh). No verdict is recorded, so the
+		// restarted worker runs again from the last verdict to the tip.
+		p.logf("%s (%s) superseded: the daemon stopped before %q reached a verdict; the restarted worker reruns it at the untested tip%s", short(pl.Commit), pl.by(), cmd, fullLog(res.LogPath))
+		return
+	}
 	switch {
 	case res.Err != nil:
-		if ctx.Err() == nil {
-			p.logf("WARNING could not run %q at %s (%s): %v", cmd, short(pl.Commit), pl.by(), res.Err)
-		}
+		p.logf("WARNING could not run %q at %s (%s): %v", cmd, short(pl.Commit), pl.by(), res.Err)
 	case res.ExitCode != 0:
 		tail := lastLines(res.Tail, postLandTailLines)
-		p.logf("RED: %q exited %d at %s (%s)\n%s", cmd, res.ExitCode, short(pl.Commit), pl.by(), tail)
-		msg := fmt.Sprintf("post-landing check RED at %s: %s", pl.Commit, "exit "+fmt.Sprint(res.ExitCode)+", last lines:\n"+tail)
+		failing := strings.Join(failingPackages(res), ", ")
+		if failing == "" {
+			failing = redMainNoPackage
+		}
+		p.logf("RED: %q exited %d at %s (%s); failing: %s%s\n%s", cmd, res.ExitCode, short(pl.Commit), pl.by(), failing, fullLog(res.LogPath), tail)
+		msg := fmt.Sprintf("post-landing check RED at %s: exit %d, failing: %s%s; last lines:\n%s", pl.Commit, res.ExitCode, failing, fullLog(res.LogPath), tail)
 		if p.Beads != nil && pl.BeadID != "" {
 			if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
 				p.logf("commenting on %s: %v", pl.BeadID, err)
@@ -165,6 +176,14 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 			p.OnGreen(ctx, cmd, pl, res)
 		}
 	}
+}
+
+// fullLog is "; full log <path>" for a run that kept its output, else "".
+func fullLog(path string) string {
+	if path == "" {
+		return ""
+	}
+	return "; full log " + path
 }
 
 func lastLines(s string, n int) string {

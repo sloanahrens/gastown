@@ -200,3 +200,45 @@ func TestPassTriggersPostLandForNewLandingsOnly(t *testing.T) {
 		t.Fatalf("repair triggered post-land: %+v", trig2.got)
 	}
 }
+
+// gt-f2voh: a run cut short by the daemon stopping is no verdict. It goes to
+// neither handler (a killed run would otherwise be filed as red main) and
+// the log records that the restarted worker's run supersedes it.
+func TestPostLandCanceledRunIsSupersededNotRed(t *testing.T) {
+	t.Parallel()
+	var logs []string
+	var red []PostLand
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &PostLandRunner{Rig: "gastown", Command: func() string { return "make test-slow" }, Beads: &commentLog{},
+		Logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		Run: func(context.Context, string, PostLand) PostLandResult {
+			cancel()
+			return PostLandResult{ExitCode: -1, LogPath: "/logs/post-9/test.log"}
+		},
+		OnRed: func(_ context.Context, _ string, pl PostLand, _ PostLandResult) { red = append(red, pl) }}
+	p.Trigger(ctx, PostLand{Commit: "abc123def456", Direct: true, From: "c0"})
+	p.Wait()
+	all := strings.Join(logs, "\n")
+	if len(red) != 0 || !strings.Contains(all, "superseded") || !strings.Contains(all, "/logs/post-9/test.log") {
+		t.Fatalf("red %v; log:\n%s", red, all)
+	}
+}
+
+// gt-f2voh: the RED log line names the failing packages and the full log,
+// since its tail is usually the shell tests that ran after the Go suite.
+func TestPostLandRedLogNamesPackagesAndLog(t *testing.T) {
+	t.Parallel()
+	var logs []string
+	p := &PostLandRunner{Rig: "gastown", Command: func() string { return "make test-slow" },
+		Logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		Run: func(context.Context, string, PostLand) PostLandResult {
+			return PostLandResult{ExitCode: 2, LogPath: "/logs/post-9/test.log", Tail: "makefile-gate_test: 33 passed",
+				Packages: []land.PackageResult{{Package: "x/internal/cmd"}, {Package: "x/internal/ok", Passed: true}}}
+		}}
+	p.Trigger(context.Background(), PostLand{BeadID: "gt-1", Commit: "abc123def456"})
+	p.Wait()
+	all := strings.Join(logs, "\n")
+	if !strings.Contains(all, "failing: x/internal/cmd;") || strings.Contains(all, "x/internal/ok") || !strings.Contains(all, "full log /logs/post-9/test.log") {
+		t.Fatalf("log:\n%s", all)
+	}
+}

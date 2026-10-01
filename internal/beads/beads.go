@@ -3378,6 +3378,25 @@ func (b *Beads) AddComment(id, comment string) error {
 	return err
 }
 
+// AddCommentAs appends a comment recorded as written by author.
+func (b *Beads) AddCommentAs(id, author, comment string) error {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.AddCommentAs(id, author, comment)
+		}
+	}
+
+	if b.store != nil {
+		ctx, cancel := storeCtx()
+		defer cancel()
+		_, err := b.store.AddIssueComment(ctx, id, author, comment)
+		return err
+	}
+
+	_, err := b.run("comments", "add", id, comment, "--author", author)
+	return err
+}
+
 // Comments returns comments for an issue, routing by issue ID when needed.
 func (b *Beads) Comments(id string) ([]Comment, error) {
 	if !b.noRoute {

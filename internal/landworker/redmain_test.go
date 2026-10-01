@@ -2,6 +2,7 @@ package landworker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -141,13 +142,64 @@ func TestRedMainClosesBeadsForPackagesThatPass(t *testing.T) {
 	}
 }
 
-func TestRedMainStopsWhenCanceled(t *testing.T) {
+// gt-f2voh: a daemon stopping mid-rerun reaches no verdict, so it files
+// nothing, but it must say so: the red run is superseded by the run the
+// restarted worker makes at the untested tip, and the log names that.
+func TestRedMainCanceledLogsTheSupersede(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		preCancel  bool
+		wantReruns int
+	}{
+		{name: "before any rerun", preCancel: true},
+		{name: "mid rerun", wantReruns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRedMainHarness(t)
+			var logs []string
+			h.r.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			}
+			rerun := h.r.Rerun
+			h.r.Rerun = func(ctx context.Context, cmd, pkg string, pl PostLand) PostLandResult {
+				rerun(ctx, cmd, pkg, pl)
+				cancel() // the daemon stops; the killed rerun exits non-zero
+				return PostLandResult{ExitCode: -1}
+			}
+			pl := PostLand{Commit: "c1c1c1c1c1", Direct: true, From: "c0"}
+			h.r.Red(ctx, "make test-slow", pl, PostLandResult{ExitCode: 2, LogPath: "/logs/post-1/test.log", Packages: pkgs(map[string]bool{pkgA: false, pkgB: false})})
+			if len(h.reruns) != tc.wantReruns || len(h.open(t)) != 0 {
+				t.Fatalf("a stopping daemon reran %v, filed %v", h.reruns, h.open(t))
+			}
+			all := strings.Join(logs, "\n")
+			if !strings.Contains(all, "RED at c1c1c1c1") || !strings.Contains(all, "superseded") || !strings.Contains(all, "/logs/post-1/test.log") {
+				t.Fatalf("log does not record the supersede:\n%s", all)
+			}
+		})
+	}
+}
+
+// gt-f2voh: every red-main bead points at the full post-landing log.
+func TestRedMainBeadsCiteTheFullLog(t *testing.T) {
 	t.Parallel()
 	h := newRedMainHarness(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	h.r.Red(ctx, "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1"}, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
-	if len(h.reruns) != 0 || len(h.open(t)) != 0 || len(h.status) != 0 {
-		t.Fatalf("a stopping daemon reran %v, filed %v, said %v", h.reruns, h.open(t), h.status)
+	h.rerunExit[pkgA] = 1
+	ctx := context.Background()
+	h.r.Red(ctx, "make test-slow", PostLand{Commit: "c1"}, PostLandResult{ExitCode: 2, LogPath: "/logs/post-1/test.log", Packages: pkgs(map[string]bool{pkgA: false})})
+	// A timeout or kill names no package: the bead says how the command exited.
+	h.r.Red(ctx, "make test-slow", PostLand{Commit: "c2"}, PostLandResult{ExitCode: 2, LogPath: "/logs/post-2/test.log", Tail: "test-slow: FAILED in 1004s wall"})
+	open := h.open(t)
+	a, none := open[RedMainTitle("gastown", pkgA)], open[RedMainTitle("gastown", redMainNoPackage)]
+	if a == nil || !strings.Contains(a.Description, "Full log: /logs/post-1/test.log") {
+		t.Fatalf("package bead %+v; want the full log path", a)
+	}
+	if none == nil || !strings.Contains(none.Description, "exited 2") || !strings.Contains(none.Description, "Full log: /logs/post-2/test.log") ||
+		!strings.Contains(none.Description, "FAILED in 1004s wall") {
+		t.Fatalf("no-package bead %+v; want exit code, tail and full log path", none)
 	}
 }

@@ -460,14 +460,17 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 		rctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		res := cg.Run(rctx, dir)
+		// The full output outlives the worktree, pruned with the landing
+		// logs; red-main beads cite it (gt-f2voh).
+		logPath := filepath.Join(cg.LogDir, "test.log")
 		if res.Err != nil || len(res.Steps) == 0 {
 			if res.Err == nil {
 				res.Err = fmt.Errorf("post-land command produced no result")
 			}
-			return landworker.PostLandResult{ExitCode: -1, Err: res.Err}
+			return landworker.PostLandResult{ExitCode: -1, Err: res.Err, LogPath: logPath}
 		}
 		step := res.Steps[len(res.Steps)-1]
-		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages}
+		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages, LogPath: logPath}
 	}
 }
 
