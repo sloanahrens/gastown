@@ -270,22 +270,18 @@ gate: lint
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
-	@# The unit tier: every package. -fast-tier names a package that ran
-	@# longer than testpolicy.FastTierMaxWall, but only as a warning: wall time depends on host load (gt-z7qtk). The user-CPU
-	@# budget is the failing check when load < ncpu or GATE_STRICT_BUDGET=1,
-	@# reported otherwise (gt-3vbfn); make tier-check fails on wall (gt-z862q).
-	@# The budget runner measures converted
-	@# packages through its CPU-measuring -exec wrapper, which bypasses the
-	@# test result cache, and at the same time runs the packages in
-	@# unconverted.txt with the cache (gt-22hdp.53), the two halves sharing
-	@# go test's -p cap (gt-qe4b0). -timeout 20m is the per-package hang
-	@# detector, kept from the one gate definition (gt-ik4a1.1).
+	@# The unit tier: every package, through go test's result cache, so a
+	@# landing reruns only the packages its change can affect (gt-s1vff).
+	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
+	@# reran every test on every landing; per-package CPU and wall budgets are
+	@# enforced by make tier-check (the hourly sweep), not the landing path.
+	@# -timeout 20m is the per-package hang detector (gt-ik4a1.1).
 	@echo "gate: unit tier (every package)" >&2
 	@# The suite runs in the background so the trap fires at once on INT or
 	@# TERM (bash defers traps until a foreground child exits); the trap finds
 	@# it as this shell's child (pgrep -P) and stops it before its children.
 	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
-	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -fast-tier -- -timeout 20m ./... & gt=$$!; \
+	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
