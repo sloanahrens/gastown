@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -2650,5 +2651,56 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 					fields.AgentState, AgentBeadUpdatedAt(agentIssue), mgr.spawnGraceWindow, got, p.State)
 			}
 		})
+	}
+}
+
+// A removed polecat must take its intent record with it: townhealth reads
+// every record under .runtime/agents, so one that outlives its seat reports
+// that seat dead forever (gt-u7voe).
+func TestRemoveDeletesThePolecatsIntentRecord(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	seat := intent.Seat{Rig: "rig", Role: "polecat", Name: "toast"}
+	if _, err := intent.Update(mgr.townRoot, seat, func(r *intent.Record) error {
+		r.Desired = intent.DesiredPark
+		return nil
+	}); err != nil {
+		t.Fatalf("writing the intent record: %v", err)
+	}
+
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("RemoveWithOptions: %v", err)
+	}
+
+	if _, err := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(err) {
+		t.Fatalf("polecat dir survived removal, stat err=%v", err)
+	}
+	if _, err := os.Stat(seat.Path(mgr.townRoot)); !os.IsNotExist(err) {
+		t.Fatalf("intent record survived removal, stat err=%v", err)
+	}
+}
+
+// A refused removal leaves the record alone: the polecat is still there, so it
+// still needs the record.
+func TestRemoveKeepsTheIntentRecordWhenTheRemovalIsRefused(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, false, "toast")
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+		f.CleanupStatus = string(CleanupUncommitted)
+	})
+	seat := intent.Seat{Rig: "rig", Role: "polecat", Name: "toast"}
+	if _, err := intent.Update(mgr.townRoot, seat, func(r *intent.Record) error { return nil }); err != nil {
+		t.Fatalf("writing the intent record: %v", err)
+	}
+
+	if err := mgr.Remove("toast", false); err == nil {
+		t.Fatal("Remove of a polecat with uncommitted work succeeded, want a refusal")
+	}
+
+	if _, err := os.Stat(mgr.polecatDir("toast")); err != nil {
+		t.Fatalf("polecat dir removed by a refused removal: %v", err)
+	}
+	if _, err := os.Stat(seat.Path(mgr.townRoot)); err != nil {
+		t.Fatalf("refused removal deleted the intent record: %v", err)
 	}
 }
