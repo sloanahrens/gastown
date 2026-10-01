@@ -83,20 +83,17 @@ Git-backed issue tracking system that stores work state as structured data.
 
 Workflow templates that coordinate multi-step work. Formulas (TOML definitions) are instantiated as molecules with tracked steps. Two modes: root-only wisps (steps materialized at runtime, lightweight) and poured wisps (steps materialized as sub-wisps with checkpoint recovery). See [Molecules](docs/concepts/molecules.md).
 
-### Monitoring: Witness, Deacon
+### Supervision
 
-A watchdog system keeps agents healthy:
+The daemon is the only process that kills or restarts an agent. Its `patrol_scan` tick restarts a polecat whose session died while it held work, closes orphaned molecules and comments on stranded work. No long-running LLM session watches the town. See [ADR 0003](docs/adr/0003-one-supervisor-no-idle-llm.md) and [ADR 0005](docs/adr/0005-patrol-scan-tick.md).
 
-- **Witness** - Per-rig lifecycle manager. Monitors polecats, detects stuck agents, triggers recovery, manages session cleanup.
-- **Deacon** - Background supervisor running continuous patrol cycles across all rigs.
+### Landing 🛬
 
-### Refinery 🏭
-
-Per-rig merge queue processor. When polecats complete work via `gt done`, the Refinery batches merge requests, runs verification gates, and merges to main using a Bors-style bisecting queue. Failed MRs are isolated and either fixed inline or re-dispatched.
+When a polecat finishes, `gt done` rebases onto main, runs the fast gate, pushes the branch and labels the work bead `gt:ready-to-land`. The daemon's landing worker, one per rig, merges the branch onto main in a throwaway worktree, runs the gate and review on the merged tree, pushes, and writes the landing record to the work bead. Workers never push main. See [ADR 0004](docs/adr/0004-daemon-lands-work.md).
 
 ### Escalation 🚨
 
-Severity-routed issue escalation. Agents that hit blockers escalate via `gt escalate`, which creates tracked beads routed through the Deacon, Mayor, and (if needed) Overseer. Severity levels: CRITICAL (P0), HIGH (P1), MEDIUM (P2). See [Escalation](docs/design/escalation.md).
+Severity-routed issue escalation. Agents that hit blockers escalate via `gt escalate`, which creates tracked beads routed to the Mayor and (if needed) the Overseer. Severity levels: CRITICAL (P0), HIGH (P1), MEDIUM (P2). See [Escalation](docs/design/escalation.md).
 
 ### Scheduler ⏱️
 
@@ -119,7 +116,7 @@ Native installs require the host tools below. Docker installs only require Docke
 | Beads (`bd`) | 0.57.0+ | Required for native installs. Homebrew and Docker supply it; source/native Go paths install it with `go install`. |
 | sqlite3 | any | Used by convoy database queries. Usually pre-installed on macOS and Linux. |
 | ICU4C dev headers | varies | Required for source builds that compile the ICU-backed query layer. Use `libicu-dev` on Debian/Ubuntu, `libicu-devel` on Fedora/RHEL, `icu4c` on macOS, and MSYS2 ICU packages for native Windows. |
-| tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (Mayor, Witnesses, Refineries, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
+| tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (Mayor, crew, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
 | Claude Code CLI | latest | Default runtime. See [Runtime Configuration](#runtime-configuration) for alternatives (Codex, Copilot, Gemini, Cursor). |
 
 ### Local setup
@@ -187,7 +184,7 @@ gt install ~/gt --shell --git
 cd ~/gt
 ```
 
-Start the long-lived services. `gt up` boots Dolt, the daemon, the Deacon, the Mayor, and per-rig Witnesses and Refineries.
+Start the long-lived services. `gt up` boots Dolt, the daemon and the Mayor.
 
 ```bash
 gt up
@@ -456,8 +453,8 @@ Gas Town supports multiple AI coding runtimes. Per-rig runtime settings are in `
 - For Codex, set `project_doc_fallback_filenames = ["CLAUDE.md"]` in
   `~/.codex/config.toml` so role instructions are picked up.
 - For runtimes without hooks (e.g., Codex), Gas Town sends a startup fallback
-  after the session is ready: `gt prime`, optional `gt mail check --inject`
-  for autonomous roles, and `gt nudge deacon session-started`.
+  after the session is ready: `gt prime`, and `gt mail check --inject`
+  for autonomous roles.
 - **GitHub Copilot** (`copilot`) is a built-in preset using `--yolo` for autonomous
   mode. It uses executable lifecycle hooks in `.github/hooks/gastown.json` (same events
   as Claude: `sessionStart`, `userPromptSubmitted`, `preToolUse`, `sessionEnd`). Uses a
@@ -550,22 +547,7 @@ gt tail --kind landings      # One source
 
 ## Monitoring & Health
 
-Gas Town uses a three-tier watchdog chain to keep agents healthy at scale:
-
-```
-Daemon (Go process) ← heartbeat every 3 min
-    └── Boot (AI agent) ← intelligent triage
-        └── Deacon (AI agent) ← continuous patrol
-            └── Witnesses & Refineries ← per-rig agents
-```
-
-### Witness (Per-Rig)
-
-Each rig has a Witness that monitors its polecats. The Witness detects stuck agents, triggers recovery (nudge or handoff), manages session cleanup, and tracks completion. Witnesses delegate work rather than implementing it directly.
-
-### Deacon (Cross-Rig)
-
-The Deacon runs continuous patrol cycles across all rigs, checking agent health and escalating issues that individual Witnesses can't resolve.
+The daemon supervises every agent; see [Supervision](#supervision).
 
 ### Escalation
 
@@ -577,19 +559,7 @@ gt escalate list                    # List open escalations
 gt escalate ack <bead-id>           # Acknowledge an escalation
 ```
 
-Escalations route through Deacon -> Mayor -> Overseer based on severity. See [Escalation design](docs/design/escalation.md).
-
-## Merge Queue (Refinery)
-
-The Refinery processes completed polecat work through a bisecting merge queue:
-
-1. Polecat runs `gt done` -> branch pushed, MR bead created
-2. Refinery batches pending MRs
-3. Runs verification gates on the merged stack
-4. If green: all MRs in batch merge to main
-5. If red: bisects to isolate the failing MR, merges the good ones
-
-This is a Bors-style merge queue — polecats never push directly to main.
+Escalations route to the Mayor and the Overseer based on severity. See [Escalation design](docs/design/escalation.md).
 
 ## Scheduler
 
@@ -660,9 +630,6 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 | **Mayor**       | AI coordinator                       | `gt mayor attach`    |
 | **Human (You)** | Crew member                          | Your crew directory  |
 | **Polecat**     | Worker agent                         | Spawned by Mayor     |
-| **Witness**     | Per-rig agent health monitor         | Automatic patrol     |
-| **Deacon**      | Cross-rig supervisor daemon          | `gt patrol`          |
-| **Refinery**    | Merge queue processor                | Automatic            |
 | **Hook**        | Persistent storage                   | Git worktree         |
 | **Convoy**      | Work tracker                         | `gt convoy` commands |
 
@@ -686,9 +653,8 @@ For deeper technical details, see the design docs in `docs/`:
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |
 | Scheduler | [docs/design/scheduler.md](docs/design/scheduler.md) |
-| Witness design | [docs/design/witness-at-team-lead.md](docs/design/witness-at-team-lead.md) |
 | Convoy lifecycle | [docs/design/convoy/](docs/design/convoy/) |
-| Polecat lifecycle | [docs/design/polecat-lifecycle-patrol.md](docs/design/polecat-lifecycle-patrol.md) |
+| Polecat lifecycle | [docs/concepts/polecat-lifecycle.md](docs/concepts/polecat-lifecycle.md) |
 | Plugin system | [docs/design/plugin-system.md](docs/design/plugin-system.md) |
 | Agent providers | [docs/agent-provider-integration.md](docs/agent-provider-integration.md) |
 | Hooks | [docs/HOOKS.md](docs/HOOKS.md) |

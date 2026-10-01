@@ -87,7 +87,7 @@ Daemon heartbeat (every 3 min)
          +- DispatchCycle.Run() — plan + execute + report
          |    +- PlanDispatch(availableCapacity, batchSize, ready)
          |    +- For each planned bead: Execute → OnSuccess/OnFailure
-         +- Wake rig agents (witness, refinery)
+         +- Warn per rig if the daemon is not running
          +- Save dispatch state
 ```
 
@@ -131,7 +131,7 @@ Sling context beads eliminate all of this:
 | `merge` | string | Merge strategy: `mr`, `local` |
 | `convoy` | string | Convoy bead ID (set after auto-convoy creation) |
 | `base_branch` | string | Override base branch for polecat worktree |
-| `no_merge` | bool | Skip merge queue on completion |
+| `no_merge` | bool | Do not land the work on completion |
 | `account` | string | Claude Code account handle |
 | `agent` | string | Agent/runtime override |
 | `hook_raw_bead` | bool | Hook without default formula |

@@ -6,7 +6,7 @@
 
 Polecats have three distinct lifecycle layers that operate independently. The
 key design principle: **clean completion retires the live polecat session**.
-The agent identity and merge evidence persist, but completed sessions do not
+The agent identity and landing evidence persist, but completed sessions do not
 return to the idle reuse pool.
 
 ## Operating States
@@ -34,7 +34,7 @@ Polecats use these primary operating states:
               │ gt done
               v
          ┌──────────┐
-         │  DONE    │──── branch/MR evidence preserved, session exits
+         │  DONE    │──── branch and bead evidence preserved, session exits
          └──────────┘
 ```
 
@@ -44,8 +44,8 @@ No idle reuse in the happy path. Polecats move: IDLE -> WORKING -> DONE.
 
 - **Working** = actively executing. Session alive, hook set, doing work.
 - **Idle** = not yet assigned and safe to use.
-- **Done** = work done, session killed, waiting for cleanup/refinery outcome.
-- **Stalled** = supposed to be working, but stopped. Needs Witness intervention.
+- **Done** = work done, session killed, waiting for the landing worker and cleanup.
+- **Stalled** = supposed to be working, but stopped. The daemon restarts it.
 - **Zombie** = finished work, tried to exit, but cleanup failed. Stuck in limbo.
 
 ## The Retired Completion Model
@@ -54,28 +54,31 @@ No idle reuse in the happy path. Polecats move: IDLE -> WORKING -> DONE.
 When a polecat finishes its assignment:
 
 1. Signals completion via `gt done`
-2. Pushes branch, submits MR to merge queue
+2. Rebases onto the target, runs the local gate, pushes the branch and labels
+   the work bead `gt:ready-to-land`
 3. Clears its hook (work is done)
 4. Sets agent state to "done"
 5. Kills its own session using PID-excluding cleanup
-6. Leaves branch/MR metadata for Witness/refinery cleanup
+6. Leaves the branch and the READY TO LAND block on the bead for the landing worker
 
 The next `gt sling` allocates available capacity without reusing a completed
-session that still has branch/MR or cleanup state attached.
+session that still has unlanded work or cleanup state attached.
 
 ### Why Retire Sessions?
 
 - **Preserved identity** — The polecat's agent bead, CV chain, and work history persist
 - **Simpler lifecycle** — Clean completion has one terminal session path
-- **Done means retired** — Session dies, cleanup/refinery owns remaining state
+- **Done means retired** — Session dies, the landing worker and cleanup own remaining state
 
-### What About Pending Merges?
+### What About Pending Landings?
 
-The Refinery owns the merge queue. Once `gt done` submits work:
+The daemon's landing worker owns landing ([ADR 0004](../adr/0004-daemon-lands-work.md)).
+Once `gt done` submits work:
 - The branch is pushed to origin
-- Work exists in the MQ, not in the polecat
-- If rebase fails, Refinery creates a conflict-resolution task
-- The completed polecat is not reused while pending MR or cleanup state remains
+- The work bead carries `gt:ready-to-land`; the work no longer lives in the polecat
+- The landing worker merges, gates and pushes, then writes the landing record to the bead
+- A rejection is written to the bead and the bead is re-dispatched to a fresh
+  polecat at most twice, then parked
 
 ## The Three Layers
 
@@ -90,8 +93,8 @@ Early designs treated polecats as monolithic. This caused recurring issues:
 | **Session** | Ephemeral (Claude context window) | = polecat lifetime |
 
 Separating these three layers keeps completed sessions out of the idle reuse pool,
-preserves capability records (CV, completion history), and lets cleanup/refinery
-own branch and worktree state after handoff.
+preserves capability records (CV, completion history), and lets the landing
+worker and cleanup own branch and worktree state after handoff.
 
 ### Layer Summary
 
@@ -147,17 +150,17 @@ This worktree:
 - Is not synced to main or branch-deleted by `gt done`
 - Contains uncommitted work, staged changes, branch state during active work
 
-Witness/refinery cleanup owns sandbox retirement after durable handoff. Explicit
+Cleanup owns sandbox retirement after durable handoff. Explicit
 `gt polecat nuke` remains the manual destructive path.
 
 #### Branch Preservation (After Completion)
 
-When work completes, `gt done` leaves the feature branch and MR metadata intact:
+When work completes, `gt done` leaves the feature branch and the bead's landing metadata intact:
 
 ```bash
 # Handled by gt done
 git push origin polecat/<name>/<issue>@<suffix>
-# Branch and metadata remain available for refinery/review/cleanup
+# Branch and metadata remain available to the landing worker and cleanup
 ```
 
 When new work is slung:
@@ -167,8 +170,8 @@ git checkout -b polecat/<name>/<new-issue>+<timestamp>
 # Start working
 ```
 
-Completed sandboxes are not treated as reusable idle worktrees while branch,
-MR, or cleanup state remains attached.
+Completed sandboxes are not treated as reusable idle worktrees while unlanded
+work or cleanup state remains attached.
 
 ### Slot Layer
 
@@ -203,7 +206,7 @@ The slot:
 │  Session cycles happen here:                               │
 │  - gt handoff between steps                                │
 │  - Compaction triggers respawn                             │
-│  - Crash → Witness respawns                                │
+│  - Crash → daemon restarts the session                     │
 │                                                             │
 │  Sandbox persists through ALL session cycles               │
 └─────────────────────────────────────────────────────────────┘
@@ -211,26 +214,20 @@ The slot:
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                  gt done (retired model)                     │
-│  → Push branch to origin                                   │
-│  → Submit work to merge queue (MR bead)                    │
+│  → Rebase onto target, run local gate                      │
+│  → Push branch, label bead gt:ready-to-land                │
 │  → Set agent state to "done"                               │
 │  → Kill session                                            │
-│                                                             │
-│  Work now lives in MQ. Polecat session is retired.         │
-│  Branch/MR metadata remains for refinery and cleanup.       │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   Refinery: merge queue                     │
-│  → Rebase and merge to target branch                       │
+│                 Daemon: landing worker                      │
+│  → Merge onto target in a throwaway worktree               │
 │    (main or integration branch — see below)                │
-│  → Close the issue                                         │
-│  → If conflict: create task for available polecat          │
-│                                                             │
-│  Integration branch path:                                  │
-│  → MRs from epic children merge to integration/<epic>      │
-│  → When all children closed: land to main as one commit    │
+│  → Gate and review the merged tree, push, read back        │
+│  → Close the bead with the landing record                  │
+│  → If rejected: record why, re-dispatch (at most twice)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -273,20 +270,20 @@ Polecats manage their own session lifecycle. External manipulation bypasses veri
 
 ### Sandboxes Without Work (Idle vs Done vs Stalled)
 
-An idle polecat has no hook, no session, and no completion/MR cleanup state —
+An idle polecat has no hook, no session, and no unlanded work or cleanup state —
 this is **available capacity**.
 
-A **done** polecat has completed work and exited, but branch/MR or cleanup state
+A **done** polecat has completed work and exited, but unlanded work or cleanup state
 may still be attached. It is not reusable until cleanup resolves that state.
 
 A **stalled** polecat has a hook but no session — this is a **failure**:
-- The session crashed and wasn't nudged back to life
+- The session crashed and has not been restarted yet
 - The hook was lost during a crash
 - State corruption occurred
 
 **Recovery for stalled:**
 ```bash
-# Witness respawns the session in the existing sandbox
+# The daemon's patrol_scan tick restarts the session in the existing sandbox
 # Or, if unrecoverable:
 gt polecat nuke Toast        # Clean up the stalled polecat
 gt sling gt-abc gastown      # Respawn with fresh polecat
@@ -315,24 +312,21 @@ Sessions cycle for these reasons:
 |---------|--------|--------|
 | `gt handoff` | Voluntary | Clean cycle to fresh context |
 | Context compaction | Automatic | Forced by Claude Code |
-| Crash/timeout | Failure | Witness respawns |
+| Crash/timeout | Failure | Daemon restarts |
 | `gt done` | Completion | Session exits, polecat goes done |
 
 All except `gt done` result in continued work. Only `gt done` signals completion
 and retires the completed polecat session.
 
-## Witness Responsibilities
+## Supervision
 
-The Witness monitors polecats but does NOT:
-- Force session cycles (polecats self-manage via handoff)
-- Interrupt mid-step (unless truly stuck)
-- Reuse polecats after completion while cleanup/MR state remains
-
-The Witness DOES:
-- Detect and nudge stalled polecats (sessions that stopped unexpectedly)
-- Clean up zombie polecats (sessions where `gt done` failed)
-- Respawn crashed sessions
-- Handle escalations from stuck polecats (polecats that explicitly asked for help)
+The daemon is the only process that kills or restarts a polecat
+([ADR 0003](../adr/0003-one-supervisor-no-idle-llm.md)). Its `patrol_scan` tick
+([ADR 0005](../adr/0005-patrol-scan-tick.md)) restarts a polecat whose session
+is dead on two consecutive samples while it holds work, closes the molecules
+of hooked work whose polecat is gone, and comments on stranded work. It does
+not force session cycles, interrupt a live session, re-sling or reset work.
+A polecat that needs help runs `gt escalate`.
 
 ## Polecat Identity
 
@@ -362,18 +356,13 @@ This distinction matters for:
 - **Cost accounting** - Who pays for inference?
 - **Federation** - Agents having their own chains in a distributed world
 
-## Implementation Status
+## Key Files
 
-As of 2026-03-07 (gt-o8g8 audit), all core lifecycle operations are **shipped and
-running in production**. See [design/polecat-lifecycle-patrol.md § 10](../design/polecat-lifecycle-patrol.md#10-implementation-status-gt-o8g8-audit-2026-03-07)
-for the full implementation matrix and [design/persistent-polecat-pool.md](../design/persistent-polecat-pool.md)
-for phase-by-phase shipping status.
-
-Key files:
 - `internal/cmd/done.go` — work submission, done-state handoff, session retirement
 - `internal/cmd/sling.go` + `polecat_spawn.go` — capacity allocation, branch setup
 - `internal/cmd/handoff.go` — session cycling for all roles
-- `internal/witness/handlers.go` — cleanup pipeline, POLECAT_DONE routing, zombie/orphan detection
+- `internal/patrolscan/` — dead-session restart, orphaned molecules, stranded work
+- `internal/landworker/`, `internal/land/` — the landing worker
 - `internal/polecat/manager.go` — stale detection, done-state projection, pool management
 
 ## Related Documentation
@@ -381,5 +370,4 @@ Key files:
 - [Overview](../overview.md) - Role taxonomy and architecture
 - [Molecules](molecules.md) - Molecule execution and polecat workflow
 - [Propulsion Principle](propulsion-principle.md) - Why work triggers immediate execution
-- [Polecat Lifecycle Patrol](../design/polecat-lifecycle-patrol.md) - Implementation details, cleanup stages, patrol coordination
 - [Persistent Polecat Pool](../design/persistent-polecat-pool.md) - Pool management design and shipping status

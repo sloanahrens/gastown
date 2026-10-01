@@ -283,81 +283,8 @@ bd label remove gt-rig-gastown status:docked
 
 ### Daemon Integration
 
-The daemon's lifecycle manager checks config before starting services:
-
-```go
-func (d *Daemon) maybeStartRigServices(rig string) {
-    r := d.getRig(rig)
-
-    status := r.GetConfig("status")
-    if status == "parked" || status == "docked" {
-        log.Info("Rig %s is offline, skipping auto-start", rig)
-        return
-    }
-
-    d.ensureWitness(rig)
-    d.ensureRefinery(rig)
-}
-```
-
-## Operational State Events
-
-Operational state changes are tracked as event beads, providing an immutable audit
-trail. Labels cache the current state for fast queries.
-
-### Event Types
-
-| Event Type | Description | Payload |
-|------------|-------------|---------|
-| `patrol.muted` | Patrol cycle disabled | `{reason, until?}` |
-| `patrol.unmuted` | Patrol cycle re-enabled | `{reason?}` |
-| `agent.started` | Agent session began | `{session_id?}` |
-| `agent.stopped` | Agent session ended | `{reason, outcome?}` |
-| `mode.degraded` | System entered degraded mode | `{reason}` |
-| `mode.normal` | System returned to normal | `{}` |
-
-### Creating and Querying Events
-
-```bash
-# Create operational event
-bd create --type=event --event-type=patrol.muted \
-  --actor=human:overseer --target=agent:deacon \
-  --payload='{"reason":"fixing convoy deadlock","until":"gt-abc1"}'
-
-# Query recent events for an agent
-bd list --type=event --target=agent:deacon --limit=10
-
-# Query current state via labels
-bd list --type=role --label=patrol:muted
-```
-
-### Labels-as-State Pattern
-
-Events capture the full history. Labels cache the current state:
-
-- `patrol:muted` / `patrol:active`
-- `mode:degraded` / `mode:normal`
-- `status:idle` / `status:working`
-
-State change flow: create event bead (immutable), then update role bead labels (cache).
-
-```bash
-# Mute patrol
-bd create --type=event --event-type=patrol.muted ...
-bd update role-deacon --add-label=patrol:muted --remove-label=patrol:active
-```
-
-### Configuration vs State
-
-| Type | Storage | Example |
-|------|---------|---------|
-| **Static config** | TOML files | Daemon tick interval |
-| **Role directives** | Markdown files | Operator behavioral policy per role |
-| **Formula overlays** | TOML files | Per-step formula modifications |
-| **Operational state** | Beads (events + labels) | Patrol muted |
-| **Runtime flags** | Marker files | `.deacon-disabled` |
-
-*Events are the source of truth. Labels are the cache.*
+The daemon reads rig status before starting a rig's agents: a parked or docked
+rig is skipped.
 
 ## Role Directives and Formula Overlays
 

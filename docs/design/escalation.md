@@ -22,12 +22,10 @@ with automatic re-escalation.
 Agent -> gt escalate -s <SEVERITY> "description"
            |
            v
-     [Deacon receives]
+     [Mayor receives]
            |
            +-- resolves --> updates issue, re-slings work
-           +-- cannot  --> forwards to Mayor
-                              +-- resolves --> updates issue, re-slings
-                              +-- cannot  --> forwards to Overseer --> resolves
+           +-- cannot  --> forwards to Overseer --> resolves
 ```
 
 Each tier can resolve OR forward. The chain is tracked via bead comments.
@@ -90,7 +88,7 @@ Escalation beads use `type: escalation` with structured labels for tracking.
 | Label | Values | Purpose |
 |-------|--------|---------|
 | `severity:<level>` | MEDIUM, HIGH, CRITICAL | Current severity |
-| `source:<type>:<name>` | plugin:rebuild-gt, patrol:deacon | What triggered it |
+| `source:<type>:<name>` | plugin:rebuild-gt, daemon:patrol-scan | What triggered it |
 | `acknowledged:<bool>` | true, false | Has human acknowledged |
 | `reescalated:<bool>` | true, false | Has been re-escalated |
 | `reescalation_count:<n>` | 0, 1, 2, ... | Times re-escalated |
@@ -99,17 +97,16 @@ Escalation beads use `type: escalation` with structured labels for tracking.
 ## Category Routing (future)
 
 Categories provide structured routing based on the nature of the escalation.
-Not yet implemented as CLI flags; currently use `--to` for explicit routing.
+Not yet implemented; routing is by severity only.
 
 | Category | Description | Default Route |
 |----------|-------------|---------------|
-| `decision` | Multiple valid paths, need choice | Deacon -> Mayor |
-| `help` | Need guidance or expertise | Deacon -> Mayor |
+| `decision` | Multiple valid paths, need choice | Mayor |
+| `help` | Need guidance or expertise | Mayor |
 | `blocked` | Waiting on unresolvable dependency | Mayor |
-| `failed` | Unexpected error, can't proceed | Deacon |
+| `failed` | Unexpected error, can't proceed | Mayor |
 | `emergency` | Security or data integrity issue | Overseer (direct) |
-| `gate_timeout` | Gate didn't resolve in time | Deacon |
-| `lifecycle` | Worker stuck or needs recycle | Witness |
+| `gate_timeout` | Gate didn't resolve in time | Mayor |
 
 ## Commands
 
@@ -119,11 +116,11 @@ Create a new escalation.
 
 ```bash
 gt escalate -s <MEDIUM|HIGH|CRITICAL> "Short description" \
-  [-m "Detailed explanation"] [--source="plugin:rebuild-gt"]
+  [-r "Detailed explanation"] [--source="plugin:rebuild-gt"]
 ```
 
-Flags: `-s` severity (required), `-m` body, `--source` origin identifier,
-`--to` route to tier (deacon/mayor/overseer), `--dry-run`, `--json`.
+Flags: `-s` severity, `-r` reason (body), `--source` origin identifier,
+`--fingerprint` stable alert key, `--related` related bead, `--dry-run`, `--json`.
 
 For Dolt outages or GT behavior mismatches that involve Dolt-backed state, add
 the RCA capture checklist from `docs/dolt-health-guide.md` to the escalation
@@ -166,23 +163,14 @@ Plugins use escalation for failure notification:
 
 ```bash
 gt escalate -s MEDIUM "Plugin FAILED: rebuild-gt" \
-  -m "$ERROR" --source="plugin:rebuild-gt"
+  -r "$ERROR" --source="plugin:rebuild-gt"
 ```
 
-### Deacon Patrol
+### Stale Escalations
 
-Deacon uses escalation for health issues:
-
-```bash
-if [ $unresponsive_cycles -ge 5 ]; then
-  gt escalate -s HIGH "Witness unresponsive: gastown" \
-    -m "Witness has been unresponsive for $unresponsive_cycles cycles" \
-    --source="patrol:deacon:health-scan"
-fi
-```
-
-Deacon patrol also runs `gt escalate stale` periodically to catch unacked
-escalations and re-escalate them.
+`gt escalate stale` re-escalates unacknowledged escalations past
+`stale_threshold`. Nothing runs it on a schedule since the deacon patrol was
+deleted (ADR 0005); run it by hand or from a plugin.
 
 ## When to Escalate
 
