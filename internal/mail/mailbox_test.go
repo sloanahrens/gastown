@@ -464,7 +464,7 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 // so the close always matches the assignee it was filed under.
 func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		if c.Args[0] == "close" {
 			return "", "", 0
 		}
@@ -488,7 +488,7 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		argv := strings.Join(c.Args, " ")
 		switch c.Args[0] {
 		case "list":
@@ -561,7 +561,7 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 
 func TestQueryWispMessagesEscapesIdentitySQLLiterals(t *testing.T) {
 	t.Parallel()
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		if c.Args[0] == "sql" {
 			return "[]\n", "", 0
 		}

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/ui"
 )
@@ -84,10 +83,10 @@ type CheckContext struct {
 	// means the real bd CLI (see repair); tests record the calls.
 	openRepair bdRepairOpener
 
-	// bdRun answers the bd calls of the beads clients checks open with
-	// beadsAt, beadsRigLocal and beadsWithDir. Nil is the bd on PATH; tests
-	// answer in process.
-	bdRun beads.BDRunner
+	// openBeads opens the bead stores checks open with beadsAt,
+	// beadsRigLocal and beadsWithDir. Nil is bd; tests answer from
+	// beadsfake.
+	openBeads func(beadsSite) doctorBeads
 
 	// openGit opens the git checks inspect and repair repositories through.
 	// Nil means the real git (git.NewGitWithDir); tests set gitfake.

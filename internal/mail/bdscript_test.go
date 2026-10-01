@@ -9,16 +9,16 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// bdScript is a beads.BDRunner for the unit tier: it records every bd call
+// bdScript is a bdRunner for the unit tier: it records every bd call
 // and answers it with answer (stdout, stderr and an exit code, 0 for
 // success). A nil answer prints nothing and succeeds.
 type bdScript struct {
 	mu     sync.Mutex
-	calls  []beads.BDCall
-	answer func(c beads.BDCall) (stdout, stderr string, code int)
+	calls  []bdCall
+	answer func(c bdCall) (stdout, stderr string, code int)
 }
 
-func (s *bdScript) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+func (s *bdScript) run(_ context.Context, c bdCall) ([]byte, []byte, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, c)
 	answer := s.answer
@@ -34,10 +34,10 @@ func (s *bdScript) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error
 }
 
 // recorded returns the calls made so far.
-func (s *bdScript) recorded() []beads.BDCall {
+func (s *bdScript) recorded() []bdCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]beads.BDCall(nil), s.calls...)
+	return append([]bdCall(nil), s.calls...)
 }
 
 // argvs returns each call's arguments joined by spaces.
@@ -57,6 +57,20 @@ func (e bdExit) ExitCode() int { return int(e) }
 
 // noBeadsDatabase answers every bd call as bd does in a directory with no
 // beads database.
-func noBeadsDatabase(context.Context, beads.BDCall) ([]byte, []byte, error) {
+func noBeadsDatabase(context.Context, bdCall) ([]byte, []byte, error) {
 	return nil, []byte("Error: no beads database found\nHint: run 'bd where' to inspect the resolved workspace, run 'bd doctor' to diagnose, or 'bd init' to create a new database\n      or set BEADS_DIR to point to your .beads directory\n"), bdExit(1)
 }
+
+// noTownBeads is a town with no channel or agent beads: no channel exists
+// and no agent is muted.
+type noTownBeads struct{}
+
+func (noTownBeads) GetChannelBead(string) (*beads.Issue, *beads.ChannelFields, error) {
+	return nil, nil, nil
+}
+
+func (noTownBeads) GetAgentNotificationLevel(string) (string, error) {
+	return "", beads.ErrNotFound
+}
+
+func (noTownBeads) EnforceChannelRetention(string) error { return nil }

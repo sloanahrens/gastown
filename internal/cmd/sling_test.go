@@ -693,17 +693,6 @@ func TestIsHookedAgentDead_UnknownFormat(t *testing.T) {
 	}
 }
 
-func TestIsHookedAgentDead_NoTmuxSession(t *testing.T) {
-	t.Parallel()
-	// For a known assignee format where no tmux session exists,
-	// isHookedAgentDead should return true (session is dead).
-	// Use a highly unlikely polecat name to ensure no collision with real sessions.
-	result := isHookedAgentDead("nonexistent_rig_xyz/polecats/ghost_polecat_999")
-	// This might return true (no session) or false (tmux not available).
-	// We just verify it doesn't panic.
-	_ = result
-}
-
 // TestHookBeadWithRetryWritesHookDirDatabase: the hook lands as hooked to the
 // target agent in hookDir's own database (a pinned store, whose mutations
 // auto-commit, so the read-back and every later bd call see it).

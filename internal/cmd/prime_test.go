@@ -190,8 +190,9 @@ func TestDetectSessionState(t *testing.T) {
 	t.Run("normal_state", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
-			Role:    RoleMayor,
-			WorkDir: workDir,
+			Role:     RoleMayor,
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		state := detectSessionState(ctx)
@@ -219,10 +220,11 @@ func TestDetectSessionState(t *testing.T) {
 		}
 
 		ctx := RoleContext{
-			Role:    RolePolecat,
-			Rig:     "beads",
-			Polecat: "jade",
-			WorkDir: workDir,
+			Role:     RolePolecat,
+			Rig:      "beads",
+			Polecat:  "jade",
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		state := detectSessionState(ctx)
@@ -250,10 +252,11 @@ func TestDetectSessionState(t *testing.T) {
 		}
 
 		ctx := RoleContext{
-			Role:    RolePolecat,
-			Rig:     "beads",
-			Polecat: "jade",
-			WorkDir: workDir,
+			Role:     RolePolecat,
+			Rig:      "beads",
+			Polecat:  "jade",
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		state := detectSessionState(ctx)
@@ -282,8 +285,9 @@ func TestDetectSessionState(t *testing.T) {
 
 		// Mayor should NOT enter crash-recovery (only polecat/crew)
 		ctx := RoleContext{
-			Role:    RoleMayor,
-			WorkDir: workDir,
+			Role:     RoleMayor,
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		state := detectSessionState(ctx)
@@ -301,8 +305,9 @@ func TestOutputState(t *testing.T) {
 	t.Run("text_output", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
-			Role:    RoleMayor,
-			WorkDir: workDir,
+			Role:     RoleMayor,
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		var outputBuf bytes.Buffer
@@ -320,10 +325,11 @@ func TestOutputState(t *testing.T) {
 	t.Run("json_output", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
-			Role:    RolePolecat,
-			Rig:     "beads",
-			Polecat: "jade",
-			WorkDir: workDir,
+			Role:     RolePolecat,
+			Rig:      "beads",
+			Polecat:  "jade",
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		var outputBuf bytes.Buffer
@@ -359,10 +365,11 @@ func TestOutputState(t *testing.T) {
 		}
 
 		ctx := RoleContext{
-			Role:    RolePolecat,
-			Rig:     "beads",
-			Polecat: "jade",
-			WorkDir: workDir,
+			Role:     RolePolecat,
+			Rig:      "beads",
+			Polecat:  "jade",
+			WorkDir:  workDir,
+			TownRoot: failingTownBD(t),
 		}
 
 		var outputBuf bytes.Buffer

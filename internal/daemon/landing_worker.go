@@ -235,11 +235,16 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 				d.logger.Printf("landing_worker: %s: not landing: %s", rigName, why)
 				skipLogged = why
 			}
+		} else if d.upgradeRestartPending.Load() {
+			// Drain: no new pass while an upgrade restart is pending.
+			skipLogged = ""
 		} else {
 			skipLogged = ""
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
 			d.landingPasses.Add(1)
+			d.landingBeads.Store(rigName, "")
 			rep := w.Pass(d.ctx)
+			d.landingBeads.Delete(rigName)
 			d.landingPasses.Add(-1)
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
@@ -368,6 +373,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		MainState:   mainState,
 		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
 		Logf:        d.logger.Printf,
+		Draining:    d.upgradeRestartPending.Load,
+		Active:      func(id string) { d.landingBeads.Store(rigName, id) },
 		ClearIntent: func(w land.Work) error {
 			seat := supervisor.IntentSeat(supervisor.SeatFor(rigName, constants.RolePolecat, w.Worker))
 			_, err := intent.ClearLanded(townRoot, seat, w.BeadID, "landing worker", time.Now())

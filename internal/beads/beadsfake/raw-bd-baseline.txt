@@ -18,14 +18,8 @@ internal/cmdtree/gen-bd-tree/main.go argv 1
 internal/daemon/patrol_scan.go argv 1
 internal/deps/bd_handshake.go argv 1
 internal/deps/beads.go argv 1
-internal/doctor/bd_client.go BDRunner 1
-internal/doctor/types.go BDRunner 1
 internal/mail/bd.go argv 2
-internal/mail/bd.go BDRunner 1
-internal/mail/delivery.go BDRunner 3
-internal/mail/mailbox.go BDRunner 2
 internal/mail/router_integration_test.go argv 1
-internal/mail/router.go BDRunner 1
 internal/plugin/recording.go argv 1
 internal/polecat/fakes_test.go BDRunner 1
 internal/polecat/manager.go BDRunner 1
