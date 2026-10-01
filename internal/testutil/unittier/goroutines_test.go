@@ -100,11 +100,11 @@ func TestLeakedGivesUpAfterSettle(t *testing.T) {
 	}
 }
 
-func TestReportFailsTheRunAndNamesTheCreator(t *testing.T) {
+func TestReportLeaksFailsTheRunAndNamesTheCreator(t *testing.T) {
 	t.Parallel()
 	leaks := stray(parseGoroutines(dump), map[int]bool{7: true})
 	var w bytes.Buffer
-	if code := report(0, leaks, &w); code != 1 {
+	if code := reportLeaks(0, leaks, &w); code != 1 {
 		t.Errorf("code = %d, want 1", code)
 	}
 	for _, want := range []string{"GOROUTINE LEAK: 1 goroutine(s) outlived the unit tests", "created by example.com/pkg.(*cache).enqueue"} {
@@ -112,28 +112,28 @@ func TestReportFailsTheRunAndNamesTheCreator(t *testing.T) {
 			t.Errorf("report lacks %q:\n%s", want, w.String())
 		}
 	}
-	if code := report(3, leaks, &bytes.Buffer{}); code != 3 {
+	if code := reportLeaks(3, leaks, &bytes.Buffer{}); code != 3 {
 		t.Errorf("a failing code = %d, want it kept (3)", code)
 	}
 	w.Reset()
-	if code := report(0, nil, &w); code != 0 || w.Len() != 0 {
+	if code := reportLeaks(0, nil, &w); code != 0 || w.Len() != 0 {
 		t.Errorf("no leaks: code %d, output %q; want 0 and nothing", code, w.String())
 	}
 }
 
-func TestZeroGoroutinesChecksNothing(t *testing.T) {
+func TestNilRunChecksNothing(t *testing.T) {
 	t.Parallel()
 	var w bytes.Buffer
-	if code := (Goroutines{}).Check(0, &w); code != 0 || w.Len() != 0 {
-		t.Errorf("zero Goroutines: code %d, output %q; want 0 and nothing", code, w.String())
+	if code := (*Run)(nil).Check(0, &w); code != 0 || w.Len() != 0 {
+		t.Errorf("nil Run: code %d, output %q; want 0 and nothing", code, w.String())
 	}
 }
 
 func TestSnapshotHoldsTheCaller(t *testing.T) {
 	t.Parallel()
-	s := Snapshot()
-	if self := allGoroutines()[0]; !s.ids[self.id] {
-		t.Errorf("snapshot %v lacks the calling goroutine %d", s.ids, self.id)
+	ids := snapshot()
+	if self := allGoroutines()[0]; !ids[self.id] {
+		t.Errorf("snapshot %v lacks the calling goroutine %d", ids, self.id)
 	}
 }
 

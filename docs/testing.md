@@ -98,9 +98,14 @@ A test that needs a Dolt database on the shared test container leases one from t
 | `no-global-swap` | assign a package-level variable |
 | `parallel` | leave out `t.Parallel()` in a top-level `TestX` |
 
-One rule is checked when the package's unit tests end, because no syntax shows it: **no goroutine outlives the tests.** A goroutine a test starts, directly or through the code under test, must have returned by the time the test ends; stop it in `t.Cleanup` and wait for it. The check (`internal/testutil/unittier`) compares the goroutines running after `m.Run` with those running before it, gives a stopped one up to 2 s to return, and fails the run with a `GOROUTINE LEAK` block that prints each survivor's stack and the function that started it. It does not blame goroutines that package init started, the `os/signal` loop, or lumberjack's compression goroutine, which its `Close` cannot stop. It is off in the integration tier.
+Two rules are checked at run time, by `internal/testutil/unittier`, because no syntax shows them. Both are off in the integration tier and when `GT_TEST_DOCKER=1` opts in to container tests.
 
-The check runs only where the package's unit-tier `TestMain` runs it, so every package has one: `testutil.HermeticMain` (or `StartHermetic` and `Finish`) runs it, and a package that does not need the harness, or that `testutil` imports, uses
+- **No goroutine outlives the tests.** A goroutine a test starts, directly or through the code under test, must have returned by the time the test ends; stop it in `t.Cleanup` and wait for it. The check compares the goroutines running after `m.Run` with those running before it, gives a stopped one up to 2 s to return, and fails the run with a `GOROUTINE LEAK` block that prints each survivor's stack and the function that started it. It does not blame goroutines that package init started, the `os/signal` loop, or lumberjack's compression goroutine, which its `Close` cannot stop. When the check was added (gt-22hdp.20), one package of 82 leaked: `internal/daemon`'s per-rig escalation workers never exited, and now return when their queue drains.
+- **No test starts an external tool,** whether the test runs it or the code under test does: the static `no-subprocess` rule sees only the test's own `exec.Command`. Before the tests run, the check puts a refusing stand-in first on `PATH` for each tool in `unittier`'s `refusedTools` that is installed: bd, gt, dolt, tmux, go, docker, the shells, ps, lsof, which, find, sleep and the other tools production code runs by name. A stand-in records the call, prints why and exits 1, and the run fails with a `SUBPROCESS TRIPWIRE` block listing each call's directory and arguments, even when the code under test tolerated the error. git is not on the list: `gitfree.txt`, `WithoutGit` and `realgit.txt` govern it ([below](#no-git-in-a-converted-packages-unit-tier)). A tool started by absolute path, or the test binary re-executing itself, is not seen. The harness's own setup runs `go env` before the stand-ins go up, and its teardown runs `tmux kill-server` only when a test started that server.
+
+A package whose unit tier still starts a tool names it in its `TestMain`: `testutil.HermeticMain(m, testutil.AllowTools("bd", "tmux"))`, or `unittier.Main(m, unittier.AllowTools(...))`. That is the baseline, and it only shrinks: `TestAllowedTools` in `internal/testpolicy` fails when the names passed to `AllowTools` across the tree are more or fewer than `maxAllowedTools`, and `go test -run 'TestAllowedTools$' -v ./internal/testpolicy/` lists them per package. When the check was added, four packages started tools: `internal/beads` (bd, sh, sleep) and `internal/cmd` (bd, tmux), both still on `unconverted.txt`, and `internal/daemon` (gt, and lsof, ps and ss from the Dolt server manager's probes) and `internal/doctor` (diskutil, find, which).
+
+The checks run only where the package's unit-tier `TestMain` runs them, so every package has one: `testutil.HermeticMain` (or `StartHermetic` and `Finish`) runs them, and a package that does not need the harness, or that `testutil` imports, uses
 
 ```go
 func TestMain(m *testing.M) {
@@ -108,7 +113,7 @@ func TestMain(m *testing.M) {
 }
 ```
 
-`TestUnitTierMain` in `internal/testpolicy` fails on a package whose unit tier has test files but no such `TestMain`. When the check was added (gt-22hdp.20), one package of 82 leaked: `internal/daemon`'s per-rig escalation workers never exited, and now return when their queue drains.
+`TestUnitTierMain` in `internal/testpolicy` fails on a package whose unit tier has test files but no such `TestMain`.
 
 The rules for production code, and for the tree as a whole, are:
 
@@ -119,6 +124,7 @@ The rules for production code, and for the tree as a whole, are:
 | `integration-name` | a test in an integration-tagged file must be named `TestIntegration…` |
 | `fake-contract` | a `…fake` package must export a `Run…Contract`, and an integration test must call it |
 | `allow-reason` | an exemption must carry a reason |
+| `allow-tools` | an `AllowTools` argument must be a string literal, so the baseline can count it |
 
 An exemption is a comment on the offending line or the line above it:
 

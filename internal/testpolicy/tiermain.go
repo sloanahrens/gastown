@@ -76,3 +76,48 @@ func CheckUnitTierMains(root string, dirs []string) ([]string, error) {
 	}
 	return findings, nil
 }
+
+// AllowedTools returns the tool names dir's unit-tier test files pass to
+// testutil.AllowTools or unittier.AllowTools (unqualified inside their own
+// packages): the external tools its unit tier may still start. An argument
+// that is not a string literal is returned as a violation, since the
+// baseline cannot count it.
+func AllowedTools(dir string) (names []string, vs []Violation, err error) {
+	fset, files, err := unitTierTestFiles(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, f := range files {
+		imp := imports(f)
+		ast.Inspect(f, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok || !isAllowTools(f, imp, c.Fun) {
+				return true
+			}
+			for _, a := range c.Args {
+				if s := stringLit(a); s != "" {
+					names = append(names, s)
+					continue
+				}
+				vs = append(vs, Violation{Pos: fset.Position(a.Pos()), Rule: RuleAllowTools, Msg: "AllowTools takes string literals, so the baseline can count them"})
+			}
+			return true
+		})
+	}
+	return names, vs, nil
+}
+
+// RuleAllowTools is broken by an AllowTools argument the baseline cannot
+// count.
+const RuleAllowTools = "allow-tools"
+
+func isAllowTools(f *ast.File, imp map[string]string, fun ast.Expr) bool {
+	switch fn := fun.(type) {
+	case *ast.Ident:
+		return fn.Obj == nil && fn.Name == "AllowTools" && (f.Name.Name == "testutil" || f.Name.Name == "unittier")
+	case *ast.SelectorExpr:
+		x, ok := fn.X.(*ast.Ident)
+		return ok && x.Obj == nil && fn.Sel.Name == "AllowTools" && (imp[x.Name] == testutilPkgPath || imp[x.Name] == unittierPkgPath)
+	}
+	return false
+}

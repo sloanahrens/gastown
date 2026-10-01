@@ -70,3 +70,58 @@ func TestUnitTierMain(t *testing.T) {
 		t.Error(f)
 	}
 }
+
+func TestAllowedToolsFixture(t *testing.T) {
+	t.Parallel()
+	names, vs, err := AllowedTools(filepath.Join("testdata", "allowtools"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "dolt" is in an integration-tagged file, which is not the unit tier.
+	if got := strings.Join(names, ","); got != "ps,bd,sh" {
+		t.Errorf("names = %s, want ps,bd,sh", got)
+	}
+	if len(vs) != 1 || vs[0].Rule != RuleAllowTools || vs[0].Pos.Line != 15 {
+		t.Errorf("violations = %v, want one for the variable on line 15", vs)
+	}
+}
+
+// maxAllowedTools is the number of tool names passed to AllowTools across
+// the tree: the external tools unit tiers still start. It only shrinks:
+// seaming a tool out of a package's unit tier deletes its name from that
+// package's TestMain AND lowers this, in the same change.
+const maxAllowedTools = 12
+
+// TestAllowedTools holds the AllowTools baseline to maxAllowedTools. Run it
+// with -v to see what each package still starts.
+func TestAllowedTools(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs, err := PackageDirs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, dir := range dirs {
+		names, vs, err := AllowedTools(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range vs {
+			t.Error(v)
+		}
+		if len(names) > 0 {
+			t.Logf("%s: %s", relPath(root, dir), strings.Join(names, " "))
+		}
+		total += len(names)
+	}
+	if total > maxAllowedTools {
+		t.Errorf("AllowTools names %d tools across the tree, want at most %d: the baseline only shrinks; answer the new tool through a seam instead", total, maxAllowedTools)
+	}
+	if total < maxAllowedTools {
+		t.Errorf("AllowTools names %d tools across the tree, but maxAllowedTools is %d: lower it to %d", total, maxAllowedTools, total)
+	}
+}

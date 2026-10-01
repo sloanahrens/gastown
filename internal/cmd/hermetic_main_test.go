@@ -13,11 +13,12 @@ import (
 // harness (gt-lwi): GT_*/BD_* env scrubbed, HOME and town root redirected to a
 // sandbox, Dolt ports poisoned so nothing reaches the production server, and
 // workspace resolution refusing the live town. (The integration build has its
-// own TestMain in integration_testmain_test.go.)
+// own TestMain in integration_testmain_test.go.) The unit tier still starts bd
+// and tmux (testutil.AllowTools, a baseline that only shrinks).
 func TestMain(m *testing.M) {
 	prepareTestCommandTree() // tests then only read the tree
 	sweepStaleGTBinaries()
-	code := testutil.HermeticMain(m)
+	code := testutil.HermeticMain(m, testutil.AllowTools("bd", "tmux"))
 	removeBuiltGT()
 	os.Exit(code)
 }
