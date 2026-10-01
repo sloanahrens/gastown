@@ -40,6 +40,38 @@ func TestParseBudgetOverrunsOnlyFailingLines(t *testing.T) {
 	}
 }
 
+func TestParseWarningsKeepsTheGatesOwnWarnings(t *testing.T) {
+	t.Parallel()
+	out := "gate: build (go build ./...)\n" +
+		"gate: WARNING exec tax 180 ms/exec in this process tree; see gt-2ycne.1\n" +
+		"gate: FAILED at build\n" +
+		"golangci-lint: something gate: WARNING but not at the line start\n"
+	got := parseWarnings(out)
+	want := "exec tax 180 ms/exec in this process tree; see gt-2ycne.1"
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("warnings = %q, want only %q", got, want)
+	}
+}
+
+// A warning rides the landing record: a landing that took 12 minutes because
+// its host was taxed says so in the record and in the bead's note.
+func TestGateRecordCarriesTheWarnings(t *testing.T) {
+	t.Parallel()
+	res := Result{
+		Gate: GateResult{Passed: true, Steps: []StepResult{
+			{Name: "preflight", Warnings: []string{"exec tax 180 ms/exec in this process tree"}},
+			{Name: "unit", Warnings: []string{"packages mostly waiting, not computing"}},
+		}},
+		Rerun: &GateResult{Passed: true},
+	}
+	got := gateRecord(res)
+	for _, want := range []string{"pass (", "exec tax 180 ms/exec", "packages mostly waiting", "rerun of the failed package(s)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("gateRecord = %q, want it to name %q", got, want)
+		}
+	}
+}
+
 type fakeGateBeads struct {
 	mu    sync.Mutex
 	filed []GateBead

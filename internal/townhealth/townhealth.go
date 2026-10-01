@@ -77,7 +77,10 @@ func (v Verdict) Worse(w Verdict) Verdict {
 
 // Field names.
 const (
-	FieldDolt       = "dolt"
+	FieldDolt = "dolt"
+	// FieldExecTax is the per-exec cost of a freshly written program in the
+	// daemon's process tree (gt-2ycne.1).
+	FieldExecTax    = "exec-tax"
 	FieldDaemon     = "daemon"
 	FieldTick       = "tick"
 	FieldLanding    = "landing"
@@ -129,6 +132,11 @@ type Report struct {
 	// HeartbeatCount is the daemon heartbeat count this report saw, the
 	// baseline the next report checks for advance. Zero when unread.
 	HeartbeatCount int64 `json:"heartbeat_count,omitempty"`
+	// ExecTaxMS is the median cost of exec'ing a freshly written program in
+	// the daemon's process tree, in milliseconds; nil when the probe did not
+	// answer. The exec-tax field carries its verdict; this is the number a
+	// reader compares between reports (gt-2ycne.1).
+	ExecTaxMS *float64 `json:"exec_tax_ms,omitempty"`
 }
 
 // Limits is a degraded and a red threshold. A zero limit never trips.
@@ -156,6 +164,8 @@ type Thresholds struct {
 	DoltSamples int
 	// DoltLatency judges the p50.
 	DoltLatency Limits
+	// ExecTax judges the median cost of exec'ing a freshly written program.
+	ExecTax Limits
 	// Heartbeat judges the age of the daemon's last completed heartbeat,
 	// and how long a count that stopped advancing is tolerated.
 	Heartbeat Limits
@@ -188,6 +198,7 @@ func DefaultThresholds() Thresholds {
 	return Thresholds{
 		DoltSamples:        3,
 		DoltLatency:        Limits{Degraded: time.Second, Red: 5 * time.Second},
+		ExecTax:            Limits{Red: 50 * time.Millisecond},
 		Heartbeat:          Limits{Degraded: 10 * time.Minute, Red: 30 * time.Minute},
 		TickDegradedFactor: 2,
 		TickRedFactor:      4,
@@ -204,6 +215,12 @@ func DefaultThresholds() Thresholds {
 // Dolt pings the Dolt server once and returns the round trip.
 type Dolt interface {
 	Ping(ctx context.Context) (time.Duration, error)
+}
+
+// ExecTax measures what one exec of a freshly written program costs in the
+// caller's process tree (internal/exectax).
+type ExecTax interface {
+	ExecTax(ctx context.Context) (time.Duration, error)
 }
 
 // HeartbeatRecord is the daemon's last completed heartbeat.
@@ -326,6 +343,7 @@ type Inputs struct {
 	Prev *Report
 
 	Dolt        Dolt
+	ExecTax     ExecTax
 	Heartbeat   Heartbeat
 	Ticks       Ticks
 	Landings    Landings
@@ -346,6 +364,9 @@ var errNotWired = errors.New("no source wired")
 func Compute(ctx context.Context, in Inputs) Report {
 	r := Report{At: in.Now}
 	r.Fields = append(r.Fields, dolt(ctx, in))
+	et, ms := execTax(ctx, in)
+	r.Fields = append(r.Fields, et)
+	r.ExecTaxMS = ms
 	hb, count := heartbeat(in)
 	r.Fields = append(r.Fields, hb)
 	r.HeartbeatCount = count
@@ -402,6 +423,26 @@ func dolt(ctx context.Context, in Inputs) Field {
 		f.Detail = fmt.Sprintf("%d of %d pings failed: %v", failed, n, lastErr)
 	}
 	return f
+}
+
+// execTax judges the cost of exec'ing a freshly written program in this
+// process tree, which is what the landing gate pays once per test binary.
+// The millisecond count is the report's to publish; the field is the verdict
+// on it.
+func execTax(ctx context.Context, in Inputs) (Field, *float64) {
+	if in.ExecTax == nil {
+		return unknown(FieldExecTax, "", "", errNotWired), nil
+	}
+	d, err := in.ExecTax.ExecTax(ctx)
+	if err != nil {
+		return unknown(FieldExecTax, "", "", err), nil
+	}
+	ms := float64(d) / float64(time.Millisecond)
+	f := Field{Name: FieldExecTax, Tag: Live, Verdict: in.Thresholds.ExecTax.judge(d), Value: Short(d) + "/exec"}
+	if f.Verdict != Green {
+		f.Detail = "every fresh executable in this tree pays " + Short(d)
+	}
+	return f, &ms
 }
 
 // median returns the middle sample (the lower middle for an even count).

@@ -166,8 +166,36 @@ func run() int {
 		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *strictWall); code == 0 {
 			code = c
 		}
+		reportIdle(res.Judged)
 	}
 	return code
+}
+
+// reportIdle prints the gate's "packages mostly waiting" warning. A tier
+// whose packages ran long without computing was waiting on the host -- a
+// macOS scan per executable, a throttled process, a lock -- and its wall time
+// says nothing about the tree (gt-2ycne.1). The warning fails nothing: make
+// gate is judged by its exit code, and a loaded host is not a defect in the
+// branch under test.
+func reportIdle(times []testpolicy.PkgTime) {
+	rep := testpolicy.IdleJudged(times)
+	if !rep.Waiting {
+		return
+	}
+	top := make([]string, 0, len(rep.Top))
+	for _, p := range rep.Top {
+		top = append(top, fmt.Sprintf("%s %s wall / %s CPU", p.Package, round(p.Wall), round(p.CPU.User+p.CPU.Sys)))
+	}
+	fmt.Fprintf(os.Stderr, "gate: WARNING packages mostly waiting, not computing: the median of %d judged packages waited %s of wall for %s of CPU; top %d by wall: %s\n",
+		rep.Packages, round(rep.Wall), round(rep.CPU), len(top), strings.Join(top, ", "))
+}
+
+// round trims a duration to the unit that reads best in one line.
+func round(d time.Duration) time.Duration {
+	if d >= time.Second {
+		return d.Round(100 * time.Millisecond)
+	}
+	return d.Round(time.Millisecond)
 }
 
 // reportOver writes a BUDGET: line for each overrun to w and reports

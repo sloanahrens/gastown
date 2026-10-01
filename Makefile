@@ -1,13 +1,14 @@
-.PHONY: build install install-local check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
+.PHONY: build install install-local check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate exec-tax-preflight tier-check presubmit
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
 # shell.
 #
-#   make gate              the landing gate: lint, then `go build ./...`, then
-#                          the unit tier: the budget runner over every
-#                          package (there is no slow tier: internal/cmd and
-#                          internal/beads run here since gt-ik4a1.9). A
+#   make gate              the landing gate: the exec-tax preflight (a warning
+#                          at worst, gt-2ycne.1), then lint, then `go build
+#                          ./...`, then the unit tier: the budget runner over
+#                          every package (there is no slow tier: internal/cmd
+#                          and internal/beads run here since gt-ik4a1.9). A
 #                          package over testpolicy.FastTierMaxWall of wall
 #                          time is only warned about (a TIER: line): wall time
 #                          depends on host load, and a landing is never
@@ -245,6 +246,14 @@ NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -
 # scripts/makefile-gate_test.sh can drive the failure paths with a stub.
 SHELL_TESTS ?= scripts/test-makefile.sh
 
+# The exec-tax preflight the gate runs first (gt-2ycne.1): it measures what an
+# exec of a fresh program costs in this process tree and warns, naming itself
+# on a "gate: WARNING" line, when the tree pays a macOS scan per new
+# executable. A warning fails nothing; the landing worker copies it into the
+# landing record. A make variable only so scripts/makefile-gate_test.sh can
+# drive the warning path with a stub.
+EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
+
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
 # lint must not read as red. Plain `make lint` retries a contended lint for
@@ -254,7 +263,7 @@ gate: LINT_RUNNER_FLAGS := --allow-serial-runners
 # The gate's start, read when make parses the Makefile, so the wall it prints
 # includes lint.
 gate: GATE_START := $(shell date +%s)
-gate: lint
+gate: exec-tax-preflight lint
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
 	@# -o into a temp dir: `go build ./...` over a module with one main
@@ -280,6 +289,12 @@ gate: lint
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	echo "gate: PASSED in $${wall}s wall" >&2
+
+# The preflight the gate runs before lint. It prints at most a warning, so a
+# preflight that cannot measure (no `go run`, a temp dir it cannot write)
+# leaves the gate's verdict to the tree's tests.
+exec-tax-preflight:
+	@$(EXEC_TAX_PREFLIGHT) || true
 
 # tier-check is the unit tier with the wall check failing. It is the drift
 # guard that the gate is not: it reruns every package, so it belongs

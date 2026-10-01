@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
 # `make gate`, `make test-slow` and `make test-integration` are the test
-# tiers (`make test` only chains them), the gate runs lint, build and the unit
+# tiers (`make test` only chains them), the gate runs the exec-tax preflight
+# (a warning fails nothing, gt-2ycne.1), lint, build and the unit
 # tier over every package in that order (no slow tier since gt-ik4a1.9),
 # test-slow runs the gate and then the shell tests, neither starts a container
 # or takes the container-gate slot, and the integration tier runs every
@@ -222,7 +223,18 @@ echo "shell-tests" >>"$STUB_LOG"
 [[ -n "${STUB_SHELL_FAIL:-}" ]] && exit 1
 exit 0
 STUB
-chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint"
+# The exec-tax preflight, which the real gate reaches through `go run`: the
+# go stub would swallow that call, so every case below points
+# EXEC_TAX_PREFLIGHT at this stub. It warns only when EXEC_TAX_WARN is set,
+# and exits 0 either way.
+cat >"$TMP/preflight.sh" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n "${EXEC_TAX_WARN:-}" ]]; then
+  echo "gate: WARNING exec tax 180 ms/exec in this process tree: a fresh executable here waits on a macOS scan or a throttled process, and the unit tier builds one per package (see gt-2ycne.1)" >&2
+fi
+exit 0
+STUB
+chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh"
 
 # run_gate [make flags] -- VAR=value... runs the real gate recipe against the
 # stubs, with an inherited GT_TEST_DOCKER=1 the recipe must override, and
@@ -237,7 +249,7 @@ run_gate() {
   : >"$TMP/calls"
   local rc=0
   env "$@" STUB_LOG="$TMP/calls" GT_TEST_DOCKER=1 PATH="$TMP/bin:$PATH" \
-    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" EXEC_TAX_PREFLIGHT="$TMP/preflight.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
   echo "$rc"
 }
 
@@ -246,6 +258,15 @@ if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && g
   pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
   fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+# The preflight's warning path: a taxed host says so, and the gate still
+# passes. -o lint so the real docs-lint runs once, in the green case above.
+rc=$(run_gate -o lint -- EXEC_TAX_WARN=1)
+if [[ "$rc" == 0 ]] && grep -q -F 'gate: WARNING exec tax 180 ms/exec' "$TMP/err" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "a taxed host: the gate warns on the exec tax and still passes (gt-2ycne.1)"
+else
+  fail "a taxed host: the gate warns on the exec tax and still passes (gt-2ycne.1) (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
 rc=$(run_gate -o docs-lint -- STUB_LINT_FAIL=1)
