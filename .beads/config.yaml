@@ -50,3 +50,8 @@ dolt.idle-timeout: "0"
 # reach the GitHub issue tracker. Disabling auto-export prevents silent
 # regressions when the bd binary is upgraded. (gt-b48)
 export.auto: "false"
+
+# Convoy polling reads `bd events tail`, which needs the events journal
+# (gt-7iwy0.7). gt rig add / install / unpark turn it on for new stores;
+# gt doctor --check events-journal fails a store that has it off.
+events-journal: true
