@@ -1,12 +1,12 @@
 package rig
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -20,9 +20,9 @@ func TestGetConfig_SystemDefaults(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// Should get system defaults
@@ -58,9 +58,9 @@ func TestGetConfig_WispOverride(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// Create wisp config with override
@@ -88,9 +88,9 @@ func TestGetConfig_WispBlocked(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// Block auto_restart at wisp layer
@@ -123,9 +123,9 @@ func TestGetIntConfig_Stacking(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// Set wisp adjustment
@@ -150,9 +150,9 @@ func TestGetBoolConfig_StringConversion(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// Set string "true" in wisp
@@ -184,9 +184,9 @@ func TestGetConfig_UnknownKey(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	result := rig.GetConfigWithSource("nonexistent_key")
@@ -207,9 +207,9 @@ func TestGetStringConfig(t *testing.T) {
 	}
 
 	rig := &Rig{
-		Name:     "testrig",
-		Path:     rigPath,
-		BDRunner: noRigBead,
+		Name:          "testrig",
+		Path:          rigPath,
+		IdentityBeads: noRigBead(),
 	}
 
 	// System default for default_formula
@@ -294,7 +294,7 @@ func TestGetIntConfig_LegacyBoolValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rig := &Rig{Name: "testrig", Path: rigPath, BDRunner: noRigBead}
+	rig := &Rig{Name: "testrig", Path: rigPath, IdentityBeads: noRigBead()}
 
 	wispCfg := wisp.NewConfig(tmpDir, "testrig")
 	if err := wispCfg.Set("max_polecats", true); err != nil {
@@ -317,7 +317,7 @@ func TestGetBoolConfig_NumericValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rig := &Rig{Name: "testrig", Path: rigPath, BDRunner: noRigBead}
+	rig := &Rig{Name: "testrig", Path: rigPath, IdentityBeads: noRigBead()}
 
 	wispCfg := wisp.NewConfig(tmpDir, "testrig")
 	if err := wispCfg.Set("auto_restart", float64(0)); err != nil {
@@ -329,41 +329,23 @@ func TestGetBoolConfig_NumericValue(t *testing.T) {
 	}
 }
 
-// TestGetConfig_BeadLabelThroughRunner pins the rig identity bead layer
-// through the Rig's BDRunner: the label on the bead the runner returns wins
-// over the system default, and the read names the rig identity bead.
-func TestGetConfig_BeadLabelThroughRunner(t *testing.T) {
+// TestGetConfig_BeadLabelThroughIdentityBeads pins the rig identity bead
+// layer: the label on the rig identity bead wins over the system default.
+func TestGetConfig_BeadLabelThroughIdentityBeads(t *testing.T) {
 	t.Parallel()
 	rigPath := filepath.Join(t.TempDir(), "testrig")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var shown []string
-	r := &Rig{
-		Name: "testrig",
-		Path: rigPath,
-		BDRunner: func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-			if len(c.Args) > 1 && c.Args[0] == "show" {
-				shown = append(shown, c.Args[1])
-				return []byte(`[{"id":"gt-rig-testrig","title":"testrig","status":"open","labels":["polecat_branch_template:team/{name}"]}]`), nil, nil
-			}
-			return nil, nil, nil
-		},
-	}
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-rig-testrig", Title: "testrig", Labels: []string{"polecat_branch_template:team/{name}"}})
+	r := &Rig{Name: "testrig", Path: rigPath, IdentityBeads: db}
 	result := r.GetConfigWithSource("polecat_branch_template")
 	if result.Source != SourceBead || result.Value != "team/{name}" {
 		t.Fatalf("GetConfigWithSource = %+v, want the bead label team/{name}", result)
 	}
-	if len(shown) != 1 || shown[0] != "gt-rig-testrig" {
-		t.Fatalf("bd show calls = %v, want one read of gt-rig-testrig", shown)
-	}
 }
 
-// noRigBead is a bd with no rig identity bead: the bead layer has nothing,
-// so lookups fall through to the system defaults.
-func noRigBead(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
-	if bdVerb(c.Args) == "show" {
-		return []byte("[]"), nil, nil
-	}
-	return nil, nil, nil
-}
+// noRigBead is a database with no rig identity bead: the bead layer has
+// nothing, so lookups fall through to the system defaults.
+func noRigBead() beads.Client { return beadsfake.New() }

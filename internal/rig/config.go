@@ -203,11 +203,7 @@ func (r *Rig) getBeadLabel(key string) interface{} {
 	// Construct rig identity bead ID
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, r.Name)
 
-	// Load the bead
-	beadsDir := beads.ResolveBeadsDir(r.Path)
-	bd := beads.NewWithBeadsDirAndRunner(r.Path, beadsDir, r.BDRunner)
-
-	issue, err := bd.Show(rigBeadID)
+	issue, err := identityBeads(r.Path, r.IdentityBeads).Show(rigBeadID)
 	if err != nil {
 		return nil
 	}

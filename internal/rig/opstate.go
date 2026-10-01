@@ -55,9 +55,9 @@ func GetOpState(townRoot, rigName string) (OpState, string) {
 	return getOpState(townRoot, rigName, nil)
 }
 
-// getOpState is GetOpState with the identity bead read through run (nil:
-// the bd on PATH).
-func getOpState(townRoot, rigName string, run beads.BDRunner) (OpState, string) {
+// getOpState is GetOpState with the identity bead read from store (nil: bd
+// in the rig's own database).
+func getOpState(townRoot, rigName string, store beads.Client) (OpState, string) {
 	if parked, _ := townconfig.IsParked(townRoot, rigName); parked {
 		return OpStateParked, OpStateSourceRegistry
 	}
@@ -76,8 +76,7 @@ func getOpState(townRoot, rigName string, run beads.BDRunner) (OpState, string) 
 		return OpStateOperational, OpStateSourceDefault
 	}
 
-	bd := beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), run)
-	rigBead, err := bd.Show(beads.RigBeadIDWithPrefix(prefix, rigName))
+	rigBead, err := identityBeads(rigPath, store).Show(beads.RigBeadIDWithPrefix(prefix, rigName))
 	if err != nil {
 		// No readable identity bead: either the rig never got one, or bd could
 		// not answer. Report operational — inventing a docked rig out of a
@@ -105,4 +104,13 @@ func (s OpState) Label() string {
 		return strings.ToLower(string(s))
 	}
 	return ""
+}
+
+// identityBeads is store, or, when it is nil, bd in rigPath's own database:
+// where the rig identity bead lives.
+func identityBeads(rigPath string, store beads.Client) beads.Client {
+	if store != nil {
+		return store
+	}
+	return beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))
 }
