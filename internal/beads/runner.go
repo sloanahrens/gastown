@@ -12,6 +12,8 @@ import (
 // bdCall is one bd subprocess: the argv after "bd", the working directory,
 // the complete environment and optional stdin.
 type bdCall struct {
+	// bin is the bd binary to run; "" is the bd on PATH.
+	bin  string
 	dir  string
 	env  []string // the whole environment; nil inherits the process's (plain calls only)
 	args []string
@@ -29,7 +31,7 @@ type bdCall struct {
 // interface{ ExitCode() int }, as *exec.ExitError does.
 type bdRunFunc func(ctx context.Context, c bdCall) (stdout, stderr []byte, err error)
 
-// runBDProcess is the real bdRunFunc: it runs bd from PATH.
+// runBDProcess is the real bdRunFunc: it runs c.bin, or bd from PATH.
 func runBDProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 	var stdout, stderr bytes.Buffer
 	err := newBDProcess(ctx, c, &stdout, &stderr).Run()
@@ -43,15 +45,23 @@ func newBDProcess(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) *
 	if c.plain {
 		return newPlainBDCmd(ctx, c, stdout, stderr)
 	}
-	return newBDCmd(ctx, c.dir, c.env, c.stdin, c.args, stdout, stderr)
+	return newBDCmd(ctx, c.bin, c.dir, c.env, c.stdin, c.args, stdout, stderr)
+}
+
+// bdBinary is bin, or "bd" (resolved on PATH) when bin is "".
+func bdBinary(bin string) string {
+	if bin == "" {
+		return "bd"
+	}
+	return bin
 }
 
 // newPlainBDCmd builds a plain call's bd subprocess the way CommandWithEnv
-// builds one: bd from PATH in c.dir with exactly c.env (nil inherits the
-// process environment, with PWD set to the directory), in the caller's
-// process group, nothing added.
+// builds one: c.bin (or bd from PATH) in c.dir with exactly c.env (nil
+// inherits the process environment, with PWD set to the directory), in the
+// caller's process group, nothing added.
 func newPlainBDCmd(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "bd", c.args...) //nolint:gosec // G204: args are constructed internally
+	cmd := exec.CommandContext(ctx, bdBinary(c.bin), c.args...) //nolint:gosec // G204: args are constructed internally
 	cmd.Dir = c.dir
 	cmd.Env = c.env
 	cmd.Stdout = stdout
@@ -77,11 +87,14 @@ func (b *Beads) runner() bdRunFunc {
 // decides the answer and never reaches the bd on PATH.
 func (b *Beads) allowStaleArgs(env, args []string) []string {
 	if b.exec == nil {
-		return MaybePrependAllowStaleWithEnv(env, args)
+		if bdSupportsAllowStale(b.bin, env) {
+			return append([]string{"--allow-stale"}, args...)
+		}
+		return args
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
 	defer cancel()
-	stdout, stderr, err := b.exec(ctx, bdCall{dir: b.workDir, env: env, args: []string{"--allow-stale", "version"}})
+	stdout, stderr, err := b.exec(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: []string{"--allow-stale", "version"}})
 	out := strings.TrimSpace(string(stdout) + string(stderr))
 	if err == nil && out != "" && !strings.Contains(out, "unknown flag") {
 		return append([]string{"--allow-stale"}, args...)
@@ -136,8 +149,8 @@ func runnerExec(run BDRunner) bdRunFunc {
 // no --allow-stale probe, no subprocess deadline, no retries, no prefix
 // routing. It exists so callers that managed bd's environment themselves
 // can move from raw argv onto typed methods without changing what bd sees.
-func NewPlain(dir string, env []string) *Beads {
-	b := newBeads(beadsFields{workDir: dir, noRoute: true})
+func NewPlain(dir string, env []string, opts ...Option) *Beads {
+	b := newBeads(applyOptions(beadsFields{workDir: dir, noRoute: true}, opts))
 	b.plain = true
 	b.plainEnv = env
 	return b
@@ -159,7 +172,7 @@ func (b *Beads) WithTimeout(d time.Duration) *Beads {
 	if !b.plain {
 		panic("beads: WithTimeout on a wrapper not built by NewPlain")
 	}
-	c := NewPlain(b.workDir, b.plainEnv)
+	c := NewPlain(b.workDir, b.plainEnv, WithBin(b.bin))
 	c.exec = b.exec
 	c.plainTimeout = d
 	return c
@@ -207,7 +220,7 @@ func (b *Beads) runPlain(stdin []byte, args []string) ([]byte, error) {
 		defer cancel()
 	}
 	env := machineEnvForCall(b.workDir, b.plainEnv, args)
-	stdout, stderr, err := b.runner()(ctx, bdCall{dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
+	stdout, stderr, err := b.runner()(ctx, bdCall{bin: b.bin, dir: b.workDir, env: env, args: args, stdin: stdin, plain: true})
 	if err != nil {
 		return stdout, &CLIError{Args: args, Stdout: stdout, Stderr: stderr, Err: SubprocessFailureError(ctx, b.plainTimeout, err)}
 	}

@@ -182,7 +182,7 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var out bytes.Buffer
-	cmd := newBDCmd(runCtx, dir, env, nil, args, &out, &out)
+	cmd := newBDCmd(runCtx, "", dir, env, nil, args, &out, &out)
 	quitOnTimeout(cmd)
 	if err := cmd.Run(); err != nil {
 		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
