@@ -107,7 +107,7 @@ func runPeek(cmd *cobra.Command, args []string) error {
 	// e.g., "beads/crew/dave" -> session name "gt-beads-crew-dave"
 	if strings.HasPrefix(polecatName, "crew/") {
 		crewName := strings.TrimPrefix(polecatName, "crew/")
-		sessionID := session.CrewSessionName(session.PrefixFor(rigName), crewName)
+		sessionID := session.CrewSessionName(townRegistry().PrefixForRig(rigName), crewName)
 		output, err = mgr.CaptureSession(sessionID, lines)
 	} else {
 		output, err = mgr.Capture(polecatName, lines)

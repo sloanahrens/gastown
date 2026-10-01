@@ -31,7 +31,7 @@ func TestResolvePathToSessionRejectsUnsafeSegments(t *testing.T) {
 	t.Parallel()
 	for _, target := range []string{"../crew/toast", "gastown/../toast", "gastown/crew/..", `gastown\crew\toast`} {
 		t.Run(target, func(t *testing.T) {
-			if _, err := resolvePathToSession(target); err == nil {
+			if _, err := resolvePathToSession(handoffTestRegistry(), target); err == nil {
 				t.Fatalf("resolvePathToSession(%q) error = nil, want rejection", target)
 			}
 		})

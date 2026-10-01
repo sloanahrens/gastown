@@ -52,7 +52,7 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 		// Check for running session (unless forced)
 		if !forceRemove {
 			t := tmux.NewTmux()
-			sessionID := crewSessionName(r.Name, name)
+			sessionID := crewSessionName(townRegistry(), r.Name, name)
 			hasSession, _ := t.HasSession(sessionID)
 			if hasSession {
 				fmt.Printf("Error removing %s: session '%s' is running (use --force to kill and remove)\n", arg, sessionID)
@@ -63,7 +63,7 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 
 		// Kill session if it exists (with proper process cleanup to avoid orphans)
 		t := tmux.NewTmux()
-		sessionID := crewSessionName(r.Name, name)
+		sessionID := crewSessionName(townRegistry(), r.Name, name)
 		if hasSession, _ := t.HasSession(sessionID); hasSession {
 			if err := t.KillSessionWithProcesses(sessionID); err != nil {
 				fmt.Printf("Error killing session for %s: %v\n", arg, err)
@@ -599,7 +599,7 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		sessionID := crewSessionName(r.Name, name)
+		sessionID := crewSessionName(townRegistry(), r.Name, name)
 
 		// Check if session exists
 		hasSession, err := t.HasSession(sessionID)

@@ -118,7 +118,7 @@ func checkPauseGated(role session.Role) error {
 
 // parseAgentAddr parses an address for gt agent pause/resume.
 // Accepts <rig>/<name> (polecat), <rig>/crew/<name> and mayor.
-func parseAgentAddr(address string) (*agentAddr, error) {
+func parseAgentAddr(reg *session.PrefixRegistry, address string) (*agentAddr, error) {
 	id, err := session.ParseAddress(address)
 	if err != nil {
 		return nil, fmt.Errorf("invalid agent address %q: %w", address, err)
@@ -133,7 +133,7 @@ func parseAgentAddr(address string) (*agentAddr, error) {
 	case session.RoleMayor:
 		addr.BeadID = beads.MayorBeadIDTown()
 	default:
-		addr.BeadID = beads.AgentBeadIDWithPrefix(session.PrefixFor(id.Rig), id.Rig, role, name)
+		addr.BeadID = beads.AgentBeadIDWithPrefix(reg.PrefixForRig(id.Rig), id.Rig, role, name)
 	}
 	return addr, nil
 }
@@ -191,7 +191,7 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	target, err := parseAgentAddr(args[0])
+	target, err := parseAgentAddr(townRegistry(), args[0])
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	target, err := parseAgentAddr(args[0])
+	target, err := parseAgentAddr(townRegistry(), args[0])
 	if err != nil {
 		return err
 	}

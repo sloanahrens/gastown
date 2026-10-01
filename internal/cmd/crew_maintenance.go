@@ -32,7 +32,7 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 	// Kill any running session for the old name.
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	t := tmux.NewTmux()
-	oldSessionID := crewSessionName(r.Name, oldName)
+	oldSessionID := crewSessionName(townRegistry(), r.Name, oldName)
 	if hasSession, _ := t.HasSession(oldSessionID); hasSession {
 		if err := t.KillSessionWithProcesses(oldSessionID); err != nil {
 			return fmt.Errorf("killing old session: %w", err)
@@ -56,7 +56,7 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Renamed crew workspace: %s/%s → %s/%s\n",
 		style.Bold.Render("✓"), r.Name, oldName, r.Name, newName)
-	fmt.Printf("New session will be: %s\n", style.Dim.Render(crewSessionName(r.Name, newName)))
+	fmt.Printf("New session will be: %s\n", style.Dim.Render(crewSessionName(townRegistry(), r.Name, newName)))
 
 	return nil
 }

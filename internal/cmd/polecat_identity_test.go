@@ -146,8 +146,8 @@ func TestFormatWorkTypeStats(t *testing.T) {
 func TestSessionToAgentID(t *testing.T) {
 	t.Parallel()
 	// Generate known session names and verify the agent ID
-	sessionName := crewSessionName("gastown", "tester")
-	agentID := sessionToAgentID(sessionName)
+	sessionName := crewSessionName(cmdTestRegistry(), "gastown", "tester")
+	agentID := sessionToAgentID(cmdTestRegistry(), sessionName)
 	if agentID == "" {
 		t.Errorf("sessionToAgentID(%q) returned empty", sessionName)
 	}
@@ -162,7 +162,7 @@ func TestSessionToAgentID(t *testing.T) {
 func TestSessionToAgentID_Fallback(t *testing.T) {
 	t.Parallel()
 	// Invalid session names should return the input as fallback
-	got := sessionToAgentID("random-session-name")
+	got := sessionToAgentID(cmdTestRegistry(), "random-session-name")
 	// Should still return something (either parsed or fallback)
 	if got == "" {
 		t.Error("sessionToAgentID should not return empty for any input")
@@ -182,7 +182,7 @@ func TestSessionToAgentID_TownLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := sessionToAgentID(tt.session)
+			got := sessionToAgentID(cmdTestRegistry(), tt.session)
 			if got != tt.want {
 				t.Errorf("sessionToAgentID(%q) = %q, want %q", tt.session, got, tt.want)
 			}

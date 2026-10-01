@@ -149,7 +149,7 @@ func runEstop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	frozen := freezeAllSessions(t, townRoot, "")
+	frozen := freezeAllSessions(townRegistry(), t, townRoot, "")
 
 	fmt.Println()
 	fmt.Printf("%s %d session(s) frozen\n", style.Error.Render("⛔"), frozen)
@@ -183,7 +183,7 @@ func runEstopRig(townRoot, rigName string) error {
 		return nil
 	}
 
-	frozen := freezeAllSessions(t, townRoot, rigName)
+	frozen := freezeAllSessions(townRegistry(), t, townRoot, rigName)
 
 	fmt.Println()
 	fmt.Printf("%s %d session(s) frozen in %s\n", style.Error.Render("⛔"), frozen, rigName)
@@ -212,10 +212,10 @@ func runThaw(cmd *cobra.Command, args []string) error {
 
 	t := tmux.NewTmux()
 	if t.IsAvailable() {
-		thawed := thawAllSessions(t, townRoot, "")
+		thawed := thawAllSessions(townRegistry(), t, townRoot, "")
 		fmt.Printf("%s %d session(s) resumed\n", style.Success.Render("✓"), thawed)
 
-		nudged := nudgeAllSessions(t, townRoot, "")
+		nudged := nudgeAllSessions(townRegistry(), t, townRoot, "")
 		if nudged > 0 {
 			fmt.Printf("   Nudged %d session(s)\n", nudged)
 		}
@@ -243,10 +243,10 @@ func runThawRig(townRoot, rigName string) error {
 
 	t := tmux.NewTmux()
 	if t.IsAvailable() {
-		thawed := thawAllSessions(t, townRoot, rigName)
+		thawed := thawAllSessions(townRegistry(), t, townRoot, rigName)
 		fmt.Printf("%s %d session(s) resumed in %s\n", style.Success.Render("✓"), thawed, rigName)
 
-		nudged := nudgeAllSessions(t, townRoot, rigName)
+		nudged := nudgeAllSessions(townRegistry(), t, townRoot, rigName)
 		if nudged > 0 {
 			fmt.Printf("   Nudged %d session(s)\n", nudged)
 		}
@@ -273,13 +273,13 @@ var exemptSessions = map[string]bool{
 // freezeAllSessions sends SIGTSTP to all Gas Town agent sessions via
 // process-group signaling. Mayor and overseer sessions are exempt.
 // If rigFilter is non-empty, only sessions for that rig are frozen.
-func freezeAllSessions(t *tmux.Tmux, townRoot string, rigFilter string) int {
-	sessions := collectGTSessions(t, townRoot)
+func freezeAllSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string, rigFilter string) int {
+	sessions := collectGTSessions(reg, t, townRoot)
 	frozen := 0
 
 	var rigPrefix string
 	if rigFilter != "" {
-		rigPrefix = session.PrefixFor(rigFilter)
+		rigPrefix = reg.PrefixForRig(rigFilter)
 	}
 
 	for _, sess := range sessions {
@@ -305,13 +305,13 @@ func freezeAllSessions(t *tmux.Tmux, townRoot string, rigFilter string) int {
 
 // thawAllSessions sends SIGCONT to all Gas Town agent sessions.
 // If rigFilter is non-empty, only sessions for that rig are thawed.
-func thawAllSessions(t *tmux.Tmux, townRoot string, rigFilter string) int {
-	sessions := collectGTSessions(t, townRoot)
+func thawAllSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string, rigFilter string) int {
+	sessions := collectGTSessions(reg, t, townRoot)
 	thawed := 0
 
 	var rigPrefix string
 	if rigFilter != "" {
-		rigPrefix = session.PrefixFor(rigFilter)
+		rigPrefix = reg.PrefixForRig(rigFilter)
 	}
 
 	for _, sess := range sessions {
@@ -332,13 +332,13 @@ func thawAllSessions(t *tmux.Tmux, townRoot string, rigFilter string) int {
 
 // nudgeAllSessions sends a nudge to all GT sessions to alert them of resume.
 // If rigFilter is non-empty, only sessions for that rig are nudged.
-func nudgeAllSessions(t *tmux.Tmux, townRoot string, rigFilter string) int {
-	sessions := collectGTSessions(t, townRoot)
+func nudgeAllSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string, rigFilter string) int {
+	sessions := collectGTSessions(reg, t, townRoot)
 	nudged := 0
 
 	var rigPrefix string
 	if rigFilter != "" {
-		rigPrefix = session.PrefixFor(rigFilter)
+		rigPrefix = reg.PrefixForRig(rigFilter)
 	}
 
 	for _, sess := range sessions {
@@ -362,7 +362,7 @@ func isRigSession(name, rigPrefix string) bool {
 }
 
 // collectGTSessions returns all Gas Town tmux sessions.
-func collectGTSessions(t *tmux.Tmux, townRoot string) []string {
+func collectGTSessions(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string) []string {
 	allSessions, err := t.ListSessions()
 	if err != nil {
 		return nil
@@ -371,7 +371,7 @@ func collectGTSessions(t *tmux.Tmux, townRoot string) []string {
 	rigs := discoverRigs(townRoot)
 	prefixes := make(map[string]bool)
 	for _, rigName := range rigs {
-		prefixes[session.PrefixFor(rigName)] = true
+		prefixes[reg.PrefixForRig(rigName)] = true
 	}
 
 	var gtSessions []string

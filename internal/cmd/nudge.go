@@ -576,7 +576,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		_ = session.InitRegistry(townRoot)
 	}
 	if townRoot != "" && !nudgeForceFlag {
-		shouldSend, level, _ := shouldNudgeTarget(townRoot, target, nudgeForceFlag)
+		shouldSend, level, _ := shouldNudgeTarget(townRegistry(), townRoot, target, nudgeForceFlag)
 		if !shouldSend {
 			fmt.Printf("%s Target has DND enabled (%s) - nudge skipped\n", style.Dim.Render("○"), level)
 			fmt.Printf("  Use %s to override\n", style.Bold.Render("--force"))
@@ -610,7 +610,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		if strings.HasPrefix(polecatName, "crew/") {
 			// Extract crew name and use crew session naming
 			crewName := strings.TrimPrefix(polecatName, "crew/")
-			sessionName = crewSessionName(rigName, crewName)
+			sessionName = crewSessionName(townRegistry(), rigName, crewName)
 		} else if strings.HasPrefix(polecatName, "polecats/") {
 			// Explicit polecat address (e.g., "vastal/polecats/furiosa").
 			// Bypasses crew-first resolution for short addresses.
@@ -624,7 +624,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			// Short address (e.g., "gastown/holden") - could be crew or polecat.
 			// Try crew first (matches mail system's addressToSessionIDs pattern),
 			// then fall back to polecat.
-			crewSession := crewSessionName(rigName, polecatName)
+			crewSession := crewSessionName(townRegistry(), rigName, polecatName)
 			if exists, _ := t.HasSession(crewSession); exists {
 				sessionName = crewSession
 			} else {
@@ -751,7 +751,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 		// Convert session name back to address format for DND lookup
 		targetAddr := sessionNameToAddress(reg, sessionName)
 		if targetAddr != "" {
-			if shouldSend, level, _ := shouldNudgeTarget(townRoot, targetAddr, false); !shouldSend {
+			if shouldSend, level, _ := shouldNudgeTarget(reg, townRoot, targetAddr, false); !shouldSend {
 				skipped++
 				fmt.Printf("  %s %s (DND: %s)\n", style.Dim.Render("○"), sessionName, level)
 				continue
@@ -864,13 +864,13 @@ func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
 // Returns (shouldSend bool, level string, err error).
 // If force is true, always returns true.
 // If the agent bead cannot be found, returns true (fail-open for backward compatibility).
-func shouldNudgeTarget(townRoot, targetAddress string, force bool) (bool, string, error) { //nolint:unparam // error return kept for future use
+func shouldNudgeTarget(reg *session.PrefixRegistry, townRoot, targetAddress string, force bool) (bool, string, error) { //nolint:unparam // error return kept for future use
 	if force {
 		return true, "", nil
 	}
 
 	// Try to determine agent bead ID from address
-	agentBeadID := addressToAgentBeadID(targetAddress)
+	agentBeadID := addressToAgentBeadID(reg, targetAddress)
 	if agentBeadID == "" {
 		// Can't determine agent bead, allow the nudge
 		return true, "", nil
@@ -918,7 +918,7 @@ func sessionNameToAddress(reg *session.PrefixRegistry, sessionName string) strin
 //   - "gastown/alpha" -> "gt-alpha"
 //
 // Returns empty string if the address cannot be converted.
-func addressToAgentBeadID(address string) string {
+func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	// Handle special cases
 	switch address {
 	case constants.RoleMayor, constants.RoleMayor + "/":
@@ -943,12 +943,12 @@ func addressToAgentBeadID(address string) string {
 
 	if strings.HasPrefix(role, "crew/") {
 		crewName := strings.TrimPrefix(role, "crew/")
-		return session.CrewSessionName(session.PrefixFor(rig), crewName)
+		return session.CrewSessionName(reg.PrefixForRig(rig), crewName)
 	}
 	if strings.HasPrefix(role, "polecats/") {
 		pcName := strings.TrimPrefix(role, "polecats/")
-		return session.PolecatSessionName(session.PrefixFor(rig), pcName)
+		return session.PolecatSessionName(reg.PrefixForRig(rig), pcName)
 	}
 	// Assume polecat
-	return session.PolecatSessionName(session.PrefixFor(rig), role)
+	return session.PolecatSessionName(reg.PrefixForRig(rig), role)
 }

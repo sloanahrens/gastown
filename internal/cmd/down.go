@@ -345,7 +345,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
 
 		time.Sleep(500 * time.Millisecond)
-		respawned := verifyShutdown(t, townRoot)
+		respawned := verifyShutdown(townRegistry(), t, townRoot)
 		if len(respawned) > 0 {
 			fmt.Println()
 			fmt.Printf("%s Warning: Some processes may have respawned:\n", style.Bold.Render("⚠"))
@@ -654,13 +654,13 @@ func acquireShutdownLock(townRoot string) (*flock.Flock, error) {
 
 // verifyShutdown checks for respawned processes after shutdown.
 // Returns list of things that are still running or respawned.
-func verifyShutdown(t *tmux.Tmux, townRoot string) []string {
+func verifyShutdown(reg *session.PrefixRegistry, t *tmux.Tmux, townRoot string) []string {
 	var respawned []string
 
 	sessions, err := t.ListSessions()
 	if err == nil {
 		for _, sess := range sessions {
-			if session.IsKnownSession(sess) {
+			if reg.IsKnownSession(sess) {
 				respawned = append(respawned, fmt.Sprintf("tmux session %s", sess))
 			}
 		}

@@ -638,7 +638,7 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	reg := townRegistry()
 
 	for name := range rigsConfig.Rigs {
-		prefix := session.PrefixFor(name)
+		prefix := reg.PrefixForRig(name)
 
 		r, err := mgr.GetRig(name)
 		if err != nil {
@@ -1426,6 +1426,7 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 }
 
 func runRigStatus(cmd *cobra.Command, args []string) error {
+	reg := townRegistry()
 	var rigName string
 
 	if len(args) > 0 {
@@ -1522,7 +1523,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 			sessionWg.Add(1)
 			go func(idx int, p *polecat.Polecat) {
 				defer sessionWg.Done()
-				sessionName := session.PolecatSessionName(session.PrefixFor(rigName), p.Name)
+				sessionName := session.PolecatSessionName(reg.PrefixForRig(rigName), p.Name)
 				pInfos[idx].hasSession = isAgentSessionHealthy(t, sessionName)
 			}(i, p)
 		}
@@ -1535,7 +1536,7 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 			sessionWg.Add(1)
 			go func(idx int, w *crew.CrewWorker) {
 				defer sessionWg.Done()
-				sessionName := crewSessionName(rigName, w.Name)
+				sessionName := crewSessionName(reg, rigName, w.Name)
 				cInfos[idx].hasSession = isAgentSessionHealthy(t, sessionName)
 				crewGit := git.NewGit(w.ClonePath)
 				cInfos[idx].branch, _ = crewGit.CurrentBranch()

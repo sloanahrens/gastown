@@ -959,13 +959,13 @@ func TestRetirePolecatSessionAfterDoneUsesPIDExclusion(t *testing.T) {
 	newDoneSessionKiller = func() doneSessionKiller { return fake }
 	t.Cleanup(func() { newDoneSessionKiller = old })
 
-	if err := retirePolecatSessionAfterDone("gastown", "nitro", 12345); err != nil {
+	if err := retirePolecatSessionAfterDone(cmdTestRegistry(), "gastown", "nitro", 12345); err != nil {
 		t.Fatalf("retirePolecatSessionAfterDone: %v", err)
 	}
 	if fake.calls != 1 {
 		t.Fatalf("killer calls = %d, want 1", fake.calls)
 	}
-	wantSession := session.PolecatSessionName(session.PrefixFor("gastown"), "nitro")
+	wantSession := session.PolecatSessionName("gt", "nitro")
 	if fake.name != wantSession {
 		t.Fatalf("session name = %q, want %q", fake.name, wantSession)
 	}
@@ -991,7 +991,7 @@ func TestRetirePolecatSessionAfterDoneNoopsWithoutIdentity(t *testing.T) {
 		{"missing pid", "gastown", "nitro", 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := retirePolecatSessionAfterDone(tt.rigName, tt.polecatName, tt.pid); err != nil {
+			if err := retirePolecatSessionAfterDone(cmdTestRegistry(), tt.rigName, tt.polecatName, tt.pid); err != nil {
 				t.Fatalf("retirePolecatSessionAfterDone: %v", err)
 			}
 		})
@@ -1026,7 +1026,7 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 			newDoneSessionKiller = func() doneSessionKiller { return fake }
 			t.Cleanup(func() { newDoneSessionKiller = old })
 
-			retired := retirePolecatSessionAfterFinalExit(tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(cmdTestRegistry(), tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
@@ -1037,7 +1037,7 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 			if tt.wantKills == 0 {
 				return
 			}
-			wantSession := session.PolecatSessionName(session.PrefixFor("gastown"), "basalt")
+			wantSession := session.PolecatSessionName("gt", "basalt")
 			if fake.name != wantSession {
 				t.Errorf("killed session = %q, want %q", fake.name, wantSession)
 			}

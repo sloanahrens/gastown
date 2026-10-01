@@ -134,7 +134,7 @@ func TestEmitUpJSON_SuccessDerivesFromServices(t *testing.T) {
 func TestEmitUpJSON_SessionNames(t *testing.T) {
 	t.Parallel()
 	rigName := "gastown"
-	prefix := session.PrefixFor(rigName)
+	prefix := cmdTestRegistry().PrefixForRig(rigName)
 
 	services := []ServiceStatus{
 		{

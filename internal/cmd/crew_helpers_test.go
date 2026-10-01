@@ -18,7 +18,7 @@ func TestCrewSessionName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := crewSessionName(tt.rigName, tt.crewName)
+			got := crewSessionName(cmdTestRegistry(), tt.rigName, tt.crewName)
 			if got == "" {
 				t.Error("crewSessionName returned empty string")
 			}

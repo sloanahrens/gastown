@@ -439,15 +439,15 @@ func doneCanonicalPath(path string) string {
 	return filepath.Clean(abs)
 }
 
-func polecatSessionRetirementTarget(rigName, polecatName string, pid int) (string, []string, bool) {
+func polecatSessionRetirementTarget(reg *session.PrefixRegistry, rigName, polecatName string, pid int) (string, []string, bool) {
 	if rigName == "" || polecatName == "" || pid <= 0 {
 		return "", nil, false
 	}
-	return session.PolecatSessionName(session.PrefixFor(rigName), polecatName), []string{fmt.Sprintf("%d", pid)}, true
+	return session.PolecatSessionName(reg.PrefixForRig(rigName), polecatName), []string{fmt.Sprintf("%d", pid)}, true
 }
 
-func retirePolecatSessionAfterDone(rigName, polecatName string, pid int) error {
-	sessionName, excludePIDs, ok := polecatSessionRetirementTarget(rigName, polecatName, pid)
+func retirePolecatSessionAfterDone(reg *session.PrefixRegistry, rigName, polecatName string, pid int) error {
+	sessionName, excludePIDs, ok := polecatSessionRetirementTarget(reg, rigName, polecatName, pid)
 	if !ok {
 		return nil
 	}
@@ -461,14 +461,14 @@ func retirePolecatSessionAfterDone(rigName, polecatName string, pid int) error {
 //
 // Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
 // caller's own PID, so the durable handoff writes above it still finish.
-func retirePolecatSessionAfterFinalExit(exitType string, fromHandoff bool, rigName, polecatName string, pid int) bool {
+func retirePolecatSessionAfterFinalExit(reg *session.PrefixRegistry, exitType string, fromHandoff bool, rigName, polecatName string, pid int) bool {
 	if !shouldRetirePolecatSessionAfterDone(exitType, fromHandoff) {
 		fmt.Printf("%s Session preserved for handoff continuation\n", style.Bold.Render("→"))
 		return false
 	}
 	fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
 	fmt.Printf("%s Terminating polecat session\n", style.Bold.Render("→"))
-	if err := retirePolecatSessionAfterDone(rigName, polecatName, pid); err != nil {
+	if err := retirePolecatSessionAfterDone(reg, rigName, polecatName, pid); err != nil {
 		style.PrintWarning("could not terminate polecat session: %v", err)
 	}
 	return true
@@ -1590,7 +1590,7 @@ func reportDone(r *doneRun, exitType string) error {
 	}
 	// Retire the live session as the final action. The PID exclusion keeps
 	// gt done alive until everything above is written.
-	retirePolecatSessionAfterFinalExit(exitType, fromHandoff, r.rigName, r.polecatName, os.Getpid())
+	retirePolecatSessionAfterFinalExit(townRegistry(), exitType, fromHandoff, r.rigName, r.polecatName, os.Getpid())
 	return nil
 }
 

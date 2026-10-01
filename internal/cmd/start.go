@@ -111,7 +111,7 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 
-	toStop, preserved := categorizeSessions(sessions)
+	toStop, preserved := categorizeSessions(townRegistry(), sessions)
 
 	if len(toStop) == 0 {
 		fmt.Printf("%s Gas Town was not running\n", style.Dim.Render("○"))
@@ -159,17 +159,17 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 }
 
 // categorizeSessions splits sessions into those to stop and those to preserve.
-func categorizeSessions(sessions []string) (toStop, preserved []string) {
+func categorizeSessions(reg *session.PrefixRegistry, sessions []string) (toStop, preserved []string) {
 	for _, sess := range sessions {
 		// Gas Town sessions use rig-specific prefixes or hq- (town-level)
-		if !session.IsKnownSession(sess) {
+		if !reg.IsKnownSession(sess) {
 			continue // Not a Gas Town session
 		}
 
 		// Parse session to determine role
 		isPolecat := false
 		isCrew := false
-		if identity, err := session.ParseSessionName(sess); err == nil {
+		if identity, err := session.ParseSessionNameWithRegistry(sess, reg); err == nil {
 			switch identity.Role {
 			case session.RolePolecat:
 				isPolecat = true

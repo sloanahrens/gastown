@@ -598,7 +598,7 @@ func normalizeHookShowTarget(reg *session.PrefixRegistry, target string) string 
 	// Use the same role/path resolver as dispatching commands, then convert
 	// the resulting tmux session back to a canonical assignee address.
 	// This keeps "hook show" target parsing aligned with sling/hook behavior.
-	if sessionName, err := resolveRoleToSession(target); err == nil && sessionName != "" {
+	if sessionName, err := resolveRoleToSession(reg, target); err == nil && sessionName != "" {
 		if addr, ok := sessionNameToCanonicalAddress(reg, sessionName, target); ok {
 			return addr
 		}
@@ -654,7 +654,7 @@ func sessionNameToCanonicalAddress(reg *session.PrefixRegistry, sessionName, tar
 	parts := strings.Split(strings.TrimSpace(targetHint), "/")
 	if len(parts) >= 2 && parts[0] != "" {
 		rig := parts[0]
-		registry.Register(session.PrefixFor(rig), rig)
+		registry.Register(reg.PrefixForRig(rig), rig)
 	}
 
 	identity, err := session.ParseSessionNameWithRegistry(sessionName, registry)

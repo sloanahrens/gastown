@@ -69,7 +69,7 @@ func findRigPolecatSessions(reg *session.PrefixRegistry, rigName string) ([]stri
 		return nil, nil
 	}
 
-	prefix := session.PrefixFor(rigName) + "-"
+	prefix := reg.PrefixForRig(rigName) + "-"
 	var sessions []string
 
 	for _, s := range allSessions {

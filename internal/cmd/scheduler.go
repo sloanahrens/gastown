@@ -446,6 +446,7 @@ func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFie
 // Capacity admission uses polecatCapacitySnapshotForTown instead; active sessions
 // are shown for operator context only.
 func countActivePolecats() int {
+	reg := townRegistry()
 	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
 	out, err := listCmd.Output()
 	if err != nil {
@@ -457,7 +458,7 @@ func countActivePolecats() int {
 		if line == "" {
 			continue
 		}
-		identity, err := session.ParseSessionName(line)
+		identity, err := session.ParseSessionNameWithRegistry(line, reg)
 		if err != nil {
 			continue
 		}

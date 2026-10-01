@@ -134,7 +134,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 
 	// Check if session exists
 	t := tmux.NewTmux()
-	sessionID := crewSessionName(r.Name, name)
+	sessionID := crewSessionName(townRegistry(), r.Name, name)
 	if debug {
 		fmt.Printf("[DEBUG] sessionID=%q (r.Name=%q, name=%q)\n", sessionID, r.Name, name)
 	}

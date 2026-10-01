@@ -66,7 +66,7 @@ func runCrewList(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, w := range workers {
-			sessionID := crewSessionName(r.Name, w.Name)
+			sessionID := crewSessionName(townRegistry(), r.Name, w.Name)
 			hasSession, _ := t.HasSession(sessionID)
 
 			workerGit := git.NewGit(w.ClonePath)

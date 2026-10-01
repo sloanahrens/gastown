@@ -71,7 +71,7 @@ func handoffCooldownCause(handoffAge func() (time.Duration, bool), next string) 
 func recordOwnSessionCycle(townRoot, workDir, session string) {
 	recordHandoffTimeIn(workDir)
 	writeHandoffMarker(workDir, session, unitCycleHandoffReason)
-	agent := sessionToGTRole(session)
+	agent := sessionToGTRole(townRegistry(), session)
 	if agent == "" {
 		agent = session
 	}
@@ -89,6 +89,6 @@ func respawnOwnSessionFresh(session string) error {
 		return err
 	}
 	t := tmux.NewTmuxWithSocket(tmux.SocketFromEnv())
-	updateSessionEnvForHandoff(t, session)
+	updateSessionEnvForHandoff(townRegistry(), t, session)
 	return respawnOwnPane(t, session, pane, restartCmd)
 }

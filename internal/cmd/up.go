@@ -318,7 +318,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 					Type:   constants.RoleCrew,
 					Rig:    rigName,
 					OK:     true,
-					Detail: session.CrewSessionName(session.PrefixFor(rigName), name),
+					Detail: session.CrewSessionName(townRegistry().PrefixForRig(rigName), name),
 				})
 			}
 			for name, err := range crewErrors {
@@ -342,7 +342,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 					Type:   constants.RolePolecat,
 					Rig:    rigName,
 					OK:     true,
-					Detail: session.PolecatSessionName(session.PrefixFor(rigName), name),
+					Detail: session.PolecatSessionName(townRegistry().PrefixForRig(rigName), name),
 				})
 			}
 			for name, err := range polecatErrors {

@@ -5190,7 +5190,7 @@ func CurrentSessionName() string {
 // A zombie session is one where tmux is alive but the Claude process has died.
 // This runs at `gt start` time to prevent session name conflicts and resource accumulation.
 //
-// The isGTSession predicate identifies Gas Town sessions (e.g. session.IsKnownSession).
+// The isGTSession predicate identifies Gas Town sessions (e.g. (*session.PrefixRegistry).IsKnownSession).
 // It is passed as a parameter to avoid a circular import from tmux → session.
 //
 // Returns:
