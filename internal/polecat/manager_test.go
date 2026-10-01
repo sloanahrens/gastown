@@ -2554,7 +2554,7 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath, BDRunner: newNoDatabaseBd().run}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), newNoDatabaseBd().run)}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
@@ -2593,7 +2593,7 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath, BDRunner: newNoDatabaseBd().run}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, IdentityBeads: beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), newNoDatabaseBd().run)}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)

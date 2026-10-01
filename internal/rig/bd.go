@@ -1,8 +1,7 @@
 package rig
 
 import (
-	"bytes"
-	"context"
+	"errors"
 	"os"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -18,37 +17,44 @@ func (m *Manager) environ() []string {
 	return os.Environ()
 }
 
-// runBD runs bd in dir with env, nil meaning the base environment, and
-// returns what it wrote to stdout (unwrapped from the machine envelope on
-// success, as beads.CommandWithEnv's Run leaves it) and stderr.
-func (m *Manager) runBD(dir string, env []string, args ...string) (stdout, stderr []byte, err error) {
-	if m.bd == nil {
-		cmd := beads.CommandWithEnv(dir, env, args...)
-		var out, errOut bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &errOut
-		err := cmd.Run()
-		return out.Bytes(), errOut.Bytes(), err
-	}
+// rigBD is the bd surface rig setup runs: init, config and the
+// repository-fingerprint migration. A *beads.Beads from beads.NewPlain
+// provides it, sending exactly the argv, directory and environment given.
+type rigBD interface {
+	InitDatabase(opts beads.InitOptions) error
+	ConfigGet(key string) (string, error)
+	ConfigSet(key, value string) error
+	MigrateRepoID() error
+}
+
+// bdIn is the bd client that runs in dir with env, nil meaning the base
+// environment.
+func (m *Manager) bdIn(dir string, env []string) rigBD {
 	if env == nil {
 		env = m.environ()
 	}
-	stdout, stderr, err = m.bd(context.Background(), beads.BDCall{Dir: dir, Env: env, Args: args})
-	if err == nil {
-		stdout = beads.LegacyPayload(args, stdout)
+	if m.openBD != nil {
+		return m.openBD(dir, env)
 	}
-	return stdout, stderr, err
+	return beads.NewPlain(dir, env)
 }
 
-// combinedBD is runBD's stdout followed by its stderr, as CombinedOutput
-// reports them.
-func (m *Manager) combinedBD(dir string, env []string, args ...string) ([]byte, error) {
-	stdout, stderr, err := m.runBD(dir, env, args...)
-	return append(stdout, stderr...), err
+// rigLocalBD is the bd client pinned to dir's own database.
+func (m *Manager) rigLocalBD(dir string) configSetter {
+	if m.openLocal != nil {
+		return m.openLocal(dir)
+	}
+	return beads.NewRigLocal(dir)
 }
 
-// beadsFor is the bd client for a rig's beads directory.
-func (m *Manager) beadsFor(workDir, beadsDir string) *beads.Beads {
-	return beads.NewWithBeadsDirAndRunner(workDir, beadsDir, m.bd)
+// bdErrOutput is what a failed bd call printed (stdout then stderr), or the
+// error's text when bd never ran.
+func bdErrOutput(err error) string {
+	var cliErr *beads.CLIError
+	if errors.As(err, &cliErr) {
+		return cliErr.Output()
+	}
+	return err.Error()
 }
 
 func (m *Manager) checkBeads() (deps.BeadsStatus, string) {

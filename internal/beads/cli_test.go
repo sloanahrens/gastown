@@ -59,6 +59,12 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 	if err := b.InitDatabase(InitOptions{Database: "hq"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := b.InitDatabase(InitOptions{Prefix: "gt", SkipAgents: true, ReinitLocal: true, DiscardRemote: true, DestroyToken: "DESTROY-gt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.MigrateRepoID(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := b.WispGCCandidates(90 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +78,8 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		"stats --json",
 		"init --prefix gt --database gastown --server --server-port 3307 --force --destroy-token=DESTROY-gt",
 		"init --database hq --server",
+		"init --prefix gt --server --skip-agents --reinit-local --discard-remote --destroy-token=DESTROY-gt",
+		"migrate --update-repo-id",
 		"mol wisp gc --dry-run --json --age 1h30m0s",
 	}
 	if got := r.argvs(); !reflect.DeepEqual(got, want) {
