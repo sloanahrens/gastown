@@ -60,6 +60,9 @@ func TestIntegrationUpApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t
 	t.Setenv("GT_DOLT_HOST", "stale-host")
 	t.Setenv("GT_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	// applyConfiguredDoltEnv sets these too; t.Setenv restores them.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
 
 	applyConfiguredDoltEnv(townRoot)
 

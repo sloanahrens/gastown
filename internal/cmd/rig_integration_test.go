@@ -763,6 +763,7 @@ func TestRigAddWithUpstreamURL(t *testing.T) {
 	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
+	bridgeDoltPidToTown(t, townRoot)
 
 	// Create two repos: one acts as the fork (origin), one as the upstream.
 	forkURL := createTestGitRepo(t, "myfork")
