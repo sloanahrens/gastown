@@ -69,7 +69,7 @@ func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
 	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 2, Free: 2}
 	rigs := []dispatchRig{
-		{Rig: "om", Ready: 9, ReadyMRs: 15, MRCeiling: 12, Backpressure: true},
+		{Rig: "om", Ready: 9, ReadyToLand: 15, LandingCeiling: 12, Backpressure: true},
 	}
 
 	// Only the held rig has work: silence, because the work could not land.
@@ -84,7 +84,7 @@ func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
 	if !nudge {
 		t.Fatal("expected a nudge when a rig outside its ceiling has work")
 	}
-	if !strings.Contains(msg, "Held by merge-queue depth: om=15 ready MRs (ceiling 12)") {
+	if !strings.Contains(msg, "Held by landing-queue depth: om=15 waiting to land (ceiling 12)") {
 		t.Errorf("nudge does not say which rig is held and why: %s", msg)
 	}
 	if strings.Contains(msg, "om=9") {
@@ -243,7 +243,7 @@ func TestPoolSeatPicture_UncappedOverflowIsAtLeastOneFreeSeat(t *testing.T) {
 }
 
 // TestRigMergeQueueDepthReadsRigRootMergeQueue reproduces gt-xwt9:
-// rigMergeQueueDepth read max_ready_for_dispatch from rig-local settings/
+// rigLandingQueueDepth read max_ready_for_dispatch from rig-local settings/
 // config.json only via config.LoadRigSettings, so a rig-root-only ceiling
 // (gt-me9t's floor) was silently ignored and the dispatch patrol fell back
 // to the operator default. Routing through rig.ResolveMergeQueueConfig makes
@@ -266,7 +266,7 @@ func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ready, ceiling := rigMergeQueueDepth(rigPath, rigName, &fakeDispatchMRLister{mrs: readyMRs(5)})
+	ready, ceiling := rigLandingQueueDepth(rigPath, rigName, &fakeDispatchMRLister{mrs: readyMRs(5)})
 	if ceiling != 3 {
 		t.Errorf("ceiling = %d, want 3 (rig-root merge_queue floor invisible to dispatch patrol)", ceiling)
 	}

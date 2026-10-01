@@ -341,7 +341,7 @@ func TestIsDaemonUnreachable(t *testing.T) {
 // to everything it spawns for the rest of those processes' lives. Presence
 // alone therefore exempted unrelated work from the lock: while the daemon's
 // main_branch_test hold was up, the agent sessions it spawned carried the
-// marker, and the refinery gates and `gt done` verify suites descending
+// marker, and the landing gates and `gt done` verify suites descending
 // from them ran invisibly beside the very suite they must serialize
 // against. The marker now names the holder's role, and only that role's
 // work skips the lock — everyone else contends and queues.
@@ -353,11 +353,11 @@ func TestAcquire_MarkerRoleScopesTheFastPath(t *testing.T) {
 	t.Parallel()
 	tg := newTestGate(t)
 	townRoot := t.TempDir()
-	// The role the daemon's main_branch_test runner acquires under, and the
+	// The role a daemon gate acquires under, and the
 	// roles of the two callers gt-off9 named as victims.
 	const (
-		daemonRole   = "gastown/main-branch-test"
-		refineryRole = "gastown/refinery"
+		daemonRole  = "mango/landing"
+		landingRole = "gastown/landing"
 	)
 
 	h := tg.mustAcquirePool(t, townRoot, daemonRole, DefaultPool)
@@ -376,14 +376,14 @@ func TestAcquire_MarkerRoleScopesTheFastPath(t *testing.T) {
 	}
 	release(t, nested)
 
-	// A refinery gate descending from the hold is different work. It must
+	// A landing gate descending from the hold is different work. It must
 	// wait for the real lock rather than run alongside the daemon's suite.
-	_, err, elapsed = tg.run(t, func() (*Handle, error) { return child.Acquire(townRoot, refineryRole, timeout) })
+	_, err, elapsed = tg.run(t, func() (*Handle, error) { return child.Acquire(townRoot, landingRole, timeout) })
 	if err == nil {
-		t.Fatalf("Acquire(%q) succeeded while an ancestor held the slot — it rode the reentrant fast path with a foreign role instead of queueing", refineryRole)
+		t.Fatalf("Acquire(%q) succeeded while an ancestor held the slot — it rode the reentrant fast path with a foreign role instead of queueing", landingRole)
 	}
 	if elapsed < timeout {
-		t.Fatalf("Acquire(%q) returned after %s, before its %s timeout — it did not actually contend for the lock", refineryRole, elapsed, timeout)
+		t.Fatalf("Acquire(%q) returned after %s, before its %s timeout — it did not actually contend for the lock", landingRole, elapsed, timeout)
 	}
 
 	// The ancestor's real hold is unaffected by the reentrant Release.
@@ -397,12 +397,12 @@ func TestAcquire_MarkerRoleScopesTheFastPath(t *testing.T) {
 
 	release(t, h)
 	// ...and the queue drains as soon as the hold ends.
-	gate, err, _ := tg.run(t, func() (*Handle, error) { return child.Acquire(townRoot, refineryRole, timeout) })
+	gate, err, _ := tg.run(t, func() (*Handle, error) { return child.Acquire(townRoot, landingRole, timeout) })
 	if err != nil {
-		t.Fatalf("Acquire(%q) after the holder released: %v", refineryRole, err)
+		t.Fatalf("Acquire(%q) after the holder released: %v", landingRole, err)
 	}
 	if gate.reentrant {
-		t.Fatalf("Acquire(%q) after the holder released took the fast path, want the real lock", refineryRole)
+		t.Fatalf("Acquire(%q) after the holder released took the fast path, want the real lock", landingRole)
 	}
 }
 
@@ -423,12 +423,12 @@ func TestReentrantMarkGrants(t *testing.T) {
 		role  string
 		want  bool
 	}{
-		{"same role", lockPath + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", true},
-		{"different role", lockPath + "|" + foreignPID + "|gastown/main-branch-test", "gastown/refinery", false},
-		{"legacy marker without a role", lockPath + "|" + foreignPID, "gastown/refinery", true},
-		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/refinery", "gastown/refinery", false},
-		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", false},
-		{"not a slot lock path", filepath.Join(LockDir(townRoot), "notes.txt") + "|" + foreignPID + "|gastown/refinery", "gastown/refinery", false},
+		{"same role", lockPath + "|" + foreignPID + "|gastown/landing", "gastown/landing", true},
+		{"different role", lockPath + "|" + foreignPID + "|mango/landing", "gastown/landing", false},
+		{"legacy marker without a role", lockPath + "|" + foreignPID, "gastown/landing", true},
+		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/landing", "gastown/landing", false},
+		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/landing", "gastown/landing", false},
+		{"not a slot lock path", filepath.Join(LockDir(townRoot), "notes.txt") + "|" + foreignPID + "|gastown/landing", "gastown/landing", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -442,7 +442,7 @@ func TestReentrantMarkGrants(t *testing.T) {
 		})
 	}
 
-	for _, bad := range []string{"", "no-separator", lockPath + "|not-a-pid", lockPath + "|not-a-pid|gastown/refinery"} {
+	for _, bad := range []string{"", "no-separator", lockPath + "|not-a-pid", lockPath + "|not-a-pid|gastown/landing"} {
 		if _, ok := parseReentrantMark(bad); ok {
 			t.Errorf("parseReentrantMark(%q) parsed, want failure", bad)
 		}
@@ -466,11 +466,11 @@ func TestInheritedRole(t *testing.T) {
 		wantRole string
 		wantOK   bool
 	}{
-		{"genuine ancestor hold", lockPath + "|" + foreignPID + "|gastown/refinery-batch", "gastown/refinery-batch", true},
+		{"genuine ancestor hold", lockPath + "|" + foreignPID + "|hm/landing", "hm/landing", true},
 		{"no marker at all", "", "", false},
 		{"legacy marker has no role to hand back", lockPath + "|" + foreignPID, "", false},
-		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/refinery", "", false},
-		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/refinery", "", false},
+		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/landing", "", false},
+		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/landing", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

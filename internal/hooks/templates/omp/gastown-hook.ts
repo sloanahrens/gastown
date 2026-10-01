@@ -12,9 +12,6 @@
 // Loaded via: omp --hook gastown-hook.ts
 
 export default function (pi) {
-  const role = (process.env.GT_ROLE || "").toLowerCase();
-  const shouldCheckMail = () =>
-    !role.includes("witness") && !role.includes("refinery") && !role.startsWith("deacon") && !role.includes("boot");
   let primeContext = null;
   let contextInjected = false;
   let lastMailCheck = 0;
@@ -39,20 +36,18 @@ export default function (pi) {
   pi.on("before_agent_start", async (event, ctx) => {
     let mailContext = null;
 
-    // Check mail on every prompt (throttled to once per 30s) for non-patrol roles.
-    if (shouldCheckMail()) {
-      const now = Date.now();
-      if (now - lastMailCheck >= 30000) {
-        lastMailCheck = now;
-        try {
-          const mailResult = await pi.exec("gt", ["mail", "check", "--inject"]);
-          if (mailResult.code === 0 && mailResult.stdout?.trim()) {
-            mailContext = mailResult.stdout.trim();
-            console.error("[gastown] mail check: new mail found");
-          }
-        } catch (e) {
-          console.error("[gastown] per-prompt mail check failed:", e.message);
+    // Check mail on every prompt (throttled to once per 30s).
+    const now = Date.now();
+    if (now - lastMailCheck >= 30000) {
+      lastMailCheck = now;
+      try {
+        const mailResult = await pi.exec("gt", ["mail", "check", "--inject"]);
+        if (mailResult.code === 0 && mailResult.stdout?.trim()) {
+          mailContext = mailResult.stdout.trim();
+          console.error("[gastown] mail check: new mail found");
         }
+      } catch (e) {
+        console.error("[gastown] per-prompt mail check failed:", e.message);
       }
     }
 

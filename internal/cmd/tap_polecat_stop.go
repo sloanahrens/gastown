@@ -164,7 +164,6 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 
 	if err := doneCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  Auto gt done failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "   Witness will handle cleanup.\n")
 		// Don't return error — don't block session stop
 		return nil
 	}

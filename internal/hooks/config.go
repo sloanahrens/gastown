@@ -547,7 +547,7 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "mayor" || entry.Name() == "deacon" ||
+		if !entry.IsDir() || entry.Name() == "mayor" ||
 			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -619,7 +619,7 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "mayor" || entry.Name() == "deacon" ||
+		if !entry.IsDir() || entry.Name() == "mayor" ||
 			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}

@@ -56,7 +56,7 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
-	holder, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 10*time.Second) })
+	holder, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/landing", 10*time.Second) })
 	if err != nil {
 		t.Fatalf("holder Acquire: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 		t.Fatalf("History holds %d entries, want one per acquisition: %+v", len(history), history)
 	}
 	first, second := history[0], history[1]
-	if first.Role != "gastown/refinery" || second.Role != "gastown/pearl" {
+	if first.Role != "gastown/landing" || second.Role != "gastown/pearl" {
 		t.Fatalf("history roles = %q then %q, want the holder then the waiter", first.Role, second.Role)
 	}
 	if first.Reason != "" {
@@ -96,7 +96,7 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 	if second.Reason != WaitReasonTokenHeld {
 		t.Errorf("waiter recorded reason %q, want %q", second.Reason, WaitReasonTokenHeld)
 	}
-	if second.HolderRole != "gastown/refinery" {
+	if second.HolderRole != "gastown/landing" {
 		t.Errorf("waiter recorded holder_role %q, want the role it queued behind", second.HolderRole)
 	}
 	if first.HeldS == nil {
@@ -128,8 +128,8 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 	if !ok {
 		t.Fatalf("slot_wait held_by = %#v, want the owner it queued behind", waiterEvent.Payload["held_by"])
 	}
-	if heldBy["role"] != "gastown/refinery" {
-		t.Errorf("slot_wait held_by.role = %v, want gastown/refinery", heldBy["role"])
+	if heldBy["role"] != "gastown/landing" {
+		t.Errorf("slot_wait held_by.role = %v, want gastown/landing", heldBy["role"])
 	}
 	if msg, _ := waiterEvent.Payload["message"].(string); !strings.Contains(msg, "waited") {
 		t.Errorf("slot_wait message = %q, want it to name the wait", msg)
@@ -146,7 +146,7 @@ func TestRelease_RecordsTheHold(t *testing.T) {
 	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
-	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 5*time.Second) })
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/landing", 5*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -165,8 +165,8 @@ func TestRelease_RecordsTheHold(t *testing.T) {
 	if len(holds) != 1 {
 		t.Fatalf("slot_hold events = %d, want exactly one per hold", len(holds))
 	}
-	if got := holds[0].Payload["role"]; got != "gastown/refinery" {
-		t.Errorf("slot_hold role = %v, want gastown/refinery", got)
+	if got := holds[0].Payload["role"]; got != "gastown/landing" {
+		t.Errorf("slot_hold role = %v, want gastown/landing", got)
 	}
 	if got := holds[0].Payload["exit_status"]; got != float64(1) {
 		t.Errorf("slot_hold exit_status = %v, want 1", got)
@@ -207,7 +207,7 @@ func TestAcquire_WaitReasonUnwrappedContainers(t *testing.T) {
 	// waiting (gt-78b8), not only in the record of how it ended.
 	probeOut := tg.probe
 
-	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 30*time.Second) })
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/landing", 30*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire while an unwrapped suite cleared on the second check: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestAcquire_WaitReasonDaemonUnreachable(t *testing.T) {
 	// The inconclusive probe announces itself through the probe stream.
 	probeOut := tg.probe
 
-	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 30*time.Second) }); err != nil {
+	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/landing", 30*time.Second) }); err != nil {
 		t.Fatalf("Acquire after a wedged docker probe cleared: %v", err)
 	}
 
@@ -330,11 +330,11 @@ func TestCompleteHold_ClosesTheNewestOpenEntry(t *testing.T) {
 	townRoot := t.TempDir()
 
 	for _, waited := range []time.Duration{time.Second, 3 * time.Second} {
-		if err := recordWaitResult(townRoot, "gastown/refinery", 0, os.Getpid(), testNow, waitInfo{Waited: waited}); err != nil {
+		if err := recordWaitResult(townRoot, "gastown/landing", 0, os.Getpid(), testNow, waitInfo{Waited: waited}); err != nil {
 			t.Fatalf("recordWaitResult: %v", err)
 		}
 	}
-	if _, err := completeHold(townRoot, "gastown/refinery", 0, os.Getpid(), 7*time.Second); err != nil {
+	if _, err := completeHold(townRoot, "gastown/landing", 0, os.Getpid(), 7*time.Second); err != nil {
 		t.Fatalf("completeHold: %v", err)
 	}
 
@@ -400,8 +400,8 @@ func TestWaitMessage(t *testing.T) {
 		Timeout: time.Hour,
 		Holder:  &Owner{Role: "gastown/polecats/mica", PID: 62965},
 	}
-	msg := waitMessage("gastown/refinery", 0, info)
-	for _, want := range []string{"gastown/refinery", "4m12s", "slot 0", "token held by gastown/polecats/mica pid 62965"} {
+	msg := waitMessage("gastown/landing", 0, info)
+	for _, want := range []string{"gastown/landing", "4m12s", "slot 0", "token held by gastown/polecats/mica pid 62965"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("waitMessage = %q, want it to contain %q", msg, want)
 		}

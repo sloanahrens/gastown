@@ -1233,10 +1233,11 @@ type MergeQueueConfig struct {
 	// TypecheckCommand is the command to run for type checking (e.g., tsc --noEmit).
 	TypecheckCommand string `json:"typecheck_command,omitempty"`
 
-	// MaxReadyForDispatch is the ready-MR ceiling above which a new dispatch
-	// is refused: the merge queue, not the pool, is the real limit on how
-	// much work the town can absorb, so `gt sling` stops feeding it while the
-	// rig has more than this many ready MRs (plan Task 3 / A3). A bead
+	// MaxReadyForDispatch is the landing-queue ceiling above which a new
+	// dispatch is refused: the landing queue (open gt:ready-to-land beads),
+	// not the pool, is the real limit on how much work the town can absorb,
+	// so `gt sling` stops feeding it while the rig has more than this many
+	// beads waiting to land (plan Task 3 / A3). A bead
 	// labeled `rework` or an explicit --force passes anyway. Zero or unset
 	// disables the guard (no queue read at all).
 	MaxReadyForDispatch int `json:"max_ready_for_dispatch,omitempty"`
@@ -1284,7 +1285,7 @@ func (c *MergeQueueConfig) IsRequireReviewEnabled() bool {
 	return *c.RequireReview
 }
 
-// GetMaxReadyForDispatch returns the ready-MR ceiling above which a new
+// GetMaxReadyForDispatch returns the landing-queue ceiling above which a new
 // dispatch is refused. Nil-safe, and zero means the guard is off: a rig that
 // never sets the knob must not pay for a queue read on every sling.
 func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {

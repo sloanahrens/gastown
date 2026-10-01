@@ -17,15 +17,15 @@ func TestResolveSlotRunRole(t *testing.T) {
 	noAncestor := func(string) (string, bool) { return "", false }
 
 	t.Run("explicit role always wins", func(t *testing.T) {
-		ancestor := func(string) (string, bool) { return "gastown/refinery-batch", true }
-		if got := resolveSlotRunRole("gastown/refinery", townRoot, ancestor); got != "gastown/refinery" {
+		ancestor := func(string) (string, bool) { return "hm/landing", true }
+		if got := resolveSlotRunRole("gastown/landing", townRoot, ancestor); got != "gastown/landing" {
 			t.Errorf("resolveSlotRunRole() = %q, want the explicit role unchanged", got)
 		}
 	})
 
 	t.Run("omitted role nested under an ancestor hold inherits it", func(t *testing.T) {
-		ancestor := func(root string) (string, bool) { return "gastown/refinery-batch", root == townRoot }
-		if got := resolveSlotRunRole("", townRoot, ancestor); got != "gastown/refinery-batch" {
+		ancestor := func(root string) (string, bool) { return "hm/landing", root == townRoot }
+		if got := resolveSlotRunRole("", townRoot, ancestor); got != "hm/landing" {
 			t.Errorf("resolveSlotRunRole() = %q, want the inherited ancestor role", got)
 		}
 	})

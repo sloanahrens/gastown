@@ -42,7 +42,7 @@ func acquireAndDrop(t *testing.T, tg *testGate, town string) {
 	t.Helper()
 	// A free slot is granted on the first pass, before the poll loop ever
 	// sleeps, so this needs no clock driving.
-	if _, err := tg.Acquire(town, "gastown/refinery", time.Second); err != nil {
+	if _, err := tg.Acquire(town, "gastown/landing", time.Second); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
 	if _, err := tg.AcquireMarker(town, testMarkerName, "gastown/om-review"); err != nil {
