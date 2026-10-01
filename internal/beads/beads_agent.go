@@ -224,10 +224,12 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 
 	description := FormatAgentDescription(title, fields)
 
-	// Ensure the target database has the custom types configured. bd is the
-	// only write path (gt-7iwy0.2): the in-process store create it replaced
-	// wrote rows without the fork's columns and never reached the journal.
-	_ = EnsureCustomTypes(targetDir)
+	// Ensure the target database has the custom types configured. A failure is
+	// reported rather than swallowed: creates of a custom type in this
+	// database fail if this did (gt-fcxe9.11).
+	if err := EnsureCustomTypes(targetDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not configure custom types in %s: %v\n", targetDir, err)
+	}
 
 	buildArgs := func() []string {
 		a := []string{"create", "--json",

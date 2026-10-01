@@ -951,20 +951,26 @@ func TestStoreAddDependency(t *testing.T) {
 	}
 }
 
-func TestStoreRemoveDependency(t *testing.T) {
+// RemoveDependency is bd's dep remove even when the instance carries an
+// in-process store: the store's own RemoveDependency commits against a fork
+// database with the pre-fork is_blocked predicate and no event (gt-fcxe9.11).
+func TestRemoveDependency_GoesToBDNotTheStore(t *testing.T) {
 	store := newMockStorage()
-	b := newTestBeads(store)
-
-	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "a"}, "test")
-	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "b"}, "test")
 	store.deps["test-1"] = []string{"test-2"}
+	r := newRecorder(nil)
+	b := newRecordedBeads(t.TempDir(), r)
+	b.store = store
 
-	err := b.RemoveDependency("test-1", "test-2")
-	if err != nil {
+	if err := b.RemoveDependency("test-1", "test-2"); err != nil {
 		t.Fatalf("RemoveDependency: %v", err)
 	}
-	if len(store.deps["test-1"]) != 0 {
-		t.Fatalf("expected no deps, got %v", store.deps["test-1"])
+
+	want := "dep remove test-1 test-2"
+	if got := r.argvs(); len(got) != 1 || got[0] != want {
+		t.Fatalf("bd calls = %v, want [%s]", got, want)
+	}
+	if got := store.deps["test-1"]; len(got) != 1 || got[0] != "test-2" {
+		t.Fatalf("the store's dependency was changed (%v): the write reached the library", got)
 	}
 }
 

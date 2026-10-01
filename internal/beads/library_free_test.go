@@ -16,6 +16,7 @@ var libraryFreeFiles = []string{
 	"beads_agent.go",
 	"../cmd/tracking_relations.go",
 	"../cmd/daemon_dispatch.go",
+	"../doltserver/doltserver.go",
 }
 
 func TestMigratedFilesImportNoBeadsLibrary(t *testing.T) {
