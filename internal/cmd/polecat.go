@@ -2168,7 +2168,17 @@ func activeMRBlocker(bd issueShower, mrID, sourceHint string, requireGitSafe, gi
 }
 
 func hasSubmittableWorkForRecovery(worktreePath string, targetRefs []string, gitState *GitState, gitErr error) bool {
-	g := git.NewGit(worktreePath)
+	return hasSubmittableWork(git.NewGit(worktreePath), targetRefs, gitState, gitErr)
+}
+
+// recoveryBranchGit is the git hasSubmittableWork reads.
+type recoveryBranchGit interface {
+	CurrentBranch() (string, error)
+	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
+}
+
+func hasSubmittableWork(g recoveryBranchGit, targetRefs []string, gitState *GitState, gitErr error) bool {
 	branch, _ := g.CurrentBranch()
 	if status, err := g.BranchTargetStatus(branch, "origin", targetRefs); err == nil {
 		return status.UnpreservedPatchCount > 0
