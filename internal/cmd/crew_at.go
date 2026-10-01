@@ -132,10 +132,14 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	sessionID := crewSessionName(townRegistry(), r.Name, name)
 
 	// Every start syncs the managed settings and reports hooks:present or
-	// hooks:absent for the session (gt-4k3fj.8.3).
+	// hooks:absent for the session (gt-4k3fj.8.3). Only a start reports: an
+	// attach to a running agent says nothing about the settings it loaded
+	// (gt-4k3fj.8.4).
 	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
 	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig)
-	runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", r.Name, name), sessionID, hooksStatus)
+	reportHooks := func() {
+		runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", r.Name, name), sessionID, hooksStatus)
+	}
 	if err != nil {
 		// Non-fatal but log warning - missing settings can cause agents to start without hooks
 		style.PrintWarning("could not ensure settings for %s: %v", name, err)
@@ -254,6 +258,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		// a fresh shell. Killing it would destroy the pane before we can respawn.
 		// KillPaneProcesses is only needed when restarting in an EXISTING session
 		// where Claude/Node processes might be running and ignoring SIGHUP.
+		reportHooks()
 		if err := t.RespawnPane(paneID, startupCmd); err != nil {
 			return fmt.Errorf("starting runtime: %w", err)
 		}
@@ -334,6 +339,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 					// Non-fatal but log the warning
 					style.PrintWarning("could not kill pane processes: %v", err)
 				}
+				reportHooks()
 				if err := t.RespawnPane(paneID, startupCmd); err != nil {
 					// If pane is stale (session exists but pane doesn't), recreate the session
 					if strings.Contains(err.Error(), "can't find pane") {
@@ -392,6 +398,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			Topic:     "start",
 		})
 		fmt.Printf("Starting %s in current session...\n", agentCfg.Command)
+		reportHooks()
 		return execAgent(agentCfg, beacon)
 	}
 

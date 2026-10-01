@@ -321,7 +321,7 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		return fmt.Errorf("getting session name: %w", err)
 	}
 
-	restartCmd, err := buildRestartCommand(townRegistry(), currentSession)
+	plan, err := buildRestartPlan(currentSession, buildRestartCommandOpts{Registry: townRegistry()})
 	if err != nil {
 		return fmt.Errorf("building restart command: %w", err)
 	}
@@ -338,6 +338,10 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 	// Respawn, which an e-stop, a park or a gt down in progress refuses
 	// (gt-4k3fj.4.1), and records before the kill below ends this process.
 	return superviseHandoff(currentSession, "gt mol step done", "molecule step: respawn for the next step", func() error {
+		// The successor starts on the managed settings, as a first start
+		// does (gt-4k3fj.8.4); sync before the kill can end this process.
+		plan.syncSettings()
+
 		// Kill all processes in the pane before respawning to prevent process leaks
 		if err := t.KillPaneProcesses(pane); err != nil {
 			// Non-fatal but log the warning
@@ -350,7 +354,7 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 			style.PrintWarning("could not clear history: %v", err)
 		}
 
-		return t.RespawnPane(pane, restartCmd)
+		return t.RespawnPane(pane, plan.Command)
 	})
 }
 
