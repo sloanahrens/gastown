@@ -1,7 +1,7 @@
 package doctor
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,7 +36,8 @@ func (c *PatrolHooksWiredCheck) Run(ctx *CheckContext) *CheckResult {
 	daemonConfigPath := config.DaemonPatrolConfigPath(ctx.TownRoot)
 	relPath, _ := filepath.Rel(ctx.TownRoot, daemonConfigPath)
 
-	if _, err := os.Stat(daemonConfigPath); os.IsNotExist(err) {
+	cfg, err := config.LoadDaemonPatrolConfig(daemonConfigPath)
+	if errors.Is(err, config.ErrNotFound) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -44,8 +45,6 @@ func (c *PatrolHooksWiredCheck) Run(ctx *CheckContext) *CheckResult {
 			FixHint: "Run 'gt doctor --fix' to create default config, or 'gt daemon start' to start the daemon",
 		}
 	}
-
-	cfg, err := config.LoadDaemonPatrolConfig(daemonConfigPath)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -370,16 +369,11 @@ func (c *PatrolPluginDriftCheck) Fix(ctx *CheckContext) error {
 // discoverRigs finds all registered rigs.
 func discoverRigs(townRoot string) ([]string, error) {
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, config.ErrNotFound) {
 			return nil, nil // No rigs configured
 		}
-		return nil, err
-	}
-
-	var rigsConfig config.RigsConfig
-	if err := json.Unmarshal(data, &rigsConfig); err != nil {
 		return nil, err
 	}
 

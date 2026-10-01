@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -251,10 +252,12 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create rigs.json in mayor/ (only if it doesn't already exist).
-	// Re-running install must NOT clobber existing rig registrations.
+	// Create the rig registry (only if it doesn't already exist).
+	// Re-running install must NOT clobber existing rig registrations, which
+	// on the two-file layout live in mayor/town.json (config.LoadRigsConfig
+	// finds them there).
 	rigsPath := filepath.Join(mayorDir, "rigs.json")
-	if rigsInfo, err := os.Stat(rigsPath); os.IsNotExist(err) {
+	if _, err := config.LoadRigsConfig(rigsPath); errors.Is(err, config.ErrNotFound) {
 		rigsConfig := &config.RigsConfig{
 			Version: config.CurrentRigsVersion,
 			Rigs:    make(map[string]config.RigEntry),
@@ -265,10 +268,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   ✓ Created mayor/rigs.json\n")
 	} else if err != nil {
 		return fmt.Errorf("checking rigs.json: %w", err)
-	} else if !rigsInfo.Mode().IsRegular() {
-		return fmt.Errorf("rigs.json exists but is not a regular file")
 	} else {
-		fmt.Printf("   • mayor/rigs.json already exists, preserving\n")
+		fmt.Printf("   • rig registry already exists, preserving\n")
 	}
 
 	// Create a generic CLAUDE.md at the town root as an identity anchor.

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // RigsJSONCheck verifies that rigs.json exists and the PrefixRegistry is populated.
@@ -71,6 +73,16 @@ func (c *RigsJSONCheck) Fix(ctx *CheckContext) error {
 // Run checks that rigs.json exists at the canonical or fallback location.
 func (c *RigsJSONCheck) Run(ctx *CheckContext) *CheckResult {
 	c.townRoot = ctx.TownRoot
+	c.canonicalPath = ""
+	// On the two-file layout the registry is a section of mayor/town.json
+	// and there is no rigs.json to keep or restore (gt-y3pgh.7).
+	if r, err := config.DetectLayout(ctx.TownRoot); err == nil && r.Layout == config.LayoutTwoFile {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Rig registry is in mayor/town.json (two-file layout)",
+		}
+	}
 	c.canonicalPath = filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 	c.fallbackPath = filepath.Join(ctx.TownRoot, "rigs.json")
 
