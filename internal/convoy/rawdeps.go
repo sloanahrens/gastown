@@ -11,9 +11,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // registers the "mysql" driver sql.Open uses below
-
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -76,22 +75,19 @@ func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, er
 		host = "127.0.0.1"
 	}
 	dsn := fmt.Sprintf("root@tcp(%s)/%s?parseTime=true", net.JoinHostPort(host, strconv.Itoa(cfg.Port)), url.PathEscape(cfg.Database))
-	db, err := sql.Open("mysql", dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// beadsql holds the database at a schema level with the typed
+	// dependency columns, so the legacy query is never needed here.
+	db, err := beadsql.Open(ctx, dsn, cfg.Database)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	typedQuery, typedArgs := rawDepSQLArgs(issueID, direction, depType, false)
-	ids, err := queryRawDepIDs(ctx, db, typedQuery, typedArgs)
-	if err == nil {
-		return ids, nil
-	}
-	legacyQuery, legacyArgs := rawDepSQLArgs(issueID, direction, depType, true)
-	return queryRawDepIDs(ctx, db, legacyQuery, legacyArgs)
+	query, args := rawDepSQLArgs(issueID, direction, depType, false)
+	return queryRawDepIDs(ctx, db, query, args)
 }
 
 func rawDepSQLArgs(issueID, direction, depType string, legacy bool) (string, []any) {
@@ -127,7 +123,7 @@ func rawDepSQLLiteral(issueID, direction, depType string, legacy bool) string {
 	return query
 }
 
-func queryRawDepIDs(ctx context.Context, db *sql.DB, query string, args []any) ([]string, error) {
+func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query string, args []any) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -2314,7 +2314,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Currently handles (in order):
-//  1. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?")
+//  1. Workspace trust dialog ("Quick safety check")
 //  2. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
 //
 // Call this after starting the agent and waiting for it to initialize (WaitForCommand),
@@ -2352,9 +2352,8 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 	}
 }
 
-// AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
-// agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?".
+// AcceptWorkspaceTrustDialog dismisses Claude Code's workspace trust dialog
+// ("Quick safety check").
 //
 // The dialog is a select list whose option order and default focus are not
 // stable across agent releases, so the option to choose is read from the pane
@@ -2375,8 +2374,6 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 		}
 
 		// Look for characteristic trust dialog text before prompt detection.
-		// Codex trust screens include a leading ">" banner line, so prompt
-		// detection alone would exit too early.
 		if containsWorkspaceTrustDialog(content) {
 			return t.selectTrustDialogOption(session, content)
 		}
@@ -2471,8 +2468,7 @@ func (t *Tmux) verifyDialogDismissed(session, blocker string) error {
 
 func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
-		strings.Contains(content, "Quick safety check") ||
-		strings.Contains(content, "Do you trust the contents of this directory?")
+		strings.Contains(content, "Quick safety check")
 }
 
 // containsBypassPermissionsDialog reports whether the pane is showing the live
@@ -2492,9 +2488,6 @@ func containsBypassPermissionsDialog(content string) bool {
 func containsBlockingStartupDialog(content string) (string, bool) {
 	if promptAppearsAfterStartupBlocker(content) {
 		return "", false
-	}
-	if containsCodexUpdateDialog(content) {
-		return "codex update prompt", true
 	}
 	if containsWorkspaceTrustDialog(content) {
 		return "workspace trust prompt", true
@@ -2516,12 +2509,8 @@ func promptAppearsAfterStartupBlocker(content string) bool {
 
 func lastStartupBlockerLine(content string) int {
 	markers := []string{
-		"Update available!",
-		"Update now",
-		"Skip until next version",
 		"trust this folder",
 		"Quick safety check",
-		"Do you trust the contents of this directory?",
 		"Bypass Permissions mode",
 	}
 	last := -1
@@ -2536,16 +2525,10 @@ func lastStartupBlockerLine(content string) int {
 	return last
 }
 
-func containsCodexUpdateDialog(content string) bool {
-	return strings.Contains(content, "Update available!") &&
-		strings.Contains(content, "Update now") &&
-		strings.Contains(content, "Skip until next version")
-}
-
 // promptSuffixes are strings that indicate a shell or agent prompt is visible.
-// Claude prompt ends with ">", Codex uses "›", and shells often end with
-// "$", "%", "#", or "❯".
-var promptSuffixes = []string{">", "›", "$", "%", "#", "❯"}
+// Claude prompt ends with ">" or "❯", and shells often end with "$", "%",
+// "#", or "❯".
+var promptSuffixes = []string{">", "$", "%", "#", "❯"}
 
 // containsPromptIndicator checks if pane content contains a prompt indicator
 // that signals a shell or agent is ready (no dialog blocking it).
@@ -3882,8 +3865,7 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 // shouldSendEscape. If an agent uses different wording, add it here — that is
 // the only place that needs to change.
 //
-// "esc to interrupt" is the legacy marker (pre-2026-09 Claude Code, still used
-// by Codex/Gemini as of this writing). "to run in background" is the hint the
+// "esc to interrupt" is the legacy marker (pre-2026-09 Claude Code). "to run in background" is the hint the
 // current Claude Code TUI shows beneath a long-running tool call while busy —
 // verified live 2026-09-09 (gastownhall/gastown#4240): e.g. "(ctrl+b ctrl+b
 // (twice) to run in background)".
@@ -3980,12 +3962,11 @@ const busyCaptureLines = 20
 // (nudge delivery step 5) is safe to send, given a snapshot of pane lines.
 //
 // The Escape exists to exit a vim-mode composer's INSERT mode so the following
-// Enter submits the line (GH#307). But in Claude Code — and Codex/Gemini —
-// Escape also cancels in-flight generation; the status bar shows a busy
-// indicator (see hasBusyIndicator) while the agent is working. Sending Escape
-// in that state would interrupt the agent's current turn (e.g. the Mayor).
-// Returns false when any line shows the busy indicator so the caller
-// suppresses the Escape.
+// Enter submits the line (GH#307). But in Claude Code Escape also cancels
+// in-flight generation; the status bar shows a busy indicator (see
+// hasBusyIndicator) while the agent is working. Sending Escape in that state
+// would interrupt the agent's current turn (e.g. the Mayor). Returns false
+// when any line shows the busy indicator so the caller suppresses the Escape.
 //
 // FRAGILITY: this depends on the agent TUI rendering one of the known busy
 // markers (via hasBusyIndicator — the same assumption IsIdle/WaitForIdle

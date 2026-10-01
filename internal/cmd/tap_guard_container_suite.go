@@ -528,8 +528,8 @@ func isGastownModule(goModPath string) bool {
 // refinery runs from /Users/sloan/gt/gastown/refinery/rig and a polecat
 // worktree may be named "rig", so matching the name "gastown" makes the
 // lookup miss in the very layouts the guards run in and lets "go test ."
-// through (gt-1lko). A nearer go.mod that is a different module — e.g. the
-// plugins/dolt-snapshots submodule — ends the walk: nothing under it is a
+// through (gt-1lko). A nearer go.mod that is a different module — a module
+// nested under plugins/, say — ends the walk: nothing under it is a
 // gastown package path, so no listed package can be there to block.
 func moduleRootFromCwd(dir string) string {
 	for {

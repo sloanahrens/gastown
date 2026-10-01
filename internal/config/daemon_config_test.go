@@ -76,6 +76,25 @@ func TestDaemonPatrolConfigDecodesRetiredRoleKeys(t *testing.T) {
 	}
 }
 
+// hookless_agent and max_hookless are retired with the hookless seat class
+// (gt-4k3fj.8.7): a spec_dispatch block that still carries them decodes and
+// keeps them on a rewrite.
+func TestDaemonPatrolConfigDecodesRetiredHooklessKeys(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"spec_dispatch":{"enabled":true,"hooked_agent":"claude-sonnet","hookless_agent":"local-coder","max_hookless":2}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"hookless_agent":"local-coder","max_hookless":2`) {
+		t.Errorf("rewrite dropped the retired keys: %s", out)
+	}
+}
+
 // events_prune (gt-ori5j) decodes strictly with its own fields, and a
 // daemon.json without it still decodes (the daemon then runs it on defaults).
 func TestDaemonPatrolConfigDecodesEventsPrune(t *testing.T) {

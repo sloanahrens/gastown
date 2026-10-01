@@ -39,14 +39,14 @@ func TestSpecDispatchInterval(t *testing.T) {
 
 func TestFormatSpecDispatchReport(t *testing.T) {
 	t.Parallel()
-	out := []byte("  ✓ Work attached to p\n{\n  \"template\": \"built-in\",\n  \"roster\": \"hooked 1/2, hookless 2/2\",\n  \"candidates\": 3,\n" +
+	out := []byte("  ✓ Work attached to p\n{\n  \"template\": \"built-in\",\n  \"roster\": \"claude-sonnet 1/2, deepseek-flash 2/2\",\n  \"candidates\": 3,\n" +
 		"  \"dispatched\": [{\"bead\": \"gt-a\", \"line\": \"gt-a: slung to gastown/p on claude-sonnet (hooked seat 2/2)\"}],\n" +
 		"  \"refused\": [{\"bead\": \"gt-b\", \"line\": \"gt-b: spec lint refused: ## Gate: section missing\"}],\n" +
 		"  \"planning\": null, \"skipped\": [{\"bead\": \"gt-c\", \"line\": \"x\"}], \"failed\": null\n}\n")
 	lines := formatSpecDispatchReport(out)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"tick: 3 candidate(s), roster hooked 1/2, hookless 2/2, 1 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed",
+		"tick: 3 candidate(s), roster claude-sonnet 1/2, deepseek-flash 2/2, 1 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed",
 		"dispatched: gt-a: slung to gastown/p",
 		"refused: gt-b: spec lint refused: ## Gate",
 	} {

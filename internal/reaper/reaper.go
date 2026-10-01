@@ -11,7 +11,6 @@ package reaper
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,9 +20,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-
-	"github.com/steveyegge/gastown/internal/testdb"
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
@@ -50,47 +47,6 @@ func isTableNotFound(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "table not found") || strings.Contains(msg, "doesn't exist")
-}
-
-// DiscoverDatabases queries SHOW DATABASES on the Dolt server and returns
-// all production databases, filtering out system databases and test pollution.
-// Falls back to DefaultDatabases on any error.
-func DiscoverDatabases(host string, port int) []string {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true&timeout=5s", host, port)
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return DefaultDatabases
-	}
-	defer db.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
-	if err != nil {
-		return DefaultDatabases
-	}
-	defer rows.Close()
-
-	var databases []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			continue
-		}
-		if name == "information_schema" || name == "mysql" {
-			continue
-		}
-		if testdb.IsTestDatabaseName(name) {
-			continue
-		}
-		databases = append(databases, name)
-	}
-
-	if len(databases) == 0 {
-		return DefaultDatabases
-	}
-	return databases
 }
 
 // ScanResult holds the results of scanning a database for reaper candidates.
@@ -297,8 +253,12 @@ func ValidateDBName(dbName string) error {
 	return nil
 }
 
-// OpenDB opens a connection to the Dolt server for a given database.
-func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time.Duration) (*sql.DB, error) {
+// OpenDB opens a read-only connection to one database on the Dolt server
+// (beadsql.Open). It refuses a database at a bd schema level other than
+// beadsql.SchemaVersion, and one with no schema_migrations table
+// (beadsql.ErrNotBeads), which callers skip like a database without the
+// reaper schema.
+func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error) {
 	if err := ValidateDBName(dbName); err != nil {
 		return nil, err
 	}
@@ -306,7 +266,9 @@ func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time
 		host, port, dbName,
 		fmt.Sprintf("%ds", int(readTimeout.Seconds())),
 		fmt.Sprintf("%ds", int(writeTimeout.Seconds())))
-	return sql.Open("mysql", dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout+5*time.Second)
+	defer cancel()
+	return beadsql.Open(ctx, dsn, dbName)
 }
 
 // parentExcludeJoin returns a LEFT JOIN clause and WHERE condition that restricts
@@ -436,7 +398,7 @@ const (
 // looked up (gt-gyb6, gt-4okk). The protection lapses when the pointer does: on
 // the agent's next MR, on hook release, or on nuke. Both agent-bead stores are
 // read (agentBeadWispQuery, agentBeadIssueQuery).
-func liveAgentReferencedWispIDs(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+func liveAgentReferencedWispIDs(ctx context.Context, db *beadsql.DB) (map[string]bool, error) {
 	protected := make(map[string]bool)
 
 	if err := collectAgentReferences(ctx, db, agentBeadWispQuery, protected); err != nil {
@@ -454,7 +416,7 @@ func liveAgentReferencedWispIDs(ctx context.Context, db *sql.DB) (map[string]boo
 
 // collectAgentReferences adds to protected every wisp ID named as active_mr or
 // hook_bead by an agent bead in the rows query returns.
-func collectAgentReferences(ctx context.Context, db *sql.DB, query string, protected map[string]bool) error {
+func collectAgentReferences(ctx context.Context, db *beadsql.DB, query string, protected map[string]bool) error {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("query agent beads for references: %w", err)
@@ -529,7 +491,7 @@ func closedMoleculeStepExcludeJoin(alias string) string {
 // operations (wisps and issues). Returns false (no error) when tables are missing
 // — callers use this to skip databases that have incomplete beads schema (e.g.
 // partially initialized databases on the central Dolt server).
-func HasReaperSchema(db *sql.DB) (bool, error) {
+func HasReaperSchema(db *beadsql.DB) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -554,14 +516,14 @@ func HasReaperSchema(db *sql.DB) (bool, error) {
 	return hasColumns(ctx, db, "dependencies", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external")
 }
 
-func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
+func tableExists(ctx context.Context, db *beadsql.DB, table string) (bool, error) {
 	var count int
 	err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ? AND table_schema = DATABASE()", table).Scan(&count)
 	return count > 0, err
 }
 
-func hasColumns(ctx context.Context, db *sql.DB, table string, columns ...string) (bool, error) {
+func hasColumns(ctx context.Context, db *beadsql.DB, table string, columns ...string) (bool, error) {
 	if len(columns) == 0 {
 		return true, nil
 	}
@@ -578,7 +540,7 @@ func hasColumns(ctx context.Context, db *sql.DB, table string, columns ...string
 }
 
 // Scan counts reaper candidates in a database without modifying anything.
-func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssueAge time.Duration) (*ScanResult, error) {
+func Scan(db *beadsql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssueAge time.Duration) (*ScanResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 
@@ -707,7 +669,7 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 // Reap closes stale wisps in a database whose parent molecule is already closed.
 // Candidates are selected with read-only SQL on db; every close goes through
 // w (bd close --force), which may be nil only for a dry run.
-func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {
+func Reap(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {
 	if !dryRun && w == nil {
 		return nil, ErrNoWriter
 	}
@@ -835,7 +797,7 @@ func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool
 // Unlike the UPDATE this replaced, nothing re-checks status at write time, so
 // a wisp pinned or closed in the moment between SELECT and close is closed
 // anyway; every query still excludes agent wisps, whose type never changes.
-func closeWispsSelected(ctx context.Context, db *sql.DB, w Writer, idQuery string, queryArgs []interface{}, reason, description string) (int, error) {
+func closeWispsSelected(ctx context.Context, db *beadsql.DB, w Writer, idQuery string, queryArgs []interface{}, reason, description string) (int, error) {
 	ids, err := selectIDs(ctx, db, idQuery, queryArgs...)
 	if err != nil {
 		return 0, fmt.Errorf("select %s: %w", description, err)
@@ -850,7 +812,7 @@ func closeWispsSelected(ctx context.Context, db *sql.DB, w Writer, idQuery strin
 }
 
 // selectIDs runs a read-only query whose single column is an issue id.
-func selectIDs(ctx context.Context, db *sql.DB, query string, args ...interface{}) ([]string, error) {
+func selectIDs(ctx context.Context, db *beadsql.DB, query string, args ...interface{}) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -870,7 +832,7 @@ func selectIDs(ctx context.Context, db *sql.DB, query string, args ...interface{
 // Purge deletes old closed wisps and mail from a database. Candidates are
 // selected with read-only SQL on db; every delete goes through w
 // (bd delete --force), which may be nil only for a dry run.
-func Purge(db *sql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
+func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
 	if !dryRun && w == nil {
 		return nil, ErrNoWriter
 	}
@@ -894,7 +856,7 @@ func Purge(db *sql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Dur
 	return result, nil
 }
 
-func purgeClosedWisps(db *sql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
+func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -958,7 +920,7 @@ func purgeClosedWisps(db *sql.DB, w Writer, purgeAge time.Duration, dryRun bool)
 	return totalDeleted, anomalies, nil
 }
 
-func purgeOldMail(db *sql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
+func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -1070,7 +1032,7 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 // threshold would take alongside ErrStaleAgeTooLow, so the caller gets the
 // operator notice without the cycle halting on exit status. All three are
 // lifted by opts.Force.
-func AutoClose(db *sql.DB, w Writer, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
+func AutoClose(db *beadsql.DB, w Writer, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
 	// A below-floor threshold refuses, and the refusal is the whole output:
 	// nothing is closed, so what the caller has to act on is how much the
 	// threshold would have taken. opts.StaleAge is left as asked for — the
@@ -1206,7 +1168,7 @@ type ClosePluginReceiptResult struct {
 // plugins; they should be closed shortly after creation since they exist only
 // for audit/cooldown-gate purposes. The standard AutoClose path requires 7 days
 // of staleness, which lets plugin receipts accumulate into the hundreds.
-func ClosePluginReceipts(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+func ClosePluginReceipts(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 
@@ -1252,7 +1214,7 @@ func ClosePluginReceipts(db *sql.DB, w Writer, dbName string, maxAge time.Durati
 // + "from:daemon" with a title prefix "Plugin:" and are never closed after the
 // dog completes. Without this, they accumulate at ~288/day (one per 5-minute
 // stuck-agent-dog run) and are only caught by AutoClose after 7 days.
-func ClosePluginDispatches(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+func ClosePluginDispatches(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 

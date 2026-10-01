@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -116,37 +115,5 @@ func TestOneDefinition(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestPluginCopyMatches: plugins/dolt-snapshots is its own module and cannot
-// import internal/testdb, so it keeps a copy; this keeps the copy equal.
-func TestPluginCopyMatches(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(repoRoot(t), "plugins", "dolt-snapshots", "main.go")
-	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		vs, ok := n.(*ast.ValueSpec)
-		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "testDatabasePrefixes" || len(vs.Values) != 1 {
-			return true
-		}
-		cl, ok := vs.Values[0].(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		for _, e := range cl.Elts {
-			if lit, ok := e.(*ast.BasicLit); ok {
-				s, _ := strconv.Unquote(lit.Value)
-				got = append(got, s)
-			}
-		}
-		return false
-	})
-	if !reflect.DeepEqual(got, Prefixes()) {
-		t.Fatalf("plugins/dolt-snapshots/main.go testDatabasePrefixes = %q, want %q (internal/testdb)", got, Prefixes())
 	}
 }

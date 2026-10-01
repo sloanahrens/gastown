@@ -3,7 +3,6 @@ package plugin
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -78,28 +77,6 @@ These are the instructions.
 	}
 	if plugin.Instructions == "" {
 		t.Error("expected instructions to be non-empty")
-	}
-}
-
-func TestDoltShellPluginsPreferGTDoltEnv(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join("..", "..")
-	for _, rel := range []string{
-		filepath.Join("plugins", "dolt-archive", "run.sh"),
-	} {
-		data, err := os.ReadFile(filepath.Join(root, rel))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		content := string(data)
-		for _, want := range []string{
-			`DOLT_HOST="${GT_DOLT_HOST:-${DOLT_HOST:-127.0.0.1}}"`,
-			`DOLT_PORT="${GT_DOLT_PORT:-${DOLT_PORT:-3307}}"`,
-		} {
-			if !strings.Contains(content, want) {
-				t.Fatalf("%s missing %q", rel, want)
-			}
-		}
 	}
 }
 

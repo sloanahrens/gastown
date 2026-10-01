@@ -141,6 +141,11 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 			wantParts: []string{"schema<=66", "database at 65"},
 		},
 		{
+			name:      "bd and database past the level gastown's SQL reads declare",
+			bd:        &fakeBD{version: strings.Replace(bdVersionDa4983e, `"db_schema_version":66`, `"db_schema_version":67`, 1), sqlOut: dbLevel(67)},
+			wantParts: []string{"database is at schema 67", "written for 66", "beadsql.SchemaVersion"},
+		},
+		{
 			name:      "database ahead of bd",
 			bd:        &fakeBD{version: bdVersionDa4983e, sqlErr: fakeExit(26), sqlStderr: "schema skew"},
 			wantParts: []string{"database schema is ahead of this bd"},

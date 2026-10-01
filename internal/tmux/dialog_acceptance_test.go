@@ -206,7 +206,6 @@ func TestContainsPromptIndicator(t *testing.T) {
 		want    bool
 	}{
 		{"claude prompt", "Hello! How can I help?\n>", true},
-		{"codex prompt", "Ready\n› ", true},
 		{"bash prompt", "user@host:~$", true},
 		{"zsh prompt", "╰─❯", true},
 		{"root prompt", "root@host:~#", true},
@@ -234,7 +233,6 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 		want    bool
 	}{
 		{"claude trust prompt", "Quick safety check\nDo you trust this folder?", true},
-		{"codex trust prompt", "> You are in /tmp/demo\nDo you trust the contents of this directory?", true},
 		{"bypass dialog", "Bypass Permissions mode\n1. No\n2. Yes, I accept", false},
 		{"shell prompt", "user@host:~$", false},
 	}
@@ -258,21 +256,6 @@ func TestContainsBlockingStartupDialog(t *testing.T) {
 		wantName    string
 	}{
 		{
-			name: "codex update modal",
-			content: `Update available! 0.137.0 -> 0.138.0
-Update now
-Skip
-Skip until next version`,
-			wantBlocked: true,
-			wantName:    "codex update prompt",
-		},
-		{
-			name:        "codex trust modal",
-			content:     "> You are in /tmp/demo\nDo you trust the contents of this directory?",
-			wantBlocked: true,
-			wantName:    "workspace trust prompt",
-		},
-		{
 			name:        "bypass modal",
 			content:     "Bypass Permissions mode\n1. No\n2. Yes, I accept",
 			wantBlocked: true,
@@ -280,15 +263,15 @@ Skip until next version`,
 		},
 		{
 			name:        "ready prompt",
-			content:     "› ",
+			content:     "❯ ",
 			wantBlocked: false,
 		},
 		{
-			name: "stale bypass dialog before codex prompt",
+			name: "stale bypass dialog before claude prompt",
 			content: `Bypass Permissions mode
 1. No
 2. Yes, I accept
-› `,
+❯ `,
 			wantBlocked: false,
 		},
 		{
@@ -296,7 +279,7 @@ Skip until next version`,
 			content: `Bypass Permissions mode
 1. No
 2. Yes, I accept
-›
+❯
 session ready`,
 			wantBlocked: false,
 		},

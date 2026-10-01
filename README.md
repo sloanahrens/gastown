@@ -1,10 +1,10 @@
 # Gas Town
 
-**Multi-agent orchestration system for Claude Code, GitHub Copilot, and other AI agents with persistent work tracking**
+**Multi-agent orchestration system for Claude Code with persistent work tracking**
 
 ## Overview
 
-Gas Town is a workspace manager that lets you coordinate multiple AI coding agents (Claude Code, GitHub Copilot, Codex, Gemini, and others) working on different tasks. Instead of losing context when agents restart, Gas Town persists work state in git-backed hooks, enabling reliable multi-agent workflows.
+Gas Town is a workspace manager that lets you coordinate multiple Claude Code agents working on different tasks. Instead of losing context when agents restart, Gas Town persists work state in git-backed hooks, enabling reliable multi-agent workflows.
 
 ### What Problem Does This Solve?
 
@@ -117,7 +117,7 @@ Native installs require the host tools below. Docker installs only require Docke
 | sqlite3 | any | Used by convoy database queries. Usually pre-installed on macOS and Linux. |
 | ICU4C dev headers | varies | Required for source builds that compile the ICU-backed query layer. Use `libicu-dev` on Debian/Ubuntu, `libicu-devel` on Fedora/RHEL, `icu4c` on macOS, and MSYS2 ICU packages for native Windows. |
 | tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (Mayor, crew, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
-| Claude Code CLI | latest | Default runtime. See [Runtime Configuration](#runtime-configuration) for alternatives (Codex, Copilot, Gemini, Cursor). |
+| Claude Code CLI | latest | The only runtime. See [Runtime Configuration](#runtime-configuration) for wrappers and other backends. |
 
 ### Local setup
 
@@ -349,8 +349,7 @@ Run individual runtime instances manually. Gas Town just tracks state.
 ```bash
 gt convoy create "Fix bugs" gt-abc12   # Create convoy (sling auto-creates if skipped)
 gt sling gt-abc12 myproject            # Assign to worker
-claude --resume                        # Agent reads mail, runs work (Claude)
-# or: codex                            # Start Codex in the workspace
+claude --resume                        # Agent reads mail, runs work
 gt convoy list                         # Check progress
 ```
 
@@ -434,32 +433,24 @@ gt convoy show
 
 ## Runtime Configuration
 
-Gas Town supports multiple AI coding runtimes. Per-rig runtime settings are in `settings/config.json`.
+Every agent runs the Claude Code CLI, or a wrapper script that execs it. Agent
+definitions live in `settings/config.json`; an agent may point the CLI at
+another Anthropic-compatible backend through `env` (for example
+`ANTHROPIC_BASE_URL`).
 
 ```json
 {
-  "runtime": {
-    "provider": "codex",
-    "command": "codex",
-    "args": [],
-    "prompt_mode": "none"
+  "agents": {
+    "deepseek-flash": {
+      "command": "claude",
+      "env": { "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic" }
+    }
   }
 }
 ```
 
-**Notes:**
-
-- Claude uses hooks in `.claude/settings.json` (managed via `--settings` flag) for mail injection and startup.
-- For Codex, set `project_doc_fallback_filenames = ["CLAUDE.md"]` in
-  `~/.codex/config.toml` so role instructions are picked up.
-- For runtimes without hooks (e.g., Codex), Gas Town sends a startup fallback
-  after the session is ready: `gt prime`, and `gt mail check --inject`
-  for autonomous roles.
-- **GitHub Copilot** (`copilot`) is a built-in preset using `--yolo` for autonomous
-  mode. It uses executable lifecycle hooks in `.github/hooks/gastown.json` (same events
-  as Claude: `sessionStart`, `userPromptSubmitted`, `preToolUse`, `sessionEnd`). Uses a
-  5-second ready delay instead of prompt detection. Requires a Copilot seat and org-level
-  CLI policy. See [docs/INSTALLING.md](docs/INSTALLING.md).
+Every session gets the town's managed settings and hooks through the
+`--settings` flag, whatever its backend.
 
 ## Key Commands
 
@@ -477,19 +468,15 @@ gt crew add <name> --rig <rig>  # Create crew workspace
 ```bash
 gt agents                   # List active agents
 gt sling <bead-id> <rig>    # Assign work to agent
-gt sling <bead-id> <rig> --agent cursor   # Override runtime for this sling/spawn
+gt sling <bead-id> <rig> --agent claude-sonnet   # Override the agent for this sling/spawn
 gt mayor attach             # Start Mayor session
-gt mayor start --agent auggie           # Run Mayor with a specific agent alias
+gt mayor start --agent claude-opus      # Run Mayor with a specific agent alias
 gt prime                    # Context recovery (run inside existing session)
 gt tail -f                  # Follow what the town is doing
 gt tail --since 1h          # The last hour, then exit
 ```
 
-**Built-in agent presets**: `claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`, `pi`, `omp`
-
-The `kiro` preset launches `kiro-cli chat --trust-all-tools`, supports Kiro's
-documented `--resume` / `--resume-id` session flags, and does not install Kiro
-hooks or `.kiro` project files.
+**Built-in agent presets**: `claude`, `groq-compound` (the Claude CLI over Groq)
 
 ### Convoy (Work Tracking)
 
@@ -505,7 +492,7 @@ gt convoy add <convoy-id> <issue-id...>  # Add issues to convoy
 ```bash
 # Set custom agent command
 gt config agent set claude-glm "claude-glm --model glm-4"
-gt config agent set codex-low "codex --thinking low"
+gt config agent set claude-opus "claude --model opus"
 
 # Set default agent
 gt config default-agent claude-glm

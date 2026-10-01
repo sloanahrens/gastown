@@ -445,7 +445,6 @@ via the SessionStart hook. No per-directory CLAUDE.md or AGENTS.md files are cre
 
 **Why no per-directory files?**
 - Claude Code traverses upward from CWD for CLAUDE.md — all agents under `~/gt/` find the town-root file
-- AGENTS.md (for Codex) uses downward traversal from git root — parent directories are invisible, so per-directory AGENTS.md never worked
 - The real context comes from `gt prime`, making on-disk bootstrap pointers redundant
 
 ### Customer Repo Files (CLAUDE.md and .claude/)
@@ -528,17 +527,9 @@ gt config agent remove <name>     # Remove custom agent (built-ins protected)
 gt config default-agent [name]    # Get or set town default agent
 ```
 
-**Built-in agents**: `claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`
-
-The `kiro` preset launches `kiro-cli chat --trust-all-tools` and uses Kiro's
-documented `--resume` / `--resume-id` session flags. Gas Town does not install
-Kiro hooks or `.kiro` project files for this preset.
-
-> **Note on GitHub Copilot**: The `copilot` preset uses executable lifecycle hooks in
-> `.github/hooks/gastown.json` (`sessionStart`, `userPromptSubmitted`, `preToolUse`,
-> `sessionEnd`) — the same lifecycle events as Claude Code, in Copilot's JSON format.
-> Copilot uses a 5-second ready delay instead of prompt-based detection. Requires a
-> Copilot seat and org-level CLI policy enabled.
+**Built-in agents**: `claude`, `groq-compound` (the Claude CLI over Groq). Every
+agent runs the Claude Code CLI or a wrapper that execs it, and gets the town's
+managed settings through `--settings`.
 
 **Custom agents**: Define per-town via CLI or JSON:
 ```bash
@@ -552,15 +543,9 @@ gt config default-agent claude-glm       # Set default
 {
   "version": 1,
   "agents": {
-    "opencode": {
-      "command": "opencode",
-      "args": [],
-      "resume_flag": "--session",
-      "resume_style": "flag",
-      "non_interactive": {
-        "subcommand": "run",
-        "output_flag": "--format json"
-      }
+    "claude-haiku": {
+      "command": "claude",
+      "args": ["--model", "haiku", "--dangerously-skip-permissions"]
     }
   }
 }
@@ -571,49 +556,17 @@ gt config default-agent claude-glm       # Set default
 {
   "type": "rig-settings",
   "version": 1,
-  "agent": "opencode",
+  "agent": "claude-haiku",
   "agents": {
-    "opencode": {
-      "command": "opencode",
-      "args": ["--session"]
+    "claude-haiku": {
+      "command": "claude",
+      "args": ["--model", "haiku", "--dangerously-skip-permissions"]
     }
   }
 }
 ```
-
-**ACP-enabled custom agents** (`settings/config.json`):
-```json
-{
-  "type": "town-settings",
-  "version": 1,
-  "default_agent": "opencode-acp-debug",
-  "agents": {
-    "opencode-acp-debug": {
-      "command": "opencode",
-      "acp": {
-        "command": "acp",
-        "args": ["--debug", "--print-logs"]
-      }
-    }
-  }
-}
-```
-
-The `acp` field configures Agent Communication Protocol support:
-- `command`: ACP subcommand (e.g., `"acp"` for `opencode acp`)
-- `args`: Additional arguments passed to the ACP subcommand
-
-Custom agents inherit ACP support from their base command's preset. For example,
-a custom agent with `"command": "opencode"` automatically inherits ACP support
-from the opencode preset. You can override or extend the ACP args by specifying
-the `acp` field explicitly.
 
 **Agent resolution order**: rig-level → town-level → built-in presets.
-
-For OpenCode autonomous mode, set env var in your shell profile:
-```bash
-export OPENCODE_PERMISSION='{"*":"allow"}'
-```
 
 ### Rig Management
 
@@ -657,7 +610,7 @@ Note: "Swarm" is ephemeral (workers on a convoy's issues). See [Convoys](concept
 # Standard workflow: convoy first, then sling
 gt convoy create "Feature X" gt-abc gt-def
 gt sling gt-abc <rig>                    # Assign to polecat
-gt sling gt-abc <rig> --agent codex      # Override runtime for this sling/spawn
+gt sling gt-abc <rig> --agent claude-haiku  # Override the agent for this sling/spawn
 gt sling <proto> --on gt-def <rig>       # With workflow template
 
 # Quick sling (auto-creates convoy)

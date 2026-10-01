@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -293,12 +294,16 @@ func (s *reaperSweepFake) recordedWrites() []string {
 
 // openReaperSweepFake registers a driver over the fake and returns a handle to
 // it, in the shape the daemon's autoCloseDB takes.
-func openReaperSweepFake(t *testing.T, staleIssues [][]driver.Value) (*sql.DB, *reaperSweepFake) {
+func openReaperSweepFake(t *testing.T, staleIssues [][]driver.Value) (*beadsql.DB, *reaperSweepFake) {
 	t.Helper()
 	fake := &reaperSweepFake{rows: staleIssues}
 	driverName := fmt.Sprintf("fake_wisp_reaper_%d", atomic.AddUint64(&reaperSweepFakeDriverID, 1))
 	sql.Register(driverName, &reaperSweepDriver{state: fake})
-	db, err := sql.Open(driverName, "")
+	raw, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open fake db: %v", err)
+	}
+	db, err := beadsql.New(context.Background(), raw, "hq")
 	if err != nil {
 		t.Fatalf("open fake db: %v", err)
 	}
@@ -326,6 +331,9 @@ func (c *reaperSweepConn) Begin() (driver.Tx, error) { return reaperSweepTx{}, n
 func (c *reaperSweepConn) CheckNamedValue(*driver.NamedValue) error { return nil }
 
 func (c *reaperSweepConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if query == beadsql.SchemaLevelQuery {
+		return &reaperSweepRows{cols: []string{"version"}, rows: [][]driver.Value{{int64(beadsql.SchemaVersion)}}}, nil
+	}
 	if !strings.Contains(query, "SELECT i.id, i.title, i.updated_at FROM issues i WHERE") {
 		return nil, fmt.Errorf("unexpected query on the auto-close sweep: %s", query)
 	}
@@ -350,12 +358,18 @@ func (reaperSweepTx) Commit() error   { return nil }
 func (reaperSweepTx) Rollback() error { return nil }
 
 type reaperSweepRows struct {
+	cols []string // nil: the stale-issue SELECT's columns
 	rows [][]driver.Value
 	next int
 }
 
-func (r *reaperSweepRows) Columns() []string { return []string{"id", "title", "updated_at"} }
-func (r *reaperSweepRows) Close() error      { return nil }
+func (r *reaperSweepRows) Columns() []string {
+	if r.cols != nil {
+		return r.cols
+	}
+	return []string{"id", "title", "updated_at"}
+}
+func (r *reaperSweepRows) Close() error { return nil }
 
 func (r *reaperSweepRows) Next(dest []driver.Value) error {
 	if r.next >= len(r.rows) {

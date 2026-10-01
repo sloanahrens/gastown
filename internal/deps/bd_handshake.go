@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -105,9 +106,11 @@ func ParseBDVersionJSON(out []byte) (BDVersionInfo, error) {
 // CheckBDHandshake decides whether the town may run against the bd run
 // reaches. It requires a fork build (build_id present) whose JSON contract
 // version this gt knows and whose schema level equals the migration level
-// of the database it serves. The database is read through bd only after the
-// version passes. Every refusal wraps ErrBDHandshake and names what was
-// found, what is required and how to install bd; bdPath is for the message.
+// of the database it serves, and that level must be beadsql.SchemaVersion,
+// the one gastown's SQL reads were written for. The database is read
+// through bd only after the version passes. Every refusal wraps
+// ErrBDHandshake and names what was found, what is required and how to
+// install bd; bdPath is for the message.
 func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHandshake, error) {
 	hs := &BDHandshake{Path: bdPath}
 	stdout, stderr, err := run(ctx, nil, "version", "--json")
@@ -147,6 +150,11 @@ func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHand
 	hs.DBSchema = level
 	if level != info.DBSchemaVersion {
 		return nil, refuseBD(hs, true, fmt.Sprintf("bd migrates to schema<=%d but the database is at %d", info.DBSchemaVersion, level))
+	}
+	// gastown's own SQL reads (internal/beadsql) and the ones it sends
+	// through bd sql are written for one schema level.
+	if level != beadsql.SchemaVersion {
+		return nil, refuseBD(hs, true, fmt.Sprintf("the database is at schema %d but this gt's SQL reads are written for %d (beadsql.SchemaVersion)", level, beadsql.SchemaVersion))
 	}
 	return hs, nil
 }
@@ -220,8 +228,8 @@ func refuseBD(hs *BDHandshake, dbRead bool, reason string) error {
 	if dbRead {
 		found += fmt.Sprintf("; database at %d", hs.DBSchema)
 	}
-	return fmt.Errorf("%w: %s\n  found:    %s\n  required: a beads fork build with contract %s whose schema level equals the database migration level\n  fix:      %s",
-		ErrBDHandshake, reason, found, knownContractList(), BDInstallHint)
+	return fmt.Errorf("%w: %s\n  found:    %s\n  required: a beads fork build with contract %s whose schema level equals the database migration level, at schema %d\n  fix:      %s",
+		ErrBDHandshake, reason, found, knownContractList(), beadsql.SchemaVersion, BDInstallHint)
 }
 
 func knownContract(v int) bool {

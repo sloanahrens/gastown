@@ -36,8 +36,8 @@ func TestAssignTheme_Distribution(t *testing.T) {
 func TestGetThemeByName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		want  bool
+		name string
+		want bool
 	}{
 		{"ocean", true},
 		{"forest", true},

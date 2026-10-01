@@ -15,8 +15,8 @@ Use the bootstrap script instead:
   --local-repo /gt/nightRider \
   --prefix nr \
   --polecat-agent claude \
-  --witness-agent codex \
-  --refinery-agent codex
+  --witness-agent claude-haiku \
+  --refinery-agent claude-haiku
 ```
 
 If you omit `--remote`, the script registers the rig with `file://<local-repo>`.

@@ -210,9 +210,8 @@ func TestCwdPackagePath(t *testing.T) {
 
 // A cwd outside this module has no package path to judge. Failing open there
 // cannot hide a listed package: the lists are module-relative, so a cwd in
-// another module or in no module at all cannot be one. A nested module (the
-// plugins/dolt-snapshots submodule in this repo) ends the walk for the same
-// reason.
+// another module or in no module at all cannot be one. A nested module (one
+// under plugins/, say) ends the walk for the same reason.
 func TestCwdPackagePath_OutsideModule(t *testing.T) {
 	t.Parallel()
 	t.Run("no go.mod anywhere", func(t *testing.T) {
@@ -223,12 +222,12 @@ func TestCwdPackagePath_OutsideModule(t *testing.T) {
 
 	t.Run("another module", func(t *testing.T) {
 		root := fakeModule(t, "clone")
-		nested := filepath.Join(root, "plugins", "dolt-snapshots", "internal")
+		nested := filepath.Join(root, "plugins", "nested", "internal")
 		if err := os.MkdirAll(nested, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(filepath.Dir(nested), "go.mod"),
-			[]byte("module "+gastownModulePath+"/plugins/dolt-snapshots\n"), 0o644); err != nil {
+			[]byte("module "+gastownModulePath+"/plugins/nested\n"), 0o644); err != nil {
 			t.Fatalf("write go.mod: %v", err)
 		}
 		if pkg, ok := cwdPackagePath(nested); ok {

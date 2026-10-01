@@ -4,17 +4,9 @@ Centralized hook management for Gas Town workspaces.
 
 ## Overview
 
-Gas Town manages context injection for all supported agents. The mechanism varies by agent:
-
-| Agent | Hook mechanism | Managed file |
-|-------|---------------|-------------|
-| Claude Code, Gemini | `settings.json` lifecycle hooks | `<role>/.claude/settings.json` |
-| OpenCode | JS plugin | `workDir/.opencode/plugins/gastown.js` |
-| GitHub Copilot | JSON lifecycle hooks | `workDir/.github/hooks/gastown.json` |
-| Codex, others | Startup nudge fallback | *(no file — nudge only)* |
-
-Copilot's JSON hooks cover the same lifecycle as Claude Code's. The `gt hooks`
-commands below apply to Claude Code (and Gemini) only.
+Every agent runs the Claude Code CLI, so every session gets the same
+`settings.json` lifecycle hooks (`<role>/.claude/settings.json`), whatever
+backend the agent points the CLI at.
 
 Gas Town writes `.claude/settings.json` into its own parent directories and
 passes it to Claude Code via `--settings`, so customer repos stay clean. One

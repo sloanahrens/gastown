@@ -51,14 +51,6 @@ const claudeTrustDialogWarning = ` Accessing workspace: /Users/sloan/gt/gastown/
 
  Enter to confirm · Esc to cancel`
 
-// codexTrustDialog is Codex's numbered variant, with the trust option focused.
-const codexTrustDialog = `> You are in /tmp/demo
-
-  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
-
-› 1. Yes, proceed (y)
-  2. No, quit (n)`
-
 // bypassPermissionsDialog is Claude's bypass-permissions warning, which uses the
 // same select component with the same cancel-first ordering as the trust dialog.
 const bypassPermissionsDialog = ` WARNING: Claude Code running in Bypass Permissions mode
@@ -101,18 +93,9 @@ func TestTrustNavigation(t *testing.T) {
 			wantPresses: 1,
 		},
 		{
-			name:        "codex numbered options with trust focused",
-			content:     codexTrustDialog,
-			wantPresses: 0,
-		},
-		{
-			name: "codex numbered options with cancel focused moves up",
-			content: `> You are in /tmp/demo
-
-  Do you trust the contents of this directory?
-
-  1. Yes, proceed (y)
-› 2. No, quit (n)`,
+			name: "numbered options with cancel focused moves up",
+			content: `  1. Yes, I trust this folder
+❯ 2. No, exit`,
 			wantKey:     "Up",
 			wantPresses: 1,
 		},
@@ -295,9 +278,9 @@ func TestParseTrustOptionLineCursorMarkers(t *testing.T) {
 		wantOK       bool
 	}{
 		{"claude cursor", " ❯ No, exit", true, true},
-		{"codex cursor", "› 1. Yes, proceed (y)", true, true},
+		{"numbered option", "❯ 1. Yes, I accept", true, true},
 		{"unfocused option", "   Yes, I trust this folder", false, true},
-		{"codex banner is not an option", "> You are in /tmp/demo", false, false},
+		{"quoted banner is not an option", "> You are in /tmp/demo", false, false},
 		{"prompt line is not an option", "❯ ", false, false},
 		{"claude composer prompt", ">", false, false},
 	}
@@ -327,7 +310,6 @@ func TestLiveDialogsAreNotStale(t *testing.T) {
 		"claude cancel-first": claudeTrustDialogCancelFirst,
 		"claude yes-first":    claudeTrustDialogYesFirst,
 		"claude warning":      claudeTrustDialogWarning,
-		"codex":               codexTrustDialog,
 		"bypass permissions":  bypassPermissionsDialog,
 	}
 

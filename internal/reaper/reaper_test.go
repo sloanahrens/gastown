@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 func TestValidateDBName(t *testing.T) {
@@ -1157,11 +1159,15 @@ func TestPurgeSparesAgentReferencedWispsFromIssuesTable(t *testing.T) {
 
 var fakeReaperDriverID uint64
 
-func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
+func openFakeReaperDB(t *testing.T, state *fakeReaperState) *beadsql.DB {
 	t.Helper()
 	driverName := fmt.Sprintf("fake_reaper_%d", atomic.AddUint64(&fakeReaperDriverID, 1))
 	sql.Register(driverName, &fakeReaperDriver{state: state, t: t})
-	db, err := sql.Open(driverName, "")
+	raw, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open fake db: %v", err)
+	}
+	db, err := beadsql.New(context.Background(), raw, "hq")
 	if err != nil {
 		t.Fatalf("open fake db: %v", err)
 	}
@@ -1602,6 +1608,9 @@ func (c *fakeReaperConn) Begin() (driver.Tx, error) { return fakeReaperTx{}, nil
 func (c *fakeReaperConn) CheckNamedValue(*driver.NamedValue) error { return nil }
 
 func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if query == beadsql.SchemaLevelQuery {
+		return fakeCountRows(beadsql.SchemaVersion), nil
+	}
 	normalized := normalizeSQL(query)
 	c.state.mu.Lock()
 	defer c.state.mu.Unlock()
