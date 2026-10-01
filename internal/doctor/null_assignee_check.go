@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // NullAssigneeCheck detects in_progress beads with a NULL or empty assignee.
@@ -30,7 +30,7 @@ type nullAssigneeRow struct {
 	ID        string
 	Title     string
 	UpdatedAt string
-	RigDB     string // Dolt database name (= rig name)
+	RigDB     string // registered rig name
 }
 
 // NewNullAssigneeCheck creates a new null-assignee steps check.
@@ -48,12 +48,16 @@ func NewNullAssigneeCheck() *NullAssigneeCheck {
 
 const nullAssigneeSelectQuery = `SELECT id, title, updated_at FROM issues WHERE status = 'in_progress' AND (assignee IS NULL OR assignee = '') ORDER BY updated_at ASC`
 
-// Run queries each rig database for in_progress beads with NULL/empty assignee.
+// Run queries each registered rig's database for in_progress beads with
+// NULL/empty assignee. It goes by mayor/rigs.json, not the Dolt server's
+// database list: database names are bead prefixes (gt, be), not rig
+// directories, and the server also hosts trackers that are no rig, such as
+// the operator's own, whose in_progress epics carry no assignee by design.
 func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	c.affected = nil
 
-	databases, err := doltserver.ListDatabases(ctx.TownRoot)
-	if err != nil || len(databases) == 0 {
+	registered := loadRegisteredRigNames(ctx.TownRoot)
+	if len(registered) == 0 {
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusOK,
@@ -61,16 +65,21 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 			Category: c.Category(),
 		}
 	}
+	rigs := make([]string, 0, len(registered))
+	for rig := range registered {
+		rigs = append(rigs, rig)
+	}
+	sort.Strings(rigs)
 
-	for _, db := range databases {
-		rigDir := filepath.Join(ctx.TownRoot, db)
+	for _, rig := range rigs {
+		rigDir := filepath.Join(ctx.TownRoot, rig)
 		rows, err := queryNullAssigneeBeads(ctx, rigDir)
 		if err != nil {
 			// Non-fatal: Dolt might not be running or rig may not be bd-managed.
 			continue
 		}
 		for _, row := range rows {
-			row.RigDB = db
+			row.RigDB = rig
 			c.affected = append(c.affected, row)
 		}
 	}

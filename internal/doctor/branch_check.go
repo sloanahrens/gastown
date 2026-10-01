@@ -138,15 +138,9 @@ func (c *CloneDivergenceCheck) findAllClones(townRoot string) []string {
 		}
 
 		// Add crew members
-		crewPath := filepath.Join(rigPath, "crew")
-		if crewEntries, err := os.ReadDir(crewPath); err == nil {
-			for _, crew := range crewEntries {
-				if crew.IsDir() && !strings.HasPrefix(crew.Name(), ".") {
-					path := filepath.Join(crewPath, crew.Name())
-					if c.isGitRepo(path) {
-						clones = append(clones, path)
-					}
-				}
+		for _, path := range crewCloneDirs(filepath.Join(rigPath, "crew")) {
+			if c.isGitRepo(path) {
+				clones = append(clones, path)
 			}
 		}
 

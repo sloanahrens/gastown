@@ -102,14 +102,7 @@ func findRigClones(rigPath string) []string {
 	clones = append(clones, filepath.Join(rigPath, "mayor", "rig"))
 
 	// Crew clones
-	crewDir := filepath.Join(rigPath, "crew")
-	if entries, err := os.ReadDir(crewDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				clones = append(clones, filepath.Join(crewDir, entry.Name()))
-			}
-		}
-	}
+	clones = append(clones, crewCloneDirs(filepath.Join(rigPath, "crew"))...)
 
 	// Polecat clones
 	polecatDir := filepath.Join(rigPath, "polecats")
