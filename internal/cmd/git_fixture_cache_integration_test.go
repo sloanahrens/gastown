@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -280,11 +282,11 @@ func cachedGitFixtureStrings(t *testing.T, key string, build func(dir string) []
 	return out
 }
 
-// TestCachedGitFixtureCopiesAreIndependent pins the copy's one job beyond
+// TestIntegrationCachedGitFixtureCopiesAreIndependent pins the copy's one job beyond
 // copying bytes: a clone's origin must be the copy's own bare repo. A copy
 // still pointing at the template would push into state every later caller
 // starts from, and the tests sharing it would pass or fail by run order.
-func TestCachedGitFixtureCopiesAreIndependent(t *testing.T) {
+func TestIntegrationCachedGitFixtureCopiesAreIndependent(t *testing.T) {
 	t.Parallel()
 	build := func(dir string) []string {
 		origin := filepath.Join(dir, "origin.git")

@@ -172,7 +172,17 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 }
 
 func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
-	g := git.NewGit(cloneDir)
+	return polecatStopPendingWorkIn(git.NewGit(cloneDir), branch)
+}
+
+// polecatStopGit is the part of *git.Git the pending-work check reads.
+type polecatStopGit interface {
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
+	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+}
+
+// polecatStopPendingWorkIn is polecatStopPendingWork over g.
+func polecatStopPendingWorkIn(g polecatStopGit, branch string) (bool, string, error) {
 	workStatus, err := g.CheckUncommittedWork()
 	if err != nil {
 		return false, "", err
@@ -226,7 +236,14 @@ func polecatStopCommittedWithinGrace(cloneDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	tsStr := strings.TrimSpace(string(out))
+	return commitWithinGrace(string(out), time.Now())
+}
+
+// commitWithinGrace reads git log's %ct (a commit's unix time) and reports
+// whether that commit is less than pendingWorkGracePeriod older than now. An
+// empty log (no commit) is not within grace.
+func commitWithinGrace(ct string, now time.Time) (bool, error) {
+	tsStr := strings.TrimSpace(ct)
 	if tsStr == "" {
 		return false, nil
 	}
@@ -234,7 +251,7 @@ func polecatStopCommittedWithinGrace(cloneDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return time.Since(time.Unix(unixSeconds, 0)) < pendingWorkGracePeriod, nil
+	return now.Sub(time.Unix(unixSeconds, 0)) < pendingWorkGracePeriod, nil
 }
 
 // polecatStopPaneChildRunning reports whether the polecat's own tmux pane
