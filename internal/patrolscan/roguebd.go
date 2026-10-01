@@ -25,14 +25,14 @@ const rogueBDMaxDepth = 4
 
 // RogueBDAggregates returns the directories the check walks under townRoot:
 // every rig's polecats, crew, refinery, witness and mayor trees, the
-// town-level mayor tree and the dogs.
+// town-level mayor tree.
 func RogueBDAggregates(townRoot string) []string {
 	var out []string
 	for _, pat := range []string{"*/polecats", "*/crew", "*/refinery", "*/witness", "*/mayor"} {
 		m, _ := filepath.Glob(filepath.Join(townRoot, pat))
 		out = append(out, m...)
 	}
-	out = append(out, filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, "deacon", "dogs"))
+	out = append(out, filepath.Join(townRoot, "mayor"))
 	sort.Strings(out)
 	return out
 }

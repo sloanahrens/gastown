@@ -365,9 +365,6 @@ func agentBeadToAddress(bead *agentBead) string {
 	}
 
 	id := bead.ID
-	if isRetiredDogBeadID(id) {
-		return ""
-	}
 
 	// Handle hq- prefixed IDs (town-level format)
 	if strings.HasPrefix(id, "hq-") {

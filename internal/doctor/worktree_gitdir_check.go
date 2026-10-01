@@ -46,7 +46,7 @@ func NewWorktreeGitdirCheck() *WorktreeGitdirCheck {
 	}
 }
 
-// Run scans all rigs and the dog kennel for worktrees with broken gitdir references.
+// Run scans all rigs for worktrees with broken gitdir references.
 func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 	c.brokenWorktrees = nil
 	c.townRoot = ctx.TownRoot
@@ -79,10 +79,6 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 
 		c.checkRigWorktrees(rigPath, entry.Name())
 	}
-
-	// Scan the dog kennel (deacon/dogs) for cross-rig worktrees (not covered
-	// by the rig scan because deacon/ doesn't have config.json or rig subdirs).
-	c.checkDogKennel(ctx.TownRoot)
 
 	if len(c.brokenWorktrees) == 0 {
 		return &CheckResult{
@@ -135,42 +131,6 @@ func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 		oldPath := filepath.Join(polecatsDir, entry.Name())
 		if c.hasGitFile(oldPath) {
 			c.checkWorktree(oldPath, rigPath)
-		}
-	}
-}
-
-// checkDogKennel scans the dog kennel (deacon/dogs/<dogname>/<rigname>/) for
-// cross-rig worktrees. Each dog directory contains worktrees of various rigs,
-// created by gt sling.
-func (c *WorktreeGitdirCheck) checkDogKennel(townRoot string) {
-	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
-	dogEntries, err := os.ReadDir(dogsDir)
-	if err != nil {
-		return // No dog kennel — that's fine
-	}
-
-	for _, dogEntry := range dogEntries {
-		if !dogEntry.IsDir() || strings.HasPrefix(dogEntry.Name(), ".") {
-			continue
-		}
-
-		dogPath := filepath.Join(dogsDir, dogEntry.Name())
-		rigEntries, err := os.ReadDir(dogPath)
-		if err != nil {
-			continue
-		}
-
-		for _, rigEntry := range rigEntries {
-			if !rigEntry.IsDir() || strings.HasPrefix(rigEntry.Name(), ".") {
-				continue
-			}
-
-			wtPath := filepath.Join(dogPath, rigEntry.Name())
-			if c.hasGitFile(wtPath) {
-				// For dog worktrees, rigPath is the rig the worktree belongs to
-				rigPath := filepath.Join(townRoot, rigEntry.Name())
-				c.checkWorktree(wtPath, rigPath)
-			}
 		}
 	}
 }
