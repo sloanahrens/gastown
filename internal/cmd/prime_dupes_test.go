@@ -61,8 +61,9 @@ func realGitPrimeTools() (primeTools, *bytes.Buffer) {
 }
 
 // hookedPathDupesOutput runs the check on real git and returns what it printed.
-func hookedPathDupesOutput(ctx RoleContext, bead *beads.Issue) string {
+func hookedPathDupesOutput(ctx RoleContext, bead *beads.Issue, skip ...bool) string {
 	p, out := realGitPrimeTools()
+	p.skipDupes = len(skip) > 0 && skip[0]
 	p.hookedPathDupes(ctx, bead)
 	return out.String()
 }
@@ -97,6 +98,7 @@ func TestDupesRecentLog(t *testing.T) {
 }
 
 func TestCheckHookedPathDupes(t *testing.T) {
+	t.Parallel()
 	t.Run("warns when a shared file was recently changed", func(t *testing.T) {
 		root := gitRootFixture(t)
 		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
@@ -139,12 +141,8 @@ func TestCheckHookedPathDupes(t *testing.T) {
 	})
 
 	t.Run("skipped in continuation mode", func(t *testing.T) {
-		old := primeContinuationMode
-		primeContinuationMode = true
-		defer func() { primeContinuationMode = old }()
-
 		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
-			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
+			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."}, true)
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("continuation mode must skip the check, got:\n%s", out)
 		}
@@ -162,16 +160,12 @@ func TestCheckHookedPathDupes(t *testing.T) {
 		// The fixture is one the check WOULD warn on, so silence here is the
 		// dry-run gate and not an absent overlap.
 		root := gitRootFixture(t)
-		old := primeDryRun
-		primeDryRun = true
-		defer func() { primeDryRun = old }()
-
 		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
 			&beads.Issue{
 				ID:          "gt-x",
 				Title:       "Fix the slow-mail bound",
 				Description: "cmd/gt/hermetic_main_test.go fails in TestRunPrimeExternalTools_BoundsSlowMailCheck.",
-			})
+			}, true)
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("dry-run must skip the check, got:\n%s", out)
 		}

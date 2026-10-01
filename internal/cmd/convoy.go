@@ -964,7 +964,9 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	stranded, err := convoyops.StdTown(townBeads).FindStranded(context.Background())
+	town := convoyops.StdTown(townBeads)
+	town.Prefixes = townRegistry()
+	stranded, err := town.FindStranded(context.Background())
 	if err != nil {
 		return err
 	}

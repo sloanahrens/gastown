@@ -74,8 +74,8 @@ var ErrNoStarter = errors.New("supervisor has no restart executor")
 type Seat = session.AgentIdentity
 
 // SeatFor builds a seat. rig is empty for town-level seats; name is empty
-// for singletons. Its session name resolves the rig's prefix from
-// session.DefaultRegistry when asked; SeatIn resolves it up front.
+// for singletons. It carries no rig prefix, so its session name uses
+// session.DefaultPrefix; SeatIn resolves the rig's prefix up front.
 func SeatFor(rig, role, name string) Seat {
 	return Seat{Rig: rig, Role: session.Role(role), Name: name}
 }
@@ -90,9 +90,10 @@ func SeatIn(reg *session.PrefixRegistry, rig, role, name string) Seat {
 	return seat
 }
 
-// SeatForSession parses a tmux session name into its seat.
-func SeatForSession(name string) (Seat, error) {
-	id, err := session.ParseSessionName(name)
+// SeatForSession parses a tmux session name into its seat, resolving its
+// prefix through reg.
+func SeatForSession(reg *session.PrefixRegistry, name string) (Seat, error) {
+	id, err := session.ParseSessionNameWithRegistry(name, reg)
 	if err != nil {
 		return Seat{}, err
 	}
@@ -117,6 +118,9 @@ type Options struct {
 	// Restart replaces any session the seat has with a fresh one. Nil makes
 	// Restart return ErrNoStarter.
 	Restart func(seat Seat) error
+	// Prefixes resolves the rig of a stray session KillStray is handed, so
+	// that rig's e-stop applies. Nil is an empty registry.
+	Prefixes *session.PrefixRegistry
 	// Mirror writes the agent-bead display mirror after the record; its
 	// error is logged and never undoes an action.
 	Mirror func(seat Seat, rec intent.Record) error
@@ -467,7 +471,7 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 func (s *Supervisor) KillStray(sessionName, reason, actor string) error {
 	l := ActionLine{Verb: "kill-stray", Session: sessionName, Reason: reason, Actor: actor}
 	rig := ""
-	if seat, err := SeatForSession(sessionName); err == nil {
+	if seat, err := SeatForSession(s.o.Prefixes, sessionName); err == nil {
 		rig = seat.Rig
 	}
 	if on, err := estop.ActiveFor(s.o.TownRoot, rig); on {

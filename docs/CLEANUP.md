@@ -104,12 +104,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt config agent remove <name>` | Removes custom agent definition |
 | `make clean` | Removes compiled `gt` binary |
 
-## Scripts
-
-| Command | What it does |
-|---------|-------------|
-| `scripts/migration-test/reset-vm.sh` | Restores VM to pristine v0.5.0 state (test environments) |
-
 ## Internal (Automatic / Side-Effect)
 
 | Function | Where | What it does |

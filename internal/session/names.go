@@ -37,14 +37,9 @@ func OverseerSessionName() string {
 }
 
 // AssigneeSessionName converts an assignee (rig/name, rig/crew/name or
-// rig/polecats/name) to its tmux session name. persistent is true for a crew
-// identity. An assignee in any other shape has no session name.
-func AssigneeSessionName(assignee string) (sessionName string, persistent bool) {
-	return DefaultRegistry().AssigneeSessionName(assignee)
-}
-
-// AssigneeSessionName is the package AssigneeSessionName reading rig prefixes
-// from r.
+// rig/polecats/name) to its tmux session name, reading rig prefixes from r.
+// persistent is true for a crew identity. An assignee in any other shape has
+// no session name.
 func (r *PrefixRegistry) AssigneeSessionName(assignee string) (sessionName string, persistent bool) {
 	parts := strings.Split(assignee, "/")
 

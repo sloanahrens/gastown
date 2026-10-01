@@ -56,8 +56,12 @@ func (r *PrefixRegistry) RigForPrefix(prefix string) string {
 }
 
 // PrefixForRig returns the beads prefix for a given rig name.
-// Returns DefaultPrefix if no mapping is found.
+// Returns DefaultPrefix if no mapping is found; a nil registry is an empty
+// one.
 func (r *PrefixRegistry) PrefixForRig(rigName string) string {
+	if r == nil {
+		return DefaultPrefix
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if prefix, ok := r.rigToPrefix[rigName]; ok {
@@ -211,12 +215,6 @@ func sanitizeTownName(name string) string {
 		return "default"
 	}
 	return name
-}
-
-// PrefixFor returns the beads prefix for a rig, using the default registry.
-// Returns DefaultPrefix if the rig is unknown.
-func PrefixFor(rigName string) string {
-	return DefaultRegistry().PrefixForRig(rigName)
 }
 
 // BuildPrefixRegistryFromTown reads rigs.json and returns a populated PrefixRegistry.

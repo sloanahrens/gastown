@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -94,19 +95,66 @@ func init() {
 	rootCmd.AddCommand(handoffCmd)
 }
 
+// handoffMessageInput is the handoff message: messageFlag, or with --stdin
+// what readStdin returns. The two cannot be combined.
+func handoffMessageInput(messageFlag string, stdin bool, readStdin func() ([]byte, error)) (string, error) {
+	if !stdin {
+		return messageFlag, nil
+	}
+	if messageFlag != "" {
+		return "", fmt.Errorf("cannot use --stdin with --message/-m")
+	}
+	data, err := readStdin()
+	if err != nil {
+		return "", fmt.Errorf("reading stdin: %w", err)
+	}
+	return strings.TrimRight(string(data), "\n"), nil
+}
+
+// handoffPolecat reports whether the handing-off session is a polecat, which
+// hands off through gt done instead, and its name. GT_ROLE decides first:
+// coordinators (mayor, witness, etc.) may have a stale GT_POLECAT in their
+// environment from spawning polecats. Only a role that parses as polecat
+// counts (handles compound forms like "gastown/polecats/Toast"). If GT_ROLE
+// is unset, GT_POLECAT decides.
+func handoffPolecat(getenv func(string) string) (isPolecat bool, name string) {
+	if role := getenv("GT_ROLE"); role != "" {
+		parsedRole, _, roleName := parseRoleString(role)
+		if parsedRole != RolePolecat {
+			return false, ""
+		}
+		// Bare "polecat" role yields empty name; fall back to GT_POLECAT.
+		if roleName == "" {
+			roleName = getenv("GT_POLECAT")
+		}
+		return true, roleName
+	}
+	if name := getenv("GT_POLECAT"); name != "" {
+		return true, name
+	}
+	return false, ""
+}
+
+// polecatHandoffDoneCmd is the gt done a polecat's handoff runs, in the
+// environment environ. Polecats don't respawn themselves - Witness handles
+// lifecycle - so it calls gt done with DEFERRED status to preserve work
+// state, marked as handoff-originated so gt done preserves the session
+// instead of retiring it (gt-5g3e): a mid-work handoff must keep the polecat
+// (or its successor) going, exactly as polecat-CLAUDE.md promises.
+func polecatHandoffDoneCmd(environ []string) *exec.Cmd {
+	doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
+	doneCmd.Env = append(environ, envDoneFromHandoff+"=1")
+	return doneCmd
+}
+
 func runHandoff(cmd *cobra.Command, args []string) error {
 	reg := townRegistry()
 	// Handle --stdin: read message body from stdin (avoids shell quoting issues)
-	if handoffStdin {
-		if handoffMessage != "" {
-			return fmt.Errorf("cannot use --stdin with --message/-m")
-		}
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading stdin: %w", err)
-		}
-		handoffMessage = strings.TrimRight(string(data), "\n")
+	msg, err := handoffMessageInput(handoffMessage, handoffStdin, func() ([]byte, error) { return io.ReadAll(os.Stdin) })
+	if err != nil {
+		return err
 	}
+	handoffMessage = msg
 
 	// --auto mode: save state only, no session cycling.
 	// Used by PreCompact hook to preserve state before compaction.
@@ -133,33 +181,10 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
 	// parsed role is actually polecat (handles compound forms like
 	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
-	isPolecat := false
-	polecatName := ""
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		parsedRole, _, name := parseRoleString(role)
-		if parsedRole == RolePolecat {
-			isPolecat = true
-			polecatName = name
-			// Bare "polecat" role yields empty name; fall back to GT_POLECAT.
-			if polecatName == "" {
-				polecatName = os.Getenv("GT_POLECAT")
-			}
-		}
-	} else if name := os.Getenv("GT_POLECAT"); name != "" {
-		isPolecat = true
-		polecatName = name
-	}
-	if isPolecat {
+	if isPolecat, polecatName := handoffPolecat(os.Getenv); isPolecat {
 		fmt.Printf("%s Polecat detected (%s) - using gt done for handoff\n",
 			style.Bold.Render("🐾"), polecatName)
-		// Polecats don't respawn themselves - Witness handles lifecycle
-		// Call gt done with DEFERRED status to preserve work state
-		doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
-		// Mark this as a handoff-originated call so gt done preserves the
-		// session instead of retiring it (gt-5g3e): a mid-work handoff must
-		// keep the polecat (or its successor) going, exactly as
-		// polecat-CLAUDE.md promises, not end the session.
-		doneCmd.Env = append(os.Environ(), envDoneFromHandoff+"=1")
+		doneCmd := polecatHandoffDoneCmd(os.Environ())
 		doneCmd.Stdout = os.Stdout
 		doneCmd.Stderr = os.Stderr
 		return doneCmd.Run()
@@ -696,6 +721,15 @@ type buildRestartCommandOpts struct {
 	ContinuePrompt string
 	// Registry supplies the rig prefixes the session name parses with.
 	Registry *session.PrefixRegistry
+	// TownRoot is the town the session belongs to; "" detects it from the
+	// working directory and environment.
+	TownRoot string
+	// LookupEnv reads the handing-off process's environment; nil is
+	// os.LookupEnv.
+	LookupEnv func(key string) (string, bool)
+	// SessionEnv reads the session's tmux environment, the fallback when
+	// GT_AGENT is not in the process environment; nil asks tmux.
+	SessionEnv func(sessionName, key string) (string, error)
 }
 
 func buildRestartCommand(reg *session.PrefixRegistry, sessionName string) (string, error) {
@@ -758,9 +792,21 @@ func liveRespawnConfig(role, agentName, townRoot, rigPath string) (*config.Runti
 
 func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
 	reg := opts.Registry
+	lookupEnv := opts.LookupEnv
+	if lookupEnv == nil {
+		lookupEnv = os.LookupEnv
+	}
+	getenv := func(key string) string { v, _ := lookupEnv(key); return v }
+	sessionEnv := opts.SessionEnv
+	if sessionEnv == nil {
+		sessionEnv = tmux.NewTmux().GetEnvironment
+	}
 
 	// Detect town root from current directory
-	townRoot := detectTownRootFromCwd()
+	townRoot := opts.TownRoot
+	if townRoot == "" {
+		townRoot = detectTownRootFromCwd()
+	}
 	if townRoot == "" {
 		return "", fmt.Errorf("cannot detect town root - run from within a Gas Town workspace")
 	}
@@ -814,15 +860,14 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	// If so, preserve it across handoff by using the override variant.
 	// Fall back to tmux session environment if process env doesn't have it,
 	// since exec env vars may not propagate through all agent runtimes.
-	currentAgent, agentInEnv := os.LookupEnv("GT_AGENT")
-	agentPinFromOverride := os.Getenv(config.EnvAgentOverride) == "1"
+	currentAgent, agentInEnv := lookupEnv("GT_AGENT")
+	agentPinFromOverride := getenv(config.EnvAgentOverride) == "1"
 	if !agentInEnv {
 		// GT_AGENT not in process env at all — try tmux session environment
 		// as fallback, since exec env vars may not propagate through all runtimes.
-		t := tmux.NewTmux()
-		if val, err := t.GetEnvironment(sessionName, config.EnvAgent); err == nil && val != "" {
+		if val, err := sessionEnv(sessionName, config.EnvAgent); err == nil && val != "" {
 			currentAgent = val
-			if marker, err := t.GetEnvironment(sessionName, config.EnvAgentOverride); err == nil && marker == "1" {
+			if marker, err := sessionEnv(sessionName, config.EnvAgentOverride); err == nil && marker == "1" {
 				agentPinFromOverride = true
 			}
 		}
@@ -950,7 +995,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	// "codex" running "opencode") would revert to GT_AGENT-based lookup after
 	// handoff, causing false liveness failures. A re-resolved agent is not the
 	// one those names describe, so it is recomputed from its own preset.
-	if processNames := os.Getenv("GT_PROCESS_NAMES"); processNames != "" && !staleAgentPin {
+	if processNames := getenv("GT_PROCESS_NAMES"); processNames != "" && !staleAgentPin {
 		envMap["GT_PROCESS_NAMES"] = processNames
 	} else if resolvedAgent != "" {
 		var command string
@@ -964,7 +1009,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 
 	// Add Claude-related env vars from current environment
 	for _, name := range claudeEnvVars {
-		if val := os.Getenv(name); val != "" {
+		if val := getenv(name); val != "" {
 			envMap[name] = val
 		}
 	}
@@ -1157,20 +1202,14 @@ func sessionToGTRole(reg *session.PrefixRegistry, sessionName string) string {
 
 // detectTownRootFromCwd walks up from the current directory to find the town root.
 // Falls back to GT_TOWN_ROOT or GT_ROOT env vars if cwd detection fails (broken state recovery).
-func detectTownRootFromCwd() string {
-	// Use workspace.FindFromCwd which handles both primary (mayor/town.json)
-	// and secondary (mayor/ directory) markers
-	townRoot, err := workspace.FindFromCwd()
-	if err == nil && townRoot != "" {
-		return townRoot
-	}
-
-	// Fallback: try environment variables for town root
-	// GT_TOWN_ROOT is set by shell integration, GT_ROOT is set by session manager
-	// This enables handoff to work even when cwd detection fails due to
-	// detached HEAD, wrong branch, deleted worktree, etc.
+// townRootFromEnv returns the town GT_TOWN_ROOT or GT_ROOT names, in that
+// order, when it is a workspace; "" otherwise. GT_TOWN_ROOT is set by shell
+// integration, GT_ROOT by the session manager. This enables handoff to work
+// even when cwd detection fails due to detached HEAD, wrong branch, deleted
+// worktree, etc.
+func townRootFromEnv(getenv func(string) string) string {
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if envRoot := os.Getenv(envName); envRoot != "" {
+		if envRoot := getenv(envName); envRoot != "" {
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(envRoot, workspace.PrimaryMarker)); statErr == nil {
 				return envRoot
@@ -1180,6 +1219,21 @@ func detectTownRootFromCwd() string {
 				return envRoot
 			}
 		}
+	}
+	return ""
+}
+
+func detectTownRootFromCwd() string {
+	// Use workspace.FindFromCwd which handles both primary (mayor/town.json)
+	// and secondary (mayor/ directory) markers
+	townRoot, err := workspace.FindFromCwd()
+	if err == nil && townRoot != "" {
+		return townRoot
+	}
+
+	// Fallback: try environment variables for town root
+	if envRoot := townRootFromEnv(os.Getenv); envRoot != "" {
+		return envRoot
 	}
 
 	// Final fallback: read GT_TOWN_ROOT from tmux global environment.
@@ -1755,13 +1809,18 @@ func cleanupMoleculeOnHandoff() {
 // Crew and mayor roles are exempt — they hand off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
 func enforceHandoffCooldown() {
-	enforceHandoffCooldownWith(time.Sleep)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	enforceHandoffCooldownIn(os.Stdout, os.Getenv("GT_ROLE"), cwd, clockwork.NewRealClock().Sleep)
 }
 
-// enforceHandoffCooldownWith is enforceHandoffCooldown with the wait passed
-// in, so tests can see how long it would sleep without sleeping.
-func enforceHandoffCooldownWith(sleep func(time.Duration)) {
-	if role := os.Getenv("GT_ROLE"); role != "" {
+// enforceHandoffCooldownIn is enforceHandoffCooldown for a session whose
+// GT_ROLE is role, recording handoffs under dir, with the wait passed in so
+// tests can see how long it would sleep without sleeping.
+func enforceHandoffCooldownIn(w io.Writer, role, dir string, sleep func(time.Duration)) {
+	if role != "" {
 		parsed, _, _ := parseRoleString(role)
 		switch parsed {
 		case RoleMayor, RoleCrew:
@@ -1769,18 +1828,13 @@ func enforceHandoffCooldownWith(sleep func(time.Duration)) {
 		}
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-
-	age, ok := lastHandoffAge(cwd)
+	age, ok := lastHandoffAge(dir)
 	if !ok || age >= constants.MinHandoffCooldown {
 		return
 	}
 
 	remaining := constants.MinHandoffCooldown - age
-	fmt.Printf("%s Handoff cooldown: waiting %v (last handoff %v ago, min %v)\n",
+	fmt.Fprintf(w, "%s Handoff cooldown: waiting %v (last handoff %v ago, min %v)\n",
 		style.Dim.Render("⏳"), remaining.Round(time.Second),
 		age.Round(time.Second), constants.MinHandoffCooldown)
 	sleep(remaining)

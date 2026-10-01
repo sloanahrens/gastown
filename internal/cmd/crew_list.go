@@ -48,7 +48,9 @@ func runCrewList(cmd *cobra.Command, args []string) error {
 
 	t := tmux.NewTmux()
 	probe := crewWorkerProbe{
-		list: func(r *rig.Rig) ([]*crew.CrewWorker, error) { return crew.NewManager(r, git.NewGit(r.Path)).List() },
+		list: func(r *rig.Rig) ([]*crew.CrewWorker, error) {
+			return crew.NewManager(r, git.NewGit(r.Path), townRegistry()).List()
+		},
 		hasSession: func(sessionID string) bool {
 			has, _ := t.HasSession(sessionID)
 			return has

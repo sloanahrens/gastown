@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 func brokenIdleReclaimDispositionBlocker(d WorkstateDisposition) string {
@@ -84,7 +83,7 @@ func (m *Manager) brokenIdleReclaimSessionBlocker(name string) string {
 	if m.tmux == nil {
 		return "session_state=unverified"
 	}
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	sessionName := m.sessionName(name)
 	running, err := m.tmux.HasSession(sessionName)
 	if err != nil {
 		return fmt.Sprintf("session_state=lookup_error: %v", err)

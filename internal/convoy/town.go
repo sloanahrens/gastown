@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -25,6 +26,9 @@ type Town struct {
 
 	// Run answers the town's bd calls in process; nil runs the bd on PATH.
 	Run beads.BDRunner
+	// Prefixes maps rigs to the session prefixes the stranded scan probes
+	// assignees' sessions under; nil gives every rig session.DefaultPrefix.
+	Prefixes *session.PrefixRegistry
 	// gtRun runs the town's gt notice children; nil runs the gt on PATH.
 	gtRun gtRunner
 }

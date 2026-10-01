@@ -24,7 +24,7 @@ func runMailSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get mailbox
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(address)
 	if err != nil {
 		return fmt.Errorf("getting mailbox: %w", err)

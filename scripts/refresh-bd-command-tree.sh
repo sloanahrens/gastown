@@ -11,8 +11,9 @@
 # into a temporary directory (never on PATH), and runs gen-bd-tree against it:
 # `bd capabilities --json` plus `bd <parent> --help` for each parent, in an
 # empty directory (neither opens a store). Refresh when the fork's commands
-# change or its contract_version is bumped, and update the contract_version
-# assertion in internal/cmdtree/bdtree_test.go with it.
+# change or its contract_version is bumped; on a bump, add the new version to
+# KnownBDContractVersions (internal/deps/bd_handshake.go) in the same commit,
+# or TestBdCommandTreeSnapshotMatchesContract fails.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

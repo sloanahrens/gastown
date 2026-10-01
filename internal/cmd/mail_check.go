@@ -34,7 +34,7 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get mailbox
-	router := mail.NewRouter(workDir)
+	router := mail.NewRouter(workDir, townRegistry())
 	mailbox, err := router.GetMailbox(address)
 	if err != nil {
 		if mailCheckInject {

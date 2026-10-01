@@ -14,7 +14,8 @@ import (
 
 // TestCommandTokensResolve is the command-tree lint (gt-fcxe9.5, deep review
 // G4-03/B1-08/B5-11). Formulas, role and message templates, plugins, hook
-// templates and scripts, role configs, and exec.Command/BdCmd literals name
+// templates and scripts, role configs, repo scripts and git hooks, agent
+// wrappers, the repo's agent commands and skills, and exec.Command/BdCmd literals name
 // gt and bd commands as untyped strings; nothing else notices when one of
 // them is renamed or removed, and an agent handed "unknown command"
 // improvises. Every gt invocation must resolve against this binary's cobra
@@ -56,8 +57,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	// really removed. The witness/deacon deletion (gt-4k3fj.6.1) took formulas
 	// to 319 and the role configs to none, so both floors dropped with it.
 	// The sling/convoy conversion (gt-z56xs.5) deleted dead bd-calling code
-	// and took go to 69.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 35, "hooks": 8}
+	// and took go to 69. Repo scripts, git hooks and agent wrappers (44) and
+	// the repo's .claude/.cursor commands and skills (20) joined on 2026-09-30
+	// (gt-fd2cu.4).
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 35, "hooks": 8, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++
@@ -121,6 +124,10 @@ func refSource(file string) string {
 		return "plugins"
 	case strings.HasPrefix(file, "internal/config/roles/"):
 		return "roles"
+	case strings.HasPrefix(file, "scripts/"), strings.HasPrefix(file, ".githooks/"), strings.HasPrefix(file, "internal/wrappers/scripts/"):
+		return "scripts"
+	case strings.HasPrefix(file, ".claude/"), strings.HasPrefix(file, ".cursor/"):
+		return "agent"
 	}
 	return "other"
 }

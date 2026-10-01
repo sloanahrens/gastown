@@ -208,7 +208,7 @@ func TestAddressToSessionIDs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.address, func(t *testing.T) {
-			got := AddressToSessionIDs(tt.address)
+			got := AddressToSessionIDs(testPrefixRegistry(), tt.address)
 			if len(got) != len(tt.want) {
 				t.Errorf("AddressToSessionIDs(%q) = %v, want %v", tt.address, got, tt.want)
 				return
@@ -367,7 +367,7 @@ func TestShouldBeWisp(t *testing.T) {
 func TestResolveBeadsDir(t *testing.T) {
 	t.Parallel()
 	// With town root set
-	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
+	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt", testPrefixRegistry())
 	got := r.resolveBeadsDir()
 	want := "/home/user/gt/.beads"
 	if filepath.ToSlash(got) != want {
@@ -429,7 +429,7 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 		return "[]\n", "", 0
 	}}
 
-	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
 	r.bd = bd.run
 	// "gastown/crew/max" is the raw GGT address form (as discoverRigAgents
 	// builds it); it must be normalized to "gastown/max" before querying.
@@ -526,7 +526,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
 
-	r := NewRouter(senderDir)
+	r := NewRouter(senderDir, testPrefixRegistry())
 	r.bd = bd.run
 	msg := &Message{
 		From:           "barnaby/crew/tom",
@@ -608,7 +608,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 		return "", "unsupported bd args: " + strings.Join(args, " "), 1
 	}}
 
-	r := NewRouter(senderDir)
+	r := NewRouter(senderDir, testPrefixRegistry())
 	r.bd = bd.run
 	// Built as a plain struct literal with no ThreadID set, matching how
 	// system notices like RECOVERED_BEAD are constructed in production.
@@ -641,7 +641,7 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 
 func TestNewRouterWithTownRoot(t *testing.T) {
 	t.Parallel()
-	r := NewRouterWithTownRoot("/work/rig", "/home/gt")
+	r := NewRouterWithTownRoot("/work/rig", "/home/gt", testPrefixRegistry())
 	if filepath.ToSlash(r.workDir) != "/work/rig" {
 		t.Errorf("workDir = %q, want '/work/rig'", r.workDir)
 	}
@@ -769,7 +769,7 @@ func TestExpandList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 
 	tests := []struct {
 		name      string
@@ -858,7 +858,7 @@ func TestExpandQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 
 	tests := []struct {
 		name        string
@@ -1268,7 +1268,7 @@ func TestExpandAnnounce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 
 	tests := []struct {
 		name         string
@@ -1497,7 +1497,7 @@ func TestAddressToAgentBeadID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := addressToAgentBeadID(tt.address)
+			got := addressToAgentBeadID(testPrefixRegistry(), tt.address)
 			if got != tt.expected {
 				t.Errorf("addressToAgentBeadID(%q) = %q, want %q", tt.address, got, tt.expected)
 			}
@@ -1528,7 +1528,7 @@ func TestResolveCrewShorthand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 
 	tests := []struct {
 		name     string
@@ -1577,7 +1577,7 @@ func TestResolveCrewShorthand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			router := r
 			if tt.name == "no town root" {
-				router = NewRouterWithTownRoot(tmpDir, "") // empty townRoot
+				router = NewRouterWithTownRoot(tmpDir, "", testPrefixRegistry()) // empty townRoot
 			}
 			got := router.resolveCrewShorthand(tt.identity)
 			if got != tt.want {
@@ -1612,7 +1612,7 @@ func TestValidateRecipientFilesystemFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 	// No agent beads: every bd query fails as it does with no database.
 	r.bd = noBeadsDatabase
 
@@ -1671,7 +1671,7 @@ func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	r := NewRouterWithTownRoot(tmpDir, tmpDir, testPrefixRegistry())
 	// No agent beads: every bd query fails as it does with no database.
 	r.bd = noBeadsDatabase
 
@@ -2158,7 +2158,7 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 				Subject: "LIFECYCLE:Shutdown guzzle",
 				Type:    TypeTask,
 			}
-			sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+			sessionID := session.CrewSessionName(session.DefaultPrefix, "bob")
 
 			r.enqueueReplyReminder(msg, sessionID)
 
@@ -2185,7 +2185,7 @@ func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 				Subject: "status check",
 				Type:    TypeNotification,
 			}
-			sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+			sessionID := session.CrewSessionName(session.DefaultPrefix, "bob")
 
 			r.enqueueReplyReminder(msg, sessionID)
 
@@ -2259,8 +2259,12 @@ func TestSenderCanReceiveReply(t *testing.T) {
 func TestClearReplyReminders(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
-	sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+	// A non-default prefix proves the router resolves the rig through its
+	// own registry.
+	prefixes := session.NewPrefixRegistry()
+	prefixes.Register("ga", "gastown")
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot, prefixes: prefixes}
+	sessionID := "ga-crew-bob"
 
 	for _, n := range []nudge.QueuedNudge{
 		{Sender: "system", Message: "reply-1", Kind: "reply-reminder", ThreadID: "thread-1"},

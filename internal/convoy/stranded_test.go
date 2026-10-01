@@ -119,7 +119,7 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isReadyIssue(tc.in, map[string]bool{"gt-sched": true})
+			got := isReadyIssue(nil, tc.in, map[string]bool{"gt-sched": true})
 			if got != tc.want {
 				t.Fatalf("isReadyIssue() = %v, want %v", got, tc.want)
 			}

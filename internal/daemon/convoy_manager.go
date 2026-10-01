@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -151,6 +152,10 @@ type ConvoyManager struct {
 	// openGitFn opens a dead holder's worktree for the state read and the
 	// preserve push; nil opens a *git.Git. Tests hand it a gitfake world.
 	openGitFn func(dir string) deadHolderGit
+
+	// prefixes names assignees' sessions for the stranded scan; nil gives
+	// every rig session.DefaultPrefix. The daemon sets its registry.
+	prefixes *session.PrefixRegistry
 
 	townRoot     string
 	scanInterval time.Duration
@@ -1014,7 +1019,7 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 	if m.findStrandedFn != nil {
 		return m.findStrandedFn(m.ctx)
 	}
-	town := convoy.Town{Root: m.townRoot, Env: bdReadOnlyRoutingEnv(m.townRoot)}
+	town := convoy.Town{Root: m.townRoot, Env: bdReadOnlyRoutingEnv(m.townRoot), Prefixes: m.prefixes}
 	found, err := town.FindStranded(m.ctx)
 	if err != nil {
 		return nil, err

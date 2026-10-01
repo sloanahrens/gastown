@@ -621,7 +621,7 @@ func normalizeHookShowTarget(reg *session.PrefixRegistry, target string) string 
 	}
 
 	// Fallback for explicit/canonical addresses when resolver couldn't help.
-	if identity, err := session.ParseAddress(target); err == nil {
+	if identity, err := session.ParseAddressWithRegistry(target, reg); err == nil {
 		return identity.Address()
 	}
 

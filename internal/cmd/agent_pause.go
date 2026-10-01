@@ -120,7 +120,7 @@ func checkPauseGated(role session.Role) error {
 // parseAgentAddr parses an address for gt agent pause/resume.
 // Accepts <rig>/<name> (polecat), <rig>/crew/<name> and mayor.
 func parseAgentAddr(reg *session.PrefixRegistry, address string) (*agentAddr, error) {
-	id, err := session.ParseAddress(address)
+	id, err := session.ParseAddressWithRegistry(address, reg)
 	if err != nil {
 		return nil, fmt.Errorf("invalid agent address %q: %w", address, err)
 	}

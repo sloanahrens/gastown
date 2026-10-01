@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -15,25 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 )
-
-func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
-	t.Helper()
-
-	var path string
-	if runtime.GOOS == "windows" {
-		path = filepath.Join(binDir, "bd.cmd")
-		if err := os.WriteFile(path, []byte(windowsScript), 0644); err != nil {
-			t.Fatalf("write bd stub: %v", err)
-		}
-		return path
-	}
-
-	path = filepath.Join(binDir, "bd")
-	if err := os.WriteFile(path, []byte(unixScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	return path
-}
 
 func assertNoRawReviewMetadata(t *testing.T, desc string) {
 	t.Helper()

@@ -102,7 +102,7 @@ func TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) 
 	initBeadsDBWithPrefix(t, mayorRigPath, prefix)
 
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := NewManager(r, git.NewGit(rigPath), nil)
+	mgr := NewManager(r, git.NewGit(rigPath), nil, nil)
 
 	stale, err := mgr.beads.Create(beads.CreateOptions{
 		Title:    "stale old issue",
@@ -197,7 +197,7 @@ func TestIntegrationManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing
 
 	r := &rig.Rig{Name: rigName, Path: rigPath}
 	tm := tmux.NewTmux()
-	mgr := NewManager(r, git.NewGit(rigPath), tm)
+	mgr := NewManager(r, git.NewGit(rigPath), tm, nil)
 
 	agentID := mgr.agentBeadID("toast")
 	assignee := mgr.assigneeID("toast")
@@ -207,7 +207,7 @@ func TestIntegrationManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing
 		t.Fatalf("create idle agent bead: %v", err)
 	}
 
-	sessionName := NewSessionManager(tm, r).SessionName("toast")
+	sessionName := NewSessionManager(tm, r, nil).SessionName("toast")
 	startLiveSession(t, sessionName)
 
 	p, err := mgr.Get("toast")

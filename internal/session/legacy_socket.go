@@ -16,44 +16,44 @@ type legacySocketTmux interface {
 
 // legacySockets is what legacy socket cleanup reads: the socket this process
 // uses, a tmux on another socket, and the rig prefixes that mark a session as
-// Gas Town's. Tests build one with fakes; production uses defaultLegacySockets.
+// Gas Town's. Tests build one with fakes; production uses newLegacySockets.
 type legacySockets struct {
 	current  string
 	open     func(socket string) legacySocketTmux
 	prefixes *PrefixRegistry
 }
 
-func defaultLegacySockets() legacySockets {
+func newLegacySockets(prefixes *PrefixRegistry) legacySockets {
 	return legacySockets{
 		current:  tmux.GetDefaultSocket(),
 		open:     func(socket string) legacySocketTmux { return tmux.NewTmuxWithSocket(socket) },
-		prefixes: DefaultRegistry(),
+		prefixes: prefixes,
 	}
 }
 
 // CleanupLegacyDefaultSocket removes Gas Town sessions left on the "default"
 // tmux socket by old binaries. Returns the number of sessions cleaned.
-func CleanupLegacyDefaultSocket() int {
-	return defaultLegacySockets().cleanupDefault()
+func CleanupLegacyDefaultSocket(prefixes *PrefixRegistry) int {
+	return newLegacySockets(prefixes).cleanupDefault()
 }
 
 // CountLegacyDefaultSocketSessions counts Gas Town sessions on the "default"
 // tmux socket for dry-run output.
-func CountLegacyDefaultSocketSessions() int {
-	return defaultLegacySockets().countDefault()
+func CountLegacyDefaultSocketSessions(prefixes *PrefixRegistry) int {
+	return newLegacySockets(prefixes).countDefault()
 }
 
 // CleanupLegacyBaseSocket removes Gas Town sessions left on the old
 // basename-only tmux socket by binaries from before path-hashed socket names
 // were introduced. Returns the number of sessions cleaned.
-func CleanupLegacyBaseSocket(townRoot string) int {
-	return defaultLegacySockets().cleanupBase(townRoot)
+func CleanupLegacyBaseSocket(prefixes *PrefixRegistry, townRoot string) int {
+	return newLegacySockets(prefixes).cleanupBase(townRoot)
 }
 
 // CountLegacyBaseSocketSessions counts Gas Town sessions on the old
 // basename-only tmux socket for dry-run output.
-func CountLegacyBaseSocketSessions(townRoot string) int {
-	return defaultLegacySockets().countBase(townRoot)
+func CountLegacyBaseSocketSessions(prefixes *PrefixRegistry, townRoot string) int {
+	return newLegacySockets(prefixes).countBase(townRoot)
 }
 
 func (l legacySockets) cleanupDefault() int {

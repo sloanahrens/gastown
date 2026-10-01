@@ -24,9 +24,10 @@ func init() {
 // A session name that does not parse has no agent address to reach, so the
 // notice goes to the mayor, who owns town-level routing (gt-oexm).
 func mailExpiredNudge(ev nudge.ExpiryEvent) {
-	to := expiredNudgeMailTarget(townRegistry(), ev.Session)
+	reg := townRegistry()
+	to := expiredNudgeMailTarget(reg, ev.Session)
 
-	router := mail.NewRouter(ev.TownRoot)
+	router := mail.NewRouter(ev.TownRoot, reg)
 	msg := &mail.Message{
 		To:      to,
 		From:    ev.Nudge.Sender,

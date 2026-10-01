@@ -692,8 +692,8 @@ func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
 	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm, newNoDatabaseBd())
 	activeName := "toast"
 	orphanName := "nux"
-	activeSession := session.PolecatSessionName(session.PrefixFor("myrig"), activeName)
-	orphanSession := session.PolecatSessionName(session.PrefixFor("myrig"), orphanName)
+	activeSession := session.PolecatSessionName(session.DefaultPrefix, activeName)
+	orphanSession := session.PolecatSessionName(session.DefaultPrefix, orphanName)
 
 	for _, sessionName := range []string{activeSession, orphanSession} {
 		if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
@@ -2336,7 +2336,7 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
 
 	// Create a live tmux session (simulates Claude sitting at ❯ after gt done)
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	sessionName := session.PolecatSessionName(session.DefaultPrefix, polecatName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
@@ -2422,7 +2422,7 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	}
 
 	tm := newFakeProbe()
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	sessionName := session.PolecatSessionName(session.DefaultPrefix, polecatName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, oldClonePath, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
@@ -2462,7 +2462,7 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 	r := &rig.Rig{Name: rigName, Path: rigPath}
 	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
 
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	sessionName := session.PolecatSessionName(session.DefaultPrefix, polecatName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}

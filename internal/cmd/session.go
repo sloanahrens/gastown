@@ -305,7 +305,7 @@ func getSessionManager(rigName string) (*polecat.SessionManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	return polecat.NewSessionManager(tmux.NewTmux(), r), nil
+	return polecat.NewSessionManager(tmux.NewTmux(), r, townRegistry()), nil
 }
 
 // sessionSeat is a resolved `gt session` address: the <rig>/<name> polecat
@@ -344,7 +344,7 @@ func resolveSessionSeatWith(args []string, lookupRig func(rigName string) (strin
 	if err != nil {
 		return sessionSeat{}, err
 	}
-	mgr := polecat.NewSessionManager(tmux.NewTmux(), r)
+	mgr := polecat.NewSessionManager(tmux.NewTmux(), r, townRegistry())
 
 	if mgr.HasPolecat(name) {
 		return sessionSeat{Rig: rigName, Name: name, Mgr: mgr}, nil
@@ -581,7 +581,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	var allSessions []SessionListItem
 
 	for _, r := range rigs {
-		polecatMgr := polecat.NewSessionManager(t, r)
+		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
 		infos, err := polecatMgr.List()
 		if err != nil {
 			continue

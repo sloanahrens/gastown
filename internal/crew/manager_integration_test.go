@@ -63,7 +63,7 @@ func TestIntegrationManagerAddUsesLocalRepoReference(t *testing.T) {
 		LocalRepo: localRepoPath,
 	}
 
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := NewManager(r, git.NewGit(rigPath), nil)
 
 	worker, err := mgr.Add("dave", false)
 	if err != nil {

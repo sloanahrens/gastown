@@ -144,7 +144,7 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 	if k, ok := c.sessionLister.(supervisor.Killer); ok {
 		killer = k
 	}
-	sup := fixSupervisor(ctx.TownRoot, killer)
+	sup := fixSupervisor(ctx, killer)
 	var lastErr error
 
 	for _, sess := range c.orphanSessions {

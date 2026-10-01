@@ -405,7 +405,7 @@ func defaultParkedPromptMailer(subject, body string) bool {
 	}
 	done := make(chan error, 1)
 	go func() {
-		router := mail.NewRouter(townRoot)
+		router := mail.NewRouter(townRoot, townRegistry())
 		done <- router.Send(&mail.Message{
 			From:     detectSender(),
 			To:       "mayor/",

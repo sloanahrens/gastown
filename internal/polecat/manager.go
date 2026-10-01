@@ -193,6 +193,9 @@ type Manager struct {
 	// setupCmdTimeout. Tests set it so the timeout path takes milliseconds
 	// instead of half an hour.
 	setupTimeout time.Duration
+	// prefixes maps the rig to its session prefix; nil gives
+	// session.DefaultPrefix.
+	prefixes *session.PrefixRegistry
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the
@@ -207,8 +210,9 @@ type sessionProbe interface {
 
 var _ sessionProbe = (*tmux.Tmux)(nil)
 
-// NewManager creates a new polecat manager.
-func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
+// NewManager creates a new polecat manager. prefixes names its polecats'
+// sessions.
+func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRegistry) *Manager {
 	var probe sessionProbe
 	if t != nil {
 		probe = t
@@ -217,7 +221,14 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
 	if g != nil {
 		repo = g
 	}
-	return newManager(r, repo, probe, nil)
+	m := newManager(r, repo, probe, nil)
+	m.prefixes = prefixes
+	return m
+}
+
+// sessionName is the tmux session name of the rig's polecat name.
+func (m *Manager) sessionName(name string) string {
+	return session.PolecatSessionName(m.prefixes.PrefixForRig(m.rig.Name), name)
 }
 
 // newManager is NewManager with its collaborators injected: tmux answers the
@@ -814,7 +825,7 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 
 	// Kill any lingering tmux session for this name (gt-pqf9x)
 	if m.tmux != nil {
-		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		sessionName := m.sessionName(name)
 		if alive, _ := m.tmux.HasSession(sessionName); alive {
 			_ = m.tmux.KillSessionWithProcesses(sessionName)
 		}
@@ -825,7 +836,7 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 	// stale timestamp/state (e.g. state=exiting from hours ago) against the new
 	// session and reaps it within one tick of the session starting, even though
 	// the new incarnation hasn't written its own heartbeat yet.
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	sessionName := m.sessionName(name)
 	RemoveSessionHeartbeat(m.townRoot, sessionName)
 
 	// Directory exists — pool lock can be released. No concurrent AllocateName
@@ -883,7 +894,7 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 	_ = m.namePool.Save() // the directory is the reservation; the pool file is a cache
 
 	// Same fresh-incarnation hygiene as AllocateAndAdd (gt-pqf9x, gt-5mkr).
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	sessionName := m.sessionName(name)
 	if m.tmux != nil {
 		if alive, _ := m.tmux.HasSession(sessionName); alive {
 			_ = m.tmux.KillSessionWithProcesses(sessionName)
@@ -1718,7 +1729,7 @@ func (m *Manager) AllocateName() (string, error) {
 	// lingers (race between cleanup and allocation). This extra check ensures
 	// no stale session blocks the new polecat's session creation.
 	if m.tmux != nil {
-		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		sessionName := m.sessionName(name)
 		if alive, _ := m.tmux.HasSession(sessionName); alive {
 			_ = m.tmux.KillSessionWithProcesses(sessionName)
 		}
@@ -2294,7 +2305,7 @@ func (m *Manager) releaseHolder(holderPath, branch, bead string) error {
 		return fmt.Errorf("polecat %s is %s, not idle or stalled", name, current.State)
 	}
 	if m.tmux != nil {
-		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		sessionName := m.sessionName(name)
 		running, err := m.tmux.HasSession(sessionName)
 		if err != nil {
 			return fmt.Errorf("cannot tell whether polecat %s has a session: %w", name, err)
@@ -2375,7 +2386,7 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 		return nil
 	}
 
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	sessionName := m.sessionName(name)
 	running, err := m.tmux.HasSession(sessionName)
 	if err != nil || !running {
 		return nil
@@ -2438,7 +2449,7 @@ func (m *Manager) reconcilePoolInternal() {
 	if m.tmux != nil {
 		poolNames := m.namePool.getNames()
 		for _, name := range poolNames {
-			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+			sessionName := m.sessionName(name)
 			hasSession, _ := m.tmux.HasSession(sessionName)
 			if hasSession {
 				namesWithSessions = append(namesWithSessions, name)
@@ -2475,7 +2486,7 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 	if m.tmux != nil {
 		townRoot := filepath.Dir(m.rig.Path)
 		for _, name := range namesWithSessions {
-			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+			sessionName := m.sessionName(name)
 			if !dirSet[name] {
 				// Orphan: session exists but no directory
 				_ = m.tmux.KillSessionWithProcesses(sessionName)
@@ -3552,7 +3563,7 @@ func (m *Manager) polecatSessionState(name string) (running bool, stale bool) {
 		return false, false
 	}
 
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	sessionName := m.sessionName(name)
 	running, err := m.tmux.HasSession(sessionName)
 	if err != nil || !running {
 		return false, false
@@ -3769,7 +3780,7 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 
 		// Check for active tmux session
 		// Session name follows pattern: gt-<rig>-<polecat>
-		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), p.Name)
+		sessionName := m.sessionName(p.Name)
 		info.HasActiveSession = m.hasActiveSession(sessionName)
 
 		// Check how far behind main

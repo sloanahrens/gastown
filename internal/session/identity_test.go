@@ -303,22 +303,27 @@ func TestParseAddress(t *testing.T) {
 			// just a polecat that happens to be named "refinery".
 			name:    "refinery is no longer a role",
 			address: "rig-a/refinery",
-			want:    AgentIdentity{Role: RolePolecat, Rig: "rig-a", Name: "refinery", Prefix: PrefixFor("rig-a")},
+			want:    AgentIdentity{Role: RolePolecat, Rig: "rig-a", Name: "refinery", Prefix: DefaultPrefix},
 		},
 		{
 			name:    "crew",
 			address: "gastown/crew/max",
-			want:    AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max", Prefix: PrefixFor("gastown")},
+			want:    AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max", Prefix: "gt"},
 		},
 		{
 			name:    "polecat explicit",
 			address: "gastown/polecats/nux",
-			want:    AgentIdentity{Role: RolePolecat, Rig: "gastown", Name: "nux", Prefix: PrefixFor("gastown")},
+			want:    AgentIdentity{Role: RolePolecat, Rig: "gastown", Name: "nux", Prefix: "gt"},
 		},
 		{
 			name:    "polecat canonical",
 			address: "gastown/nux",
-			want:    AgentIdentity{Role: RolePolecat, Rig: "gastown", Name: "nux", Prefix: PrefixFor("gastown")},
+			want:    AgentIdentity{Role: RolePolecat, Rig: "gastown", Name: "nux", Prefix: "gt"},
+		},
+		{
+			name:    "registered prefix",
+			address: "my-project/crew/max",
+			want:    AgentIdentity{Role: RoleCrew, Rig: "my-project", Name: "max", Prefix: "mp"},
 		},
 		{
 			name:    "invalid",
@@ -327,9 +332,10 @@ func TestParseAddress(t *testing.T) {
 		},
 	}
 
+	reg := testRegistry()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseAddress(tt.address)
+			got, err := ParseAddressWithRegistry(tt.address, reg)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error")

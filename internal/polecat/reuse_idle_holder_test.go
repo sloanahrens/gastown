@@ -108,7 +108,7 @@ func TestReuseIdlePolecat_KeepsRefusingHolderWithSomethingToLose(t *testing.T) {
 			name: "live session",
 			setup: func(t *testing.T, _ *world, mgr *Manager, _ *Polecat) {
 				tm := newFakeProbe()
-				sess := session.PolecatSessionName(session.PrefixFor(mgr.rig.Name), "beta")
+				sess := session.PolecatSessionName(session.DefaultPrefix, "beta")
 				if err := tm.NewSessionWithCommandAndEnv(sess, t.TempDir(), "sleep 300", nil); err != nil {
 					t.Fatalf("create session: %v", err)
 				}

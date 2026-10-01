@@ -93,7 +93,7 @@ func TestIntegrationNewManagerRunsTheBdOnPath(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	root := t.TempDir()
-	m := NewManager(&rig.Rig{Name: "rig", Path: root}, nil, nil)
+	m := NewManager(&rig.Rig{Name: "rig", Path: root}, nil, nil, nil)
 	if err := m.CheckDoltHealth(); err != nil {
 		t.Fatalf("CheckDoltHealth: %v", err)
 	}
