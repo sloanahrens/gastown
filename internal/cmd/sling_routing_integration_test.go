@@ -97,7 +97,7 @@ case "$cmd" in
     exit 0
     ;;
   cook)
-    exit 0
+    echo '{"schema_version":1,"contract_version":1,"data":{"formula":"mol-polecat-work","vars":[],"steps":[]},"error":null}'
     ;;
 	  mol)
 		sub="$1"
@@ -139,7 +139,10 @@ if "%cmd%"=="formula" (
   echo {"name":"test-formula"}
   exit /b 0
 )
-if "%cmd%"=="cook" exit /b 0
+if "%cmd%"=="cook" (
+  echo {"schema_version":1,"contract_version":1,"data":{"formula":"mol-polecat-work","vars":[],"steps":[]},"error":null}
+  exit /b 0
+)
 if "%cmd%"=="mol" (
   if "%sub%"=="wisp" (
     echo legacy mol wisp should not be called 1>&2
