@@ -5,8 +5,10 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -205,6 +207,12 @@ func contractCreateShow(t *testing.T, s *scope) {
 	assigned := s.mustCreate(t, beads.CreateOptions{Title: "assigned", Priority: -1, Assignee: s.who("holder")})
 	if who := s.mustShow(t, assigned.ID).Assignee; who != s.who("holder") {
 		t.Errorf("Assignee = %q, want %q", who, s.who("holder"))
+	}
+	// A database can outlive a run, so the chosen ID is unique to this one.
+	id := "gt-" + s.tag + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	named := s.mustCreate(t, beads.CreateOptions{ID: id, Title: "named", Priority: -1})
+	if named.ID != id || s.mustShow(t, id).Title != "named" {
+		t.Errorf("create with ID %s made %q", id, named.ID)
 	}
 	wisp := s.mustCreate(t, beads.CreateOptions{Title: "a wisp", Priority: -1, Ephemeral: true})
 	if !s.mustShow(t, wisp.ID).Ephemeral {

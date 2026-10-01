@@ -65,7 +65,13 @@ func TestIntegrationSlingRoutesNewRigBeadToTargetRig(t *testing.T) {
 	bdScript := `#!/bin/sh
 set -e
 log_args=""
+body=""
 for arg in "$@"; do
+  [ "$arg" = "--body-file=-" ] && body="$(cat)"
+done
+for arg in "$@"; do
+  # A description sent on stdin is logged as if it were --description.
+  [ "$arg" = "--body-file=-" ] && arg="--description=$body"
   case "$arg" in
     --description=*attached_molecule:*gt-wisp-xyz*attached_formula:*mol-polecat-work*) arg="--description=<attached-molecule-and-formula-fields>" ;;
     --description=*no_merge:*true*review_only:*true*) arg="--description=<review-only-fields>" ;;

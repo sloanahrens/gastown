@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // TestBatchSling_ConvoyIDStoredInBeadFieldUpdates verifies that the batch convoy ID
@@ -203,7 +205,17 @@ func newAutoConvoyTown(t *testing.T, bd *inprocBD) slingConvoyTown {
 	if err := os.MkdirAll(filepath.Join(root, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
-	return slingConvoyTown{root: root, bd: bd.run}
+	return slingConvoyTown{root: root, bd: bd.run, db: beadsfake.New(beadsfake.WithPrefix("hq"))}
+}
+
+// createdConvoy is the convoy createAutoConvoy wrote in town's database.
+func createdConvoy(t *testing.T, town slingConvoyTown, id string) *beads.Issue {
+	t.Helper()
+	is, err := town.db.Show(id)
+	if err != nil {
+		t.Fatalf("convoy %s not in the town database: %v", id, err)
+	}
+	return is
 }
 
 // loggedWith is the first logged bd call that starts with prefix, or "". A
@@ -267,11 +279,8 @@ func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
 	if !strings.HasPrefix(convoyID, "hq-cv-") {
 		t.Errorf("convoy ID %q should have hq-cv- prefix", convoyID)
 	}
-	create := loggedWith(bd, "create ")
-	for _, want := range []string{"--id=" + convoyID, "--title=Work: Fix the widget", "--labels=gt:convoy"} {
-		if !strings.Contains(create, want) {
-			t.Errorf("create %q missing %q", create, want)
-		}
+	if c := createdConvoy(t, town, convoyID); c.Title != "Work: Fix the widget" || strings.Join(c.Labels, ",") != "gt:convoy" {
+		t.Errorf("convoy = title %q labels %v", c.Title, c.Labels)
 	}
 	if !bd.logged("dep add " + convoyID + " gt-aaa --type=tracks") {
 		t.Errorf("convoy does not track gt-aaa; bd log:\n%s", bd.log())
@@ -286,10 +295,11 @@ func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
 	t.Parallel()
 	bd := autoConvoyBD(false)
 	town := newAutoConvoyTown(t, bd)
-	if _, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash", ""); err != nil {
+	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash", "")
+	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
-	create := loggedWith(bd, "create ")
+	create := createdConvoy(t, town, id).Description
 	if !strings.Contains(create, "agent: deepseek-flash") {
 		t.Errorf("convoy description should record the requested agent:\n%s", create)
 	}
@@ -299,11 +309,12 @@ func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
 
 	// No agent requested: nothing recorded, so feeders fall back to the rig
 	// default (and log it) rather than pinning a stray value.
-	none := autoConvoyBD(false)
-	if _, err := newAutoConvoyTown(t, none).createAutoConvoy("gt-bbb", "Another task", false, "", "", "", ""); err != nil {
+	other := newAutoConvoyTown(t, autoConvoyBD(false))
+	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
+	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
-	if create := loggedWith(none, "create "); strings.Contains(create, "agent:") {
+	if create := createdConvoy(t, other, id).Description; strings.Contains(create, "agent:") {
 		t.Errorf("convoy description should omit agent when none requested:\n%s", create)
 	}
 }
@@ -316,20 +327,22 @@ func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
 	t.Parallel()
 	bd := autoConvoyBD(false)
 	town := newAutoConvoyTown(t, bd)
-	if _, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "", " mol-doc-audit "); err != nil {
+	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "", " mol-doc-audit ")
+	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
-	if create := loggedWith(bd, "create "); !strings.Contains(create, "formula: mol-doc-audit") {
+	if create := createdConvoy(t, town, id).Description; !strings.Contains(create, "formula: mol-doc-audit") {
 		t.Errorf("convoy description should record the requested formula:\n%s", create)
 	}
 
 	// No formula requested: nothing recorded, so feeders fall back to
 	// gt sling's own resolution rather than pinning a stray value.
-	none := autoConvoyBD(false)
-	if _, err := newAutoConvoyTown(t, none).createAutoConvoy("gt-bbb", "Another task", false, "", "", "", ""); err != nil {
+	other := newAutoConvoyTown(t, autoConvoyBD(false))
+	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
+	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
-	if create := loggedWith(none, "create "); strings.Contains(create, "formula:") {
+	if create := createdConvoy(t, other, id).Description; strings.Contains(create, "formula:") {
 		t.Errorf("convoy description should omit formula when none requested:\n%s", create)
 	}
 }
@@ -338,12 +351,13 @@ func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
 // label next to gt:convoy.
 func TestCreateAutoConvoy_OwnedLabel(t *testing.T) {
 	t.Parallel()
-	bd := autoConvoyBD(false)
-	if _, err := newAutoConvoyTown(t, bd).createAutoConvoy("gt-aaa", "My task", true, "local", "", "", ""); err != nil {
+	town := newAutoConvoyTown(t, autoConvoyBD(false))
+	id, err := town.createAutoConvoy("gt-aaa", "My task", true, "local", "", "", "")
+	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
-	if create := loggedWith(bd, "create "); !strings.Contains(create, "--labels=gt:convoy,gt:owned") {
-		t.Errorf("create should include convoy/owned labels:\n%q", create)
+	if labels := createdConvoy(t, town, id).Labels; strings.Join(labels, ",") != "gt:convoy,gt:owned" {
+		t.Errorf("convoy labels = %v, want gt:convoy and gt:owned", labels)
 	}
 }
 
@@ -355,18 +369,16 @@ func TestCreateAutoConvoy_OwnedLabel(t *testing.T) {
 func TestCreateAutoConvoy_DepFailIsNonFatal(t *testing.T) {
 	t.Parallel()
 	bd := autoConvoyBD(true)
-	convoyID, err := newAutoConvoyTown(t, bd).createAutoConvoy("gt-aaa", "My task", false, "", "", "", "")
+	town := newAutoConvoyTown(t, bd)
+	convoyID, err := town.createAutoConvoy("gt-aaa", "My task", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}
-	if convoyID == "" {
-		t.Fatal("expected non-empty convoy ID")
+	if loggedWith(bd, "dep add ") == "" {
+		t.Errorf("expected a dep add attempt:\n%s", bd.log())
 	}
-	if loggedWith(bd, "create ") == "" || loggedWith(bd, "dep add ") == "" {
-		t.Errorf("expected create and a dep add attempt:\n%s", bd.log())
-	}
-	if loggedWith(bd, "close ") != "" {
-		t.Errorf("close should NOT be called (dep fail is non-fatal):\n%s", bd.log())
+	if status := createdConvoy(t, town, convoyID).Status; status != "open" {
+		t.Errorf("convoy status %q: a failed dep add must not close it", status)
 	}
 }
 

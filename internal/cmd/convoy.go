@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -418,8 +417,11 @@ func collectEpicChildren(epicID string) ([]string, error) {
 // PATH; a unit test builds one over a temp town and an in-process bd, so the
 // command's decisions run with nothing spawned and no global swapped.
 type convoyCLI struct {
-	townRoot    func() (string, error)
-	bd          beads.BDRunner // nil is the bd on PATH
+	townRoot func() (string, error)
+	bd       beads.BDRunner // nil is the bd on PATH
+	// townDB opens the town database at townBeads (the town root); nil is
+	// bd pinned to its .beads.
+	townDB      func(townBeads string) beads.Client
 	out, warn   io.Writer
 	entropy     io.Reader                   // convoy ID suffixes
 	sender      func() string               // the default convoy owner
@@ -436,6 +438,14 @@ func realConvoyCLI() convoyCLI {
 		sender:      detectSender,
 		ensureTypes: ensureConvoyTypes,
 	}
+}
+
+// db is the town database at townBeads.
+func (c convoyCLI) db(townBeads string) beads.Client {
+	if c.townDB != nil {
+		return c.townDB(townBeads)
+	}
+	return beads.NewPinned(beads.ResolveBeadsDir(townBeads))
 }
 
 // town is the convoy package's view of c's town.
@@ -599,27 +609,14 @@ func (c convoyCLI) create(opts convoyCreateOptions, args []string) error {
 	// Generate convoy ID with cv- prefix
 	convoyID := fmt.Sprintf("hq-cv-%s", generateShortIDFromReader(c.entropy))
 
-	createArgs := []string{
-		"create",
-		"--type=task",
-		"--id=" + convoyID,
-		"--title=" + name,
-		"--description=" + description,
-		"--labels=" + convoyLabels(opts.owned),
-		"--json",
-	}
-	if beads.NeedsForceForID(convoyID) {
-		createArgs = append(createArgs, "--force")
-	}
-
-	var stderr bytes.Buffer
-	if err := BdCmd(createArgs...).
-		WithAutoCommit().
-		Dir(townBeads).
-		Stderr(&stderr).
-		Via(c.bd).
-		Run(); err != nil {
-		return fmt.Errorf("creating convoy: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	if _, err := c.db(townBeads).Create(beads.CreateOptions{
+		ID:          convoyID,
+		Title:       name,
+		Description: description,
+		Labels:      convoyLabels(opts.owned),
+		Priority:    -1,
+	}); err != nil {
+		return fmt.Errorf("creating convoy: %w", err)
 	}
 
 	// Notify address is stored in description (line 166-168) and read from there
@@ -693,32 +690,11 @@ func (c convoyCLI) add(args []string) error {
 	}
 
 	// Validate convoy exists and get its status
-	showOut, err := BdCmd("show", convoyID, "--json").
-		Dir(townBeads).
-		Stderr(io.Discard).
-		Via(c.bd).
-		Output()
+	db := c.db(townBeads)
+	convoy, err := db.Show(convoyID)
 	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
-
-	var convoys []struct {
-		ID          string   `json:"id"`
-		Title       string   `json:"title"`
-		Status      string   `json:"status"`
-		Type        string   `json:"issue_type"`
-		Description string   `json:"description"`
-		Labels      []string `json:"labels"`
-	}
-	if err := json.Unmarshal(showOut, &convoys); err != nil {
-		return fmt.Errorf("parsing convoy data: %w", err)
-	}
-
-	if len(convoys) == 0 {
-		return fmt.Errorf("convoy '%s' not found", convoyID)
-	}
-
-	convoy := convoys[0]
 
 	// Verify it's actually a convoy type
 	if !convoyops.IsConvoyIssue(convoy.Type, convoy.Labels) {
@@ -733,21 +709,14 @@ func (c convoyCLI) add(args []string) error {
 	if normalizeConvoyStatus(convoy.Status) == convoyStatusClosed {
 		// closed→open is always valid; ensureKnownConvoyStatus above guarantees
 		// the current status is known, so no additional transition check needed.
-		if err := BdCmd("update", convoyID, "--status=open").
-			Dir(townBeads).
-			WithAutoCommit().
-			Via(c.bd).
-			Run(); err != nil {
+		open := "open"
+		if err := db.Update(convoyID, beads.UpdateOptions{Status: &open}); err != nil {
 			return fmt.Errorf("couldn't reopen convoy: %w", err)
 		}
-		if fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); fields != nil && fields.CompletionNotifiedAt != "" {
+		if fields := beads.ParseConvoyFields(convoy); fields != nil && fields.CompletionNotifiedAt != "" {
 			fields.CompletionNotifiedAt = ""
 			newDesc := beads.SetConvoyFields(&beads.Issue{Description: convoy.Description}, fields)
-			if err := BdCmd("update", convoyID, "--description="+newDesc).
-				Dir(townBeads).
-				WithAutoCommit().
-				Via(c.bd).
-				Run(); err != nil {
+			if err := db.Update(convoyID, beads.UpdateOptions{Description: &newDesc}); err != nil {
 				return fmt.Errorf("couldn't clear convoy completion notification state: %w", err)
 			}
 		}
@@ -1385,11 +1354,11 @@ func (c convoyCLI) printConvoyTree(townBeads string, convoys []convoyops.ListedC
 	return nil
 }
 
-func convoyLabels(owned bool) string {
+func convoyLabels(owned bool) []string {
 	if owned {
-		return "gt:convoy,gt:owned"
+		return []string{"gt:convoy", "gt:owned"}
 	}
-	return "gt:convoy"
+	return []string{"gt:convoy"}
 }
 
 // convoyMergeFromFields extracts the merge strategy from a convoy description
