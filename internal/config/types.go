@@ -150,7 +150,7 @@ type TownSettings struct {
 	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
 	// "jsonl_git_backup", "scheduled_maintenance",
-	// "landing_worker", "events_prune", "handler").
+	// "landing_worker", "steward", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
 

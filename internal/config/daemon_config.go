@@ -64,6 +64,10 @@ type PatrolsConfig struct {
 	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
 	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
 
+	// Steward spawns one headless job per landing-queue event, the daemon side
+	// of gt-9bioi. Opt-in: the jobs act on submitted work.
+	Steward *StewardConfig `json:"steward,omitempty"`
+
 	// DoltBackup is retired: the 15-minute dolt_backup patrol (dolt backup
 	// sync into <town>/.dolt-backup plus an iCloud rsync) was replaced by the
 	// nightly backup in scheduled_maintenance (gt-8z769.5) and nothing reads
@@ -485,6 +489,40 @@ type LandingWorkerConfig struct {
 	// PostLandTimeoutStr bounds one run of the rig's
 	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
+}
+
+// StewardConfig holds configuration for the steward patrol.
+type StewardConfig struct {
+	// Enabled turns the jobs on. Defaults to false: a job acts on submitted
+	// work, so the operator opts in.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the wait between landing-queue scans (e.g. "60s").
+	// Default 60s.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// MaxJobs caps jobs running at once across every rig (default 2).
+	MaxJobs int `json:"max_jobs,omitempty"`
+
+	// JobTimeoutStr bounds one job, agent session included (e.g. "45m").
+	// Default 45m.
+	JobTimeoutStr string `json:"job_timeout,omitempty"`
+
+	// RoutineAgent is the preset routine jobs run on (default
+	// "deepseek-flash": Sloan's Q3 call to try flash first).
+	RoutineAgent string `json:"routine_agent,omitempty"`
+
+	// HardAgent is the preset a job retries on after a routine failure, and
+	// the one a conflict job starts on (default "deepseek-pro": the town runs fully on DeepSeek, Claude is only the human-run overseer).
+	HardAgent string `json:"hard_agent,omitempty"`
+
+	// Rigs limits the scans to these rigs. Empty means every known rig.
+	Rigs []string `json:"rigs,omitempty"`
+
+	// WorkRoot is where a job's throwaway worktree is created (a <rig>
+	// directory under it, 0700). It must not be under the town root: the git
+	// guard refuses worktrees there. Empty means $TMPDIR/gt-steward-<uid>.
+	WorkRoot string `json:"work_root,omitempty"`
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),

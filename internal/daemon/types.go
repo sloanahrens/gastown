@@ -137,6 +137,7 @@ type (
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
+	StewardConfig              = agentconfig.StewardConfig
 )
 
 // PatrolConfigFile returns the path to the patrol config file.
@@ -224,6 +225,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
+	}
+	// steward is opt-in: its jobs act on submitted work, so only an explicit
+	// enabled:true turns it on (gt-9bioi.1).
+	if patrol == "steward" {
+		if config == nil || config.Patrols == nil || config.Patrols.Steward == nil {
+			return false
+		}
+		return config.Patrols.Steward.Enabled
 	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).
