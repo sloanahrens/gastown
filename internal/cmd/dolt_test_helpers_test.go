@@ -65,6 +65,13 @@ func configureTestGitIdentity(t *testing.T, homeDir string) {
 // shortcut path (which just checks if the PID is alive, not the process name).
 func bridgeDoltPidToTown(t *testing.T, townRoot string) {
 	t.Helper()
+	bridgeDoltPidToTownOnPort(t, townRoot, os.Getenv("GT_DOLT_PORT"))
+}
+
+// bridgeDoltPidToTownOnPort is bridgeDoltPidToTown for a test Dolt server on
+// port, for a parallel test that cannot point GT_DOLT_PORT at it.
+func bridgeDoltPidToTownOnPort(t *testing.T, townRoot, port string) {
+	t.Helper()
 
 	pid := fmt.Sprintf("%d", os.Getpid())
 
@@ -83,9 +90,8 @@ func bridgeDoltPidToTown(t *testing.T, townRoot string) {
 	if _, ok := config.ResolveDoltEndpoint(townRoot); ok {
 		return
 	}
-	port := os.Getenv("GT_DOLT_PORT")
 	if port == "" {
-		t.Fatal("bridgeDoltPidToTown: no test Dolt server port in GT_DOLT_PORT")
+		t.Fatal("bridgeDoltPidToTown: no test Dolt server port")
 	}
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
