@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildCommand_Claude(t *testing.T) {
@@ -129,12 +130,12 @@ func TestProvisionAndMissing(t *testing.T) {
 		t.Fatalf("Missing(empty) = %v, want all %v", got, Names())
 	}
 
-	// A pre-existing command file is never overwritten.
+	// A file the registry does not name is none of Provision's business.
 	dir := filepath.Join(ws, ".claude", "commands")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	custom := filepath.Join(dir, "handoff.md")
+	custom := filepath.Join(dir, "reaper.md")
 	if err := os.WriteFile(custom, []byte("mine"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestProvisionAndMissing(t *testing.T) {
 		t.Errorf("Missing after provision = %v, want none", got)
 	}
 	if data, err := os.ReadFile(custom); err != nil || string(data) != "mine" {
-		t.Errorf("handoff.md = %q, %v; want the pre-existing content kept", data, err)
+		t.Errorf("reaper.md = %q, %v; want the unrecognized file kept", data, err)
 	}
 	want, err := BuildCommand(*FindByName("review"))
 	if err != nil {
@@ -154,6 +155,61 @@ func TestProvisionAndMissing(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "review.md")); err != nil || string(data) != want {
 		t.Errorf("review.md = %q, %v; want BuildCommand output", data, err)
+	}
+}
+
+// A command file written from an older template must not outlive the template
+// edit: the embedded body is canonical, and a stale copy is what turned the
+// workspace-local command-tree lint red (gt-4czhp). Re-provisioning an
+// up-to-date copy rewrites nothing.
+func TestProvisionRefreshesStaleCommand(t *testing.T) {
+	t.Parallel()
+	ws := t.TempDir()
+	dir := filepath.Join(ws, ".claude", "commands")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	const staleBody = "stale-body-from-an-older-template"
+	stale := filepath.Join(dir, "done.md")
+	if err := os.WriteFile(stale, []byte("---\ndescription: old\n---\n\n"+staleBody+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Provision(ws); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	want, err := BuildCommand(*FindByName("done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != want {
+		t.Errorf("done.md = %q; want the template body %q", data, want)
+	}
+	if strings.Contains(string(data), staleBody) {
+		t.Error("done.md still carries the stale body")
+	}
+
+	// Provisioning again leaves the now-current copy untouched. The mtime is
+	// backdated a minute so any rewrite is visible on a coarse-grained clock.
+	stamp := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(stale, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := Provision(ws); err != nil {
+		t.Fatalf("second Provision: %v", err)
+	}
+	after, err := os.Stat(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(stamp) {
+		t.Errorf("second Provision rewrote an up-to-date command file (mtime %v, want %v)", after.ModTime(), stamp)
 	}
 }
 
