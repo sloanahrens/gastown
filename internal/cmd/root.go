@@ -3,21 +3,21 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"runtime"
-	"strings"
-	"testing"
-
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"testing"
 )
 
 var rootCmd = &cobra.Command{
@@ -115,7 +115,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	initCLITheme()
 
 	// gt done can autosave and push; prove ownership before shared pre-run writes.
-	if err := donePolecatGuard(cmd, os.Getenv, doneCwd(), doneGitTopLevel); err != nil {
+	if err := donePolecatGuard(cmd, os.Getenv, doneCwd(), done.GitTopLevel); err != nil {
 		return err
 	}
 
@@ -217,7 +217,7 @@ func isDoneCommand(cmd *cobra.Command) bool {
 // detected positively (gt-avwp2): a polecat that lost its env hits the
 // guard and fails there.
 func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string, cwd string) bool {
-	return isDoneCommand(cmd) && !doneIsCrewRun(getenv, cwd)
+	return isDoneCommand(cmd) && !done.IsCrewRun(getenv, cwd)
 }
 
 // donePolecatGuard refuses a polecat's gt done run from anywhere but its own
@@ -226,7 +226,7 @@ func donePolecatGuard(cmd *cobra.Command, getenv func(string) string, cwd string
 	if !doneNeedsPolecatWorktree(cmd, getenv, cwd) {
 		return nil
 	}
-	_, err := resolveDonePolecatWorktreeIn(cwd, getenv, topLevel)
+	_, err := done.ResolvePolecatWorktreeIn(cwd, getenv, topLevel)
 	return err
 }
 

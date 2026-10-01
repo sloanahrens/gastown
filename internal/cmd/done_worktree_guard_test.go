@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/done"
 )
 
 func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
@@ -66,17 +67,17 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 			}
 			env := doneGuardEnv(townRoot, "gastown", "shiny", tt.gtRole)
 
-			got, err := resolveDonePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel)
+			got, err := done.ResolvePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel)
 			if err != nil {
 				t.Fatalf("resolveDonePolecatWorktreeIn: %v", err)
 			}
-			if got.townRoot != townRoot {
-				t.Fatalf("townRoot = %q, want %q", got.townRoot, townRoot)
+			if got.TownRoot != townRoot {
+				t.Fatalf("townRoot = %q, want %q", got.TownRoot, townRoot)
 			}
-			if got.cwd != doneCanonicalPath(tt.wantRoot(townRoot)) {
-				t.Fatalf("cwd = %q, want %q", got.cwd, doneCanonicalPath(tt.wantRoot(townRoot)))
+			if got.Cwd != done.CanonicalPath(tt.wantRoot(townRoot)) {
+				t.Fatalf("cwd = %q, want %q", got.Cwd, done.CanonicalPath(tt.wantRoot(townRoot)))
 			}
-			if got.rigName != "gastown" || got.polecatName != "shiny" || got.actor != "gastown/polecats/shiny" {
+			if got.RigName != "gastown" || got.PolecatName != "shiny" || got.Actor != "gastown/polecats/shiny" {
 				t.Fatalf("identity = %#v, want gastown/polecats/shiny", got)
 			}
 		})
@@ -148,8 +149,8 @@ func TestResolveDonePolecatWorktreeRejectsUnsafePaths(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env["GT_POLECAT_PATH"] = ownRepo
 
-			if _, err := resolveDonePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel); err == nil {
-				t.Fatalf("resolveDonePolecatWorktreeIn(%q) succeeded, want rejection", cwd)
+			if _, err := done.ResolvePolecatWorktreeIn(cwd, envMap(env), markerGitTopLevel); err == nil {
+				t.Fatalf("done.ResolvePolecatWorktreeIn(%q) succeeded, want rejection", cwd)
 			}
 		})
 	}
@@ -186,7 +187,7 @@ func TestResolveDonePolecatWorktreeRejectsIdentityMismatch(t *testing.T) {
 			env := map[string]string{"GT_TOWN_ROOT": townRoot, "GT_ROOT": townRoot,
 				"BD_ACTOR": tt.actor, "GT_ROLE": tt.gtRole, "GT_RIG": tt.gtRig, "GT_POLECAT": tt.polecat}
 
-			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil {
+			if _, err := done.ResolvePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil {
 				t.Fatal("resolveDonePolecatWorktreeIn succeeded, want identity rejection")
 			}
 		})
@@ -202,7 +203,7 @@ func TestResolveDonePolecatWorktreeRejectsTownRootMismatch(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env[envName] = filepath.Join(t.TempDir(), "other-town")
 
-			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
+			if _, err := done.ResolvePolecatWorktreeIn(repoRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
 				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want town root mismatch", err)
 			}
 		})
@@ -224,7 +225,7 @@ func TestResolveDonePolecatWorktreeRejectsGitWorkTreeSpoof(t *testing.T) {
 			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
 			env[tt.envName] = tt.value(repoRoot)
 
-			if _, err := resolveDonePolecatWorktreeIn(townRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
+			if _, err := done.ResolvePolecatWorktreeIn(townRoot, envMap(env), markerGitTopLevel); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
 				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want git env override rejection", err)
 			}
 		})

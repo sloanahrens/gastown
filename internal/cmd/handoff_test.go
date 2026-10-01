@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -484,8 +485,8 @@ func TestPolecatHandoffDoneCmd(t *testing.T) {
 		t.Fatalf("args = %q, want gt done --status DEFERRED", got)
 	}
 	env := strings.Join(cmd.Env, "\n")
-	if !strings.Contains(env, envDoneFromHandoff+"=1") || !strings.Contains(env, "GT_ROLE=gastown/polecats/Toast") {
-		t.Fatalf("env = %v, want the caller's environment plus %s=1", cmd.Env, envDoneFromHandoff)
+	if !strings.Contains(env, done.EnvFromHandoff+"=1") || !strings.Contains(env, "GT_ROLE=gastown/polecats/Toast") {
+		t.Fatalf("env = %v, want the caller's environment plus %s=1", cmd.Env, done.EnvFromHandoff)
 	}
 }
 

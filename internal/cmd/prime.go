@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -53,14 +54,16 @@ var primeHookSessionID string
 // Set by checkHandoffMarker when a marker with a reason field is found.
 var primeHandoffReason string
 
-// Role represents a detected agent role.
-type Role string
+// Role represents a detected agent role. The vocabulary itself lives in
+// internal/role, which the command-logic packages that cannot import cmd
+// read it from; this is the alias the command layer keeps using.
+type Role = role.Role
 
 const (
-	RoleMayor   Role = "mayor"
-	RolePolecat Role = "polecat"
-	RoleCrew    Role = "crew"
-	RoleUnknown Role = "unknown"
+	RoleMayor   = role.Mayor
+	RolePolecat = role.Polecat
+	RoleCrew    = role.Crew
+	RoleUnknown = role.Unknown
 )
 
 // AllRoles returns every Role value GetRole can produce. It is the
@@ -70,10 +73,7 @@ const (
 // actor string detectActor() can emit is accounted for, instead of a
 // hand-maintained list that has to be kept in sync by hand (gt-9pn).
 func AllRoles() []Role {
-	return []Role{
-		RoleMayor,
-		RolePolecat, RoleCrew, RoleUnknown,
-	}
+	return role.All()
 }
 
 var primeCmd = &cobra.Command{

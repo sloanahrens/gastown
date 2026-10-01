@@ -12,7 +12,7 @@ const (
 
 // CleanupStatusSourceRecorded is the provenance tag for a cleanup_status
 // value. Every cleanup_status in the system is a self-report written by
-// `gt done` onto the polecat's agent bead (cmd/done.go selfReportCleanupStatus)
+// `gt done` onto the polecat's agent bead (internal/done selfReportCleanupStatus)
 // — a recorded hint about a moment in the past, never a live measurement.
 // claude-41j.1 D9 retires the "ZFC: trust polecat self-report" carve-out
 // (docs/design/polecat-lifecycle-patrol.md) that treated it as authoritative;

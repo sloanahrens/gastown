@@ -284,7 +284,7 @@ const checkpointRevertTargetDefault = "main"
 // (origin is a fork with a distinct upstream remote), targets
 // upstream/<default> instead of origin/<default> — origin/main would be the
 // fork's stale copy there, not the shared history the guard needs to protect
-// (internal/cmd/done.go, doneContaminationBaseRef/CleanBaseRef). This mirrors
+// (internal/done's submit path, CleanBaseRef). This mirrors
 // that same resolution so the two guards agree on what "already merged" means.
 func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
 	defaultBranch := checkpointRevertTargetDefault

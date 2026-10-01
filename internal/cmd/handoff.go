@@ -2,21 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
-	"time"
-
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
-
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -25,6 +16,14 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"golang.org/x/term"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 )
 
 var handoffCmd = &cobra.Command{
@@ -142,7 +141,7 @@ func handoffPolecat(getenv func(string) string) (isPolecat bool, name string) {
 // (or its successor) going, exactly as polecat-CLAUDE.md promises.
 func polecatHandoffDoneCmd(environ []string) *exec.Cmd {
 	doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
-	doneCmd.Env = append(environ, envDoneFromHandoff+"=1")
+	doneCmd.Env = append(environ, done.EnvFromHandoff+"=1")
 	return doneCmd
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/done"
 )
 
 // TestDoneCloseDescendantsWithChildren verifies that when gt done is called
@@ -257,14 +258,14 @@ func TestDoneStateEnvZeroValueIsTheRealProcess(t *testing.T) {
 	if got, want := reflect.ValueOf(e.lookup()).Pointer(), reflect.ValueOf(os.Getenv).Pointer(); got != want {
 		t.Error("zero doneStateEnv does not read the environment through os.Getenv")
 	}
-	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(currentReviewEvidenceHead).Pointer(); got != want {
-		t.Error("zero doneStateEnv does not resolve HEAD through currentReviewEvidenceHead")
+	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHead).Pointer(); got != want {
+		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHead")
 	}
 	if _, ok := e.routedAt(t.TempDir()).(*beads.Beads); !ok {
 		t.Error("zero doneStateEnv's routed store is not bd")
 	}
-	if got, want := reflect.ValueOf(e.sourceOpener()).Pointer(), reflect.ValueOf(openSourceStore).Pointer(); got != want {
-		t.Error("zero doneStateEnv does not open source stores through openSourceStore")
+	if got, want := reflect.ValueOf(e.sourceOpener()).Pointer(), reflect.ValueOf(done.OpenSourceStore).Pointer(); got != want {
+		t.Error("zero doneStateEnv does not open source stores through done.OpenSourceStore")
 	}
 }
 

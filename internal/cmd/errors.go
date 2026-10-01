@@ -3,6 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+
+	"github.com/steveyegge/gastown/internal/done"
 )
 
 // SilentExitError signals that the command should exit with a specific code
@@ -47,7 +49,10 @@ func (e *ExitCodeError) Error() string { return e.Err.Error() }
 func (e *ExitCodeError) Unwrap() error { return e.Err }
 
 // exitCodeForError is the process exit status for a command's error:
-// SilentExitError and ExitCodeError carry their own, anything else is 1.
+// SilentExitError, ExitCodeError and done.ExitCodeError carry their own,
+// anything else is 1. gt done's submission failures are raised in
+// internal/done, which cannot import this package, so its coded error is
+// mapped here.
 func exitCodeForError(err error) int {
 	if code, ok := IsSilentExit(err); ok {
 		return code
@@ -55,6 +60,10 @@ func exitCodeForError(err error) int {
 	var coded *ExitCodeError
 	if errors.As(err, &coded) {
 		return coded.Code
+	}
+	var doneCoded *done.ExitCodeError
+	if errors.As(err, &doneCoded) {
+		return doneCoded.Code
 	}
 	return 1
 }

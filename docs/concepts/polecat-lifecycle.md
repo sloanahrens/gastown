@@ -358,7 +358,8 @@ This distinction matters for:
 
 ## Key Files
 
-- `internal/cmd/done.go` — work submission, done-state handoff, session retirement
+- `internal/done/` — work submission, done-state handoff; `internal/cmd/done.go` is the thin cobra shell around it
+- `internal/cmd/done_agent_state.go` — the CLI layer's hooked-bead close and agent-bead state write
 - `internal/cmd/sling.go` + `polecat_spawn.go` — capacity allocation, branch setup
 - `internal/cmd/handoff.go` — session cycling for all roles
 - `internal/patrolscan/` — dead-session restart, orphaned molecules, stranded work

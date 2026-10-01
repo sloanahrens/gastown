@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -216,52 +216,11 @@ func detectRole(cwd, townRoot string) RoleInfo {
 	return ctx
 }
 
-// parseRoleString parses a role string like "mayor", "gastown/crew/max", or "gastown/polecats/alpha".
+// parseRoleString parses a role string like "mayor", "gastown/crew/max", or
+// "gastown/polecats/alpha". The vocabulary and the parser live in
+// internal/role, which the command-logic packages read it from.
 func parseRoleString(s string) (Role, string, string) {
-	s = strings.TrimSpace(s)
-
-	// Normalize consecutive slashes (e.g. "gamestore//refinery" → "gamestore/refinery")
-	for strings.Contains(s, "//") {
-		s = strings.ReplaceAll(s, "//", "/")
-	}
-	s = strings.TrimSuffix(s, "/")
-
-	// Simple roles
-	switch s {
-	case constants.RoleMayor:
-		return RoleMayor, "", ""
-	}
-
-	// Compound roles: rig/role or rig/polecats/name or rig/crew/name
-	parts := strings.Split(s, "/")
-	if len(parts) < 2 {
-		// Unknown format, try to match as simple role
-		return Role(s), "", ""
-	}
-
-	rig := parts[0]
-
-	switch parts[1] {
-	case "boot", "witness", "refinery":
-		// The boot, witness (gt-4k3fj.6.1) and refinery (gt-v4ssj.6) roles
-		// were deleted. A stale GT_ROLE of deacon/boot, <rig>/witness or
-		// <rig>/refinery is an unknown role, not a polecat of that name (a
-		// name the pool already reserves).
-		return Role(s), "", ""
-	case "polecats":
-		if len(parts) >= 3 {
-			return RolePolecat, rig, parts[2]
-		}
-		return RolePolecat, rig, ""
-	case constants.RoleCrew:
-		if len(parts) >= 3 {
-			return RoleCrew, rig, parts[2]
-		}
-		return RoleCrew, rig, ""
-	default:
-		// Might be rig/polecatName format
-		return RolePolecat, rig, parts[1]
-	}
+	return role.Parse(s)
 }
 
 // ActorString returns the actor identity string for beads attribution.
@@ -269,22 +228,7 @@ func parseRoleString(s string) (Role, string, string) {
 //   - Simple roles: "mayor"
 //   - Workers: "gastown/crew/max", "gastown/polecats/Toast"
 func (info RoleInfo) ActorString() string {
-	switch info.Role {
-	case RoleMayor:
-		return "mayor"
-	case RolePolecat:
-		if info.Rig != "" && info.Polecat != "" {
-			return fmt.Sprintf("%s/polecats/%s", info.Rig, info.Polecat)
-		}
-		return "polecat"
-	case RoleCrew:
-		if info.Rig != "" && info.Polecat != "" {
-			return fmt.Sprintf("%s/crew/%s", info.Rig, info.Polecat)
-		}
-		return "crew"
-	default:
-		return string(info.Role)
-	}
+	return role.Actor(info.Role, info.Rig, info.Polecat)
 }
 
 // getRoleHome returns the canonical home directory for a role.
