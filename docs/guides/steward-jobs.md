@@ -24,7 +24,7 @@ crew member, or labeled `gt:needs-human`, is left alone.
 
 ```json
 {"enabled": true, "interval": "60s", "max_jobs": 2, "job_timeout": "45m",
- "routine_agent": "deepseek-flash", "hard_agent": "claude-opus",
+ "routine_agent": "deepseek-flash", "hard_agent": "deepseek-pro",
  "rigs": ["gastown"], "work_root": "/tmp/gt-steward"}
 ```
 

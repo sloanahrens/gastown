@@ -501,7 +501,7 @@ type StewardConfig struct {
 	RoutineAgent string `json:"routine_agent,omitempty"`
 
 	// HardAgent is the preset a job retries on after a routine failure, and
-	// the one a conflict job starts on (default "claude-opus").
+	// the one a conflict job starts on (default "deepseek-pro": the town runs fully on DeepSeek, Claude is only the human-run overseer).
 	HardAgent string `json:"hard_agent,omitempty"`
 
 	// Rigs limits the scans to these rigs. Empty means every known rig.

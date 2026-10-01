@@ -224,7 +224,7 @@ func TestReadVerdictRejectsUnknownOutcome(t *testing.T) {
 // — the escalation instead of a third job is the operator's (gt-9bioi).
 func TestChooseModel(t *testing.T) {
 	t.Parallel()
-	routine, hard := "deepseek-flash", "claude-opus"
+	routine, hard := "deepseek-flash", "deepseek-pro"
 	failed := Job{Outcome: OutcomeFail, Model: routine}
 	passed := Job{Outcome: OutcomePass, Model: routine}
 	hardFailed := Job{Outcome: OutcomeFail, Model: hard}

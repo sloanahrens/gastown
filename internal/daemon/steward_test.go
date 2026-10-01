@@ -60,8 +60,8 @@ func TestStewardConfigDefaults(t *testing.T) {
 		wantRoutine, wantHard string
 	}{
 		"nothing configured": {nil, defaultStewardInterval, steward.DefaultMaxJobs, steward.DefaultJobTimeout, steward.DefaultRoutineAgent, steward.DefaultHardAgent},
-		"configured": {&StewardConfig{IntervalStr: "5m", MaxJobs: 4, JobTimeoutStr: "10m", RoutineAgent: "claude-sonnet", HardAgent: "claude-opus"},
-			5 * time.Minute, 4, 10 * time.Minute, "claude-sonnet", "claude-opus"},
+		"configured": {&StewardConfig{IntervalStr: "5m", MaxJobs: 4, JobTimeoutStr: "10m", RoutineAgent: "deepseek-flash-x", HardAgent: "deepseek-pro-x"},
+			5 * time.Minute, 4, 10 * time.Minute, "deepseek-flash-x", "deepseek-pro-x"},
 		"garbage durations keep the defaults": {&StewardConfig{IntervalStr: "soon", JobTimeoutStr: "-1m"},
 			defaultStewardInterval, steward.DefaultMaxJobs, steward.DefaultJobTimeout, steward.DefaultRoutineAgent, steward.DefaultHardAgent},
 	} {

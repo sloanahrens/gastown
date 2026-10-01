@@ -24,7 +24,7 @@ const (
 	DefaultRoutineAgent = "deepseek-flash"
 	// DefaultHardAgent is the preset a job retries on after a routine
 	// failure, and the one a conflict job starts on.
-	DefaultHardAgent = "claude-opus"
+	DefaultHardAgent = "deepseek-pro"
 )
 
 // ResultFile is the file a job writes to report its verdict: a JSON object
