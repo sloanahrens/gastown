@@ -1,129 +1,18 @@
-// Package formula provides parsing, validation, and execution planning for
-// TOML-based workflow definitions.
+// Package formula owns gastown's shipped formula files, not their format.
 //
-// # Overview
+// bd is the one formula engine (D6, gt-fd2cu): it parses, resolves and cooks
+// every formula, and gastown reads what `bd cook` returns. This package holds
+// what gastown itself owns:
 //
-// The formula package enables structured workflow definitions with dependency
-// tracking, validation, and parallel execution planning. It supports four
-// formula types, each designed for different execution patterns:
+//   - the formulas embedded in the gt binary (formulas/*.formula.toml) and
+//     their sync to <town>/.beads/formulas, checked by content hash
+//     (ProvisionFormulas, PlanFormulaSync, SyncFormulas, UpdateFormulas)
+//   - the town's one overlay dir, <town>/formula-overlays, and its step
+//     override files (OverlayDir, LoadFormulaOverlay)
 //
-//   - convoy: Parallel execution of independent legs with synthesis
-//   - workflow: Sequential steps with explicit dependencies
-//   - expansion: Template-based step generation
-//   - aspect: Multi-aspect parallel analysis
-//
-// # Quick Start
-//
-// Parse a formula file and get execution order:
-//
-//	f, err := formula.ParseFile("workflow.formula.toml")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// Get topologically sorted execution order
-//	order, err := f.TopologicalSort()
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// Execute steps, tracking completion
-//	completed := make(map[string]bool)
-//	for len(completed) < len(order) {
-//	    ready := f.ReadySteps(completed)
-//	    // Execute ready steps in parallel...
-//	    for _, id := range ready {
-//	        completed[id] = true
-//	    }
-//	}
-//
-// # Formula Types
-//
-// Convoy formulas execute legs in parallel, then synthesize results:
-//
-//	formula = "security-audit"
-//	type = "convoy"
-//
-//	[[legs]]
-//	id = "sast"
-//	title = "Static Analysis"
-//	focus = "Find code vulnerabilities"
-//
-//	[[legs]]
-//	id = "deps"
-//	title = "Dependency Audit"
-//	focus = "Check for vulnerable dependencies"
-//
-//	[synthesis]
-//	title = "Combine Findings"
-//	depends_on = ["sast", "deps"]
-//
-// Workflow formulas execute steps sequentially with dependencies:
-//
-//	formula = "release"
-//	type = "workflow"
-//
-//	[[steps]]
-//	id = "test"
-//	title = "Run Tests"
-//
-//	[[steps]]
-//	id = "build"
-//	title = "Build"
-//	needs = ["test"]
-//
-//	[[steps]]
-//	id = "publish"
-//	title = "Publish"
-//	needs = ["build"]
-//
-// # Validation
-//
-// The package performs comprehensive validation:
-//
-//   - Required fields (formula name, valid type)
-//   - Unique IDs within steps/legs/templates/aspects
-//   - Valid dependency references (needs/depends_on)
-//   - Cycle detection in dependency graphs
-//
-// # Cycle Detection
-//
-// Workflow and expansion formulas are validated for circular dependencies
-// using depth-first search. Cycles are reported with the offending step ID:
-//
-//	f, err := formula.Parse([]byte(tomlContent))
-//	// Returns: "cycle detected involving: build"
-//
-// # Topological Sorting
-//
-// The TopologicalSort method returns steps in dependency order using
-// Kahn's algorithm. Dependencies are guaranteed to appear before dependents:
-//
-//	order, err := f.TopologicalSort()
-//	// Returns: ["test", "build", "publish"]
-//
-// For convoy and aspect formulas (which are parallel), TopologicalSort
-// returns all items in their original order.
-//
-// # Ready Step Computation
-//
-// The ReadySteps method efficiently computes which steps can execute
-// given a set of completed steps:
-//
-//	completed := map[string]bool{"test": true}
-//	ready := f.ReadySteps(completed)
-//	// Returns: ["build"] (test is done, build can run)
-//
-// # Embedded Formulas
-//
-// The package includes embedded formula files that can be provisioned
-// to a beads workspace. The binary is canonical: ProvisionFormulas and
-// UpdateFormulas write each embedded formula with its content hash, and
-// PlanFormulaSync reports drifted copies and files gt does not own.
-//
-// # Thread Safety
-//
-// Formula instances are safe for concurrent read access after parsing.
-// The ReadySteps method does not modify state and can be called from
-// multiple goroutines with different completed maps.
+// Gastown's own fields ride in keys bd's strict decode accepts: a step's
+// metadata table (a workflow step's target and interactive flag, a convoy
+// leg's focus, agent and review_only, metadata.convoy = "synthesis") and
+// vars (a convoy's base_prompt, output_* and review_only settings), which
+// gt formula run reads from the cooked tree.
 package formula

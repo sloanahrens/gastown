@@ -1,277 +1,67 @@
 # Formula Package
 
-TOML-based workflow definitions with validation, cycle detection, and execution planning.
+Gastown's shipped formulas and the town overlay dir. bd is the one formula
+engine (D6, gt-fd2cu): it parses, resolves and cooks every formula, and
+gastown renders what `bd cook` returns. Nothing in gastown parses a formula.
 
-## Overview
+## What lives here
 
-The formula package parses and validates structured workflow definitions, enabling:
+- `formulas/*.formula.toml`: the formulas embedded in the gt binary. The
+  binary is canonical: `gt formula sync` (and `gt doctor --fix`) writes them
+  to `<town>/.beads/formulas`, checked by content hash (`embed.go`).
+- `overlay.go`: the one overlay dir, `<town>/formula-overlays/<formula>.toml`,
+  whose step overrides bd applies when it cooks.
 
-- **Type inference** - Automatically detect formula type from content
-- **Validation** - Check required fields, unique IDs, valid references
-- **Cycle detection** - Prevent circular dependencies
-- **Topological sorting** - Compute dependency-ordered execution
-- **Ready computation** - Find steps with satisfied dependencies
+Check a formula against bd's strict decoder with `bd formula lint
+internal/formula/formulas`.
 
-## Installation
+## Gastown fields
 
-```go
-import "github.com/steveyegge/gastown/internal/formula"
-```
+bd's strict decode rejects keys it does not know, so gastown's own fields
+use the places it accepts:
 
-## Quick Start
-
-```go
-// Parse a formula file
-f, err := formula.ParseFile("workflow.formula.toml")
-if err != nil {
-    log.Fatal(err)
-}
-
-fmt.Printf("Formula: %s (type: %s)\n", f.Name, f.Type)
-
-// Get execution order
-order, _ := f.TopologicalSort()
-fmt.Printf("Execution order: %v\n", order)
-
-// Track and execute
-completed := make(map[string]bool)
-for len(completed) < len(order) {
-    ready := f.ReadySteps(completed)
-    // Execute ready steps (can be parallel)
-    for _, id := range ready {
-        step := f.GetStep(id)
-        fmt.Printf("Executing: %s\n", step.Title)
-        completed[id] = true
-    }
-}
-```
-
-## Formula Types
-
-### Workflow
-
-Sequential steps with explicit dependencies. Steps execute when all `needs` are satisfied.
+- Step metadata: a workflow step's `metadata.target` (where `gt formula run`
+  slings it) and `metadata.interactive` (keep it in the current session).
+- Convoy formulas (`type = "convoy"`): the step with
+  `metadata.convoy = "synthesis"` is the synthesis and every other step is a
+  leg (`metadata.focus`, `metadata.agent`, `metadata.review_only`). The vars
+  `base_prompt`, `output_directory`, `output_leg_pattern`, `output_synthesis`
+  and `review_only` are the run settings; `--set` overrides any of them.
+- There is no formula-level `agent` (bd rejects the top-level key): set
+  `metadata.agent` on a leg, or pass `gt formula run --agent`, which also
+  applies to workflow steps.
 
 ```toml
-formula = "release"
-description = "Standard release process"
-type = "workflow"
+formula = "design"
+type = "convoy"
+version = 1
 
-[vars.version]
-description = "Version to release"
+[vars.problem]
+description = "The design problem"
 required = true
 
-[[steps]]
-id = "test"
-title = "Run Tests"
-description = "Execute test suite"
+[vars.base_prompt]
+default = """Analyze {{.problem}} for {{.leg.focus}}."""
+
+[vars.output_directory]
+default = ".designs/{{.review_id}}"
 
 [[steps]]
-id = "build"
-title = "Build Artifacts"
-needs = ["test"]
+id = "api"
+title = "API Design"
+metadata.focus = "Interface design"
+description = "..."
 
 [[steps]]
-id = "publish"
-title = "Publish Release"
-needs = ["build"]
-```
-
-### Convoy
-
-Parallel legs that execute independently, with optional synthesis.
-
-```toml
-formula = "security-scan"
-type = "convoy"
-
-[[legs]]
-id = "sast"
-title = "Static Analysis"
-focus = "Code vulnerabilities"
-
-[[legs]]
-id = "deps"
-title = "Dependency Audit"
-focus = "Vulnerable packages"
-
-[[legs]]
-id = "secrets"
-title = "Secret Detection"
-focus = "Leaked credentials"
-
-[synthesis]
-title = "Security Report"
-description = "Combine all findings"
-depends_on = ["sast", "deps", "secrets"]
-```
-
-### Expansion
-
-Template-based formulas for parameterized workflows.
-
-```toml
-formula = "component-review"
-type = "expansion"
-
-[[template]]
-id = "analyze"
-title = "Analyze {{component}}"
-
-[[template]]
-id = "test"
-title = "Test {{component}}"
-needs = ["analyze"]
-```
-
-### Aspect
-
-Multi-aspect parallel analysis (similar to convoy).
-
-```toml
-formula = "code-review"
-type = "aspect"
-
-[[aspects]]
-id = "security"
-title = "Security Review"
-focus = "OWASP Top 10"
-
-[[aspects]]
-id = "performance"
-title = "Performance Review"
-focus = "Complexity and bottlenecks"
-
-[[aspects]]
-id = "maintainability"
-title = "Maintainability Review"
-focus = "Code clarity and documentation"
-```
-
-An aspect formula may instead be bd's cross-cutting form: `[[advice]]` rules
-(with optional `[[pointcuts]]`) and no `[[aspects]]`. Another formula applies
-it through `compose.aspects`, and `bd cook` inserts the advice steps around
-matching targets. `security-audit` is this form.
-
-```toml
-formula = "security-audit"
-type = "aspect"
-
-[[advice]]
-target = "implement"
-[[advice.around.before]]
-id = "{step.id}-security-prescan"
-title = "Security prescan for {step.id}"
-```
-
-## Command Allowlists
-
-A formula may declare the only shell commands a run of it should need
-(gt-9iv). Each entry is a whitespace-tokenized command prefix: `"gt reaper"`
-allows `gt reaper scan --json` but not `gt dolt cleanup`.
-
-```toml
-formula = "mol-example-reaper"
-command_allowlist = [
-  "gt reaper",
-  "gt convoy check",
-  "gt escalate",
-]
-```
-
-Semantics:
-
-- Empty/absent means unconstrained.
-- Entries are inherited through `extends` (parent entries merge with the child's).
-- Nothing enforces an allowlist at runtime today. The PreToolUse guard that
-  enforced it was retired (gt-ckunw); the declaration
-  remains as the formula's recorded scope. When checked, every segment of a
-  compound command (`&&`, `;`, pipes, `$(...)` substitutions) must match.
-- Matching is via `CheckCommandAllowed(command, entries)` — a guardrail
-  against scope drift, not a hardened sandbox.
-
-## API Reference
-
-### Parsing
-
-```go
-// Parse from file
-f, err := formula.ParseFile("path/to/formula.toml")
-
-// Parse from bytes
-f, err := formula.Parse([]byte(tomlContent))
-```
-
-### Validation
-
-Validation is automatic during parsing. Errors are descriptive:
-
-```go
-f, err := formula.Parse(data)
-// Possible errors:
-// - "formula field is required"
-// - "invalid formula type \"foo\""
-// - "duplicate step id: build"
-// - "step \"deploy\" needs unknown step: missing"
-// - "cycle detected involving step: a"
-```
-
-### Execution Planning
-
-```go
-// Get dependency-sorted order
-order, err := f.TopologicalSort()
-
-// Find ready steps given completed set
-completed := map[string]bool{"test": true, "lint": true}
-ready := f.ReadySteps(completed)
-
-// Lookup individual items
-step := f.GetStep("build")
-leg := f.GetLeg("sast")
-tmpl := f.GetTemplate("analyze")
-aspect := f.GetAspect("security")
-```
-
-### Dependency Queries
-
-```go
-// Get all item IDs
-ids := f.GetAllIDs()
-
-// Get dependencies for a specific item
-deps := f.GetDependencies("build")  // Returns ["test"]
-```
-
-## Embedded Formulas
-
-The package embeds common formulas for Gas Town workflows:
-
-```go
-// The binary is canonical: sync writes every embedded formula whose disk hash
-// differs (hand-edited copies included) and records the hash it wrote.
-count, err := formula.ProvisionFormulas("/path/to/workspace")
-plan, err := formula.UpdateFormulas("/path/to/workspace")
-
-// Classify every file by hash without writing anything (gt doctor uses this)
-dryRun, err := formula.PlanFormulaSync("/path/to/workspace")
-plan.Installed(); plan.Updated(); plan.ReplacedDrift()
-plan.Orphaned() // gt wrote it, the binary no longer embeds it
-plan.Unowned()  // gt never wrote it and the binary does not embed it
+id = "synthesis"
+metadata.convoy = "synthesis"
+title = "Design Synthesis"
+description = "Combine {{.output.directory}}/*.md"
+depends_on = ["api"]
 ```
 
 ## Testing
 
-```bash
-go test ./internal/formula/... -v
-```
-
-The package has 130% test coverage (1,200 lines of tests for 925 lines of code).
-
-## Dependencies
-
-- `github.com/BurntSushi/toml` - TOML parsing (stable, widely-used)
-
-## License
-
-MIT License - see repository LICENSE file.
+Unit tests read the embedded files as text. Real-bd checks live in
+`TestIntegrationFormulaCook*` (here and in `internal/cmd`), which cook every
+shipped formula.

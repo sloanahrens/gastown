@@ -46,6 +46,19 @@ const (
 	TypeBoot    = "boot"
 	TypeHalt    = "halt"
 
+	// TypeWake records an explicit agent-session resume: `gt session start`
+	// or `gt session restart` brought a seat back. It is the agent's own
+	// session_start (TypeSessionStart), seen from the command that asked for
+	// it — the record exists even when the session never gets far enough to
+	// prime and emit its own (gt-tcrgb, gt-i057g).
+	TypeWake = "wake"
+
+	// TypeHandoffNoPersist records a handoff whose mail never reached Dolt.
+	// A false handoff: the command failed and the successor will find an
+	// empty hook, so it is distinct from TypeHandoff rather than a field on
+	// one (gt-i057g).
+	TypeHandoffNoPersist = "handoff_nopersist"
+
 	// Session lifecycle events
 	TypeSessionStart = "session_start"
 	TypeSessionEnd   = "session_end"
@@ -266,6 +279,20 @@ func HookPayload(beadID string) map[string]interface{} {
 	}
 }
 
+// HandoffFailedPayload creates a payload for TypeHandoffNoPersist: the handoff
+// mail never reached Dolt, so there is no successor session to name and the
+// persistence error is the record.
+func HandoffFailedPayload(subject string, persistErr error) map[string]interface{} {
+	p := map[string]interface{}{}
+	if subject != "" {
+		p["subject"] = subject
+	}
+	if persistErr != nil {
+		p["error"] = persistErr.Error()
+	}
+	return p
+}
+
 // HandoffPayload creates a payload for handoff events.
 func HandoffPayload(subject string, toSession bool) map[string]interface{} {
 	p := map[string]interface{}{
@@ -384,6 +411,19 @@ func KillPayload(rig, target, reason string) map[string]interface{} {
 		"target": target,
 		"reason": reason,
 	}
+}
+
+// WakePayload creates a payload for wake events. context is what the resuming
+// command knew: the hooked issue for `gt session start`, who requested it for
+// `gt session restart`.
+func WakePayload(rig, context string) map[string]interface{} {
+	p := map[string]interface{}{
+		"rig": rig,
+	}
+	if context != "" {
+		p["context"] = context
+	}
+	return p
 }
 
 // HaltPayload creates a payload for halt events.

@@ -573,7 +573,8 @@ func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSigna
 	return waitOnTail(ctx, tail, rig, ticker.C)
 }
 
-// eventsPollInterval is how often waitForEventsFile polls the events file.
+// eventsPollInterval is how often the events file is polled, by
+// waitForEventsFile and by gt log's follow mode.
 const eventsPollInterval = 200 * time.Millisecond
 
 // waitOnTail polls tail once per value received from ticks until a line

@@ -1,5 +1,3 @@
-review_only = true  # All legs are analysis-only — no code commits expected (gt-kvf)
-
 description = """
 Parallel PRD review via specialized analysts. Uncovers missing requirements,
 ambiguities, feasibility risks, and scope issues before implementation begins.
@@ -9,27 +7,26 @@ run as a polecat in parallel and write one analysis file. The synthesis step
 turns them into a prioritized list of clarifying questions for the human.
 
 ## Output
-A .prd-reviews/<review-id>/ directory containing:
-- Individual dimension analyses
-- prd-review.md with consolidated questions and confidence assessment
+.prd-reviews/<review-id>/: one analysis per leg plus prd-review.md
+(consolidated questions, confidence assessment).
 """
 formula = "mol-prd-review"
 type = "convoy"
 version = 1
 
-[inputs]
-[inputs.problem]
+# Every step is a leg but the one metadata.convoy marks the synthesis.
+[vars.problem]
 description = "The idea, feature, or problem statement to review"
 type = "string"
 required = true
 
-[inputs.context]
+[vars.context]
 description = "Additional context: existing code, constraints, prior decisions, related beads"
 type = "string"
 required = false
 
-[prompts]
-base = """
+[vars.base_prompt]
+default = """
 # PRD Review Assignment
 
 You are a specialized analyst participating in a parallel PRD review convoy.
@@ -82,19 +79,27 @@ Be specific. Flag unknowns explicitly. Your job is to surface what's missing
 or unclear — not to fill in the gaps yourself.
 """
 
-[output]
-directory = ".prd-reviews/{{.review_id}}"
-leg_pattern = "{{.leg.id}}.md"
-synthesis = "prd-review.md"
+[vars.output_directory]
+default = ".prd-reviews/{{.review_id}}"
+
+[vars.output_leg_pattern]
+default = "{{.leg.id}}.md"
+
+[vars.output_synthesis]
+default = "prd-review.md"
+
+# Analysis only, no commits (gt-kvf)
+[vars.review_only]
+default = "true"
 
 # ============================================================================
 # LEGS
 # ============================================================================
 
-[[legs]]
+[[steps]]
 id = "requirements"
 title = "Requirements Completeness"
-focus = "Success criteria and acceptance conditions"
+metadata.focus = "Success criteria and acceptance conditions"
 description = """
 Analyze whether the requirements are complete enough to build from.
 
@@ -113,10 +118,10 @@ Analyze whether the requirements are complete enough to build from.
 - What would a QA engineer flag as untestable?
 """
 
-[[legs]]
+[[steps]]
 id = "gaps"
 title = "Missing Requirements"
-focus = "What hasn't been thought through yet"
+metadata.focus = "What hasn't been thought through yet"
 description = """
 Identify requirements that are completely absent from the PRD.
 
@@ -139,10 +144,10 @@ Identify requirements that are completely absent from the PRD.
 - What will ops ask about at launch that nobody thought about?
 """
 
-[[legs]]
+[[steps]]
 id = "ambiguity"
 title = "Ambiguity Analysis"
-focus = "What's unclear, contradictory, or underspecified"
+metadata.focus = "What's unclear, contradictory, or underspecified"
 description = """
 Find statements in the PRD that are ambiguous or open to multiple interpretations.
 
@@ -162,10 +167,10 @@ Find statements in the PRD that are ambiguous or open to multiple interpretation
 - What will cause a PR review debate because the spec doesn't say?
 """
 
-[[legs]]
+[[steps]]
 id = "feasibility"
 title = "Technical Feasibility"
-focus = "Is this buildable? What are the hard problems?"
+metadata.focus = "Is this buildable? What are the hard problems?"
 description = """
 Assess the technical feasibility and identify hard engineering challenges.
 
@@ -185,10 +190,10 @@ Assess the technical feasibility and identify hard engineering challenges.
 - What would double the implementation effort if discovered mid-build?
 """
 
-[[legs]]
+[[steps]]
 id = "scope"
 title = "Scope Analysis"
-focus = "What's in/out and where scope creep will happen"
+metadata.focus = "What's in/out and where scope creep will happen"
 description = """
 Analyze scope boundaries and identify scope creep risk.
 
@@ -208,10 +213,10 @@ Analyze scope boundaries and identify scope creep risk.
 - Are there requirements that belong in a separate project entirely?
 """
 
-[[legs]]
+[[steps]]
 id = "stakeholders"
 title = "Stakeholder Analysis"
-focus = "Who's affected and whether needs conflict"
+metadata.focus = "Who's affected and whether needs conflict"
 description = """
 Identify all affected stakeholders and assess whether their needs conflict.
 
@@ -234,7 +239,9 @@ Identify all affected stakeholders and assess whether their needs conflict.
 # SYNTHESIS
 # ============================================================================
 
-[synthesis]
+[[steps]]
+id = "synthesis"
+metadata.convoy = "synthesis"
 title = "PRD Review Synthesis"
 description = """
 Combine all leg analyses into a consolidated PRD review with prioritized questions.

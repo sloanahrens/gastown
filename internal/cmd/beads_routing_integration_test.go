@@ -189,6 +189,7 @@ func hasIssueID(issues []*beads.Issue, id string) bool {
 // TestIntegrationBeadsRoutingFromTownRoot verifies that bd show routes to correct rig
 // based on issue ID prefix when run from town root.
 func TestIntegrationBeadsRoutingFromTownRoot(t *testing.T) {
+	t.Parallel()
 	// Skip if bd is not available
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping routing test")
@@ -241,6 +242,7 @@ func TestIntegrationBeadsRoutingFromTownRoot(t *testing.T) {
 
 // TestIntegrationBeadsRedirectResolution verifies that redirect files are followed correctly.
 func TestIntegrationBeadsRedirectResolution(t *testing.T) {
+	t.Parallel()
 	townRoot := setupRoutingTestTown(t)
 
 	tests := []struct {
@@ -280,6 +282,7 @@ func TestIntegrationBeadsRedirectResolution(t *testing.T) {
 
 // TestIntegrationBeadsCircularRedirectDetection verifies that circular redirects are detected.
 func TestIntegrationBeadsCircularRedirectDetection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a beads directory with a redirect pointing to itself
@@ -309,6 +312,7 @@ func TestIntegrationBeadsCircularRedirectDetection(t *testing.T) {
 
 // TestIntegrationBeadsPrefixConflictDetection verifies that duplicate prefixes are detected.
 func TestIntegrationBeadsPrefixConflictDetection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -344,6 +348,7 @@ func TestIntegrationBeadsPrefixConflictDetection(t *testing.T) {
 
 // TestIntegrationBeadsListFromPolecatDirectory verifies that bd list works from polecat directories.
 func TestIntegrationBeadsListFromPolecatDirectory(t *testing.T) {
+	t.Parallel()
 	// Skip if bd is not available
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
@@ -376,6 +381,7 @@ func TestIntegrationBeadsListFromPolecatDirectory(t *testing.T) {
 
 // TestIntegrationBeadsListFromCrewDirectory verifies that bd list works from crew directories.
 func TestIntegrationBeadsListFromCrewDirectory(t *testing.T) {
+	t.Parallel()
 	// Skip if bd is not available
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
@@ -407,6 +413,7 @@ func TestIntegrationBeadsListFromCrewDirectory(t *testing.T) {
 
 // TestIntegrationBeadsRoutesLoading verifies that routes.jsonl is loaded correctly.
 func TestIntegrationBeadsRoutesLoading(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -455,6 +462,7 @@ func TestIntegrationBeadsRoutesLoading(t *testing.T) {
 
 // TestIntegrationBeadsAppendRoute verifies that routes can be appended and updated.
 func TestIntegrationBeadsAppendRoute(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -503,6 +511,7 @@ func TestIntegrationBeadsAppendRoute(t *testing.T) {
 
 // TestIntegrationBeadsRemoveRoute verifies that routes can be removed.
 func TestIntegrationBeadsRemoveRoute(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -537,6 +546,7 @@ func TestIntegrationBeadsRemoveRoute(t *testing.T) {
 // for cross-rig bead hooking using ExtractPrefix and GetRigPathForPrefix.
 // This is the fix for https://github.com/steveyegge/gastown/issues/148
 func TestIntegrationSlingCrossRigRoutingResolution(t *testing.T) {
+	t.Parallel()
 	townRoot := setupRoutingTestTown(t)
 
 	tests := []struct {
@@ -585,6 +595,7 @@ func TestIntegrationSlingCrossRigRoutingResolution(t *testing.T) {
 
 // TestIntegrationSlingCrossRigUnknownPrefix verifies behavior for unknown prefixes.
 func TestIntegrationSlingCrossRigUnknownPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := setupRoutingTestTown(t)
 
 	// An unknown prefix should return empty string
@@ -602,6 +613,7 @@ func TestIntegrationSlingCrossRigUnknownPrefix(t *testing.T) {
 
 // TestIntegrationBeadsGetPrefixForRig verifies prefix lookup by rig name.
 func TestIntegrationBeadsGetPrefixForRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
