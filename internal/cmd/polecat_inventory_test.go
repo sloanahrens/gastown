@@ -466,3 +466,132 @@ func TestPolecatNameFromAssignee(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildPolecatInventoryItemStaleAgentState is the agent_state half of
+// gt-eqiid (gt-is9jb): flint's agent bead still said working after its session
+// died, and its hook named a deferred bead. With no live bead assigned, the
+// state alone read as a stall the witness may restart. The record is debris
+// only when the hook reference is readable and names nothing at risk; every
+// other shape keeps reading as a stall.
+func TestBuildPolecatInventoryItemStaleAgentState(t *testing.T) {
+	t.Parallel()
+	sessions := func(running bool) polecatSessionSet {
+		if running {
+			return newPolecatSessionSet(polecatTestRegistry(), []string{"gt-running"})
+		}
+		return polecatSessionSet{}
+	}
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		agentState beads.AgentState
+		hookBead   string
+		source     polecat.IssueReader
+		running    bool
+		updatedAt  time.Time
+		wantState  polecat.State
+		wantCap    bool
+	}{
+		{
+			// The reported case.
+			name:       "working, no session, deferred hook is idle debris",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-2xqtj",
+			source:     fakeIssueShower{issue: &beads.Issue{ID: "gt-2xqtj", Status: string(beads.StatusDeferred)}},
+			wantState:  polecat.StateIdle,
+		},
+		{
+			name:       "working, no session, no hook reference is idle debris",
+			agentState: beads.AgentStateWorking,
+			source:     fakeIssueShower{},
+			wantState:  polecat.StateIdle,
+		},
+		{
+			name:       "working, no session, closed hook is idle debris",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-done",
+			source:     fakeIssueShower{issue: &beads.Issue{ID: "gt-done", Status: string(beads.StatusClosed)}},
+			wantState:  polecat.StateIdle,
+		},
+		{
+			name:       "working, no session, live hook is still a stall",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-work",
+			source:     fakeIssueShower{issue: &beads.Issue{ID: "gt-work", Status: string(beads.IssueStatusHooked)}},
+			wantState:  polecat.StateStalled,
+			wantCap:    true,
+		},
+		{
+			name:       "working, no session, unreadable hook is still a stall",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-work",
+			source:     fakeIssueShower{err: errors.New("bd exploded")},
+			wantState:  polecat.StateStalled,
+			wantCap:    true,
+		},
+		{
+			name:       "working, no session, missing hook bead is still a stall",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-gone",
+			source:     fakeIssueShower{},
+			wantState:  polecat.StateStalled,
+			wantCap:    true,
+		},
+		{
+			// The capacity projection passes no source: it cannot read the
+			// hook, so it keeps counting the seat.
+			name:       "working, no session, no issue source is still a stall",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-2xqtj",
+			wantState:  polecat.StateStalled,
+			wantCap:    true,
+		},
+		{
+			name:       "working with a live session is working",
+			agentState: beads.AgentStateWorking,
+			hookBead:   "gt-2xqtj",
+			source:     fakeIssueShower{issue: &beads.Issue{ID: "gt-2xqtj", Status: string(beads.StatusDeferred)}},
+			running:    true,
+			wantState:  polecat.StateWorking,
+			wantCap:    true,
+		},
+		{
+			name:       "spawning inside its grace window is spawning",
+			agentState: beads.AgentStateSpawning,
+			source:     fakeIssueShower{},
+			updatedAt:  now.Add(-30 * time.Second),
+			wantState:  polecat.StateSpawning,
+			wantCap:    true,
+		},
+		{
+			name:       "spawning past its grace window with an inert hook is idle debris",
+			agentState: beads.AgentStateSpawning,
+			hookBead:   "gt-2xqtj",
+			source:     fakeIssueShower{issue: &beads.Issue{ID: "gt-2xqtj", Status: string(beads.StatusDeferred)}},
+			updatedAt:  now.Add(-6 * time.Minute),
+			wantState:  polecat.StateIdle,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := polecatInventoryEnv{
+				IssueSource: tt.source,
+				Spawn:       polecatSpawnFacts{UpdatedAt: tt.updatedAt, Grace: 5 * time.Minute, Now: now},
+			}
+			item := buildPolecatInventoryItem(
+				"gastown", "running",
+				&beads.AgentFields{AgentState: string(tt.agentState), CleanupStatus: string(polecat.CleanupClean), HookBead: tt.hookBead},
+				nil, sessions(tt.running), env,
+			)
+			if item.State != tt.wantState {
+				t.Fatalf("state = %q, want %q (item %+v)", item.State, tt.wantState, item)
+			}
+			if item.Disposition.CountsTowardCapacity != tt.wantCap {
+				t.Errorf("CountsTowardCapacity = %v, want %v (disposition %+v)", item.Disposition.CountsTowardCapacity, tt.wantCap, item.Disposition)
+			}
+		})
+	}
+}
