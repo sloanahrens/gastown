@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -135,25 +134,19 @@ func (c *HookAttachmentValidCheck) findRigBeadsDirs(townRoot string) []string {
 
 	// Look for .beads directories in rig subdirectories
 	// Pattern: <townRoot>/<rig>/.beads (but NOT <townRoot>/.beads which is town-level)
-	cmd := exec.Command("find", townRoot, "-maxdepth", "2", "-type", "d", "-name", ".beads")
-	output, err := cmd.Output()
+	entries, err := os.ReadDir(townRoot)
 	if err != nil {
 		return nil
 	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if line == "" {
+	for _, e := range entries {
+		// Skip the mayor directory; a symlinked rig is not walked.
+		if !e.IsDir() || e.Name() == "mayor" {
 			continue
 		}
-		// Skip town-level .beads
-		if line == filepath.Join(townRoot, ".beads") {
-			continue
+		dir := filepath.Join(townRoot, e.Name(), ".beads")
+		if fi, err := os.Lstat(dir); err == nil && fi.IsDir() {
+			dirs = append(dirs, dir)
 		}
-		// Skip mayor directory
-		if strings.Contains(line, "/mayor/") {
-			continue
-		}
-		dirs = append(dirs, line)
 	}
 
 	return dirs

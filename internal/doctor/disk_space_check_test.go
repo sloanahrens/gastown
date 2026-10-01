@@ -1,39 +1,48 @@
 package doctor
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
+
+// diskSpaceCheck is a DiskSpaceCheck measuring info, or failing with err.
+func diskSpaceCheck(info *util.DiskSpaceInfo, err error) *DiskSpaceCheck {
+	c := NewDiskSpaceCheck()
+	c.diskSpace = func(string) (*util.DiskSpaceInfo, error) { return info, err }
+	return c
+}
 
 func TestDiskSpaceCheck_Run(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	check := NewDiskSpaceCheck()
-	result := check.Run(ctx)
-
-	if result.Name != "disk-space" {
-		t.Errorf("Name = %q, want %q", result.Name, "disk-space")
+	const gb = 1 << 30
+	cases := []struct {
+		name   string
+		info   *util.DiskSpaceInfo
+		status CheckStatus
+		prefix string
+	}{
+		{"plenty", &util.DiskSpaceInfo{AvailableBytes: 100 * gb, TotalBytes: 500 * gb, UsedPercent: 80}, StatusOK, "100.0 GB free"},
+		{"low", &util.DiskSpaceInfo{AvailableBytes: 800 << 20, TotalBytes: 500 * gb, UsedPercent: 90}, StatusWarning, "WARNING"},
+		{"exhausted", &util.DiskSpaceInfo{AvailableBytes: gb / 4, TotalBytes: 500 * gb, UsedPercent: 99.9}, StatusError, "CRITICAL"},
 	}
-
-	// In a normal test environment, disk space should be OK or Warning (not Error)
-	if result.Status == StatusError {
-		t.Logf("Disk space is critical in test environment: %s", result.Message)
-	}
-
-	// Message should always be non-empty
-	if result.Message == "" {
-		t.Error("Message should not be empty")
+	for _, tc := range cases {
+		result := diskSpaceCheck(tc.info, nil).Run(&CheckContext{TownRoot: "/town"})
+		if result.Name != "disk-space" {
+			t.Errorf("%s: Name = %q, want %q", tc.name, result.Name, "disk-space")
+		}
+		if result.Status != tc.status || !strings.HasPrefix(result.Message, tc.prefix) {
+			t.Errorf("%s: got %v %q, want %v %q...", tc.name, result.Status, result.Message, tc.status, tc.prefix)
+		}
 	}
 }
 
 func TestDiskSpaceCheck_InvalidPath(t *testing.T) {
 	t.Parallel()
-	ctx := &CheckContext{TownRoot: "/nonexistent/path/that/should/not/exist"}
-
-	check := NewDiskSpaceCheck()
-	result := check.Run(ctx)
+	check := diskSpaceCheck(nil, errors.New("statfs /nonexistent: no such file or directory"))
+	result := check.Run(&CheckContext{TownRoot: "/nonexistent"})
 
 	if result.Status != StatusWarning {
 		t.Errorf("Status = %v, want Warning for invalid path", result.Status)

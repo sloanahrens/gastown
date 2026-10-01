@@ -109,6 +109,11 @@ func CheckDiskSpace(path string) (DiskSpaceLevel, string, error) {
 	return level, msg, nil
 }
 
+// Level is CheckDiskSpace's verdict on space already measured.
+func (d *DiskSpaceInfo) Level() (DiskSpaceLevel, string) {
+	return diskSpaceLevel(d)
+}
+
 // apfsSpaceFunc reports an APFS container's free and total bytes for the
 // volume mounted at mountPoint.
 type apfsSpaceFunc func(mountPoint string) (free, total uint64, err error)
