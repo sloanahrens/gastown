@@ -127,3 +127,16 @@ func ForAgentBead(c Client) Client {
 	}
 	return c
 }
+
+// UpdateAgentDescriptionFields updates the agent description fields updates
+// sets, in one read-modify-write of the bead's description. A *Beads also
+// routes id to its canonical database and holds the agent-bead lock.
+func UpdateAgentDescriptionFields(c Client, id string, updates AgentFieldUpdates) error {
+	if b, ok := c.(*Beads); ok {
+		return b.UpdateAgentDescriptionFields(id, updates)
+	}
+	if err := updates.validate(); err != nil {
+		return err
+	}
+	return updateAgentDescriptionFields(c, id, updates)
+}

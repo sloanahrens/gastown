@@ -30,7 +30,12 @@ func HandoffBeadTitle(role string) string {
 // FindHandoffBead finds the pinned handoff bead for a role by title.
 // Returns nil if not found (not an error).
 func (b *Beads) FindHandoffBead(role string) (*Issue, error) {
-	issues, err := b.List(ListOptions{Status: StatusPinned, Priority: -1})
+	return FindHandoffBead(b, role)
+}
+
+// FindHandoffBead is (*Beads).FindHandoffBead in any Client.
+func FindHandoffBead(c Client, role string) (*Issue, error) {
+	issues, err := c.List(ListOptions{Status: StatusPinned, Priority: -1})
 	if err != nil {
 		return nil, fmt.Errorf("listing pinned issues: %w", err)
 	}

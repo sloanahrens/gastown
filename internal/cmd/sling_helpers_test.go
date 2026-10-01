@@ -370,3 +370,32 @@ func TestFormulaShowHasBody(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifyFormulaTriesMolPrefixAndChecksBody: a formula is found under its
+// own name or with the mol- prefix, in the town's formula engine at workDir;
+// a show that prints no formula does not count.
+func TestVerifyFormulaTriesMolPrefixAndChecksBody(t *testing.T) {
+	t.Parallel()
+	fake := &fakeCook{show: func(name string) []byte {
+		switch name {
+		case "mol-widget":
+			return []byte(`{"formula":"mol-widget"}`)
+		case "ghost", "mol-ghost":
+			return []byte("null\n")
+		}
+		return nil
+	}}
+	f := formulaBD{open: fake.open}
+	if err := f.verifyFormula("widget", "/town/gastown", "/town"); err != nil {
+		t.Fatalf("widget via mol-widget: %v", err)
+	}
+	if got, want := fake.log(), "formula show widget\nformula show mol-widget"; got != want {
+		t.Errorf("calls = %q, want %q", got, want)
+	}
+	if site := fake.calls[0].site; site.dir != "/town/gastown" || site.townRoot != "/town" {
+		t.Errorf("site = %+v, want dir /town/gastown in town /town", site)
+	}
+	if err := f.verifyFormula("ghost", "", "/town"); err == nil || !strings.Contains(err.Error(), "formula 'ghost' not found") {
+		t.Errorf("ghost: err = %v, want not found", err)
+	}
+}

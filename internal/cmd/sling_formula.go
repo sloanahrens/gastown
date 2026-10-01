@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -154,31 +153,23 @@ func formulaShowHasBody(out []byte) bool {
 
 // verifyFormulaExists checks that the formula exists using bd formula show.
 // Formulas are TOML files (.formula.toml).
-// Requests stale-read compatibility for consistency with verifyBeadExists.
 func verifyFormulaExists(formulaName, workDir, townRoot string) error {
+	return realFormulaBD().verifyFormula(formulaName, workDir, townRoot)
+}
+
+// verifyFormula is verifyFormulaExists with bd reached through f.
+func (f formulaBD) verifyFormula(formulaName, workDir, townRoot string) error {
 	if workDir == "" {
 		workDir = townRoot
 	}
-	// Try bd formula show (handles all formula file formats)
-	// Use Output() instead of Run() to detect bd exit 0 bug:
-	// when formula not found, bd may exit 0 but produce empty stdout
-	// (an envelope with null data under machine mode).
-	// Stderr discarded — first attempt may fail expectedly (retry with mol- prefix).
-	if out, err := BdCmd("formula", "show", formulaName).
-		AllowStale().
-		Dir(workDir).
-		WithGTRoot(townRoot).
-		Stderr(io.Discard).Output(); err == nil && formulaShowHasBody(out) {
-		return nil
-	}
-
-	// Try with mol- prefix
-	if out, err := BdCmd("formula", "show", "mol-"+formulaName).
-		AllowStale().
-		Dir(workDir).
-		WithGTRoot(townRoot).
-		Stderr(io.Discard).Output(); err == nil && formulaShowHasBody(out) {
-		return nil
+	// Try bd formula show (handles all formula file formats), then with
+	// the mol- prefix. bd can exit 0 for a formula it did not find, with
+	// an empty body, so the body is checked too.
+	eng := f.engine(formulaSite{dir: workDir, townRoot: townRoot})
+	for _, name := range []string{formulaName, "mol-" + formulaName} {
+		if out, err := eng.FormulaShow(name); err == nil && formulaShowHasBody(out) {
+			return nil
+		}
 	}
 	if _, err := formula.GetEmbeddedFormulaContent(formulaName); err == nil {
 		return nil
@@ -196,27 +187,10 @@ func runSlingFormula(ctx context.Context, args []string) error {
 	return newSlingRun(slingOptionsFromFlags()).runFormula(ctx, args)
 }
 
-// cookStandaloneFormula cooks a formula's proto for a standalone sling.
-func cookStandaloneFormula(formulaName, workDir, townRoot string) error {
-	return BdCmd("cook", formulaName).
-		Dir(workDir).
-		WithGTRoot(townRoot).
-		Run()
-}
-
 // createFormulaWisp instantiates formulaName as an ephemeral wisp and
 // returns bd's JSON answer.
 func createFormulaWisp(formulaName, workDir, townRoot string, vars []string) ([]byte, error) {
-	wispArgs := []string{"mol", "wisp", formulaName}
-	for _, v := range vars {
-		wispArgs = append(wispArgs, "--var", v)
-	}
-	wispArgs = append(wispArgs, "--json")
-	return BdCmd(wispArgs...).
-		Dir(workDir).
-		WithAutoCommit().
-		WithGTRoot(townRoot).
-		Output()
+	return realFormulaBD().engine(formulaSite{dir: workDir, townRoot: townRoot}).Wisp(formulaName, vars)
 }
 
 // runFormula handles standalone formula slinging.

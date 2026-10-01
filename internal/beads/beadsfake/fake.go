@@ -55,7 +55,7 @@ type Fake struct {
 	clock  clockwork.Clock
 	// own is the default clock when no WithClock was given. It moves one
 	// second at every write, as timestamps on a real database move on.
-	own *clockwork.FakeClock
+	own    *clockwork.FakeClock
 	seq    int
 	issues map[string]*record
 
@@ -195,8 +195,20 @@ func statusMatches(status, filter string) bool {
 	case "all":
 		return true
 	default:
-		return status == filter
+		for _, f := range strings.Split(filter, ",") {
+			if status == f {
+				return true
+			}
+		}
+		return false
 	}
+}
+
+// closedAtOrAfter reports whether is was closed at or after t; an issue
+// never closed is not.
+func closedAtOrAfter(is *beads.Issue, t time.Time) bool {
+	at, err := time.Parse(time.RFC3339, is.ClosedAt)
+	return err == nil && !at.Before(t.Truncate(time.Second))
 }
 
 func hasLabel(is *beads.Issue, label string) bool {
@@ -231,7 +243,8 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			opts.Parent != "" && is.Parent != opts.Parent,
 			opts.Assignee != "" && is.Assignee != opts.Assignee,
 			opts.NoAssignee && is.Assignee != "",
-			opts.IssueType != "" && is.Type != opts.IssueType:
+			opts.IssueType != "" && is.Type != opts.IssueType,
+			!opts.ClosedAfter.IsZero() && !closedAtOrAfter(is, opts.ClosedAfter):
 			continue
 		}
 		out = append(out, is)

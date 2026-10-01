@@ -511,7 +511,7 @@ func buildAgentIdentity(ctx RoleContext) string {
 }
 
 // getMoleculeProgressInfo gets progress info for a molecule instance.
-func getMoleculeProgressInfo(b *beads.Beads, moleculeRootID string) (*MoleculeProgressInfo, error) {
+func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculeProgressInfo, error) {
 	// Get the molecule root issue
 	root, err := b.Show(moleculeRootID)
 	if err != nil {

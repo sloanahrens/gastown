@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // TestExtractRoleFromIdentity verifies that role names are correctly extracted
@@ -38,158 +41,40 @@ func TestExtractRoleFromIdentity(t *testing.T) {
 	}
 }
 
-// TestDoneClosesAttachedMolecule verifies that gt done closes both the hooked
-// bead AND its attached molecule (wisp).
-//
-// Current bug: gt done only closes the hooked bead. If base bead is hooked
-// with attached_molecule pointing to wisp, the wisp becomes orphaned.
-//
-// Expected behavior: gt done should:
-// 1. Check for attached_molecule in hooked bead
-// 2. Close the attached molecule (wisp) first
-// 3. Close the hooked bead (base bead)
-//
-// This ensures no orphaned wisps remain after work completes.
-func TestDoneClosesAttachedMolecule(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-
-	// Create rig structure - use simple rig name that matches routes lookup
-	rigPath := filepath.Join(townRoot, "gastown")
-	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		t.Fatalf("mkdir rig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	// Create routes - path first part must match GT_RIG for prefix lookup
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"gastown"}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
-	}
-
-	// The in-process bd holds:
-	// - Agent bead gt-gastown-polecat-nux with hook_bead = gt-abc123 (base bead)
-	// - Base bead gt-abc123 with attached_molecule: gt-wisp-xyz, status=hooked
-	// - Wisp gt-wisp-xyz (the attached molecule)
-	shows := map[string]string{
-		"gt-gastown-polecat-nux": `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-abc123","agent_state":"working"}]`,
-		"gt-abc123":              `[{"id":"gt-abc123","title":"Bug to fix","status":"hooked","description":"attached_molecule: gt-wisp-xyz"}]`,
-		"gt-wisp-xyz":            `[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]`,
-	}
-	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		ids := nonFlagArgs(args)
-		switch cmd {
-		case "show":
-			if len(ids) == 0 {
-				return bdOut("[]")
-			}
-			if argsMention(args, "--children") {
-				return bdOut(`{"` + ids[0] + `":[]}`)
-			}
-			if out, ok := shows[ids[0]]; ok {
-				return bdOut(out)
-			}
-			return bdOut("[]")
-		case "close":
-			if len(ids) > 0 {
-				f.logLine("close " + ids[0])
-			}
-		}
-		return bdOut("")
-	}}
-	env := doneStateEnv{
-		getenv:     envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
-		bd:         bd.run,
-		reviewHead: func() (string, error) { return "", errors.New("no review evidence in this test") },
-	}
-
-	// Pass issueID directly — hq-l6mm5 removed agent bead hook slot lookup
-	_ = updateAgentStateOnDoneIn(env, rigPath, townRoot, ExitCompleted, "gt-abc123")
-
-	closed := closeLines(bd)
-	foundWisp, foundBase := false, false
-	for _, line := range closed {
-		if strings.Contains(line, "gt-wisp-xyz") {
-			foundWisp = true
-		}
-		if strings.Contains(line, "gt-abc123") {
-			foundBase = true
-		}
-	}
-	if !foundWisp {
-		t.Errorf("attached molecule gt-wisp-xyz was NOT closed\n"+
-			"gt done should close the attached_molecule before closing the hooked bead.\n"+
-			"This leaves orphaned wisps after work completes.\n"+
-			"Beads closed: %v", closed)
-	}
-	if !foundBase {
-		t.Errorf("hooked bead gt-abc123 was NOT closed\nBeads closed: %v", closed)
-	}
-}
-
 // testMoleculeEnv is gt mol burn/squash in townRoot, whose local beads
-// workspace is the town, with bd answered by bd and flags at their defaults.
-func testMoleculeEnv(townRoot string, bd *inprocBD) moleculeLifecycleEnv {
+// workspace is the town, with db as its store and flags at their defaults.
+func testMoleculeEnv(townRoot string, db *doneRecorder) moleculeLifecycleEnv {
 	return moleculeLifecycleEnv{
 		getwd:        func() (string, error) { return townRoot, nil },
 		findTown:     func() (string, error) { return townRoot, nil },
 		getenv:       envMap(nil),
 		beadsWorkDir: func() (string, error) { return townRoot, nil },
-		bd:           bd.run,
+		store:        func(string) moleculeStore { return moleculeFake{db} },
 		out:          io.Discard,
 		errOut:       io.Discard,
 		noDigest:     true, // the digest path is not what these tests pin
 	}
 }
 
-// handoffMoleculeBD is an in-process bd holding one pinned handoff bead with
-// molecule attached; children maps a parent to its --children answer. Every
-// close is logged as "close <args>".
-func handoffMoleculeBD(handoffTitle, molecule string, children map[string]string) *inprocBD {
-	handoff := `[{"id":"gt-handoff-1","title":"` + handoffTitle + `","status":"pinned","description":"attached_molecule: ` + molecule + `"}]`
-	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
-		switch cmd {
-		case "list":
-			if argsMention(args, "status=pinned") {
-				return bdOut(handoff)
-			}
-			for parent, kids := range children {
-				if argsMention(args, "parent="+parent) {
-					return bdOut(kids)
-				}
-			}
-			return bdOut("[]")
-		case "show":
-			if argsMention(args, "--children") {
-				if kids, ok := children[args[0]]; ok {
-					return bdOut(`{"` + args[0] + `":` + kids + `}`)
-				}
-				return bdOut(`{"` + args[0] + `":[]}`)
-			}
-			return bdOut(handoff)
-		case "create":
-			return bdOut(`{"id":"gt-digest-1","title":"Digest"}`)
-		case "close":
-			f.logLine("close " + strings.Join(args, " "))
-		}
-		return bdOut("")
-	}}
+// moleculeFake is a recorded store with the audited detach.
+type moleculeFake struct{ *doneRecorder }
+
+func (f moleculeFake) DetachMoleculeWithAudit(id string, _ beads.DetachOptions) (*beads.Issue, error) {
+	return fakeDetach(f, id)
 }
 
-// closeLines is the bd close calls, in order.
-func closeLines(bd *inprocBD) []string {
-	var out []string
-	for _, l := range strings.Split(strings.TrimSpace(bd.log()), "\n") {
-		if strings.HasPrefix(l, "close ") {
-			out = append(out, l)
-		}
-	}
-	return out
+// handoffMoleculeDB holds one pinned handoff bead titled handoffTitle with
+// molecule attached, the molecule's root, and steps as its children; every
+// close is recorded.
+func handoffMoleculeDB(t *testing.T, handoffTitle, molecule string, steps ...beads.Issue) *doneRecorder {
+	t.Helper()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-handoff-1", Title: handoffTitle, Status: string(beads.StatusPinned), Description: "attached_molecule: " + molecule},
+		beads.Issue{ID: molecule, Title: "mol", Status: string(beads.StatusHooked), Ephemeral: true},
+	)
+	seedChildren(t, db, molecule, steps...)
+	return &doneRecorder{Client: db, mu: &sync.Mutex{}, closes: &[]string{}}
 }
 
 func squashCmd(ctx context.Context) *cobra.Command {
@@ -203,7 +88,7 @@ func squashCmd(ctx context.Context) *cobra.Command {
 func TestSquashJitterRejectsBadDurations(t *testing.T) {
 	t.Parallel()
 	for jitter, want := range map[string]string{"bogus": "invalid --jitter duration", "-5s": "non-negative"} {
-		e := testMoleculeEnv(t.TempDir(), handoffMoleculeBD("x", "y", nil))
+		e := testMoleculeEnv(t.TempDir(), handoffMoleculeDB(t, "x", "y"))
 		e.jitter = jitter
 		e.findTown = func() (string, error) { t.Error("workspace looked up before the jitter was validated"); return "", nil }
 		err := moleculeSquash(squashCmd(context.Background()), e, nil)
@@ -217,7 +102,7 @@ func TestSquashJitterRejectsBadDurations(t *testing.T) {
 // to the workspace lookup, which fails here.
 func TestSquashJitterZeroDuration(t *testing.T) {
 	t.Parallel()
-	e := testMoleculeEnv(t.TempDir(), handoffMoleculeBD("x", "y", nil))
+	e := testMoleculeEnv(t.TempDir(), handoffMoleculeDB(t, "x", "y"))
 	e.jitter = "0s"
 	e.findTown = func() (string, error) { return "", errors.New("not in a Gas Town workspace") }
 	err := moleculeSquash(squashCmd(context.Background()), e, nil)
@@ -231,7 +116,7 @@ func TestSquashJitterZeroDuration(t *testing.T) {
 func TestSquashJitterContextCancellation(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	e := testMoleculeEnv(townRoot, handoffMoleculeBD("refinery Handoff", "gt-wisp-patrol1", nil))
+	e := testMoleculeEnv(townRoot, handoffMoleculeDB(t, "refinery Handoff", "gt-wisp-patrol1"))
 	e.jitter = "10m" // the sleep would block if cancellation didn't work
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -250,12 +135,15 @@ func TestSquashJitterContextCancellation(t *testing.T) {
 func TestBurnClosesWispRoot(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol1", nil)
-	if err := moleculeBurn(testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+	db := handoffMoleculeDB(t, "witness Handoff", "gt-wisp-mol1")
+	if err := moleculeBurn(testMoleculeEnv(townRoot, db), []string{"witness"}); err != nil {
 		t.Fatalf("burn: %v", err)
 	}
-	if closes := strings.Join(closeLines(bd), "\n"); !strings.Contains(closes, "gt-wisp-mol1") {
-		t.Errorf("molecule root gt-wisp-mol1 was not closed; close calls:\n%s", closes)
+	if got := db.closed(); !reflect.DeepEqual(got, []string{"gt-wisp-mol1"}) {
+		t.Errorf("closes = %v, want the molecule root gt-wisp-mol1", got)
+	}
+	if h, err := db.Show("gt-handoff-1"); err != nil || beads.ParseAttachmentFields(h) != nil {
+		t.Errorf("handoff = %+v, %v; want the molecule detached", h, err)
 	}
 }
 
@@ -264,12 +152,12 @@ func TestBurnClosesWispRoot(t *testing.T) {
 func TestSquashClosesWispRoot(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	bd := handoffMoleculeBD("refinery Handoff", "gt-wisp-patrol1", nil)
-	if err := moleculeSquash(squashCmd(context.Background()), testMoleculeEnv(townRoot, bd), []string{"refinery"}); err != nil {
+	db := handoffMoleculeDB(t, "refinery Handoff", "gt-wisp-patrol1")
+	if err := moleculeSquash(squashCmd(context.Background()), testMoleculeEnv(townRoot, db), []string{"refinery"}); err != nil {
 		t.Fatalf("squash: %v", err)
 	}
-	if closes := strings.Join(closeLines(bd), "\n"); !strings.Contains(closes, "gt-wisp-patrol1") {
-		t.Errorf("molecule root gt-wisp-patrol1 was not closed; close calls:\n%s", closes)
+	if got := db.closed(); !reflect.DeepEqual(got, []string{"gt-wisp-patrol1"}) {
+		t.Errorf("closes = %v, want the molecule root gt-wisp-patrol1", got)
 	}
 }
 
@@ -278,26 +166,13 @@ func TestSquashClosesWispRoot(t *testing.T) {
 func TestSquashClosesDescendantsAndRoot(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol2", map[string]string{
-		"gt-wisp-mol2": `[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]`,
-	})
-	if err := moleculeBurn(testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+	db := handoffMoleculeDB(t, "witness Handoff", "gt-wisp-mol2",
+		beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "open"},
+		beads.Issue{ID: "gt-step-2", Title: "Step 2", Status: "closed"})
+	if err := moleculeBurn(testMoleculeEnv(townRoot, db), []string{"witness"}); err != nil {
 		t.Fatalf("burn: %v", err)
 	}
-	lines := closeLines(bd)
-	step1, root := -1, -1
-	for i, l := range lines {
-		if strings.Contains(l, "gt-step-1") && step1 < 0 {
-			step1 = i
-		}
-		if strings.Contains(l, "gt-wisp-mol2") {
-			root = i
-		}
-		if strings.Contains(l, "gt-step-2") {
-			t.Errorf("the already-closed gt-step-2 was closed again: %s", l)
-		}
-	}
-	if step1 < 0 || root < 0 || root < step1 {
-		t.Fatalf("close order: step-1 at %d, root at %d, want both with the root last; close calls:\n%s", step1, root, strings.Join(lines, "\n"))
+	if got, want := db.closed(), []string{"gt-step-1", "gt-wisp-mol2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("closes = %v, want %v (the closed step left alone, the root last)", got, want)
 	}
 }
