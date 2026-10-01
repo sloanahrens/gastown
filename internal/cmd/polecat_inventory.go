@@ -93,12 +93,13 @@ type polecatInventoryEnv struct {
 	// probe measures WorktreePath; nil means probePolecatWorktree. Tests set
 	// it to canned states so the verdict runs without a repository.
 	probe func(worktreePath string, localOnly bool) polecat.LiveGitState
-	// ActiveMRSource resolves the ids the active_mr policy looks up (the MR
-	// itself and its source issue). Nil — the zero value, and what the capacity
-	// path passes — leaves the policy reading the same fail-closed
-	// "status=unverified" it read before there was a source at all, so
+	// IssueSource resolves the bead ids this seat's facts depend on: the ones
+	// the active_mr policy looks up (the MR itself and its source issue), and
+	// the bead a hook_bead reference names. Nil — the zero value, and what the
+	// capacity path passes — leaves both reading the same fail-closed
+	// "status=unverified" they read before there was a source at all, so
 	// admission still pays no beads call per polecat.
-	ActiveMRSource polecat.IssueReader
+	IssueSource polecat.IssueReader
 	// Parked is the refusal reason when the polecat carries an agentpause
 	// marker (polecat.ParkedReuseBlocker), empty when it does not. A parked
 	// slot is skipped by the reuse path (gt-0r29l), so the verdict must not
@@ -255,6 +256,23 @@ func polecatSessionKey(rigName, polecatName string) string {
 	return rigName + polecatSessionKeySep + polecatName
 }
 
+// hookBeadDispositionForInventory resolves a hook_bead reference through the
+// shared ClassifyHookBead policy, so the list's reading of a hook cannot drift
+// from check-recovery's or the reuse gate's (gt-eqiid).
+//
+// A nil source skips the lookup and answers fail-closed with the wording this
+// path used before it could resolve anything. That is the counts-only capacity
+// projection's case: it is a capacity question, not a reuse decision, and
+// paying a beads call per polecat on the admission path is exactly what
+// polecatListInventoryEnv exists to avoid.
+func hookBeadDispositionForInventory(source polecat.IssueReader, hookBead string) polecat.HookBeadDisposition {
+	if source == nil {
+		return polecat.HookBeadDisposition{Blocker: "hook_bead=" + hookBead + " status=unverified"}
+	}
+	issue, err := source.Show(hookBead)
+	return polecat.ClassifyHookBead(hookBead, issue, err)
+}
+
 func buildPolecatInventoryItem(rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet, env polecatInventoryEnv) polecatInventoryItem {
 	return buildPolecatInventoryItemFromEvidence(rigName, polecatName, fields, assessPolecatAssignedIssueWork(activeWork), sessions, env)
 }
@@ -350,7 +368,15 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	if fields != nil && !activeWorkEvidence.BlocksCleanup {
 		if hookBead := strings.TrimSpace(fields.HookBead); hookBead != "" {
-			facts.ActiveWorkBlocker = fmt.Sprintf("hook_bead=%s status=unverified", hookBead)
+			// The same classifier check-recovery and the reuse gate read, so a
+			// seat the recovery report clears is not still flagged here as an
+			// unverified hook (gt-eqiid).
+			disposition := hookBeadDispositionForInventory(env.IssueSource, hookBead)
+			if disposition.Safe {
+				facts.HookBeadSubmitted = disposition.Submitted
+			} else {
+				facts.ActiveWorkBlocker = disposition.Blocker
+			}
 		}
 	}
 	if item.ActiveMR != "" {
@@ -368,7 +394,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		if mrStatus == "" {
 			mrStatus = "unknown"
 		}
-		assessment := polecat.AssessActiveMRWithLandedEvidence(env.ActiveMRSource, polecat.ActiveMRInput{
+		assessment := polecat.AssessActiveMRWithLandedEvidence(env.IssueSource, polecat.ActiveMRInput{
 			ActiveMR:        item.ActiveMR,
 			SourceIssueHint: agentSourceIssueHint(item.Issue, fields),
 		}, env.landedProbe(item.Branch))
@@ -408,7 +434,7 @@ func probePolecatWorktree(worktreePath string, localOnly bool) polecat.LiveGitSt
 // out of its per-rig queries. It is a named function because one field in it
 // is a performance contract rather than a verdict input, and that choice is
 // worth being able to assert on directly (see TestPolecatListInventoryEnvProbe).
-func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polecatMRIndex, activeMRSource polecat.IssueReader, spawn polecatSpawnFacts) polecatInventoryEnv {
+func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polecatMRIndex, issueSource polecat.IssueReader, spawn polecatSpawnFacts) polecatInventoryEnv {
 	return polecatInventoryEnv{
 		// Status consumers poll this command, so it must not pay a network
 		// round trip per seat: the probe reads branch preservation from the
@@ -416,9 +442,10 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		GitProbeLocalOnly: true,
 		MRs:               mrIndex,
 		// The active_mr policy resolves MR ids through the index it already has
-		// and source issues through the rig's database; the counts-only
+		// and source issues through the rig's database, and a hook_bead
+		// reference is an ordinary bead in that same database; the counts-only
 		// capacity path passes neither.
-		ActiveMRSource: activeMRSource,
+		IssueSource: issueSource,
 		Spawn:          spawn,
 		// claude-41j.1 D9: probe the worktree so the listed verdict re-derives
 		// from live git rather than the recorded hint. An unresolvable path (no
