@@ -256,7 +256,7 @@ func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntr
 func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
 	cmd := exec.CommandContext(ctx, r.gtPath, r.slingArgs(beadID, e)...)
 	cmd.Dir = r.townRoot
-	cmd.Env = bdMutationRoutingEnv(r.townRoot)
+	cmd.Env = daemonGTEnv(bdMutationRoutingEnv(r.townRoot))
 	util.SetProcessGroup(cmd)
 	if _, stderr, err := runWith(r.execCmd, cmd); err != nil {
 		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(string(stderr)))

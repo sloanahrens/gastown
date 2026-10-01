@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -101,6 +102,7 @@ func (d *Daemon) runSpecDispatchCommand() ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "dispatch", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
+	cmd.Env = daemonGTEnv(os.Environ())
 	stdout, stderr, err := d.runCmd(cmd)
 	if err != nil {
 		if msg := strings.TrimSpace(string(stderr)); msg != "" {
