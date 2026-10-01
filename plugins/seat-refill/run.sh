@@ -72,6 +72,15 @@ SONNET_MAX=$(int_or_default "${GT_SEAT_REFILL_SONNET_MAX:-}" 1)
 SONNET_AGENT="${GT_SEAT_REFILL_SONNET_AGENT:-claude-sonnet}"
 SONNET_LABEL="${GT_SEAT_REFILL_SONNET_LABEL:-needs-sonnet}"
 CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
+# sling (default): fill an empty seat directly, no mayor involved (gt-qvs0b).
+# nudge: the old behavior, ask the mayor. GT_SEAT_REFILL_DRY_RUN=1 decides and
+# logs what it would sling, and neither slings nor writes state.
+MODE="${GT_SEAT_REFILL_MODE:-sling}"
+DRY_RUN="${GT_SEAT_REFILL_DRY_RUN:-}"
+SLING_BOUND=$(int_or_default "${GT_SEAT_REFILL_SLING_BOUND:-}" 120)
+# Seconds a seat must sit empty before a direct sling; 0 fills at once.
+DISPATCH_EMPTY_SECONDS=$(int_or_default "${GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS:-}" 0)
+case "$MODE" in sling|nudge) ;; *) fail "GT_SEAT_REFILL_MODE must be sling or nudge, got $MODE" ;; esac
 
 iso_age() {
   local iso="$1" epoch
@@ -183,6 +192,24 @@ claims_agents() {
   done
 }
 
+# Beads already held by a live polecat or an in-flight sling are not candidates
+# (gt-inu1y): slinging them again duplicates work in progress.
+claims_beads() {
+  local dir="$TOWN_ROOT/.runtime/polecat-pool-claims" f
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.json; do
+    [ -e "$f" ] || continue
+    jq -r '.bead // empty' "$f" 2>/dev/null || true
+  done
+}
+
+HELD_BEADS=$(
+  {
+    printf '%s' "$SESSIONS_JSON" | jq -r '.[] | .issue // empty' 2>/dev/null
+    claims_beads
+  } | grep -v '^$' || true
+)
+
 LIVE_AGENTS=$(
   {
     printf '%s' "$SESSIONS_JSON" | jq -r '.[] | select(.session_running == true) | .agent // empty' 2>/dev/null
@@ -245,9 +272,13 @@ while IFS= read -r RIG; do
     log "SKIP $RIG: gt ready failed"
     continue
   }
-  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" '
-    [ .sources[]? | select(.name == $rig) | .issues[]? ]
+  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" --arg held "$HELD_BEADS" '
+    ($held | split("\n")) as $heldids
+    | [ .sources[]? | select(.name == $rig) | .issues[]? ]
     | .[]
+    | select(.id as $i | $heldids | index($i) | not)
+    | select((.status // "open") != "in_progress" and (.status // "open") != "hooked")
+    | select(([(.labels // [])[] | ascii_downcase] | map(select(. == "gt:ready-to-land" or . == "gt:needs-human" or . == "needs-human")) | length) == 0)
     | select((.priority // 99) <= $maxp)
     | select((.issue_type // "") == "task" or (.issue_type // "") == "bug" or (.issue_type // "") == "feature")
     | select((.assignee // "") == "")
@@ -299,6 +330,8 @@ state_field() {
 # seat<TAB>empty_since<TAB>last_nudge, one row per seat still empty.
 STATE_ROWS=""
 NUDGE_LINES=""
+SLUNG=","
+DISPATCHED=0
 
 while IFS='|' read -r seat agent cap selector; do
   [ -n "$seat" ] || continue
@@ -323,6 +356,47 @@ while IFS='|' read -r seat agent cap selector; do
   [ -n "$seat_candidates" ] && seat_count=$(printf '%s\n' "$seat_candidates" | grep -c . || true)
 
   log "seat $seat: $live/$cap live ($agent), empty ${empty_for}s, $seat_count candidate(s)"
+
+  if [ "$MODE" = sling ]; then
+    # Direct dispatch: one bead per open slot, best first. sonnet takes only
+    # needs-sonnet work; the other seats leave it for the sonnet seat.
+    room=$((cap - live))
+    placed=0
+    if [ "$seat_count" -gt 0 ] && [ "$empty_for" -ge "$DISPATCH_EMPTY_SECONDS" ]; then
+      while IFS=$'\t' read -r c_rig c_id c_prio c_labels; do
+        [ -n "$c_id" ] || continue
+        [ "$placed" -lt "$room" ] || break
+        case ",$SLUNG," in *",$c_id,"*) continue ;; esac
+        if [ "$selector" = any ]; then
+          case ",${c_labels}," in *",${SONNET_LABEL},"*) continue ;; esac
+        fi
+        if [ -n "$DRY_RUN" ]; then
+          log "DRY-RUN: would sling $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
+          SLUNG+="$c_id,"
+          placed=$((placed + 1))
+          continue
+        fi
+        sling_rc=0
+        sling_out=$(timeout "$SLING_BOUND" gt sling "$c_id" "$c_rig" --agent "$agent" 2>&1) || sling_rc=$?
+        if [ "$sling_rc" -eq 0 ]; then
+          log "slung $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
+          SLUNG+="$c_id,"
+          placed=$((placed + 1))
+        else
+          # A refusal (backpressure, hold, rig estop) is the dispatcher doing
+          # its job, not a plugin fault; log it and try the next candidate.
+          log "sling $c_id to $c_rig refused (exit $sling_rc): $(printf '%s' "$sling_out" | tail -n 1)"
+          SLUNG+="$c_id,"
+        fi
+      done <<< "$seat_candidates"
+    fi
+    [ "$placed" -gt 0 ] && DISPATCHED=$((DISPATCHED + placed))
+    if [ "$placed" -ge "$room" ]; then
+      continue   # seat is full as of this run; the next run starts a new episode
+    fi
+    STATE_ROWS+="$seat"$'\t'"$empty_since"$'\t'"$last_nudge"$'\n'
+    continue
+  fi
 
   # Empty with nothing to take it is not a fault. The episode keeps running so
   # that work appearing later is nudged about promptly.
@@ -359,6 +433,15 @@ write_state() {
   mv "$STATE_FILE.tmp" "$STATE_FILE" || fail "could not replace $STATE_FILE"
 }
 
+if [ "$MODE" = sling ]; then
+  [ -n "$DRY_RUN" ] || write_state
+  if [ "$DISPATCHED" -gt 0 ]; then
+    log "dispatched $DISPATCHED bead(s) to empty seat(s)"
+    exit 0
+  fi
+  skip "no empty seat with a slingable bead"
+fi
+
 if [ -z "$NUDGE_LINES" ]; then
   write_state
   skip "no seat has been empty long enough with work ready"
@@ -392,12 +475,16 @@ log "nudging $MAYOR_TARGET: $seat_n empty seat(s) with work"
 # silence — the one outcome this plugin exists to prevent.
 NUDGE_BOUND=90
 nudge_rc=0
-timeout "$NUDGE_BOUND" gt nudge "$MAYOR_TARGET" "$message" 2>&1 || nudge_rc=$?
+nudge_out=$(timeout "$NUDGE_BOUND" gt nudge "$MAYOR_TARGET" "$message" 2>&1) || nudge_rc=$?
+[ -z "$nudge_out" ] || printf '%s\n' "$nudge_out"
 if [ "$nudge_rc" -eq 124 ]; then
   # Past its whole budget gt nudge is wedged. Wait-idle queues before it
   # watches, so the message may still be delivered on the mayor's next drain;
   # say that rather than claiming it was lost.
   fail "gt nudge $MAYOR_TARGET timed out after ${NUDGE_BOUND}s; delivery unconfirmed (it may be queued for the mayor's next turn)"
+elif [ "$nudge_rc" -ne 0 ] && printf '%s' "$nudge_out" | grep -qi 'not found'; then
+  # A mayor that is down is a decision (gt-qvs0b), not a plugin fault.
+  skip "mayor session $MAYOR_TARGET is not running; nothing to nudge"
 elif [ "$nudge_rc" -ne 0 ]; then
   fail "gt nudge $MAYOR_TARGET failed (exit $nudge_rc); the empty seat was not reported"
 fi

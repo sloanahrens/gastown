@@ -1,6 +1,6 @@
 +++
 name = "seat-refill"
-description = "Nudges the mayor when a polecat pool seat sits empty for 5m with slingable work ready"
+description = "Slings the top eligible ready bead into an empty polecat pool seat (mayor-free); GT_SEAT_REFILL_MODE=nudge restores the mayor nudge"
 version = 1
 
 [gate]
@@ -23,6 +23,28 @@ severity = "medium"
 Nudges the mayor when a polecat seat has been empty for five minutes and there
 is work a sling could take. The daemon heartbeat runs `run.sh` in-process; no
 agent reads this file. A nonzero exit is logged and escalated by the daemon.
+
+## Direct dispatch (default, gt-qvs0b)
+
+With no mayor running, nothing else fills an empty seat, so the default mode
+slings. Each run, for every empty seat, it runs
+`gt sling <bead> <rig> --agent <seat agent>` for the best candidate (lowest
+priority number, then id), one bead per free slot, never the same bead twice.
+`gt sling` still enforces its own refusals (backpressure, hold, rig estop); a
+refusal is logged and is not a plugin failure. A seat fills at once unless
+`GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS` is set. The sonnet seat takes only
+`needs-sonnet` beads, and the other seats leave those alone.
+
+Candidates skip: `gt:ready-to-land` and `gt:needs-human` beads, `in_progress`
+or assigned beads (crew included), epics, molecules and agent beads (type
+whitelist), the `operator` label, and any bead named by a live polecat session
+or an in-flight pool claim (gt-inu1y).
+
+`GT_SEAT_REFILL_DRY_RUN=1` logs `DRY-RUN: would sling ...` and neither slings
+nor writes state. `GT_SEAT_REFILL_MODE=nudge` restores the mayor nudge below;
+in that mode a mayor that is not running skips the run rather than failing it.
+The hold file, ESTOP, parked rigs and seat caps apply in both modes. The prose
+below describes nudge mode.
 
 ## Why
 
