@@ -208,7 +208,7 @@ directory.
 - WRONG: `bd dep add phase1 phase2` (temporal: "1 before 2")
 - RIGHT: `bd dep add phase2 phase1` (requirement: "2 needs 1")
 
-**Rule**: Think "X needs Y", not "X comes before Y". Verify with `bd blocked`.
+**Rule**: Think "X needs Y", not "X comes before Y". Verify with `bd show <id>`: X lists Y under its dependencies.
 
 ## Startup Protocol: Propulsion
 

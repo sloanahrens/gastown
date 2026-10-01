@@ -12,11 +12,7 @@ This formula orchestrates a complete release cycle:
 
 ## Usage
 
-```bash
-bd mol wisp create beads-release --var version=0.37.0
-```
-
-Or assign to a crew member:
+Assign it to a crew member:
 ```bash
 gt sling beads/crew/max --formula beads-release --var version=0.37.0
 ```
@@ -109,7 +105,7 @@ needs = ["update-changelog"]
 description = """
 Add entry to versionChanges in cmd/bd/info.go.
 
-This powers `bd info --whats-new` for agents.
+This powers bd's `info --whats-new` output for agents.
 
 ```go
 "{{version}}": {

@@ -82,8 +82,8 @@ bd show <dependent-id>
 
 **2. Check if now unblocked:**
 ```bash
-bd blocked <dependent-id>
-# If empty or only shows other blockers, issue is now unblocked
+bd show <dependent-id>
+# If its dependencies list no open blocker, the issue is now unblocked
 ```
 
 **3. Verify automatic unblock worked:**
@@ -109,7 +109,7 @@ bd show <issue-id>
 # Check:
 # - Status: should be 'open' (not already in_progress)
 # - Priority: high priority may warrant immediate dispatch
-# - No other blockers: bd blocked should be empty
+# - No other blockers: it should be listed by bd ready
 ```
 
 **2. Decision: trigger dispatch?**

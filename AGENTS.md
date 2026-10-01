@@ -20,34 +20,28 @@ The CLI is **bd** (issue CRUD).
 
 ### bd: Issue Management
 
+Agents run only the read-only bd commands (show, list, query, ready, search)
+and `bd remember`; every change to a bead goes through a gt verb.
+
 ```bash
 bd ready              # Unblocked issues ready to work
 bd list --status=open # All open issues
 bd show <id>          # Full details with dependencies
-bd create --title="..." --type=task --priority=2
-bd update <id> --status=in_progress
-bd close <id>         # Mark complete
-bd close <id1> <id2>  # Close multiple
-bd dep add <a> <b>    # a depends on b
-bd sync               # Sync with git
+gt done --bead <id>   # Submit your pushed branch; landing closes the bead
 ```
 
 ### Workflow
 
 1. **Start**: `bd ready`
-2. **Claim**: `bd update <id> --status=in_progress`
-3. **Work**: Implement the task
-4. **Complete**: `bd close <id>`
-5. **Sync**: `bd sync` at session end
+2. **Work**: Implement the task, commit and push your branch
+3. **Complete**: `gt done --bead <id>`
 
 ### Session Close Protocol
 
 ```bash
 git status            # Check what changed
 git add <files>       # Stage code changes
-bd sync               # Commit beads changes
 git commit -m "..."   # Commit code
-bd sync               # Commit any new beads changes
 git push              # Push to remote
 ```
 
@@ -86,7 +80,7 @@ Never print "Hey @name" — the other agent cannot see your terminal output.
 
 ### Sending Mail (Persistent Messages)
 
-`gt mail` sends messages that persist across session restarts:
+`gt mail send` sends messages that persist across session restarts:
 
 ```bash
 # Reading
@@ -133,8 +127,7 @@ This project uses **bd (beads)** for issue tracking. Run `gt prime` to see full 
 ```bash
 bd ready              # Find available work
 bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+gt done --bead <id>   # Submit your pushed branch; landing closes the bead
 ```
 
 ### Rules
