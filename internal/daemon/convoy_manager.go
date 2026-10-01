@@ -1732,8 +1732,13 @@ func (m *ConvoyManager) slingSlinger() convoy.Slinger {
 // slingInProcess dispatches one bead through the in-process engine, timing the
 // spawn's stages into a buffer the feeder logs against the convoy it was
 // feeding (gt-llg8). The exec boundary this replaces captured the same lines
-// from the child's stderr; the engine's own progress output is discarded,
-// which is what the feeder did with the child's stdout.
+// from the child's stderr.
+//
+// The engine's own progress output goes to Deps.Out, discarded here — the
+// treatment the feeder gave the child's stdout. The spawn and rollback
+// mechanisms the engine calls are still internal/cmd code that prints with
+// fmt.Printf, so THOSE lines reach this process's stdout instead of Deps.Out;
+// moving them out of cmd is what routes them (gt-638go.7 follow-up).
 func (m *ConvoyManager) slingInProcess(convoyID string, opts sling.Options) (*sling.Result, error) {
 	if m.slingFn != nil {
 		return m.slingFn(convoyID, opts)

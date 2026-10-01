@@ -21,7 +21,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		FindTown:    d.findTown,
 		Actor:       d.engineActor,
 		Requester:   d.requester,
-		ReleaseSeat: d.releaseSeat,
+		ReleaseSeat: d.engineReleaseSeat,
 
 		EstopOn:            d.estopOn,
 		RigParked:          d.rigParked,
@@ -30,6 +30,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		SurvivingWorkGuard: d.survivingWorkGuard,
 		CheckDuplicates:    d.checkDuplicates,
 		VerifyInTargetRig:  d.verifyInTargetRig,
+		DefaultFormula:     d.engineDefaultFormula,
 
 		LockBead:     d.lockBead,
 		LockAssignee: d.lockAssignee,
@@ -83,6 +84,33 @@ func (d *slingDeps) engineActor(opts sling.Options) string {
 		return opts.Actor
 	}
 	return d.actor()
+}
+
+// engineReleaseSeat drops the pool seat the dispatch's spawn reserved. The
+// claim lives in the spawn's own store, so this is the spawn's release and not
+// a process-wide one: the daemon dispatches concurrently, and a release that
+// dropped whichever claim the process held last would free a seat another
+// in-flight dispatch is standing on (gt-t8q5).
+func (d *slingDeps) engineReleaseSeat(spawn *sling.Spawn) {
+	// Deliberately not cmdSpawn: that panics on a spawn this package did not
+	// make, and dropping a claim is not a step worth crashing a dispatch over.
+	// A spawn the engine made itself — or made none of — reserved no seat in
+	// this process, so its release is the release of nothing.
+	var cmdSpawnRecord *SpawnedPolecatInfo
+	if spawn != nil {
+		cmdSpawnRecord, _ = spawn.Ref.(*SpawnedPolecatInfo)
+	}
+	d.releaseSeat(cmdSpawnRecord)
+}
+
+// engineDefaultFormula is the formula the cobra layer would have applied to a
+// dispatch that named none: resolveFormula's rig property layers, its rig
+// settings file, and the system default. The engine asks for it instead of the
+// caller so that a dispatch made from the daemon resolves the same formula the
+// `gt sling` it replaced would have — the caller there holds a convoy's record,
+// not the town's config.
+func (d *slingDeps) engineDefaultFormula(townRoot, rigName string) string {
+	return d.resolveFormula("", false, townRoot, rigName)
 }
 
 // engineSpawnPolecat is d.spawnPolecat in the engine's vocabulary.

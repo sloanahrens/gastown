@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -21,7 +24,21 @@ import (
 // NOT handled here: the cross-rig guard (callers verify the bead's prefix
 // matches the target rig before Run) and waking the rig's agents after the
 // dispatch loop when NoBoot is false.
+//
+// ctx cancels the dispatch. Run checks it at every step boundary and returns
+// its error there, rolling back a spawn that has already happened. The
+// mechanisms Deps supplies do not take a context — the bd, git and tmux calls
+// behind them are internal/cmd's — so a cancellation lands at the next
+// boundary rather than inside a blocking call. That is what the daemon's
+// shutdown relies on: it cancels the context the feeder dispatches under, and
+// the dispatch stops at the next step instead of running to completion.
 func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := &Result{
+		BeadID: opts.BeadID,
+	}
 	// A seat the pool claimed for this dispatch stops standing when the
 	// dispatch returns: the tmux session exists by then and is what the pool
 	// counts, or the dispatch failed and no session will exist. Every spawn
@@ -29,7 +46,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// guarantees the claim cannot outlive the dispatch — the batch and
 	// scheduler callers keep the process alive afterwards, where a leaked
 	// claim would hold its seat for the pool's claim TTL (gt-t8q5).
-	defer d.ReleaseSeat()
+	defer func() { d.ReleaseSeat(result.SpawnInfo) }()
 
 	townRoot := opts.TownRoot
 	if townRoot == "" {
@@ -55,8 +72,11 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		beadsDir = filepath.Join(townRoot, ".beads")
 	}
 
-	result := &Result{
-		BeadID: opts.BeadID,
+	// The dispatch is cancellable from here on: nothing has been written yet,
+	// so a cancellation costs nothing to honor.
+	if err := canceled(ctx); err != nil {
+		result.ErrMsg = err.Error()
+		return result, err
 	}
 
 	// 0. Refuse an e-stopped, parked or docked rig before dispatching
@@ -80,6 +100,31 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	if info.Status == "closed" || info.Status == "tombstone" {
 		result.ErrMsg = "already " + info.Status
 		return result, fmt.Errorf("bead %s is %s (work already completed)", opts.BeadID, info.Status)
+	}
+
+	// Guard against slinging beads with flag-like titles (gt-e0kx5). These are
+	// garbage beads created by flag-parsing bugs; slinging one causes dispatch
+	// loops where polecats bounce the work back.
+	if beads.IsFlagLikeTitle(info.Title) {
+		result.ErrMsg = "flag-like title"
+		return result, fmt.Errorf("refusing to sling bead %s: title %q looks like a CLI flag (garbage bead from flag-parsing bug)",
+			opts.BeadID, info.Title)
+	}
+
+	// Guard against re-dispatching work submitted for landing (gt-v4ssj.2). Its
+	// session ended on purpose in gt done and its assignee is dead by design,
+	// which the dead-agent auto-force below would read as abandoned work. The
+	// landing worker owns it until it lands or is handed back.
+	//
+	// --force does not override, unlike the operator-reservation guard: the
+	// automated redispatch paths — the convoy feeder, the scheduler — all pass
+	// --force for the other guards they need, so a guard --force opens is a
+	// guard none of them is actually held by. A human who needs the bead back
+	// removes the label.
+	if slices.Contains(info.Labels, land.LabelReadyToLand) {
+		result.ErrMsg = "ready-to-land"
+		return result, fmt.Errorf("%s %s is submitted for landing (%s); the landing worker owns it.\nRemove the label first to take it back",
+			dispatch.SlingRefusalMarker, opts.BeadID, land.LabelReadyToLand)
 	}
 
 	// Save explicit force state before dead-agent auto-force, so the deferred
@@ -168,6 +213,18 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// 2. Burn stale molecules (if formula applies)
+	// Settle the formula here, not at the top: resolving it reads the rig's
+	// config, and a dispatch the guards above refuse should not pay for that.
+	// `gt sling` resolves it in the same place, after its own guards.
+	//
+	// A caller that named a formula keeps it; one that did not gets the target
+	// rig's default, which is what `gt sling` has always applied to a polecat
+	// target and what the callers holding only a convoy's record used to
+	// inherit from the command they exec'd. Only --hook-raw-bead asks for the
+	// bare bead (gt-4lor).
+	if opts.FormulaName == "" && !opts.HookRawBead && d.DefaultFormula != nil {
+		opts.FormulaName = d.DefaultFormula(townRoot, opts.RigName)
+	}
 	if opts.FormulaName != "" {
 		existingMolecules, err := d.CollectMolecules(info, opts.BeadID, townRoot)
 		if err != nil {
@@ -196,6 +253,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// 3. Spawn polecat
+	// Last boundary before the dispatch gets expensive: a spawn allocates a
+	// worktree and a session, and everything past it has to be rolled back.
+	if err := canceled(ctx); err != nil {
+		result.ErrMsg = err.Error()
+		return result, err
+	}
 	spawnOpts := SpawnOptions{
 		TownRoot:     townRoot,
 		Force:        opts.Force,
@@ -250,6 +313,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// 5. Cook formula (unless SkipCook)
+	// Past the spawn now, so every exit below rolls the polecat back.
+	if err := canceled(ctx); err != nil {
+		rollbackSpawnedPolecat(opts.BeadID, "Dispatch canceled")
+		result.ErrMsg = err.Error()
+		return result, err
+	}
 	formulaCooked := opts.SkipCook
 	if opts.FormulaName != "" && !formulaCooked {
 		workDir := d.HookDir(townRoot, opts.BeadID, hookWorkDir)
@@ -289,7 +358,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 		varsForAttachment = append([]string(nil), allVars...)
 		formulaVarsForAttachment = strings.Join(allVars, "\n")
-		formulaResult, err := d.InstantiateFormula(context.Background(), opts.FormulaName, opts.BeadID, info.Title, hookWorkDir, townRoot, allVars)
+		formulaResult, err := d.InstantiateFormula(ctx, opts.FormulaName, opts.BeadID, info.Title, hookWorkDir, townRoot, allVars)
 		if err != nil {
 			if opts.FormulaFailFatal {
 				// Rollback spawned polecat on fatal formula failure
@@ -335,6 +404,11 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// 7. Hook bead with retry
+	if err := canceled(ctx); err != nil {
+		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
+		result.ErrMsg = err.Error()
+		return result, err
+	}
 	// Acquire per-assignee lock to serialize concurrent hook writes (issue #3114).
 	assigneeUnlock, assigneeLockErr := d.LockAssignee(townRoot, targetAgent)
 	if assigneeLockErr != nil {
@@ -394,6 +468,11 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// 11. Start polecat session
+	if err := canceled(ctx); err != nil {
+		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
+		result.ErrMsg = err.Error()
+		return result, err
+	}
 	pane, err := d.StartSession(spawnInfo)
 	if err != nil {
 		fmt.Fprintf(d.out(), "  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
@@ -406,6 +485,18 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 
 	result.Success = true
 	return result, nil
+}
+
+// canceled reports a caller's cancellation as an error a dispatch can return.
+// Run checks it at its step boundaries; see Run's doc for what that bound is
+// worth and what it is not.
+func canceled(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("dispatch canceled: %w", ctx.Err())
+	default:
+		return nil
+	}
 }
 
 // buildFormulaVars assembles the ordered var list for formula instantiation:

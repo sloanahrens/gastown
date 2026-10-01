@@ -90,9 +90,11 @@ type slingDeps struct {
 
 	// Process state.
 	autoCommitOff func() (restore func())
-	releaseSeat   func()
-	findTown      func() (string, error)
-	townOrEnv     func() (string, error)
+	// releaseSeat drops the pool seat one spawn reserved; nil spawn means the
+	// dispatch made none. See slingDeps.engineReleaseSeat.
+	releaseSeat func(*SpawnedPolecatInfo)
+	findTown    func() (string, error)
+	townOrEnv   func() (string, error)
 
 	// Routing and dispatch paths runSling hands a request to.
 	resolvePRBranch        func(prNumber int) (string, error)
@@ -200,7 +202,7 @@ func realSlingDeps() *slingDeps {
 		stdin:         os.Stdin,
 		steps:         slingSteps,
 		autoCommitOff: setBDAutoCommitOff,
-		releaseSeat:   releasePoolSeatClaim,
+		releaseSeat:   func(s *SpawnedPolecatInfo) { s.releaseSeatClaim() },
 		findTown:      findTownRoot,
 		townOrEnv:     workspace.FindFromCwdOrError,
 

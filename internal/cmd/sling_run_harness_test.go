@@ -71,7 +71,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("autocommit off")
 			return func() { h.record("autocommit restore") }
 		},
-		releaseSeat: func() { h.record("release seat") },
+		releaseSeat: func(*SpawnedPolecatInfo) { h.record("release seat") },
 		findTown:    func() (string, error) { return slingTestTown, nil },
 		townOrEnv:   func() (string, error) { return slingTestTown, nil },
 

@@ -15,11 +15,17 @@ import (
 // them.
 type Deps struct {
 	// Output and identity.
-	Out         io.Writer
-	FindTown    func() (string, error)
-	Actor       func(opts Options) string
-	Requester   func() string
-	ReleaseSeat func()
+	Out       io.Writer
+	FindTown  func() (string, error)
+	Actor     func(opts Options) string
+	Requester func() string
+	// ReleaseSeat drops the pool seat a dispatch's spawn reserved, once the
+	// dispatch is over. It is the outer boundary of the claim's life: the two
+	// inner ones are the session start and the rollback of a spawn that never
+	// got one, and both of them belong to the spawn record. It is called with
+	// the spawn the dispatch made, or nil when it made none, and is safe to
+	// call more than once (gt-t8q5).
+	ReleaseSeat func(spawn *Spawn)
 
 	// Rig and bead guards.
 	EstopOn            func(townRoot, rigName string) (bool, error)
@@ -29,6 +35,15 @@ type Deps struct {
 	SurvivingWorkGuard func(townRoot, beadID, holder string) error
 	CheckDuplicates    func(townRoot, beadID string, info *Bead) (*Duplicate, []DuplicateMatch, error)
 	VerifyInTargetRig  func(beadID, targetRig, townRoot string) error
+
+	// DefaultFormula is the formula a dispatch runs under when its caller named
+	// none: the target rig's configured default, falling back to the system
+	// one. `gt sling` has always resolved this for a polecat target, and a
+	// caller that only has the convoy's record — the daemon's convoy feeder and
+	// the convoy continuation feed, which pass the formula recorded at sling
+	// time and nothing when none was recorded — used to get it by exec'ing that
+	// command. Nil leaves an empty FormulaName meaning "hook the raw bead".
+	DefaultFormula func(townRoot, rigName string) string
 
 	// Serializing concurrent writes.
 	LockBead     func(townRoot, beadID string) (func(), error)

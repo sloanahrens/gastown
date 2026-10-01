@@ -12,9 +12,9 @@ import (
 
 // slingRollback is what undoing a partial sling reaches outside the
 // process: the town, bd, and the seams that release the work and remove the
-// sandbox. realSlingRollback wires the cwd's town, the bd on PATH and the
-// package seams; tests build one with an in-process bd and fakes, so they
-// need no stub on PATH, no chdir and no package-global swap.
+// sandbox. realSlingRollbackIn wires the caller's town (or the cwd's), the bd
+// on PATH and the package seams; tests build one with an in-process bd and
+// fakes, so they need no stub on PATH, no chdir and no package-global swap.
 type slingRollback struct {
 	townRoot string
 	townErr  error // set when the cwd is not in a town
@@ -27,22 +27,19 @@ type slingRollback struct {
 	getBeadInfo      func(beadID string) (*beadInfo, error)
 	collectMolecules func(info *beadInfo) []string
 	burnMolecules    func(molecules []string, beadID, townRoot string) error
-	releaseSeat      func()
+	releaseSeat      func(*SpawnedPolecatInfo)
 	newReleaser      func(townRoot, hookWorkDir string) polecatWorkReleaser
 	survivingWork    func(townRoot, beadID string) (string, error)
 	openSandbox      func(townRoot, rigName string) (spawnedPolecatSandbox, error)
 }
 
-// realSlingRollback is the rollback of the running gt: the cwd's town, bd on
-// PATH, and the package seams (which tests of other paths still replace).
-func realSlingRollback() slingRollback {
-	townRoot, err := workspace.FindFromCwdOrError()
-	return realSlingRollbackIn(townRoot, err)
-}
-
-// realSlingRollbackIn is realSlingRollback for a caller that already resolved
-// the town root — the dispatch engine, which reaches the daemon's convoy
-// feeder as well as the cobra command. The cwd is only the fallback.
+// realSlingRollbackIn is the rollback of the running gt: the caller's town
+// root (falling back to the cwd's), bd on PATH, and the package seams (which
+// tests of other paths still replace).
+//
+// The town root is a parameter rather than a lookup because the dispatch
+// engine reaches the daemon's convoy feeder as well as the cobra command, and
+// the daemon's cwd is not the town it dispatches into.
 func realSlingRollbackIn(townRoot string, err error) slingRollback {
 	if townRoot == "" && err == nil {
 		townRoot, err = workspace.FindFromCwdOrError()
@@ -53,7 +50,7 @@ func realSlingRollbackIn(townRoot string, err error) slingRollback {
 		getBeadInfo:      getBeadInfoForRollback,
 		collectMolecules: collectExistingMoleculesForRollback,
 		burnMolecules:    burnExistingMoleculesForRollback,
-		releaseSeat:      releasePoolSeatClaim,
+		releaseSeat:      func(spawn *SpawnedPolecatInfo) { spawn.releaseSeatClaim() },
 		newReleaser:      newPolecatWorkReleaserFn,
 		survivingWork:    survivingWorkForBeadFn,
 		openSandbox:      openSpawnedPolecatSandboxFn,
@@ -111,8 +108,11 @@ func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkD
 	// 2. Release the bead — only while it is still hooked to this polecat —
 	// and undo the spawn: a fresh sandbox is removed, a reused one is kept with
 	// its slot reset, and only a branch this sling created may go (gt-7evi4).
+	//
+	// No seat claim to drop when there is no spawn: a claim belongs to a spawn
+	// and is dropped by its rollback, so a failure before the spawn has none
+	// to give back.
 	if spawnInfo == nil {
-		s.releaseSeat()
 		return
 	}
 	s.cleanupSpawned(spawnInfo, spawnInfo.RigName, beadID, hookWorkDir, convoyID)
@@ -125,7 +125,7 @@ func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, be
 	// the one path every caller-side failure after a spawn comes through —
 	// returning before the cleanup below, which is best-effort and gives up
 	// early when the workspace or rig cannot be read (gt-t8q5).
-	s.releaseSeat()
+	s.releaseSeat(spawnInfo)
 
 	if spawnInfo == nil {
 		return

@@ -72,6 +72,22 @@ type SpawnedPolecatInfo struct {
 	// touched it; nil when unknown. A rollback that finds the bead's work
 	// surviving hands it back to this holder instead of releasing it.
 	originalHold *beadHold
+
+	// seatClaim is the pool seat this spawn reserved, and the store it lives
+	// in. It travels with the spawn because that is what both ends of the
+	// claim's life have in hand: startSession drops it once the tmux session
+	// exists, and the rollback drops it when no session ever will. Nil when
+	// the spawn did not go through the pool's seat decision (gt-t8q5).
+	seatClaim *poolSeatClaimStore
+}
+
+// releaseSeatClaim drops the pool seat this spawn reserved. Idempotent, and a
+// no-op for a spawn that reserved none.
+func (s *SpawnedPolecatInfo) releaseSeatClaim() {
+	if s == nil {
+		return
+	}
+	s.seatClaim.release()
 }
 
 // beadHold is a work bead's status and assignee.
@@ -502,18 +518,30 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // polecat and its worktree. realSlingSeatSpawn wires the real ones.
 type slingSeatSpawn struct {
 	backpressure func(townRoot, rigName string, opts SlingSpawnOptions) error
-	// resolvePool is resolvePolecatPoolAgent.
+	// resolvePool is the pool decision for this spawn, claiming a seat in
+	// seatClaims.
 	resolvePool func(townRoot, requested string) (agent, reason string, err error)
 	releaseSeat func()
 	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
+	// seatClaims is the store this spawn's pool decision claims in and
+	// releaseSeat drops from. It is handed to the spawn record on success, so
+	// StartSession and the rollback drop the same claim this spawn made.
+	seatClaims *poolSeatClaimStore
 }
 
 func realSlingSeatSpawn() slingSeatSpawn {
+	// One store per spawn, never one per process: the daemon dispatches
+	// concurrently inside a single process, and a shared store would let one
+	// dispatch's release drop a seat another is still standing on (gt-t8q5).
+	store := newPoolSeatClaimStore()
 	return slingSeatSpawn{
 		backpressure: checkSlingBackpressure,
-		resolvePool:  resolvePolecatPoolAgent,
-		releaseSeat:  releasePoolSeatClaim,
-		prepare:      prepareSlingPolecat,
+		resolvePool: func(townRoot, requested string) (agent, reason string, err error) {
+			return poolRouterFor(townRoot, store).route(requested, true)
+		},
+		releaseSeat: store.release,
+		prepare:     prepareSlingPolecat,
+		seatClaims:  store,
 	}
 }
 
@@ -549,9 +577,9 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	}
 
 	// The seat claimed above belongs to the polecat this call is about to
-	// spawn: the SpawnedPolecatInfo returned below carries it to StartSession,
-	// which drops it once the tmux session exists — the session is what the
-	// pool counts from then on. Every other way out of this function leaves no
+	// spawn: the SpawnedPolecatInfo returned below carries its store to
+	// StartSession, which drops it once the tmux session exists — the session
+	// is what the pool counts from then on. Every other way out of this function leaves no
 	// session behind — a rig that will not load, Dolt down, no connection
 	// capacity, a parked rig, the respawn breaker, the per-rig directory cap, a
 	// failed allocation — so the claim is dropped on the way out. A claim a
@@ -565,6 +593,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 		s.releaseSeat()
 		return nil, err
 	}
+	info.seatClaim = s.seatClaims
 	return info, nil
 }
 
@@ -813,11 +842,11 @@ func (s *SpawnedPolecatInfo) noteStartOutcomeIn(townRoot string, startErr error)
 
 func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// The tmux session this starts is what the pool counts, so the seat claim
-	// this process made for it (sling_pool.go) is redundant the moment the
+	// this spawn made for it (sling_pool.go) is redundant the moment the
 	// session exists — and holding both would read one polecat as two seats.
 	// Releasing on the way out also covers the failure paths, where no session
 	// will ever appear and the seat must not stay claimed.
-	defer releasePoolSeatClaim()
+	defer s.releaseSeatClaim()
 
 	if s.SessionStarted() {
 		return s.Pane, nil

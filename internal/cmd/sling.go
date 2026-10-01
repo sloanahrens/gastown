@@ -214,12 +214,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	// Per-step timing on stderr so a slow dispatch can be attributed (gt-llg8).
 	slingSteps = sling.NewTimer(os.Stderr)
-	// The same boundary as executeSling's: a seat the pool claimed for this
-	// sling stops standing when the command returns. StartSession drops it on
-	// the success path, and the failure paths drop it here — including the ones
-	// that return after the spawn without rolling it back, which the rollback
-	// paths alone would miss (gt-t8q5).
-	defer releasePoolSeatClaim()
 	return newSlingRun(slingOptionsFromFlags()).run(ctx, cmd, args)
 }
 
@@ -228,6 +222,15 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 // itself, rolling back a spawned polecat on every exit short of the commit
 // point.
 func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (retErr error) {
+	// The same boundary as executeSling's: a seat the pool claimed for this
+	// sling stops standing when the sling returns. StartSession drops the claim
+	// on the success path and the rollback drops it when no session will ever
+	// exist; this catches the returns that reach neither — an error between the
+	// spawn and the rollback guard, which the rollback paths alone would miss
+	// (gt-t8q5).
+	var seatSpawn *SpawnedPolecatInfo
+	defer func() { seatSpawn.releaseSeatClaim() }()
+
 	// Polecats cannot sling - check early before writing anything.
 	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
@@ -755,11 +758,22 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
-	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (mayor, crew, self-sling, nudge)
-	// that executeSling does not cover. The rig-target case could be factored out
-	// to use executeSling, limiting this to non-rig targets only.
+	// The inline logic below duplicates executeSling's 12-step flow. Batch sling,
+	// scheduler dispatch and the daemon's convoy feeders already use the unified
+	// path — the feeder used to exec this command and now calls the engine, so
+	// the two are on the same code for the first time (gt-638go.7). Single-sling
+	// is deferred because it handles non-rig targets (mayor, crew, self-sling,
+	// nudge) that executeSling does not cover. The rig-target case could be
+	// factored out to use executeSling, limiting this to non-rig targets only.
+	//
+	// Until then the two are not identical for a rig target, and the difference
+	// is deliberate where it exists. The dispatch guards all live in the engine
+	// (closed, deferred, operator reservation, ready-to-land, flag-like title,
+	// dead-holder auto-force, duplicates), so a bead one path refuses the other
+	// refuses too. What is still inline-only is the interactive surface: the
+	// idempotency no-op for a bead already on the target, the unhook of a force
+	// steal, --dry-run, and the start nudge. Factor the rig-target case out
+	// before adding a guard to one path alone.
 	//
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
@@ -789,6 +803,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	hookWorkDir := resolved.WorkDir
 	hookSetAtomically := resolved.HookSetAtomically
 	newPolecatInfo := resolved.NewPolecatInfo
+	// Hand the spawn to run's boundary: from here every exit drops the seat it
+	// reserved, including the ones that never reach the rollback guard below.
+	seatSpawn = newPolecatInfo
 	isSelfSling := resolved.IsSelfSling
 	if newPolecatInfo != nil {
 		newPolecatInfo.originalHold = &beadHold{Status: originalStatus, Assignee: originalAssignee}

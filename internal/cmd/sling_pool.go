@@ -345,12 +345,17 @@ func (osPoolSeatFS) WriteFile(name string, data []byte, perm os.FileMode) error 
 }
 func (osPoolSeatFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
-// poolSeatClaimStore holds the claim this process made. A process holds at most
-// one — a sling spawns one polecat at a time, and the claim is dropped before
-// the next decision — so a package var keeps it reachable from StartSession,
-// the one place that knows the session has become countable, without threading
-// a handle through the spawn call chain. The filesystem the claim was written to
-// is kept with it, so the release removes it from the same place.
+// poolSeatClaimStore holds the claim ONE SPAWN made. A spawn takes at most one
+// seat — it claims at the pool decision and drops the claim when the session
+// starts or the spawn fails — so the store is created by the spawn that may
+// take the seat and travels with that spawn's record, which is what reaches
+// StartSession and the rollback.
+//
+// It is per spawn and not per process on purpose. The daemon runs dispatches
+// concurrently in one process, and a single store they shared would let one
+// dispatch's release drop a seat another dispatch is still standing on: the
+// second claim overwrites the first's, and whichever dispatch returns first
+// removes the survivor's file (gt-t8q5).
 type poolSeatClaimStore struct {
 	mu  sync.Mutex
 	fs  poolSeatFS
@@ -358,9 +363,11 @@ type poolSeatClaimStore struct {
 	id  string
 }
 
-var processPoolSeatClaims = &poolSeatClaimStore{}
+// newPoolSeatClaimStore is the store for one spawn: empty until that spawn's
+// pool decision claims a seat in it.
+func newPoolSeatClaimStore() *poolSeatClaimStore { return &poolSeatClaimStore{} }
 
-// ownID returns the claim this process holds, or "" when it holds none.
+// ownID returns the claim this spawn holds, or "" when it holds none.
 func (c *poolSeatClaimStore) ownID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -373,10 +380,13 @@ func (c *poolSeatClaimStore) hold(fsys poolSeatFS, dir, id string) {
 	c.fs, c.dir, c.id = fsys, dir, id
 }
 
-// release drops this process's claim. Idempotent, and a no-op when the process
+// release drops this spawn's claim. Idempotent, and a no-op when the spawn
 // never claimed a seat (an uncapped pool, an --agent the pool does not own, a
-// dry run).
+// dry run) or already released one.
 func (c *poolSeatClaimStore) release() {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	fsys, dir, id := c.fs, c.dir, c.id
 	c.fs, c.dir, c.id = nil, "", ""
@@ -387,17 +397,10 @@ func (c *poolSeatClaimStore) release() {
 	_ = fsys.Remove(filepath.Join(dir, id+".json"))
 }
 
-// releasePoolSeatClaim drops this process's seat claim. Every path a claim
-// stops standing for a polecat calls it: StartSession, once the tmux session
-// exists and is the record of that seat (holding both would read one polecat as
-// two); the error returns of the spawn the claim was made for; and the rollback
-// of a spawn whose session never started (gt-t8q5).
-func releasePoolSeatClaim() { processPoolSeatClaims.release() }
-
 // poolSeatLedger is the seat claim set of one town, with the collaborators it
-// reads and writes through: the filesystem, the claim this process holds, the
-// decision lock, the process-liveness probe, this process's PID, and the clock.
-// realPoolSeatLedger wires the real ones.
+// reads and writes through: the filesystem, the claim one spawn holds, the
+// decision lock, the process-liveness probe, this process's PID, and the
+// clock. poolSeatLedgerFor wires the real ones.
 type poolSeatLedger struct {
 	townRoot string
 	fs       poolSeatFS
@@ -409,14 +412,14 @@ type poolSeatLedger struct {
 	now   func() time.Time
 }
 
-// realPoolSeatLedger is the ledger a sling uses: the town's claim directory on
-// disk, this process's claim store and PID, and the flock that makes
-// count-then-claim atomic.
-func realPoolSeatLedger(townRoot string) *poolSeatLedger {
+// poolSeatLedgerFor is the ledger one spawn uses: the town's claim directory on
+// disk, that spawn's claim store and this process's PID, and the flock that
+// makes count-then-claim atomic.
+func poolSeatLedgerFor(townRoot string, store *poolSeatClaimStore) *poolSeatLedger {
 	return &poolSeatLedger{
 		townRoot: townRoot,
 		fs:       osPoolSeatFS{},
-		store:    processPoolSeatClaims,
+		store:    store,
 		lock: func() (func(), error) {
 			l, err := lockPoolDecision(townRoot)
 			if err != nil {
@@ -500,7 +503,9 @@ func (d *poolSeatDecision) done() {
 // poolSeatClaimSessions renders the claims other slings hold in townRoot as
 // poolSessions; see poolSeatLedger.claimSessions.
 func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
-	return realPoolSeatLedger(townRoot).claimSessions(ownID)
+	// A reader, not a spawn: it claims nothing, so it gets a store of its own
+	// rather than one a spawn's release is watching.
+	return poolSeatLedgerFor(townRoot, newPoolSeatClaimStore()).claimSessions(ownID)
 }
 
 // claimSessions renders the claims other slings hold as poolSessions so the
@@ -671,7 +676,7 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 
 // poolRouter is the pool decision for one town with its collaborators
 // explicit: the town's polecat_pool, the tmux sessions it counts, each
-// polecat's own bead state, the seat claims, and the clock. realPoolRouter
+// polecat's own bead state, the seat claims, and the clock. poolRouterFor
 // wires the real ones; the free functions below are thin wrappers over it.
 type poolRouter struct {
 	// pool returns the town's polecat_pool, nil when none is configured or the
@@ -683,9 +688,9 @@ type poolRouter struct {
 	now         func() time.Time
 }
 
-// realPoolRouter wires the pool decision to the town on disk, the tmux server,
-// bd (each polecat's own state), and this process's seat claim.
-func realPoolRouter(townRoot string) *poolRouter {
+// poolRouterFor wires the pool decision to the town on disk, the tmux server,
+// bd (each polecat's own state), and the seat claim of the spawn asking.
+func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
 	return &poolRouter{
 		pool: func() *config.PolecatPool {
 			ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
@@ -698,26 +703,18 @@ func realPoolRouter(townRoot string) *poolRouter {
 		disposition: func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 			return poolPolecatDisposition(townRoot, rigName, polecatName)
 		},
-		seats: realPoolSeatLedger(townRoot),
+		seats: poolSeatLedgerFor(townRoot, store),
 		now:   time.Now,
 	}
 }
 
-// resolvePolecatPoolAgent applies the town's polecat_pool to a sling, whatever
-// agent it asked for. It claims the seat it routes to while it decides (so a
-// sling racing this one sees the seat as taken) and returns the agent to use
-// with a one-line reason naming that agent. An empty agent with an empty reason
-// means the pool has no opinion and the caller's own choice stands. It returns
-// errPoolBackpressure when the seat is at its cap.
-func resolvePolecatPoolAgent(townRoot, requested string) (agent, reason string, err error) {
-	return realPoolRouter(townRoot).route(requested, true)
-}
-
-// peekPolecatPoolAgent is resolvePolecatPoolAgent without the side effects:
+// peekPolecatPoolAgent is the pool decision without the side effects:
 // `gt sling --dry-run` must print the route it would take — a refusal included,
-// since that is the route a live sling would take — without claiming a seat.
+// since that is the route a live sling would take — without claiming a seat. It
+// gets a store nothing else reads, because a preview must leave the pool's
+// state alone.
 func peekPolecatPoolAgent(townRoot, requested string) (agent, reason string, err error) {
-	return realPoolRouter(townRoot).route(requested, false)
+	return poolRouterFor(townRoot, newPoolSeatClaimStore()).route(requested, false)
 }
 
 // errPoolBackpressure identifies a pool refusal so callers and tests can match
@@ -779,12 +776,10 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 		return pool.OverflowAgent,
 			"pool: cannot list sessions (" + err.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
-	if live {
-		// The claim this process holds stood for its previous spawn, whose
-		// session is countable by now. Drop it before counting, or a batch
-		// sling reads its own last polecat as two seats.
-		r.seats.store.release()
-	}
+	// No release of a previous claim before counting: the store is this
+	// spawn's, and a spawn makes one decision. A claim from an earlier spawn
+	// was dropped by StartSession or the rollback that ended it, and
+	// claimSessions skips this store's own claim anyway.
 	sessions, seat, claimErr := r.seats.begin(live, sessions)
 	defer seat.done()
 	if claimErr != nil {
