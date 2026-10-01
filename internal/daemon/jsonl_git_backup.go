@@ -919,12 +919,11 @@ func escalationTitle(source, message string) string {
 // condition that persists across many patrol cycles leaves exactly one open
 // escalation behind (gt-vwry) instead of one per cycle.
 const (
-	alertKeyMainBranchTest = "main_branch_test:failures"
-	alertKeyJSONLInit      = "jsonl_git_backup:init"
-	alertKeyJSONLNoDBs     = "jsonl_git_backup:no-databases"
-	alertKeyJSONLScrub     = "jsonl_git_backup:scrub-suspicious"
-	alertKeyJSONLSpike     = "jsonl_git_backup:spike"
-	alertKeyJSONLPush      = "jsonl_git_backup:push"
+	alertKeyJSONLInit  = "jsonl_git_backup:init"
+	alertKeyJSONLNoDBs = "jsonl_git_backup:no-databases"
+	alertKeyJSONLScrub = "jsonl_git_backup:scrub-suspicious"
+	alertKeyJSONLSpike = "jsonl_git_backup:spike"
+	alertKeyJSONLPush  = "jsonl_git_backup:push"
 )
 
 // escalate raises an alert whose key is derived from its own title, for

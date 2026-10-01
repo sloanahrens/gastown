@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // PostLand is one landing whose post-landing command should run.
@@ -19,6 +21,8 @@ type PostLand struct {
 type PostLandResult struct {
 	ExitCode int
 	Tail     string
+	// Packages are the Go packages the run reported as ok or FAIL.
+	Packages []land.PackageResult
 	Err      error
 }
 
@@ -36,8 +40,10 @@ const postLandTailLines = 10
 // coalesced: when the run finishes, the command runs once more at the newest
 // landed commit, whatever number of landings arrived meanwhile.
 //
-// A red run comments on the landed bead and never blocks or reverts
-// anything. OnRed is the seam for red-main ownership (gt-v4ssj.4).
+// A red run comments on the landed bead and never blocks anything. OnRed and
+// OnGreen receive every verdict on the runner's goroutine, so a landing that
+// arrives while they work coalesces like one that arrives mid-run; RedMain is
+// the production pair (gt-v4ssj.4).
 type PostLandRunner struct {
 	Rig string
 	// Command returns the command to run; "" disables the runner. It is
@@ -49,8 +55,9 @@ type PostLandRunner struct {
 	Beads interface {
 		AddComment(id, text string) error
 	}
-	Logf  func(format string, args ...any)
-	OnRed func(pl PostLand, res PostLandResult)
+	Logf    func(format string, args ...any)
+	OnRed   func(ctx context.Context, cmd string, pl PostLand, res PostLandResult)
+	OnGreen func(ctx context.Context, cmd string, pl PostLand, res PostLandResult)
 
 	mu      sync.Mutex
 	running bool
@@ -133,10 +140,13 @@ func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
 			}
 		}
 		if p.OnRed != nil {
-			p.OnRed(pl, res)
+			p.OnRed(ctx, cmd, pl, res)
 		}
 	default:
 		p.logf("green at %s (%s)", short(pl.Commit), pl.BeadID)
+		if p.OnGreen != nil {
+			p.OnGreen(ctx, cmd, pl, res)
+		}
 	}
 }
 

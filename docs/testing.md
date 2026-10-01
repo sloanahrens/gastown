@@ -11,7 +11,7 @@ Three Makefile targets are the test tiers, and `make test` runs all three in ord
 | `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, warning about any package over `testpolicy.FastTierMaxWall` of wall time; prints its wall at the end | never | before every landing |
 | `make presubmit` | `make lint`, then `go build ./...`, then `go test` of only the packages the branch changed against `origin/main` (`internal/land/cmd/changedpkgs`); no drift guard, no budget runner | never | `gt done`, before it pushes (a crew `gt done` runs it on the pushed branch; `--pre-verified` skips it for crew only): the cheap first look, not a substitute for `make gate`, which the landing worker runs on the merged tree (gt-ssyxd) |
 | `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` (`make test-makefile` runs those alone) | never | after each landing: the landing worker runs it as the rig's `merge_queue.post_land_command`; until that hook is enabled, the overseer runs it after landings |
-| `make test-integration` | `go test -tags integration ./...` with no name filter, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
+| `make test-integration` | `go test -tags integration ./...` with no name filter, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the landing worker's post-landing command when a rig's `merge_queue.post_land_command` names it (gt-v4ssj.4), and the nightly workflow |
 
 Exit codes, for every target:
 - 0 means green.

@@ -37,11 +37,6 @@ func TestIsIdleForUpgrade(t *testing.T) {
 		{"compactor dog running", func(_ *testing.T, d *Daemon) { d.compactorDogRunning = true }, false},
 		{"scheduled slings running", func(_ *testing.T, d *Daemon) { d.scheduledSlingsRunning.Store(true) }, false},
 		{"mayor dispatch running", func(_ *testing.T, d *Daemon) { d.mayorDispatchRunning.Store(true) }, false},
-		{"main branch test mid-run", func(_ *testing.T, d *Daemon) { d.mainBranchTestRunning.Store(true) }, false},
-		{"main branch test waiting for a slot", func(_ *testing.T, d *Daemon) {
-			d.mainBranchTestRunning.Store(true)
-			d.mainBranchTestWaitingSlot.Store(true)
-		}, true},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
 			writeInstallLock(t, d)
 		}, true},

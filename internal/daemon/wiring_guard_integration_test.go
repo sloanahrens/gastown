@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -15,16 +14,6 @@ import (
 // Wiring guards whose production collaborator is a real process: each leaves
 // one seam nil and proves the collaborator behind it ran. The unit tier's
 // guards that need no process are in wiring_guard_test.go.
-
-// TestIntegrationHostLoadMeasuresTheRealHost guards hostLoad's nil path: the reading is
-// the host's own (its CPU count), not a zero value.
-func TestIntegrationHostLoadMeasuresTheRealHost(t *testing.T) {
-	t.Parallel()
-	d := &Daemon{}
-	if got := d.hostLoad().NumCPU; got != runtime.NumCPU() {
-		t.Errorf("hostLoad().NumCPU = %d, want this host's %d: the nil seam must measure the real host", got, runtime.NumCPU())
-	}
-}
 
 // TestIntegrationListOriginBranchesReadsTheRigOrigin guards listOriginBranches' nil
 // path: it lists the polecat branches on the rig's real origin remote.

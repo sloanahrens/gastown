@@ -96,23 +96,25 @@ func TestPostLandExitCodeRouting(t *testing.T) {
 		res         PostLandResult
 		wantComment bool
 		wantRed     bool
+		wantGreen   bool
 	}{
-		{name: "green", res: PostLandResult{ExitCode: 0, Tail: "ok all"}},
+		{name: "green", res: PostLandResult{ExitCode: 0, Tail: "ok all"}, wantGreen: true},
 		{name: "red", res: PostLandResult{ExitCode: 2, Tail: strings.Repeat("noise\n", 20) + "--- FAIL: TestSlow\nFAIL\tpkg"}, wantComment: true, wantRed: true},
 		{name: "could not run", res: PostLandResult{ExitCode: -1, Err: errors.New("slot wait timed out")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			comments := &commentLog{}
-			var red []PostLand
+			var red, green []PostLand
 			p := &PostLandRunner{Rig: "gastown", Command: func() string { return "make test-slow" }, Beads: comments, Logf: t.Logf,
-				Run:   func(context.Context, string, PostLand) PostLandResult { return tc.res },
-				OnRed: func(pl PostLand, _ PostLandResult) { red = append(red, pl) }}
+				Run:     func(context.Context, string, PostLand) PostLandResult { return tc.res },
+				OnRed:   func(_ context.Context, _ string, pl PostLand, _ PostLandResult) { red = append(red, pl) },
+				OnGreen: func(_ context.Context, _ string, pl PostLand, _ PostLandResult) { green = append(green, pl) }}
 			p.Trigger(context.Background(), PostLand{BeadID: "gt-1", Commit: "abc123def456"})
 			p.Wait()
 			cs := comments.get("gt-1")
-			if (len(cs) == 1) != tc.wantComment || (len(red) == 1) != tc.wantRed {
-				t.Fatalf("comments %q red %v", cs, red)
+			if (len(cs) == 1) != tc.wantComment || (len(red) == 1) != tc.wantRed || (len(green) == 1) != tc.wantGreen {
+				t.Fatalf("comments %q red %v green %v", cs, red, green)
 			}
 			if tc.wantComment {
 				c := cs[0]

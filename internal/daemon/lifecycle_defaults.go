@@ -16,7 +16,6 @@ package daemon
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	threshold := 1000
 	scrub := true
-	skipWhenGateBusy := true
 	return &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
@@ -59,20 +58,6 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Window:    "03:00",
 				Interval:  "daily",
 				Threshold: &threshold,
-			},
-			MainBranchTest: &MainBranchTestConfig{
-				Enabled:          true,
-				IntervalStr:      "60m",
-				TimeoutStr:       "10m",
-				SkipWhenGateBusy: &skipWhenGateBusy,
-				// Written out rather than left nil so the bound on the yield
-				// above is visible in a generated config, next to the knob
-				// that turns it on (gt-lf2r).
-				GateBusyStarveAfterStr: defaultGateBusyStarveAfter.String(),
-				// The integration tier's cadence, written out for the same
-				// reason: a generated config should show that the patrol also
-				// runs `make test-integration` daily (gt-22hdp.39).
-				IntegrationIntervalStr: defaultMainBranchIntegrationInterval.String(),
 			},
 			Handler: &PatrolConfig{
 				Enabled: true,
@@ -128,10 +113,6 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.ScheduledMaintenance == nil {
 		p.ScheduledMaintenance = d.ScheduledMaintenance
-		changed = true
-	}
-	if p.MainBranchTest == nil {
-		p.MainBranchTest = d.MainBranchTest
 		changed = true
 	}
 	if p.Handler == nil {

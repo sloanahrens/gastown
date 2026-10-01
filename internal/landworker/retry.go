@@ -12,14 +12,24 @@ import (
 // failure (Error 1213) under load. Such a transaction was rolled back, so the
 // retry cannot apply a write twice. Every other error returns at once.
 type RetryBeads struct {
-	Inner Beads
+	Inner RetryInner
 	// Tries is the total number of attempts; 0 means 4.
 	Tries int
 	// Sleep waits between attempts; nil means time.Sleep.
 	Sleep func(time.Duration)
 }
 
-var _ Beads = RetryBeads{}
+// RetryInner is the beads client RetryBeads wraps: the worker's surface and
+// the red-main owner's.
+type RetryInner interface {
+	Beads
+	RedMainBeads
+}
+
+var (
+	_ Beads        = RetryBeads{}
+	_ RedMainBeads = RetryBeads{}
+)
 
 // IsSerializationFailure reports whether err is Dolt's retryable
 // transaction conflict.
@@ -94,4 +104,13 @@ func (r RetryBeads) Comments(id string) (out []beads.Comment, err error) {
 
 func (r RetryBeads) AddComment(id, text string) error {
 	return r.do(func() error { return r.Inner.AddComment(id, text) })
+}
+
+func (r RetryBeads) Create(opts beads.CreateOptions) (is *beads.Issue, err error) {
+	err = r.do(func() error { is, err = r.Inner.Create(opts); return err })
+	return is, err
+}
+
+func (r RetryBeads) CloseWithReason(reason string, ids ...string) error {
+	return r.do(func() error { return r.Inner.CloseWithReason(reason, ids...) })
 }
