@@ -132,7 +132,7 @@ per-machine differences (PATH) and per-role overrides out of the shared registry
 
 `gt rig add` syncs hooks for the new rig's targets. The `hooks-sync` doctor
 check flags any settings file that differs from what `gt hooks sync` would
-write; `gt doctor --fix` rewrites it.
+write; `gt doctor fix hooks-sync` rewrites it.
 
 ## Per-matcher merge semantics
 

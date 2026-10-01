@@ -77,7 +77,7 @@ only cherry-picks (which produce new SHAs) are not detected. It matches only
 branches under `integration/`.
 
 **Requires**: `core.hooksPath` must be configured for the hook to be active.
-New rigs get this automatically. Existing rigs: run `gt doctor --fix`.
+New rigs get this automatically. Existing rigs: run `gt doctor fix git-exclude-configured`.
 
 ## Anti-Patterns
 

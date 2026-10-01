@@ -24,8 +24,8 @@ var doltDatabaseKeyAllowed = map[string]string{
 	"internal/config/bd_metadata.go:BeadsFileDatabase":            "the one read of bd's copy",
 	"internal/beads/beads_metadata.go:EnsureMetadataDatabase":     "writes bd's metadata.json",
 	"internal/doltserver/doltserver.go:EnsureMetadataForBeadsDir": "writes bd's metadata.json",
-	"internal/doctor/migration_check.go:writeDoltMetadata":        "writes bd's metadata.json (gt doctor --fix)",
-	"internal/doctor/rig_config_sync_check.go:Fix":                "writes bd's metadata.json (gt doctor --fix)",
+	"internal/doctor/migration_check.go:writeDoltMetadata":        "writes bd's metadata.json (gt doctor fix dolt-orphaned-databases)",
+	"internal/doctor/rig_config_sync_check.go:Fix":                "writes bd's metadata.json (gt doctor fix rig-config-sync)",
 }
 
 // TestDoltDatabaseIsReadThroughTheKernel fails when production code names the

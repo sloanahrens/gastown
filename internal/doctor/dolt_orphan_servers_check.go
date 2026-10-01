@@ -94,9 +94,12 @@ func (c *DoltOrphanServersCheck) Run(ctx *CheckContext) *CheckResult {
 		Message: fmt.Sprintf("%d orphaned dolt sql-server process(es) (%d auto-fixable), %d stale test temp dir(s)",
 			len(c.orphans), reapable, len(c.staleDirs)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to SIGTERM orphaned servers and remove stale test temp dirs",
+		FixHint: "Run 'gt doctor fix dolt-orphan-servers' to SIGTERM orphaned servers and remove stale test temp dirs",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it SIGTERMs orphaned Dolt servers.
+func (c *DoltOrphanServersCheck) DestructiveFix() bool { return true }
 
 // Fix sends SIGTERM to every orphan tagged "orphan" (never "unexpected" —
 // those may be a developer's own manual server) and removes stale test temp

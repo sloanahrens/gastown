@@ -55,7 +55,7 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 				"The town root should be on the main branch",
 				"Detached HEAD can cause gt commands to fail",
 			},
-			FixHint: "Run 'gt doctor --fix' or manually: cd ~/gt && git checkout main",
+			FixHint: "Run 'gt doctor fix town-root-branch' or manually: cd ~/gt && git checkout main",
 		}
 	}
 
@@ -79,7 +79,7 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 			"This can cause gt commands to fail (missing rigs.json, etc.)",
 			"The branch switch was likely accidental (git command in wrong dir)",
 		},
-		FixHint: "Run 'gt doctor --fix' or manually: cd ~/gt && git checkout main",
+		FixHint: "Run 'gt doctor fix town-root-branch' or manually: cd ~/gt && git checkout main",
 	}
 }
 

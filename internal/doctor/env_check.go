@@ -54,7 +54,7 @@ var envCheckedRoles = map[session.Role]bool{
 // EnvVarsCheck verifies that tmux session environment variables match expected values.
 type EnvVarsCheck struct {
 	FixableCheck
-	reader   SessionEnvReader  // nil means use real tmux
+	reader   SessionEnvReader   // nil means use real tmux
 	accessor SessionEnvAccessor // non-nil when Fix() support is needed
 }
 
@@ -213,7 +213,7 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found %d env var mismatch(es) across %d session(s)", len(mismatches), checkedCount),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to apply missing env vars in-place, or 'gt shutdown && gt up' to restart",
+		FixHint: "Run 'gt doctor fix env-vars' to apply missing env vars in-place, or 'gt shutdown && gt up' to restart",
 	}
 }
 

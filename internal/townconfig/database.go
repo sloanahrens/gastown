@@ -6,7 +6,7 @@ package townconfig
 // rig registry holds it: the entry's "dolt_database". It came from the
 // dolt_database of the rig's bd .beads/metadata.json, which stays, because
 // bd reads that file itself. gt rig add records both; gt config migrate and
-// gt doctor --fix (rig-database) copy metadata.json's name into an entry
+// gt doctor fix rig-database copy metadata.json's name into an entry
 // that has none (AbsorbRigDatabases).
 //
 // Gastown reads the name only through this file: DatabaseForBeadsDir for a
@@ -159,8 +159,8 @@ func rigDatabaseState(root, name string, entry config.RigEntry) RigDatabaseState
 // returns those rigs' states as they were before. An entry that already has
 // a name keeps it, even when metadata.json names another (gt doctor's
 // rig-database check reports that). With dryRun it writes nothing. Running
-// it again finds nothing to do. gt config migrate and gt doctor --fix call
-// it; it works on either config layout.
+// it again finds nothing to do. gt config migrate and gt doctor fix
+// rig-database call it; it works on either config layout.
 func AbsorbRigDatabases(root string, dryRun bool) ([]RigDatabaseState, error) {
 	if dryRun {
 		states, err := RigDatabaseStates(root)

@@ -153,7 +153,7 @@ func (c *RigsRegistryExistsCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: "mayor/rigs.json not found (no rigs registered)",
-			FixHint: "Run 'gt doctor --fix' to create empty rigs.json",
+			FixHint: "Run 'gt doctor fix rigs-registry-exists' to create empty rigs.json",
 		}
 	}
 
@@ -252,7 +252,7 @@ func (c *RigsRegistryValidCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d of %d registered rig(s) missing", len(missing), len(registry.Rigs)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to remove missing rigs from registry",
+			FixHint: "Run 'gt doctor fix rigs-registry-valid' to remove missing rigs from registry",
 		}
 	}
 

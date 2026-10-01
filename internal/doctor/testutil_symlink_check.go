@@ -104,7 +104,7 @@ func (c *TestutilSymlinkCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d testutil dir(s) not symlinked to canonical copy", len(c.issues)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix --rig <rig>' to replace with symlinks",
+			FixHint: "Run 'gt doctor fix testutil-symlink --rig <rig>' to replace with symlinks",
 		}
 	}
 

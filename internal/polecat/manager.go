@@ -393,7 +393,7 @@ func (m *Manager) CheckDoltHealth() error {
 		}
 		// Fail fast on config/init errors — retrying won't help (gt-2ra, gas-tc4)
 		if isDoltConfigError(err) {
-			return fmt.Errorf("%w: %v\n\nRecovery: run 'gt doctor --fix' to repair database configuration.\n"+
+			return fmt.Errorf("%w: %v\n\nRecovery: run 'gt doctor' to see the failing check, then 'gt doctor fix <check>' to repair just that one.\n"+
 				"If that doesn't help, try: bd init --force --server", ErrDoltUnhealthy, err)
 		}
 		lastErr = err
@@ -416,7 +416,7 @@ func (m *Manager) CheckDoltHealth() error {
 		}
 	}
 
-	return fmt.Errorf("%w: %v\n\nRecovery: run 'gt doctor --fix' to diagnose and repair Dolt configuration", ErrDoltUnhealthy, lastErr)
+	return fmt.Errorf("%w: %v\n\nRecovery: run 'gt doctor' to see the failing check, then 'gt doctor fix <check>' to repair just that one (or 'gt dolt status' for server health)", ErrDoltUnhealthy, lastErr)
 }
 
 // CheckDoltServerCapacity verifies the Dolt server has capacity for new connections.

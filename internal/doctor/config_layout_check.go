@@ -8,7 +8,8 @@ import (
 
 // ConfigLayoutCheck reports which config layout the town is on
 // (gt-y3pgh.7, internal/config/layout.go). The five-file layout still
-// loads, so it is a warning, never an error. It has no --fix: the move is
+// loads, so it is a warning, never an error. There is no gt doctor fix
+// config-layout: the move is
 // gt config migrate, run by the operator.
 type ConfigLayoutCheck struct {
 	BaseCheck

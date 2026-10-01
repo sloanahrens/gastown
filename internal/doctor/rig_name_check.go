@@ -128,7 +128,7 @@ func (c *RigNameMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d rig config mismatch(es) found", len(details)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to update config.json to match directory name and registry prefix",
+		FixHint: "Run 'gt doctor fix rig-name-mismatch' to update config.json to match directory name and registry prefix",
 	}
 }
 

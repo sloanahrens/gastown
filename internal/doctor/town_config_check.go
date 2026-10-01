@@ -11,7 +11,7 @@ import (
 // settings/config.json, mayor/daemon.json, settings/daemon.env,
 // .dolt-data/config.yaml), including an unknown key. The town-running
 // commands, agent session starts and the daemon refuse on the same check
-// (gt-fcxe9.10, gt-y3pgh.1). It has no --fix: gt never rewrites an
+// (gt-fcxe9.10, gt-y3pgh.1). It has no gt doctor fix: gt never rewrites an
 // unparseable file, the operator fixes it by hand.
 type TownConfigParseCheck struct {
 	BaseCheck

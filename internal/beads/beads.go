@@ -1068,7 +1068,7 @@ func (b *Beads) agentBeadCanonicalDir(id string) string {
 // agent bead must be created: its canonical (prefix-routed) database. This is
 // what makes spawn paths create rig-LOCAL agent beads (gt-8we); previously
 // they re-rooted to the town database and every newly added agent regressed
-// the doctor agent-beads-exist check until the next doctor --fix.
+// the doctor agent-beads-exist check until the next repair.
 // Pinned wrappers (doctor's NewRigLocal) are returned unchanged.
 func (b *Beads) agentBeadCreateTarget(id string) *Beads {
 	if b.noRoute {

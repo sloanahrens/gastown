@@ -94,7 +94,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt doctor --fix` | Auto-fixes: orphan sessions, wisp GC, stale redirects, worktree validity |
+| `gt doctor fix <check>` | Repairs one named check: orphan sessions, stale redirects, worktree validity, … |
 
 ## System-Level Cleanup
 
@@ -124,7 +124,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | **L1** | Processes | `gt down --all`, daemon orphan cleanup |
 | **L2** | Git artifacts | `gt polecat gc` |
 | **L3** | Agents/sessions | `gt polecat nuke`, `gt done`, `gt shutdown`, `gt down` |
-| **L4** | Workspace | `gt rig reset`, `gt doctor --fix`, `gt dolt cleanup` |
+| **L4** | Workspace | `gt rig reset`, `gt doctor fix <check>`, `gt dolt cleanup` |
 | **L5** | System | `make clean` |
 
 **Total: ~62 commands/functions** across the cleanup ecosystem.

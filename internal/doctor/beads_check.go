@@ -188,7 +188,7 @@ func (c *PrefixMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d prefix mismatch(es) between rigs.json and routes.jsonl", len(mismatches)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to update rigs.json with correct prefixes",
+		FixHint: "Run 'gt doctor fix prefix-mismatch' to update rigs.json with correct prefixes",
 	}
 }
 
@@ -444,7 +444,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d database prefix mismatch(es) with routes.jsonl", len(c.mismatches)),
 		Details:  problems,
-		FixHint:  "Run 'gt doctor --fix' to update database configs to match routes.jsonl",
+		FixHint:  "Run 'gt doctor fix database-prefix' to update database configs to match routes.jsonl",
 		Category: c.Category(),
 	}
 }

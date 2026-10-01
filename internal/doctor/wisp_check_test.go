@@ -99,10 +99,10 @@ func TestWispGCCheckFreshWispsAreOK(t *testing.T) {
 	}
 }
 
-// TestWispGCCheckFixDeletesNothing is the C1 guard: gt doctor --fix (which
+// TestWispGCCheckFixDeletesNothing is the C1 guard: a doctor repair (which
 // the mol-session-gc formula runs) must not collect wisps, because age gc
-// deletes open merge-request wisps too. The check is not fixable, a doctor
-// fix leaves every wisp in place, and doctor's bd surface (bdCLI) has no
+// deletes open merge-request wisps too. The check is not fixable, a repair
+// leaves every wisp in place, and doctor's bd surface (bdCLI) has no
 // method that runs gc at all.
 func TestWispGCCheckFixDeletesNothing(t *testing.T) {
 	t.Parallel()
@@ -123,7 +123,7 @@ func TestWispGCCheckFixDeletesNothing(t *testing.T) {
 	}
 	d := NewDoctor()
 	d.Register(check)
-	report := d.Fix(bd.ctx(town))
+	report := fixRegisteredForTest(t, d, bd.ctx(town))
 	for _, r := range report.Checks {
 		if r.Fixed {
 			t.Errorf("%s reported fixed", r.Name)

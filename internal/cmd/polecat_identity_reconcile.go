@@ -163,7 +163,7 @@ func runReconcile(out io.Writer, stores reconcileStores, townRoot, id string, ap
 		return fmt.Errorf("reading rig row %s: %w", id, err)
 	}
 	if rigIssue == nil {
-		return fmt.Errorf("%s has no rig row; run 'gt doctor --fix' (agent-beads-exist) first", id)
+		return fmt.Errorf("%s has no rig row; run 'gt doctor fix agent-beads-exist' first", id)
 	}
 	townIssue, _, err := townBd.GetAgentBeadInStoreOnly(id)
 	if err != nil {

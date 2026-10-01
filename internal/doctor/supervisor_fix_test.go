@@ -27,8 +27,8 @@ func parkSession(t *testing.T, town, sess string) {
 	}
 }
 
-// gt doctor --fix kills zombie seats through the supervisor: a parked seat
-// is refused and reported, and a free one is killed and logged.
+// gt doctor fix <check> kills zombie seats through the supervisor: a parked
+// seat is refused and reported, and a free one is killed and logged.
 func TestZombieSessionCheck_FixHonorsAParkedSeat(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -46,7 +46,7 @@ func TestZombieSessionCheck_FixHonorsAParkedSeat(t *testing.T) {
 		t.Fatalf("Fix error = %v, want the parked-seat refusal reported", err)
 	}
 	lines, _ := os.ReadFile(supervisor.ActionLogPath(town))
-	if !strings.Contains(string(lines), `"actor":"gt doctor --fix"`) {
+	if !strings.Contains(string(lines), `"actor":"gt doctor fix"`) {
 		t.Fatalf("doctor kills missing from the action log: %s", lines)
 	}
 }

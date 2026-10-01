@@ -83,7 +83,7 @@ func (c *SettingsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d rig(s) missing settings/ directory", len(missing)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to create missing directories",
+		FixHint: "Run 'gt doctor fix rig-settings' to create missing directories",
 	}
 }
 
@@ -198,6 +198,9 @@ func NewLegacyGastownCheck() *LegacyGastownCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes legacy .gastown directories.
+func (c *LegacyGastownCheck) DestructiveFix() bool { return true }
+
 // Run checks for legacy .gastown/ directories.
 func (c *LegacyGastownCheck) Run(ctx *CheckContext) *CheckResult {
 	var found []string
@@ -243,7 +246,7 @@ func (c *LegacyGastownCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d legacy .gastown/ directory(ies) found", len(found)),
 		Details: found,
-		FixHint: "Run 'gt doctor --fix' to remove after verifying migration is complete",
+		FixHint: "Run 'gt doctor fix legacy-gastown' to remove after verifying migration is complete",
 	}
 }
 
@@ -326,7 +329,7 @@ func (c *SessionHookCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d hook issue(s) found across settings.json files", len(issues)),
 		Details: issues,
-		FixHint: "Run 'gt doctor --fix' to update hooks to use 'gt prime --hook'",
+		FixHint: "Run 'gt doctor fix session-hooks' to update hooks to use 'gt prime --hook'",
 	}
 }
 
@@ -634,7 +637,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 				"Gas Town custom types (agent, role, rig, convoy, slot) are not registered",
 				"This may cause bead creation/validation errors",
 			},
-			FixHint: "Run 'gt doctor --fix' or 'bd config set types.custom \"" + constants.BeadsCustomTypes + "\"'",
+			FixHint: "Run 'gt doctor fix beads-custom-types' or 'bd config set types.custom \"" + constants.BeadsCustomTypes + "\"'",
 		}
 	}
 
@@ -672,7 +675,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 				Status:  StatusWarning,
 				Message: "Infra types not configured for durable rig identity beads",
 				Details: details,
-				FixHint: "Run 'gt doctor --fix' to register infra types",
+				FixHint: "Run 'gt doctor fix beads-custom-types' to register infra types",
 			}
 		}
 		return &CheckResult{
@@ -695,7 +698,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 			fmt.Sprintf("Configured: %s", configuredTypes),
 			fmt.Sprintf("Required: %s", constants.BeadsCustomTypes),
 		},
-		FixHint: "Run 'gt doctor --fix' to register missing types",
+		FixHint: "Run 'gt doctor fix beads-custom-types' to register missing types",
 	}
 }
 
@@ -791,7 +794,7 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 				"Gas Town custom statuses (staged_ready, staged_warnings) are not registered",
 				"Convoy staging will fail without these statuses",
 			},
-			FixHint: "Run 'gt doctor --fix' or 'bd config set status.custom \"" + constants.BeadsCustomStatuses + "\"'",
+			FixHint: "Run 'gt doctor fix beads-custom-statuses' or 'bd config set status.custom \"" + constants.BeadsCustomStatuses + "\"'",
 		}
 	}
 
@@ -829,7 +832,7 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 			fmt.Sprintf("Configured: %s", configuredStatuses),
 			fmt.Sprintf("Required: %s", constants.BeadsCustomStatuses),
 		},
-		FixHint: "Run 'gt doctor --fix' to register missing statuses",
+		FixHint: "Run 'gt doctor fix beads-custom-statuses' to register missing statuses",
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 // All agents inherit these via Claude's directory traversal - no per-workspace copies needed.
 type CommandsCheck struct {
 	FixableCheck
-	townRoot       string   // Cached for Fix
+	townRoot        string   // Cached for Fix
 	missingCommands []string // Cached during Run for use in Fix
 }
 
@@ -54,7 +54,7 @@ func (c *CommandsCheck) Run(ctx *CheckContext) *CheckResult {
 			fmt.Sprintf("Expected at: %s/.claude/commands/", ctx.TownRoot),
 			"All agents inherit town-level commands via directory traversal",
 		},
-		FixHint: "Run 'gt doctor --fix' to provision missing commands",
+		FixHint: "Run 'gt doctor fix commands-provisioned' to provision missing commands",
 	}
 }
 

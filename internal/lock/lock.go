@@ -30,10 +30,10 @@ var (
 
 // LockInfo contains information about who holds a lock.
 type LockInfo struct {
-	PID       int       `json:"pid"`
+	PID        int       `json:"pid"`
 	AcquiredAt time.Time `json:"acquired_at"`
-	SessionID string    `json:"session_id,omitempty"`
-	Hostname  string    `json:"hostname,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Hostname   string    `json:"hostname,omitempty"`
 }
 
 // IsStale checks if the lock is stale (owning process is dead).
@@ -178,7 +178,7 @@ func (l *Lock) Status() string {
 }
 
 // ForceRelease removes the lock regardless of who holds it.
-// Use with caution - only for doctor --fix scenarios.
+// Use with caution - only for `gt doctor fix identity-collision` scenarios.
 func (l *Lock) ForceRelease() error {
 	return l.Release()
 }

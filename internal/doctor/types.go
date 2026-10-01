@@ -72,8 +72,8 @@ type CheckContext struct {
 	TownRoot        string // Root directory of the Gas Town workspace
 	RigName         string // Rig name (empty for town-level checks)
 	Verbose         bool   // Enable verbose output
-	RestartSessions bool   // Restart patrol sessions when fixing (requires explicit --restart-sessions flag)
-	NoStart         bool   // Suppress starting daemon/agents during --fix
+	RestartSessions bool   // Restart patrol sessions when repairing (requires explicit --restart-sessions flag)
+	NoStart         bool   // Suppress starting daemon/agents during a repair
 
 	// openBD opens the bd client checks run maintenance commands through.
 	// Nil means the real bd CLI (see bd); tests set a beadsfake.

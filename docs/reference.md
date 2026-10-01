@@ -146,7 +146,7 @@ Town-level role defaults live in `mayor/config.json` under:
 
 Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict
-decoding; `gt doctor --fix` deletes them.
+decoding; `gt doctor fix deprecated-merge-queue-keys` deletes them.
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
@@ -521,7 +521,7 @@ These coexist safely because:
   customer `.claude/` files are fully preserved
 
 **Doctor check**: `gt doctor` warns if legacy sparse checkout is still configured.
-Run `gt doctor --fix` to remove it. Tracked `settings.json` files in worktrees are
+Run `gt doctor fix sparse-checkout` to remove it. Tracked `settings.json` files in worktrees are
 recognized as customer project config and are not flagged as stale.
 
 ### Settings Inheritance
@@ -554,8 +554,8 @@ at session start. Interactive agents wait for user prompts.
 | Problem | Solution |
 |---------|----------|
 | Agent using wrong settings | Check `gt doctor`, verify `.claude/settings.json` in role parent dir |
-| Settings not found | Run `gt install` to recreate settings, or `gt doctor --fix` |
-| Source repo settings leaking | Run `gt doctor --fix` to remove legacy sparse checkout |
+| Settings not found | Run `gt install` to recreate settings, or `gt doctor fix <check>` |
+| Source repo settings leaking | Run `gt doctor fix sparse-checkout` to remove legacy sparse checkout |
 | Mayor settings affecting polecats | Mayor should run in `mayor/`, not town root |
 
 ## CLI Reference
@@ -565,8 +565,8 @@ at session start. Interactive agents wait for user prompts.
 ```bash
 gt install [path]            # Create town
 gt install --git             # With git init
-gt doctor                    # Health check
-gt doctor --fix              # Auto-repair
+gt doctor                    # Read-only health check
+gt doctor fix <check>        # Repair one named check
 ```
 
 ### Configuration

@@ -43,7 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has no run receipt and `hq` has no tags. It was the repository's only nested
   Go module.
 
+- **`gt doctor --fix` and its blanket repair loop** (gt-638go.3, G4-09) — the
+  town-wide fixer ran every repairable check's repair after one command, and
+  agent-facing remediation text pointed at it, so a polecat chasing a stale
+  worktree could kill other agents' sessions or remove a rig's shared
+  `.repo.git`. `gt doctor` is now read-only; `--no-start` and
+  `--restart-sessions` moved to the named repair.
+
 ### Added
+
+- **`gt doctor fix <check>`** (gt-638go.3, G4-09) — repairs exactly one named
+  check and re-runs it to verify. It refuses an unknown name, a report-only
+  check, and a check that could not determine a result (UNKNOWN / skipped),
+  which a fixer must never act on (gt-fcxe9.1). A repair that can end a running
+  process or destroy state (24 checks, marked by `DestructiveFixer`) requires
+  `--authorized-by <bead-id>` when an agent runs it: an open bead labeled
+  `doctor-fix-auth` that the mayor/overseer created, the guard `gt dolt
+  cleanup` already uses (gt-61x). Humans at a terminal are not asked.
 
 - **`git_hygiene` daemon patrol** (gt-4k3fj.8.5) — every 12h (`patrols.git_hygiene`
   in `mayor/daemon.json`, on when absent) the daemon fetches with `--prune` in

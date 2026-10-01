@@ -68,7 +68,7 @@ func (c *TmuxGlobalEnvCheck) Run(ctx *CheckContext) *CheckResult {
 				"The daemon sets GT_TOWN_ROOT in tmux global env for run-shell subprocesses.",
 				"Without it, prefix-based cycle groups (prefix+n/p) fail when CWD is $HOME.",
 			},
-			FixHint: "Run 'gt doctor --fix' to set GT_TOWN_ROOT in tmux global env",
+			FixHint: "Run 'gt doctor fix tmux-global-env' to set GT_TOWN_ROOT in tmux global env",
 		}
 	}
 
@@ -81,7 +81,7 @@ func (c *TmuxGlobalEnvCheck) Run(ctx *CheckContext) *CheckResult {
 				"The daemon sets GT_TOWN_ROOT in tmux global env for run-shell subprocesses.",
 				"Without it, prefix-based cycle groups (prefix+n/p) fail when CWD is $HOME.",
 			},
-			FixHint: "Run 'gt doctor --fix' to set GT_TOWN_ROOT in tmux global env",
+			FixHint: "Run 'gt doctor fix tmux-global-env' to set GT_TOWN_ROOT in tmux global env",
 		}
 	}
 

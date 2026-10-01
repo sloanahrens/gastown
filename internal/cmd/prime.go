@@ -350,7 +350,7 @@ func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
 		TownRoot: townRoot,
 		Require:  roleRequiresWorktreeIntegrity(role),
 	}); err != nil {
-		return fmt.Errorf("%w\nRemediation: stop using this worktree and run `gt doctor --fix`", err)
+		return fmt.Errorf("%w\nRemediation: stop using this worktree and run `gt doctor fix worktree-gitdir-valid`", err)
 	}
 	return nil
 }
@@ -1460,7 +1460,7 @@ func acquireIdentityLock(ctx RoleContext) error {
 
 			fmt.Printf("To resolve:\n")
 			fmt.Printf("  1. Find the other session and close it, OR\n")
-			fmt.Printf("  2. Run: gt doctor --fix (cleans stale locks)\n")
+			fmt.Printf("  2. Run: gt doctor fix identity-collision (cleans stale locks)\n")
 			fmt.Printf("  3. If lock is stale: rm %s/.runtime/agent.lock\n", ctx.WorkDir)
 			fmt.Println()
 

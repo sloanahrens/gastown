@@ -120,7 +120,7 @@ func (c *RigsJSONCheck) Run(ctx *CheckContext) *CheckResult {
 				fmt.Sprintf("Fallback: %s (exists)", c.fallbackPath),
 				"Likely deleted by git operation in mayor worktree",
 			},
-			FixHint: "Run 'gt doctor --fix' to restore from fallback",
+			FixHint: "Run 'gt doctor fix rigs-json' to restore from fallback",
 		}
 	}
 

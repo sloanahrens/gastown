@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -49,6 +50,20 @@ func (m *mockCheck) Fix(ctx *CheckContext) error {
 	m.status = StatusOK
 	return nil
 }
+
+// destructiveMockCheck is a fixable check whose repair is destructive, so it
+// exercises the authorize hook.
+type destructiveMockCheck struct {
+	mockCheck
+}
+
+func newDestructiveMockCheck(name string, status CheckStatus) *destructiveMockCheck {
+	c := &destructiveMockCheck{mockCheck: *newMockCheck(name, status)}
+	c.mockCheck.fixable = true
+	return c
+}
+
+func (m *destructiveMockCheck) DestructiveFix() bool { return true }
 
 func TestCheckStatus_String(t *testing.T) {
 	t.Parallel()
@@ -387,7 +402,22 @@ func TestDoctor_RunStreaming_SkippedIcon(t *testing.T) {
 	}
 }
 
-func TestDoctor_Fix(t *testing.T) {
+// fixRegisteredForTest repairs every registered check, one FixOne call at a
+// time, and returns their results. It exists for tests of several fixers at
+// once; production has no blanket path — `gt doctor fix <check>` names one.
+func fixRegisteredForTest(t *testing.T, d *Doctor, ctx *CheckContext) *Report {
+	t.Helper()
+	report := NewReport()
+	for _, check := range d.Checks() {
+		result, _ := d.FixOne(ctx, check.Name(), nil, nil)
+		if result != nil {
+			report.Add(result)
+		}
+	}
+	return report
+}
+
+func TestDoctor_FixOne(t *testing.T) {
 	t.Parallel()
 	d := NewDoctor()
 
@@ -403,34 +433,48 @@ func TestDoctor_Fix(t *testing.T) {
 	d.Register(unfixableCheck)
 
 	ctx := &CheckContext{TownRoot: "/test"}
-	report := d.Fix(ctx)
 
-	// OK check should remain OK
-	if report.Checks[0].Status != StatusOK {
-		t.Error("OK check should remain OK")
+	// A passing check is already the goal: no repair, no error.
+	result, err := d.FixOne(ctx, "ok", nil, nil)
+	if err != nil {
+		t.Fatalf("FixOne(ok) returned error: %v", err)
+	}
+	if result.Status != StatusOK {
+		t.Errorf("ok check should stay OK, got %s", result.Status)
+	}
+	if okCheck.fixCount != 0 {
+		t.Error("a passing check must not have Fix() called")
 	}
 
-	// Fixable check should be fixed
+	// A fixable problem is repaired and verified.
+	result, err = d.FixOne(ctx, "fixable", nil, nil)
+	if err != nil {
+		t.Fatalf("FixOne(fixable) returned error: %v", err)
+	}
 	if fixableCheck.fixCount != 1 {
-		t.Error("Fixable check should have Fix() called once")
+		t.Errorf("fixable check should have Fix() called once, got %d", fixableCheck.fixCount)
 	}
-	if report.Checks[1].Status != StatusOK {
-		t.Error("Fixable check should be OK after fix")
+	if result.Status != StatusOK || !result.Fixed {
+		t.Errorf("fixable check should be OK and marked fixed, got status=%s fixed=%v", result.Status, result.Fixed)
 	}
 
-	// Unfixable check should remain error
-	if unfixableCheck.fixCount != 0 {
-		t.Error("Unfixable check should not have Fix() called")
+	// A report-only check is refused, not repaired.
+	result, err = d.FixOne(ctx, "unfixable", nil, nil)
+	if !errors.Is(err, ErrNotFixable) {
+		t.Errorf("FixOne(unfixable) error = %v, want ErrNotFixable", err)
 	}
-	if report.Checks[2].Status != StatusError {
-		t.Error("Unfixable check should remain Error")
+	if unfixableCheck.fixCount != 0 {
+		t.Error("unfixable check must not have Fix() called")
+	}
+	if result.Status != StatusError {
+		t.Errorf("unfixable check should stay Error, got %s", result.Status)
 	}
 }
 
-// TestDoctor_Fix_SkipsSkippedChecks locks in the fix for gt-whvu: a check
-// that could not determine a result has nothing to fix, so Fix() must never
-// be invoked on it even when the check is otherwise fixable.
-func TestDoctor_Fix_SkipsSkippedChecks(t *testing.T) {
+// TestDoctor_FixOne_RefusesUnknownResult locks in the fix for gt-whvu and the
+// gt-fcxe9.1 rule: a check that could not determine a result is UNKNOWN, and a
+// fixer must never be invoked on it even when the check is otherwise fixable.
+func TestDoctor_FixOne_RefusesUnknownResult(t *testing.T) {
 	t.Parallel()
 	d := NewDoctor()
 
@@ -439,16 +483,86 @@ func TestDoctor_Fix_SkipsSkippedChecks(t *testing.T) {
 	d.Register(skippedCheck)
 
 	ctx := &CheckContext{TownRoot: "/test"}
-	report := d.Fix(ctx)
-
+	result, err := d.FixOne(ctx, "skipped", nil, nil)
+	if !errors.Is(err, ErrUnknownResult) {
+		t.Errorf("FixOne(skipped) error = %v, want ErrUnknownResult", err)
+	}
 	if skippedCheck.fixCount != 0 {
 		t.Error("Skipped check should not have Fix() called")
 	}
-	if report.Checks[0].Status != StatusSkipped {
-		t.Error("Skipped check should remain Skipped")
+	if result.Status != StatusSkipped {
+		t.Errorf("Skipped check should remain Skipped, got %s", result.Status)
 	}
-	if report.Checks[0].Fixed {
+	if result.Fixed {
 		t.Error("Skipped check should not be marked Fixed")
+	}
+}
+
+// TestDoctor_FixOne_UnknownCheck: the fixer names the check, so a typo is an
+// error rather than a silent no-op.
+func TestDoctor_FixOne_UnknownCheck(t *testing.T) {
+	t.Parallel()
+	d := NewDoctor()
+	d.Register(newMockCheck("known", StatusOK))
+
+	_, err := d.FixOne(&CheckContext{TownRoot: "/test"}, "nope", nil, nil)
+	if !errors.Is(err, ErrUnknownCheck) {
+		t.Errorf("FixOne(unknown) error = %v, want ErrUnknownCheck", err)
+	}
+}
+
+// TestDoctor_FixOne_DestructiveNeedsAuthorization: a destructive check consults
+// the authorize hook before its Fix runs, and a refusal leaves the check alone.
+func TestDoctor_FixOne_DestructiveNeedsAuthorization(t *testing.T) {
+	t.Parallel()
+	d := NewDoctor()
+
+	destructive := newDestructiveMockCheck("killer", StatusError)
+	d.Register(destructive)
+
+	ctx := &CheckContext{TownRoot: "/test"}
+	refused := errors.New("no authorization")
+	_, err := d.FixOne(ctx, "killer", nil, func(Check) error { return refused })
+	if !errors.Is(err, refused) {
+		t.Fatalf("FixOne(destructive) error = %v, want the authorizer's refusal", err)
+	}
+	if destructive.fixCount != 0 {
+		t.Error("a refused destructive check must not have Fix() called")
+	}
+
+	// With authorization, the repair runs.
+	result, err := d.FixOne(ctx, "killer", nil, func(Check) error { return nil })
+	if err != nil {
+		t.Fatalf("authorized FixOne(destructive) returned error: %v", err)
+	}
+	if destructive.fixCount != 1 {
+		t.Errorf("authorized destructive check should have Fix() called once, got %d", destructive.fixCount)
+	}
+	if !result.Fixed {
+		t.Error("authorized destructive repair should be marked fixed")
+	}
+}
+
+// TestDoctor_FixOne_NonDestructiveSkipsAuthorizer: the authorizer is a
+// destructive-only gate, so a benign repair never calls it.
+func TestDoctor_FixOne_NonDestructiveSkipsAuthorizer(t *testing.T) {
+	t.Parallel()
+	d := NewDoctor()
+
+	benign := newMockCheck("benign", StatusError)
+	benign.fixable = true
+	d.Register(benign)
+
+	consulted := false
+	_, err := d.FixOne(&CheckContext{TownRoot: "/test"}, "benign", nil, func(Check) error {
+		consulted = true
+		return errors.New("must not be called")
+	})
+	if err != nil {
+		t.Fatalf("FixOne(benign) returned error: %v", err)
+	}
+	if consulted {
+		t.Error("authorizer must not be consulted for a non-destructive check")
 	}
 }
 
@@ -551,7 +665,7 @@ func TestFixableCheck(t *testing.T) {
 
 // TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible verifies that "Fix
 // failed:" details print even WITHOUT --verbose. Fix errors that only render
-// under --verbose make gt doctor --fix look like a silent no-op and hide the
+// under --verbose make a doctor repair look like a silent no-op and hide the
 // real error (gt-8po).
 func TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible(t *testing.T) {
 	t.Parallel()

@@ -96,7 +96,7 @@ func (c *CheckMisclassifiedWisps) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d ephemeral bead(s) misplaced in issues table", total),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to migrate to wisps table",
+			FixHint: "Run 'gt doctor fix misclassified-wisps' to migrate to wisps table",
 		}
 	}
 
@@ -144,6 +144,9 @@ func (c *CheckMisclassifiedWisps) findMisplacedEphemeralsDolt(ctx *CheckContext,
 
 	return found, 0
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it moves tracker rows to the wisps table.
+func (c *CheckMisclassifiedWisps) DestructiveFix() bool { return true }
 
 // Fix moves each misplaced ephemeral bead from the issues table to the wisps
 // table through bd (bd update --ephemeral), which carries its labels,

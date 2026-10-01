@@ -28,7 +28,7 @@ func buildPrefixSet(registeredRigs map[string]bool, townRoot string) map[string]
 // think agents are running or try to start agents for removed rigs.
 type StaleRuntimeFilesCheck struct {
 	FixableCheck
-	stalePIDFiles   []string
+	stalePIDFiles    []string
 	staleWispConfigs []string
 }
 
@@ -142,7 +142,7 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: msg,
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to remove stale runtime files",
+		FixHint: "Run 'gt doctor fix stale-runtime-files' to remove stale runtime files",
 	}
 }
 
@@ -174,4 +174,3 @@ func extractRigPrefix(filename string) string {
 	}
 	return name
 }
-

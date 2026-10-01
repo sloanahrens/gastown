@@ -217,7 +217,7 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: fmt.Sprintf("Found %d stalled polecat(s) with unpushed work at risk of loss",
 				len(stalled)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to push stalled branches to remote",
+			FixHint: "Run 'gt doctor fix stalled-polecats' to push stalled branches to remote",
 		}
 	}
 

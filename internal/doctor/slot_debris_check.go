@@ -10,10 +10,10 @@ import (
 // SlotDebrisCheck reports the container-gate debris that used to block every
 // container-backed suite town-wide: gate containers older than the staleness
 // window with no live ryuk reaper, and the owner files dead suites left behind
-// (gt-ul1k). --fix reaps them.
+// (gt-ul1k). 'gt doctor fix slot-debris' reaps them.
 //
 // It runs the same slot.Reap a dry run would, so the warning names exactly
-// what --fix removes; nothing is classified twice by two code paths that could
+// what 'gt doctor fix slot-debris' removes; nothing is classified twice by two code paths that could
 // disagree.
 type SlotDebrisCheck struct {
 	FixableCheck
@@ -83,9 +83,12 @@ func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
 		Message: fmt.Sprintf("%d stale gate container(s), %d stale owner file(s) — blocking nothing, but worth removing",
 			len(report.Debris), len(report.OwnerFiles)),
 		Details: details,
-		FixHint: "run 'gt doctor --check slot-debris --fix' to remove them",
+		FixHint: "run 'gt doctor fix slot-debris' to remove them",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes debris containers.
+func (c *SlotDebrisCheck) DestructiveFix() bool { return true }
 
 // Fix reaps the debris. It re-runs the classification rather than trusting the
 // listing Run cached: between the two calls a suite may have started, and

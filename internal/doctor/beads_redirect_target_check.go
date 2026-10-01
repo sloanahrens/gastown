@@ -156,7 +156,7 @@ func (c *BeadsRedirectTargetCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d broken redirect target(s)", len(broken)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to repair redirects, or 'bd init' to initialize beads",
+		FixHint: "Run 'gt doctor fix beads-redirect-target' to repair redirects, or 'bd init' to initialize beads",
 	}
 }
 

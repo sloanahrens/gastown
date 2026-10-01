@@ -102,7 +102,7 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("%d worktree(s) with broken gitdir references", len(c.brokenWorktrees)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to re-create broken worktrees from .repo.git",
+		FixHint: "Run 'gt doctor fix worktree-gitdir-valid' to re-create broken worktrees from .repo.git",
 	}
 }
 
@@ -255,6 +255,9 @@ func (c *WorktreeGitdirCheck) hasGitFile(path string) bool {
 	}
 	return !info.IsDir()
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes broken worktree .git files and prunes.
+func (c *WorktreeGitdirCheck) DestructiveFix() bool { return true }
 
 // Fix attempts to re-create broken worktrees.
 func (c *WorktreeGitdirCheck) Fix(ctx *CheckContext) error {
