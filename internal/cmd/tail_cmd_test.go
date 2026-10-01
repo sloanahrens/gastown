@@ -32,6 +32,7 @@ func (s *scriptedTailSource) Poll() []tailLine {
 }
 
 func TestRunTailStream_GoldenMergedStream(t *testing.T) {
+	t.Parallel()
 	ev := func(ts, rig, text string) tailLine {
 		return tailLine{At: at(ts), Rig: rig, Kind: tailKindEvents, Text: text}
 	}
@@ -68,6 +69,7 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 }
 
 func TestRunTailStream_FollowPrintsEachBatchUntilCancelled(t *testing.T) {
+	t.Parallel()
 	src := &scriptedTailSource{batches: [][]tailLine{
 		{{At: at("2026-09-30T14:00:00Z"), Rig: "gastown", Kind: tailKindEvents, Text: "first"}},
 		{{At: at("2026-09-30T14:00:05Z"), Rig: "gastown", Kind: tailKindEvents, Text: "second"}},
@@ -97,6 +99,7 @@ type failingWriter struct{}
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
 
 func TestRunTailStream_WriteFailureStops(t *testing.T) {
+	t.Parallel()
 	src := &scriptedTailSource{batches: [][]tailLine{{{At: tailNow, Rig: "x", Kind: "events", Text: "y"}}}}
 	if err := runTailStream(context.Background(), failingWriter{}, []tailSource{src}, nil, true, make(chan time.Time), tailTestLoc); err == nil {
 		t.Fatal("a failed write did not stop the stream")
@@ -104,8 +107,8 @@ func TestRunTailStream_WriteFailureStops(t *testing.T) {
 }
 
 // fakeTailTown lays out a town with landings files and a daemon log, and
-// swaps the rig registry and the journal opener for fakes.
-func fakeTailTown(t *testing.T, rigs []string, regErr error) (string, map[string]*fakeTailJournal) {
+// returns options reading it through a fake rig registry and journal opener.
+func fakeTailTown(t *testing.T, rigs []string, regErr error) (tailOptions, map[string]*fakeTailJournal) {
 	t.Helper()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, ".runtime", "landings"), 0o700); err != nil {
@@ -122,20 +125,25 @@ func fakeTailTown(t *testing.T, rigs []string, regErr error) (string, map[string
 		"2026/09/30 08:59:10 Convoy: close detected: gt-1 (from gastown)\n2026/09/30 08:59:20 hm witness restarted\n")
 
 	journals := map[string]*fakeTailJournal{}
-	origRigs, origJournal := tailRigNames, tailJournalFor
-	t.Cleanup(func() { tailRigNames, tailJournalFor = origRigs, origJournal })
-	tailRigNames = func(string) ([]string, error) { return rigs, regErr }
-	tailJournalFor = func(_ string, rig string) (tailJournal, error) {
-		j := &fakeTailJournal{config: "true", records: []beads.EventRecord{{Seq: 1, TS: "2026-09-30T13:58:00Z", Op: "create", IssueID: rig + "-e", Actor: "a", Status: "open"}}}
-		journals[rig] = j
-		return j, nil
+	o := tailOptions{
+		townRoot: town,
+		loc:      tailTestLoc,
+		now:      fixedNow,
+		rigNames: func(string) ([]string, error) { return rigs, regErr },
+		journalFor: func(_ string, rig string) (tailJournal, error) {
+			j := &fakeTailJournal{config: "true", records: []beads.EventRecord{{Seq: 1, TS: "2026-09-30T13:58:00Z", Op: "create", IssueID: rig + "-e", Actor: "a", Status: "open"}}}
+			journals[rig] = j
+			return j, nil
+		},
 	}
-	return town, journals
+	return o, journals
 }
 
 func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
-	town, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
-	sources, preface, err := buildTailSources(tailOptions{townRoot: town, kinds: allTailKinds(), cutoff: at("2026-09-30T13:00:00Z"), loc: tailTestLoc, now: fixedNow})
+	t.Parallel()
+	o, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
+	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
+	sources, preface, err := buildTailSources(o)
 	if err != nil || len(preface) != 0 {
 		t.Fatalf("build: %v %v", err, preface)
 	}
@@ -166,8 +174,10 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 }
 
 func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
-	town, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
-	sources, _, err := buildTailSources(tailOptions{townRoot: town, rig: "hm", kinds: map[string]bool{tailKindLandings: true, tailKindDaemon: true}, cutoff: at("2026-09-30T13:00:00Z"), loc: tailTestLoc, now: fixedNow})
+	t.Parallel()
+	o, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
+	o.rig, o.kinds, o.cutoff = "hm", map[string]bool{tailKindLandings: true, tailKindDaemon: true}, at("2026-09-30T13:00:00Z")
+	sources, _, err := buildTailSources(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,15 +196,19 @@ func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
 }
 
 func TestBuildTailSources_UnknownRigIsRefused(t *testing.T) {
-	town, _ := fakeTailTown(t, []string{"gastown"}, nil)
-	if _, _, err := buildTailSources(tailOptions{townRoot: town, rig: "nope", kinds: allTailKinds(), loc: tailTestLoc, now: fixedNow}); err == nil {
+	t.Parallel()
+	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o.rig, o.kinds = "nope", allTailKinds()
+	if _, _, err := buildTailSources(o); err == nil {
 		t.Fatal("--rig nope accepted")
 	}
 }
 
 func TestBuildTailSources_UnreadableRegistryKeepsHQAndDaemon(t *testing.T) {
-	town, journals := fakeTailTown(t, nil, errors.New("rigs.json: no such file"))
-	sources, preface, err := buildTailSources(tailOptions{townRoot: town, kinds: allTailKinds(), cutoff: at("2026-09-30T13:00:00Z"), loc: tailTestLoc, now: fixedNow})
+	t.Parallel()
+	o, journals := fakeTailTown(t, nil, errors.New("rigs.json: no such file"))
+	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
+	sources, preface, err := buildTailSources(o)
 	if err != nil {
 		t.Fatal(err)
 	}

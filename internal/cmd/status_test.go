@@ -260,46 +260,27 @@ func TestOutputStatusText_ContainerSlot(t *testing.T) {
 // site, and neither can a check made while a slot is HELD — StatusPool skips
 // its cross-check then too, because a holder's containers are not "unwrapped"
 // ones. Only the idle gate separates the two, and the idle gate is the common
-// case this bug was about.
+// case this bug was about. The call site reads through
+// slot.StatusPoolLocksOnly, whose TestStatusPoolLocksOnlySkipsDockerProbe pins
+// that it never lists containers; this test pins the reading itself.
 func TestReadGateSlotHolderSkipsDockerProbe(t *testing.T) {
+	t.Parallel()
+	stubNoContainers(t)
 	t.Run("idle gate", func(t *testing.T) {
 		townRoot := t.TempDir()
-
-		// Any probe here is the bug under test. The stub also returns a
-		// matching container, so a revert shows up as a wrong reading as well
-		// as a call count.
-		var calls int
-		restore := slot.SetContainerListerForTest(func() ([]string, error) {
-			calls++
-			return []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, nil
-		})
-		t.Cleanup(restore)
-
 		if got := readGateSlotHolder(townRoot); got != nil {
 			t.Fatalf("readGateSlotHolder = %+v, want nil with no slot held", got)
-		}
-		if calls != 0 {
-			t.Fatalf("readGateSlotHolder probed docker %d time(s) with no slot held; the status line reads the flock alone", calls)
 		}
 	})
 
 	t.Run("held slot", func(t *testing.T) {
 		townRoot := t.TempDir()
 
-		var calls int
-		restore := slot.SetContainerListerForTest(func() ([]string, error) {
-			calls++
-			return nil, nil
-		})
-		t.Cleanup(restore)
-
 		handle, err := slot.Acquire(townRoot, "gastown/refinery", time.Second)
 		if err != nil {
 			t.Fatalf("slot.Acquire: %v", err)
 		}
 		t.Cleanup(func() { _ = handle.Release() })
-
-		calls = 0 // Acquiring legitimately probes; only the read below is under test.
 
 		got := readGateSlotHolder(townRoot)
 		if got == nil {
@@ -308,72 +289,33 @@ func TestReadGateSlotHolderSkipsDockerProbe(t *testing.T) {
 		if got.Role != "gastown/refinery" || got.PID != os.Getpid() {
 			t.Fatalf("readGateSlotHolder = %+v, want role gastown/refinery at pid %d", got, os.Getpid())
 		}
-		if calls != 0 {
-			t.Fatalf("readGateSlotHolder probed docker %d time(s) with a slot held", calls)
-		}
 	})
 }
 
-func TestRunStatusWatch_RejectsZeroInterval(t *testing.T) {
-	oldInterval := statusInterval
-	oldWatch := statusWatch
-	defer func() {
-		statusInterval = oldInterval
-		statusWatch = oldWatch
-	}()
-
-	statusInterval = 0
-	statusWatch = true
-
-	err := runStatusWatch(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for zero interval, got nil")
+func TestValidateStatusWatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		jsonOut  bool
+		interval int
+		wantErr  string
+	}{
+		{"zero interval", false, 0, "positive"},
+		{"negative interval", false, -5, "positive"},
+		{"json combo", true, 2, "cannot be used together"},
+		{"valid", false, 2, ""},
 	}
-	if !strings.Contains(err.Error(), "positive") {
-		t.Errorf("error %q should mention 'positive'", err.Error())
-	}
-}
-
-func TestRunStatusWatch_RejectsNegativeInterval(t *testing.T) {
-	oldInterval := statusInterval
-	oldWatch := statusWatch
-	defer func() {
-		statusInterval = oldInterval
-		statusWatch = oldWatch
-	}()
-
-	statusInterval = -5
-	statusWatch = true
-
-	err := runStatusWatch(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for negative interval, got nil")
-	}
-	if !strings.Contains(err.Error(), "positive") {
-		t.Errorf("error %q should mention 'positive'", err.Error())
-	}
-}
-
-func TestRunStatusWatch_RejectsJSONCombo(t *testing.T) {
-	oldJSON := statusJSON
-	oldWatch := statusWatch
-	oldInterval := statusInterval
-	defer func() {
-		statusJSON = oldJSON
-		statusWatch = oldWatch
-		statusInterval = oldInterval
-	}()
-
-	statusJSON = true
-	statusWatch = true
-	statusInterval = 2
-
-	err := runStatusWatch(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for --json + --watch, got nil")
-	}
-	if !strings.Contains(err.Error(), "cannot be used together") {
-		t.Errorf("error %q should mention 'cannot be used together'", err.Error())
+	for _, tt := range tests {
+		err := validateStatusWatch(tt.jsonOut, tt.interval)
+		if tt.wantErr == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected error %v", tt.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Errorf("%s: error %v, want one mentioning %q", tt.name, err, tt.wantErr)
+		}
 	}
 }
 

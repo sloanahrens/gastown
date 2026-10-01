@@ -95,6 +95,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	}
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
+		rigNames: knownRigNames, journalFor: openTailJournal,
 	})
 	if err != nil {
 		return err
@@ -118,6 +119,10 @@ type tailOptions struct {
 	cutoff   time.Time
 	loc      *time.Location
 	now      func() time.Time
+	// rigNames reads the rig registry (knownRigNames in production).
+	rigNames func(townRoot string) ([]string, error)
+	// journalFor opens a store's journal (openTailJournal in production).
+	journalFor func(townRoot, rig string) (tailJournal, error)
 }
 
 func allTailKinds() map[string]bool {
@@ -128,12 +133,9 @@ func allTailKinds() map[string]bool {
 	return m
 }
 
-// tailRigNames reads the rig registry. Tests replace it.
-var tailRigNames = knownRigNames
-
-// tailJournalFor opens a store's journal through bd, pinned to that store's
-// beads directory. Tests replace it.
-var tailJournalFor = func(townRoot, rig string) (tailJournal, error) {
+// openTailJournal opens a store's journal through bd, pinned to that store's
+// beads directory.
+func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	dir := doltserver.FindRigBeadsDir(townRoot, rig)
 	if dir == "" {
 		return nil, fmt.Errorf("no beads directory for %s", rig)
@@ -148,7 +150,7 @@ var tailJournalFor = func(townRoot, rig string) (tailJournal, error) {
 // rig by name (events before landings), then the daemon. preface holds lines
 // about the selection itself. Only an unknown --rig is an error.
 func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, err error) {
-	rigs, regErr := tailRigNames(o.townRoot)
+	rigs, regErr := o.rigNames(o.townRoot)
 	if regErr != nil {
 		if o.rig != "" && o.rig != "hq" {
 			return nil, nil, fmt.Errorf("--rig %q: cannot read the rig registry: %w", o.rig, regErr)
@@ -172,7 +174,7 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 	}
 	for _, rig := range stores {
 		if o.kinds[tailKindEvents] {
-			j, openErr := tailJournalFor(o.townRoot, rig)
+			j, openErr := o.journalFor(o.townRoot, rig)
 			sources = append(sources, &eventsSource{rig: rig, journal: j, openErr: openErr, cutoff: o.cutoff, now: o.now})
 		}
 		if o.kinds[tailKindLandings] && rig != "hq" {
