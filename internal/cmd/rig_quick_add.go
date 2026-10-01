@@ -165,8 +165,8 @@ func sanitizeRigName(name string) string {
 }
 
 func findOrCreateTown(getenv func(string) string, cwdTown, userHome func() (string, error)) (string, error) {
-	// Priority 1: GT_TOWN_ROOT env var (explicit user preference)
-	if townRoot := getenv("GT_TOWN_ROOT"); townRoot != "" {
+	// Priority 1: the town root the session was spawned with (explicit user preference)
+	if townRoot := workspace.TownRootFromEnv(getenv); townRoot != "" {
 		if isValidTown(townRoot) {
 			return townRoot, nil
 		}

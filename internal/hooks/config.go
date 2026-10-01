@@ -686,6 +686,11 @@ type configHome struct {
 	home   string // os.UserHomeDir(); "" when it cannot be determined
 }
 
+// GTDir is the per-user .gt directory, $GT_HOME/.gt else ~/.gt: the one
+// reader of GT_HOME (gt-y3pgh.2). Hook configs and gt's runtime data files
+// (logs, command usage, cost records) live there.
+func GTDir() string { return envConfigHome().primaryDir() }
+
 // envConfigHome reads the config home from the environment.
 func envConfigHome() configHome {
 	home, _ := os.UserHomeDir()
