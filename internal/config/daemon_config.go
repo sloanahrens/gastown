@@ -333,7 +333,7 @@ type PatrolScanConfig struct {
 
 // SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
 // ready, unassigned, spec-labeled feature bead that passes the spec lint is
-// slung onto a polecat seat within the seat-class budget. Off unless enabled.
+// slung onto a polecat seat within the seat budget. Off unless enabled.
 type SpecDispatchConfig struct {
 	// Enabled turns the ticker on. Default off.
 	Enabled bool `json:"enabled"`
@@ -341,31 +341,22 @@ type SpecDispatchConfig struct {
 	// IntervalStr is the tick cadence (default "60s").
 	IntervalStr string `json:"interval,omitempty"`
 
-	// Seats are per agent, each with its own cap, and classed by the agent's
-	// provider: provider=claude is hooked (managed settings and guards), any
-	// other provider is hookless. A spec uses hooked seats only, unless it
-	// carries label host-safe and names no host-touching command or path.
+	// Seats are per agent, each with its own cap. Every agent runs the claude
+	// CLI with the town's managed settings, so no seat is less guarded than
+	// another. The "hooked" key names predate that and are kept for config
+	// compatibility; the retired hookless_agent/max_hookless keys are ignored.
 
-	// HookedAgent is a provider=claude agent seat the dispatcher may use
-	// beside the pool's overflow_agent. Default "claude-sonnet"; ignored when
-	// its provider is not claude.
+	// HookedAgent is the agent seat the dispatcher may use beside the pool's
+	// overflow_agent. Default "claude-sonnet".
 	HookedAgent string `json:"hooked_agent,omitempty"`
 
 	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
 	// default; a negative value closes the seat.
 	MaxHooked int `json:"max_hooked,omitempty"`
 
-	// HooklessAgent is an optional extra seat, typically a non-claude
-	// provider. Only host-safe specs use a hookless seat.
-	HooklessAgent string `json:"hookless_agent,omitempty"`
-
-	// MaxHookless caps live polecats on HooklessAgent (default 2). The pool's
-	// overflow_agent seat is capped by polecat_pool.max_overflow instead
-	// (default 2 when unset).
-	MaxHookless int `json:"max_hookless,omitempty"`
-
 	// PreferHooked puts the HookedAgent seat first. Default: the pool's
-	// overflow_agent first, then HooklessAgent, then HookedAgent.
+	// overflow_agent first (capped by polecat_pool.max_overflow, default 2
+	// when unset), then HookedAgent.
 	PreferHooked bool `json:"prefer_hooked,omitempty"`
 
 	// MaxPerTick bounds slings per tick (default 1).
