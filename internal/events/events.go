@@ -141,7 +141,7 @@ const (
 // other caller is still reported (gt-d9423, gt-rqajq).
 const (
 	CallerDaemon = "daemon"    // daemon crash detection and idle reap
-	CallerDoctor = "gt doctor" // gt doctor --fix zombie and orphan cleanup
+	CallerDoctor = "gt doctor" // gt doctor fix zombie-sessions / orphan-processes / orphan-sessions
 	CallerDown   = "gt down"   // gt down town-session shutdown
 )
 

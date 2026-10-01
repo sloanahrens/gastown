@@ -57,7 +57,7 @@ func (c *TownBeadsConfigCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:   StatusError,
 			Message:  "Missing town .beads/config.yaml",
 			Details:  []string{"Fix will create config.yaml without modifying existing metadata or configs."},
-			FixHint:  "Run 'gt doctor --fix' to create config.yaml",
+			FixHint:  "Run 'gt doctor fix town-beads-config' to create config.yaml",
 			Category: c.CheckCategory,
 		}
 	} else if err != nil {
@@ -76,7 +76,7 @@ func (c *TownBeadsConfigCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:   StatusWarning,
 			Message:  "Town beads config.yaml must disable export.auto",
 			Details:  []string{"Fix will set export.auto: \"false\" to prevent non-actionable bd auto-export git-add warnings in server-mode runtime beads dirs."},
-			FixHint:  "Run 'gt doctor --fix' to repair config.yaml",
+			FixHint:  "Run 'gt doctor fix town-beads-config' to repair config.yaml",
 			Category: c.CheckCategory,
 		}
 	} else if err != nil {

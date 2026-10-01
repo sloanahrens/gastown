@@ -9,9 +9,9 @@ import (
 // RigDatabaseCheck compares each registered rig's database name in the rig
 // registry, which gastown reads, with the dolt_database of the rig's bd
 // metadata.json, which bd reads (gt-y3pgh.11). A registry entry without a
-// name is a warning, and --fix copies metadata.json's name into it
+// name is a warning, and gt doctor fix rig-database copies metadata.json's name into it
 // (townconfig.AbsorbRigDatabases, the same step gt config migrate runs).
-// Two different names are an error with no --fix: gastown and bd would
+// Two different names are an error with no gt doctor fix: gastown and bd would
 // address different databases, and only the operator knows which is right.
 type RigDatabaseCheck struct {
 	FixableCheck
@@ -61,7 +61,7 @@ func (c *RigDatabaseCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d rig(s) have no database name in the registry", len(missing)),
 			Details: missing,
-			FixHint: "Run 'gt doctor --fix' (or 'gt config migrate') to record metadata.json's name in the registry",
+			FixHint: "Run 'gt doctor fix rig-database' (or 'gt config migrate') to record metadata.json's name in the registry",
 		}
 	}
 	return &CheckResult{Name: c.Name(), Status: StatusOK, Message: "The registry and bd's metadata.json name the same rig databases"}

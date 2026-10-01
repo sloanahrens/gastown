@@ -117,7 +117,7 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d clone(s) have an unprotected .beads/ directory", len(c.exposedClones)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to add .beads/ to each clone's local git exclude",
+			FixHint: "Run 'gt doctor fix beads-exposure' to add .beads/ to each clone's local git exclude",
 		}
 	}
 	return &CheckResult{

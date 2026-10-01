@@ -136,7 +136,7 @@ func (c *CrewStateCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d crew workspace(s) with invalid state.json", len(c.invalidCrews)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to regenerate state files",
+		FixHint: "Run 'gt doctor fix crew-state' to regenerate state files",
 	}
 }
 

@@ -178,7 +178,7 @@ func (l *Lock) Status() string {
 }
 
 // ForceRelease removes the lock regardless of who holds it.
-// Use with caution - only for doctor --fix scenarios.
+// Use with caution - only for `gt doctor fix identity-collision` scenarios.
 func (l *Lock) ForceRelease() error {
 	return l.Release()
 }

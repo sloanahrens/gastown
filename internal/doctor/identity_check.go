@@ -130,7 +130,7 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 		for _, s := range staleLocks {
 			result.Details = append(result.Details, "  "+s)
 		}
-		result.FixHint = "Run 'gt doctor --fix' or 'gt agents fix' to clean up"
+		result.FixHint = "Run 'gt doctor fix identity-collision' or 'gt agents fix' to clean up"
 	}
 
 	if len(orphanedLocks) > 0 {
@@ -146,7 +146,7 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 			result.Details = append(result.Details, "  "+s)
 		}
 		if !strings.Contains(result.FixHint, "doctor") {
-			result.FixHint = "Run 'gt doctor --fix' to clean up stale locks"
+			result.FixHint = "Run 'gt doctor fix identity-collision' to clean up stale locks"
 		}
 	}
 

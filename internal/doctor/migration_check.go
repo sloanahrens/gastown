@@ -530,6 +530,9 @@ func NewDoltOrphanedDatabaseCheck() *DoltOrphanedDatabaseCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it drops Dolt databases.
+func (c *DoltOrphanedDatabaseCheck) DestructiveFix() bool { return true }
+
 // Run checks for orphaned databases.
 func (c *DoltOrphanedDatabaseCheck) Run(ctx *CheckContext) *CheckResult {
 	c.orphanNames = nil

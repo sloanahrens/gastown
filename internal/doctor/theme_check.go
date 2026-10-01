@@ -83,7 +83,7 @@ func (c *ThemeCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d session(s) have outdated theme format", len(needsUpdate)),
 			Details: details,
-			FixHint: "Run 'gt theme apply --all' or 'gt doctor --fix'",
+			FixHint: "Run 'gt theme apply --all' or 'gt doctor fix themes'",
 		}
 	}
 

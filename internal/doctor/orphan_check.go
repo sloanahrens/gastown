@@ -55,6 +55,9 @@ func NewOrphanSessionCheckWithSessionLister(lister SessionLister) *OrphanSession
 	return check
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it kills tmux sessions.
+func (c *OrphanSessionCheck) DestructiveFix() bool { return true }
+
 // Run checks for orphaned Gas Town tmux sessions.
 func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 	lister := c.sessionLister
@@ -128,7 +131,7 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found %d orphaned session(s)", len(orphans)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to kill orphaned sessions",
+		FixHint: "Run 'gt doctor fix orphan-sessions' to kill orphaned sessions",
 	}
 }
 

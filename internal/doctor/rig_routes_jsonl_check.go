@@ -94,7 +94,7 @@ func (c *RigRoutesJSONLCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d rig(s) have routes.jsonl (breaks routing)", len(c.affectedRigs)),
 		Details:  problems,
-		FixHint:  "Run 'gt doctor --fix' to delete these files",
+		FixHint:  "Run 'gt doctor fix rig-routes-jsonl' to delete these files",
 		Category: c.Category(),
 	}
 }

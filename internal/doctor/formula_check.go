@@ -16,11 +16,11 @@ import (
 // content hash against the embedded formula and the hash gt recorded when it
 // wrote the file.
 //
-//   - missing, new or outdated copies: warning, --fix writes them.
-//   - drifted copies (a hash gt never wrote): error, --fix replaces them. While
+//   - missing, new or outdated copies: warning, gt doctor fix formulas writes them.
+//   - drifted copies (a hash gt never wrote): error, gt doctor fix formulas replaces them. While
 //     one stands, the formula this binary carries reaches nobody (gt-dt7r).
 //   - files the binary does not embed (orphaned copies of deleted formulas,
-//     hand-written formulas, *.bak copies): error. --fix never deletes; each is
+//     hand-written formulas, *.bak copies): error. gt doctor fix formulas never deletes; each is
 //     promoted into gastown source or deleted by an operator.
 type FormulaCheck struct {
 	FixableCheck
@@ -67,7 +67,7 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 	addGroup(plan.Updated(), "outdated", "update available", true)
 	addGroup(plan.Reinstalled(), "missing", "missing (will reinstall)", false)
 	addGroup(plan.Installed(), "new", "new formula available", false)
-	addGroup(plan.ReplacedDrift(), "drifted", "hash is not one gt wrote (hand-edited or hand-copied); --fix replaces it with the embedded formula", true)
+	addGroup(plan.ReplacedDrift(), "drifted", "hash is not one gt wrote (hand-edited or hand-copied); gt doctor fix formulas replaces it with the embedded formula", true)
 	addGroup(plan.Orphaned(), "no longer shipped", "gt wrote it but this binary no longer embeds it; delete it", false)
 	addGroup(plan.Unowned(), "not owned by gt", "not in gastown source and never written by gt; promote it into source or delete it", false)
 
@@ -92,9 +92,9 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	switch {
 	case plan.Changed() > 0 && len(plan.Orphaned())+len(plan.Unowned()) > 0:
-		result.FixHint = "Run 'gt doctor --fix' to write the embedded formulas; delete the files gt does not own from .beads/formulas/ by hand"
+		result.FixHint = "Run 'gt doctor fix formulas' to write the embedded formulas; delete the files gt does not own from .beads/formulas/ by hand"
 	case plan.Changed() > 0:
-		result.FixHint = "Run 'gt doctor --fix' (or 'gt formula sync') to write the embedded formulas"
+		result.FixHint = "Run 'gt doctor fix formulas' (or 'gt formula sync') to write the embedded formulas"
 	default:
 		result.FixHint = "Delete the files gt does not own from .beads/formulas/, or promote a still-used one into gastown source"
 	}

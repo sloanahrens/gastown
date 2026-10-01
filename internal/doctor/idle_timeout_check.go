@@ -102,7 +102,7 @@ func (c *IdleTimeoutCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d rig(s) missing dolt.idle-timeout: \"0\"", len(missing)),
 		Details: missing,
-		FixHint: "Run 'gt doctor --fix' to add idle-timeout config to all rigs",
+		FixHint: "Run 'gt doctor fix idle-timeout-config' to add idle-timeout config to all rigs",
 	}
 }
 

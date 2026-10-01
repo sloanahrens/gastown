@@ -525,7 +525,7 @@ func TestRepeatedRefusalIsLoggedOncePerWindow(t *testing.T) {
 		t.Fatalf("action lines after the window = %d, want 2", n)
 	}
 	// A different actor is a different request and is logged.
-	_ = h.sup().Restart(flint, "witness dead", "gt doctor --fix")
+	_ = h.sup().Restart(flint, "witness dead", "gt doctor fix")
 	if n := len(h.actions(t)); n != 3 {
 		t.Fatalf("action lines after another actor asked = %d, want 3", n)
 	}

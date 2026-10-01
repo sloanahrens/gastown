@@ -7,10 +7,10 @@ import (
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
-// doctorActor is the actor gt doctor's kills are logged under.
-const doctorActor = "gt doctor --fix"
+// doctorActor is the actor a doctor repair's kills are logged under.
+const doctorActor = "gt doctor fix"
 
-// fixSupervisor returns the supervisor gt doctor --fix kills through
+// fixSupervisor returns the supervisor `gt doctor fix <check>` kills through
 // (gt-4k3fj.3): the same pause, e-stop and actor-logging rules as the
 // daemon, over the check's own tmux and session prefixes.
 func fixSupervisor(ctx *CheckContext, k supervisor.Killer) *supervisor.Supervisor {

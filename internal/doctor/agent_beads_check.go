@@ -74,6 +74,9 @@ func loadAgentBeadScope(bd doctorBeads) agentBeadScope {
 	return scope
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it mutates tracker rows.
+func (c *AgentBeadsCheck) DestructiveFix() bool { return true }
+
 // Run checks if agent beads exist for all expected agents.
 func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Load routes to get prefixes (routes.jsonl is source of truth for prefixes)
@@ -166,7 +169,7 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d agent bead(s) missing, %d missing gt:agent label", len(missing), len(missingLabel)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to create missing agent beads and add labels",
+			FixHint: "Run 'gt doctor fix agent-beads-exist' to create missing agent beads and add labels",
 		}
 	}
 
@@ -204,7 +207,7 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d agent bead(s) missing", len(missing)),
 			Details: missing,
-			FixHint: "Run 'gt doctor --fix' to create missing agent beads",
+			FixHint: "Run 'gt doctor fix agent-beads-exist' to create missing agent beads",
 		}
 	}
 
@@ -213,7 +216,7 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d agent bead(s) missing gt:agent label", len(missingLabel)),
 		Details: missingLabel,
-		FixHint: "Run 'gt doctor --fix' to add missing labels",
+		FixHint: "Run 'gt doctor fix agent-beads-exist' to add missing labels",
 	}
 }
 

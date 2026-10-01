@@ -106,10 +106,13 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 			len(c.affected),
 		),
 		Details:  details,
-		FixHint:  "Run 'gt doctor --fix' to reset to open for re-dispatch",
+		FixHint:  "Run 'gt doctor fix null-assignee-steps' to reset to open for re-dispatch",
 		Category: c.Category(),
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it resets in-progress tracker rows.
+func (c *NullAssigneeCheck) DestructiveFix() bool { return true }
 
 // Fix resets each affected bead to open with no assignee through bd, in the
 // database it was found in. Only the ids Run found are touched, and a failed

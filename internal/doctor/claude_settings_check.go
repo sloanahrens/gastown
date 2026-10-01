@@ -146,16 +146,16 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 	} else if hasStaleFiles && !hasMissingFiles {
 		message = fmt.Sprintf("Found %d stale Claude config file(s)", len(c.staleSettings))
 		if hasModifiedFiles {
-			fixHint = "Run 'gt doctor --fix' to fix safe issues. Files with local modifications require manual review."
+			fixHint = "Run 'gt doctor fix claude-settings' to fix safe issues. Files with local modifications require manual review."
 		} else {
-			fixHint = "Run 'gt doctor --fix' to delete stale files, then 'gt up --restore' to create new settings"
+			fixHint = "Run 'gt doctor fix claude-settings' to delete stale files, then 'gt up --restore' to create new settings"
 		}
 	} else {
 		message = fmt.Sprintf("Found %d Claude settings issue(s)", len(c.staleSettings))
 		if hasModifiedFiles {
-			fixHint = "Run 'gt doctor --fix' to fix safe issues, then 'gt up --restore'. Files with local modifications require manual review."
+			fixHint = "Run 'gt doctor fix claude-settings' to fix safe issues, then 'gt up --restore'. Files with local modifications require manual review."
 		} else {
-			fixHint = "Run 'gt doctor --fix' to delete stale files, then 'gt up --restore' to create new settings"
+			fixHint = "Run 'gt doctor fix claude-settings' to delete stale files, then 'gt up --restore' to create new settings"
 		}
 	}
 
@@ -554,6 +554,9 @@ func (c *ClaudeSettingsCheck) hookHasPattern(hooks map[string]any, hookName, pat
 	return false
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it deletes settings files and kills the mayor session.
+func (c *ClaudeSettingsCheck) DestructiveFix() bool { return true }
+
 // Fix deletes stale settings files. Agents auto-install correct settings on restart.
 // Files with local modifications are skipped to avoid losing user changes.
 func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
@@ -652,7 +655,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 		}
 
 		// Only cycle the mayor if --restart-sessions was explicitly passed.
-		// This prevents unexpected session restarts during routine --fix operations.
+		// This prevents unexpected session restarts during routine gt doctor fix claude-settings runs.
 		// Crew and polecats are spawned on-demand and won't auto-restart anyway.
 		if ctx.RestartSessions {
 			if sf.agentType == "mayor" {

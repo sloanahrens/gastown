@@ -192,7 +192,7 @@ gt doctor                    # Runs all checks including overlay health
 **Auto-fix:**
 
 ```bash
-gt doctor --fix              # Removes stale step-override entries
+gt doctor fix overlay-health  # Removes stale step-override entries
 ```
 
 The fix removes step overrides that reference non-existent step IDs. If all
@@ -266,7 +266,7 @@ overlay's `step_id` becomes stale. On next `gt doctor` run:
   - step_id "submit-review" not found in formula mol-polecat-work
 ```
 
-Running `gt doctor --fix` removes the stale override. The operator then
+Running `gt doctor fix overlay-health` removes the stale override. The operator then
 creates a new override targeting `post-results`.
 
 ## Design Rationale

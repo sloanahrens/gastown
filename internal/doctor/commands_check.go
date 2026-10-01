@@ -71,7 +71,7 @@ func (c *CommandsCheck) Run(ctx *CheckContext) *CheckResult {
 			"A stale copy differs from the command body this binary embeds",
 			"All agents inherit town-level commands via directory traversal",
 		},
-		FixHint: "Run 'gt doctor --fix' to refresh the command bodies",
+		FixHint: "Run 'gt doctor fix commands-provisioned' to provision missing commands",
 	}
 }
 

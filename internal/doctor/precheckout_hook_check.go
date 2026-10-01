@@ -104,7 +104,7 @@ func (c *BranchProtectionCheck) Run(ctx *CheckContext) *CheckResult {
 					"The pre-checkout hook was installed but git doesn't support it",
 					"Branch protection needs to be in post-checkout instead",
 				},
-				FixHint: "Run 'gt doctor --fix' to migrate to post-checkout",
+				FixHint: "Run 'gt doctor fix branch-protection' to migrate to post-checkout",
 			}
 		}
 	}
@@ -124,7 +124,7 @@ func (c *BranchProtectionCheck) Run(ctx *CheckContext) *CheckResult {
 				"Without it, a git checkout in ~/gt could switch to a polecat branch",
 				"This can break gt commands (missing rigs.json, wrong configs)",
 			},
-			FixHint: "Run 'gt doctor --fix' to install branch protection",
+			FixHint: "Run 'gt doctor fix branch-protection' to install branch protection",
 		}
 	}
 
@@ -147,7 +147,7 @@ func (c *BranchProtectionCheck) Run(ctx *CheckContext) *CheckResult {
 				"Post-checkout hook exists but doesn't include branch protection",
 				"Branch protection auto-reverts if non-main branch is checked out",
 			},
-			FixHint: "Run 'gt doctor --fix' to add branch protection",
+			FixHint: "Run 'gt doctor fix branch-protection' to add branch protection",
 		}
 	}
 

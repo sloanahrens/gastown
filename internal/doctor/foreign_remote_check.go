@@ -115,7 +115,7 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found %d foreign remote(s): %s", len(c.foreignRemotes), strings.Join(names, ", ")),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to remove foreign remotes",
+		FixHint: "Run 'gt doctor fix foreign-remotes' to remove foreign remotes",
 	}
 }
 

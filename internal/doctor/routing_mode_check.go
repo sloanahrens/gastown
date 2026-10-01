@@ -74,7 +74,7 @@ func (c *RoutingModeCheck) checkRoutingMode(ctx *CheckContext, beadsDir, locatio
 				"This causes mail and issues to be stored in the wrong location",
 				"See: https://github.com/steveyegge/beads/issues/1165",
 			},
-			FixHint: "Run 'gt doctor --fix' or 'bd config set routing.mode explicit'",
+			FixHint: "Run 'gt doctor fix routing-mode' or 'bd config set routing.mode explicit'",
 		}
 	}
 	if err != nil {
@@ -97,7 +97,7 @@ func (c *RoutingModeCheck) checkRoutingMode(ctx *CheckContext, beadsDir, locatio
 				"This causes mail and issues to be stored in the wrong location",
 				"See: https://github.com/steveyegge/beads/issues/1165",
 			},
-			FixHint: "Run 'gt doctor --fix' or 'bd config set routing.mode explicit'",
+			FixHint: "Run 'gt doctor fix routing-mode' or 'bd config set routing.mode explicit'",
 		}
 	}
 

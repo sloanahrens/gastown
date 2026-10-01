@@ -559,7 +559,7 @@ func assertSlotValue(t *testing.T, townRoot, issueID, slot, want string) {
 // 3. gt crew add succeeds
 // 4. Basic commands work
 //
-// NOTE: Full doctor --fix verification is currently limited by known issues:
+// NOTE: Full doctor repair verification is currently limited by known issues:
 // - Doctor fix has bugs with bead creation (UNIQUE constraint errors)
 // - Container environment lacks tmux for session checks
 // - Test repos don't satisfy priming expectations (AGENTS.md length)

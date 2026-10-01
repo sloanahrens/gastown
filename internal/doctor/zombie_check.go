@@ -140,9 +140,12 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found %d zombie session(s)", len(zombies)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to kill zombie sessions",
+		FixHint: "Run 'gt doctor fix zombie-sessions' to kill zombie sessions",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it kills tmux sessions.
+func (c *ZombieSessionCheck) DestructiveFix() bool { return true }
 
 // Fix kills all zombie sessions (tmux sessions with no Claude running).
 // Crew sessions are never auto-killed as they are human-managed.

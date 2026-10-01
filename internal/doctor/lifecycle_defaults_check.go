@@ -37,7 +37,7 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	config, err := daemon.ReadPatrolConfig(ctx.TownRoot)
 	if err != nil {
-		// Never offer --fix here: EnsureLifecycleConfigFile refuses to
+		// Never offer gt doctor fix lifecycle-defaults here: EnsureLifecycleConfigFile refuses to
 		// rewrite a file that does not parse (gt-fcxe9.10).
 		return &CheckResult{
 			Name:    c.Name(),
@@ -48,12 +48,12 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	if config == nil {
 		// No daemon.json at all — EnsureLifecycleConfigFile handles creation.
-		// Report as warning so --fix can create it.
+		// Report as warning so gt doctor fix lifecycle-defaults can create it.
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: "daemon.json not found",
-			FixHint: "Run 'gt doctor --fix' to create with defaults",
+			FixHint: "Run 'gt doctor fix lifecycle-defaults' to create with defaults",
 		}
 	}
 
@@ -63,7 +63,7 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: "daemon.json missing patrols section",
-			FixHint: "Run 'gt doctor --fix' to populate defaults",
+			FixHint: "Run 'gt doctor fix lifecycle-defaults' to populate defaults",
 		}
 	}
 
@@ -97,7 +97,7 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Missing %d lifecycle patrol(s): %s", len(c.missing), strings.Join(c.missing, ", ")),
-		FixHint: "Run 'gt doctor --fix' to populate defaults",
+		FixHint: "Run 'gt doctor fix lifecycle-defaults' to populate defaults",
 	}
 }
 

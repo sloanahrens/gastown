@@ -29,8 +29,8 @@ GC is destructive. This formula errs on the side of caution:
 - Conservative mode: Only obviously dead things
 - Aggressive mode: Includes old but possibly-recoverable state
 
-Running `gt doctor --fix` handles most of this. This formula wraps it with
-reporting and multi-rig scope."""
+`gt doctor` reports this state; `gt doctor fix <check>` repairs one named
+check at a time. This formula wraps that with reporting and multi-rig scope."""
 formula = "mol-session-gc"
 version = 2
 
@@ -111,11 +111,16 @@ needs = ["preview-cleanup"]
 description = """
 Actually remove the garbage.
 
-**1. Run doctor with fix:**
+**1. Repair one named check at a time:**
 ```bash
-gt doctor --fix
-# This handles sessions, processes, and wisps
+gt doctor fix zombie-sessions
+gt doctor fix orphan-sessions
+# wisp-gc and orphan-processes report only: decide and act by hand.
 ```
+
+A repair that kills a session needs recorded authorization when an agent runs
+it: get an authorization bead from the mayor and pass --authorized-by <bead-id>,
+or leave the session for the daemon tick that owns it.
 
 **2. For aggressive mode, additional cleanup:**
 ```bash

@@ -69,7 +69,7 @@ func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
 			fmt.Sprintf("Expected at: %s", store.BasePath()),
 			"Without this file, hooks sync works but drift detection is unavailable.",
 		},
-		FixHint: "Run 'gt doctor --fix hooks-base-missing' or 'gt hooks base --show' to create it",
+		FixHint: "Run 'gt doctor fix hooks-base-missing' or 'gt hooks base --show' to create it",
 	}
 }
 
