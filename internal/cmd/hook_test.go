@@ -1,50 +1,19 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
 // TestHookPolecatEnvCheck verifies that the polecat guard in runHook uses
 // GT_ROLE as the authoritative check, so coordinators with a stale GT_POLECAT
 // in their environment are not blocked from hooking (GH #1707).
-// TestRunHookAppliesThePolecatRefusal: runHook refuses a polecat session
-// from the process environment, and lets a coordinator with a stale
-// GT_POLECAT past the refusal (it then fails later, on the dummy bead).
-func TestRunHookAppliesThePolecatRefusal(t *testing.T) {
-	for _, tt := range []struct {
-		name, role, polecat string
-		wantBlock           bool
-	}{
-		{name: "polecat", role: "gastown/polecats/Toast", polecat: "Toast", wantBlock: true},
-		{name: "mayor with stale GT_POLECAT", role: "mayor", polecat: "alpha", wantBlock: false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.role)
-			t.Setenv("GT_POLECAT", tt.polecat)
-
-			var blocked bool
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// Panic means we got past the guard — not blocked
-						blocked = false
-					}
-				}()
-				err := runHook(nil, []string{"fake-bead-id"})
-				blocked = err != nil && strings.Contains(err.Error(), "polecats cannot hook")
-			}()
-			if blocked != tt.wantBlock {
-				t.Errorf("runHook blocked = %v, want %v (GT_ROLE=%q GT_POLECAT=%q)", blocked, tt.wantBlock, tt.role, tt.polecat)
-			}
-		})
-	}
-}
-
 func TestHookPolecatEnvCheck(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -125,22 +94,20 @@ func TestHookPolecatEnvCheck(t *testing.T) {
 // look like bead IDs should produce a clear error pointing at --help rather
 // than the misleading "bead 'set' not found" emitted by bd show.
 func TestHookRejectsNonBeadArg(t *testing.T) {
-	// Ensure we don't trip the polecat guard.
-	t.Setenv("GT_ROLE", "")
-	t.Setenv("GT_POLECAT", "")
-
+	t.Parallel()
 	tests := []string{"set", "list", "delete", "nonexistentword12345"}
 	for _, arg := range tests {
 		t.Run(arg, func(t *testing.T) {
-			err := runHook(nil, []string{arg})
+			t.Parallel()
+			err := hookBeadArgError(arg)
 			if err == nil {
-				t.Fatalf("runHook(%q) returned nil, want error", arg)
+				t.Fatalf("hookBeadArgError(%q) returned nil, want error", arg)
 			}
 			if !strings.Contains(err.Error(), "is not a bead ID") {
-				t.Errorf("runHook(%q) error = %q, want substring %q", arg, err.Error(), "is not a bead ID")
+				t.Errorf("hookBeadArgError(%q) error = %q, want substring %q", arg, err.Error(), "is not a bead ID")
 			}
 			if !strings.Contains(err.Error(), "--help") {
-				t.Errorf("runHook(%q) error = %q, want it to point at --help", arg, err.Error())
+				t.Errorf("hookBeadArgError(%q) error = %q, want it to point at --help", arg, err.Error())
 			}
 		})
 	}
@@ -186,17 +153,7 @@ func TestNormalizeHookShowTarget(t *testing.T) {
 }
 
 func TestCloseCompletedHookedMoleculeUsesBdCmdEnv(t *testing.T) {
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	writeHookBDStub(t, binDir)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_STUB_LOG", logPath)
-	t.Setenv("CLAUDE_SESSION_ID", "ses-hook-test")
-	t.Setenv("BEADS_DIR", "/wrong")
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
-	t.Setenv("BD_READONLY", "true")
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-
+	t.Parallel()
 	workDir := t.TempDir()
 	beadsDir := filepath.Join(workDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -206,48 +163,30 @@ func TestCloseCompletedHookedMoleculeUsesBdCmdEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := closeCompletedHookedMolecule(workDir, "gt-old"); err != nil {
+	var calls []beads.BDCall
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		calls = append(calls, c)
+		return nil, nil, nil
+	}
+	if err := closeCompletedHookedMoleculeVia(run, workDir, "gt-old", "ses-hook-test"); err != nil {
 		t.Fatalf("closeCompletedHookedMolecule: %v", err)
 	}
-	log := readHookStubLog(t, logPath)
-	for _, want := range []string{
-		"args:[close][gt-old][--force][--reason=Auto-replaced by gt hook (molecule complete)][--session=ses-hook-test]",
-		"BEADS_DIR=" + beadsDir,
-		"BEADS_DOLT_SERVER_DATABASE=hookdb",
-		"\nBD_READONLY=\n",
-		"BD_DOLT_AUTO_COMMIT=on",
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want 1", len(calls))
+	}
+	wantArgs := []string{"close", "gt-old", "--force", "--reason=Auto-replaced by gt hook (molecule complete)", "--session=ses-hook-test"}
+	if got := calls[0].Args; strings.Join(got, "|") != strings.Join(wantArgs, "|") {
+		t.Fatalf("args = %q, want %q", got, wantArgs)
+	}
+	env := envSlice(calls[0].Env)
+	for k, want := range map[string]string{
+		"BEADS_DIR":                  beadsDir,
+		"BEADS_DOLT_SERVER_DATABASE": "hookdb",
+		"BD_READONLY":                "",
+		"BD_DOLT_AUTO_COMMIT":        "on",
 	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("hook close log missing %q:\n%s", want, log)
+		if env[k] != want {
+			t.Errorf("%s = %q, want %q", k, env[k], want)
 		}
 	}
-}
-
-func writeHookBDStub(t *testing.T, binDir string) {
-	t.Helper()
-	script := `#!/usr/bin/env sh
-{
-	printf 'args:'
-	for arg in "$@"; do
-		printf '[%s]' "$arg"
-	done
-	printf '\n'
-	printf 'BEADS_DIR=%s\n' "${BEADS_DIR-}"
-	printf 'BEADS_DOLT_SERVER_DATABASE=%s\n' "${BEADS_DOLT_SERVER_DATABASE-}"
-	printf 'BD_READONLY=%s\n' "${BD_READONLY-}"
-	printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT-}"
-} >> "$BD_STUB_LOG"
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func readHookStubLog(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
 }

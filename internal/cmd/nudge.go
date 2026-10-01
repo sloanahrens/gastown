@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -428,7 +429,7 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 	fmt.Fprintf(os.Stderr, "Watching %s for idle (up to %s)...\n", sessionName, idleWatcherTimeout)
 	deadline := time.Now().Add(idleWatcherTimeout)
 	for time.Now().Before(deadline) {
-		time.Sleep(idleWatcherPollInterval)
+		clockwork.NewRealClock().Sleep(idleWatcherPollInterval)
 
 		// If queue is already empty, someone else drained it.
 		if nudge.QueueLen(townRoot, sessionName) == 0 {
@@ -769,7 +770,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 
 		// Small delay between nudges
 		if i < len(targets)-1 {
-			time.Sleep(100 * time.Millisecond)
+			clockwork.NewRealClock().Sleep(100 * time.Millisecond)
 		}
 	}
 

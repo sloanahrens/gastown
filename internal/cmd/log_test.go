@@ -11,6 +11,7 @@ import (
 )
 
 func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
+	t.Parallel()
 	townRoot, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
@@ -22,26 +23,7 @@ func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
-
-	origAgent, origSession, origExitCode := crashAgent, crashSession, crashExitCode
-	t.Cleanup(func() {
-		crashAgent = origAgent
-		crashSession = origSession
-		crashExitCode = origExitCode
-	})
-	crashAgent = "gastown/polecats/rust"
-	crashSession = "gt-gastown-rust"
-	crashExitCode = 42
-
-	if err := runLogCrash(nil, nil); err != nil {
+	if err := logCrash(townRoot, "gastown/polecats/rust", "gt-gastown-rust", 42); err != nil {
 		t.Fatalf("runLogCrash: %v", err)
 	}
 
@@ -92,6 +74,7 @@ func assertPayloadString(t *testing.T, payload map[string]interface{}, key, want
 }
 
 func TestRunLogPruneWorktreeEmitsFeedEvent(t *testing.T) {
+	t.Parallel()
 	townRoot, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
@@ -103,26 +86,7 @@ func TestRunLogPruneWorktreeEmitsFeedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
-
-	origKind, origOwner, origPath := prunedWorktreeKind, prunedWorktreeOwner, prunedWorktreePath
-	t.Cleanup(func() {
-		prunedWorktreeKind = origKind
-		prunedWorktreeOwner = origOwner
-		prunedWorktreePath = origPath
-	})
-	prunedWorktreeKind = "dog"
-	prunedWorktreeOwner = "rex"
-	prunedWorktreePath = "/Users/rex/gt/deacon/dogs/rex/gastown"
-
-	if err := runLogPruneWorktree(nil, nil); err != nil {
+	if err := logPruneWorktree(townRoot, "deacon", "dog", "rex", "/Users/rex/gt/deacon/dogs/rex/gastown"); err != nil {
 		t.Fatalf("runLogPruneWorktree: %v", err)
 	}
 

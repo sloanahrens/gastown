@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -33,41 +35,79 @@ type daemonSupervisor struct {
 	// unloads and kickstart then cannot reach the job.
 	bootstrap []string
 	load      string // how to load the job when start says it is not loaded
+
+	ctl *daemonControl // what runs the commands above and reads the job
 }
 
-// Seams for tests: supervisor detection, running its command, reading the
-// job's live state, the direct spawn, the stop and the running check.
-// Production values are the real ones.
-var (
-	supervisorPlistPath = templates.LaunchdPlistPath
-	supervisorUnitPath  = templates.SystemdUnitPath
-	supervisorRun       = func(argv []string) error {
-		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from detectDaemonSupervisor
-		if err != nil {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+// daemonControl is what the daemon's start, stop, restart and status paths
+// take from the host: supervisor detection (GOOS and file paths), running
+// the supervisor's command, reading the job's live state, the direct spawn,
+// the stop, the running check and the waits between polls. realDaemonControl
+// wires the real ones; unit tests build their own.
+type daemonControl struct {
+	goos       string
+	plistPath  func() (string, error)
+	unitPath   func() (string, error)
+	uid        int
+	run        func(argv []string) error
+	stateFor   templates.SupervisorReader
+	spawn      func(townRoot string) (int, error)
+	stopDirect func(townRoot string) error
+	isRunning  func(townRoot string) (bool, int, error)
+	// install writes a repaired supervisor file (installSupervisorFile).
+	install func(path, content string) error
+	// statusLine renders the Supervised: line of gt daemon status
+	// (templates.SupervisorStatusLine over stateFor).
+	statusLine func(townRoot string, lockPID int) string
+	// sleep waits pollInterval between lock checks and loadRetryInterval
+	// between bootstrap attempts.
+	sleep             func(time.Duration)
+	pollInterval      time.Duration
+	loadRetryInterval time.Duration
+}
+
+// realDaemonControl is the daemonControl of this host.
+func realDaemonControl() *daemonControl {
+	c := &daemonControl{
+		goos:      runtime.GOOS,
+		plistPath: templates.LaunchdPlistPath,
+		unitPath:  templates.SystemdUnitPath,
+		uid:       os.Getuid(),
+		run: func(argv []string) error {
+			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from detectDaemonSupervisor
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+		stateFor:          templates.SupervisorJobState,
+		stopDirect:        daemon.StopDaemon,
+		isRunning:         daemon.IsRunning,
+		install:           installSupervisorFile,
+		sleep:             clockwork.NewRealClock().Sleep,
+		pollInterval:      daemonPollInterval,
+		loadRetryInterval: supervisorLoadRetryInterval,
 	}
-	supervisorStateFor templates.SupervisorReader = templates.SupervisorJobState
-	spawnDaemonDirect                             = spawnDaemonProcess
-	stopDaemonDirect                              = daemon.StopDaemon
-	daemonIsRunning                               = daemon.IsRunning
-	supervisorGOOS                                = runtime.GOOS
-)
+	c.spawn = func(townRoot string) (int, error) { return spawnDaemonProcess(c, townRoot) }
+	c.statusLine = func(townRoot string, lockPID int) string {
+		return templates.SupervisorStatusLine(townRoot, lockPID, c.stateFor)
+	}
+	return c
+}
 
 // supervisorFilePath returns the path of the supervisor file this host would
 // use for a daemon and the kind it belongs to ("launchd" / "systemd"), or
 // ("", "") on a host with no supported supervisor. The file need not exist.
 // Both the detection below and the file reconciliation use it, so the two
 // never disagree about which file they are talking about.
-func supervisorFilePath() (path, kind string) {
-	switch supervisorGOOS {
+func (c *daemonControl) supervisorFilePath() (path, kind string) {
+	switch c.goos {
 	case "darwin":
-		if p, err := supervisorPlistPath(); err == nil {
+		if p, err := c.plistPath(); err == nil {
 			return p, "launchd"
 		}
 	case "linux":
-		if p, err := supervisorUnitPath(); err == nil {
+		if p, err := c.unitPath(); err == nil {
 			return p, "systemd"
 		}
 	}
@@ -82,8 +122,8 @@ func supervisorFilePath() (path, kind string) {
 // and then wait for this town's lock in vain. A file that exists but cannot
 // be read is an error, never "no supervisor": the whole point of the check
 // is to never hand-spawn beside a provisioned one.
-func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
-	p, kind := supervisorFilePath()
+func (c *daemonControl) detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
+	p, kind := c.supervisorFilePath()
 	if kind == "" {
 		// No resolvable home means nowhere a plist could have been
 		// provisioned; same reading as templates.SupervisorStatus.
@@ -97,10 +137,11 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 	case "launchd":
 		return &daemonSupervisor{
 			name:      "launchd",
-			start:     []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), templates.LaunchdLabel)},
-			stop:      []string{"launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), templates.LaunchdLabel)},
-			bootstrap: []string{"launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), p},
-			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), p),
+			start:     []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/%s", c.uid, templates.LaunchdLabel)},
+			stop:      []string{"launchctl", "bootout", fmt.Sprintf("gui/%d/%s", c.uid, templates.LaunchdLabel)},
+			bootstrap: []string{"launchctl", "bootstrap", fmt.Sprintf("gui/%d", c.uid), p},
+			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", c.uid, p),
+			ctl:       c,
 		}, nil
 	case "systemd":
 		return &daemonSupervisor{
@@ -109,6 +150,7 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 			stop:      []string{"systemctl", "--user", "stop", templates.SystemdUnit},
 			bootstrap: []string{"systemctl", "--user", "enable", "--now", templates.SystemdUnit},
 			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
+			ctl:       c,
 		}, nil
 	}
 	return nil, nil
@@ -134,14 +176,14 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 // separate and deliberate: both managers cache a job definition at load time,
 // so a changed file reaches the running job only through the unload and load
 // that startFromFile does, never through an in-place restart.
-func syncSupervisorFile(townRoot string) (rewritten bool) {
-	path, kind := supervisorFilePath()
+func (c *daemonControl) syncSupervisorFile(townRoot string) (rewritten bool) {
+	path, kind := c.supervisorFilePath()
 	if kind == "" {
 		return false
 	}
 	content, repair, err := templates.SupervisorFileRepair(path, kind, townRoot, daemon.ShutdownBudget)
 	if err == nil && repair {
-		err = installSupervisorFile(path, content)
+		err = c.install(path, content)
 	}
 	if err != nil {
 		style.PrintWarning("could not bring the %s job file up to date: %v", kind, err)
@@ -190,12 +232,12 @@ func installSupervisorFile(path, content string) error {
 // rewrite is what makes the next boot find the file current. The alternative
 // is an ExitTimeOut that never takes effect on any town that is not
 // re-provisioned, which is the whole of the bug.
-func reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err error) {
-	sup, err := detectDaemonSupervisor(townRoot)
+func (c *daemonControl) reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err error) {
+	sup, err := c.detectDaemonSupervisor(townRoot)
 	if err != nil || sup == nil {
 		return "", err
 	}
-	if !syncSupervisorFile(townRoot) {
+	if !c.syncSupervisorFile(townRoot) {
 		return "", nil
 	}
 
@@ -207,7 +249,7 @@ func reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err er
 	// restart paths, the PID that must be replaced is the one the caller
 	// already read: a wait that stopped at "the lock is held" would report the
 	// daemon on its way out and call this a success.
-	if _, err := waitForRestart(townRoot, daemonPID); err != nil {
+	if _, err := c.waitForRestart(townRoot, daemonPID); err != nil {
 		return "", fmt.Errorf("daemon did not come back after the %s job was reloaded from its file: %w", sup.name, err)
 	}
 	return fmt.Sprintf("%s job reloaded from an updated file", sup.name), nil
@@ -235,11 +277,11 @@ func (s *daemonSupervisor) startFromFile() error {
 	// Unload only a job the manager knows: bootout on a job that is not there
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
-	if st := supervisorStateFor(s.name); st.Err == nil && st.Loaded {
-		if err := supervisorRun(s.stop); err != nil {
+	if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
+		if err := s.ctl.run(s.stop); err != nil {
 			// Only a job that is still loaded means the unload did not
 			// happen, and then that job is still supervising the daemon.
-			if st := supervisorStateFor(s.name); st.Err != nil || st.Loaded {
+			if st := s.ctl.stateFor(s.name); st.Err != nil || st.Loaded {
 				return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
 			}
 		}
@@ -253,19 +295,19 @@ func (s *daemonSupervisor) startFromFile() error {
 // follows retries, and is the one that reports a job that would not go.
 func (s *daemonSupervisor) waitUnloaded() {
 	for range handStopConfirmAttempts {
-		if st := supervisorStateFor(s.name); st.Err == nil && !st.Loaded {
+		if st := s.ctl.stateFor(s.name); st.Err == nil && !st.Loaded {
 			return
 		}
-		time.Sleep(daemonPollInterval)
+		s.ctl.sleep(s.ctl.pollInterval)
 	}
 }
 
 // supervisorLoadAttempts is how many times loadJob tries to bootstrap the job;
-// supervisorLoadRetryInterval separates the tries, and is a seam so tests need
-// not wait it out.
-const supervisorLoadAttempts = 6
-
-var supervisorLoadRetryInterval = time.Second
+// supervisorLoadRetryInterval separates the tries.
+const (
+	supervisorLoadAttempts      = 6
+	supervisorLoadRetryInterval = time.Second
+)
 
 // loadJob bootstraps the job, retrying a failed attempt, and returns nil once
 // the manager knows the job — including when another caller (a concurrent
@@ -276,12 +318,12 @@ func (s *daemonSupervisor) loadJob() error {
 	var err error
 	for attempt := range supervisorLoadAttempts {
 		if attempt > 0 {
-			time.Sleep(supervisorLoadRetryInterval)
+			s.ctl.sleep(s.ctl.loadRetryInterval)
 		}
-		if err = supervisorRun(s.bootstrap); err == nil {
+		if err = s.ctl.run(s.bootstrap); err == nil {
 			return nil
 		}
-		if st := supervisorStateFor(s.name); st.Err == nil && st.Loaded {
+		if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
 			return nil
 		}
 	}
@@ -297,65 +339,67 @@ func (s *daemonSupervisor) loadJob() error {
 // error says how to load the job, or that removing the file returns the
 // daemon to manual operation.
 func startDaemon(townRoot string) (via string, pid int, err error) {
-	running, pid, err := daemonIsRunning(townRoot)
+	return realDaemonControl().startDaemon(townRoot)
+}
+
+func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err error) {
+	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
 		return "", 0, fmt.Errorf("checking daemon status: %w", err)
 	}
 	if running {
 		return "", pid, fmt.Errorf("daemon already running (PID %d)", pid)
 	}
-	sup, err := detectDaemonSupervisor(townRoot)
+	sup, err := c.detectDaemonSupervisor(townRoot)
 	if err != nil {
 		return "", 0, err
 	}
 	if sup != nil {
-		rewritten := syncSupervisorFile(townRoot)
+		rewritten := c.syncSupervisorFile(townRoot)
 		var runErr error
 		if rewritten {
 			// The file the job will start from is the one just rewritten, so
 			// the job has to be loaded from it rather than restarted in place.
 			runErr = sup.startFromFile()
 		} else {
-			runErr = supervisorRun(sup.start)
+			runErr = c.run(sup.start)
 			if runErr != nil {
 				// kickstart / restart reach only a job the service manager knows.
 				// One that gt daemon stop unloaded is bootstrapped instead, so that
 				// a stop-then-start pair leaves a supervised daemon rather than the
 				// hand spawn that recreates the crash loop (gt-3jrm).
-				if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
-					runErr = supervisorRun(sup.bootstrap)
+				if st := c.stateFor(sup.name); st.Err == nil && !st.Loaded {
+					runErr = c.run(sup.bootstrap)
 				}
 			}
 		}
 		if runErr != nil {
 			// The command may have failed after starting the daemon.
-			if pid, err := waitForDaemon(townRoot); err == nil {
+			if pid, err := c.waitForDaemon(townRoot); err == nil {
 				return sup.name, pid, nil
 			}
 			return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not start the daemon: %v\n  load it with: %s\n  or remove its file to run the daemon by hand", sup.name, runErr, sup.load)
 		}
-		pid, err = waitForDaemon(townRoot)
+		pid, err = c.waitForDaemon(townRoot)
 		if err != nil {
 			return sup.name, 0, fmt.Errorf("daemon did not come up under %s: %w", sup.name, err)
 		}
 		return sup.name, pid, nil
 	}
-	pid, err = spawnDaemonDirect(townRoot)
+	pid, err = c.spawn(townRoot)
 	return "", pid, err
 }
 
 // daemonPollInterval is how often waitForDaemon/waitForRestart re-check the
-// lock. A seam so tests can shrink it and finish in milliseconds: the
-// attempt counts below are chosen for their real-time products (interval *
-// attempts), so shrinking the interval shrinks wall-clock wait time without
-// changing how many times the lock gets checked relative to the budget.
-var daemonPollInterval = 100 * time.Millisecond
+// lock. The attempt counts below are chosen for their real-time products
+// (interval * attempts).
+const daemonPollInterval = 100 * time.Millisecond
 
 // waitForDaemon polls the lock for up to 3 s and returns the daemon's PID.
-func waitForDaemon(townRoot string) (int, error) {
+func (c *daemonControl) waitForDaemon(townRoot string) (int, error) {
 	for range 30 {
-		time.Sleep(daemonPollInterval)
-		running, pid, err := daemonIsRunning(townRoot)
+		c.sleep(c.pollInterval)
+		running, pid, err := c.isRunning(townRoot)
 		if err != nil {
 			return 0, fmt.Errorf("checking daemon status: %w", err)
 		}
@@ -367,29 +411,28 @@ func waitForDaemon(townRoot string) (int, error) {
 }
 
 // handStopConfirmBudget bounds waitForDaemonGone: how long restartDaemon's
-// hand path waits, after stopDaemonDirect returns, for the OS to actually
+// hand path waits, after c.stopDirect returns, for the OS to actually
 // finish tearing the old process down and releasing daemon.lock. SIGKILL
 // itself is near-instant, so this is confirming the OS finished, not waiting
 // out a graceful shutdown — a short budget, unlike restartWaitBudget above.
 const handStopConfirmBudget = 5 * time.Second
 
 // handStopConfirmAttempts is handStopConfirmBudget expressed as a poll count
-// the same way restartWaitAttempts is (see its doc): against the fixed
-// production poll interval, not the possibly-shrunk test one.
-const handStopConfirmAttempts = int(handStopConfirmBudget / (100 * time.Millisecond))
+// the same way restartWaitAttempts is (see its doc).
+const handStopConfirmAttempts = int(handStopConfirmBudget / daemonPollInterval)
 
 // waitForDaemonGone polls the lock for up to handStopConfirmBudget and
 // reports an error if the daemon is still running at the end of it.
-func waitForDaemonGone(townRoot string) error {
+func (c *daemonControl) waitForDaemonGone(townRoot string) error {
 	for range handStopConfirmAttempts {
-		running, _, err := daemonIsRunning(townRoot)
+		running, _, err := c.isRunning(townRoot)
 		if err != nil {
 			return fmt.Errorf("checking daemon status: %w", err)
 		}
 		if !running {
 			return nil
 		}
-		time.Sleep(daemonPollInterval)
+		c.sleep(c.pollInterval)
 	}
 	return fmt.Errorf("daemon still held its lock %s after stopping (check logs with 'gt daemon logs')", handStopConfirmBudget)
 }
@@ -425,40 +468,44 @@ func waitForDaemonGone(townRoot string) error {
 // running, and throughout a restart that is true of the process on its way
 // out as well.
 func restartDaemon(townRoot string) (via string, pid int, err error) {
-	running, oldPID, err := daemonIsRunning(townRoot)
+	return realDaemonControl().restartDaemon(townRoot)
+}
+
+func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err error) {
+	running, oldPID, err := c.isRunning(townRoot)
 	if err != nil {
 		return "", 0, fmt.Errorf("checking daemon status: %w", err)
 	}
 	if !running {
-		return startDaemon(townRoot)
+		return c.startDaemon(townRoot)
 	}
-	sup, err := detectDaemonSupervisor(townRoot)
+	sup, err := c.detectDaemonSupervisor(townRoot)
 	if err != nil {
 		return "", 0, err
 	}
 	if sup == nil {
-		if err := stopDaemonDirect(townRoot); err != nil {
+		if err := c.stopDirect(townRoot); err != nil {
 			return "", 0, fmt.Errorf("stopping the daemon: %w", err)
 		}
-		// stopDaemonDirect (daemon.StopDaemon) sends SIGKILL and returns
+		// c.stopDirect (daemon.StopDaemon) sends SIGKILL and returns
 		// without confirming it took: its own caller (`gt daemon stop`) has
 		// nothing further to do with the process either way. This caller
 		// does — it is about to spawn a new daemon into the same lock — so
 		// starting that race before the old holder is confirmed gone risks
 		// the new process losing the flock to a not-quite-dead old one.
-		if err := waitForDaemonGone(townRoot); err != nil {
+		if err := c.waitForDaemonGone(townRoot); err != nil {
 			return "", 0, err
 		}
-		return startDaemon(townRoot)
+		return c.startDaemon(townRoot)
 	}
 	var runErr error
-	if syncSupervisorFile(townRoot) {
+	if c.syncSupervisorFile(townRoot) {
 		// This is the restart the ExitTimeOut it carries exists for: the job
 		// is reloaded from the file, so the new value is in force before the
 		// next stop this restart causes — and for every one after it.
 		runErr = sup.startFromFile()
 	} else {
-		runErr = supervisorRun(sup.start)
+		runErr = c.run(sup.start)
 		if runErr != nil {
 			// kickstart reaches only a job the manager knows. The daemon that
 			// is up is then running outside its supervisor (the job was
@@ -466,20 +513,20 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 			// cannot be loaded beside it: the loaded job would respawn
 			// against the lock the hand-run daemon holds (gt-3jrm). So it
 			// goes, and the job comes up in its place.
-			if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
-				runErr = replaceUnsupervisedDaemon(townRoot, sup)
+			if st := c.stateFor(sup.name); st.Err == nil && !st.Loaded {
+				runErr = c.replaceUnsupervisedDaemon(townRoot, sup)
 			}
 		}
 	}
 	if runErr != nil {
 		// The command may have failed after the job came up; a live daemon
 		// that is not the old one is what the caller asked for either way.
-		if pid, waitErr := waitForRestart(townRoot, oldPID); waitErr == nil {
+		if pid, waitErr := c.waitForRestart(townRoot, oldPID); waitErr == nil {
 			return sup.name, pid, nil
 		}
 		return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not restart the daemon: %v\n  load it with: %s\n  or remove its file to run the daemon by hand", sup.name, runErr, sup.load)
 	}
-	pid, err = waitForRestart(townRoot, oldPID)
+	pid, err = c.waitForRestart(townRoot, oldPID)
 	if err != nil {
 		return sup.name, 0, fmt.Errorf("daemon did not come back under %s: %w", sup.name, err)
 	}
@@ -488,11 +535,11 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 
 // replaceUnsupervisedDaemon stops the daemon holding daemon.lock outside its
 // supervisor and loads the job, which starts the daemon under it.
-func replaceUnsupervisedDaemon(townRoot string, sup *daemonSupervisor) error {
-	if err := stopDaemonDirect(townRoot); err != nil {
+func (c *daemonControl) replaceUnsupervisedDaemon(townRoot string, sup *daemonSupervisor) error {
+	if err := c.stopDirect(townRoot); err != nil {
 		return fmt.Errorf("stopping the daemon running outside %s: %w", sup.name, err)
 	}
-	if err := waitForDaemonGone(townRoot); err != nil {
+	if err := c.waitForDaemonGone(townRoot); err != nil {
 		return err
 	}
 	return sup.loadJob()
@@ -518,7 +565,7 @@ const daemonStartupMargin = 30 * time.Second
 //     guaranteed gone within ShutdownBudget of the restart, whatever its own
 //     shutdown steps add up to.
 //   - The hand path (no supervisor) does not use this function at all:
-//     restartDaemon calls stopDaemonDirect (daemon.StopDaemon) instead, whose
+//     restartDaemon calls c.stopDirect (daemon.StopDaemon) instead, whose
 //     own SIGKILL grace is constants.ShutdownNotifyDelay (500 ms) — an order
 //     of magnitude tighter, because there is no supervisor to leave the job
 //     loaded for, so the caller can afford to force the issue immediately.
@@ -528,12 +575,8 @@ const daemonStartupMargin = 30 * time.Second
 const restartWaitBudget = daemon.ShutdownBudget + daemonStartupMargin
 
 // restartWaitAttempts is how many times waitForRestart polls: chosen so that
-// restartWaitAttempts * daemonPollInterval's PRODUCTION value (100ms) equals
-// restartWaitBudget. It is computed against that fixed default, not against
-// the current daemonPollInterval, so that shrinking daemonPollInterval in
-// tests (see its doc) shrinks the real wait proportionally instead of
-// canceling out against a count recomputed from the same shrunk value.
-const restartWaitAttempts = int(restartWaitBudget / (100 * time.Millisecond))
+// restartWaitAttempts * daemonPollInterval equals restartWaitBudget.
+const restartWaitAttempts = int(restartWaitBudget / daemonPollInterval)
 
 // waitForRestart polls the lock for up to restartWaitBudget and returns the
 // PID of a daemon other than oldPID. The longer budget than waitForDaemon's
@@ -547,10 +590,10 @@ const restartWaitAttempts = int(restartWaitBudget / (100 * time.Millisecond))
 // PID file has not been written yet (the same race daemon.StopDaemon's own
 // comment calls out) — a start still in flight, not the new daemon this is
 // waiting for.
-func waitForRestart(townRoot string, oldPID int) (int, error) {
+func (c *daemonControl) waitForRestart(townRoot string, oldPID int) (int, error) {
 	for range restartWaitAttempts {
-		time.Sleep(daemonPollInterval)
-		running, pid, err := daemonIsRunning(townRoot)
+		c.sleep(c.pollInterval)
+		running, pid, err := c.isRunning(townRoot)
 		if err != nil {
 			return 0, fmt.Errorf("checking daemon status: %w", err)
 		}

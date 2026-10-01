@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -133,7 +134,12 @@ func reaperDatabaseNames() []string {
 	if reaperDB == "" {
 		return reaper.DiscoverDatabases(reaperHost, reaperPort)
 	}
-	parts := strings.Split(reaperDB, ",")
+	return parseReaperDatabaseList(reaperDB)
+}
+
+// parseReaperDatabaseList splits a --db list on commas, dropping blanks.
+func parseReaperDatabaseList(list string) []string {
+	parts := strings.Split(list, ",")
 	databases := make([]string, 0, len(parts))
 	for _, part := range parts {
 		name := strings.TrimSpace(part)
@@ -145,19 +151,26 @@ func reaperDatabaseNames() []string {
 }
 
 func defaultReaperEndpoint() (string, int) {
-	host := agentconfig.ResolveDoltHost("")
+	townRoot, _ := findTownRoot()
+	return reaperEndpoint(townRoot, os.Getenv)
+}
+
+// reaperEndpoint resolves the Dolt host and port the reaper talks to from
+// getenv and, when townRoot is not "", the town's Dolt config.
+func reaperEndpoint(townRoot string, getenv func(string) string) (string, int) {
+	host := agentconfig.ResolveDoltHostWithEnv("", getenv)
 	port := 0
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+	if p := getenv("GT_DOLT_PORT"); p != "" {
 		if v, err := strconv.Atoi(p); err == nil && v > 0 {
 			port = v
 		}
 	}
-	if townRoot, err := findTownRoot(); err == nil {
+	if townRoot != "" {
 		if host == "" {
-			host = agentconfig.ResolveDoltHost(townRoot)
+			host = agentconfig.ResolveDoltHostWithEnv(townRoot, getenv)
 		}
 		if port == 0 {
-			port = agentconfig.ResolveDoltPort(townRoot)
+			port = agentconfig.ResolveDoltPortWithEnv(townRoot, getenv)
 		}
 	}
 	if host == "" {
@@ -169,16 +182,16 @@ func defaultReaperEndpoint() (string, int) {
 	return host, port
 }
 
-func waitBeforeReaperDatabase(index int) error {
+func waitBeforeReaperDatabase(clk clockwork.Clock, index int, dbDelay string) error {
 	if index == 0 {
 		return nil
 	}
-	delay, err := time.ParseDuration(reaperDBDelay)
+	delay, err := time.ParseDuration(dbDelay)
 	if err != nil {
 		return fmt.Errorf("invalid --db-delay: %w", err)
 	}
 	if delay > 0 {
-		time.Sleep(delay)
+		clk.Sleep(delay)
 	}
 	return nil
 }
@@ -250,7 +263,7 @@ Use this to understand the state before deciding what to reap.`,
 
 		var results []*reaper.ScanResult
 		for i, dbName := range databases {
-			if err := waitBeforeReaperDatabase(i); err != nil {
+			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
@@ -351,7 +364,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 
 		var results []*reaper.ReapResult
 		for i, dbName := range databases {
-			if err := waitBeforeReaperDatabase(i); err != nil {
+			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
@@ -457,7 +470,7 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 
 		var results []*reaper.PurgeResult
 		for i, dbName := range databases {
-			if err := waitBeforeReaperDatabase(i); err != nil {
+			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
@@ -573,7 +586,7 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 		var results []*reaper.AutoCloseResult
 		var refusals []string
 		for i, dbName := range databases {
-			if err := waitBeforeReaperDatabase(i); err != nil {
+			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
@@ -701,7 +714,7 @@ it by hand.`,
 		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
 
 		for i, dbName := range databases {
-			if err := waitBeforeReaperDatabase(i); err != nil {
+			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {

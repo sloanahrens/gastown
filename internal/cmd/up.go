@@ -485,17 +485,18 @@ func ensureDaemon(townRoot string) (note string, err error) {
 	if err != nil {
 		return "", err
 	}
+	ctl := realDaemonControl()
 	if running {
-		return reconcileSupervisorJob(townRoot, pid)
+		return ctl.reconcileSupervisorJob(townRoot, pid)
 	}
 
 	// Start it — through the provisioned supervisor when there is one
 	// (gt-3jrm: a daemon spawned here by hand leaves a KeepAlive launchd job
 	// respawn-looping against it).
-	if _, _, err := startDaemon(townRoot); err != nil {
+	if _, _, err := ctl.startDaemon(townRoot); err != nil {
 		// A concurrent starter (gt mayor, another gt up) may have won the
 		// race between the check above and the start; that is success.
-		if running, _, chk := daemonIsRunning(townRoot); chk == nil && running {
+		if running, _, chk := ctl.isRunning(townRoot); chk == nil && running {
 			return "", nil
 		}
 		return "", err

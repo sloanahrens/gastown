@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -424,7 +425,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		const maxBackoff = 8 * time.Second
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
-			time.Sleep(backoff)
+			clockwork.NewRealClock().Sleep(backoff)
 			hookBead = lookupHookedWork()
 			if hookBead != nil {
 				break
