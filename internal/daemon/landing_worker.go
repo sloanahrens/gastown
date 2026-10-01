@@ -238,7 +238,9 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 		} else {
 			skipLogged = ""
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
+			d.landingPasses.Add(1)
 			rep := w.Pass(d.ctx)
+			d.landingPasses.Add(-1)
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
 			}

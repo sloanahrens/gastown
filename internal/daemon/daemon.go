@@ -310,6 +310,11 @@ type Daemon struct {
 	patrolScanRunning atomic.Bool
 	patrolScanCycles  sync.WaitGroup
 
+	// landingPasses counts landing-worker passes in flight, one per rig at
+	// most: a restart mid-pass kills the merged-tree gate of the bead being
+	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
+	landingPasses atomic.Int32
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog
