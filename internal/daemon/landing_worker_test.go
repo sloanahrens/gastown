@@ -172,3 +172,36 @@ func TestGitRemoteReadsTheTargetOnOrigin(t *testing.T) {
 		t.Errorf("Contains(missing target) = %v, %v; want an error, never a no", on, err)
 	}
 }
+
+func TestPostLandRerunCommandMatchesTheTier(t *testing.T) {
+	t.Parallel()
+	const pkg = "github.com/steveyegge/gastown/internal/cmd"
+	for cmd, want := range map[string]string{
+		"make test-slow":                        "GT_TEST_DOCKER=0 go test -count=1 -timeout 20m " + pkg,
+		"make test-slow; make test-integration": "GT_TEST_DOCKER=1 go test -count=1 -tags integration -timeout 20m " + pkg,
+	} {
+		if got, err := postLandRerunCommand(cmd, pkg); err != nil || got != want {
+			t.Errorf("%q: %q, %v; want %q", cmd, got, err, want)
+		}
+	}
+	for _, bad := range []string{"pkg;rm -rf x", "$(id)", "-exec=sh"} {
+		if got, err := postLandRerunCommand("make test-slow", bad); err == nil {
+			t.Errorf("package %q accepted as %q", bad, got)
+		}
+	}
+}
+
+func TestWriteRedMainStatusReplacesTheLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	for _, line := range []string{"main RED at c1 (landed by gt-1): pkg [gt-2]", "main GREEN at c2 (landed by gt-3)"} {
+		if err := writeRedMainStatus(town, "gastown", line, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(RedMainStatusPath(town, "gastown"))
+	if err != nil || string(got) != "2026-09-30T12:00:00Z main GREEN at c2 (landed by gt-3)\n" {
+		t.Fatalf("status file %q, %v", got, err)
+	}
+}
