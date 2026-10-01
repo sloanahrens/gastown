@@ -6,7 +6,6 @@ version = 1
 [[template]]
 id = "{target}.write-tests"
 title = "Write failing tests for: {target.title}"
-acceptance = "Failing tests committed in a separate commit before any implementation code"
 description = """
 Read the bead requirements and acceptance criteria. Write tests that verify the expected behavior.
 
@@ -25,13 +24,14 @@ Steps:
 - Go services: `go test ./...`
 Detect which service is affected by the bead and use the right command.
 
-Do NOT write any implementation code in this step."""
+Do NOT write any implementation code in this step.
+
+Done when: Failing tests committed in a separate commit before any implementation code"""
 
 [[template]]
 id = "{target}.verify-red"
 title = "Verify tests fail (red)"
 needs = ["{target}.write-tests"]
-acceptance = "Test suite ran and produced at least one failure — zero failures means tests are not testing new behavior"
 description = """
 Run the test suite. The tests you wrote in the previous step MUST fail.
 
@@ -42,13 +42,14 @@ Do NOT proceed to implementation until you see genuine test failures.
 Run the tests and verify:
 - At least one test failure exists
 - The failures are for the expected reasons (missing implementation, not broken setup)
-- No pre-existing tests are broken"""
+- No pre-existing tests are broken
+
+Done when: Test suite ran and produced at least one failure — zero failures means tests are not testing new behavior"""
 
 [[template]]
 id = "{target}.implement"
 title = "Implement to green: {target.title}"
 needs = ["{target}.verify-red"]
-acceptance = "Implementation code committed — test files from write-tests step are NOT modified"
 description = """
 Write the minimal code to make all tests pass.
 
@@ -58,13 +59,14 @@ Write the minimal code to make all tests pass.
 - Keep the implementation minimal — just enough to pass the tests
 - Commit the implementation: `git add <impl files> && git commit -m "feat: implement {target.title}"`
 
-{target.description}"""
+{target.description}
+
+Done when: Implementation code committed — test files from write-tests step are NOT modified"""
 
 [[template]]
 id = "{target}.verify-green"
 title = "Verify all tests pass (green)"
 needs = ["{target}.implement"]
-acceptance = "Full test suite passes with zero failures"
 description = """
 Run the full test suite. ALL tests must pass — both the new tests and all pre-existing tests.
 
@@ -74,13 +76,14 @@ Do NOT proceed to refactor until the suite is fully green.
 Run tests and verify:
 - Zero test failures
 - No regressions in pre-existing tests
-- New tests pass for the right reasons"""
+- New tests pass for the right reasons
+
+Done when: Full test suite passes with zero failures"""
 
 [[template]]
 id = "{target}.refactor"
 title = "Refactor: {target.title}"
 needs = ["{target}.verify-green"]
-acceptance = "Code cleaned up, tests still pass, refactor committed (or no refactor needed)"
 description = """
 Clean up the implementation. Improve naming, reduce duplication, simplify logic.
 
@@ -89,4 +92,6 @@ Clean up the implementation. Improve naming, reduce duplication, simplify logic.
 If no meaningful refactoring is needed, skip this step — don't refactor for the sake of it.
 
 If changes were made:
-`git add <files> && git commit -m "refactor: clean up {target.title} implementation"`"""
+`git add <files> && git commit -m "refactor: clean up {target.title} implementation"`
+
+Done when: Code cleaned up, tests still pass, refactor committed (or no refactor needed)"""
