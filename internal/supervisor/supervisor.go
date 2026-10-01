@@ -9,7 +9,9 @@
 //     new session would only find finished work; Kill still works;
 //   - e-stop: the town sentinel or the seat's rig sentinel refuses both
 //     (running sessions finish; only the operator's explicit KillAll, from
-//     `gt kill-all`, bypasses it and the seat's hold);
+//     `gt kill-all`, and Stop, from the operator's stop verbs, bypass it and
+//     the seat's hold; Respawn, the in-place restart behind explicit verbs,
+//     is refused like Restart);
 //   - shutdown: a `gt down` in progress refuses Restart;
 //   - the restart budget: Budget restarts per seat per Window (3 per hour),
 //     persisted in the intent record; the next one freezes the seat, writes it
@@ -167,7 +169,7 @@ type ActionLine struct {
 	Session string    `json:"session"`
 	Reason  string    `json:"reason,omitempty"`
 	Actor   string    `json:"actor"`
-	Outcome string    `json:"outcome"` // done, refused, failed, declined
+	Outcome string    `json:"outcome"` // done, refused, failed, declined, started
 	Detail  string    `json:"detail,omitempty"`
 }
 
@@ -181,6 +183,7 @@ const (
 	outcomeRefused  = "refused"
 	outcomeFailed   = "failed"
 	outcomeDeclined = "declined"
+	outcomeStarted  = "started"
 )
 
 // record logs an action line to the logger and appends it to the action log.
@@ -301,7 +304,7 @@ func refusal(kind error, detail string) error {
 // takes the same lock) cannot land between the check and the kill. Killing a
 // seat with no session succeeds.
 func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
-	return s.kill(seat, "kill", reason, actor)
+	return s.kill(seat, "kill", false, reason, actor)
 }
 
 // KillAll is Kill for the operator's explicit `gt kill-all` (gt-4k3fj.4):
@@ -310,15 +313,107 @@ func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 // It is logged as verb kill-all with the actor and records desired=stop,
 // except on a held seat, whose park or freeze it leaves in place.
 func (s *Supervisor) KillAll(seat Seat, reason, actor string) error {
-	return s.kill(seat, verbKillAll, reason, actor)
+	return s.kill(seat, verbKillAll, true, reason, actor)
 }
 
 const verbKillAll = "kill-all"
 
-// kill is Kill and KillAll; only verb kill-all skips the hold and e-stop.
-func (s *Supervisor) kill(seat Seat, verb, reason, actor string) error {
+// Stop is the kill behind an explicit operator stop verb: gt down, gt crew
+// stop, gt crew remove --force, gt crew rename, gt rig remove --force
+// (gt-4k3fj.4.1). Like KillAll it is not refused by an e-stop or a seat's
+// hold, which hold back automatic paths and the restarts that follow a kill;
+// an operator ending a session is what an e-stop asks for, never what it
+// forbids. It is logged as verb stop with the actor (the command and who ran
+// it) and the reason, and records desired=stop unless the seat is held.
+func (s *Supervisor) Stop(seat Seat, reason, actor string) error {
+	return s.kill(seat, verbStop, true, reason, actor)
+}
+
+// Cleanup is the kill of a session gt itself just created and is abandoning
+// (a spawn rolled back after a failed startup). It is internal cleanup, not
+// a lifecycle decision: nothing refuses it, and it is logged as verb cleanup
+// with the actor and reason like Stop.
+func (s *Supervisor) Cleanup(seat Seat, reason, actor string) error {
+	return s.kill(seat, verbCleanup, true, reason, actor)
+}
+
+// StopSession is Stop for a caller holding a session name. A name that does
+// not parse to a seat (a stale prefix, a rig the registry no longer has) is
+// killed as a stray, still unrefused and logged as verb stop-stray.
+func (s *Supervisor) StopSession(sessionName, reason, actor string) error {
+	if seat, err := SeatForSession(s.o.Prefixes, sessionName); err == nil {
+		return s.Stop(seat, reason, actor)
+	}
+	l := ActionLine{Verb: verbStop + "-stray", Session: sessionName, Reason: reason, Actor: actor}
+	if err := s.o.Tmux.KillSessionWithProcesses(sessionName); err != nil {
+		l.Outcome, l.Detail = outcomeFailed, err.Error()
+		s.record(l)
+		return fmt.Errorf("killing %s: %w", sessionName, err)
+	}
+	l.Outcome = outcomeDone
+	s.record(l)
+	return nil
+}
+
+const (
+	verbStop    = "stop"
+	verbCleanup = "cleanup"
+	verbRespawn = "respawn"
+)
+
+// Respawn replaces the seat's running agent in place for an explicit verb:
+// gt crew restart, gt crew start --resume, gt crew at reviving an exited
+// runtime, gt handoff, a molecule step cycling its session (gt-4k3fj.4.1).
+// run does the kill and the new start. It is refused like Restart by the
+// seat's hold, an e-stop and a gt down in progress (an e-stop means no
+// restarts); it spends no restart budget, since an operator or agent asking
+// for a fresh session is not a crash loop. The record (desired=run, a new
+// incarnation) and a "started" action line are written before run, because
+// run may end the calling process (a self-handoff respawns its own pane); a
+// failed run is logged again as failed.
+func (s *Supervisor) Respawn(seat Seat, reason, actor string, run func() error) error {
 	name := seat.SessionName()
-	force := verb == verbKillAll
+	l := ActionLine{Verb: verbRespawn, Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
+	if err := s.guard(seat, l); err != nil {
+		return err
+	}
+	if ShutdownInProgress(s.o.TownRoot) {
+		return s.refuse(l, ErrShutdown, "")
+	}
+	now := s.o.Now().UTC()
+	var held string
+	rec, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
+		if r.Held() {
+			held = r.HoldReason()
+			return errHeld
+		}
+		r.Desired = intent.DesiredRun
+		r.IncarnationID = newIncarnationID()
+		r.Progress = nil
+		r.Actor, r.UpdatedAt = actor, now
+		r.LastAction = &intent.Action{Verb: verbRespawn, Reason: reason, Actor: actor, Outcome: outcomeStarted, At: now}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errHeld):
+		return s.refuseHeldUnderLock(seat, l, held)
+	case err != nil:
+		return s.refuse(l, ErrIntentUnreadable, err.Error())
+	}
+	l.Outcome = outcomeStarted
+	s.record(l)
+	s.mirror(seat, rec, nil)
+	if runErr := run(); runErr != nil {
+		l.Outcome, l.Detail = outcomeFailed, runErr.Error()
+		s.record(l)
+		return fmt.Errorf("respawning %s: %w", name, runErr)
+	}
+	return nil
+}
+
+// kill is Kill, KillAll, Stop and Cleanup; force skips the hold and e-stop.
+func (s *Supervisor) kill(seat Seat, verb string, force bool, reason, actor string) error {
+	name := seat.SessionName()
 	l := ActionLine{Verb: verb, Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
 	if !force {
 		if err := s.guard(seat, l); err != nil {

@@ -579,3 +579,126 @@ func TestDecidesWithoutTheStore(t *testing.T) {
 		}
 	}
 }
+
+// Stop and Cleanup are the operator's stop verbs and gt's own rollback
+// kill (gt-4k3fj.4.1): neither an e-stop nor a park refuses them, and each
+// is logged under its verb with the actor and reason.
+func TestStopAndCleanupBypassEstopAndHold(t *testing.T) {
+	t.Parallel()
+	for _, verb := range []string{"stop", "cleanup"} {
+		h := newHarness(t)
+		_ = estop.Activate(h.town, estop.TriggerManual, "x")
+		h.pause(t)
+		s := h.sup()
+		var err error
+		if verb == "stop" {
+			err = s.Stop(flint, "gt down", "gt down/overseer")
+		} else {
+			err = s.Cleanup(flint, "spawn rollback", "gt sling/overseer")
+		}
+		if err != nil {
+			t.Fatalf("%s = %v, want the kill", verb, err)
+		}
+		if got := h.tmux.kills(); len(got) != 1 || got[0] != flint.SessionName() {
+			t.Fatalf("%s kills = %v", verb, got)
+		}
+		lines := h.actions(t)
+		if len(lines) != 1 || lines[0].Verb != verb || lines[0].Outcome != "done" || lines[0].Actor == "" || lines[0].Reason == "" {
+			t.Fatalf("%s action log = %+v, want one done line with actor and reason", verb, lines)
+		}
+	}
+}
+
+// StopSession kills a name that names no seat as a logged stray, through
+// an e-stop.
+func TestStopSessionKillsStrayThroughEstop(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	_ = estop.Activate(h.town, estop.TriggerManual, "x")
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	s := New(Options{TownRoot: h.town, Tmux: h.tmux, Prefixes: reg, Logf: func(string, ...any) {}, Now: func() time.Time { return h.now }})
+	if err := s.StopSession("zz-not-a-seat-name-at-all", "rig remove --force", "gt rig remove/overseer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StopSession(flint.SessionName(), "rig remove --force", "gt rig remove/overseer"); err != nil {
+		t.Fatal(err)
+	}
+	lines := h.actions(t)
+	if len(lines) != 2 || lines[0].Verb != "stop-stray" || lines[1].Verb != "stop" || lines[1].Seat == "" {
+		t.Fatalf("action log = %+v, want stop-stray then stop on the seat", lines)
+	}
+}
+
+// Respawn is refused by an e-stop, a park and a gt down in progress, and
+// never runs its executor then.
+func TestRespawnRefusals(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		setup func(t *testing.T, h *harness)
+		want  error
+	}{
+		"town estop": {func(_ *testing.T, h *harness) { _ = estop.Activate(h.town, estop.TriggerManual, "x") }, ErrEstop},
+		"rig estop": {func(_ *testing.T, h *harness) {
+			_ = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+		}, ErrEstop},
+		"park": {func(t *testing.T, h *harness) { h.pause(t) }, ErrPaused},
+		"shutdown": {func(t *testing.T, h *harness) {
+			lockPath := filepath.Join(h.town, "daemon", "shutdown.lock")
+			_ = os.MkdirAll(filepath.Dir(lockPath), 0o755)
+			fl := flock.New(lockPath)
+			if ok, err := fl.TryLock(); !ok || err != nil {
+				t.Fatalf("taking the shutdown lock: %v %v", ok, err)
+			}
+			t.Cleanup(func() { _ = fl.Unlock() })
+		}, ErrShutdown},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			tc.setup(t, h)
+			ran := false
+			err := h.sup().Respawn(flint, "crew restart", "gt crew restart/overseer", func() error { ran = true; return nil })
+			if !errors.Is(err, ErrRefused) || !errors.Is(err, tc.want) {
+				t.Fatalf("Respawn = %v, want %v", err, tc.want)
+			}
+			if ran {
+				t.Fatal("Respawn ran its executor after refusing")
+			}
+		})
+	}
+}
+
+// Respawn records the new incarnation and a started line before it runs
+// (a self-handoff never returns), spends no budget, and logs a failed run.
+func TestRespawnRecordsBeforeRunAndSpendsNoBudget(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	s := h.sup()
+	for i := 0; i < DefaultBudget+2; i++ {
+		err := s.Respawn(flint, "handoff", "gt handoff/gastown/crew/max", func() error {
+			if lines := h.actions(t); len(lines) == 0 || lines[len(lines)-1].Outcome != "started" {
+				t.Errorf("no started line before run: %+v", lines)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("respawn %d = %v", i, err)
+		}
+	}
+	rec, err := intent.Read(h.town, IntentSeat(flint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Desired != intent.DesiredRun || rec.IncarnationID == "" || len(rec.Restarts) != 0 || rec.Frozen {
+		t.Fatalf("record = %+v, want desired=run, an incarnation and no budget spent", rec)
+	}
+	if err := s.Respawn(flint, "handoff", "gt handoff", func() error { return errors.New("pane gone") }); err == nil {
+		t.Fatal("Respawn with a failing run = nil")
+	}
+	lines := h.actions(t)
+	if last := lines[len(lines)-1]; last.Verb != "respawn" || last.Outcome != "failed" || last.Detail != "pane gone" {
+		t.Fatalf("last action = %+v, want a failed respawn", last)
+	}
+}

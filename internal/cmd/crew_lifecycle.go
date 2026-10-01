@@ -66,7 +66,8 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 		t := tmux.NewTmux()
 		sessionID := crewSessionName(townRegistry(), r.Name, name)
 		if hasSession, _ := t.HasSession(sessionID); hasSession {
-			if err := t.KillSessionWithProcesses(sessionID); err != nil {
+			sup := operatorSupervisor(filepath.Dir(r.Path))
+			if err := sup.StopSession(sessionID, "crew remove --force", operatorActor("gt crew remove")); err != nil {
 				fmt.Printf("Error killing session for %s: %v\n", arg, err)
 				lastErr = err
 				continue
@@ -626,8 +627,10 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 			output, _ = t.CapturePane(sessionID, 50)
 		}
 
-		// Kill the session (with proper process cleanup to avoid orphans)
-		if err := t.KillSessionWithProcesses(sessionID); err != nil {
+		// Kill the session through the supervisor (logged; an e-stop does
+		// not refuse an operator stop).
+		sup := operatorSupervisor(filepath.Dir(r.Path))
+		if err := sup.StopSession(sessionID, "crew stop", operatorActor("gt crew stop")); err != nil {
 			fmt.Printf("  %s [%s] %s: %s\n",
 				style.ErrorPrefix,
 				r.Name, name,
@@ -702,7 +705,13 @@ func runCrewStopAll() error {
 	fmt.Printf("%s Stopping %d crew session(s)...\n\n",
 		style.Bold.Render("🛑"), len(targets))
 
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
 	t := tmux.NewTmux()
+	sup := operatorSupervisor(townRoot)
+	actor := operatorActor("gt crew stop")
 	var succeeded, failed int
 	var failures []string
 
@@ -716,8 +725,9 @@ func runCrewStopAll() error {
 			output, _ = t.CapturePane(sessionID, 50)
 		}
 
-		// Kill the session (with proper process cleanup to avoid orphans)
-		if err := t.KillSessionWithProcesses(sessionID); err != nil {
+		// Kill the session through the supervisor (logged; an e-stop does
+		// not refuse an operator stop).
+		if err := sup.StopSession(sessionID, "crew stop --all", actor); err != nil {
 			failed++
 			failures = append(failures, fmt.Sprintf("%s: %v", agentName, err))
 			fmt.Printf("  %s %s\n", style.ErrorPrefix, agentName)
@@ -728,11 +738,8 @@ func runCrewStopAll() error {
 		fmt.Printf("  %s %s\n", style.SuccessPrefix, agentName)
 
 		// Log kill event to town log
-		townRoot, _ := workspace.FindFromCwd()
-		if townRoot != "" {
-			logger := townlog.NewLogger(townRoot)
-			_ = logger.Log(townlog.EventKill, agentName, "gt crew stop --all")
-		}
+		logger := townlog.NewLogger(townRoot)
+		_ = logger.Log(townlog.EventKill, agentName, "gt crew stop --all")
 
 		// Log captured output (truncated)
 		if len(output) > 200 {
