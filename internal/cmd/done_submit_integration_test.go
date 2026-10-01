@@ -245,27 +245,6 @@ func TestIntegrationRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 	}
 }
 
-// TestRunDoneFailureClearsTheDoneIntentLabel: the label written before the
-// long stages must not outlive a run that failed and reported nothing, or the
-// witness restarts a polecat that is fixing its branch (gt-wmpy). A run that
-// succeeded leaves it to updateAgentStateOnDone, which clears it last.
-func TestIntegrationRunDoneFailureClearsTheDoneIntentLabel(t *testing.T) {
-	red := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 1}}}}
-	r := runDoneSubmit(t, red, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
-	assertDoneExitCode(t, r.err, doneExitGateFailed, "local gate failed")
-	if !strings.Contains(r.bdLog, "--remove-label=done-intent:COMPLETED:") {
-		t.Errorf("a failed run left its done-intent label:\n%s", r.bdLog)
-	}
-
-	ok := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
-	if ok.err != nil {
-		t.Fatalf("runDone: %v", ok.err)
-	}
-	if strings.Contains(ok.bdLog, "--remove-label=done-intent:") {
-		t.Errorf("a reported run cleared the label before updateAgentStateOnDone:\n%s", ok.bdLog)
-	}
-}
-
 // TestRunDoneGateThatCouldNotRunExits16: a gate that could not run says
 // nothing about the code, so it gets its own exit code and the polecat is told
 // to escalate rather than fix code.

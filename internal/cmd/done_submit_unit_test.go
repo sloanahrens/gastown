@@ -692,46 +692,6 @@ func TestSubmitRefusesUncommittedWork(t *testing.T) {
 	}
 }
 
-// TestDoneIntentLabelOutlivesOnlyAReportedRun: the label written before the
-// long stages must not outlive a run that failed and reported nothing, or
-// the witness restarts a polecat that is fixing its branch (gt-wmpy). A run
-// that reported done leaves it for updateAgentStateOnDone to clear last.
-func TestDoneIntentLabelOutlivesOnlyAReportedRun(t *testing.T) {
-	t.Parallel()
-	for name, tc := range map[string]struct {
-		runErr    error
-		wantLabel bool
-	}{
-		"failed run":   {runErr: doneExit(doneExitGateFailed, "local gate failed", nil), wantLabel: false},
-		"reported run": {runErr: nil, wantLabel: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			bd := beadsfake.New()
-			bd.Seed(beads.Issue{ID: "gt-gastown-polecat-refuge", Title: "Polecat refuge", Type: "task"})
-			release := holdDoneIntent(bd, "gt-gastown-polecat-refuge", ExitCompleted)
-			agent, _ := bd.Show("gt-gastown-polecat-refuge")
-			if !hasDoneIntentLabel(agent) {
-				t.Fatalf("no done-intent label written: %v", agent.Labels)
-			}
-			release(tc.runErr)
-			agent, _ = bd.Show("gt-gastown-polecat-refuge")
-			if got := hasDoneIntentLabel(agent); got != tc.wantLabel {
-				t.Errorf("done-intent label present = %v, want %v (labels %v)", got, tc.wantLabel, agent.Labels)
-			}
-		})
-	}
-}
-
-func hasDoneIntentLabel(issue *beads.Issue) bool {
-	for _, l := range issue.Labels {
-		if strings.HasPrefix(l, "done-intent:COMPLETED:") {
-			return true
-		}
-	}
-	return false
-}
-
 // TestDoneLandingFlagsAreGone: gt done has no landing modes and no polecat
 // gate bypass (ADR 0004). --pre-verified exists for crew only and the
 // polecat path refuses it (runDone).

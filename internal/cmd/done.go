@@ -511,8 +511,7 @@ func observeCleanupStatus(g *git.Git, branch string) string {
 // That dependency was the silent hole: getAgentBeadID returns "" for a
 // RoleUnknown/rig-less context, and every agent-bead write in gt done is
 // guarded by `agentBeadID != ""`. When role detection degraded, gt done skipped
-// the done-intent label, the resume checkpoints, active_mr, the completion
-// metadata, agent_state AND the cleanup_status self-report, then exited 0 and
+// the resume checkpoints, active_mr, the completion metadata, agent_state AND the cleanup_status self-report, then exited 0 and
 // logged "[done]" — leaving a slot that reads cleanup_status=<missing> with no
 // later writer to repair it (see selfReportCleanupStatus and reclaim.go).
 //
@@ -596,7 +595,7 @@ func selfReportCleanupStatus(g *git.Git, branch string, updater cleanupStatusUpd
 	}
 	status := resolveCleanupStatusForSelfReport(doneCleanupStatus, observed)
 	if err := updater.UpdateAgentCleanupStatus(agentBeadID, string(status)); err != nil {
-		// Non-fatal: don't return — done-intent labels still need clearing (za-o9e)
+		// Non-fatal: the rest of gt done still runs (za-o9e)
 		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
 	}
 }
@@ -902,7 +901,7 @@ type doneSubmission struct {
 	sourceBD    beads.Client
 }
 
-func runDone(cmd *cobra.Command, args []string) (retErr error) {
+func runDone(cmd *cobra.Command, args []string) error {
 	// Guard: Only polecats should call gt done
 	// Polecat sessions end with gt done — the session is cleaned up, but the
 	// polecat's persistent identity (agent bead, CV chain) survives across assignments.
@@ -976,8 +975,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	r.agentBeadID = getAgentBeadID(ctx)
 
-	// Recreate the agent bead if it's missing (hq-xu4p). Done-intent labels
-	// and completion metadata write to it; when it's gone every write fails
+	// Recreate the agent bead if it's missing (hq-xu4p). Completion metadata
+	// writes to it; when it's gone every write fails
 	// 'issue not found'.
 	ensureAgentBeadExists(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, ctx)
 	var assignedIssueIDs []string
@@ -1012,18 +1011,6 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		} else if ambiguous {
 			return fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", r.branch, info.Issue, r.sender)
 		}
-	}
-
-	// Write the done-intent label before the long stages, so a polecat that
-	// died inside gt done can be told from one still working. A run
-	// that fails does not report done and keeps its session to fix the
-	// failure, so the label must not outlive it: a stale done-intent label
-	// gets a working polecat restarted (gt-wmpy). Every error return is such a
-	// run: reportDone's only error comes before it records completion. A run that
-	// succeeds leaves the label to updateAgentStateOnDone, which clears it last.
-	if r.agentBeadID != "" {
-		release := holdDoneIntent(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, exitType)
-		defer func() { release(retErr) }()
 	}
 
 	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the agent is
@@ -1861,66 +1848,6 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 	return fmt.Sprintf("push failed for branch '%s': %v [after retry: %v]", branch, pushErr, verifyErr)
 }
 
-// holdDoneIntent writes the done-intent label and returns what runDone
-// defers: it clears the label when the run failed, and leaves it to
-// updateAgentStateOnDone when the run reported done (gt-wmpy).
-func holdDoneIntent(bd beads.Client, agentBeadID, exitType string) func(runErr error) {
-	setDoneIntentLabel(bd, agentBeadID, exitType)
-	return func(runErr error) {
-		if runErr != nil {
-			clearDoneIntentLabel(bd, agentBeadID)
-		}
-	}
-}
-
-// setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
-// EARLY in gt done, before push/MR. It marks a polecat that crashed mid-gt-done:
-// if the session is dead but done-intent exists, the polecat was trying to exit.
-//
-// Follows the existing idle:N / backoff-until:TIMESTAMP label pattern.
-// Non-fatal: if this fails, gt done continues without the safety net.
-func setDoneIntentLabel(bd beads.Client, agentBeadID, exitType string) {
-	if agentBeadID == "" {
-		return
-	}
-	label := fmt.Sprintf("done-intent:%s:%d", exitType, time.Now().Unix())
-	if err := bd.Update(agentBeadID, beads.UpdateOptions{
-		AddLabels: []string{label},
-	}); err != nil {
-		// Non-fatal: warn but continue
-		fmt.Fprintf(os.Stderr, "Warning: couldn't set done-intent label on %s: %v\n", agentBeadID, err)
-	}
-}
-
-// clearDoneIntentLabel removes any done-intent:* label from the agent bead.
-// Called at the end of updateAgentStateOnDone on clean exit.
-// Uses read-modify-write pattern (same as clearAgentBackoffUntil).
-func clearDoneIntentLabel(bd beads.Client, agentBeadID string) {
-	if agentBeadID == "" {
-		return
-	}
-	issue, err := bd.Show(agentBeadID)
-	if err != nil {
-		return // Agent bead gone, nothing to clear
-	}
-
-	var toRemove []string
-	for _, label := range issue.Labels {
-		if strings.HasPrefix(label, "done-intent:") {
-			toRemove = append(toRemove, label)
-		}
-	}
-	if len(toRemove) == 0 {
-		return // No done-intent label to clear
-	}
-
-	if err := bd.Update(agentBeadID, beads.UpdateOptions{
-		RemoveLabels: toRemove,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear done-intent label on %s: %v\n", agentBeadID, err)
-	}
-}
-
 // clearDoneCheckpoints removes done-cp:* labels from the agent bead. gt done
 // no longer writes them (its push is idempotent under a lease), but agent
 // beads from earlier runs still carry them.
@@ -2200,15 +2127,12 @@ doneStateUpdate:
 	// also used to be skipped whenever the status was empty/unknown, leaving
 	// cleanup_status=<missing> on a slot that can never be reclaimed.
 
-	// Clear done-intent label and checkpoints on clean exit — gt done completed
-	// successfully. If we don't reach here (crash/stuck), the lingering labels
-	// mark the zombie and the checkpoints let a restart resume.
-	clearDoneIntentLabel(agentBd, agentBeadID)
+	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return nil
 }
 
-// ensureAgentBeadExists recreates a missing agent bead so done-intent labels,
+// ensureAgentBeadExists recreates a missing agent bead so completion metadata,
 // checkpoints, and active_mr writes don't silently fail (hq-xu4p). Only
 // rig-level agents are handled — town agents (mayor/deacon) are owned by
 // gt doctor. Best-effort: failures are warned, never fatal.

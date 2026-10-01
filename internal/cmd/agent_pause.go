@@ -3,7 +3,7 @@
 // A mayor/operator freeze (SIGSTOP) of a misbehaving agent is
 // indistinguishable from a stuck agent: the stuck-agent dog respawned a
 // frozen flint 20 minutes later, and the witness patrol restarted parked
-// agents through the done-intent-dead path (gt-ahik). This command is the
+// agents (gt-ahik). This command is the
 // sanctioned freeze: it writes a durable pause marker (the only source of
 // truth every scanner reads), then mirrors agent_state=paused onto the agent
 // bead for display, and freezes the session's process group.

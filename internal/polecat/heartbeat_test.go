@@ -441,8 +441,7 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 		t.Fatalf("keep-alive did not renew the seeded heartbeat: got %v, want %v (seeded %v)", first.Timestamp, clk.Now(), seeded)
 	}
 	// Content, not just freshness: a renewal that downgrades the state (or
-	// drops the bead) would let the witness's exiting-check miss it and fall
-	// through to the done-intent restart this fix exists to prevent.
+	// drops the bead) would change what readers see the polecat doing.
 	if first.State != HeartbeatExiting || first.Context != "gt done" || first.Bead != "gt-azmw" {
 		t.Fatalf("renewal changed the heartbeat's meaning: state=%q context=%q bead=%q", first.State, first.Context, first.Bead)
 	}
@@ -617,10 +616,9 @@ func TestReadSessionHeartbeat_V2AllStates(t *testing.T) {
 }
 
 // TestTouchSessionHeartbeat_ReaderNeverSeesTornWrite pins the write as atomic
-// (gt-sle0). ReadSessionHeartbeat returns nil on a parse error, and the
-// witness reads a nil heartbeat as "no agent-reported state" and falls through
-// to the legacy done-intent timeout, so a torn read restarts a polecat that is
-// mid gt done. A truncate-then-write lets a reader see an empty or partial
+// (gt-sle0). ReadSessionHeartbeat returns nil on a parse error, and a reader
+// takes a nil heartbeat as "no agent-reported state", so a torn read can make
+// a polecat that is mid gt done look abandoned. A truncate-then-write lets a reader see an empty or partial
 // file; the payload is large enough that the write window is milliseconds
 // rather than microseconds, so the reader hits it on nearly every run.
 func TestTouchSessionHeartbeat_ReaderNeverSeesTornWrite(t *testing.T) {
