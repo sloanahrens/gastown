@@ -1,12 +1,10 @@
 package cmd
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -409,24 +407,6 @@ func TestNudgeTrailingSlashNormalization(t *testing.T) {
 			t.Errorf("target %q -> (%q, %q), want (%q, hello)", target, got, message, want)
 		}
 	}
-}
-
-func TestIdleWatcherExitsOnEmptyQueue(t *testing.T) {
-	t.Parallel()
-	// watchAndDeliver should exit after its first poll when the queue is
-	// empty (someone else drained it). A nil Tmux is safe: QueueLen returns 0
-	// before the session is consulted.
-	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
-	done := make(chan struct{})
-	go func() {
-		watchAndDeliverWith(clk, time.Minute, time.Second, nil, t.TempDir(), "test-session")
-		close(done)
-	}()
-	if err := clk.BlockUntilContext(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	clk.Advance(time.Second) // one poll, not the whole minute
-	<-done
 }
 
 func TestQueueLen(t *testing.T) {

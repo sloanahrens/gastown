@@ -3,13 +3,15 @@
 // and `gt escalate` themselves take a Notifier instead, so their tests record
 // what was sent (notifyfake) rather than stubbing a gt binary on PATH.
 //
-// The production implementation, CLI, still runs the gt binary. That is
-// deliberate: `gt nudge` is the town's one nudge path (wait-idle delivery,
-// queue fallback, DND, role-shortcut resolution), and `gt mail send` and
-// `gt escalate` derive the sender from the process that runs them. Running
-// them as a subprocess keeps those semantics and the per-call timeout
-// isolation the daemon relies on, byte for byte, while the escalation logic
-// itself lives here (escalate.go) instead of in internal/cmd.
+// The production implementation, CLI, still runs the gt binary for mail and
+// escalations: `gt mail send` and `gt escalate` derive the sender from the
+// process that runs them, and running them as a subprocess keeps those
+// semantics and the per-call timeout isolation the daemon relies on, while
+// the escalation logic itself lives here (escalate.go) instead of in
+// internal/cmd. Nudges go in-process through TownNudger, which calls gt
+// nudge's own delivery (internal/nudge/deliver): wait-idle delivery, queue
+// fallback, DND, role-shortcut resolution and sender attribution, with the
+// context's deadline in place of killing the process.
 package notify
 
 import (

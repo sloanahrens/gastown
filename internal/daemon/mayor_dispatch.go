@@ -26,13 +26,14 @@ const (
 	// that a wedged Dolt does not strand the patrol.
 	mayorDispatchTimeout = 2 * time.Minute
 
-	// mayorNudgeTimeout bounds `gt nudge`. Its default wait-idle mode does not
-	// return the instant it queues: it polls for idle up to waitIdleTimeout
-	// (15s), and on timeout queues *and then watches synchronously* for up to
-	// idleWatcherTimeout (60s) more before giving up (internal/cmd/nudge.go).
-	// A 60s bound here killed that watch mid-flight — cmd.Run's error read
-	// back as "signal: killed: Watching hq-mayor for idle" — which reported a
-	// nudge that had already queued as a hard failure instead of letting the
+	// mayorNudgeTimeout bounds the mayor nudge. Its default wait-idle mode
+	// does not return the instant it queues: it polls for idle up to
+	// deliver.WaitIdleTimeout (15s), and on timeout queues *and then watches
+	// synchronously* for up to deliver.WatchTimeout (60s) more before giving
+	// up (internal/nudge/deliver). A 60s bound here ended that watch
+	// mid-flight — then by killing `gt nudge`, whose error read back as
+	// "signal: killed: Watching hq-mayor for idle" — which reported a nudge
+	// that had already queued as a hard failure instead of letting the
 	// watcher either deliver it or leave it for the next drain (gt-8hi4w,
 	// same shape as the seat-refill plugin's own bound, gt-hen4o). 90s covers
 	// 15s+60s with slack.
@@ -213,10 +214,11 @@ func parseDispatchCheck(out []byte) (*dispatchCheckResult, error) {
 
 // nudgeMayor delivers the patrol's nudge to the mayor session.
 //
-// Delivery goes through `gt nudge`, which is the town's one nudge path: it
-// queues when the mayor is busy rather than interrupting a turn, and it honors
-// the mayor's DND setting — a nudge the target has asked not to receive is
-// dropped by that path, and that is the correct outcome for a cadence.
+// Delivery goes through gt nudge's own delivery, in-process
+// (notify.TownNudger): the town's one nudge path. It queues when the mayor is
+// busy rather than interrupting a turn, and it honors the mayor's DND
+// setting — a nudge the target has asked not to receive is dropped by that
+// path, and that is the correct outcome for a cadence.
 func (d *Daemon) nudgeMayor(message string) error {
 	if strings.TrimSpace(message) == "" {
 		return fmt.Errorf("refusing to nudge with an empty message")

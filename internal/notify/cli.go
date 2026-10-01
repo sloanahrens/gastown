@@ -12,7 +12,9 @@ import (
 )
 
 // CLI is the production Notifier: it runs `gt mail send`, `gt nudge` and
-// `gt escalate`, exactly as the call sites that now take a Notifier used to.
+// `gt escalate`, exactly as the call sites that now take a Notifier used to,
+// except that it hands nudges to Nudger when one is set (TownNudger delivers
+// them in-process).
 //
 // A zero CLI runs "gt" from PATH in the caller's working directory with the
 // caller's environment. Each call runs in its own process group; its only
@@ -27,6 +29,8 @@ type CLI struct {
 	// caller's. It is a function so each call sees the environment as it is
 	// at that moment, as exec.Command's callers always did.
 	Env func() []string
+	// Nudger delivers Nudge's nudges instead of `gt nudge`; nil runs gt.
+	Nudger Nudger
 
 	run runFunc // nil means realRun
 }
@@ -83,10 +87,14 @@ func (c *CLI) MailSend(ctx context.Context, to, subject, body string, opts ...Ma
 	return c.exec(ctx, "", args...)
 }
 
-// Nudge runs `gt nudge` in its default (wait-idle) mode.
+// Nudge runs `gt nudge` in its default (wait-idle) mode, or hands the nudge
+// to Nudger.
 func (c *CLI) Nudge(ctx context.Context, target, message string) error {
 	if err := ValidateNudge(target, message); err != nil {
 		return err
+	}
+	if c.Nudger != nil {
+		return c.Nudger.Nudge(ctx, target, message)
 	}
 	return c.exec(ctx, "", "nudge", "--", target, message)
 }
