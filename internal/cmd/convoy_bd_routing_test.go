@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
 // convoyCLIFixture is a convoyCLI over a temp town with an in-process bd.
@@ -39,7 +40,7 @@ func newConvoyCLIFixture(t *testing.T, answer func(f *inprocBD, cmd string, args
 	fx.c = convoyCLI{
 		townRoot: func() (string, error) { return root, nil },
 		bd:       fx.rec.run,
-		townDB: func(townBeads string) beads.Client {
+		townDB: func(townBeads string) convoyops.Store {
 			if townBeads != root {
 				t.Errorf("town database opened at %q, want the town root %q", townBeads, root)
 			}
@@ -62,66 +63,32 @@ func (fx *convoyCLIFixture) seedConvoy(status string) {
 	fx.town.Seed(beads.Issue{ID: "hq-cv-test", Title: "Test Convoy", Status: status, Labels: []string{"gt:convoy"}})
 }
 
-// assertAllPinnedToTown fails unless every bd call ran from the town root
-// against the town's .beads database, whatever BEADS_DIR the caller had.
-func (fx *convoyCLIFixture) assertAllPinnedToTown(t *testing.T) {
-	t.Helper()
-	calls := fx.rec.recorded()
-	if len(calls) == 0 {
-		t.Fatal("no bd calls")
-	}
-	townBeads := filepath.Join(fx.root, ".beads")
-	for _, c := range calls {
-		if c.Dir != fx.root {
-			t.Errorf("bd %q ran in %q, want town root %q", c.Args, c.Dir, fx.root)
-		}
-		if got := callEnv(c, "BEADS_DIR"); got != townBeads {
-			t.Errorf("bd %q BEADS_DIR = %q, want %q", c.Args, got, townBeads)
-		}
-	}
-}
-
-// TestRunConvoyList_UsesTownRootAndStripsBeadsDir: gt convoy list --json
-// --all reads the convoys and their tracked issues from the town root,
-// pinned to the town database.
-func TestRunConvoyList_UsesTownRootAndStripsBeadsDir(t *testing.T) {
+// TestRunConvoyList_ReadsTheTownDatabase: gt convoy list --json --all reads
+// the convoys, closed ones included, from the town database at the town root.
+func TestRunConvoyList_ReadsTheTownDatabase(t *testing.T) {
 	t.Parallel()
-	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer {
-		switch cmd {
-		case "list":
-			if argsMention(args, "--label=gt:convoy") {
-				return bdOut(`[{"id":"hq-cv-town","title":"Town convoy","status":"open","created_at":"2026-03-09T00:00:00Z","labels":["gt:convoy"]}]`)
-			}
-			return bdOut("[]")
-		case "show":
-			return bdOut(`[{"id":"hq-cv-town","title":"Town convoy","status":"open","issue_type":"convoy","dependencies":[]}]`)
-		}
-		return bdOut("[]")
-	})
+	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer { return bdOut("[]") })
+	fx.town.Seed(
+		beads.Issue{ID: "hq-cv-town", Title: "Town convoy", CreatedAt: "2026-03-09T00:00:00Z", Labels: []string{"gt:convoy"}},
+		beads.Issue{ID: "hq-cv-shut", Title: "Closed convoy", Status: "closed", CreatedAt: "2026-03-08T00:00:00Z", Labels: []string{"gt:convoy"}},
+	)
 
 	if err := fx.c.list(convoyListOptions{json: true, all: true}); err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if !strings.Contains(fx.out.String(), `"id": "hq-cv-town"`) {
-		t.Fatalf("expected convoy JSON output, got:\n%s", fx.out.String())
+	for _, id := range []string{"hq-cv-town", "hq-cv-shut"} {
+		if !strings.Contains(fx.out.String(), `"id": "`+id+`"`) {
+			t.Errorf("convoy %s missing from the --all JSON output:\n%s", id, fx.out.String())
+		}
 	}
-	if !fx.bd.logged("list --label=gt:convoy --json --limit=0 --all --flat") {
-		t.Errorf("convoys not listed with --all; bd log:\n%s", fx.bd.log())
-	}
-	fx.assertAllPinnedToTown(t)
 }
 
-// TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir: gt convoy status <id>
-// reads the convoy from the town root, pinned to the town database, and
-// reports its progress.
-func TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir(t *testing.T) {
+// TestRunConvoyStatus_ReadsTheTownDatabase: gt convoy status <id> reads the
+// convoy from the town database and reports its progress.
+func TestRunConvoyStatus_ReadsTheTownDatabase(t *testing.T) {
 	t.Parallel()
-	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer {
-		if cmd == "show" {
-			return bdOut(`[{"id":"hq-cv-status","title":"Status convoy","status":"open","issue_type":"convoy","created_at":"2026-03-09T00:00:00Z","labels":[],"dependencies":[]}]`)
-		}
-		return bdOut("[]")
-	})
+	fx := newConvoyCLIFixture(t, func(f *inprocBD, cmd string, args []string) bdAnswer { return bdOut("[]") })
+	fx.town.Seed(beads.Issue{ID: "hq-cv-status", Title: "Status convoy", Type: "convoy", CreatedAt: "2026-03-09T00:00:00Z"})
 
 	if err := fx.c.status(false, []string{"hq-cv-status"}); err != nil {
 		t.Fatalf("status: %v", err)
@@ -130,7 +97,6 @@ func TestRunConvoyStatus_UsesTownRootAndStripsBeadsDir(t *testing.T) {
 	if !strings.Contains(out, "hq-cv-status") || !strings.Contains(out, "Progress:  0/0 completed") {
 		t.Fatalf("unexpected status output:\n%s", out)
 	}
-	fx.assertAllPinnedToTown(t)
 }
 
 // convoyWriteBD answers `bd show` of the convoy hq-cv-test and fails

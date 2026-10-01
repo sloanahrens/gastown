@@ -28,7 +28,7 @@ type slingConvoyTown struct {
 	root string
 	bd   beads.BDRunner // nil is the bd on PATH
 	// db is the town database; nil is bd pinned to the town's .beads.
-	db beads.Client
+	db convoyops.Store
 }
 
 // townDB is the town database.
@@ -43,7 +43,12 @@ func (c slingConvoyTown) beadsDir() string { return filepath.Join(c.root, ".bead
 
 // convoys is the convoy package's view of the town database.
 func (c slingConvoyTown) convoys() convoyops.Town {
-	return convoyops.Town{Root: c.beadsDir(), Out: os.Stdout, Warn: os.Stderr, Run: c.bd}
+	town := convoyops.Town{Root: c.beadsDir(), Out: os.Stdout, Warn: os.Stderr}
+	if c.db != nil {
+		town.Open = func(string) convoyops.Store { return c.db }
+		town.Issues = c.db
+	}
+	return town
 }
 
 // isTrackedByConvoy checks if an issue is already being tracked by a convoy.
@@ -70,11 +75,11 @@ func (c slingConvoyTown) trackingConvoy(beadID string) string {
 	if err == nil && len(trackerIDs) > 0 {
 		// Check each tracker to find an open convoy
 		for _, trackerID := range trackerIDs {
-			result, err := bdShowIn(c.bd, c.root, trackerID)
+			tracker, err := c.townDB().Show(trackerID)
 			if err != nil {
 				continue
 			}
-			if convoyops.IsConvoyIssue(result.IssueType, result.Labels) && result.Status == "open" {
+			if convoyops.IsConvoyIssue(tracker.Type, tracker.Labels) && tracker.Status == "open" {
 				return trackerID
 			}
 		}

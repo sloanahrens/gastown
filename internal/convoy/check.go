@@ -2,7 +2,6 @@ package convoy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,28 +55,10 @@ func (t Town) CheckAll(ctx context.Context, dryRun bool) ([]Ref, error) {
 
 // CheckOne closes one convoy if all its tracked issues are resolved.
 func (t Town) CheckOne(convoyID string, dryRun bool) error {
-	stdout, err := t.bdJSON(t.Root, "show", convoyID, "--json")
+	convoy, err := t.store(t.Root).Show(convoyID)
 	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
-
-	var convoys []struct {
-		ID          string   `json:"id"`
-		Title       string   `json:"title"`
-		Status      string   `json:"status"`
-		Type        string   `json:"issue_type"`
-		Description string   `json:"description"`
-		Labels      []string `json:"labels"`
-	}
-	if err := json.Unmarshal(stdout, &convoys); err != nil {
-		return fmt.Errorf("parsing convoy data: %w", err)
-	}
-
-	if len(convoys) == 0 {
-		return fmt.Errorf("convoy '%s' not found", convoyID)
-	}
-
-	convoy := convoys[0]
 
 	// Verify it's actually a convoy type
 	if !IsConvoyIssue(convoy.Type, convoy.Labels) {
@@ -150,9 +131,7 @@ func (t Town) closeIfComplete(convoyID, title string, tracked []TrackedIssue, dr
 		return true, nil
 	}
 
-	reason := "All tracked issues completed"
-	closeArgs := []string{"close", convoyID, "-r", reason}
-	if err := t.MutateAndExport(closeArgs...); err != nil {
+	if err := t.CloseAndExport(convoyID, "All tracked issues completed"); err != nil {
 		return false, fmt.Errorf("closing convoy: %w", err)
 	}
 
@@ -170,13 +149,13 @@ func (t Town) PersistJSONL() error {
 	if beadsDir == "" {
 		return fmt.Errorf("could not resolve town .beads directory")
 	}
-	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
-	return t.bd("export", "-o", issuesPath).Dir(t.Root).Run()
+	return t.store(t.Root).Export(filepath.Join(beadsDir, "issues.jsonl"))
 }
 
-// MutateAndExport runs a bd mutation in the town and re-exports the JSONL.
-func (t Town) MutateAndExport(args ...string) error {
-	if err := t.bd(args...).Dir(t.Root).WithAutoCommit().Run(); err != nil {
+// CloseAndExport closes a convoy in the town with reason and re-exports the
+// JSONL.
+func (t Town) CloseAndExport(convoyID, reason string) error {
+	if err := t.store(t.Root).CloseWithReason(reason, convoyID); err != nil {
 		return err
 	}
 	return t.PersistJSONL()
@@ -240,21 +219,13 @@ func (t Town) NotifyClosed(addr, convoyID, title, reason string) {
 
 // NotifyCompletion sends notifications to owner, any notify addresses, and mayor/.
 func (t Town) NotifyCompletion(convoyID, title string) {
-	stdout, err := t.bdJSON(t.Root, "show", convoyID, "--json")
+	convoy, err := t.store(t.Root).Show(convoyID)
 	if err != nil {
 		return
 	}
 
-	var convoys []struct {
-		Description string `json:"description"`
-		CreatedAt   string `json:"created_at"`
-	}
-	if err := json.Unmarshal(stdout, &convoys); err != nil || len(convoys) == 0 {
-		return
-	}
-
 	// ZFC: Use typed accessor instead of parsing description text
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoys[0].Description})
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
 	if fields == nil {
 		fields = &beads.ConvoyFields{}
 	}
@@ -264,7 +235,7 @@ func (t Town) NotifyCompletion(convoyID, title string) {
 
 	// Compute duration since convoy was created.
 	var durationStr string
-	if created, err := time.Parse(time.RFC3339, convoys[0].CreatedAt); err == nil {
+	if created, err := time.Parse(time.RFC3339, convoy.CreatedAt); err == nil {
 		durationStr = FormatWorkerAge(time.Since(created).Round(time.Minute))
 	}
 
@@ -318,8 +289,12 @@ func (t Town) NotifyCompletion(convoyID, title string) {
 	t.notifyMayorSession(convoyID, title)
 
 	fields.CompletionNotifiedAt = time.Now().UTC().Format(time.RFC3339)
-	newDesc := beads.SetConvoyFields(&beads.Issue{Description: convoys[0].Description}, fields)
-	if err := t.MutateAndExport("update", convoyID, "--description="+newDesc); err != nil {
+	newDesc := beads.SetConvoyFields(&beads.Issue{Description: convoy.Description}, fields)
+	err = t.store(t.Root).Update(convoyID, beads.UpdateOptions{Description: &newDesc})
+	if err == nil {
+		err = t.PersistJSONL()
+	}
+	if err != nil {
 		t.warnf("could not record convoy completion notification state for %s: %v", convoyID, err)
 		return
 	}

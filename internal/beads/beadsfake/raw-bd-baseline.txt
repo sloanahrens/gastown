@@ -38,8 +38,6 @@ internal/cmd/sling.go BDRunner 1
 internal/cmd/source_validation.go BDRunner 2
 internal/cmd/tracking_relations.go BDRunner 2
 internal/cmdtree/gen-bd-tree/main.go argv 1
-internal/convoy/town.go argv 1
-internal/convoy/town.go BDRunner 1
 internal/daemon/patrol_scan.go argv 2
 internal/daemon/scheduled_slings.go argv 1
 internal/deps/bd_handshake.go argv 1

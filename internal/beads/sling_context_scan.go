@@ -55,9 +55,9 @@ func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) 
 	return listOpenSlingContextRecords(townRoot, nil)
 }
 
-// listOpenSlingContextRecords is ListOpenSlingContextRecords with its bd
-// calls sent to run (nil runs the bd on PATH).
-func listOpenSlingContextRecords(townRoot string, run BDRunner) ([]SlingContextRecord, error) {
+// listOpenSlingContextRecords is ListOpenSlingContextRecords reading each
+// search directory's store through open (nil is bd at that directory).
+func listOpenSlingContextRecords(townRoot string, open func(dir string) Client) ([]SlingContextRecord, error) {
 	var records []SlingContextRecord
 	seen := make(map[string]bool)
 	dirs, err := SlingContextSearchDirs(townRoot)
@@ -66,8 +66,13 @@ func listOpenSlingContextRecords(townRoot string, run BDRunner) ([]SlingContextR
 	}
 	for _, dir := range dirs {
 		beadsDir := ResolveBeadsDir(dir)
-		b := NewWithBeadsDirAndRunner(dir, beadsDir, run)
-		contexts, err := b.ListOpenSlingContexts()
+		var store Client
+		if open != nil {
+			store = open(dir)
+		} else {
+			store = NewWithBeadsDir(dir, beadsDir)
+		}
+		contexts, err := store.List(openSlingContexts)
 		if err != nil {
 			return nil, fmt.Errorf("listing sling contexts in %s: %w", beadsDir, err)
 		}
@@ -87,18 +92,18 @@ func listOpenSlingContextRecords(townRoot string, run BDRunner) ([]SlingContextR
 // townRoot. It fails closed: when the contexts cannot be listed, every ID is
 // reported scheduled, so no caller dispatches on a guess.
 func AreScheduled(townRoot string, beadIDs []string) map[string]bool {
-	return AreScheduledWith(townRoot, beadIDs, nil)
+	return AreScheduledIn(townRoot, beadIDs, nil)
 }
 
-// AreScheduledWith is AreScheduled with its bd calls sent to run; nil runs
-// the bd on PATH, exactly AreScheduled.
-func AreScheduledWith(townRoot string, beadIDs []string, run BDRunner) map[string]bool {
+// AreScheduledIn is AreScheduled reading each store through open; nil runs
+// bd, exactly AreScheduled.
+func AreScheduledIn(townRoot string, beadIDs []string, open func(dir string) Client) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
 		return result
 	}
 
-	contexts, err := listOpenSlingContextRecords(townRoot, run)
+	contexts, err := listOpenSlingContextRecords(townRoot, open)
 	if err != nil {
 		for _, id := range beadIDs {
 			result[id] = true

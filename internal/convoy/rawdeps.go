@@ -3,7 +3,6 @@ package convoy
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -46,15 +45,11 @@ func (t Town) DepListRawIDs(dir, issueID, direction, depType string) ([]string, 
 		return ids, nil
 	}
 
-	args, err := beadsql.RawDeps(issueID, direction, depType).BdArgs("--json")
-	if err != nil {
-		return nil, err
-	}
-	out, err := t.bdJSONAutoCommit(dir, args...)
+	rows, err := t.store(dir).SQLCSV(beadsql.RawDeps(issueID, direction, depType))
 	if err != nil {
 		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
 	}
-	ids, err := parseRawDepRows(out, parseKey)
+	ids, err := parseRawDepRows(rows, parseKey)
 	if err != nil {
 		return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
 	}
@@ -113,15 +108,28 @@ func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query beadsql.Query) ([
 	return ids, nil
 }
 
-func parseRawDepRows(out []byte, parseKey string) ([]string, error) {
-	var rows []map[string]string
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, err
+// parseRawDepRows reads the parseKey column of a bd sql --csv answer: a
+// header row, then one row per dependency.
+func parseRawDepRows(rows [][]string, parseKey string) ([]string, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	col := -1
+	for i, name := range rows[0] {
+		if name == parseKey {
+			col = i
+		}
+	}
+	if col < 0 {
+		return nil, fmt.Errorf("no %s column in %q", parseKey, rows[0])
 	}
 	seen := make(map[string]bool, len(rows))
 	var ids []string
-	for _, row := range rows {
-		id := beads.ExtractIssueID(row[parseKey])
+	for _, row := range rows[1:] {
+		if col >= len(row) {
+			continue
+		}
+		id := beads.ExtractIssueID(row[col])
 		if id != "" && !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
