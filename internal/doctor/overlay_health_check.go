@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -11,9 +12,11 @@ import (
 )
 
 // OverlayHealthCheck verifies that formula overlay files reference valid step IDs.
-// It scans overlay files at both town-level and rig-level, loads the referenced
+// It scans the one overlay dir, <townRoot>/formula-overlays, loads the referenced
 // formula from the embedded binary, resolves its extends and compose, and checks that every step_id in the overlay
 // matches a real step in the formula. Fix mode removes stale step-override entries.
+// A rig-level <rig>/formula-overlays dir is not read (gt-fd2cu.3), so one that
+// still holds overlays is reported for an operator to move or delete.
 type OverlayHealthCheck struct {
 	FixableCheck
 }
@@ -40,9 +43,30 @@ type overlayFile struct {
 	StaleIDs    []string // step IDs that don't match any formula step
 }
 
-// Run checks all formula overlay files for stale step IDs and malformed TOML.
+// Run checks all formula overlay files for stale step IDs and malformed TOML,
+// and reports rig-level overlay dirs that are no longer read.
 func (c *OverlayHealthCheck) Run(ctx *CheckContext) *CheckResult {
-	files := c.scanOverlays(ctx.TownRoot)
+	result := c.runOverlayDir(ctx.TownRoot)
+	unread := unreadRigOverlayFiles(ctx.TownRoot)
+	if len(unread) == 0 {
+		return result
+	}
+	if result.Status == StatusOK {
+		result.Status = StatusWarning
+		result.Message = fmt.Sprintf("%d rig-level overlay file(s) not read", len(unread))
+		result.FixHint = "Move a still-wanted overlay into <townRoot>/formula-overlays; delete the rest"
+	} else {
+		result.Message += fmt.Sprintf("; %d rig-level overlay file(s) not read", len(unread))
+	}
+	for _, path := range unread {
+		result.Details = append(result.Details, fmt.Sprintf("%s: rig-level overlay is not read (one overlay dir: %s)", path, formula.OverlayDir(ctx.TownRoot)))
+	}
+	return result
+}
+
+// runOverlayDir checks the overlay files in the one overlay dir.
+func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
+	files := c.scanOverlays(townRoot)
 
 	if len(files) == 0 {
 		return &CheckResult{
@@ -139,22 +163,27 @@ func (c *OverlayHealthCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// scanOverlays discovers and validates all overlay files in the workspace.
+// scanOverlays discovers and validates the overlay files in the one overlay dir.
 func (c *OverlayHealthCheck) scanOverlays(townRoot string) []overlayFile {
-	var results []overlayFile
+	return scanOverlayDir(formula.OverlayDir(townRoot))
+}
 
-	// Scan town-level overlays.
-	townDir := filepath.Join(townRoot, "formula-overlays")
-	results = append(results, scanOverlayDir(townDir)...)
-
-	// Scan rig-level overlays by reading rigs.json.
-	rigNames := loadRigNames(filepath.Join(townRoot, "mayor", "rigs.json"))
-	for rigName := range rigNames {
-		rigDir := filepath.Join(townRoot, rigName, "formula-overlays")
-		results = append(results, scanOverlayDir(rigDir)...)
+// unreadRigOverlayFiles lists every file under a registered rig's
+// formula-overlays dir, sorted. Nothing reads those dirs any more.
+func unreadRigOverlayFiles(townRoot string) []string {
+	var paths []string
+	for rigName := range loadRigNames(filepath.Join(townRoot, "mayor", "rigs.json")) {
+		dir := filepath.Join(townRoot, rigName, formula.OverlayDirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			paths = append(paths, filepath.Join(dir, e.Name()))
+		}
 	}
-
-	return results
+	sort.Strings(paths)
+	return paths
 }
 
 // scanOverlayDir reads all .toml files in a formula-overlays directory,

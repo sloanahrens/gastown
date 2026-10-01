@@ -519,16 +519,13 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 	}
 }
 
-// TestFormulaSyncMessage_NamesHandEditedFormulas is the regression test for
-// gt-dt7r: a town copy that sync will not overwrite used to be counted and
-// dropped, so a merged formula fix could sit undelivered indefinitely with
-// "synced" as the only signal. The summary must name each one and say the
-// embedded content is not reaching the town.
-func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
+// TestFormulaSyncMessage_ReplacesAndNamesDrift: the binary is canonical
+// (gt-fd2cu.3), so a town copy whose hash gt never wrote is replaced, and the
+// summary names it so the hand edit is not lost silently (gt-dt7r).
+func TestFormulaSyncMessage_ReplacesAndNamesDrift(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 
-	// A fresh sync installs the embedded set.
 	if _, err := formulaSyncMessage(root); err != nil {
 		t.Fatalf("formulaSyncMessage (initial): %v", err)
 	}
@@ -544,24 +541,18 @@ func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("formulaSyncMessage: %v", err)
 	}
-
-	if !strings.Contains(msg, edited) {
-		t.Errorf("summary does not name the hand-edited formula %s:\n%s", edited, msg)
-	}
-	if !strings.Contains(msg, "NOT delivered") {
-		t.Errorf("summary does not say the embedded content is undelivered:\n%s", msg)
-	}
-	if !strings.Contains(msg, "overlay") {
-		t.Errorf("summary does not point at the overlay remedy:\n%s", msg)
+	for _, want := range []string{edited, "were replaced", "not one gt wrote", "gastown source"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("summary lacks %q:\n%s", want, msg)
+		}
 	}
 
-	// The edit must survive: naming it is the point, not overwriting it.
-	content, err := os.ReadFile(path)
+	embedded, err := formula.GetEmbeddedFormulaContent(edited)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != "# hand-edited\n" {
-		t.Error("the hand-edited formula was overwritten")
+	if content, _ := os.ReadFile(path); string(content) != string(embedded) {
+		t.Error("sync left the drifted copy in place")
 	}
 
 	// root is a bare temp dir with no gt source checkout under it, so drift must
@@ -573,15 +564,11 @@ func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
 	}
 }
 
-// TestBuildFormulaSyncReport_DryRunForceNamesTheDestination is the gt-vxjz
-// follow-up to gt-dt7r: --dry-run --force read the on-disk backup manifest and
-// so reported the copies some earlier force sync displaced, rather than the
-// ones this run would move aside.
-func TestBuildFormulaSyncReport_DryRunForceNamesTheDestination(t *testing.T) {
+// TestBuildFormulaSyncReport_DryRunReplacesNothing: a dry run names the drift
+// a real run would replace and writes nothing.
+func TestBuildFormulaSyncReport_DryRunReplacesNothing(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-
-	// A fresh sync installs the embedded set; one copy is then hand-edited.
 	if _, err := formulaSyncMessage(root); err != nil {
 		t.Fatalf("formulaSyncMessage (initial): %v", err)
 	}
@@ -591,96 +578,36 @@ func TestBuildFormulaSyncReport_DryRunForceNamesTheDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A manifest left by some earlier force sync. Its paths describe that run.
-	bakDir := filepath.Join(root, ".beads", "formulas", ".bak")
-	if err := os.MkdirAll(bakDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	const earlierRun = "/elsewhere/it-went"
-	if err := os.WriteFile(filepath.Join(bakDir, "last-force-sync.txt"),
-		[]byte(edited+"\t"+filepath.Join(earlierRun, edited)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	report, err := buildFormulaSyncReport(root, formula.SyncOptions{DryRun: true, Force: true})
+	report, err := buildFormulaSyncReport(root, formula.SyncOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("buildFormulaSyncReport: %v", err)
 	}
-	msg := formatFormulaSyncReport(report)
-
-	want := filepath.Join(bakDir, edited)
-	if got := report.BackedUp[edited]; got != want {
-		t.Errorf("BackedUp[%s] = %q, want the destination a real run would write, %q", edited, got, want)
+	if len(report.ReplacedDrift) != 1 || report.ReplacedDrift[0] != edited {
+		t.Errorf("ReplacedDrift = %v, want [%s]", report.ReplacedDrift, edited)
 	}
-	if strings.Contains(msg, earlierRun) {
-		t.Errorf("summary reports the earlier run's backup path:\n%s", msg)
+	if msg := formatFormulaSyncReport(report); !strings.Contains(msg, "would be replaced") {
+		t.Errorf("a dry run must not claim it replaced anything:\n%s", msg)
 	}
-	if !strings.Contains(msg, "would be overwritten") {
-		t.Errorf("a dry run must not claim it overwrote anything:\n%s", msg)
-	}
-
-	// A dry run writes nothing: the edit survives and nothing is parked.
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "# hand-edited\n" {
-		t.Error("a dry run overwrote the hand-edited formula")
-	}
-	if _, err := os.Stat(want); !os.IsNotExist(err) {
-		t.Errorf("a dry run created %s", want)
-	}
-}
-
-// TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent covers the real run:
-// the summary points at the copies the overwrite actually displaced.
-func TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-
-	if _, err := formulaSyncMessage(root); err != nil {
-		t.Fatalf("formulaSyncMessage (initial): %v", err)
-	}
-	const edited = "mol-polecat-work.formula.toml"
-	if err := os.WriteFile(filepath.Join(root, ".beads", "formulas", edited),
-		[]byte("# hand-edited\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	report, err := buildFormulaSyncReport(root, formula.SyncOptions{Force: true})
-	if err != nil {
-		t.Fatalf("buildFormulaSyncReport: %v", err)
-	}
-
-	want := filepath.Join(root, ".beads", "formulas", ".bak", edited)
-	if got := report.BackedUp[edited]; got != want {
-		t.Errorf("BackedUp[%s] = %q, want %q", edited, got, want)
-	}
-	backed, err := os.ReadFile(want)
-	if err != nil {
-		t.Fatalf("reading the backup: %v", err)
-	}
-	if string(backed) != "# hand-edited\n" {
-		t.Error("the backup does not hold the displaced hand edit")
-	}
-	if !strings.Contains(formatFormulaSyncReport(report), "were overwritten") {
-		t.Error("a real --force run should say the copies were overwritten")
+	if content, _ := os.ReadFile(path); string(content) != "# hand-edited\n" {
+		t.Error("a dry run overwrote the drifted copy")
 	}
 }
 
 // TestFormatFormulaSyncReport_NamesOrphanedCopies: a town copy whose formula
 // left the binary is still listed by gt formula list, so the summary names it
-// and says how to remove it (gt-zggoh).
+// and says how to remove it (gt-zggoh); so is a file gt never wrote (gt-fd2cu.3).
 func TestFormatFormulaSyncReport_NamesOrphanedCopies(t *testing.T) {
 	t.Parallel()
 	report := &formulaSyncReport{
 		UpToDate:     3,
 		Orphaned:     []string{"mol-refinery-patrol.formula.toml"},
+		Unowned:      []string{"mol-polecat-work.formula.toml.bak-20260921-resync"},
 		DriftChecked: true,
 		CompareRef:   "origin/main",
 	}
 	msg := formatFormulaSyncReport(report)
-	for _, want := range []string{"mol-refinery-patrol.formula.toml", "no longer shipped"} {
+	for _, want := range []string{"mol-refinery-patrol.formula.toml", "no longer shipped",
+		"mol-polecat-work.formula.toml.bak-20260921-resync", "not in gastown source"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("summary lacks %q:\n%s", want, msg)
 		}

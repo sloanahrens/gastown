@@ -169,7 +169,7 @@ func resolveFormulaForRendering(formulaName, townRoot, rigName string, vars []st
 	if err != nil {
 		return nil, nil, err
 	}
-	applyFormulaOverlays(f, formulaName, townRoot, rigName)
+	applyFormulaOverlays(f, formulaName, townRoot)
 	return f, buildFormulaVarMap(f, vars), nil
 }
 
@@ -353,12 +353,12 @@ func truncateDescription(desc string, maxLen int) string {
 
 // applyFormulaOverlays loads and applies overlays to a parsed formula.
 // It emits warnings for stale step IDs and, in --explain mode, shows which overlays are active.
-func applyFormulaOverlays(f *formula.Formula, formulaName, townRoot, rigName string) {
+func applyFormulaOverlays(f *formula.Formula, formulaName, townRoot string) {
 	if townRoot == "" {
 		return
 	}
 
-	overlay, err := formula.LoadFormulaOverlay(formulaName, townRoot, rigName)
+	overlay, err := formula.LoadFormulaOverlay(formulaName, townRoot)
 	if err != nil {
 		style.PrintWarning("could not load overlay for %s: %v", formulaName, err)
 		return
@@ -368,7 +368,7 @@ func applyFormulaOverlays(f *formula.Formula, formulaName, townRoot, rigName str
 		return
 	}
 
-	explain(true, fmt.Sprintf("Formula overlay: applying %d override(s) for %s (rig=%s)", len(overlay.StepOverrides), formulaName, rigName))
+	explain(true, fmt.Sprintf("Formula overlay: applying %d override(s) for %s", len(overlay.StepOverrides), formulaName))
 	for _, so := range overlay.StepOverrides {
 		explain(true, fmt.Sprintf("  overlay: step_id=%s mode=%s", so.StepID, so.Mode))
 	}

@@ -12,7 +12,7 @@ import (
 func TestLoadFormulaOverlay_NoFiles(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir, "gastown")
+	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir)
 	require.NoError(t, err)
 	assert.Nil(t, overlay)
 }
@@ -31,7 +31,7 @@ description = "Custom submission instructions"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-polecat-work.toml"), []byte(content), 0o644))
 
-	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir, "gastown")
+	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir)
 	require.NoError(t, err)
 	require.NotNil(t, overlay)
 	require.Len(t, overlay.StepOverrides, 1)
@@ -40,7 +40,9 @@ description = "Custom submission instructions"
 	assert.Equal(t, "Custom submission instructions", overlay.StepOverrides[0].Description)
 }
 
-func TestLoadFormulaOverlay_RigLevel(t *testing.T) {
+// TestLoadFormulaOverlay_RigLevelDirIsNotRead: there is one overlay dir
+// (gt-fd2cu.3); a <rig>/formula-overlays file changes nothing.
+func TestLoadFormulaOverlay_RigLevelDirIsNotRead(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "gastown", "formula-overlays")
@@ -54,46 +56,9 @@ description = "Also run integration tests"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(rigDir, "mol-polecat-work.toml"), []byte(content), 0o644))
 
-	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir, "gastown")
+	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir)
 	require.NoError(t, err)
-	require.NotNil(t, overlay)
-	require.Len(t, overlay.StepOverrides, 1)
-	assert.Equal(t, "build", overlay.StepOverrides[0].StepID)
-	assert.Equal(t, ModeAppend, overlay.StepOverrides[0].Mode)
-}
-
-func TestLoadFormulaOverlay_RigPrecedence(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create town-level overlay.
-	townDir := filepath.Join(tmpDir, "formula-overlays")
-	require.NoError(t, os.MkdirAll(townDir, 0o755))
-	townContent := `
-[[step-overrides]]
-step_id = "submit-review"
-mode = "replace"
-description = "Town-level override"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(townDir, "mol-polecat-work.toml"), []byte(townContent), 0o644))
-
-	// Create rig-level overlay (should win).
-	rigDir := filepath.Join(tmpDir, "gastown", "formula-overlays")
-	require.NoError(t, os.MkdirAll(rigDir, 0o755))
-	rigContent := `
-[[step-overrides]]
-step_id = "build"
-mode = "skip"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(rigDir, "mol-polecat-work.toml"), []byte(rigContent), 0o644))
-
-	overlay, err := LoadFormulaOverlay("mol-polecat-work", tmpDir, "gastown")
-	require.NoError(t, err)
-	require.NotNil(t, overlay)
-	// Rig-level wins entirely — only its overrides appear.
-	require.Len(t, overlay.StepOverrides, 1)
-	assert.Equal(t, "build", overlay.StepOverrides[0].StepID)
-	assert.Equal(t, ModeSkip, overlay.StepOverrides[0].Mode)
+	assert.Nil(t, overlay)
 }
 
 func TestLoadFormulaOverlay_InvalidMode(t *testing.T) {
@@ -110,7 +75,7 @@ description = "Bad mode"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "test-formula.toml"), []byte(content), 0o644))
 
-	overlay, err := LoadFormulaOverlay("test-formula", tmpDir, "rig")
+	overlay, err := LoadFormulaOverlay("test-formula", tmpDir)
 	assert.Error(t, err)
 	assert.Nil(t, overlay)
 	assert.Contains(t, err.Error(), `invalid mode "delete"`)
@@ -129,7 +94,7 @@ description = "No step_id"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "test-formula.toml"), []byte(content), 0o644))
 
-	overlay, err := LoadFormulaOverlay("test-formula", tmpDir, "rig")
+	overlay, err := LoadFormulaOverlay("test-formula", tmpDir)
 	assert.Error(t, err)
 	assert.Nil(t, overlay)
 	assert.Contains(t, err.Error(), "step_id is required")
@@ -143,7 +108,7 @@ func TestLoadFormulaOverlay_InvalidTOML(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "test-formula.toml"), []byte("[[invalid"), 0o644))
 
-	overlay, err := LoadFormulaOverlay("test-formula", tmpDir, "rig")
+	overlay, err := LoadFormulaOverlay("test-formula", tmpDir)
 	assert.Error(t, err)
 	assert.Nil(t, overlay)
 }

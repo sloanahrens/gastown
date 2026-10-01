@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var formulaOverlayEditCmd = &cobra.Command{
@@ -15,45 +16,26 @@ var formulaOverlayEditCmd = &cobra.Command{
 	Short: "Edit overlay for a formula",
 	Long: `Open the overlay file for a formula in $EDITOR.
 
-Creates the directory and file if they do not exist. By default, edits the
-rig-level overlay (if a rig is detected) or the town-level overlay.
-
-Use --town to explicitly edit the town-level overlay.
+Creates <townRoot>/formula-overlays/<formula>.toml if it does not exist.
 
 Examples:
-  gt formula overlay edit mol-polecat-work
-  gt formula overlay edit mol-polecat-work --rig gastown
-  gt formula overlay edit mol-polecat-work --town`,
+  gt formula overlay edit mol-polecat-work`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFormulaOverlayEdit,
 }
 
-var (
-	formulaOverlayEditRig  string
-	formulaOverlayEditTown bool
-)
-
 func init() {
 	formulaOverlayCmd.AddCommand(formulaOverlayEditCmd)
-	formulaOverlayEditCmd.Flags().StringVar(&formulaOverlayEditRig, "rig", "", "Rig name (default: auto-detect from cwd)")
-	formulaOverlayEditCmd.Flags().BoolVar(&formulaOverlayEditTown, "town", false, "Edit town-level overlay instead of rig-level")
 }
 
 func runFormulaOverlayEdit(cmd *cobra.Command, args []string) error {
 	formulaName := args[0]
 
-	townRoot, rigName, err := resolveOverlayContext(formulaOverlayEditRig)
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
-		return err
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-
-	// Determine which file to edit
-	var path string
-	if formulaOverlayEditTown || rigName == "" {
-		path = filepath.Join(townRoot, "formula-overlays", formulaName+".toml")
-	} else {
-		path = filepath.Join(townRoot, rigName, "formula-overlays", formulaName+".toml")
-	}
+	path := formula.OverlayPath(townRoot, formulaName)
 
 	// Create directory and file if needed
 	dir := filepath.Dir(path)
@@ -93,7 +75,7 @@ func runFormulaOverlayEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validate after editing
-	if _, err := formula.LoadFormulaOverlay(formulaName, townRoot, rigName); err != nil {
+	if _, err := formula.LoadFormulaOverlay(formulaName, townRoot); err != nil {
 		return fmt.Errorf("warning: overlay has errors after editing: %w", err)
 	}
 

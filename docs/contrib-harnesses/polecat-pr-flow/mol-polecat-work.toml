@@ -4,7 +4,7 @@
 # mol-polecat-work. Use this in rigs that gate work on a GitHub PR review
 # rather than the canonical Refinery merge queue.
 #
-# Install to: ~/gt/<rig>/formula-overlays/mol-polecat-work.toml
+# Install to: ~/gt/formula-overlays/mol-polecat-work.toml
 # Verify with: gt doctor  (checks overlay-health)
 # See also:    directives/polecat.md in this harness
 
