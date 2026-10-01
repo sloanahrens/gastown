@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // Owner labels bind a test container to the process that started it
@@ -36,7 +38,7 @@ const (
 	// judged by this host's process table.
 	OwnerHostLabel = "gastown.test.owner-host"
 	// OwnerStartLabel carries the owner's process start time as the kernel
-	// reports it (processStartToken). A pid is reused once its process dies;
+	// reports it (procid.StartToken). A pid is reused once its process dies;
 	// a start time is not, so the pair names one process for good.
 	OwnerStartLabel = "gastown.test.owner-start"
 )
@@ -56,7 +58,7 @@ func TestContainerOwnerLabels() map[string]string {
 	}
 	// Without a start time the owner can still be judged, only less strongly:
 	// see ownerVerdict.
-	if start, ok := processStartToken(os.Getpid()); ok {
+	if start, ok := procid.StartToken(os.Getpid()); ok {
 		labels[OwnerStartLabel] = start
 	}
 	return labels

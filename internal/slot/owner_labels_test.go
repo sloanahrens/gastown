@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // ownerLabels is the label set internal/testutil stamps on a Dolt container,
@@ -37,7 +39,7 @@ func TestTestContainerOwnerLabels(t *testing.T) {
 	if labels[OwnerHostLabel] != host {
 		t.Errorf("%s = %q, want %q", OwnerHostLabel, labels[OwnerHostLabel], host)
 	}
-	if want, ok := processStartToken(os.Getpid()); ok && labels[OwnerStartLabel] != want {
+	if want, ok := procid.StartToken(os.Getpid()); ok && labels[OwnerStartLabel] != want {
 		t.Errorf("%s = %q, want %q", OwnerStartLabel, labels[OwnerStartLabel], want)
 	}
 	for k := range labels {

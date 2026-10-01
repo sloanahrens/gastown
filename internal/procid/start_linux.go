@@ -1,6 +1,6 @@
 //go:build linux
 
-package slot
+package procid
 
 import (
 	"os"
@@ -8,11 +8,12 @@ import (
 	"strings"
 )
 
-// processStartToken returns pid's start time in clock ticks since boot, field
+// StartToken returns pid's start time in clock ticks since boot, field
 // 22 of /proc/<pid>/stat. It never changes for the life of a process, so a
-// live pid whose token differs from the one recorded at container creation is
-// a different process that reused the pid. ok is false when it cannot be read.
-func processStartToken(pid int) (string, bool) {
+// live pid whose token differs from a recorded one is a different process
+// that reused the pid. ok is false when it cannot be read, which includes a
+// pid with no process.
+func StartToken(pid int) (string, bool) {
 	if pid <= 0 {
 		return "", false
 	}
