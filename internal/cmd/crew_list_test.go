@@ -2,192 +2,89 @@ package cmd
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/crew"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
-func setupTestTownForCrewList(t *testing.T, rigs map[string][]string) string {
-	t.Helper()
-
-	townRoot := t.TempDir()
-	mayorDir := filepath.Join(townRoot, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-
-	townConfig := &config.TownConfig{
-		Type:       "town",
-		Version:    config.CurrentTownVersion,
-		Name:       "test-town",
-		PublicName: "Test Town",
-		CreatedAt:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	if err := config.SaveTownConfig(filepath.Join(mayorDir, "town.json"), townConfig); err != nil {
-		t.Fatalf("save town.json: %v", err)
-	}
-
-	rigsConfig := &config.RigsConfig{
-		Version: config.CurrentRigsVersion,
-		Rigs:    make(map[string]config.RigEntry),
-	}
-
-	for rigName, crewNames := range rigs {
-		rigsConfig.Rigs[rigName] = config.RigEntry{
-			GitURL:  "https://example.com/" + rigName + ".git",
-			AddedAt: time.Now(),
-		}
-
-		rigPath := filepath.Join(townRoot, rigName)
-		crewDir := filepath.Join(rigPath, "crew")
-		if err := os.MkdirAll(crewDir, 0755); err != nil {
-			t.Fatalf("mkdir crew dir: %v", err)
-		}
-		for _, crewName := range crewNames {
-			if err := os.MkdirAll(filepath.Join(crewDir, crewName), 0755); err != nil {
-				t.Fatalf("mkdir crew worker: %v", err)
+func TestCrewListScope(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		rigFlag string
+		all     bool
+		args    []string
+		want    string
+		wantErr string
+	}{
+		{name: "positional arg sets rig filter", args: []string{"rig-a"}, want: "rig-a"},
+		{name: "--rig flag", rigFlag: "rig-b", want: "rig-b"},
+		{name: "neither is the cwd rig", want: ""},
+		{name: "--all alone", all: true, want: ""},
+		{name: "positional arg conflicts with --rig flag", rigFlag: "rig-b", args: []string{"rig-a"}, wantErr: "cannot specify both"},
+		{name: "positional arg with --all errors", all: true, args: []string{"rig-a"}, wantErr: "cannot use --all"},
+		{name: "--all with --rig errors", all: true, rigFlag: "rig-a", wantErr: "cannot use --all"},
+	} {
+		got, err := crewListScope(tc.rigFlag, tc.all, tc.args)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
 			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("%s: crewListScope = (%q, %v), want %q", tc.name, got, err, tc.want)
 		}
 	}
-
-	if err := config.SaveRigsConfig(filepath.Join(mayorDir, "rigs.json"), rigsConfig); err != nil {
-		t.Fatalf("save rigs.json: %v", err)
-	}
-
-	return townRoot
 }
 
-func TestRunCrewList_PositionalRigArg(t *testing.T) {
-	townRoot := setupTestTownForCrewList(t, map[string][]string{
-		"rig-a": {"alice"},
-		"rig-b": {"bob"},
-	})
-
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	t.Run("positional arg sets rig filter", func(t *testing.T) {
-		crewRig = ""
-		crewListAll = false
-		crewJSON = true
-		defer func() {
-			crewRig = ""
-			crewJSON = false
-		}()
-
-		output := captureStdout(t, func() {
-			if err := runCrewList(&cobra.Command{}, []string{"rig-a"}); err != nil {
-				t.Fatalf("runCrewList error: %v", err)
+// TestCrewListItems_AggregatesAcrossRigs: --all lists the workers of every
+// rig, with each worker's session and clone state, and a rig whose workers
+// cannot be listed is skipped rather than failing the listing.
+func TestCrewListItems_AggregatesAcrossRigs(t *testing.T) {
+	t.Parallel()
+	rigs := []*rig.Rig{{Name: "rig-a"}, {Name: "rig-b"}, {Name: "rig-broken"}}
+	probe := crewWorkerProbe{
+		list: func(r *rig.Rig) ([]*crew.CrewWorker, error) {
+			switch r.Name {
+			case "rig-a":
+				return []*crew.CrewWorker{{Name: "alice", Branch: "main", ClonePath: "/t/rig-a/crew/alice"}}, nil
+			case "rig-b":
+				return []*crew.CrewWorker{{Name: "bob", Branch: "work", ClonePath: "/t/rig-b/crew/bob"}}, nil
 			}
-		})
-
-		var items []CrewListItem
-		if err := json.Unmarshal([]byte(output), &items); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if len(items) != 1 {
-			t.Fatalf("expected 1 crew worker, got %d", len(items))
-		}
-		if items[0].Rig != "rig-a" {
-			t.Errorf("expected rig-a, got %s", items[0].Rig)
-		}
-	})
-
-	t.Run("positional arg conflicts with --rig flag", func(t *testing.T) {
-		crewRig = "rig-b"
-		crewListAll = false
-		defer func() { crewRig = "" }()
-
-		err := runCrewList(&cobra.Command{}, []string{"rig-a"})
-		if err == nil {
-			t.Fatal("expected error for positional arg + --rig flag")
-		}
-		if !strings.Contains(err.Error(), "cannot specify both") {
-			t.Errorf("unexpected error message: %v", err)
-		}
-	})
-
-	t.Run("positional arg with --all errors", func(t *testing.T) {
-		crewRig = ""
-		crewListAll = true
-		defer func() { crewListAll = false }()
-
-		err := runCrewList(&cobra.Command{}, []string{"rig-a"})
-		if err == nil {
-			t.Fatal("expected error for positional arg + --all")
-		}
-	})
-}
-
-func TestRunCrewList_AllWithRigErrors(t *testing.T) {
-	townRoot := setupTestTownForCrewList(t, map[string][]string{"rig-a": {"alice"}})
-
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
+			return nil, errors.New("unreadable crew dir")
+		},
+		hasSession: func(string) bool { return true },
+		gitClean:   func(path string) bool { return !strings.Contains(path, "bob") },
 	}
 
-	crewListAll = true
-	crewRig = "rig-a"
-	defer func() {
-		crewListAll = false
-		crewRig = ""
-	}()
-
-	err := runCrewList(&cobra.Command{}, nil)
-	if err == nil {
-		t.Fatal("expected error for --all with --rig, got nil")
+	items := crewListItems(cmdTestRegistry(), rigs, probe)
+	var out strings.Builder
+	if err := printCrewList(&out, items, true); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestRunCrewList_AllAggregatesJSON(t *testing.T) {
-	townRoot := setupTestTownForCrewList(t, map[string][]string{
-		"rig-a": {"alice"},
-		"rig-b": {"bob"},
-	})
-
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	crewListAll = true
-	crewJSON = true
-	crewRig = ""
-	defer func() {
-		crewListAll = false
-		crewJSON = false
-	}()
-
-	output := captureStdout(t, func() {
-		if err := runCrewList(&cobra.Command{}, nil); err != nil {
-			t.Fatalf("runCrewList failed: %v", err)
-		}
-	})
-
-	var items []CrewListItem
-	if err := json.Unmarshal([]byte(output), &items); err != nil {
+	var got []CrewListItem
+	if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
 		t.Fatalf("unmarshal output: %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 crew workers, got %d", len(items))
+	if len(got) != 2 || got[0].Rig != "rig-a" || got[0].Name != "alice" || got[1].Rig != "rig-b" || got[1].Name != "bob" {
+		t.Fatalf("items = %+v, want alice from rig-a and bob from rig-b", got)
 	}
+	if !got[0].GitClean || got[1].GitClean || !got[0].HasSession {
+		t.Errorf("items = %+v, want alice clean, bob dirty, sessions up", got)
+	}
+}
 
-	rigs := map[string]bool{}
-	for _, item := range items {
-		rigs[item.Rig] = true
+func TestPrintCrewList_Empty(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	if err := printCrewList(&out, nil, true); err != nil {
+		t.Fatal(err)
 	}
-	if !rigs["rig-a"] || !rigs["rig-b"] {
-		t.Fatalf("expected crew from rig-a and rig-b, got: %#v", rigs)
+	if !strings.Contains(out.String(), "No crew workspaces found.") {
+		t.Errorf("output = %q", out.String())
 	}
 }

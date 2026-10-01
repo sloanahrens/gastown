@@ -20,33 +20,74 @@ import (
 )
 
 func runEscalate(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return escalateRunFromFlags().escalate(args)
+}
+
+// escalateRun is one gt escalate invocation: its flags, where it reads and
+// writes, and the collaborators that find the town, name the sender and file
+// or clear the escalation. escalateRunFromFlags wires the real ones.
+type escalateRun struct {
+	severity, reason, source, relatedBead, fingerprint string
+	stdin, dryRun, json                                bool
+	clearKeys                                          []string
+	clearReason                                        string
+
+	in       io.Reader
+	out      io.Writer
+	townRoot func() (string, error)
+	sender   func() string
+	raise    func(notify.EscalationRequest, *config.EscalationConfig) (*notify.RaiseResult, error)
+	clear    func(townRoot string, keys []string, closedBy, reason string) ([]string, error)
+}
+
+func escalateRunFromFlags() escalateRun {
+	return escalateRun{
+		severity:    escalateSeverity,
+		reason:      escalateReason,
+		source:      escalateSource,
+		relatedBead: escalateRelatedBead,
+		fingerprint: escalateFingerprint,
+		stdin:       escalateStdin,
+		dryRun:      escalateDryRun,
+		json:        escalateJSON,
+		clearKeys:   escalateClearKeys,
+		clearReason: escalateClearReason,
+		in:          os.Stdin,
+		out:         os.Stdout,
+		townRoot:    workspace.FindFromCwdOrError,
+		sender:      detectSender,
+		raise:       notify.Raise,
+		clear:       notify.Clear,
+	}
+}
+
+// escalate files the escalation described by args.
+func (r escalateRun) escalate(args []string) error {
 	// Handle --stdin: read reason from stdin (avoids shell quoting issues)
-	if escalateStdin {
-		if escalateReason != "" {
+	if r.stdin {
+		if r.reason != "" {
 			return fmt.Errorf("cannot use --stdin with --reason/-r")
 		}
-		data, err := io.ReadAll(os.Stdin)
+		data, err := io.ReadAll(r.in)
 		if err != nil {
 			return fmt.Errorf("reading stdin: %w", err)
 		}
-		escalateReason = strings.TrimRight(string(data), "\n")
-	}
-
-	// Require at least a description when creating an escalation
-	if len(args) == 0 {
-		return cmd.Help()
+		r.reason = strings.TrimRight(string(data), "\n")
 	}
 
 	description := strings.Join(args, " ")
 
 	// Validate severity
-	severity := strings.ToLower(escalateSeverity)
+	severity := strings.ToLower(r.severity)
 	if !config.IsValidSeverity(severity) {
-		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", escalateSeverity)
+		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", r.severity)
 	}
 
 	// Find workspace
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := r.townRoot()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
@@ -58,38 +99,38 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Detect agent identity
-	agentID := detectSender()
+	agentID := r.sender()
 	if agentID == "" {
 		agentID = "unknown"
 	}
 
 	// Dry run mode
-	if escalateDryRun {
+	if r.dryRun {
 		actions := escalationConfig.GetRouteForSeverity(severity)
 		targets := notify.MailTargets(actions)
-		fmt.Printf("Would create escalation:\n")
-		fmt.Printf("  Severity: %s\n", severity)
-		fmt.Printf("  Description: %s\n", description)
-		fmt.Printf("  Reason: %s\n", reasonDisplay(escalateReason))
-		if escalateSource != "" {
-			fmt.Printf("  Source: %s\n", escalateSource)
+		fmt.Fprintf(r.out, "Would create escalation:\n")
+		fmt.Fprintf(r.out, "  Severity: %s\n", severity)
+		fmt.Fprintf(r.out, "  Description: %s\n", description)
+		fmt.Fprintf(r.out, "  Reason: %s\n", reasonDisplay(r.reason))
+		if r.source != "" {
+			fmt.Fprintf(r.out, "  Source: %s\n", r.source)
 		}
-		if escalateFingerprint != "" {
-			fmt.Printf("  Fingerprint: %s\n", notify.FingerprintLabel(escalateFingerprint))
+		if r.fingerprint != "" {
+			fmt.Fprintf(r.out, "  Fingerprint: %s\n", notify.FingerprintLabel(r.fingerprint))
 		}
-		fmt.Printf("  Actions: %s\n", strings.Join(actions, ", "))
-		fmt.Printf("  Mail targets: %s\n", strings.Join(targets, ", "))
+		fmt.Fprintf(r.out, "  Actions: %s\n", strings.Join(actions, ", "))
+		fmt.Fprintf(r.out, "  Mail targets: %s\n", strings.Join(targets, ", "))
 		return nil
 	}
 
-	res, err := notify.Raise(notify.EscalationRequest{
+	res, err := r.raise(notify.EscalationRequest{
 		TownRoot:    townRoot,
 		Severity:    severity,
 		Description: description,
-		Reason:      escalateReason,
-		Source:      escalateSource,
-		Fingerprint: escalateFingerprint,
-		RelatedBead: escalateRelatedBead,
+		Reason:      r.reason,
+		Source:      r.source,
+		Fingerprint: r.fingerprint,
+		RelatedBead: r.relatedBead,
 		EscalatedBy: agentID,
 	}, escalationConfig)
 	if err != nil {
@@ -97,17 +138,17 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	}
 
 	if res.Duplicate {
-		printRepeatEscalation(res)
+		r.printRepeatEscalation(res)
 		return nil
 	}
-	printCreatedEscalation(res, severity)
+	r.printCreatedEscalation(res, severity)
 	return nil
 }
 
 // printRepeatEscalation reports a firing that was recorded on the open
 // escalation with the same alert key.
-func printRepeatEscalation(res *notify.RaiseResult) {
-	if escalateJSON {
+func (r escalateRun) printRepeatEscalation(res *notify.RaiseResult) {
+	if r.json {
 		result := map[string]interface{}{
 			"id":          res.ID,
 			"status":      "duplicate_recorded",
@@ -119,27 +160,27 @@ func printRepeatEscalation(res *notify.RaiseResult) {
 			result["delivery"] = res.Delivery
 		}
 		out, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(out))
+		fmt.Fprintln(r.out, string(out))
 		return
 	}
-	fmt.Printf("%s Repeat escalation recorded on %s (occurrence %d)\n", style.Bold.Render("✓"), res.ID, res.Occurrences)
-	fmt.Printf("  Fingerprint: %s\n", res.FingerprintLabel)
+	fmt.Fprintf(r.out, "%s Repeat escalation recorded on %s (occurrence %d)\n", style.Bold.Render("✓"), res.ID, res.Occurrences)
+	fmt.Fprintf(r.out, "  Fingerprint: %s\n", res.FingerprintLabel)
 	if res.Renotified {
-		fmt.Printf("  Re-notified (renotify window elapsed)\n")
+		fmt.Fprintf(r.out, "  Re-notified (renotify window elapsed)\n")
 		for _, status := range res.Delivery {
 			if status.Error != "" {
-				fmt.Printf("  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
+				fmt.Fprintf(r.out, "  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
 			}
 		}
 	} else {
-		fmt.Printf("  Not re-notified (within renotify window)\n")
+		fmt.Fprintf(r.out, "  Not re-notified (within renotify window)\n")
 	}
-	fmt.Printf("  Clear when resolved with: gt escalate clear --fingerprint %q\n", res.AlertKey)
+	fmt.Fprintf(r.out, "  Clear when resolved with: gt escalate clear --fingerprint %q\n", res.AlertKey)
 }
 
 // printCreatedEscalation reports a newly created escalation.
-func printCreatedEscalation(res *notify.RaiseResult, severity string) {
-	if escalateJSON {
+func (r escalateRun) printCreatedEscalation(res *notify.RaiseResult, severity string) {
+	if r.json {
 		hasFailure := false
 		for _, status := range res.Delivery {
 			if status.Error != "" {
@@ -150,36 +191,36 @@ func printCreatedEscalation(res *notify.RaiseResult, severity string) {
 		result := map[string]interface{}{
 			"id":       res.ID,
 			"severity": severity,
-			"reason":   escalateReason,
+			"reason":   r.reason,
 			"actions":  res.Actions,
 			"targets":  res.Targets,
 			"delivery": res.Delivery,
 			"status":   map[bool]string{true: "partial_failure", false: "ok"}[hasFailure],
 		}
-		if escalateSource != "" {
-			result["source"] = escalateSource
+		if r.source != "" {
+			result["source"] = r.source
 		}
 		if res.FingerprintLabel != "" {
 			result["fingerprint"] = res.FingerprintLabel
 		}
 		out, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(out))
+		fmt.Fprintln(r.out, string(out))
 		return
 	}
 	emoji := severityEmoji(severity)
-	fmt.Printf("%s Escalation created: %s\n", emoji, res.ID)
-	fmt.Printf("  Severity: %s\n", severity)
-	fmt.Printf("  Reason: %s\n", reasonDisplay(escalateReason))
-	if escalateSource != "" {
-		fmt.Printf("  Source: %s\n", escalateSource)
+	fmt.Fprintf(r.out, "%s Escalation created: %s\n", emoji, res.ID)
+	fmt.Fprintf(r.out, "  Severity: %s\n", severity)
+	fmt.Fprintf(r.out, "  Reason: %s\n", reasonDisplay(r.reason))
+	if r.source != "" {
+		fmt.Fprintf(r.out, "  Source: %s\n", r.source)
 	}
 	if res.FingerprintLabel != "" {
-		fmt.Printf("  Fingerprint: %s\n", res.FingerprintLabel)
+		fmt.Fprintf(r.out, "  Fingerprint: %s\n", res.FingerprintLabel)
 	}
-	fmt.Printf("  Routed to: %s\n", strings.Join(res.Targets, ", "))
+	fmt.Fprintf(r.out, "  Routed to: %s\n", strings.Join(res.Targets, ", "))
 	for _, status := range res.Delivery {
 		if status.Error != "" {
-			fmt.Printf("  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
+			fmt.Fprintf(r.out, "  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
 		}
 	}
 }
@@ -200,11 +241,17 @@ func printCreatedEscalation(res *notify.RaiseResult, severity string) {
 // gone the first clear wins while every later one is a no-op that must not
 // turn a patrol into an error. Exit status is therefore 0 either way.
 func runEscalateClear(cmd *cobra.Command, args []string) error {
+	return escalateRunFromFlags().clearAlerts(args)
+}
+
+// clearAlerts closes the open escalations under the keys --fingerprint and
+// --source plus args name.
+func (r escalateRun) clearAlerts(args []string) error {
 	// Keys come from repeated --fingerprint flags and/or one derived from
 	// --source plus the positional description.
-	keys := make([]string, 0, len(escalateClearKeys)+1)
-	keys = append(keys, escalateClearKeys...)
-	if derived := notify.AlertKey("", escalateSource, strings.Join(args, " ")); strings.TrimSpace(derived) != "" {
+	keys := make([]string, 0, len(r.clearKeys)+1)
+	keys = append(keys, r.clearKeys...)
+	if derived := notify.AlertKey("", r.source, strings.Join(args, " ")); strings.TrimSpace(derived) != "" {
 		keys = append(keys, derived)
 	}
 	hasLabel := false
@@ -218,38 +265,38 @@ func runEscalateClear(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("clear requires --fingerprint or a description (see gt escalate clear --help)")
 	}
 
-	closedBy := detectSender()
+	closedBy := r.sender()
 	if closedBy == "" {
 		closedBy = "unknown"
 	}
 
 	// Find workspace
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := r.townRoot()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	closed, err := notify.Clear(townRoot, keys, closedBy, escalateClearReason)
+	closed, err := r.clear(townRoot, keys, closedBy, r.clearReason)
 	if err != nil {
 		return err
 	}
 
-	if escalateJSON {
+	if r.json {
 		result := map[string]interface{}{
 			"keys":   keys,
 			"closed": closed,
 			"count":  len(closed),
 		}
 		out, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(out))
+		fmt.Fprintln(r.out, string(out))
 		return nil
 	}
 
 	if len(closed) == 0 {
-		fmt.Printf("%s Nothing to clear for %s\n", style.Bold.Render("✓"), strings.Join(keys, ", "))
+		fmt.Fprintf(r.out, "%s Nothing to clear for %s\n", style.Bold.Render("✓"), strings.Join(keys, ", "))
 		return nil
 	}
-	fmt.Printf("%s Cleared %d escalation(s) for %s: %s\n", style.Bold.Render("✓"), len(closed), strings.Join(keys, ", "), strings.Join(closed, ", "))
+	fmt.Fprintf(r.out, "%s Cleared %d escalation(s) for %s: %s\n", style.Bold.Render("✓"), len(closed), strings.Join(keys, ", "), strings.Join(closed, ", "))
 	return nil
 }
 
@@ -272,12 +319,18 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
+	return listEscalations(os.Stdout, os.Stderr, bd, escalateListAll, escalateListJSON)
+}
 
+// listEscalations writes the escalations across every rig's database to w:
+// the open ones, or every one with all.
+func listEscalations(w, errOut io.Writer, bd *beads.Beads, all, asJSON bool) error {
+	var err error
 	// Both branches query across rigs: escalations live in the database of the
 	// rig that filed them, so a single-database list reports "No escalations
 	// found" while other rigs' escalations sit open (gt-wbxb).
 	var issues []*beads.Issue
-	if escalateListAll {
+	if all {
 		// List all (open and closed)
 		issues, err = bd.ListAllEscalationsAcrossRigs()
 		if err != nil {
@@ -301,34 +354,34 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 		if _, err := bd.Show(issue.ID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				phantomCount++
-				fmt.Fprintf(os.Stderr, "warning: skipping unresolvable escalation %s (not found in live Dolt)\n", issue.ID)
+				fmt.Fprintf(errOut, "warning: skipping unresolvable escalation %s (not found in live Dolt)\n", issue.ID)
 				continue
 			}
 			// For other errors (e.g. Dolt temporarily unreachable), include
 			// the entry so the user can see it — just warn.
-			fmt.Fprintf(os.Stderr, "warning: could not verify escalation %s: %v\n", issue.ID, err)
+			fmt.Fprintf(errOut, "warning: could not verify escalation %s: %v\n", issue.ID, err)
 		}
 		live = append(live, issue)
 	}
 	issues = live
 
-	if escalateListJSON {
+	if asJSON {
 		out, _ := json.MarshalIndent(issues, "", "  ")
-		fmt.Println(string(out))
+		fmt.Fprintln(w, string(out))
 		return nil
 	}
 
 	if len(issues) == 0 {
 		if phantomCount > 0 {
-			fmt.Printf("No escalations found (%d phantom entr%s skipped — bead IDs no longer exist in live Dolt)\n",
+			fmt.Fprintf(w, "No escalations found (%d phantom entr%s skipped — bead IDs no longer exist in live Dolt)\n",
 				phantomCount, map[bool]string{true: "y", false: "ies"}[phantomCount == 1])
 		} else {
-			fmt.Println("No escalations found")
+			fmt.Fprintln(w, "No escalations found")
 		}
 		return nil
 	}
 
-	fmt.Printf("Escalations (%d):\n\n", len(issues))
+	fmt.Fprintf(w, "Escalations (%d):\n\n", len(issues))
 	for _, issue := range issues {
 		fields := beads.ParseEscalationFields(issue.Description)
 		emoji := severityEmoji(fields.Severity)
@@ -338,13 +391,13 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 			status = "acked"
 		}
 
-		fmt.Printf("  %s %s [%s] %s\n", emoji, issue.ID, status, issue.Title)
-		fmt.Printf("     Severity: %s | From: %s | %s\n",
+		fmt.Fprintf(w, "  %s %s [%s] %s\n", emoji, issue.ID, status, issue.Title)
+		fmt.Fprintf(w, "     Severity: %s | From: %s | %s\n",
 			fields.Severity, fields.EscalatedBy, formatRelativeTime(issue.CreatedAt))
 		if fields.AckedBy != "" {
-			fmt.Printf("     Acked by: %s\n", fields.AckedBy)
+			fmt.Fprintf(w, "     Acked by: %s\n", fields.AckedBy)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	return nil
@@ -757,18 +810,4 @@ func formatRelativeTime(timestamp string) string {
 		return "1 day ago"
 	}
 	return fmt.Sprintf("%d days ago", days)
-}
-
-// detectSender is defined in mail_send.go - we reuse it here
-// If it's not accessible, we fall back to environment variables
-func detectSenderFallback() string {
-	// Try BD_ACTOR first (most common in agent context)
-	if actor := os.Getenv("BD_ACTOR"); actor != "" {
-		return actor
-	}
-	// Try GT_ROLE
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		return role
-	}
-	return ""
 }

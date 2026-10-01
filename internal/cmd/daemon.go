@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,7 +234,7 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 // process — the right thing only when no supervisor is provisioned (see
 // startDaemon) — and returns the PID of the daemon now holding the lock
 // (ours, or a concurrent starter's that won the race).
-func spawnDaemonProcess(townRoot string) (int, error) {
+func spawnDaemonProcess(c *daemonControl, townRoot string) (int, error) {
 	// Start daemon in background
 	// We use 'gt daemon run' as the actual daemon process
 	gtPath, err := os.Executable()
@@ -257,7 +258,7 @@ func spawnDaemonProcess(townRoot string) (int, error) {
 	// Poll for daemon to initialize and acquire the lock (up to 3s). If a
 	// concurrent starter won the race our child exited without the lock and
 	// the PID file names the winner — that daemon is as good as ours.
-	pid, err := waitForDaemon(townRoot)
+	pid, err := c.waitForDaemon(townRoot)
 	if err != nil {
 		if msg := readDaemonStartupFailure(townRoot, daemonCmd.Process.Pid); msg != "" {
 			return 0, fmt.Errorf("daemon failed to start: %s", msg)
@@ -272,8 +273,13 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return realDaemonControl().stopDaemon(cmd.OutOrStdout(), townRoot)
+}
 
-	running, pid, err := daemonIsRunning(townRoot)
+// stopDaemon stops townRoot's daemon and leaves its supervisor job, if any,
+// stopped, reporting to w.
+func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
+	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
@@ -293,16 +299,16 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	// the uncertainty and the mechanism that was used instead (gt-ojbb).
 	stoppedUnder := ""
 	var unconfirmed error
-	sup, supErr := detectDaemonSupervisor(townRoot)
+	sup, supErr := c.detectDaemonSupervisor(townRoot)
 	switch {
 	case supErr != nil:
 		unconfirmed = fmt.Errorf("could not tell whether a supervisor is provisioned for this town: %w", supErr)
 	case sup != nil:
-		switch st := supervisorStateFor(sup.name); {
+		switch st := c.stateFor(sup.name); {
 		case st.Err != nil:
 			unconfirmed = fmt.Errorf("could not read the %s job's state: %w", sup.name, st.Err)
 		case st.Loaded:
-			if runErr := supervisorRun(sup.stop); runErr != nil {
+			if runErr := c.run(sup.stop); runErr != nil {
 				unconfirmed = fmt.Errorf("could not stop the %s job: %w", sup.name, runErr)
 			} else {
 				stoppedUnder = sup.name
@@ -314,18 +320,18 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	// job that was never loaded — the lock holder has to go before this can
 	// report a stop.
 	outcome := "the daemon is gone from daemon.lock"
-	stillRunning, _, err := daemonIsRunning(townRoot)
+	stillRunning, _, err := c.isRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status after stopping: %w", err)
 	}
 	if stillRunning {
 		outcome = "the daemon was signaled directly"
-		if err := stopDaemonDirect(townRoot); err != nil {
+		if err := c.stopDirect(townRoot); err != nil {
 			// The supervisor's SIGTERM can land between that re-check and
 			// StopDaemon's own: the process releases the lock and StopDaemon
 			// finds nothing to stop. The stop this path is after still
 			// happened, so a free lock is the outcome, not an error (gt-ojbb).
-			nowRunning, _, checkErr := daemonIsRunning(townRoot)
+			nowRunning, _, checkErr := c.isRunning(townRoot)
 			if checkErr != nil || nowRunning {
 				return fmt.Errorf("stopping daemon: %w", err)
 			}
@@ -339,12 +345,12 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 	}
 
 	if stoppedUnder != "" {
-		fmt.Printf("%s Daemon stopped (was PID %d) — the %s job is stopped, so it stays down\n",
+		fmt.Fprintf(w, "%s Daemon stopped (was PID %d) — the %s job is stopped, so it stays down\n",
 			style.Bold.Render("✓"), pid, stoppedUnder)
-		fmt.Printf("  Start it again with: %s\n", style.Dim.Render("gt daemon start"))
+		fmt.Fprintf(w, "  Start it again with: %s\n", style.Dim.Render("gt daemon start"))
 		return nil
 	}
-	fmt.Printf("%s Daemon stopped (was PID %d)\n", style.Bold.Render("✓"), pid)
+	fmt.Fprintf(w, "%s Daemon stopped (was PID %d)\n", style.Bold.Render("✓"), pid)
 	return nil
 }
 
@@ -353,49 +359,54 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return realDaemonControl().daemonStatus(cmd.OutOrStdout(), townRoot)
+}
 
-	running, pid, err := daemonIsRunning(townRoot)
+// daemonStatus reports townRoot's daemon and its supervisor to w, and exits 3
+// when no daemon runs.
+func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
+	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
 
 	if running {
-		fmt.Printf("%s Daemon is %s (PID %d)\n",
+		fmt.Fprintf(w, "%s Daemon is %s (PID %d)\n",
 			style.Bold.Render("●"),
 			style.Bold.Render("running"),
 			pid)
-		fmt.Printf("  Town: %s\n", townRoot)
+		fmt.Fprintf(w, "  Town: %s\n", townRoot)
 		// Reports on the supervisor's own process, not just its file: a daemon
 		// holding the lock while the provisioned job crash-loops behind it is
 		// the state this line has to name (gt-sq9e).
-		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatusLine(townRoot, pid, supervisorStateFor))
+		fmt.Fprintf(w, "  Supervised: %s\n", c.statusLine(townRoot, pid))
 
 		// Load state for more details
 		state, err := daemon.LoadState(townRoot)
 		if err == nil && !state.StartedAt.IsZero() {
-			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(w, "  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 			if !state.LastHeartbeat.IsZero() {
-				fmt.Printf("  Last heartbeat: %s (#%d)\n",
+				fmt.Fprintf(w, "  Last heartbeat: %s (#%d)\n",
 					state.LastHeartbeat.Format("15:04:05"),
 					state.HeartbeatCount)
 			}
 
 			// Check if binary is newer than process
 			if binaryModTime, err := getBinaryModTime(); err == nil {
-				fmt.Printf("  Binary: %s\n", binaryModTime.Format("2006-01-02 15:04:05"))
+				fmt.Fprintf(w, "  Binary: %s\n", binaryModTime.Format("2006-01-02 15:04:05"))
 				if binaryModTime.After(state.StartedAt) {
-					fmt.Printf("  %s Binary is newer than process - consider '%s'\n",
+					fmt.Fprintf(w, "  %s Binary is newer than process - consider '%s'\n",
 						style.Bold.Render("⚠"),
 						style.Dim.Render("gt daemon restart"))
 				}
 			}
 		}
 	} else {
-		fmt.Printf("%s Daemon is %s\n",
+		fmt.Fprintf(w, "%s Daemon is %s\n",
 			style.Dim.Render("○"),
 			"not running")
-		fmt.Printf("  Supervised: %s\n", templates.SupervisorStatusLine(townRoot, 0, supervisorStateFor))
-		fmt.Printf("\nStart with: %s\n", style.Dim.Render("gt daemon start"))
+		fmt.Fprintf(w, "  Supervised: %s\n", c.statusLine(townRoot, 0))
+		fmt.Fprintf(w, "\nStart with: %s\n", style.Dim.Render("gt daemon start"))
 		// Exit 3 (LSB "program is not running") so scripts can use status as
 		// the running probe: make install restarts only a running daemon and
 		// mol-gastown-boot runs `status || start` (gt-o848l).
