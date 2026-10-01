@@ -6,7 +6,7 @@
 
 **Status**: In Progress
 **Owner**: Design
-**Related**: [molecules.md](../concepts/molecules.md) | [agent-provider-integration.md](../agent-provider-integration.md)
+**Related**: [molecules.md](../concepts/molecules.md)
 
 ---
 

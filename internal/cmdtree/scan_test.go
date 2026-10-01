@@ -144,23 +144,6 @@ func TestScanCmdTemplateIsGt(t *testing.T) {
 	)
 }
 
-func TestScanJS(t *testing.T) {
-	t.Parallel()
-	text := strings.Join([]string{
-		`const r = await pi.exec("gt", ["tap", "guard", "pr-workflow"]);`, // 1
-		`return { reason: r.stderr || "gt tap guard rejected this" };`,    // 2: message text
-		`console.error("[gastown] gt prime failed:", e.message);`,         // 3: message text
-		`await pi.exec('bd', [`,  // 4: multi-line array
-		`  'mol', 'wisp', id]);`, // 5
-		`// pi.exec("gt", ["context"]) in a comment still reads as a call`, // 6
-	}, "\n")
-	assertRefs(t, ScanJS("h.js", text),
-		"1:gt tap guard pr-workflow",
-		"4:bd mol wisp",
-		"6:gt context",
-	)
-}
-
 func TestScanTOMLMarkdownKeepsPhysicalLines(t *testing.T) {
 	t.Parallel()
 	text := strings.Join([]string{
@@ -244,12 +227,10 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 	write("plugins/p/run.sh", "gt four\n")
 	write("plugins/p/run_test.sh", "gt skipped\n")
 	write("internal/hooks/templates/claude/s.json", `"gt five"`+"\n")
-	write("internal/hooks/templates/pi/h.js", `pi.exec("gt", ["fivejs"]); log("gt skipped")`+"\n")
 	write("scripts/guards/g.sh", "gt six\n")
 	write("scripts/s.sh", "gt nine\n")
 	write("scripts/s.py", "gt skipped\n")
 	write(".githooks/pre-push", "gt ten\n")
-	write("internal/wrappers/scripts/gt-codex", "exec gt eleven\n")
 	write(".claude/commands/c.md", "`gt twelve`\n")
 	write(".claude/skills/k/SKILL.md", "`bd thirteen`\n")
 	write("internal/config/roles/x.toml", "nudge = \"Run 'gt seven'\"\n")
@@ -267,7 +248,7 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 		words = append(words, r.Words[0])
 	}
 	got := strings.Join(words, ",")
-	if got != "twelve,thirteen,ten,seven,one,five,fivejs,two,eleven,eight,three,four,six,nine" {
+	if got != "twelve,thirteen,ten,seven,one,five,two,eight,three,four,six,nine" {
 		t.Fatalf("ScanRepo words = %s", got)
 	}
 	for _, r := range refs {

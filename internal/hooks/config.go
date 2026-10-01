@@ -328,11 +328,10 @@ func HooksEqual(a, b *HooksConfig) bool {
 
 // Target represents a managed settings.json location.
 type Target struct {
-	Path     string // Full path to .claude/settings.json or .gemini/settings.json
-	Key      string // Override key: "gastown/crew", "mayor", etc.
-	Rig      string // Rig name or empty for town-level
-	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor.
-	Provider string // Hook provider: "claude" (default/empty) or "gemini", etc.
+	Path string // Full path to .claude/settings.json
+	Key  string // Override key: "gastown/crew", "mayor", etc.
+	Rig  string // Rig name or empty for town-level
+	Role string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor.
 }
 
 // DisplayKey returns a human-readable label for the target.
@@ -587,121 +586,6 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 	}
 
 	return targets, nil
-}
-
-// RoleLocation represents a discovered role directory in the workspace,
-// independent of any specific agent. Used by callers that need to resolve
-// agent configuration for each location (e.g., syncing non-Claude agents).
-type RoleLocation struct {
-	Dir  string // Absolute path to the role's parent directory (e.g., .../rig/crew)
-	Rig  string // Rig name, or empty for town-level roles
-	Role string // Role name: crew, polecat, mayor
-}
-
-// DiscoverRoleLocations finds all role directories in a workspace.
-// Unlike DiscoverTargets (which returns Claude-specific paths), this returns
-// agent-agnostic directory locations that callers can use with any agent config.
-func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
-	var locations []RoleLocation
-
-	// Town-level roles
-	for _, role := range []string{"mayor"} {
-		dir := filepath.Join(townRoot, role)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			locations = append(locations, RoleLocation{Dir: dir, Role: role})
-		}
-	}
-
-	// Scan rigs
-	entries, err := os.ReadDir(townRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "mayor" ||
-			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		rigName := entry.Name()
-		rigPath := filepath.Join(townRoot, rigName)
-
-		if !isRig(rigPath) {
-			continue
-		}
-
-		// Map subdirectories to roles
-		for _, sub := range []struct{ dir, role string }{
-			{"crew", "crew"},
-			{"polecats", "polecat"},
-		} {
-			dir := filepath.Join(rigPath, sub.dir)
-			if info, err := os.Stat(dir); err == nil && info.IsDir() {
-				locations = append(locations, RoleLocation{Dir: dir, Rig: rigName, Role: sub.role})
-			}
-		}
-	}
-
-	return locations, nil
-}
-
-// DiscoverWorktrees returns subdirectories within a role parent directory that
-// are individual worktrees (e.g., crew/alice, crew/bob, polecats/toast).
-// Skips hidden directories and non-directories.
-//
-// Some roles, especially polecats, keep the git worktree one level below the
-// agent slot directory (for example, polecats/fury/gastown). When an immediate
-// child contains nested git worktree roots, prefer those nested directories so
-// hooks are synced into the real repo root instead of the slot parent.
-func DiscoverWorktrees(roleDir string) []string {
-	entries, err := os.ReadDir(roleDir)
-	if err != nil {
-		return nil
-	}
-
-	var dirs []string
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		path := filepath.Join(roleDir, entry.Name())
-		nested := nestedWorktreeRoots(path)
-		if len(nested) > 0 {
-			dirs = append(dirs, nested...)
-			continue
-		}
-
-		dirs = append(dirs, path)
-	}
-	return dirs
-}
-
-func nestedWorktreeRoots(parent string) []string {
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return nil
-	}
-
-	var dirs []string
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		path := filepath.Join(parent, entry.Name())
-		if isGitWorktreeRoot(path) {
-			dirs = append(dirs, path)
-		}
-	}
-
-	return dirs
-}
-
-func isGitWorktreeRoot(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
-	return err == nil
 }
 
 // isRig checks if a directory looks like a rig (has a crew/ or polecats/ subdirectory).

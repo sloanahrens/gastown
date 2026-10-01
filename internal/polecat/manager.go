@@ -1051,14 +1051,8 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
-	townRoot := filepath.Dir(m.rig.Path)
-	runtimeConfig, err := config.ResolveRoleAgentConfigWithOverride("polecat", townRoot, m.rig.Path, "", name)
-	if err != nil {
-		style.PrintWarning("could not resolve runtime config: %v", err)
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
-	}
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat", runtimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat"); err != nil {
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}
 
@@ -1284,14 +1278,8 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 
 	// Install runtime settings in the shared polecats parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	townRoot := filepath.Dir(m.rig.Path)
-	runtimeConfig, err := config.ResolveRoleAgentConfigWithOverride("polecat", townRoot, m.rig.Path, "", name)
-	if err != nil {
-		style.PrintWarning("could not resolve runtime config: %v", err)
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
-	}
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat", runtimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, clonePath, "polecat"); err != nil {
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}

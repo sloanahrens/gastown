@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doctor"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/style"
@@ -22,19 +21,13 @@ var hooksSyncDryRun bool
 var hooksSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Regenerate all agent hook/settings files",
-	Long: `Regenerate hook and settings files for all agents across the workspace.
+	Long: `Regenerate the Claude Code settings.json for every role across the workspace:
 
-For Claude agents (settings.json merge):
 1. Load base config
 2. Apply role override (if exists)
 3. Apply rig+role override (if exists)
 4. Merge hooks section into existing settings.json (preserving all fields)
 5. Write updated settings.json
-
-For template-based agents (OpenCode, Gemini, Copilot, etc.):
-1. Resolve the agent configured for each role
-2. Compare deployed hook file against current template
-3. Overwrite if content differs
 
 Examples:
   gt hooks sync             # Regenerate all hook/settings files
@@ -174,100 +167,6 @@ func (r hooksSyncRun) run() error {
 		printSyncResult(r.out, townRoot, target, result, r.dryRun, &created, &updated, &unchanged)
 		if !r.dryRun {
 			recordRoleReport(r.home, roleReports, target)
-		}
-	}
-
-	// Sync template-based (non-Claude) agents at each role location.
-	// These agents use SyncForRole (content-aware comparison) instead of the
-	// JSON merge path used for Claude targets above.
-	locations, locErr := hooks.DiscoverRoleLocations(townRoot)
-	if locErr != nil {
-		fmt.Fprintf(r.out, "  %s discovering role locations: %v\n", style.Error.Render("✖"), locErr)
-		errors++
-	} else {
-		for _, loc := range locations {
-			rigPath := ""
-			if loc.Rig != "" {
-				rigPath = filepath.Join(townRoot, loc.Rig)
-			}
-
-			// Use ResolveRoleAgentName (not ResolveRoleAgentConfig) so that hooks are
-			// installed based on the *configured* agent, not the *resolved* one.
-			// ResolveRoleAgentConfig falls back to claude when the agent binary is not
-			// found in PATH (e.g., in CI or on a fresh machine), which would silently
-			// skip creating opencode/gemini/etc. plugin files.
-			agentName, _ := config.ResolveRoleAgentName(loc.Role, townRoot, rigPath)
-			if agentName == "" {
-				continue
-			}
-
-			preset, ok := config.ResolveAgentPreset(agentName, townRoot, rigPath)
-			if !ok || preset.HooksDir == "" || preset.HooksSettingsFile == "" {
-				continue
-			}
-
-			hooksProvider := preset.HooksProvider
-			if hooksProvider == "" {
-				hooksProvider = string(preset.Name)
-			}
-
-			// Claude targets are already handled by DiscoverTargets + syncTarget above.
-			if hooksProvider == "claude" {
-				continue
-			}
-
-			useSettingsDir := preset.HooksUseSettingsDir
-
-			// Determine sync targets.
-			// - Town-level roles (mayor, deacon): the role dir IS the working directory.
-			// - Rig roles with useSettingsDir: one shared file in the role parent.
-			// - Rig roles without useSettingsDir (OpenCode, etc.): need files in each
-			//   individual worktree subdirectory.
-			var syncDirs []string
-			if loc.Rig == "" || useSettingsDir {
-				syncDirs = []string{loc.Dir}
-			} else {
-				syncDirs = hooks.DiscoverWorktrees(loc.Dir)
-			}
-
-			for _, dir := range syncDirs {
-				targetPath := filepath.Join(dir, preset.HooksDir, preset.HooksSettingsFile)
-				relPath, pathErr := filepath.Rel(townRoot, targetPath)
-				if pathErr != nil {
-					relPath = targetPath
-				}
-
-				if r.dryRun {
-					if _, statErr := os.Stat(targetPath); statErr == nil {
-						fmt.Fprintf(r.out, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would check "+hooksProvider+")"))
-					} else {
-						fmt.Fprintf(r.out, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would create "+hooksProvider+")"))
-						created++
-					}
-					continue
-				}
-
-				result, syncErr := hooks.SyncForRole(hooksProvider, dir, dir, loc.Role,
-					preset.HooksDir, preset.HooksSettingsFile, preset.Command, useSettingsDir)
-				if syncErr != nil {
-					fmt.Fprintf(r.out, "  %s %s (%s): %v\n", style.Error.Render("✖"), relPath, hooksProvider, syncErr)
-					errors++
-					failedTargets = append(failedTargets, relPath)
-					continue
-				}
-
-				switch result {
-				case hooks.SyncCreated:
-					fmt.Fprintf(r.out, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(created "+hooksProvider+")"))
-					created++
-				case hooks.SyncUpdated:
-					fmt.Fprintf(r.out, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(updated "+hooksProvider+")"))
-					updated++
-				case hooks.SyncUnchanged:
-					fmt.Fprintf(r.out, "  %s %s %s\n", style.Dim.Render("·"), relPath, style.Dim.Render("(unchanged "+hooksProvider+")"))
-					unchanged++
-				}
-			}
 		}
 	}
 

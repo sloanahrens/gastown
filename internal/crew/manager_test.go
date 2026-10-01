@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -552,61 +553,8 @@ func TestBuildResumeArgs(t *testing.T) {
 			sessionID: "abc-123-def",
 			wantArgs:  "--resume abc-123-def",
 		},
-		// Gemini: no ContinueFlag, flag-style resume
 		{
-			name:      "gemini last errors without ContinueFlag",
-			agent:     "gemini",
-			sessionID: "last",
-			wantErr:   "does not support --resume without a session ID",
-		},
-		{
-			name:      "gemini specific ID works",
-			agent:     "gemini",
-			sessionID: "sess-456",
-			wantArgs:  "--resume sess-456",
-		},
-		// Kiro: has ContinueFlag and flag-style session ID resume
-		{
-			name:      "kiro last uses --resume",
-			agent:     "kiro",
-			sessionID: "last",
-			wantArgs:  "--resume",
-		},
-		{
-			name:      "kiro specific ID uses --resume-id",
-			agent:     "kiro",
-			sessionID: "f2946a26-3735-4b08-8d05-c928010302d5",
-			wantArgs:  "--resume-id f2946a26-3735-4b08-8d05-c928010302d5",
-		},
-		// Codex: subcommand-style resume
-		{
-			name:      "codex rejected as subcommand-style",
-			agent:     "codex",
-			sessionID: "last",
-			wantErr:   "subcommand-style agents",
-		},
-		{
-			name:      "codex specific ID also rejected",
-			agent:     "codex",
-			sessionID: "abc-123",
-			wantErr:   "subcommand-style agents",
-		},
-		// Cursor: no ContinueFlag, flag-style resume
-		{
-			name:      "cursor last errors without ContinueFlag",
-			agent:     "cursor",
-			sessionID: "last",
-			wantErr:   "does not support --resume without a session ID",
-		},
-		{
-			name:      "cursor specific ID works",
-			agent:     "cursor",
-			sessionID: "chat-789",
-			wantArgs:  "--resume chat-789",
-		},
-		// OpenCode: no resume support at all
-		{
-			name:      "opencode rejected no resume support",
+			name:      "retired opencode preset rejected",
 			agent:     "opencode",
 			sessionID: "last",
 			wantErr:   "does not support session resume",
@@ -640,6 +588,20 @@ func TestBuildResumeArgs(t *testing.T) {
 				t.Errorf("buildResumeArgs(%q, %q) = %q, want %q", tt.agent, tt.sessionID, got, tt.wantArgs)
 			}
 		})
+	}
+}
+
+// A preset without a ContinueFlag can resume a named session but not "last".
+func TestBuildResumeArgs_NoContinueFlag(t *testing.T) {
+	t.Parallel()
+	reg := &config.AgentRegistry{Agents: map[string]*config.AgentPresetInfo{
+		"claude-wrapper": {Name: "claude-wrapper", Command: "claude", ResumeFlag: "--resume"},
+	}}
+	if _, err := buildResumeArgs(reg, "claude-wrapper", "last"); err == nil || !strings.Contains(err.Error(), "does not support --resume without a session ID") {
+		t.Errorf("buildResumeArgs(last) error = %v, want the no-ContinueFlag refusal", err)
+	}
+	if got, err := buildResumeArgs(reg, "claude-wrapper", "sess-456"); err != nil || got != "--resume sess-456" {
+		t.Errorf("buildResumeArgs(sess-456) = %q, %v; want --resume sess-456", got, err)
 	}
 }
 

@@ -4,14 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/steveyegge/gastown/internal/cli"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/cli"
+
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -389,12 +389,7 @@ func (c *PrimingCheck) Fix(ctx *CheckContext) error {
 
 			// Recreate from template via EnsureSettingsForRole
 			settingsDir := filepath.Join(ctx.TownRoot, issue.location)
-			rigPath := ""
-			if issue.rigName != "" {
-				rigPath = filepath.Join(ctx.TownRoot, issue.rigName)
-			}
-			runtimeConfig := config.ResolveRoleAgentConfig(issue.agentType, ctx.TownRoot, rigPath)
-			if err := runtime.EnsureSettingsForRole(settingsDir, settingsDir, issue.agentType, runtimeConfig); err != nil {
+			if err := runtime.EnsureSettingsForRole(settingsDir, settingsDir, issue.agentType); err != nil {
 				errors = append(errors, fmt.Sprintf("%s: failed to recreate settings: %v", issue.location, err))
 			}
 

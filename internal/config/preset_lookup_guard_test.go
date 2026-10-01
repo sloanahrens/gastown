@@ -19,19 +19,15 @@ import (
 var allowedPresetLookups = map[string]bool{
 	"cmd/config.go#configAgentList": true,
 	// configAgentGet checks town custom agents before this built-in lookup.
-	"cmd/config.go#configAgentGet":             true,
-	"runtime/runtime.go#EnsureSettingsForRole": true,
-	"crew/manager.go#buildResumeArgs":          true,
-	"crew/manager.go#launchSession":            true,
+	"cmd/config.go#configAgentGet":    true,
+	"crew/manager.go#buildResumeArgs": true,
+	"crew/manager.go#launchSession":   true,
 	// ensureAgentReady wants the readiness settings of a registry preset; an
 	// agent defined only in settings/config.json deliberately falls back to a
 	// fixed delay.
 	"cmd/sling_helpers.go#ensureAgentReady": true,
 	// Looks up the built-in claude preset by its constant.
 	"cmd/sling_helpers.go#shouldAcceptPermissionWarning": true,
-	// provision.go receives harness names only: runtime passes the hooks
-	// provider and rig/manager resolves default_agent first (claude-9a8).
-	"templates/commands/provision.go#getAgentConfigDir": true,
 }
 
 // presetLookupFuncs are the selector names TestNoAgentNamePresetLookups

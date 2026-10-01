@@ -47,66 +47,6 @@ func TestParseDurationOrDefault(t *testing.T) {
 
 // --- Gemini provider defaults ---
 
-func TestGeminiProviderDefaults(t *testing.T) {
-	t.Parallel()
-
-	t.Run("defaultRuntimeCommand", func(t *testing.T) {
-		cmd := defaultRuntimeCommand(nil, "gemini")
-		if cmd != "gemini" {
-			t.Errorf("defaultRuntimeCommand(gemini) = %q, want %q", cmd, "gemini")
-		}
-	})
-
-	t.Run("defaultSessionIDEnv", func(t *testing.T) {
-		env := defaultSessionIDEnv(nil, "gemini")
-		if env != "GEMINI_SESSION_ID" {
-			t.Errorf("defaultSessionIDEnv(gemini) = %q, want %q", env, "GEMINI_SESSION_ID")
-		}
-	})
-
-	t.Run("defaultHooksProvider", func(t *testing.T) {
-		provider := defaultHooksProvider(nil, "gemini")
-		if provider != "gemini" {
-			t.Errorf("defaultHooksProvider(gemini) = %q, want %q", provider, "gemini")
-		}
-	})
-
-	t.Run("defaultHooksDir", func(t *testing.T) {
-		dir := defaultHooksDir(nil, "gemini")
-		if dir != ".gemini" {
-			t.Errorf("defaultHooksDir(gemini) = %q, want %q", dir, ".gemini")
-		}
-	})
-
-	t.Run("defaultHooksFile", func(t *testing.T) {
-		file := defaultHooksFile(nil, "gemini")
-		if file != "settings.json" {
-			t.Errorf("defaultHooksFile(gemini) = %q, want %q", file, "settings.json")
-		}
-	})
-
-	t.Run("defaultProcessNames", func(t *testing.T) {
-		names := defaultProcessNames(nil, "gemini", "gemini")
-		if len(names) != 1 || names[0] != "gemini" {
-			t.Errorf("defaultProcessNames(gemini) = %v, want [gemini]", names)
-		}
-	})
-
-	t.Run("defaultReadyDelayMs", func(t *testing.T) {
-		delay := defaultReadyDelayMs(nil, "gemini")
-		if delay != 5000 {
-			t.Errorf("defaultReadyDelayMs(gemini) = %d, want 5000", delay)
-		}
-	})
-
-	t.Run("defaultInstructionsFile", func(t *testing.T) {
-		file := defaultInstructionsFile(nil, "gemini")
-		if file != "AGENTS.md" {
-			t.Errorf("defaultInstructionsFile(gemini) = %q, want %q", file, "AGENTS.md")
-		}
-	})
-}
-
 func TestTownSettings_WithoutNewFields_LoadsDefaults(t *testing.T) {
 	t.Parallel()
 	// Simulate a pre-existing settings/config.json that has NO new config fields.
@@ -229,52 +169,75 @@ func TestTownSettings_DisabledPatrols_OmitemptyWhenNil(t *testing.T) {
 
 // --- PolecatPool knobs ---
 
-// The idle-seat fill is the shipped behavior, so only a stored false turns it
-// off; a town that has never written the knob, and a pool that does not exist,
-// both keep it (gt-nn7n).
-func TestPolecatPoolIdleFillEnabled(t *testing.T) {
+// TestTownSettings_RetiredLocalPoolKeysStillLoad: the live town config still
+// carries the retired local-model seat (local_agent, max_local, idle_fill,
+// D4). It must decode under strict decoding, keep the live seat (overflow_agent,
+// max_overflow, min_spawn_gap), and write the retired keys back verbatim.
+func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		pool *PolecatPool
-		want bool
-	}{
-		{"no pool", nil, true},
-		{"knob unset", &PolecatPool{LocalAgent: "l", MaxLocal: 3}, true},
-		{"knob true", &PolecatPool{IdleFill: boolPtr(true)}, true},
-		{"knob false", &PolecatPool{IdleFill: boolPtr(false)}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := c.pool.IdleFillEnabled(); got != c.want {
-				t.Errorf("IdleFillEnabled() = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// idle_fill: false has to survive a settings round trip: a *bool field that the
-// encoder drops would silently turn the fill back on at the next load.
-func TestPolecatPoolIdleFillRoundTrip(t *testing.T) {
-	t.Parallel()
-	ts := NewTownSettings()
-	ts.PolecatPool = &PolecatPool{LocalAgent: "l", MaxLocal: 3, IdleFill: boolPtr(false)}
+	settingsJSON := `{
+		"type": "town-settings",
+		"version": 1,
+		"default_agent": "claude",
+		"polecat_pool": {
+			"local_agent": "local-coder-polecat",
+			"max_local": 0,
+			"idle_fill": true,
+			"min_spawn_gap": "4m",
+			"overflow_agent": "deepseek-flash",
+			"max_overflow": 3
+		}
+	}`
 	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ts, err := LoadOrCreateTownSettings(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateTownSettings: %v", err)
+	}
+	pool := ts.PolecatPool
+	if pool == nil || pool.OverflowAgent != "deepseek-flash" || pool.MaxOverflow != 3 || pool.MinSpawnGapD() != 4*time.Minute {
+		t.Fatalf("live pool keys not loaded: %+v", pool)
+	}
+	if !pool.OverflowCapped() {
+		t.Error("pool with max_overflow 3 must be capped")
+	}
+
 	if err := SaveTownSettings(path, ts); err != nil {
-		t.Fatal(err)
+		t.Fatalf("SaveTownSettings: %v", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"idle_fill": false`) {
-		t.Errorf("saved settings must carry idle_fill: false, got %s", raw)
+	for _, want := range []string{`"local_agent": "local-coder-polecat"`, `"max_local": 0`, `"idle_fill": true`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("saved settings dropped retired key %s:\n%s", want, raw)
+		}
 	}
-	back, err := LoadOrCreateTownSettings(path)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// TestNonClaudeProviderGetsClaudeRuntime: the Claude CLI is the only runtime
+// (D4). A live town agent carries provider "deepseek" (a backend, not a
+// harness) and a backend wrapper's command is not literally "claude"; both
+// once took the no-hooks path and started without --settings or guards
+// (gt-be0z). Both must now resolve to Claude's defaults and settings.
+func TestNonClaudeProviderGetsClaudeRuntime(t *testing.T) {
+	t.Parallel()
+	rc := normalizeRuntimeConfig(&RuntimeConfig{Provider: "deepseek", Command: "claude"})
+	if rc.Provider != string(AgentClaude) {
+		t.Errorf("Provider = %q, want claude", rc.Provider)
 	}
-	if back.PolecatPool == nil || back.PolecatPool.IdleFillEnabled() {
-		t.Errorf("reloaded pool must report the fill off, got %+v", back.PolecatPool)
+	if rc.Session.SessionIDEnv != "CLAUDE_SESSION_ID" || rc.Tmux.ReadyPromptPrefix != "❯ " || rc.Instructions.File != "CLAUDE.md" {
+		t.Errorf("provider deepseek did not take Claude defaults: session=%+v tmux=%+v instructions=%+v", rc.Session, rc.Tmux, rc.Instructions)
+	}
+
+	rigPath := filepath.Join("town", "rig")
+	wrapped := withRoleSettingsFlag(&RuntimeConfig{Command: "claude-deepseek-flash"}, "polecat", rigPath)
+	want := []string{"--settings", filepath.Join(rigPath, "polecats", ".claude", "settings.json")}
+	if len(wrapped.Args) != 2 || wrapped.Args[0] != want[0] || wrapped.Args[1] != want[1] {
+		t.Errorf("backend wrapper Args = %v, want %v", wrapped.Args, want)
 	}
 }

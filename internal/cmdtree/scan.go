@@ -414,36 +414,6 @@ func ScanGo(file string, src []byte) ([]Ref, error) {
 	return refs, nil
 }
 
-// jsExec matches an exec-style call whose program is gt or bd and whose
-// arguments are an array literal: pi.exec("gt", ["prime", "--hook"]).
-var (
-	jsExec   = regexp.MustCompile(`(?s)\bexec\w*\(\s*["'](gt|bd)["']\s*,\s*\[([^\]]*)\]`)
-	jsString = regexp.MustCompile(`^["']([^"']*)["']$`)
-)
-
-// ScanJS finds exec("gt"|"bd", [...]) calls in JavaScript and TypeScript hook
-// templates. Other strings in those files are log and error text that names
-// gt in prose ("gt tap guard rejected this operation"), so they are not read.
-func ScanJS(file, text string) []Ref {
-	var refs []Ref
-	for _, m := range jsExec.FindAllStringSubmatchIndex(text, -1) {
-		var words []string
-		for _, el := range strings.Split(text[m[4]:m[5]], ",") {
-			lit := jsString.FindStringSubmatch(strings.TrimSpace(el))
-			if lit == nil || !cmdWord.MatchString(lit[1]) {
-				break
-			}
-			words = append(words, lit[1])
-		}
-		if len(words) == 0 {
-			continue
-		}
-		line := 1 + strings.Count(text[:m[0]], "\n")
-		refs = append(refs, Ref{File: file, Line: line, Bin: text[m[2]:m[3]], Words: words})
-	}
-	return refs
-}
-
 type scanFunc func(file string, src []byte) ([]Ref, error)
 
 func textScan(fn func(file, text string) []Ref) scanFunc {
@@ -454,15 +424,13 @@ var (
 	scanShellFile = textScan(func(file, text string) []Ref { return ScanShell(file, text, 1) })
 	scanMDFile    = textScan(ScanMarkdown)
 	scanTOMLFile  = textScan(ScanTOMLMarkdown)
-	scanJSFile    = textScan(ScanJS)
 	scanScript    = textScan(ScanScript)
 )
 
 // scannerFor picks the scanner for a repo-relative path, or nil when the
 // file is not one of the lint's inputs: formulas, templates, plugins, hook
-// templates and scripts, role configs, repo scripts and git hooks, the
-// installed agent wrappers, the repo's agent commands and skills, and non-test
-// Go under internal/ and cmd/.
+// templates and scripts, role configs, repo scripts and git hooks, the repo's
+// agent commands and skills, and non-test Go under internal/ and cmd/.
 func scannerFor(rel string) scanFunc {
 	base := filepath.Base(rel)
 	ext := filepath.Ext(rel)
@@ -479,9 +447,6 @@ func scannerFor(rel string) scanFunc {
 			return scanTOMLFile
 		}
 	case under("internal/hooks/templates/"):
-		if ext == ".js" || ext == ".ts" {
-			return scanJSFile
-		}
 		return scanShellFile
 	case under("internal/templates/"), under("templates/"):
 		if ext == ".md" || ext == ".tmpl" {
@@ -502,9 +467,9 @@ func scannerFor(rel string) scanFunc {
 		if ext == ".sh" {
 			return scanScript
 		}
-	case under("internal/wrappers/scripts/"), under(".githooks/"):
+	case under(".githooks/"):
 		return scanScript
-	case under(".claude/commands/"), under(".claude/skills/"), under(".cursor/skills/"):
+	case under(".claude/commands/"), under(".claude/skills/"):
 		if ext == ".md" {
 			return scanMDFile
 		}

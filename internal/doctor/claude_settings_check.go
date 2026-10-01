@@ -36,14 +36,14 @@ type ClaudeSettingsCheck struct {
 }
 
 type staleSettingsInfo struct {
-	path           string        // Full path to settings file
-	agentType      string        // e.g., "mayor", "crew", "polecat"
-	rigName        string        // Rig name (empty for town-level agents)
-	sessionName    string        // tmux session name for cycling
-	missing        []string      // What's missing from the settings
-	wrongLocation  bool          // True if file is in wrong location (should be deleted)
-	missingFile    bool          // True if settings.local.json doesn't exist (needs agent restart)
-	gitStatus      gitFileStatus // Git status for wrong-location files (for safe deletion)
+	path          string        // Full path to settings file
+	agentType     string        // e.g., "mayor", "crew", "polecat"
+	rigName       string        // Rig name (empty for town-level agents)
+	sessionName   string        // tmux session name for cycling
+	missing       []string      // What's missing from the settings
+	wrongLocation bool          // True if file is in wrong location (should be deleted)
+	missingFile   bool          // True if settings.local.json doesn't exist (needs agent restart)
+	gitStatus     gitFileStatus // Git status for wrong-location files (for safe deletion)
 }
 
 // NewClaudeSettingsCheck creates a new Claude settings validation check.
@@ -618,8 +618,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 			if strings.HasSuffix(claudeDir, ".claude") {
 				// Town-root .claude/settings{.local}.json → recreate at mayor/.claude/
 				if err := os.MkdirAll(mayorDir, 0755); err == nil {
-					runtimeConfig := config.ResolveRoleAgentConfig("mayor", ctx.TownRoot, mayorDir)
-					_ = runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor", runtimeConfig)
+					_ = runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor")
 				}
 			}
 
@@ -647,8 +646,7 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 				workDir = sd
 			}
 		}
-		runtimeConfig := config.ResolveRoleAgentConfig(sf.agentType, ctx.TownRoot, rigPath)
-		if err := runtime.EnsureSettingsForRole(settingsDir, workDir, sf.agentType, runtimeConfig); err != nil {
+		if err := runtime.EnsureSettingsForRole(settingsDir, workDir, sf.agentType); err != nil {
 			errors = append(errors, fmt.Sprintf("failed to recreate settings for %s: %v", sf.path, err))
 			continue
 		}

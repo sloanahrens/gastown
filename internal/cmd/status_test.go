@@ -410,18 +410,6 @@ func TestParseRuntimeInfo(t *testing.T) {
 	}
 }
 
-func TestParseRuntimeInfo_PiBare(t *testing.T) {
-	t.Parallel()
-	// Bare pi (no --model flag) calls readPiDefaults() which reads
-	// ~/.pi/agent/settings.json. The result is either "pi" (if no settings)
-	// or "pi/<default-model>" (if settings exist). Both are valid.
-	cmdline := "pi\x00-e\x00gastown-hooks.js"
-	got := parseRuntimeInfo(cmdline)
-	if !strings.HasPrefix(got, "pi") {
-		t.Errorf("parseRuntimeInfo(pi bare) = %q, want prefix 'pi'", got)
-	}
-}
-
 func TestBuildInfoFromConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -474,9 +462,8 @@ func TestIsAgentCmdline(t *testing.T) {
 		want    bool
 	}{
 		{"claude direct", "claude\x00--model\x00opus", true},
-		{"pi direct", "pi\x00-e\x00hooks.js", true},
-		{"node wrapper with pi", "node\x00/path/to/pi\x00-e\x00hooks.js", true},
-		{"bun wrapper with opencode", "bun\x00/path/to/opencode", true},
+		{"node wrapper with claude", "node\x00/path/to/claude\x00--model\x00opus", true},
+		{"retired pi runtime", "pi\x00-e\x00hooks.js", false},
 		{"bash not agent", "bash\x00-c\x00echo hi", false},
 		{"node without agent", "node\x00/path/to/server.js", false},
 		{"empty", "", false},

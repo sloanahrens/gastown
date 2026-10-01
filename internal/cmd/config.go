@@ -75,16 +75,15 @@ to all rigs in the town.
 The command can include arguments. Use quotes if the command or
 arguments contain spaces.
 
+Every agent runs the Claude CLI (or a wrapper script that execs it).
 The provider preset is inferred from the command binary name when it
-matches a known preset (e.g., "gemini", "claude"). Use --provider to
-set it explicitly for custom binary names. The provider controls
-session handling, tmux detection, hooks, and other runtime defaults.
+matches a known preset; anything else takes the claude preset's
+session handling, tmux detection and hooks.
 
 Examples:
   gt config agent set claude-glm \"claude-glm --model glm-4\"
-  gt config agent set gemini-custom gemini --approval-mode yolo
   gt config agent set claude \"claude-glm\"  # Override built-in claude
-  gt config agent set my-bot my-bot-cli --provider claude  # Use Claude defaults`,
+  gt config agent set claude-opus claude --model opus`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigAgentSet,
 }
@@ -405,9 +404,8 @@ func displayAgentConfig(name string, runtime *config.RuntimeConfig, preset *conf
 			fmt.Printf("Session ID Env: %s\n", preset.SessionIDEnv)
 		}
 		if preset.ResumeFlag != "" {
-			fmt.Printf("Resume Style:  %s (%s)\n", preset.ResumeStyle, preset.ResumeFlag)
+			fmt.Printf("Resume Flag:   %s\n", preset.ResumeFlag)
 		}
-		fmt.Printf("Supports Hooks: %v\n", preset.SupportsHooks)
 	}
 }
 
@@ -1307,7 +1305,7 @@ Examples:
   gt config default-agent           # Show current default
   gt config default-agent list      # List available agents
   gt config default-agent claude    # Set to claude
-  gt config default-agent gemini    # Set to gemini
+  gt config default-agent claude-opus    # Set to claude-opus
   gt config default-agent my-custom # Set to custom agent`, presets)
 
 	// Add flags

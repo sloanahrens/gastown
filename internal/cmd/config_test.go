@@ -270,8 +270,8 @@ func TestConfigAgentSetProviderInference(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// "gemini" is a known preset — provider should be inferred
-		args := []string{"gemini-custom", "gemini --fast-mode"}
+		// "claude" is a known preset — provider should be inferred
+		args := []string{"claude-custom", "claude --model opus"}
 		if err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args); err != nil {
 			t.Fatalf("runConfigAgentSet failed: %v", err)
 		}
@@ -281,15 +281,15 @@ func TestConfigAgentSetProviderInference(t *testing.T) {
 			t.Fatalf("load settings: %v", err)
 		}
 
-		agent := loaded.Agents["gemini-custom"]
+		agent := loaded.Agents["claude-custom"]
 		if agent == nil {
 			t.Fatal("agent not found")
 		}
-		if agent.Provider != "gemini" {
-			t.Errorf("Provider = %q, want 'gemini' (inferred from command)", agent.Provider)
+		if agent.Provider != "claude" {
+			t.Errorf("Provider = %q, want 'claude' (inferred from command)", agent.Provider)
 		}
-		if agent.Command != "gemini" {
-			t.Errorf("Command = %q, want 'gemini'", agent.Command)
+		if agent.Command != "claude" {
+			t.Errorf("Command = %q, want 'claude'", agent.Command)
 		}
 	})
 
@@ -431,8 +431,8 @@ func TestConfigDefaultAgent(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 		settingsPath := config.TownSettingsPath(townRoot)
 
-		// Set default to gemini
-		args := []string{"gemini"}
+		// Set default to groq-compound
+		args := []string{"groq-compound"}
 		err := configDefaultAgent(townConfigCmdEnv(townRoot, io.Discard), args)
 		if err != nil {
 			t.Fatalf("runConfigDefaultAgent failed: %v", err)
@@ -444,8 +444,8 @@ func TestConfigDefaultAgent(t *testing.T) {
 			t.Fatalf("load settings: %v", err)
 		}
 
-		if loaded.DefaultAgent != "gemini" {
-			t.Errorf("DefaultAgent = %q, want 'gemini'", loaded.DefaultAgent)
+		if loaded.DefaultAgent != "groq-compound" {
+			t.Errorf("DefaultAgent = %q, want 'groq-compound'", loaded.DefaultAgent)
 		}
 	})
 

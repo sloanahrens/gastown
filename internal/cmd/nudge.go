@@ -177,8 +177,8 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 
 	default: // NudgeModeImmediate
 		// NudgeSessionWithOpts itself skips the Escape keystroke for agents
-		// where Escape cancels in-flight generation (Gemini CLI, Copilot CLI,
-		// Claude Code — see EscapeCancelsRequest / effectiveSkipEscape), so no
+		// where Escape cancels in-flight generation (Claude Code — see
+		// EscapeCancelsRequest / effectiveSkipEscape), so no
 		// per-agent opt-in is needed here. (GH#gt-wasn, gt-cyyg)
 		opts := tmux.NudgeOpts{TownRoot: townRoot}
 
@@ -296,8 +296,8 @@ func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string
 	}
 	// Check if the target agent supports prompt-based idle detection.
 	// WaitForIdle uses Claude Code's prompt pattern (❯) and status bar (⏵⏵).
-	// Non-Claude agents (Gemini, Codex, etc.) have no ReadyPromptPrefix,
-	// so WaitForIdle produces false positives — it sees no busy indicator
+	// An agent preset without a ReadyPromptPrefix (or an unidentified one)
+	// makes WaitForIdle produce false positives — it sees no busy indicator
 	// and matches stale prompt characters in the pane buffer. (GH#gt-5ey3)
 	// Degrade to queue mode for agents without prompt-based detection.
 	if agentName, preset, ok := t.SessionAgentPreset(sessionName, townRoot); agentName != "" {

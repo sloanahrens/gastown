@@ -131,9 +131,15 @@ func TestEscapeSafe_CustomClaudeAgentOnIdlePane(t *testing.T) {
 	if tm.escapeSafe("gt-x", "gt-x", "") {
 		t.Fatal("escapeSafe for custom claude agent on idle pane = true, want false")
 	}
-	f.with(func() { f.sessions["gt-x"].env["GT_AGENT"] = "codex" })
+	// A registry preset that clears escape_cancels_request leaves the
+	// Escape keystroke to the busy scrape, which reads the idle pane as safe.
+	if err := os.WriteFile(filepath.Join(town, "settings", "agents.json"),
+		[]byte(`{"version":1,"agents":{"scrape-gated":{"command":"claude","escape_cancels_request":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.with(func() { f.sessions["gt-x"].env["GT_AGENT"] = "scrape-gated" })
 	if !tm.escapeSafe("gt-x", "gt-x", "") {
-		t.Fatal("escapeSafe for codex on idle pane = false, want true")
+		t.Fatal("escapeSafe for a scrape-gated preset on idle pane = false, want true")
 	}
 }
 

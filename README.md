@@ -656,7 +656,6 @@ For deeper technical details, see the design docs in `docs/`:
 | Convoy lifecycle | [docs/design/convoy/](docs/design/convoy/) |
 | Polecat lifecycle | [docs/concepts/polecat-lifecycle.md](docs/concepts/polecat-lifecycle.md) |
 | Plugin system | [docs/design/plugin-system.md](docs/design/plugin-system.md) |
-| Agent providers | [docs/agent-provider-integration.md](docs/agent-provider-integration.md) |
 | Hooks | [docs/HOOKS.md](docs/HOOKS.md) |
 | Installation guide | [docs/INSTALLING.md](docs/INSTALLING.md) |
 | Docker guide | [docs/docker.md](docs/docker.md) |

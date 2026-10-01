@@ -11,35 +11,19 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Common errors
 var (
 	ErrNotRunning     = errors.New("mayor not running")
 	ErrAlreadyRunning = errors.New("mayor already running")
-	ErrACPActive      = errors.New("ACP mayor is active")
 )
 
-// Mode represents the mayor session mode.
-type Mode string
-
-const (
-	ModeTMUX Mode = "tmux"
-	ModeACP  Mode = "acp"
-	ModeBoth Mode = "both"
-	ModeNone Mode = "none"
-)
-
-// MayorStatus represents the combined status of the mayor across all modes.
+// MayorStatus represents the status of the mayor's tmux session.
 type MayorStatus struct {
-	Active  bool
-	Mode    Mode
-	Tmux    *tmux.SessionInfo
-	ACPPid  int
-	Running bool // Deprecated: use Active
+	Active bool
+	Tmux   *tmux.SessionInfo
 }
 
 // Manager handles mayor lifecycle operations.
@@ -57,42 +41,18 @@ type Manager struct {
 	Respawn func(reason string, run func() error) error
 }
 
-// CombinedStatus returns the combined status of the mayor across all modes.
+// CombinedStatus returns the status of the mayor's tmux session.
 func (m *Manager) CombinedStatus() (*MayorStatus, error) {
-	status := &MayorStatus{
-		Mode: ModeNone,
-	}
-
-	// Check TMUX
+	status := &MayorStatus{}
 	tmuxRunning, _ := m.IsRunning()
 	if tmuxRunning {
 		info, err := m.Status()
 		if err == nil {
 			status.Tmux = info
 			status.Active = true
-			status.Mode = ModeTMUX
 		}
 	}
-
-	// Check ACP
-	if IsACPActive(m.townRoot) {
-		status.Active = true
-		if status.Mode == ModeTMUX {
-			status.Mode = ModeBoth
-		} else {
-			status.Mode = ModeACP
-		}
-		pid, _ := GetACPPid(m.townRoot)
-		status.ACPPid = pid
-	}
-
 	return status, nil
-}
-
-// IsActive checks if the mayor session is active in any mode.
-func (m *Manager) IsActive() (bool, Mode) {
-	status, _ := m.CombinedStatus()
-	return status.Active, status.Mode
 }
 
 // NewManager creates a new mayor manager for a town.
@@ -118,8 +78,7 @@ func (m *Manager) mayorDir() string {
 	return filepath.Join(m.townRoot, "mayor")
 }
 
-// Start starts the mayor session.
-// It checks both TMUX and ACP modes and returns ErrAlreadyRunning if active.
+// Start starts the mayor session, returning ErrAlreadyRunning if it is active.
 // agentOverride optionally specifies a different agent alias to use.
 func (m *Manager) Start(agentOverride string) error {
 	// Refuse before any side effect when the gt binary's bd handshake failed.
@@ -128,12 +87,7 @@ func (m *Manager) Start(agentOverride string) error {
 	}
 	status, err := m.CombinedStatus()
 	if err == nil && status.Active {
-		switch status.Mode {
-		case ModeACP, ModeBoth:
-			return ErrACPActive
-		case ModeTMUX:
-			return ErrAlreadyRunning
-		}
+		return ErrAlreadyRunning
 	}
 	return m.StartTMUX(agentOverride)
 }
@@ -141,10 +95,6 @@ func (m *Manager) Start(agentOverride string) error {
 // StartTMUX starts the mayor session in TMUX mode.
 // agentOverride optionally specifies a different agent alias to use.
 func (m *Manager) StartTMUX(agentOverride string) error {
-	if IsACPActive(m.townRoot) {
-		return ErrAlreadyRunning
-	}
-
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -270,37 +220,4 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 	}
 
 	return t.GetSessionInfo(sessionID)
-}
-
-// GetMayorPrime returns the rendered mayor prime context as a raw string.
-// This includes the formula from templates and a timestamp, suitable for
-// ACP initialize responses where the full context needs to be provided
-// as a single string payload.
-func GetMayorPrime(townRoot string) (string, error) {
-	tmpl, err := templates.New()
-	if err != nil {
-		return "", fmt.Errorf("loading templates: %w", err)
-	}
-
-	townName, err := workspace.GetTownName(townRoot)
-	if err != nil {
-		townName = "unknown"
-	}
-
-	data := templates.RoleData{
-		Role:         "mayor",
-		TownRoot:     townRoot,
-		TownName:     townName,
-		WorkDir:      townRoot,
-		MayorSession: session.MayorSessionName(),
-	}
-
-	content, err := tmpl.RenderRole("mayor", data)
-	if err != nil {
-		return "", fmt.Errorf("rendering mayor template: %w", err)
-	}
-
-	// Append timestamp
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	return fmt.Sprintf("[prime-rendered-at: %s]\n\n%s", timestamp, content), nil
 }

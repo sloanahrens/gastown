@@ -371,7 +371,7 @@ func parseEtime(etime string) (int, error) {
 // TTY-less orphan / zombie cleanup (matches internal/config agent presets).
 func isAgentOrphanCommName(cmdLower string) bool {
 	switch cmdLower {
-	case "claude", "claude-code", "codex", "opencode", "cursor-agent", "agent", "copilot":
+	case "claude", "claude-code":
 		return true
 	default:
 		return false
@@ -475,7 +475,7 @@ func unownedCandidates(entries []processEntry, protected map[int]bool) []unowned
 
 	var candidates []unownedCandidate
 	for _, e := range entries {
-		// Only look for claude/codex processes without a TTY.
+		// Only look for claude processes without a TTY.
 		// Linux shows "?" for no TTY, macOS shows "??"
 		if e.TTY != "?" && e.TTY != "??" {
 			continue
@@ -794,7 +794,7 @@ func orphanRecord(pid int, byPID map[int]OrphanedProcess) OrphanedProcess {
 	return OrphanedProcess{PID: pid, Cmd: "claude"}
 }
 
-// CleanupOrphanedClaudeProcesses finds and kills orphaned claude/codex processes.
+// CleanupOrphanedClaudeProcesses finds and kills orphaned claude processes.
 //
 // Uses a state machine to escalate signals:
 //  1. First encounter → SIGTERM, record in state file

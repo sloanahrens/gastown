@@ -183,11 +183,11 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 		if opts.DryRun {
 			fmt.Fprintf(d.out, "Would spawn fresh polecat in rig '%s'\n", rigName)
 			// peek, not resolve: a dry run prints the route it would take
-			// but must not attach local-attempt:1 to the bead. A refusal is
-			// printed as the refusal a live sling would raise, since that is
-			// the route it would take. The pool is asked whatever --agent says,
-			// so the preview matches the live sling (gt-4lbz).
-			_, reason, poolErr := d.peekPool(opts.TownRoot, opts.HookBead, opts.Agent)
+			// but must not claim a seat. A refusal is printed as the refusal a
+			// live sling would raise, since that is the route it would take.
+			// The pool is asked whatever --agent says, so the preview matches
+			// the live sling (gt-4lbz).
+			_, reason, poolErr := d.peekPool(opts.TownRoot, opts.Agent)
 			if poolErr != nil {
 				fmt.Fprintf(d.out, "  %s\n", poolErr)
 			} else if reason != "" {

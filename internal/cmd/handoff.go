@@ -762,7 +762,7 @@ func agentNameForRole(role, workerName string) string {
 //
 // Two pins describe something live config does not, and are kept:
 //   - an explicit --agent override (config.EnvAgentOverride), which nothing
-//     else records — a sling --agent codex or a polecat_pool seat would
+//     else records — a sling --agent claude-haiku or a polecat_pool seat would
 //     otherwise be swapped for the role's preset on the worker's next handoff;
 //   - a crew worker's worker_agents/crew_agents mapping, which outranks
 //     role_agents.crew and belongs to this identity rather than the role.
@@ -996,7 +996,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 
 	// Preserve GT_PROCESS_NAMES across handoff for accurate liveness detection.
 	// Without this, custom agents that shadow built-in presets (e.g., custom
-	// "codex" running "opencode") would revert to GT_AGENT-based lookup after
+	// "claude" running a wrapper script) would revert to GT_AGENT-based lookup after
 	// handoff, causing false liveness failures. A re-resolved agent is not the
 	// one those names describe, so it is recomputed from its own preset.
 	if processNames := getenv("GT_PROCESS_NAMES"); processNames != "" && !staleAgentPin {

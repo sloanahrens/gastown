@@ -181,12 +181,7 @@ func CreatePolecatCLAUDEmd(worktreePath, rigName, polecatName string) (bool, err
 // even if the source repo doesn't have them tracked.
 // If a command already exists, it is skipped (no overwrite).
 func ProvisionCommands(workspacePath string) error {
-	return commands.ProvisionFor(workspacePath, "claude")
-}
-
-// ProvisionCommandsFor provisions commands for a specific agent.
-func ProvisionCommandsFor(workspacePath, agent string) error {
-	return commands.ProvisionFor(workspacePath, agent)
+	return commands.Provision(workspacePath)
 }
 
 // CommandNames returns the list of embedded slash commands.
@@ -194,24 +189,9 @@ func CommandNames() []string {
 	return commands.Names()
 }
 
-// HasCommands checks if a workspace has the .claude/commands/ directory provisioned.
-func HasCommands(workspacePath string) bool {
-	return HasCommandsFor(workspacePath, "claude")
-}
-
-// HasCommandsFor checks if a workspace has commands provisioned for an agent.
-func HasCommandsFor(workspacePath, agent string) bool {
-	return len(commands.MissingFor(workspacePath, agent)) == 0
-}
-
 // MissingCommands returns the list of embedded commands missing from the workspace.
 func MissingCommands(workspacePath string) []string {
-	return commands.MissingFor(workspacePath, "claude")
-}
-
-// MissingCommandsFor returns missing commands for a specific agent.
-func MissingCommandsFor(workspacePath, agent string) []string {
-	return commands.MissingFor(workspacePath, agent)
+	return commands.Missing(workspacePath)
 }
 
 // ProvisionSupervisor creates and configures supervisor files for the daemon.

@@ -163,7 +163,7 @@ type SessionStartOptions struct {
 	// If set, this is injected as an environment variable.
 	RuntimeConfigDir string
 
-	// Agent is the agent override for this polecat session (e.g., "codex", "gemini").
+	// Agent is the agent override for this polecat session (e.g., "claude-haiku").
 	// If set, GT_AGENT is written to the tmux session environment table so that
 	// IsAgentAliveChecked and waitForPolecatReady read the correct process names.
 	Agent string
@@ -455,7 +455,7 @@ func (m *SessionManager) polecatSlot(polecat string) int {
 // the in-pane backstop.
 func (m *SessionManager) ensureRuntimeWorkspace(workDir, runtimeConfigDir string, runtimeConfig *config.RuntimeConfig) error {
 	polecatSettingsDir := config.RoleSettingsDir("polecat", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, workDir, "polecat", runtimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(polecatSettingsDir, workDir, "polecat"); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 	runtime.SeedWorkspaceTrust(workDir, runtimeConfigDir, runtimeConfig)
@@ -548,24 +548,16 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		return err
 	}
 
-	// Get fallback info to determine beacon content based on agent capabilities.
-	// Non-hook agents need "Run gt prime" in beacon; work instructions come as delayed nudge.
-	fallbackInfo := runtime.GetStartupFallbackInfo(runtimeConfig)
-
-	// Build startup command with beacon for predecessor discovery.
-	// Configure beacon based on agent's hook/prompt capabilities.
+	// Build startup command with beacon for predecessor discovery. Claude's
+	// SessionStart hook runs gt prime, and the beacon rides in as the CLI prompt.
 	address := session.BeaconRecipient("polecat", polecat, m.rig.Name)
-	beaconConfig := session.BeaconConfig{
-		Recipient:               address,
-		Sender:                  "witness",
-		Topic:                   "assigned",
-		MolID:                   opts.Issue,
-		IncludePrimeInstruction: fallbackInfo.IncludePrimeInBeacon,
-		ExcludeWorkInstructions: fallbackInfo.SendStartupNudge,
-	}
-	beacon := session.FormatStartupBeacon(beaconConfig)
+	beacon := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: address,
+		Sender:    "witness",
+		Topic:     "assigned",
+		MolID:     opts.Issue,
+	})
 	startupNudgeContent := runtime.StartupNudgeContent()
-	startupPromptFallback := session.BuildStartupPrompt(beaconConfig, startupNudgeContent)
 
 	command := opts.Command
 	if command == "" {
@@ -623,7 +615,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	if _, hasGTAgent := envVars["GT_AGENT"]; !hasGTAgent && runtimeConfig.ResolvedAgent != "" {
 		envVars["GT_AGENT"] = runtimeConfig.ResolvedAgent
 	}
-	// Custom agent config dir env (e.g., GEMINI_CONFIG_DIR) for non-Claude agents.
+	// Account config dir env (CLAUDE_CONFIG_DIR) for the selected account.
 	if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && opts.RuntimeConfigDir != "" {
 		envVars[runtimeConfig.Session.ConfigDirEnv] = opts.RuntimeConfigDir
 	}
@@ -677,39 +669,6 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		return fmt.Errorf("startup blocked: %w", err)
 	}
 
-	// Handle fallback nudges for non-hook agents.
-	// See StartupFallbackInfo in runtime package for the fallback matrix.
-	if fallbackInfo.SendBeaconNudge {
-		// Promptless runtimes need the full startup prompt delivered via nudge so
-		// the agent sees both the beacon and the initial work instructions.
-		debugSession("DeliverStartupPromptFallback",
-			runtime.DeliverStartupPromptFallback(m.tmux, sessionID, startupPromptFallback, runtimeConfig, constants.ClaudeStartTimeout))
-	} else {
-		if fallbackInfo.StartupNudgeDelayMs > 0 {
-			// Wait for agent to finish processing the beacon + gt prime before sending
-			// work instructions. Prompt-capable runtimes already got the beacon as the
-			// initial CLI prompt, so they only need the delayed startup nudge here.
-			primeWaitRC := runtime.RuntimeConfigWithMinDelay(runtimeConfig, fallbackInfo.StartupNudgeDelayMs)
-			debugSession("WaitForPrimeReady", m.tmux.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
-		}
-
-		if fallbackInfo.SendStartupNudge {
-			// Send work instructions via nudge
-			debugSession("SendStartupNudge", m.tmux.NudgeSession(sessionID, startupNudgeContent))
-		}
-	}
-
-	// Verify startup nudge was delivered: poll for idle prompt and retry if lost.
-	// This fixes the Mode B race where the nudge arrives before Claude Code is ready,
-	// causing the polecat to sit idle at an empty prompt. See GH#1379.
-	if fallbackInfo.SendStartupNudge {
-		verifyContent := startupNudgeContent
-		if fallbackInfo.SendBeaconNudge {
-			verifyContent = startupPromptFallback
-		}
-		m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, verifyContent)
-	}
-
 	// Verify beacon delivery for hook+prompt agents (Mode A, hi-y44).
 	// Fresh spawns may show the Claude Code splash screen with the CLI beacon
 	// pre-filled but not auto-submitted. If the agent is still idle after startup,
@@ -717,15 +676,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// Runs asynchronously: verifyStartupNudgeDelivery sleeps before checking, so a
 	// synchronous call would add ~25s to every successful polecat startup on the
 	// common gt sling path. Non-fatal: the witness zombie patrol handles unrecovered stalls.
-	if !fallbackInfo.SendBeaconNudge && !fallbackInfo.SendStartupNudge {
-		go m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, startupNudgeContent)
-	}
-
-	// Legacy fallback for other startup paths (non-fatal). It and the PID
-	// tracking below need the real tmux; a test's fake tmux skips them.
-	if real, ok := m.tmux.(*tmux.Tmux); ok {
-		_ = runtime.RunStartupFallback(real, sessionID, "polecat", runtimeConfig)
-	}
+	go m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, startupNudgeContent)
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
@@ -743,9 +694,9 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		return fmt.Errorf("session %s unhealthy during startup: %s", sessionID, status)
 	}
 
-	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAliveChecked falls back to
-	// ["node", "claude"] process detection and witness patrol will auto-nuke
-	// polecats running non-Claude agents (e.g., opencode). Fail fast.
+	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAliveChecked cannot
+	// resolve the session's preset (process names, Escape policy) and witness
+	// patrol may auto-nuke a live polecat. Fail fast.
 	gtAgent, _ := m.tmux.GetEnvironment(sessionID, "GT_AGENT")
 	if gtAgent == "" {
 		m.cleanup(polecat, sessionID, "polecat start: GT_AGENT not set")
@@ -755,7 +706,8 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			sessionID, runtimeConfig.Command)
 	}
 
-	// Track PID for defense-in-depth orphan cleanup (non-fatal)
+	// Track PID for defense-in-depth orphan cleanup (non-fatal). It needs the
+	// real tmux; a test's fake tmux skips it.
 	if real, ok := m.tmux.(*tmux.Tmux); ok {
 		_ = session.TrackSessionPID(townRoot, sessionID, real)
 	}

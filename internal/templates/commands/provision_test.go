@@ -14,7 +14,7 @@ func TestBuildCommand_Claude(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("handoff command not found")
 	}
-	content, err := BuildCommand(*cmd, "claude")
+	content, err := BuildCommand(*cmd)
 	if err != nil {
 		t.Fatalf("BuildCommand failed: %v", err)
 	}
@@ -42,69 +42,13 @@ func TestBuildCommand_Claude(t *testing.T) {
 	}
 }
 
-func TestBuildCommand_OpenCode(t *testing.T) {
-	t.Parallel()
-	cmd := FindByName("handoff")
-	if cmd == nil {
-		t.Fatal("handoff command not found")
-	}
-	content, err := BuildCommand(*cmd, "opencode")
-	if err != nil {
-		t.Fatalf("BuildCommand failed: %v", err)
-	}
-
-	// Check frontmatter - only description, no Claude-specific fields
-	if !strings.Contains(content, "description: Hand off to fresh session") {
-		t.Error("missing description")
-	}
-	if strings.Contains(content, "allowed-tools") {
-		t.Error("OpenCode should not have allowed-tools")
-	}
-	if strings.Contains(content, "argument-hint") {
-		t.Error("OpenCode should not have argument-hint")
-	}
-
-	// Check body
-	if !strings.Contains(content, "$ARGUMENTS") {
-		t.Error("missing $ARGUMENTS in body")
-	}
-}
-
-func TestBuildCommand_Copilot(t *testing.T) {
-	t.Parallel()
-	cmd := FindByName("handoff")
-	if cmd == nil {
-		t.Fatal("handoff command not found")
-	}
-	content, err := BuildCommand(*cmd, "copilot")
-	if err != nil {
-		t.Fatalf("BuildCommand failed: %v", err)
-	}
-
-	// Check frontmatter - only description, no Claude-specific fields
-	if !strings.Contains(content, "description: Hand off to fresh session") {
-		t.Error("missing description")
-	}
-	if strings.Contains(content, "allowed-tools") {
-		t.Error("Copilot should not have allowed-tools")
-	}
-	if strings.Contains(content, "argument-hint") {
-		t.Error("Copilot should not have argument-hint")
-	}
-
-	// Check body
-	if !strings.Contains(content, "$ARGUMENTS") {
-		t.Error("missing $ARGUMENTS in body")
-	}
-}
-
 func TestBuildCommand_Review_Claude(t *testing.T) {
 	t.Parallel()
 	cmd := FindByName("review")
 	if cmd == nil {
 		t.Fatal("review command not found")
 	}
-	content, err := BuildCommand(*cmd, "claude")
+	content, err := BuildCommand(*cmd)
 	if err != nil {
 		t.Fatalf("BuildCommand failed: %v", err)
 	}
@@ -177,23 +121,16 @@ func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 	}
 }
 
-func TestProvisionForAndMissingFor(t *testing.T) {
+func TestProvisionAndMissing(t *testing.T) {
 	t.Parallel()
 	ws := t.TempDir()
-	configDir := getAgentConfigDir("claude")
-	if configDir == "" {
-		t.Fatal("claude preset has no config dir")
-	}
-	if !IsKnownAgent("Claude") {
-		t.Error("IsKnownAgent(Claude) = false, want true (case-insensitive)")
-	}
 
-	if got := MissingFor(ws, "claude"); !slices.Equal(got, Names()) {
-		t.Fatalf("MissingFor(empty) = %v, want all %v", got, Names())
+	if got := Missing(ws); !slices.Equal(got, Names()) {
+		t.Fatalf("Missing(empty) = %v, want all %v", got, Names())
 	}
 
 	// A pre-existing command file is never overwritten.
-	dir := filepath.Join(ws, configDir, "commands")
+	dir := filepath.Join(ws, ".claude", "commands")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -202,16 +139,16 @@ func TestProvisionForAndMissingFor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ProvisionFor(ws, "CLAUDE"); err != nil {
-		t.Fatalf("ProvisionFor: %v", err)
+	if err := Provision(ws); err != nil {
+		t.Fatalf("Provision: %v", err)
 	}
-	if got := MissingFor(ws, "claude"); len(got) != 0 {
-		t.Errorf("MissingFor after provision = %v, want none", got)
+	if got := Missing(ws); len(got) != 0 {
+		t.Errorf("Missing after provision = %v, want none", got)
 	}
 	if data, err := os.ReadFile(custom); err != nil || string(data) != "mine" {
 		t.Errorf("handoff.md = %q, %v; want the pre-existing content kept", data, err)
 	}
-	want, err := BuildCommand(*FindByName("review"), "claude")
+	want, err := BuildCommand(*FindByName("review"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,22 +157,12 @@ func TestProvisionForAndMissingFor(t *testing.T) {
 	}
 }
 
-func TestProvisionForUnknownAgent(t *testing.T) {
+func TestUnknownCommand(t *testing.T) {
 	t.Parallel()
-	ws := t.TempDir()
-	if err := ProvisionFor(ws, "no-such-agent"); err == nil {
-		t.Error("ProvisionFor(unknown) = nil, want an error")
-	}
-	if got := MissingFor(ws, "no-such-agent"); got != nil {
-		t.Errorf("MissingFor(unknown) = %v, want nil", got)
-	}
-	if IsKnownAgent("no-such-agent") {
-		t.Error("IsKnownAgent(no-such-agent) = true")
-	}
 	if FindByName("no-such-command") != nil {
 		t.Error("FindByName(no-such-command) != nil")
 	}
-	if _, err := BuildCommand(Command{Name: "no-such-body"}, "claude"); err == nil {
+	if _, err := BuildCommand(Command{Name: "no-such-body"}); err == nil {
 		t.Error("BuildCommand with no body = nil error")
 	}
 }

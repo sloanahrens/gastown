@@ -454,16 +454,6 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 	}
 }
 
-func TestArgvHasFlag(t *testing.T) {
-	t.Parallel()
-	if !argvHasFlag("/x/cursor-agent -f --resume z", "-f") {
-		t.Error("expected -f in argv")
-	}
-	if argvHasFlag("/x/cursor-agent --resume z", "-f") {
-		t.Error("did not expect -f")
-	}
-}
-
 func TestGasTownRuntimeYOLO(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -474,12 +464,8 @@ func TestGasTownRuntimeYOLO(t *testing.T) {
 	}{
 		{"claude_gt", "claude", "/x/claude --dangerously-skip-permissions foo", true},
 		{"claude_personal", "claude", "/x/claude foo", false},
-		{"cursor_agent", "cursor-agent", "cursor-agent -f --resume x", true},
-		{"cursor_no_f", "cursor-agent", "cursor-agent --resume x", false},
-		{"agent_symlink", "agent", "agent -f --resume x", true},
-		{"agent_f_only", "agent", "agent -f", false},
-		{"copilot_yolo", "copilot", "copilot --yolo", true},
-		{"copilot_plain", "copilot", "copilot", false},
+		{"claude_code_gt", "claude-code", "claude-code --dangerously-skip-permissions", true},
+		{"retired_runtime", "codex", "codex --dangerously-skip-permissions", false},
 		{"unknown", "vim", "vim foo", false},
 	}
 	for _, tt := range tests {

@@ -436,39 +436,20 @@ func (machineProcesses) parentPID(pid int) (int, error) {
 	return ppid, nil
 }
 
-// argvHasFlag reports whether argv (full command line) contains a standalone flag token.
-func argvHasFlag(args, flag string) bool {
-	for _, tok := range strings.Fields(args) {
-		if tok == flag || strings.HasPrefix(tok, flag+"=") {
-			return true
-		}
-	}
-	return false
-}
-
 // gasTownRuntimeYOLO returns true when argv matches a Gas Town-managed agent (YOLO / auto-approve),
 // excluding personal interactive sessions that omit these flags.
 func gasTownRuntimeYOLO(cmdName, args string) bool {
 	cmdName = strings.ToLower(filepath.Base(cmdName))
 	switch cmdName {
-	case "claude", "claude-code", "codex":
+	case "claude", "claude-code":
 		return strings.Contains(args, "--dangerously-skip-permissions")
-	case "cursor-agent":
-		return argvHasFlag(args, "-f")
-	case "agent":
-		// Install may symlink cursor-agent as "agent"; require -f plus a Cursor-specific token.
-		return argvHasFlag(args, "-f") &&
-			(strings.Contains(args, "--resume") || argvHasFlag(args, "-p") || strings.Contains(args, "--print"))
-	case "copilot":
-		return strings.Contains(args, "--yolo")
 	default:
 		return false
 	}
 }
 
-// findRuntimeProcesses finds Gas Town agent processes by per-provider YOLO / launch signatures
-// in argv (not comm name alone): claude/codex --dangerously-skip-permissions, cursor-agent -f,
-// copilot --yolo, etc.
+// findRuntimeProcesses finds Gas Town agent processes by their launch signature in argv
+// (not comm name alone): claude --dangerously-skip-permissions.
 func (c *OrphanProcessCheck) findRuntimeProcesses() ([]processInfo, error) {
 	var procs []processInfo
 

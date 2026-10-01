@@ -128,7 +128,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		runtimeConfig = config.DefaultRuntimeConfig()
 	}
 	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
-	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew"); err != nil {
 		// Non-fatal but log warning - missing settings can cause agents to start without hooks
 		style.PrintWarning("could not ensure settings for %s: %v", name, err)
 	}

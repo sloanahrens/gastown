@@ -1,8 +1,7 @@
-// Package hooks provides a generic hook/settings installer for all agent runtimes.
-//
-// Instead of per-agent packages (claude/, gemini/, cursor/, etc.) each containing
-// near-identical boilerplate, this package embeds all agent templates and provides
-// a single generic installer that reads template metadata from AgentPresetInfo.
+// Package hooks installs and syncs the Claude Code settings.json that carries
+// Gas Town's hooks. Claude Code is the only agent runtime (D4), so every role
+// gets the same file shape: the embedded templates for interactive roles, and
+// the JSON merge path (base + overrides) for boot and polecats.
 package hooks
 
 import (
@@ -22,53 +21,42 @@ import (
 //go:embed templates/*
 var templateFS embed.FS
 
-// InstallForRole provisions hook/settings files for an agent based on its preset config.
-// It creates the file if it does not exist, or overwrites if the existing file contains
-// known stale patterns (e.g., legacy "export PATH=" format). Otherwise it does not
-// overwrite — this is the safe path for session startup, where Claude's settings.json
-// may have been customized by syncTarget (base + role overrides merge) and must not
-// be clobbered.
-//
-// For explicit sync operations that should update stale files, use SyncForRole.
+// settingsFile is the file Claude Code reads its hooks from, under .claude/
+// in the settings directory (passed to Claude via --settings for crew and
+// polecats).
+const settingsFile = "settings.json"
+
+// InstallForRole provisions settingsDir/.claude/settings.json for a role.
+// It creates the file if it does not exist, or overwrites if the existing file
+// contains known stale patterns (e.g., legacy "export PATH=" format). Otherwise
+// it does not overwrite — this is the safe path for session startup, where
+// settings.json may have been customized by syncTarget (base + role overrides
+// merge) and must not be clobbered.
 //
 // Parameters:
-//   - provider: the preset's HooksProvider (e.g., "claude", "gemini").
-//   - settingsDir: the gastown-managed parent (used by agents with --settings flag).
-//   - workDir: the agent's working directory.
+//   - settingsDir: the gastown-managed parent (passed to Claude via --settings
+//     for crew and polecats; the working directory for town-level roles).
 //   - role: the Gas Town role (e.g., "polecat", "crew", "mayor").
-//   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
-//   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     boot/polecat settings-sync path, which must not apply to non-Claude agents.
 //
-// Template resolution:
-//   - Role-aware agents (have both autonomous and interactive templates):
-//     templates/<provider>/settings-autonomous.json + settings-interactive.json
-//     or templates/<provider>/hooks-autonomous.json + hooks-interactive.json
-//   - Role-agnostic agents (single template): templates/<provider>/<hooksFile>
+// Template resolution: templates/claude/settings-autonomous.json for
+// autonomous roles, settings-interactive.json for the rest.
 //
-// The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
-// or workDir for all others.
-//
-// For boot/polecat on Claude, install goes through the JSON merge path
+// For boot/polecat, install goes through the JSON merge path
 // (SyncManagedClaudeSettings) and fails closed: an unparseable hooks-base.json,
 // hooks-override file, or existing settings.json aborts the install with an
 // error naming the file, rather than silently falling back to a template that
 // may be missing hooks a rig-scoped override added. See gt-8stz.
-func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
-	return envConfigHome().installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command, useSettingsDir)
+func InstallForRole(settingsDir, role string) error {
+	return envConfigHome().installForRole(settingsDir, role)
 }
 
-func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) error {
-	if provider == "" || hooksDir == "" || hooksFile == "" {
-		return nil
-	}
-
-	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
+func (h configHome) installForRole(settingsDir, role string) error {
+	targetPath := filepath.Join(settingsDir, ".claude", settingsFile)
 	// Boot and polecat settings are managed through the JSON merge path
 	// so their role overrides are kept in sync rather than frozen at first
 	// install; the needsUpgrade heuristic below has no way to detect a hook
 	// type added in code (gt-8stz REOPENED).
-	if (provider == "claude" || command == "claude") && (role == "boot" || role == "polecat") && isSettingsFile(hooksFile) {
+	if role == "boot" || role == "polecat" {
 		// DefaultOverrides keys the polecat entry "polecats" (plural); role is
 		// singular everywhere else. ComputeExpected resolves Key literally, so
 		// this must be normalized or the merge silently drops the override.
@@ -88,10 +76,9 @@ func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDi
 			}
 		}
 		if _, err := h.syncManagedClaudeSettings(Target{
-			Path:     targetPath,
-			Key:      key,
-			Role:     role,
-			Provider: "claude",
+			Path: targetPath,
+			Key:  key,
+			Role: role,
 		}, false); err != nil {
 			return fmt.Errorf("installing managed claude settings for role %q at %s: %w", role, targetPath, err)
 		}
@@ -105,7 +92,7 @@ func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDi
 		// Stale file detected — fall through to overwrite with current template
 	}
 
-	return writeTemplate(provider, role, hooksFile, targetPath)
+	return writeTemplate(role, targetPath)
 }
 
 // needsUpgrade returns true if an existing hooks file contains stale patterns
@@ -113,15 +100,8 @@ func (h configHome) installForRole(provider, settingsDir, workDir, role, hooksDi
 // to auto-upgrade hooks from earlier versions without requiring manual intervention.
 func needsUpgrade(content []byte) bool {
 	// Stale pattern: export PATH=... && gt — replaced by {{GT_BIN}} in current templates.
-	// The PATH export breaks Gemini CLI's hook runner which expands $PATH into
-	// an enormous string. Also catches files missing GT_HOOK_SOURCE env vars.
 	if bytes.Contains(content, []byte(`export PATH=`)) {
 		return true
-	}
-	if bytes.Contains(content, []byte(`Gas Town OpenCode plugin`)) {
-		return bytes.Contains(content, []byte(`captureRun("gt prime")`)) ||
-			bytes.Contains(content, []byte("$`gt prime`")) ||
-			!bytes.Contains(content, []byte(`prime --hook`))
 	}
 	// Stale pattern: a PreToolUse matcher written as a permission-rule
 	// pattern (e.g. "Bash(gh pr create*)") instead of a bare tool name —
@@ -202,7 +182,7 @@ func hasBareBashPreToolUseMatcher(content []byte) bool {
 	return false
 }
 
-// SyncResult describes what SyncForRole did.
+// SyncResult describes what a settings sync did.
 type SyncResult int
 
 const (
@@ -211,86 +191,25 @@ const (
 	SyncUpdated                     // File existed but content differed, updated
 )
 
-// SyncForRole compares the deployed hook/settings file against the current template
-// and overwrites if content differs. Returns what action was taken.
-//
-// This is the explicit sync path used by "gt hooks sync" for template-based agents
-// (OpenCode, Copilot, Pi, OMP, etc.). It should NOT be used for agents whose settings
-// are managed by the JSON merge path (Claude), as that would clobber merged overrides.
-func SyncForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, command string, useSettingsDir bool) (SyncResult, error) {
-	if provider == "" || hooksDir == "" || hooksFile == "" {
-		return SyncUnchanged, nil
+// renderTemplate returns the role's settings template with {{GT_BIN}}
+// resolved to the gt binary.
+func renderTemplate(role string) ([]byte, error) {
+	name := "settings-interactive.json"
+	if hookutil.IsAutonomousRole(role) {
+		name = "settings-autonomous.json"
 	}
-
-	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-
-	content, err := resolveAndSubstitute(provider, hooksFile, role)
+	content, err := templateFS.ReadFile("templates/claude/" + name)
 	if err != nil {
-		return 0, err
-	}
-
-	fileExisted := false
-	if existing, err := os.ReadFile(targetPath); err == nil {
-		fileExisted = true
-		if isSettingsFile(hooksFile) {
-			// JSON files: use structural comparison to tolerate whitespace differences.
-			if TemplateContentEqual(existing, content) {
-				return SyncUnchanged, nil
-			}
-		} else {
-			if bytes.Equal(existing, content) {
-				return SyncUnchanged, nil
-			}
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return 0, fmt.Errorf("creating hooks directory: %w", err)
-	}
-
-	perm := os.FileMode(0644)
-	if isSettingsFile(hooksFile) {
-		perm = 0600
-	}
-
-	// Atomic write (temp + rename) prevents concurrent polecat spawns from
-	// interleaving truncates+writes into a partial JSON file that Claude
-	// rejects at startup. See gh#3500.
-	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
-		return 0, fmt.Errorf("writing hooks file: %w", err)
-	}
-
-	if fileExisted {
-		return SyncUpdated, nil
-	}
-	return SyncCreated, nil
-}
-
-// installTargetPath computes the full path for a hook/settings file.
-func installTargetPath(settingsDir, workDir, hooksDir, hooksFile string, useSettingsDir bool) string {
-	installDir := workDir
-	if useSettingsDir {
-		installDir = settingsDir
-	}
-	return filepath.Join(installDir, hooksDir, hooksFile)
-}
-
-// resolveAndSubstitute resolves the template and performs {{GT_BIN}} substitution.
-func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
-	content, err := resolveTemplate(provider, hooksFile, role)
-	if err != nil {
-		return nil, fmt.Errorf("resolving template for %s: %w", provider, err)
+		return nil, fmt.Errorf("reading settings template %s: %w", name, err)
 	}
 
 	if bytes.Contains(content, []byte("{{GT_BIN}}")) {
+		// JSON-encode the path so Windows backslashes are properly escaped.
+		// json.Marshal produces `"C:\\path\\gt.exe"` (with quotes); strip the quotes.
 		gtBin := resolveGTBinary()
 		gtBinBytes := []byte(gtBin)
-		if isSettingsFile(hooksFile) {
-			// JSON-encode the path so Windows backslashes are properly escaped.
-			// json.Marshal produces `"C:\\path\\gt.exe"` (with quotes); strip the quotes.
-			if encoded, err := json.Marshal(gtBin); err == nil {
-				gtBinBytes = encoded[1 : len(encoded)-1]
-			}
+		if encoded, err := json.Marshal(gtBin); err == nil {
+			gtBinBytes = encoded[1 : len(encoded)-1]
 		}
 		content = bytes.ReplaceAll(content, []byte("{{GT_BIN}}"), gtBinBytes)
 	}
@@ -298,9 +217,9 @@ func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
 	return content, nil
 }
 
-// writeTemplate resolves a template, substitutes placeholders, and writes it to targetPath.
-func writeTemplate(provider, role, hooksFile, targetPath string) error {
-	content, err := resolveAndSubstitute(provider, hooksFile, role)
+// writeTemplate renders the role's template and writes it to targetPath.
+func writeTemplate(role, targetPath string) error {
+	content, err := renderTemplate(role)
 	if err != nil {
 		return err
 	}
@@ -309,68 +228,14 @@ func writeTemplate(provider, role, hooksFile, targetPath string) error {
 		return fmt.Errorf("creating hooks directory: %w", err)
 	}
 
-	perm := os.FileMode(0644)
-	if isSettingsFile(hooksFile) {
-		perm = 0600
-	}
-
-	// Atomic write (temp + rename) — see gh#3500.
-	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
+	// Atomic write (temp + rename) prevents concurrent polecat spawns from
+	// interleaving truncates+writes into a partial JSON file that Claude
+	// rejects at startup. See gh#3500.
+	if err := atomicfile.WriteFile(targetPath, content, 0600); err != nil {
 		return fmt.Errorf("writing hooks file: %w", err)
 	}
 
 	return nil
-}
-
-// resolveTemplate finds the right template for a provider+role combination.
-func resolveTemplate(provider, hooksFile, role string) ([]byte, error) {
-	// Determine role type
-	autonomous := hookutil.IsAutonomousRole(role)
-
-	// Try role-aware naming conventions
-	if autonomous {
-		for _, pattern := range roleAwarePatterns("autonomous", hooksFile) {
-			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
-			if content, err := templateFS.ReadFile(path); err == nil {
-				return content, nil
-			}
-		}
-	} else {
-		for _, pattern := range roleAwarePatterns("interactive", hooksFile) {
-			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
-			if content, err := templateFS.ReadFile(path); err == nil {
-				return content, nil
-			}
-		}
-	}
-
-	// Fall back to single template (role-agnostic agents)
-	path := fmt.Sprintf("templates/%s/%s", provider, hooksFile)
-	content, err := templateFS.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("no template found for provider %q file %q: %w", provider, hooksFile, err)
-	}
-	return content, nil
-}
-
-// roleAwarePatterns generates candidate template filenames for role-aware agents.
-// Given roleType "autonomous" and hooksFile "settings.json", it tries:
-//   - settings-autonomous.json
-//   - hooks-autonomous.json
-func roleAwarePatterns(roleType, hooksFile string) []string {
-	ext := filepath.Ext(hooksFile)
-	base := hooksFile[:len(hooksFile)-len(ext)]
-
-	return []string{
-		base + "-" + roleType + ext,  // settings-autonomous.json
-		"hooks-" + roleType + ext,    // hooks-autonomous.json
-		"settings-" + roleType + ext, // settings-autonomous.json (fallback)
-	}
-}
-
-// isSettingsFile returns true for files that may contain sensitive role config.
-func isSettingsFile(name string) bool {
-	return filepath.Ext(name) == ".json"
 }
 
 // resolveGTBinary returns the absolute path to the gt binary.
@@ -385,27 +250,4 @@ func resolveGTBinary() string {
 		return path
 	}
 	return "gt"
-}
-
-// ComputeExpectedTemplate returns the expected file content for a template-based
-// provider (e.g., gemini) with {{GT_BIN}} resolved to the actual gt binary path.
-// This is used by the doctor hooks-sync check to compare installed files against
-// current templates.
-func ComputeExpectedTemplate(provider, hooksFile, role string) ([]byte, error) {
-	return resolveAndSubstitute(provider, hooksFile, role)
-}
-
-// TemplateContentEqual compares two JSON byte slices for structural equality
-// by normalizing whitespace. Returns true if they represent the same JSON.
-func TemplateContentEqual(expected, actual []byte) bool {
-	var e, a interface{}
-	if err := json.Unmarshal(expected, &e); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(actual, &a); err != nil {
-		return false
-	}
-	ej, _ := json.Marshal(e)
-	aj, _ := json.Marshal(a)
-	return string(ej) == string(aj)
 }

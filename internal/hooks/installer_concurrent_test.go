@@ -60,7 +60,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", "claude", true); err != nil {
+			if err := InstallForRole(dir, "witness"); err != nil {
 				errs <- err
 			}
 		}()
@@ -86,7 +86,7 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 	}
 
 	// And it must match the resolved template byte-for-byte.
-	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "witness")
+	want, err := renderTemplate("witness")
 	if err != nil {
 		t.Fatalf("resolveAndSubstitute: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := home.installForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+			if err := home.installForRole(settingsDir, "polecat"); err != nil {
 				errs <- err
 			}
 		}()
@@ -179,32 +179,7 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 		t.Fatalf("seed file: %v", err)
 	}
 
-	err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", "claude", true)
-	if err == nil {
-		t.Fatal("expected error from read-only directory, got nil")
-	}
-	if !strings.Contains(err.Error(), "writing hooks file") {
-		t.Errorf("expected wrapped 'writing hooks file' error, got: %v", err)
-	}
-}
-
-// TestSyncForRole_AtomicWriteErrorPropagates is the SyncForRole counterpart
-// to TestInstallForRole_AtomicWriteErrorPropagates — covers the second
-// atomic-write call site introduced in gh#3500.
-func TestSyncForRole_AtomicWriteErrorPropagates(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// The target path is a non-empty directory, so the atomic write's final
-	// rename fails.
-	target := filepath.Join(dir, ".opencode", "plugins", "gastown.js")
-	if err := os.MkdirAll(target, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "occupied"), nil, 0644); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-
-	_, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
+	err := InstallForRole(dir, "witness")
 	if err == nil {
 		t.Fatal("expected error from read-only directory, got nil")
 	}

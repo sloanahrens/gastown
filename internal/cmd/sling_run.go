@@ -138,7 +138,7 @@ type slingDeps struct {
 	resolveAgent   func(target string) (agentID, pane, hookRoot string, err error)
 	cwdTown        func() string
 	crewExists     func(townRoot, rigName, name string) bool
-	peekPool       func(townRoot, beadID, requested string) (agent, reason string, err error)
+	peekPool       func(townRoot, requested string) (agent, reason string, err error)
 	wakeRig        func(rigName string)
 
 	// Reassignment away from a previous holder.

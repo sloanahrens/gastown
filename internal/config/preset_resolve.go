@@ -10,9 +10,10 @@ import (
 // or default_agent — to the preset of the harness that actually runs it.
 // Custom agents in rig then town settings/config.json come first (the same
 // order as lookupAgentConfigIfExists), then the registry for that town and
-// rig (LoadAgentRegistryFor). ok=false means the
-// name could not be identified: callers must treat that as an unknown
-// harness, never as Claude. (claude-9a8)
+// rig (LoadAgentRegistryFor). ok=false means no agent of that name is
+// configured: callers must treat that as an unknown harness, never as
+// Claude. A configured agent always resolves, to Claude when its command is
+// a wrapper (claude-9a8).
 func ResolveAgentPreset(name, townRoot, rigPath string) (*AgentPresetInfo, bool) {
 	if name == "" {
 		return nil, false
@@ -46,17 +47,13 @@ func HarnessPreset(rc *RuntimeConfig) (*AgentPresetInfo, bool) {
 }
 
 // HarnessPreset returns the preset in r of the harness a RuntimeConfig
-// launches, by the same command-wins rule as isClaudeAgent.
+// launches (see harnessPresetName).
 func (r *AgentRegistry) HarnessPreset(rc *RuntimeConfig) (*AgentPresetInfo, bool) {
 	if rc == nil {
 		return nil, false
 	}
 	table := r.presetTable()
-	name := harnessPresetName(rc.Command, rc.Args, rc.Provider, table)
-	if name == "" {
-		return nil, false
-	}
-	preset := table[name]
+	preset := table[harnessPresetName(rc.Command, rc.Args, rc.Provider, table)]
 	return preset, preset != nil
 }
 
@@ -92,25 +89,20 @@ func (r *AgentRegistry) presetTable() map[string]*AgentPresetInfo {
 
 // harnessPresetName names the preset for a command line. The command is
 // authoritative (basename, gt- prefix and wrappers such as `env -u X claude`
-// unwrapped); provider is the fallback. An empty command and provider means
-// Claude, the historical default. Returns "" when nothing matches.
+// unwrapped); provider is the fallback. Anything else is Claude: the Claude CLI
+// is the only runtime (D4), so an unrecognised command is a wrapper script that
+// execs it (a claude-deepseek-* backend wrapper) and an unknown provider names
+// a backend, not a harness.
 func harnessPresetName(command string, args []string, provider string, presets map[string]*AgentPresetInfo) string {
-	if command == "" {
-		if provider == "" {
-			return string(AgentClaude)
+	if command != "" {
+		if name := presetForBinary(commandBinary(command, args), presets); name != "" {
+			return name
 		}
-		if _, ok := presets[provider]; ok {
-			return provider
-		}
-		return ""
-	}
-	if name := presetForBinary(commandBinary(command, args), presets); name != "" {
-		return name
 	}
 	if _, ok := presets[provider]; ok && provider != "" {
 		return provider
 	}
-	return ""
+	return string(AgentClaude)
 }
 
 // commandBinary returns the normalized binary a command line runs.

@@ -243,8 +243,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if err := mayorMgr.Start(""); err != nil {
 			if errors.Is(err, mayor.ErrAlreadyRunning) {
 				mayorResult = agentStartResult{name: "Mayor", ok: true, detail: mayorMgr.SessionName()}
-			} else if errors.Is(err, mayor.ErrACPActive) {
-				mayorResult = agentStartResult{name: "Mayor", ok: true, detail: "ACP active"}
 			} else {
 				mayorResult = agentStartResult{name: "Mayor", ok: false, detail: err.Error()}
 			}

@@ -2113,14 +2113,10 @@ func (t *Tmux) sessionScope(session, townRootHint string) (townRoot, rigPath str
 }
 
 // escapeAllowed reports whether agent identity permits the vim-mode Escape
-// (nudge delivery step 5). Copilot and Gemini cancel generation on Escape
-// (hq-isz, GH#gt-wasn); Claude Code reads a mid-tool-call Escape as an
+// (nudge delivery step 5). Claude Code reads a mid-tool-call Escape as an
 // operator interrupt (gt-cyyg). An unidentified harness fails safe: custom
 // town agents went unidentified and were interrupted for weeks (claude-9a8).
 func escapeAllowed(agentName string, preset *config.AgentPresetInfo, ok bool) bool {
-	if agentName == "copilot" {
-		return false
-	}
 	if !ok || preset == nil {
 		return false
 	}
@@ -3669,90 +3665,6 @@ func isMissingEnvironmentError(err error, key string) bool {
 	return strings.Contains(msg, "unknown variable") || strings.Contains(msg, fmt.Sprintf("environment variable %s not found", key))
 }
 
-// cursorAgentSessionDeclaresCursor reports whether tmux session env identifies the Cursor
-// runtime (preset "cursor"). Used to disambiguate the generic process name "agent" (Cursor's
-// install script symlinks `agent` to the same binary as cursor-agent) from unrelated binaries
-// named `agent`. The most reliable signal is GT_AGENT=cursor together with GT_PROCESS_NAMES
-// set at session startup (see internal/session/lifecycle.go).
-func cursorAgentSessionDeclaresCursor(t *Tmux, session string) bool {
-	if t == nil || session == "" {
-		return false
-	}
-	agent, err := t.GetEnvironment(session, "GT_AGENT")
-	if err == nil && agent == string(config.AgentCursor) {
-		return true
-	}
-	if names, err := t.GetEnvironment(session, "GT_PROCESS_NAMES"); err == nil && names != "" {
-		for _, n := range strings.Split(names, ",") {
-			if strings.TrimSpace(n) == "cursor-agent" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func withoutProcessName(names []string, drop string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		if n != drop {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// processNamesForSession returns process names for pane matching, dropping the ambiguous
-// name "agent" unless the session declares the Cursor runtime.
-func processNamesForSession(t *Tmux, session string, processNames []string) []string {
-	if len(processNames) == 0 {
-		return processNames
-	}
-	if cursorAgentSessionDeclaresCursor(t, session) {
-		return processNames
-	}
-	return withoutProcessName(processNames, "agent")
-}
-
-func processNamesForSessionChecked(t *Tmux, session string, processNames []string) ([]string, error) {
-	if len(processNames) == 0 {
-		return processNames, nil
-	}
-	declaresCursor, err := cursorAgentSessionDeclaresCursorChecked(t, session)
-	if err != nil {
-		return nil, err
-	}
-	if declaresCursor {
-		return processNames, nil
-	}
-	return withoutProcessName(processNames, "agent"), nil
-}
-
-func cursorAgentSessionDeclaresCursorChecked(t *Tmux, session string) (bool, error) {
-	if t == nil || session == "" {
-		return false, nil
-	}
-	agent, ok, err := t.getEnvironmentOptional(session, "GT_AGENT")
-	if err != nil {
-		return false, err
-	}
-	if ok && agent == string(config.AgentCursor) {
-		return true, nil
-	}
-	names, ok, err := t.getEnvironmentOptional(session, "GT_PROCESS_NAMES")
-	if err != nil {
-		return false, err
-	}
-	if ok && names != "" {
-		for _, n := range strings.Split(names, ",") {
-			if strings.TrimSpace(n) == "cursor-agent" {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
 // matchesPaneRuntime checks if a pane with the given command and PID is running a matching process.
 func (t *Tmux) matchesPaneRuntime(session, cmd, pid string, processNames []string) bool {
 	running, _ := t.matchesPaneRuntimeChecked(session, cmd, pid, processNames)
@@ -3760,10 +3672,7 @@ func (t *Tmux) matchesPaneRuntime(session, cmd, pid string, processNames []strin
 }
 
 func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames []string) (bool, error) {
-	names, err := processNamesForSessionChecked(t, session, processNames)
-	if err != nil {
-		return false, err
-	}
+	names := processNames
 	if len(names) == 0 {
 		return false, nil
 	}

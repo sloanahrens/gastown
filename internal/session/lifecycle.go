@@ -160,7 +160,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	if settingsDir == "" {
 		settingsDir = cfg.WorkDir
 	}
-	if err := runtime.EnsureSettingsForRole(settingsDir, cfg.WorkDir, cfg.Role, runtimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(settingsDir, cfg.WorkDir, cfg.Role); err != nil {
 		return nil, fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 

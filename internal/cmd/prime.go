@@ -103,10 +103,6 @@ HOOK MODE (--hook):
   Claude Code integration (in .claude/settings.json):
     "SessionStart": [{"hooks": [{"type": "command", "command": "gt prime --hook"}]}]
     Claude sends JSON on stdin: {"session_id":"uuid","source":"startup|resume|compact"}
-
-  Gemini CLI / other runtimes (in .gemini/settings.json):
-    "SessionStart": "export GT_SESSION_ID=$(uuidgen) GT_HOOK_SOURCE=startup && gt prime --hook"
-    "PreCompress":  "export GT_HOOK_SOURCE=compact && gt prime --hook"
     Set GT_SESSION_ID + GT_HOOK_SOURCE as env vars to skip the stdin read entirely.`,
 	RunE: runPrime,
 }
