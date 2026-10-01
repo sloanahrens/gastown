@@ -49,7 +49,7 @@ decides and reports without slinging, labeling or commenting.
 A seat is one agent with its own cap. Every agent runs the claude CLI with the
 town's managed settings and guard hooks, so no seat is less guarded than
 another. The `hooked_*` key names predate that and are kept for compatibility;
-`hookless_agent` and `max_hookless` are retired and ignored.
+`hookless_agent` and `max_hookless` are retired: still accepted, never read.
 
 Seats, in order:
 

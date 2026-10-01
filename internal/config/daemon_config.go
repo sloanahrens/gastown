@@ -344,7 +344,7 @@ type SpecDispatchConfig struct {
 	// Seats are per agent, each with its own cap. Every agent runs the claude
 	// CLI with the town's managed settings, so no seat is less guarded than
 	// another. The "hooked" key names predate that and are kept for config
-	// compatibility; the retired hookless_agent/max_hookless keys are ignored.
+	// compatibility.
 
 	// HookedAgent is the agent seat the dispatcher may use beside the pool's
 	// overflow_agent. Default "claude-sonnet".
@@ -353,6 +353,13 @@ type SpecDispatchConfig struct {
 	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
 	// default; a negative value closes the seat.
 	MaxHooked int `json:"max_hooked,omitempty"`
+
+	// HooklessAgent and MaxHookless are retired with the hookless seat class
+	// (gt-4k3fj.8.7): nothing reads them. They are declared so a daemon.json
+	// that still carries them decodes under strict decoding, and kept
+	// verbatim. Delete the keys by hand.
+	HooklessAgent json.RawMessage `json:"hookless_agent,omitempty"`
+	MaxHookless   json.RawMessage `json:"max_hookless,omitempty"`
 
 	// PreferHooked puts the HookedAgent seat first. Default: the pool's
 	// overflow_agent first (capped by polecat_pool.max_overflow, default 2
