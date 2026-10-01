@@ -20,9 +20,6 @@ const (
 	defaultWispMaxAge = 24 * time.Hour
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
 	defaultWispDeleteAge = 7 * 24 * time.Hour
-	// Alert threshold: if open wisp count exceeds this, the reaper warns.
-	// Shared with `gt reaper run` warning. See reaper.DefaultAlertThreshold.
-	wispAlertThreshold = reaper.DefaultAlertThreshold
 	// Closed mail older than this is permanently deleted.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
 	// Issues stale longer than this are auto-closed.
@@ -236,6 +233,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	port := d.doltServerPort()
 	dryRun := config.DryRun
 	var totalReaped, totalMoleculeSteps, totalOpen, totalPurged, totalMailPurged, totalAutoClosed int
+	// openDBs counts the databases totalOpen covers, so the alert can compare
+	// this cycle's total to a baseline taken over the same set (gt-11kyy).
+	var openDBs int
 
 	// Step 2: Reap
 	reapErrors := 0
@@ -274,6 +274,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalReaped += result.Reaped
 		totalMoleculeSteps += result.MoleculeStepsClosed
 		totalOpen += result.OpenRemain
+		openDBs++
 		if result.Reaped > 0 || result.MoleculeStepsClosed > 0 {
 			reapSummary := fmt.Sprintf("wisp_reaper: %s: reaped %d stale wisps", dbName, result.Reaped)
 			if result.MoleculeStepsClosed > 0 {
@@ -450,10 +451,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	}
 
 	// Step 5: Report
-	if totalOpen > wispAlertThreshold {
-		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
-			totalOpen, wispAlertThreshold)
-	}
+	d.reportOpenWispAlert(reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: dryRun})
 	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", totalReaped)
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
@@ -462,6 +460,27 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
 	d.logger.Printf("%s", summary)
 	cycle.closeStep("report")
+}
+
+// reportOpenWispAlert warns when this cycle's open-wisp count grew enough over
+// the last recorded cycle to mean accumulation rather than a working set, then
+// records the cycle as the reading the next one is judged against. The record
+// outlives the process — the baseline is on disk — so a daemon restart loses no
+// comparison (gt-11kyy).
+func (d *Daemon) reportOpenWispAlert(sample reaper.OpenWispSample) {
+	townRoot := d.config.TownRoot
+	previous, err := LoadWispAlertBaseline(townRoot)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: WARNING: cannot read the open-wisp baseline (%v) — "+
+			"this cycle cannot be judged against the last one", err)
+	}
+	if alert, detail := reaper.OpenWispAlert(sample, previous); alert {
+		d.logger.Printf("wisp_reaper: WARNING: %s — investigate wisp lifecycle", detail)
+	}
+	if err := SaveWispAlertBaseline(townRoot, sample); err != nil {
+		d.logger.Printf("wisp_reaper: WARNING: cannot record the open-wisp baseline (%v) — "+
+			"the next cycle will have nothing to compare against", err)
+	}
 }
 
 // autoCloseDB runs the auto-close sweep against one open database and returns
