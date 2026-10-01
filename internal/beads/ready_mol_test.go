@@ -102,3 +102,28 @@ func TestReadyForMolReadsBDsMolEnvelope(t *testing.T) {
 		t.Errorf("argv %q, want a bd ready --mol query", argv)
 	}
 }
+
+// TestReadyForMolDropsTheMoleculeRoot drives the CLI path against the envelope
+// a real bd prints for a live molecule, where the root is one of the ready
+// steps beside the step that is actually next. A walker that keeps the root
+// takes it for a second ready step and continues to the molecule itself
+// instead of the next step (gt-mejma).
+func TestReadyForMolDropsTheMoleculeRoot(t *testing.T) {
+	t.Parallel()
+	data := molEnvelope(molStepJSON("gt-mol-1"), molStepJSON("gt-step-1"))
+	out := `{"schema_version":1,"contract_version":1,"data":` + data + `,"pagination":null,"error":null}`
+	rec := newRecorder(func(args []string) reply {
+		if len(args) > 0 && args[0] == "ready" {
+			return reply{stdout: out}
+		}
+		return reply{}
+	})
+
+	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyForMol("gt-mol-1")
+	if err != nil {
+		t.Fatalf("ReadyForMol: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-step-1" {
+		t.Fatalf("ReadyForMol = %v, want [gt-step-1]", issues)
+	}
+}
