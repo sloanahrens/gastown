@@ -21,6 +21,15 @@ const (
 	// can lift (no_merge).
 	LabelNeedsHuman = "gt:needs-human"
 
+	// LabelOverseerReviewed marks a work bead whose head the overseer
+	// reviewed in place of om; it counts only beside an OverseerReviewedMarker
+	// note naming that exact head (gt-g8t3m). gt done removes it on every
+	// submission, so a new head is never waved through on an old review.
+	LabelOverseerReviewed = "gt:overseer-reviewed"
+	// OverseerReviewedMarker opens the note line "OVERSEER REVIEWED <full
+	// head sha>" that binds the overseer's review to one head.
+	OverseerReviewedMarker = "OVERSEER REVIEWED"
+
 	// ReadyNoteMarker opens the notes block gt done writes to say what to land.
 	ReadyNoteMarker = "READY TO LAND"
 )
@@ -132,4 +141,21 @@ func WorkFromBead(issue *beads.Issue, rig string) (Work, error) {
 // "MERGE REJECTION (attempt" marker, or a forged Head (gt-s4f6).
 func NoteField(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// OverseerReviewed reports whether the overseer reviewed head in place of om:
+// the bead carries LabelOverseerReviewed and a notes line
+// "OVERSEER REVIEWED <sha>" whose sha is the full head. A label alone, or a
+// review of another head, is not one (gt-g8t3m).
+func OverseerReviewed(issue *beads.Issue, head string) bool {
+	if issue == nil || head == "" || !beads.HasLabel(issue, LabelOverseerReviewed) {
+		return false
+	}
+	for _, line := range strings.Split(issue.Notes, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), OverseerReviewedMarker+" ")
+		if ok && strings.TrimSpace(rest) == head {
+			return true
+		}
+	}
+	return false
 }

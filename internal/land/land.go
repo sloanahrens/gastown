@@ -364,11 +364,23 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		res.Rerun, res.Flaky = fv.rerun, fv.flakes
 		l.logf("%s: the failed package(s) passed their rerun; landing with %d flake(s) filed", w.BeadID, len(fv.flakes))
 	}
-	reviewStart := time.Now()
-	verdict, reviewErr := l.Reviewer.Review(ctx, dir, base, merged)
-	l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))
+	var (
+		verdict   Verdict
+		reviewErr error
+	)
+	if OverseerReviewed(issue, w.Head) {
+		// The overseer reviewed this exact head in place of om, which could
+		// not return a verdict (gt-g8t3m): record that and do not pay for om
+		// again. The gate above still ran.
+		verdict = Verdict{Verdict: VerdictOverseerPrefix + shortSHA(w.Head)}
+		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0))
+	} else {
+		reviewStart := time.Now()
+		verdict, reviewErr = l.Reviewer.Review(ctx, dir, base, merged)
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))
+	}
 	res.Verdict = verdict
-	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped {
+	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped && !strings.HasPrefix(verdict.Verdict, VerdictOverseerPrefix) {
 		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
 	}
 	if reviewErr != nil {

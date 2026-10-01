@@ -703,3 +703,18 @@ func TestDoneLandingFlagsAreGone(t *testing.T) {
 		}
 	}
 }
+
+// TestSubmitDropsAnOverseerReview: an overseer review covers one head, and a
+// submission brings a new one, so gt done removes the label (gt-g8t3m).
+func TestSubmitDropsAnOverseerReview(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusHooked),
+		Labels: []string{land.LabelOverseerReviewed}, Notes: land.OverseerReviewedMarker + " oldhead"})
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if issue := h.source(t); beads.HasLabel(issue, land.LabelOverseerReviewed) {
+		t.Errorf("labels %v still carry %s after a new submission", issue.Labels, land.LabelOverseerReviewed)
+	}
+}

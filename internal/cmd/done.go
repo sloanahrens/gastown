@@ -1521,8 +1521,10 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 		return fmt.Errorf("writing the READY TO LAND note: %w", err)
 	}
 	if err := bd.Update(w.BeadID, beads.UpdateOptions{
-		AddLabels:    []string{land.LabelReadyToLand},
-		RemoveLabels: []string{land.LabelRework},
+		AddLabels: []string{land.LabelReadyToLand},
+		// An overseer review covers one head; a submission brings a new one,
+		// so it must face om again (gt-g8t3m).
+		RemoveLabels: []string{land.LabelRework, land.LabelOverseerReviewed},
 	}); err != nil {
 		return fmt.Errorf("adding %s: %w", land.LabelReadyToLand, err)
 	}
