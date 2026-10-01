@@ -19,7 +19,7 @@ Comment on the bead, then write the verdict file:
 - All five steps clean: `gt bead comment {{ .Bead }} "STEWARD REVIEW PASS {{ .Head }}: <build, gate wall time, attribution 0, tests -N/+M, baselines unchanged or shrunk>"`, outcome `pass`.
 - Any step failed: `gt bead comment {{ .Bead }} "STEWARD REVIEW FAIL {{ .Head }}: <step>: <the evidence: file:line, test name, or output tail>"`, outcome `fail`.
 
-The review never changes the branch or the bead's labels. Done when `bd comments {{ .Bead }}` lists your comment.
+The review never changes the branch or the bead's labels. Done when `bd show {{ .Bead }}` lists your comment.
 
 {{ template "steward-authority" . }}
 

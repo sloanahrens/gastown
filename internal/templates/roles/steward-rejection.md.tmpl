@@ -33,13 +33,13 @@ Done when the sling prints the polecat it spawned.
 4. **Push and requeue.** `git push origin HEAD:refs/heads/{{ .Branch }}`, then confirm `git ls-remote origin refs/heads/{{ .Branch }}` prints the sha that `git rev-parse HEAD` prints. Append the block and swap the labels, in this order (the block first, so a bead carrying the label always says what to land):
 
    ```bash
-   bd update {{ .Bead }} --append-notes "READY TO LAND
+   gt bead note {{ .Bead }} "READY TO LAND
    Branch: {{ .Branch }}
    Head: $(git rev-parse HEAD)
    Target: {{ .Target }}
    Worker: {{ if .Worker }}{{ .Worker }}{{ else }}steward{{ end }}
    Submitted: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-   bd update {{ .Bead }} --add-label gt:ready-to-land --remove-label rework --remove-label gt:overseer-reviewed
+   gt bead update {{ .Bead }} --add-label gt:ready-to-land --remove-label rework --remove-label gt:overseer-reviewed
    ```
 
    Done when `bd show {{ .Bead }}` lists `gt:ready-to-land` and the new head.
