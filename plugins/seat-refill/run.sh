@@ -73,6 +73,37 @@ SONNET_AGENT="${GT_SEAT_REFILL_SONNET_AGENT:-claude-sonnet}"
 SONNET_LABEL="${GT_SEAT_REFILL_SONNET_LABEL:-needs-sonnet}"
 CLAIM_TTL=$(int_or_default "${GT_SEAT_REFILL_CLAIM_TTL:-}" 1800)
 
+# --- Pre-nudge budget ----------------------------------------------------
+# Everything before the nudge is three `gt` client calls: the pool list, the
+# rig list, and one `gt ready` per operational rig. Unbounded, one wedged call
+# eats the plugin's whole 3m [execution] timeout and the run dies with no word
+# about which call it was in (gt-d6rse). Each call gets a cap, and the caps
+# share one budget: a saturated host fails the run inside 60s, by name, and
+# the 90s nudge bound that follows still fits under the 3m.
+PRE_NUDGE_BUDGET=60
+POOL_BOUND=30
+RIGS_BOUND=20
+READY_BOUND=15
+
+# budget_left is what remains of the pre-nudge budget, on the shell's own
+# SECONDS so the clock is real without a call to date.
+budget_left() {
+  local left=$(( PRE_NUDGE_BUDGET - SECONDS ))
+  [ "$left" -gt 0 ] || left=0
+  printf '%s' "$left"
+}
+
+# bound <cap> is the seconds to give `timeout` for one pre-nudge call: the
+# call's cap, or all the budget has left when that is smaller. Never 0 —
+# `timeout 0` disables the bound instead of expiring immediately.
+bound() {
+  local cap="$1" left
+  left=$(budget_left)
+  if [ "$left" -lt "$cap" ]; then cap="$left"; fi
+  [ "$cap" -gt 0 ] || cap=1
+  printf '%s' "$cap"
+}
+
 iso_age() {
   local iso="$1" epoch
   [ -n "$iso" ] || return 1
@@ -156,7 +187,15 @@ fi
 # GT_AGENT is that seat's agent, exactly as sling_pool.go counts them. A nudge
 # that named room the next sling would refuse is worse than no nudge (gt-59o9).
 
-SESSIONS_JSON=$(gt polecat list --all --json 2>/dev/null) ||
+# The pool read gates every seat, so a wedge here is named as itself rather
+# than left to the daemon's blunt kill three minutes later.
+POOL_LIMIT=$(bound "$POOL_BOUND")
+pool_rc=0
+SESSIONS_JSON=$(timeout "$POOL_LIMIT" gt polecat list --all --json 2>/dev/null) || pool_rc=$?
+if [ "$pool_rc" -eq 124 ]; then
+  fail "gt polecat list --all --json timed out after ${POOL_LIMIT}s ($(budget_left)s left of the ${PRE_NUDGE_BUDGET}s pre-nudge budget); the call wedged, seat occupancy is unknown"
+fi
+[ "$pool_rc" -eq 0 ] ||
   fail "gt polecat list --all --json failed; seat occupancy is unknown, not zero"
 printf '%s' "$SESSIONS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 ||
   fail "gt polecat list --all --json did not return an array; seat occupancy is unknown"
@@ -214,18 +253,28 @@ agent_live() {
 # that asks rather than slings, so it has to read it here.
 
 operational_rigs() {
-  local out rows
-  out=$(gt rig list --json 2>/dev/null) || {
-    log "SKIP: gt rig list --json failed; cannot tell parked from served rigs"
+  local out rows rc=0 limit
+  # This function's stdout is the rig list the caller reads, so every line it
+  # says goes to stderr — a log on stdout is read back as a rig name and
+  # probed. The daemon interleaves both streams into the run record
+  # (internal/daemon/proc_runner.go), so nothing is lost by it.
+  limit=$(bound "$RIGS_BOUND")
+  out=$(timeout "$limit" gt rig list --json 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    log "SKIP: gt rig list --json timed out after ${limit}s; cannot tell parked from served rigs" >&2
     return 0
-  }
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log "SKIP: gt rig list --json failed; cannot tell parked from served rigs" >&2
+    return 0
+  fi
   rows=$(printf '%s' "$out" | jq -r '
     if type == "array" then .[] else empty end
     | select((.status // "" | ascii_downcase) == "operational")
     | select((.name // "") != "")
     | .name
   ' 2>/dev/null) || {
-    log "SKIP: gt rig list --json not parseable; cannot tell parked from served rigs"
+    log "SKIP: gt rig list --json not parseable; cannot tell parked from served rigs" >&2
     return 0
   }
   printf '%s\n' "$rows" | awk 'NF >= 1 && $1 != ""'
@@ -241,10 +290,17 @@ while IFS= read -r RIG; do
     continue
   fi
 
-  out=$(gt ready --rig "$RIG" --json 2>/dev/null) || {
+  limit=$(bound "$READY_BOUND")
+  ready_rc=0
+  out=$(timeout "$limit" gt ready --rig "$RIG" --json 2>/dev/null) || ready_rc=$?
+  if [ "$ready_rc" -eq 124 ]; then
+    log "SKIP $RIG: gt ready timed out after ${limit}s"
+    continue
+  fi
+  if [ "$ready_rc" -ne 0 ]; then
     log "SKIP $RIG: gt ready failed"
     continue
-  }
+  fi
   rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" '
     [ .sources[]? | select(.name == $rig) | .issues[]? ]
     | .[]
@@ -385,7 +441,8 @@ log "nudging $MAYOR_TARGET: $seat_n empty seat(s) with work"
 # watches up to 60s more (internal/cmd/nudge.go waitIdleTimeout,
 # idleWatcherTimeout). At 60s it killed every nudge to a mayor busy for more
 # than ~45s — a normal nudge, already queued — and reported it lost (gt-hen4o).
-# 90s covers 15s+60s with slack; pre-nudge work plus 90s stays under 3m.
+# 90s covers 15s+60s with slack, and the pre-nudge budget above bounds the
+# rest, so the whole run stays inside the plugin's own 3m.
 #
 # State is written only after the nudge lands. Persisting the episode first
 # would record a nudge that never arrived and buy the seat 15 minutes of

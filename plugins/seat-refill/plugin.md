@@ -146,6 +146,8 @@ nudge asks the mayor to decide, not to comply.
 
 A seat count it cannot read is never reported as zero. If `gt polecat list`
 fails, the run fails loudly rather than nudging about a seat that may be
-occupied. A single rig whose `gt ready` read fails is skipped with a log line
+occupied. Every `gt` call the run makes is bounded, so a call that stops
+answering is named in the failure rather than eating the plugin's own timeout
+(gt-d6rse). A single rig whose `gt ready` read fails is skipped with a log line
 and no nudge, which is a real blind spot — it is logged in the run receipt and
 in `daemon/plugin-runs/seat-refill.log`.

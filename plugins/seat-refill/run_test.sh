@@ -64,17 +64,24 @@ assert_not_contains() {
 }
 
 # --- Fake timeout ---------------------------------------------------------
-# Records the bound run.sh puts on each command, then runs the command — or,
-# with $TEST_STATE/timeout_expires present, exits 124 as coreutils timeout does
-# when the bound fires, without running it. The real `timeout` never runs, so
-# no case waits on a clock.
+# Records the bound run.sh puts on each command (bound|cmd|subcommand), then
+# runs the command — or, when the string in $TEST_STATE/timeout_expires appears
+# in the wrapped command, exits 124 as coreutils timeout does when the bound
+# fires, without running it. Naming the command keeps one case's expiry from
+# firing inside another's calls. The real `timeout` never runs, so no case
+# waits on a clock.
 write_fake_timeout() {
   local bin_dir="$1"
   cat > "$bin_dir/timeout" <<'SH'
 #!/usr/bin/env bash
-printf '%s|%s\n' "$1" "$2" >> "$TEST_STATE/timeout.log"
+printf '%s|%s|%s\n' "$1" "$2" "${3:-}" >> "$TEST_STATE/timeout.log"
 if [ -f "$TEST_STATE/timeout_expires" ]; then
-  exit 124
+  want=$(cat "$TEST_STATE/timeout_expires")
+  if [ -n "$want" ]; then
+    case "$*" in
+      *"$want"*) exit 124 ;;
+    esac
+  fi
 fi
 shift
 exec "$@"
@@ -113,6 +120,10 @@ case "${1:-}" in
     ;;
   rig)
     if [ "${2:-}" = "list" ]; then
+      if [ -f "$TEST_STATE/rig_list_fails" ]; then
+        echo "rig list: store unavailable" >&2
+        exit 1
+      fi
       cat "$TEST_STATE/rigs.json"
       exit 0
     fi
@@ -465,7 +476,7 @@ setup_case
 write_polecats "$LIVE_NONE"
 ready_bug gastown
 run_plugin 15000000
-touch "$TEST_STATE/timeout_expires"
+printf 'nudge' > "$TEST_STATE/timeout_expires"
 run_plugin 15000300
 assert_eq "$EXIT" "1" "nudge bound fired: still exits nonzero"
 assert_contains "$TEST_STATE/stderr.log" "timed out" "nudge bound fired: the failure names the timeout"
@@ -501,6 +512,93 @@ JSON
 run_plugin 16000600
 assert_eq "$(nudges)" "1" \
   "operator label: another label does not reserve the bead"
+
+# --- Case 20: a wedged pool read is named, not left to the plugin timeout --
+# The 2026-09-30 09:46 run was killed at 3m1s having printed one log line
+# (gt-d6rse). The pool read is the call it was in, so that call has to say so
+# rather than let the daemon's kill be the only evidence.
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 17000000
+: > "$TEST_STATE/timeout.log"
+printf 'polecat list' > "$TEST_STATE/timeout_expires"
+run_plugin 17000300
+assert_eq "$EXIT" "1" "wedged pool read: exits nonzero so the daemon escalates it"
+assert_eq "$(nudges)" "0" "wedged pool read: no nudge about a seat that may be occupied"
+assert_contains "$TEST_STATE/stderr.log" "gt polecat list --all --json timed out after" \
+  "wedged pool read: the failure names the call that wedged"
+assert_contains "$TEST_STATE/stderr.log" "pre-nudge budget" \
+  "wedged pool read: the failure says which budget the call spent"
+pool_bound=$(awk -F'|' '$3 == "polecat" { print $1 }' "$TEST_STATE/timeout.log" | tail -1)
+if [[ "$pool_bound" =~ ^[0-9]+$ ]] && [ "$pool_bound" -gt 0 ]; then
+  record_pass "wedged pool read: the call ran under a bound (${pool_bound}s)"
+else
+  record_fail "wedged pool read: the call ran unbounded (${pool_bound:-<none>})"
+fi
+rm -f "$TEST_STATE/timeout_expires"
+
+# --- Case 21: a wedged rig list blinds the run instead of spending it ------
+# The skip line goes to stderr: operational_rigs' stdout is the rig list the
+# caller reads, so a log line on it is read back as a rig name and probed.
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 18000000
+: > "$TEST_STATE/timeout.log"
+printf 'rig list' > "$TEST_STATE/timeout_expires"
+run_plugin 18000300
+assert_eq "$EXIT" "0" "wedged rig list: the run still completes"
+assert_eq "$(nudges)" "0" "wedged rig list: no rig is known, so no nudge"
+assert_contains "$TEST_STATE/stderr.log" "gt rig list --json timed out after" \
+  "wedged rig list: the log names the call that wedged"
+assert_eq "$(awk -F'|' '$3 == "ready" { print $1 }' "$TEST_STATE/timeout.log" | grep -c . || true)" "0" \
+  "wedged rig list: no rig is probed, since none could be enumerated"
+rm -f "$TEST_STATE/timeout_expires"
+
+# --- Case 22: a wedged ready read skips its rig, by name -------------------
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 19000000
+printf 'ready --rig' > "$TEST_STATE/timeout_expires"
+run_plugin 19000300
+assert_eq "$EXIT" "0" "wedged ready read: the run still completes"
+assert_eq "$(nudges)" "0" "wedged ready read: the rig is skipped, not nudged about"
+assert_contains "$TEST_STATE/stdout.log" "SKIP gastown: gt ready timed out after" \
+  "wedged ready read: the log names the call and the rig"
+rm -f "$TEST_STATE/timeout_expires"
+
+# --- Case 23: a failed rig list is said on stderr, not read as a rig -------
+# Same leak as the wedged case, on the plain-failure path it has always had.
+setup_case
+write_polecats "$LIVE_NONE"
+ready_bug gastown
+run_plugin 20000000
+: > "$TEST_STATE/timeout.log"
+touch "$TEST_STATE/rig_list_fails"
+run_plugin 20000300
+assert_eq "$EXIT" "0" "failed rig list: the run still completes"
+assert_eq "$(nudges)" "0" "failed rig list: no rig is known, so no nudge"
+assert_contains "$TEST_STATE/stderr.log" "gt rig list --json failed" \
+  "failed rig list: the skip is said on stderr"
+assert_eq "$(awk -F'|' '$3 == "ready" { print $1 }' "$TEST_STATE/timeout.log" | grep -c . || true)" "0" \
+  "failed rig list: no rig is probed, since none could be enumerated"
+rm -f "$TEST_STATE/rig_list_fails"
+
+# --- Case 24: the run's own bounds fit inside the plugin's timeout ---------
+# The named failures above are only written if the script's bounds expire
+# before the daemon's [execution] timeout kills it, so the pre-nudge budget and
+# the nudge bound together have to stay under what plugin.md declares.
+pre_budget=$(awk -F= '$1 == "PRE_NUDGE_BUDGET" { print $2 }' "$SCRIPT")
+nudge_bound=$(awk -F= '$1 == "NUDGE_BOUND" { print $2 }' "$SCRIPT")
+declared=$(awk -F'"' '/^timeout = /{ print $2; exit }' "$ROOT_DIR/plugins/seat-refill/plugin.md")
+if [[ "$pre_budget" =~ ^[0-9]+$ ]] && [[ "$nudge_bound" =~ ^[0-9]+$ ]] && [[ "$declared" =~ ^[0-9]+m$ ]] &&
+  [ "$((pre_budget + nudge_bound))" -lt "$((${declared%m} * 60))" ]; then
+  record_pass "bound fit: ${pre_budget}s + ${nudge_bound}s stays under the plugin's ${declared} timeout"
+else
+  record_fail "bound fit: pre-nudge=${pre_budget:-<none>} nudge=${nudge_bound:-<none>} declared=${declared:-<none>} do not fit"
+fi
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
