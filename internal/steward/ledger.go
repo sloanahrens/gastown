@@ -68,17 +68,50 @@ func (o Outcome) Failed() bool {
 	return o == OutcomeFail || o == OutcomeError || o == OutcomeTimeout || o == OutcomeEscalated
 }
 
+// Mode is how much a job may do: shadow jobs decide and comment, live jobs
+// act on the decision (gt-9bioi.4).
+type Mode string
+
+const (
+	// ModeShadow: the job runs its procedure but changes nothing outside its
+	// throwaway worktree and the bead's comments. The default, so enabling
+	// the steward never lets it act until the operator says so.
+	ModeShadow Mode = "shadow"
+	// ModeLive: the job pushes, requeues, re-slings and escalates.
+	ModeLive Mode = "live"
+)
+
+// ParseMode reads patrols.steward.mode: empty is shadow. Anything else that
+// is not a mode is an error, which the caller treats as shadow: a typo must
+// not switch the steward live.
+func ParseMode(s string) (Mode, error) {
+	switch Mode(s) {
+	case "", ModeShadow:
+		return ModeShadow, nil
+	case ModeLive:
+		return ModeLive, nil
+	}
+	return ModeShadow, fmt.Errorf("patrols.steward.mode %q is neither %q nor %q; running in shadow", s, ModeShadow, ModeLive)
+}
+
+// Shadow reports whether m is shadow. The zero Mode is not: a ledger row
+// written before modes existed was a job that acted.
+func (m Mode) Shadow() bool { return m == ModeShadow }
+
 // Job is one steward job's ledger record. Started is written when the job
 // starts, the record is rewritten complete when it ends; Ended's zero value
 // is "still running" (see Ledger.CloseRunning).
 type Job struct {
-	ID      string    `json:"id"`
-	Event   Kind      `json:"event"`
-	Bead    string    `json:"bead"`
-	Rig     string    `json:"rig"`
-	Branch  string    `json:"branch,omitempty"`
-	Head    string    `json:"head,omitempty"`
-	Model   string    `json:"model,omitempty"`
+	ID     string `json:"id"`
+	Event  Kind   `json:"event"`
+	Bead   string `json:"bead"`
+	Rig    string `json:"rig"`
+	Branch string `json:"branch,omitempty"`
+	Head   string `json:"head,omitempty"`
+	Model  string `json:"model,omitempty"`
+	// Mode is the mode the job ran in; empty on a row from before modes
+	// existed, which counts as live.
+	Mode    Mode      `json:"mode,omitempty"`
 	Started time.Time `json:"started"`
 	// Pgid is the job's process group, recorded once the process starts.
 	// Rows without one (the job had not started yet, or the row predates the

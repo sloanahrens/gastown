@@ -35,6 +35,8 @@ type Event struct {
 	Attempt int `json:"attempt,omitempty"`
 	// RejectionDetail is what the landing worker refused, empty for a review.
 	RejectionDetail string `json:"rejection_detail,omitempty"`
+	// Mode is the mode the job will run in, set by the daemon after Detect.
+	Mode Mode `json:"mode,omitempty"`
 }
 
 // Key is the dedupe key: one event on one head of one bead. A resubmission

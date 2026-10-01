@@ -70,9 +70,13 @@ func init() {
 type stewardStatusView struct {
 	// Enabled is whether the town's steward patrol is on; the ledger is read
 	// either way, so a town that turned it off still sees its history.
-	Enabled   bool   `json:"enabled"`
-	Timeout   string `json:"job_timeout"`
-	HardAgent string `json:"hard_agent"`
+	Enabled bool `json:"enabled"`
+	// Mode is the mode new jobs run in (shadow or live); ModeError says why
+	// the configured value was read as shadow.
+	Mode      steward.Mode `json:"mode"`
+	ModeError string       `json:"mode_error,omitempty"`
+	Timeout   string       `json:"job_timeout"`
+	HardAgent string       `json:"hard_agent"`
 	steward.Stats
 	// Alerts counts the escalations the daemon raised about the steward in
 	// the window, by kind (pro, stuck, error-rate).
@@ -95,13 +99,19 @@ func buildStewardStatus(townRoot string, since, now time.Time, last int) (stewar
 	if last == 0 {
 		last = -1
 	}
-	return stewardStatusView{
+	mode, modeErr := daemon.StewardMode(cfg)
+	view := stewardStatusView{
 		Enabled:   daemon.IsPatrolEnabled(cfg, "steward"),
+		Mode:      mode,
 		Timeout:   timeout.String(),
 		HardAgent: hard,
 		Stats:     steward.Summarize(rows, steward.StatsOptions{Since: since, Now: now, Timeout: timeout, HardAgent: hard, Last: last}),
 		Alerts:    steward.CountSince(alerts, since),
-	}, nil
+	}
+	if modeErr != nil {
+		view.ModeError = modeErr.Error()
+	}
+	return view, nil
 }
 
 func runStewardStatus(cmd *cobra.Command, _ []string) error {
@@ -137,7 +147,15 @@ func renderStewardStatus(w io.Writer, v stewardStatusView, loc *time.Location) {
 	}
 	fmt.Fprintf(w, "steward %s: %s to %s (job timeout %s, hard preset %s)\n",
 		state, v.Since.In(loc).Format("2006-01-02 15:04"), v.Now.In(loc).Format("15:04"), v.Timeout, v.HardAgent)
-	fmt.Fprintf(w, "  jobs        %d (%d finished, %d running)\n", v.Jobs, v.Finished, len(v.Running))
+	fmt.Fprintf(w, "  mode        %s\n", v.Mode)
+	if v.ModeError != "" {
+		fmt.Fprintf(w, "              %s\n", v.ModeError)
+	}
+	shadow := ""
+	if v.Shadow > 0 {
+		shadow = fmt.Sprintf(", %d shadow", v.Shadow)
+	}
+	fmt.Fprintf(w, "  jobs        %d (%d finished, %d running%s)\n", v.Jobs, v.Finished, len(v.Running), shadow)
 	fmt.Fprintf(w, "  outcomes    %s\n", countsLine(outcomeCounts(v.Outcomes)))
 	fmt.Fprintf(w, "  broke       %d of %d attempted ended in error or timeout (%.0f%%)\n", v.Broke, v.Attempted, v.ErrorRate()*100)
 	fmt.Fprintf(w, "  models      %s\n", countsLine(v.Models))

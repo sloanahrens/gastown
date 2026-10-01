@@ -13,10 +13,21 @@ Head, the commit the author submitted. Bead notes hold the READY TO LAND block
 and every MERGE REJECTION block: run `bd show {{ .Bead }}` first.
 {{- end }}
 
+{{ define "steward-tag" -}}STEWARD{{ if .Shadow }} (shadow){{ end }}{{- end }}
+
+{{ define "steward-shadow" -}}
+{{- if .Shadow -}}
+## Shadow run
+
+The overseer compares your verdict with its own before the steward is allowed to act, so this run decides and changes nothing. Do every step that reads, merges, builds or tests inside your worktree. Where a step would push, requeue, re-sling, change labels or notes, or escalate, do none of it: say in your comment what you would have done, and report the outcome that action would have had. Your outputs are one comment on `{{ .Bead }}`, whose verdict begins `STEWARD (shadow)`, and the verdict file.
+
+{{ end -}}
+{{- end }}
+
 {{ define "steward-authority" -}}
 ## What you may do
 
-{{ if eq .Kind "rejection" -}}
+{{ if and (eq .Kind "rejection") (not .Shadow) -}}
 - Commit and push to `{{ .Branch }}`, as a fast-forward:
   `git push origin HEAD:refs/heads/{{ .Branch }}`. A rejected push means the author
   moved the branch: write outcome `error`.
@@ -27,7 +38,7 @@ and every MERGE REJECTION block: run `bd show {{ .Bead }}` first.
   with no Co-Authored-By trailer and no AI attribution.
 {{- else -}}
 - Comment on `{{ .Bead }}` (`gt bead comment {{ .Bead }} "<text>"`). Merging
-  `{{ .Target }}` into your worktree is local; push nothing.
+  `{{ .Target }}` into your worktree and committing there are local; push nothing.
 {{- end }}
 
 Everything else belongs to the overseer. Work only on `{{ .Branch }}` and
@@ -39,7 +50,12 @@ decide" instead of working around it.
 
 ## When you cannot decide
 
-{{ if .Final -}}
+{{ if and .Final .Shadow -}}
+You are the last attempt: no further job runs for this event. When a step
+below does not settle the case, or the same fix failed twice, escalate nothing:
+comment `STEWARD (shadow) ESCALATE: <evidence: commands run, their output
+tails, what you tried, what you need decided>` and write outcome `escalated`.
+{{- else if .Final -}}
 You are the last attempt: no further job runs for this event. When a step
 below does not settle the case, or the same fix failed twice, file one
 escalation and report it:

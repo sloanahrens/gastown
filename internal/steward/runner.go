@@ -129,7 +129,7 @@ func (r *Runner) Start(ctx context.Context, ev Event, model, prompt string) bool
 		return false
 	}
 	started := r.now()
-	j := Job{ID: id, Event: ev.Kind, Bead: ev.Bead, Rig: ev.Rig, Branch: ev.Branch, Head: ev.Head, Model: model, Started: started}
+	j := Job{ID: id, Event: ev.Kind, Bead: ev.Bead, Rig: ev.Rig, Branch: ev.Branch, Head: ev.Head, Model: model, Mode: ev.Mode, Started: started}
 	if err := r.Ledger.Append(j); err != nil {
 		r.logf("steward: %s: recording the start failed: %v", id, err)
 		return false
