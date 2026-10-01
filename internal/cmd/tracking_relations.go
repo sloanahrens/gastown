@@ -17,30 +17,23 @@ type trackingDeps interface {
 }
 
 // townTrackingDeps returns the bd client for the town database, where
-// convoys (hq-cv-*) and their tracks edges live. run answers its bd calls;
-// nil is the bd on PATH.
-func townTrackingDeps(run beads.BDRunner, townRoot string) (trackingDeps, error) {
+// convoys (hq-cv-*) and their tracks edges live.
+func townTrackingDeps(townRoot string) (trackingDeps, error) {
 	resolved := beads.ResolveBeadsDir(townRoot)
 	if resolved == "" {
 		return nil, fmt.Errorf("resolving town beads dir")
 	}
-	return beads.NewWithBeadsDirAndRunner(townRoot, resolved, run), nil
+	return beads.NewWithBeadsDir(townRoot, resolved), nil
 }
 
 func addTrackingRelation(townRoot, trackerID, issueID string) error {
-	return addTrackingRelationVia(nil, townRoot, trackerID, issueID)
-}
-
-// addTrackingRelationVia is addTrackingRelation with its bd calls answered
-// by run; nil is the bd on PATH.
-func addTrackingRelationVia(run beads.BDRunner, townRoot, trackerID, issueID string) error {
 	// Refuse here rather than in each caller: this is the one place a tracks
 	// edge is written, and an edge to a non-ID target can never be resolved
 	// (gt-gsky). The refusal comes before the client, so it needs no town.
 	if !isTrackingTargetID(issueID) {
 		return fmt.Errorf("refusing to record a tracks edge to %q: not a bead ID", issueID)
 	}
-	deps, err := townTrackingDeps(run, townRoot)
+	deps, err := townTrackingDeps(townRoot)
 	if err != nil {
 		return err
 	}

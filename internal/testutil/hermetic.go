@@ -162,14 +162,18 @@ type Hermetic struct {
 	// refusedGitLog is where WithoutGit's refusing git records calls; ""
 	// without WithoutGit.
 	refusedGitLog string
-	// goroutines were running when the tests started; Finish fails the run
-	// on any other goroutine still running (unittier).
-	goroutines unittier.Goroutines
+	// unitTier is the unit tier's run-time checks (unittier), which Finish
+	// applies; nil checks nothing.
+	unitTier *unittier.Run
+	// tmuxPath is the tmux that isolateTmuxSocket found, which Finish kills
+	// the isolated server with.
+	tmuxPath string
 }
 
 type hermeticConfig struct {
-	dolt  bool
-	noGit bool
+	dolt       bool
+	noGit      bool
+	allowTools []string
 }
 
 // HermeticOption configures StartHermetic/HermeticMain.
@@ -195,6 +199,13 @@ func WithDolt() HermeticOption {
 // The integration tier's TestMain does not pass it.
 func WithoutGit() HermeticOption {
 	return func(c *hermeticConfig) { c.noGit = true }
+}
+
+// AllowTools lets the package's unit tier start the named external tools,
+// which the harness otherwise refuses (unittier.AllowTools). It is the
+// baseline of packages that still start them, and only shrinks.
+func AllowTools(names ...string) HermeticOption {
+	return func(c *hermeticConfig) { c.allowTools = append(c.allowTools, names...) }
 }
 
 // noGitMessage is what the refusing git writes to stderr.
@@ -436,7 +447,7 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 		return nil, err
 	}
 
-	h.TmuxSocket = host.isolateTmuxSocket()
+	h.TmuxSocket, h.tmuxPath = host.isolateTmuxSocket()
 
 	// The env scrub above only reaches resolvers that consult it. Probe them
 	// from the package's own directory — the one cwd guaranteed to sit inside
@@ -448,7 +459,13 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 		}
 	}
 
-	h.goroutines = unittier.Snapshot()
+	// Last: the setup above runs go and looks up tmux, which the unit tier's
+	// refusing tools would refuse.
+	run, err := host.startUnitTier(unittier.AllowTools(h.cfg.allowTools...))
+	if err != nil {
+		return nil, err
+	}
+	h.unitTier = run
 	return h, nil
 }
 
@@ -459,18 +476,19 @@ func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error
 // polecat worktree previously inherited GT_TOWN_SOCKET and created real
 // sessions — including ones named like polecats — on the town's tmux
 // server, flapping zombie/capacity readings and risking a phantom-session
-// auto-nuke). Returns the socket name bound, or "" when tmux isn't
-// installed or AllowLiveTmuxEnv opts out.
-func (h *harnessHost) isolateTmuxSocket() string {
+// auto-nuke). Returns the socket name bound and the tmux found, or "" for
+// both when tmux isn't installed or AllowLiveTmuxEnv opts out.
+func (h *harnessHost) isolateTmuxSocket() (socket, tmuxPath string) {
 	if getenv(h.env, AllowLiveTmuxEnv) == "1" {
-		return ""
+		return "", ""
 	}
-	if _, err := h.lookPath("tmux"); err != nil {
-		return ""
+	tmuxPath, err := h.lookPath("tmux")
+	if err != nil {
+		return "", ""
 	}
-	socket := fmt.Sprintf("gt-test-%d", h.pid)
+	socket = fmt.Sprintf("gt-test-%d", h.pid)
 	h.setTmuxSocket(socket)
-	return socket
+	return socket, tmuxPath
 }
 
 // Finish tears down the sandbox. It returns the exit code for os.Exit: the
@@ -484,7 +502,7 @@ func (h *Hermetic) Finish(code int) int {
 		host = processHost()
 	}
 	// First, before the teardown below starts or stops anything.
-	code = h.goroutines.Check(code, host.stderr)
+	code = h.unitTier.Check(code, host.stderr)
 	// No-op when no container was started; also covers containers started
 	// lazily by tests via RequireDoltContainer.
 	if err := host.terminateDolt(); errors.Is(err, ErrDoltCatalogChanged) {
@@ -510,12 +528,19 @@ func (h *Hermetic) Finish(code int) int {
 	if h.SandboxDir != "" {
 		_ = os.RemoveAll(h.SandboxDir)
 	}
-	if h.TmuxSocket != "" {
-		_, _ = host.run("tmux", "-L", h.TmuxSocket, "kill-server") //nolint:errcheck // best-effort cleanup
-		_ = os.Remove(filepath.Join(host.tmuxSocketDir(), h.TmuxSocket))
+	// Only a server some test started has a socket; the unit tier starts none,
+	// so it runs no tmux here either.
+	if socket := filepath.Join(host.tmuxSocketDir(), h.TmuxSocket); h.TmuxSocket != "" && fileExists(socket) {
+		_, _ = host.run(h.tmuxPath, "-L", h.TmuxSocket, "kill-server") //nolint:errcheck // best-effort cleanup
+		_ = os.Remove(socket)
 	}
 
 	return code
+}
+
+func fileExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // bdTelemetryOff is what every bd spawned under the harness must see. With

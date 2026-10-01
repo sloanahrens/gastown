@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
 // mapEnv is an environment in memory, for the harness's own tests.
@@ -99,6 +101,7 @@ func newFakeHarness(t *testing.T, env ...string) *fakeHarness {
 		tmuxSocketDir: func() string { return cwd },
 		ensureDolt:    func() error { return errors.New("fake: no Docker") },
 		terminateDolt: func() error { return nil },
+		startUnitTier: func(...unittier.Option) (*unittier.Run, error) { return nil, nil },
 		forbidden:     func(string) bool { return false },
 		stderr:        f.stderr,
 		tempDir:       t.TempDir(),

@@ -1,69 +1,17 @@
-// Package unittier checks, at the end of a package's unit tests, the unit
-// tier's rules that only a run can see: no goroutine a test started may still
-// be running when the tests end (docs/testing.md, "The rules").
-//
-// A package whose TestMain runs testutil.HermeticMain gets the check from the
-// harness. Every other package's unit-tier TestMain calls Main:
-//
-//	func TestMain(m *testing.M) {
-//		os.Exit(unittier.Main(m))
-//	}
-//
-// The package imports nothing from the module, so any package can use it,
-// including the ones testutil itself imports. TestUnitTierMain in
-// internal/testpolicy holds every package to one or the other. In the
-// integration tier (the integration build tag) the checks are off.
 package unittier
 
 import (
 	"fmt"
 	"io"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"testing"
 	"time"
 )
 
-// Main runs the tests and returns the exit code for os.Exit: m.Run's code,
-// forced to 1 when a goroutine outlived the tests.
-func Main(m *testing.M) int {
-	before := Snapshot()
-	return before.Check(m.Run(), os.Stderr)
-}
-
-// Goroutines is the set of goroutines running at a moment, taken by Snapshot
-// before the tests start. The zero value checks nothing.
-type Goroutines struct {
-	ids map[int]bool
-}
-
-// Snapshot records the goroutines running now: those that package init or
-// TestMain started before the tests, which Check does not blame on a test.
-func Snapshot() Goroutines {
-	gs := allGoroutines()
-	ids := make(map[int]bool, len(gs))
-	for _, g := range gs {
-		ids[g.id] = true
-	}
-	return Goroutines{ids: ids}
-}
-
-// Check reports to w every goroutine still running that the snapshot does
-// not hold, after giving stopped ones settle to exit, and returns code,
-// forced to 1 from 0 when there was any. It checks nothing in the
-// integration tier, or on the zero Goroutines.
-func (before Goroutines) Check(code int, w io.Writer) int {
-	if !enforced || before.ids == nil {
-		return code
-	}
-	return report(code, leaked(allGoroutines, before.ids, settle, time.Sleep), w)
-}
-
-// report writes leaks to w and returns code, forced to 1 from 0 when there
+// reportLeaks writes leaks to w and returns code, forced to 1 from 0 when there
 // is any.
-func report(code int, leaks []goroutine, w io.Writer) int {
+func reportLeaks(code int, leaks []goroutine, w io.Writer) int {
 	if len(leaks) == 0 {
 		return code
 	}
@@ -164,11 +112,6 @@ func stray(gs []goroutine, before map[int]bool) []goroutine {
 	}
 	return out
 }
-
-// settle is how long Check waits for goroutines a test stopped, but that have
-// not returned yet, to exit. A package with no stray goroutine pays nothing:
-// the first look returns.
-const settle = 2 * time.Second
 
 // leaked returns the goroutines that outlived the tests: those stray still
 // finds in dump after waiting up to settle for them to exit.

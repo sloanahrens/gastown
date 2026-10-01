@@ -8,7 +8,6 @@ internal/cmd/bd_helpers.go argv 1
 internal/cmd/beads_db_init_test.go argv 4
 internal/cmd/beads_routing_integration_test.go argv 2
 internal/cmd/convoy_bd.go BDRunner 1
-internal/cmd/convoy.go BDRunner 1
 internal/cmd/done_open_source_consumers_integration_test.go argv 1
 internal/cmd/done.go BDRunner 1
 internal/cmd/formula_cook.go BdCmd 1
@@ -21,19 +20,16 @@ internal/cmd/polecat_identity_reconcile.go BDRunner 1
 internal/cmd/polecat_identity.go argv 1
 internal/cmd/prime.go argv 1
 internal/cmd/role.go BDRunner 1
-internal/cmd/scheduler_epic.go BdCmd 1
 internal/cmd/scheduler_integration_test.go argv 9
 internal/cmd/scheduler_test_helpers_integration_test.go argv 9
 internal/cmd/show.go argv 1
 internal/cmd/sling_288_test.go BDRunner 1
-internal/cmd/sling_convoy.go BDRunner 1
 internal/cmd/sling_duplicate.go BDRunner 3
 internal/cmd/sling_formula.go BdCmd 4
 internal/cmd/sling_helpers.go BdCmd 2
 internal/cmd/sling_helpers.go BDRunner 1
 internal/cmd/sling_routing_integration_test.go BdCmd 1
 internal/cmd/source_validation.go BDRunner 2
-internal/cmd/tracking_relations.go BDRunner 2
 internal/cmdtree/gen-bd-tree/main.go argv 1
 internal/daemon/patrol_scan.go argv 1
 internal/deps/bd_handshake.go argv 1

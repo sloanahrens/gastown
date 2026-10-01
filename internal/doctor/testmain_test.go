@@ -14,7 +14,8 @@ import (
 // git through CheckContext.openGit, which the tests point at gitfake. The
 // harness scrubs GT_*/BD_* env, redirects HOME and the town root to a
 // sandbox, poisons the Dolt ports and fails the run if state leaks into a
-// live town.
+// live town. The unit tier still starts diskutil, find and which
+// (testutil.AllowTools, a baseline that only shrinks).
 func TestMain(m *testing.M) {
-	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
+	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit(), testutil.AllowTools("diskutil", "find", "which")))
 }

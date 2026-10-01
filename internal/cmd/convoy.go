@@ -418,7 +418,6 @@ func collectEpicChildren(epicID string) ([]string, error) {
 // command's decisions run with nothing spawned and no global swapped.
 type convoyCLI struct {
 	townRoot func() (string, error)
-	bd       beads.BDRunner // nil is the bd on PATH
 	// townDB opens the town database at townBeads (the town root); nil is
 	// bd pinned to its .beads.
 	townDB      func(townBeads string) convoyops.Store
@@ -629,7 +628,7 @@ func (c convoyCLI) create(opts convoyCreateOptions, args []string) error {
 	// Add 'tracks' relations for each tracked issue
 	trackedCount := 0
 	for _, issueID := range trackedIssues {
-		if err := addTrackingRelationVia(c.bd, townBeads, convoyID, issueID); err != nil {
+		if err := addTrackingRelationWith(c.db(townBeads), townBeads, convoyID, issueID); err != nil {
 			style.FprintWarning(c.warn, "couldn't track %s: %s", issueID, err)
 		} else {
 			trackedCount++
@@ -735,7 +734,7 @@ func (c convoyCLI) add(args []string) error {
 	// Add 'tracks' relations for each issue
 	var added []string
 	for _, issueID := range issuesToAdd {
-		if err := addTrackingRelationVia(c.bd, townBeads, convoyID, issueID); err != nil {
+		if err := addTrackingRelationWith(c.db(townBeads), townBeads, convoyID, issueID); err != nil {
 			style.FprintWarning(c.warn, "couldn't add %s: %s", issueID, err)
 		} else {
 			added = append(added, issueID)

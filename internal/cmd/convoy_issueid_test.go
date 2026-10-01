@@ -18,19 +18,14 @@ import (
 // can resolve, which held the convoy open forever.
 func TestConvoyCreate_ProseNameStaysAName(t *testing.T) {
 	t.Parallel()
-	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+	fx := newConvoyCLIFixture(t, "")
+	fx.seedIssues("om-1a2b", "om-3c4d", "om-5e6f")
 
 	if err := fx.c.create(convoyCreateOptions{}, []string{"om-gate coverage: om", "om-1a2b", "om-3c4d", "om-5e6f"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	var tracked []string
-	for _, line := range strings.Split(fx.bd.log(), "\n") {
-		if strings.HasPrefix(line, "dep add ") {
-			tracked = append(tracked, strings.Fields(line)[3])
-		}
-	}
-	if got, want := strings.Join(tracked, ","), "om-1a2b,om-3c4d,om-5e6f"; got != want {
+	if got, want := strings.Join(fx.tracked(t, "hq-cv-pqrst"), ","), "om-1a2b,om-3c4d,om-5e6f"; got != want {
 		t.Fatalf("tracked = %s, want %s", got, want)
 	}
 	if !strings.Contains(fx.out.String(), "om-gate coverage: om") {
@@ -44,7 +39,7 @@ func TestConvoyCreate_ProseNameStaysAName(t *testing.T) {
 // query can resolve.
 func TestConvoyCreate_RejectsNonBeadIDTarget(t *testing.T) {
 	t.Parallel()
-	fx := newConvoyCLIFixture(t, convoyWriteBD(""))
+	fx := newConvoyCLIFixture(t, "")
 
 	err := fx.c.create(convoyCreateOptions{}, []string{"test-convoy", "om-gate coverage: om"})
 	if err == nil {
