@@ -115,7 +115,7 @@ Gate behavior:
   scheduler and this command has no script interpreter (gt-o1z7)
 
 Examples:
-  gt plugin run github-sheriff          # parked plugin: prints instructions
+  gt plugin run <name>                  # parked plugin: prints instructions
   gt plugin run <name> --dry-run        # Show what would happen`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginRun,
