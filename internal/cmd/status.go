@@ -976,7 +976,7 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 	fmt.Fprintf(w, "%s\n\n", style.Dim.Render(status.Location))
 
 	// E-stop banner (if active)
-	addEstopToStatus(status.Location)
+	addEstopToStatus(w, status.Location)
 
 	// Paused-agent banner (gt-ahik): surface sanctioned pauses with reasons
 	addPausedToStatus(w, status.Location)

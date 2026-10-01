@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -265,6 +266,27 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	return resumeAgent(cmd.OutOrStdout(), townRoot, target, beadsAgentStates{townRoot: townRoot}, thawAgentSession)
+}
+
+// agentStates is the agent bead's agent_state mirror as gt agent resume reads
+// and writes it. beadsAgentStates is the real one; unit tests use a map.
+type agentStates interface {
+	read(beadID string) string
+	write(beadID, state string) error
+}
+
+type beadsAgentStates struct{ townRoot string }
+
+func (s beadsAgentStates) read(beadID string) string { return readAgentState(s.townRoot, beadID) }
+
+func (s beadsAgentStates) write(beadID, state string) error {
+	return beads.New(s.townRoot).ForAgentBead().UpdateAgentState(beadID, state)
+}
+
+// resumeAgent clears target's pause marker under townRoot, restores the bead
+// mirror through states and thaws the session through thaw.
+func resumeAgent(w io.Writer, townRoot string, target *agentAddr, states agentStates, thaw func(*agentAddr) (bool, error)) error {
 	role, name := target.roleAndName()
 	display := target.displayAddress(role, name)
 
@@ -281,19 +303,19 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 		// mirror is display-only and best-effort, so this can drift from the
 		// marker, which is long gone by the time anyone notices — minor
 		// finding on om kgx0). Nothing else clears it, so resume does.
-		if beads.AgentState(readAgentState(townRoot, target.BeadID)) == beads.AgentStatePaused {
-			if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStateIdle)); err != nil {
+		if beads.AgentState(states.read(target.BeadID)) == beads.AgentStatePaused {
+			if err := states.write(target.BeadID, string(beads.AgentStateIdle)); err != nil {
 				return fmt.Errorf("clearing stale agent_state=paused mirror on bead %s: %w", target.BeadID, err)
 			}
-			fmt.Printf("%s %s bead mirror was still agent_state=paused (no pause marker); cleared to idle\n",
+			fmt.Fprintf(w, "%s %s bead mirror was still agent_state=paused (no pause marker); cleared to idle\n",
 				style.Dim.Render("○"), display)
 			return nil
 		}
-		fmt.Printf("%s %s is not paused\n", style.Dim.Render("○"), display)
+		fmt.Fprintf(w, "%s %s is not paused\n", style.Dim.Render("○"), display)
 		return nil
 	}
 	if st != nil && st.Reason != "" {
-		fmt.Printf("  Was paused: %s\n", st.Reason)
+		fmt.Fprintf(w, "  Was paused: %s\n", st.Reason)
 	}
 
 	// 1. Clear the marker file (no-op if it is already gone).
@@ -309,21 +331,21 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 	if st != nil && st.PriorAgentState != "" {
 		priorState = st.PriorAgentState
 	}
-	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, priorState); err != nil {
+	if err := states.write(target.BeadID, priorState); err != nil {
 		style.PrintWarning("could not restore agent_state=%s on bead %s: %v", priorState, target.BeadID, err)
 	}
 
 	// 3. Thaw the session process group (SIGCONT). Best-effort.
-	thawed, terr := thawAgentSession(target)
+	thawed, terr := thaw(target)
 	if terr != nil {
 		style.PrintWarning("could not thaw session %s: %v (marker cleared — agent will run when next started)", target.SessionName(), terr)
 	}
 
-	fmt.Printf("%s %s resumed\n", style.Bold.Render("▶️"), display)
+	fmt.Fprintf(w, "%s %s resumed\n", style.Bold.Render("▶️"), display)
 	if thawed {
-		fmt.Printf("  Session: %s (thawed)\n", target.SessionName())
+		fmt.Fprintf(w, "  Session: %s (thawed)\n", target.SessionName())
 	} else {
-		fmt.Printf("  Session: %s\n", target.SessionName())
+		fmt.Fprintf(w, "  Session: %s\n", target.SessionName())
 	}
 	return nil
 }

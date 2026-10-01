@@ -45,8 +45,7 @@ func TestReadBeadsRuntimeConfigServerMetadata(t *testing.T) {
 }
 
 func TestReadBeadsRuntimeConfigDefaultServerAddr(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "32769")
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -74,8 +73,7 @@ func TestReadBeadsRuntimeConfigDefaultServerAddr(t *testing.T) {
 }
 
 func TestReadBeadsRuntimeConfigPortFileFallback(t *testing.T) {
-	t.Setenv("GT_DOLT_PORT", "32769")
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

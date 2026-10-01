@@ -383,7 +383,7 @@ func dispatchRigPictures(townRoot string) ([]dispatchRig, error) {
 			return nil, fmt.Errorf("counting ready work for %s: %w", name, err)
 		}
 		rig.Ready, rig.Urgent = ready, urgent
-		rig.ReadyMRs, rig.MRCeiling = rigMergeQueueDepth(rigPath, name)
+		rig.ReadyMRs, rig.MRCeiling = rigMergeQueueDepth(rigPath, name, newDispatchMRLister(rigPath))
 		rig.Backpressure = rig.ReadyMRs > rig.MRCeiling
 		rigs = append(rigs, rig)
 	}
@@ -420,7 +420,7 @@ func knownRigNames(townRoot string) ([]string, error) {
 // patrol exists to break, and produces it invisibly. A rig with no beads
 // database at all is not a failure — it has no ready work to report.
 func countActionableReady(rigPath string) (ready, urgent int, err error) {
-	issues, err := readyIssuesUnlimited(rigPath)
+	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -442,9 +442,8 @@ type readyBoard interface {
 }
 
 // readyBoardFor returns the bd client readyIssuesUnlimited reads a rig's
-// board through. It is a var so tests can serve a board of more than a page
-// without a live bd.
-var readyBoardFor = func(rigPath string) readyBoard {
+// board through.
+func readyBoardFor(rigPath string) readyBoard {
 	return beads.New(rigPath)
 }
 
@@ -457,12 +456,13 @@ var readyBoardFor = func(rigPath string) readyBoard {
 // of the check (gt-59o9). A truncated answer is an error, never a count.
 //
 // A rig with no beads database returns no issues: it is a rig that has never
-// been initialized, not a read failure.
-func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
+// been initialized, not a read failure. boardFor opens the rig's board
+// (readyBoardFor).
+func readyIssuesUnlimited(rigPath string, boardFor func(rigPath string) readyBoard) ([]*beads.Issue, error) {
 	if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
 		return nil, nil
 	}
-	issues, err := readyBoardFor(rigPath).ReadyAll()
+	issues, err := boardFor(rigPath).ReadyAll()
 	if err != nil {
 		return nil, fmt.Errorf("reading the ready board for %s: %w", rigPath, err)
 	}
@@ -573,12 +573,12 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 // guard's fail-open: a queue we cannot read is not evidence of a queue that is
 // full, and suppressing the nudge on a Dolt hiccup would silence the patrol
 // for the one reason it exists.
-func rigMergeQueueDepth(rigPath, rigName string) (ready, ceiling int) {
+func rigMergeQueueDepth(rigPath, rigName string, lister dispatchMRLister) (ready, ceiling int) {
 	ceiling = defaultDispatchReadyMRCeiling
 	if configured := rig.ResolveMergeQueueConfig(filepath.Dir(rigPath), rigName).GetMaxReadyForDispatch(); configured > 0 {
 		ceiling = configured
 	}
-	ready, err := countReadyToLand(newDispatchMRLister(rigPath), rigName)
+	ready, err := countReadyToLand(lister, rigName)
 	if err != nil {
 		return 0, ceiling
 	}

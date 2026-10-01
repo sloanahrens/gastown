@@ -482,7 +482,7 @@ func writeDeliberateStopMarker(townRoot, rigName, polecatName string) (bool, err
 	if polecatSessionParked(townRoot, rigName, polecatName) {
 		return false, nil
 	}
-	actor := agentActor()
+	actor := agentActor(os.Getenv)
 	if actor == "" {
 		actor = "human operator"
 	}

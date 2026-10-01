@@ -72,6 +72,7 @@ func TestBondFormulaDirectDoesNotRetryNonContentionFailure(t *testing.T) {
 }
 
 func TestBdSerializationFailure(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		cause string
@@ -102,6 +103,7 @@ func TestBdSerializationFailure(t *testing.T) {
 // attempt killed at bd's own deadline is a wedge, not contention, so its cause
 // text is never read (matchesTransientMarkers makes the same call).
 func TestBdContentionRetryable(t *testing.T) {
+	t.Parallel()
 	abort := "Error 1213 (40001): serialization failure: try restarting transaction"
 	tests := []struct {
 		name  string
@@ -128,6 +130,7 @@ func TestBdContentionRetryable(t *testing.T) {
 // A failed bond's cause is read from the machine envelope's typed error as well
 // as the legacy {"error": "..."} string.
 func TestBdJSONErrorMessage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		out  string
