@@ -678,7 +678,7 @@ case "$cmd" in
       exit 0
     fi
     echo 'Error: issue not found' >&2
-    exit 1
+    exit 20
     ;;
   list)
     printf '%%s\n' '[]'
