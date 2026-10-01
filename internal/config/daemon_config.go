@@ -51,6 +51,12 @@ type PatrolsConfig struct {
 	// rig's repository (internal/daemon/git_hygiene.go). On when absent.
 	GitHygiene *PatrolConfig `json:"git_hygiene,omitempty"`
 
+	// RebuildGT brings the installed gt binary in force from main when it
+	// falls behind (internal/daemon/rebuild_gt.go, was the rebuild-gt plugin).
+	// On when absent: a patrol that has to be switched on cannot prevent the
+	// staleness it exists for (gt-oqbw).
+	RebuildGT *PatrolConfig `json:"rebuild_gt,omitempty"`
+
 	// MainBranchTest is the deleted main_branch_test patrol's key
 	// (gt-v4ssj.4: the landing worker's post-landing run owns red main). It is
 	// accepted and ignored so a daemon.json that still carries it parses.

@@ -33,11 +33,12 @@ import (
 // internal/daemon, so the call cannot go the other way).
 //
 // Seat accounting counts every live polecat session plus the in-flight seat
-// claims other slings hold, whoever slung them. seat-refill nudges and the
-// mayor's slings both land in that count, so the ticker never pushes past a
-// cap another path already filled — it skips the tick instead. Turn
-// seat-refill off when the ticker is the town's only dispatcher, so the roster
-// is the operator's to read.
+// claims other slings hold, whoever slung them. The mayor's slings and every
+// other dispatch path land in that count, so the ticker never pushes past a
+// cap another one already filled — it skips the tick instead. The seat-refill
+// plugin kept a second copy of that roster in shell; it is deleted
+// (gt-4k3fj.8.6), so this one and the daemon's idle-seat check are the whole
+// picture.
 
 const (
 	specDispatchActor       = "daemon/spec-dispatch"

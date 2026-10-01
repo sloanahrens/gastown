@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`seat-refill` and `rebuild-gt` plugins** (gt-4k3fj.8.6) — the last two
+  dispatch/lifecycle-shaped `run.sh` plugins. `rebuild-gt` is now the daemon's
+  `rebuild_gt` job (below). `seat-refill` is deleted outright: the D4 spec
+  dispatcher (`gt spec dispatch`) already allocates a polecat seat per seat
+  class in Go with the in-flight seat claims counted (gt-t8q5), its own seat
+  model watched a retired local tier (`max_local` 0) and the interim sonnet
+  policy, and its per-seat empty episodes were a second copy of the pool's
+  accounting in shell — the copy that disagreed was the one that a nudge is
+  worse than silence for (gt-59o9). What it did that Go did not, the daemon's
+  idle-seat check now does: `gt daemon dispatch-check` counts the same
+  in-flight seat claims. The operator hand brake keeps its name
+  (`<town>/seat-refill.hold`); an operator's hold file is on disk under it.
+
+
 - **Dog molecule pours** (gt-4k3fj.8.1) — the daemon's dog jobs (`doctor_dog`,
   `wisp_reaper`, `jsonl_git_backup`, `compactor_dog`, `checkpoint_dog`,
   `mayor_dispatch`) and the Dolt health warnings no longer pour a `mol-dog-*`
@@ -44,6 +58,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go module.
 
 ### Added
+
+- **`rebuild_gt` daemon job** (gt-4k3fj.8.6) — brings the installed `gt`
+  binary in force from `main` when it falls behind and the town is quiet, the
+  job the deleted `rebuild-gt` plugin did. The daemon's own upgrade path does
+  not cover this: `checkUpgradeRestart` only restarts onto a binary something
+  else already installed, so a merged commit stayed inert until an operator
+  ran `make install` (gt-oqbw). The trigger is the script's, in Go: read
+  staleness in-process, escalate drift over 20 commits behind (and a count
+  that cannot be read at all — that is not "0 behind"), refuse a dirty
+  checkout or a checkout off `main`, fast-forward the source under
+  `install-gt.sh`'s flock, yield to a container-gate holder (waiting one out
+  after 30 minutes of a due binary), then run the town's one install path
+  `scripts/install-gt.sh --source rebuild-gt` and map its RESULT line. A
+  cycle that accomplished nothing — a busy gate, a lock another install
+  holds, `install-gt` exit 3 — retries on the next heartbeat instead of
+  spending the hour. The starvation and drift alarms survive under the same
+  fingerprints. Everything the script persisted to
+  `daemon/rebuild-gt-state.json` is in-memory now: the daemon is the process
+  that restarts to consume an install, so an episode that outlives it is
+  over. `gt plugin history rebuild-gt` has no successor; a cycle reads as one
+  `dog_cycle: rebuild_gt outcome=` line in `daemon/daemon.log`.
 
 - **`git_hygiene` daemon patrol** (gt-4k3fj.8.5) — every 12h (`patrols.git_hygiene`
   in `mayor/daemon.json`, on when absent) the daemon fetches with `--prune` in

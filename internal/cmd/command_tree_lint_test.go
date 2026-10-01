@@ -64,12 +64,15 @@ func TestCommandTokensResolve(t *testing.T) {
 	// does not read as gt. The dog-job conversion (gt-4k3fj.8.1/.8.5) deleted
 	// the compactor, dolt-backup, dolt-log-rotate, github-sheriff, git-hygiene,
 	// gitignore-reconcile, submodule-commit, dolt-archive and dolt-snapshots
-	// plugins and took plugins to 69. The one-client migration
+	// plugins and took plugins to 69. The dispatch/install conversion
+	// (gt-4k3fj.8.6) deleted seat-refill and rebuild-gt — the last two
+	// dispatch-shaped scripts — and took plugins to 5, tool-updater alone.
+	// The one-client migration
 	// (gt-7iwy0.4.1) keeps moving raw bd argv onto typed beads methods, which
 	// the scanner does not read; go was 34 after the handoff/hook/rollback move,
 	// 18 after the sling formula/duplicate/done move, and 17 after the
 	// scheduler-run leaf (gt-638go.9) deleted the daemon's `gt scheduler run`.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 35, "go": 17, "scripts": 22, "agent": 10}
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 3, "go": 17, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

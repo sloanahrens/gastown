@@ -936,13 +936,22 @@ func (d *Daemon) escalateAlert(key, source, message string) {
 // alarm that reports itself as raised when it never arrived is worse than no
 // alarm, because it closes the streak that would have retried.
 func (d *Daemon) escalateAlertErr(key, source, message string) error {
+	return d.escalateSeverityErr("HIGH", key, source, message)
+}
+
+// escalateSeverityErr is escalateAlertErr with the severity named by the
+// caller, for the producers whose conditions want an operator's attention
+// rather than the town stopping. The retries, the timeout logging and the
+// feed fallback are the same at every severity; only how loudly the town
+// reads the result differs.
+func (d *Daemon) escalateSeverityErr(severity, key, source, message string) error {
 	title := escalationTitle(source, message)
 
 	var lastErr error
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
 		err := d.notify().Escalate(ctx, notify.Escalation{
-			Severity:    "HIGH",
+			Severity:    severity,
 			Description: title,
 			Reason:      message,
 			Fingerprint: key,

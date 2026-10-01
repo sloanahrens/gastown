@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -182,6 +184,65 @@ func TestIsActionableReadyBead(t *testing.T) {
 				t.Errorf("isActionableReadyBead = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPoolSeatSessions_CountsInFlightClaims pins the half of the seat picture
+// the deleted seat-refill plugin covered (gt-4k3fj.8.6). A sling writes a seat
+// claim before its session exists; a seat picture built from live sessions
+// alone can name that seat free, and the pool's own admission path will refuse
+// the next sling into it — the "nudge that names room the next sling would
+// refuse" gt-59o9 calls worse than no nudge at all.
+func TestPoolSeatSessions_CountsInFlightClaims(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	lister := &fakeLister{
+		sessions: map[string]map[string]string{
+			"gt-live": {"GT_ROLE": "gastown/polecats/live", "GT_AGENT": "deepseek-flash"},
+		},
+		created: map[string]time.Time{"gt-live": time.Now()},
+	}
+	writeSeatClaim(t, townRoot, "4242-1", "deepseek-flash")
+
+	sessions, err := poolSeatSessions(lister, townRoot, nil)
+	if err != nil {
+		t.Fatalf("poolSeatSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %+v, want the live session and the claim", sessions)
+	}
+
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	if seats := poolSeatPicture(pool, sessions); seats.Occupied != 2 || seats.Free != 1 {
+		t.Errorf("seats = %+v, want the claimed seat counted (occupied 2, free 1)", seats)
+	}
+
+	// A claim on another seat does not occupy this one: the count is per agent,
+	// the way the pool's admission counts it.
+	other := t.TempDir()
+	writeSeatClaim(t, other, "4242-2", "claude-sonnet")
+	otherSessions, err := poolSeatSessions(lister, other, nil)
+	if err != nil {
+		t.Fatalf("poolSeatSessions: %v", err)
+	}
+	if seats := poolSeatPicture(pool, otherSessions); seats.Occupied != 1 || seats.Free != 2 {
+		t.Errorf("seats = %+v, want a claim on another agent left out (occupied 1, free 2)", seats)
+	}
+}
+
+// writeSeatClaim stages one in-flight seat claim the way a sling leaves it.
+func writeSeatClaim(t *testing.T, townRoot, id, agent string) {
+	t.Helper()
+	dir := poolSeatClaimDir(townRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(poolSeatClaim{ID: id, PID: 4242, Agent: agent, CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

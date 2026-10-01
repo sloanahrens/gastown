@@ -102,11 +102,19 @@ In `mayor/daemon.json`:
 
 Then restart the daemon.
 
-## seat-refill
+## The roster this ticker shares
 
 The ticker counts every polecat, whoever slung it, so it never exceeds a cap
-that seat-refill nudges or mayor slings already filled. It skips the tick
-instead. On 2026-09-30 seat-refill filled four flash seats on its own and the
-operator's slings were refused. When the ticker is the town's dispatcher, turn
-seat-refill off so the roster is readable: disable the seat-refill plugin. Do not park seat-refill with its hold file, because the
-ticker honors that file too and would stop as well.
+another dispatcher already filled: it skips the tick instead. That was the
+`seat-refill` plugin's job too — and the plugin is deleted (gt-4k3fj.8.6), for
+two reasons worth keeping in view. It filled four flash seats on its own on
+2026-09-30 and the operator's slings were refused, and its per-seat empty
+episodes were a second copy of the pool's accounting in shell. The Go
+dispatchers count one roster now: live sessions plus the in-flight seat claims
+a sling writes before its session exists (gt-t8q5), which is also what the
+daemon's idle-seat check reports (`internal/cmd/daemon_dispatch.go`).
+
+The operator hand brake is unchanged and still named `seat-refill.hold`:
+`<town>/seat-refill.hold` stops this tick and every other automatic dispatcher
+(`internal/dispatch/hold.go`). Do not rename it — an operator's hold file is
+on disk under that name.

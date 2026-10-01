@@ -57,10 +57,10 @@ E2E_BUILD_RETRIES ?= 1
 E2E_RUN_RETRIES ?= 1
 
 # Get version info for ldflags.
-# Dirty detection is aligned with the rebuild-gt plugin's guard (excludes
+# Dirty detection is aligned with the rebuild_gt job's guard (excludes
 # .beads/, whose config.yaml churns from bd's own writes and isn't part of
 # what 'make build' produces) — otherwise every build stamps '-dirty' even
-# when the tree the guard considers clean. See plugins/rebuild-gt/run.sh.
+# when the tree the guard considers clean. See internal/daemon/rebuild_gt.go.
 GIT_DESCRIBE := $(shell git describe --tags --always 2>/dev/null)
 GIT_DIRTY := $(shell git status --porcelain --untracked-files=no -- . ':(exclude).beads' 2>/dev/null)
 ifeq ($(GIT_DESCRIBE),)
@@ -369,13 +369,7 @@ test-makefile:
 	bash scripts/install-gt_test.sh
 	bash -n scripts/uninstall-gt.sh
 	bash scripts/uninstall-gt_test.sh
-	bash -n plugins/rebuild-gt/run.sh
-	bash -n plugins/rebuild-gt/run_test.sh
-	bash plugins/rebuild-gt/run_test.sh
-	bash -n plugins/seat-refill/run.sh
-	bash -n plugins/seat-refill/run_test.sh
-	bash plugins/seat-refill/run_test.sh
-	bash -n scripts/docs-lint.sh
+	bash scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
 	bash -n scripts/repo-guards.sh
 	bash scripts/repo-guards_test.sh

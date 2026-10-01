@@ -89,8 +89,8 @@ var pluginShowCmd = &cobra.Command{
 Displays the plugin's configuration, gate settings, and instructions.
 
 Examples:
-  gt plugin show rebuild-gt
-  gt plugin show rebuild-gt --json`,
+  gt plugin show tool-updater
+  gt plugin show tool-updater --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginShow,
 }
@@ -157,9 +157,9 @@ var pluginHistoryCmd = &cobra.Command{
 Queries ephemeral beads (wisps) that record plugin runs.
 
 Examples:
-  gt plugin history rebuild-gt
-  gt plugin history rebuild-gt --json
-  gt plugin history rebuild-gt --limit 20`,
+  gt plugin history tool-updater
+  gt plugin history tool-updater --json
+  gt plugin history tool-updater --limit 20`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginHistory,
 }
@@ -682,7 +682,8 @@ func (r pluginSyncRun) run() error {
 
 // reportProtectedPlugins lists plugins the sync left untouched because their
 // runtime copy holds edits the source repo lacks, and returns an error so
-// callers (make install, rebuild-gt) see the drift instead of a success line.
+// callers (make install, the daemon's rebuild_gt job) see the drift
+// instead of a success line.
 func reportProtectedPlugins(errOut io.Writer, protected map[string][]string) error {
 	if len(protected) == 0 {
 		return nil

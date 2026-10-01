@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -268,7 +270,7 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 
 	var sessions []poolSession
 	if settings.PolecatPool != nil && settings.PolecatPool.OverflowAgent != "" {
-		sessions, err = listPolecatSessions(newPoolSessionLister(), townRoot)
+		sessions, err = poolSeatSessions(newPoolSessionLister(), townRoot, poolDispositionFor(townRoot))
 		if err != nil {
 			return dispatchSeats{}, fmt.Errorf("listing polecat sessions for dispatch seats: %w", err)
 		}
@@ -291,6 +293,44 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 	default:
 		pool.Source = pool.Source + "+" + scheduled.Source
 		return pool, nil
+	}
+}
+
+// poolSeatSessions lists the pool's occupants: the live polecat sessions, plus
+// the in-flight seat claims a sling writes before its session exists (gt-t8q5).
+//
+// Both belong in the count. The pool's own admission path counts them
+// (choosePoolAgent), so a picture taken from live sessions alone can name a
+// seat free that the very next sling refuses — and a nudge that names room the
+// next sling refuses is worse than no nudge, because it spends the mayor's
+// attention to produce a refusal (gt-59o9). This is the half the deleted
+// seat-refill plugin covered (gt-4k3fj.8.6); the spec dispatcher already
+// merges the claims the same way (spec.go's Roster).
+//
+// disposition is the polecat-state read listPolecatSessions would build for
+// townRoot; a caller with no town to read (a test) passes nil.
+func poolSeatSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc) ([]poolSession, error) {
+	sessions, err := listPolecatSessionsWith(t, disposition, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	claims, err := poolSeatClaimSessions(townRoot, "")
+	if err != nil {
+		// A claim set that cannot be read is not an empty claim set: reading it
+		// as one is what makes the picture lie (gt-t8q5).
+		return nil, err
+	}
+	return append(sessions, claims...), nil
+}
+
+// poolDispositionFor is the polecat-state read a caller in townRoot wants, or
+// nil when there is no town to read.
+func poolDispositionFor(townRoot string) polecatDispositionFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+		return poolPolecatDisposition(townRoot, rigName, polecatName)
 	}
 }
 
@@ -550,8 +590,8 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 	}
 	// Work the operator reserved is not the mayor's to sling: naming one here
 	// is what sends the mayor into a sling that refuses (gt-21pl0). The rule is
-	// the convoy feeders' own, so this check and seat-refill's draw the same
-	// line the sling guard does.
+	// the convoy feeders' own, so this check draws the same line the sling
+	// guard does.
 	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
 		return false
 	}
