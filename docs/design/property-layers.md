@@ -324,14 +324,10 @@ SYSTEM LAYER:   Embedded formula (compiled in)
                         │ if overlay exists
                         ▼
 TOWN LAYER:     ~/gt/formula-overlays/<formula>.toml
-                        │ rig replaces town entirely
-                        ▼
-RIG LAYER:      ~/gt/<rig>/formula-overlays/<formula>.toml
 ```
 
-Unlike directives, overlays use **full replacement** at the rig level — if a
-rig overlay exists, the town overlay is ignored entirely. This prevents
-conflicting step modifications from merging unpredictably.
+Unlike directives, overlays have no rig layer: there is one overlay dir
+(gt-fd2cu.3).
 
 ### Precedence Summary
 

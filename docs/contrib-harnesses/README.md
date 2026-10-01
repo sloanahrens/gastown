@@ -5,8 +5,8 @@ contributors and operators can drop into their own Gas Town setup to customize
 agent behavior — without patching the framework.
 
 These examples are not active by default. They are starting points you copy
-into your own `~/gt/<rig>/directives/` or `~/gt/<rig>/formula-overlays/`
-directory and adapt to your rig's needs.
+into your own `~/gt/<rig>/directives/` or `~/gt/formula-overlays/`
+directory and adapt to your needs.
 
 See [`docs/design/directives-and-overlays.md`](../design/directives-and-overlays.md)
 for the design of the extension surface (how directives and overlays are
