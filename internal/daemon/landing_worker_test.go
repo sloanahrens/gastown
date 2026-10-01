@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -319,11 +320,9 @@ func TestLandingWorkerPassesAtStart(t *testing.T) {
 	passed := make(chan struct{})
 	pass := func(context.Context) landworker.Report { close(passed); return landworker.Report{} }
 	go d.landingWorkerLoop("testrig", time.Hour, pass)
-	select {
-	case <-passed:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the first pass never ran: the worker waited out its interval")
-	}
+	// The interval is an hour: a worker that waited it out would never pass,
+	// and the test binary's timeout reports that with every stack.
+	<-passed
 }
 
 // gt-fzwcd: the pass that was in flight when the restart went pending is the
@@ -343,11 +342,9 @@ func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
 	// The heartbeat drains the workers while this pass is in flight.
 	d.upgradeRestartPending.Store(true)
 	close(release)
-	select {
-	case <-d.landingDrained():
-	case <-time.After(30 * time.Second):
-		t.Fatal("a pass that ended with a restart pending did not wake the run loop")
-	}
+	// Never woken = the run loop restarts only at the next heartbeat; the
+	// test binary's timeout reports that.
+	<-d.landingDrained()
 }
 
 // A pass ending with no restart pending must stay silent: a wake per pass
@@ -355,11 +352,23 @@ func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
 func TestLandingWorkerDoesNotWakeTheRunLoopWithoutAPendingRestart(t *testing.T) {
 	t.Parallel()
 	d := landingWorkerDaemon(t)
-	pass := func(context.Context) landworker.Report { return landworker.Report{} }
-	go d.landingWorkerLoop("testrig", time.Hour, pass)
+	// The loop handles one pass's end before it starts the next, so once the
+	// second pass has started, a wake for the first would already be sent.
+	second, hold := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	var calls atomic.Int32
+	pass := func(context.Context) landworker.Report {
+		if calls.Add(1) == 2 {
+			close(second)
+			<-hold
+		}
+		return landworker.Report{}
+	}
+	go d.landingWorkerLoop("testrig", time.Nanosecond, pass)
+	<-second
 	select {
 	case <-d.landingDrained():
 		t.Fatal("woke the run loop with no restart pending")
-	case <-time.After(2 * time.Second):
+	default:
 	}
 }
