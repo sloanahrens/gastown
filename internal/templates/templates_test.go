@@ -465,6 +465,30 @@ func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
 	}
 }
 
+// TestRenderLaunchdPlist_StandardProcessType guards gt-2ycne. launchd's
+// ProcessType=Background puts the daemon and every child it spawns (landing
+// gates, post-land gates, plugin runs) in darwinbg: efficiency cores only, CPU
+// and I/O throttled whenever the host is busy. A landing gate that takes ~100s
+// from a shell took 8-15 minutes under the daemon (priority 4, linkers idle at
+// 0% CPU for 30-50s). The daemon does foreground work for the whole town, so
+// it must run as a Standard job.
+func TestRenderLaunchdPlist_StandardProcessType(t *testing.T) {
+	t.Parallel()
+	output, err := renderLaunchdPlist(SupervisorData{
+		GTPath:   "/usr/local/bin/gt",
+		TownRoot: "/test/town",
+	})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	if strings.Contains(output, "<string>Background</string>") {
+		t.Errorf("plist runs the daemon as a Background process; its landing gates inherit darwinbg throttling (gt-2ycne):\n%s", output)
+	}
+	if !strings.Contains(output, "<key>ProcessType</key>\n    <string>Standard</string>") {
+		t.Errorf("plist must set ProcessType Standard explicitly (gt-2ycne):\n%s", output)
+	}
+}
+
 // TestRenderLaunchdPlist_ExitTimeOut verifies ExitTimeOutSeconds renders as
 // launchd's ExitTimeOut key, and that a zero value (the default before a
 // caller opts in) omits the key entirely rather than writing <integer>0</integer>,
@@ -536,8 +560,8 @@ func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
 	if !strings.Contains(content, "<key>ExitTimeOut</key>") || !strings.Contains(content, "<integer>55</integer>") {
 		t.Errorf("repair does not carry ExitTimeOut=55:\n%s", content)
 	}
-	if stripped := withExitTimeOutStripped(content); stripped != renderedPlist(t, town, 0) {
-		t.Errorf("repair changed something other than ExitTimeOut:\n%s", content)
+	if content != renderedPlist(t, town, 55*time.Second) {
+		t.Errorf("repair is not the current rendering (changed something other than ExitTimeOut):\n%s", content)
 	}
 }
 
@@ -557,6 +581,33 @@ func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
 	}
 	if !strings.Contains(content, "<integer>55</integer>") {
 		t.Errorf("repair does not carry the current ExitTimeOut:\n%s", content)
+	}
+}
+
+// TestSupervisorFileRepair_ReplacesABackgroundProcessType is gt-2ycne: every
+// plist installed before the fix says ProcessType Background, which throttles
+// the daemon and every landing gate it runs. The value comes from the template,
+// so it follows the binary like ExitTimeOut does, and an installed file that
+// differs only there is repaired to Standard.
+func TestSupervisorFileRepair_ReplacesABackgroundProcessType(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	current := renderedPlist(t, town, 55*time.Second)
+	old := strings.Replace(current, "<string>Standard</string>", "<string>Background</string>", 1)
+	if old == current {
+		t.Fatal("test setup: rendered plist has no Standard ProcessType to replace")
+	}
+	path := writeInstalledPlist(t, town, old)
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if !repair {
+		t.Fatal("SupervisorFileRepair() did not repair a plist whose ProcessType is Background")
+	}
+	if content != current {
+		t.Errorf("repair is not the current rendering:\n%s", content)
 	}
 }
 
