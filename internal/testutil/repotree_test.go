@@ -75,7 +75,7 @@ func loadRepoTree(root string) (*repoTree, error) {
 		case "vendor", ".git", "testdata", "node_modules":
 			return filepath.SkipDir
 		}
-		// A nested module (plugins/dolt-snapshots) has its own import paths;
+		// A nested module (one under plugins/, say) has its own import paths;
 		// resolving its packages against this module's prefix would be wrong.
 		if path != root {
 			if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {

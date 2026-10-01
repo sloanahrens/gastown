@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (gt-fcxe9.13). `plugins/rig-list-consumers/run_test.sh`, which tested the
   three scripts, goes with them.
 
+- **`dolt-archive` and `dolt-snapshots` plugins** (gt-4k3fj.8.5) —
+  `dolt-archive` exported each database's `issues` table hourly and pushed it
+  to `~/gt/.dolt-archive/git`, the same repository and remote the daemon's
+  `jsonl_git_backup` job pushes every 15 minutes with more tables, scrubbing
+  and spike checks; the Dolt databases themselves are covered by the nightly
+  backup in `scheduled_maintenance`. `dolt-snapshots` tagged databases at
+  convoy events through an `event` gate that nothing dispatches (gt-qehkn): it
+  has no run receipt and `hq` has no tags. It was the repository's only nested
+  Go module.
+
 ### Added
 
 - **`git_hygiene` daemon patrol** (gt-4k3fj.8.5) — every 12h (`patrols.git_hygiene`

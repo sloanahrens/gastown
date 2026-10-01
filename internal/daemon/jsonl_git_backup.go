@@ -708,9 +708,8 @@ func (d *Daemon) gitPackSizeSummary(gitRepo string) string {
 }
 
 // discoverJsonlBackupDatabases lists production database directories under
-// dataDir, for use when JsonlGitBackupConfig.Databases is empty. Mirrors
-// dolt-archive/run.sh's auto-discovery exclusions (test/scratch DB prefixes)
-// and additionally requires a real `.dolt` subdirectory so stray non-database
+// dataDir, for use when JsonlGitBackupConfig.Databases is empty. It skips
+// test/scratch DB prefixes (internal/testdb) and requires a real `.dolt` subdirectory so stray non-database
 // entries in dataDir (config files, dropped-database housekeeping dirs) are
 // never mistaken for a production database.
 func discoverJsonlBackupDatabases(dataDir string) []string {

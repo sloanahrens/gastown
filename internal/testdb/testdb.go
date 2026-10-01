@@ -4,8 +4,7 @@
 // Test code mints these names; orphan cleanup, the reaper, the JSONL backup
 // and gt dolt's migrate walk skip or remove them. The list used to live in
 // seven copies that disagreed. Every Go caller in this module imports this
-// package; TestOneDefinition fails on a new copy. plugins/dolt-snapshots is a
-// separate module and keeps a copy that TestPluginCopyMatches holds equal.
+// package; TestOneDefinition fails on a new copy.
 //
 // It is a leaf package with no gastown imports, so anything can use it.
 package testdb
