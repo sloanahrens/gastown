@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dog_cycle_outcome` feed event when a step failed. The six `mol-dog-*`
   formulas and the pour-failure escalation are gone.
 
+- **`dolt-log-rotate` and `github-sheriff` plugins** (gt-4k3fj.8.1) — the
+  daemon heartbeat's `log-rotation` step already rotates `daemon/dolt.log`
+  (and the other Dolt server logs) at 100MB keeping three copies, so the 6h
+  script duplicated it. `github-sheriff` was a parked plugin.md with no
+  script, for a town that merges through GitHub pull requests.
+
 ### Added
 
 - **Nightly Dolt backup in the maintenance window** (gt-8z769.5) — before its
