@@ -368,4 +368,3 @@ func TestExecScheduledSlingRunner_CreatesAndClosesRunBeads(t *testing.T) {
 		t.Errorf("closed run bead: status %q reason %q", is.Status, is.CloseReason)
 	}
 }
-
