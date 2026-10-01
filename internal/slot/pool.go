@@ -313,7 +313,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 	// holding ANY slot of this town, doing the same role's work, does not
 	// compete with its ancestor. A first-class holder never takes it.
 	if !firstClass {
-		if m, ok := g.reentrantHolder(); ok && m.grants(townRoot, role, g.pid) {
+		if m, ok := g.reentrantHolder(townRoot); ok && m.grants(townRoot, role, g.pid) {
 			return &Handle{gate: g, townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
 		}
 	}
@@ -369,7 +369,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		})
 		// Both acquire paths arm the marker for their own descendants; only
 		// the fast path differs between them (see AcquirePoolReal).
-		g.env.Setenv(ReentrantEnvVar, reentrantEnvValue(townRoot, i, role, g.pid))
+		armReentrant(g.env, townRoot, i, role, g.pid)
 		if err := recordWaitResult(townRoot, role, i, g.pid, g.clock.Now(), info); err != nil {
 			fmt.Fprintf(g.probeOut, "gt slot: recording slot acquisition in history: %v\n", err)
 		}
@@ -527,7 +527,7 @@ func timeoutError(timeout time.Duration, info waitInfo) error {
 // names. A marker outlives its hold in every process spawned while the hold
 // was active (gt-off9), so the marker alone is not enough.
 func (g *Gate) underGateHold(townRoot string) bool {
-	m, ok := g.reentrantHolder()
+	m, ok := g.reentrantHolder(townRoot)
 	if !ok || !m.validAncestor(townRoot, g.pid) || !IsGateRole(m.role) {
 		return false
 	}

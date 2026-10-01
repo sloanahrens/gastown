@@ -180,13 +180,15 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return slotRun(cmd.OutOrStdout(), townRoot, args, os.Getenv("PATH"), os.Environ())
+	return slotRun(cmd.OutOrStdout(), townRoot, args, os.Getenv("PATH"), os.Environ)
 }
 
 // slotRun is gt slot run in townRoot: it validates args, takes the gate, and
-// runs the command, reporting to out. ambientPath and environ are this
-// process's PATH and environment, which the child inherits.
-func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, environ []string) error {
+// runs the command, reporting to out. ambientPath is this process's PATH, and
+// environ reads its environment, which the child inherits: it is read after
+// the slot is taken, so the child carries the reentrant marker the hold armed
+// (slot.ReentrantEnvVar) and a wrap nested in it rides the hold (gt-tuiy).
+func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, environ func() []string) error {
 	role := resolveSlotRunRole(slotRunRole, townRoot, slot.InheritedRole)
 
 	// Resolve and validate the command before taking the slot: the gate is the
@@ -221,7 +223,7 @@ func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, 
 	}
 	sub := slotChildCommand(program, cmdArgs, niceWrapper(niceness))
 	if len(envAssigns) > 0 {
-		sub.Env = slotRunEnv(environ, envAssigns)
+		sub.Env = slotRunEnv(environ(), envAssigns)
 	}
 	sub.Stdin = os.Stdin
 	sub.Stdout = os.Stdout
