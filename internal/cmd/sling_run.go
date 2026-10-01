@@ -334,8 +334,6 @@ func setBDAutoCommitOff() (restore func()) {
 // unhookFromPreviousOwner sets a force-reassigned bead back to open with no
 // assignee.
 func unhookFromPreviousOwner(townRoot, beadID string) error {
-	return BdCmd("update", beadID, "--status=open", "--assignee=").
-		Dir(beads.ResolveHookDir(townRoot, beadID, "")).
-		WithAutoCommit().
-		Run()
+	open, unassigned := string(beads.StatusOpen), ""
+	return pinnedBd(beads.ResolveHookDir(townRoot, beadID, "")).Update(beadID, beads.UpdateOptions{Status: &open, Assignee: &unassigned})
 }

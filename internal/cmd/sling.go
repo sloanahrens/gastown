@@ -1365,10 +1365,8 @@ func restorePinnedBead(townRoot, beadID, assignee string) {
 		return
 	}
 	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	if err := BdCmd("update", beadID, "--status=pinned", "--assignee="+assignee).
-		Dir(dir).
-		WithAutoCommit().
-		Run(); err != nil {
+	pinned := beads.StatusPinned
+	if err := pinnedBd(dir).Update(beadID, beads.UpdateOptions{Status: &pinned, Assignee: &assignee}); err != nil {
 		fmt.Printf("  %s Could not restore pinned state for bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
 	} else {
 		fmt.Printf("  %s Restored pinned state for bead %s\n", style.Dim.Render("○"), beadID)
