@@ -585,10 +585,6 @@ func TestMaintenanceQuiet(t *testing.T) {
 	}{
 		{"all clear", func(*Daemon) {}, nil, nil, true, ""},
 		{"compactor running", func(d *Daemon) { d.compactorDogRunning = true }, nil, nil, false, "daemon"},
-		{"main branch test waiting on a slot", func(d *Daemon) {
-			d.mainBranchTestRunning.Store(true)
-			d.mainBranchTestWaitingSlot.Store(true)
-		}, nil, nil, false, "main_branch_test"},
 		{"gate slot held", func(*Daemon) {},
 			func(string) ([]string, error) { return []string{"gastown/refinery"}, nil }, nil, false, "gastown/refinery"},
 		{"slot probe fails", func(*Daemon) {},

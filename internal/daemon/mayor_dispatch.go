@@ -67,7 +67,7 @@ type dispatchCheckResult struct {
 // triggerMayorDispatch runs one idle-seat cycle on its own goroutine. The check
 // shells out (a subprocess that reads Dolt and tmux) and then nudges, which can
 // each take tens of seconds; running either inline would hold the tick loop.
-// Same shape as triggerMainBranchTests (gt-uvxy, gt-59o9).
+// Same shape as the other background patrols (gt-uvxy, gt-59o9).
 //
 // The ticker that drives this call is a check cadence, not a run cadence: an
 // in-process ticker resets its countdown on every daemon restart, so due-ness

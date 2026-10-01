@@ -96,12 +96,11 @@ func TestClearAlerts_NoKeysIsANoOp(t *testing.T) {
 func TestAlertKeysAreDistinctAndNonEmpty(t *testing.T) {
 	t.Parallel()
 	keys := map[string]string{
-		"alertKeyMainBranchTest": alertKeyMainBranchTest,
-		"alertKeyJSONLInit":      alertKeyJSONLInit,
-		"alertKeyJSONLNoDBs":     alertKeyJSONLNoDBs,
-		"alertKeyJSONLScrub":     alertKeyJSONLScrub,
-		"alertKeyJSONLSpike":     alertKeyJSONLSpike,
-		"alertKeyJSONLPush":      alertKeyJSONLPush,
+		"alertKeyJSONLInit":  alertKeyJSONLInit,
+		"alertKeyJSONLNoDBs": alertKeyJSONLNoDBs,
+		"alertKeyJSONLScrub": alertKeyJSONLScrub,
+		"alertKeyJSONLSpike": alertKeyJSONLSpike,
+		"alertKeyJSONLPush":  alertKeyJSONLPush,
 	}
 
 	seen := make(map[string]string, len(keys))

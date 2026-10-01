@@ -120,7 +120,6 @@ type (
 	CompactorDogConfig         = agentconfig.CompactorDogConfig
 	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
-	MainBranchTestConfig       = agentconfig.MainBranchTestConfig
 	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
@@ -222,12 +221,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
-	}
-	if patrol == "main_branch_test" {
-		if config == nil || config.Patrols == nil || config.Patrols.MainBranchTest == nil {
-			return false
-		}
-		return config.Patrols.MainBranchTest.Enabled
 	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).

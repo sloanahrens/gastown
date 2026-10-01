@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -159,7 +160,7 @@ func landingWorkerRigs(config *DaemonPatrolConfig, known []string) []string {
 	}
 	var out []string
 	for _, r := range known {
-		if sliceContains(c.Rigs, r) {
+		if slices.Contains(c.Rigs, r) {
 			out = append(out, r)
 		}
 	}

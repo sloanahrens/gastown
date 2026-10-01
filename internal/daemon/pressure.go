@@ -134,3 +134,14 @@ func loadAverage1() float64 {
 	_, _ = fmt.Sscanf(string(data), "%f", &load1)
 	return load1
 }
+
+// EstimateLoad1 gives callers outside this package the raw 1-minute load
+// average, one instant sysctl/proc read. It is not normalized by core count:
+// macOS loadavg counts processes in uninterruptible wait (disk/IO), not just
+// CPU-runnable ones, so on a many-core host with bursty non-CPU load (e.g. a
+// Dolt server) load1/NumCPU reports "busy" long before the CPU actually is.
+// Gates that need to match the operator's own "don't retry above load1 60"
+// rule of thumb read this directly instead (gt-e6xh).
+func EstimateLoad1() float64 {
+	return loadAverage1()
+}

@@ -352,8 +352,8 @@ next interval treats the database as never gc'd and gc's it again if it is
 still over `gc_min_bytes`.
 Eligible databases run smallest first, one at a time, each bounded by 10
 minutes. Before each database the patrol re-checks a quiet-window guard: the
-daemon's upgrade-idle predicate, no `main_branch_test` (even one waiting for a
-slot), no container-gate slot or in-flight marker held by anyone, and no
+daemon's upgrade-idle predicate, no container-gate slot or in-flight marker
+held by anyone, and no
 polecat with a fresh `working` heartbeat. If the town is busy it logs why and
 stops; the next 5-minute tick in the window retries, and databases already
 gc'd have fresh baselines so they drop out. A gc error stops the run, logs,

@@ -1964,7 +1964,7 @@ func wholeRepoArgFollows(tokens []string, idx int) bool {
 // load-average sample (one instant sysctl/proc read, no subprocess sampling
 // loop) rather than shelling out to
 // `top` for several seconds on every suite-start command — the same
-// mechanism that already powers the main_branch_test patrol's gate
+// mechanism the deleted main_branch_test patrol's gate used
 // (gt-f57o), read unnormalized so a host whose load comes from non-CPU
 // (uninterruptible-wait) contention isn't misjudged as CPU-saturated
 // (gt-e6xh).
