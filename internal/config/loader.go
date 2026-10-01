@@ -64,14 +64,26 @@ func SaveTownConfig(path string, config *TownConfig) error {
 		return err
 	}
 
-	return WriteConfigJSON(path, config, 0600)
+	return UpdateConfigJSON(path, 0o600, func(cur *TownConfig, _ bool) error {
+		registry, overseer := cur.Registry, cur.Overseer
+		*cur = *config
+		// The sections are written through their own paths (layout.go);
+		// a TownConfig read before gt config migrate must not drop them.
+		if cur.Registry == nil {
+			cur.Registry = registry
+		}
+		if cur.Overseer == nil {
+			cur.Overseer = overseer
+		}
+		return nil
+	})
 }
 
 // LoadRigsConfig loads and validates a rigs registry file. Every writer is
 // atomic (WriteConfigJSON), so a file that does not parse is damage and is
 // reported, not retried.
 func LoadRigsConfig(path string) (*RigsConfig, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
+	data, label, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
@@ -80,7 +92,7 @@ func LoadRigsConfig(path string) (*RigsConfig, error) {
 	}
 
 	var config RigsConfig
-	if err := DecodeJSONFile(path, data, &config); err != nil {
+	if err := DecodeJSONFile(label, data, &config); err != nil {
 		return nil, err
 	}
 
@@ -406,7 +418,7 @@ func DaemonPatrolConfigPath(townRoot string) string {
 
 // LoadDaemonPatrolConfig loads and validates a daemon patrol config file.
 func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	data, label, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
@@ -415,7 +427,7 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 	}
 
 	var config DaemonPatrolConfig
-	if err := DecodeJSONFile(path, data, &config); err != nil {
+	if err := DecodeJSONFile(label, data, &config); err != nil {
 		return nil, err
 	}
 
@@ -729,7 +741,19 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 	}
 
 	// 0600 for a new file: agent presets carry API tokens until gt-y3pgh.5.
-	return WriteConfigJSON(path, settings, 0o600)
+	return UpdateConfigJSON(path, 0o600, func(cur *TownSettings, _ bool) error {
+		daemon, escalation := cur.Daemon, cur.Escalation
+		*cur = *settings
+		// The sections are written through their own paths (layout.go);
+		// settings read before gt config migrate must not drop them.
+		if cur.Daemon == nil {
+			cur.Daemon = daemon
+		}
+		if cur.Escalation == nil {
+			cur.Escalation = escalation
+		}
+		return nil
+	})
 }
 
 // ResolveAgentConfig resolves the agent configuration for a rig.
@@ -2303,7 +2327,7 @@ func EscalationConfigPath(townRoot string) string {
 
 // LoadEscalationConfig loads and validates an escalation configuration file.
 func LoadEscalationConfig(path string) (*EscalationConfig, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
+	data, label, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
@@ -2312,7 +2336,7 @@ func LoadEscalationConfig(path string) (*EscalationConfig, error) {
 	}
 
 	var config EscalationConfig
-	if err := DecodeJSONFile(path, data, &config); err != nil {
+	if err := DecodeJSONFile(label, data, &config); err != nil {
 		return nil, err
 	}
 

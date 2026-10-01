@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -285,5 +286,53 @@ func TestTownJSONRejectsNonPortDolt(t *testing.T) {
 	write(t, root, FileTown, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":0}}`)
 	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "dolt.port") {
 		t.Fatalf("Load(dolt.port 0) = %v, want a dolt.port error", err)
+	}
+}
+
+// TestLoadReadsTheTwoFileLayout: after gt config migrate the kernel reads
+// the same town from mayor/town.json and settings/config.json alone.
+func TestLoadReadsTheTwoFileLayout(t *testing.T) {
+	t.Parallel()
+	root := copyLiveTown(t)
+	before, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.MigrateLayout(root); err != nil {
+		t.Fatalf("MigrateLayout = %v", err)
+	}
+	for _, f := range []string{FileRigs, FileDaemon} {
+		if _, err := os.Stat(filepath.Join(root, f)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived the migration (%v)", f, err)
+		}
+	}
+	after, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load(two-file town) = %v", err)
+	}
+	if got, want := strings.Join(after.RigNames(), ","), strings.Join(before.RigNames(), ","); got != want {
+		t.Errorf("RigNames = %s, want %s", got, want)
+	}
+	if got, want := after.RigPrefixes(), before.RigPrefixes(); !reflect.DeepEqual(got, want) {
+		t.Errorf("RigPrefixes = %v, want %v", got, want)
+	}
+	for _, rig := range before.RigNames() {
+		b, _ := before.Rig(rig)
+		a, _ := after.Rig(rig)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("Rig(%s) = %+v, want %+v", rig, a, b)
+		}
+	}
+	if p, _ := ParkState(root, "mango"); p == nil || p.By != "operator" {
+		t.Errorf("ParkState(mango) = %+v, want the registry park", p)
+	}
+	if d := after.Daemon(); d == nil || d.Patrols.RolePatrol("handler") == nil {
+		t.Error("Daemon() lost the handler patrol")
+	}
+	if ep, ok := after.DoltEndpoint(); !ok || ep.Port != 3307 {
+		t.Errorf("DoltEndpoint = %+v, %v", ep, ok)
+	}
+	if err := Check(root); err != nil {
+		t.Errorf("Check(two-file town) = %v", err)
 	}
 }
