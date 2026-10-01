@@ -452,12 +452,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return runStatusOnce(cmd, args)
 }
 
-func runStatusWatch(_ *cobra.Command, _ []string) error {
-	if statusJSON {
+// validateStatusWatch rejects the flag combinations --watch cannot run with:
+// --json, and an interval (seconds) that is not positive.
+func validateStatusWatch(jsonOut bool, interval int) error {
+	if jsonOut {
 		return fmt.Errorf("--json and --watch cannot be used together")
 	}
-	if statusInterval <= 0 {
-		return fmt.Errorf("interval must be positive, got %d", statusInterval)
+	if interval <= 0 {
+		return fmt.Errorf("interval must be positive, got %d", interval)
+	}
+	return nil
+}
+
+func runStatusWatch(_ *cobra.Command, _ []string) error {
+	if err := validateStatusWatch(statusJSON, statusInterval); err != nil {
+		return err
 	}
 
 	sigChan := make(chan os.Signal, 1)

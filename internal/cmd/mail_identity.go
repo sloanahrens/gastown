@@ -89,22 +89,32 @@ func localBeadsWorkDir(cwd, envBeadsDir string) (string, error) {
 // --inject`, run by the probed settings' own hooks, read and ACKed the real
 // human operator's mail (gt-wyia).
 func detectSender() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return detectSenderWith(os.Getenv, cwd)
+}
+
+// detectSenderWith is detectSender reading the environment through getenv
+// and taking the working directory as cwd ("" when it is unknown).
+func detectSenderWith(getenv func(string) string, cwd string) string {
 	// Check GT_ROLE first (authoritative for agent sessions)
-	role := os.Getenv("GT_ROLE")
+	role := getenv("GT_ROLE")
 	if role != "" {
 		// Agent session - build address from role and context
-		return detectSenderFromRole(role)
+		return detectSenderFromRole(getenv, cwd, role)
 	}
 
-	if polecat := os.Getenv("GT_POLECAT"); polecat != "" {
-		if rig := os.Getenv("GT_RIG"); rig != "" {
+	if polecat := getenv("GT_POLECAT"); polecat != "" {
+		if rig := getenv("GT_RIG"); rig != "" {
 			return fmt.Sprintf("%s/%s", rig, polecat)
 		}
 		return polecat
 	}
 
 	// No GT_ROLE - try cwd-based detection, defaults to overseer if not in agent directory
-	return detectSenderFromCwd()
+	return detectSenderFromCwd(cwd)
 }
 
 // detectSenderFromRole builds an address from the GT_ROLE and related env vars.
@@ -114,8 +124,8 @@ func detectSender() string {
 // If GT_ROLE is a simple name but required env vars (GT_RIG, GT_POLECAT, etc.)
 // are missing, falls back to cwd-based detection. This could return "overseer"
 // if cwd doesn't match any known agent path - a misconfigured agent session.
-func detectSenderFromRole(role string) string {
-	rig := os.Getenv("GT_RIG")
+func detectSenderFromRole(getenv func(string) string, cwd, role string) string {
+	rig := getenv("GT_RIG")
 
 	// Check if role is already a full address (contains /)
 	if strings.Contains(role, "/") {
@@ -128,29 +138,28 @@ func detectSenderFromRole(role string) string {
 	case constants.RoleMayor:
 		return "mayor/"
 	case constants.RolePolecat:
-		polecat := os.Getenv("GT_POLECAT")
+		polecat := getenv("GT_POLECAT")
 		if rig != "" && polecat != "" {
 			return fmt.Sprintf("%s/%s", rig, polecat)
 		}
 		// Fallback to cwd detection for polecats
-		return detectSenderFromCwd()
+		return detectSenderFromCwd(cwd)
 	case constants.RoleCrew:
-		crew := os.Getenv("GT_CREW")
+		crew := getenv("GT_CREW")
 		if rig != "" && crew != "" {
 			return fmt.Sprintf("%s/crew/%s", rig, crew)
 		}
 		// Fallback to cwd detection for crew
-		return detectSenderFromCwd()
+		return detectSenderFromCwd(cwd)
 	default:
 		// Unknown role, try cwd detection
-		return detectSenderFromCwd()
+		return detectSenderFromCwd(cwd)
 	}
 }
 
 // detectSenderFromCwd is the legacy cwd-based detection for edge cases.
-func detectSenderFromCwd() string {
-	cwd, err := os.Getwd()
-	if err != nil {
+func detectSenderFromCwd(cwd string) string {
+	if cwd == "" {
 		return "overseer"
 	}
 

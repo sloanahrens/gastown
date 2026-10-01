@@ -14,6 +14,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
@@ -681,7 +682,7 @@ func initTownBeads(townPath string) error {
 			break
 		}
 		lastErr = err
-		time.Sleep(500 * time.Millisecond)
+		clockwork.NewRealClock().Sleep(500 * time.Millisecond)
 	}
 	if lastErr != nil {
 		return fmt.Errorf("Dolt server is not ready after 10s: %w", lastErr)

@@ -2,42 +2,56 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doctor"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
-// stubLiveFirePairRunner overrides liveFirePairRunner for the duration of
-// the test so 'gt hooks sync' tests never spawn a real claude subprocess —
-// this session's own harness proves claude is often in PATH, so tests must
-// not rely on its absence to stay hermetic and fast.
-func stubLiveFirePairRunner(t *testing.T, blocked, allowed doctor.LiveFireVerdict) {
-	t.Helper()
-	orig := liveFirePairRunner
-	liveFirePairRunner = func(claudePath, settingsPath, label string) *doctor.LiveFirePairResult {
+// stubLiveFire returns a canary probe answering blocked and allowed, so
+// 'gt hooks sync' tests never spawn a real claude.
+func stubLiveFire(blocked, allowed doctor.LiveFireVerdict) func(hooks.Target) (*doctor.LiveFirePairResult, error) {
+	return func(target hooks.Target) (*doctor.LiveFirePairResult, error) {
 		return &doctor.LiveFirePairResult{
-			Label:        label,
-			SettingsPath: settingsPath,
+			Label:        target.DisplayKey(),
+			SettingsPath: target.Path,
 			Blocked:      doctor.LiveFireShapeResult{Verdict: blocked, Detail: "stubbed blocked shape"},
 			Allowed:      doctor.LiveFireShapeResult{Verdict: allowed, Detail: "stubbed allowed shape"},
-		}
+		}, nil
 	}
-	origLookPath := claudeLookPath
-	claudeLookPath = func(string) (string, error) { return "/stub/bin/claude", nil }
-	t.Cleanup(func() {
-		liveFirePairRunner = orig
-		claudeLookPath = origLookPath
-	})
+}
+
+// noLiveFire is a canary probe a test does not expect to run.
+func noLiveFire(t *testing.T) func(hooks.Target) (*doctor.LiveFirePairResult, error) {
+	return func(target hooks.Target) (*doctor.LiveFirePairResult, error) {
+		t.Errorf("canary live-fire ran against %s", target.Path)
+		return nil, errors.New("unexpected live-fire")
+	}
+}
+
+// newHooksSyncRun is a sync of townRoot with hook configs under home.
+func newHooksSyncRun(townRoot, home string, dryRun bool, liveFire func(hooks.Target) (*doctor.LiveFirePairResult, error)) hooksSyncRun {
+	return hooksSyncRun{
+		townRoot: townRoot,
+		dryRun:   dryRun,
+		home:     hooks.HomeAt(home),
+		liveFire: liveFire,
+		out:      io.Discard,
+		now:      func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) },
+	}
 }
 
 func TestSyncTargetCreatesNew(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	// Save a base config
 	base := &hooks.HooksConfig{
@@ -45,7 +59,7 @@ func TestSyncTargetCreatesNew(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo hello"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -57,7 +71,7 @@ func TestSyncTargetCreatesNew(t *testing.T) {
 		Role: "crew",
 	}
 
-	result, err := syncTarget(target, false)
+	result, err := syncTargetIn(home, target, false)
 	if err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
@@ -86,8 +100,9 @@ func TestSyncTargetCreatesNew(t *testing.T) {
 }
 
 func TestSyncTargetUpdatesExisting(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	// Save a base config
 	base := &hooks.HooksConfig{
@@ -95,7 +110,7 @@ func TestSyncTargetUpdatesExisting(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "new-command"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -127,7 +142,7 @@ func TestSyncTargetUpdatesExisting(t *testing.T) {
 		Role: "crew",
 	}
 
-	result, err := syncTarget(target, false)
+	result, err := syncTargetIn(home, target, false)
 	if err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
@@ -151,8 +166,9 @@ func TestSyncTargetUpdatesExisting(t *testing.T) {
 }
 
 func TestSyncTargetUnchanged(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	// Save a base config
 	base := &hooks.HooksConfig{
@@ -160,7 +176,7 @@ func TestSyncTargetUnchanged(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "same-command"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -171,7 +187,7 @@ func TestSyncTargetUnchanged(t *testing.T) {
 	}
 
 	// Compute expected config for crew to ensure existing matches
-	expected, err := hooks.ComputeExpected("crew")
+	expected, err := home.ComputeExpected("crew")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -192,7 +208,7 @@ func TestSyncTargetUnchanged(t *testing.T) {
 		Role: "crew",
 	}
 
-	result, err := syncTarget(target, false)
+	result, err := syncTargetIn(home, target, false)
 	if err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
@@ -203,15 +219,16 @@ func TestSyncTargetUnchanged(t *testing.T) {
 }
 
 func TestSyncTargetUpdatesExistingPromptDefaults(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	targetPath := filepath.Join(tmpDir, "test", ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	expected, err := hooks.ComputeExpected("crew")
+	expected, err := home.ComputeExpected("crew")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
@@ -237,7 +254,7 @@ func TestSyncTargetUpdatesExistingPromptDefaults(t *testing.T) {
 		Role: "crew",
 	}
 
-	result, err := syncTarget(target, false)
+	result, err := syncTargetIn(home, target, false)
 	if err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
@@ -269,8 +286,9 @@ func TestSyncTargetUpdatesExistingPromptDefaults(t *testing.T) {
 }
 
 func TestSyncTargetDryRun(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	// Save a base config
 	base := &hooks.HooksConfig{
@@ -278,7 +296,7 @@ func TestSyncTargetDryRun(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -290,7 +308,7 @@ func TestSyncTargetDryRun(t *testing.T) {
 	}
 
 	// Dry run should not create the file
-	result, err := syncTarget(target, true)
+	result, err := syncTargetIn(home, target, true)
 	if err != nil {
 		t.Fatalf("syncTarget dry-run failed: %v", err)
 	}
@@ -306,15 +324,16 @@ func TestSyncTargetDryRun(t *testing.T) {
 }
 
 func TestSyncTargetSetsEnabledPlugins(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	base := &hooks.HooksConfig{
 		SessionStart: []hooks.HookEntry{
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
@@ -325,7 +344,7 @@ func TestSyncTargetSetsEnabledPlugins(t *testing.T) {
 		Role: "crew",
 	}
 
-	if _, err := syncTarget(target, false); err != nil {
+	if _, err := syncTargetIn(home, target, false); err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
 
@@ -343,8 +362,9 @@ func TestSyncTargetSetsEnabledPlugins(t *testing.T) {
 }
 
 func TestSyncTargetCreatesClaudePromptDefaults(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	targetPath := filepath.Join(tmpDir, "test-rig", "crew", ".claude", "settings.json")
 	target := hooks.Target{
@@ -353,7 +373,7 @@ func TestSyncTargetCreatesClaudePromptDefaults(t *testing.T) {
 		Role: "crew",
 	}
 
-	if _, err := syncTarget(target, false); err != nil {
+	if _, err := syncTargetIn(home, target, false); err != nil {
 		t.Fatalf("syncTarget failed: %v", err)
 	}
 
@@ -391,8 +411,9 @@ func TestSyncTargetCreatesClaudePromptDefaults(t *testing.T) {
 }
 
 func TestRunHooksSyncFailsClosedOnIntegrityViolation(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	townRoot := filepath.Join(tmpDir, "town")
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", ".claude"), 0755); err != nil {
@@ -413,23 +434,11 @@ func TestRunHooksSyncFailsClosedOnIntegrityViolation(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo hello"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = os.Chdir(cwd)
-	}()
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	hooksSyncDryRun = false
-	err = runHooksSync(nil, nil)
+	err := newHooksSyncRun(townRoot, tmpDir, false, noLiveFire(t)).run()
 	if err == nil {
 		t.Fatal("expected hooks sync to fail closed")
 	}
@@ -439,18 +448,9 @@ func TestRunHooksSyncFailsClosedOnIntegrityViolation(t *testing.T) {
 }
 
 func TestRunHooksSyncNonClaudeAgent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	// Put a dummy opencode binary on PATH so agent resolution doesn't fall back to claude.
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := hooks.HomeAt(tmpDir)
 
 	townRoot := filepath.Join(tmpDir, "town")
 
@@ -499,22 +499,11 @@ func TestRunHooksSyncNonClaudeAgent(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
-	hooksSyncDryRun = false
-	if err := runHooksSync(nil, nil); err != nil {
+	if err := newHooksSyncRun(townRoot, tmpDir, false, stubLiveFire(doctor.LiveFirePass, doctor.LiveFirePass)).run(); err != nil {
 		t.Fatalf("runHooksSync failed: %v", err)
 	}
 
@@ -538,8 +527,9 @@ func TestRunHooksSyncNonClaudeAgent(t *testing.T) {
 }
 
 func TestRunHooksSyncNonClaudeAgentDryRun(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
 	townRoot := filepath.Join(tmpDir, "town")
 
@@ -575,22 +565,11 @@ func TestRunHooksSyncNonClaudeAgentDryRun(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	hooksSyncDryRun = true
-	defer func() { hooksSyncDryRun = false }()
-	if err := runHooksSync(nil, nil); err != nil {
+	if err := newHooksSyncRun(townRoot, tmpDir, true, noLiveFire(t)).run(); err != nil {
 		t.Fatalf("runHooksSync dry-run failed: %v", err)
 	}
 
@@ -602,17 +581,9 @@ func TestRunHooksSyncNonClaudeAgentDryRun(t *testing.T) {
 }
 
 func TestRunHooksSyncNonClaudeAgentNestedPolecatWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := hooks.HomeAt(tmpDir)
 
 	townRoot := filepath.Join(tmpDir, "town")
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
@@ -654,22 +625,11 @@ func TestRunHooksSyncNonClaudeAgentNestedPolecatWorktree(t *testing.T) {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
-	hooksSyncDryRun = false
-	if err := runHooksSync(nil, nil); err != nil {
+	if err := newHooksSyncRun(townRoot, tmpDir, false, stubLiveFire(doctor.LiveFirePass, doctor.LiveFirePass)).run(); err != nil {
 		t.Fatalf("runHooksSync failed: %v", err)
 	}
 
@@ -685,14 +645,14 @@ func TestRunHooksSyncNonClaudeAgentNestedPolecatWorktree(t *testing.T) {
 }
 
 // scaffoldSyncWorkspace creates a minimal town (mayor, deacon, and one rig
-// with a crew worktree) with a base hooks config, and chdirs into it,
-// restoring the original cwd on test cleanup. Returns the town root.
-func scaffoldSyncWorkspace(t *testing.T) string {
+// with a crew worktree) and a home holding a base hooks config. Returns the
+// town root and the home.
+func scaffoldSyncWorkspace(t *testing.T) (townRoot, homeDir string) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	home := hooks.HomeAt(tmpDir)
 
-	townRoot := filepath.Join(tmpDir, "town")
+	townRoot = filepath.Join(tmpDir, "town")
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -715,20 +675,11 @@ func scaffoldSyncWorkspace(t *testing.T) string {
 			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
 		},
 	}
-	if err := hooks.SaveBase(base); err != nil {
+	if err := home.SaveBase(base); err != nil {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	return townRoot
+	return townRoot, tmpDir
 }
 
 // TestRunHooksSyncCanaryFailurePreventsFanOut pins the acceptance criterion
@@ -736,11 +687,10 @@ func scaffoldSyncWorkspace(t *testing.T) string {
 // is touched (claude-41j.1 D7/D8): the crew target — synced only after the
 // canary in fan-out order — must never be written.
 func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
-	townRoot := scaffoldSyncWorkspace(t)
-	stubLiveFirePairRunner(t, doctor.LiveFireFail, doctor.LiveFirePass)
-
-	hooksSyncDryRun = false
-	err := runHooksSync(nil, nil)
+	t.Parallel()
+	townRoot, home := scaffoldSyncWorkspace(t)
+	r := newHooksSyncRun(townRoot, home, false, stubLiveFire(doctor.LiveFireFail, doctor.LiveFirePass))
+	err := r.run()
 	if err == nil {
 		t.Fatal("expected hooks sync to abort on a failed canary live-fire pair")
 	}
@@ -765,11 +715,10 @@ func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
 // canary result (could not prove either shape) is a warning, not an abort —
 // only a confirmed failure blocks fan-out.
 func TestRunHooksSyncCanaryInconclusiveProceeds(t *testing.T) {
-	townRoot := scaffoldSyncWorkspace(t)
-	stubLiveFirePairRunner(t, doctor.LiveFireInconclusive, doctor.LiveFirePass)
-
-	hooksSyncDryRun = false
-	if err := runHooksSync(nil, nil); err != nil {
+	t.Parallel()
+	townRoot, home := scaffoldSyncWorkspace(t)
+	r := newHooksSyncRun(townRoot, home, false, stubLiveFire(doctor.LiveFireInconclusive, doctor.LiveFirePass))
+	if err := r.run(); err != nil {
 		t.Fatalf("runHooksSync should proceed on an inconclusive (not failed) canary pair: %v", err)
 	}
 
@@ -793,11 +742,10 @@ func TestRunHooksSyncCanaryInconclusiveProceeds(t *testing.T) {
 // record: on a fully successful run, sync-report.json records the canary's
 // pair result and, per role, the effective hook set as rendered.
 func TestRunHooksSyncWritesReportWithEffectiveHookSet(t *testing.T) {
-	townRoot := scaffoldSyncWorkspace(t)
-	stubLiveFirePairRunner(t, doctor.LiveFirePass, doctor.LiveFirePass)
-
-	hooksSyncDryRun = false
-	if err := runHooksSync(nil, nil); err != nil {
+	t.Parallel()
+	townRoot, home := scaffoldSyncWorkspace(t)
+	r := newHooksSyncRun(townRoot, home, false, stubLiveFire(doctor.LiveFirePass, doctor.LiveFirePass))
+	if err := r.run(); err != nil {
 		t.Fatalf("runHooksSync failed: %v", err)
 	}
 

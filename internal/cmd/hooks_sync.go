@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,17 +52,41 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return hooksSyncRun{
+		townRoot: townRoot,
+		dryRun:   hooksSyncDryRun,
+		home:     hooks.EnvHome(),
+		liveFire: liveFireCanary,
+		out:      os.Stdout,
+		now:      time.Now,
+	}.run()
+}
 
+// hooksSyncRun is one gt hooks sync: the town, the --dry-run flag, where the
+// hook configs live, the canary live-fire probe, where output goes and the
+// clock. runHooksSync wires the real ones; unit tests build one with a
+// sandbox Home and a scripted probe.
+type hooksSyncRun struct {
+	townRoot string
+	dryRun   bool
+	home     hooks.Home
+	liveFire func(target hooks.Target) (*doctor.LiveFirePairResult, error)
+	out      io.Writer
+	now      func() time.Time
+}
+
+func (r hooksSyncRun) run() error {
+	townRoot := r.townRoot
 	targets, err := hooks.DiscoverTargets(townRoot)
 	if err != nil {
 		return fmt.Errorf("discovering targets: %w", err)
 	}
 
-	if hooksSyncDryRun {
-		fmt.Println("Dry run - showing what would change...")
-		fmt.Println()
+	if r.dryRun {
+		fmt.Fprintln(r.out, "Dry run - showing what would change...")
+		fmt.Fprintln(r.out)
 	} else {
-		fmt.Println("Syncing hooks...")
+		fmt.Fprintln(r.out, "Syncing hooks...")
 	}
 
 	updated := 0
@@ -81,11 +106,11 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 	// 2026-09-10 — no probe existed on the post-sync file to catch it before
 	// fan-out. targets[0] is always the mayor target (DiscoverTargets
 	// appends it unconditionally, first), giving a deterministic canary.
-	if !hooksSyncDryRun && len(targets) > 0 {
+	if !r.dryRun && len(targets) > 0 {
 		canary := targets[0]
 		targets = targets[1:]
 
-		result, err := syncTarget(canary, false)
+		result, err := syncTargetIn(r.home, canary, false)
 		if err != nil {
 			// A write failure here is a plain sync error, not a live-fire
 			// regression — fold it into the ordinary per-target error
@@ -97,16 +122,16 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 				integrityErrors++
 				label = "integrity violation"
 			}
-			fmt.Printf("  %s %s (%s): %v\n", style.Error.Render("✖"), canary.DisplayKey(), label, err)
+			fmt.Fprintf(r.out, "  %s %s (%s): %v\n", style.Error.Render("✖"), canary.DisplayKey(), label, err)
 			errors++
 			failedTargets = append(failedTargets, canary.DisplayKey())
 		} else {
-			printSyncResult(townRoot, canary, result, false, &created, &updated, &unchanged)
+			printSyncResult(r.out, townRoot, canary, result, false, &created, &updated, &unchanged)
 
-			pair, pairErr := liveFireCanary(canary)
+			pair, pairErr := r.liveFire(canary)
 			switch {
 			case pairErr != nil:
-				fmt.Printf("  %s canary live-fire skipped for %s: %v\n", style.Warning.Render("~"), canary.DisplayKey(), pairErr)
+				fmt.Fprintf(r.out, "  %s canary live-fire skipped for %s: %v\n", style.Warning.Render("~"), canary.DisplayKey(), pairErr)
 			case pair.Failed():
 				return fmt.Errorf(
 					"hooks sync aborted: canary live-fire pair failed against %s (%s) — fan-out stopped before any other target was touched (blocked=%s, allowed=%s)",
@@ -115,26 +140,26 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 			default:
 				canaryReport = pairToReport(canary, pair)
 				if !pair.Passed() {
-					fmt.Printf(
+					fmt.Fprintf(r.out,
 						"  %s canary live-fire pair inconclusive against %s (blocked=%s, allowed=%s) — proceeding without a verified pass\n",
 						style.Warning.Render("~"), canary.DisplayKey(), pair.Blocked.Verdict, pair.Allowed.Verdict,
 					)
 				}
 			}
 
-			recordRoleReport(roleReports, canary)
+			recordRoleReport(r.home, roleReports, canary)
 		}
 	}
 
 	for _, target := range targets {
-		result, err := syncTarget(target, hooksSyncDryRun)
+		result, err := syncTargetIn(r.home, target, r.dryRun)
 		if err != nil {
 			label := "sync error"
 			if hooks.IsSettingsIntegrityError(err) {
 				label = "integrity violation"
 				integrityErrors++
 			}
-			fmt.Printf(
+			fmt.Fprintf(r.out,
 				"  %s %s (%s): %v\n",
 				style.Error.Render("✖"),
 				target.DisplayKey(),
@@ -146,9 +171,9 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		printSyncResult(townRoot, target, result, hooksSyncDryRun, &created, &updated, &unchanged)
-		if !hooksSyncDryRun {
-			recordRoleReport(roleReports, target)
+		printSyncResult(r.out, townRoot, target, result, r.dryRun, &created, &updated, &unchanged)
+		if !r.dryRun {
+			recordRoleReport(r.home, roleReports, target)
 		}
 	}
 
@@ -157,7 +182,7 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 	// JSON merge path used for Claude targets above.
 	locations, locErr := hooks.DiscoverRoleLocations(townRoot)
 	if locErr != nil {
-		fmt.Printf("  %s discovering role locations: %v\n", style.Error.Render("✖"), locErr)
+		fmt.Fprintf(r.out, "  %s discovering role locations: %v\n", style.Error.Render("✖"), locErr)
 		errors++
 	} else {
 		for _, loc := range locations {
@@ -212,11 +237,11 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 					relPath = targetPath
 				}
 
-				if hooksSyncDryRun {
+				if r.dryRun {
 					if _, statErr := os.Stat(targetPath); statErr == nil {
-						fmt.Printf("  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would check "+hooksProvider+")"))
+						fmt.Fprintf(r.out, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would check "+hooksProvider+")"))
 					} else {
-						fmt.Printf("  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would create "+hooksProvider+")"))
+						fmt.Fprintf(r.out, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would create "+hooksProvider+")"))
 						created++
 					}
 					continue
@@ -225,7 +250,7 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 				result, syncErr := hooks.SyncForRole(hooksProvider, dir, dir, loc.Role,
 					preset.HooksDir, preset.HooksSettingsFile, preset.Command, useSettingsDir)
 				if syncErr != nil {
-					fmt.Printf("  %s %s (%s): %v\n", style.Error.Render("✖"), relPath, hooksProvider, syncErr)
+					fmt.Fprintf(r.out, "  %s %s (%s): %v\n", style.Error.Render("✖"), relPath, hooksProvider, syncErr)
 					errors++
 					failedTargets = append(failedTargets, relPath)
 					continue
@@ -233,13 +258,13 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 
 				switch result {
 				case hooks.SyncCreated:
-					fmt.Printf("  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(created "+hooksProvider+")"))
+					fmt.Fprintf(r.out, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(created "+hooksProvider+")"))
 					created++
 				case hooks.SyncUpdated:
-					fmt.Printf("  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(updated "+hooksProvider+")"))
+					fmt.Fprintf(r.out, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(updated "+hooksProvider+")"))
 					updated++
 				case hooks.SyncUnchanged:
-					fmt.Printf("  %s %s %s\n", style.Dim.Render("·"), relPath, style.Dim.Render("(unchanged "+hooksProvider+")"))
+					fmt.Fprintf(r.out, "  %s %s %s\n", style.Dim.Render("·"), relPath, style.Dim.Render("(unchanged "+hooksProvider+")"))
 					unchanged++
 				}
 			}
@@ -247,19 +272,19 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Summary
-	fmt.Println()
+	fmt.Fprintln(r.out)
 	total := updated + unchanged + created + errors
-	if hooksSyncDryRun {
-		fmt.Printf("Would sync %d targets (%d to create, %d to update, %d unchanged",
+	if r.dryRun {
+		fmt.Fprintf(r.out, "Would sync %d targets (%d to create, %d to update, %d unchanged",
 			total, created, updated, unchanged)
 	} else {
-		fmt.Printf("Synced %d targets (%d created, %d updated, %d unchanged",
+		fmt.Fprintf(r.out, "Synced %d targets (%d created, %d updated, %d unchanged",
 			total, created, updated, unchanged)
 	}
 	if errors > 0 {
-		fmt.Printf(", %s", style.Error.Render(fmt.Sprintf("%d errors", errors)))
+		fmt.Fprintf(r.out, ", %s", style.Error.Render(fmt.Sprintf("%d errors", errors)))
 	}
-	fmt.Println(")")
+	fmt.Fprintln(r.out, ")")
 
 	if errors > 0 {
 		if integrityErrors > 0 {
@@ -281,14 +306,14 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 	// timestamp. doctor hooks-sync reads it back and reports Skipped when
 	// it's absent — a role count or a role's mail is not proof the hooks
 	// that were written actually work end-to-end (claude-41j.1 D7/D8).
-	if !hooksSyncDryRun && canaryReport != nil {
+	if !r.dryRun && canaryReport != nil {
 		report := &hooks.SyncReport{
-			Timestamp: time.Now().UTC(),
+			Timestamp: r.now().UTC(),
 			Canary:    *canaryReport,
 			Roles:     roleReports,
 		}
 		if err := hooks.WriteSyncReport(townRoot, report); err != nil {
-			fmt.Printf("  %s writing sync report: %v\n", style.Warning.Render("✖"), err)
+			fmt.Fprintf(r.out, "  %s writing sync report: %v\n", style.Warning.Render("✖"), err)
 		}
 	}
 
@@ -297,7 +322,7 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 
 // printSyncResult prints one target's sync outcome and updates the running
 // created/updated/unchanged counters.
-func printSyncResult(townRoot string, target hooks.Target, result syncResult, dryRun bool, created, updated, unchanged *int) {
+func printSyncResult(w io.Writer, townRoot string, target hooks.Target, result syncResult, dryRun bool, created, updated, unchanged *int) {
 	relPath, pathErr := filepath.Rel(townRoot, target.Path)
 	if pathErr != nil {
 		relPath = target.Path
@@ -306,28 +331,28 @@ func printSyncResult(townRoot string, target hooks.Target, result syncResult, dr
 	switch result {
 	case syncCreated:
 		if dryRun {
-			fmt.Printf("  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would create)"))
+			fmt.Fprintf(w, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would create)"))
 		} else {
-			fmt.Printf("  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(created)"))
+			fmt.Fprintf(w, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(created)"))
 		}
 		*created++
 	case syncUpdated:
 		if dryRun {
-			fmt.Printf("  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would update)"))
+			fmt.Fprintf(w, "  %s %s %s\n", style.Warning.Render("~"), relPath, style.Dim.Render("(would update)"))
 		} else {
-			fmt.Printf("  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(updated)"))
+			fmt.Fprintf(w, "  %s %s %s\n", style.Success.Render("✓"), relPath, style.Dim.Render("(updated)"))
 		}
 		*updated++
 	case syncUnchanged:
-		fmt.Printf("  %s %s %s\n", style.Dim.Render("·"), relPath, style.Dim.Render("(unchanged)"))
+		fmt.Fprintf(w, "  %s %s %s\n", style.Dim.Render("·"), relPath, style.Dim.Render("(unchanged)"))
 		*unchanged++
 	}
 }
 
 // recordRoleReport records the effective hook set actually computed for
 // target into roles, keyed by the target's override key.
-func recordRoleReport(roles map[string]hooks.SyncReportRole, target hooks.Target) {
-	expected, err := hooks.ComputeExpected(target.Key)
+func recordRoleReport(home hooks.Home, roles map[string]hooks.SyncReportRole, target hooks.Target) {
+	expected, err := home.ComputeExpected(target.Key)
 	if err != nil {
 		return
 	}
@@ -339,29 +364,17 @@ func recordRoleReport(roles map[string]hooks.SyncReportRole, target hooks.Target
 	}
 }
 
-// liveFirePairRunner is overridable so tests never spawn a real claude
-// subprocess (production 'gt hooks sync' runs are expected to have claude
-// in PATH — this session's own harness is proof of that — so tests must not
-// rely on its absence to stay hermetic; they override this var instead).
-var liveFirePairRunner = doctor.RunLiveFirePair
-
-// claudeLookPath finds the claude binary the canary fires. Overridable with
-// liveFirePairRunner: a test that stubs the runner must not also depend on a
-// real claude being on PATH, or it passes only on hosts that have one (it
-// failed on every CI runner, gt-22hdp.39).
-var claudeLookPath = exec.LookPath
-
 // liveFireCanary runs the blocked+allowed live-fire pair against the
 // canary's already-synced settings file. Returns a non-nil error only when
 // the probe could not even be attempted (claude missing) — that is a soft
 // warning to the caller, not grounds to abort the sync, since machines
 // without the claude binary installed must still be able to sync hooks.
 func liveFireCanary(target hooks.Target) (*doctor.LiveFirePairResult, error) {
-	claudePath, err := claudeLookPath("claude")
+	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude not found in PATH")
 	}
-	return liveFirePairRunner(claudePath, target.Path, target.DisplayKey()), nil
+	return doctor.RunLiveFirePair(claudePath, target.Path, target.DisplayKey()), nil
 }
 
 // pairToReport converts a doctor live-fire pair result into the
@@ -399,7 +412,12 @@ const (
 // syncTarget syncs a single target's .claude/settings.json.
 // Uses MarshalSettings/UnmarshalSettings to preserve unknown fields.
 func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
-	result, err := hooks.SyncManagedClaudeSettings(target, dryRun)
+	return syncTargetIn(hooks.EnvHome(), target, dryRun)
+}
+
+// syncTargetIn is syncTarget against the hook configs in home.
+func syncTargetIn(home hooks.Home, target hooks.Target, dryRun bool) (syncResult, error) {
+	result, err := home.SyncManagedClaudeSettings(target, dryRun)
 	if err != nil {
 		return 0, err
 	}

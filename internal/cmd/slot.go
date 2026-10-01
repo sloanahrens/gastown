@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -162,11 +163,13 @@ func init() {
 // deadlock class gt-tuiy exists to prevent. A top-level invocation with no
 // ancestor hold at all still falls back to the old unique-pid role, so two
 // unrelated unnamed invocations never collide with each other.
-func resolveSlotRunRole(flagRole, townRoot string) string {
+//
+// inheritedRole reads the ancestor's hold (slot.InheritedRole in production).
+func resolveSlotRunRole(flagRole, townRoot string, inheritedRole func(townRoot string) (string, bool)) string {
 	if flagRole != "" {
 		return flagRole
 	}
-	if inherited, ok := slot.InheritedRole(townRoot); ok {
+	if inherited, ok := inheritedRole(townRoot); ok {
 		return inherited
 	}
 	return fmt.Sprintf("pid-%d", os.Getpid())
@@ -177,20 +180,26 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return slotRun(cmd.OutOrStdout(), townRoot, args, os.Getenv("PATH"), os.Environ())
+}
 
-	role := resolveSlotRunRole(slotRunRole, townRoot)
+// slotRun is gt slot run in townRoot: it validates args, takes the gate, and
+// runs the command, reporting to out. ambientPath and environ are this
+// process's PATH and environment, which the child inherits.
+func slotRun(out io.Writer, townRoot string, args []string, ambientPath string, environ []string) error {
+	role := resolveSlotRunRole(slotRunRole, townRoot, slot.InheritedRole)
 
 	// Resolve and validate the command before taking the slot: the gate is the
 	// merge path's critical section, and a command that cannot run must not hold
 	// it (gt-f4xe). Leading VAR=value tokens are env(1) assignments, so the
 	// program is looked up under the PATH the child will see (gt-18nx).
 	envAssigns, cmdArgs := splitEnvPrefix(args)
-	program, err := resolveSlotCommand(envAssigns, cmdArgs)
+	program, err := resolveSlotCommand(envAssigns, cmdArgs, ambientPath)
 	if err != nil {
 		return fmt.Errorf("gt slot run: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Waiting for container-gate slot (role=%s)...\n", role)
+	fmt.Fprintf(out, "Waiting for container-gate slot (role=%s)...\n", role)
 	pool := containerGatePool(townRoot)
 	h, err := slot.AcquirePool(townRoot, role, slotRunTimeout, pool)
 	if err != nil {
@@ -199,7 +208,7 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	defer func() { _ = h.Release() }()
 	// The wait is reported even when it was negligible: a queued invocation and
 	// the one it queued behind only read as a pair (gt-dc81).
-	fmt.Fprintf(cmd.OutOrStdout(), slotAcquiredFormat,
+	fmt.Fprintf(out, slotAcquiredFormat,
 		role, h.WaitedFor.Round(time.Second), h.Index, pool.Slots)
 
 	// A polecat's own suite is optional verification where a gate-class holder
@@ -208,11 +217,11 @@ func runSlotRun(cmd *cobra.Command, args []string) error {
 	// nice(1) unless --nice says otherwise.
 	niceness := slotRunNiceness(role, slotRunNice)
 	if niceness > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Running at nice %d (non-gate holder; --nice 0 to disable).\n", niceness)
+		fmt.Fprintf(out, "Running at nice %d (non-gate holder; --nice 0 to disable).\n", niceness)
 	}
 	sub := slotChildCommand(program, cmdArgs, niceWrapper(niceness))
 	if len(envAssigns) > 0 {
-		sub.Env = slotRunEnv(envAssigns)
+		sub.Env = slotRunEnv(environ, envAssigns)
 	}
 	sub.Stdin = os.Stdin
 	sub.Stdout = os.Stdout
@@ -632,26 +641,27 @@ func splitEnvPrefix(args []string) (envAssigns, cmdArgs []string) {
 // resolveSlotCommand resolves the program gt slot run will exec, rejecting a
 // command it must not take a gate slot for: one naming no program at all (only
 // VAR=value assignments), or one whose program cannot be exec'd. It is called
-// before slot.AcquirePool so the refusal costs nothing (gt-f4xe).
-func resolveSlotCommand(envAssigns, cmdArgs []string) (string, error) {
+// before slot.AcquirePool so the refusal costs nothing (gt-f4xe). ambientPath
+// is this process's PATH.
+func resolveSlotCommand(envAssigns, cmdArgs []string, ambientPath string) (string, error) {
 	if len(cmdArgs) == 0 {
 		return "", fmt.Errorf("no command after environment assignment(s) %v", envAssigns)
 	}
-	return lookPathForSlot(cmdArgs[0], slotChildPath(envAssigns))
+	return lookPathForSlot(cmdArgs[0], slotChildPath(envAssigns, ambientPath))
 }
 
 // slotChildPath is the PATH the child is run with, and so the one its program
 // is resolved against: the assigned PATH= when the leading assignments set one,
-// the ambient PATH otherwise. slotRunEnv builds the child's environment out of
+// ambientPath otherwise. slotRunEnv builds the child's environment out of
 // those same assignments, so this is the PATH the child — and the nice(1)
 // wrapper resolving the program inside it — searches.
-func slotChildPath(envAssigns []string) string {
+func slotChildPath(envAssigns []string, ambientPath string) string {
 	for i := len(envAssigns) - 1; i >= 0; i-- {
 		if path, ok := strings.CutPrefix(envAssigns[i], "PATH="); ok {
 			return path
 		}
 	}
-	return os.Getenv("PATH")
+	return ambientPath
 }
 
 // lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
@@ -745,8 +755,8 @@ func slotChildCommand(program string, cmdArgs, wrapper []string) *exec.Cmd {
 	return exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: args come from the operator's own CLI invocation
 }
 
-// slotRunEnv is the environment for the slot's child: this process's own, with
-// the operator's leading VAR=value assignments applied over it.
+// slotRunEnv is the environment for the slot's child: environ (this process's
+// own), with the operator's leading VAR=value assignments applied over it.
 //
 // An assigned key's inherited entry is removed rather than left beside the
 // assignment, so the child reads the operator's value by construction instead
@@ -756,8 +766,8 @@ func slotChildCommand(program string, cmdArgs, wrapper []string) *exec.Cmd {
 // inherited key before appending their own value for theirs (gt-g7ym).
 //
 // A repeated assignment settles on the last one, as env(1) leaves it.
-func slotRunEnv(envAssigns []string) []string {
-	env := os.Environ()
+func slotRunEnv(environ, envAssigns []string) []string {
+	env := append([]string(nil), environ...)
 	for _, kv := range envAssigns {
 		key, _, _ := strings.Cut(kv, "=")
 		env = filterEnvKey(env, key)

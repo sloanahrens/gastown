@@ -75,6 +75,7 @@ var tailNow = at("2026-09-30T14:00:00Z")
 func fixedNow() time.Time { return tailNow }
 
 func TestEventsSource_JournalOffBacklogPagingAndFollow(t *testing.T) {
+	t.Parallel()
 	j := &fakeTailJournal{config: "false", records: []beads.EventRecord{
 		{Seq: 1, TS: "2026-09-30T12:00:00Z", Op: "create", IssueID: "gt-old", Actor: "a", Status: "open"},
 		{Seq: 2, TS: "2026-09-30T13:50:00Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
@@ -110,6 +111,7 @@ func TestEventsSource_JournalOffBacklogPagingAndFollow(t *testing.T) {
 }
 
 func TestEventsSource_JournalOnSaysNothing(t *testing.T) {
+	t.Parallel()
 	j := &fakeTailJournal{config: "true"}
 	if got := (&eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}).Poll(); len(got) != 0 {
 		t.Fatalf("journal on, empty: %q", texts(got))
@@ -117,6 +119,7 @@ func TestEventsSource_JournalOnSaysNothing(t *testing.T) {
 }
 
 func TestEventsSource_UnreadableConfigSaysSoOnce(t *testing.T) {
+	t.Parallel()
 	j := &fakeTailJournal{configErr: errors.New("boom")}
 	s := &eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"hq events cannot read events-journal config (boom): the journal may hold only mutations made through gt"}) {
@@ -128,6 +131,7 @@ func TestEventsSource_UnreadableConfigSaysSoOnce(t *testing.T) {
 }
 
 func TestEventsSource_PrunedJournalResumesWithOneLine(t *testing.T) {
+	t.Parallel()
 	j := &fakeTailJournal{config: "true",
 		trunc: &beads.EventsTruncatedError{Floor: 7, Head: 8},
 		records: []beads.EventRecord{
@@ -146,6 +150,7 @@ func TestEventsSource_PrunedJournalResumesWithOneLine(t *testing.T) {
 }
 
 func TestEventsSource_ReadErrorsPrintOncePerDistinctFailure(t *testing.T) {
+	t.Parallel()
 	down := errors.New("bd events tail: exit status 25")
 	j := &fakeTailJournal{config: "true", errs: []error{down, down}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: tailNow, now: fixedNow}
@@ -163,6 +168,7 @@ func TestEventsSource_ReadErrorsPrintOncePerDistinctFailure(t *testing.T) {
 }
 
 func TestEventsSource_OpenErrorIsOneLine(t *testing.T) {
+	t.Parallel()
 	s := &eventsSource{rig: "mango", openErr: errors.New("no beads directory"), now: fixedNow}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"mango events cannot read the journal: no beads directory"}) {
 		t.Fatalf("got %q", got)
@@ -173,6 +179,7 @@ func TestEventsSource_OpenErrorIsOneLine(t *testing.T) {
 }
 
 func TestLandingsSource_BacklogFollowAndBadLines(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gastown.jsonl")
 	appendFile(t, path,
 		`{"bead":"gt-old","rig":"gastown","landed_at":"2026-09-30T12:00:00Z"}`+"\n"+
@@ -226,6 +233,7 @@ func writeGz(t *testing.T, path, s string) {
 }
 
 func TestDaemonSource_BackupsContinuationFollowAndRotation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Rotated before the cutoff: none of its lines can qualify, never read.
 	if err := os.WriteFile(filepath.Join(dir, "daemon-2026-09-29T00-00-00.000.log"), []byte("2026/09/30 07:59:59 must-not-appear\n"), 0o600); err != nil {
@@ -276,6 +284,7 @@ func TestDaemonSource_BackupsContinuationFollowAndRotation(t *testing.T) {
 }
 
 func TestDaemonSource_RigFilterKeepsLinesNamingTheRig(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	appendFile(t, filepath.Join(dir, "daemon.log"),
 		"2026/09/30 08:01:00 Convoy: close detected: gt-1 (from gastown)\n"+
@@ -293,6 +302,7 @@ func TestDaemonSource_RigFilterKeepsLinesNamingTheRig(t *testing.T) {
 }
 
 func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
+	t.Parallel()
 	s := &daemonSource{dir: t.TempDir(), cutoff: tailNow, loc: tailTestLoc, now: fixedNow}
 	got := texts(s.Poll())
 	if len(got) != 1 || !regexp.MustCompile(`^town daemon cannot read daemon.log: `).MatchString(got[0]) {
@@ -304,6 +314,7 @@ func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
 }
 
 func TestEventsSource_PruneThatCannotAdvanceIsAReadFailure(t *testing.T) {
+	t.Parallel()
 	// bd reports a floor and head at or below the cursor: resuming would not
 	// move forward, so the read fails once instead of looping.
 	j := &fakeTailJournal{config: "true", errs: []error{&beads.EventsTruncatedError{Since: 0, Floor: 0, Head: 0}}}
@@ -319,6 +330,7 @@ func TestEventsSource_PruneThatCannotAdvanceIsAReadFailure(t *testing.T) {
 }
 
 func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "daemon-2026-09-30T13-30-00.000.log.gz"), []byte("this is plainly not a gzip stream"), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,6 +347,7 @@ func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
 }
 
 func TestTailBDJournal_ConfigGetReadsTheStoreConfigNotGtsOverride(t *testing.T) {
+	t.Parallel()
 	var gotEnv, gotArgs []string
 	j := &tailBDJournal{dir: "/town/gastown/mayor/rig/.beads", run: func(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
 		gotEnv, gotArgs = env, args
@@ -360,6 +373,7 @@ func TestTailBDJournal_ConfigGetReadsTheStoreConfigNotGtsOverride(t *testing.T) 
 }
 
 func TestEventsSource_TruthyConfigIsOn(t *testing.T) {
+	t.Parallel()
 	for _, v := range []string{"true", "1", "TRUE"} {
 		j := &fakeTailJournal{config: v}
 		if got := (&eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}).Poll(); len(got) != 0 {
@@ -369,6 +383,7 @@ func TestEventsSource_TruthyConfigIsOn(t *testing.T) {
 }
 
 func TestEventsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	t.Parallel()
 	down := errors.New("bd events tail: exit status 25")
 	j := &fakeTailJournal{config: "false", errs: []error{down}, records: []beads.EventRecord{
 		{Seq: 1, TS: "2026-09-30T12:00:00Z", Op: "create", IssueID: "gt-old"},
@@ -388,6 +403,7 @@ func TestEventsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
 }
 
 func TestLandingsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gastown.jsonl")
 	if err := os.Mkdir(path, 0o700); err != nil { // unreadable as a file
 		t.Fatal(err)
@@ -407,6 +423,7 @@ func TestLandingsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
 }
 
 func TestDaemonSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGz(t, filepath.Join(dir, "daemon-2026-09-30T13-30-00.000.log.gz"), "2026/09/30 08:10:00 in-backup\n")
 	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T13:00:00Z"), loc: tailTestLoc, now: fixedNow}

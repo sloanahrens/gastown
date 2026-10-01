@@ -305,7 +305,12 @@ func saveRigTheme(rigName, themeName string) error {
 	if townRoot == "" {
 		return fmt.Errorf("not in a Gas Town workspace")
 	}
+	return saveRigThemeIn(townRoot, rigName, themeName)
+}
 
+// saveRigThemeIn is saveRigTheme for the town at townRoot.
+func saveRigThemeIn(townRoot, rigName, themeName string) error {
+	var err error
 	settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
 
 	// Load existing settings or create new

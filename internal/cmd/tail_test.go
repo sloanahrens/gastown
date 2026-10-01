@@ -17,6 +17,7 @@ func at(s string) time.Time {
 }
 
 func TestMergeTail_OrdersByTimeStably(t *testing.T) {
+	t.Parallel()
 	events := []tailLine{
 		{At: at("2026-09-30T14:00:02Z"), Rig: "gastown", Kind: "events", Text: "e2"},
 		{At: at("2026-09-30T14:00:00Z"), Rig: "gastown", Kind: "events", Text: "e0"},
@@ -35,6 +36,7 @@ func TestMergeTail_OrdersByTimeStably(t *testing.T) {
 }
 
 func TestRenderTailLine(t *testing.T) {
+	t.Parallel()
 	l := tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: "events", Text: "close gt-1\nforged line\tx\x1b[31m"}
 	got := renderTailLine(l, tailTestLoc)
 	want := "2026-09-30T09:05:06-05:00 gastown events close gt-1 forged line x [31m"
@@ -50,6 +52,7 @@ func TestRenderTailLine(t *testing.T) {
 }
 
 func TestParseTailSince(t *testing.T) {
+	t.Parallel()
 	now := at("2026-09-30T14:00:00Z")
 	cases := map[string]time.Time{
 		"15m":                       now.Add(-15 * time.Minute),
@@ -76,6 +79,7 @@ func TestParseTailSince(t *testing.T) {
 }
 
 func TestParseTailKinds(t *testing.T) {
+	t.Parallel()
 	got, err := parseTailKinds("events, daemon")
 	if err != nil || !reflect.DeepEqual(got, map[string]bool{"events": true, "daemon": true}) {
 		t.Fatalf("kinds = %v, %v", got, err)

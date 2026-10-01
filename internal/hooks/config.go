@@ -1229,3 +1229,30 @@ func gtCommand(command string) string {
 	}
 	return command
 }
+
+// Home is where hook configs are read from and written to: $GT_HOME/.gt or
+// ~/.gt. EnvHome resolves it from the environment, as the package-level
+// functions do; HomeAt names a directory instead, so callers can be tested
+// without setting HOME.
+type Home struct{ h configHome }
+
+// EnvHome returns the Home the environment names.
+func EnvHome() Home { return Home{envConfigHome()} }
+
+// HomeAt returns the Home of a user whose home directory is home, with
+// GT_HOME unset.
+func HomeAt(home string) Home { return Home{configHome{home: home}} }
+
+// SyncManagedClaudeSettings is the package-level SyncManagedClaudeSettings
+// against this Home.
+func (h Home) SyncManagedClaudeSettings(target Target, dryRun bool) (SyncResult, error) {
+	return h.h.syncManagedClaudeSettings(target, dryRun)
+}
+
+// ComputeExpected is the package-level ComputeExpected against this Home.
+func (h Home) ComputeExpected(target string) (*HooksConfig, error) {
+	return h.h.computeExpected(target)
+}
+
+// SaveBase is the package-level SaveBase against this Home.
+func (h Home) SaveBase(cfg *HooksConfig) error { return h.h.saveBase(cfg) }

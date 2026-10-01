@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -175,18 +176,25 @@ func showSpec(townRoot, beadID string) (specdispatch.Spec, error) {
 
 func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
-	spec, err := showSpec(townRoot, args[0])
-	if err != nil {
-		line := fmt.Sprintf("%s: spec lint refused: bead: %v", args[0], err)
-		fmt.Fprintln(cmd.OutOrStdout(), line)
-		return NewSilentExit(specLintExitRefused)
-	}
 	path := specLintTemplate
 	if path == "" {
 		path = specdispatch.DefaultTemplatePath()
 	}
-	verdict := specdispatch.Lint(spec, specdispatch.LoadTemplate(path))
-	fmt.Fprintln(cmd.OutOrStdout(), verdict.Line(spec.ID))
+	spec, err := showSpec(townRoot, args[0])
+	return specLint(cmd.OutOrStdout(), args[0], spec, err, path)
+}
+
+// specLint prints the lint verdict for beadID's spec (or for showErr, the
+// failure to read it) against the template at templatePath, and returns the
+// exit code as a SilentExit: 0 dispatchable, specLintExitRefused,
+// specLintExitNeedsPlan.
+func specLint(out io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string) error {
+	if showErr != nil {
+		fmt.Fprintf(out, "%s: spec lint refused: bead: %v\n", beadID, showErr)
+		return NewSilentExit(specLintExitRefused)
+	}
+	verdict := specdispatch.Lint(spec, specdispatch.LoadTemplate(templatePath))
+	fmt.Fprintln(out, verdict.Line(spec.ID))
 	switch verdict.Route {
 	case specdispatch.RouteDispatch:
 		return nil
