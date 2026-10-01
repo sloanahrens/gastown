@@ -54,7 +54,7 @@ var envCheckedRoles = map[session.Role]bool{
 // EnvVarsCheck verifies that tmux session environment variables match expected values.
 type EnvVarsCheck struct {
 	FixableCheck
-	reader   SessionEnvReader  // nil means use real tmux
+	reader   SessionEnvReader   // nil means use real tmux
 	accessor SessionEnvAccessor // non-nil when Fix() support is needed
 }
 

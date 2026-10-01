@@ -18,10 +18,10 @@ type HookAttachmentValidCheck struct {
 }
 
 type invalidAttachment struct {
-	pinnedBeadID   string
-	pinnedBeadDir  string // Directory where the pinned bead was found
-	moleculeID     string
-	reason         string // "not_found" or "closed"
+	pinnedBeadID  string
+	pinnedBeadDir string // Directory where the pinned bead was found
+	moleculeID    string
+	reason        string // "not_found" or "closed"
 }
 
 // NewHookAttachmentValidCheck creates a new hook attachment validation check.
@@ -192,9 +192,9 @@ type HookSingletonCheck struct {
 }
 
 type duplicateHandoff struct {
-	title     string
-	beadsDir  string
-	beadIDs   []string // All IDs with this title (first one is kept, rest are duplicates)
+	title    string
+	beadsDir string
+	beadIDs  []string // All IDs with this title (first one is kept, rest are duplicates)
 }
 
 // NewHookSingletonCheck creates a new hook singleton check.
