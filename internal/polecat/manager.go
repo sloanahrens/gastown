@@ -2810,7 +2810,10 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		// defaults a not-found/error GetAgentBead result leaves in place. See
 		// ResolveIgnoreCleanupStatus's agentBeadRead/liveGitProbeRan branch.
 		facts.AgentBeadRead = true
-		facts.HookBeadSafe, facts.HookBeadTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
+		hookDisposition := m.hookBeadSafeForWorkstate(fields.HookBead)
+		facts.HookBeadSafe = hookDisposition.Safe
+		facts.HookBeadTerminal = hookDisposition.Terminal
+		facts.HookBeadSubmitted = hookDisposition.Submitted
 		facts.HookBead = fields.HookBead
 		facts.PushFailed = fields.PushFailed
 		facts.MRFailed = fields.MRFailed
@@ -2931,18 +2934,16 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	return NewWorkstateInput(facts)
 }
 
-func (m *Manager) hookBeadSafeForWorkstate(hookBead string) (safe bool, terminal bool) {
+// hookBeadSafeForWorkstate answers the reuse gate's hook question from the
+// bead's live state, through the same ClassifyHookBead policy the recovery
+// report and the nuke gate use (gt-eqiid). The lookup stays here because this
+// package owns its beads handle.
+func (m *Manager) hookBeadSafeForWorkstate(hookBead string) HookBeadDisposition {
 	if hookBead == "" {
-		return true, false
+		return HookBeadDisposition{Safe: true}
 	}
 	issue, err := m.beads.Show(hookBead)
-	if err != nil || issue == nil {
-		return false, false
-	}
-	if beads.IssueStatus(issue.Status).IsTerminal() {
-		return true, true
-	}
-	return false, false
+	return ClassifyHookBead(hookBead, issue, err)
 }
 
 func (m *Manager) assignedBeadTerminal(issueID string) bool {
