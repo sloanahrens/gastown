@@ -134,28 +134,18 @@ func TestPolecatStopPendingWork(t *testing.T) {
 // running" as abandonment, but a slot held by an unrelated polecat/rig must
 // not falsely suppress the auto-done either.
 //
-// Serial because the first subtest counts lister calls: a counting stub is a
-// value no peer test can share, so it cannot be installed once and left
-// (gt-k317).
+// This runs at every turn boundary and reads only the flock, through
+// slot.StatusPoolLocksOnly, so it never shells out to `docker ps` (gt-a8kx);
+// TestStatusPoolLocksOnlySkipsDockerProbe pins that in internal/slot.
 func TestPolecatStopVerificationRunning(t *testing.T) {
+	t.Parallel()
 	t.Run("no slot held", func(t *testing.T) {
+		stubNoContainers(t)
 		townRoot := t.TempDir()
-
-		// This runs at every turn boundary and reads only the flock, so it
-		// must not shell out to `docker ps` (gt-a8kx).
-		var calls int
-		restore := slot.SetContainerListerForTest(func() ([]string, error) {
-			calls++
-			return nil, nil
-		})
-		defer restore()
 
 		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
 		if busy {
 			t.Fatalf("busy = true (%s), want false when nothing holds the slot", reason)
-		}
-		if calls != 0 {
-			t.Fatalf("polecatStopVerificationRunning probed docker %d time(s); it reads only the flock", calls)
 		}
 	})
 

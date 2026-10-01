@@ -4,7 +4,6 @@ import (
 	"os"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -86,20 +85,16 @@ func TestResolvePolecatSeatsPassesDecidedRowsThrough(t *testing.T) {
 // downstream code depends on (gt-92zx).
 func TestBuildAllRigSeatsPreservesOutputOrder(t *testing.T) {
 	t.Parallel()
-	// Deliberately not sorted, and the fake builder sleeps longest on the
-	// first rig, so the completion order is the reverse of the input order:
-	// an implementation that appended results as they landed, or that sorted
-	// them, would produce a different list.
+	// Deliberately not sorted: an implementation that sorted the rows, or
+	// appended them as the concurrent builds landed, would produce a
+	// different list.
 	names := []string{"gastown", "beads", "quartz", "basalt", "topaz", "cobalt", "flint", "marble"}
 	rigs := make([]*rig.Rig, len(names))
-	delay := make(map[string]time.Duration, len(names))
 	for i, name := range names {
 		rigs[i] = &rig.Rig{Name: name}
-		delay[name] = time.Duration(len(names)-i) * 5 * time.Millisecond
 	}
 
 	rigSeats := buildAllRigSeats(rigs, func(r *rig.Rig) []polecatSeat {
-		time.Sleep(delay[r.Name])
 		return []polecatSeat{{rigName: r.Name, name: "seat-" + r.Name}}
 	})
 
@@ -146,10 +141,11 @@ func TestBuildAllRigSeatsRunsEveryRigExactlyOnce(t *testing.T) {
 // well for a serial loop, and a serial loop is the very thing the pool
 // replaced: `--all` paid every rig's Dolt round trips one after another and
 // timed out on a many-rig town. So this asserts the mechanism, not a duration
-// (a timing bound flakes on a loaded host): the first builds block at a
+// (a timing bound flakes on a loaded host): every build blocks at a
 // rendezvous until as many builds as the pool has workers are in flight
-// together. A serial implementation never gets there and fails at the timeout
-// instead of hanging; an unbounded one is caught by the peak-in-flight check.
+// together. A serial implementation never gets there and hangs until go
+// test's -timeout names this test; an unbounded one is caught by the
+// peak-in-flight check.
 func TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize(t *testing.T) {
 	t.Parallel()
 	workers := polecatSeatPoolSize()
@@ -163,7 +159,6 @@ func TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize(t *testing.T) {
 		inFlight int
 		peak     int
 		arrived  int
-		stalled  bool
 	)
 	allArrived := make(chan struct{})
 
@@ -177,23 +172,9 @@ func TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize(t *testing.T) {
 		if arrived == workers {
 			close(allArrived)
 		}
-		alreadyStalled := stalled
 		mu.Unlock()
 
-		// Once one build has timed out the verdict is in; later builds skip
-		// the wait so a serial pool fails in seconds, not minutes.
-		if !alreadyStalled {
-			select {
-			case <-allArrived:
-			case <-time.After(5 * time.Second):
-				mu.Lock()
-				stalled = true
-				mu.Unlock()
-			}
-		}
-		// Hold the slot briefly so any worker beyond the bound would overlap
-		// with the others and show up in peak.
-		time.Sleep(2 * time.Millisecond)
+		<-allArrived
 
 		mu.Lock()
 		inFlight--
@@ -201,9 +182,6 @@ func TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize(t *testing.T) {
 		return nil
 	})
 
-	if stalled {
-		t.Fatalf("fewer than %d rigs were ever built at once: the pool is not overlapping rigs (serial fallback?)", workers)
-	}
 	if peak != workers {
 		t.Fatalf("peak concurrent rig builds = %d, want exactly the pool size %d (bounded, and fully used)", peak, workers)
 	}

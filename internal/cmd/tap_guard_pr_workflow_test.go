@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +95,7 @@ func polecatBranchPayload(dir, command string) string {
 // having spawned polecats, and inheriting an exemption from it is exactly how
 // the live-fire probe mis-read a refinery session (gt-xy4b).
 func TestIsPolecatSession(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		gtRole    string
@@ -110,9 +113,8 @@ func TestIsPolecatSession(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.gtRole)
-			t.Setenv("GT_POLECAT", tt.gtPolecat)
-			if got := isPolecatSession(); got != tt.want {
+			proc := fakeGuardProcess(map[string]string{"GT_ROLE": tt.gtRole, "GT_POLECAT": tt.gtPolecat}, "")
+			if got := isPolecatSession(proc); got != tt.want {
 				t.Errorf("isPolecatSession() with GT_ROLE=%q GT_POLECAT=%q = %v, want %v", tt.gtRole, tt.gtPolecat, got, tt.want)
 			}
 		})
@@ -128,8 +130,8 @@ func TestIsPolecatSession(t *testing.T) {
 // polecats by gt-ibt8, so before this exemption the session had no open route
 // at all. The command is pearl's exact gt-da2x shape.
 func TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed(t *testing.T) {
-	town := newPolecatTestTown(t)
-	t.Setenv("GT_ROLE", "gastown/polecats/"+town.name)
+	t.Parallel()
+	town := newPolecatTestTown(t).withEnv("GT_ROLE", "gastown/polecats/ruby")
 
 	allowed := []struct {
 		name    string
@@ -143,10 +145,7 @@ func TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed(t *testing.T) {
 	}
 	for _, tt := range allowed {
 		t.Run(tt.name, func(t *testing.T) {
-			var err error
-			withStdin(t, polecatBranchPayload(tt.cwd, tt.command), func() {
-				err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-			})
+			err := tapGuardPRWorkflow(strings.NewReader(polecatBranchPayload(tt.cwd, tt.command)), io.Discard, town.proc())
 			if err != nil {
 				t.Errorf("expected a polecat's session branch in its own worktree to be allowed, got error: %v", err)
 			}
@@ -158,50 +157,51 @@ func TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed(t *testing.T) {
 // half of gt-6hg7: the exemption is narrowly scoped, so the shapes the guard
 // exists to block stay blocked.
 func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T) {
+	t.Parallel()
 	town := newPolecatTestTown(t)
 	branch := "polecat/ruby/gt-da2x+mu6jwe92"
 
 	tests := []struct {
 		name    string
-		setup   func(t *testing.T)
+		env     []string
 		cwd     string
 		command string
 	}{
 		{
 			name:    "branch creation in a sibling polecat's worktree",
-			setup:   func(t *testing.T) { t.Setenv("GT_ROLE", "gastown/polecats/"+town.name) },
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.sibling,
 			command: "git checkout -b " + branch,
 		},
 		{
 			name:    "branch creation at the rig root",
-			setup:   func(t *testing.T) { t.Setenv("GT_ROLE", "gastown/polecats/"+town.name) },
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.rigRoot,
 			command: "git switch -c " + branch,
 		},
 		{
 			name:    "gh pr create in the polecat's own worktree",
-			setup:   func(t *testing.T) { t.Setenv("GT_ROLE", "gastown/polecats/"+town.name) },
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.worktree,
 			command: "gh pr create --title foo",
 		},
 		{
 			name:    "branch creation chained with gh pr create in the own worktree",
-			setup:   func(t *testing.T) { t.Setenv("GT_ROLE", "gastown/polecats/"+town.name) },
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.worktree,
 			command: "git checkout -b " + branch + " && gh pr create --title foo",
 		},
 		{
 			name:    "gh pr create chained before a branch creation in the own worktree",
-			setup:   func(t *testing.T) { t.Setenv("GT_ROLE", "gastown/polecats/"+town.name) },
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.worktree,
 			command: "gh pr create --title foo && git checkout -b " + branch,
 		},
 		{
 			name: "coordinator carrying a stale GT_POLECAT",
-			setup: func(t *testing.T) {
-				t.Setenv("GT_ROLE", "gastown/witness")
-				t.Setenv("GT_POLECAT", town.name) // stale, from having spawned one
+			env: []string{
+				"GT_ROLE", "gastown/witness",
+				"GT_POLECAT", town.name, // stale, from having spawned one
 			},
 			cwd:     town.worktree,
 			command: "git checkout -b " + branch,
@@ -213,10 +213,10 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 			// 'git checkout -b' here as broken matcher wiring, so the
 			// exemption must not fire on role alone.
 			name: "live-fire probe sandbox with GT_POLECAT and no worktree",
-			setup: func(t *testing.T) {
-				t.Setenv("GT_ROLE", "")
-				t.Setenv("GT_POLECAT", "live-fire")
-				t.Setenv("GT_POLECAT_PATH", "")
+			env: []string{
+				"GT_ROLE", "",
+				"GT_POLECAT", "live-fire",
+				"GT_POLECAT_PATH", "",
 			},
 			cwd:     t.TempDir(),
 			command: "git checkout -b gt-live-fire-probe",
@@ -224,9 +224,8 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.setup(t)
 			payload := polecatBranchPayload(tt.cwd, tt.command)
-			if got := evaluatePRWorkflowGuard([]byte(payload)); got != prWorkflowBlockAgentContext {
+			if got := evaluatePRWorkflowGuard([]byte(payload), town.withEnv(tt.env...).proc()); got != prWorkflowBlockAgentContext {
 				t.Errorf("evaluatePRWorkflowGuard(%q) in %s = %v, want prWorkflowBlockAgentContext", tt.command, tt.cwd, got)
 			}
 		})
@@ -237,18 +236,21 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 // end-to-end for a shape the exemption does not cover — the guard must still
 // exit 2 with the banner, not merely decide to block.
 func TestRunTapGuardPRWorkflow_PolecatBlockedShapeShowsBanner(t *testing.T) {
+	t.Parallel()
 	town := newPolecatTestTown(t)
-	t.Setenv("GT_ROLE", "gastown/polecats/"+town.name)
+	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
 
-	var err error
-	withStdin(t, polecatBranchPayload(town.sibling, "git checkout -b polecat/ruby/gt-da2x+mu6jwe92"), func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	var stderr strings.Builder
+	payload := polecatBranchPayload(town.sibling, "git checkout -b polecat/ruby/gt-da2x+mu6jwe92")
+	err := tapGuardPRWorkflow(strings.NewReader(payload), &stderr, town.proc())
 	if err == nil {
 		t.Fatal("expected branch creation in a sibling worktree to be blocked, got nil error")
 	}
 	exit, ok := err.(*SilentExitError)
 	if !ok || exit.Code != 2 {
 		t.Fatalf("expected a silent exit 2 (BLOCK), got %T: %v", err, err)
+	}
+	if !strings.Contains(stderr.String(), "PR WORKFLOW BLOCKED") {
+		t.Errorf("expected the PR WORKFLOW BLOCKED banner on stderr, got:\n%s", stderr.String())
 	}
 }

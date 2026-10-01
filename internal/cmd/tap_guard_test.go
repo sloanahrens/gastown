@@ -1,9 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"io"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,38 +66,60 @@ func TestIsLeadingBranchCreation(t *testing.T) {
 	}
 }
 
-// withStdin replaces os.Stdin with content for the duration of fn, restoring
-// the original afterward. Needed because runTapGuardPRWorkflow reads the
-// command straight off os.Stdin (Claude Code hook protocol).
-func withStdin(t *testing.T, content string, fn func()) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+// fakeGuardProcess is a guardProcess whose environment is env and whose
+// working directory is wd ("" makes getwd fail, as a deleted cwd does). HOME
+// and TMPDIR come from env, as os.UserHomeDir and os.TempDir read them on
+// Unix; there are no host temp dirs, no origin remote, and the host is idle.
+func fakeGuardProcess(env map[string]string, wd string) guardProcess {
+	return guardProcess{
+		getenv: func(key string) string { return env[key] },
+		lookupEnv: func(key string) (string, bool) {
+			value, ok := env[key]
+			return value, ok
+		},
+		getwd: func() (string, error) {
+			if wd == "" {
+				return "", errors.New("getwd: no working directory")
+			}
+			return wd, nil
+		},
+		homeDir: func() (string, error) {
+			if home := env["HOME"]; home != "" {
+				return home, nil
+			}
+			return "", errors.New("$HOME is not defined")
+		},
+		tempDir: func() string {
+			if dir := env["TMPDIR"]; dir != "" {
+				return dir
+			}
+			return "/tmp"
+		},
+		originURL: func() (string, error) { return "", errors.New("no origin remote") },
+		load1:     func() (float64, bool) { return 0, true },
 	}
-	origStdin := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = origStdin }()
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.WriteString(w, content)
-		w.Close()
-		close(done)
-	}()
-	fn()
-	<-done
 }
 
+// bareGuardProcess has an empty environment and no working directory.
+var bareGuardProcess = fakeGuardProcess(nil, "")
+
+// noTownSession judges a command as bareGuardProcess, outside any town.
+var noTownSession = guardSession{proc: bareGuardProcess}
+
+// unreadableReader fails every read, the way a write-only stdin does.
+type unreadableReader struct{}
+
+func (unreadableReader) Read([]byte) (int, error) { return 0, errors.New("read: bad file descriptor") }
+
 func TestRunTapGuardPRWorkflow_RefineryStillBlocksPRCreate(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"gh pr create --title foo"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected gh pr create to remain blocked for the refinery role, got nil error")
 	}
@@ -108,17 +130,14 @@ func TestRunTapGuardPRWorkflow_RefineryStillBlocksPRCreate(t *testing.T) {
 // scoping, and TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout's
 // sandbox-cwd pin applies).
 func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksRehearsalBranchName(t *testing.T) {
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_POLECAT_PATH", "")
-	t.Setenv("GT_RIG", "")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_ROLE":    "gastown/polecats/topaz",
+		"GT_POLECAT": "topaz",
+	}, "")
 
 	hookInput := polecatBranchPayload(t.TempDir(), "git fetch --prune origin\ngit checkout -b temp origin/main\ngit merge --no-ff --no-edit origin/main")
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected a non-refinery agent to remain blocked on a rehearsal-named branch, got nil error")
 	}
@@ -129,14 +148,14 @@ func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksRehearsalBranchName(t *test
 // the name-scoped exemption (gt-mo53) must not widen into "refinery may
 // create any branch on any segment."
 func TestRunTapGuardPRWorkflow_RefineryArbitraryBranchLaterSegmentStillBlocks(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git fetch --prune origin\ngit checkout -b feature/foo origin/main"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected a non-rehearsal branch name on a later segment to remain blocked for the refinery role, got nil error")
 	}
@@ -151,14 +170,14 @@ func TestRunTapGuardPRWorkflow_RefineryArbitraryBranchLaterSegmentStillBlocks(t 
 // the command does NOT match the leading shape — it does not prove the
 // clause itself.
 func TestRunTapGuardPRWorkflow_RefineryPRCreateThenRehearsalNameStillBlocks(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"git fetch origin\ngit checkout -b temp origin/main && gh pr create --title foo"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected a rehearsal-named checkout glued after gh pr create to remain blocked, got nil error")
 	}
@@ -179,17 +198,14 @@ func TestRunTapGuardPRWorkflow_RefineryPRCreateThenRehearsalNameStillBlocks(t *t
 // verdict asserted here. The positive case — a polecat's session branch in its
 // own worktree — is TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed.
 func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout(t *testing.T) {
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_POLECAT_PATH", "")
-	t.Setenv("GT_RIG", "")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_ROLE":    "gastown/polecats/topaz",
+		"GT_POLECAT": "topaz",
+	}, "")
 
 	hookInput := polecatBranchPayload(t.TempDir(), "git checkout -b temp origin/main")
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected non-refinery feature-branch checkout to remain blocked, got nil error")
 	}
@@ -202,15 +218,14 @@ func TestRunTapGuardPRWorkflow_NonRefineryStillBlocksCheckout(t *testing.T) {
 // payload the harness actually sends. JSON's \n escape decodes to the real
 // newline the tokenizer has to treat as a command separator.
 func TestRunTapGuardPRWorkflow_BlocksNewlineSeparatedCommand(t *testing.T) {
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
-	t.Setenv("GT_POLECAT", "topaz")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_ROLE":    "gastown/polecats/topaz",
+		"GT_POLECAT": "topaz",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"cd /tmp\ngit checkout -b feature/x"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected a blocked shape on a later line of a multi-line command to be blocked, got nil error")
 	}
@@ -223,49 +238,30 @@ func TestRunTapGuardPRWorkflow_BlocksNewlineSeparatedCommand(t *testing.T) {
 // refinery role — the exemption must not widen into "refinery role always
 // passes."
 func TestRunTapGuardPRWorkflow_RefineryUnrelatedCommandAllowed(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"ls -la"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err != nil {
 		t.Errorf("expected unrelated command to be allowed for refinery role via self-filter, got error: %v", err)
 	}
 }
 
 func TestRunTapGuardPRWorkflow_RefineryEmptyStdinStillBlocks(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
-	var err error
-	withStdin(t, "", func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(""), io.Discard, proc)
 	if err == nil {
 		t.Error("expected refinery role with empty/unparsable stdin to still be blocked (fail closed), got nil error")
 	}
-}
-
-// withUnreadableStdin replaces os.Stdin with a write-only file for the
-// duration of fn, so io.ReadAll fails where withStdin's pipe would merely
-// yield an empty payload. Reading a write-only fd returns EBADF; no payload
-// content can reach the guard at all.
-func withUnreadableStdin(t *testing.T, fn func()) {
-	t.Helper()
-	f, err := os.OpenFile(filepath.Join(t.TempDir(), "stdin"), os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		t.Fatalf("opening write-only stdin: %v", err)
-	}
-	defer f.Close()
-
-	origStdin := os.Stdin
-	os.Stdin = f
-	defer func() { os.Stdin = origStdin }()
-
-	fn()
 }
 
 // gt-hift: an io.ReadAll error returned nil straight out of the guard,
@@ -275,12 +271,12 @@ func withUnreadableStdin(t *testing.T, fn func()) {
 // command this is" condition gt-wisp-52y4 gives the fail-closed fallback,
 // so it must reach the unconditional context/origin check.
 func TestRunTapGuardPRWorkflow_UnreadableStdinStillBlocks(t *testing.T) {
-	t.Setenv("GT_POLECAT", "topaz")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "topaz",
+	}, "")
 
-	var err error
-	withUnreadableStdin(t, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(unreadableReader{}, io.Discard, proc)
 	if err == nil {
 		t.Error("expected unreadable stdin in agent context to fail closed (block), got nil error")
 	}
@@ -293,9 +289,11 @@ func TestRunTapGuardPRWorkflow_UnreadableStdinStillBlocks(t *testing.T) {
 // exemption into "refinery always passes" (gt-r2xm composed with
 // gt-wisp-52y4).
 func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
-	t.Setenv("GT_POLECAT", "topaz")
-	t.Setenv("GT_REFINERY", "")
-	t.Setenv("GT_ROLE", "gastown/polecats/topaz")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "topaz",
+		"GT_ROLE":    "gastown/polecats/topaz",
+	}, "")
 
 	unknown := []struct {
 		name  string
@@ -307,22 +305,26 @@ func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
 	}
 	for _, tt := range unknown {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := evaluatePRWorkflowGuard(tt.input); got != prWorkflowBlockAgentContext {
+			if got := evaluatePRWorkflowGuard(tt.input, proc); got != prWorkflowBlockAgentContext {
 				t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want prWorkflowBlockAgentContext (unknown input fails closed)", tt.input, got)
 			}
 		})
 	}
 
 	t.Run("refinery role does not exempt unknown input", func(t *testing.T) {
-		t.Setenv("GT_REFINERY", "1")
-		if got := evaluatePRWorkflowGuard(nil); got != prWorkflowBlockAgentContext {
+		refinery := fakeGuardProcess(map[string]string{
+			"GT_POLECAT":  "topaz",
+			"GT_REFINERY": "1",
+			"GT_ROLE":     "gastown/polecats/topaz",
+		}, "")
+		if got := evaluatePRWorkflowGuard(nil, refinery); got != prWorkflowBlockAgentContext {
 			t.Errorf("evaluatePRWorkflowGuard(nil) under GT_REFINERY = %v, want prWorkflowBlockAgentContext", got)
 		}
 	})
 
 	t.Run("known unrelated command is still allowed", func(t *testing.T) {
 		hookInput := []byte(`{"tool_name":"Bash","tool_input":{"command":"ls -la"}}`)
-		if got := evaluatePRWorkflowGuard(hookInput); got != prWorkflowAllow {
+		if got := evaluatePRWorkflowGuard(hookInput, proc); got != prWorkflowAllow {
 			t.Errorf("evaluatePRWorkflowGuard(unrelated command) = %v, want prWorkflowAllow", got)
 		}
 	})
@@ -338,15 +340,38 @@ func TestEvaluatePRWorkflowGuard_UnknownInputFailsClosed(t *testing.T) {
 // the hook "if" glob that routes the command here is anchored — so the escape
 // is closed.
 func TestRunTapGuardPRWorkflow_RefineryChainedPRCreateStillBlocks(t *testing.T) {
-	t.Setenv("GT_REFINERY", "1")
-	t.Setenv("GT_ROLE", "gastown/refinery")
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_REFINERY": "1",
+		"GT_ROLE":     "gastown/refinery",
+	}, "")
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"gh pr create --title foo && git checkout -b temp origin/main"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardPRWorkflow(tapGuardPRWorkflowCmd, nil)
-	})
+	err := tapGuardPRWorkflow(strings.NewReader(hookInput), io.Discard, proc)
 	if err == nil {
 		t.Error("expected chained 'gh pr create && git checkout -b' to remain blocked for the refinery role, got nil error")
+	}
+}
+
+// Outside an agent context the guard still blocks a PR in the maintainer's
+// own repo, read through the origin remote — in either URL format — and lets
+// any other origin through.
+func TestEvaluatePRWorkflowGuard_MaintainerOrigin(t *testing.T) {
+	t.Parallel()
+	hookInput := []byte(`{"tool_name":"Bash","tool_input":{"command":"gh pr create --title foo"}}`)
+	tests := []struct {
+		origin string
+		want   prWorkflowGuardDecision
+	}{
+		{"https://github.com/steveyegge/gastown.git", prWorkflowBlockMaintainerOrigin},
+		{"git@github.com:steveyegge/gastown.git", prWorkflowBlockMaintainerOrigin},
+		{"git@github.com:someone/gastown.git", prWorkflowAllow},
+	}
+	for _, tt := range tests {
+		proc := fakeGuardProcess(nil, "/home/u/src/gastown")
+		proc.originURL = func() (string, error) { return tt.origin, nil }
+		if got := evaluatePRWorkflowGuard(hookInput, proc); got != tt.want {
+			t.Errorf("evaluatePRWorkflowGuard with origin %s = %v, want %v", tt.origin, got, tt.want)
+		}
 	}
 }

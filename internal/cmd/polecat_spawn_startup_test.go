@@ -13,6 +13,7 @@ import (
 // sling that fails at session start is what tells the convoy feeders to back
 // off, and a later sling that starts its session lifts the backoff.
 func TestNoteStartOutcome_RecordsFailureAndClearsOnSuccess(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
@@ -20,20 +21,18 @@ func TestNoteStartOutcome_RecordsFailureAndClearsOnSuccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":1,"name":"t"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	t.Chdir(t.TempDir())
 
 	s := &SpawnedPolecatInfo{HookBead: "gt-abc"}
-	s.noteStartOutcome(errors.New("starting session: startup blocked: trust dialog"))
+	s.noteStartOutcomeIn(townRoot, errors.New("starting session: startup blocked: trust dialog"))
 	if dispatch.StartupBackoff(townRoot, "gt-abc") == "" {
 		t.Fatal("a failed session start should put the bead into backoff")
 	}
 
-	s.noteStartOutcome(nil)
+	s.noteStartOutcomeIn(townRoot, nil)
 	if got := dispatch.StartupBackoff(townRoot, "gt-abc"); got != "" {
 		t.Errorf("a started session should clear the backoff, got %q", got)
 	}
 
 	// A spawn with no bead has nothing to record against.
-	(&SpawnedPolecatInfo{}).noteStartOutcome(errors.New("boom"))
+	(&SpawnedPolecatInfo{}).noteStartOutcomeIn(townRoot, errors.New("boom"))
 }

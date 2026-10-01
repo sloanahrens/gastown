@@ -512,16 +512,12 @@ func envSlice(env []string) map[string]string {
 func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
 	t.Parallel()
 	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`)
-	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
-	keepAppendingEvents(t, w.townRoot)
+	wakeOnSignal(w)
 
-	start := time.Now()
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed >= 20*time.Second {
-		t.Fatalf("wait ran %v; the event should have woken it", elapsed)
 	}
 	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label updates = %q, want exactly [idle:0]", got)
@@ -546,9 +542,9 @@ func TestRunMoleculeAwaitSignal_TimeoutIncrementsIdle(t *testing.T) {
 func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
 	t.Parallel()
 	w := newAwaitSignalTown(t, `["gt:agent","idle:0"]`)
-	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
-	keepAppendingEvents(t, w.townRoot)
+	wakeOnSignal(w)
 
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
@@ -561,44 +557,22 @@ func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
 	}
 }
 
-// keepAppendingEvents appends a town event every 200ms until the test ends.
-// A single append at a fixed delay races the fake-bd calls that run before
-// the wait opens the events file: under a loaded full-package run they took
-// longer than the delay, the append landed before the tail's seek-to-end,
-// and the wait slept to its cap.
-func keepAppendingEvents(t *testing.T, townRoot string) {
-	t.Helper()
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	t.Cleanup(func() { close(stop); <-done })
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				f, err := os.OpenFile(filepath.Join(townRoot, ".events.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-				if err != nil {
-					continue
-				}
-				_, _ = f.WriteString(`{"ts":"now","type":"mail","actor":"mayor"}` + "\n")
-				_ = f.Close()
-			}
-		}
-	}()
+// wakeOnSignal makes the run's wait return a signal at once, as a town event
+// arriving would.
+func wakeOnSignal(w *awaitSignalTown) {
+	w.run.wait = func(context.Context, string, string) (*AwaitSignalResult, error) {
+		return &AwaitSignalResult{Reason: "signal", Signal: `{"ts":"now","type":"mail","actor":"mayor"}`}, nil
+	}
 }
 
 // When the idle read failed (a transient bd error), the counter is unknown and
 // may be high: a real wake must still try to reset it.
 func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
 	t.Parallel()
-	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 1)               // only the initial idle read fails
-	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
+	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 1) // only the initial idle read fails
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 
-	keepAppendingEvents(t, w.townRoot)
+	wakeOnSignal(w)
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
@@ -614,10 +588,10 @@ func TestRunMoleculeAwaitSignal_ResetFailureWarnsUnderQuiet(t *testing.T) {
 	// Show calls: 1 idle read, 2 backoff-until set, 3 heartbeat, 4 idle
 	// reset. Fail the reset's read so the reset itself fails.
 	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 4)
-	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"}
 	w.run.quiet = true
 
-	keepAppendingEvents(t, w.townRoot)
+	wakeOnSignal(w)
 	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}

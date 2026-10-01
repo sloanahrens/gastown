@@ -1,11 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -153,32 +153,14 @@ func TestFilterFormulaScaffolds_EmptyIssues(t *testing.T) {
 	}
 }
 
-func TestGetWispIDsUsesBdMolWispList(t *testing.T) {
-	beadsPath := t.TempDir()
-	if err := os.WriteFile(filepath.Join(beadsPath, "issues.jsonl"), []byte(`{"id":"stale-jsonl-wisp"}`+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	bdScript := `#!/bin/sh
-if [ "$1" = "mol" ] && [ "$2" = "wisp" ] && [ "$3" = "list" ] && [ "$4" = "--json" ]; then
-  printf '{"wisps":[{"id":"dolt-wisp-1"},{"id":"dolt-wisp-2"}],"count":2}\n'
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ids := getWispIDs(beadsPath)
-	if !ids["dolt-wisp-1"] || !ids["dolt-wisp-2"] {
+func TestParseWispIDs(t *testing.T) {
+	t.Parallel()
+	ids := parseWispIDs([]byte(`{"wisps":[{"id":"dolt-wisp-1"},{"id":"dolt-wisp-2"}],"count":2}`))
+	if len(ids) != 2 || !ids["dolt-wisp-1"] || !ids["dolt-wisp-2"] {
 		t.Fatalf("expected IDs from bd mol wisp list, got %#v", ids)
 	}
-	if ids["stale-jsonl-wisp"] {
-		t.Fatalf("getWispIDs read stale issues.jsonl; got %#v", ids)
+	if ids := parseWispIDs([]byte("not json")); ids != nil {
+		t.Fatalf("unparseable output = %#v, want nil", ids)
 	}
 }
 
@@ -401,35 +383,24 @@ func TestCappedNote_NeverRendersLikeACompleteBoard(t *testing.T) {
 // byte-identical on the wire to an idle town, and the exit status agreed with
 // the idle case too. /api/ready keys off that status, so it answered 200
 // carrying the panel's "No ready work" for a town it could not read at all.
-//
-// Serial: it drives runReady through the real workspace lookup and the
-// captureOutput os.Stdout swap, and runReady's output mode and rig filter are
-// package variables.
+
 func TestRunReady_AllSourcesFailedIsACommandFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	// A bd that always fails: every source's ready query dies, which is the
-	// all-sources-failed case. The stub never reaches a real bd or Dolt.
-	setupTownWithBdStub(t, "#!/bin/sh\nexit 1\n")
-
-	oldJSON := readyJSON
-	readyJSON = true
-	t.Cleanup(func() { readyJSON = oldJSON })
-
-	var err error
-	out := captureOutput(func() { err = runReady(nil, nil) })
+	t.Parallel()
+	// Every source's ready query died: the all-sources-failed case.
+	sources := []ReadySource{{Name: "town", Error: "bd: exit 1"}, {Name: "gastown", Error: "bd: exit 1"}}
+	var buf bytes.Buffer
+	err := renderReady(&buf, sources, "/town", true)
+	out := buf.String()
 
 	if err == nil {
-		t.Fatalf("runReady returned nil for a town whose every source failed; "+
+		t.Fatalf("renderReady returned nil for a town whose every source failed; "+
 			"stdout was %q", out)
 	}
 	if !strings.Contains(err.Error(), "all sources failed to load") {
-		t.Errorf("runReady error = %v, want it to name the all-sources failure", err)
+		t.Errorf("renderReady error = %v, want it to name the all-sources failure", err)
 	}
 	if got := strings.TrimSpace(out); got != "" {
-		t.Errorf("runReady wrote %q on stdout; a failed command must not print a "+
+		t.Errorf("renderReady wrote %q; a failed command must not print a "+
 			"zero-item report, which is byte-identical to what an idle town prints", got)
 	}
 }

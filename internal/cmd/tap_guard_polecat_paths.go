@@ -134,7 +134,13 @@ type polecatPathsInput struct {
 }
 
 func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardPolecatPaths(os.Stdin, os.Stderr, realGuardProcess())
+}
+
+// tapGuardPolecatPaths is the polecat-paths guard: it reads the hook payload
+// from stdin and the session from proc, and prints a block to stderr.
+func tapGuardPolecatPaths(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
 		// No payload to judge. Some harness wrappers drain stdin before
 		// invoking a guard (gt-wisp-52y4's Copilot template does), and denying
@@ -146,7 +152,7 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 	if err := json.Unmarshal(input, &hook); err != nil {
 		return nil
 	}
-	scope, ok := resolvePolecatPathScope(hook.Cwd)
+	scope, ok := resolvePolecatPathScope(hook.Cwd, proc)
 	if !ok {
 		return nil // not a polecat session — outside this guard's remit
 	}
@@ -154,7 +160,7 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 	if reason == "" {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "polecat-paths: %s\n", reason)
+	fmt.Fprintf(stderr, "polecat-paths: %s\n", reason)
 	return NewSilentExit(2)
 }
 
@@ -168,6 +174,7 @@ type polecatPathScope struct {
 	cwd          string // canonical directory relative targets resolve against
 	scratch      []string
 	protectedBin []string // shared host binary dirs no polecat may write to (gt-tnts5)
+	proc         guardProcess
 }
 
 // evaluate reports why the hook payload must be blocked, or "" to allow it.
@@ -203,7 +210,7 @@ func (s polecatPathScope) checkFileTarget(raw, tool string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
 	}
-	target, ok := canonicalizeToolPath(raw, s.cwd)
+	target, ok := canonicalizeToolPath(s.proc, raw, s.cwd)
 	if !ok {
 		return fmt.Sprintf("%s target %q cannot be resolved (unknown variable or missing parent) — refusing to guess. Write inside your own worktree: %s", tool, raw, s.worktree)
 	}
@@ -327,7 +334,7 @@ func (s polecatPathScope) checkBashTarget(raw, context string) string {
 // only town-internal paths that are not the polecat's own (and the shared bin
 // directory) are denied.
 func (s polecatPathScope) checkBashPathFrom(candidate, base, context string) string {
-	target, ok := canonicalizeToolPath(candidate, base)
+	target, ok := canonicalizeToolPath(s.proc, candidate, base)
 	if !ok {
 		return fmt.Sprintf("%s path %q cannot be resolved (unknown variable or missing parent) — refusing to guess; name an explicit path inside your worktree: %s", context, candidate, s.worktree)
 	}
@@ -377,7 +384,7 @@ func (s polecatPathScope) symlinkDirs(ln lnArgs) []string {
 		raws = append(raws, ln.targetDir)
 	case ln.dest != "":
 		raws = append(raws, pathDirPart(ln.dest))
-		if dest, ok := canonicalizeToolPath(ln.dest, s.cwd); ok {
+		if dest, ok := canonicalizeToolPath(s.proc, ln.dest, s.cwd); ok {
 			if info, err := os.Stat(dest); err == nil && info.IsDir() {
 				raws = append(raws, dest)
 			}
@@ -387,7 +394,7 @@ func (s polecatPathScope) symlinkDirs(ln lnArgs) []string {
 	}
 	var dirs []string
 	for _, raw := range raws {
-		dir, ok := canonicalizeToolPath(raw, s.cwd)
+		dir, ok := canonicalizeToolPath(s.proc, raw, s.cwd)
 		if !ok {
 			// Only an unresolvable spelling gets here (an unknown variable), and
 			// checkBashArgs has already denied that same operand fail-closed.
@@ -601,26 +608,26 @@ func (s polecatPathScope) isScratchPath(target string) bool {
 //
 // The path supplies the layout (town root, rig root, sibling names); GT_RIG and
 // GT_POLECAT supply identity, and identity wins if the two disagree.
-func resolvePolecatPathScope(payloadCwd string) (polecatPathScope, bool) {
-	name := os.Getenv("GT_POLECAT")
+func resolvePolecatPathScope(payloadCwd string, proc guardProcess) (polecatPathScope, bool) {
+	name := proc.getenv("GT_POLECAT")
 	if name == "" {
 		return polecatPathScope{}, false
 	}
 	cwd := ""
 	if payloadCwd != "" && filepath.IsAbs(payloadCwd) {
-		if canonical, ok := canonicalizeToolPath(payloadCwd, ""); ok {
+		if canonical, ok := canonicalizeToolPath(proc, payloadCwd, ""); ok {
 			cwd = canonical
 		}
 	}
 	if cwd == "" {
-		if wd, err := os.Getwd(); err == nil {
-			if canonical, ok := canonicalizeToolPath(wd, ""); ok {
+		if wd, err := proc.getwd(); err == nil {
+			if canonical, ok := canonicalizeToolPath(proc, wd, ""); ok {
 				cwd = canonical
 			}
 		}
 	}
 
-	own := os.Getenv("GT_POLECAT_PATH")
+	own := proc.getenv("GT_POLECAT_PATH")
 	if own == "" && cwd != "" {
 		if layout, ok := splitPolecatLayout(cwd); ok && layout.name == name {
 			own = layout.worktree
@@ -633,19 +640,20 @@ func resolvePolecatPathScope(payloadCwd string) (polecatPathScope, bool) {
 	if !ok {
 		return polecatPathScope{}, false
 	}
-	if rig := os.Getenv("GT_RIG"); rig != "" && rig != layout.rig {
+	if rig := proc.getenv("GT_RIG"); rig != "" && rig != layout.rig {
 		layout.polecatDir = filepath.Join(layout.townRoot, rig, "polecats", name)
 		layout.worktree = filepath.Join(layout.polecatDir, filepath.Base(layout.worktree))
 	}
 
 	scope := polecatPathScope{
-		worktree:     resolveGuardDir(layout.worktree),
-		ownDir:       resolveGuardDir(layout.polecatDir),
-		repoGit:      resolveGuardDir(filepath.Join(layout.rigRoot, bareRepoDir)),
-		townRoot:     resolveGuardDir(layout.townRoot),
+		worktree:     resolveGuardDir(proc, layout.worktree),
+		ownDir:       resolveGuardDir(proc, layout.polecatDir),
+		repoGit:      resolveGuardDir(proc, filepath.Join(layout.rigRoot, bareRepoDir)),
+		townRoot:     resolveGuardDir(proc, layout.townRoot),
 		cwd:          cwd,
-		scratch:      scratchRoots(layout.townRoot),
-		protectedBin: protectedBinDirs(),
+		scratch:      scratchRoots(proc, layout.townRoot),
+		protectedBin: protectedBinDirs(proc),
+		proc:         proc,
 	}
 	if scope.worktree == "" {
 		scope.worktree = scope.ownDir
@@ -737,7 +745,7 @@ func splitPolecatLayout(path string) (polecatLayout, bool) {
 // ok is false when the path cannot be resolved at all — an unknown variable, an
 // unresolvable home directory, a command substitution, no usable cwd, or a
 // symlink loop. Callers must treat !ok as DENY (fail closed, rule 3).
-func canonicalizeToolPath(raw, cwd string) (string, bool) {
+func canonicalizeToolPath(proc guardProcess, raw, cwd string) (string, bool) {
 	if raw == "" {
 		return "", false
 	}
@@ -746,8 +754,8 @@ func canonicalizeToolPath(raw, cwd string) (string, bool) {
 	if strings.Contains(raw, "$(") || strings.Contains(raw, "`") {
 		return "", false
 	}
-	expanded := expandEnvVars(raw)
-	expanded, ok := expandHomePath(expanded)
+	expanded := expandEnvVars(proc, raw)
+	expanded, ok := expandHomePath(proc, expanded)
 	if !ok || expanded == "" {
 		return "", false
 	}
@@ -853,13 +861,13 @@ func kernelPathComponents(path string) []string {
 	return out
 }
 
-// expandEnvVars expands $VAR and ${VAR} for every variable this process can see.
+// expandEnvVars expands $VAR and ${VAR} for every variable proc can see.
 // A variable it cannot see is left in place ("$NAME"), which the caller detects
 // and treats as unresolvable — guessing a value there is how a guard starts
 // blocking innocent commands, or letting a real one through.
-func expandEnvVars(raw string) string {
+func expandEnvVars(proc guardProcess, raw string) string {
 	return os.Expand(raw, func(key string) string {
-		if value, found := os.LookupEnv(key); found {
+		if value, found := proc.lookupEnv(key); found {
 			return value
 		}
 		return "$" + key
@@ -870,11 +878,11 @@ func expandEnvVars(raw string) string {
 // Unlike a tool-supplied target (rule 3), a failure here falls back to the
 // cleaned path instead of denying everything: these come from the session
 // environment, not from the model, and a bogus boundary would wedge the session.
-func resolveGuardDir(path string) string {
+func resolveGuardDir(proc guardProcess, path string) string {
 	if path == "" {
 		return ""
 	}
-	if resolved, ok := canonicalizeToolPath(path, ""); ok {
+	if resolved, ok := canonicalizeToolPath(proc, path, ""); ok {
 		return resolved
 	}
 	return filepath.Clean(path)
@@ -935,19 +943,19 @@ func claudeConfigScratchRoots(configDir, home string) []string {
 // needs, and it is what made an earlier version of this guard's tests
 // meaningless — a temp-dir test town looked like scratch space.
 // hostTempScratchDirs are the well-known host temp dirs scratchRoots adds
-// beside $TMPDIR. A variable so the guard's test town can be judged apart
-// from wherever the host's /tmp is: on Linux t.TempDir() is itself under
-// /tmp, so the test town's $HOME and its surroundings were scratch space
-// there and not on macOS.
+// beside $TMPDIR (guardProcess.hostTemp in production). A field there so the
+// guard's test town can be judged apart from wherever the host's /tmp is: on
+// Linux t.TempDir() is itself under /tmp, so the test town's $HOME and its
+// surroundings were scratch space there and not on macOS.
 var hostTempScratchDirs = []string{"/tmp", "/var/tmp"}
 
-func scratchRoots(townRoot string) []string {
-	candidates := append([]string{os.TempDir()}, hostTempScratchDirs...)
-	home, err := os.UserHomeDir()
+func scratchRoots(proc guardProcess, townRoot string) []string {
+	candidates := append([]string{proc.tempDir()}, proc.hostTemp...)
+	home, err := proc.homeDir()
 	if err != nil {
 		home = ""
 	}
-	candidates = append(candidates, claudeConfigScratchRoots(os.Getenv("CLAUDE_CONFIG_DIR"), home)...)
+	candidates = append(candidates, claudeConfigScratchRoots(proc.getenv("CLAUDE_CONFIG_DIR"), home)...)
 	if townRoot != "" {
 		candidates = append(candidates, filepath.Join(townRoot, sessionScratchDir, "projects"))
 	}
@@ -956,7 +964,7 @@ func scratchRoots(townRoot string) []string {
 	}
 	roots := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		if root := resolveGuardDir(candidate); root != "" {
+		if root := resolveGuardDir(proc, candidate); root != "" {
 			roots = append(roots, root)
 		}
 	}
@@ -969,12 +977,12 @@ func scratchRoots(townRoot string) []string {
 // them off PATH there — and it sits outside the town tree, so isTownPath alone
 // never covers it. An unresolvable $HOME yields no roots rather than guessing:
 // callers still have the town-membership rules to fall back on.
-func protectedBinDirs() []string {
-	home, err := os.UserHomeDir()
+func protectedBinDirs(proc guardProcess) []string {
+	home, err := proc.homeDir()
 	if err != nil || home == "" {
 		return nil
 	}
-	return []string{resolveGuardDir(filepath.Join(home, ".local", "bin"))}
+	return []string{resolveGuardDir(proc, filepath.Join(home, ".local", "bin"))}
 }
 
 // isProtectedBinPath reports whether target lies inside a shared host binary

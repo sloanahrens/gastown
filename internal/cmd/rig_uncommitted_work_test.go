@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -10,31 +11,20 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-func stubUncommittedWorkCheckDeps(
-	t *testing.T,
+func fakeUncommittedWorkCheck(
 	listFn func(*rig.Rig) ([]*polecat.Polecat, error),
 	checkFn func(string) (*git.UncommittedWorkStatus, error),
 	isTTYFn func() bool,
 	promptFn func(string) bool,
-) {
-	t.Helper()
-
-	oldList := listPolecatsForWorkCheck
-	oldCheck := checkPolecatWorkStatus
-	oldIsTTY := isStdinTerminal
-	oldPrompt := promptYesNoUnsafeProceed
-
-	listPolecatsForWorkCheck = listFn
-	checkPolecatWorkStatus = checkFn
-	isStdinTerminal = isTTYFn
-	promptYesNoUnsafeProceed = promptFn
-
-	t.Cleanup(func() {
-		listPolecatsForWorkCheck = oldList
-		checkPolecatWorkStatus = oldCheck
-		isStdinTerminal = oldIsTTY
-		promptYesNoUnsafeProceed = oldPrompt
-	})
+) (uncommittedWorkCheck, *bytes.Buffer) {
+	var out bytes.Buffer
+	return uncommittedWorkCheck{
+		listPolecats: listFn,
+		workStatus:   checkFn,
+		isTerminal:   isTTYFn,
+		prompt:       promptFn,
+		out:          &out,
+	}, &out
 }
 
 func testRig() *rig.Rig {
@@ -45,8 +35,8 @@ func testRig() *rig.Rig {
 }
 
 func TestCheckUncommittedWork_ListErrorBlocksWithoutForce(t *testing.T) {
-	stubUncommittedWorkCheckDeps(
-		t,
+	t.Parallel()
+	c, out := fakeUncommittedWorkCheck(
 		func(*rig.Rig) ([]*polecat.Polecat, error) {
 			return nil, errors.New("list failed")
 		},
@@ -61,10 +51,8 @@ func TestCheckUncommittedWork_ListErrorBlocksWithoutForce(t *testing.T) {
 		},
 	)
 
-	var proceed bool
-	output := captureStdout(t, func() {
-		proceed = checkUncommittedWork(testRig(), "testrig", "stop", false)
-	})
+	proceed := c.check(testRig(), "testrig", "stop", false)
+	output := out.String()
 
 	if proceed {
 		t.Fatal("expected proceed=false when polecat listing fails without --force")
@@ -78,8 +66,8 @@ func TestCheckUncommittedWork_ListErrorBlocksWithoutForce(t *testing.T) {
 }
 
 func TestCheckUncommittedWork_ListErrorForceTTYPrompts(t *testing.T) {
-	stubUncommittedWorkCheckDeps(
-		t,
+	t.Parallel()
+	c, _ := fakeUncommittedWorkCheck(
 		func(*rig.Rig) ([]*polecat.Polecat, error) {
 			return nil, errors.New("list failed")
 		},
@@ -96,15 +84,15 @@ func TestCheckUncommittedWork_ListErrorForceTTYPrompts(t *testing.T) {
 		},
 	)
 
-	proceed := checkUncommittedWork(testRig(), "testrig", "shutdown", true)
+	proceed := c.check(testRig(), "testrig", "shutdown", true)
 	if !proceed {
 		t.Fatal("expected proceed=true after force+TTY confirmation")
 	}
 }
 
 func TestCheckUncommittedWork_PolecatStatusErrorBlocks(t *testing.T) {
-	stubUncommittedWorkCheckDeps(
-		t,
+	t.Parallel()
+	c, out := fakeUncommittedWorkCheck(
 		func(*rig.Rig) ([]*polecat.Polecat, error) {
 			return []*polecat.Polecat{
 				{Name: "alpha", ClonePath: "/tmp/alpha"},
@@ -120,10 +108,8 @@ func TestCheckUncommittedWork_PolecatStatusErrorBlocks(t *testing.T) {
 		},
 	)
 
-	var proceed bool
-	output := captureStdout(t, func() {
-		proceed = checkUncommittedWork(testRig(), "testrig", "restart", false)
-	})
+	proceed := c.check(testRig(), "testrig", "restart", false)
+	output := out.String()
 
 	if proceed {
 		t.Fatal("expected proceed=false when polecat status check fails")
@@ -137,8 +123,8 @@ func TestCheckUncommittedWork_PolecatStatusErrorBlocks(t *testing.T) {
 }
 
 func TestCheckUncommittedWork_DirtyForceNonTTYBlocks(t *testing.T) {
-	stubUncommittedWorkCheckDeps(
-		t,
+	t.Parallel()
+	c, out := fakeUncommittedWorkCheck(
 		func(*rig.Rig) ([]*polecat.Polecat, error) {
 			return []*polecat.Polecat{
 				{Name: "alpha", ClonePath: "/tmp/alpha"},
@@ -157,10 +143,8 @@ func TestCheckUncommittedWork_DirtyForceNonTTYBlocks(t *testing.T) {
 		},
 	)
 
-	var proceed bool
-	output := captureStdout(t, func() {
-		proceed = checkUncommittedWork(testRig(), "testrig", "stop", true)
-	})
+	proceed := c.check(testRig(), "testrig", "stop", true)
+	output := out.String()
 
 	if proceed {
 		t.Fatal("expected proceed=false for force in non-TTY mode")
@@ -171,8 +155,8 @@ func TestCheckUncommittedWork_DirtyForceNonTTYBlocks(t *testing.T) {
 }
 
 func TestCheckUncommittedWork_DirtyForceTTYPrompts(t *testing.T) {
-	stubUncommittedWorkCheckDeps(
-		t,
+	t.Parallel()
+	c, _ := fakeUncommittedWorkCheck(
 		func(*rig.Rig) ([]*polecat.Polecat, error) {
 			return []*polecat.Polecat{
 				{Name: "alpha", ClonePath: "/tmp/alpha"},
@@ -193,7 +177,7 @@ func TestCheckUncommittedWork_DirtyForceTTYPrompts(t *testing.T) {
 		},
 	)
 
-	proceed := checkUncommittedWork(testRig(), "testrig", "stop", true)
+	proceed := c.check(testRig(), "testrig", "stop", true)
 	if !proceed {
 		t.Fatal("expected proceed=true after force+TTY confirmation")
 	}

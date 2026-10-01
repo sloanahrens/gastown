@@ -1,85 +1,67 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestFindOrCreateTown(t *testing.T) {
-	// Save original env and restore after test
-	origTownRoot := os.Getenv("GT_TOWN_ROOT")
-	defer os.Setenv("GT_TOWN_ROOT", origTownRoot)
-
-	t.Run("respects GT_TOWN_ROOT when set", func(t *testing.T) {
-		// Create a valid town in temp dir
-		tmpTown := t.TempDir()
-		mayorDir := filepath.Join(tmpTown, "mayor")
-		if err := os.MkdirAll(mayorDir, 0755); err != nil {
-			t.Fatalf("mkdir mayor: %v", err)
+	t.Parallel()
+	newTown := func(t *testing.T) string {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "mayor"), 0755); err != nil {
+			t.Fatal(err)
 		}
-
-		os.Setenv("GT_TOWN_ROOT", tmpTown)
-
-		result, err := findOrCreateTown()
-		if err != nil {
-			t.Fatalf("findOrCreateTown() error = %v", err)
+		return dir
+	}
+	env := func(root string) func(string) string {
+		return func(k string) string {
+			if k == "GT_TOWN_ROOT" {
+				return root
+			}
+			return ""
 		}
-		if result != tmpTown {
-			t.Errorf("findOrCreateTown() = %q, want %q", result, tmpTown)
-		}
-	})
+	}
+	noCwdTown := func() (string, error) { return "", errors.New("not in a town") }
 
-	t.Run("ignores invalid GT_TOWN_ROOT", func(t *testing.T) {
-		// Set GT_TOWN_ROOT to a non-existent path
-		os.Setenv("GT_TOWN_ROOT", "/nonexistent/path/to/town")
-
-		// Create a valid town at ~/gt for fallback
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Skip("cannot get home dir")
-		}
-
-		gtPath := filepath.Join(home, "gt")
-		mayorDir := filepath.Join(gtPath, "mayor")
-
-		// Skip if ~/gt doesn't exist (don't want to create it in user's home)
-		if _, err := os.Stat(mayorDir); os.IsNotExist(err) {
-			t.Skip("~/gt/mayor does not exist, skipping fallback test")
-		}
-
-		result, err := findOrCreateTown()
-		if err != nil {
-			t.Fatalf("findOrCreateTown() error = %v", err)
-		}
-		// Should fall back to ~/gt since GT_TOWN_ROOT is invalid
-		if result != gtPath {
-			t.Logf("findOrCreateTown() = %q (fell back to valid town)", result)
+	t.Run("GT_TOWN_ROOT takes priority over the cwd town", func(t *testing.T) {
+		t.Parallel()
+		town := newTown(t)
+		cwdTown := func() (string, error) { return "/cwd/town", nil }
+		got, err := findOrCreateTown(env(town), cwdTown, func() (string, error) { return t.TempDir(), nil })
+		if err != nil || got != town {
+			t.Fatalf("findOrCreateTown() = %q, %v; want %q", got, err, town)
 		}
 	})
 
-	t.Run("GT_TOWN_ROOT takes priority over fallback", func(t *testing.T) {
-		// Create two valid towns
-		tmpTown1 := t.TempDir()
-		tmpTown2 := t.TempDir()
-
-		if err := os.MkdirAll(filepath.Join(tmpTown1, "mayor"), 0755); err != nil {
-			t.Fatalf("mkdir mayor1: %v", err)
+	t.Run("invalid GT_TOWN_ROOT falls back to the cwd town", func(t *testing.T) {
+		t.Parallel()
+		cwdTown := func() (string, error) { return "/cwd/town", nil }
+		got, err := findOrCreateTown(env("/nonexistent/path/to/town"), cwdTown, func() (string, error) { return t.TempDir(), nil })
+		if err != nil || got != "/cwd/town" {
+			t.Fatalf("findOrCreateTown() = %q, %v; want /cwd/town", got, err)
 		}
-		if err := os.MkdirAll(filepath.Join(tmpTown2, "mayor"), 0755); err != nil {
-			t.Fatalf("mkdir mayor2: %v", err)
-		}
+	})
 
-		// Set GT_TOWN_ROOT to tmpTown1
-		os.Setenv("GT_TOWN_ROOT", tmpTown1)
-
-		result, err := findOrCreateTown()
-		if err != nil {
-			t.Fatalf("findOrCreateTown() error = %v", err)
+	t.Run("falls back to ~/gt", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, "gt", "mayor"), 0755); err != nil {
+			t.Fatal(err)
 		}
-		// Should use GT_TOWN_ROOT, not any other valid town
-		if result != tmpTown1 {
-			t.Errorf("findOrCreateTown() = %q, want %q (GT_TOWN_ROOT should take priority)", result, tmpTown1)
+		got, err := findOrCreateTown(env(""), noCwdTown, func() (string, error) { return home, nil })
+		if want := filepath.Join(home, "gt"); err != nil || got != want {
+			t.Fatalf("findOrCreateTown() = %q, %v; want %q", got, err, want)
+		}
+	})
+
+	t.Run("no town anywhere is an error", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		if _, err := findOrCreateTown(env(""), noCwdTown, func() (string, error) { return home, nil }); err == nil {
+			t.Fatal("want an error when no town exists")
 		}
 	})
 }

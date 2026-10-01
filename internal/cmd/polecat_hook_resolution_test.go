@@ -36,6 +36,7 @@ func (c *twoStoreClient) ShowMultiple(ids []string) (map[string]*beads.Issue, er
 }
 
 func TestListActivePolecatWorkByNameSeesTownPrefixedHook(t *testing.T) {
+	t.Parallel()
 	townHook := &beads.Issue{ID: "hq-90m15", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/agate"}
 	bd := &twoStoreClient{
 		rigListing: []*beads.Issue{
@@ -67,6 +68,7 @@ func TestListActivePolecatWorkByNameSeesTownPrefixedHook(t *testing.T) {
 }
 
 func TestListActivePolecatWorkByNameSkipsRoutedReadWhenListingHasHooks(t *testing.T) {
+	t.Parallel()
 	bd := &twoStoreClient{
 		rigListing: []*beads.Issue{
 			{ID: "gt-0sjf", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/amber"},
@@ -81,6 +83,7 @@ func TestListActivePolecatWorkByNameSkipsRoutedReadWhenListingHasHooks(t *testin
 }
 
 func TestListActivePolecatWorkByNameIgnoresStaleTownHook(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		issue *beads.Issue
@@ -110,6 +113,7 @@ func TestListActivePolecatWorkByNameIgnoresStaleTownHook(t *testing.T) {
 }
 
 func TestListActivePolecatWorkByNameFailsOnUnreadableHook(t *testing.T) {
+	t.Parallel()
 	bd := &twoStoreClient{showErr: errors.New("town store unreachable")}
 	if _, err := listActivePolecatWorkByName(bd, "gastown", map[string]string{"agate": "hq-90m15"}); err == nil {
 		t.Fatal("want an error so callers fail closed, got nil")
@@ -117,6 +121,7 @@ func TestListActivePolecatWorkByNameFailsOnUnreadableHook(t *testing.T) {
 }
 
 func TestPolecatHookBeads(t *testing.T) {
+	t.Parallel()
 	agentID := func(name string) string { return "gt-gastown-polecat-" + name }
 	agents := map[string]*beads.Issue{
 		"gt-gastown-polecat-agate": {ID: "gt-gastown-polecat-agate", Description: "hook_bead: hq-90m15\n"},

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,9 @@ import (
 // <root>/gt/.claude-town is also $CLAUDE_CONFIG_DIR, as it is in production,
 // so the config-dir cases below exercise the tree the guard really sees.
 //
+// The session environment is env, read through proc(), so no test touches the
+// process environment and every one can run in parallel.
+//
 // Every path the guard sees (the payload cwd, GT_POLECAT_PATH, HOME) is under
 // the test's own temp root, so the block cases below hold on a clean machine
 // and never touch the operator's live tree — the previous attempt's tests
@@ -35,6 +39,7 @@ type polecatTestTown struct {
 	sibling  string
 	repoGit  string
 	hostTmp  string // stands in for the host's /tmp (see hostTempScratchDirs)
+	env      map[string]string
 }
 
 func newPolecatTestTown(t *testing.T) polecatTestTown {
@@ -67,11 +72,9 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 		t.Fatalf("seeding the sibling worktree: %v", err)
 	}
 
-	t.Setenv("HOME", root) // ~ expands inside the test root, not the operator's home
 	if err := os.MkdirAll(filepath.Join(root, "tmp"), 0o755); err != nil {
 		t.Fatalf("creating the temp root: %v", err)
 	}
-	t.Setenv("TMPDIR", filepath.Join(root, "tmp")) // $TMPDIR and /tmp-adjacent rules stay hermetic
 	// The host's /tmp and /var/tmp are scratch space, but on Linux t.TempDir()
 	// is itself under /tmp, which made this whole fixture — its $HOME and its
 	// town — scratch space there and not on macOS. The fixture's host temp dir
@@ -80,18 +83,19 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 	if err := os.MkdirAll(hostTmp, 0o755); err != nil {
 		t.Fatalf("creating the host temp dir: %v", err)
 	}
-	origHostTemp := hostTempScratchDirs
-	hostTempScratchDirs = []string{hostTmp}
-	t.Cleanup(func() { hostTempScratchDirs = origHostTemp })
-	t.Setenv("GT_TOWN_ROOT", town)
-	t.Setenv("GT_ROOT", town)
-	t.Setenv("GT_RIG", rig)
-	t.Setenv("GT_POLECAT", name)
-	t.Setenv("GT_POLECAT_PATH", worktree)
-	// $CLAUDE_CONFIG_DIR is the town's own config tree, exactly as production
-	// sets it — inside the town, which is also what makes the Bash leg judge it
-	// (that leg only polices targets inside the town).
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(town, ".claude-town"))
+	env := map[string]string{
+		"HOME":            root,                       // ~ expands inside the test root, not the operator's home
+		"TMPDIR":          filepath.Join(root, "tmp"), // $TMPDIR and /tmp-adjacent rules stay hermetic
+		"GT_TOWN_ROOT":    town,
+		"GT_ROOT":         town,
+		"GT_RIG":          rig,
+		"GT_POLECAT":      name,
+		"GT_POLECAT_PATH": worktree,
+		// $CLAUDE_CONFIG_DIR is the town's own config tree, exactly as
+		// production sets it — inside the town, which is also what makes the
+		// Bash leg judge it (that leg only polices targets inside the town).
+		"CLAUDE_CONFIG_DIR": filepath.Join(town, ".claude-town"),
+	}
 
 	return polecatTestTown{
 		root:     root,
@@ -104,7 +108,34 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 		sibling:  sibling,
 		repoGit:  filepath.Join(rigRoot, ".repo.git"),
 		hostTmp:  hostTmp,
+		env:      env,
 	}
+}
+
+// withEnv returns the town with its session environment changed by kv, a
+// list of key, value pairs; an empty value unsets the key.
+func (p polecatTestTown) withEnv(kv ...string) polecatTestTown {
+	env := make(map[string]string, len(p.env)+len(kv)/2)
+	for k, v := range p.env {
+		env[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i+1] == "" {
+			delete(env, kv[i])
+			continue
+		}
+		env[kv[i]] = kv[i+1]
+	}
+	p.env = env
+	return p
+}
+
+// proc is the guard's view of the session: the town's environment, no
+// working directory, and the fixture's own host temp dir.
+func (p polecatTestTown) proc() guardProcess {
+	proc := fakeGuardProcess(p.env, "")
+	proc.hostTemp = []string{p.hostTmp}
+	return proc
 }
 
 // run invokes the guard exactly as the PreToolUse hook does: a Claude Code
@@ -112,11 +143,7 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 func (p polecatTestTown) run(t *testing.T, tool, toolInput string) error {
 	t.Helper()
 	payload := fmt.Sprintf(`{"tool_name":%q,"cwd":%q,"tool_input":%s}`, tool, p.worktree, toolInput)
-	var err error
-	withStdin(t, payload, func() {
-		err = runTapGuardPolecatPaths(tapGuardPolecatPathsCmd, nil)
-	})
-	return err
+	return tapGuardPolecatPaths(strings.NewReader(payload), io.Discard, p.proc())
 }
 
 func fileInput(path string) string {
@@ -136,6 +163,7 @@ func commandInput(command string) string {
 // an Edit whose file_path is inside a sibling polecat's worktree — driven
 // through the real stdin payload the hook sends, not by calling internals.
 func TestRunTapGuardPolecatPaths_BlocksLiveHookPayload(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	err := p.run(t, "Edit", fileInput(filepath.Join(p.sibling, "internal.go")))
 	if err == nil {
@@ -151,8 +179,9 @@ func TestRunTapGuardPolecatPaths_BlocksLiveHookPayload(t *testing.T) {
 // polecat-paths test failed on the CI runner while passing on macOS, whose
 // TMPDIR is /var/folders (gt-22hdp.39).
 func TestRunTapGuardPolecatPaths_TownUnderTempDirStillGuarded(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
-	t.Setenv("TMPDIR", p.root) // the town's parent is the session's temp dir
+	p = p.withEnv("TMPDIR", p.root) // the town's parent is the session's temp dir
 
 	for _, target := range []string{
 		filepath.Join(p.sibling, "internal.go"),
@@ -183,6 +212,7 @@ func TestRunTapGuardPolecatPaths_TownUnderTempDirStillGuarded(t *testing.T) {
 // on its own rule rather than the town-membership check that protects
 // everything else — driven through the real stdin payload, not internals.
 func TestRunTapGuardPolecatPaths_BlocksSharedBinDir(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	target := filepath.Join(p.root, ".local", "bin", "bd")
 	err := p.run(t, "Bash", commandInput("echo 'echo STUB-RAN' > "+target))
@@ -195,8 +225,9 @@ func TestRunTapGuardPolecatPaths_BlocksSharedBinDir(t *testing.T) {
 // leg: only the polecat's own worktree, temp directories and the session
 // scratchpad are writable.
 func TestPolecatPathGuardFileTargets(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
-	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	configDir := p.env["CLAUDE_CONFIG_DIR"]
 
 	cases := []struct {
 		name      string
@@ -262,6 +293,7 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 // created inside the worktree that points at a sibling's worktree must not be
 // a way in.
 func TestPolecatPathGuardFollowsSymlinks(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	link := filepath.Join(p.worktree, "escape")
 	if err := os.Symlink(p.sibling, link); err != nil {
@@ -324,8 +356,9 @@ func TestClaudeConfigScratchRoots(t *testing.T) {
 // which the bare config dir used to allowlist along with everything beside it —
 // must be denied, while the session's ordinary scratch space stays writable.
 func TestPolecatPathGuardUnexpectedConfigDirFailsClosed(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
-	t.Setenv("CLAUDE_CONFIG_DIR", p.root) // the test's $HOME, a config dir shaped wrong
+	p = p.withEnv("CLAUDE_CONFIG_DIR", p.root) // the test's $HOME, a config dir shaped wrong
 	err := p.run(t, "Write", fileInput(filepath.Join(p.root, "plans", "x.md")))
 	if err == nil {
 		t.Errorf("expected a write to $HOME/plans/ to be blocked when CLAUDE_CONFIG_DIR=$HOME, got allow")
@@ -347,9 +380,9 @@ func TestPolecatPathGuardUnexpectedConfigDirFailsClosed(t *testing.T) {
 // session that is not a polecat's (and for the same call once the polecat env
 // is gone).
 func TestPolecatPathGuardNoOpOutsidePolecatContext(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_POLECAT_PATH", "")
+	p = p.withEnv("GT_POLECAT", "", "GT_POLECAT_PATH", "")
 	err := p.run(t, "Edit", fileInput(filepath.Join(p.sibling, "internal.go")))
 	if err != nil {
 		t.Errorf("expected no-op outside a polecat session, got block: %v", err)
@@ -359,6 +392,7 @@ func TestPolecatPathGuardNoOpOutsidePolecatContext(t *testing.T) {
 // TestPolecatPathGuardBash covers the Bash leg in one table: writes aimed at
 // another agent's tree are blocked, ordinary polecat work is not.
 func TestPolecatPathGuardBash(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	sib := filepath.Join(p.sibling, "x.go")
 	town := p.town
@@ -480,6 +514,7 @@ func TestPolecatPathGuardBash(t *testing.T) {
 // able to reach a sibling's worktree just by routing the same command
 // through Monitor instead of Bash.
 func TestPolecatPathGuardMonitorSameAsBash(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	blocked := "rm -rf " + filepath.Join(p.sibling, "internal.go")
 	if err := p.run(t, "Monitor", commandInput(blocked)); err == nil {
@@ -496,6 +531,7 @@ func TestPolecatPathGuardMonitorSameAsBash(t *testing.T) {
 // heredoc body really is code: a script handed to an interpreter on stdin
 // cannot be inspected, so it is denied rather than waved through.
 func TestPolecatPathGuardBashHeredocFedInterpreter(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	command := "python3 - <<'EOF'\nopen('/tmp/x','w').write('hi')\nEOF"
 	if err := p.run(t, "Bash", commandInput(command)); err == nil {
@@ -507,6 +543,7 @@ func TestPolecatPathGuardBashHeredocFedInterpreter(t *testing.T) {
 // applies to writes only: reading through a path the guard cannot resolve is
 // not a hazard it needs to block.
 func TestPolecatPathGuardBashUnresolvableReadIsAllowed(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	if err := p.run(t, "Bash", commandInput("grep -rn TODO $POLECAT_PATHS_UNSET/dir")); err != nil {
 		t.Errorf("expected an unresolvable read target to be allowed, got block: %v", err)
@@ -572,6 +609,7 @@ func TestIsWithinPath(t *testing.T) {
 }
 
 func TestCanonicalizeToolPath(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// t.TempDir() on macOS is /var/folders/..., whose /private symlink the
 	// canonicaliser resolves; compare against the resolved spelling.
@@ -587,11 +625,13 @@ func TestCanonicalizeToolPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the test tree: %v", err)
 	}
-	t.Setenv("HOME", resolvedRoot)
-	t.Setenv("POLEKAT_TEST_DIR", resolvedExisting)
+	proc := fakeGuardProcess(map[string]string{
+		"HOME":             resolvedRoot,
+		"POLEKAT_TEST_DIR": resolvedExisting,
+	}, "")
 
 	t.Run("new file resolves through its parent", func(t *testing.T) {
-		got, ok := canonicalizeToolPath(filepath.Join(existing, "internal", "new.go"), "")
+		got, ok := canonicalizeToolPath(proc, filepath.Join(existing, "internal", "new.go"), "")
 		if !ok {
 			t.Fatal("expected a not-yet-created file to resolve through its existing parent")
 		}
@@ -600,7 +640,7 @@ func TestCanonicalizeToolPath(t *testing.T) {
 		}
 	})
 	t.Run("relative resolves against cwd", func(t *testing.T) {
-		got, ok := canonicalizeToolPath("internal/new.go", existing)
+		got, ok := canonicalizeToolPath(proc, "internal/new.go", existing)
 		if !ok {
 			t.Fatal("expected a relative path to resolve")
 		}
@@ -610,7 +650,7 @@ func TestCanonicalizeToolPath(t *testing.T) {
 	})
 	t.Run("tilde and env vars expand", func(t *testing.T) {
 		for _, raw := range []string{"~/gt/x", "$HOME/gt/x", "${HOME}/gt/x", "$POLEKAT_TEST_DIR/x"} {
-			got, ok := canonicalizeToolPath(raw, "")
+			got, ok := canonicalizeToolPath(proc, raw, "")
 			if !ok {
 				t.Fatalf("%s: expected to resolve", raw)
 			}
@@ -621,7 +661,7 @@ func TestCanonicalizeToolPath(t *testing.T) {
 	})
 	t.Run("unresolvable fails closed", func(t *testing.T) {
 		for _, raw := range []string{"", "$POLEKAT_TEST_UNSET/x", "$(mktemp -d)/x", "x", `dir/"` + "`" + `cmd` + "`"} {
-			if got, ok := canonicalizeToolPath(raw, ""); ok {
+			if got, ok := canonicalizeToolPath(proc, raw, ""); ok {
 				t.Errorf("%q resolved to %q, want a fail-closed failure", raw, got)
 			}
 		}

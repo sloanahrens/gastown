@@ -1431,7 +1431,7 @@ func TestHasSubmittableWorkForRecoveryUsesExplicitTargetSquashNoop(t *testing.T)
 	t.Parallel()
 	repo := setupRecoveryGitRepo(t)
 	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
-		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+		t.Fatalf("git merge-tree --write-tree unsupported: %v", err)
 	}
 	runGit(t, repo, "switch", "-c", "polecat/squash")
 	writeRecoveryFile(t, filepath.Join(repo, "squash.txt"), "one\n")
@@ -1493,8 +1493,8 @@ func buildSetupRecoveryGitRepo(t *testing.T, root string) string {
 	t.Helper()
 	remote := filepath.Join(root, "remote.git")
 	repo := filepath.Join(root, "repo")
-	runCmd(t, root, "git", "init", "--bare", remote)
-	runCmd(t, root, "git", "init", repo)
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "init", repo)
 	runGit(t, repo, "config", "user.email", "test@example.com")
 	runGit(t, repo, "config", "user.name", "Test User")
 	writeRecoveryFile(t, filepath.Join(repo, "README.md"), "base")
@@ -1517,15 +1517,10 @@ func writeRecoveryFile(t *testing.T, path, data string) {
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	runCmd(t, dir, "git", args...)
-}
-
-func runCmd(t *testing.T, dir, name string, args ...string) {
-	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 

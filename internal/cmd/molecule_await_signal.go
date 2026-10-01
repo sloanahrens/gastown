@@ -199,6 +199,9 @@ type awaitSignalRun struct {
 	out, errOut io.Writer
 	eventRig    func(townRoot, explicit string) string
 	drainNudges func(townRoot string) []nudge.QueuedNudge
+	// wait blocks until town activity relevant to rig or ctx's deadline;
+	// nil tails the town events file (waitForActivitySignal).
+	wait func(ctx context.Context, townRoot, rig string) (*AwaitSignalResult, error)
 }
 
 func awaitSignalFromFlags(role string) awaitSignalRun {
@@ -312,7 +315,11 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	result, err := waitForActivitySignal(ctx, townRoot, rigScope)
+	wait := r.wait
+	if wait == nil {
+		wait = waitForActivitySignal
+	}
+	result, err := wait(ctx, townRoot, rigScope)
 	if err != nil {
 		return fmt.Errorf("feed subscription failed: %w", err)
 	}

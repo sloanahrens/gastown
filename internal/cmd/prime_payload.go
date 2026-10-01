@@ -190,7 +190,9 @@ func staticRoleText(ctx RoleContext) (text string, fromTemplate bool, err error)
 	fromTemplate = text != ""
 	if !fromTemplate {
 		explain(true, "Role context: templates unavailable or role unknown, using hardcoded fallback")
-		text = captureOutput(func() { outputPrimeContextFallback(ctx) })
+		var buf bytes.Buffer
+		outputPrimeContextFallback(&buf, ctx)
+		text = buf.String()
 	}
 	contextPath := filepath.Join(ctx.TownRoot, "CONTEXT.md")
 	data, readErr := os.ReadFile(contextPath)

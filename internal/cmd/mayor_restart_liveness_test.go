@@ -31,6 +31,7 @@ func (f *fakeMayorTmux) RespawnPane(_, _ string) error {
 // gt-fcxe9.1: `gt mayor attach` killed and respawned a live Mayor when the
 // liveness query failed. An unknown answer must touch nothing.
 func TestRestartMayorRuntimeIfDead_UnknownLivenessTouchesNothing(t *testing.T) {
+	t.Parallel()
 	f := &fakeMayorTmux{aliveErr: errors.New("tmux show-environment: timed out")}
 	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir()); err != nil {
 		t.Fatalf("restartMayorRuntimeIfDead: %v", err)
@@ -42,6 +43,7 @@ func TestRestartMayorRuntimeIfDead_UnknownLivenessTouchesNothing(t *testing.T) {
 
 // A live Mayor is left alone too.
 func TestRestartMayorRuntimeIfDead_AliveTouchesNothing(t *testing.T) {
+	t.Parallel()
 	f := &fakeMayorTmux{alive: true}
 	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir()); err != nil {
 		t.Fatalf("restartMayorRuntimeIfDead: %v", err)

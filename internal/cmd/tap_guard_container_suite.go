@@ -91,7 +91,13 @@ var containerSuitePackages = []string{
 }
 
 func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardContainerSuite(os.Stdin, os.Stderr, realGuardProcess())
+}
+
+// tapGuardContainerSuite is the container-suite guard: it reads the hook
+// payload from stdin and the session from proc, and prints a block to stderr.
+func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil {
 		return nil // fail open
 	}
@@ -99,23 +105,24 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 	if command == "" {
 		return nil
 	}
-	if !isPolecatOrRefineryContext() {
+	if !isPolecatOrRefineryContext(proc) {
 		return nil
 	}
+	cwd, _ := proc.getwd()
 
 	// The scope rule answers first for a polecat: its advice is "iterate with
 	// -run", and it must win over the container-suite rule's "run it wrapped"
 	// line, which for a whole-suite command is exactly the run the scope rule
 	// forbids (gt-v6se: three polecats followed that line into full suites
 	// beside the refinery's gate).
-	if isPolecatContext() {
-		if reason, matched := evaluatePolecatTestScope(command); reason != "" {
-			printPolecatTestScopeBlock(reason, command, matched)
+	if isPolecatContext(proc) {
+		if reason, matched := evaluatePolecatTestScope(command, cwd); reason != "" {
+			printPolecatTestScopeBlock(stderr, reason, command, matched)
 			return NewSilentExit(2)
 		}
 	}
-	if reason, matched := evaluateContainerSuiteCommand(command); reason != "" {
-		printContainerSuiteBlock(reason, command, matched)
+	if reason, matched := evaluateContainerSuiteCommand(command, cwd, proc.getenv(dockerTestsEnv)); reason != "" {
+		printContainerSuiteBlock(stderr, reason, command, matched, proc.getenv("GT_ROLE"))
 		return NewSilentExit(2)
 	}
 	return nil
@@ -128,11 +135,11 @@ func runTapGuardContainerSuite(cmd *cobra.Command, args []string) error {
 // two collisions in one night, one starving the refinery for 29 minutes).
 // Other agent contexts (crew, witness, deacon, mayor) are left unguarded —
 // they don't run scoped test suites as part of their normal work.
-func isPolecatOrRefineryContext() bool {
-	if os.Getenv("GT_POLECAT") != "" {
+func isPolecatOrRefineryContext(proc guardProcess) bool {
+	if proc.getenv("GT_POLECAT") != "" {
 		return true
 	}
-	cwd, err := os.Getwd()
+	cwd, err := proc.getwd()
 	if err == nil && strings.Contains(cwd, "/polecats/") {
 		return true
 	}
@@ -150,8 +157,9 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // unrelated later "go test ./internal/beads/..." on the same compound line
 // are judged separately rather than one exemption covering the whole line.
 // Returns the reason for the first blocked segment found, or ("", nil) if
-// none is blocked.
-func evaluateContainerSuiteCommand(command string) (reason string, matched []string) {
+// none is blocked. cwd is the invocation's working directory ("" when
+// unknown) and envOptIn the hook environment's own GT_TEST_DOCKER.
+func evaluateContainerSuiteCommand(command, cwd, envOptIn string) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(command))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
 	// `go test` of a container-bearing package cannot start a container
@@ -162,12 +170,12 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 	// not per segment, because `export X=1; go test ...` enables it for the
 	// later segment. An opt-in already exported in the hook's environment
 	// counts too: the test process inherits it without it being typed.
-	dockerOn := commandEnablesDockerTests(tokens) || os.Getenv(dockerTestsEnv) == "1"
+	dockerOn := commandEnablesDockerTests(tokens) || envOptIn == "1"
 
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluateContainerSuiteSegment(segment, dockerOn); r != "" {
+			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, cwd); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -175,7 +183,7 @@ func evaluateContainerSuiteCommand(command string) (reason string, matched []str
 		}
 		segment = append(segment, tok)
 	}
-	return evaluateContainerSuiteSegment(segment, dockerOn)
+	return evaluateContainerSuiteSegment(segment, dockerOn, cwd)
 }
 
 // dockerTestsEnv mirrors testutil.DockerTestsEnv. It is spelled out here
@@ -213,7 +221,7 @@ func commandSetsDockerTests(tokens []string, value string) bool {
 // evaluateContainerSuiteSegment judges a single shell segment (tokens
 // between shell operators). tokens is original-case; matching is done on a
 // lowercased copy so "Go Test" and "go test" are treated the same.
-func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason string, matched []string) {
+func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (reason string, matched []string) {
 	if len(tokens) == 0 {
 		return "", nil
 	}
@@ -227,7 +235,6 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool) (reason strin
 	}
 
 	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
-		cwd, _ := os.Getwd()
 		wholeRepo, pkgs := containerSuiteTarget(goTestPackageArgs(tokens[i+2:]), cwd)
 		if wholeRepo {
 			return "bare 'go test' with a whole-repo target touches every testcontainers-backed package", nil
@@ -574,25 +581,25 @@ func cwdPackagePath(dir string) (pkg string, ok bool) {
 // directly, or letting `gt done`'s gate run the containers — because a refusal
 // that names only the hardest path is what sends polecats improvising around it
 // (gt-7dxw).
-func printContainerSuiteBlock(reason, originalCommand string, matched []string) {
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ❌ CONTAINER-SUITE COMMAND BLOCKED                              ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintf(os.Stderr, "║  Command: %-53s ║\n", truncateStr(originalCommand, 53))
-	fmt.Fprintf(os.Stderr, "║  Reason:  %-53s ║\n", truncateStr(reason, 53))
+func printContainerSuiteBlock(w io.Writer, reason, originalCommand string, matched []string, gtRole string) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(w, "║  ❌ CONTAINER-SUITE COMMAND BLOCKED                              ║")
+	fmt.Fprintln(w, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintf(w, "║  Command: %-53s ║\n", truncateStr(originalCommand, 53))
+	fmt.Fprintf(w, "║  Reason:  %-53s ║\n", truncateStr(reason, 53))
 	if len(matched) > 0 {
-		fmt.Fprintf(os.Stderr, "║  Packages: %-52s ║\n", truncateStr(strings.Join(matched, ", "), 52))
+		fmt.Fprintf(w, "║  Packages: %-52s ║\n", truncateStr(strings.Join(matched, ", "), 52))
 	}
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  This spins Dolt/testcontainers containers on the shared Docker ║")
-	fmt.Fprintln(os.Stderr, "║  VM. Running it bare can collide with another rig's suite.      ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintf(os.Stderr, "  Run it wrapped instead: %s\n", containerSuiteWrap(originalCommand))
-	fmt.Fprintln(os.Stderr, "  Or run the non-container packages directly (they need no slot, and they are")
-	fmt.Fprintln(os.Stderr, "  where your change usually lives) — or run neither and let `gt done` gate the")
-	fmt.Fprintln(os.Stderr, "  container suites for you: its default test-verify gate runs them once you submit.")
-	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  This spins Dolt/testcontainers containers on the shared Docker ║")
+	fmt.Fprintln(w, "║  VM. Running it bare can collide with another rig's suite.      ║")
+	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintf(w, "  Run it wrapped instead: %s\n", containerSuiteWrap(originalCommand, gtRole))
+	fmt.Fprintln(w, "  Or run the non-container packages directly (they need no slot, and they are")
+	fmt.Fprintln(w, "  where your change usually lives) — or run neither and let `gt done` gate the")
+	fmt.Fprintln(w, "  container suites for you: its default test-verify gate runs them once you submit.")
+	fmt.Fprintln(w, "")
 }
 
 // containerSuiteWrap renders the remediation command for a blocked suite: the
@@ -622,9 +629,9 @@ func printContainerSuiteBlock(reason, originalCommand string, matched []string) 
 //     redirection. The caller's own GT_ROLE is already the "rig/role" form the
 //     --role flag documents, so it is printed when present and the placeholder
 //     is kept only as the fallback for a hook that inherited no role.
-func containerSuiteWrap(command string) string {
+func containerSuiteWrap(command, gtRole string) string {
 	command = strings.TrimSpace(command)
-	role := containerSuiteWrapRole()
+	role := containerSuiteWrapRole(gtRole)
 	if isCompoundShellCommand(command) {
 		return fmt.Sprintf("gt slot run --role %s -- sh -c %s", role, config.ShellQuote(command))
 	}
@@ -642,8 +649,8 @@ func containerSuiteWrap(command string) string {
 // "gastown/polecats/zircon"), which is the form `gt slot run --role` documents
 // and makes the printed line runnable verbatim. Without one the formula's
 // placeholder is printed and the operator fills it in.
-func containerSuiteWrapRole() string {
-	role := strings.TrimSpace(os.Getenv("GT_ROLE"))
+func containerSuiteWrapRole(gtRole string) string {
+	role := strings.TrimSpace(gtRole)
 	if role == "" || !strings.Contains(role, "/") {
 		return "<rig>/<you>"
 	}

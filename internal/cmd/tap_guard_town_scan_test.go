@@ -115,11 +115,17 @@ func TestTownScanHazardNoTown(t *testing.T) {
 	}
 }
 
+// townScanSession is a guard session whose $HOME is home, whose cwd is wd,
+// and whose town root is town ("" for none).
+func townScanSession(home, wd, town string) guardSession {
+	return guardSession{proc: fakeGuardProcess(map[string]string{"HOME": home}, wd), townRoot: town}
+}
+
 func TestScanRootPath(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	work := t.TempDir()
-	t.Chdir(work)
+	proc := townScanSession(home, work, "").proc
 	if err := os.MkdirAll(filepath.Join(work, "src"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +169,7 @@ func TestScanRootPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := scanRootPath(tt.token); got != tt.want {
+			if got := scanRootPath(proc, tt.token); got != tt.want {
 				t.Errorf("scanRootPath(%q) = %q, want %q", tt.token, got, tt.want)
 			}
 		})
@@ -175,10 +181,10 @@ func TestScanRootPath(t *testing.T) {
 // (gt-yts7), while a token that spells a path resolves as any other scan root
 // does, so the denylist, home-directory and town-tree rules still see it.
 func TestScanPatternPath(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	work := t.TempDir()
-	t.Chdir(work)
+	proc := townScanSession(home, work, "").proc
 	if err := os.MkdirAll(filepath.Join(work, "src", "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +212,7 @@ func TestScanPatternPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := scanPatternPath(tt.token); got != tt.want {
+			if got := scanPatternPath(proc, tt.token); got != tt.want {
 				t.Errorf("scanPatternPath(%q) = %q, want %q", tt.token, got, tt.want)
 			}
 		})
@@ -218,10 +224,10 @@ func TestScanPatternPath(t *testing.T) {
 // denylist's existing ~/$HOME entries name the *home* directory, so the
 // unexpanded ~/gt was the obvious way around the town rule.
 func TestTownScanHazardHomeOverride(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
-	t.Chdir(town)
+	proc := townScanSession(home, town, town).proc
 
 	for _, token := range []string{
 		town,
@@ -230,7 +236,7 @@ func TestTownScanHazardHomeOverride(t *testing.T) {
 		filepath.Join(home, "gt", fakeRigName),
 		"~/gt/" + fakeRigName + "/.repo.git",
 	} {
-		resolved := scanRootPath(token)
+		resolved := scanRootPath(proc, token)
 		if resolved == "" {
 			t.Fatalf("scanRootPath(%q) did not resolve", token)
 		}
@@ -246,14 +252,14 @@ func TestTownScanHazardHomeOverride(t *testing.T) {
 // shapes that must keep working. A fix that blocks the first set by blocking
 // scans generally would be a worse bug than the one being fixed.
 func TestMatchesUnboundedScanTownTree(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
 	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
 	// The guard resolves relative tokens (and the town root) against cwd, so
 	// run from inside a polecat worktree where a real polecat session sits.
-	t.Chdir(worktree)
+	sess := townScanSession(home, worktree, town)
 
 	other := t.TempDir()
 
@@ -288,7 +294,7 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), sess)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -313,11 +319,11 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 // positional argument a path, so a pattern-consuming flag cannot smear a root
 // into the pattern slot (gt-yts7's rejection).
 func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
-	t.Chdir(rig)
+	sess := townScanSession(home, rig, town)
 
 	tests := []struct {
 		name    string
@@ -392,7 +398,7 @@ func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), sess)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -408,12 +414,12 @@ func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
 // level up, where the names a pattern can collide with are the town's own
 // children: every rig directory, and the town's logs/ and .dolt-data/.
 func TestMatchesUnboundedScanPatternNotRootFromTownRoot(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
 	bounded := filepath.Join(rig, "settings")
-	t.Chdir(town)
+	sess := townScanSession(home, town, town)
 
 	tests := []struct {
 		name    string
@@ -435,7 +441,7 @@ func TestMatchesUnboundedScanPatternNotRootFromTownRoot(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), sess)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -454,11 +460,11 @@ func TestMatchesUnboundedScanPatternNotRootFromTownRoot(t *testing.T) {
 // that unrolls shell wrappers and threads the resolved town root down to each
 // payload, so a wrapper cannot be used to escape the town rule (gt-6e2l).
 func TestNestedTownScanPayloadIsBlocked(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	worktree := filepath.Join(town, fakeRigName, "polecats", "lapis", "gastown")
-	t.Chdir(worktree)
+	sess := townScanSession(home, worktree, town)
 
 	tests := []struct {
 		name    string
@@ -477,7 +483,7 @@ func TestNestedTownScanPayloadIsBlocked(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0, town)
+			reason, _ := evaluateDangerousCommand(tt.command, 0, sess)
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
 			}
@@ -494,19 +500,17 @@ func TestNestedTownScanPayloadIsBlocked(t *testing.T) {
 // guard blocking nothing in production (gt-6e2l is exactly that shape of
 // gap: correct rules, wrong tree).
 func TestRunTapGuardDangerousBlocksTownScan(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	// Pin cwd resolution: these two are the fallback path, not what is under
-	// test here, and the environment may legitimately have them set.
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
 
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	townJSON := filepath.Join(town, "mayor", "town.json")
 	if err := os.WriteFile(townJSON, []byte(`{"type":"town","version":2}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(filepath.Join(town, fakeRigName, "polecats", "lapis", "gastown"))
+	// GT_TOWN_ROOT and GT_ROOT are unset: they are the fallback path, not
+	// what is under test here.
+	proc := fakeGuardProcess(map[string]string{"HOME": home}, filepath.Join(town, fakeRigName, "polecats", "lapis", "gastown"))
 
 	tests := []struct {
 		name    string
@@ -532,12 +536,9 @@ func TestRunTapGuardDangerousBlocksTownScan(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			var guardErr error
-			stderr := captureStderr(t, func() {
-				withStdin(t, string(input), func() {
-					guardErr = runTapGuardDangerous(tapGuardDangerousCmd, nil)
-				})
-			})
+			var buf strings.Builder
+			guardErr := tapGuardDangerous(strings.NewReader(string(input)), &buf, proc)
+			stderr := buf.String()
 
 			code, isSilentExit := IsSilentExit(guardErr)
 			if (guardErr != nil) != tt.blocked {
@@ -562,11 +563,11 @@ func TestRunTapGuardDangerousBlocksTownScan(t *testing.T) {
 // "<cwd>/gt", which could point into an unrelated tree and turn a blocked
 // scan into an allowed one (or the reverse).
 func TestScanRootPathWithoutHome(t *testing.T) {
-	t.Setenv("HOME", "")
-	t.Chdir(t.TempDir())
+	t.Parallel()
+	proc := fakeGuardProcess(nil, t.TempDir())
 
 	for _, token := range []string{"~", "~/gt", "$HOME", "$HOME/gt", "${HOME}/gt"} {
-		if got := scanRootPath(token); got != "" {
+		if got := scanRootPath(proc, token); got != "" {
 			t.Errorf("scanRootPath(%q) with no HOME = %q, want \"\"", token, got)
 		}
 	}
@@ -579,8 +580,8 @@ func TestScanRootPathWithoutHome(t *testing.T) {
 // a scan that names a root is judged on that root wherever the session sits,
 // and a cd before the scan moves the walk root with it.
 func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
 	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
@@ -667,8 +668,8 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Chdir(tt.cwd)
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			sess := townScanSession(home, tt.cwd, town)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), sess)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q) from %s blocked=%v (reason=%q), want %v",
@@ -689,13 +690,13 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 // the working directory it started from — an agent whose command spells no
 // path has nothing else to correct.
 func TestUnboundedScanImplicitRootNamesTheWalk(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
-	t.Chdir(rig)
+	sess := townScanSession(home, rig, town)
 
-	reason, alternative := matchesUnboundedScan(shellTokenize("grep -rn TODO"), town)
+	reason, alternative := matchesUnboundedScan(shellTokenize("grep -rn TODO"), sess)
 	if want := "Unbounded scan (grep, cwd is a rig root)"; reason != want {
 		t.Errorf("reason = %q, want %q", reason, want)
 	}
@@ -708,18 +709,16 @@ func TestUnboundedScanImplicitRootNamesTheWalk(t *testing.T) {
 // outside a town: with no town context the walk root is judged by the
 // filesystem and home rules alone, exactly as an explicit root always was.
 func TestUnboundedScanImplicitRootNoTown(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
 	rig := filepath.Join(town, fakeRigName)
 
-	t.Chdir(rig)
-	if reason, _ := matchesUnboundedScan(shellTokenize("grep -rn TODO"), ""); reason != "" {
+	if reason, _ := matchesUnboundedScan(shellTokenize("grep -rn TODO"), townScanSession(home, rig, "")); reason != "" {
 		t.Errorf("implicit root blocked inside a rig with no town context: %q", reason)
 	}
 
-	t.Chdir(home)
-	reason, alternative := matchesUnboundedScan(shellTokenize("ls -R"), "")
+	reason, alternative := matchesUnboundedScan(shellTokenize("ls -R"), townScanSession(home, home, ""))
 	if !strings.Contains(reason, "the home directory") {
 		t.Errorf("implicit root from the home directory = %q, want the home directory rule", reason)
 	}
@@ -733,9 +732,10 @@ func TestUnboundedScanImplicitRootNoTown(t *testing.T) {
 // argument it would print is the working directory rather than a token in the
 // command.
 func TestScanRootHazard(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
 	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	sess := townScanSession(home, "", town)
 	rig := filepath.Join(town, fakeRigName)
 
 	tests := []struct {
@@ -755,7 +755,7 @@ func TestScanRootHazard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			label, suggestion := scanRootHazard(tt.token, tt.root, town)
+			label, suggestion := scanRootHazard(tt.token, tt.root, sess)
 			if label != tt.want {
 				t.Errorf("scanRootHazard(%q, %q, town) label = %q, want %q", tt.token, tt.root, label, tt.want)
 			}

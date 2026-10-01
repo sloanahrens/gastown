@@ -38,7 +38,7 @@ func runPolecatSurvivingWork(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "surviving-work: %v\n", err)
 		return NewSilentExit(2)
 	}
-	return reportSurvivingWork(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0])
+	return reportSurvivingWork(cmd.OutOrStdout(), cmd.ErrOrStderr(), survivingWorkForBeadFn, townRoot, args[0])
 }
 
 // Exit codes of gt polecat surviving-work besides 0 (work survives). 1 is left
@@ -50,9 +50,9 @@ const (
 )
 
 // reportSurvivingWork prints the surviving branch and maps the answer to the
-// command's exit contract.
-func reportSurvivingWork(stdout, stderr io.Writer, townRoot, beadID string) error {
-	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+// command's exit contract. survivingWork finds the surviving branch.
+func reportSurvivingWork(stdout, stderr io.Writer, survivingWork func(townRoot, beadID string) (string, error), townRoot, beadID string) error {
+	branch, err := survivingWork(townRoot, beadID)
 	switch {
 	case err != nil && noRepoToProtect(err):
 		return NewSilentExit(survivingWorkNone) // no git repo: no branch to protect

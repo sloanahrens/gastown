@@ -1097,8 +1097,8 @@ func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
 // difference between "my prerequisite is on main" and "my prerequisite is
 // sitting in the queue behind me".
 func outputDependencyMergeStatus(ctx RoleContext, hookedBead *beads.Issue) {
-	issue := beadWithFullDependencies(ctx, hookedBead)
-	renderDependencyMergeStatus(beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), issue))
+	issue := beadWithFullDependencies(hookedBead, beads.New(rigBeadsRoot(ctx)).Show)
+	renderDependencyMergeStatus(os.Stdout, beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), issue))
 }
 
 // beadWithFullDependencies re-fetches hookedBead via `bd show` when it looks
@@ -1111,11 +1111,11 @@ func outputDependencyMergeStatus(ctx RoleContext, hookedBead *beads.Issue) {
 // as a full issue record instead, which is what the merge-status check
 // needs. A failed re-fetch falls back to the bead as given rather than
 // losing it. (gt-u6p4)
-func beadWithFullDependencies(ctx RoleContext, hookedBead *beads.Issue) *beads.Issue {
+func beadWithFullDependencies(hookedBead *beads.Issue, show func(id string) (*beads.Issue, error)) *beads.Issue {
 	if hookedBead == nil || hookedBead.DependencyCount == 0 {
 		return hookedBead
 	}
-	if full, err := beads.New(rigBeadsRoot(ctx)).Show(hookedBead.ID); err == nil && full != nil {
+	if full, err := show(hookedBead.ID); err == nil && full != nil {
 		return full
 	}
 	return hookedBead
@@ -1124,13 +1124,13 @@ func beadWithFullDependencies(ctx RoleContext, hookedBead *beads.Issue) *beads.I
 // renderDependencyMergeStatus prints already-resolved dependency merge states.
 // Split from the lookup so the wording a worker actually reads is testable
 // without a database.
-func renderDependencyMergeStatus(statuses []beads.DependencyMergeStatus) {
+func renderDependencyMergeStatus(w io.Writer, statuses []beads.DependencyMergeStatus) {
 	if len(statuses) == 0 {
 		return
 	}
 
-	fmt.Println()
-	fmt.Printf("  %s\n", style.Bold.Render("Dependencies:"))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %s\n", style.Bold.Render("Dependencies:"))
 	for _, status := range statuses {
 		switch status.State {
 		case beads.DependencyMergeUnmerged:
@@ -1139,13 +1139,13 @@ func renderDependencyMergeStatus(statuses []beads.DependencyMergeStatus) {
 				detail += " on " + status.Branch
 			}
 			detail += ")"
-			fmt.Printf("    %s %s — %s\n", style.Warning.Render("⏳"), status.ID, detail)
+			fmt.Fprintf(w, "    %s %s — %s\n", style.Warning.Render("⏳"), status.ID, detail)
 		case beads.DependencyMergeLanded:
-			fmt.Printf("    %s %s — landed\n", style.Success.Render("✓"), status.ID)
+			fmt.Fprintf(w, "    %s %s — landed\n", style.Success.Render("✓"), status.ID)
 		case beads.DependencyMergeOpen:
-			fmt.Printf("    %s %s — still open\n", style.Dim.Render("○"), status.ID)
+			fmt.Fprintf(w, "    %s %s — still open\n", style.Dim.Render("○"), status.ID)
 		default:
-			fmt.Printf("    %s %s — merge state unknown\n", style.Warning.Render("?"), status.ID)
+			fmt.Fprintf(w, "    %s %s — merge state unknown\n", style.Warning.Render("?"), status.ID)
 		}
 	}
 
@@ -1155,11 +1155,11 @@ func renderDependencyMergeStatus(statuses []beads.DependencyMergeStatus) {
 		if status.State != beads.DependencyMergeUnmerged {
 			continue
 		}
-		fmt.Println()
-		fmt.Printf("  %s %s is closed but its work is NOT on your base branch yet.\n",
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s %s is closed but its work is NOT on your base branch yet.\n",
 			style.Warning.Render("⚠"), status.ID)
-		fmt.Printf("  Do not build on it as though it exists. Verify it is actually present\n")
-		fmt.Printf("  before relying on it, or design to work without it.\n")
+		fmt.Fprintf(w, "  Do not build on it as though it exists. Verify it is actually present\n")
+		fmt.Fprintf(w, "  before relying on it, or design to work without it.\n")
 		break
 	}
 }

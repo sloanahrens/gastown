@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"io"
-	"os"
 	"strings"
 	"testing"
 
@@ -11,16 +9,7 @@ import (
 )
 
 func TestOutputMoleculeStatus_StandaloneFormulaShowsVars(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir tempDir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-
+	t.Parallel()
 	status := MoleculeStatusInfo{
 		HasWork:         true,
 		PinnedBead:      &beads.Issue{ID: "gt-wisp-xyz", Title: "Standalone formula work"},
@@ -28,16 +17,8 @@ func TestOutputMoleculeStatus_StandaloneFormulaShowsVars(t *testing.T) {
 		AttachedVars:    []string{"version=1.2.3", "channel=stable"},
 	}
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	outputMoleculeStatus(status)
-
-	w.Close()
 	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	os.Stdout = oldStdout
+	outputMoleculeStatus(&buf, status, func() {})
 	output := buf.String()
 
 	if !strings.Contains(output, "📐 Formula: mol-release") {
@@ -49,10 +30,7 @@ func TestOutputMoleculeStatus_StandaloneFormulaShowsVars(t *testing.T) {
 }
 
 func TestOutputMoleculeStatus_FormulaWispShowsWorkflowContext(t *testing.T) {
-	// outputMoleculeStatus ends with the git divergence and trail hints for
-	// the current directory. Run from an empty temp dir: from the package
-	// dir they fetched origin of the real checkout on every run.
-	t.Chdir(t.TempDir())
+	t.Parallel()
 
 	status := MoleculeStatusInfo{
 		HasWork:         true,
@@ -68,16 +46,8 @@ func TestOutputMoleculeStatus_FormulaWispShowsWorkflowContext(t *testing.T) {
 		NextAction: "Show the workflow steps: gt prime or bd mol current tool-wisp-demo",
 	}
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	outputMoleculeStatus(status)
-
-	w.Close()
 	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	os.Stdout = oldStdout
+	outputMoleculeStatus(&buf, status, func() {})
 	output := buf.String()
 
 	if !strings.Contains(output, "📐 Formula: demo-hello") {
