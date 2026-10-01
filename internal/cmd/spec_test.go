@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +119,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 }
 
 func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
+	t.Parallel()
 	f := newFakeSpecTown(
 		cleanSpec("gt-late", 2, "2026-09-29T12:00:00Z"),
 		cleanSpec("gt-urgent", 1, "2026-09-29T13:00:00Z"),
@@ -139,6 +142,7 @@ func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
 }
 
 func TestSpecDispatchPerTickLimit(t *testing.T) {
+	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T10:00:00Z"), cleanSpec("gt-b", 2, "2026-09-29T11:00:00Z"))
 	r := runSpecDispatchCycle(f.env())
 	if len(f.slung) != 1 || f.slung[0] != "gt-a" || len(r.Skipped) != 1 {
@@ -147,6 +151,7 @@ func TestSpecDispatchPerTickLimit(t *testing.T) {
 }
 
 func TestSpecDispatchRefusesAndAnnotatesOnce(t *testing.T) {
+	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
 	bad.Description = strings.Replace(bad.Description, "## Gate\nmake gate", "", 1)
 	f := newFakeSpecTown(bad)
@@ -165,6 +170,7 @@ func TestSpecDispatchRefusesAndAnnotatesOnce(t *testing.T) {
 }
 
 func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
+	t.Parallel()
 	big := cleanSpec("gt-big", 1, "2026-09-29T10:00:00Z")
 	big.Acceptance = strings.Repeat("- [ ] x\n", 8)
 	labeled := cleanSpec("gt-plan", 1, "2026-09-29T11:00:00Z")
@@ -187,6 +193,7 @@ func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
 }
 
 func TestSpecDispatchHostSafety(t *testing.T) {
+	t.Parallel()
 	full := map[string]int{"deepseek-flash": 2, "claude-sonnet": 2}
 
 	// No host-safe label: hooked seats only, so a free hookless seat is not
@@ -244,6 +251,7 @@ func TestSpecDispatchHostSafety(t *testing.T) {
 }
 
 func TestSpecSlingParams(t *testing.T) {
+	t.Parallel()
 	c := specCandidate{Spec: cleanSpec("gt-a", 1, ""), Rig: "gastown"}
 	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, specdispatch.SeatChoice{Agent: "claude-sonnet"})
 	if p.Agent != "claude-sonnet" || !p.AgentBeatsRoute || !p.NoConvoy || !p.NoBoot || !p.FormulaFailFatal ||
@@ -253,6 +261,7 @@ func TestSpecSlingParams(t *testing.T) {
 }
 
 func TestSpecDispatchRespectsCapsAndRoster(t *testing.T) {
+	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
 	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2, "local-coder": 2, "claude-sonnet": 2}}
 	r := runSpecDispatchCycle(f.env())
@@ -280,6 +289,7 @@ func TestSpecDispatchRespectsCapsAndRoster(t *testing.T) {
 }
 
 func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
+	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
 	f.hold = "town ESTOP active"
 	if r := runSpecDispatchCycle(f.env()); r.Hold == "" || len(f.slung) != 0 {
@@ -308,6 +318,7 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 }
 
 func TestSpecDispatchRetriesDoltContention(t *testing.T) {
+	t.Parallel()
 	contention := errors.New("formula failed: bd mol bond: Error 1213 (40001): serialization failure")
 
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
@@ -338,6 +349,7 @@ func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 }
 
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
+	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
 	f.slingErrs["gt-a"] = []error{&poolBackpressureError{Reason: "pool: overflow full (2/2) -> no seat"}}
 	r := runSpecDispatchCycle(f.env())
@@ -347,6 +359,7 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 }
 
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
+	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
 	bad.Type = "task"
 	bad.Labels = []string{"spec"}
@@ -365,6 +378,7 @@ func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 }
 
 func TestSpecBudgetFromConfig(t *testing.T) {
+	t.Parallel()
 	ts := config.NewTownSettings()
 	ts.Agents = map[string]*config.RuntimeConfig{
 		"claude-sonnet":  {Provider: "claude", Command: "claude"},
@@ -399,6 +413,7 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 }
 
 func TestSpecRosterCountsByAgent(t *testing.T) {
+	t.Parallel()
 	ts := config.NewTownSettings()
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 	now := time.Now()
@@ -414,26 +429,28 @@ func TestSpecRosterCountsByAgent(t *testing.T) {
 }
 
 func TestResolvePolecatPoolAgentExplicitBeatsRouteLabel(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	ts := config.NewTownSettings()
 	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0, OverflowAgent: "deepseek-flash", MaxOverflow: 2}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
 		t.Fatal(err)
 	}
-	origLister, origLookup := newPoolSessionLister, poolBeadLookup
-	t.Cleanup(func() { newPoolSessionLister, poolBeadLookup = origLister, origLookup })
-	newPoolSessionLister = func() sessionLister {
+	router := realPoolRouter(townRoot)
+	router.sessions = func() sessionLister {
 		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	}
-	poolBeadLookup = func(_, beadID string) (poolBead, error) {
+	router.lookupBead = func(beadID string) (poolBead, error) {
 		return poolBead{ID: beadID, Type: "feature", Labels: []string{"spec", routeFlashLabel}}, nil
 	}
-	// The default path keeps gt-4lbz: the label outranks the request.
-	if a, _, err := peekPolecatPoolAgent(townRoot, "gt-a", "claude-sonnet"); a != "deepseek-flash" || err != nil {
+	// The default path keeps gt-4lbz: the label outranks the request
+	// (peekPolecatPoolAgent's route).
+	if a, _, err := router.route("gt-a", "claude-sonnet", false, false); a != "deepseek-flash" || err != nil {
 		t.Fatalf("default route: got %q %v", a, err)
 	}
-	// The dispatcher's explicit agent stands.
-	if a, r, err := resolvePolecatPoolAgentExplicit(townRoot, "gt-a", "claude-sonnet"); a != "" || r != "" || err != nil {
+	// The dispatcher's explicit agent stands (resolvePolecatPoolAgentExplicit's
+	// route).
+	if a, r, err := router.route("gt-a", "claude-sonnet", true, true); a != "" || r != "" || err != nil {
 		t.Fatalf("explicit route: got %q %q %v, want the request untouched", a, r, err)
 	}
 	if got := withoutRouteLabels([]string{"spec", "Route:Flash", "route:local", "x"}); strings.Join(got, ",") != "spec,x" {
@@ -442,6 +459,7 @@ func TestResolvePolecatPoolAgentExplicitBeatsRouteLabel(t *testing.T) {
 }
 
 func TestSpecLintCommandExitCodes(t *testing.T) {
+	t.Parallel()
 	tmpl := filepath.Join(t.TempDir(), "spec-template.md")
 	if err := os.WriteFile(tmpl, []byte("--description=\"## Goal\n## Constraints\n## Out of scope\n## Gate\n## Size\n\""), 0o644); err != nil {
 		t.Fatal(err)
@@ -453,16 +471,24 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 		{"clean", `[{"id":"gt-ok","issue_type":"feature","status":"open","labels":["spec"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-ok: spec lint ok", 0},
 		{"refused", `[{"id":"gt-no","issue_type":"feature","status":"open","labels":["spec"],"description":"## Goal\nx"}]`, "gt-no: spec lint refused: ## Constraints: section missing", 1},
 		{"planning", `[{"id":"gt-pl","issue_type":"feature","status":"open","labels":["spec","needs-planning"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-pl: spec needs planning: label needs-planning", 2},
+		{"unreadable bead", "", "gt-gone: spec lint refused: bead: bead gt-gone not found", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			installFakeBdShow(t, tc.json, 0)
-			t.Chdir(t.TempDir())
-			specLintTemplate = tmpl
-			t.Cleanup(func() { specLintTemplate = "" })
+			beadID := strings.SplitN(tc.want, ":", 2)[0]
+			var spec specdispatch.Spec
+			var showErr error
+			if tc.json == "" {
+				showErr = fmt.Errorf("bead %s not found", beadID)
+			} else {
+				var issues []beads.Issue
+				if err := json.Unmarshal([]byte(tc.json), &issues); err != nil {
+					t.Fatal(err)
+				}
+				spec = specFromIssue(&issues[0])
+			}
 			var out bytes.Buffer
-			specLintCmd.SetOut(&out)
-			err := runSpecLint(specLintCmd, []string{strings.SplitN(tc.want, ":", 2)[0]})
+			err := specLint(&out, beadID, spec, showErr, tmpl)
 			code, _ := IsSilentExit(err)
 			if err != nil && code == 0 {
 				t.Fatalf("unexpected error %v", err)
@@ -482,6 +508,7 @@ func jsonEscape(s string) string {
 }
 
 func TestHasCommentWithPrefix(t *testing.T) {
+	t.Parallel()
 	comments := []beads.Comment{{Text: "unrelated"}, {Text: "  spec-dispatch: gt-a: routed to the planner (gt-4k3fj.7): x"}}
 	if !hasCommentWithPrefix(comments, "spec-dispatch: gt-a: routed to the planner") {
 		t.Error("existing planner note not found")
@@ -492,6 +519,7 @@ func TestHasCommentWithPrefix(t *testing.T) {
 }
 
 func TestSpecReadyQueryAndParse(t *testing.T) {
+	t.Parallel()
 	args := strings.Join(specReadyArgs(), " ")
 	for _, want := range []string{"ready --json", "--label spec", "--type feature", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "spec-dispatch-failed"} {
 		if !strings.Contains(args, want) {

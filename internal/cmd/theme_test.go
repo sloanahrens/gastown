@@ -36,6 +36,7 @@ func setupTestTownForTheme(t *testing.T) string {
 }
 
 func TestSaveRigTheme_PreservesRoleThemes(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForTheme(t)
 	rigName := "testrig"
 
@@ -66,18 +67,8 @@ func TestSaveRigTheme_PreservesRoleThemes(t *testing.T) {
 		t.Fatalf("save initial settings: %v", err)
 	}
 
-	// Chdir into the town root so workspace.FindFromCwd works
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origCwd)
-
 	// Call saveRigTheme to change theme name to "forest"
-	if err := saveRigTheme(rigName, "forest"); err != nil {
+	if err := saveRigThemeIn(townRoot, rigName, "forest"); err != nil {
 		t.Fatalf("saveRigTheme: %v", err)
 	}
 
@@ -114,6 +105,7 @@ func TestSaveRigTheme_PreservesRoleThemes(t *testing.T) {
 }
 
 func TestSaveRigTheme_CreatesNewSettings(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForTheme(t)
 	rigName := "newrig"
 
@@ -123,17 +115,8 @@ func TestSaveRigTheme_CreatesNewSettings(t *testing.T) {
 		t.Fatalf("mkdir settings: %v", err)
 	}
 
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origCwd)
-
 	// Call saveRigTheme on a rig with no existing settings
-	if err := saveRigTheme(rigName, "forest"); err != nil {
+	if err := saveRigThemeIn(townRoot, rigName, "forest"); err != nil {
 		t.Fatalf("saveRigTheme: %v", err)
 	}
 
@@ -153,6 +136,7 @@ func TestSaveRigTheme_CreatesNewSettings(t *testing.T) {
 }
 
 func TestSaveRigTheme_PreservesNonThemeSettings(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForTheme(t)
 	rigName := "testrig"
 
@@ -171,16 +155,7 @@ func TestSaveRigTheme_PreservesNonThemeSettings(t *testing.T) {
 		t.Fatalf("save initial settings: %v", err)
 	}
 
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origCwd)
-
-	if err := saveRigTheme(rigName, "forest"); err != nil {
+	if err := saveRigThemeIn(townRoot, rigName, "forest"); err != nil {
 		t.Fatalf("saveRigTheme: %v", err)
 	}
 
@@ -248,6 +223,7 @@ func TestSaveRigTheme_RoundTripsJSON(t *testing.T) {
 }
 
 func TestSaveRigTheme_DisablesTheming(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTestTownForTheme(t)
 	rigName := "testrig"
 
@@ -256,16 +232,7 @@ func TestSaveRigTheme_DisablesTheming(t *testing.T) {
 		t.Fatalf("mkdir settings: %v", err)
 	}
 
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer os.Chdir(origCwd)
-
-	if err := saveRigTheme(rigName, "none"); err != nil {
+	if err := saveRigThemeIn(townRoot, rigName, "none"); err != nil {
 		t.Fatalf("saveRigTheme: %v", err)
 	}
 
