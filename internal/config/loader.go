@@ -114,6 +114,9 @@ func validateTownConfig(c *TownConfig) error {
 	if c.Name == "" {
 		return fmt.Errorf("%w: name", ErrMissingField)
 	}
+	if c.Dolt != nil && (c.Dolt.Port < 1 || c.Dolt.Port > 65535) {
+		return fmt.Errorf("dolt.port %d is not a TCP port", c.Dolt.Port)
+	}
 	return nil
 }
 

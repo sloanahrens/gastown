@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // host is the machine the adapter manages Dolt on (docs/testing.md, "Seams
@@ -56,6 +57,8 @@ type host struct {
 	// write it through the in-process store (seedRigIssuePrefix).
 	readIssuePrefix  func(townRoot, beadsDir string) (string, error)
 	writeIssuePrefix func(townRoot, beadsDir, database, prefix string) error
+	// doltEndpoint is the town's Dolt endpoint (config.ResolveDoltEndpoint).
+	doltEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
 }
 
 // std is the real machine.
@@ -68,6 +71,13 @@ type hostCall struct {
 	Dir   string
 	Env   []string
 	Stdin []byte
+}
+
+func (h *host) resolveDoltEndpoint(townRoot string) (configpkg.DoltEndpoint, bool) {
+	if h.doltEndpoint != nil {
+		return h.doltEndpoint(townRoot)
+	}
+	return configpkg.ResolveDoltEndpoint(townRoot)
 }
 
 func (h *host) getenv(key string) string {

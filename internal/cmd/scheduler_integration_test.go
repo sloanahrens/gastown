@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -97,10 +98,23 @@ func initSchedulerGitRepo(t *testing.T, dir, homeDir string) {
 func schedulerBDInitEnv(homeDir, beadsDir string) []string {
 	env := cleanSchedulerTestEnv(homeDir)
 	if p := schedulerDoltPort(); p != "" {
-		env = beads.StripEnvKey(env, "GT_DOLT_PORT")
-		env = append(env, "GT_DOLT_PORT="+p)
+		for _, key := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+			env = beads.StripEnvKey(env, key)
+			env = append(env, key+"="+p)
+		}
 	}
 	return beads.BuildMutationPinnedBDEnv(env, beadsDir)
+}
+
+// schedulerDoltEndpoint is the test Dolt server as a town endpoint: gt
+// reads the endpoint from town.json only (gt-y3pgh.3).
+func schedulerDoltEndpoint(t *testing.T) *config.DoltEndpoint {
+	t.Helper()
+	port, err := strconv.Atoi(schedulerDoltPort())
+	if err != nil {
+		t.Fatalf("test Dolt server port: %v", err)
+	}
+	return &config.DoltEndpoint{Port: port}
 }
 
 func schedulerDoltPort() string {
@@ -210,6 +224,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 		Type:    "town",
 		Name:    "test",
 		Version: config.CurrentTownVersion,
+		Dolt:    schedulerDoltEndpoint(t),
 	})
 
 	rigsConfig := &config.RigsConfig{
@@ -875,6 +890,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 		Type:    "town",
 		Name:    "test",
 		Version: config.CurrentTownVersion,
+		Dolt:    schedulerDoltEndpoint(t),
 	})
 
 	rigsConfig := &config.RigsConfig{

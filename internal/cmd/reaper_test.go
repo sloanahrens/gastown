@@ -66,19 +66,13 @@ func TestWaitBeforeReaperDatabase(t *testing.T) {
 	}
 }
 
-// staleBeadsAliasEnv is an environment carrying only the stale BEADS_*
-// aliases the reaper must ignore.
-var staleBeadsAliasEnv = envMap(map[string]string{
-	"BEADS_DOLT_SERVER_HOST": "stale-host",
-	"BEADS_DOLT_SERVER_PORT": "9999",
-	"BEADS_DOLT_PORT":        "9999",
-})
-
-func TestDefaultReaperEndpointIgnoresStaleBeadsAliases(t *testing.T) {
+// Without a town endpoint the reaper gets no port, never a guessed 3307
+// (gt-y3pgh.3).
+func TestDefaultReaperEndpointWithoutTownHasNoPort(t *testing.T) {
 	t.Parallel()
-	host, port := reaperEndpoint("", staleBeadsAliasEnv)
-	if host != "127.0.0.1" || port != 3307 {
-		t.Fatalf("defaultReaperEndpoint() = %s:%d, want 127.0.0.1:3307", host, port)
+	host, port := reaperEndpoint("")
+	if host != "127.0.0.1" || port != 0 {
+		t.Fatalf("reaperEndpoint(\"\") = %s:%d, want 127.0.0.1:0", host, port)
 	}
 }
 
@@ -100,7 +94,7 @@ func TestDefaultReaperEndpointUsesTownConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	host, port := reaperEndpoint(townRoot, staleBeadsAliasEnv)
+	host, port := reaperEndpoint(townRoot)
 	if host != "127.0.0.2" || port != 5507 {
 		t.Fatalf("defaultReaperEndpoint() = %s:%d, want 127.0.0.2:5507", host, port)
 	}

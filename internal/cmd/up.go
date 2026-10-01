@@ -184,6 +184,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 			os.Setenv(k, v)
 		}
 	}
+	// Every server and agent gt up starts inherits the town's Dolt endpoint,
+	// so bd in agent sessions neither auto-starts rogue Dolt instances
+	// (GH#2412) nor falls back to 127.0.0.1 for a remote server.
 	applyConfiguredDoltEnv(townRoot)
 
 	allOK := true
@@ -316,26 +319,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// was skipped, polling the port would just burn the full timeout. (review finding #1)
 	if !doltSkipped && doltOK {
 		waitForDoltReady(townRoot)
-		// Propagate Dolt connection info to process env so all subsequently spawned
-		// agents (crew, polecats) inherit it. Without this,
-		// bd auto-starts rogue Dolt instances in agent tmux sessions. (GH#2412)
-		// Host propagation prevents bd from falling back to 127.0.0.1 when the
-		// Dolt server runs on a remote machine (e.g., mini2 over Tailscale).
-		doltCfg := doltserver.DefaultConfig(townRoot)
-		portStr := fmt.Sprintf("%d", doltCfg.Port)
-		publish := map[string]string{
-			"GT_DOLT_PORT":           portStr,
-			"BEADS_DOLT_SERVER_PORT": portStr,
-			"BEADS_DOLT_PORT":        portStr,
-		}
-		if doltCfg.Host != "" {
-			publish["GT_DOLT_HOST"] = doltCfg.Host
-			publish["BEADS_DOLT_SERVER_HOST"] = doltCfg.Host
-		}
-		for k, v := range publish {
-			//testpolicy:allow prod-no-setenv — gt up publishes its environment to every server and agent it starts
-			os.Setenv(k, v)
-		}
 	}
 
 	// 3. Crew (if --restore)

@@ -97,8 +97,7 @@ func setupRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 	}
 }
 
-// noEnv is an environment with no variables set: GT_DOLT_PORT would override
-// the port fallbacks these tests expect, and agent sessions set it.
+// noEnv is an environment with no variables set.
 func noEnv(string) (string, bool) { return "", false }
 
 // reachableCheck is a DoltServerReachableCheck with an empty environment,
@@ -124,7 +123,7 @@ func TestGetServerAddr(t *testing.T) {
 		wantOK   bool
 	}{
 		{
-			name:     "defaults to 127.0.0.1:3307",
+			name:     "defaults to 127.0.0.1 and the town's port",
 			wantAddr: "127.0.0.1:3307",
 			wantOK:   true,
 		},
@@ -158,7 +157,7 @@ func TestGetServerAddr(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			townRoot := t.TempDir()
+			townRoot := endpointTown(t) // the town's port is 3307
 			beadsDir := filepath.Join(townRoot, ".beads")
 			setupServerMetadata(t, beadsDir, tt.host, tt.port)
 
@@ -206,8 +205,6 @@ func TestGetServerAddr_NoMetadata(t *testing.T) {
 
 func TestGetServerAddr_UsesConfigYAMLPort(t *testing.T) {
 	t.Parallel()
-	// GT_DOLT_PORT takes precedence over config.yaml in ResolveDoltPort, so
-	// the check reads an environment without it to test the config.yaml path.
 	check := NewDoltServerReachableCheck()
 	check.lookupEnv = noEnv
 	townRoot := t.TempDir()
@@ -468,5 +465,19 @@ func TestDoltOrphanedDatabaseCheck_Name(t *testing.T) {
 	check := NewDoltOrphanedDatabaseCheck()
 	if check.Name() != "dolt-orphaned-databases" {
 		t.Errorf("expected name 'dolt-orphaned-databases', got %q", check.Name())
+	}
+}
+
+// Metadata without a port in a town without an endpoint has nothing to
+// probe: no guessed 3307 (gt-y3pgh.3).
+func TestGetServerAddr_NoPortWithoutEndpoint(t *testing.T) {
+	t.Parallel()
+	check := NewDoltServerReachableCheck()
+	check.lookupEnv = noEnv
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	setupServerMetadata(t, beadsDir, "", 0)
+	if addr, ok := check.getServerAddr(beadsDir, townRoot); ok {
+		t.Errorf("getServerAddr() = %q, true; want no address", addr)
 	}
 }

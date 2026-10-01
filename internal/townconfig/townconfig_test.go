@@ -259,3 +259,31 @@ func TestCheckRefusesAnUnreadableFile(t *testing.T) {
 		}
 	}
 }
+
+// The endpoint in town.json is the truth; the managed config.yaml answers
+// only for a town.json without one (gt-y3pgh.3).
+func TestDoltEndpointTownJSONWins(t *testing.T) {
+	t.Parallel()
+	root := copyLiveTown(t)
+	write(t, root, FileTown, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"host":"127.0.0.2","port":5507}}`)
+	town, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep, ok := town.DoltEndpoint()
+	if !ok || ep.Host != "127.0.0.2" || ep.Port != 5507 {
+		t.Fatalf("DoltEndpoint = %+v, %v; want 127.0.0.2:5507 from town.json", ep, ok)
+	}
+	if want, _ := config.ResolveDoltEndpoint(root); want.Host != ep.Host || want.Port != ep.Port {
+		t.Errorf("config.ResolveDoltEndpoint = %+v, kernel = %+v; the two must agree", want, ep)
+	}
+}
+
+func TestTownJSONRejectsNonPortDolt(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, FileTown, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"port":0}}`)
+	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "dolt.port") {
+		t.Fatalf("Load(dolt.port 0) = %v, want a dolt.port error", err)
+	}
+}

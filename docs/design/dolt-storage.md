@@ -34,24 +34,34 @@ accessible via `USE <name>` in SQL.
 
 **Connection**: `root@tcp(<host>:3307)/<database>` (no password).
 
-## Environment Variables
+## Endpoint
 
-gt and bd use separate env vars for Dolt connection. gt automatically
-translates its variables to bd's equivalents when spawning agents.
+The town's Dolt endpoint (host, port) lives in `mayor/town.json`:
+
+```json
+"dolt": {"host": "100.64.0.5", "port": 3307}
+```
+
+`gt install` writes it (`--dolt-port`, default 3307) and
+`gt config set dolt.port <port>` changes it. A town whose `town.json`
+predates the field reads the listener in `.dolt-data/config.yaml`. gt never
+reads the endpoint from the environment (gt-y3pgh.3): `gt dolt start` writes
+the server's `config.yaml` from it, `gt rig add` stamps it into each new
+rig's `.beads/config.yaml` (`dolt.port`, `dolt.host`) through
+`bd config set`, and gt exports it to the agents and bd processes it starts:
 
 | gt (Gas Town) | bd (Beads) | Purpose |
 |---------------|------------|---------|
 | `GT_DOLT_HOST` | `BEADS_DOLT_SERVER_HOST` | Server host (bd defaults to `127.0.0.1` if unset) |
-| `GT_DOLT_PORT` | `BEADS_DOLT_PORT` | Server port (default: `3307`) |
+| `GT_DOLT_PORT` | `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT` | Server port |
+
+The exported variables are outputs for children (plugins read `GT_DOLT_*`,
+bd reads `BEADS_DOLT_*`); setting them in a shell does not move gt.
 
 **Remote Dolt servers**: If Dolt runs on a different machine (e.g., over
-Tailscale), set `GT_DOLT_HOST` in the environment. gt propagates this as
+Tailscale), set `"host"` in `town.json`'s `dolt` block. gt exports it as
 `BEADS_DOLT_SERVER_HOST` to all bd subprocesses, overriding bd's hardcoded
-`127.0.0.1` default. Without this, every new rig/worktree/polecat silently
-connects to localhost and fails.
-
-Per-workspace override: set `dolt.host` in a rig's `.beads/config.yaml`.
-This takes priority over the env var for that specific workspace.
+`127.0.0.1` default.
 
 ## Commands
 
@@ -641,7 +651,7 @@ Dolt server stays up throughout.
 2. Remove every registered remote. The loop finds them itself, so it needs
    no database list. `DOLT_REMOTE('remove', ...)` changes repository state,
    not a table, so it makes no Dolt commit. The server listens on the
-   town's Dolt port (3307 unless `GT_DOLT_PORT` says otherwise).
+   town's Dolt port (`gt config get dolt.port`; 3307 by default).
 
    ```bash
    dq() { dolt --host 127.0.0.1 --port "${GT_DOLT_PORT:-3307}" --user root --password "" --no-tls "$@"; }
