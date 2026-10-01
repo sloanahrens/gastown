@@ -78,7 +78,7 @@ A test that needs a Dolt database on the shared test container leases one from t
 - A reset cannot restore `AUTO_INCREMENT` counters, so a database whose reset point has an `AUTO_INCREMENT` column is refused at release.
 - The pool has a fixed size whatever `-count` says. A lease waits for a returned database and fails after two minutes; it never creates one. A test that holds more databases at once than the pool has needs a bigger `doltPoolStores`.
 
-`go test -tags integration` compiles both tiers together. `TestMain` therefore lives in the integration tier only (see `internal/tmux/testmain_integration_test.go`). A unit test must pass with no tmux, ps or docker on `PATH`.
+`go test -tags integration` compiles both tiers together, so a package with a `TestMain` in each tier tags the unit-tier one `//go:build !integration` (see `internal/tmux/main_test.go` and `internal/tmux/testmain_integration_test.go`). A unit test must pass with no tmux, ps or docker on `PATH`.
 
 ## The rules
 
@@ -97,6 +97,18 @@ A test that needs a Dolt database on the shared test container leases one from t
 | `no-exec-files` | write a `#!` script or create or chmod a file with an execute bit |
 | `no-global-swap` | assign a package-level variable |
 | `parallel` | leave out `t.Parallel()` in a top-level `TestX` |
+
+One rule is checked when the package's unit tests end, because no syntax shows it: **no goroutine outlives the tests.** A goroutine a test starts, directly or through the code under test, must have returned by the time the test ends; stop it in `t.Cleanup` and wait for it. The check (`internal/testutil/unittier`) compares the goroutines running after `m.Run` with those running before it, gives a stopped one up to 2 s to return, and fails the run with a `GOROUTINE LEAK` block that prints each survivor's stack and the function that started it. It does not blame goroutines that package init started, the `os/signal` loop, or lumberjack's compression goroutine, which its `Close` cannot stop. It is off in the integration tier.
+
+The check runs only where the package's unit-tier `TestMain` runs it, so every package has one: `testutil.HermeticMain` (or `StartHermetic` and `Finish`) runs it, and a package that does not need the harness, or that `testutil` imports, uses
+
+```go
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
+```
+
+`TestUnitTierMain` in `internal/testpolicy` fails on a package whose unit tier has test files but no such `TestMain`. When the check was added (gt-22hdp.20), one package of 82 leaked: `internal/daemon`'s per-rig escalation workers never exited, and now return when their queue drains.
 
 The rules for production code, and for the tree as a whole, are:
 
