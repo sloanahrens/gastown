@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -180,10 +182,28 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var out bytes.Buffer
-	if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
+	cmd := newBDCmd(runCtx, dir, env, nil, args, &out, &out)
+	quitOnTimeout(cmd)
+	if err := cmd.Run(); err != nil {
 		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
 	}
 	return out.Bytes(), nil
+}
+
+// testInitQuitGrace is how long a bd init that got SIGQUIT has to write its
+// goroutine dump and exit before it is killed, and how long Wait then waits
+// for anything else holding its output pipe.
+const testInitQuitGrace = 10 * time.Second
+
+// quitOnTimeout makes cmd's context deadline send bd SIGQUIT instead of
+// SIGKILL, so a hung test init (gt-16rk2: one sat in Wait4 for 5 minutes)
+// fails with bd's goroutine dump in its output: where it waited (the server,
+// a lock, a migration) is what the next diagnosis needs. WaitDelay bounds the
+// rest: a bd that ignores the signal is killed, and a child that inherited the
+// output pipe cannot hold Wait open.
+func quitOnTimeout(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+	cmd.WaitDelay = testInitQuitGrace
 }
 
 // hasDatabaseArg reports whether args carry bd's --database flag.

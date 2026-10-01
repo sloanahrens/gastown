@@ -352,7 +352,7 @@ esac
 // TestRigAddCreatesCorrectStructure verifies that gt rig add creates
 // the expected directory structure.
 func TestRigAddCreatesCorrectStructure(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -476,7 +476,7 @@ func TestRigAddCreatesCorrectStructure(t *testing.T) {
 // TestRigAddRespectsDefaultAgent verifies that gt rig add scaffolds the polecat
 // config directory matching the town's default_agent setting (gt-vdx).
 func TestRigAddRespectsDefaultAgent(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -529,7 +529,7 @@ func TestRigAddRespectsDefaultAgent(t *testing.T) {
 // TestRigAddInitializesBeads verifies that beads is initialized with
 // the correct prefix.
 func TestRigAddInitializesBeads(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -598,7 +598,7 @@ func TestRigAddInitializesBeads(t *testing.T) {
 // TestRigAddUpdatesRoutes verifies that routes.jsonl is updated
 // with the new rig's route.
 func TestRigAddUpdatesRoutes(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -669,7 +669,7 @@ func TestRigAddUpdatesRoutes(t *testing.T) {
 // TestRigAddUpdatesRigsJson verifies that rigs.json is updated
 // with the new rig entry.
 func TestRigAddUpdatesRigsJson(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -720,7 +720,7 @@ func TestRigAddUpdatesRigsJson(t *testing.T) {
 // TestRigAddDerivesPrefix verifies that when no prefix is specified,
 // one is derived from the rig name.
 func TestRigAddDerivesPrefix(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -753,7 +753,7 @@ func TestRigAddDerivesPrefix(t *testing.T) {
 // TestRigAddCreatesRigConfig verifies that config.json contains
 // the correct rig configuration.
 func TestRigAddCreatesRigConfig(t *testing.T) {
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 	bridgeDoltPidToTown(t, townRoot)
@@ -813,7 +813,7 @@ func TestRigAddCreatesRigConfig(t *testing.T) {
 // and persists the URL to config.json and rigs.json.
 func TestRigAddWithUpstreamURL(t *testing.T) {
 	// bd is mocked, but AddRig still creates the rig's database over SQL.
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 	_ = mockBdCommand(t)
 	townRoot := setupTestTown(t)
 
@@ -985,7 +985,7 @@ func TestAgentWorktreesStayClean(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
 	}
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 
 	testCases := []struct {
 		name            string

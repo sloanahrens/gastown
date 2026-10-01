@@ -11,7 +11,8 @@ import (
 )
 
 // applyOpts runs the container options against an empty request, so the
-// test can read what dolt.Run would be asked for without starting Docker.
+// test can read what testcontainers.Run would be asked for without starting
+// Docker.
 func applyOpts(t *testing.T, env environment) testcontainers.GenericContainerRequest {
 	t.Helper()
 	var req testcontainers.GenericContainerRequest
@@ -37,29 +38,24 @@ func TestDoltContainerOpts_TmpfsByDefault(t *testing.T) {
 	}
 }
 
-// The dolt-sql-server image's entrypoint logs "Server ready" (dolt's own line,
-// all the dolt module waits for) and then runs its init SQL through `dolt sql`
-// under `set -e`. A test that changes the catalog meanwhile makes that SQL
-// fail, the entrypoint exit 1, and the container die under the suite: 2 of 3
-// containers in a probe that churned CREATE/DROP DATABASE from "Server ready",
-// 0 of 3 once the start waited for the entrypoint's last line. The start must
-// wait for that line.
+// The dolt-sql-server image's entrypoint logs "Server ready" (dolt's own line)
+// and then runs its init SQL through `dolt sql` under `set -e`. A test that
+// changes the catalog meanwhile makes that SQL fail, the entrypoint exit 1,
+// and the container die under the suite: 2 of 3 containers in a probe that
+// churned CREATE/DROP DATABASE from "Server ready", 0 of 3 once the start
+// waited for the entrypoint's last line. The start must wait for both lines,
+// each under its own deadline, on the published Dolt port.
 func TestDoltContainerOpts_WaitsForEntrypointInit(t *testing.T) {
 	t.Parallel()
-	// What dolt.Run puts on the request before it applies these options.
-	req := testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			WaitingFor: wait.ForLog("Server ready. Accepting connections."),
-		},
-	}
-	for _, o := range doltContainerOpts() {
-		if err := o.Customize(&req); err != nil {
-			t.Fatalf("Customize: %v", err)
+	req := applyOpts(t, newMapEnv())
+	logs := waitedForLogs(req.WaitingFor)
+	for _, want := range []string{doltServerReadyLog, doltEntrypointDoneLog} {
+		if !slices.Contains(logs, want) {
+			t.Fatalf("container start waits for logs %q, want %q among them", logs, want)
 		}
 	}
-	logs := waitedForLogs(req.WaitingFor)
-	if !slices.Contains(logs, doltEntrypointDoneLog) {
-		t.Fatalf("container start waits for logs %q, want it to wait for the entrypoint's %q", logs, doltEntrypointDoneLog)
+	if !slices.Contains(req.ExposedPorts, doltContainerPort) {
+		t.Fatalf("ExposedPorts = %q, want %s", req.ExposedPorts, doltContainerPort)
 	}
 }
 

@@ -16,26 +16,26 @@ import (
 // container serves only databases from its pool (bd init through
 // beads.RunTestContainerInit or an isolated beads.Init); a test whose code
 // under test names its own databases — gt install, gt rig add — uses
-// requireIsolatedDoltServer instead.
+// requireScratchDoltServer instead.
 func requireDoltServer(t *testing.T) {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
 }
 
-// requireIsolatedDoltServer gives t a Dolt container of its own and points
-// this process and its gt/bd subprocesses at it for the rest of the test.
+// requireScratchDoltServer leases t the package's scratch Dolt container and
+// points this process and its gt/bd subprocesses at it for the rest of the
+// test.
 //
 // gt install and gt rig add create the databases they name (hq, the rig's),
 // and a later test creates the same names again. On the shared container that
 // is a catalog change while other tests run, which the pool's teardown guard
 // fails the package for (internal/testutil/doltpool.go), and the next test
-// meets the last one's databases. A container per test has neither problem;
-// it goes when the test does.
-func requireIsolatedDoltServer(t *testing.T) {
+// meets the last one's databases. The scratch container is leased to one test
+// at a time and dropped back to its starting catalog after each, so these
+// tests share one container instead of starting one each (gt-16rk2).
+func requireScratchDoltServer(t *testing.T) {
 	t.Helper()
-	port := testutil.StartIsolatedDoltContainer(t)
-	t.Setenv("BEADS_DOLT_PORT", port)
-	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	testutil.LeaseScratchDoltContainer(t)
 }
 
 // configureTestGitIdentity sets git global config in an isolated HOME directory

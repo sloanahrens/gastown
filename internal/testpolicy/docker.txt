@@ -1,6 +1,6 @@
 # Packages whose unit-tier test files start a container when GT_TEST_DOCKER=1:
 # they call a testutil container entry point (RequireDoltContainer,
-# EnsureDoltContainerForTestMain, StartIsolatedDoltContainer, OpenTestStore,
+# EnsureDoltContainerForTestMain, LeaseScratchDoltContainer, OpenTestStore,
 # TakePooledSQLDatabase, WithDolt, DockerTestsEnabled) or
 # beads.RunTestContainerInit. `make gate` runs them with GT_TEST_DOCKER=0, so
 # their container tests skip there; `make test-integration` runs each of them

@@ -8,31 +8,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 )
 
 // Proves Docker actually mounts tmpfs over the image's declared VOLUME on
-// this runtime. Starts and terminates its own container so it never touches
-// the package's shared one.
+// this runtime, on the scratch container (every test container starts with
+// the same options).
 func TestIntegrationDoltContainerDataDirIsTmpfs(t *testing.T) {
-	if !DockerTestsEnabled() {
-		t.Skip(dockerTestsSkipMsg)
+	if getenv(procEnv{}, DoltTmpfsEnv) == "0" {
+		t.Skip(DoltTmpfsEnv + "=0 opted this run out of tmpfs")
 	}
-	if !isDockerAvailable() {
-		t.Fatal(dockerMissingMsg)
-	}
-	t.Setenv(DoltTmpfsEnv, "")
+	LeaseScratchDoltContainer(t)
 	ctx := context.Background()
-	ctr, err := runDoltContainerWithRetry(ctx)
-	if err != nil {
-		t.Fatalf("starting Dolt container: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := testcontainers.TerminateContainer(ctr); err != nil {
-			t.Errorf("terminating Dolt container: %v", err)
-		}
-	})
+	ctr := scratchDolt.ctr
 	code, r, err := ctr.Exec(ctx, []string{"stat", "-f", "-c", "%T", doltDataDir}, tcexec.Multiplexed())
 	if err != nil || code != 0 {
 		t.Fatalf("stat %s: code=%d err=%v", doltDataDir, code, err)

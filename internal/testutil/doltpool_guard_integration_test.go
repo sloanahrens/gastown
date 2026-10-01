@@ -12,10 +12,13 @@ import (
 // TestIntegrationDoltCatalogGuardFiresOnRealServer is the guard's mutation proof against
 // the real image: on a container holding the image's databases and a pool, the
 // guard passes; a stray CREATE DATABASE, and a CREATE then DROP that leaves
-// SHOW DATABASES as it was, each fail it by name. It runs on its own container
-// so its catalog changes cannot reach any other test.
+// SHOW DATABASES as it was, each fail it by name. It runs on the scratch
+// container, which no other test uses while it holds the lease, so its
+// catalog changes cannot reach any other test; the lease's reset also
+// proves itself here, since the guard's first check is that the catalog
+// is the image's own.
 func TestIntegrationDoltCatalogGuardFiresOnRealServer(t *testing.T) {
-	port := StartIsolatedDoltContainer(t)
+	port := LeaseScratchDoltContainer(t)
 	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:"+port+")/?timeout=30s")
 	if err != nil {
 		t.Fatal(err)

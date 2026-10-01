@@ -132,7 +132,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	}
 	// Dolt server required: bd init auto-detects server on 3307,
 	// and gt rig add --adopt uses --server mode for re-initialization.
-	requireIsolatedDoltServer(t)
+	requireScratchDoltServer(t)
 
 	tmpDir := t.TempDir()
 	configureTestGitIdentity(t, tmpDir)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -595,5 +596,19 @@ func TestRunTestContainerInitRejectsNonInit(t *testing.T) {
 		if _, err := RunTestContainerInit(context.Background(), t.TempDir(), args, nil); err == nil {
 			t.Errorf("RunTestContainerInit(%q) succeeded, want a refusal", args)
 		}
+	}
+}
+
+// A test init that outlives its budget gets SIGQUIT, not SIGKILL, so bd's
+// goroutine dump lands in the failure (gt-16rk2), and Wait is bounded past it.
+func TestQuitOnTimeoutAsksForADumpAndBoundsWait(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command("bd", "init")
+	quitOnTimeout(cmd)
+	if cmd.Cancel == nil {
+		t.Fatal("Cancel is unset; the deadline would SIGKILL bd with no dump")
+	}
+	if cmd.WaitDelay != testInitQuitGrace {
+		t.Fatalf("WaitDelay = %v, want %v", cmd.WaitDelay, testInitQuitGrace)
 	}
 }

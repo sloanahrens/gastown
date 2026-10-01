@@ -19,7 +19,7 @@ import (
 var containerEntryPoints = map[string]bool{
 	"RequireDoltContainer":           true,
 	"EnsureDoltContainerForTestMain": true,
-	"StartIsolatedDoltContainer":     true,
+	"LeaseScratchDoltContainer":      true,
 	"OpenTestStore":                  true,
 	"TakePooledSQLDatabase":          true,
 	"WithDolt":                       true,

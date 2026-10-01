@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go/modules/dolt"
+	"github.com/testcontainers/testcontainers-go"
 )
 
 // portNotMappedErr is the startup failure gt-jvve is about: the container is up
@@ -89,7 +89,7 @@ func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
 // with each failed one, so no Docker is involved.
 type fakeContainerStart struct {
 	t        *testing.T
-	ctr      *dolt.DoltContainer
+	ctr      testcontainers.Container
 	failures []error // one per start, in order; nil is a successful start
 	logTail  string
 	logErr   error
@@ -102,7 +102,7 @@ type fakeContainerStart struct {
 
 func (f *fakeContainerStart) hooks() containerStartHooks {
 	return containerStartHooks{
-		start: func(context.Context) (*dolt.DoltContainer, error) {
+		start: func(context.Context) (testcontainers.Container, error) {
 			if f.attempts >= len(f.failures) {
 				f.t.Fatalf("start called %d times, %d scripted", f.attempts+1, len(f.failures))
 			}
@@ -110,16 +110,18 @@ func (f *fakeContainerStart) hooks() containerStartHooks {
 			f.attempts++
 			return f.ctr, err
 		},
-		settle: func(context.Context, *dolt.DoltContainer) { f.settles++ },
-		reap:   func(*dolt.DoltContainer) { f.reaps++ },
-		logs:   func(context.Context, *dolt.DoltContainer) (string, error) { return f.logTail, f.logErr },
+		settle: func(context.Context, testcontainers.Container) { f.settles++ },
+		reap:   func(testcontainers.Container) { f.reaps++ },
+		logs:   func(context.Context, testcontainers.Container) (string, error) { return f.logTail, f.logErr },
 		sleep:  func(d time.Duration) { f.sleeps = append(f.sleeps, d) },
+
+		attemptTimeout: time.Minute,
 	}
 }
 
 func TestRetryContainerStartSucceedsFirstAttempt(t *testing.T) {
 	t.Parallel()
-	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{nil}}
+	f := &fakeContainerStart{t: t, ctr: &testcontainers.DockerContainer{}, failures: []error{nil}}
 
 	ctr, err := retryContainerStart(context.Background(), f.hooks())
 	if err != nil || ctr != f.ctr {
@@ -135,7 +137,7 @@ func TestRetryContainerStartSucceedsFirstAttempt(t *testing.T) {
 // the failed attempt left behind is reaped rather than leaked.
 func TestRetryContainerStartRetriesUnmappedPort(t *testing.T) {
 	t.Parallel()
-	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{portNotMappedErr(), nil}}
+	f := &fakeContainerStart{t: t, ctr: &testcontainers.DockerContainer{}, failures: []error{portNotMappedErr(), nil}}
 
 	ctr, err := retryContainerStart(context.Background(), f.hooks())
 	if err != nil || ctr != f.ctr {
@@ -154,7 +156,7 @@ func TestRetryContainerStartRetriesUnmappedPort(t *testing.T) {
 func TestRetryContainerStartRetriesReaperRemoving(t *testing.T) {
 	t.Parallel()
 	reaperErr := errors.New("unexpected container status \"removing\"")
-	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{reaperErr, nil}}
+	f := &fakeContainerStart{t: t, ctr: &testcontainers.DockerContainer{}, failures: []error{reaperErr, nil}}
 
 	if _, err := retryContainerStart(context.Background(), f.hooks()); err != nil {
 		t.Fatalf("retryContainerStart: %v", err)
@@ -170,7 +172,7 @@ func TestRetryContainerStartExhaustedReportsLogs(t *testing.T) {
 	t.Parallel()
 	f := &fakeContainerStart{
 		t:        t,
-		ctr:      &dolt.DoltContainer{},
+		ctr:      &testcontainers.DockerContainer{},
 		failures: []error{portNotMappedErr(), portNotMappedErr(), portNotMappedErr()},
 		logTail:  "Server ready. Accepting connections.",
 	}
@@ -195,12 +197,12 @@ func TestRetryContainerStartExhaustedReportsLogs(t *testing.T) {
 }
 
 // An error the retry does not recognise is reported at once, still with the
-// container's logs.
+// container's logs, and the container it left is reaped rather than leaked.
 func TestRetryContainerStartDoesNotRetryOtherFailures(t *testing.T) {
 	t.Parallel()
 	f := &fakeContainerStart{
 		t:        t,
-		ctr:      &dolt.DoltContainer{},
+		ctr:      &testcontainers.DockerContainer{},
 		failures: []error{errors.New("pull access denied for dolthub/dolt-sql-server")},
 		logTail:  "no matching manifest",
 	}
@@ -210,8 +212,34 @@ func TestRetryContainerStartDoesNotRetryOtherFailures(t *testing.T) {
 		!strings.Contains(err.Error(), "no matching manifest") {
 		t.Fatalf("err = %v, want the pull failure with its logs", err)
 	}
-	if f.attempts != 1 || f.reaps != 0 || len(f.sleeps) != 0 {
-		t.Fatalf("attempts = %d, reaps = %d, sleeps = %v, want one attempt", f.attempts, f.reaps, f.sleeps)
+	if f.attempts != 1 || f.reaps != 1 || len(f.sleeps) != 0 {
+		t.Fatalf("attempts = %d, reaps = %d, sleeps = %v, want one attempt, reaped", f.attempts, f.reaps, f.sleeps)
+	}
+}
+
+// A start that stalls (gt-16rk2: one sat 3.5 minutes after "Container is
+// ready") fails at the attempt budget with the container's logs, and is not
+// retried.
+func TestRetryContainerStartBoundsAStalledStart(t *testing.T) {
+	t.Parallel()
+	f := &fakeContainerStart{t: t, ctr: &testcontainers.DockerContainer{}, logTail: "Server ready. Accepting connections."}
+	hooks := f.hooks()
+	hooks.attemptTimeout = time.Millisecond
+	hooks.start = func(ctx context.Context) (testcontainers.Container, error) {
+		f.attempts++
+		<-ctx.Done()
+		return f.ctr, ctx.Err()
+	}
+
+	_, err := retryContainerStart(context.Background(), hooks)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not finish within 1ms") {
+		t.Fatalf("err = %v, want the attempt deadline named", err)
+	}
+	if !strings.Contains(err.Error(), "Server ready. Accepting connections.") {
+		t.Fatalf("err = %v, want the container log tail attached", err)
+	}
+	if f.attempts != 1 || f.reaps != 1 {
+		t.Fatalf("attempts = %d, reaps = %d, want one attempt, reaped", f.attempts, f.reaps)
 	}
 }
 

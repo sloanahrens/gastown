@@ -55,7 +55,7 @@ func init() {
 // them), derived (2026-09-11, gt-e2rs; re-verified 2026-09-22, gt-dlzc) by
 // finding every package whose TEST BINARY links internal/testutil — the
 // only path into container-spinning code (testutil.RequireDoltContainer,
-// testutil.WithDolt, testutil.StartIsolatedDoltContainer, all in
+// testutil.WithDolt, testutil.LeaseScratchDoltContainer, all in
 // internal/testutil/doltserver.go) — with
 // `go list -test -f '{{.ImportPath}} {{join .Deps "\n"}}' ./internal/...`
 // and filtering for the module's testutil import path. This catches both

@@ -209,7 +209,7 @@ that may not be available in every environment. Use the helpers in
 | Helper | When to use |
 |--------|-------------|
 | `testutil.RequireDoltContainer(t)` | Test needs a running Dolt SQL server (starts a Docker container) |
-| `testutil.StartIsolatedDoltContainer(t)` | Test needs its own isolated Dolt instance (per-test container) |
+| `testutil.LeaseScratchDoltContainer(t)` | Code under test creates databases it names (gt install, gt rig add); a sequential test leases one shared scratch server, reset to its starting catalog after each test |
 | `testutil.RequireTownEnv(t)` | Test needs a live Gas Town workspace (checks `workspace.FindFromCwd` + `rigs.json`); returns root path |
 
 **`requireDoltServer`** (in `internal/cmd`) is a local wrapper around
@@ -218,7 +218,8 @@ that may not be available in every environment. Use the helpers in
 **When to use which guard:**
 
 - Tests that connect to Dolt (create databases, run SQL) →
-  `RequireDoltContainer` or `StartIsolatedDoltContainer`
+  `RequireDoltContainer`, or `LeaseScratchDoltContainer` when the code under
+  test creates its own named databases
 - Tests that need a real Gas Town directory tree (shell out to `gt`/`bd` with
   workspace detection) → `RequireTownEnv`
 - Tests that create their own temporary town via `t.TempDir()` → no guard needed

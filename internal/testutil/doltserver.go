@@ -5,6 +5,7 @@ package testutil
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/dolt"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -59,13 +59,27 @@ const (
 	// startupLogTailLines is how much container output a startup failure
 	// carries into its error message.
 	startupLogTailLines = 40
+	// startAttemptTimeout bounds one container start: image pull, create,
+	// the log waits and the readiness probe. Every Docker and SQL call in a
+	// start runs under it, so a start that stalls fails with the container's
+	// logs instead of holding the package until the go test timeout
+	// (gt-16rk2).
+	startAttemptTimeout = 3 * time.Minute
+	// logWaitTimeout bounds each log line a start waits for. A healthy
+	// container prints both within seconds.
+	logWaitTimeout = 90 * time.Second
+	// terminateTimeout bounds stopping and removing one container.
+	terminateTimeout = time.Minute
 )
+
+// doltServerReadyLog is the line dolt sql-server prints once it listens.
+const doltServerReadyLog = "Server ready. Accepting connections."
 
 // portLookup returns the host port Docker published for a container port.
 type portLookup func(ctx context.Context, containerPort string) (string, error)
 
 // doltPortLookup returns ctr's published Dolt port.
-func doltPortLookup(ctr *dolt.DoltContainer) portLookup {
+func doltPortLookup(ctr testcontainers.Container) portLookup {
 	return func(ctx context.Context, containerPort string) (string, error) {
 		p, err := ctr.MappedPort(ctx, containerPort)
 		if err != nil {
@@ -105,7 +119,7 @@ func waitForMappedPortSleeping(ctx context.Context, lookup portLookup, sleep fun
 }
 
 var (
-	doltCtr     *dolt.DoltContainer
+	doltCtr     testcontainers.Container
 	doltCtrOnce sync.Once
 	doltCtrErr  error
 	doltCtrPort string
@@ -136,14 +150,49 @@ func isReaperRemovingErr(err error) bool {
 		strings.Contains(err.Error(), "removing")
 }
 
-func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) {
+// runDoltContainer starts one Dolt container and probes it. It returns the
+// container even when the start fails, so the caller can read its logs and
+// remove it.
+//
+// It does not use the testcontainers dolt module: the module's initialize
+// pings and creates its user with database/sql calls that take no context, on
+// a DSN with no read timeout, so a server that accepts the connection and
+// never answers holds the start forever after "Container is ready" (gt-16rk2:
+// a start sat 3.5 minutes there). The image's entrypoint already creates
+// DOLT_DATABASE, and no test logs in as the module's user.
+func runDoltContainer(ctx context.Context) (ctr testcontainers.Container, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("testcontainers docker unavailable: %v", r)
 		}
 	}()
 
-	return dolt.Run(ctx, DoltDockerImage, doltContainerOpts()...)
+	dc, err := testcontainers.Run(ctx, DoltDockerImage, doltContainerOpts()...)
+	if dc != nil {
+		ctr = dc
+	}
+	if err != nil {
+		return ctr, fmt.Errorf("run dolt: %w", err)
+	}
+	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
+	if err != nil {
+		return ctr, err
+	}
+	if err := pingDolt(ctx, port); err != nil {
+		return ctr, fmt.Errorf("dolt readiness probe: %w", err)
+	}
+	return ctr, nil
+}
+
+// pingDolt opens a session on the server at port and pings it, bounded by ctx
+// and by the DSN's own dial and read timeouts.
+func pingDolt(ctx context.Context, port string) error {
+	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:"+port+")/?timeout=10s&readTimeout=30s&writeTimeout=30s")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return db.PingContext(ctx)
 }
 
 // doltEntrypointDoneLog is the last line the dolt-sql-server image's
@@ -167,11 +216,9 @@ func doltContainerOpts() []testcontainers.ContainerCustomizer {
 // doltContainerOptsIn is doltContainerOpts reading DoltTmpfsEnv from env.
 func doltContainerOptsIn(env environment) []testcontainers.ContainerCustomizer {
 	opts := []testcontainers.ContainerCustomizer{
-		// WithEnv must precede dolt.WithDatabase: dolt.WithDatabase writes
-		// req.Env without a nil check, so it needs the map already set.
-		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
-		dolt.WithDatabase("gt_test"),
-		// The module waits only for dolt's own "Server ready" line. The
+		testcontainers.WithExposedPorts(doltContainerPort),
+		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%", "DOLT_DATABASE": "gt_test"}),
+		// Dolt's own "Server ready" line is not enough. The
 		// image's entrypoint logs that and then keeps running init SQL
 		// (a root-host check, CREATE DATABASE gt_test, SELECT FROM
 		// mysql.user) through `dolt sql` under `set -e`: a statement that
@@ -179,7 +226,10 @@ func doltContainerOptsIn(env environment) []testcontainers.ContainerCustomizer {
 		// dies under the tests, and one overlapping a catalog change (the
 		// pool's CREATE DATABASEs, a test's CREATE or DROP) does fail. Wait
 		// for the entrypoint's own last line as well.
-		testcontainers.WithAdditionalWaitStrategy(wait.ForLog(doltEntrypointDoneLog)),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog(doltServerReadyLog).WithStartupTimeout(logWaitTimeout),
+			wait.ForLog(doltEntrypointDoneLog).WithStartupTimeout(logWaitTimeout),
+		),
 	}
 	if labels := slot.TestContainerOwnerLabels(); labels != nil {
 		opts = append(opts, testcontainers.WithLabels(labels))
@@ -207,8 +257,8 @@ func isRetriableContainerStartErr(err error) bool {
 
 // settleDoltContainer waits for ctr's published port so the daemon that
 // answers the lookup is the one that starts the replacement.
-func settleDoltContainer(ctx context.Context, ctr *dolt.DoltContainer) {
-	if ctr == nil {
+func settleDoltContainer(ctx context.Context, ctr testcontainers.Container) {
+	if noContainer(ctr) {
 		return
 	}
 	_, _ = waitForMappedPort(ctx, doltPortLookup(ctr))
@@ -219,18 +269,18 @@ func settleDoltContainer(ctx context.Context, ctr *dolt.DoltContainer) {
 // attempt runs. The termination error is dropped because the startup failure
 // is the one worth reporting, and the reaper collects what this misses
 // (gt-p98h).
-func reapFailedContainer(ctr *dolt.DoltContainer) {
-	if ctr == nil {
+func reapFailedContainer(ctr testcontainers.Container) {
+	if noContainer(ctr) {
 		return
 	}
-	_ = testcontainers.TerminateContainer(ctr)
+	_ = terminateContainer(ctr)
 }
 
 // containerLogTail returns the last startupLogTailLines of ctr's output, which
 // is what a startup failure is missing when it reports only the port lookup
 // that raced the container (gt-jvve).
-func containerLogTail(ctx context.Context, ctr *dolt.DoltContainer) (string, error) {
-	if ctr == nil {
+func containerLogTail(ctx context.Context, ctr testcontainers.Container) (string, error) {
+	if noContainer(ctr) {
 		return "", errors.New("the failed start left no container to read")
 	}
 	logs, err := ctr.Logs(ctx)
@@ -269,7 +319,7 @@ func withContainerLogs(err error, tail string, logErr error) error {
 
 // containerStartError attaches ctr's log tail to a startup failure whose
 // container outlived it.
-func containerStartError(ctx context.Context, ctr *dolt.DoltContainer, err error) error {
+func containerStartError(ctx context.Context, ctr testcontainers.Container, err error) error {
 	tail, logErr := containerLogTail(ctx, ctr)
 	return withContainerLogs(err, tail, logErr)
 }
@@ -279,57 +329,84 @@ func containerStartError(ctx context.Context, ctr *dolt.DoltContainer, err error
 // testable with a fake (gt-jvve); the production set is in
 // runDoltContainerWithRetry.
 type containerStartHooks struct {
-	start  func(ctx context.Context) (*dolt.DoltContainer, error)
-	settle func(ctx context.Context, ctr *dolt.DoltContainer)
-	reap   func(ctr *dolt.DoltContainer)
-	logs   func(ctx context.Context, ctr *dolt.DoltContainer) (string, error)
+	start  func(ctx context.Context) (testcontainers.Container, error)
+	settle func(ctx context.Context, ctr testcontainers.Container)
+	reap   func(ctr testcontainers.Container)
+	logs   func(ctx context.Context, ctr testcontainers.Container) (string, error)
 	sleep  func(time.Duration)
+	// attemptTimeout bounds each start (startAttemptTimeout).
+	attemptTimeout time.Duration
 }
 
 // retryContainerStart starts one Dolt container, retrying the failures
 // isRetriableContainerStartErr names, and reports the last failure with that
-// container's logs attached.
-func retryContainerStart(ctx context.Context, hooks containerStartHooks) (*dolt.DoltContainer, error) {
+// container's logs attached. Each attempt runs under hooks.attemptTimeout; one
+// that runs out is reported, not retried, since a start that stalled once
+// under the same load is likely to stall again. Every failed attempt's
+// container is reaped, the last one after its logs are read.
+func retryContainerStart(ctx context.Context, hooks containerStartHooks) (testcontainers.Container, error) {
 	delay := startupRetryDelay
-	var lastCtr *dolt.DoltContainer
-	var lastErr error
 
-	for attempt := range startupAttempts {
-		ctr, err := hooks.start(ctx)
+	for attempt := 0; ; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, hooks.attemptTimeout)
+		ctr, err := hooks.start(attemptCtx)
+		cancel()
 		if err == nil {
 			return ctr, nil
 		}
-		lastCtr, lastErr = ctr, err
-		if !isRetriableContainerStartErr(err) {
-			break
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			err = fmt.Errorf("container start did not finish within %s (gt-16rk2): %w", hooks.attemptTimeout, err)
 		}
-		if isPortNotMappedErr(err) {
+		retriable := isRetriableContainerStartErr(err)
+		if retriable && isPortNotMappedErr(err) {
 			hooks.settle(ctx, ctr)
 		}
-		hooks.reap(ctr)
-		if attempt < startupAttempts-1 {
-			hooks.sleep(delay)
-			delay *= 2
+		if !retriable || attempt == startupAttempts-1 {
+			if noContainer(ctr) {
+				return nil, err
+			}
+			logCtx, cancelLogs := context.WithTimeout(context.WithoutCancel(ctx), terminateTimeout)
+			tail, logErr := hooks.logs(logCtx, ctr)
+			cancelLogs()
+			hooks.reap(ctr)
+			return nil, withContainerLogs(err, tail, logErr)
 		}
+		hooks.reap(ctr)
+		hooks.sleep(delay)
+		delay *= 2
 	}
+}
 
-	if lastCtr == nil {
-		return nil, lastErr
+// noContainer reports whether ctr holds no container, including a typed nil pointer
+// a failed start returned.
+func noContainer(ctr testcontainers.Container) bool {
+	if ctr == nil {
+		return true
 	}
-	tail, logErr := hooks.logs(ctx, lastCtr)
-	return nil, withContainerLogs(lastErr, tail, logErr)
+	if d, ok := ctr.(*testcontainers.DockerContainer); ok && d == nil {
+		return true
+	}
+	return false
 }
 
 // runDoltContainerWithRetry starts a Dolt container, retrying the transient
 // startup failures up to startupAttempts times.
-func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
+func runDoltContainerWithRetry(ctx context.Context) (testcontainers.Container, error) {
 	return retryContainerStart(ctx, containerStartHooks{
-		start:  runDoltContainer,
-		settle: settleDoltContainer,
-		reap:   reapFailedContainer,
-		logs:   containerLogTail,
-		sleep:  time.Sleep,
+		start:          runDoltContainer,
+		settle:         settleDoltContainer,
+		reap:           reapFailedContainer,
+		logs:           containerLogTail,
+		sleep:          time.Sleep,
+		attemptTimeout: startAttemptTimeout,
 	})
+}
+
+// terminateContainer stops and removes ctr, bounded by terminateTimeout.
+func terminateContainer(ctr testcontainers.Container) error {
+	ctx, cancel := context.WithTimeout(context.Background(), terminateTimeout)
+	defer cancel()
+	return testcontainers.TerminateContainer(ctr, testcontainers.StopContext(ctx))
 }
 
 // startSharedDoltContainer starts the shared Dolt container and sets
@@ -345,7 +422,7 @@ func startSharedDoltContainer() {
 	p, err := waitForMappedPort(ctx, doltPortLookup(ctr))
 	if err != nil {
 		doltCtrErr = containerStartError(ctx, ctr, fmt.Errorf("getting mapped port: %w", err))
-		_ = testcontainers.TerminateContainer(ctr)
+		_ = terminateContainer(ctr)
 		return
 	}
 
@@ -355,7 +432,7 @@ func startSharedDoltContainer() {
 	}
 	if err != nil {
 		doltCtrErr = containerStartError(ctx, ctr, err)
-		_ = testcontainers.TerminateContainer(ctr)
+		_ = terminateContainer(ctr)
 		return
 	}
 
@@ -379,48 +456,6 @@ func startSharedDoltContainer() {
 	// Isolated beads clients strip BEADS_*; they pass BEADS_TEST_SERVER to bd
 	// only for a registered port (gt-fcxe9.9).
 	beads.RegisterTestServerPort(portNum)
-}
-
-// StartIsolatedDoltContainer starts a per-test Dolt container and returns the
-// mapped host port. GT_DOLT_PORT is set via t.Setenv (scoped to the test).
-// The container is terminated automatically when the test finishes.
-func StartIsolatedDoltContainer(t *testing.T) string {
-	t.Helper()
-	if !DockerTestsEnabled() {
-		t.Skip(dockerTestsSkipMsg)
-	}
-	if !isDockerAvailable() {
-		t.Fatal(dockerMissingMsg)
-	}
-
-	ctx := context.Background()
-	ctr, err := runDoltContainerWithRetry(ctx)
-	if err != nil {
-		t.Fatalf("starting Dolt container (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, err)
-	}
-	t.Cleanup(func() {
-		if err := testcontainers.TerminateContainer(ctr); err != nil {
-			// Fail loud: a swallowed termination error is exactly how
-			// containers leak and quietly exhaust the shared Docker VM
-			// (gt-p98h, gt-n5g6).
-			t.Errorf("terminating Dolt container: %v", err)
-		}
-	})
-
-	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
-	if err != nil {
-		t.Fatalf("getting mapped port: %v", containerStartError(ctx, ctr, err))
-	}
-
-	portStr := port
-	t.Setenv("GT_DOLT_PORT", portStr)
-	t.Setenv("BEADS_TEST_SERVER", "1")
-	n, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Dolt container mapped port %q is not a number: %v", portStr, err)
-	}
-	beads.RegisterTestServerPort(n)
-	return portStr
 }
 
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
@@ -498,12 +533,15 @@ func DoltContainerPort() string {
 // Before the container goes, the pool's catalog guard runs (releaseDoltPool):
 // a database created or dropped while tests ran fails the package, with an
 // error that wraps ErrDoltCatalogChanged and names each database.
+//
+// The scratch container (LeaseScratchDoltContainer) goes too.
 func TerminateDoltContainer() error {
+	scratchErr := terminateScratchDoltContainer()
 	if doltCtr == nil {
-		return nil
+		return scratchErr
 	}
 	catalogErr := releaseDoltPool()
-	err := testcontainers.TerminateContainer(doltCtr)
+	err := terminateContainer(doltCtr)
 	doltCtr = nil
-	return errors.Join(catalogErr, err)
+	return errors.Join(catalogErr, err, scratchErr)
 }

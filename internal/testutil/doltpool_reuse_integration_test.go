@@ -21,9 +21,9 @@ import (
 // lessee gets the same database back exactly as the migration left it. A bd
 // init lease then gets it back empty, and a SQL database is reset the same
 // way. The server's catalog is the same at the end as at the start. It runs on
-// its own container, so its pool cannot reach any other test.
+// the scratch container, so its pool cannot reach any other test.
 func TestIntegrationDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
-	port := StartIsolatedDoltContainer(t)
+	port := LeaseScratchDoltContainer(t)
 	portNum, err := strconv.Atoi(port)
 	if err != nil {
 		t.Fatal(err)
