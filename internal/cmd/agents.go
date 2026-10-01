@@ -68,7 +68,7 @@ var agentsCmd = &cobra.Command{
 	Short:   "List Gas Town agent sessions",
 	Long: `List Gas Town agent sessions to stdout.
 
-Shows Mayor, Deacon, Witnesses, Refineries, and Crew workers.
+Shows the Mayor and Crew workers.
 Polecats are hidden (use 'gt polecat list' to see them).
 
 Use 'gt agents menu' for an interactive tmux popup menu.`,
@@ -431,7 +431,6 @@ func runAgents(cmd *cobra.Command, args []string) error {
 		fmt.Println("No agent sessions running.")
 		fmt.Println("\nStart agents with:")
 		fmt.Println("  gt mayor start")
-		fmt.Println("  gt deacon start")
 		return nil
 	}
 
