@@ -20,8 +20,8 @@ func isClaudeCmd(cmd string) bool {
 func TestBuiltInAgentPresetSummary(t *testing.T) {
 	t.Parallel()
 	s := BuiltInAgentPresetSummary()
-	if !strings.Contains(s, "cursor") || !strings.Contains(s, "claude") {
-		t.Fatalf("BuiltInAgentPresetSummary() = %q, want cursor and claude", s)
+	if !strings.Contains(s, "groq-compound") || !strings.Contains(s, "claude") {
+		t.Fatalf("BuiltInAgentPresetSummary() = %q, want groq-compound and claude", s)
 	}
 	names := strings.Split(s, ", ")
 	if !sort.StringsAreSorted(names) {
@@ -32,7 +32,7 @@ func TestBuiltInAgentPresetSummary(t *testing.T) {
 func TestBuiltinPresets(t *testing.T) {
 	t.Parallel()
 	// Ensure all built-in presets are accessible
-	presets := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentKiro, AgentCursor, AgentAuggie, AgentAmp, AgentOpenCode, AgentCopilot, AgentPi, AgentOmp}
+	presets := []AgentPreset{AgentClaude, AgentGroqCompound}
 
 	for _, preset := range presets {
 		info := GetAgentPreset(preset)
@@ -60,17 +60,9 @@ func TestGetAgentPresetByName(t *testing.T) {
 		wantNil bool
 	}{
 		{"claude", AgentClaude, false},
-		{"gemini", AgentGemini, false},
-		{"codex", AgentCodex, false},
-		{"kiro", AgentKiro, false},
-		{"cursor", AgentCursor, false},
-		{"auggie", AgentAuggie, false},
-		{"amp", AgentAmp, false},
-		{"aider", "", true},                // Not built-in, can be added via config
-		{"opencode", AgentOpenCode, false}, // Built-in multi-model CLI agent
-		{"copilot", AgentCopilot, false},   // Built-in GitHub Copilot CLI agent
-		{"pi", AgentPi, false},             // Pi Coding Agent
-		{"omp", AgentOmp, false},           // Oh My Pi
+		{"groq-compound", AgentGroqCompound, false},
+		{"gemini", "", true}, // retired with every non-Claude runtime (D4)
+		{"aider", "", true},  // Not built-in, can be added via config
 		{"unknown", "", true},
 	}
 
@@ -97,13 +89,6 @@ func TestRuntimeConfigFromPreset(t *testing.T) {
 		wantCommand string
 	}{
 		{AgentClaude, "claude"}, // Note: claude may resolve to full path
-		{AgentGemini, "gemini"},
-		{AgentCodex, "codex"},
-		{AgentKiro, "kiro-cli"},
-		{AgentCursor, "cursor-agent"},
-		{AgentAuggie, "auggie"},
-		{AgentAmp, "amp"},
-		{AgentCopilot, "copilot"},
 	}
 
 	for _, tt := range tests {
@@ -145,16 +130,9 @@ func TestIsKnownPreset(t *testing.T) {
 		want bool
 	}{
 		{"claude", true},
-		{"gemini", true},
-		{"codex", true},
-		{"cursor", true},
-		{"auggie", true},
-		{"amp", true},
-		{"aider", false},   // Not built-in, can be added via config
-		{"opencode", true}, // Built-in multi-model CLI agent
-		{"copilot", true},  // Built-in GitHub Copilot CLI agent
-		{"pi", true},       // Pi Coding Agent
-		{"omp", true},      // Oh My Pi
+		{"groq-compound", true},
+		{"codex", false}, // retired with every non-Claude runtime (D4)
+		{"aider", false}, // Not built-in, can be added via config
 		{"unknown", false},
 		{"chatgpt", false},
 	}
@@ -300,30 +278,6 @@ func TestResolveProcessNames(t *testing.T) {
 			want:      []string{"node", "claude"},
 		},
 		{
-			name:      "built-in preset with matching command (opencode)",
-			agentName: "opencode",
-			command:   "opencode",
-			want:      []string{"opencode", "node", "bun"},
-		},
-		{
-			name:      "custom agent shadowing built-in with different command",
-			agentName: "codex",
-			command:   "opencode",
-			want:      []string{"opencode", "node", "bun"},
-		},
-		{
-			name:      "custom agent shadowing built-in with same command",
-			agentName: "codex",
-			command:   "codex",
-			want:      []string{"codex"},
-		},
-		{
-			name:      "built-in preset through gt wrapper command",
-			agentName: "codex",
-			command:   "gt-codex",
-			want:      []string{"codex"},
-		},
-		{
 			name:      "unknown agent with known command",
 			agentName: "my-custom-agent",
 			command:   "claude",
@@ -358,22 +312,10 @@ func TestResolveProcessNames(t *testing.T) {
 			want:      []string{"node", "claude"},
 		},
 		{
-			name:      "empty agent name with command",
-			agentName: "",
-			command:   "opencode",
-			want:      []string{"opencode", "node", "bun"},
-		},
-		{
 			name:      "path-resolved command matches built-in preset",
 			agentName: "claude",
 			command:   "/usr/local/bin/claude",
 			want:      []string{"node", "claude"},
-		},
-		{
-			name:      "path-resolved command with unknown agent",
-			agentName: "my-custom-agent",
-			command:   "/opt/bin/opencode",
-			want:      []string{"opencode", "node", "bun"},
 		},
 		{
 			name:      "path-resolved unknown command falls back to basename",
@@ -487,26 +429,6 @@ func TestResolveProcessNames(t *testing.T) {
 			want:    []string{"node", "claude"},
 		},
 		{
-			name: "nohup opencode unwraps to opencode preset",
-			agent: AgentPresetInfo{
-				Name:    "opencode",
-				Command: "nohup",
-				Args:    []string{"opencode", "--quiet"},
-			},
-			command: "nohup",
-			want:    []string{"opencode", "node", "bun"},
-		},
-		{
-			name: "sudo -u runner codex unwraps to codex preset",
-			agent: AgentPresetInfo{
-				Name:    "codex",
-				Command: "sudo",
-				Args:    []string{"-u", "runner", "codex", "--dangerously-bypass-approvals-and-sandbox"},
-			},
-			command: "sudo",
-			want:    []string{"codex"},
-		},
-		{
 			name: "env wrapping unknown binary returns binary basename",
 			agent: AgentPresetInfo{
 				Name:    "my-agent",
@@ -554,40 +476,6 @@ func TestResolveProcessNames(t *testing.T) {
 	})
 }
 
-func TestAgentPresetApprovalFlags(t *testing.T) {
-	t.Parallel()
-	// Verify permissive-approval flags are set correctly for each E2E tested agent.
-	tests := []struct {
-		preset  AgentPreset
-		wantArg string // At least this arg should be present
-	}{
-		{AgentClaude, "--dangerously-skip-permissions"},
-		{AgentGemini, "yolo"}, // Part of "--approval-mode yolo"
-		{AgentCodex, "--dangerously-bypass-approvals-and-sandbox"},
-		{AgentCopilot, "--yolo"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.preset), func(t *testing.T) {
-			info := GetAgentPreset(tt.preset)
-			if info == nil {
-				t.Fatalf("preset %s not found", tt.preset)
-			}
-
-			found := false
-			for _, arg := range info.Args {
-				if arg == tt.wantArg || (tt.preset == AgentGemini && arg == "yolo") {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Errorf("preset %s args %v missing expected %s", tt.preset, info.Args, tt.wantArg)
-			}
-		})
-	}
-}
-
 func TestBuildResumeCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -605,39 +493,11 @@ func TestBuildResumeCommand(t *testing.T) {
 			contains:  []string{"claude", "--dangerously-skip-permissions", "--resume", "session-123"},
 		},
 		{
-			name:      "gemini with session",
-			agentName: "gemini",
-			sessionID: "gemini-sess-456",
-			wantEmpty: false,
-			contains:  []string{"gemini", "--approval-mode", "yolo", "--resume", "gemini-sess-456"},
-		},
-		{
-			name:      "codex subcommand style",
-			agentName: "codex",
-			sessionID: "codex-sess-789",
-			wantEmpty: false,
-			contains:  []string{"codex", "resume", "codex-sess-789", "--dangerously-bypass-approvals-and-sandbox"},
-		},
-		{
-			name:      "kiro flag style",
-			agentName: "kiro",
-			sessionID: "f2946a26-3735-4b08-8d05-c928010302d5",
-			wantEmpty: false,
-			contains:  []string{"kiro-cli", "chat", "--trust-all-tools", "--resume-id", "f2946a26-3735-4b08-8d05-c928010302d5"},
-		},
-		{
 			name:      "empty session ID",
 			agentName: "claude",
 			sessionID: "",
 			wantEmpty: true,
 			contains:  []string{"claude"},
-		},
-		{
-			name:      "copilot flag style",
-			agentName: "copilot",
-			sessionID: "cea0d5f0-662a-4a98-9585-060b9d2a7a19",
-			wantEmpty: false,
-			contains:  []string{"copilot", "--yolo", "--resume", "cea0d5f0-662a-4a98-9585-060b9d2a7a19"},
 		},
 		{
 			name:      "unknown agent",
@@ -673,13 +533,6 @@ func TestSupportsSessionResume(t *testing.T) {
 		want      bool
 	}{
 		{"claude", true},
-		{"gemini", true},
-		{"codex", true},
-		{"kiro", true},
-		{"cursor", true},
-		{"auggie", true},
-		{"amp", true},
-		{"copilot", true},
 		{"unknown", false},
 	}
 
@@ -699,13 +552,6 @@ func TestGetSessionIDEnvVar(t *testing.T) {
 		want      string
 	}{
 		{"claude", "CLAUDE_SESSION_ID"},
-		{"gemini", "GEMINI_SESSION_ID"},
-		{"codex", ""},   // Codex uses JSONL output instead
-		{"kiro", ""},    // Kiro stores sessions per directory and resumes by CLI flag
-		{"cursor", ""},  // Cursor uses --resume with chatId directly
-		{"auggie", ""},  // Auggie uses --resume directly
-		{"amp", ""},     // AMP uses 'threads continue' subcommand
-		{"copilot", ""}, // Copilot stores session IDs on disk, not in env
 		{"unknown", ""},
 	}
 
@@ -725,15 +571,6 @@ func TestGetProcessNames(t *testing.T) {
 		want      []string
 	}{
 		{"claude", []string{"node", "claude"}},
-		{"gemini", []string{"gemini"}},
-		{"codex", []string{"codex"}},
-		{"kiro", []string{"kiro-cli"}},
-		{"cursor", []string{"cursor-agent", "agent"}},
-		{"auggie", []string{"auggie"}},
-		{"amp", []string{"amp"}},
-		{"opencode", []string{"opencode", "node", "bun"}},
-		{"copilot", []string{"copilot"}},
-		{"pi", []string{"pi", "node", "bun"}},
 		{"unknown", []string{"node", "claude"}}, // Falls back to Claude's process
 	}
 
@@ -750,213 +587,6 @@ func TestGetProcessNames(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestListAgentPresetsMatchesConstants(t *testing.T) {
-	t.Parallel()
-	// Ensure all AgentPreset constants are returned by ListAgentPresets
-	allConstants := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp, AgentOpenCode, AgentCopilot, AgentPi, AgentOmp}
-	presets := ListAgentPresets()
-
-	// Convert to map for quick lookup
-	presetMap := make(map[string]bool)
-	for _, p := range presets {
-		presetMap[p] = true
-	}
-
-	// Verify all constants are in the list
-	for _, c := range allConstants {
-		if !presetMap[string(c)] {
-			t.Errorf("ListAgentPresets() missing constant %q", c)
-		}
-	}
-
-	// Verify no empty names
-	for _, p := range presets {
-		if p == "" {
-			t.Error("ListAgentPresets() contains empty string")
-		}
-	}
-}
-
-func TestAgentCommandGeneration(t *testing.T) {
-	t.Parallel()
-	// Test full command line generation for each agent
-	tests := []struct {
-		preset       AgentPreset
-		wantCommand  string
-		wantContains []string // Args that should be present
-	}{
-		{
-			preset:       AgentClaude,
-			wantCommand:  "claude",
-			wantContains: []string{"--dangerously-skip-permissions"},
-		},
-		{
-			preset:       AgentGemini,
-			wantCommand:  "gemini",
-			wantContains: []string{"--approval-mode", "yolo"},
-		},
-		{
-			preset:       AgentCodex,
-			wantCommand:  "codex",
-			wantContains: []string{"--dangerously-bypass-approvals-and-sandbox"},
-		},
-		{
-			preset:       AgentCursor,
-			wantCommand:  "cursor-agent",
-			wantContains: []string{"-f"},
-		},
-		{
-			preset:       AgentAuggie,
-			wantCommand:  "auggie",
-			wantContains: []string{"--allow-indexing"},
-		},
-		{
-			preset:       AgentAmp,
-			wantCommand:  "amp",
-			wantContains: []string{"--dangerously-allow-all", "--no-ide"},
-		},
-		{
-			preset:       AgentCopilot,
-			wantCommand:  "copilot",
-			wantContains: []string{"--yolo"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.preset), func(t *testing.T) {
-			rc := RuntimeConfigFromPreset(tt.preset)
-			if rc == nil {
-				t.Fatal("RuntimeConfigFromPreset returned nil")
-			}
-
-			// For claude, command may be full path due to resolveClaudePath
-			if tt.preset == AgentClaude {
-				if !isClaudeCmd(rc.Command) {
-					t.Errorf("Command = %q, want claude or path ending in /claude", rc.Command)
-				}
-			} else if rc.Command != tt.wantCommand {
-				t.Errorf("Command = %q, want %q", rc.Command, tt.wantCommand)
-			}
-
-			// Check required args are present
-			argsStr := strings.Join(rc.Args, " ")
-			for _, arg := range tt.wantContains {
-				found := false
-				for _, a := range rc.Args {
-					if a == arg {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Args %q missing expected %q", argsStr, arg)
-				}
-			}
-		})
-	}
-}
-
-func TestCursorAgentPreset(t *testing.T) {
-	t.Parallel()
-	// Verify cursor agent preset is correctly configured
-	info := GetAgentPreset(AgentCursor)
-	if info == nil {
-		t.Fatal("cursor preset not found")
-	}
-
-	// Check command
-	if info.Command != "cursor-agent" {
-		t.Errorf("cursor command = %q, want cursor-agent", info.Command)
-	}
-
-	// Check YOLO-equivalent flag (-f for force mode; CLI also documents --force / --yolo)
-	hasF := false
-	for _, arg := range info.Args {
-		if arg == "-f" {
-			hasF = true
-		}
-	}
-	if !hasF {
-		t.Error("cursor args missing -f (force/YOLO mode)")
-	}
-
-	// Check ProcessNames for detection (install script provides both "agent" and "cursor-agent" symlinks).
-	// Tmux only treats "agent" as Cursor when GT_AGENT=cursor or GT_PROCESS_NAMES includes cursor-agent.
-	seen := make(map[string]bool, len(info.ProcessNames))
-	for _, n := range info.ProcessNames {
-		seen[n] = true
-	}
-	for _, name := range []string{"agent", "cursor-agent"} {
-		if !seen[name] {
-			t.Errorf("cursor ProcessNames missing %q (got %v)", name, info.ProcessNames)
-		}
-	}
-
-	// Check resume support
-	if info.ResumeFlag != "--resume" {
-		t.Errorf("cursor ResumeFlag = %q, want --resume", info.ResumeFlag)
-	}
-	if info.ResumeStyle != "flag" {
-		t.Errorf("cursor ResumeStyle = %q, want flag", info.ResumeStyle)
-	}
-	if info.ReadyDelayMs != 5000 {
-		t.Errorf("cursor ReadyDelayMs = %d, want 5000 (nudge poller + WaitForRuntimeReady)", info.ReadyDelayMs)
-	}
-}
-
-func TestKiroAgentPreset(t *testing.T) {
-	t.Parallel()
-
-	info := GetAgentPreset(AgentKiro)
-	if info == nil {
-		t.Fatal("kiro preset not found")
-	}
-
-	if info.Command != "kiro-cli" {
-		t.Errorf("kiro Command = %q, want kiro-cli", info.Command)
-	}
-	wantArgs := []string{"chat", "--trust-all-tools"}
-	if len(info.Args) != len(wantArgs) {
-		t.Fatalf("kiro Args = %v, want %v", info.Args, wantArgs)
-	}
-	for i, want := range wantArgs {
-		if info.Args[i] != want {
-			t.Errorf("kiro Args[%d] = %q, want %q", i, info.Args[i], want)
-		}
-	}
-
-	if len(info.ProcessNames) != 1 || info.ProcessNames[0] != "kiro-cli" {
-		t.Errorf("kiro ProcessNames = %v, want [kiro-cli]", info.ProcessNames)
-	}
-	if info.SessionIDEnv != "" {
-		t.Errorf("kiro SessionIDEnv = %q, want empty", info.SessionIDEnv)
-	}
-	if info.ResumeFlag != "--resume-id" {
-		t.Errorf("kiro ResumeFlag = %q, want --resume-id", info.ResumeFlag)
-	}
-	if info.ContinueFlag != "--resume" {
-		t.Errorf("kiro ContinueFlag = %q, want --resume", info.ContinueFlag)
-	}
-	if info.ResumeStyle != "flag" {
-		t.Errorf("kiro ResumeStyle = %q, want flag", info.ResumeStyle)
-	}
-	if info.SupportsHooks {
-		t.Error("kiro SupportsHooks should remain false until Gas Town has a Kiro hook adapter")
-	}
-	if info.SupportsForkSession {
-		t.Error("kiro should not support fork session")
-	}
-	if info.NonInteractive != nil {
-		t.Errorf("kiro NonInteractive = %+v, want nil until --no-interactive positional prompts are modeled", info.NonInteractive)
-	}
-	if info.ReadyDelayMs != 5000 {
-		t.Errorf("kiro ReadyDelayMs = %d, want 5000", info.ReadyDelayMs)
-	}
-	if info.InstructionsFile != "AGENTS.md" {
-		t.Errorf("kiro InstructionsFile = %q, want AGENTS.md", info.InstructionsFile)
 	}
 }
 
@@ -1000,13 +630,9 @@ func TestLoadAgentRegistryForRig(t *testing.T) {
 	registryContent := `{
   "version": 1,
   "agents": {
-    "opencode": {
-      "command": "opencode",
-      "args": ["--session"],
-      "non_interactive": {
-        "subcommand": "run",
-        "output_flag": "--format json"
-      }
+    "claude": {
+      "command": "claude",
+      "args": ["--session"]
     }
   }
 }`
@@ -1022,28 +648,22 @@ func TestLoadAgentRegistryForRig(t *testing.T) {
 			t.Fatalf("LoadAgentRegistryFor(rig %s) failed: %v", tmpDir, err)
 		}
 
-		info := reg.Preset("opencode")
+		info := reg.Preset("claude")
 		if info == nil {
-			t.Fatal("expected opencode agent to be available after loading rig registry")
+			t.Fatal("expected claude agent to be available after loading rig registry")
 		}
 
-		if info.Command != "opencode" {
-			t.Errorf("expected opencode agent command to be 'opencode', got %s", info.Command)
+		if len(info.Args) != 1 || info.Args[0] != "--session" {
+			t.Errorf("expected rig override args [--session], got %v", info.Args)
 		}
-		if info.ConfigDir != ".opencode" {
-			t.Errorf("expected opencode ConfigDir to inherit '.opencode', got %q", info.ConfigDir)
-		}
-		if info.HooksDir != ".opencode/plugins" {
-			t.Errorf("expected opencode HooksDir to inherit '.opencode/plugins', got %q", info.HooksDir)
-		}
-		if info.HooksSettingsFile != "gastown.js" {
-			t.Errorf("expected opencode HooksSettingsFile to inherit 'gastown.js', got %q", info.HooksSettingsFile)
+		if info.SessionIDEnv != "CLAUDE_SESSION_ID" {
+			t.Errorf("expected claude SessionIDEnv to inherit CLAUDE_SESSION_ID, got %q", info.SessionIDEnv)
 		}
 		if len(info.ProcessNames) == 0 {
-			t.Errorf("expected opencode ProcessNames to remain populated after partial override")
+			t.Errorf("expected claude ProcessNames to remain populated after partial override")
 		}
-		if info.ReadyDelayMs != 8000 {
-			t.Errorf("expected opencode ReadyDelayMs to inherit 8000, got %d", info.ReadyDelayMs)
+		if info.ReadyDelayMs != 10000 {
+			t.Errorf("expected claude ReadyDelayMs to inherit 10000, got %d", info.ReadyDelayMs)
 		}
 	})
 
@@ -1055,14 +675,14 @@ func TestLoadAgentRegistryForRig(t *testing.T) {
 			t.Errorf("LoadAgentRegistryFor(rig %s) should not error for non-existent file: %v", otherRig, err)
 		}
 
-		// A rig without its own file gets the built-in opencode preset, not
+		// A rig without its own file gets the built-in claude preset, not
 		// the one loaded for another rig above (gt-rg4f1).
-		info := reg.Preset("opencode")
+		info := reg.Preset("claude")
 		if info == nil {
-			t.Fatal("expected built-in opencode preset")
+			t.Fatal("expected built-in claude preset")
 		}
 		if len(info.Args) == 1 && info.Args[0] == "--session" {
-			t.Errorf("opencode override from another rig leaked: args %v", info.Args)
+			t.Errorf("claude override from another rig leaked: args %v", info.Args)
 		}
 	})
 
@@ -1088,752 +708,4 @@ func TestLoadAgentRegistryForRig(t *testing.T) {
 			t.Errorf("registry with a bad rig file should still hold the built-ins")
 		}
 	})
-}
-
-func TestOpenCodeAgentPreset(t *testing.T) {
-	t.Parallel()
-	// Verify OpenCode agent preset is correctly configured
-	info := GetAgentPreset(AgentOpenCode)
-	if info == nil {
-		t.Fatal("opencode preset not found")
-	}
-
-	// Check command
-	if info.Command != "opencode" {
-		t.Errorf("opencode command = %q, want opencode", info.Command)
-	}
-
-	// Check Args (should be empty - YOLO via Env)
-	if len(info.Args) != 0 {
-		t.Errorf("opencode args = %v, want empty (uses Env for YOLO)", info.Args)
-	}
-
-	// Check Env for OPENCODE_PERMISSION
-	if info.Env == nil {
-		t.Fatal("opencode Env is nil")
-	}
-	permission, ok := info.Env["OPENCODE_PERMISSION"]
-	if !ok {
-		t.Error("opencode Env missing OPENCODE_PERMISSION")
-	}
-	if permission != `{"*":"allow"}` {
-		t.Errorf("OPENCODE_PERMISSION = %q, want {\"*\":\"allow\"}", permission)
-	}
-
-	// Check ProcessNames for detection (opencode, node, bun)
-	if len(info.ProcessNames) != 3 {
-		t.Errorf("opencode ProcessNames length = %d, want 3", len(info.ProcessNames))
-	}
-	expectedNames := []string{"opencode", "node", "bun"}
-	for i, want := range expectedNames {
-		if i < len(info.ProcessNames) && info.ProcessNames[i] != want {
-			t.Errorf("opencode ProcessNames[%d] = %q, want %q", i, info.ProcessNames[i], want)
-		}
-	}
-
-	// Check hooks support
-	if !info.SupportsHooks {
-		t.Error("opencode should support hooks")
-	}
-
-	// Check fork session (not supported)
-	if info.SupportsForkSession {
-		t.Error("opencode should not support fork session")
-	}
-
-	// Check NonInteractive config
-	if info.NonInteractive == nil {
-		t.Fatal("opencode NonInteractive is nil")
-	}
-	if info.NonInteractive.Subcommand != "run" {
-		t.Errorf("opencode NonInteractive.Subcommand = %q, want run", info.NonInteractive.Subcommand)
-	}
-	if info.NonInteractive.OutputFlag != "--format json" {
-		t.Errorf("opencode NonInteractive.OutputFlag = %q, want --format json", info.NonInteractive.OutputFlag)
-	}
-}
-
-func TestOpenCodeProviderDefaults(t *testing.T) {
-	t.Parallel()
-
-	// Test defaultReadyDelayMs for opencode
-	delay := defaultReadyDelayMs(nil, "opencode")
-	if delay != 8000 {
-		t.Errorf("defaultReadyDelayMs(opencode) = %d, want 8000", delay)
-	}
-
-	// Test defaultProcessNames for opencode (from preset: opencode, node, bun)
-	names := defaultProcessNames(nil, "opencode", "opencode")
-	if len(names) != 3 {
-		t.Errorf("defaultProcessNames(opencode) length = %d, want 3", len(names))
-	}
-	if len(names) >= 3 && (names[0] != "opencode" || names[1] != "node" || names[2] != "bun") {
-		t.Errorf("defaultProcessNames(opencode) = %v, want [opencode, node, bun]", names)
-	}
-
-	// Test defaultInstructionsFile for opencode
-	instFile := defaultInstructionsFile(nil, "opencode")
-	if instFile != "AGENTS.md" {
-		t.Errorf("defaultInstructionsFile(opencode) = %q, want AGENTS.md", instFile)
-	}
-}
-
-func TestOpenCodeRuntimeConfigFromPreset(t *testing.T) {
-	t.Parallel()
-	rc := RuntimeConfigFromPreset(AgentOpenCode)
-	if rc == nil {
-		t.Fatal("RuntimeConfigFromPreset(opencode) returned nil")
-	}
-
-	// Check command
-	if rc.Command != "opencode" {
-		t.Errorf("RuntimeConfig.Command = %q, want opencode", rc.Command)
-	}
-
-	// Check Env is copied
-	if rc.Env == nil {
-		t.Fatal("RuntimeConfig.Env is nil")
-	}
-	if rc.Env["OPENCODE_PERMISSION"] != `{"*":"allow"}` {
-		t.Errorf("RuntimeConfig.Env[OPENCODE_PERMISSION] = %q, want {\"*\":\"allow\"}", rc.Env["OPENCODE_PERMISSION"])
-	}
-
-	// Verify Env is a copy (mutation doesn't affect original)
-	rc.Env["MUTATED"] = "yes"
-	original := GetAgentPreset(AgentOpenCode)
-	if _, exists := original.Env["MUTATED"]; exists {
-		t.Error("Mutation of RuntimeConfig.Env affected original preset")
-	}
-}
-
-func TestCopilotAgentPreset(t *testing.T) {
-	t.Parallel()
-	info := GetAgentPreset(AgentCopilot)
-	if info == nil {
-		t.Fatal("copilot preset not found")
-	}
-
-	if info.Command != "copilot" {
-		t.Errorf("copilot command = %q, want copilot", info.Command)
-	}
-
-	hasYolo := false
-	for _, arg := range info.Args {
-		if arg == "--yolo" {
-			hasYolo = true
-		}
-	}
-	if !hasYolo {
-		t.Error("copilot args missing --yolo")
-	}
-
-	if len(info.ProcessNames) != 1 || info.ProcessNames[0] != "copilot" {
-		t.Errorf("copilot ProcessNames = %v, want [copilot]", info.ProcessNames)
-	}
-
-	if info.SessionIDEnv != "" {
-		t.Errorf("copilot SessionIDEnv = %q, want empty", info.SessionIDEnv)
-	}
-
-	if info.ResumeFlag != "--resume" {
-		t.Errorf("copilot ResumeFlag = %q, want --resume", info.ResumeFlag)
-	}
-	if info.ContinueFlag != "--continue" {
-		t.Errorf("copilot ContinueFlag = %q, want --continue", info.ContinueFlag)
-	}
-	if info.ResumeStyle != "flag" {
-		t.Errorf("copilot ResumeStyle = %q, want flag", info.ResumeStyle)
-	}
-
-	if !info.SupportsHooks {
-		t.Error("copilot should support hooks (.github/hooks/*.json lifecycle hooks)")
-	}
-
-	if info.SupportsForkSession {
-		t.Error("copilot should not support fork session")
-	}
-
-	// GA: COPILOT_HOME overrides config directory
-	if info.ConfigDirEnv != "COPILOT_HOME" {
-		t.Errorf("copilot ConfigDirEnv = %q, want COPILOT_HOME", info.ConfigDirEnv)
-	}
-
-	// GA: no detectable prompt prefix — uses delay-based readiness
-	if info.ReadyPromptPrefix != "" {
-		t.Errorf("copilot ReadyPromptPrefix = %q, want empty (GA has no ❯ prompt)", info.ReadyPromptPrefix)
-	}
-
-	if info.NonInteractive == nil {
-		t.Fatal("copilot NonInteractive is nil")
-	}
-	if info.NonInteractive.PromptFlag != "-p" {
-		t.Errorf("copilot NonInteractive.PromptFlag = %q, want -p", info.NonInteractive.PromptFlag)
-	}
-}
-
-func TestPiAgentPreset(t *testing.T) {
-	t.Parallel()
-	info := GetAgentPreset(AgentPi)
-	if info == nil {
-		t.Fatal("pi preset not found")
-	}
-
-	if info.Command != "pi" {
-		t.Errorf("pi command = %q, want pi", info.Command)
-	}
-
-	// Pi preset includes -e flag to load gastown hooks extension
-	if len(info.Args) != 2 || info.Args[0] != "-e" {
-		t.Errorf("pi args = %v, want [-e .pi/extensions/gastown-hooks.js]", info.Args)
-	}
-
-	if len(info.ProcessNames) != 3 {
-		t.Errorf("pi ProcessNames length = %d, want 3", len(info.ProcessNames))
-	}
-	expectedNames := []string{"pi", "node", "bun"}
-	for i, want := range expectedNames {
-		if i < len(info.ProcessNames) && info.ProcessNames[i] != want {
-			t.Errorf("pi ProcessNames[%d] = %q, want %q", i, info.ProcessNames[i], want)
-		}
-	}
-
-	if !info.SupportsHooks {
-		t.Error("pi should support hooks")
-	}
-
-	if info.SupportsForkSession {
-		t.Error("pi should not support fork session")
-	}
-
-	if info.SessionIDEnv != "PI_SESSION_ID" {
-		t.Errorf("pi SessionIDEnv = %q, want PI_SESSION_ID", info.SessionIDEnv)
-	}
-
-	if info.NonInteractive == nil {
-		t.Fatal("pi NonInteractive is nil")
-	}
-	if info.NonInteractive.PromptFlag != "-p" {
-		t.Errorf("pi NonInteractive.PromptFlag = %q, want -p", info.NonInteractive.PromptFlag)
-	}
-}
-
-func TestCopilotProviderDefaults(t *testing.T) {
-	t.Parallel()
-
-	cmd := defaultRuntimeCommand(nil, "copilot")
-	if cmd != "copilot" {
-		t.Errorf("defaultRuntimeCommand(copilot) = %q, want copilot", cmd)
-	}
-
-	args := defaultRuntimeArgs(nil, "copilot")
-	if len(args) != 1 || args[0] != "--yolo" {
-		t.Errorf("defaultRuntimeArgs(copilot) = %v, want [--yolo]", args)
-	}
-
-	mode := defaultPromptMode(nil, "copilot")
-	if mode != "arg" {
-		t.Errorf("defaultPromptMode(copilot) = %q, want arg", mode)
-	}
-
-	env := defaultSessionIDEnv(nil, "copilot")
-	if env != "" {
-		t.Errorf("defaultSessionIDEnv(copilot) = %q, want empty", env)
-	}
-
-	configEnv := defaultConfigDirEnv(nil, "copilot")
-	if configEnv != "COPILOT_HOME" {
-		t.Errorf("defaultConfigDirEnv(copilot) = %q, want COPILOT_HOME", configEnv)
-	}
-
-	provider := defaultHooksProvider(nil, "copilot")
-	if provider != "copilot" {
-		t.Errorf("defaultHooksProvider(copilot) = %q, want copilot", provider)
-	}
-
-	if defaultHooksInformational(nil, "copilot") {
-		t.Error("defaultHooksInformational(copilot) should be false (executable hooks)")
-	}
-	if defaultHooksInformational(nil, "claude") {
-		t.Error("defaultHooksInformational(claude) should be false")
-	}
-
-	dir := defaultHooksDir(nil, "copilot")
-	if dir != ".github/hooks" {
-		t.Errorf("defaultHooksDir(copilot) = %q, want .github/hooks", dir)
-	}
-
-	file := defaultHooksFile(nil, "copilot")
-	if file != "gastown.json" {
-		t.Errorf("defaultHooksFile(copilot) = %q, want gastown.json", file)
-	}
-
-	names := defaultProcessNames(nil, "copilot", "copilot")
-	if len(names) != 1 || names[0] != "copilot" {
-		t.Errorf("defaultProcessNames(copilot) = %v, want [copilot]", names)
-	}
-
-	prefix := defaultReadyPromptPrefix(nil, "copilot")
-	if prefix != "" {
-		t.Errorf("defaultReadyPromptPrefix(copilot) = %q, want empty (GA has no ❯ prompt)", prefix)
-	}
-
-	delay := defaultReadyDelayMs(nil, "copilot")
-	if delay != 5000 {
-		t.Errorf("defaultReadyDelayMs(copilot) = %d, want 5000", delay)
-	}
-
-	instFile := defaultInstructionsFile(nil, "copilot")
-	if instFile != "AGENTS.md" {
-		t.Errorf("defaultInstructionsFile(copilot) = %q, want AGENTS.md", instFile)
-	}
-}
-
-func TestCopilotRuntimeConfigFromPreset(t *testing.T) {
-	t.Parallel()
-	rc := RuntimeConfigFromPreset(AgentCopilot)
-	if rc == nil {
-		t.Fatal("RuntimeConfigFromPreset(copilot) returned nil")
-	}
-
-	if rc.Command != "copilot" {
-		t.Errorf("RuntimeConfig.Command = %q, want copilot", rc.Command)
-	}
-
-	if len(rc.Args) != 1 || rc.Args[0] != "--yolo" {
-		t.Errorf("RuntimeConfig.Args = %v, want [--yolo]", rc.Args)
-	}
-
-	if rc.Env != nil && len(rc.Env) > 0 {
-		t.Errorf("Expected nil/empty Env for Copilot preset, got %v", rc.Env)
-	}
-}
-
-func TestCodexRuntimeConfigHasPromptDetection(t *testing.T) {
-	t.Parallel()
-
-	rc := RuntimeConfigFromPreset(AgentCodex)
-	if rc == nil {
-		t.Fatal("RuntimeConfigFromPreset(codex) returned nil")
-	}
-	if rc.Tmux == nil {
-		t.Fatal("RuntimeConfigFromPreset(codex).Tmux returned nil")
-	}
-	if rc.Tmux.ReadyPromptPrefix != "› " {
-		t.Errorf("RuntimeConfigFromPreset(codex).Tmux.ReadyPromptPrefix = %q, want %q", rc.Tmux.ReadyPromptPrefix, "› ")
-	}
-	if rc.PromptMode != "arg" {
-		t.Errorf("RuntimeConfigFromPreset(codex).PromptMode = %q, want arg", rc.PromptMode)
-	}
-	args := strings.Join(rc.Args, " ")
-	if !strings.Contains(args, codexUpdateCheckConfig) {
-		t.Errorf("RuntimeConfigFromPreset(codex).Args = %v, want %q", rc.Args, codexUpdateCheckConfig)
-	}
-	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
-		t.Errorf("RuntimeConfigFromPreset(codex).Args = %v, want bypass flag", rc.Args)
-	}
-}
-
-func TestPiProviderDefaults(t *testing.T) {
-	t.Parallel()
-
-	input := &RuntimeConfig{Command: "pi"}
-	result := fillRuntimeDefaults(input)
-
-	if result.Tmux == nil {
-		t.Fatal("fillRuntimeDefaults(pi) should auto-fill Tmux")
-	}
-	if result.Tmux.ReadyDelayMs != 8000 {
-		t.Errorf("Tmux.ReadyDelayMs = %d, want 8000", result.Tmux.ReadyDelayMs)
-	}
-	wantNames := []string{"pi", "node", "bun"}
-	if len(result.Tmux.ProcessNames) != len(wantNames) {
-		t.Errorf("Tmux.ProcessNames = %v, want %v", result.Tmux.ProcessNames, wantNames)
-	}
-
-	if result.PromptMode != "arg" {
-		t.Errorf("PromptMode = %q, want arg", result.PromptMode)
-	}
-
-	if result.Hooks == nil {
-		t.Fatal("fillRuntimeDefaults(pi) should auto-fill Hooks")
-	}
-	if result.Hooks.Provider != "pi" {
-		t.Errorf("Hooks.Provider = %q, want pi", result.Hooks.Provider)
-	}
-}
-
-func TestPiRuntimeConfigFromPreset(t *testing.T) {
-	t.Parallel()
-	rc := RuntimeConfigFromPreset(AgentPi)
-	if rc == nil {
-		t.Fatal("RuntimeConfigFromPreset(pi) returned nil")
-	}
-
-	if rc.Command != "pi" {
-		t.Errorf("RuntimeConfig.Command = %q, want pi", rc.Command)
-	}
-
-	if rc.Env != nil && len(rc.Env) > 0 {
-		t.Errorf("Expected nil/empty Env for Pi preset, got %v", rc.Env)
-	}
-}
-
-// TestAllHookSupportingAgentsHaveHookFields ensures that every built-in preset
-// with SupportsHooks=true also declares the three fields required by the hooks
-// install path: HooksProvider, HooksDir, and HooksSettingsFile.
-//
-// If this test fails, add the missing fields to the offending preset in
-// builtinPresets (agents.go) before setting SupportsHooks=true.
-func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
-	t.Parallel()
-	for name, preset := range builtinPresets {
-		if !preset.SupportsHooks {
-			continue
-		}
-		if preset.HooksProvider == "" {
-			t.Errorf("agent %q: SupportsHooks=true but HooksProvider is empty", name)
-		}
-		if preset.HooksDir == "" {
-			t.Errorf("agent %q: SupportsHooks=true but HooksDir is empty", name)
-		}
-		if preset.HooksSettingsFile == "" {
-			t.Errorf("agent %q: SupportsHooks=true but HooksSettingsFile is empty", name)
-		}
-	}
-}
-
-func TestResolveACPConfig(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		agentName string
-		command   string
-		wantCmd   string
-	}{
-		{
-			name:      "built-in preset with matching command",
-			agentName: "opencode",
-			command:   "opencode",
-			wantCmd:   "acp",
-		},
-		{
-			name:      "custom agent shadowing built-in with same command",
-			agentName: "opencode",
-			command:   "opencode",
-			wantCmd:   "acp",
-		},
-		{
-			name:      "unknown agent with known command",
-			agentName: "my-custom-model",
-			command:   "opencode",
-			wantCmd:   "acp",
-		},
-		{
-			name:      "unknown agent with unknown command",
-			agentName: "my-custom-agent",
-			command:   "my-binary",
-			wantCmd:   "",
-		},
-		{
-			name:      "path-resolved command matches built-in preset",
-			agentName: "opencode",
-			command:   "/usr/local/bin/opencode",
-			wantCmd:   "acp",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveACPConfig(tt.agentName, tt.command)
-			if tt.wantCmd == "" {
-				if got != nil {
-					t.Errorf("ResolveACPConfig(%q, %q) = %v, want nil", tt.agentName, tt.command, got)
-				}
-			} else {
-				if got == nil {
-					t.Fatalf("ResolveACPConfig(%q, %q) = nil, want config with command %q", tt.agentName, tt.command, tt.wantCmd)
-				}
-				if got.Command != tt.wantCmd {
-					t.Errorf("ResolveACPConfig(%q, %q).Command = %q, want %q", tt.agentName, tt.command, got.Command, tt.wantCmd)
-				}
-			}
-		})
-	}
-}
-
-func TestSupportsACPWithCustomAgent(t *testing.T) {
-	t.Parallel()
-
-	// A custom agent that uses 'opencode' command but doesn't have ACP config
-	reg := registryWith(AgentPresetInfo{
-		Name:    "custom-model",
-		Command: "opencode",
-	})
-
-	if !reg.SupportsACP("custom-model") {
-		t.Error("SupportsACP(custom-model) = false, want true (uses opencode command)")
-	}
-
-	acpCfg := reg.ACPConfig("custom-model")
-	if acpCfg == nil {
-		t.Fatal("GetACPConfig(custom-model) = nil, want config")
-	}
-	if acpCfg.Command != "acp" {
-		t.Errorf("GetACPConfig(custom-model).Command = %q, want acp", acpCfg.Command)
-	}
-}
-
-func TestGetACPCommand(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		agentName string
-		want      string
-	}{
-		{"opencode", "acp"},
-		{"claude", ""},
-		{"gemini", ""},
-		{"codex", ""},
-		{"cursor", ""},
-		{"auggie", ""},
-		{"amp", ""},
-		{"copilot", ""},
-		{"pi", ""},
-		{"unknown-agent", ""},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.agentName, func(t *testing.T) {
-			if got := GetACPCommand(tt.agentName); got != tt.want {
-				t.Errorf("GetACPCommand(%q) = %q, want %q", tt.agentName, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestACPConfig(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	configPath := DefaultAgentRegistryPath(tmpDir)
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	customRegistry := AgentRegistry{
-		Version: CurrentAgentRegistryVersion,
-		Agents: map[string]*AgentPresetInfo{
-			"custom-agent": {
-				Name:    "custom-agent",
-				Command: "custom-agent",
-				ACP: &ACPConfig{
-					Command: "acp",
-				},
-			},
-			"legacy-agent": {
-				Name:    "legacy-agent",
-				Command: "legacy-agent",
-				ACP:     nil,
-			},
-		},
-	}
-
-	data, err := json.Marshal(customRegistry)
-	if err != nil {
-		t.Fatalf("failed to marshal test config: %v", err)
-	}
-
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		t.Fatalf("failed to write test config: %v", err)
-	}
-
-	reg, err := LoadAgentRegistryFor(tmpDir, "")
-	if err != nil {
-		t.Fatalf("LoadAgentRegistryFor failed: %v", err)
-	}
-
-	if !reg.SupportsACP("custom-agent") {
-		t.Error("reg.SupportsACP(custom-agent) = false, want true (has ACP)")
-	}
-
-	if reg.ACPCommand("custom-agent") != "acp" {
-		t.Errorf("reg.ACPCommand(custom-agent) = %q, want acp", reg.ACPCommand("custom-agent"))
-	}
-
-	if reg.SupportsACP("legacy-agent") {
-		t.Error("reg.SupportsACP(legacy-agent) = true, want false (no ACP)")
-	}
-
-	if reg.ACPCommand("legacy-agent") != "" {
-		t.Errorf("reg.ACPCommand(legacy-agent) = %q, want empty", reg.ACPCommand("legacy-agent"))
-	}
-
-	agentInfo := reg.Preset("custom-agent")
-	if agentInfo == nil {
-		t.Fatal("custom-agent not found after loading registry")
-	}
-	if agentInfo.ACP == nil || agentInfo.ACP.Command != "acp" {
-		t.Errorf("AgentPresetInfo.ACP.Command = %q, want acp", agentInfo.ACP.Command)
-	}
-}
-
-// TestACPModes tests the three ACP invocation modes:
-// - Native mode: Binary is already an ACP adapter
-// - Subcommand mode: Agent has ACP as a subcommand
-// - Flag mode: Agent uses flags to enable ACP
-func TestACPModes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		rc       *RuntimeConfig
-		wantACP  bool
-		wantMode string
-		wantCmd  string
-		wantArgs []string
-	}{
-		{
-			name: "native mode - claude-agent-acp",
-			rc: &RuntimeConfig{
-				Command: "claude-agent-acp",
-				ACP: &ACPConfig{
-					Mode: ACPModeNative,
-				},
-			},
-			wantACP:  true,
-			wantMode: ACPModeNative,
-			wantCmd:  "",
-			wantArgs: nil,
-		},
-		{
-			name: "subcommand mode - opencode acp",
-			rc: &RuntimeConfig{
-				Command: "opencode",
-				ACP: &ACPConfig{
-					Command: "acp",
-					Args:    []string{"--debug"},
-				},
-			},
-			wantACP:  true,
-			wantMode: "", // Mode is not set, defaults to subcommand behavior
-			wantCmd:  "acp",
-			wantArgs: []string{"--debug"},
-		},
-		{
-			name: "subcommand mode with explicit mode",
-			rc: &RuntimeConfig{
-				Command: "opencode",
-				ACP: &ACPConfig{
-					Mode:    ACPModeSubcommand,
-					Command: "acp",
-				},
-			},
-			wantACP:  true,
-			wantMode: ACPModeSubcommand,
-			wantCmd:  "acp",
-			wantArgs: nil,
-		},
-		{
-			name: "flag mode - gemini --acp",
-			rc: &RuntimeConfig{
-				Command: "gemini",
-				ACP: &ACPConfig{
-					Mode: ACPModeFlag,
-					Args: []string{"--acp"},
-				},
-			},
-			wantACP:  true,
-			wantMode: ACPModeFlag,
-			wantCmd:  "",
-			wantArgs: []string{"--acp"},
-		},
-		{
-			name: "native mode with args",
-			rc: &RuntimeConfig{
-				Command: "claude-agent-acp",
-				ACP: &ACPConfig{
-					Mode: ACPModeNative,
-					Args: []string{"--debug"},
-				},
-			},
-			wantACP:  true,
-			wantMode: ACPModeNative,
-			wantCmd:  "",
-			wantArgs: []string{"--debug"},
-		},
-		{
-			name: "inherited ACP from preset",
-			rc: &RuntimeConfig{
-				Command: "opencode",
-			},
-			wantACP:  true,
-			wantMode: "", // Default, treated as subcommand
-			wantCmd:  "acp",
-			wantArgs: nil,
-		},
-		{
-			name: "no ACP support",
-			rc: &RuntimeConfig{
-				Command: "claude",
-			},
-			wantACP:  false,
-			wantMode: "",
-			wantCmd:  "",
-			wantArgs: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotACP := RuntimeConfigSupportsACP(tt.rc)
-			if gotACP != tt.wantACP {
-				t.Errorf("RuntimeConfigSupportsACP() = %v, want %v", gotACP, tt.wantACP)
-			}
-
-			if tt.wantACP {
-				acpConfig := GetACPConfigFromRuntime(tt.rc)
-				if acpConfig == nil {
-					t.Fatalf("GetACPConfigFromRuntime() = nil, want config")
-				}
-				if acpConfig.Mode != tt.wantMode {
-					t.Errorf("ACP.Mode = %q, want %q", acpConfig.Mode, tt.wantMode)
-				}
-				if acpConfig.Command != tt.wantCmd {
-					t.Errorf("ACP.Command = %q, want %q", acpConfig.Command, tt.wantCmd)
-				}
-				if tt.wantArgs != nil {
-					if len(acpConfig.Args) != len(tt.wantArgs) {
-						t.Errorf("ACP.Args length = %d, want %d", len(acpConfig.Args), len(tt.wantArgs))
-					} else {
-						for i, arg := range tt.wantArgs {
-							if acpConfig.Args[i] != arg {
-								t.Errorf("ACP.Args[%d] = %q, want %q", i, acpConfig.Args[i], arg)
-							}
-						}
-					}
-				}
-			} else {
-				acpConfig := GetACPConfigFromRuntime(tt.rc)
-				if acpConfig != nil {
-					t.Errorf("GetACPConfigFromRuntime() = %+v, want nil", acpConfig)
-				}
-			}
-		})
-	}
-}
-
-// TestACPModeConstants verifies the ACP mode constants.
-func TestACPModeConstants(t *testing.T) {
-	t.Parallel()
-	if ACPModeNative != "native" {
-		t.Errorf("ACPModeNative = %q, want native", ACPModeNative)
-	}
-	if ACPModeSubcommand != "subcommand" {
-		t.Errorf("ACPModeSubcommand = %q, want subcommand", ACPModeSubcommand)
-	}
-	if ACPModeFlag != "flag" {
-		t.Errorf("ACPModeFlag = %q, want flag", ACPModeFlag)
-	}
 }

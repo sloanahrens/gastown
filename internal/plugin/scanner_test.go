@@ -389,55 +389,6 @@ version = 1
 	}
 }
 
-func TestParsePluginMD_GitHubSheriff(t *testing.T) {
-	t.Parallel()
-	// Verify the actual github-sheriff plugin.md parses correctly.
-	// This catches frontmatter regressions in the shipped plugin.
-	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "github-sheriff", "plugin.md"))
-	if err != nil {
-		t.Fatalf("github-sheriff plugin not found (expected in plugins/): %v", err)
-	}
-
-	plugin, err := parsePluginMD(content, "/test/github-sheriff", LocationRig, "gastown")
-	if err != nil {
-		t.Fatalf("parsePluginMD failed: %v", err)
-	}
-
-	if plugin.Name != "github-sheriff" {
-		t.Errorf("expected name 'github-sheriff', got %q", plugin.Name)
-	}
-	// The gate is deliberately not pinned to a value: which gate a town runs a
-	// plugin behind is deployment policy, so a test that asserted one would
-	// break every town that sets a different one. What is a regression is a
-	// gate that no longer parses, or a plugin that lost its identity.
-	if plugin.Gate == nil {
-		t.Fatal("expected gate to be non-nil")
-	}
-	switch plugin.Gate.Type {
-	case GateCooldown, GateCron, GateCondition, GateEvent, GateManual:
-	default:
-		t.Errorf("expected a recognized gate type, got %q", plugin.Gate.Type)
-	}
-	if plugin.Tracking == nil {
-		t.Fatal("expected tracking to be non-nil")
-	}
-	if !plugin.Tracking.Digest {
-		t.Error("expected digest to be true")
-	}
-	if plugin.Execution == nil {
-		t.Fatal("expected execution to be non-nil")
-	}
-	if plugin.Execution.Timeout != "2m" {
-		t.Errorf("expected timeout '2m', got %q", plugin.Execution.Timeout)
-	}
-	if !plugin.Execution.NotifyOnFailure {
-		t.Error("expected notify_on_failure to be true")
-	}
-	if plugin.Instructions == "" {
-		t.Error("expected non-empty instructions")
-	}
-}
-
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	t.Parallel()
 	// Use a temp dir with a fixture plugin.md and run.sh so the test

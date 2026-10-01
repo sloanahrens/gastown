@@ -66,7 +66,7 @@ type StartOptions struct {
 }
 
 // validateSessionID checks that a resume session ID contains only safe characters.
-// Session IDs from Claude, Gemini, etc. are typically UUIDs or hex strings.
+// Claude session IDs are typically UUIDs or hex strings.
 // This rejects shell metacharacters that could cause injection when the ID is
 // interpolated into a shell command string.
 func validateSessionID(id string) error {
@@ -102,15 +102,12 @@ func harnessAgentName(override, workerName, townRoot, rigPath string) string {
 
 // buildResumeArgs validates the agent preset supports resume and returns the
 // flag(s) to append to the command string. agentName is the resolved agent
-// preset name (e.g. "claude", "gemini"). sessionID is "last" for auto-resume
+// preset name (e.g. "claude"). sessionID is "last" for auto-resume
 // or a specific session ID.
 func buildResumeArgs(registry *config.AgentRegistry, agentName, sessionID string) (string, error) {
 	preset := registry.Preset(agentName)
 	if preset == nil || preset.ResumeFlag == "" {
 		return "", fmt.Errorf("agent %q does not support session resume", agentName)
-	}
-	if preset.ResumeStyle == "subcommand" {
-		return "", fmt.Errorf("--resume not yet supported for subcommand-style agents (e.g., %s); use the agent's native resume mechanism", agentName)
 	}
 
 	if sessionID == "last" {
@@ -376,10 +373,8 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 
 	// Install runtime settings in the shared crew parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	addTownRoot := filepath.Dir(m.rig.Path)
-	addRuntimeConfig := config.ResolveWorkerAgentConfig(name, addTownRoot, m.rig.Path)
 	crewSettingsDir := config.RoleSettingsDir("crew", m.rig.Path)
-	if err := runtime.EnsureSettingsForRole(crewSettingsDir, crewPath, "crew", addRuntimeConfig); err != nil {
+	if err := runtime.EnsureSettingsForRole(crewSettingsDir, crewPath, "crew"); err != nil {
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}
@@ -792,7 +787,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Every start syncs the managed settings and reports hooks:present or
 	// hooks:absent for the session (gt-4k3fj.8.3).
 	crewSettingsDir := config.RoleSettingsDir("crew", m.rig.Path)
-	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig)
+	hooksStatus, err := runtime.SyncSessionSettings(crewSettingsDir, worker.ClonePath, "crew")
 	runtime.ReportHooks(townRoot, fmt.Sprintf("%s/crew/%s", m.rig.Name, name), m.SessionName(name), hooksStatus)
 	if err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)

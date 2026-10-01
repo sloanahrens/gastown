@@ -1029,6 +1029,14 @@ func (g *Git) FetchPrune(remote string) error {
 	return err
 }
 
+// GC runs git gc with its default prune window. --prune=now is not used: it
+// can delete objects a concurrent git process in the same repository is
+// still writing.
+func (g *Git) GC() error {
+	_, err := g.run("gc", "--quiet")
+	return err
+}
+
 // RemoteQueryTimeout is the bound on read-only remote queries (ls-remote and
 // small, targeted fetches), exported for callers that pick their own bound.
 const RemoteQueryTimeout = remoteQueryTimeout

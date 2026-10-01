@@ -2,11 +2,9 @@ package daemon
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/slot"
@@ -70,7 +68,7 @@ func doctorDogDatabases(config *DaemonPatrolConfig) []string {
 	return []string{"hq", "gt", "mo"}
 }
 
-// doctorProbes are the measurements behind every mol-dog-doctor step. They
+// doctorProbes are the measurements behind every doctor_dog check. They
 // are functions so tests can drive each branch without a Dolt server or a
 // docker daemon.
 type doctorProbes struct {
@@ -95,7 +93,7 @@ type doctorLimits struct {
 	backupStale time.Duration
 }
 
-// doctorReport is one precheck: findings need an agent, notes are logged.
+// doctorReport is one cycle: findings fail the cycle, notes are logged.
 type doctorReport struct {
 	findings []string
 	notes    []string
@@ -105,13 +103,13 @@ type doctorReport struct {
 	orphans  int
 }
 
-// doctorConnAlertPct is the share of max connections the formula warns at.
+// doctorConnAlertPct is the share of max connections doctor_dog warns at.
 const doctorConnAlertPct = 80
 
-// doctorDogFindings runs the mol-dog-doctor checks deterministically. Every
-// step in that formula is a threshold comparison or a sanctioned reap; an
-// agent session added nothing to the all-clear case except a ~24k-token
-// uncached first turn every five minutes (claude-l5w).
+// doctorDogFindings runs the doctor checks deterministically. Every check is
+// a threshold comparison or a sanctioned reap; the agent session that once ran
+// them as the mol-dog-doctor formula added nothing to the all-clear case except
+// a ~24k-token uncached first turn every five minutes (claude-l5w).
 func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 	var r doctorReport
 
@@ -213,11 +211,8 @@ func doctorDogProbes(townRoot string) doctorProbes {
 	}
 }
 
-// runDoctorDog runs the doctor checks in the daemon and pours a mol-dog-doctor
-// molecule for an agent only when one of them finds something. The daemon
-// still only measures and reaps what the formula already sanctioned; the
-// judgment (escalate, recommend cleanup) stays with the agent, which now gets
-// the findings instead of re-deriving them.
+// runDoctorDog runs the doctor checks in the daemon. A cycle with findings is
+// reported as failed (a log line and a feed event); a clean cycle logs only.
 func (d *Daemon) runDoctorDog() {
 	if !d.isPatrolActive("doctor_dog") {
 		return
@@ -240,33 +235,14 @@ func (d *Daemon) runDoctorDog() {
 		d.logger.Printf("doctor_dog: %s", n)
 	}
 	if len(r.findings) == 0 {
-		d.logger.Printf("doctor_dog: all clear (latency %v, connections %d/%d, orphans %d); no molecule",
+		d.logger.Printf("doctor_dog: all clear (latency %v, connections %d/%d, orphans %d)",
 			r.latency.Round(time.Millisecond), r.conns, r.connMax, r.orphans)
 		return
 	}
 
-	findings := strings.Join(r.findings, "; ")
-	d.logger.Printf("doctor_dog: %d finding(s), pouring the receipt molecule: %s", len(r.findings), findings)
-
-	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
-		"port":              strconv.Itoa(d.doltServerPort()),
-		"latency_threshold": strconv.FormatFloat(latencyMs, 'f', 0, 64) + "ms",
-		"orphan_threshold":  strconv.Itoa(orphanCount),
-		"backup_threshold":  strconv.FormatFloat(backupStaleSec, 'f', 0, 64) + "s",
-		"findings":          findings,
-		"latency":           r.latency.Round(time.Millisecond).String(),
-		"conn_count":        strconv.Itoa(r.conns),
-		"conn_max":          strconv.Itoa(r.connMax),
-		"orphan_count":      strconv.Itoa(r.orphans),
-	})
-	defer mol.close()
-
-	if mol.rootID == "" {
-		d.logger.Printf("doctor_dog: molecule pour failed (non-fatal), skipping cycle")
-		return
-	}
-
-	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
+	cycle := d.startDogCycle("doctor_dog")
+	defer cycle.close()
+	cycle.failStep("inspect", strings.Join(r.findings, "; "))
 }
 
 // cleanupOrphanedDoltServers reaps orphaned test 'dolt sql-server' processes:

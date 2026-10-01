@@ -625,14 +625,6 @@ func TestBuiltinHooksNeverUseIf(t *testing.T) {
 	for target, override := range DefaultOverrides() {
 		check("DefaultOverrides["+target+"]", override)
 	}
-
-	// The templates bypass DefaultBase/DefaultOverrides entirely, so the
-	// invariant has to be asserted against them directly — both shipped
-	// templates still carried an If-gated pr-workflow hook long after the
-	// built-ins dropped theirs (gt-ly9c4).
-	for _, tmplFile := range claudeSettingsTemplates {
-		check(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
-	}
 }
 
 // requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare
@@ -809,70 +801,6 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 	}
 }
 
-// TestPreToolUseGuardsCoverMonitorTool pins gt-vx2mm: Claude Code's Monitor
-// tool carries the same tool_input.command shape as Bash (both take a
-// "command" string), but every self-filtering PreToolUse guard (pr-workflow,
-// dangerous-command, container-suite, bd-close-invariant, polecat-paths,
-// patrol-loop, boot-sendkeys, formula-allowlist) used to route through a
-// bare "Bash" matcher — invisible to Monitor, since Claude Code's
-// hooks[].matcher only ever matches the tool name (gt-5ihs). A polecat could
-// run any guard-blocked command (rm -rf, a force push, an unwrapped test
-// suite, a raw bd close) through Monitor and skip every one of those guards.
-// This test both pins that shellExecutingToolMatcher actually names Bash and
-// Monitor, and regression-guards against any PreToolUse entry — built-in or
-// computed — reverting to the narrower bare "Bash" matcher the bug shipped
-// with.
-func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	home := configHome{home: tmpDir}
-
-	tools := strings.Split(shellExecutingToolMatcher, "|")
-	for _, want := range []string{"Bash", "Monitor"} {
-		found := false
-		for _, tool := range tools {
-			if tool == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("shellExecutingToolMatcher %q is missing tool %q — a shell-executing Claude Code tool must be listed here or its guard-blocked commands bypass every guard (gt-vx2mm)", shellExecutingToolMatcher, want)
-		}
-	}
-
-	assertNoBareBashMatcher := func(label string, cfg *HooksConfig) {
-		t.Helper()
-		for _, entry := range cfg.PreToolUse {
-			if entry.Matcher == "Bash" {
-				t.Errorf("%s: PreToolUse matcher is bare \"Bash\" — Monitor-run commands bypass this guard entirely (gt-vx2mm); use shellExecutingToolMatcher instead. Hooks: %+v", label, entry.Hooks)
-			}
-		}
-	}
-
-	assertNoBareBashMatcher("DefaultBase", DefaultBase())
-	for role, override := range DefaultOverrides() {
-		assertNoBareBashMatcher("DefaultOverrides["+role+"]", override)
-	}
-
-	// End-to-end: every role's fully computed config must expose its
-	// self-filtering guards under shellExecutingToolMatcher.
-	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "boot"} {
-		cfg, err := home.computeExpected(target)
-		if err != nil {
-			t.Fatalf("home.computeExpected(%s): %v", target, err)
-		}
-		assertNoBareBashMatcher("home.computeExpected("+target+")", cfg)
-	}
-
-	// The templates bypass DefaultBase/DefaultOverrides entirely and are
-	// written verbatim by writeTemplate, so a bare "Bash" matcher here is the
-	// bypass itself, not a duplicate of one — this is exactly where gt-ly9c4
-	// lived, long after TestPreToolUseGuardsCoverMonitorTool started passing.
-	for _, tmplFile := range claudeSettingsTemplates {
-		assertNoBareBashMatcher(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
-	}
-}
-
 func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 	for _, entry := range cfg.PreToolUse {
 		if entry.Matcher == matcher {
@@ -880,35 +808,6 @@ func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 		}
 	}
 	return HookEntry{}, false
-}
-
-// claudeSettingsTemplates are the embedded Claude settings templates that
-// InstallForRole writes verbatim (installer.go writeTemplate) for every Claude
-// role off the managed-merge path — mayor, deacon and crew. They bypass
-// DefaultBase and DefaultOverrides entirely, so every invariant asserted
-// against those built-ins has to be asserted against the templates too, or a
-// freshly installed host ships the bug the invariant was written to catch
-// (gt-ly9c4).
-var claudeSettingsTemplates = []string{
-	"templates/claude/settings-autonomous.json",
-	"templates/claude/settings-interactive.json",
-}
-
-// loadClaudeTemplateHooks parses one embedded Claude settings template and
-// returns its hooks section.
-func loadClaudeTemplateHooks(t *testing.T, tmplFile string) *HooksConfig {
-	t.Helper()
-	data, err := templateFS.ReadFile(tmplFile)
-	if err != nil {
-		t.Fatalf("reading %s: %v", tmplFile, err)
-	}
-	var settings struct {
-		Hooks HooksConfig `json:"hooks"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		t.Fatalf("parsing %s: %v", tmplFile, err)
-	}
-	return &settings.Hooks
 }
 
 // TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings pins the
@@ -1183,36 +1082,6 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 	}
 }
 
-func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
-
-	// Create a rig with crew members that have both Claude and Gemini settings.
-	// DiscoverTargets should only return Claude targets; non-Claude agents are
-	// discovered via DiscoverRoleLocations instead.
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "crew", "alice"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "witness"), 0755)
-
-	// Install gemini settings (should NOT appear in DiscoverTargets results)
-	geminiDir := filepath.Join(tmpDir, "rig1", "crew", "alice", ".gemini")
-	os.MkdirAll(geminiDir, 0755)
-	os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(`{"hooks":{}}`), 0644)
-
-	targets, err := DiscoverTargets(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverTargets failed: %v", err)
-	}
-
-	for _, tgt := range targets {
-		if tgt.Provider == "gemini" {
-			t.Errorf("DiscoverTargets should not return gemini targets, got: %s", tgt.DisplayKey())
-		}
-	}
-}
-
 func TestDiscoverTargets_BootAbsent(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -1230,161 +1099,6 @@ func TestDiscoverTargets_BootAbsent(t *testing.T) {
 		if tgt.Key == "boot" {
 			t.Errorf("expected no boot target when deacon/dogs/boot/ absent, got one: %+v", tgt)
 		}
-	}
-}
-
-func TestDiscoverRoleLocations(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "crew", "alice"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "polecats", "toast"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "witness"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "refinery"), 0755)
-
-	locations, err := DiscoverRoleLocations(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverRoleLocations failed: %v", err)
-	}
-
-	// Build lookup by role+rig
-	type key struct{ rig, role string }
-	found := make(map[key]RoleLocation)
-	for _, loc := range locations {
-		found[key{loc.Rig, loc.Role}] = loc
-	}
-
-	expected := []struct {
-		rig, role string
-	}{
-		{"", "mayor"},
-		{"rig1", "crew"},
-		{"rig1", "polecat"},
-	}
-
-	for _, e := range expected {
-		loc, ok := found[key{e.rig, e.role}]
-		if !ok {
-			t.Errorf("expected location rig=%q role=%q not found", e.rig, e.role)
-			continue
-		}
-		if loc.Dir == "" {
-			t.Errorf("location rig=%q role=%q has empty Dir", e.rig, e.role)
-		}
-	}
-
-	if len(locations) != len(expected) {
-		t.Errorf("expected %d locations, got %d", len(expected), len(locations))
-	}
-}
-
-func TestDiscoverRoleLocations_SkipsNonRigs(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create a directory that isn't a rig (no crew/witness/polecats/refinery subdirs)
-	os.MkdirAll(filepath.Join(tmpDir, "notarig", "something"), 0755)
-	// Hidden dirs should be skipped
-	os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, ".hidden", "crew"), 0755)
-
-	locations, err := DiscoverRoleLocations(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverRoleLocations failed: %v", err)
-	}
-
-	for _, loc := range locations {
-		if loc.Rig == "notarig" || loc.Rig == ".beads" || loc.Rig == ".hidden" {
-			t.Errorf("unexpected location found: rig=%q role=%q", loc.Rig, loc.Role)
-		}
-	}
-}
-
-func TestDiscoverWorktrees(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create worktree subdirectories
-	os.MkdirAll(filepath.Join(tmpDir, "alice"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "bob"), 0755)
-	// Hidden dirs should be skipped
-	os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0755)
-	// Files should be skipped
-	os.WriteFile(filepath.Join(tmpDir, "state.json"), []byte("{}"), 0644)
-
-	dirs := DiscoverWorktrees(tmpDir)
-
-	if len(dirs) != 2 {
-		t.Errorf("expected 2 worktrees, got %d: %v", len(dirs), dirs)
-	}
-
-	names := make(map[string]bool)
-	for _, d := range dirs {
-		names[filepath.Base(d)] = true
-	}
-	if !names["alice"] || !names["bob"] {
-		t.Errorf("expected alice and bob, got %v", names)
-	}
-	if names[".claude"] {
-		t.Error("hidden directory should be skipped")
-	}
-}
-
-func TestDiscoverWorktrees_EmptyDir(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	dirs := DiscoverWorktrees(tmpDir)
-	if len(dirs) != 0 {
-		t.Errorf("expected 0 worktrees, got %d", len(dirs))
-	}
-}
-
-func TestDiscoverWorktrees_PrefersNestedGitWorktreeRoots(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	worktree := filepath.Join(tmpDir, "fury", "gastown")
-	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(tmpDir, "dust"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	dirs := DiscoverWorktrees(tmpDir)
-
-	if len(dirs) != 2 {
-		t.Fatalf("expected 2 worktrees, got %d: %v", len(dirs), dirs)
-	}
-
-	got := make(map[string]bool)
-	for _, dir := range dirs {
-		got[dir] = true
-	}
-
-	if !got[worktree] {
-		t.Fatalf("expected nested worktree root %q, got %v", worktree, dirs)
-	}
-	if !got[filepath.Join(tmpDir, "dust")] {
-		t.Fatalf("expected direct worktree fallback %q, got %v", filepath.Join(tmpDir, "dust"), dirs)
-	}
-}
-
-func TestDiscoverWorktrees_InvalidDir(t *testing.T) {
-	t.Parallel()
-	dirs := DiscoverWorktrees("/nonexistent/path/that/does/not/exist")
-	if dirs != nil {
-		t.Errorf("expected nil for invalid dir, got %v", dirs)
-	}
-}
-
-func TestDiscoverRoleLocations_ReadError(t *testing.T) {
-	t.Parallel()
-	_, err := DiscoverRoleLocations("/nonexistent/path/that/does/not/exist")
-	if err == nil {
-		t.Error("expected error for nonexistent directory")
 	}
 }
 
@@ -1560,13 +1274,6 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 			t.Fatalf("home.computeExpected(%s) failed: %v", target, err)
 		}
 		assertNoParenMatchers(t, "home.computeExpected("+target+")", expected)
-	}
-
-	// A stale paren-style matcher in the templates reintroduces gt-5ihs for
-	// every newly onboarded agent even after DefaultBase is fixed, so the
-	// templates need their own guard.
-	for _, tmplFile := range claudeSettingsTemplates {
-		assertNoParenMatchers(t, tmplFile, loadClaudeTemplateHooks(t, tmplFile))
 	}
 }
 

@@ -384,8 +384,8 @@ func runHook(_ *cobra.Command, args []string) error {
 		break
 	}
 
-	// Emit a propulsion signal if the target is the mayor.
-	// This allows the ACP propeller to react to hook changes event-driven.
+	// Emit a propulsion signal if the target is the mayor, so the mayor
+	// hears about the hook change at its next turn boundary.
 	if agentID == "mayor/" {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			session := "hq-mayor"

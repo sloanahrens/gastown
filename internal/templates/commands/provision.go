@@ -1,4 +1,5 @@
-// Package commands provides agent-agnostic command provisioning.
+// Package commands provisions Gas Town's slash commands into a workspace's
+// .claude/commands/ directory.
 package commands
 
 import (
@@ -7,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 //go:embed bodies/*.md
@@ -20,21 +19,11 @@ type Field struct {
 	Value string
 }
 
-// Command defines a slash command with agent-specific frontmatter.
+// Command defines a slash command and its Claude Code frontmatter.
 type Command struct {
 	Name        string
 	Description string
-	AgentFields map[string][]Field
-}
-
-// getAgentConfigDir returns the config directory for an agent from the preset registry.
-// Returns empty string if the agent has no config directory.
-func getAgentConfigDir(agent string) string {
-	preset := config.GetAgentPresetByName(agent)
-	if preset == nil {
-		return ""
-	}
-	return preset.ConfigDir
+	Fields      []Field
 }
 
 // Commands is the registry of available commands.
@@ -42,38 +31,31 @@ var Commands = []Command{
 	{
 		Name:        "done",
 		Description: "Signal work complete and submit the branch for landing",
-		AgentFields: map[string][]Field{
-			"claude": {
-				{"allowed-tools", "Bash(gt done:*), Bash(git status:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(bd close:*)"},
-				{"argument-hint", "[--status COMPLETED|ESCALATED|DEFERRED] [--target <branch>]"},
-			},
+		Fields: []Field{
+			{"allowed-tools", "Bash(gt done:*), Bash(git status:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(bd close:*)"},
+			{"argument-hint", "[--status COMPLETED|ESCALATED|DEFERRED] [--target <branch>]"},
 		},
 	},
 	{
 		Name:        "handoff",
 		Description: "Hand off to fresh session, work continues from hook",
-		AgentFields: map[string][]Field{
-			"claude": {
-				{"allowed-tools", "Bash(gt handoff:*)"},
-				{"argument-hint", "[message]"},
-			},
-			// opencode: no extra fields, just description
+		Fields: []Field{
+			{"allowed-tools", "Bash(gt handoff:*)"},
+			{"argument-hint", "[message]"},
 		},
 	},
 	{
 		Name:        "review",
 		Description: "Review code changes with structured grading (A-F)",
-		AgentFields: map[string][]Field{
-			"claude": {
-				{"allowed-tools", "Bash(git diff:*), Bash(git rev-parse:*), Bash(gh pr diff:*)"},
-				{"argument-hint", "[--staged | --branch | --pr <url>]"},
-			},
+		Fields: []Field{
+			{"allowed-tools", "Bash(git diff:*), Bash(git rev-parse:*), Bash(gh pr diff:*)"},
+			{"argument-hint", "[--staged | --branch | --pr <url>]"},
 		},
 	},
 }
 
-// BuildCommand assembles frontmatter + body for an agent.
-func BuildCommand(cmd Command, agent string) (string, error) {
+// BuildCommand assembles frontmatter + body for a command.
+func BuildCommand(cmd Command) (string, error) {
 	body, err := bodiesFS.ReadFile("bodies/" + cmd.Name + ".md")
 	if err != nil {
 		return "", fmt.Errorf("reading body: %w", err)
@@ -82,28 +64,24 @@ func BuildCommand(cmd Command, agent string) (string, error) {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString(fmt.Sprintf("description: %s\n", cmd.Description))
-
-	if fields, ok := cmd.AgentFields[agent]; ok {
-		for _, f := range fields {
-			b.WriteString(fmt.Sprintf("%s: %s\n", f.Key, f.Value))
-		}
+	for _, f := range cmd.Fields {
+		b.WriteString(fmt.Sprintf("%s: %s\n", f.Key, f.Value))
 	}
-
 	b.WriteString("---\n\n")
 	b.Write(body)
 
 	return b.String(), nil
 }
 
-// ProvisionFor provisions commands for an agent.
-func ProvisionFor(workspacePath, agent string) error {
-	agent = strings.ToLower(agent)
-	configDir := getAgentConfigDir(agent)
-	if configDir == "" {
-		return fmt.Errorf("unknown agent or no config dir: %s", agent)
-	}
+// commandsDir is where Claude Code reads a workspace's slash commands.
+func commandsDir(workspacePath string) string {
+	return filepath.Join(workspacePath, ".claude", "commands")
+}
 
-	dir := filepath.Join(workspacePath, configDir, "commands")
+// Provision writes the commands into workspacePath/.claude/commands/.
+// An existing command file is left alone (no overwrite).
+func Provision(workspacePath string) error {
+	dir := commandsDir(workspacePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating dir: %w", err)
 	}
@@ -116,7 +94,7 @@ func ProvisionFor(workspacePath, agent string) error {
 			continue
 		}
 
-		content, err := BuildCommand(cmd, agent)
+		content, err := BuildCommand(cmd)
 		if err != nil {
 			return fmt.Errorf("building %s: %w", cmd.Name, err)
 		}
@@ -129,15 +107,9 @@ func ProvisionFor(workspacePath, agent string) error {
 	return nil
 }
 
-// MissingFor returns commands missing for an agent.
-func MissingFor(workspacePath, agent string) []string {
-	agent = strings.ToLower(agent)
-	configDir := getAgentConfigDir(agent)
-	if configDir == "" {
-		return nil
-	}
-
-	dir := filepath.Join(workspacePath, configDir, "commands")
+// Missing returns the commands missing from workspacePath/.claude/commands/.
+func Missing(workspacePath string) []string {
+	dir := commandsDir(workspacePath)
 	var missing []string
 
 	for _, cmd := range Commands {
@@ -167,9 +139,4 @@ func Names() []string {
 		names[i] = cmd.Name
 	}
 	return names
-}
-
-// IsKnownAgent returns true if the agent has a config directory for command provisioning.
-func IsKnownAgent(agent string) bool {
-	return getAgentConfigDir(strings.ToLower(agent)) != ""
 }

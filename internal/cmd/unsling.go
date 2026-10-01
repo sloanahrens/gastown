@@ -239,7 +239,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	_ = events.LogFeed(events.TypeUnhook, agentID, events.UnhookPayload(hookedBeadID))
 
 	// Emit a propulsion signal if the target is the mayor.
-	// This allows the ACP propeller to react to hook changes event-driven.
+	// The mayor hears about the hook change at its next turn boundary.
 	if agentID == "mayor/" {
 		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 			session := "hq-mayor"

@@ -176,8 +176,8 @@ type AgentRuntime struct {
 	NotificationLevel string `json:"notification_level,omitempty"` // Notification level (verbose, normal, muted)
 	UnreadMail        int    `json:"unread_mail"`                  // Number of unread messages
 	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
-	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "opus-46", "pi")
-	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
+	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "claude-opus")
+	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus")
 	Paused            bool   `json:"paused,omitempty"`             // True when the pause marker file says paused (gt-ahik)
 	PausedReason      string `json:"paused_reason,omitempty"`      // Reason from the pause marker (gt agent pause)
 }
@@ -269,8 +269,8 @@ func detectRuntimeFromSession(sessionName string) string {
 }
 
 // findAgentCmdline checks the pane process itself and its descendants for a known agent.
-// The pane PID may BE the agent (e.g., claude), or the agent may be a child (e.g., shell → pi).
-// Also handles wrapper processes (node /path/to/pi, bun /path/to/opencode).
+// The pane PID may BE the agent (e.g., claude), or the agent may be a child (e.g., shell → claude).
+// Also handles wrapper processes (node /path/to/claude).
 func findAgentCmdline(panePid string) string {
 	// Check the pane process itself first
 	cmdline := readCmdline(panePid)
@@ -368,7 +368,7 @@ func isAgentWrapper(base string) bool {
 }
 
 // parseRuntimeInfo extracts "runtime/model" from a null-separated cmdline.
-// Handles direct invocation (claude --model opus) and wrapper patterns (node /path/to/pi).
+// Handles direct invocation (claude --model opus) and wrapper patterns (node /path/to/claude).
 func parseRuntimeInfo(cmdline string) string {
 	if cmdline == "" {
 		return ""
@@ -393,60 +393,15 @@ func parseRuntimeInfo(cmdline string) string {
 		cmd = filepath.Base(parts[0])
 	}
 
-	// Extract model and provider from flags
-	model := ""
-	provider := ""
+	// Extract the model from flags
 	for i := startIdx; i < len(parts); i++ {
 		arg := parts[i]
 		if (arg == "--model" || arg == "-m") && i+1 < len(parts) && parts[i+1] != "" {
-			model = parts[i+1]
-		}
-		if arg == "--provider" && i+1 < len(parts) && parts[i+1] != "" {
-			provider = parts[i+1]
-		}
-	}
-
-	if model != "" {
-		return cmd + "/" + model
-	}
-	if provider != "" {
-		return cmd + "/" + provider
-	}
-
-	// For pi, check its settings file for actual default provider/model
-	if cmd == "pi" {
-		if piInfo := readPiDefaults(); piInfo != "" {
-			return "pi/" + piInfo
+			return cmd + "/" + parts[i+1]
 		}
 	}
 
 	return cmd
-}
-
-// readPiDefaults reads ~/.pi/agent/settings.json to get the actual default provider/model.
-func readPiDefaults() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".pi", "agent", "settings.json"))
-	if err != nil {
-		return ""
-	}
-	var settings struct {
-		DefaultProvider string `json:"defaultProvider"`
-		DefaultModel    string `json:"defaultModel"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return ""
-	}
-	if settings.DefaultModel != "" {
-		return settings.DefaultModel
-	}
-	if settings.DefaultProvider != "" {
-		return settings.DefaultProvider
-	}
-	return ""
 }
 
 // buildInfoFromConfig builds display info from a RuntimeConfig (fallback when not running).

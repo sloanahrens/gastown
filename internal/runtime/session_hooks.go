@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
@@ -22,8 +21,7 @@ const (
 type HooksStatus struct {
 	Present bool
 	Role    string
-	// Path is the settings file the session loads; "" when its runtime
-	// loads no managed Claude settings.
+	// Path is the settings file the session loads.
 	Path string
 	// Reason is why the guards are absent; "" when present.
 	Reason string
@@ -51,39 +49,21 @@ func (s HooksStatus) Payload(session string) map[string]interface{} {
 // checks the file the session will load. The error is EnsureSettingsForRole's;
 // the status is absent whenever the guards are not in place, including when
 // the file could not be written.
-func SyncSessionSettings(settingsDir, workDir, role string, rc *config.RuntimeConfig) (HooksStatus, error) {
-	return syncSessionSettings(hooks.EnvHome(), settingsDir, workDir, role, rc)
+func SyncSessionSettings(settingsDir, workDir, role string) (HooksStatus, error) {
+	return syncSessionSettings(hooks.EnvHome(), settingsDir, workDir, role)
 }
 
-func syncSessionSettings(home hooks.Home, settingsDir, workDir, role string, rc *config.RuntimeConfig) (HooksStatus, error) {
-	if rc == nil {
-		rc = config.DefaultRuntimeConfig()
-	}
-	err := ensureSettingsForRole(home, settingsDir, workDir, role, rc)
-	status := HooksStatus{Role: role}
-	h := rc.Hooks
-	if h == nil || h.Provider == "" || h.Provider == "none" {
-		status.Reason = "runtime config installs no hooks"
-		return status, err
-	}
-	if h.Provider != "claude" && rc.Command != "claude" {
-		status.Reason = fmt.Sprintf("provider %q does not load the managed Claude settings", h.Provider)
-		return status, err
-	}
-	dir := workDir
-	if hooksUseSettingsDir(h) {
-		dir = settingsDir
-	}
-	status.Path = filepath.Join(dir, h.Dir, h.SettingsFile)
+func syncSessionSettings(home hooks.Home, settingsDir, workDir, role string) (HooksStatus, error) {
+	err := ensureSettingsForRole(home, settingsDir, workDir, role)
+	status := HooksStatus{Role: role, Path: filepath.Join(settingsDir, ".claude", "settings.json")}
 	if err != nil {
 		status.Reason = err.Error()
 		return status, err
 	}
 	if checkErr := home.CheckManagedClaudeSettings(hooks.Target{
-		Path:     status.Path,
-		Key:      hooks.ManagedTargetKey(role, settingsDir),
-		Role:     role,
-		Provider: "claude",
+		Path: status.Path,
+		Key:  hooks.ManagedTargetKey(role, settingsDir),
+		Role: role,
 	}); checkErr != nil {
 		status.Reason = checkErr.Error()
 		return status, nil

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
@@ -25,13 +24,13 @@ const (
 	// Alert threshold: if open wisp count exceeds this, the reaper warns.
 	// Shared with `gt reaper run` warning. See reaper.DefaultAlertThreshold.
 	wispAlertThreshold = reaper.DefaultAlertThreshold
-	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
+	// Closed mail older than this is permanently deleted.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
-	// Issues stale longer than this are auto-closed. Formula var: stale_issue_age.
+	// Issues stale longer than this are auto-closed.
 	//
-	// This MUST track the mol-dog-reaper formula default (720h). It was 7d until
-	// gt-2qzr: the daemon injected the shorter value on the dog path, overriding
-	// the formula, and the inline fallback used it directly. Agent beads are idle
+	// It was 7d until gt-2qzr: the daemon injected the shorter value on the dog
+	// path, overriding the formula's 720h, and the inline fallback used it
+	// directly. Agent beads are idle
 	// by design and were eight days old, so a 7d threshold swept 102 durable
 	// beads — every agent, dog, and patrol-molecule bead in the town. Auto-close
 	// is for work that was abandoned, and abandonment does not look like a week.
@@ -115,8 +114,8 @@ func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig) bool {
 	return knob != nil && *knob
 }
 
-// ParseAgeDuration parses an age string, accepting the day suffix that the
-// mol-dog-reaper formula emits for its 30d default. time.ParseDuration rejects
+// ParseAgeDuration parses an age string, accepting the day suffix the retired
+// mol-dog-reaper formula emitted for its 30d default. time.ParseDuration rejects
 // "30d" as "unknown unit d", which is how the incident run ended up with a
 // locally-invented shorter value instead of the formula's intent (gt-2qzr).
 func ParseAgeDuration(s string) (time.Duration, error) {
@@ -169,9 +168,8 @@ func (d *Daemon) triggerWispReaper() {
 	}()
 }
 
-// reapWisps is the thin orchestrator for the wisp_reaper patrol. It pours a
-// mol-dog-reaper molecule as the cycle's receipt and runs the sweep inline,
-// closing the molecule's steps as it goes.
+// reapWisps is the thin orchestrator for the wisp_reaper patrol: it runs the
+// sweep inline and records each step on the cycle's receipt.
 func (d *Daemon) reapWisps() {
 	if !d.isPatrolActive("wisp_reaper") {
 		return
@@ -196,35 +194,14 @@ func (d *Daemon) reapWisps() {
 	deleteAge := wispDeleteAge(d.patrolConfig)
 	staleIssueAge := wispReaperStaleIssueAge(d.patrolConfig)
 
-	vars := map[string]string{
-		"max_age":         maxAge.String(),
-		"purge_age":       deleteAge.String(),
-		"stale_issue_age": staleIssueAge.String(),
-		"mail_delete_age": defaultMailDeleteAge.String(),
-		"alert_threshold": fmt.Sprintf("%d", wispAlertThreshold),
-	}
-
-	if config.DryRun {
-		vars["dry_run"] = "true"
-	}
-	if WispReaperAutoCloseDisarmed(d.patrolConfig) {
-		// Recorded on the receipt, so the molecule says why auto-close did
-		// nothing.
-		vars["auto_close"] = "false"
-	}
-	if len(config.Databases) > 0 {
-		vars["databases"] = strings.Join(config.Databases, ",")
-	}
-
-	// Pour the molecule for observability tracking.
-	mol := d.pourDogMolecule(constants.MolDogReaper, vars)
-	defer mol.close()
+	cycle := d.startDogCycle("wisp_reaper")
+	defer cycle.close()
 
 	if config.DryRun {
 		d.logger.Printf("wisp_reaper: DRY RUN — reporting only, no changes will be made")
 	}
 
-	d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, mol)
+	d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, cycle)
 }
 
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
@@ -240,9 +217,10 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
 }
 
-// reapWispsInline runs the reaper cycle in the daemon. Delegates to the
+// reapWispsInline runs the reaper cycle in the daemon, recording each step on
+// cycle. Delegates to the
 // reaper package, which selects with SQL and writes through bd.
-func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, mol *dogMol) {
+func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, cycle *dogCycle) {
 	databases := config.Databases
 	host := d.doltServerHost()
 	if len(databases) == 0 {
@@ -250,11 +228,11 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("wisp_reaper: no databases to reap")
-		mol.failStep("scan", "no databases found")
+		cycle.failStep("scan", "no databases found")
 		return
 	}
 	d.logger.Printf("wisp_reaper: scanning %d databases", len(databases))
-	mol.closeStep("scan")
+	cycle.closeStep("scan")
 
 	port := d.doltServerPort()
 	dryRun := config.DryRun
@@ -303,9 +281,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 	}
 	if reapErrors > 0 {
-		mol.failStep("reap", fmt.Sprintf("%d databases had reap errors", reapErrors))
+		cycle.failStep("reap", fmt.Sprintf("%d databases had reap errors", reapErrors))
 	} else {
-		mol.closeStep("reap")
+		cycle.closeStep("reap")
 	}
 
 	// Step 3: Purge
@@ -344,9 +322,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 	}
 	if purgeErrors > 0 {
-		mol.failStep("purge", fmt.Sprintf("%d databases had purge errors", purgeErrors))
+		cycle.failStep("purge", fmt.Sprintf("%d databases had purge errors", purgeErrors))
 	} else {
-		mol.closeStep("purge")
+		cycle.closeStep("purge")
 	}
 
 	// Step 3b: Close plugin receipts (fast-track — 1h instead of 7d stale age)
@@ -423,7 +401,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	// that knob also stops reap and purge.
 	if !wispReaperAutoCloseEnabled(d.patrolConfig) {
 		d.logger.Printf("wisp_reaper: auto-close skipped (set patrols.wisp_reaper.auto_close=true to allow)")
-		mol.closeStep("auto-close")
+		cycle.skipStep("auto-close", "patrols.wisp_reaper.auto_close is not true")
 	} else {
 		autoCloseErrors := 0
 		for _, dbName := range databases {
@@ -451,9 +429,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			totalAutoClosed += closed
 		}
 		if autoCloseErrors > 0 {
-			mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
+			cycle.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
 		} else {
-			mol.closeStep("auto-close")
+			cycle.closeStep("auto-close")
 		}
 	}
 
@@ -469,7 +447,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	summary += fmt.Sprintf(" purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
 		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
 	d.logger.Printf("%s", summary)
-	mol.closeStep("report")
+	cycle.closeStep("report")
 }
 
 // autoCloseDB runs the auto-close sweep against one open database and returns

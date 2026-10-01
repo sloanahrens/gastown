@@ -108,16 +108,10 @@ type SlingSpawnOptions struct {
 	Account       string // Claude Code account handle to use
 	Create        bool   // Create polecat if it doesn't exist (currently always true for sling)
 	HookBead      string // Bead ID to set as hook_bead at spawn time (atomic assignment)
-	Agent         string // Agent override for this spawn (e.g., "gemini", "codex", "claude-haiku")
+	Agent         string // Agent override for this spawn (e.g., "claude-haiku")
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
 	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>+<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
-	// AgentBeatsRoute makes Agent outrank the bead's route:* labels in the
-	// polecat pool. Only the spec dispatcher sets it: it names a hooked agent
-	// for a host-safety spec, and a route:flash label must not move that spec
-	// onto a hookless seat (gt-4k3fj.5). Every other caller keeps gt-4lbz,
-	// where the label outranks a convoy's recorded agent.
-	AgentBeatsRoute bool
 	// Name is the exact polecat a named sling targets (gt sling <bead>
 	// <rig>/<name>). Set, it is reused or — with Create — created by that
 	// name, or the sling is refused; the pool never substitutes another
@@ -480,9 +474,8 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // polecat and its worktree. realSlingSeatSpawn wires the real ones.
 type slingSeatSpawn struct {
 	backpressure func(townRoot, rigName string, opts SlingSpawnOptions) error
-	// resolvePool is resolvePolecatPoolAgent, or its explicit variant when
-	// explicit is set.
-	resolvePool func(townRoot, beadID, requested string, explicit bool) (agent, reason string, err error)
+	// resolvePool is resolvePolecatPoolAgent.
+	resolvePool func(townRoot, requested string) (agent, reason string, err error)
 	releaseSeat func()
 	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
 }
@@ -490,14 +483,9 @@ type slingSeatSpawn struct {
 func realSlingSeatSpawn() slingSeatSpawn {
 	return slingSeatSpawn{
 		backpressure: checkSlingBackpressure,
-		resolvePool: func(townRoot, beadID, requested string, explicit bool) (string, string, error) {
-			if explicit {
-				return resolvePolecatPoolAgentExplicit(townRoot, beadID, requested)
-			}
-			return resolvePolecatPoolAgent(townRoot, beadID, requested)
-		},
-		releaseSeat: releasePoolSeatClaim,
-		prepare:     prepareSlingPolecat,
+		resolvePool:  resolvePolecatPoolAgent,
+		releaseSeat:  releasePoolSeatClaim,
+		prepare:      prepareSlingPolecat,
 	}
 }
 
@@ -507,23 +495,19 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// queue is the limit on what the town can absorb, so a sling is refused
 	// while the rig has more beads waiting to land than
 	// merge_queue.max_ready_for_dispatch allows. It runs before the pool decision below, which costs a tmux round
-	// trip and may claim a local seat for a polecat that will never spawn.
+	// trip and may claim a seat for a polecat that will never spawn.
 	if err := s.backpressure(townRoot, rigName, opts); err != nil {
 		return nil, err
 	}
 
-	// Polecat model pool: the town's polecat_pool decides the seat from the
-	// hooked bead's shape, its route:* labels and the live polecat sessions
-	// (see sling_pool.go). It is consulted on every spawn path, --agent
-	// included: an agent that names one of the pool's own seats is a request for
-	// that seat, served by that seat's rules or refused — never swapped for the
-	// other seat (gt-x40u) — so the agent a convoy recorded at sling time and
-	// the agent the deacon escalates to can no longer spawn past a full pool
-	// (gt-4lbz). An agent the pool does not own leaves it with no opinion and the
-	// request stands. The reason line always names the agent the pool chose, and
-	// a pool whose seats are all at their cap refuses the sling.
-	explicit := opts.AgentBeatsRoute && opts.Agent != ""
-	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, opts.HookBead, opts.Agent, explicit)
+	// Polecat seat pool: the town's polecat_pool caps live polecats on its
+	// agent (see sling_pool.go). It is consulted on every spawn path, --agent
+	// included: an agent that names the pool's seat is admitted by its cap or
+	// refused, so the agent a convoy recorded at sling time can no longer spawn
+	// past a full pool (gt-4lbz). An agent the pool does not own leaves it with
+	// no opinion and the request stands. The reason line always names the agent
+	// the pool chose, and a pool whose seat is at its cap refuses the sling.
+	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, opts.Agent)
 	if poolErr != nil {
 		return nil, poolErr
 	}
@@ -854,11 +838,9 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	}
 
 	// Wait for runtime to be fully ready before returning.
-	// When an agent override is specified (e.g., --agent codex), resolve the runtime
-	// config from the override so WaitForRuntimeReady uses the correct readiness
-	// strategy (delay-based for Codex vs prompt-polling for Claude). Without this,
-	// ResolveRoleAgentConfig returns the default agent (Claude) and polls for "❯ "
-	// in a Codex session, always timing out after 30 seconds (gt-1j3m).
+	// When an agent override is specified (e.g., --agent claude-haiku), resolve
+	// the runtime config from the override so WaitForRuntimeReady uses that
+	// agent's readiness settings rather than the role default's (gt-1j3m).
 	spawnTownRoot := filepath.Dir(r.Path)
 	var runtimeConfig *config.RuntimeConfig
 	if s.agent != "" {

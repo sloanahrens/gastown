@@ -160,7 +160,7 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingCreate, "create", false, "Create polecat if it doesn't exist")
 	slingCmd.Flags().BoolVar(&slingForce, "force", false, "Force spawn even if polecat has unread mail")
 	slingCmd.Flags().StringVar(&slingAccount, "account", "", "Claude Code account handle to use")
-	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent/runtime for this sling (e.g., claude, gemini, codex, or custom alias). A polecat_pool seat is honored or the sling is refused; the pool never swaps in the other seat")
+	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent for this sling (e.g., claude, claude-haiku, or custom alias). A polecat_pool seat is honored or the sling is refused; the pool never swaps in the other seat")
 	slingCmd.Flags().BoolVar(&slingNoConvoy, "no-convoy", false, "Skip auto-convoy creation for single-issue sling")
 	slingCmd.Flags().BoolVar(&slingOwned, "owned", false, "Mark auto-convoy as caller-managed lifecycle (no automatic witness/refinery registration)")
 	slingCmd.Flags().BoolVar(&slingHookRawBead, "hook-raw-bead", false, "Hook raw bead without default formula (expert mode)")
@@ -1119,8 +1119,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// see it in the pool even though their snapshot predates this hook.
 	r.noteDispatched(townRoot, dupCandidate)
 
-	// Emit a propulsion signal if the target is the mayor.
-	// This allows the ACP propeller to react to hook changes event-driven.
+	// Emit a propulsion signal if the target is the mayor, so the mayor
+	// hears about the hook change at its next turn boundary.
 	if targetAgent == "mayor/" {
 		if townRoot != "" {
 			session := "hq-mayor"

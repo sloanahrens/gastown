@@ -71,7 +71,7 @@ type AgentEnvConfig struct {
 	// Sets GT_SESSION_ID_ENV so the runtime knows where to find the session ID.
 	SessionIDEnv string
 
-	// Agent is the agent override (e.g., "codex", "gemini").
+	// Agent is the agent override (e.g., "claude-haiku").
 	// If set, GT_AGENT is written to the tmux session table via SetEnvironment
 	// so that IsAgentAliveChecked and waitForPolecatReady can read it via GetEnvironment.
 	// Without this, GetEnvironment returns empty (tmux show-environment reads the

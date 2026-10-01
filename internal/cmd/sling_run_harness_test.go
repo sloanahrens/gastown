@@ -195,7 +195,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			defer h.mu.Unlock()
 			return h.crew[rig+"/"+name]
 		},
-		peekPool: func(string, string, string) (string, string, error) { return "", "", nil },
+		peekPool: func(string, string) (string, string, error) { return "", "", nil },
 		wakeRig:  func(rig string) { h.record("wake rig %s", rig) },
 
 		requester:       func() string { return "tester" },

@@ -100,7 +100,7 @@ func (r *Rig) DefaultBranch() string {
 // The rig root is not usually a git worktree: `gt rig add` lays out the clones
 // at <rig>/mayor/rig and <rig>/refinery/rig, while the rig root holds only the
 // .beads/ redirect and the agent directories. Callers that need to run git in
-// the rig's repository (plugins like gitignore-reconcile and git-hygiene, which
+// the rig's repository (the daemon's git_hygiene patrol, and scripts that
 // enumerate rigs through `gt rig list --json`) need one of those clones — the
 // rig root would make `git -C` resolve to the enclosing town repo instead.
 //

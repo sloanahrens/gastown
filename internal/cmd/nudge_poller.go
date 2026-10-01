@@ -26,12 +26,12 @@ func init() {
 
 var nudgePollerCmd = &cobra.Command{
 	Use:    "nudge-poller <session>",
-	Short:  "Background nudge queue poller for non-Claude agents",
+	Short:  "Background nudge queue poller",
 	Hidden: true, // Internal command — launched by crew manager, not by users.
 	Long: `Polls the nudge queue for a tmux session and drains it when the agent
 is idle. This is the background equivalent of Claude's UserPromptSubmit hook
-drain — it ensures queued nudges are delivered to agents that lack
-turn-boundary hooks (Gemini, Codex, Cursor, etc.).
+drain — it ensures queued nudges reach an agent that stays in one long turn
+and so never reaches a turn boundary (gt-9le0e).
 
 This command runs as a long-lived background process. It exits when:
   - The target tmux session dies
@@ -69,9 +69,9 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("session %q not found", sessionName)
 	}
 
-	// Resolve nudge options once at startup: if the target agent uses Escape
-	// as cancel (e.g., Gemini CLI), skip the Escape keystroke during delivery
-	// to avoid canceling in-flight generation. (GH#gt-wasn)
+	// Resolve nudge options once at startup: if the target agent reads Escape
+	// as cancel (Claude Code does, gt-cyyg), skip the Escape keystroke during
+	// delivery to avoid canceling in-flight generation. (GH#gt-wasn)
 	//
 	// TownRoot enables the cross-process nudge lock. Without it the poller's
 	// send-keys can interleave with a concurrent `gt nudge` to the same

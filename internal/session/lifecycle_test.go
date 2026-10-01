@@ -105,7 +105,7 @@ func TestBuildCommand_WithAgentOverride(t *testing.T) {
 	cfg := SessionConfig{
 		Role:          "boot",
 		TownRoot:      "/tmp/town",
-		AgentOverride: "opencode",
+		AgentOverride: "claude",
 	}
 	cmd, err := buildCommand(cfg, "test prompt")
 	if err != nil {
@@ -173,29 +173,6 @@ func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
 	}
 	if got["GT_PROCESS_NAMES"] != "custom-bin,custom-agent" {
 		t.Fatalf("GT_PROCESS_NAMES = %q, want %q", got["GT_PROCESS_NAMES"], "custom-bin,custom-agent")
-	}
-}
-
-func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T) {
-	t.Parallel()
-	// When AgentOverride sets GT_AGENT to a different agent than
-	// runtimeConfig.ResolvedAgent, process names must be resolved from
-	// the effective agent (GT_AGENT), not the workspace-default resolved agent.
-	env := map[string]string{
-		"GT_AGENT": "codex", // set by AgentEnv from AgentOverride
-	}
-	rc := &config.RuntimeConfig{
-		Command:       "claude",
-		ResolvedAgent: "claude", // workspace default, NOT the override
-	}
-
-	got := MergeRuntimeLivenessEnv(env, rc)
-
-	if got["GT_AGENT"] != "codex" {
-		t.Fatalf("GT_AGENT = %q, want %q", got["GT_AGENT"], "codex")
-	}
-	if got["GT_PROCESS_NAMES"] != "codex" {
-		t.Fatalf("GT_PROCESS_NAMES = %q, want %q (should resolve from effective agent, not runtimeConfig)", got["GT_PROCESS_NAMES"], "codex")
 	}
 }
 

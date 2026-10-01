@@ -194,27 +194,6 @@ func TestEnsureWorkspaceTrust_SeedsSymlinkResolvedPath(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceTrust_NonClaudeRuntimeIsNoop(t *testing.T) {
-	t.Parallel()
-	configDir := t.TempDir()
-	workDir := t.TempDir()
-
-	for _, rc := range []*config.RuntimeConfig{
-		nil,
-		{Command: "gemini"},
-		{Command: "/usr/local/bin/codex"},
-		{Command: ""},
-	} {
-		if err := EnsureWorkspaceTrust(workDir, configDir, rc); err != nil {
-			t.Fatalf("EnsureWorkspaceTrust(%+v): %v", rc, err)
-		}
-	}
-
-	if _, err := os.Stat(filepath.Join(configDir, ".claude.json")); !os.IsNotExist(err) {
-		t.Errorf(".claude.json should not be created for non-claude runtimes")
-	}
-}
-
 func TestEnsureWorkspaceTrust_ClaudePathVariants(t *testing.T) {
 	t.Parallel()
 	for _, cmd := range []string{
@@ -226,8 +205,13 @@ func TestEnsureWorkspaceTrust_ClaudePathVariants(t *testing.T) {
 			t.Errorf("isClaudeRuntime(%q) = false, want true", cmd)
 		}
 	}
-	if isClaudeRuntime(&config.RuntimeConfig{Command: "claudette"}) {
-		t.Errorf("isClaudeRuntime(claudette) = true, want false")
+	// Every runtime is the Claude CLI (D4): a wrapper command is seeded too,
+	// and only an unresolved runtime is left alone.
+	if !isClaudeRuntime(&config.RuntimeConfig{Command: "claude-deepseek-flash"}) {
+		t.Errorf("isClaudeRuntime(claude-deepseek-flash) = false, want true")
+	}
+	if isClaudeRuntime(&config.RuntimeConfig{}) || isClaudeRuntime(nil) {
+		t.Errorf("isClaudeRuntime of an unresolved runtime = true, want false")
 	}
 }
 
@@ -355,26 +339,6 @@ func TestEnsureWorkspaceTrust_NonClaudeCommandWithClaudeProviderIsSeeded(t *test
 	cfg := readTrustConfig(t, filepath.Join(configDir, ".claude.json"))
 	if !trustAccepted(t, cfg, workDir) {
 		t.Errorf("expected trust entry for %s via the wrapped claude command", workDir)
-	}
-}
-
-// A wrapper command with no Claude provider is a genuinely different runtime
-// (e.g. a codex shim): no trust entry, matching config.IsResolvedAgentClaude.
-func TestEnsureWorkspaceTrust_WrappedNonClaudeCommandIsNoop(t *testing.T) {
-	t.Parallel()
-	configDir := t.TempDir()
-	workDir := t.TempDir()
-
-	rc := &config.RuntimeConfig{
-		Command:  "/opt/gastown/bin/codex-shim",
-		Provider: "codex",
-	}
-	if err := EnsureWorkspaceTrust(workDir, configDir, rc); err != nil {
-		t.Fatalf("EnsureWorkspaceTrust: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(configDir, ".claude.json")); !os.IsNotExist(err) {
-		t.Errorf(".claude.json should not be created for a wrapped non-claude runtime")
 	}
 }
 

@@ -27,9 +27,9 @@ func TestHarnessPresetName(t *testing.T) {
 		{"command basename maps to preset name", "kiro-cli", "", nil, "kiro"},
 		{"empty command uses provider", "", "codex", nil, "codex"},
 		{"empty command and provider default to claude", "", "", nil, "claude"},
-		{"empty command unknown provider", "", "generic", nil, ""},
+		{"empty command unknown provider is claude", "", "generic", nil, "claude"},
 		{"unknown command falls back to provider", "my-wrapper.sh", "claude", nil, "claude"},
-		{"unknown command no provider", "aider", "", nil, ""},
+		{"unknown command no provider is a claude wrapper", "claude-deepseek-flash", "", nil, "claude"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,7 +60,7 @@ func TestResolveAgentPreset(t *testing.T) {
 		"test-9a8-over":{"command":"claude"},
 		"test-9a8-script":{"command":"/opt/bin/mystery"}}}`)
 	writeTestSettings(t, RigSettingsPath(rig), `{"type":"rig-settings","version":1,"agents":{
-		"test-9a8-over":{"command":"codex"}}}`)
+		"test-9a8-over":{"provider":"groq-compound"}}}`)
 
 	tests := []struct {
 		name, agent, rigPath, want string
@@ -68,11 +68,11 @@ func TestResolveAgentPreset(t *testing.T) {
 	}{
 		{"custom claude agent", "test-9a8-flash", "", "claude", true},
 		{"provider deepseek command claude", "test-9a8-dog", "", "claude", true},
-		{"rig definition wins over town", "test-9a8-over", rig, "codex", true},
+		{"rig definition wins over town", "test-9a8-over", rig, "groq-compound", true},
 		{"town definition without rig", "test-9a8-over", "", "claude", true},
-		{"builtin passes through", "codex", "", "codex", true},
+		{"builtin passes through", "groq-compound", "", "groq-compound", true},
 		{"unknown name", "test-9a8-nope", "", "", false},
-		{"unrecognised command", "test-9a8-script", "", "", false},
+		{"wrapper command is claude", "test-9a8-script", "", "claude", true},
 		{"empty name", "", "", "", false},
 	}
 	for _, tt := range tests {

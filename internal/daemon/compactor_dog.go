@@ -7,7 +7,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -53,8 +52,8 @@ const compactorDogTickInterval = 15 * time.Minute
 
 // compactorDogCycle runs one monitoring cycle and reports whether it
 // completed cleanly: compactorDogCycleFn's answer when a test set one, else
-// the real cycle. A cycle opens a SQL connection to every production database
-// and pours a dog molecule, so a test of the schedule must not need Dolt.
+// the real cycle. A cycle opens a SQL connection to every production database,
+// so a test of the schedule must not need Dolt.
 // Recording the last-run time stays outside the seam — the record is what
 // the schedule is built on, and it must only happen for a cycle this return
 // value calls clean (gt-4uxs): a cycle that found no databases or failed
@@ -166,8 +165,8 @@ func (d *Daemon) triggerCompactorDog() {
 //
 // The in-memory time is set even when the write fails: an unwritable daemon
 // directory would otherwise leave the file stale, so every 15-minute check
-// would see a due patrol and run a full cycle — and each cycle pours a
-// molecule, making that a bead leak rather than just noise. A restart then
+// would see a due patrol and run a full cycle, opening a SQL connection to
+// every production database each time. A restart then
 // reads the missing record as "run the check", which is the safe direction for
 // a monitor.
 func (d *Daemon) recordCompactorDogRun() {
@@ -211,13 +210,6 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 // procedure (docs/dolt-history-offline.md) with a single trigger, a database
 // past 2 GB.
 //
-// ZFC Exemption: This dog executes imperatively in Go rather than via agent-driven
-// formula execution. The mol-dog-compactor formula is used for observability
-// tracking only (pourDogMolecule + closeStep/failStep). Agent execution is
-// impractical because the patrol needs database/sql connections and a stable
-// per-run step ledger that outlives any single agent session. See
-// mol-dog-compactor.formula.toml for full rationale.
-//
 // Returns whether the cycle completed cleanly — false when there was nothing
 // to inspect or every inspection errored, so the caller knows not to record
 // this as a completed run (gt-4uxs).
@@ -231,13 +223,13 @@ func (d *Daemon) runCompactorDog() bool {
 
 	warnDeprecatedCompactorConfig(d, compactorDogConfig(d.patrolConfig))
 
-	mol := d.pourDogMolecule(constants.MolDogCompactor, nil)
-	defer mol.close()
+	cycle := d.startDogCycle("compactor_dog")
+	defer cycle.close()
 
 	databases := d.compactorDatabases()
 	if len(databases) == 0 {
 		d.logger.Printf("compactor_dog: no databases to check")
-		mol.failStep("inspect", "no databases found")
+		cycle.failStep("inspect", "no databases found")
 		return false
 	}
 
@@ -271,9 +263,9 @@ func (d *Daemon) runCompactorDog() bool {
 	}
 
 	if errors > 0 {
-		mol.failStep("inspect", fmt.Sprintf("%d databases had errors", errors))
+		cycle.failStep("inspect", fmt.Sprintf("%d databases had errors", errors))
 	} else {
-		mol.closeStep("inspect")
+		cycle.closeStep("inspect")
 	}
 
 	// Step "monitor": escalate. This step does not fail — escalation is the
@@ -287,11 +279,11 @@ func (d *Daemon) runCompactorDog() bool {
 				"(docs/dolt-history-offline.md), triggered only by a database past 2 GB.",
 			c.name, c.commits, threshold))
 	}
-	mol.closeStep("monitor")
+	cycle.closeStep("monitor")
 
 	d.logger.Printf("compactor_dog: cycle complete — above_threshold=%d below_threshold=%d errors=%d",
 		len(candidates), belowThreshold, errors)
-	mol.closeStep("report")
+	cycle.closeStep("report")
 
 	// A cycle that inspected every database without error is the only kind
 	// clean enough to record as a completed run; a partial or total inspection

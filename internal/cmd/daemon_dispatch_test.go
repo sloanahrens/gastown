@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -189,25 +188,19 @@ func TestIsActionableReadyBead(t *testing.T) {
 
 func TestPoolSeatPicture(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
-	pool := &config.PolecatPool{
-		LocalAgent:    "deepseek-flash",
-		MaxLocal:      2,
-		OverflowAgent: "flash-overflow",
-		MaxOverflow:   2,
-	}
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
 	sessions := []poolSession{
-		{name: "gastown/flint", agent: "deepseek-flash", created: now.Add(-time.Hour)},
-		{name: "gastown/jade", agent: "deepseek-flash", created: now.Add(-time.Minute)},
-		{name: "beads/fury", agent: "flash-overflow", created: now.Add(-time.Hour)},
+		{name: "gastown/flint", agent: "deepseek-flash"},
+		{name: "gastown/jade", agent: "deepseek-flash"},
+		{name: "beads/fury", agent: "claude-sonnet"},
 	}
 
 	seats := poolSeatPicture(pool, sessions)
 	if seats.Source != "polecat_pool" {
 		t.Errorf("source = %q, want polecat_pool", seats.Source)
 	}
-	if seats.Capacity != 4 || seats.Occupied != 3 || seats.Free != 1 {
-		t.Errorf("seats = %+v, want capacity 4, occupied 3, free 1", seats)
+	if seats.Capacity != 3 || seats.Occupied != 2 || seats.Free != 1 || seats.Uncapped {
+		t.Errorf("seats = %+v, want capacity 3, occupied 2, free 1, capped", seats)
 	}
 
 	// No pool at all: the model has nothing to say, and says so with an empty
@@ -216,29 +209,25 @@ func TestPoolSeatPicture(t *testing.T) {
 		t.Errorf("nil pool should leave Source empty, got %+v", got)
 	}
 
-	// A pool with no local_agent is a pool that was never configured.
-	if got := poolSeatPicture(&config.PolecatPool{MaxLocal: 2}, sessions); got.Source != "" {
-		t.Errorf("pool without local_agent should leave Source empty, got %+v", got)
+	// A pool with no overflow_agent has no seat to report.
+	if got := poolSeatPicture(&config.PolecatPool{MaxOverflow: 2}, sessions); got.Source != "" {
+		t.Errorf("pool without overflow_agent should leave Source empty, got %+v", got)
 	}
 }
 
-func TestPoolSeatPicture_UncappedOverflowIsAtLeastOneFreeSeat(t *testing.T) {
+func TestPoolSeatPicture_UncappedSeatIsAtLeastOneFreeSeat(t *testing.T) {
 	t.Parallel()
-	// An overflow seat with no cap is unbounded room: the pool never refuses a
-	// spawn, so a full local pool must not read as a town with no seat free.
-	pool := &config.PolecatPool{
-		LocalAgent:    "local",
-		MaxLocal:      1,
-		OverflowAgent: "overflow", // MaxOverflow 0 = uncapped
-	}
-	sessions := []poolSession{{name: "gastown/flint", agent: "local"}}
+	// A seat with no cap is unbounded room: the pool never refuses a spawn,
+	// so a busy town must not read as a town with no seat free.
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash"} // MaxOverflow 0 = uncapped
+	sessions := []poolSession{{name: "gastown/flint", agent: "deepseek-flash"}}
 
 	seats := poolSeatPicture(pool, sessions)
 	if !seats.Uncapped {
-		t.Fatalf("expected Uncapped for an unbounded overflow seat, got %+v", seats)
+		t.Fatalf("expected Uncapped for an unbounded seat, got %+v", seats)
 	}
 	if seats.Free < 1 {
-		t.Errorf("free = %d, want at least 1 while the overflow seat is uncapped", seats.Free)
+		t.Errorf("free = %d, want at least 1 while the seat is uncapped", seats.Free)
 	}
 }
 

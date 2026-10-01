@@ -33,11 +33,11 @@ import (
 // internal/daemon, so the call cannot go the other way).
 //
 // Seat accounting counts every live polecat session plus the in-flight seat
-// claims other slings hold, whoever slung them. seat-refill nudges, the
-// mayor's slings and the pool's idle_fill all land in that count, so the
-// ticker never pushes past a cap another path already filled — it skips the
-// tick instead. Turn seat-refill and idle_fill off when the ticker is the
-// town's only dispatcher, so the roster is the operator's to read.
+// claims other slings hold, whoever slung them. seat-refill nudges and the
+// mayor's slings both land in that count, so the ticker never pushes past a
+// cap another path already filled — it skips the tick instead. Turn
+// seat-refill off when the ticker is the town's only dispatcher, so the roster
+// is the operator's to read.
 
 const (
 	specDispatchActor       = "daemon/spec-dispatch"
@@ -741,8 +741,8 @@ func hasCommentWithPrefix(comments []beads.Comment, key string) bool {
 	return false
 }
 
-// specSlingParams is the sling a spec dispatch makes. The agent is explicit
-// and outranks route:* labels; there is no auto-convoy, so a failed dispatch
+// specSlingParams is the sling a spec dispatch makes. The agent is explicit;
+// there is no auto-convoy, so a failed dispatch
 // leaves the bead unassigned for the next tick rather than handing it to a
 // convoy re-feed loop; and every dispatch carries the host-safety instruction,
 // because the term scan is defense in depth and can miss.
@@ -752,7 +752,6 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat s
 		RigName:          c.Rig,
 		FormulaName:      formula,
 		Agent:            seat.Agent,
-		AgentBeatsRoute:  true,
 		Args:             specdispatch.HostSafetyPrompt,
 		FormulaFailFatal: true,
 		NoConvoy:         true,

@@ -130,7 +130,7 @@ the rig's settings/config.json under workflow.default_formula.
 Options:
   --pr=N        Run formula on GitHub PR #N
   --rig=NAME    Target specific rig (default: inferred from cwd, or sole registered rig)
-  --agent=ALIAS Override agent/runtime for all legs (e.g., gemini, codex)
+  --agent=ALIAS Override agent for all legs (e.g., claude-haiku)
   --dry-run     Show what would happen without executing
 
 Agent precedence (highest to lowest):
@@ -145,7 +145,7 @@ Examples:
   gt formula run shiny --pr=123           # Run on PR #123
   gt formula run security-audit --rig=beads  # Run in specific rig
   gt formula run release --dry-run        # Preview execution
-  gt formula run code-review --agent=gemini  # All legs use gemini`,
+  gt formula run code-review --agent=claude-haiku  # All legs use claude-haiku`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runFormulaRun,
 }
@@ -214,7 +214,7 @@ func init() {
 	formulaRunCmd.Flags().IntVar(&formulaRunPR, "pr", 0, "GitHub PR number to run formula on")
 	formulaRunCmd.Flags().StringVar(&formulaRunRig, "rig", "", "Target rig (default: inferred from cwd, or sole registered rig)")
 	formulaRunCmd.Flags().BoolVar(&formulaRunDryRun, "dry-run", false, "Preview execution without running")
-	formulaRunCmd.Flags().StringVar(&formulaRunAgent, "agent", "", "Override agent/runtime for all legs (e.g., gemini, codex, claude-haiku)")
+	formulaRunCmd.Flags().StringVar(&formulaRunAgent, "agent", "", "Override agent for all legs (e.g., claude-haiku)")
 	formulaRunCmd.Flags().StringSliceVar(&formulaRunFiles, "files", nil, "Files to pass to formula legs (available as {{.files}} in templates)")
 	formulaRunCmd.Flags().StringSliceVar(&formulaRunSet, "set", nil, "Set input variables as key=value pairs (available as {{.key}} in templates)")
 

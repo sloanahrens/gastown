@@ -19,7 +19,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -201,9 +200,8 @@ func (d *Daemon) syncJsonlGitBackup() {
 		}
 	}()
 
-	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
-	mol := d.pourDogMolecule(constants.MolDogJSONL, nil)
-	defer mol.close()
+	cycle := d.startDogCycle("jsonl_git_backup")
+	defer cycle.close()
 
 	config := d.patrolConfig.Patrols.JsonlGitBackup
 
@@ -223,7 +221,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// signal anywhere that offsite backup was dead (gt-kme).
 	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		d.logger.Printf("jsonl_git_backup: cannot initialize git repo %s: %v", gitRepo, err)
-		mol.failStep("export", "git repo init failed: "+err.Error())
+		cycle.failStep("export", "git repo init failed: "+err.Error())
 		d.escalateAlert(alertKeyJSONLInit, "jsonl_git_backup", fmt.Sprintf("cannot initialize offsite backup repo %s: %v", gitRepo, err))
 		return
 	}
@@ -258,7 +256,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("jsonl_git_backup: no databases found (configured or auto-discovered) under %s, skipping", dataDir)
-		mol.failStep("export", "no databases found")
+		cycle.failStep("export", "no databases found")
 		d.escalateAlert(alertKeyJSONLNoDBs, "jsonl_git_backup", fmt.Sprintf("no databases found under %s — offsite backup has nothing to export", dataDir))
 		return
 	}
@@ -282,11 +280,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	if exported == 0 {
 		d.logger.Printf("jsonl_git_backup: no databases exported successfully")
-		mol.failStep("export", "no databases exported successfully")
+		cycle.failStep("export", "no databases exported successfully")
 		return
 	}
 
-	mol.closeStep("export")
+	cycle.closeStep("export")
 
 	// Phase D: Pollution firewall — filter test data from exports.
 	removed := d.applyPollutionFilter(gitRepo, databases)
@@ -304,7 +302,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 		d.clearAlerts("no suspicious records survived scrub", alertKeyJSONLScrub)
 	}
 
-	mol.closeStep("verify")
+	cycle.closeStep("verify")
 
 	// Phase D: Spike detection — compare current counts against the rolling
 	// baseline derived from recent backup commit history.
@@ -325,14 +323,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 				gitRepo, gitRepo, gitRepo, gitRepo)
 		}
 		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", msg)
-		mol.failStep("push", baselineErr.Error())
+		cycle.failStep("push", baselineErr.Error())
 		return // Do NOT commit — no baseline to verify against.
 	}
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
 		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report)
-		mol.failStep("push", "spike detected")
+		cycle.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
 	d.clearAlerts("no export spike", alertKeyJSONLSpike)
@@ -343,7 +341,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if err := d.commitAndPushJsonlBackup(gitRepo, databases, counts, failed); err != nil {
 		d.logger.Printf("jsonl_git_backup: git operations failed: %v", err)
 		pushStatus = "failed"
-		mol.failStep("push", err.Error())
+		cycle.failStep("push", err.Error())
 		d.jsonlPushFailures++
 		if d.jsonlPushFailures >= maxConsecutivePushFailures {
 			d.logger.Printf("jsonl_git_backup: ESCALATION: %d consecutive push failures", d.jsonlPushFailures)
@@ -357,12 +355,12 @@ func (d *Daemon) syncJsonlGitBackup() {
 		}
 	} else {
 		d.jsonlPushFailures = 0
-		mol.closeStep("push")
+		cycle.closeStep("push")
 		d.clearAlerts("backup push succeeded", alertKeyJSONLPush)
 	}
 
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
-	mol.closeStep("report")
+	cycle.closeStep("report")
 }
 
 // supplementalTables lists non-issues tables to include in JSONL backup.
