@@ -226,7 +226,6 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 	write("plugins/p/plugin.md", "`gt three`\n")
 	write("plugins/p/run.sh", "gt four\n")
 	write("plugins/p/run_test.sh", "gt skipped\n")
-	write("internal/hooks/templates/claude/s.json", `"gt five"`+"\n")
 	write("scripts/guards/g.sh", "gt six\n")
 	write("scripts/s.sh", "gt nine\n")
 	write("scripts/s.py", "gt skipped\n")
@@ -248,7 +247,7 @@ func TestScanRepoSelectsFiles(t *testing.T) {
 		words = append(words, r.Words[0])
 	}
 	got := strings.Join(words, ",")
-	if got != "twelve,thirteen,ten,seven,one,five,two,eight,three,four,six,nine" {
+	if got != "twelve,thirteen,ten,seven,one,two,eight,three,four,six,nine" {
 		t.Fatalf("ScanRepo words = %s", got)
 	}
 	for _, r := range refs {

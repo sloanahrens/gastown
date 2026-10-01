@@ -118,8 +118,6 @@ func refSource(file string) string {
 		return "go"
 	case strings.HasPrefix(file, "internal/formula/formulas/"):
 		return "formulas"
-	case strings.HasPrefix(file, "internal/hooks/templates/"):
-		return "hooks"
 	case strings.HasPrefix(file, "internal/templates/"), strings.HasPrefix(file, "templates/"):
 		return "templates"
 	case strings.HasPrefix(file, "plugins/"):

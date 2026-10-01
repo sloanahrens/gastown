@@ -429,7 +429,7 @@ var (
 
 // scannerFor picks the scanner for a repo-relative path, or nil when the
 // file is not one of the lint's inputs: formulas, templates, plugins, hook
-// templates and scripts, role configs, repo scripts and git hooks, the repo's
+// scripts, role configs, repo scripts and git hooks, the repo's
 // agent commands and skills, and non-test Go under internal/ and cmd/.
 func scannerFor(rel string) scanFunc {
 	base := filepath.Base(rel)
@@ -446,8 +446,6 @@ func scannerFor(rel string) scanFunc {
 		if ext == ".toml" {
 			return scanTOMLFile
 		}
-	case under("internal/hooks/templates/"):
-		return scanShellFile
 	case under("internal/templates/"), under("templates/"):
 		if ext == ".md" || ext == ".tmpl" {
 			return scanMDFile
