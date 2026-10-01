@@ -49,8 +49,19 @@ func logCommandUsage(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	actor := usageActor(os.Getenv, ui.IsTerminal())
+	actor := commandActor(cmd, os.Getenv, ui.IsTerminal())
 	_ = appendUsage(gtDataDir(), time.Now(), buildCommandPath(cmd), actor, len(args))
+}
+
+// commandActor is the usage-log actor for cmd. "gt daemon run" is the
+// daemon whatever environment launched it: runDaemonRun clears inherited
+// identity and sets BD_ACTOR=daemon, but only after this entry is written,
+// and the launchd job sets no identity of its own (gt-dswsc).
+func commandActor(cmd *cobra.Command, getenv func(string) string, interactive bool) string {
+	if cmd == daemonRunCmd {
+		return daemonRunActor
+	}
+	return usageActor(getenv, interactive)
 }
 
 // usageLogSuppressed reports whether this process must not write the usage

@@ -463,6 +463,10 @@ func runDaemonLogs(cmd *cobra.Command, args []string) error {
 	return tailCmd.Run()
 }
 
+// daemonRunActor is the identity of the daemon process and of everything it
+// spawns.
+const daemonRunActor = "daemon"
+
 func runDaemonRun(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -477,7 +481,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	for _, k := range agentconfig.IdentityEnvVars {
 		os.Unsetenv(k)
 	}
-	os.Setenv("BD_ACTOR", "daemon")
+	os.Setenv("BD_ACTOR", daemonRunActor)
 
 	config := daemon.DefaultConfig(townRoot)
 	d, err := daemon.New(config)
