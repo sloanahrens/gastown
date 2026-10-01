@@ -3,6 +3,7 @@ package git
 import (
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -42,6 +43,19 @@ import (
 // only counts as a revert when the removed code does not survive anywhere
 // else in its package at the candidate tip; the ones whose code survives are
 // reported as relocations (RevertReport.Relocated) rather than refused.
+//
+// A fourth shape is a deletion, and it arrives from the other side of the
+// same question. A candidate that retires a package deletes every file in it,
+// and one that carries a file into another package deletes it from the path
+// the observation is anchored on; both leave the candidate's tree without a
+// path a target commit wrote, which is also what a stale checkout's tree looks
+// like. Reading the deletion as that inversion refused two branches that were
+// doing what their beads said — retiring internal/townlog, and moving
+// internal/cmd's slot tests into internal/slot — and both needed a hand
+// override (gt-mdyds). So a path the candidate no longer has is read against
+// the candidate's own tree instead: content that survives at a path the
+// candidate added is a move (git's rename rule, and git's rename threshold),
+// and a package the candidate no longer holds at all is a retirement.
 
 // revertScanCommits bounds how far back through target's history the check
 // looks. A candidate can only revert commits merged after its checkout was
@@ -68,9 +82,11 @@ type RevertReport struct {
 
 	// Relocated are changes the candidate moves instead of undoing: every line
 	// of code the target commit added still exists in the package at the
-	// candidate tip, at a new position or in a sibling file, so the behavior
-	// those lines carry survives the submission (gt-x748o). These are reported
-	// for the operator's benefit and are not a reason to refuse.
+	// candidate tip, at a new position or in a sibling file (gt-x748o), or the
+	// path the target commit wrote has been carried to a path the candidate
+	// added (gt-mdyds). Either way the behavior those lines carry survives the
+	// submission. These are reported for the operator's benefit and are not a
+	// reason to refuse.
 	Relocated []RevertedMerge
 }
 
@@ -118,6 +134,13 @@ var _ RevertReader = (*Git)(nil)
 // Each detection is then classified against the rest of the path's package: an
 // observation whose added code survives there is a relocation, and every
 // observation is one or the other (gt-x748o).
+//
+// A path headTreeRef no longer has is classified against its tree rather than
+// its package: content carried to a path headTreeRef added is a relocation
+// (gt-mdyds), and a package headTreeRef holds no file of is a retirement, which
+// is reported as neither — the candidate is not reverting the package, it is
+// deleting it, which is a thing its own bead has to say and not something a
+// stale tree can be distinguished from here.
 func DetectRevertedMerges(g RevertReader, target, headTreeRef string) (RevertReport, error) {
 	mergeBase, err := g.MergeBase(target, "HEAD")
 	if err != nil {
@@ -143,7 +166,7 @@ func DetectRevertedMerges(g RevertReader, target, headTreeRef string) (RevertRep
 	var report RevertReport
 	revertedAt := make(map[string]int)  // commit -> index in report.Reverted
 	relocatedAt := make(map[string]int) // commit -> index in report.Relocated
-	content := newPackageContent(g, headBlobs)
+	content := newPackageContent(g, baseBlobs, targetBlobs, headBlobs)
 
 	for _, ch := range changes {
 		// preImage is the content the commit started from ("" if it created the
@@ -172,6 +195,24 @@ func DetectRevertedMerges(g RevertReader, target, headTreeRef string) (RevertRep
 		}
 		if !reverts {
 			continue
+		}
+
+		// headTreeRef does not have this path at all. Read that against
+		// headTreeRef's own tree before the package the path came from, which
+		// is what separates a deletion from a stale tree that never saw the
+		// commit (gt-mdyds).
+		if head == "" {
+			renamed, err := content.changeRenamed(ch.Path, base)
+			if err != nil {
+				return RevertReport{}, fmt.Errorf("checking whether %s moves %s: %w", headTreeRef, ch.Path, err)
+			}
+			if renamed {
+				report.Relocated = addPath(report.Relocated, relocatedAt, ch.Commit, ch.Path)
+				continue
+			}
+			if content.packageRetired(ch.Path) {
+				continue
+			}
 		}
 
 		relocated, err := content.changeMoved(ch.Path, preImage, postImage)
@@ -262,15 +303,56 @@ func multisetContains(have, want map[string]int) bool {
 // — the code leaving the path it was observed on is the move — so the search
 // covers the directory rather than that one path. A Go package is one
 // directory; a subdirectory is a different package, and code there does not
-// mean the change survived.
+// mean the change survived. Only a whole file carries that meaning across the
+// boundary, and changeRenamed is where it does.
 type packageContent struct {
-	g     RevertReader
-	blobs map[string]string          // path -> blob sha, from the tree under search
-	lines map[string]map[string]bool // directory -> set of its lines, as changeMoved compares them
+	g         RevertReader
+	blobs     map[string]string          // path -> blob sha, from the tree under search
+	additions []string                   // paths the tree under search has and the target did not, sorted
+	counts    map[string]int             // blob sha -> how many lines it holds, read once
+	lines     map[string]map[string]bool // directory -> set of its lines, as changeMoved compares them
 }
 
-func newPackageContent(g RevertReader, blobs map[string]string) *packageContent {
-	return &packageContent{g: g, blobs: blobs, lines: map[string]map[string]bool{}}
+func newPackageContent(g RevertReader, baseBlobs, targetBlobs, headBlobs map[string]string) *packageContent {
+	return &packageContent{
+		g:         g,
+		blobs:     headBlobs,
+		additions: candidateAdditions(baseBlobs, targetBlobs, headBlobs),
+		counts:    map[string]int{},
+		lines:     map[string]map[string]bool{},
+	}
+}
+
+// candidateAdditions returns the paths the tree under search holds that neither
+// the merge base nor the target holds: the files the candidate's own work
+// created, and so the only paths a file it moved can have landed on. A path the
+// target holds is not where a move landed — the candidate did not put it there.
+func candidateAdditions(baseBlobs, targetBlobs, headBlobs map[string]string) []string {
+	var paths []string
+	for filePath := range headBlobs {
+		if _, inBase := baseBlobs[filePath]; inBase {
+			continue
+		}
+		if _, inTarget := targetBlobs[filePath]; inTarget {
+			continue
+		}
+		paths = append(paths, filePath)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// packageRetired reports whether the tree under search holds no file in
+// filePath's directory: the package is gone from the candidate, rather than one
+// file missing from a package that survives it.
+func (p *packageContent) packageRetired(filePath string) bool {
+	dir := path.Dir(filePath)
+	for candidate := range p.blobs {
+		if path.Dir(candidate) == dir {
+			return false
+		}
+	}
+	return true
 }
 
 // changeMoved reports whether every line of code the change from preImage to
@@ -340,6 +422,91 @@ func (p *packageContent) readDir(dir string) (map[string]bool, error) {
 		}
 	}
 	return lines, nil
+}
+
+// changeRenamed reports whether the candidate moved the file at filePath to a
+// path its own work added, by the rule git's rename detection applies: at least
+// half of the larger blob's lines are common to both (`-M` detects a rename at
+// 50%). The file is what moves, and it is not required to arrive verbatim — the
+// package clause and the references around it are rewritten where it lands —
+// which is why the line containment changeMoved asks for cannot answer this,
+// and why a whole file is what may cross a package boundary: a block of code
+// leaving a package whose file survives is the revert gt-x748o keeps refusing,
+// and this is git's rename, whatever directory it lands in (gt-mdyds).
+//
+// blob is the content the path held in the tree the candidate deleted it from.
+func (p *packageContent) changeRenamed(filePath, blob string) (bool, error) {
+	source, err := p.lineCount(blob)
+	if err != nil || source == 0 {
+		return false, err
+	}
+	for _, dest := range p.additions {
+		if dest == filePath {
+			continue
+		}
+		destBlob := p.blobs[dest]
+		landed, err := p.lineCount(destBlob)
+		if err != nil {
+			return false, err
+		}
+		// The move keeps at least half of the larger blob's lines, so a pair
+		// whose smaller side is under half the larger cannot be one: the diff
+		// below is the only part worth asking git for, and this answers most
+		// pairs without it. It also drops an empty destination, which no
+		// rename produces.
+		if 2*min(source, landed) < max(source, landed) {
+			continue
+		}
+		moved, err := blobsRenamed(p.g, blob, destBlob, source, landed)
+		if err != nil {
+			return false, err
+		}
+		if moved {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// blobsRenamed reports whether two blobs are the two ends of one file's move,
+// given the number of lines each holds. The lines common to both are the ones
+// the diff does not report as added or removed; each line has to be common, so
+// a line the diff reports on both sides was rewritten rather than kept.
+func blobsRenamed(g RevertReader, oldBlob, newBlob string, oldLines, newLines int) (bool, error) {
+	added, removed, err := g.BlobDiffLines(oldBlob, newBlob)
+	if err != nil {
+		return false, fmt.Errorf("diffing %s..%s: %w", oldBlob, newBlob, err)
+	}
+	common := min(oldLines-countLines(removed), newLines-countLines(added))
+	return 2*common >= max(oldLines, newLines), nil
+}
+
+// lineCount returns how many lines a blob holds, reading each blob once for the
+// whole scan.
+func (p *packageContent) lineCount(blob string) (int, error) {
+	if n, read := p.counts[blob]; read {
+		return n, nil
+	}
+	content, err := p.g.BlobContent(blob)
+	if err != nil {
+		return 0, fmt.Errorf("reading blob %s: %w", blob, err)
+	}
+	n := 0
+	if content != "" {
+		n = strings.Count(content, "\n") + 1
+	}
+	p.counts[blob] = n
+	return n, nil
+}
+
+// countLines returns how many lines a line multiset counts, so two diff sides
+// can be subtracted from two blob sizes.
+func countLines(lines map[string]int) int {
+	n := 0
+	for _, count := range lines {
+		n += count
+	}
+	return n
 }
 
 // addedLines returns the multiset of lines the change from preImage to
