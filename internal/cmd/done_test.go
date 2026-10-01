@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -682,37 +683,17 @@ func TestDoneCircularRedirectProtection(t *testing.T) {
 // contain the actual issue ID (test-845.1), but the status query finds it.
 func TestFindHookedBeadForAgent(t *testing.T) {
 	t.Parallel()
-	// Skip: bd CLI 0.47.2 has a bug where database writes don't commit
-	// ("sql: database is closed" during auto-flush). This blocks tests
-	// that need to create issues. See internal issue for tracking.
-	t.Skip("bd CLI 0.47.2 bug: database writes don't commit")
-
 	tests := []struct {
 		name        string
 		agentID     string
-		setupBeads  func(t *testing.T, bd *beads.Beads) // setup hooked bead
+		seed        []beads.Issue
 		wantIssueID string
 	}{
 		{
 			name:    "hooked bead assigned to agent returns issue ID",
 			agentID: "testrig/polecats/furiosa",
-			setupBeads: func(t *testing.T, bd *beads.Beads) {
-				// Create a task and set it to hooked with assignee
-				_, err := bd.CreateWithID("test-456", beads.CreateOptions{
-					Title:  "Task to be hooked",
-					Labels: []string{"gt:task"},
-				})
-				if err != nil {
-					t.Fatalf("create task bead: %v", err)
-				}
-				hookedStatus := beads.StatusHooked
-				assignee := "testrig/polecats/furiosa"
-				if err := bd.Update("test-456", beads.UpdateOptions{
-					Status:   &hookedStatus,
-					Assignee: &assignee,
-				}); err != nil {
-					t.Fatalf("update bead to hooked: %v", err)
-				}
+			seed: []beads.Issue{
+				{ID: "test-456", Status: string(beads.StatusHooked), Assignee: "testrig/polecats/furiosa"},
 			},
 			wantIssueID: "test-456",
 		},
@@ -724,55 +705,40 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 			// while the real assignment re-dkf sat in_progress).
 			name:    "in_progress bead assigned to agent returns issue ID",
 			agentID: "testrig/polecats/toast",
-			setupBeads: func(t *testing.T, bd *beads.Beads) {
-				_, err := bd.CreateWithID("test-789", beads.CreateOptions{
-					Title:  "Claimed task",
-					Labels: []string{"gt:task"},
-				})
-				if err != nil {
-					t.Fatalf("create task bead: %v", err)
-				}
-				inProgress := "in_progress"
-				assignee := "testrig/polecats/toast"
-				if err := bd.Update("test-789", beads.UpdateOptions{
-					Status:   &inProgress,
-					Assignee: &assignee,
-				}); err != nil {
-					t.Fatalf("update bead to in_progress: %v", err)
-				}
+			seed: []beads.Issue{
+				{ID: "test-789", Status: "in_progress", Assignee: "testrig/polecats/toast"},
 			},
 			wantIssueID: "test-789",
 		},
 		{
-			name:        "no hooked beads returns empty",
-			agentID:     "testrig/polecats/idle",
-			setupBeads:  func(t *testing.T, bd *beads.Beads) {},
+			name:    "hooked wins over in_progress",
+			agentID: "testrig/polecats/toast",
+			seed: []beads.Issue{
+				{ID: "test-789", Status: "in_progress", Assignee: "testrig/polecats/toast"},
+				{ID: "test-456", Status: string(beads.StatusHooked), Assignee: "testrig/polecats/toast"},
+			},
+			wantIssueID: "test-456",
+		},
+		{
+			name:    "another agent's hooked bead is not returned",
+			agentID: "testrig/polecats/idle",
+			seed: []beads.Issue{
+				{ID: "test-456", Status: string(beads.StatusHooked), Assignee: "testrig/polecats/furiosa"},
+			},
 			wantIssueID: "",
 		},
 		{
 			name:        "empty agent ID returns empty",
 			agentID:     "",
-			setupBeads:  func(t *testing.T, bd *beads.Beads) {},
 			wantIssueID: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-
-			// Initialize the beads database
-			cmd := exec.Command("bd", "init", "--prefix", "test", "--quiet")
-			cmd.Dir = tmpDir
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("bd init: %v\n%s", err, output)
-			}
-
-			// beads.New expects the .beads directory path
-			beadsDir := filepath.Join(tmpDir, ".beads")
-			bd := beads.New(beadsDir)
-
-			tt.setupBeads(t, bd)
+			t.Parallel()
+			bd := beadsfake.New(beadsfake.WithPrefix("test"))
+			bd.Seed(tt.seed...)
 
 			got := findHookedBeadForAgent(bd, tt.agentID)
 			if got != tt.wantIssueID {
