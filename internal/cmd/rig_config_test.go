@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -323,7 +322,7 @@ func noRigBeadEnv(townRoot string, out, errOut io.Writer) rigCmdEnv {
 	env.findRig = func(rigName string) (string, *rig.Rig, error) {
 		path, r, err := find(rigName)
 		if r != nil {
-			r.BDRunner = beads.UnavailableBD
+			downRigIdentityBeads(r)
 		}
 		return path, r, err
 	}
