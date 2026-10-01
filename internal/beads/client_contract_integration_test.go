@@ -51,6 +51,11 @@ func TestIntegrationClientContract(t *testing.T) {
 		if err := b.Init("gt"); err != nil {
 			t.Fatalf("bd init on the test container: %v", err)
 		}
+		// Every store gastown makes turns the events journal on in its
+		// config (gt-7iwy0.7); the admin contract reads the journal.
+		if _, err := beads.EnsureEventsJournal(b); err != nil {
+			t.Fatalf("events journal on: %v", err)
+		}
 		return b
 	}
 	t.Run("client", func(t *testing.T) {
