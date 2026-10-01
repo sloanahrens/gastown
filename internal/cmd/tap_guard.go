@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -211,7 +210,13 @@ func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
 	// git switch -c*) invoke this same command with no argument telling us
 	// which one fired, so the actual command must be read back off stdin
 	// (Claude Code hook protocol).
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardPRWorkflow(os.Stdin, os.Stderr, realGuardProcess())
+}
+
+// tapGuardPRWorkflow is the pr-workflow guard: it reads the hook payload
+// from stdin and the session from proc, and prints a block to stderr.
+func tapGuardPRWorkflow(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil {
 		// Unreadable stdin is "we don't know what command this is", not
 		// "nothing to block" — the same distinction evaluatePRWorkflowGuard
@@ -223,12 +228,12 @@ func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
 		input = nil
 	}
 
-	switch evaluatePRWorkflowGuard(input) {
+	switch evaluatePRWorkflowGuard(input, proc) {
 	case prWorkflowBlockAgentContext:
-		printPRWorkflowAgentContextBlock()
+		printPRWorkflowAgentContextBlock(stderr)
 		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
 	case prWorkflowBlockMaintainerOrigin:
-		printPRWorkflowMaintainerOriginBlock()
+		printPRWorkflowMaintainerOriginBlock(stderr)
 		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
 	}
 	return nil
@@ -254,7 +259,7 @@ const (
 // self-filter below and falls through to the unconditional context/origin
 // check — the guard's only behavior before the self-filter existed — rather
 // than allowing everything.
-func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
+func evaluatePRWorkflowGuard(input []byte, proc guardProcess) prWorkflowGuardDecision {
 	command := extractCommand(input)
 
 	// gt-6hg7: a polecat that resumes a branch whose push already went out
@@ -288,8 +293,8 @@ func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	//     blocked-shape 'git checkout -b' through and read that as broken
 	//     matcher wiring (gt-xy4b). Last because it is the only condition
 	//     that touches the filesystem.
-	if isPolecatSession() && isLeadingBranchCreation(command) &&
-		!isPRCreateCommand(command) && isInOwnPolecatWorktree(input) {
+	if isPolecatSession(proc) && isLeadingBranchCreation(command) &&
+		!isPRCreateCommand(command) && isInOwnPolecatWorktree(input, proc) {
 		return prWorkflowAllow
 	}
 
@@ -302,12 +307,12 @@ func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	}
 
 	// Check if we're in a Gas Town agent context
-	if isGasTownAgentContext() {
+	if isGasTownAgentContextIn(proc.getenv, proc.getwd) {
 		return prWorkflowBlockAgentContext
 	}
 
 	// Check if origin is the maintainer's repo (steveyegge/gastown)
-	if isMaintainerOrigin() {
+	if isMaintainerOrigin(proc) {
 		return prWorkflowBlockMaintainerOrigin
 	}
 
@@ -315,37 +320,37 @@ func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	return prWorkflowAllow
 }
 
-func printPRWorkflowAgentContextBlock() {
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ❌ PR WORKFLOW BLOCKED                                          ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintln(os.Stderr, "║  Gas Town workers push directly to main. PRs are forbidden.     ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create / git checkout -b / git switch -c    ║")
-	fmt.Fprintln(os.Stderr, "║  Do this:     git add . && git commit && git push origin main   ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  In your own polecat worktree, creating a session branch is     ║")
-	fmt.Fprintln(os.Stderr, "║  allowed: git checkout -b <branch> / git switch -c <branch>.    ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  Why? PRs add friction that breaks autonomous execution.        ║")
-	fmt.Fprintln(os.Stderr, "║  See: ~/gt/docs/PRIMING.md (GUPP principle)                     ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(os.Stderr, "")
+func printPRWorkflowAgentContextBlock(w io.Writer) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(w, "║  ❌ PR WORKFLOW BLOCKED                                          ║")
+	fmt.Fprintln(w, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintln(w, "║  Gas Town workers push directly to main. PRs are forbidden.     ║")
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  Instead of:  gh pr create / git checkout -b / git switch -c    ║")
+	fmt.Fprintln(w, "║  Do this:     git add . && git commit && git push origin main   ║")
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  In your own polecat worktree, creating a session branch is     ║")
+	fmt.Fprintln(w, "║  allowed: git checkout -b <branch> / git switch -c <branch>.    ║")
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  Why? PRs add friction that breaks autonomous execution.        ║")
+	fmt.Fprintln(w, "║  See: ~/gt/docs/PRIMING.md (GUPP principle)                     ║")
+	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(w, "")
 }
 
-func printPRWorkflowMaintainerOriginBlock() {
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ❌ PR BLOCKED - MAINTAINER ORIGIN                               ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintln(os.Stderr, "║  Your origin is steveyegge/gastown - push directly to main.     ║")
-	fmt.Fprintln(os.Stderr, "║  PRs are for external contributors, not maintainers.            ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  Instead of:  gh pr create                                      ║")
-	fmt.Fprintln(os.Stderr, "║  Do this:     git push origin main                              ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(os.Stderr, "")
+func printPRWorkflowMaintainerOriginBlock(w io.Writer) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(w, "║  ❌ PR BLOCKED - MAINTAINER ORIGIN                               ║")
+	fmt.Fprintln(w, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintln(w, "║  Your origin is steveyegge/gastown - push directly to main.     ║")
+	fmt.Fprintln(w, "║  PRs are for external contributors, not maintainers.            ║")
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  Instead of:  gh pr create                                      ║")
+	fmt.Fprintln(w, "║  Do this:     git push origin main                              ║")
+	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(w, "")
 }
 
 // isGasTownAgentContext returns true if we're running as a Gas Town managed agent.
@@ -390,13 +395,11 @@ func isGasTownAgentContextIn(getenv func(string) string, getwd func() (string, e
 
 // isMaintainerOrigin returns true if the origin remote points to the maintainer's repo.
 // This prevents the maintainer from accidentally creating PRs in their own repo.
-func isMaintainerOrigin() bool {
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	output, err := cmd.Output()
+func isMaintainerOrigin(proc guardProcess) bool {
+	url, err := proc.originURL()
 	if err != nil {
 		return false
 	}
-	url := strings.TrimSpace(string(output))
 	// Match both HTTPS and SSH URL formats:
 	// - https://github.com/steveyegge/gastown.git
 	// - git@github.com:steveyegge/gastown.git
@@ -408,11 +411,11 @@ func isMaintainerOrigin() bool {
 // `gt handoff` use: a coordinator (mayor, witness) may carry a
 // stale GT_POLECAT in its environment from having spawned polecats, so
 // GT_ROLE decides whenever it is set and GT_POLECAT is only the fallback.
-func isPolecatSession() bool {
-	if role := strings.TrimSpace(os.Getenv("GT_ROLE")); role != "" {
+func isPolecatSession(proc guardProcess) bool {
+	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
 		return isPolecatRole(role)
 	}
-	return os.Getenv("GT_POLECAT") != ""
+	return proc.getenv("GT_POLECAT") != ""
 }
 
 // isPolecatRole reports whether a GT_ROLE value names a polecat — the one
@@ -437,8 +440,8 @@ func isPolecatRole(role string) bool {
 // of its own. An unresolvable scope is not a polecat session as far as this
 // question goes, so the caller stays on the blocking side — the same
 // fail-closed direction resolvePolecatPathScope's callers rely on.
-func isInOwnPolecatWorktree(input []byte) bool {
-	scope, ok := resolvePolecatPathScope(payloadCwd(input))
+func isInOwnPolecatWorktree(input []byte, proc guardProcess) bool {
+	scope, ok := resolvePolecatPathScope(payloadCwd(input), proc)
 	if !ok {
 		return false
 	}

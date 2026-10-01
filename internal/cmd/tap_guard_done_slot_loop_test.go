@@ -109,7 +109,7 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 func TestDoneSlotLoopReachesGuard(t *testing.T) {
 	t.Parallel()
 	const incident = `for i in $(seq 1 300); do if gt slot status | grep -q free; then gt done; fi; done`
-	reason, alt := evaluateDangerousCommand(incident, 0, "")
+	reason, alt := evaluateDangerousCommand(incident, 0, noTownSession)
 	if reason != doneSlotLoopReason {
 		t.Fatalf("evaluateDangerousCommand(%q) reason = %q, want %q", incident, reason, doneSlotLoopReason)
 	}
@@ -117,7 +117,7 @@ func TestDoneSlotLoopReachesGuard(t *testing.T) {
 		t.Error("no alternative line: the refusal must name the sanctioned path")
 	}
 	// A single `gt done` is the sanctioned path and must stay untouched.
-	if reason, _ := evaluateDangerousCommand("gt done", 0, ""); reason != "" {
+	if reason, _ := evaluateDangerousCommand("gt done", 0, noTownSession); reason != "" {
 		t.Errorf("evaluateDangerousCommand(\"gt done\") blocked: %q", reason)
 	}
 	// Nested payloads are judged the same way: the loop lives inside a
@@ -129,7 +129,7 @@ func TestDoneSlotLoopReachesGuard(t *testing.T) {
 		"echo $(for i in 1 2; do gt slot status; done)",
 		`seq 1 300 | xargs -I{} bash -c 'gt done'`,
 	} {
-		if reason, _ := evaluateDangerousCommand(nested, 0, ""); reason != doneSlotLoopReason {
+		if reason, _ := evaluateDangerousCommand(nested, 0, noTownSession); reason != doneSlotLoopReason {
 			t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", nested, reason, doneSlotLoopReason)
 		}
 	}
@@ -140,18 +140,19 @@ func TestDoneSlotLoopReachesGuard(t *testing.T) {
 // names the one-shot escalation path (gt-7dxw, and the gt-pnkd ruling the
 // incident produced).
 func TestRunTapGuardDangerous_DoneSlotLoopRefusalText(t *testing.T) {
-	t.Setenv("GT_POLECAT", "ruby")
-	t.Setenv("GT_ROLE", "gastown/polecats/ruby")
-	t.Setenv("GT_POLECAT_PATH", "/tmp/polecats/ruby")
-	t.Chdir(t.TempDir())
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT":      "ruby",
+		"GT_ROLE":         "gastown/polecats/ruby",
+		"GT_POLECAT_PATH": "/tmp/polecats/ruby",
+	}, t.TempDir())
 
 	command := `for i in $(seq 1 300); do gt done; done`
 	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(command) + `}}`
 
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, input, func() { err = runTapGuardDangerous(tapGuardDangerousCmd, nil) })
-	})
+	var buf strings.Builder
+	err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
+	stderr := buf.String()
 	if err == nil {
 		t.Fatal("the slot-polling gt done loop was allowed through the hook")
 	}
@@ -171,16 +172,17 @@ func TestRunTapGuardDangerous_DoneSlotLoopRefusalText(t *testing.T) {
 // A single `gt done` must survive the whole hook path in a polecat session:
 // the rule exists to stop the loop around it, not the command itself.
 func TestRunTapGuardDangerous_PlainGtDoneAllowed(t *testing.T) {
-	t.Setenv("GT_POLECAT", "ruby")
-	t.Setenv("GT_ROLE", "gastown/polecats/ruby")
-	t.Setenv("GT_POLECAT_PATH", "/tmp/polecats/ruby")
-	t.Chdir(t.TempDir())
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT":      "ruby",
+		"GT_ROLE":         "gastown/polecats/ruby",
+		"GT_POLECAT_PATH": "/tmp/polecats/ruby",
+	}, t.TempDir())
 
 	input := `{"tool_name":"Bash","tool_input":{"command":"gt done"}}`
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, input, func() { err = runTapGuardDangerous(tapGuardDangerousCmd, nil) })
-	})
+	var buf strings.Builder
+	err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
+	stderr := buf.String()
 	if err != nil {
 		t.Errorf("plain `gt done` was blocked: err=%v stderr=%s", err, stderr)
 	}
@@ -190,16 +192,17 @@ func TestRunTapGuardDangerous_PlainGtDoneAllowed(t *testing.T) {
 // own authoring shape, and the body is invisible to every other rule because
 // stripHeredocBodies removes it before the tokens are built.
 func TestRunTapGuardDangerous_HeredocWrittenRetryScriptBlocked(t *testing.T) {
-	t.Setenv("GT_POLECAT", "ruby")
-	t.Setenv("GT_POLECAT_PATH", "/tmp/polecats/ruby")
-	t.Chdir(t.TempDir())
+	t.Parallel()
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT":      "ruby",
+		"GT_POLECAT_PATH": "/tmp/polecats/ruby",
+	}, t.TempDir())
 
 	command := "cat > /tmp/retry.sh <<'EOF'\nfor i in $(seq 1 300); do gt done; done\nEOF"
 	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(command) + `}}`
-	var err error
-	stderr := captureStderr(t, func() {
-		withStdin(t, input, func() { err = runTapGuardDangerous(tapGuardDangerousCmd, nil) })
-	})
+	var buf strings.Builder
+	err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
+	stderr := buf.String()
 	if err == nil {
 		t.Fatalf("writing a retry script was allowed through the hook: %s", stderr)
 	}

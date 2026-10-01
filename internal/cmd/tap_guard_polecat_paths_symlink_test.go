@@ -48,7 +48,7 @@ func resolvedTempDir(t *testing.T) string {
 // a write through raw must create exactly the file at want.
 func assertKernelLandsAt(t *testing.T, raw, cwd, want string) {
 	t.Helper()
-	got, ok := canonicalizeToolPath(raw, cwd)
+	got, ok := canonicalizeToolPath(bareGuardProcess, raw, cwd)
 	if !ok {
 		t.Fatalf("canonicalizeToolPath(%q) failed to resolve; the kernel resolves it to %s", raw, want)
 	}
@@ -161,7 +161,7 @@ func TestCanonicalizeToolPathMatchesKernel(t *testing.T) {
 		t.Parallel()
 		root := resolvedTempDir(t)
 		mustMkdirAll(t, filepath.Join(root, "w"))
-		got, ok := canonicalizeToolPath(filepath.Join(root, "w")+"/new/sub/../x.go", "")
+		got, ok := canonicalizeToolPath(bareGuardProcess, filepath.Join(root, "w")+"/new/sub/../x.go", "")
 		if !ok {
 			t.Fatal("expected a path under an existing directory to resolve")
 		}
@@ -175,7 +175,7 @@ func TestCanonicalizeToolPathMatchesKernel(t *testing.T) {
 		root := resolvedTempDir(t)
 		mustSymlink(t, "b", filepath.Join(root, "a"))
 		mustSymlink(t, "a", filepath.Join(root, "b"))
-		if got, ok := canonicalizeToolPath(filepath.Join(root, "a", "x"), ""); ok {
+		if got, ok := canonicalizeToolPath(bareGuardProcess, filepath.Join(root, "a", "x"), ""); ok {
 			t.Errorf("a symlink cycle resolved to %s, want a fail-closed failure", got)
 		}
 	})
@@ -197,6 +197,7 @@ func polecatSymlinkTownTmp(t *testing.T, p polecatTestTown) string {
 // writes it into the town's mayor dir, and the guard must decide on that real
 // location — for a Write tool call and for a Bash redirect alike.
 func TestPolecatPathGuardSymlinkResolution(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	tmp := polecatSymlinkTownTmp(t, p)
 	town, err := filepath.EvalSymlinks(p.town)
@@ -227,7 +228,7 @@ func TestPolecatPathGuardSymlinkResolution(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, ok := canonicalizeToolPath(tc.raw, p.worktree); !ok || got != tc.want {
+			if got, ok := canonicalizeToolPath(p.proc(), tc.raw, p.worktree); !ok || got != tc.want {
 				t.Errorf("canonicalizeToolPath(%q) = %q, %v; the kernel writes %s", tc.raw, got, ok, tc.want)
 			}
 			if err := p.run(t, "Write", fileInput(tc.raw)); err == nil {
@@ -252,6 +253,7 @@ func TestPolecatPathGuardSymlinkResolution(t *testing.T) {
 // by "..", lands in scratch — the guard must allow it, not judge the lexical
 // spelling (which names the polecat dir, outside the worktree).
 func TestPolecatPathGuardSymlinkDotDotBackToScratch(t *testing.T) {
+	t.Parallel()
 	p := newPolecatTestTown(t)
 	tmp := polecatSymlinkTownTmp(t, p)
 	mustMkdirAll(t, filepath.Join(tmp, "L", "a"))

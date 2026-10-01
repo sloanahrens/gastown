@@ -249,7 +249,7 @@ func TestGitCleanMentionOnACompoundLineIsAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (%q), want allowed", tt.command, reason)
 			}
 		})
@@ -366,7 +366,7 @@ func TestGitResetAndDDLMentionsOnCompoundLinesAreAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (%q), want allowed", tt.command, reason)
 			}
 		})
@@ -385,7 +385,7 @@ func TestGitCleanLongForceFlagReachesGuard(t *testing.T) {
 		"cd /tmp && git clean --force",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
+			if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — --force is -f", command)
 			}
 		})
@@ -514,7 +514,7 @@ func TestNestedShellCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -540,7 +540,7 @@ func TestQuotedSQLStaysOpaque(t *testing.T) {
 	}
 	for _, command := range tests {
 		t.Run(command, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(command, 0, "")
+			reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
 			if reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted SQL must stay opaque", command, reason)
 			}
@@ -565,7 +565,7 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -633,7 +633,7 @@ func TestMatchesUnboundedScan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), "")
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), noTownSession)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -768,6 +768,7 @@ func TestMatchesPolecatMainPush(t *testing.T) {
 // session's environment happened to carry rather than on the role the town
 // assigned it.
 func TestInPolecatSession(t *testing.T) {
+	t.Parallel()
 	const worktree = "/town/rig/polecats/flint/rig"
 	tests := []struct {
 		name          string
@@ -787,9 +788,8 @@ func TestInPolecatSession(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.gtRole)
-			t.Setenv("GT_POLECAT_PATH", tt.gtPolecatPath)
-			if got := inPolecatSession(); got != tt.want {
+			proc := fakeGuardProcess(map[string]string{"GT_ROLE": tt.gtRole, "GT_POLECAT_PATH": tt.gtPolecatPath}, "")
+			if got := inPolecatSession(proc); got != tt.want {
 				t.Errorf("inPolecatSession() with GT_ROLE=%q GT_POLECAT_PATH=%q = %v, want %v",
 					tt.gtRole, tt.gtPolecatPath, got, tt.want)
 			}
@@ -807,6 +807,7 @@ func TestInPolecatSession(t *testing.T) {
 // — so the role alone reaches the block, and a coordinator that carries a
 // stale path marker keeps its direct default-branch push path.
 func TestPolecatMainPushReachesGuard(t *testing.T) {
+	t.Parallel()
 	const incident = "git push origin HEAD:main"
 	const worktree = "/town/rig/polecats/flint/rig"
 
@@ -825,9 +826,8 @@ func TestPolecatMainPushReachesGuard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.gtRole)
-			t.Setenv("GT_POLECAT_PATH", tt.gtPolecatPath)
-			reason, _ := evaluateDangerousCommand(incident, 0, "")
+			sess := guardSession{proc: fakeGuardProcess(map[string]string{"GT_ROLE": tt.gtRole, "GT_POLECAT_PATH": tt.gtPolecatPath}, "")}
+			reason, _ := evaluateDangerousCommand(incident, 0, sess)
 			if (reason != "") != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) with GT_ROLE=%q GT_POLECAT_PATH=%q blocked=%v, want %v",
 					incident, tt.gtRole, tt.gtPolecatPath, reason != "", tt.blocked)
@@ -841,10 +841,9 @@ func TestPolecatMainPushReachesGuard(t *testing.T) {
 
 	// Nested payloads (bash -c) must be judged the same way.
 	t.Run("nested payload", func(t *testing.T) {
-		t.Setenv("GT_ROLE", "gastown/polecats/flint")
-		t.Setenv("GT_POLECAT_PATH", "")
+		sess := guardSession{proc: fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/flint"}, "")}
 		nested := `bash -c "git push origin HEAD:main"`
-		if reason, _ := evaluateDangerousCommand(nested, 0, ""); reason == "" {
+		if reason, _ := evaluateDangerousCommand(nested, 0, sess); reason == "" {
 			t.Fatalf("evaluateDangerousCommand(%q) allowed for a polecat session, want blocked", nested)
 		}
 	})
@@ -903,7 +902,7 @@ func TestGtMkrjRegressions(t *testing.T) {
 			if reason := matchesDangerousGitPush(lower); reason != "" {
 				t.Fatalf("matchesDangerousGitPush false-fired: %q", reason)
 			}
-			if reason, _ := matchesUnboundedScan(tokens, ""); reason != "" {
+			if reason, _ := matchesUnboundedScan(tokens, noTownSession); reason != "" {
 				t.Fatalf("matchesUnboundedScan false-fired: %q", reason)
 			}
 			if reason := matchesGitResetHard(tokens); reason != "" {
@@ -933,7 +932,7 @@ func TestGluedOperatorsAreBlocked(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (glued operator hid a dangerous fragment)", tt.command)
 			}
 		})
@@ -948,7 +947,7 @@ func TestGluedOperatorsAreBlocked(t *testing.T) {
 func TestGluedOperatorsInsideQuotesStayOpaque(t *testing.T) {
 	t.Parallel()
 	command := `sed -i '' "s|OLD|jq -r '.[] // []'|" watch.sh`
-	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — quoted operators must stay opaque", command, reason)
 	}
 }
@@ -1061,7 +1060,7 @@ func TestShellVariableScanRootIsBlocked(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked (shell variable indirection hid an unbounded scan root)", tt.command)
 			}
 		})
@@ -1075,7 +1074,7 @@ func TestShellVariableScanRootIsBlocked(t *testing.T) {
 func TestShellVariableScanRootAllowsBoundedPath(t *testing.T) {
 	t.Parallel()
 	command := "x=./src; bfs $x -name regex.h"
-	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — variable resolves to a bounded path", command, reason)
 	}
 }
@@ -1121,7 +1120,7 @@ func TestCommandSubstitutionProgramStaysOpaque(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := evaluateDangerousCommand(tt.command, 0, "")
+			reason, alternative := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -1177,7 +1176,7 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — heredoc body is data", tt.command, reason)
 			}
 		})
@@ -1190,7 +1189,7 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	t.Parallel()
 	command := "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /"
-	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
 		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — real command after heredoc must still be checked", command)
 	}
 }
@@ -1216,7 +1215,7 @@ func TestShellFedHeredocBodyIsInspected(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason == "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason == "" {
 				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — a shell invoker runs the heredoc body", tt.command)
 			}
 		})
@@ -1237,7 +1236,7 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data", tt.command, reason)
 			}
 		})
@@ -1250,7 +1249,7 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 func TestShellFedHeredocRecursesThroughNestedBodies(t *testing.T) {
 	t.Parallel()
 	command := "bash <<'A'\nbash <<'B'\ngit reset --hard\nB\nA"
-	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
 		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the inner body is a nested shell command", command)
 	}
 }
@@ -1265,7 +1264,7 @@ func TestShellFedHeredocRecursesThroughNestedBodies(t *testing.T) {
 func TestNestedShellCPositionalArgsAreNotConcatenated(t *testing.T) {
 	t.Parallel()
 	command := `bash -c "echo a" "&&" "rm -rf /"`
-	if reason, _ := evaluateDangerousCommand(command, 0, ""); reason != "" {
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != "" {
 		t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — extra -c args are positional params, not appended command text", command, reason)
 	}
 }
@@ -1460,7 +1459,7 @@ func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
 				// Being routed to the guard isn't itself a failure — the guard
 				// must still allow it. Confirm that's actually what happens.
 				lower := lowerTokens(command)
-				if reason, _ := matchesUnboundedScan(shellTokenize(command), ""); reason != "" {
+				if reason, _ := matchesUnboundedScan(shellTokenize(command), noTownSession); reason != "" {
 					t.Fatalf("command %q reached the dangerous-command guard and was blocked: %q", command, reason)
 				}
 				if matchesDangerousRmRf(lower) != "" || matchesDangerousGitPush(lower) != "" {
@@ -1479,8 +1478,9 @@ func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
 // literal home path must block exactly like ~; a path one level below it
 // must stay allowed, or the fix is just "block scans" wearing a home check.
 func TestUnboundedScanLiteralHomeDir(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	sess := guardSession{proc: fakeGuardProcess(map[string]string{"HOME": home}, "")}
 
 	tests := []struct {
 		name    string
@@ -1499,7 +1499,7 @@ func TestUnboundedScanLiteralHomeDir(t *testing.T) {
 	blockedCount := 0
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), "")
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), sess)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
@@ -1536,7 +1536,7 @@ EOF`,
 	}
 	for _, cmd := range braceGroupCommands {
 		t.Run("brace-group with quoted string", func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(cmd, 0, "")
+			reason, _ := evaluateDangerousCommand(cmd, 0, noTownSession)
 			if reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed (brace-group with quoted string should not trip the guard)", cmd, reason)
 			}
@@ -1552,7 +1552,7 @@ EOF`,
 	}
 	for _, cmd := range commandSubCommands {
 		t.Run("command substitution with bare $VAR", func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(cmd, 0, "")
+			reason, _ := evaluateDangerousCommand(cmd, 0, noTownSession)
 			if reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed (command substitution with bare $VAR should not trip the guard)", cmd, reason)
 			}
@@ -1619,7 +1619,7 @@ func TestGoCleanSharedCacheReachesGuard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateDangerousCommand(tt.command, 0, "")
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			if blocked := reason != ""; blocked != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, blocked, reason, tt.blocked)
 			}
@@ -1680,8 +1680,7 @@ func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 // is at or below threshold, the sample fails (fail open), or the command
 // isn't gated at all.
 func TestEvaluateIdleGate(t *testing.T) {
-	origHostLoad1 := hostLoad1
-	t.Cleanup(func() { hostLoad1 = origHostLoad1 })
+	t.Parallel()
 
 	tests := []struct {
 		name        string
@@ -1698,8 +1697,8 @@ func TestEvaluateIdleGate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hostLoad1 = func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
-			_, held := evaluateIdleGate(tt.command)
+			sample := func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
+			_, held := evaluateIdleGate(tt.command, sample)
 			if held != tt.wantHeld {
 				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
 			}

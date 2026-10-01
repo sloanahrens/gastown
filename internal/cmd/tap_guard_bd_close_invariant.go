@@ -138,21 +138,6 @@ func runTapGuardBdCloseInvariant(cmd *cobra.Command, args []string) error {
 	return tapGuardBdCloseInvariant(os.Stdin, realGuardProcess())
 }
 
-// realGuardProcess is the running process's environment and working
-// directory.
-func realGuardProcess() guardProcess {
-	return guardProcess{getenv: os.Getenv, getwd: os.Getwd}
-}
-
-// guardProcess is the process state the bd-close guard reads: the
-// environment and the working directory. runTapGuardBdCloseInvariant passes
-// the real ones; tests pass their own, so they need no t.Setenv and can run
-// in parallel.
-type guardProcess struct {
-	getenv func(string) string
-	getwd  func() (string, error)
-}
-
 // tapGuardBdCloseInvariant is the guard: it reads the hook payload from
 // stdin and the session from proc.
 func tapGuardBdCloseInvariant(stdin io.Reader, proc guardProcess) error {

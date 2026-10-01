@@ -74,20 +74,28 @@ const bareRepoDir = ".repo.git"
 // checkout, a crew session outside the town, ...). An empty result means the
 // guard falls back to its host-root rule alone, exactly as before.
 //
-// Resolution goes through internal/workspace — the same walk-up-from-cwd plus
-// GT_TOWN_ROOT/GT_ROOT fallback every other gt command uses — which also
-// means a test harness running with GT_TEST_FORBIDDEN_TOWN_ROOT set never
-// picks up the operator's live town.
+// Resolution is workspace.FindFromCwdOrError's, read through proc — the same
+// walk-up-from-cwd plus GT_TOWN_ROOT/GT_ROOT fallback every other gt command
+// uses — and internal/workspace's checks also mean a test harness running with
+// GT_TEST_FORBIDDEN_TOWN_ROOT set never picks up the operator's live town.
 //
 // Cost: this runs on every Bash tool call, so it is a handful of stat(2)
 // calls up the directory tree — no readdir, no rigs.json parse. That is
 // noise beside the Go process spawn the hook already pays for.
-func currentTownRoot() string {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return ""
+func currentTownRoot(proc guardProcess) string {
+	if wd, err := proc.getwd(); err == nil {
+		if root, err := workspace.Find(wd); err == nil && root != "" {
+			return root
+		}
 	}
-	return townRoot
+	for _, name := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
+		if root := proc.getenv(name); root != "" {
+			if ok, _ := workspace.IsWorkspace(root); ok {
+				return root
+			}
+		}
+	}
+	return ""
 }
 
 // townScanHazard reports whether a recursive scan rooted at scanRoot would
@@ -182,11 +190,11 @@ func isWithinRel(rel string) bool {
 // -name .git`) and walked Documents/Desktop/Music, firing macOS privacy
 // prompts at the operator. Only the exact home path is denied — /Users/me/
 // project stays bounded, consistent with the rest of the denylist.
-func isHomeDirScanRoot(resolved string) bool {
+func isHomeDirScanRoot(proc guardProcess, resolved string) bool {
 	if resolved == "" {
 		return false
 	}
-	home, err := os.UserHomeDir()
+	home, err := proc.homeDir()
 	if err != nil || home == "" {
 		return false
 	}
@@ -203,12 +211,12 @@ func isHomeDirScanRoot(resolved string) bool {
 	return strings.EqualFold(canon(resolved), canon(home))
 }
 
-func scanRootPath(token string) string {
+func scanRootPath(proc guardProcess, token string) string {
 	if token == "" || strings.HasPrefix(token, "-") {
 		return ""
 	}
 
-	p, ok := expandHomePath(token)
+	p, ok := expandHomePath(proc, token)
 	// An unknown home directory, or a variable this process cannot resolve,
 	// leaves a literal "$..." behind — both unresolvable.
 	if !ok || p == "" || strings.Contains(p, "$") {
@@ -216,17 +224,17 @@ func scanRootPath(token string) string {
 	}
 
 	if !filepath.IsAbs(p) {
+		wd, err := proc.getwd()
+		if err != nil {
+			return "" // a deleted worktree: unresolvable, never "the root"
+		}
+		p = filepath.Join(wd, p)
 		if !hasGlobMeta(p) {
 			st, err := os.Stat(p)
 			if err != nil || !st.IsDir() {
 				return ""
 			}
 		}
-		wd, err := os.Getwd()
-		if err != nil {
-			return "" // a deleted worktree: unresolvable, never "the root"
-		}
-		p = filepath.Join(wd, p)
 	}
 	return filepath.Clean(p)
 }
@@ -248,15 +256,15 @@ func hasGlobMeta(token string) bool {
 // relative path carrying a separator or a . / .. segment — resolves exactly
 // as scanRootPath resolves it, which keeps the denylist, home-directory and
 // town-tree rules judging a pattern that is one of their roots.
-func scanPatternPath(token string) string {
+func scanPatternPath(proc guardProcess, token string) string {
 	if token == "" || strings.HasPrefix(token, "-") {
 		return ""
 	}
-	expanded, ok := expandHomePath(token)
+	expanded, ok := expandHomePath(proc, token)
 	if !ok || expanded == "" || strings.Contains(expanded, "$") || !isPathSpelling(expanded) {
 		return ""
 	}
-	return scanRootPath(token)
+	return scanRootPath(proc, token)
 }
 
 // isPathSpelling reports whether token names a path by its form alone: an
@@ -273,11 +281,11 @@ func isPathSpelling(token string) bool {
 // expandHomePath applies the shell's ~ / $HOME / ${HOME} prefix rules to a
 // token, returning it unchanged when it names no home-relative path. ok is
 // false only when the token *did* reference the home directory but this
-// process cannot see it — the caller must not then treat the leftover text
+// process (proc) cannot see it — the caller must not then treat the leftover text
 // as a relative path, which is how "~/gt" would silently become "<cwd>/gt".
-func expandHomePath(token string) (path string, ok bool) {
+func expandHomePath(proc guardProcess, token string) (path string, ok bool) {
 	join := func(rest string) (string, bool) {
-		home, err := os.UserHomeDir()
+		home, err := proc.homeDir()
 		if err != nil || home == "" {
 			return "", false
 		}

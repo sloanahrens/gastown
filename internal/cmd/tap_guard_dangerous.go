@@ -85,8 +85,14 @@ func init() {
 var safeForceFlags = []string{"--force-with-lease", "--force-if-includes"}
 
 func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
-	// Read hook input from stdin (Claude Code protocol)
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardDangerous(os.Stdin, os.Stderr, realGuardProcess())
+}
+
+// tapGuardDangerous is the dangerous-command guard: it reads the hook payload
+// from stdin (Claude Code protocol) and the session from proc, and prints a
+// block to stderr.
+func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil {
 		return nil // fail open
 	}
@@ -100,17 +106,18 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 	// the recursion, so a nested payload (bash -c "grep -r x /Users/me/gt")
 	// is judged against the same town tree as the top-level command
 	// (gt-6e2l). "" means "not inside a town" — see currentTownRoot.
-	if reason, alternative := evaluateDangerousCommand(command, 0, currentTownRoot()); reason != "" {
+	sess := guardSession{proc: proc, townRoot: currentTownRoot(proc)}
+	if reason, alternative := evaluateDangerousCommand(command, 0, sess); reason != "" {
 		if alternative != "" {
-			printDangerousBlockWithAlternative(reason, command, alternative)
+			printDangerousBlockWithAlternative(stderr, reason, command, alternative)
 		} else {
-			printDangerousBlock(reason, command)
+			printDangerousBlock(stderr, reason, command)
 		}
 		return NewSilentExit(2)
 	}
 
-	if load1, held := evaluateIdleGate(command); held {
-		printIdleGateHold(load1, command)
+	if load1, held := evaluateIdleGate(command, proc.load1); held {
+		printIdleGateHold(stderr, load1, command)
 		return NewSilentExit(2)
 	}
 
@@ -122,7 +129,7 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 // 1-minute load average is above idleGateLoad1Threshold. load1 is the
 // sampled value (0 when the command isn't gated or the sample failed — a
 // failed sample fails open, never holding the command).
-func evaluateIdleGate(command string) (load1 float64, held bool) {
+func evaluateIdleGate(command string, hostLoad1 func() (float64, bool)) (load1 float64, held bool) {
 	if !isIdleGatedSuiteStartCommand(command) {
 		return 0, false
 	}
@@ -149,7 +156,7 @@ const maxDangerousNestDepth = 3
 // deliberately stays opaque — that is where this guard's real false
 // positives have come from (mayor scope, gt-5ihs attempt 2, gt-wisp-db27
 // finding 4).
-func evaluateDangerousCommand(command string, depth int, townRoot string) (reason, alternative string) {
+func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	// Read the shell-fed bodies off the untouched command: stripHeredocBodies
 	// removes them from the text scanned below, and they come back in as
 	// nested commands of their own (gt-9g0y).
@@ -185,7 +192,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	if r := matchesDangerousGitPush(lowerTokens); r != "" {
 		return r, ""
 	}
-	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession()); r != "" {
+	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession(sess.proc)); r != "" {
 		return r, alt
 	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
@@ -206,7 +213,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
 	// ls -r (reverse sort) mean different things, and lowercasing would
 	// collapse that distinction.
-	if r, alt := matchesUnboundedScan(tokens, townRoot); r != "" {
+	if r, alt := matchesUnboundedScan(tokens, sess); r != "" {
 		return r, alt
 	}
 
@@ -224,7 +231,7 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	nested = append(nested, commandSubstitutions(command)...)
 	nested = append(nested, shellFedBodies...)
 	for _, n := range nested {
-		if r, alt := evaluateDangerousCommand(n, depth+1, townRoot); r != "" {
+		if r, alt := evaluateDangerousCommand(n, depth+1, sess); r != "" {
 			return r, alt
 		}
 	}
@@ -705,27 +712,27 @@ type shellQuoteScope struct {
 }
 
 // printDangerousBlock prints the standard block banner to stderr.
-func printDangerousBlock(reason, originalCommand string) {
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ❌ DANGEROUS COMMAND BLOCKED                                    ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintf(os.Stderr, "║  Command: %-53s ║\n", truncateStr(originalCommand, 53))
-	fmt.Fprintf(os.Stderr, "║  Reason:  %-53s ║\n", truncateStr(reason, 53))
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  If this is intentional, ask the user to run it manually.        ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(os.Stderr, "")
+func printDangerousBlock(w io.Writer, reason, originalCommand string) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(w, "║  ❌ DANGEROUS COMMAND BLOCKED                                    ║")
+	fmt.Fprintln(w, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintf(w, "║  Command: %-53s ║\n", truncateStr(originalCommand, 53))
+	fmt.Fprintf(w, "║  Reason:  %-53s ║\n", truncateStr(reason, 53))
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  If this is intentional, ask the user to run it manually.        ║")
+	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(w, "")
 }
 
 // printDangerousBlockWithAlternative is printDangerousBlock plus an
 // unabbreviated suggestion line printed below the fixed-width box, so the
 // alternative isn't lost to truncateStr's 53-char box limit.
-func printDangerousBlockWithAlternative(reason, originalCommand, alternative string) {
-	printDangerousBlock(reason, originalCommand)
+func printDangerousBlockWithAlternative(w io.Writer, reason, originalCommand, alternative string) {
+	printDangerousBlock(w, reason, originalCommand)
 	if alternative != "" {
-		fmt.Fprintln(os.Stderr, "  "+alternative)
-		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(w, "  "+alternative)
+		fmt.Fprintln(w, "")
 	}
 }
 
@@ -1005,7 +1012,7 @@ func commandArgs(tokens []string, i int) []string {
 // townRoot is the Gas Town root the guard resolved for this run, or "" when
 // not inside a town; it is the only caller-supplied state here, so the
 // host-root rule behaves identically whether or not a town exists.
-func matchesUnboundedScan(tokens []string, townRoot string) (string, string) {
+func matchesUnboundedScan(tokens []string, sess guardSession) (string, string) {
 	fields := tokens
 	vars := shellVarAssignments(tokens)
 	for i, f := range fields {
@@ -1046,8 +1053,8 @@ func matchesUnboundedScan(tokens []string, townRoot string) (string, string) {
 			// implied root and put it through the same rules, so what makes a
 			// scan dangerous is the tree it walks, not whether the root was
 			// spelled.
-			if root, ok := scanWalkRoot(fields, i, vars); ok {
-				if label, suggestion := scanRootHazard(root, root, townRoot); label != "" {
+			if root, ok := scanWalkRoot(sess.proc, fields, i, vars); ok {
+				if label, suggestion := scanRootHazard(root, root, sess); label != "" {
 					return fmt.Sprintf("Unbounded scan (%s, cwd is %s)", base, label),
 						scanNoPathAlternative(root, suggestion)
 				}
@@ -1055,11 +1062,11 @@ func matchesUnboundedScan(tokens []string, townRoot string) (string, string) {
 		}
 		for j, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
-			root := scanRootPath(resolved)
+			root := scanRootPath(sess.proc, resolved)
 			if j == patternSkip {
-				root = scanPatternPath(resolved)
+				root = scanPatternPath(sess.proc, resolved)
 			}
-			label, suggestion := scanRootHazard(resolved, root, townRoot)
+			label, suggestion := scanRootHazard(resolved, root, sess)
 			if label != "" {
 				return fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, label), "Alternative: " + suggestion
 			}
@@ -1073,7 +1080,7 @@ func matchesUnboundedScan(tokens []string, townRoot string) (string, string) {
 // root as the caller spelled it — or the working directory, when the root was
 // implied — which the filesystem and home labels print; the town label names
 // the shape of the tree instead (townScanHazard).
-func scanRootHazard(token, root, townRoot string) (label, suggestion string) {
+func scanRootHazard(token, root string, sess guardSession) (label, suggestion string) {
 	// A spelling broad enough to walk the whole filesystem. Judged on the
 	// spelling because that is what the denylist is keyed on (~, $HOME), and
 	// because a spelling like /opt names the root whatever is under it.
@@ -1083,12 +1090,12 @@ func scanRootHazard(token, root, townRoot string) (label, suggestion string) {
 	// The expanded home directory names the same root as the spellings the
 	// denylist carries: an agent that writes /Users/me spells the home
 	// directory in full and lands here.
-	if isHomeDirScanRoot(root) {
+	if isHomeDirScanRoot(sess.proc, root) {
 		return "the home directory " + token, homeScanSuggestion
 	}
 	// The same walkers rooted at the town tree: the town root, a rig root, a
 	// rig's worktree directory, or a .repo.git (gt-6e2l).
-	if hazard := townScanHazard(root, townRoot); hazard != "" {
+	if hazard := townScanHazard(root, sess.townRoot); hazard != "" {
 		return hazard, townScanSuggestion
 	}
 	return "", ""
@@ -1181,8 +1188,8 @@ func hasFileOperand(args []string) bool {
 // ok is false when the walk root cannot be known — a cd this process cannot
 // resolve, or an unreadable working directory. An unknown root is not a
 // hazard, so the caller blocks nothing on it.
-func scanWalkRoot(tokens []string, scanIdx int, vars map[string]string) (string, bool) {
-	root, err := os.Getwd()
+func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[string]string) (string, bool) {
+	root, err := proc.getwd()
 	if err != nil {
 		return "", false
 	}
@@ -1191,7 +1198,7 @@ func scanWalkRoot(tokens []string, scanIdx int, vars map[string]string) (string,
 			continue
 		}
 		args := commandArgs(tokens, i)
-		target, ok := cdTarget(args, root, vars)
+		target, ok := cdTarget(proc, args, root, vars)
 		if !ok {
 			return "", false
 		}
@@ -1224,7 +1231,7 @@ func shellCommandStart(tokens []string, i int) bool {
 // (the cd fails, and what the shell does next depends on the separator), an
 // argument this process cannot expand, or more than one operand, which the
 // shell refuses. A bare `cd` goes to the home directory.
-func cdTarget(args []string, base string, vars map[string]string) (string, bool) {
+func cdTarget(proc guardProcess, args []string, base string, vars map[string]string) (string, bool) {
 	var operands []string
 	for _, arg := range args {
 		switch arg {
@@ -1240,13 +1247,13 @@ func cdTarget(args []string, base string, vars map[string]string) (string, bool)
 		return "", false
 	}
 	if len(operands) == 0 {
-		home, err := os.UserHomeDir()
+		home, err := proc.homeDir()
 		if err != nil || home == "" {
 			return "", false
 		}
 		return home, true
 	}
-	path, ok := expandHomePath(resolveShellVar(operands[0], vars))
+	path, ok := expandHomePath(proc, resolveShellVar(operands[0], vars))
 	if !ok || path == "" || strings.Contains(path, "$") {
 		return "", false
 	}
@@ -1545,11 +1552,11 @@ var polecatMainPushBranches = map[string]bool{"main": true, "master": true}
 // environment happens to carry (gt-c38o). GT_POLECAT_PATH — exported to the
 // session at polecat spawn (internal/polecat/session_manager.go) — is the
 // fallback for a run with no role in its environment at all.
-func inPolecatSession() bool {
-	if role := strings.TrimSpace(os.Getenv("GT_ROLE")); role != "" {
+func inPolecatSession(proc guardProcess) bool {
+	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
 		return isPolecatRole(role)
 	}
-	return os.Getenv("GT_POLECAT_PATH") != ""
+	return proc.getenv("GT_POLECAT_PATH") != ""
 }
 
 // matchesPolecatMainPush blocks a `git push` from a polecat session whose
@@ -1952,16 +1959,15 @@ func wholeRepoArgFollows(tokens []string, idx int) bool {
 	return idx < len(tokens) && isWholeRepoPackageArg(normalizeGoPackageArg(tokens[idx]))
 }
 
-// hostLoad1 returns the current 1-minute load average. Overridden in tests.
-// Production reads internal/daemon's raw load-average sample (one instant
-// sysctl/proc read, no subprocess sampling loop) rather than shelling out to
+// actualHostLoad1 returns the current 1-minute load average
+// (guardProcess.load1 in production). It reads internal/daemon's raw
+// load-average sample (one instant sysctl/proc read, no subprocess sampling
+// loop) rather than shelling out to
 // `top` for several seconds on every suite-start command — the same
 // mechanism that already powers the main_branch_test patrol's gate
 // (gt-f57o), read unnormalized so a host whose load comes from non-CPU
 // (uninterruptible-wait) contention isn't misjudged as CPU-saturated
 // (gt-e6xh).
-var hostLoad1 = actualHostLoad1
-
 func actualHostLoad1() (load1 float64, ok bool) {
 	return daemon.EstimateLoad1(), true
 }
@@ -1969,18 +1975,18 @@ func actualHostLoad1() (load1 float64, ok bool) {
 // printIdleGateHold prints the HOLD banner to stderr — distinct from
 // printDangerousBlock's BLOCKED banner since this command is expected to
 // succeed on retry, not to be avoided entirely.
-func printIdleGateHold(load1 float64, command string) {
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ⏸  SUITE START HELD (host busy)                                 ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintf(os.Stderr, "║  Command:   %-51s ║\n", truncateStr(command, 51))
-	fmt.Fprintf(os.Stderr, "║  Load avg:  %-51s ║\n", fmt.Sprintf("%.1f (need <= %d)", load1, idleGateLoad1Threshold))
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  Another suite is running on this shared host.                  ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(os.Stderr, "  "+idleGateAlternative)
-	fmt.Fprintln(os.Stderr, "")
+func printIdleGateHold(w io.Writer, load1 float64, command string) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(w, "║  ⏸  SUITE START HELD (host busy)                                 ║")
+	fmt.Fprintln(w, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintf(w, "║  Command:   %-51s ║\n", truncateStr(command, 51))
+	fmt.Fprintf(w, "║  Load avg:  %-51s ║\n", fmt.Sprintf("%.1f (need <= %d)", load1, idleGateLoad1Threshold))
+	fmt.Fprintln(w, "║                                                                  ║")
+	fmt.Fprintln(w, "║  Another suite is running on this shared host.                  ║")
+	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(w, "  "+idleGateAlternative)
+	fmt.Fprintln(w, "")
 }
 
 // inCommandPosition reports whether tokens[i] ("git") is being run rather

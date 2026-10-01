@@ -79,7 +79,13 @@ type questionToolInput struct {
 }
 
 func runTapGuardQuestionTool(cmd *cobra.Command, args []string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardQuestionTool(os.Stdin, os.Stderr, realGuardProcess())
+}
+
+// tapGuardQuestionTool is the question-tool guard: it reads the hook payload
+// from stdin and the session from proc, and prints a block to stderr.
+func tapGuardQuestionTool(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
 		// Nothing to judge. Some harness wrappers drain stdin before invoking a
 		// guard, and denying on an empty payload would wedge the session — the
@@ -94,11 +100,11 @@ func runTapGuardQuestionTool(cmd *cobra.Command, args []string) error {
 	if hook.ToolName != askUserQuestionTool {
 		return nil // Another tool — outside this guard's remit.
 	}
-	if !unattendedPromptSession(hook.Cwd) {
+	if !unattendedPromptSession(hook.Cwd, proc.getenv) {
 		return nil // A person is at the pane; the question reaches them.
 	}
 
-	fmt.Fprintf(os.Stderr, "question-tool: %s\n", questionToolDenial())
+	fmt.Fprintf(stderr, "question-tool: %s\n", questionToolDenial())
 	return NewSilentExit(2)
 }
 
