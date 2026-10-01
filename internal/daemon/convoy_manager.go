@@ -1166,7 +1166,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// to redo, not work to protect from a second polecat, so the
 			// surviving-branch skip below does not apply; the fresh polecat
 			// reads the rejection from the bead's notes (gt-et7ho).
-			m.logger("Convoy %s: %s carries a merge rejection; its surviving branch does not hold it (rework)", c.ID, issueID)
+			m.skipLog.logf(m.logger, c.ID+"|"+issueID, "Convoy %s: %s carries a merge rejection; its surviving branch does not hold it (rework)", c.ID, issueID)
 		} else if branch, ok := m.survivingBranchFor(rig, issueID); ok {
 			// The previous holder is gone, but its branch is still on origin:
 			// the work is preserved — either mid-flight (killed by a town

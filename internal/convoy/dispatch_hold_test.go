@@ -63,6 +63,28 @@ func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 	}
 }
 
+// TestFeedHold_NeedsHumanRejectionIsHeld pins gt-hpca9: a rejection the
+// landing worker left for a person (gt:needs-human) is not rework, so every
+// dispatcher holds it while ordinary rework still flows (gt-et7ho).
+func TestFeedHold_NeedsHumanRejectionIsHeld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
+		"gt-h":  {ID: "gt-h", Status: beadsdk.StatusOpen, Labels: []string{"gt:needs-human"}, Notes: rejectedNotes},
+		"gt-hl": {ID: "gt-hl", Status: beadsdk.StatusOpen, Labels: []string{"Needs-Human"}},
+		"gt-rw": {ID: "gt-rw", Status: beadsdk.StatusOpen, Labels: []string{"rework"}, Notes: rejectedNotes},
+	}}
+	if hold := FeedHold(ctx, store, "gt-h", nil); hold.Reason != "label gt:needs-human" || !hold.MergeRejection {
+		t.Errorf("needs-human rejection: want the label hold and the flag, got %+v", hold)
+	}
+	if reason := DispatchHoldReason(ctx, store, "gt-hl", nil); reason == "" {
+		t.Error("a hand-typed needs-human label must hold the bead")
+	}
+	if reason := DispatchHoldReason(ctx, store, "gt-rw", nil); reason != "" {
+		t.Errorf("rework must stay dispatchable, got %q", reason)
+	}
+}
+
 func TestFeedHold_Verdicts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
