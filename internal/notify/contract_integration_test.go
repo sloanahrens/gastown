@@ -4,6 +4,7 @@ package notify_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,11 +12,13 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 var (
@@ -205,6 +208,24 @@ func TestIntegrationNotifierContract(t *testing.T) {
 		town := newContractTown(t)
 		return notifyfake.Subject{
 			Notifier: &notify.CLI{Bin: town.gt, Dir: town.root, Env: town.env},
+			Observer: town,
+		}
+	})
+}
+
+// TestIntegrationNotifierContractInProcessNudge runs the contract against the
+// daemon's notifier: notify.CLI with its nudges delivered in-process by
+// notify.TownNudger, on a tmux socket of the test's own that no server
+// listens on.
+func TestIntegrationNotifierContractInProcessNudge(t *testing.T) {
+	notifyfake.RunNotifierContract(t, func(t *testing.T) notifyfake.Subject {
+		town := newContractTown(t)
+		socket := fmt.Sprintf("gt-notify-contract-%d", time.Now().UnixNano())
+		return notifyfake.Subject{
+			Notifier: &notify.CLI{
+				Bin: town.gt, Dir: town.root, Env: town.env,
+				Nudger: &notify.TownNudger{Dir: town.root, Env: town.env, Tmux: tmux.NewTmuxWithSocket(socket)},
+			},
 			Observer: town,
 		}
 	})

@@ -105,6 +105,13 @@ func TestDaemonNotifiersRunGtAsTheDaemon(t *testing.T) {
 			t.Fatalf("%s notifier = %+v, want a notify.CLI with an explicit env", name, n)
 		}
 		assertDaemonIdentity(t, name+" notifier", cli.Env())
+		// Nudges are delivered in-process, sent from the town root as the
+		// daemon (gt-22hdp.16).
+		nudger, ok := cli.Nudger.(*notify.TownNudger)
+		if !ok || nudger.Dir != "/town" || nudger.Env == nil {
+			t.Fatalf("%s notifier nudger = %+v, want an in-process TownNudger from /town with an explicit env", name, cli.Nudger)
+		}
+		assertDaemonIdentity(t, name+" nudger", nudger.Env())
 	}
 }
 

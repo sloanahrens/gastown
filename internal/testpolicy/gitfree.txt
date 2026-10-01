@@ -17,6 +17,7 @@ internal/hooks
 internal/land
 internal/mail
 internal/nudge
+internal/nudge/deliver
 internal/plugin
 internal/polecat
 internal/protocol
