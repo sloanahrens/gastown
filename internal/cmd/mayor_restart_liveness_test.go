@@ -33,7 +33,7 @@ func (f *fakeMayorTmux) RespawnPane(_, _ string) error {
 func TestRestartMayorRuntimeIfDead_UnknownLivenessTouchesNothing(t *testing.T) {
 	t.Parallel()
 	f := &fakeMayorTmux{aliveErr: errors.New("tmux show-environment: timed out")}
-	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir()); err != nil {
+	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir(), nil, ""); err != nil {
 		t.Fatalf("restartMayorRuntimeIfDead: %v", err)
 	}
 	if len(f.calls) != 0 {
@@ -45,7 +45,7 @@ func TestRestartMayorRuntimeIfDead_UnknownLivenessTouchesNothing(t *testing.T) {
 func TestRestartMayorRuntimeIfDead_AliveTouchesNothing(t *testing.T) {
 	t.Parallel()
 	f := &fakeMayorTmux{alive: true}
-	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir()); err != nil {
+	if err := restartMayorRuntimeIfDead(f, "hq-mayor", t.TempDir(), nil, ""); err != nil {
 		t.Fatalf("restartMayorRuntimeIfDead: %v", err)
 	}
 	if len(f.calls) != 0 {

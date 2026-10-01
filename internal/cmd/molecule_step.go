@@ -334,19 +334,24 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 	// agent the respawned pane is about to run (gt-di8p).
 	updateSessionEnvForHandoff(townRegistry(), t, currentSession)
 
-	// Kill all processes in the pane before respawning to prevent process leaks
-	if err := t.KillPaneProcesses(pane); err != nil {
-		// Non-fatal but log the warning
-		style.PrintWarning("could not kill pane processes: %v", err)
-	}
+	// Cycling the session for the next step is a restart: the supervisor's
+	// Respawn, which an e-stop, a park or a gt down in progress refuses
+	// (gt-4k3fj.4.1), and records before the kill below ends this process.
+	return superviseHandoff(currentSession, "gt mol step done", "molecule step: respawn for the next step", func() error {
+		// Kill all processes in the pane before respawning to prevent process leaks
+		if err := t.KillPaneProcesses(pane); err != nil {
+			// Non-fatal but log the warning
+			style.PrintWarning("could not kill pane processes: %v", err)
+		}
 
-	// Clear history before respawn
-	if err := t.ClearHistory(pane); err != nil {
-		// Non-fatal
-		style.PrintWarning("could not clear history: %v", err)
-	}
+		// Clear history before respawn
+		if err := t.ClearHistory(pane); err != nil {
+			// Non-fatal
+			style.PrintWarning("could not clear history: %v", err)
+		}
 
-	return t.RespawnPane(pane, restartCmd)
+		return t.RespawnPane(pane, restartCmd)
+	})
 }
 
 // handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).

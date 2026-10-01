@@ -369,7 +369,9 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// For orphan prevention, we rely on respawn-pane -k which sends SIGHUP/SIGTERM.
 	// If orphans still occur, the solution is to adjust the restart command to
 	// kill orphans at startup, not to kill ourselves before respawning.
-	return respawnOwnPane(t, currentSession, pane, restartCmd)
+	return superviseHandoff(currentSession, "gt handoff", "handoff", func() error {
+		return respawnOwnPane(t, currentSession, pane, restartCmd)
+	})
 }
 
 // runHandoffAuto saves state without cycling the session.
@@ -568,7 +570,9 @@ func runHandoffCycle() error {
 	updateSessionEnvForHandoff(reg, t, currentSession)
 
 	// Respawn pane — this atomically kills current process and starts fresh
-	return respawnOwnPane(t, currentSession, pane, restartCmd)
+	return superviseHandoff(currentSession, "gt handoff", "handoff --cycle", func() error {
+		return respawnOwnPane(t, currentSession, pane, restartCmd)
+	})
 }
 
 // getCurrentTmuxSession returns the current tmux session name.
@@ -1283,6 +1287,28 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 		return nil
 	}
 
+	if err := superviseHandoff(targetSession, "gt handoff", "handoff (remote)", func() error {
+		return respawnRemotePane(t, targetSession, targetPane, restartCmd)
+	}); err != nil {
+		return err
+	}
+
+	// If --watch, switch to that session
+	if handoffWatch {
+		fmt.Printf("Switching to %s...\n", targetSession)
+		// Use tmux switch-client to move our view to the target session
+		if err := tmux.BuildCommand("switch-client", "-t", targetSession).Run(); err != nil {
+			// Non-fatal - they can manually switch
+			fmt.Printf("Note: Could not auto-switch (use: tmux switch-client -t %s)\n", targetSession)
+		}
+	}
+
+	return nil
+}
+
+// respawnRemotePane replaces the agent in another session's pane: it kills
+// the pane's processes, clears its history and respawns restartCmd there.
+func respawnRemotePane(t *tmux.Tmux, targetSession, targetPane, restartCmd string) error {
 	// Set remain-on-exit so the pane survives process death during handoff.
 	// Without this, killing processes causes tmux to destroy the pane before
 	// we can respawn it. This is essential for tmux session reuse.
@@ -1319,18 +1345,21 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 	if respawnErr != nil {
 		return fmt.Errorf("respawning pane: %w", respawnErr)
 	}
-
-	// If --watch, switch to that session
-	if handoffWatch {
-		fmt.Printf("Switching to %s...\n", targetSession)
-		// Use tmux switch-client to move our view to the target session
-		if err := tmux.BuildCommand("switch-client", "-t", targetSession).Run(); err != nil {
-			// Non-fatal - they can manually switch
-			fmt.Printf("Note: Could not auto-switch (use: tmux switch-client -t %s)\n", targetSession)
-		}
-	}
-
 	return nil
+}
+
+// superviseHandoff runs run, which replaces sessionName's agent in its pane,
+// through the supervisor's Respawn (gt-4k3fj.4.1): a handoff is a restart,
+// so an e-stop, a parked seat or a gt down in progress refuses it and the
+// session keeps running. Respawn records the restart before run, because a
+// self-handoff's respawn ends this process. Outside a town there is nothing
+// to refuse it and run goes ahead. verb names the command in the actor.
+func superviseHandoff(sessionName, verb, reason string, run func() error) error {
+	townRoot := detectTownRootFromCwd()
+	if townRoot == "" {
+		return run()
+	}
+	return respawnSession(operatorSupervisor(townRoot), townRegistry(), sessionName, reason, operatorActor(verb), run)
 }
 
 // getSessionPane returns the pane identifier for a session's main pane.

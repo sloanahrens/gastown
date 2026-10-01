@@ -596,7 +596,7 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	mgr := polecat.NewManager(r, polecatGit, t, townRegistry())
+	mgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt polecat"))
 
 	return mgr, r, nil
 }
@@ -2707,7 +2707,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// The kill runs before the preserve check on purpose: a live polecat keeps
 	// committing, so a branch verified while its session is still running can
 	// grow a new unpushed commit before the worktree is deleted.
-	sessMgr := polecat.NewSessionManager(t, r, townRegistry())
+	//
+	// An operator verb ending the session: the supervisor's Stop, logged and
+	// not refused by an e-stop or a park (gt-4k3fj.4.1).
+	sessMgr := supervisedPolecatSessions(t, r, "polecat nuke", operatorActor("gt polecat nuke"))
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
 			fmt.Printf("  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)

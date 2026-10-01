@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -117,8 +116,9 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 
 	t := tmux.NewTmux()
 
-	// Stop polecat sessions if any
-	polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
+	// Stop polecat sessions if any: an operator stop, the supervisor's Stop,
+	// logged (gt-4k3fj.4.1).
+	polecatMgr := supervisedPolecatSessions(t, r, "rig dock", operatorActor("gt rig dock"))
 	polecatInfos, err := polecatMgr.List()
 	if err == nil && len(polecatInfos) > 0 {
 		fmt.Printf("  Stopping %d polecat session(s)...\n", len(polecatInfos))

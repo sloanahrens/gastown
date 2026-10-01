@@ -377,40 +377,6 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 	return envVars
 }
 
-// KillExistingSession kills an existing session if one is found.
-// Returns true if a session was killed.
-//
-// If checkAlive is true, only kills zombie sessions (tmux alive but agent dead).
-// If the session exists and the agent is alive, returns ErrAlreadyRunning.
-// If checkAlive is false, kills any existing session unconditionally.
-func KillExistingSession(t *tmux.Tmux, sessionID string, checkAlive bool) (bool, error) {
-	running, err := t.HasSession(sessionID)
-	if err != nil {
-		return false, fmt.Errorf("checking session: %w", err)
-	}
-	if !running {
-		return false, nil
-	}
-
-	if checkAlive {
-		// Only a confirmed dead agent is killed. A failed liveness query is
-		// UNKNOWN: refuse rather than kill a session that may be working (gt-fcxe9.1).
-		alive, err := t.IsAgentAliveChecked(sessionID)
-		if err != nil {
-			return false, fmt.Errorf("session %s: agent liveness unknown, not killing: %w", sessionID, err)
-		}
-		if alive {
-			return false, fmt.Errorf("session already running: %s", sessionID)
-		}
-	}
-
-	if err := t.KillSessionWithProcesses(sessionID); err != nil {
-		return false, fmt.Errorf("killing session %s: %w", sessionID, err)
-	}
-
-	return true, nil
-}
-
 // buildPrompt creates the startup prompt from beacon + instructions.
 func buildPrompt(cfg SessionConfig) string {
 	if cfg.Instructions != "" {

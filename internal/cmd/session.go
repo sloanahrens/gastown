@@ -17,11 +17,13 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -314,6 +316,14 @@ type sessionSeat struct {
 	Rig  string
 	Name string
 	Mgr  *polecat.SessionManager
+	// r is the rig the address names.
+	r *rig.Rig
+}
+
+// supervise routes the seat's session manager's kills through the operator
+// supervisor (gt-4k3fj.4.1), naming verb as the actor's command.
+func (s sessionSeat) supervise(verb string) {
+	s.Mgr.SetHooks(polecatSessionHooks(operatorSupervisor(filepath.Dir(s.r.Path)), townRegistry(), s.Rig, verb, operatorActor(verb)))
 }
 
 // resolveSessionSeat parses a <rig>/<name> address and resolves it against the
@@ -347,7 +357,7 @@ func resolveSessionSeatWith(args []string, lookupRig func(rigName string) (strin
 	mgr := polecat.NewSessionManager(tmux.NewTmux(), r, townRegistry())
 
 	if mgr.HasPolecat(name) {
-		return sessionSeat{Rig: rigName, Name: name, Mgr: mgr}, nil
+		return sessionSeat{Rig: rigName, Name: name, Mgr: mgr, r: r}, nil
 	}
 
 	suggestions := suggest.FindSimilar(name, r.Polecats, 3)
@@ -361,6 +371,9 @@ func runSessionStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	rigName, polecatName := seat.Rig, seat.Name
+	// A start over a session whose agent exited is a Respawn, a failed
+	// startup's kill a Cleanup.
+	seat.supervise("gt session start")
 
 	opts := polecat.SessionStartOptions{
 		Issue: sessionIssue,
@@ -397,10 +410,13 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	polecatMgr, err := getSessionManager(rigName)
+	_, r, err := getRig(rigName)
 	if err != nil {
 		return err
 	}
+	// An operator stop: the supervisor's Stop, logged, not refused by an
+	// e-stop or a park (gt-4k3fj.4.1).
+	polecatMgr := supervisedPolecatSessions(tmux.NewTmux(), r, "session stop", operatorActor("gt session stop"))
 
 	townRoot, _ := workspace.FindFromCwd()
 
@@ -696,34 +712,40 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 
-	if running {
-		// Stop first
-		if sessionForce {
-			fmt.Printf("Force stopping session for %s/%s...\n", rigName, polecatName)
-		} else {
-			fmt.Printf("Stopping session for %s/%s...\n", rigName, polecatName)
-		}
-		if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
-			return fmt.Errorf("stopping session: %w", err)
-		}
-
-		// Wait for session to fully terminate before starting a new one.
-		// Without this, Start may fail or create a duplicate if the old
-		// session hasn't been cleaned up by tmux yet.
-		for i := 0; i < 10; i++ {
-			still, _ := polecatMgr.IsRunning(polecatName)
-			if !still {
-				break
+	restart := func() error {
+		if running {
+			// Stop first
+			if sessionForce {
+				fmt.Printf("Force stopping session for %s/%s...\n", rigName, polecatName)
+			} else {
+				fmt.Printf("Stopping session for %s/%s...\n", rigName, polecatName)
 			}
-			clockwork.NewRealClock().Sleep(200 * time.Millisecond)
-		}
-	}
+			if err := polecatMgr.Stop(polecatName, sessionForce); err != nil {
+				return fmt.Errorf("stopping session: %w", err)
+			}
 
-	// Start fresh session
-	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
-	opts := polecat.SessionStartOptions{}
-	if err := polecatMgr.Start(polecatName, opts); err != nil {
-		return fmt.Errorf("starting session: %w", err)
+			// Wait for session to fully terminate before starting a new one.
+			// Without this, Start may fail or create a duplicate if the old
+			// session hasn't been cleaned up by tmux yet.
+			for i := 0; i < 10; i++ {
+				still, _ := polecatMgr.IsRunning(polecatName)
+				if !still {
+					break
+				}
+				clockwork.NewRealClock().Sleep(200 * time.Millisecond)
+			}
+		}
+
+		// Start fresh session
+		fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
+		opts := polecat.SessionStartOptions{}
+		if err := polecatMgr.Start(polecatName, opts); err != nil {
+			return fmt.Errorf("starting session: %w", err)
+		}
+		return nil
+	}
+	if err := superviseSessionRestart(seat, running, sessionRequestedBy, restart); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Session restarted. Attach with: %s\n",
@@ -748,6 +770,39 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// superviseSessionRestart runs a gt session restart through the supervisor
+// (gt-4k3fj.4.1). Replacing a running session is a Respawn, which an e-stop,
+// a park or a gt down in progress refuses; the stop inside it kills straight
+// through tmux, since the Respawn is the restart's one record. With no
+// session running it is a start: a dead session is replaced through Start's
+// own Respawn hook and a fresh one needs no record. When the daemon's
+// restart executor asks (--requested-by daemon/patrol-scan), supervisor.Restart
+// has already guarded, budgeted and recorded this restart, so it runs with
+// only the Cleanup hook rather than being recorded twice.
+func superviseSessionRestart(seat sessionSeat, running bool, requestedBy string, restart func() error) error {
+	actor := operatorActor("gt session restart")
+	if requestedBy != "" {
+		actor = operatorActorFor("gt session restart", requestedBy)
+	}
+	return superviseSessionRestartWith(operatorSupervisor(filepath.Dir(seat.r.Path)), townRegistry(), seat, running, requestedBy, actor, restart)
+}
+
+// superviseSessionRestartWith is superviseSessionRestart over sup and reg.
+func superviseSessionRestartWith(sup *supervisor.Supervisor, reg *session.PrefixRegistry, seat sessionSeat, running bool, requestedBy, actor string, restart func() error) error {
+	hooks := polecatSessionHooks(sup, reg, seat.Rig, "session restart", actor)
+	hooks.Stop = nil
+	if requestedBy == patrolscan.Actor {
+		hooks.Respawn = nil
+		seat.Mgr.SetHooks(hooks)
+		return restart()
+	}
+	seat.Mgr.SetHooks(hooks)
+	if !running {
+		return restart()
+	}
+	return sup.Respawn(supervisor.SeatIn(reg, seat.Rig, constants.RolePolecat, seat.Name), "session restart", actor, restart)
 }
 
 // sessionRestartWakeContext is the parenthetical of the restart path's wake

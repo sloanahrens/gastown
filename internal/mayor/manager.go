@@ -45,6 +45,16 @@ type MayorStatus struct {
 // Manager handles mayor lifecycle operations.
 type Manager struct {
 	townRoot string
+
+	// StopKill, when set, ends the session in Stop: the supervisor's logged
+	// operator stop for gt mayor stop (gt-4k3fj.4.1). nil kills through
+	// tmux, as the daemon's restart executor does once the supervisor has
+	// already guarded and recorded the restart.
+	StopKill func(sessionID string) error
+	// Respawn, when set, runs StartTMUX's replacement of a session whose
+	// agent exited, so the supervisor can refuse it (an e-stop, a park, a gt
+	// down in progress) and log it (gt-4k3fj.4.1). nil runs it directly.
+	Respawn func(reason string, run func() error) error
 }
 
 // CombinedStatus returns the combined status of the mayor across all modes.
@@ -138,13 +148,33 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
-	// Kill any existing zombie session (tmux alive but agent dead).
-	// Returns error if session is healthy and already running.
-	_, err := session.KillExistingSession(t, sessionID, true)
+	running, err := t.HasSession(sessionID)
 	if err != nil {
 		return ErrAlreadyRunning
 	}
+	if !running {
+		return m.launch(t, sessionID, agentOverride)
+	}
+	// Only a confirmed dead agent is replaced (a zombie: tmux alive, agent
+	// gone). A failed liveness query is UNKNOWN: refuse rather than kill a
+	// session that may be working (gt-fcxe9.1).
+	if alive, err := t.IsAgentAliveChecked(sessionID); err != nil || alive {
+		return ErrAlreadyRunning
+	}
+	replace := func() error {
+		if err := t.KillSessionWithProcesses(sessionID); err != nil {
+			return fmt.Errorf("killing session %s: %w", sessionID, err)
+		}
+		return m.launch(t, sessionID, agentOverride)
+	}
+	if m.Respawn == nil {
+		return replace()
+	}
+	return m.Respawn("mayor start: replace a session whose agent exited", replace)
+}
 
+// launch creates the mayor session and starts its agent.
+func (m *Manager) launch(t *tmux.Tmux, sessionID, agentOverride string) error {
 	// Ensure mayor directory exists (for Claude settings)
 	mayorDir := m.mayorDir()
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -161,7 +191,7 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 
 	// Use unified session lifecycle for config → settings → command → create → env → theme → wait.
 	theme := tmux.ResolveSessionTheme(m.townRoot, "", "mayor", "")
-	_, err = session.StartSession(t, session.SessionConfig{
+	_, err := session.StartSession(t, session.SessionConfig{
 		SessionID:        sessionID,
 		WorkDir:          mayorDir,
 		Role:             "mayor",
@@ -207,6 +237,12 @@ func (m *Manager) Stop() error {
 	time.Sleep(100 * time.Millisecond)
 
 	// Kill the session and all its processes
+	if m.StopKill != nil {
+		if err := m.StopKill(sessionID); err != nil {
+			return fmt.Errorf("killing session: %w", err)
+		}
+		return nil
+	}
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
 	}

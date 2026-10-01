@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -104,12 +105,17 @@ func init() {
 }
 
 // getMayorManager returns a mayor manager for the current workspace.
+// Its Stop is the supervisor's operator stop and its replacement of a dead
+// session a supervisor Respawn (gt-4k3fj.4.1), logged with the gt mayor
+// actor.
 func getMayorManager() (*mayor.Manager, error) {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return mayor.NewManager(townRoot), nil
+	mgr := mayor.NewManager(townRoot)
+	superviseMayor(mgr, operatorSupervisor(townRoot), operatorActor("gt mayor"))
+	return mgr, nil
 }
 
 // getMayorSessionName returns the Mayor session name.
@@ -186,7 +192,7 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		if err := restartMayorRuntimeIfDead(t, sessionID, townRoot); err != nil {
+		if err := restartMayorRuntimeIfDead(t, sessionID, townRoot, operatorSupervisor(townRoot), operatorActor("gt mayor attach")); err != nil {
 			return err
 		}
 	}
@@ -211,8 +217,10 @@ var _ mayorRuntimeTmux = (*tmux.Tmux)(nil)
 // session when the agent has exited (hq-95xfq, gt-7zl). It uses
 // IsAgentAliveChecked (descendant processes) rather than the pane command,
 // since the Mayor launches via a bash wrapper. A failed liveness query is
-// unknown: it warns and leaves the session alone (gt-fcxe9.1).
-func restartMayorRuntimeIfDead(t mayorRuntimeTmux, sessionID, townRoot string) error {
+// unknown: it warns and leaves the session alone (gt-fcxe9.1). The respawn
+// goes through sup.Respawn, which an e-stop, a park or a gt down in progress
+// refuses (gt-4k3fj.4.1), like gt crew at reviving a crew runtime.
+func restartMayorRuntimeIfDead(t mayorRuntimeTmux, sessionID, townRoot string, sup *supervisor.Supervisor, actor string) error {
 	alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 	if aliveErr != nil {
 		style.PrintWarning("could not verify the Mayor agent is running (%v); attaching without restart", aliveErr)
@@ -221,7 +229,13 @@ func restartMayorRuntimeIfDead(t mayorRuntimeTmux, sessionID, townRoot string) e
 	if alive {
 		return nil
 	}
+	return sup.Respawn(mayorSeat, "mayor attach: runtime exited", actor, func() error {
+		return respawnMayorRuntime(t, sessionID, townRoot)
+	})
+}
 
+// respawnMayorRuntime replaces the Mayor's exited runtime in its pane.
+func respawnMayorRuntime(t mayorRuntimeTmux, sessionID, townRoot string) error {
 	// Runtime has exited, restart it with proper context
 	fmt.Println("Runtime exited, restarting with context...")
 
@@ -322,18 +336,43 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runMayorRestart(cmd *cobra.Command, args []string) error {
-	mgr, err := getMayorManager()
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
-		return err
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	// Replacing a running Mayor is a Respawn, which an e-stop, a park or a
+	// gt down in progress refuses (gt-4k3fj.4.1); the stop inside it kills
+	// straight through tmux, since the Respawn is the restart's one record.
+	// With no session it is a plain start.
+	return restartMayor(mayor.NewManager(townRoot), operatorSupervisor(townRoot), operatorActor("gt mayor restart"), func() error {
+		return runMayorStart(cmd, args)
+	})
+}
 
-	// Stop if running (ignore not-running error)
-	if err := mgr.Stop(); err != nil && err != mayor.ErrNotRunning {
-		return fmt.Errorf("stopping session: %w", err)
+// mayorStopper is the mayor manager surface restartMayor drives.
+type mayorStopper interface {
+	IsRunning() (bool, error)
+	Stop() error
+}
+
+// restartMayor stops a running Mayor and starts it again through
+// sup.Respawn, or just starts it when no session is running.
+func restartMayor(mgr mayorStopper, sup *supervisor.Supervisor, actor string, start func() error) error {
+	running, err := mgr.IsRunning()
+	if err != nil {
+		return fmt.Errorf("checking session: %w", err)
 	}
-
-	// Start fresh
-	return runMayorStart(cmd, args)
+	if !running {
+		return start()
+	}
+	return sup.Respawn(mayorSeat, "mayor restart", actor, func() error {
+		// Stop if running (ignore not-running error)
+		if err := mgr.Stop(); err != nil && err != mayor.ErrNotRunning {
+			return fmt.Errorf("stopping session: %w", err)
+		}
+		// Start fresh
+		return start()
+	})
 }
 
 // ensureMayorInfra checks that daemon and dolt are running before attaching

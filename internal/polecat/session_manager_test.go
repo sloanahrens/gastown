@@ -224,7 +224,7 @@ func TestStopKillsThroughTheStopHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	var routed []string
-	m.SetStopKill(func(id string) error { routed = append(routed, id); return nil })
+	m.SetHooks(SessionHooks{Stop: func(id string) error { routed = append(routed, id); return nil }})
 	if err := m.Stop("Toast", true); err != nil {
 		t.Fatalf("Stop = %v", err)
 	}
