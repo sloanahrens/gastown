@@ -16,15 +16,19 @@
 // an unconverted package, so the runner splits the package list: the
 // converted packages run first through the exec wrapper, then the
 // unconverted ones through plain go test, cache and all, with the same
-// arguments. The two halves run one after the other, not side by side: each
-// go test already runs up to -p (GOMAXPROCS) packages at once, so running
-// both together would double the processes competing for the host and
-// compile the dependencies they share twice. The budget report comes after
-// both, and either half failing fails the run.
+// arguments. The two halves run side by side (gt-qe4b0): run one after the
+// other, the unconverted half added its whole wall to every gate, 14-41 s.
+// They share go test's -p cap (GOMAXPROCS unless the arguments set it) so
+// the host sees no more test processes than one go test would start: the
+// unconverted half gets as many slots as it has packages, at most half the
+// cap, and the converted half the rest. The unconverted half's output is held
+// and printed after the converted half's, so the two never interleave. The
+// budget report comes after both, and either half failing fails the run.
 package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +38,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -102,8 +107,11 @@ func run() int {
 		// the arguments as given.
 		judged = patterns
 	}
-	withPkgs := func(p []string) []string {
-		return append(append(append([]string{}, before...), p...), after...)
+	judgedP, cachedP := splitParallelism(parallelism(before, after), len(cached))
+	withPkgs := func(procs int, p []string) []string {
+		// The last -p wins, so this overrides one in the arguments.
+		b := append(append([]string{}, before...), "-p", strconv.Itoa(procs))
+		return append(append(b, p...), after...)
 	}
 
 	// Both halves print plain go test text; a copy of its package summary
@@ -116,26 +124,27 @@ func run() int {
 	}
 
 	var res testpolicy.BudgetResult
-	var judgedErr error
-	code := 0
+	var judgedHalf, cachedHalf half
 	if len(judged) > 0 {
-		start := time.Now()
-		res, code, judgedErr = runJudged(withPkgs(judged), root, *budget, exempt, tracked, out)
-		fmt.Fprintf(os.Stderr, "budget: %d converted packages took %s\n", len(judged), time.Since(start).Round(time.Second))
-		if judgedErr != nil {
-			return fail(judgedErr)
+		judgedHalf = func(_ context.Context, out, errOut io.Writer) (int, error) {
+			start := time.Now()
+			r, code, err := runJudged(withPkgs(judgedP, judged), root, *budget, exempt, tracked, out)
+			res = r
+			fmt.Fprintf(errOut, "budget: %d converted packages took %s\n", len(judged), time.Since(start).Round(time.Second))
+			return code, err
 		}
 	}
-	if len(cached) > 0 && !interrupted(code) {
-		start := time.Now()
-		c, err := runCached(withPkgs(cached), out)
-		fmt.Fprintf(os.Stderr, "budget: %d unconverted packages took %s\n", len(cached), time.Since(start).Round(time.Second))
-		if err != nil {
-			return fail(err)
+	if len(cached) > 0 {
+		cachedHalf = func(ctx context.Context, out, errOut io.Writer) (int, error) {
+			start := time.Now()
+			code, err := runCached(ctx, withPkgs(cachedP, cached), out, errOut)
+			fmt.Fprintf(errOut, "budget: %d unconverted packages took %s\n", len(cached), time.Since(start).Round(time.Second))
+			return code, err
 		}
-		if code == 0 {
-			code = c
-		}
+	}
+	code, err := runHalves(judgedHalf, cachedHalf, out, os.Stderr)
+	if err != nil {
+		return fail(err)
 	}
 
 	if len(res.SlowWall) > 0 {
@@ -308,12 +317,98 @@ func listPackages(tags, patterns []string) ([]string, error) {
 	return strings.Fields(string(out)), nil
 }
 
+// half runs go test over one half of the package list, writing go test's
+// output to out and errOut, and returns go test's exit code. The error is for
+// the runner's own failures; ctx is canceled when the other half has one.
+type half func(ctx context.Context, out, errOut io.Writer) (int, error)
+
+// runHalves runs the converted half (judged) and the unconverted half
+// (cached) at the same time; either may be nil. The judged half writes to out
+// and errOut as it goes; the cached half's output is held and written after
+// the judged half's, so the two never interleave. The exit code is the
+// judged half's when it is not 0 (a negative one, a signal, included), else
+// the cached half's. A runner error in either half is returned; a judged one,
+// or a signal ending the judged half, cancels the cached half first.
+func runHalves(judged, cached half, out, errOut io.Writer) (int, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cachedOut, cachedErrOut bytes.Buffer
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	if cached != nil {
+		go func() {
+			c, err := cached(ctx, &cachedOut, &cachedErrOut)
+			done <- result{c, err}
+		}()
+	} else {
+		done <- result{}
+	}
+	code := 0
+	var judgedErr error
+	if judged != nil {
+		code, judgedErr = judged(ctx, out, errOut)
+		if judgedErr != nil || interrupted(code) {
+			cancel()
+		}
+	}
+	r := <-done
+	if _, err := out.Write(cachedOut.Bytes()); err != nil && judgedErr == nil {
+		judgedErr = err
+	}
+	if _, err := errOut.Write(cachedErrOut.Bytes()); err != nil && judgedErr == nil {
+		judgedErr = err
+	}
+	if err := errors.Join(judgedErr, r.err); err != nil {
+		return 0, err
+	}
+	if code == 0 {
+		code = r.code
+	}
+	return code, nil
+}
+
+// parallelism is go test's -p cap for the run: the last -p in its arguments,
+// else GOMAXPROCS, go test's default.
+func parallelism(before, after []string) int {
+	p := runtime.GOMAXPROCS(0)
+	args := append(append([]string{}, before...), after...)
+	for i, a := range args {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if !strings.HasPrefix(a, "-") || name != "p" {
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(args) {
+				continue
+			}
+			value = args[i+1]
+		}
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			p = n
+		}
+	}
+	return p
+}
+
+// splitParallelism shares the -p cap between the halves: the cached half
+// gets one slot per package, at most half the cap, and the judged half the
+// rest. Each gets at least one, so a cap of 1 runs them at 1 each.
+func splitParallelism(procs, cachedPkgs int) (judgedP, cachedP int) {
+	cachedP = max(1, min(cachedPkgs, procs/2))
+	return max(1, procs-cachedP), cachedP
+}
+
 // runCached runs plain go test (no -json, no -exec, so its result cache
-// applies) with its output passed straight through, and returns its exit
-// code.
-func runCached(args []string, out io.Writer) (int, error) {
-	cmd := exec.Command("go", append([]string{"test"}, args...)...)
-	cmd.Stdout, cmd.Stderr = out, os.Stderr
+// applies) and returns its exit code. Canceling ctx interrupts go test,
+// which stops its test binaries in turn.
+func runCached(ctx context.Context, args []string, out, errOut io.Writer) (int, error) {
+	cmd := exec.CommandContext(ctx, "go", append([]string{"test"}, args...)...)
+	cmd.Stdout, cmd.Stderr = out, errOut
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 10 * time.Second
 	return exitCode(cmd.Run())
 }
 
