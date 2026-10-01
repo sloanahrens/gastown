@@ -67,6 +67,7 @@ func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"tr"}}`), 0o644); err != nil {
 		t.Fatalf("writing rig config.json: %v", err)
 	}
+	registerTestRigs(t, townRoot, map[string]string{rigName: "tr"})
 
 	binDir := t.TempDir()
 	countPath := filepath.Join(t.TempDir(), "bd-shows")

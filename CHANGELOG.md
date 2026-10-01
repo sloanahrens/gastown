@@ -300,6 +300,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Parked is one record in `mayor/rigs.json`** (gt-y3pgh.4, D5 Q5, G3-11) —
+  `gt rig park [--reason]` writes `{since, by, reason}` onto the rig's registry
+  entry and `gt rig unpark` clears it; they are the only writers, and
+  `gt rig config` refuses the `status` key. Dispatch (sling, convoys,
+  `gt dispatch`, spec), `gt rig list` and the daemon read it through the config
+  kernel and fail closed: a town config that does not load, or an unregistered
+  rig, reads as parked. The `status:parked` rig-bead label is no longer read.
+  Upgrading: a rig parked by an older gt (`"status"` in
+  `.beads-wisp/config/<rig>.json`) keeps reading as parked;
+  `gt rig park --migrate` moves each such record into `mayor/rigs.json`
+  (dated by the wisp file's mtime) and removes it. Any other legacy status
+  value is reported and left in place, still reading as parked. Older gt
+  binaries reject a `rigs.json` carrying the new field, so install everywhere
+  before parking.
+
 - **`gt prime` renders an index of agent memories instead of every value**
   (gt-hp7t) — prime dumped all 38 beads-kv memories in full on every session:
   48.5k chars (~12k tokens), 55% of the gastown witness's prime payload, and

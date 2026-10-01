@@ -6,7 +6,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/wisp"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // OpState is a rig's operational state: whether the town will dispatch work
@@ -29,28 +29,24 @@ const (
 	OpStateDocked OpState = "DOCKED"
 )
 
-// Where an operational state was read from. The wisp layer is local and
-// ephemeral (what `gt rig park` writes); the bead label is global and synced
-// (the fallback that survives wisp cleanup, upstream #2079).
+// Where an operational state was read from. Parked is the rig's record in
+// mayor/rigs.json (the registry); docked is the identity bead's
+// status:docked label, global and synced.
 const (
-	OpStateSourceLocal   = "local"
-	OpStateSourceGlobal  = "global - synced"
-	OpStateSourceDefault = "default"
+	OpStateSourceRegistry = "registry"
+	OpStateSourceGlobal   = "global - synced"
+	OpStateSourceDefault  = "default"
 )
 
-// The wisp config key and the values it takes. The rig identity bead carries
-// the same words under a "status:" label prefix.
-const (
-	RigStatusKey    = "status"
-	RigStatusParked = "parked"
-	RigStatusDocked = "docked"
-)
+// rigDockedLabel is the identity-bead label gt rig dock writes.
+const rigDockedLabel = "status:docked"
 
 // GetOpState returns a rig's operational state and the layer it came from.
 //
-// Precedence is the wisp layer first — local, ephemeral, and what `gt rig
-// park` writes — then the rig identity bead's status labels, the persistent
-// fallback that keeps a rig parked after wisp cleanup.
+// Parked comes first and fails closed: the registry record is read through
+// the config kernel (townconfig.IsParked), and a rig whose park state cannot
+// be read reads as parked (gt-y3pgh.4). Docked is the rig identity bead's
+// status:docked label.
 //
 // This is the one definition `gt rig list` and the dashboard's Rigs and
 // Merge Queue panels share, so a rig cannot read as parked on the CLI and
@@ -62,14 +58,8 @@ func GetOpState(townRoot, rigName string) (OpState, string) {
 // getOpState is GetOpState with the identity bead read through run (nil:
 // the bd on PATH).
 func getOpState(townRoot, rigName string, run beads.BDRunner) (OpState, string) {
-	wispConfig := wisp.NewConfig(townRoot, rigName)
-	if status := wispConfig.GetString(RigStatusKey); status != "" {
-		switch strings.ToLower(status) {
-		case RigStatusParked:
-			return OpStateParked, OpStateSourceLocal
-		case RigStatusDocked:
-			return OpStateDocked, OpStateSourceLocal
-		}
+	if parked, _ := townconfig.IsParked(townRoot, rigName); parked {
+		return OpStateParked, OpStateSourceRegistry
 	}
 
 	rigPath := filepath.Join(townRoot, rigName)
@@ -90,20 +80,14 @@ func getOpState(townRoot, rigName string, run beads.BDRunner) (OpState, string) 
 	rigBead, err := bd.Show(beads.RigBeadIDWithPrefix(prefix, rigName))
 	if err != nil {
 		// No readable identity bead: either the rig never got one, or bd could
-		// not answer. Report operational — inventing a parked rig out of a
+		// not answer. Report operational — inventing a docked rig out of a
 		// failed read would hide real work, and the callers that gate dispatch
 		// (cmd.IsRigParkedOrDocked, the daemon) do their own fail-safe reads.
 		return OpStateOperational, OpStateSourceDefault
 	}
 
 	for _, label := range rigBead.Labels {
-		if !strings.HasPrefix(label, "status:") {
-			continue
-		}
-		switch strings.ToLower(strings.TrimPrefix(label, "status:")) {
-		case RigStatusParked:
-			return OpStateParked, OpStateSourceGlobal
-		case RigStatusDocked:
+		if label == rigDockedLabel {
 			return OpStateDocked, OpStateSourceGlobal
 		}
 	}

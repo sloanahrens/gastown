@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -88,36 +87,6 @@ func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
 	return rigName, r, nil
 }
 
-// hasRigBeadLabel checks if a rig's identity bead has a specific label.
-// Returns false if the rig config or bead can't be loaded (safe default).
-func hasRigBeadLabel(townRoot, rigName, label string) bool {
-	rigPath := filepath.Join(townRoot, rigName)
-	prefix := rigBeadsPrefix(townRoot, rigPath, rigName)
-	if prefix == "" {
-		return false
-	}
-
-	beadsPath := filepath.Join(rigPath, "mayor", "rig")
-	if _, err := os.Stat(beadsPath); err != nil {
-		beadsPath = rigPath
-	}
-
-	bd := beads.New(beadsPath)
-	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
-
-	rigBead, err := bd.Show(rigBeadID)
-	if err != nil {
-		return false
-	}
-
-	for _, l := range rigBead.Labels {
-		if l == label {
-			return true
-		}
-	}
-	return false
-}
-
 // slingBlocked reports why a sling into rigName must not run, as a short
 // label and the error to return, or ("", nil) when it may. An E-stop covering
 // the rig (the town sentinel or ESTOP.<rig>, read through estopOn, which
@@ -142,24 +111,19 @@ func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName strin
 	return "", nil
 }
 
-// IsRigParkedOrDocked checks if a rig is parked or docked by any mechanism
-// (wisp ephemeral state or persistent bead labels). Returns (blocked, reason).
-// This is the single entry point for all dispatch paths (sling, convoy launch,
-// convoy stage) to check rig availability.
+// IsRigParkedOrDocked checks if a rig is parked or docked. Returns
+// (blocked, reason) with reason "parked" or "docked". This is the single
+// entry point for all dispatch paths (sling, convoy launch, convoy stage) to
+// check rig availability.
 //
-// Parked vs docked asymmetry: parked state is checked in both the wisp layer
-// (ephemeral, set by "gt rig park") and bead labels (persistent fallback for
-// when wisp state is lost during cleanup). Docked state is bead-label only
-// because "gt rig dock" never writes to wisp — it persists exclusively via
-// the rig identity bead's status:docked label.
+// Parked is the rig's record in mayor/rigs.json, read through the config
+// kernel, and fails closed: a rig whose park state cannot be read is parked
+// (gt-y3pgh.4). Docked is the rig identity bead's status:docked label.
 func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
-	// Check wisp layer first (fast, local) — only relevant for parked state
-	wispCfg := wisp.NewConfig(townRoot, rigName)
-	if wispCfg.GetString(RigStatusKey) == RigStatusParked {
+	if IsRigParked(townRoot, rigName) {
 		return true, "parked"
 	}
 
-	// Single bead lookup for both parked and docked labels.
 	// Look up the beads prefix from rigs.json (the rig registry), with fallback
 	// to the rig's own config.json for isolated/test scenarios.
 	rigPath := filepath.Join(townRoot, rigName)
@@ -181,9 +145,6 @@ func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
 	}
 
 	for _, l := range rigBead.Labels {
-		if l == "status:parked" {
-			return true, "parked"
-		}
 		if l == RigDockedLabel {
 			return true, "docked"
 		}

@@ -485,7 +485,7 @@ func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigNames []st
 		}
 
 		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
-		polecatMgr.SetStopKill(stop.kill)
+		polecatMgr.SetHooks(polecat.SessionHooks{Stop: stop.kill})
 		infos, err := polecatMgr.ListPolecats()
 		if err != nil {
 			continue

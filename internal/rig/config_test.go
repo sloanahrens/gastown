@@ -26,12 +26,12 @@ func TestGetConfig_SystemDefaults(t *testing.T) {
 	}
 
 	// Should get system defaults
-	result := rig.GetConfigWithSource("status")
+	result := rig.GetConfigWithSource("default_formula")
 	if result.Source != SourceSystem {
 		t.Errorf("expected source SourceSystem, got %s", result.Source)
 	}
-	if result.Value != "operational" {
-		t.Errorf("expected value 'operational', got %v", result.Value)
+	if result.Value != "mol-polecat-work" {
+		t.Errorf("expected value 'mol-polecat-work', got %v", result.Value)
 	}
 
 	// Test boolean default
@@ -65,17 +65,17 @@ func TestGetConfig_WispOverride(t *testing.T) {
 
 	// Create wisp config with override
 	wispCfg := wisp.NewConfig(tmpDir, "testrig")
-	if err := wispCfg.Set("status", "parked"); err != nil {
+	if err := wispCfg.Set("default_formula", "mol-other"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Should get wisp value
-	result := rig.GetConfigWithSource("status")
+	result := rig.GetConfigWithSource("default_formula")
 	if result.Source != SourceWisp {
 		t.Errorf("expected source SourceWisp, got %s", result.Source)
 	}
-	if result.Value != "parked" {
-		t.Errorf("expected value 'parked', got %v", result.Value)
+	if result.Value != "mol-other" {
+		t.Errorf("expected value 'mol-other', got %v", result.Value)
 	}
 }
 
@@ -212,10 +212,10 @@ func TestGetStringConfig(t *testing.T) {
 		BDRunner: noRigBead,
 	}
 
-	// System default for status
-	status := rig.GetStringConfig("status")
-	if status != "operational" {
-		t.Errorf("expected status='operational', got %s", status)
+	// System default for default_formula
+	formula := rig.GetStringConfig("default_formula")
+	if formula != "mol-polecat-work" {
+		t.Errorf("expected default_formula='mol-polecat-work', got %s", formula)
 	}
 
 	// Unknown key
