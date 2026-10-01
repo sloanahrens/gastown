@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -158,7 +160,7 @@ func landingWorkerRigs(config *DaemonPatrolConfig, known []string) []string {
 	}
 	var out []string
 	for _, r := range known {
-		if sliceContains(c.Rigs, r) {
+		if slices.Contains(c.Rigs, r) {
 			out = append(out, r)
 		}
 	}
@@ -313,13 +315,32 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		RangeChecks:      []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorLands: true,
 	}
+	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	redMain := &landworker.RedMain{
+		Rig:   rigName,
+		Beads: bd,
+		Rerun: func(ctx context.Context, cmd, pkg string, pl landworker.PostLand) landworker.PostLandResult {
+			rerun, err := postLandRerunCommand(cmd, pkg)
+			if err != nil {
+				return landworker.PostLandResult{ExitCode: -1, Err: err}
+			}
+			return run(ctx, rerun, pl)
+		},
+		Status: func(line string) {
+			if err := writeRedMainStatus(townRoot, rigName, line, time.Now()); err != nil {
+				d.logger.Printf("landing_worker: %s: red-main: writing status: %v", rigName, err)
+			}
+		},
+		Logf: d.logger.Printf,
+	}
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,
 		Command: func() string { return rigPostLandCommand(rigPath) },
-		Run:     postLandRun(repo, workRoot, d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)),
+		Run:     run,
 		Beads:   bd,
 		Logf:    d.logger.Printf,
-		// OnRed: red-main ownership (bisect, revert, file) is gt-v4ssj.4.
+		OnRed:   redMain.Red,
+		OnGreen: redMain.Green,
 	}
 	return &landworker.Worker{
 		Rig:         rigName,
@@ -399,8 +420,43 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 			return landworker.PostLandResult{ExitCode: -1, Err: res.Err}
 		}
 		step := res.Steps[len(res.Steps)-1]
-		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail}
+		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages}
 	}
+}
+
+// postLandPackageRE is what a package path from go test output must look like
+// before it goes into a shell command.
+var postLandPackageRE = regexp.MustCompile(`^[A-Za-z0-9._/~-]+$`)
+
+// postLandRerunCommand reruns one package of the tier cmd ran: the
+// integration tier (cmd names test-integration) with its build tag and
+// containers on, any other tier with containers off.
+func postLandRerunCommand(cmd, pkg string) (string, error) {
+	if !postLandPackageRE.MatchString(pkg) || strings.HasPrefix(pkg, "-") {
+		return "", fmt.Errorf("refusing to rerun package %q: not a Go package path", pkg)
+	}
+	if strings.Contains(cmd, "test-integration") {
+		return "GT_TEST_DOCKER=1 go test -count=1 -tags integration -timeout 20m " + pkg, nil
+	}
+	return "GT_TEST_DOCKER=0 go test -count=1 -timeout 20m " + pkg, nil
+}
+
+// RedMainStatusPath is the file holding a rig's red-main status line.
+func RedMainStatusPath(townRoot, rigName string) string {
+	return filepath.Join(townRoot, ".runtime", "red-main", rigName+".status")
+}
+
+// writeRedMainStatus replaces the rig's status line, stamped with now.
+func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
+	path := RedMainStatusPath(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(now.UTC().Format(time.RFC3339)+" "+line+"\n"), 0o644); err != nil { //nolint:gosec // G306: a status line, read by humans
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // landingRemoteGit is the git surface gitRemote reads: *git.Git over the

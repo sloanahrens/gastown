@@ -298,7 +298,6 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 // A --full gc is the one step that has correlated with a Dolt panic (design
 // doc, Problem), so it runs only when nothing else in the town is doing work:
 //   - the daemon's own in-flight work is idle (the upgrade-restart predicate),
-//   - no main_branch_test, including one still waiting for a slot,
 //   - no container-gate slot or in-flight marker held by anyone (refinery gate,
 //     batch gate, polecat verification suite, review),
 //   - no polecat with a fresh "working" heartbeat.
@@ -306,10 +305,7 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 // A probe that cannot answer counts as busy.
 func (d *Daemon) maintenanceQuiet() (bool, string) {
 	if !d.daemonWorkIdle() {
-		return false, "daemon has work in flight (scripts, compactor, triage, slings, dispatch, watchdog, main_branch_test or install)"
-	}
-	if d.mainBranchTestRunning.Load() {
-		return false, "main_branch_test running (waiting for or holding a slot)"
+		return false, "daemon has work in flight (scripts, compactor, triage, slings, dispatch, watchdog or install)"
 	}
 	holders, err := d.maintenance().slotHolders(d.config.TownRoot)
 	if err != nil {

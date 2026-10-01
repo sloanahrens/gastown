@@ -42,12 +42,16 @@ type PatrolsConfig struct {
 	CompactorDog         *CompactorDogConfig         `json:"compactor_dog,omitempty"`
 	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
-	MainBranchTest       *MainBranchTestConfig       `json:"main_branch_test,omitempty"`
 	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
+
+	// MainBranchTest is the deleted main_branch_test patrol's key
+	// (gt-v4ssj.4: the landing worker's post-landing run owns red main). It is
+	// accepted and ignored so a daemon.json that still carries it parses.
+	MainBranchTest json.RawMessage `json:"main_branch_test,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
 	// per run; the open bead is the double-dispatch guard (gt-nj23).
@@ -309,74 +313,6 @@ type ScheduledMaintenanceConfig struct {
 	// or when no such record exists. Default 2.0; a value below 1, NaN or
 	// Inf is replaced by the default with a warning.
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
-}
-
-// MainBranchTestConfig holds configuration for the main_branch_test patrol.
-// This patrol periodically runs quality gates on each rig's main branch to
-// catch regressions from direct-to-main pushes, bad merges, or sequential
-// merge conflicts that individually pass but break together.
-type MainBranchTestConfig struct {
-	// Enabled controls whether the main-branch test runner runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "30m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// TimeoutStr is the maximum time each rig's test run can take.
-	// Default: "10m".
-	TimeoutStr string `json:"timeout,omitempty"`
-
-	// Rigs limits testing to specific rigs. If empty, all rigs are tested.
-	Rigs []string `json:"rigs,omitempty"`
-
-	// MinCPUIdlePercent is the minimum estimated CPU idle percentage required
-	// before a cycle starts. Below it the host is too busy for a red verdict
-	// to be trustworthy — the suite's own contention produces failures that
-	// pass in isolation — so the cycle is skipped and logged as
-	// "skipped: host busy" instead of escalating a false FAILED (gt-f57o).
-	//
-	// Disabled by default (0), like the sibling spawn-pressure gate
-	// (operational.daemon.pressure_cpu_threshold, also opt-in): a gate that
-	// skips by default can silently stop the patrol that catches regressions
-	// in main. Set 25 to skip a cycle when less than a quarter of the host's
-	// CPU is idle. Values outside (0, 100] are treated as disabled.
-	MinCPUIdlePercent *float64 `json:"min_cpu_idle_percent,omitempty"`
-
-	// SkipWhenGateBusy makes a cycle yield the container-gate pool to a
-	// refinery holding it instead of competing for a slot (gt-lf2r).
-	//
-	// This patrol is itself gate-class (role "<rig>/main-branch-test", see
-	// slot.IsGateRole), so it takes the reserved slot the merge gates take: a
-	// baseline run that starts while a merge gate is queued delays the merge,
-	// at any interval. Yielding is what makes that harmless.
-	//
-	// Enabled by default, unlike MinCPUIdlePercent: the caller it protects has
-	// the harder deadline, and the rig is picked up again on the next tick.
-	// That default is only safe because the yield is bounded — see
-	// GateBusyStarveAfterStr — and skip_when_gate_busy=false competes instead.
-	SkipWhenGateBusy *bool `json:"skip_when_gate_busy,omitempty"`
-
-	// GateBusyStarveAfterStr bounds the yield above: a rig whose skips have run
-	// unbroken for this long is escalated as untested rather than quietly
-	// skipped again (e.g., "6h"). Default: 6h.
-	//
-	// The yield trades "tested on schedule" for "the merge gate does not
-	// wait", and that trade is only safe bounded: a pool held indefinitely
-	// would otherwise stop the patrol that catches regressions in main,
-	// silently. The rig still yields past the bound rather than running, since
-	// starving a merge gate is what the yield exists to prevent; the
-	// escalation is what gets the held pool looked at. A value <= 0 disables
-	// the bound.
-	GateBusyStarveAfterStr string `json:"gate_busy_starve_after,omitempty"`
-
-	// IntegrationIntervalStr is how often each rig's integration tier runs
-	// (see main_branch_integration.go), e.g. "24h". Default: 24h. A value
-	// <= 0 ("0s") turns the integration run off.
-	IntegrationIntervalStr string `json:"integration_interval,omitempty"`
-
-	// IntegrationTimeoutStr bounds one integration run, separately from
-	// TimeoutStr. Default: 30m.
-	IntegrationTimeoutStr string `json:"integration_timeout,omitempty"`
 }
 
 // MayorDispatchConfig holds configuration for the mayor_dispatch patrol.

@@ -63,8 +63,8 @@ func TestGetKnownRigs_CachedBetweenInvalidations(t *testing.T) {
 }
 
 // TestGetKnownRigs_ConcurrentInvalidation is the regression test for gt-f18v.
-// The cache is a heartbeat-tick memo, but a tick's main_branch_test cycle runs
-// on its own goroutine (gt-uvxy) and calls getKnownRigs, so that goroutine's
+// The cache is a heartbeat-tick memo, but a background patrol runs on its own
+// goroutine (gt-uvxy) and calls getKnownRigs, so that goroutine's
 // read races the next tick's invalidateKnownRigsCache at the top of the
 // heartbeat. Run under -race (CI does): without the mutex the reader and the
 // invalidator hit both cache fields unsynchronized and the detector reports

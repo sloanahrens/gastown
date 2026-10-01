@@ -83,10 +83,6 @@ type Daemon struct {
 	// clock times the daemon's own waits (see clk()); nil is the real clock.
 	clock clockwork.Clock
 
-	// hostLoadFn pins the host-load reading main_branch_test decides on
-	// (see hostLoad); nil measures the real host.
-	hostLoadFn func() hostLoad
-
 	// execCmd runs the gt, bd and helper subprocesses the daemon builds (see
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
@@ -249,11 +245,10 @@ type Daemon struct {
 	// re-read and re-parse the same file. Invalidated at the start of each
 	// heartbeat so rigs.json changes between ticks are picked up.
 	//
-	// knownRigsMu guards both fields. The memo is per-tick, but a tick's
-	// main_branch_test cycle runs on its own goroutine (gt-uvxy) and reads the
-	// cache, so the heartbeat's invalidation and that read would otherwise
-	// touch the fields concurrently (gt-f18v). Later background patrols that
-	// call getKnownRigs inherit the guard.
+	// knownRigsMu guards both fields. The memo is per-tick, but background
+	// patrols run on their own goroutines (gt-uvxy) and read the cache, so
+	// the heartbeat's invalidation and those reads would otherwise touch the
+	// fields concurrently (gt-f18v).
 	knownRigsMu         sync.Mutex
 	knownRigsCache      []string
 	knownRigsCacheValid bool
@@ -261,26 +256,6 @@ type Daemon struct {
 	// legacySocketCleanupOnce ensures upgrade cleanup only runs once per daemon
 	// lifetime, before any patrol agent can be started on the current socket.
 	legacySocketCleanupOnce sync.Once
-
-	// mainBranchTestRunning guards against overlapping main_branch_test
-	// cycles. A single cycle can block for up to (60m slot wait + 10m test)
-	// per rig, so it runs on its own goroutine rather than inline in the
-	// main select loop (which would otherwise freeze heartbeat, reaper, and
-	// dog ticks for hours — gt-uvxy). A tick that arrives while the previous
-	// cycle is still running is skipped rather than piling up concurrently.
-	mainBranchTestRunning atomic.Bool
-
-	// mainBranchTestCycles counts the cycle goroutines triggerMainBranchTests
-	// has started and not yet finished, including the last-run write after
-	// the cycle. Waiting on it is how a caller knows a triggered cycle is
-	// wholly done, rather than polling mainBranchTestRunning against a clock.
-	mainBranchTestCycles sync.WaitGroup
-
-	// mainBranchTestWaitingSlot is true only while a main_branch_test run is
-	// blocked in acquireMainBranchTestSlot. Killing a run in that state costs
-	// nothing (an interrupted run is a non-verdict, gt-59yz), so
-	// isIdleForUpgrade treats it as idle.
-	mainBranchTestWaitingSlot atomic.Bool
 
 	// upgradeRestartRequested is set by checkUpgradeRestart; the run loop
 	// then shuts down (leaving Dolt running) and Run returns
@@ -292,17 +267,8 @@ type Daemon struct {
 	upgradeWaitSince     time.Time
 	upgradeWaitEscalated bool
 
-	// gateBusySince records, per rig, when its current unbroken run of
-	// main_branch_test gate-busy skips began — the clock
-	// patrols.main_branch_test.gate_busy_starve_after is measured on. Guarded
-	// by gateBusyMu rather than relying on mainBranchTestRunning's single
-	// flight above: a caller that stops going through triggerMainBranchTests
-	// must not have to know that (gt-lf2r).
-	gateBusyMu    sync.Mutex
-	gateBusySince map[string]time.Time
-
 	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
-	// patrol, on its own goroutine like mainBranchTest so a slow sling never
+	// patrol, on its own goroutine so a slow sling never
 	// blocks the select loop (gt-nj23).
 	scheduledSlingsRunning atomic.Bool
 
@@ -346,7 +312,7 @@ type Daemon struct {
 
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
-	// the same gt-ima2 shape as compactor_dog and mainBranchTestRunning
+	// the same gt-ima2 shape as compactor_dog
 	// above, applied by gt-gxpwc so a restart cannot starve these patrols by
 	// resetting an in-process ticker's countdown. Due-ness for all three is
 	// decided against the persisted last-run time (patrol_last_run.go), not
@@ -976,28 +942,6 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
 	}
 
-	// Start main-branch test runner ticker if configured.
-	// Periodically runs quality gates on each rig's main branch to catch regressions.
-	// The ticker is a check cadence — due-ness comes from a persisted
-	// last-run time, because a run interval enforced by an in-process ticker
-	// resets on every restart (gt-ima2, gt-gxpwc).
-	var mainBranchTestTicker *time.Ticker
-	var mainBranchTestChan <-chan time.Time
-	if d.isPatrolActive("main_branch_test") {
-		interval := mainBranchTestInterval(d.patrolConfig)
-		mainBranchTestTicker = time.NewTicker(shortPatrolCheckTick(interval))
-		mainBranchTestChan = mainBranchTestTicker.C
-		defer mainBranchTestTicker.Stop()
-		d.logger.Printf("Main branch test ticker started (check every %v, run interval %v)",
-			shortPatrolCheckTick(interval), interval)
-		// Catch up at startup (gt-ima2, gt-gxpwc). triggerMainBranchTests logs
-		// its own due-ness decision; the startup log line below just names
-		// whether this specific check kicked off a cycle.
-		if d.triggerMainBranchTests() {
-			d.logger.Printf("Main branch test startup catch-up started a cycle")
-		}
-	}
-
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
 	// is enough (gt-nj23).
@@ -1152,17 +1096,6 @@ func (d *Daemon) Run() (err error) {
 			// `gt maintain --force`, gc dispatches a dolt_gc('--full') cycle).
 			if !d.isShutdownInProgress() {
 				d.runScheduledMaintenance()
-			}
-
-		case <-mainBranchTestChan:
-			// Main branch test runner — periodically runs quality gates on each
-			// rig's main branch to catch regressions from merges or direct pushes.
-			// Dispatched onto its own goroutine (never awaited here): a cycle can
-			// block for up to (60m slot wait + 10m test) per rig, and running it
-			// inline froze the heartbeat/reaper/dog ticks below for as long as it
-			// waited (gt-uvxy).
-			if !d.isShutdownInProgress() {
-				d.triggerMainBranchTests()
 			}
 
 		case <-scheduledSlingsChan:

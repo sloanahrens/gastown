@@ -72,16 +72,6 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 	if p.ScheduledMaintenance.Threshold == nil || *p.ScheduledMaintenance.Threshold != 1000 {
 		t.Error("expected maintenance threshold 1000")
 	}
-
-	if p.MainBranchTest == nil || !p.MainBranchTest.Enabled {
-		t.Error("expected main_branch_test to be enabled")
-	}
-	if p.MainBranchTest.IntervalStr != "60m" {
-		t.Errorf("expected main_branch_test interval 60m, got %s", p.MainBranchTest.IntervalStr)
-	}
-	if p.MainBranchTest.TimeoutStr != "10m" {
-		t.Errorf("expected main_branch_test timeout 10m, got %s", p.MainBranchTest.TimeoutStr)
-	}
 }
 
 func TestEnsureLifecycleDefaults_NilConfig(t *testing.T) {
@@ -169,7 +159,6 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
 			DoltBackup:           &DoltBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Threshold: &threshold},
-			MainBranchTest:       &MainBranchTestConfig{Enabled: false},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
 	}

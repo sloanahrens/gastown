@@ -122,7 +122,7 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 // review of gt-gxpwc: a 15m interval with a 2m cycle produced 4 runs in 8
 // ticks instead of 8). A quarter of the interval keeps that rounding error
 // from ever accumulating to a full skip; the 5m cap keeps a long-interval
-// patrol (main_branch_test, 60m+) checking often enough to catch up quickly
+// patrol (60m+) checking often enough to catch up quickly
 // after a restart, matching compactor_dog's existing fixed 15m tick against
 // its 24h interval.
 func shortPatrolCheckTick(interval time.Duration) time.Duration {

@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"io"
+	"log"
 	"sync"
 	"testing"
 	"time"
@@ -75,3 +77,9 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// discardLogger is what a test reaches for when it needs a Daemon.logger but
+// never inspects what it writes. os.Stderr is the process-wide fd go test
+// streams, so fixture text logged there landed in gate logs beside real
+// output (gt-tw45); io.Discard touches no fd.
+var discardLogger = log.New(io.Discard, "", 0)

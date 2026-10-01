@@ -13,9 +13,8 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings, mayor dispatch or patrol watchdog run, no main_branch_test past its
-// slot wait, no scheduled_maintenance gc cycle, and no install holding
-// install-gt.lock. pourDoctorMolecule and the Dolt goroutines are not
+// slings, mayor dispatch or patrol watchdog run, no scheduled_maintenance gc
+// cycle, and no install holding install-gt.lock. pourDoctorMolecule and the Dolt goroutines are not
 // counted: they are short or restartable.
 func (d *Daemon) isIdleForUpgrade() bool {
 	if d.maintenanceGCRunning.Load() {
@@ -39,9 +38,6 @@ func (d *Daemon) daemonWorkIdle() bool {
 	}
 	if d.scheduledSlingsRunning.Load() || d.mayorDispatchRunning.Load() ||
 		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() {
-		return false
-	}
-	if d.mainBranchTestRunning.Load() && !d.mainBranchTestWaitingSlot.Load() {
 		return false
 	}
 	// Checked last: it is the only check that touches the filesystem.
