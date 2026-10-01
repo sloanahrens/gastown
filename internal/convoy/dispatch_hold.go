@@ -21,12 +21,15 @@ import (
 
 // dispatchHoldLabels are the routing decisions recorded as labels: needs-pro
 // wants a specific runtime, needs-mayor-review wants the mayor's eyes before
-// any work starts. Matched case-insensitively, since a label is typed by hand.
+// any work starts, and gt:needs-human (needs-human by hand) is a landing the
+// worker left for a person (om gave no verdict, a stage timed out, a policy
+// refusal): unlike rework, no polecat can settle it (gt-hpca9). Matched
+// case-insensitively, since a label is typed by hand.
 // The operator reservation (dispatch.OperatorReservation) is the third decision
 // a label records, and the one that also reaches through the assignee; it is
 // applied in DispatchHoldFields rather than listed here so gt sling reads the
 // same rule before it spends a polecat seat.
-var dispatchHoldLabels = []string{"needs-pro", "needs-mayor-review"}
+var dispatchHoldLabels = []string{"needs-pro", "needs-mayor-review", "gt:needs-human", "needs-human"}
 
 // dispatchHoldStatuses are the statuses beads calls CategoryFrozen, "excluded
 // from bd ready": a convoy that fed one would dispatch work the tracker says is
