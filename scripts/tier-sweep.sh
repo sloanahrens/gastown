@@ -9,8 +9,12 @@
 #   integration  each package with a //go:build integration file, with
 #                -tags integration, then the docker.txt packages untagged, as
 #                make test-integration does; all under `gt slot run`
+#   race         internal/cmd's command-tree race guard under -race in the
+#                integration build, under `gt slot run`: the integration
+#                TestMain must presort the cobra tree like the unit one does
+#                (gt-jz03n.6), and only -race shows a regression
 #
-# Usage: scripts/tier-sweep.sh [slow] [shell] [integration]   (default: all)
+# Usage: scripts/tier-sweep.sh [slow] [shell] [integration] [race]   (default: all)
 #
 # TIER_SWEEP_SKIP is the known-red list: whitespace-separated entries of
 #   <tier>:<pkg>             skip the package in that tier, e.g.
@@ -28,7 +32,7 @@ cd "$(dirname "$0")/.." || exit 2
 mkdir -p "$TIER_SWEEP_LOGDIR"
 
 tiers=("$@")
-[ ${#tiers[@]} -eq 0 ] && tiers=(slow shell integration)
+[ ${#tiers[@]} -eq 0 ] && tiers=(slow shell integration race)
 
 # skip_for TIER PKG prints "pkg" when the package is skipped whole, the -skip
 # regexp when only some tests are, and nothing otherwise.
@@ -106,8 +110,12 @@ for tier in "${tiers[@]}"; do
 		read -r p2 f2 s2 n2 < <(go_tier integration-docker gt slot run -- env GT_TEST_DOCKER=1 :: :: "${docker[@]}")
 		summary integration "$((p1 + p2))" "$((f1 + f2))" "$((s1 + s2))" "$n1${n2:+ untagged:$n2}"
 		;;
+	race)
+		read -r p f s names < <(go_tier race gt slot run -- env GT_TEST_DOCKER=1 :: -race -tags integration -run '^TestCommandTreeWalkIsReadOnlyUnderParallelTests$' :: ./internal/cmd)
+		summary race "$p" "$f" "$s" "$names"
+		;;
 	*)
-		echo "tier-sweep: unknown tier $tier (want slow, shell or integration)" >&2
+		echo "tier-sweep: unknown tier $tier (want slow, shell, integration or race)" >&2
 		exit 2
 		;;
 	esac
