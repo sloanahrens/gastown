@@ -481,6 +481,12 @@ type LandingWorkerConfig struct {
 	// landing as a timeout to gt:needs-human and escalates (gt-b5ugw).
 	TestTimeoutStr string `json:"test_timeout,omitempty"`
 
+	// AlarmAfterStr is how long a landing's gate or om stage runs before the
+	// worker logs "SLOW <stage>" and files a low-severity escalation with the
+	// stage's process tree (e.g. "8m"). Default 8m. It reports only; the stage
+	// timeouts kill (gt-lcu5p).
+	AlarmAfterStr string `json:"alarm_after,omitempty"`
+
 	// WorkRoot is where throwaway landing and post-landing worktrees are
 	// created (a <rig> directory under it, 0700). It must not be under the
 	// town root: the git guard refuses worktrees there. Empty means

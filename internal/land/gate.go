@@ -649,7 +649,13 @@ func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	cmd.WaitDelay = 10 * time.Second
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		// The slow-landing alarm names the processes a stage is running.
+		untrack := trackPID(ctx, cmd.Process.Pid)
+		err = cmd.Wait()
+		untrack()
+	}
 	if err == nil {
 		return 0, nil
 	}

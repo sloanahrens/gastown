@@ -100,6 +100,9 @@ type Lander struct {
 	// GateBeads files the flake policy's beads: one per flaky test, one per
 	// package over the test budget. nil logs them only.
 	GateBeads GateBeads
+	// Slow reports a gate or om stage that runs past its threshold; nil
+	// reports nothing (gt-lcu5p).
+	Slow *SlowAlarm
 
 	afterPush func()                // test seam: runs between the push and the read-back
 	openRepo  func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
@@ -345,7 +348,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The gate's stages (lint, then tests) run in order, and om only after
 	// they pass: om is the costly stage, and work that fails lint or tests
 	// never pays for it (gt-b5ugw).
-	gateRes := l.Gate.Run(ctx, dir)
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, "gate")
+	gateRes := l.Gate.Run(gateCtx, dir)
+	gateDone()
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
@@ -395,7 +400,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0))
 	} else {
 		reviewStart := time.Now()
-		verdict, reviewErr = l.Reviewer.Review(ctx, dir, base, merged)
+		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, "om")
+		verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
+		omDone()
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))
 	}
 	res.Verdict = verdict

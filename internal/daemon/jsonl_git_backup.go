@@ -936,13 +936,19 @@ func (d *Daemon) escalateAlert(key, source, message string) {
 // alarm that reports itself as raised when it never arrived is worse than no
 // alarm, because it closes the streak that would have retried.
 func (d *Daemon) escalateAlertErr(key, source, message string) error {
+	return d.escalateAlertSeverity("HIGH", key, source, message)
+}
+
+// escalateAlertSeverity is escalateAlertErr at a chosen severity, for an alert
+// that informs rather than pages (a slow landing is "low", gt-lcu5p).
+func (d *Daemon) escalateAlertSeverity(severity, key, source, message string) error {
 	title := escalationTitle(source, message)
 
 	var lastErr error
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
 		err := d.notify().Escalate(ctx, notify.Escalation{
-			Severity:    "HIGH",
+			Severity:    severity,
 			Description: title,
 			Reason:      message,
 			Fingerprint: key,
