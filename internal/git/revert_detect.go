@@ -65,7 +65,11 @@ import (
 // question). Crossing the boundary also rewrites the qualifiers around the
 // code: params.BeadID lands as opts.BeadID, a local type arrives exported. So
 // a removed hunk is read as moved when one file the candidate's own work wrote
-// holds its lines with those qualifiers compared away (gt-bbk1f).
+// holds its lines with those qualifiers compared away (gt-bbk1f). That reading
+// is the loosest of the five, so it also asks for volume: a removed hunk of a
+// line or two is what a one-line fix looks like, and such a line turns up in
+// any unrelated file, so only a hunk of minMovedCodeLines substantial lines is
+// excused by it (gt-s5eou).
 
 // revertScanCommits bounds how far back through target's history the check
 // looks. A candidate can only revert commits merged after its checkout was
@@ -396,7 +400,8 @@ func (p *candidateContent) packageRetired(filePath string) bool {
 // around the code — params.BeadID leaves as opts.BeadID — so the lines are
 // compared with those gone (moveLine), and must be found together in ONE file:
 // a line that survived on its own somewhere in the tree is not the block that
-// arrived somewhere else.
+// arrived somewhere else. Only a change of minMovedCodeLines substantial lines
+// can be read that way at all.
 //
 // Comment lines are not evidence of anything: moving code re-wraps and
 // rewrites the prose around it, so a move cannot be required to reproduce them
@@ -409,13 +414,17 @@ func (p *candidateContent) changeMoved(filePath, preImage, postImage string) (bo
 	if err != nil {
 		return false, err
 	}
-	var code []string // the change's added lines, whitespace squashed
+	var code []codeLine
+	substantial := 0
 	for line := range added {
 		squashed := squashLine(line)
 		if squashed == "" || isComment(squashed) {
 			continue
 		}
-		code = append(code, squashed)
+		code = append(code, codeLine{squashed: squashed, moved: moveLine(line)})
+		if substantialLine(line) {
+			substantial++
+		}
 	}
 	if len(code) == 0 {
 		return false, nil
@@ -424,15 +433,27 @@ func (p *candidateContent) changeMoved(filePath, preImage, postImage string) (bo
 	if err != nil || inPackage {
 		return inPackage, err
 	}
+	if substantial < minMovedCodeLines {
+		return false, nil
+	}
 	return p.survivesInWrittenFile(filePath, code)
+}
+
+// codeLine is one added line of code in the two reductions the relocation
+// readings compare it by: squashLine for a move within the package, moveLine
+// for a move out of it. moveLine needs the line as written, so the line cannot
+// travel squashed alone.
+type codeLine struct {
+	squashed string
+	moved    string
 }
 
 // survivesInPackage reports whether every line in code is held by a file
 // directly in filePath's directory at the tree under search.
-func (p *candidateContent) survivesInPackage(filePath string, code []string) (bool, error) {
+func (p *candidateContent) survivesInPackage(filePath string, code []codeLine) (bool, error) {
 	dir := path.Dir(filePath)
 	for _, line := range code {
-		found, err := p.hasLine(dir, line)
+		found, err := p.hasLine(dir, line.squashed)
 		if err != nil {
 			return false, err
 		}
@@ -446,7 +467,7 @@ func (p *candidateContent) survivesInPackage(filePath string, code []string) (bo
 // survivesInWrittenFile reports whether one file the candidate's own work
 // wrote elsewhere in the tree holds a copy of every line in code, each
 // compared with the qualifiers a move rewrites taken out (moveLine).
-func (p *candidateContent) survivesInWrittenFile(filePath string, code []string) (bool, error) {
+func (p *candidateContent) survivesInWrittenFile(filePath string, code []codeLine) (bool, error) {
 	for _, dest := range p.writtenPaths() {
 		if dest == filePath {
 			continue
@@ -457,7 +478,7 @@ func (p *candidateContent) survivesInWrittenFile(filePath string, code []string)
 		}
 		holds := true
 		for _, line := range code {
-			if !lines[moveLine(line)] {
+			if !lines[line.moved] {
 				holds = false
 				break
 			}
@@ -644,7 +665,7 @@ func addedLines(g RevertReader, preImage, postImage string) (map[string]int, err
 		}
 		counts := make(map[string]int)
 		for _, line := range strings.Split(content, "\n") {
-			counts[squashLine(line)]++
+			counts[line]++
 		}
 		return counts, nil
 	}
@@ -671,8 +692,68 @@ func squashLine(line string) string {
 // as opts.BeadID), a package's own type arriving exported, a symbol the new
 // package reaches for gaining that package's name, and the reverse for the one
 // it left (gt-bbk1f).
+//
+// The chains collapse before the whitespace goes: squashed first, `defer
+// mu.Unlock()` reads as the identifier defermu and its keyword is stripped as
+// a qualifier, leaving a line equal to the one the fix removed (gt-s5eou).
 func moveLine(line string) string {
-	return stripQualifiers(squashLine(line))
+	return squashLine(stripQualifiers(line))
+}
+
+// minMovedCodeLines is how many substantial lines a removed hunk must carry
+// for a copy in another package to excuse it. One substantial line is a
+// one-line fix and two can be a coincidence of an unrelated file; three
+// matching in a single file is a block that was carried. Refusing a smaller
+// real move costs an operator override, excusing a stale revert costs the
+// merged fix (gt-s5eou).
+const minMovedCodeLines = 3
+
+// minLineNames is how many identifiers a line needs to be substantial. A
+// closing brace, `return err` and a lone call such as `mu.Unlock()` have fewer,
+// and are lines any file holds.
+const minLineNames = 2
+
+// goWords are the identifiers that carry no name of their own: the keywords
+// and the predeclared constants.
+var goWords = map[string]bool{
+	"break": true, "case": true, "chan": true, "const": true, "continue": true,
+	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
+	"func": true, "go": true, "goto": true, "if": true, "import": true,
+	"interface": true, "map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true, "var": true,
+	"nil": true, "true": true, "false": true, "iota": true,
+}
+
+// substantialLine reports whether line names at least minLineNames things once
+// keywords, literals, a trailing comment and the qualifiers a move rewrites are
+// set aside.
+func substantialLine(line string) bool {
+	stripped := stripQualifiers(line)
+	names := 0
+	for i := 0; i < len(stripped); {
+		c := stripped[i]
+		switch {
+		case c == '"' || c == '`' || c == '\'':
+			i = literalEnd(stripped, i)
+		case c == '/' && i+1 < len(stripped) && stripped[i+1] == '/':
+			return names >= minLineNames
+		case c >= '0' && c <= '9':
+			for i < len(stripped) && isIdentChar(stripped[i]) {
+				i++
+			}
+		default:
+			name := identifierAt(stripped, i)
+			if name == "" {
+				i++
+				continue
+			}
+			i += len(name)
+			if !goWords[name] {
+				names++
+			}
+		}
+	}
+	return names >= minLineNames
 }
 
 // stripQualifiers rewrites every identifier chain (a.b.c) to the name it ends
