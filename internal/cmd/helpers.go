@@ -37,7 +37,12 @@ func inferRigFromCwd(townRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return inferRigFromDir(townRoot, cwd)
+}
 
+// inferRigFromDir determines the rig dir sits in: the first component of its
+// path relative to townRoot.
+func inferRigFromDir(townRoot, cwd string) (string, error) {
 	// Check if cwd is within a rig
 	rel, err := filepath.Rel(townRoot, cwd)
 	if err != nil {
@@ -62,13 +67,26 @@ func inferRigFromCwd(townRoot string) (string, error) {
 // rig (town-level dirs like mayor/ are not rig contexts). Returns "" when
 // no rig context can be established.
 func resolveEventRig(townRoot, explicit string) string {
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		cwd = ""
+	}
+	return resolveEventRigWith(os.Getenv, cwd, townRoot, explicit)
+}
+
+// resolveEventRigWith is resolveEventRig reading the environment through
+// getenv and taking the working directory as cwd ("" when unknown).
+func resolveEventRigWith(getenv func(string) string, cwd, townRoot, explicit string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if rigEnv := os.Getenv("GT_RIG"); rigEnv != "" {
+	if rigEnv := getenv("GT_RIG"); rigEnv != "" {
 		return rigEnv
 	}
-	inferred, err := inferRigFromCwd(townRoot)
+	if cwd == "" {
+		return ""
+	}
+	inferred, err := inferRigFromDir(townRoot, cwd)
 	if err != nil {
 		return ""
 	}

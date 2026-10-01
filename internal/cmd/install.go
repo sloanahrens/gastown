@@ -639,22 +639,32 @@ func writeJSON(path string, data interface{}) error {
 // buildBdInitArgs returns the arguments for `bd init` including the correct
 // --server-port derived from the town's Dolt configuration.
 func buildBdInitArgs(townPath string) []string {
-	cfg := bdInitDoltConfig(townPath)
+	return buildBdInitArgsWith(townPath, os.Getenv)
+}
+
+// buildBdInitArgsWith is buildBdInitArgs reading the environment through getenv.
+func buildBdInitArgsWith(townPath string, getenv func(string) string) []string {
+	cfg := bdInitDoltConfigWith(townPath, getenv)
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
 	return []string{"init", "--prefix", "hq", "--server",
 		"--server-port", strconv.Itoa(cfg.Port)}
 }
 
 func bdInitDoltConfig(townPath string) *doltserver.Config {
+	return bdInitDoltConfigWith(townPath, os.Getenv)
+}
+
+// bdInitDoltConfigWith is bdInitDoltConfig reading the environment through getenv.
+func bdInitDoltConfigWith(townPath string, getenv func(string) string) *doltserver.Config {
 	cfg := doltserver.DefaultConfig(townPath)
 	// bd init targets durable town configuration. Keep non-endpoint defaults from
 	// DefaultConfig, but do not let ambient endpoint env override target config.
 	cfg.Host = ""
-	if host := config.ResolveConfiguredDoltHost(townPath); host != "" {
+	if host := config.ResolveConfiguredDoltHostWithEnv(townPath, getenv); host != "" {
 		cfg.Host = host
 	}
 	cfg.Port = doltserver.DefaultPort
-	if port := config.ResolveConfiguredDoltPort(townPath); port > 0 {
+	if port := config.ResolveConfiguredDoltPortWithEnv(townPath, getenv); port > 0 {
 		cfg.Port = port
 	}
 	return cfg
@@ -770,14 +780,19 @@ func initTownBeads(townPath string) error {
 // target beads directory, with stale selectors stripped and canonical Dolt
 // endpoint aliases rebuilt from the shared helper.
 func withBeadsDirEnv(beadsDir string) []string {
-	base := os.Environ()
+	return withBeadsDirEnvFrom(os.Environ(), os.Getenv, beadsDir)
+}
+
+// withBeadsDirEnvFrom is withBeadsDirEnv over the environment base, read
+// through getenv.
+func withBeadsDirEnvFrom(base []string, getenv func(string) string, beadsDir string) []string {
 	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
-		base = config.NormalizeConfiguredDoltEnv(base, townRoot)
-		if host := config.ResolveConfiguredDoltHost(townRoot); host != "" {
+		base = config.NormalizeConfiguredDoltEnvWithEnv(base, townRoot, getenv)
+		if host := config.ResolveConfiguredDoltHostWithEnv(townRoot, getenv); host != "" {
 			base = beads.StripEnvKey(base, "GT_DOLT_HOST")
 			base = append(base, "GT_DOLT_HOST="+host)
 		}
-		if port := config.ResolveConfiguredDoltPort(townRoot); port > 0 {
+		if port := config.ResolveConfiguredDoltPortWithEnv(townRoot, getenv); port > 0 {
 			base = beads.StripEnvKey(base, "GT_DOLT_PORT")
 			base = append(base, "GT_DOLT_PORT="+strconv.Itoa(port))
 		}
