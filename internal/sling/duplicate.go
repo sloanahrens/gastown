@@ -29,12 +29,19 @@ func (r ContentRefs) Empty() bool { return len(r.Tests) == 0 && len(r.Files) == 
 
 // Duplicate is one bead reduced to the fields the dedupe compares.
 type Duplicate struct {
-	ID       string
-	Title    string
-	Status   string
-	ClosedAt string
-	Refs     ContentRefs
+	ID        string
+	Title     string
+	Status    string
+	ClosedAt  string
+	IssueType string
+	Refs      ContentRefs
 }
+
+// IsEpic reports whether the bead is an epic. An epic is a container for other
+// work, so its prose enumerates its children's tests and files rather than
+// naming one defect; sharing a test with it says nothing about duplication
+// (gt-fudap).
+func (d Duplicate) IsEpic() bool { return d.IssueType == "epic" }
 
 // DuplicateMatch records one existing bead whose content overlaps the
 // candidate's, and on what.
@@ -80,6 +87,26 @@ type DuplicateDecision struct {
 	Message string
 }
 
+// Err renders the decision as the error a caller returns for a refused sling,
+// or nil when it refused nothing. The error reports ErrDuplicateContent through
+// errors.Is, so a caller that must tell a refusal from a failure — the CLI
+// suppressing its usage block, a dispatcher deciding defer or fail — does not
+// have to parse the report (gt-fudap).
+func (d DuplicateDecision) Err() error {
+	if !d.Blocked {
+		return nil
+	}
+	return &duplicateRefusal{report: d.Message}
+}
+
+// duplicateRefusal is a refused sling's error. Report is the multi-line
+// explanation; Is carries the sentinel.
+type duplicateRefusal struct{ report string }
+
+func (e *duplicateRefusal) Error() string { return e.report }
+
+func (e *duplicateRefusal) Is(target error) bool { return target == ErrDuplicateContent }
+
 // DecideDuplicates turns the overlaps found against a bead into the decision
 // the dispatch acts on, and the report it prints either way.
 func DecideDuplicates(beadID string, matches []DuplicateMatch) DuplicateDecision {
@@ -104,7 +131,12 @@ func DecideDuplicates(beadID string, matches []DuplicateMatch) DuplicateDecision
 		b.WriteString("  Two beads describing one defect from different vantage points share no\n")
 		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n\n")
 		writeMatchList(&b, blocking)
-		fmt.Fprintf(&b, "\nIf this is genuinely distinct work, re-sling with:\n  gt sling %s <target> --force\n", beadID)
+		// One line, and the report's last: seat-refill logs only the last line
+		// of a failed sling (plugins/seat-refill/run.sh), so it has to carry
+		// both the reason and the remediation or the dispatcher log is blank
+		// again (gt-fudap).
+		fmt.Fprintf(&b, "\nRefusing to sling %s: %d live bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
+			beadID, len(blocking), beadID)
 	} else {
 		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them live work sharing a test.\n",
 			style.Warning.Render("⚠"), beadID, len(warning))

@@ -231,6 +231,10 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	var seatSpawn *SpawnedPolecatInfo
 	defer func() { seatSpawn.releaseSeatClaim() }()
 
+	// A refusal is not a mistyped command: print its reason and remediation
+	// without cobra's usage block trailing it (gt-fudap).
+	defer func() { silenceUsageOnRefusal(cmd, retErr) }()
+
 	// Polecats cannot sling - check early before writing anything.
 	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
@@ -765,7 +769,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		decision := decideSlingDuplicates(beadID, matches)
 		switch {
 		case decision.Blocked && !r.opts.dryRun:
-			return errors.New(decision.Message)
+			return decision.Err()
 		case decision.Blocked:
 			fmt.Fprintf(r.out, "%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
 			_, _ = fmt.Fprint(r.out, decision.Message)
