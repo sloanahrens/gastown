@@ -386,6 +386,11 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		State:    mainState,
 		Landings: landings,
 		Revert:   postLandRevert(repo, workRoot),
+		// The landing's own commit range: the record's base is what it merged
+		// onto, so name-only is the landing's change (gt-40so9).
+		Diff: func(_ context.Context, rec land.LandingRecord) ([]string, error) {
+			return git.NewGit(repo).DiffNameOnly(rec.Base, rec.LandedCommit)
+		},
 	}
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,
@@ -562,7 +567,7 @@ func postLandRun(repo, workRoot, logRoot, townRoot, rigName string, timeout time
 			return landworker.PostLandResult{ExitCode: -1, Err: res.Err, LogPath: logPath}
 		}
 		step := res.Steps[len(res.Steps)-1]
-		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages, LogPath: logPath}
+		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail, Packages: step.Packages, ShellFailures: step.ShellFailures, LogPath: logPath}
 	}
 }
 

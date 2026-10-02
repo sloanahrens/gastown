@@ -287,7 +287,9 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	green := lwGit(t, seed, "rev-parse", "HEAD")
 	const branch = "polecat/opal/gt-cul+x1"
 	lwGit(t, seed, "checkout", "-q", "-b", branch)
-	if err := os.WriteFile(filepath.Join(seed, "b.txt"), []byte("breaks main\n"), 0o644); err != nil {
+	// A Go file, so the diff can have moved the package this landing is
+	// blamed for and red-main still reverts it (gt-40so9).
+	if err := os.WriteFile(filepath.Join(seed, "b.go"), []byte("package b\n\nfunc B() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	lwGit(t, seed, "add", ".")
@@ -317,6 +319,12 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	var status []string
 	redMain := &landworker.RedMain{Rig: "gastown", Beads: bd, Logf: t.Logf, State: state, Landings: landings,
 		Revert: postLandRevert(bare, workRoot),
+		// The landing's real commit range, read out of the rig's own repo as
+		// the daemon wires it: red-main only reverts a landing whose diff can
+		// have moved what failed (gt-40so9).
+		Diff: func(_ context.Context, rec land.LandingRecord) ([]string, error) {
+			return git.NewGit(bare).DiffNameOnly(rec.Base, rec.LandedCommit)
+		},
 		Rerun: func(context.Context, string, string, landworker.PostLand) landworker.PostLandResult {
 			return landworker.PostLandResult{ExitCode: 1, Tail: "--- FAIL: TestB"}
 		},

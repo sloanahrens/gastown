@@ -64,9 +64,11 @@ type StepResult struct {
 	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
 	// landing says why where it is recorded.
 	Warnings []string
-	// ShellFailures are the scripts the shell tier reported red, in the order
-	// its summary line named them (scripts/tier-sweep.sh). Empty for every
-	// other step, and for a shell failure that named no script.
+	// ShellFailures are the scripts this step's own tier sweep reported red,
+	// in the order its summary line named them (scripts/tier-sweep.sh). A
+	// sweep names them whatever the step is called, so the post-land run's
+	// "test" step reads like the gate's "shell" step (gt-40so9). Empty when
+	// the step ran no sweep, or the sweep named no script.
 	ShellFailures []string
 	// TimedOut is true when the step's own Timeout killed it.
 	TimedOut bool
@@ -323,10 +325,16 @@ const shellTierDiffCommand = "git diff --name-only HEAD^ HEAD"
 
 var (
 	shellTierInputsRE = regexp.MustCompile(ShellTierInputs)
-	// shellTierSummaryRE matches the shell tier's one summary line, e.g.
-	// "tier-sweep: shell RED passed=8 failed=1 skipped=0 failed: scripts/x.sh",
-	// and captures the scripts it names.
-	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:(.*)$`)
+	// shellTierSummaryRE matches the shell tier's one summary line and
+	// captures the scripts it names. The log directory trails the names, and
+	// scripts/post-land-shell.sh execs the same sweep, so this is the
+	// post-land run's own line too (gt-40so9):
+	//
+	//	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12)
+	//
+	// A script path holds no parenthesis, so the capture stops at the marker;
+	// a line without it (an older sweep) still matches.
+	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?$`)
 )
 
 // LandGate is the gate Land runs on the merged tree, one command from the
@@ -616,10 +624,7 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 	}
 	out := buf.String()
 	pkgs, tests := parseGoTestOutput(out)
-	var shells []string
-	if s.Name == ShellStepName {
-		shells = parseShellTierFailures(out)
-	}
+	shells := parseShellTierFailures(out)
 	res.Steps = append(res.Steps, StepResult{
 		Name:           s.Name,
 		Command:        s.Command,
@@ -704,7 +709,7 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 	return pkgs, tests
 }
 
-// parseShellTierFailures is the scripts the shell tier's summary line named,
+// parseShellTierFailures is the scripts the tier sweep's summary line named,
 // from the last line that carried one.
 func parseShellTierFailures(out string) []string {
 	var names []string
