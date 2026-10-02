@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
@@ -127,6 +128,9 @@ type slingDeps struct {
 	estopOn            func(townRoot, rigName string) (bool, error)
 	agentDead          func(assignee string) bool
 	survivingWorkGuard func(townRoot, beadID, holder string) error
+	// stewardReworkOwner reports why a rework bead is the steward patrol's to
+	// settle rather than the sling's (daemon.StewardReworkOwner, gt-28ibg).
+	stewardReworkOwner func(townRoot, rig string) string
 	checkDuplicates    func(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error)
 	noteDispatched     func(townRoot string, candidate *duplicateCandidate)
 	crossRigGuard      func(beadID, targetAgent, townRoot string) error
@@ -233,6 +237,7 @@ func realSlingDeps() *slingDeps {
 		estopOn:            estop.ActiveFor,
 		agentDead:          isHookedAgentDeadFn,
 		survivingWorkGuard: reslingSurvivingWorkGuard,
+		stewardReworkOwner: daemon.StewardReworkOwner,
 		checkDuplicates:    checkSlingDuplicates,
 		noteDispatched:     noteSlingCandidateDispatched,
 		crossRigGuard:      checkCrossRigGuard,

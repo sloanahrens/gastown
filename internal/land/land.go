@@ -150,7 +150,9 @@ type Rejection struct {
 	// ReviewSummary and ReviewScore are om's, when om asked for changes.
 	ReviewSummary string
 	ReviewScore   float64
-	// Rework is false when only a human can lift the refusal (no_merge).
+	// Rework is false when only a human can lift the refusal (no_merge), and
+	// past MaxReworkAttempts whatever the kind was: the loop, not the refusal,
+	// is what the ceiling stops.
 	Rework    bool
 	RecordErr error
 }
@@ -691,12 +693,29 @@ func reviewErrorReason(err error) string {
 	return reason
 }
 
+// MaxReworkAttempts is the rejection count that ends the rework loop: a bead
+// rejected this many times goes to a human instead of back to a polecat
+// (gt-28ibg). Each round costs a polecat session and a gate run, and by the
+// third the rounds are repeating a refusal rather than converging on a
+// landing, so the loop is the failure a human has to look at. It matches the
+// town's other circuit-breaker threshold, config.DefaultRecoveryMaxBeadRespawns.
+const MaxReworkAttempts = 3
+
 // reject writes rej to the work bead and returns it.
 func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
+	attempt := CountRejections(issue.Notes) + 1
+	// The attempt ceiling (gt-28ibg): the rejection count decides, before the
+	// note is written, whether this round is the last one a polecat gets.
+	capped := rej.Rework && attempt >= MaxReworkAttempts
+	reason := rej.Reason
+	if capped {
+		reason = fmt.Sprintf("%s (attempt %d of %d: the loop is escalated, not reworked again)",
+			reason, attempt, MaxReworkAttempts)
+	}
 	note := RejectionNote{
-		Attempt:     CountRejections(issue.Notes) + 1,
+		Attempt:     attempt,
 		Kind:        string(rej.Kind),
-		Reason:      rej.Reason,
+		Reason:      reason,
 		Branch:      w.Branch,
 		Target:      w.Target,
 		MR:          w.BeadID,
@@ -711,7 +730,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}
-	l.logf("%s: rejected (%s): %s", w.BeadID, rej.Kind, rej.Reason)
+	l.logf("%s: rejected (%s): %s", w.BeadID, rej.Kind, reason)
 	if err := l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note)); err != nil {
 		rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
 		return rej
@@ -729,16 +748,33 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 			w.BeadID, now.Status, now.Assignee, beads.HasLabel(now, LabelReadyToLand))
 		return rej
 	}
+	// The cap's other half: the landing worker routes the outcome by Rework,
+	// and its human branch is the one that escalates. Writing gt:needs-human
+	// without flipping this would leave a capped bead labeled for a human with
+	// nobody told (gt-28ibg).
+	if capped {
+		rej.Rework = false
+		rej.Reason = reason
+	}
 	label := LabelRework
 	if !rej.Rework {
 		label = LabelNeedsHuman
 	}
+	// The two refusal labels are exclusive. A bead can move between them — a
+	// resubmission rejected for a different reason, or one that hits the
+	// attempt cap — and carrying both would leave the record claiming the
+	// author and a human own it at once.
+	other := LabelNeedsHuman
+	if label == LabelNeedsHuman {
+		other = LabelRework
+	}
+	remove := []string{LabelReadyToLand, other}
 	open, unassigned := string(beads.StatusOpen), ""
 	if err := l.Beads.Update(w.BeadID, beads.UpdateOptions{
 		Status:       &open,
 		Assignee:     &unassigned,
 		AddLabels:    []string{label},
-		RemoveLabels: []string{LabelReadyToLand},
+		RemoveLabels: remove,
 		// The author's claim is over: gt done handed the work to the landing
 		// worker, and a rejection hands it back to dispatch. The re-read
 		// above established nobody else took it since.

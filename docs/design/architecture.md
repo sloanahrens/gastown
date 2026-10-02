@@ -210,8 +210,9 @@ Landing worker (one per rig, serial within a rig)
   → Close the bead with the landing record; append to the landings file
 ```
 
-A rejection is written to the work bead and the bead goes back for rework.
-Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
+A rejection is written to the work bead and the bead goes back for rework, or
+to a person at `land.MaxReworkAttempts` rejections, where the loop is the
+failure rather than the refusal (gt-28ibg). Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
 the daemon restarts a session only when it is dead while holding work.
 
 ## Data Plane Lifecycle

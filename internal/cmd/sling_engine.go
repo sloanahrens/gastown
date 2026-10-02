@@ -28,6 +28,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		BeadInfoInTown:     d.beadInfoInTown,
 		AgentDead:          d.agentDead,
 		SurvivingWorkGuard: d.survivingWorkGuard,
+		StewardReworkOwner: d.stewardReworkOwner,
 		CheckDuplicates:    d.checkDuplicates,
 		VerifyInTargetRig:  d.verifyInTargetRig,
 		DefaultFormula:     d.engineDefaultFormula,

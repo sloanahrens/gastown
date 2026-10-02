@@ -456,3 +456,74 @@ func TestStewardShadowRunsDoNotSpendLiveEvents(t *testing.T) {
 		t.Fatalf("ledger rows = %+v, want a shadow job then a live one", jobs)
 	}
 }
+
+// TestStewardOwnsReworkOnlyWhenLive is gt-28ibg: a rework bead belongs to the
+// steward only while its patrol is enabled, live and covering the rig. A
+// shadow job changes nothing outside its own comments, so it owns nothing a
+// dispatcher would collide with.
+func TestStewardOwnsReworkOnlyWhenLive(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		cfg *DaemonPatrolConfig
+		rig string
+	}{
+		"no config":                     {nil, "gastown"},
+		"disabled":                      {stewardPatrolConfig(&StewardConfig{Enabled: false}), "gastown"},
+		"enabled in shadow":             {stewardPatrolConfig(&StewardConfig{Enabled: true}), "gastown"},
+		"shadow spelled out":            {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "shadow"}), "gastown"},
+		"a mode typo is shadow":         {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "Live"}), "gastown"},
+		"live on another rig":           {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Rigs: []string{"longeye"}}), "gastown"},
+		"live on another rig, unlisted": {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Rigs: []string{"longeye"}}), ""},
+	} {
+		if got := stewardReworkOwner(tc.cfg, tc.rig); got != "" {
+			t.Errorf("%s: stewardReworkOwner = %q, want no owner", name, got)
+		}
+	}
+	for name, tc := range map[string]struct {
+		cfg *DaemonPatrolConfig
+		rig string
+	}{
+		"live":                  {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live"}), "gastown"},
+		"live, rigs empty":      {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Rigs: nil}), "longeye"},
+		"live, rig listed":      {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Rigs: []string{"longeye", "gastown"}}), "gastown"},
+		"live, one of two rigs": {stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Rigs: []string{"gastown"}}), "gastown"},
+	} {
+		got := stewardReworkOwner(tc.cfg, tc.rig)
+		if got == "" {
+			t.Fatalf("%s: stewardReworkOwner = no owner, want the steward named", name)
+		}
+		if !strings.Contains(got, tc.rig) {
+			t.Errorf("%s: owner reason %q does not name rig %s", name, got, tc.rig)
+		}
+	}
+}
+
+// TestStewardReworkOwnerReadsTheTownConfig: the guard answers from the files
+// the daemon reads, and a town-level disabled_patrols entry wins over an
+// enabled:true in the patrol config (gt-28ibg).
+func TestStewardReworkOwnerReadsTheTownConfig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"steward":{"enabled":true,"mode":"live"}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(cfgJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := StewardReworkOwner(townRoot, "gastown"); got == "" {
+		t.Fatal("a live steward in the town config owns nothing")
+	}
+
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(`{"disabled_patrols":["steward"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := StewardReworkOwner(townRoot, "gastown"); got != "" {
+		t.Errorf("a disabled steward still owns rejections: %q", got)
+	}
+}
