@@ -18,6 +18,7 @@ bash -n plugins/seat-refill/run_test.sh
 bash plugins/seat-refill/run_test.sh
 bash -n scripts/docs-lint.sh
 bash scripts/docs-lint_test.sh
+bash scripts/flake-sweep_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh
