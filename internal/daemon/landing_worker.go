@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/supervisor"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // The landing worker (ADR 0004, gt-v4ssj.2): one goroutine per rig, each
@@ -233,6 +234,10 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 // interval (gt-fzwcd).
 func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass func(context.Context) landworker.Report) {
 	skipLogged := ""
+	// lastPassLanded is what makes the pass after a landing readable as the
+	// drain: only an idle pass that follows one says the queue emptied, and
+	// only that pass is the quiet point the install follows (gt-3qmv4.1).
+	lastPassLanded := false
 	for {
 		if !d.isPatrolActive("landing_worker") {
 			d.logger.Printf("landing_worker: %s: patrol disabled; worker stopping", rigName)
@@ -260,6 +265,10 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
 			}
+			if rep == (landworker.Report{}) && lastPassLanded {
+				d.noteLandingDrained(rigName)
+			}
+			lastPassLanded = rep.Landed > 0
 			// This pass was the last thing a pending restart waited for, so
 			// its end is the idle moment: wake the run loop now rather than
 			// up to a heartbeat (3 min) later (gt-fzwcd).
@@ -300,6 +309,26 @@ func (d *Daemon) signalLandingDrained() {
 	case d.landingDrained() <- struct{}{}:
 	default:
 	}
+}
+
+// noteLandingDrained asks rebuild_gt to install at the next heartbeat when the
+// drained rig is the one whose checkout the binary is built from (gt-3qmv4.1).
+func (d *Daemon) noteLandingDrained(rigName string) {
+	if !d.landingOwnsGTSource(rigName) {
+		return
+	}
+	d.requestRebuildGTInstall()
+}
+
+// landingOwnsGTSource reports whether rigName's checkout is the town's gt
+// source. A landing on any other rig moves that rig's main, not the main the
+// installed binary comes from.
+func (d *Daemon) landingOwnsGTSource(rigName string) bool {
+	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
+	if err != nil {
+		return false
+	}
+	return landingPathWithin(repoRoot, filepath.Join(d.config.TownRoot, rigName))
 }
 
 func (d *Daemon) landingLogRoot(rigName string) string {

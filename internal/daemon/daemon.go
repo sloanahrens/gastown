@@ -405,11 +405,13 @@ type Daemon struct {
 	// (git_hygiene.go).
 	gitHygieneRunning atomic.Bool
 
-	// rebuildGTRunning is the rebuild_gt job's single-flight guard, and
-	// rebuildGTBlock is how long the current "due and not installed" episode
-	// has run (rebuild_gt.go).
-	rebuildGTRunning atomic.Bool
-	rebuildGTBlock   rebuildGTBlock
+	// rebuildGTRunning is the rebuild_gt job's single-flight guard,
+	// rebuildGTRequested is the landing worker's sticky request to install at
+	// the next heartbeat, and rebuildGTBlock is how long the current "due and
+	// not installed" episode has run (rebuild_gt.go).
+	rebuildGTRunning   atomic.Bool
+	rebuildGTRequested atomic.Bool
+	rebuildGTBlock     rebuildGTBlock
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
