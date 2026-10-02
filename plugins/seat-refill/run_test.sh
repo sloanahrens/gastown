@@ -272,6 +272,7 @@ setup_case() {
   unset GT_SEAT_REFILL_DRY_RUN GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS
   unset GT_SEAT_REFILL_CLAIM_TTL GT_SEAT_REFILL_TOP_CANDIDATES GT_SEAT_REFILL_MAX_PRIORITY
   unset GT_SEAT_REFILL_SHAPE_GATE GT_SEAT_REFILL_LINT_BOUND GT_SEAT_REFILL_BEAD_BOUND
+  unset GT_SEAT_REFILL_RED_MAIN_DIR
 
   # The pool every case starts from: one local seat, one capped overflow seat.
   cat > "$CASE_DIR/settings.json" <<'JSON'
@@ -358,6 +359,29 @@ JSON
 }
 
 write_polecats() { printf '%s\n' "$1" > "$TEST_STATE/polecats.json"; }
+
+# red_main_state <rig> <json>: the rig's red-main state as the landing worker
+# writes it, where the plugin reads whether a revert is in flight.
+red_main_state() {
+  mkdir -p "$GT_TOWN_ROOT/.runtime/red-main"
+  printf '%s\n' "$2" > "$GT_TOWN_ROOT/.runtime/red-main/$1.json"
+}
+
+# red_main_ready: a red-main bead and an ordinary one in gastown, plus a
+# red-main bead in om, so one rig's revert cannot be read as the other's.
+red_main_ready() {
+  cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-redmain","title":"red main (gastown): internal/a","status":"open","priority":1,"issue_type":"task","labels":["red-main"]},
+  {"id":"gt-ok","title":"ordinary work","status":"open","priority":2,"issue_type":"task"}
+]}],"summary":{},"town_root":"/town"}
+JSON
+  cat > "$TEST_STATE/ready/om.json" <<'JSON'
+{"sources":[{"name":"om","issues":[
+  {"id":"gt-omred","title":"red main (om): internal/a","status":"open","priority":0,"issue_type":"task","labels":["red-main"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+}
 
 # Two live polecats, both seats taken.
 LIVE_BOTH='[{"rig":"gastown","name":"a","agent":"local-coder-polecat","session_running":true},
@@ -1110,6 +1134,57 @@ assert_eq "$(slings)" "0" "gate timing: none of the three is slung"
 assert_eq "$(gt_calls '^spec lint ')" "3" "gate timing: one lint per candidate, none repeated"
 assert_eq "$(gt_calls 'gt-v1')" "4" "gate timing: a skipped candidate costs four calls"
 assert_contains "$TEST_STATE/stdout.log" "3 skipped by shape_gate" "gate timing: all three are named"
+
+# --- Case 51: a revert in flight takes its rig's red-main beads off the board
+# gt-zkdwt: at 4dcb093e seat-refill slung the red-main bead gt-3u7zu while the
+# red-main owner was already reverting the breakage as gt-okre7.
+direct_case
+write_polecats "$LIVE_NONE"
+red_main_ready
+red_main_state gastown '{"last_green":"aaa","last_run":"bbb","revert":{"culprit":"gt-cul","bead":"gt-revert1"}}'
+run_plugin 51000000
+assert_eq "$(slings)" "2" "red main: the two seats still fill"
+assert_not_contains "$TEST_STATE/sling.log" "gt-redmain" "red main: the queued revert holds gt-redmain back"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-ok gastown --agent deepseek-flash" "red main: the ordinary gastown bead still takes a seat"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-omred om --agent local-coder-polecat" "red main: om has no revert, so its red-main bead is a candidate"
+assert_contains "$TEST_STATE/stdout.log" "SKIP gastown red-main beads: revert of gt-cul is building or queued" \
+  "red main: the receipt names the revert that held the bead back"
+
+# The build window: the state says a revert is coming before its bead exists.
+# sling.log accumulates across the case's runs, so each is read on its own.
+: > "$TEST_STATE/sling.log"
+red_main_state gastown '{"revert":{"culprit":"gt-cul"}}'
+run_plugin 51000001
+assert_eq "$(slings)" "2" "red main: a revert that is still building holds the bead too"
+assert_not_contains "$TEST_STATE/sling.log" "gt-redmain" "red main: gt-redmain stays back while the revert builds"
+
+# --- Case 52: the bead is a candidate again once the revert is gone --------
+# The landing worker clears the revert from the state when it lands or is
+# rejected, and never sets one when it reports "no revert".
+direct_case
+write_polecats "$LIVE_NONE"
+red_main_ready
+red_main_state gastown '{"last_green":"aaa","last_run":"ccc"}'
+run_plugin 52000000
+assert_eq "$(slings)" "2" "red main landed: the seats fill"
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-redmain gastown --agent deepseek-flash" \
+  "red main landed: gt-redmain is a candidate again"
+assert_not_contains "$TEST_STATE/stdout.log" "red-main beads" "red main landed: no skip is logged"
+
+# No state file at all is the resting state of a town with no red-main owner.
+: > "$TEST_STATE/sling.log"
+rm -f "$GT_TOWN_ROOT/.runtime/red-main/gastown.json"
+run_plugin 52000001
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-redmain gastown --agent deepseek-flash" \
+  "no red-main state: a red-main bead is still a candidate"
+
+# A state file the plugin cannot read is no revert either: it must not strand
+# the seat.
+: > "$TEST_STATE/sling.log"
+red_main_state gastown 'not json'
+run_plugin 52000002
+assert_contains "$TEST_STATE/sling.log" "SLING|gt-redmain gastown --agent deepseek-flash" \
+  "unreadable red-main state: a red-main bead is still a candidate"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

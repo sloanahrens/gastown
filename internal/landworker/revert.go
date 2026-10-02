@@ -29,6 +29,18 @@ type MainState struct {
 	// LastRun is the newest commit a post-landing run reached a verdict at.
 	// The worker reads it to tell a direct push from main it has tested.
 	LastRun string `json:"last_run,omitempty"`
+	// Revert is the revert this owner has in flight, nil when none is. A
+	// dispatcher outside this process reads it to leave the rig's red-main
+	// beads alone until the revert lands (gt-zkdwt).
+	Revert *PendingRevert `json:"revert,omitempty"`
+}
+
+// PendingRevert is a revert the red-main owner has started but not finished
+// with: the culprit whose landing is being reverted, and the revert work bead
+// once it is filed (empty while the branch is still being built).
+type PendingRevert struct {
+	Culprit string `json:"culprit"`
+	Bead    string `json:"bead,omitempty"`
 }
 
 // MainStateStore persists a rig's MainState. The daemon keeps it beside the
@@ -123,6 +135,49 @@ func (r *RedMain) recordVerdict(pl PostLand, green bool) {
 	}
 }
 
+// setRevertInFlight records the revert this owner is building or has queued.
+// The state is what tells a dispatcher that this rig's breakage is already
+// being undone, so a polecat is not sent to fix forward in parallel with the
+// revert (gt-zkdwt). bead is "" until the revert work bead is filed.
+func (r *RedMain) setRevertInFlight(culprit, bead string) {
+	if r.State == nil {
+		return
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		r.logf("reading the main state to record the revert of %s: %v", culprit, err)
+		return
+	}
+	if st.Revert != nil && st.Revert.Culprit == culprit && st.Revert.Bead == bead {
+		return
+	}
+	st.Revert = &PendingRevert{Culprit: culprit, Bead: bead}
+	if err := r.State.Save(st); err != nil {
+		r.logf("saving the main state with the revert of %s: %v", culprit, err)
+	}
+}
+
+// clearRevertInFlight forgets the revert in flight: it landed, was rejected,
+// or could not be built, so a dispatcher is free to take the red-main beads
+// again.
+func (r *RedMain) clearRevertInFlight() {
+	if r.State == nil {
+		return
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		r.logf("reading the main state to clear the revert: %v", err)
+		return
+	}
+	if st.Revert == nil {
+		return
+	}
+	st.Revert = nil
+	if err := r.State.Save(st); err != nil {
+		r.logf("saving the main state without the revert: %v", err)
+	}
+}
+
 // maybeRevert files a revert of pl's landing when it is the only landing
 // between the last green commit and the red one, and its diff can have moved
 // what failed: then it is the culprit. It returns what it did, for the status
@@ -157,6 +212,7 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand, b blame) string 
 		return "no revert: the culprit is itself a revert"
 	}
 	if id := r.openRevert(pl.BeadID); id != "" {
+		r.setRevertInFlight(pl.BeadID, id)
 		return fmt.Sprintf("revert of %s already open as %s", pl.BeadID, id)
 	}
 	// The cancellation guard comes before the diff read: a run the stop cut
@@ -169,12 +225,25 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand, b blame) string 
 		return "no revert: " + why
 	}
 	branch := RevertBranch(pl.BeadID, rec.LandedCommit)
+	// The build is the start of the revert, and it can take a while: a
+	// dispatcher that reads the state mid-build must already see the revert
+	// coming, or it fills a seat with the fix-forward this revert supersedes
+	// (gt-zkdwt).
+	r.setRevertInFlight(pl.BeadID, "")
 	head, err := r.Revert(ctx, rec, branch)
 	if err != nil {
+		r.clearRevertInFlight()
 		r.logf("building the revert of %s (%s): %v", pl.BeadID, short(rec.LandedCommit), err)
 		return fmt.Sprintf("no revert: building it failed (%v)", land.NoteField(err.Error()))
 	}
 	id, err := r.fileRevert(rec, branch, head)
+	// A non-empty id means the revert bead exists and is queued, whether or
+	// not the last step of filing it failed.
+	if id != "" {
+		r.setRevertInFlight(pl.BeadID, id)
+	} else {
+		r.clearRevertInFlight()
+	}
 	if err != nil {
 		r.logf("filing the revert of %s: %v", pl.BeadID, err)
 		return fmt.Sprintf("no revert: filing it failed (%v)", land.NoteField(err.Error()))
@@ -334,6 +403,9 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 	if !ok {
 		return
 	}
+	// The revert is on main now, so the red-main beads are a dispatcher's
+	// again: the fix forward is the reopened culprit's, not theirs (gt-zkdwt).
+	r.clearRevertInFlight()
 	msg := fmt.Sprintf("Reverted by %s (%s): main went red at %s and this landing was the only change since the last green commit. "+
 		"Reopened for rework. The reverted commits are still in main's history, so a plain re-merge of the old branch brings nothing back: "+
 		"start from main, re-apply the change (git revert %s), fix it, and submit again.",
@@ -361,6 +433,9 @@ func (r *RedMain) RevertRejected(work land.Work, rej *land.Rejection) bool {
 	if !ok {
 		return false
 	}
+	// No revert is in flight once it is rejected, so the red-main beads are
+	// the fix forward again (gt-zkdwt).
+	r.clearRevertInFlight()
 	reason := fmt.Sprintf("revert of %s did not land (%s): %s; the red-main beads stand", culprit, rej.Kind, land.NoteField(rej.Reason))
 	if err := r.Beads.Update(work.BeadID, beads.UpdateOptions{RemoveLabels: []string{land.LabelRework}}); err != nil {
 		r.logf("removing %s from %s: %v", land.LabelRework, work.BeadID, err)

@@ -309,6 +309,31 @@ agent_live() {
 # read the same reservation on the bead's record; this is the one dispatcher
 # that asks rather than slings, so it has to read it here.
 
+# --- Red main ------------------------------------------------------------
+# A red-main bead is the red-main owner's work item for a package that stayed
+# red on a rig's main. While that owner has a revert of the same breakage
+# building or queued, the fix is already on its way: a polecat dispatched to
+# the red-main bead would fix forward in parallel, and the two landings collide
+# over one main (gt-zkdwt). The owner records the revert it has in flight in
+# the rig's red-main state (landworker's MainState, written beside the status
+# line the daemon logs), and this reads it.
+RED_MAIN_DIR="${GT_SEAT_REFILL_RED_MAIN_DIR:-$TOWN_ROOT/.runtime/red-main}"
+
+# revert_in_flight <rig>: prints the culprit bead whose revert is building or
+# queued for that rig and returns 0, or prints nothing and returns 1 when no
+# revert is in flight. A missing or unreadable state is no revert: a town with
+# no red-main owner is the resting state, and a dispatcher that refused to
+# dispatch on a read it could not parse would strand the seat it exists to
+# fill.
+revert_in_flight() {
+  local rig="$1" file culprit
+  file="$RED_MAIN_DIR/$rig.json"
+  [ -f "$file" ] || return 1
+  culprit=$(jq -r '.revert.culprit // empty' "$file" 2>/dev/null) || return 1
+  [ -n "$culprit" ] || return 1
+  printf '%s' "$culprit"
+}
+
 operational_rigs() {
   local out rows rc=0 limit
   # stdout here is the rig list the caller reads, so logs go to stderr.
@@ -344,6 +369,14 @@ while IFS= read -r RIG; do
     continue
   fi
 
+  # Every red-main bead in this rig belongs to the breakage a revert in flight
+  # is already undoing, so they leave the board until it lands (gt-zkdwt).
+  REVERT_CULPRIT=""
+  if culprit=$(revert_in_flight "$RIG"); then
+    REVERT_CULPRIT="$culprit"
+    log "SKIP $RIG red-main beads: revert of $culprit is building or queued"
+  fi
+
   limit=$(bound "$READY_BOUND" "$PRE_BUDGET")
   ready_rc=0
   out=$(timeout "$limit" gt ready --rig "$RIG" --json 2>/dev/null) || ready_rc=$?
@@ -355,11 +388,12 @@ while IFS= read -r RIG; do
     log "SKIP $RIG: gt ready failed"
     continue
   fi
-  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" --arg held "$HELD_BEADS" '
+  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" --arg held "$HELD_BEADS" --arg revert_culprit "$REVERT_CULPRIT" '
     ($held | split("\n")) as $heldids
     | [ .sources[]? | select(.name == $rig) | .issues[]? ]
     | .[]
     | select(.id as $i | $heldids | index($i) | not)
+    | select(($revert_culprit == "") or (([(.labels // [])[] | ascii_downcase] | index("red-main")) == null))
     | select((.status // "open") != "in_progress" and (.status // "open") != "hooked")
     | select(([(.labels // [])[] | ascii_downcase] | map(select(. == "gt:ready-to-land" or . == "gt:needs-human" or . == "needs-human")) | length) == 0)
     | select((.priority // 99) <= $maxp)

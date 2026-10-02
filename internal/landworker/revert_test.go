@@ -254,6 +254,10 @@ func TestRedMainDoesNotRevert(t *testing.T) {
 			if len(h.open(t)) != 1 {
 				t.Fatalf("red-main beads %v", h.open(t))
 			}
+			// And no revert is in flight, so a dispatcher may take it.
+			if st, _ := h.state.Load(); st.Revert != nil {
+				t.Fatalf("state %+v; the owner reported no revert", st)
+			}
 		})
 	}
 }
@@ -271,6 +275,89 @@ func TestRedMainDirectPushNamesTheRange(t *testing.T) {
 	h.r.Green(context.Background(), "make test-slow", PostLand{Commit: "9999", Direct: true, From: redSHA}, PostLandResult{})
 	if st, _ := h.state.Load(); st.LastGreen != "9999" {
 		t.Fatalf("state %+v", st)
+	}
+}
+
+// gt-zkdwt: seat-refill dispatched a red-main bead while the red-main owner
+// was reverting the same breakage, because nothing a dispatcher could read
+// said a revert was on its way.
+func TestRedMainRecordsTheRevertItHasInFlight(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; a green main has no revert in flight", st)
+	}
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	rv := h.revertBeads(t)
+	if len(rv) != 1 {
+		t.Fatalf("revert beads %+v", rv)
+	}
+	if st, _ := h.state.Load(); st.Revert == nil || st.Revert.Culprit != "gt-cul" || st.Revert.Bead != rv[0].ID {
+		t.Fatalf("state %+v; want the revert of gt-cul in flight as %s", st, rv[0].ID)
+	}
+}
+
+func TestRedMainRecordsARevertItIsStillBuilding(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	// The build reads the state back: it must already say the revert is
+	// coming, or a dispatcher reading it mid-build sees a fix-forward seat.
+	var seen *PendingRevert
+	h.r.Revert = func(_ context.Context, rec land.LandingRecord, _ string) (string, error) {
+		st, _ := h.state.Load()
+		seen = st.Revert
+		return revertSHA, nil
+	}
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	if seen == nil || seen.Culprit != "gt-cul" || seen.Bead != "" {
+		t.Fatalf("state during the build %+v; want the culprit with no bead yet", seen)
+	}
+}
+
+func TestRedMainDoesNotRecordTheRevertsItDidNotFile(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(h *revertHarness)
+	}{
+		{name: "more than one change since green", setup: func(h *revertHarness) {
+			h.files.recs[0].Base = "5555555555"
+		}},
+		{name: "the landing's diff is unreadable", setup: func(h *revertHarness) { h.diffErr = errors.New("fatal: bad revision") }},
+		{name: "the build fails", setup: func(h *revertHarness) { h.buildErr = errors.New("revert conflicts") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			tc.setup(h)
+			h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+			if len(h.revertBeads(t)) != 0 {
+				t.Fatalf("filed a revert: %+v", h.revertBeads(t))
+			}
+			if st, _ := h.state.Load(); st.Revert != nil {
+				t.Fatalf("state %+v; no revert was filed, so none is in flight", st)
+			}
+		})
+	}
+}
+
+func TestRevertLandedClearsTheRevertInFlight(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	h.r.RevertLanded(context.Background(), land.Work{BeadID: id}, land.Result{LandedCommit: "abababab"})
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; a landed revert is no longer in flight", st)
+	}
+}
+
+func TestRevertRejectedClearsTheRevertInFlight(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	h.r.RevertRejected(land.Work{BeadID: id}, &land.Rejection{Kind: land.RejectGate, Reason: "gate failed"})
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; a rejected revert is no longer in flight", st)
 	}
 }
 

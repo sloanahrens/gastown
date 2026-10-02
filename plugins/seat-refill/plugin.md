@@ -48,8 +48,9 @@ warning and never fails the dispatch, which has already happened.
 
 Candidates skip: `gt:ready-to-land` and `gt:needs-human` beads, `in_progress`
 or assigned beads (crew included), epics, molecules and agent beads (type
-whitelist), the `operator` label, and any bead named by a live polecat session
-or an in-flight pool claim (gt-inu1y).
+whitelist), the `operator` label, any bead named by a live polecat session or
+an in-flight pool claim (gt-inu1y), and a `red-main` bead whose breakage is
+already being reverted (gt-zkdwt).
 
 Each candidate is shape-linted just before its sling
 (`gt spec lint <id> --json`, gt-mmsr2), because a vague bead is the main cause

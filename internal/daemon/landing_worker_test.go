@@ -278,6 +278,30 @@ func TestFileMainStateRoundTrips(t *testing.T) {
 	}
 }
 
+// The keys are the plugin's read: seat-refill checks .revert.culprit to hold a
+// rig's red-main beads back while the revert is in flight (gt-zkdwt), so this
+// file's shape is an interface between the daemon and that plugin.
+func TestFileMainStateStoresTheRevertInFlight(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f := fileMainState{path: RedMainStatePath(town, "gastown")}
+	want := landworker.MainState{LastGreen: "g1", Revert: &landworker.PendingRevert{Culprit: "gt-cul", Bead: "gt-rv"}}
+	if err := f.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.Load()
+	if err != nil || got.LastGreen != want.LastGreen || got.Revert == nil || *got.Revert != *want.Revert {
+		t.Fatalf("loaded %+v, %v; want %+v", got, err, want)
+	}
+	raw, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"revert":{"culprit":"gt-cul","bead":"gt-rv"}`) {
+		t.Fatalf("state file %s; want the revert under .revert.culprit and .revert.bead", raw)
+	}
+}
+
 // TestLandingLogDirIsPerLanding is gt-2ycne.2's log half: every landing
 // checks out at the same <work root>/wt, so a log directory named from the
 // worktree path would put every landing's gate.log in one place. It is named
