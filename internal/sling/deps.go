@@ -55,13 +55,12 @@ type Deps struct {
 	LockBead     func(townRoot, beadID string) (func(), error)
 	LockAssignee func(townRoot, targetAgent string) (func(), error)
 
-	// The polecat the dispatch runs on. CleanupSpawned and StartSession take
-	// the town root explicitly: the exec boundary used to supply it as the
-	// subprocess's working directory, and a mechanism that reads the cwd
-	// instead is a mechanism the daemon cannot call.
-	SpawnPolecat   func(rigName string, opts SpawnOptions) (*Spawn, error)
-	CleanupSpawned func(spawn *Spawn, townRoot, rigName, convoyID string)
-	StartSession   func(spawn *Spawn) (string, error)
+	// The polecat the dispatch runs on. StartSession takes the town root
+	// explicitly: the exec boundary used to supply it as the subprocess's
+	// working directory, and a mechanism that reads the cwd instead is a
+	// mechanism the daemon cannot call.
+	SpawnPolecat func(rigName string, opts SpawnOptions) (*Spawn, error)
+	StartSession func(spawn *Spawn) (string, error)
 
 	// Reassignment away from a previous holder.
 	ClearReassigned    func(townRoot, assignee string)

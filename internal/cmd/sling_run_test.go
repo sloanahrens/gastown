@@ -78,16 +78,16 @@ func TestSlingResumeFlags(t *testing.T) {
 		h.addBead(slingBead, beadInfo{})
 		h.run.opts.resumePR = 42
 		h.run.resolvePRBranch = func(pr int) (string, error) { return "feature/pr-42", nil }
-		var got ResolveTargetOptions
-		h.run.resolveTarget = func(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
+		var got SlingSpawnOptions
+		h.run.spawnPolecat = func(rig string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 			got = opts
-			return h.resolveTarget(target, opts)
+			return h.newSpawn(rig), nil
 		}
 		if err := h.sling(slingBead, "gastown"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		if got.ResumeBranch != "feature/pr-42" {
-			t.Errorf("resolveTarget ResumeBranch = %q, want feature/pr-42", got.ResumeBranch)
+			t.Errorf("spawn ResumeBranch = %q, want feature/pr-42", got.ResumeBranch)
 		}
 		h.wantCalls("instantiate", "instantiate mol-polecat-work on gt-abc123 vars=resume_branch=feature/pr-42")
 	})
@@ -110,8 +110,8 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 		{name: "closed under force", bead: beadInfo{Status: "closed"}, force: true, want: "work already completed"},
 		{name: "tombstone", bead: beadInfo{Status: "tombstone"}, want: "is tombstone"},
 		{name: "flag-like title", bead: beadInfo{Title: "--help"}, want: "looks like a CLI flag"},
-		{name: "deferred status", bead: beadInfo{Status: "deferred"}, want: "refusing to sling deferred bead"},
-		{name: "deferred in description", bead: beadInfo{Description: "Deferred to post-launch."}, want: "refusing to sling deferred bead"},
+		{name: "deferred status", bead: beadInfo{Status: "deferred"}, want: "is deferred"},
+		{name: "deferred in description", bead: beadInfo{Description: "Deferred to post-launch."}, want: "is deferred"},
 		{name: "deferred under force", bead: beadInfo{Status: "deferred"}, force: true},
 		{name: "operator label", bead: beadInfo{Labels: []string{dispatch.OperatorLabel}}, want: dispatch.SlingRefusalMarker},
 		{name: "person assignee", bead: beadInfo{Assignee: "sloan"}, want: "is the operator's work"},
@@ -193,7 +193,18 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		if err := h.sling(slingBead, "gastown"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
-		h.wantNo("resolve target")
+		if !strings.Contains(h.out.String(), "no-op") {
+			t.Errorf("output %q does not report a no-op", h.out.String())
+		}
+		h.wantNo("spawn")
+		h.wantNo("hook")
+	})
+	t.Run("rig target held by another rig is refused", func(t *testing.T) {
+		t.Parallel()
+		h := newSlingHarness(t)
+		h.addBead(slingBead, beadInfo{Status: "in_progress", Assignee: "om/polecats/Nux"})
+		wantSlingErr(t, h.sling(slingBead, "gastown"), "already in_progress to om/polecats/Nux")
+		h.wantNo("spawn")
 	})
 	t.Run("self target matches the caller", func(t *testing.T) {
 		t.Parallel()
@@ -277,34 +288,37 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 	})
 }
 
-// TestSlingRollsBackOnEveryPostSpawnExit (gt-7evi4): once resolveTarget has
-// spawned a polecat, every failure short of the commit point rolls it back
-// exactly once. The rollback names the bead only once the sling has written
-// to it, and closes the auto-convoy only when raw metadata failed (gt-yg24).
-func TestSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
+// TestSlingRollsBackOnlyWhatItSpawned (gt-7evi4): a refusal costs no side
+// effect, so the guards a dispatch runs before its spawn leave nothing to undo.
+// Once a polecat exists, every failure short of the commit point rolls it back
+// exactly once: the rollback names the bead only once the sling has written to
+// it, and leaves the auto-convoy open for the feeder except where raw metadata
+// failed (gt-yg24).
+func TestSlingRollsBackOnlyWhatItSpawned(t *testing.T) {
 	t.Parallel()
 	injected := errors.New("injected failure")
 	cases := []struct {
 		name         string
 		inject       func(h *slingHarness)
 		wantErr      string // "" = success
+		refusedEarly bool   // refused before the spawn: no rollback to make
 		wantRollback string
 	}{
-		{name: "molecule bond read fails", wantErr: "checking existing molecule bonds", wantRollback: "rollback Toast bead= convoy=",
+		{name: "molecule bond read fails", wantErr: "checking existing molecule bonds", refusedEarly: true,
 			inject: func(h *slingHarness) {
 				h.run.collectMolecules = func(*beadInfo, string, string) ([]string, error) { return nil, injected }
 			}},
-		{name: "stale molecule burn fails", wantErr: "burning stale molecules", wantRollback: "rollback Toast bead= convoy=",
+		{name: "stale molecule burn fails", wantErr: "burning stale molecules", refusedEarly: true,
 			inject: func(h *slingHarness) {
 				h.molecules[slingBead] = []string{"gt-wisp-old"}
 				h.run.burnMolecules = func([]string, string, string) error { return injected }
 			}},
-		{name: "live molecule refuses re-sling", wantErr: "already has 1 attached molecule", wantRollback: "rollback Toast bead= convoy=",
+		{name: "live molecule refuses re-sling", wantErr: "has existing molecule(s)", refusedEarly: true,
 			inject: func(h *slingHarness) {
 				h.addBead(slingBead, beadInfo{Status: "blocked"}) // unassigned + blocked: not an orphan
 				h.molecules[slingBead] = []string{"gt-wisp-old"}
 			}},
-		{name: "cross-rig guard fails", wantErr: "cross-rig", wantRollback: "rollback Toast bead= convoy=",
+		{name: "cross-rig guard fails", wantErr: "cross-rig", refusedEarly: true,
 			inject: func(h *slingHarness) {
 				h.run.crossRigGuard = func(string, string, string) error { return errors.New("cross-rig mismatch") }
 			}},
@@ -349,6 +363,11 @@ func TestSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 				return
 			}
 			wantSlingErr(t, err, tc.wantErr)
+			if tc.refusedEarly {
+				h.wantNo("spawn")
+				h.wantNo("rollback")
+				return
+			}
 			h.wantCalls("rollback", tc.wantRollback)
 			if strings.Contains(tc.wantRollback, "bead=gt-") {
 				h.wantCalls("restore raw fields", "restore raw fields "+slingBead)
@@ -357,6 +376,27 @@ func TestSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSlingRollsBackAnInlineTargetsSpawn (gt-7evi4): the inline path still
+// owns every target the engine does not dispatch, and the one it can spawn for
+// — a named polecat whose session is gone — is rolled back exactly once when a
+// step after the spawn fails. The cases above are the engine's, which the rig
+// target takes (gt-hk555); this is run's own deferred guard.
+func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{})
+	h.run.opts.noConvoy = true
+	h.run.resolveTarget = func(string, ResolveTargetOptions) (*ResolvedTarget, error) {
+		spawn := h.newSpawn("gastown")
+		return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
+	}
+	h.run.hook = func(string, string, string, string) error { return errors.New("injected failure") }
+	err := h.sling(slingBead, "gastown/polecats/Toast")
+	wantSlingErr(t, err, "injected failure")
+	h.wantCalls("rollback", "rollback Toast bead=gt-abc123 convoy=")
+	h.wantCalls("restore raw fields", "restore raw fields "+slingBead)
 }
 
 // TestSlingForcedPinnedRollbackRestoresThePin: a forced sling of a pinned
@@ -391,8 +431,11 @@ func TestSlingDryRunWritesNothing(t *testing.T) {
 }
 
 // TestSlingWritesInOrder: the success path of a bare bead to a rig. The
-// convoy exists before the formula, the hook comes after the formula and
-// any raw metadata, and the session starts last (gt-jn40ft).
+// convoy exists before the formula, the hook comes after the formula and any
+// raw metadata, and the session starts last (gt-jn40ft). A rig target is the
+// engine's dispatch (gt-hk555), so this checks those milestones in order
+// rather than the engine's full call list, which internal/sling's callers
+// pin in sling_execute_test.go.
 func TestSlingWritesInOrder(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
@@ -401,33 +444,57 @@ func TestSlingWritesInOrder(t *testing.T) {
 	if err := h.sling(slingBead, "gastown"); err != nil {
 		t.Fatalf("sling: %v", err)
 	}
-	want := []string{
-		"autocommit off",
-		"lock bead gt-abc123",
-		`resolve target "gastown"`,
-		"admit gastown gt-abc123",
-		"cross-rig guard gt-abc123 gastown/polecats/Toast",
-		"convoy lookup gt-abc123",
+	log := strings.Join(h.log(), "\n")
+	at := -1
+	for _, want := range []string{
+		"cross-rig guard gt-abc123 gastown/polecats/_",
 		"create convoy gt-abc123",
 		"instantiate mol-polecat-work on gt-abc123 vars=",
-		"lock assignee gastown/polecats/Toast",
-		"reassign gt-abc123  -> gastown/polecats/Toast",
 		"hook gt-abc123 gastown/polecats/Toast",
-		"clear orphan labels gt-abc123",
-		"feed sling",
-		"agent hook gastown/polecats/Toast gt-abc123",
-		"store fields gt-abc123",
 		"start session Toast",
-		"unlock assignee gastown/polecats/Toast",
-		"unlock bead gt-abc123",
-		"autocommit restore",
-	}
-	if got := h.log(); strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("call log:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	} {
+		i := strings.Index(log, want)
+		if i < 0 {
+			t.Fatalf("call log has no %q:\n%s", want, log)
+		}
+		if i < at {
+			t.Errorf("%q comes before the step it must follow:\n%s", want, log)
+		}
+		at = i
 	}
 	stored := h.stored[slingBead]
 	if len(stored) != 1 || stored[0].AttachedMolecule != "gt-wisp-new" || stored[0].AttachedFormula != "mol-polecat-work" || stored[0].ConvoyID != "hq-cv-auto" {
 		t.Errorf("stored fields = %+v, want the wisp, formula and convoy attached", stored)
+	}
+}
+
+// TestSlingRigTargetWakesTheRig: booting the rig's agents is the caller's job,
+// the engine documents it so, and a dispatch that landed is what earns it —
+// --no-boot asks for none (gt-hk555).
+func TestSlingRigTargetWakesTheRig(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		noBoot bool
+		wake   bool
+	}{
+		{name: "boots the rig after the dispatch", wake: true},
+		{name: "no-boot leaves it alone", noBoot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(slingBead, beadInfo{})
+			h.run.opts.noBoot = tc.noBoot
+			if err := h.sling(slingBead, "gastown"); err != nil {
+				t.Fatalf("sling: %v", err)
+			}
+			if tc.wake {
+				h.wantCalls("wake rig", "wake rig gastown")
+				return
+			}
+			h.wantNo("wake rig")
+		})
 	}
 }
 
@@ -516,7 +583,7 @@ func TestSlingMoleculeGuard(t *testing.T) {
 		err   string
 	}{
 		{name: "orphan on an open bead", bead: beadInfo{}, burn: true},
-		{name: "live on a blocked bead", bead: beadInfo{Status: "blocked"}, err: "already has 1 attached molecule"},
+		{name: "live on a blocked bead", bead: beadInfo{Status: "blocked"}, err: "has existing molecule(s)"},
 		{name: "live under force", bead: beadInfo{Status: "blocked"}, force: true, burn: true},
 	}
 	for _, tc := range cases {
@@ -708,7 +775,7 @@ func TestSlingInputNormalization(t *testing.T) {
 		if err := h.sling(slingBead, "gastown/"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
-		h.wantCalls("resolve target", `resolve target "gastown"`)
+		h.wantCalls("spawn", "spawn gastown")
 	})
 	t.Run("crew flag", func(t *testing.T) {
 		t.Parallel()

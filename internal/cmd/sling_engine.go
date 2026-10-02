@@ -36,9 +36,8 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		LockBead:     d.lockBead,
 		LockAssignee: d.lockAssignee,
 
-		SpawnPolecat:   d.engineSpawnPolecat,
-		CleanupSpawned: d.engineCleanupSpawned,
-		StartSession:   d.engineStartSession,
+		SpawnPolecat: d.engineSpawnPolecat,
+		StartSession: d.engineStartSession,
 
 		ClearReassigned:    d.clearReassigned,
 		RecordReassignment: d.recordReassignment,
@@ -164,10 +163,6 @@ func cmdSpawn(s *sling.Spawn) *SpawnedPolecatInfo {
 		spi.originalHold = &beadHold{Status: s.OriginalHold.Status, Assignee: s.OriginalHold.Assignee}
 	}
 	return spi
-}
-
-func (d *slingDeps) engineCleanupSpawned(spawn *sling.Spawn, townRoot, rigName, convoyID string) {
-	d.cleanupSpawned(cmdSpawn(spawn), townRoot, rigName, convoyID)
 }
 
 func (d *slingDeps) engineStartSession(spawn *sling.Spawn) (string, error) {

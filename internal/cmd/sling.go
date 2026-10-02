@@ -607,6 +607,28 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
+	// A bare rig target is one dispatch, and the engine batch sling, the
+	// scheduler and the daemon's convoy feeders dispatch on owns it — handing it
+	// the request here is what keeps a single sling from being a second
+	// implementation of the same twelve steps (gt-hk555).
+	//
+	// It has to happen before the bead lock below: the engine takes that lock
+	// itself, and it is not reentrant, so a sling that held it here would refuse
+	// itself. The two answers the engine has no notion of stay in this layer, so
+	// they run before the hand-off: --dry-run, which previews the inline path's
+	// route, and the already-assigned answer, which a person at a prompt needs
+	// in full.
+	//
+	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
+	// with rig last arg) exits above. The only remaining case is len(args) <= 2.
+	var target string
+	if len(args) > 1 {
+		target = args[1]
+	}
+	if rigName, isRig := r.isRigName(target); isRig && !r.opts.dryRun {
+		return r.runRigTarget(rigName, beadID, formulaName, townRoot)
+	}
+
 	// Serialize assignment writes per bead to prevent concurrent sling races from
 	// producing conflicting assignee/metadata updates.
 	releaseSlingLock, err := r.lockBead(townRoot, beadID)
@@ -778,31 +800,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
-	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling,
-	// scheduler dispatch and the daemon's convoy feeders already use the unified
-	// path — the feeder used to exec this command and now calls the engine, so
-	// the two are on the same code for the first time (gt-638go.7). Single-sling
-	// is deferred because it handles non-rig targets (mayor, crew, self-sling,
-	// nudge) that executeSling does not cover. The rig-target case could be
-	// factored out to use executeSling, limiting this to non-rig targets only.
-	//
-	// Until then the two are not identical for a rig target, and the difference
-	// is deliberate where it exists. The dispatch guards all live in the engine
-	// (closed, deferred, operator reservation, ready-to-land, flag-like title,
-	// dead-holder auto-force, duplicates), so a bead one path refuses the other
-	// refuses too. What is still inline-only is the interactive surface: the
-	// idempotency no-op for a bead already on the target, the unhook of a force
-	// steal, --dry-run, and the start nudge. Factor the rig-target case out
-	// before adding a guard to one path alone.
-	//
-	// Resolve target agent using shared dispatch logic.
-	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
-	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
-	var target string
-	if len(args) > 1 {
-		target = args[1]
-	}
+	// What is left is a non-rig target: mayor, crew, a named polecat, or the
+	// caller itself (gt-hk555 moved the rig targets to the engine above). These
+	// the engine does not cover, so the dispatch is inline from here.
 	resolved, err := r.resolveTarget(target, ResolveTargetOptions{
 		DryRun:       r.opts.dryRun,
 		Force:        force,
@@ -1259,6 +1259,104 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	return nil
 }
 
+// runRigTarget dispatches `gt sling <bead> <rig>` on the engine in
+// internal/sling — the one path batch sling, the scheduler and the daemon's
+// convoy feeders dispatch on (gt-hk555) — and boots the rig's agents the way
+// the engine's callers must once the dispatch lands.
+func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) error {
+	if held, err := r.rigTargetHeld(rigName, beadID, formulaName); err != nil || held {
+		return err
+	}
+	// The guard the engine documents as its caller's: it checks the bead's
+	// prefix against the target rig before the engine burns a seat on it
+	// (gt-myecw). --force has always carried a bead across rigs, so it skips.
+	if !r.opts.force {
+		if err := r.crossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
+			return err
+		}
+	}
+	if formulaName == "" {
+		// A bare bead keeps the rig's default formula, which the engine takes
+		// from its caller rather than resolving itself.
+		formulaName = r.resolveFormula(r.opts.formula, r.opts.hookRawBead, townRoot, rigName)
+	}
+	mode := ""
+	if r.opts.ralph {
+		mode = "ralph"
+	}
+	_, err := r.executeSling(SlingParams{
+		BeadID:      beadID,
+		FormulaName: formulaName,
+		RigName:     rigName,
+
+		Args:         r.opts.argsText,
+		Vars:         append([]string(nil), r.opts.vars...),
+		Merge:        r.opts.merge,
+		BaseBranch:   r.opts.baseBranch,
+		ResumeBranch: r.opts.resumeBranch,
+		Account:      r.opts.account,
+		Agent:        r.opts.agent,
+		NoConvoy:     r.opts.noConvoy,
+		Owned:        r.opts.owned,
+		NoMerge:      r.opts.noMerge,
+		Force:        r.opts.force,
+		HookRawBead:  r.opts.hookRawBead,
+		NoBoot:       r.opts.noBoot,
+		Mode:         mode,
+		ReviewOnly:   r.opts.reviewOnly,
+
+		// One bead at a prompt: a formula that will not instantiate is this
+		// sling's failure and takes its spawn down with it, where the batch path
+		// hooks the raw bead and goes on to the next one.
+		FormulaFailFatal: true,
+		CallerContext:    r.requester(),
+		TownRoot:         townRoot,
+	})
+	if err != nil {
+		return err
+	}
+	if !r.opts.noBoot {
+		r.wakeRig(rigName)
+	}
+	return nil
+}
+
+// rigTargetHeld answers a bead that is already assigned, before the engine is
+// asked to dispatch it. The engine's refusal is written for a programmatic
+// caller that only needs to know the dispatch is off; a person at a prompt
+// asking for the same work twice needs either silence or the holder's name, so
+// the no-op and the reassignment detail are the cobra layer's (gt-hk555).
+//
+// A dead holder is not held: the dispatch below auto-forces past it, and the
+// engine asks the surviving-work guard before it does.
+func (r *slingRun) rigTargetHeld(rigName, beadID, formulaName string) (bool, error) {
+	if r.opts.force || formulaName != "" {
+		return false, nil
+	}
+	info, err := r.beadInfo(beadID)
+	if err != nil {
+		return false, fmt.Errorf("checking bead status: %w", err)
+	}
+	switch info.Status {
+	case "pinned", "hooked", "in_progress":
+	default:
+		return false, nil
+	}
+	if (info.Status == "hooked" || info.Status == "in_progress") && info.Assignee != "" && r.agentDead(info.Assignee) {
+		return false, nil
+	}
+	if matchesSlingTarget(rigName, info.Assignee, "") {
+		fmt.Fprintf(r.out, "%s Bead %s is already %s to %s, no-op\n",
+			style.Dim.Render("○"), beadID, info.Status, info.Assignee)
+		return true, nil
+	}
+	assignee := info.Assignee
+	if assignee == "" {
+		assignee = "(unknown)"
+	}
+	return false, fmt.Errorf("bead %s is already %s to %s\nUse --force to re-sling", beadID, info.Status, assignee)
+}
+
 // checkCrossRigGuard validates that a bead's prefix matches the target rig.
 // Polecats work in their rig's worktree and cannot fix code owned by another rig.
 // Returns an error if the bead belongs to a different rig than the target polecat.
@@ -1313,9 +1411,9 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 	return nil
 }
 
-// rawSlingMetadataRollbackReason marks the one rollback that also closes the
-// auto-convoy (see the runSling rollback guard).
-const rawSlingMetadataRollbackReason = "Raw sling metadata failed"
+// rawSlingMetadataRollbackReason is the engine's, so the inline rollback guard
+// and the engine's agree on which rollback closes the auto-convoy.
+const rawSlingMetadataRollbackReason = sling.RawMetadataRollbackReason
 
 // rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.
 var rollbackSlingArtifactsFn = rollbackSlingArtifacts
