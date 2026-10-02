@@ -1,5 +1,7 @@
 # Binaries
 /gt
+# gt-proxy binaries land at repo root from a since-deleted build target (gt-wxjhv)
+/gt-proxy-*
 *.exe
 
 # Build
