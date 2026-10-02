@@ -413,6 +413,13 @@ type Daemon struct {
 	rebuildGTRequested atomic.Bool
 	rebuildGTBlock     rebuildGTBlock
 
+	// tierSweepRunning is the tier_sweep job's single-flight guard
+	// (tier_sweep.go).
+	tierSweepRunning atomic.Bool
+	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
+	// the zero value is production (see tier_sweep.go).
+	tierSweepSeams tierSweepSeams
+
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.
 	goos string
@@ -1328,6 +1335,11 @@ var heartbeatSteps = []heartbeatStep{
 	// (was the rebuild-gt plugin, gt-4k3fj.8.6). lifecycle: the install makes
 	// the daemon restart, which the town E-stop holds.
 	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
+
+	// Sweep the tiers `make gate` does not run against origin/main
+	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an
+	// E-stopped town still wants to know its main is red.
+	{name: "tier-sweep", run: (*Daemon).triggerTierSweep},
 
 	// Compute the town health report and write the one health file gt
 	// status --line reads (gt-s3rec.2). Last, so it sees this tick's Dolt

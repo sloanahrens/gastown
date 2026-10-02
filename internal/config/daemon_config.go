@@ -74,6 +74,11 @@ type PatrolsConfig struct {
 	// of gt-9bioi. Opt-in: the jobs act on submitted work.
 	Steward *StewardConfig `json:"steward,omitempty"`
 
+	// TierSweep runs scripts/tier-sweep.sh against origin/main on an interval,
+	// the tiers `make gate` does not run (internal/daemon/tier_sweep.go,
+	// gt-vsct7.5). Opt-in: it runs the town's expensive suites.
+	TierSweep *TierSweepConfig `json:"tier_sweep,omitempty"`
+
 	// DoltBackup is retired: the 15-minute dolt_backup patrol (dolt backup
 	// sync into <town>/.dolt-backup plus an iCloud rsync) was replaced by the
 	// nightly backup in scheduled_maintenance (gt-8z769.5) and nothing reads
@@ -443,6 +448,22 @@ type ScheduledSlingEntry struct {
 	IntervalStr string            `json:"interval"`
 	Priority    int               `json:"priority,omitempty"`
 	Vars        map[string]string `json:"vars,omitempty"`
+}
+
+// TierSweepConfig holds configuration for the tier_sweep patrol
+// (internal/daemon/tier_sweep.go, gt-vsct7.5).
+type TierSweepConfig struct {
+	// Enabled turns the sweep on. Defaults to false: it runs the shell,
+	// integration and race tiers, so the operator opts in.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is how often a rig is swept, as a string (e.g. "1h").
+	// Default 1h.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// Rigs limits the sweep to these rigs. Empty means ["gastown"], the one
+	// rig the overseer's cron swept.
+	Rigs []string `json:"rigs,omitempty"`
 }
 
 // LandingWorkerConfig holds configuration for the landing_worker patrol.
