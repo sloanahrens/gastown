@@ -177,9 +177,16 @@ var treeWideGuards = []treeWideGuard{
 		// branch never touches (gt-gzmfs). A deletion counts: the lists they
 		// ratchet (unconverted.txt and the rest) go stale when the last test
 		// file of a listed package is removed with it.
-		pkg:     "internal/testpolicy",
-		tests:   []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit", "TestGitFree", "TestDockerTier"},
-		judges:  func(rel string) bool { return strings.HasSuffix(rel, "_test.go") },
+		//
+		// TestUnionMergeOnlyOnGrowOnlyLists reads the repo-root .gitattributes
+		// and the lists it marks merge=union, so those paths are inputs too.
+		pkg: "internal/testpolicy",
+		tests: []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit",
+			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists"},
+		judges: func(rel string) bool {
+			return strings.HasSuffix(rel, "_test.go") || rel == ".gitattributes" ||
+				rel == "internal/testpolicy/gitfree.txt"
+		},
 		removal: true,
 	},
 	{
