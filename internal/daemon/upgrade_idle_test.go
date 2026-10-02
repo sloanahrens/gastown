@@ -30,7 +30,10 @@ func (h holdSpawner) Spawn(_ context.Context, _ steward.SpawnRequest) steward.Sp
 }
 
 // startStewardJob gives d a runner with one job in flight and returns the
-// function that lets it finish.
+// function that lets it finish. That function waits for the runner: the job's
+// goroutine appends its ledger row only after Spawn returns, so releasing the
+// job and walking away leaves that write racing t.TempDir's RemoveAll
+// (gt-qmdbt).
 func startStewardJob(t *testing.T, d *Daemon) (release func()) {
 	t.Helper()
 	hold := holdSpawner{release: make(chan struct{})}
@@ -44,7 +47,12 @@ func startStewardJob(t *testing.T, d *Daemon) (release func()) {
 		t.Fatal("the steward job did not start")
 	}
 	var once sync.Once
-	return func() { once.Do(func() { close(hold.release) }) }
+	return func() {
+		once.Do(func() {
+			close(hold.release)
+			d.stewardRunner.Wait()
+		})
+	}
 }
 
 func TestIsIdleForUpgrade(t *testing.T) {
@@ -82,7 +90,6 @@ func TestIsIdleForUpgrade(t *testing.T) {
 		{"steward job finished", func(t *testing.T, d *Daemon) {
 			release := startStewardJob(t, d)
 			release()
-			d.stewardRunner.Wait()
 		}, true},
 		{"steward scan in flight", func(_ *testing.T, d *Daemon) { d.stewardRunning.Store(true) }, false},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
