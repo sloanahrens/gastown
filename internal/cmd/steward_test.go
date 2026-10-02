@@ -55,6 +55,7 @@ func TestStewardStatusText(t *testing.T) {
 	for _, want := range []string{
 		"steward off: 2026-10-01 11:00 to 12:00 (job timeout 45m0s, hard preset deepseek-pro)",
 		"mode        shadow",
+		"kinds       rejection",
 		"jobs        4 (3 finished, 1 running)",
 		"outcomes    error 1, escalated 1, pass 1",
 		"broke       1 of 3 attempted ended in error or timeout (33%)",
@@ -91,11 +92,14 @@ func TestStewardStatusJSONShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The overseer's hourly report reads these keys.
-	for _, key := range []string{"enabled", "job_timeout", "hard_agent", "jobs", "finished", "attempted", "outcomes", "models", "pro", "broke", "escalated",
+	for _, key := range []string{"enabled", "mode", "kinds", "job_timeout", "hard_agent", "jobs", "finished", "attempted", "outcomes", "models", "pro", "broke", "escalated",
 		"median_seconds", "max_seconds", "running", "stuck", "recent", "alerts"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("--json lacks %q: %s", key, raw)
 		}
+	}
+	if kinds, _ := got["kinds"].([]any); len(kinds) != 1 || kinds[0] != "rejection" {
+		t.Errorf("kinds = %v, want [rejection]", got["kinds"])
 	}
 	if recent, _ := got["recent"].([]any); len(recent) != 2 {
 		t.Errorf("--last 2 listed %d jobs", len(recent))

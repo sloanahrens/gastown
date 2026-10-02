@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,48 @@ func TestStewardRigs(t *testing.T) {
 	cfg := stewardPatrolConfig(&StewardConfig{Enabled: true, Rigs: []string{"longeye"}})
 	if got := stewardRigs(cfg, known); len(got) != 1 || got[0] != "longeye" {
 		t.Errorf("rigs = %v, want longeye", got)
+	}
+}
+
+// TestStewardKindsDefaultsToRejection: the scan covers rejections unless the
+// operator opts into review jobs, and an unknown kind is refused with the key
+// named but read as the default, never wider (gt-9bioi.7).
+func TestStewardKindsDefaultsToRejection(t *testing.T) {
+	t.Parallel()
+	names := func(kinds []steward.Kind) []string {
+		out := make([]string, len(kinds))
+		for i, k := range kinds {
+			out[i] = string(k)
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		cfg     *DaemonPatrolConfig
+		want    []string
+		wantErr bool
+	}{
+		"no config":     {nil, []string{"rejection"}, false},
+		"unset":         {stewardPatrolConfig(&StewardConfig{Enabled: true}), []string{"rejection"}, false},
+		"empty list":    {stewardPatrolConfig(&StewardConfig{Kinds: []string{}}), []string{"rejection"}, false},
+		"rejection":     {stewardPatrolConfig(&StewardConfig{Kinds: []string{"rejection"}}), []string{"rejection"}, false},
+		"review":        {stewardPatrolConfig(&StewardConfig{Kinds: []string{"review"}}), []string{"review"}, false},
+		"both":          {stewardPatrolConfig(&StewardConfig{Kinds: []string{"rejection", "review"}}), []string{"rejection", "review"}, false},
+		"review, duped": {stewardPatrolConfig(&StewardConfig{Kinds: []string{"review", "review"}}), []string{"review"}, false},
+		"typo":          {stewardPatrolConfig(&StewardConfig{Kinds: []string{"reviw"}}), []string{"rejection"}, true},
+		"empty string":  {stewardPatrolConfig(&StewardConfig{Kinds: []string{""}}), []string{"rejection"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := StewardKinds(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("StewardKinds error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "patrols.steward.kinds") {
+				t.Errorf("refusal %q does not name the key", err)
+			}
+			if diff := names(got); !slices.Equal(diff, tc.want) {
+				t.Errorf("StewardKinds = %v, want %v", diff, tc.want)
+			}
+		})
 	}
 }
 
@@ -214,7 +257,7 @@ func TestStewardScanFindsQueueEvents(t *testing.T) {
 			return nil, nil
 		},
 	}
-	events := d.stewardEvents("gastown", func(string) bool { return false })
+	events := d.stewardEvents("gastown", []steward.Kind{steward.KindReview, steward.KindRejection}, func(string) bool { return false })
 	if len(events) != 2 {
 		t.Fatalf("events = %+v, want a review and a rejection", events)
 	}
@@ -244,7 +287,7 @@ func TestStewardListAsksEveryPriority(t *testing.T) {
 			return nil, nil
 		},
 	}
-	d.stewardEvents("gastown", func(string) bool { return false })
+	d.stewardEvents("gastown", []steward.Kind{steward.KindReview, steward.KindRejection}, func(string) bool { return false })
 	if len(got) == 0 {
 		t.Fatal("the scan asked bd nothing")
 	}
@@ -303,7 +346,7 @@ func TestStewardScanStartsOneJobPerHead(t *testing.T) {
 		config:        &Config{TownRoot: townRoot},
 		logger:        discardLogger,
 		ctx:           t.Context(),
-		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"review"}, WorkRoot: t.TempDir()}),
 		stewardRunner: runner,
 		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
 		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
@@ -333,6 +376,70 @@ func TestStewardScanStartsOneJobPerHead(t *testing.T) {
 	}
 }
 
+// TestStewardScanHonorsKinds: the scan runs only the listed kinds, and an
+// unlisted kind is not marked seen: a review event under the default
+// [rejection] spawns nothing and still runs once review is enabled
+// (gt-9bioi.7).
+func TestStewardScanHonorsKinds(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := &countingSpawner{result: steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass, Summary: "ok"}}}
+	ids := 0
+	runner := &steward.Runner{
+		Ledger:  steward.NewLedger(steward.LedgerPath(townRoot)),
+		Spawn:   sp,
+		WorkDir: t.TempDir(),
+		MaxJobs: steward.DefaultMaxJobs,
+		Timeout: time.Minute,
+		Logf:    func(string, ...any) {},
+		NewID:   func() string { ids++; return strconv.Itoa(ids) },
+	}
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        discardLogger,
+		ctx:           t.Context(),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		stewardRunner: runner,
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
+			switch o.Label {
+			case land.LabelReadyToLand:
+				return []*beads.Issue{readyBead("gt-x", "c0ffee")}, nil
+			case land.LabelRework:
+				return []*beads.Issue{rejectedBead("gt-y", "beef")}, nil
+			}
+			return nil, nil
+		},
+	}
+	d.runSteward()
+	runner.Wait()
+	got := sp.events()
+	if len(got) != 1 || got[0].Bead != "gt-y" || got[0].Kind != steward.KindRejection {
+		t.Fatalf("scan with kinds=[rejection] started %+v, want only the rejection job", got)
+	}
+	jobs, err := runner.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.Event == steward.KindReview {
+			t.Fatalf("a review job ran under kinds=[rejection]: %+v", j)
+		}
+	}
+	// The head was not spent: enabling review still sees the queued head.
+	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"rejection", "review"}, WorkRoot: t.TempDir()})
+	d.runSteward()
+	runner.Wait()
+	got = sp.events()
+	if len(got) != 2 || got[1].Bead != "gt-x" || got[1].Kind != steward.KindReview {
+		t.Fatalf("after enabling review the scan started %+v, want the queued review", got)
+	}
+}
+
 // TestStewardScanRetriesAFailedRoutineJobOnHard: a routine job that fails
 // earns one retry on the hard preset, and nothing after that (gt-9bioi.1).
 func TestStewardScanRetriesAFailedRoutineJobOnHard(t *testing.T) {
@@ -357,7 +464,7 @@ func TestStewardScanRetriesAFailedRoutineJobOnHard(t *testing.T) {
 		config:        &Config{TownRoot: townRoot},
 		logger:        discardLogger,
 		ctx:           t.Context(),
-		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"review"}, WorkRoot: t.TempDir()}),
 		stewardRunner: runner,
 		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
 		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
@@ -457,7 +564,7 @@ func TestStewardShadowRunsDoNotSpendLiveEvents(t *testing.T) {
 		config:        &Config{TownRoot: townRoot},
 		logger:        discardLogger,
 		ctx:           t.Context(),
-		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+		patrolConfig:  stewardPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"review"}, WorkRoot: t.TempDir()}),
 		stewardRunner: runner,
 		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
 		stewardListFn: func(_ string, o beads.ListOptions) ([]*beads.Issue, error) {
@@ -476,7 +583,7 @@ func TestStewardShadowRunsDoNotSpendLiveEvents(t *testing.T) {
 	if got := sp.events(); len(got) != 1 || got[0].Mode != steward.ModeShadow {
 		t.Fatalf("two shadow scans started %+v, want one shadow job", got)
 	}
-	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", WorkRoot: t.TempDir()})
+	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, Mode: "live", Kinds: []string{"review"}, WorkRoot: t.TempDir()})
 	scan()
 	scan()
 	got := sp.events()

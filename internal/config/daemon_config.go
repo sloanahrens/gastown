@@ -536,6 +536,12 @@ type StewardConfig struct {
 	// its verdicts with its own before live lets it act (gt-9bioi.4).
 	Mode string `json:"mode,omitempty"`
 
+	// Kinds limits the scan to these event kinds: "rejection" and "review".
+	// Empty means [rejection]: a review job repeats what om and the overseer
+	// already decide, so it is opt-in. An unknown kind is refused at the
+	// scan, which then runs the default (gt-9bioi.7).
+	Kinds []string `json:"kinds,omitempty"`
+
 	// Rigs limits the scans to these rigs. Empty means every known rig.
 	Rigs []string `json:"rigs,omitempty"`
 

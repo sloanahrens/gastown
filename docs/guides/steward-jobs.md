@@ -18,6 +18,10 @@ A head a job has already run on is not run again, so a resubmission (a new
 head) earns a new job and a failed fix does not loop. A bead assigned to a
 crew member, or labeled `gt:needs-human`, is left alone.
 
+`kinds` limits the scan to a subset of the table (see Configuration). An
+unlisted kind is not scanned at all, so its heads are not spent: enabling it
+later still sees the beads queued now.
+
 While the patrol runs live it owns every rejected bead: a rework bead is the
 steward's to settle, and `gt sling` refuses to dispatch one without `--force`
 so the convoy feeders and seat-refill cannot spend a second polecat on work a
@@ -31,12 +35,17 @@ owns only those rigs' rejections.
 `patrols.steward` in `mayor/daemon.json`, off unless `enabled` is true:
 
 ```json
-{"enabled": true, "mode": "shadow", "interval": "60s", "max_jobs": 2, "job_timeout": "45m",
- "routine_agent": "deepseek-flash", "hard_agent": "deepseek-pro",
+{"enabled": true, "mode": "shadow", "kinds": ["rejection"], "interval": "60s", "max_jobs": 2,
+ "job_timeout": "45m", "routine_agent": "deepseek-flash", "hard_agent": "deepseek-pro",
  "rigs": ["gastown"], "work_root": "/tmp/gt-steward"}
 ```
 
-`mode` is `shadow` (the default) or `live`; see Rollout.
+`mode` is `shadow` (the default) or `live`; see Rollout. `kinds` is the event
+kinds the scan covers, `rejection` and `review`, and defaults to
+`["rejection"]`: a review job repeats what om and the overseer's risk review
+already decide, so it is opt-in. A `kinds` entry that is not a kind is refused
+with the key named, and the refusal falls back to `["rejection"]` — never to a
+wider scan.
 
 The concurrency cap and the one-job-per-bead rule hold across scans for the
 lifetime of the daemon. `routine_agent` runs the first attempt; a job retries
@@ -107,12 +116,12 @@ and the provider's auth error would look like a broken job.
 
 ## Monitoring
 
-`gt steward status [--since 1h] [--last N] [--json]` summarizes the ledger: jobs
-by outcome and by model, median and max duration, running and stuck jobs, the
-escalations raised, the pro (hard-preset) job count, and the newest jobs with
-bead and outcome. The overseer's hourly report quotes the `--json` object
-(`jobs`, `outcomes`, `broke`, `pro`, `median_seconds`, `stuck`, `alerts`) next
-to its audit agreement rate.
+`gt steward status [--since 1h] [--last N] [--json]` summarizes the ledger: the
+active `mode` and `kinds`, jobs by outcome and by model, median and max
+duration, running and stuck jobs, the escalations raised, the pro (hard-preset)
+job count, and the newest jobs with bead and outcome. The overseer's hourly
+report quotes the `--json` object (`jobs`, `outcomes`, `broke`, `pro`,
+`median_seconds`, `stuck`, `alerts`) next to its audit agreement rate.
 
 A job is *stuck* when it runs a minute past `job_timeout`: the runner kills at
 the timeout, so an open row past it is a job the kill did not end. "Broke"

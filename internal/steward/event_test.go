@@ -35,6 +35,37 @@ func rejectedIssue(id, head string, note land.RejectionNote) *beads.Issue {
 
 func never(string) bool { return false }
 
+// TestParseKind: the kind set is closed and an unknown name is an error that
+// names the key, so the caller can run the default instead (gt-9bioi.7).
+func TestParseKind(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		in      string
+		want    Kind
+		wantErr bool
+	}{
+		"review":    {"review", KindReview, false},
+		"rejection": {"rejection", KindRejection, false},
+		"empty":     {"", "", true},
+		"typo":      {"reviw", "", true},
+		"case":      {"Review", "", true},
+	} {
+		got, err := ParseKind(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: ParseKind(%q) error = %v, wantErr %v", name, tc.in, err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "patrols.steward.kinds") {
+			t.Errorf("%s: refusal %q does not name the key", name, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: ParseKind(%q) = %q, want %q", name, tc.in, got, tc.want)
+		}
+	}
+	if got := DefaultKinds(); len(got) != 1 || got[0] != KindRejection {
+		t.Errorf("DefaultKinds() = %v, want [rejection]", got)
+	}
+}
+
 func TestDetectReview(t *testing.T) {
 	t.Parallel()
 	issue := readyIssue("gt-x", "c0ffee")

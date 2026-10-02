@@ -146,6 +146,10 @@ func (d *Daemon) runSteward() {
 	if modeErr != nil {
 		d.logger.Printf("steward: %v", modeErr)
 	}
+	kinds, kindsErr := StewardKinds(d.patrolConfig)
+	if kindsErr != nil {
+		d.logger.Printf("steward: %v", kindsErr)
+	}
 	// Only jobs of this mode spend an event: shadow runs on a head must not
 	// stop live from acting on it once the operator switches, and a live run
 	// already acted, so shadow need not repeat it.
@@ -170,7 +174,7 @@ func (d *Daemon) runSteward() {
 			d.logger.Printf("steward: %s: not scanning: %s", rigName, why)
 			continue
 		}
-		for _, ev := range d.stewardEvents(rigName, seen) {
+		for _, ev := range d.stewardEvents(rigName, kinds, seen) {
 			if runner.RunningBead(ev.Bead) {
 				continue
 			}
@@ -196,10 +200,21 @@ func (d *Daemon) runSteward() {
 	}
 }
 
+// stewardEventSources pairs each queued label with the event kind it raises.
+var stewardEventSources = []struct {
+	label string
+	kind  steward.Kind
+}{
+	{land.LabelReadyToLand, steward.KindReview},
+	{land.LabelRework, steward.KindRejection},
+}
+
 // stewardEvents is the events one rig's landing queue raises that no job has
-// handled. A scan that cannot read a queue is logged and skipped: the next
-// scan retries it, and acting on a partial list would drop the rest.
-func (d *Daemon) stewardEvents(rigName string, seen func(key string) bool) []steward.Event {
+// handled, limited to kinds: an unlisted kind is neither scanned nor recorded,
+// so enabling it later still sees the heads queued now (gt-9bioi.7). A scan
+// that cannot read a queue is logged and skipped: the next scan retries it,
+// and acting on a partial list would drop the rest.
+func (d *Daemon) stewardEvents(rigName string, kinds []steward.Kind, seen func(key string) bool) []steward.Event {
 	rigPath := filepath.Join(d.config.TownRoot, rigName)
 	list := d.stewardListFn
 	if list == nil {
@@ -207,15 +222,21 @@ func (d *Daemon) stewardEvents(rigName string, seen func(key string) bool) []ste
 		list = func(_ string, opts beads.ListOptions) ([]*beads.Issue, error) { return bd.List(opts) }
 	}
 	var out []steward.Event
-	for _, label := range []string{land.LabelReadyToLand, land.LabelRework} {
+	for _, src := range stewardEventSources {
+		if !slices.Contains(kinds, src.kind) {
+			continue
+		}
 		// Priority -1 is "no filter": the zero value asks bd for P0 beads only.
-		issues, err := list(rigPath, beads.ListOptions{Status: "open", Label: label, Priority: -1, Limit: stewardBeadLimit})
+		issues, err := list(rigPath, beads.ListOptions{Status: "open", Label: src.label, Priority: -1, Limit: stewardBeadLimit})
 		if err != nil {
-			d.logger.Printf("steward: %s: listing %s beads: %v", rigName, label, err)
+			d.logger.Printf("steward: %s: listing %s beads: %v", rigName, src.label, err)
 			continue
 		}
 		for _, issue := range issues {
-			if ev, ok := steward.Detect(issue, rigName, seen); ok {
+			// The event's kind, not the label, decides: a bead carrying both
+			// labels is mid-transition and Detect reports it as a review, so
+			// the kind filter keeps it out when review is unlisted.
+			if ev, ok := steward.Detect(issue, rigName, seen); ok && slices.Contains(kinds, ev.Kind) {
 				out = append(out, ev)
 			}
 		}
@@ -338,6 +359,28 @@ func StewardMode(config *DaemonPatrolConfig) (steward.Mode, error) {
 		return steward.ModeShadow, nil
 	}
 	return steward.ParseMode(c.Mode)
+}
+
+// StewardKinds is the event kinds the scan covers: patrols.steward.kinds, or
+// rejections only when the key is absent (gt-9bioi.7). An unknown kind is
+// refused with the key named, and the refusal returns the default: a typo must
+// not widen the scan to review jobs, which repeat om and the overseer.
+func StewardKinds(config *DaemonPatrolConfig) ([]steward.Kind, error) {
+	c := stewardConfig(config)
+	if c == nil || len(c.Kinds) == 0 {
+		return steward.DefaultKinds(), nil
+	}
+	out := make([]steward.Kind, 0, len(c.Kinds))
+	for _, s := range c.Kinds {
+		k, err := steward.ParseKind(s)
+		if err != nil {
+			return steward.DefaultKinds(), err
+		}
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
 }
 
 // StewardReworkOwner reports why a rework bead's dispatch belongs to the
