@@ -123,6 +123,26 @@ func TestExtractContentRefs(t *testing.T) {
 			text:      "internal/testutil's TestHermeticHarnessEnforced fails",
 			wantTests: []string{"TestHermeticHarnessEnforced"},
 		},
+		{
+			// Every package's test binary defines TestMain, so citing it
+			// names no defect; a real test beside it still counts (gt-a0gk).
+			name:      "the package entrypoint is not a test reference",
+			text:      "TestMain (internal/cmd/main_test.go) panics; TestSlingRetriesHookWrite is unaffected",
+			wantTests: []string{"TestSlingRetriesHookWrite"},
+			wantFiles: []string{"internal/cmd/main_test.go"},
+		},
+		{
+			name:      "the wildcard spelling of the entrypoint is not one either",
+			text:      "TestMain_* fails in every package",
+			wantTests: nil,
+		},
+		{
+			// The exclusion is an exact name, not a prefix: a real test that
+			// happens to start with TestMain is still a signal.
+			name:      "a test whose name starts with the entrypoint still counts",
+			text:      "TestMaintenanceWindowExpiry fails",
+			wantTests: []string{"TestMaintenanceWindowExpiry"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -273,6 +293,55 @@ func TestSlingDuplicateNegativeControl(t *testing.T) {
 			t.Errorf("warning should mention %q:\n%s", want, decision.Message)
 		}
 	}
+}
+
+// TestSlingDuplicateIgnoresPackageFixtures replays the refusal behind gt-a0gk:
+// gt-hotx and gt-a8kx were each refused against ten unrelated live beads, and
+// every one of those overlaps was the name "TestMain" — Go's package
+// entrypoint, which every test binary defines and which therefore distinguishes
+// nothing. The shared file they do have is exactly the weak evidence the guard
+// warns on rather than refuses.
+func TestSlingDuplicateIgnoresPackageFixtures(t *testing.T) {
+	t.Parallel()
+
+	newPair := func(testA, testB string) (duplicateCandidate, duplicateCandidate) {
+		return newDuplicateCandidate("gt-hotx", "gt done: slot wait reports a hang", "open",
+				fmt.Sprintf("%s regressed in internal/cmd; the wait loop is in internal/cmd/done.go.", testA)),
+			newDuplicateCandidate("gt-a8kx", "done: slot wait never re-reads the queue", "open",
+				fmt.Sprintf("%s in internal/cmd; internal/cmd/done.go holds the wait.", testB))
+	}
+
+	t.Run("the entrypoint alone never blocks", func(t *testing.T) {
+		candidate, other := newPair("TestMain", "TestMain")
+		matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
+		if len(matches) != 1 {
+			t.Fatalf("expected the shared file to be reported, got %+v", matches)
+		}
+		if matches[0].Blocking() {
+			t.Fatalf("a shared TestMain must not refuse a sling: %+v", matches[0])
+		}
+		for _, m := range matches {
+			if len(m.SharedTests) != 0 {
+				t.Fatalf("shared tests = %v, want none: TestMain is a package fixture", m.SharedTests)
+			}
+		}
+		decision := decideSlingDuplicates(candidate.ID, matches)
+		if decision.Blocked {
+			t.Fatalf("distinct beads citing TestMain must pass; got refusal:\n%s", decision.Message)
+		}
+		if strings.Contains(decision.Message, "shared test:") {
+			t.Errorf("the report must not claim a shared test:\n%s", decision.Message)
+		}
+	})
+
+	t.Run("a real shared test still refuses", func(t *testing.T) {
+		candidate, other := newPair("TestRunDoneSlotWait", "TestRunDoneSlotWait")
+		matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
+		decision := decideSlingDuplicates(candidate.ID, matches)
+		if !decision.Blocked {
+			t.Fatalf("the same pair sharing a real test must refuse; report was:\n%s", decision.Message)
+		}
+	})
 }
 
 func TestDecideSlingDuplicates(t *testing.T) {

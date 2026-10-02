@@ -106,12 +106,17 @@ func decideSlingDuplicates(beadID string, matches []duplicateMatch) slingDuplica
 // extractContentRefs pulls test names and file paths out of free-form bead
 // prose. Callers pass every text field a bead carries (title, description,
 // design, notes). Extraction is purely lexical — no index, no vocabulary
-// model — because the two vantage points share none of the latter.
+// model — because the two vantage points share none of the latter. A
+// per-package fixture is not a ref: it names scaffolding every package has,
+// not a defect (sling.IsPackageFixtureTest).
 func extractContentRefs(parts ...string) contentRefs {
 	tests := map[string]bool{}
 	files := map[string]bool{}
 	for _, part := range parts {
 		for _, name := range testNameRe.FindAllString(part, -1) {
+			if sling.IsPackageFixtureTest(name) {
+				continue
+			}
 			tests[name] = true
 		}
 		for _, tok := range pathTokenRe.FindAllString(part, -1) {
