@@ -177,7 +177,7 @@ const (
 	// default timeout reclaims them, leading to a death spiral at the 1000-
 	// connection cap. 30s is aggressive but matches the documented workaround
 	// in gh-3623 and is far longer than any healthy bd query takes.
-	// Override with GT_DOLT_WAIT_TIMEOUT.
+	// Override with operational.dolt.wait_timeout.
 	DefaultWaitTimeoutSec = 30
 
 	// DefaultTimeZone is the MySQL `time_zone` server variable, set after
@@ -188,7 +188,7 @@ const (
 	// in ad-hoc queries. The reaper itself binds Go-side UTC values so its
 	// math is unaffected, but humans triaging via `dolt sql` get misled.
 	// See hq-57jr8.
-	// Override with GT_DOLT_TIME_ZONE; set to empty to skip the override.
+	// Override with operational.dolt.time_zone; set to empty to skip the override.
 	DefaultTimeZone = "+00:00"
 )
 
@@ -265,8 +265,8 @@ type Config struct {
 	TimeZone string
 
 	// LogLevel is the Dolt server log level (trace, debug, info, warning, error, fatal).
-	// Default is "warning" to suppress connection open/close noise. Override with
-	// GT_DOLT_LOGLEVEL=info (or debug) for diagnostics.
+	// Default is "warning" to suppress connection open/close noise. Set
+	// operational.dolt.log_level to info (or debug) for diagnostics.
 	LogLevel string
 
 	// EventScheduler controls Dolt's MySQL event scheduler in managed config.
@@ -281,8 +281,8 @@ type Config struct {
 
 	// AutoGC controls Dolt's non-blocking storage GC (auto_gc_behavior) in managed
 	// config. Default "on" keeps the sql-server's RSS bounded (hq-excy9g). Set to
-	// "off" (or false/0/disabled), typically via GT_DOLT_AUTO_GC, to disable it
-	// without a source revert+rebuild — a runtime escape hatch.
+	// "off" (or false/0/disabled), typically via operational.dolt.auto_gc, to
+	// disable it without a source revert+rebuild — a runtime escape hatch.
 	AutoGC string
 
 	// lookupHost resolves Host for IsRemote; nil is net.LookupHost.
@@ -298,10 +298,10 @@ var ErrNoEndpoint = errors.New("town has no Dolt endpoint: mayor/town.json has n
 // Host and Port are the town's endpoint (config.ResolveDoltEndpoint); Port
 // is 0 when the town has none.
 //
-// Environment variables for the other settings:
-//   - GT_DOLT_USER → User
-//   - GT_DOLT_PASSWORD → Password
-//   - GT_DOLT_LOGLEVEL → LogLevel (trace, debug, info, warning, error, fatal)
+// The server tunables (user, log level, idle-session timeout, time zone,
+// event scheduler, stats, auto-GC) are settings facts read from the town's
+// operational.dolt config (gt-y3pgh.2.3). Only the password still comes from
+// the environment (GT_DOLT_PASSWORD), until the secrets slice (gt-y3pgh.2.4).
 func (h *host) DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
@@ -322,21 +322,15 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 		lookupHost:       h.lookupHost,
 	}
 
-	// Optional override for the idle-session timeout. Negative values disable
-	// the override entirely (use Dolt's 8-hour default).
-	if v := h.getenv("GT_DOLT_WAIT_TIMEOUT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			if n < 0 {
-				config.WaitTimeoutSec = 0
-			} else {
-				config.WaitTimeoutSec = n
-			}
-		}
+	// Town settings (settings/config.json operational.dolt) override the
+	// defaults above. A negative wait_timeout disables the idle-session
+	// override; a present-but-empty time_zone skips the post-start SET GLOBAL
+	// and lets Dolt inherit the host TZ.
+	doltCfg := configpkg.LoadOperationalConfig(townRoot).GetDoltConfig()
+	if n, ok := doltCfg.WaitTimeoutSecSetting(); ok {
+		config.WaitTimeoutSec = n
 	}
-
-	// Optional override for the server timezone. Empty value disables the
-	// post-start `SET GLOBAL time_zone` and lets Dolt inherit the host TZ.
-	if v, ok := h.lookupEnvVar("GT_DOLT_TIME_ZONE"); ok {
+	if v, ok := doltCfg.TimeZoneSetting(); ok {
 		config.TimeZone = v
 	}
 
@@ -345,37 +339,26 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 	// refuses: there is no fallback to DefaultPort.
 	ep, _ := h.resolveDoltEndpoint(townRoot)
 	config.Host, config.Port = ep.Host, ep.Port
-	if scheduler, ok := h.lookupEnvVar("GT_DOLT_EVENT_SCHEDULER"); ok {
+	if scheduler, ok := doltCfg.EventSchedulerSetting(); ok {
 		config.EventScheduler = scheduler
 	}
-	if stats, ok := h.lookupEnvVar("GT_DOLT_STATS_ENABLED"); ok {
+	if stats, ok := doltCfg.StatsEnabledSetting(); ok {
 		config.DoltStatsEnabled = stats
 	}
-	if autoGc, ok := h.lookupEnvVar("GT_DOLT_AUTO_GC"); ok {
+	if autoGc, ok := doltCfg.AutoGCSetting(); ok {
 		config.AutoGC = autoGc
 	}
 
-	if u := h.getenv("GT_DOLT_USER"); u != "" {
+	if u, ok := doltCfg.UserSetting(); ok {
 		config.User = u
 	}
+	// GT_DOLT_PASSWORD is the last env read here; it moves to a secret
+	// reference in the next slice (gt-y3pgh.2.4).
 	if pw := h.getenv("GT_DOLT_PASSWORD"); pw != "" {
 		config.Password = pw
 	}
-	if ll := h.getenv("GT_DOLT_LOGLEVEL"); ll != "" {
+	if ll, ok := doltCfg.LogLevelSetting(); ok {
 		config.LogLevel = ll
-	} else if townRoot != "" {
-		// Fallback: read GT_DOLT_LOGLEVEL from daemon/daemon.env so the log
-		// level survives daemon-triggered Dolt restarts (gt-zb8). The daemon
-		// process may not have GT_DOLT_LOGLEVEL in its own environment when it
-		// was started before the manual env var was applied.
-		if ll := readDaemonEnvVar(filepath.Join(townRoot, "daemon", "daemon.env"), "GT_DOLT_LOGLEVEL"); ll != "" {
-			config.LogLevel = ll
-		}
-	}
-
-	// Default to warning logging. Use GT_DOLT_LOGLEVEL=info or =debug for diagnostics.
-	if config.LogLevel == "" {
-		config.LogLevel = "warning"
 	}
 
 	return config
@@ -386,31 +369,12 @@ func DefaultConfig(townRoot string) *Config {
 	return std.DefaultConfig(townRoot)
 }
 
-// DefaultConfigWithEnv is DefaultConfig reading the GT_DOLT_* variables
-// through lookupEnv instead of the process environment. A nil lookupEnv is
-// the process environment, exactly DefaultConfig.
+// DefaultConfigWithEnv is DefaultConfig reading GT_DOLT_PASSWORD through
+// lookupEnv instead of the process environment. A nil lookupEnv is the process
+// environment, exactly DefaultConfig; the server tunables no longer come from
+// the environment at all (gt-y3pgh.2.3).
 func DefaultConfigWithEnv(townRoot string, lookupEnv func(key string) (string, bool)) *Config {
 	return (&host{lookupEnv: lookupEnv}).DefaultConfig(townRoot)
-}
-
-// readDaemonEnvVar reads a single key=value variable from a simple env file.
-// Handles blank lines and # comments; returns "" if not found or on error.
-func readDaemonEnvVar(path, key string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	prefix := key + "="
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimPrefix(line, prefix)
-		}
-	}
-	return ""
 }
 
 // IsRemote returns true when the config points to a non-local Dolt server.
@@ -1972,9 +1936,9 @@ func writeServerConfig(config *Config, configPath string) error {
 	}
 
 	// Non-blocking storage GC keeps the managed sql-server's RSS bounded (hq-excy9g);
-	// enabled by default. GT_DOLT_AUTO_GC=off (or false/0/disabled) turns it off at
-	// runtime (next Dolt restart) without a source revert+rebuild — the escape hatch
-	// given the old blocking-GC lockup history. Dolt's non-blocking auto-GC is
+	// enabled by default. operational.dolt.auto_gc=off (or false/0/disabled) turns it
+	// off at runtime (next Dolt restart) without a source revert+rebuild — the escape
+	// hatch given the old blocking-GC lockup history. Dolt's non-blocking auto-GC is
 	// default-on since 1.75.
 	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
 	if v := strings.ToLower(strings.TrimSpace(config.AutoGC)); v == "off" || v == "false" || v == "0" || v == "disabled" {
@@ -1984,10 +1948,11 @@ func writeServerConfig(config *Config, configPath string) error {
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town (gt dolt start)
 # Do not edit manually; changes are overwritten on each server start.
 # The listener comes from mayor/town.json (gt config set dolt.port).
-# To customize the rest, set Gas Town environment variables:
-#   GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
-#   GT_DOLT_EVENT_SCHEDULER (OFF, ON, omit), GT_DOLT_STATS_ENABLED (0, 1, omit)
-#   GT_DOLT_AUTO_GC (on, off)
+# To customize the rest, set operational.dolt in settings/config.json: the
+# Dolt user, log level, idle-session timeout, time zone, event scheduler
+# (OFF, ON, omit), stats (0, 1, omit) and auto GC (on, off).
+# GT_DOLT_PASSWORD is still an environment variable until the secrets slice
+# (gt-y3pgh.2.4).
 
 log_level: %s
 

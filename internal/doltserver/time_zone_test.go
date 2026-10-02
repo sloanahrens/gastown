@@ -5,25 +5,41 @@ import (
 	"testing"
 )
 
-// TestDefaultConfig_TimeZoneEmptyEnvOptsOut verifies that an explicitly empty
-// GT_DOLT_TIME_ZONE disables the override (caller wants Dolt's host-TZ default).
-func TestDefaultConfig_TimeZoneEmptyEnvOptsOut(t *testing.T) {
+// TestDefaultConfig_TimeZoneEmptySettingOptsOut verifies that an explicitly
+// empty operational.dolt.time_zone disables the override (caller wants Dolt's
+// host-TZ default).
+func TestDefaultConfig_TimeZoneEmptySettingOptsOut(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_TIME_ZONE", "").host().DefaultConfig(t.TempDir())
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"time_zone":""}`)
+	config := newFakeHost().host().DefaultConfig(townRoot)
 
 	if config.TimeZone != "" {
-		t.Errorf("TimeZone = %q with explicit empty env, want empty (opt-out)", config.TimeZone)
+		t.Errorf("TimeZone = %q with explicit empty setting, want empty (opt-out)", config.TimeZone)
 	}
 }
 
-// TestDefaultConfig_TimeZoneEnvOverride verifies that GT_DOLT_TIME_ZONE
-// replaces the default.
-func TestDefaultConfig_TimeZoneEnvOverride(t *testing.T) {
+// TestDefaultConfig_TimeZoneSettingsOverride verifies that
+// operational.dolt.time_zone replaces the default.
+func TestDefaultConfig_TimeZoneSettingsOverride(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_TIME_ZONE", "America/Los_Angeles").host().DefaultConfig(t.TempDir())
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"time_zone":"America/Los_Angeles"}`)
+	config := newFakeHost().host().DefaultConfig(townRoot)
 
 	if config.TimeZone != "America/Los_Angeles" {
 		t.Errorf("TimeZone = %q, want America/Los_Angeles", config.TimeZone)
+	}
+}
+
+// TestDefaultConfig_TimeZoneDefaultWithoutSettings verifies the compiled-in
+// default holds when the town has no settings file.
+func TestDefaultConfig_TimeZoneDefaultWithoutSettings(t *testing.T) {
+	t.Parallel()
+	config := newFakeHost().host().DefaultConfig(t.TempDir())
+
+	if config.TimeZone != DefaultTimeZone {
+		t.Errorf("TimeZone = %q, want the default %q", config.TimeZone, DefaultTimeZone)
 	}
 }
 

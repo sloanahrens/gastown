@@ -517,8 +517,9 @@ Gas Town managed Dolt configs should keep `auto_gc_behavior` enabled with
 `archive_level: 1` so the sql-server does not retain every old chunk index
 and grow RSS indefinitely. The config is regenerated only when the managed
 Dolt server starts; a deployed change takes effect on the next Dolt restart.
-Set `GT_DOLT_AUTO_GC=off` before that restart to emit `enable: false` and
-`archive_level: 0` as an operational rollback switch.
+Set `operational.dolt.auto_gc` to `off` in `settings/config.json` before that
+restart to emit `enable: false` and `archive_level: 0` as an operational
+rollback switch.
 
 If auto-GC was disabled long enough for a database to bloat, schedule one
 explicit `dolt gc --full --archive-level=1` in a maintenance window to reset

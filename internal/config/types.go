@@ -228,6 +228,33 @@ type DoltThresholds struct {
 	// (default 500, the D3 target after bd batches its writes; gt-8z769.4).
 	CommitsPerDayWarn *int `json:"commits_per_day_warn,omitempty"`
 
+	// The seven server tunables below are settings facts (gt-y3pgh.2.3).
+	// Optional pointers: "unset" stays distinguishable from "set to empty",
+	// which TimeZone, EventScheduler, StatsEnabled and AutoGC treat as an
+	// override. The compiled-in defaults live in internal/doltserver's
+	// DefaultConfig.
+	//
+	// WaitTimeoutSec is the idle-session timeout in seconds (MySQL
+	// `wait_timeout`); a negative value disables the override.
+	WaitTimeoutSec *int `json:"wait_timeout,omitempty"`
+	// TimeZone is the MySQL `time_zone` server variable (default "+00:00").
+	// An explicitly empty value skips the post-start SET GLOBAL.
+	TimeZone *string `json:"time_zone,omitempty"`
+	// EventScheduler is Dolt's event_scheduler in managed config (default
+	// "OFF"; "omit" leaves the key out).
+	EventScheduler *string `json:"event_scheduler,omitempty"`
+	// StatsEnabled is the dolt_stats_enabled system variable in managed config
+	// (default "0"; "omit" leaves the key out).
+	StatsEnabled *string `json:"stats_enabled,omitempty"`
+	// AutoGC controls Dolt's non-blocking storage GC (auto_gc_behavior) in
+	// managed config (default "on"; off/false/0/disabled disables it).
+	AutoGC *string `json:"auto_gc,omitempty"`
+	// User is the Dolt SQL user (default "root").
+	User *string `json:"user,omitempty"`
+	// LogLevel is the Dolt server log level: trace, debug, info, warning,
+	// error, fatal (default "warning").
+	LogLevel *string `json:"log_level,omitempty"`
+
 	// The keys below have no reader (gt-e2kxa). They are declared so a
 	// settings file that still carries them decodes.
 	HealthCheckInterval string `json:"health_check_interval,omitempty"`

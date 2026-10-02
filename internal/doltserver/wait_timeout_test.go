@@ -9,18 +9,20 @@ import (
 // applies the gh-3623 idle-session timeout.
 func TestDefaultConfig_WaitTimeoutDefault(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "").host().DefaultConfig(t.TempDir())
+	config := newFakeHost().host().DefaultConfig(t.TempDir())
 
 	if config.WaitTimeoutSec != DefaultWaitTimeoutSec {
 		t.Errorf("WaitTimeoutSec = %d, want %d", config.WaitTimeoutSec, DefaultWaitTimeoutSec)
 	}
 }
 
-// TestDefaultConfig_WaitTimeoutEnvOverride verifies the GT_DOLT_WAIT_TIMEOUT
-// env var raises or lowers the configured timeout.
-func TestDefaultConfig_WaitTimeoutEnvOverride(t *testing.T) {
+// TestDefaultConfig_WaitTimeoutSettingsOverride verifies that
+// operational.dolt.wait_timeout raises or lowers the configured timeout.
+func TestDefaultConfig_WaitTimeoutSettingsOverride(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "120").host().DefaultConfig(t.TempDir())
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"wait_timeout":120}`)
+	config := newFakeHost().host().DefaultConfig(townRoot)
 
 	if config.WaitTimeoutSec != 120 {
 		t.Errorf("WaitTimeoutSec = %d, want 120", config.WaitTimeoutSec)
@@ -31,21 +33,26 @@ func TestDefaultConfig_WaitTimeoutEnvOverride(t *testing.T) {
 // value opts out of the override, leaving Dolt's default in place.
 func TestDefaultConfig_WaitTimeoutNegativeDisables(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "-1").host().DefaultConfig(t.TempDir())
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"wait_timeout":-1}`)
+	config := newFakeHost().host().DefaultConfig(townRoot)
 
 	if config.WaitTimeoutSec != 0 {
 		t.Errorf("WaitTimeoutSec = %d, want 0 (disabled)", config.WaitTimeoutSec)
 	}
 }
 
-// TestDefaultConfig_WaitTimeoutInvalidIgnored verifies that a non-numeric
-// env value falls back to the default rather than zeroing the timeout.
-func TestDefaultConfig_WaitTimeoutInvalidIgnored(t *testing.T) {
+// TestDefaultConfig_WaitTimeoutUnreadableSettingsIgnored verifies that a
+// settings file that does not decode falls back to the default rather than
+// zeroing the timeout.
+func TestDefaultConfig_WaitTimeoutUnreadableSettingsIgnored(t *testing.T) {
 	t.Parallel()
-	config := newFakeHost().setenv("GT_DOLT_WAIT_TIMEOUT", "not-a-number").host().DefaultConfig(t.TempDir())
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"wait_timeout":"not-a-number"}`)
+	config := newFakeHost().host().DefaultConfig(townRoot)
 
 	if config.WaitTimeoutSec != DefaultWaitTimeoutSec {
-		t.Errorf("WaitTimeoutSec = %d, want default %d when env var is invalid", config.WaitTimeoutSec, DefaultWaitTimeoutSec)
+		t.Errorf("WaitTimeoutSec = %d, want default %d when the setting does not decode", config.WaitTimeoutSec, DefaultWaitTimeoutSec)
 	}
 }
 

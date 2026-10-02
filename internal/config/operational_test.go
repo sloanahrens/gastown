@@ -536,3 +536,82 @@ func TestDoltThresholds_CommitsPerDayWarn(t *testing.T) {
 		t.Errorf("decoded: got %d, want 800", got)
 	}
 }
+
+// TestDoltThresholds_ServerTunables: the seven server tunables (gt-y3pgh.2.3)
+// decode from operational.dolt and their accessors report value and presence.
+// A negative wait_timeout resolves to 0 (the override is disabled); an
+// explicitly empty time_zone stays present; an empty user or log_level is
+// unset (the defaults live in internal/doltserver, which reads these).
+func TestDoltThresholds_ServerTunables(t *testing.T) {
+	t.Parallel()
+
+	var nilCfg *DoltThresholds
+	if _, ok := nilCfg.WaitTimeoutSecSetting(); ok {
+		t.Error("nil DoltThresholds reports wait_timeout set")
+	}
+	if _, ok := nilCfg.UserSetting(); ok {
+		t.Error("nil DoltThresholds reports user set")
+	}
+
+	data := []byte(`{"operational":{"dolt":{
+		"wait_timeout": 120, "time_zone": "UTC", "event_scheduler": "omit",
+		"stats_enabled": "omit", "auto_gc": "off", "user": "doltuser", "log_level": "info"}}}`)
+	var ts TownSettings
+	if err := DecodeJSONFile("config.json", data, &ts); err != nil {
+		t.Fatalf("the seven operational.dolt keys must decode: %v", err)
+	}
+	d := ts.Operational.GetDoltConfig()
+	if n, ok := d.WaitTimeoutSecSetting(); !ok || n != 120 {
+		t.Errorf("wait_timeout: got %d, %v; want 120, true", n, ok)
+	}
+	if v, ok := d.TimeZoneSetting(); !ok || v != "UTC" {
+		t.Errorf("time_zone: got %q, %v; want UTC, true", v, ok)
+	}
+	if v, ok := d.EventSchedulerSetting(); !ok || v != "omit" {
+		t.Errorf("event_scheduler: got %q, %v; want omit, true", v, ok)
+	}
+	if v, ok := d.StatsEnabledSetting(); !ok || v != "omit" {
+		t.Errorf("stats_enabled: got %q, %v; want omit, true", v, ok)
+	}
+	if v, ok := d.AutoGCSetting(); !ok || v != "off" {
+		t.Errorf("auto_gc: got %q, %v; want off, true", v, ok)
+	}
+	if v, ok := d.UserSetting(); !ok || v != "doltuser" {
+		t.Errorf("user: got %q, %v; want doltuser, true", v, ok)
+	}
+	if v, ok := d.LogLevelSetting(); !ok || v != "info" {
+		t.Errorf("log_level: got %q, %v; want info, true", v, ok)
+	}
+
+	// A setting that is present but empty: meaningful to the time zone (skip
+	// the override), meaningless to the user and log level (defaults hold).
+	var empty TownSettings
+	if err := DecodeJSONFile("config.json", []byte(`{"operational":{"dolt":{"time_zone":"","user":"","log_level":""}}}`), &empty); err != nil {
+		t.Fatalf("decode empty settings: %v", err)
+	}
+	ed := empty.Operational.GetDoltConfig()
+	if v, ok := ed.TimeZoneSetting(); !ok || v != "" {
+		t.Errorf("empty time_zone: got %q, %v; want \"\", true (the override is skipped)", v, ok)
+	}
+	if _, ok := ed.UserSetting(); ok {
+		t.Error("empty user stays unset: the default user holds")
+	}
+	if _, ok := ed.LogLevelSetting(); ok {
+		t.Error("empty log_level stays unset: the default level holds")
+	}
+
+	// A negative wait_timeout disables the override, exactly as the negative
+	// environment variable did.
+	negative := -1
+	neg := &DoltThresholds{WaitTimeoutSec: &negative}
+	if n, ok := neg.WaitTimeoutSecSetting(); !ok || n != 0 {
+		t.Errorf("negative wait_timeout: got %d, %v; want 0, true (disabled)", n, ok)
+	}
+
+	// Unknown keys stay rejected: strict decoding is the guarantee that a
+	// typo cannot silently become a default.
+	var strict TownSettings
+	if err := DecodeJSONFile("config.json", []byte(`{"operational":{"dolt":{"wait_timeout_sec":120}}}`), &strict); err == nil {
+		t.Error("an unknown operational.dolt key decoded; strict decoding is broken")
+	}
+}

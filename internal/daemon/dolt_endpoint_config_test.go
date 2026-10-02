@@ -96,7 +96,7 @@ func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
 	t.Parallel()
 	t.Run("default enabled", func(t *testing.T) {
 		t.Parallel()
-		got := writeAndReadDaemonAutoGC(t, mapEnv{})
+		got := writeAndReadDaemonAutoGC(t, "")
 		if !got.Enable {
 			t.Fatalf("auto_gc_behavior.enable = false, want true")
 		}
@@ -107,14 +107,28 @@ func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
 
 	t.Run("kill switch disabled", func(t *testing.T) {
 		t.Parallel()
-		got := writeAndReadDaemonAutoGC(t, mapEnv{"GT_DOLT_AUTO_GC": "disabled"})
+		got := writeAndReadDaemonAutoGC(t, `{"auto_gc":"disabled"}`)
 		if got.Enable {
-			t.Fatalf("GT_DOLT_AUTO_GC=disabled: auto_gc_behavior.enable = true, want false")
+			t.Fatalf("operational.dolt.auto_gc=disabled: auto_gc_behavior.enable = true, want false")
 		}
 		if got.ArchiveLevel != 0 {
-			t.Fatalf("GT_DOLT_AUTO_GC=disabled: auto_gc_behavior.archive_level = %d, want 0", got.ArchiveLevel)
+			t.Fatalf("operational.dolt.auto_gc=disabled: auto_gc_behavior.archive_level = %d, want 0", got.ArchiveLevel)
 		}
 	})
+}
+
+// writeTownDoltSettings writes operational.dolt into townRoot's
+// settings/config.json (gt-y3pgh.2.3). doltJSON is the dolt object's body.
+func writeTownDoltSettings(t *testing.T, townRoot, doltJSON string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town-settings","version":1,"operational":{"dolt":` + doltJSON + `}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeManagedDoltConfig(t *testing.T, townRoot, content string) {
@@ -128,16 +142,21 @@ func writeManagedDoltConfig(t *testing.T, townRoot, content string) {
 	}
 }
 
-func writeAndReadDaemonAutoGC(t *testing.T, env mapEnv) struct {
+func writeAndReadDaemonAutoGC(t *testing.T, doltSettings string) struct {
 	Enable       bool `yaml:"enable"`
 	ArchiveLevel int  `yaml:"archive_level"`
 } {
 	t.Helper()
 
 	dir := t.TempDir()
+	if doltSettings != "" {
+		writeTownDoltSettings(t, dir, doltSettings)
+	}
 	configPath := filepath.Join(dir, "config.yaml")
 	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
-	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfigWithEnv(dir, env.lookup)); err != nil {
+	// The manager hands the daemon's env only for GT_DOLT_PASSWORD now
+	// (gt-y3pgh.2.3); the auto-GC knob comes from town settings.
+	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfigWithEnv(dir, nil)); err != nil {
 		t.Fatalf("writeDaemonDoltConfig: %v", err)
 	}
 	data, err := os.ReadFile(configPath)
@@ -157,12 +176,4 @@ func writeAndReadDaemonAutoGC(t *testing.T, env mapEnv) struct {
 		t.Fatalf("generated daemon config is invalid YAML: %v\n%s", err, data)
 	}
 	return parsed.Behavior.AutoGCBehavior
-}
-
-// mapEnv is an in-memory environment: a lookup for the config writer.
-type mapEnv map[string]string
-
-func (e mapEnv) lookup(key string) (string, bool) {
-	v, ok := e[key]
-	return v, ok
 }
