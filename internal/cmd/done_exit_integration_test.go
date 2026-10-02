@@ -3,7 +3,6 @@
 package cmd
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,11 +214,17 @@ func setupReworkBranchGitRepo(t *testing.T, workDir, branch string) string {
 	return branch
 }
 
+// assertDoneExitCode checks the process exit code and message of a gt done
+// failure. gt done's submission errors are raised in internal/done, so read
+// the code the way production does: exitCodeForError maps both this package's
+// ExitCodeError and done.ExitCodeError (gt-638go.14).
 func assertDoneExitCode(t *testing.T, err error, want int, wantText string) {
 	t.Helper()
-	var coded *ExitCodeError
-	if !errors.As(err, &coded) || coded.Code != want {
-		t.Fatalf("runDone error = %T %v, want *ExitCodeError with code %d", err, err, want)
+	if err == nil {
+		t.Fatalf("runDone error = nil, want exit code %d", want)
+	}
+	if got := exitCodeForError(err); got != want {
+		t.Fatalf("runDone error = %T %v, exit code %d, want %d", err, err, got, want)
 	}
 	if !strings.Contains(err.Error(), wantText) {
 		t.Errorf("error %q lacks %q", err, wantText)
