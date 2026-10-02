@@ -768,6 +768,9 @@ func execPrimeExternalCommand(ctx context.Context, workDir, name string, args ..
 			fmt.Fprintf(os.Stderr, "gt prime: %v\n", err)
 			return stdout, stderr, err
 		}
+		// Keep-raw (gt-7iwy0.4.1): the argv comes from a prime template, so no
+		// typed method can name it; ConfigureCommand applies to it the same bd
+		// subprocess policy every other call gets.
 		beads.ConfigureCommand(cmd, workDir, beadsDir, mode)
 	} else {
 		cmd.Dir = workDir

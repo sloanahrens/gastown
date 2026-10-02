@@ -739,9 +739,11 @@ func buildCVSummary(rigPath, rigName, polecatName, identityBeadID, clonePath str
 	// Count sessions from checkpoint files (session history)
 	cv.Sessions = countPolecatSessions(rigPath, polecatName)
 
-	// Query completed issues assigned to this polecat
+	// Query completed issues assigned to this polecat. The CV counters read a
+	// plain store (no BEADS_DIR pin, no routing), as their raw bd argv did.
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-	completedIssues, err := queryAssignedIssues(beadsQueryPath, assignee, "closed")
+	cvBd := beads.NewPlain(beadsQueryPath, nil)
+	completedIssues, err := queryAssignedIssues(cvBd, assignee, "closed")
 	if err == nil {
 		cv.IssuesCompleted = len(completedIssues)
 
@@ -767,13 +769,13 @@ func buildCVSummary(rigPath, rigName, polecatName, identityBeadID, clonePath str
 	}
 
 	// Query failed/escalated issues
-	escalatedIssues, err := queryAssignedIssues(beadsQueryPath, assignee, "escalated")
+	escalatedIssues, err := queryAssignedIssues(cvBd, assignee, "escalated")
 	if err == nil {
 		cv.IssuesFailed = len(escalatedIssues)
 	}
 
 	// Query abandoned issues (deferred)
-	deferredIssues, err := queryAssignedIssues(beadsQueryPath, assignee, "deferred")
+	deferredIssues, err := queryAssignedIssues(cvBd, assignee, "deferred")
 	if err == nil {
 		cv.IssuesAbandoned = len(deferredIssues)
 	}
@@ -804,35 +806,42 @@ type IssueInfo struct {
 	Updated string `json:"updated_at"`
 }
 
-// queryAssignedIssues queries beads for issues assigned to a specific agent.
-func queryAssignedIssues(rigPath, assignee, status string) ([]IssueInfo, error) {
-	// Use bd list with filters
-	args := []string{"list", "--assignee=" + assignee, "--json"}
-	if status != "" {
-		args = append(args, "--status="+status)
-	}
-
-	cmd := beads.CommandWithEnv(rigPath, nil, args...)
-	out, err := cmd.Output()
+// queryAssignedIssues queries db for issues assigned to a specific agent.
+// The caller supplies the store so a test can drive it without bd; buildCVSummary
+// passes beads.NewPlain, which keeps bd's environment exactly as the raw argv
+// this replaced had it: the caller's environment with machine mode on, no
+// BEADS_DIR pin and no routing, run in rigPath.
+func queryAssignedIssues(db beads.Client, assignee, status string) ([]IssueInfo, error) {
+	issues, err := db.List(beads.ListOptions{
+		Assignee: assignee,
+		Status:   status,
+		Priority: -1, // no priority filter
+		Limit:    50, // bd list's default page, which omitting --limit gave
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	if len(out) == 0 {
+	if len(issues) == 0 {
 		return []IssueInfo{}, nil
 	}
 
-	var issues []IssueInfo
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, err
+	out := make([]IssueInfo, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, IssueInfo{
+			ID:      issue.ID,
+			Title:   issue.Title,
+			Type:    issue.Type,
+			Status:  issue.Status,
+			Updated: issue.UpdatedAt,
+		})
 	}
 
 	// Sort by updated date (most recent first)
-	sort.Slice(issues, func(i, j int) bool {
-		return issues[i].Updated > issues[j].Updated
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Updated > out[j].Updated
 	})
 
-	return issues, nil
+	return out, nil
 }
 
 // extractWorkType extracts the work type from issue title or type.

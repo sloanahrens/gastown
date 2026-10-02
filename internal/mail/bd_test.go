@@ -426,12 +426,14 @@ func TestRunBdCommandUsesCentralEnvPolicy(t *testing.T) {
 	if got := strings.Join(read.Args, " "); got != "list --json --flat" || read.Dir != workDir {
 		t.Fatalf("read call = %q in %s, want list --json --flat in %s", got, read.Dir, workDir)
 	}
-	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	// BD_MACHINE and PWD are what beads.WithMachineEnvIn contributes to the
+	// environment bd sees; the rest is bdSubprocessEnv's routing policy.
+	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
 		if v, _ := envLastValue(read.Env, strings.SplitN(want, "=", 2)[0]); strings.SplitN(want, "=", 2)[0]+"="+v != want {
 			t.Errorf("read env %s = %q, want %q", strings.SplitN(want, "=", 2)[0], v, want)
 		}
 	}
-	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
+	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BD_IDENTITY=gastown/chrome", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb", "BD_MACHINE=1", "PWD=" + workDir} {
 		if v, _ := envLastValue(write.Env, strings.SplitN(want, "=", 2)[0]); strings.SplitN(want, "=", 2)[0]+"="+v != want {
 			t.Errorf("write env %s = %q, want %q", strings.SplitN(want, "=", 2)[0], v, want)
 		}

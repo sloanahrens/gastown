@@ -85,8 +85,10 @@ func runBdCommand(ctx context.Context, run bdRunner, args []string, workDir, bea
 	if run == nil {
 		run = runBdProcess
 	}
-	// cmd.Environ() carries PWD=workDir, which bd's own file discovery reads.
-	env := bdSubprocessEnv(beads.CommandContextWithEnv(ctx, workDir, nil).Environ(), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
+	// WithMachineEnvIn is the environment CommandWithEnv built for this call
+	// before it was typed: the parent's environment with PWD=workDir (which
+	// bd's own file discovery reads) and machine mode on.
+	env := bdSubprocessEnv(beads.WithMachineEnvIn(workDir, nil), beadsDir, beads.ArgsAreReadOnly(args), extraEnv)
 
 	stdout, stderr, runErr := run(ctx, bdCall{Dir: workDir, Env: env, Args: args})
 
@@ -115,6 +117,10 @@ func runBdCommand(ctx context.Context, run bdRunner, args []string, workDir, bea
 // runBdProcess is the real bdRunner: bd on PATH, in its own detached
 // process group, with exactly the environment c carries.
 func runBdProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
+	// Keep-raw (gt-7iwy0.4.1): the real half of mail's bdRunner seam. Mail
+	// carries a per-call deadline and runs bd in its own detached process
+	// group; the typed Client's methods take no context, so a hung bd could
+	// pin a sender or a reader if they went through one.
 	cmd := beads.CommandContextWithEnv(ctx, c.Dir, c.Env, c.Args...)
 	util.SetDetachedProcessGroup(cmd.Cmd)
 	var stdout, stderr bytes.Buffer
