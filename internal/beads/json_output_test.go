@@ -22,7 +22,7 @@ func TestNonJSONOutputIsAnError(t *testing.T) {
 			},
 			"ListIssueStatuses":         func() error { _, err := b.ListIssueStatuses(StatusOpen); return err },
 			"ListAssignedIssueStatuses": func() error { _, err := b.ListAssignedIssueStatuses("rig/polecats/x", StatusOpen); return err },
-			"listAllWisps":              func() error { _, err := b.listAllWisps(); return err },
+			"PreloadLabeledWisps":       func() error { return b.PreloadLabeledWisps("gt:agent") },
 			"ListRigBeads":              func() error { _, err := b.ListRigBeads(); return err },
 			"GetAgentBeadInStoreOnly":   func() error { _, _, err := b.GetAgentBeadInStoreOnly("gt-x"); return err },
 		}

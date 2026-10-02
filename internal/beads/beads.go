@@ -797,6 +797,13 @@ type Beads struct {
 	// "not warmed": the reader runs its own "bd mol wisp list" unchanged.
 	wispSnapshot []*Issue
 
+	// wispDetails is the dependency half of the same PreloadLabeledWisps()
+	// round trip: every wisp that read returned, with the dependency rows it
+	// carried for them (preloadDetails). ListMergeRequests' hydration answers
+	// from it for a wisp merge request instead of paying a `bd show --json`
+	// (gt-7dctf). nil means "not warmed", and hydration runs bd show as before.
+	wispDetails *preloadDetails
+
 	// issueSnapshot is the issues-table counterpart of wispSnapshot, warmed by
 	// PreloadIssues() (beads_issue_snapshot.go). listIssues, ListAgentBeads and
 	// ListIssueStatuses answer from it when it covers the question asked and
@@ -2314,23 +2321,13 @@ func mrWispStatusMatches(status, filter string) bool {
 //
 // ListAgentBeadsFromWisps must NOT read this: the INNER JOIN makes a wisp
 // without the label row invisible, which is exactly the set its type/ID
-// fallbacks exist to catch. It reads listAllWisps instead (gt-92zx).
+// fallbacks exist to catch. It reads the unfiltered PreloadLabeledWisps
+// snapshot instead (gt-92zx).
 func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 	if len(labels) == 0 {
 		return nil, nil
 	}
 	return b.queryWisps(beadsql.WispsWithLabels(labels))
-}
-
-// listAllWisps reads every wisp in the rig in one bd sql round trip, with no
-// label filter. PreloadLabeledWisps uses this rather than listWispsByLabels
-// so that ListAgentBeadsFromWisps keeps seeing the whole wisps table, which is
-// what its legacy type-field and ID-pattern fallbacks are defined over: a
-// wisp whose JSON or label metadata is incomplete is still an agent bead by
-// type or by `prefix-rig-role` ID, and only an unfiltered read can find it.
-// Bucketing by label then happens in Go, per label, off labels_csv (gt-92zx).
-func (b *Beads) listAllWisps() ([]*Issue, error) {
-	return b.queryWisps(beadsql.AllWisps())
 }
 
 // queryWisps runs one wisps-table SELECT and scans its rows. It is the single
@@ -2341,11 +2338,18 @@ func (b *Beads) queryWisps(query beadsql.Query) ([]*Issue, error) {
 	if err != nil {
 		return nil, err
 	}
+	return wispRowsToIssues(rows), nil
+}
+
+// wispRowsToIssues maps a wisps read's rows to Issues, in the order the read
+// returned them. A row carries its table's ephemerality for free: this is the
+// wisps table.
+func wispRowsToIssues(rows []bdSQLIssueRow) []*Issue {
 	result := make([]*Issue, 0, len(rows))
 	for _, row := range rows {
 		result = append(result, row.toIssue(true))
 	}
-	return result, nil
+	return result
 }
 
 // queryIssueRows runs one bd sql SELECT over the wisps or issues table and
@@ -2371,10 +2375,9 @@ func (b *Beads) queryIssueRows(query beadsql.Query) ([]bdSQLIssueRow, error) {
 }
 
 // bdSQLIssueRow is one row of the wisps and issues reads this package runs
-// (beadsql.AllWisps, WispsWithLabels, IssuesWithLabelsOrStatuses): the
-// columns they share, plus the two only the issues read selects
-// (issue_type, ephemeral). A column a query
-// did not select decodes to its zero value.
+// (beadsql.AllWisps, WispsWithLabels, PreloadedWisps, PreloadedIssues): the
+// columns they share, plus the dependency columns the two preload reads carry.
+// A column a query did not select decodes to its zero value.
 type bdSQLIssueRow struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
@@ -2387,7 +2390,51 @@ type bdSQLIssueRow struct {
 	UpdatedAt   string `json:"updated_at"`
 	CreatedBy   string `json:"created_by"`
 	Ephemeral   int    `json:"ephemeral"`
+	CloseReason string `json:"close_reason"`
 	LabelsCSV   string `json:"labels_csv"`
+
+	// DepRow and the dep_* columns are a preload read's dependency half: a
+	// dependency row carries DepRow 1 and names the issue it belongs to in
+	// DepIssueID, with the target's own columns under dep_*. A row-half row
+	// carries DepRow 0 and "" in every other dep_* column, so the two halves of
+	// one read are told apart by DepRow alone.
+	DepRow         int    `json:"dep_row"`
+	DepIssueID     string `json:"dep_issue_id"`
+	DepType        string `json:"dep_type"`
+	DepID          string `json:"dep_id"`
+	DepStatus      string `json:"dep_status"`
+	DepCloseReason string `json:"dep_close_reason"`
+	DepTitle       string `json:"dep_title"`
+	DepPriority    int    `json:"dep_priority"`
+	DepIssueType   string `json:"dep_issue_type"`
+}
+
+// splitPreloadRows separates a preload read's two halves: the rows of the
+// read's own table, and the dependency rows the same round trip carried for
+// them.
+func splitPreloadRows(rows []bdSQLIssueRow) (tableRows, depRows []bdSQLIssueRow) {
+	for _, row := range rows {
+		if row.DepRow != 0 {
+			depRows = append(depRows, row)
+			continue
+		}
+		tableRows = append(tableRows, row)
+	}
+	return tableRows, depRows
+}
+
+// toIssueDep maps a dependency row to the IssueDep `bd show` reports for the
+// same dependency.
+func (r bdSQLIssueRow) toIssueDep() IssueDep {
+	return IssueDep{
+		ID:             r.DepID,
+		Title:          r.DepTitle,
+		Status:         r.DepStatus,
+		Priority:       r.DepPriority,
+		Type:           r.DepIssueType,
+		DependencyType: r.DepType,
+		CloseReason:    r.DepCloseReason,
+	}
 }
 
 // toIssue maps the row to an Issue. ephemeral is true for a wisps-table row,
@@ -2404,6 +2451,7 @@ func (r bdSQLIssueRow) toIssue(ephemeral bool) *Issue {
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
 		CreatedBy:   r.CreatedBy,
+		CloseReason: r.CloseReason,
 		Ephemeral:   ephemeral || r.Ephemeral != 0,
 	}
 	if r.LabelsCSV != "" {
@@ -2422,16 +2470,23 @@ func (r bdSQLIssueRow) toIssue(ephemeral bool) *Issue {
 // PreloadAgentBeads/PreloadMergeRequests: don't hold this instance across
 // writes that could create/close wisps mid-run.
 //
-// The round trip is unfiltered (listAllWisps, not listWispsByLabels) and the
-// per-label split happens in Go, because the two consumers need different
-// subsets of one read: ListMergeRequests wants its label's wisps, while
-// ListAgentBeadsFromWisps needs every wisp to run its type/ID fallbacks
-// against. A label-filtered query could not serve the second.
+// The round trip is unfiltered (PreloadedWisps reads the whole wisps table,
+// not a label-filtered subset) and the per-label split happens in Go, because
+// the two consumers need different subsets of one read: ListMergeRequests
+// wants its label's wisps, while ListAgentBeadsFromWisps needs every wisp to
+// run its type/ID fallbacks against. A label-filtered query could not serve
+// the second.
+//
+// The same round trip carries each wisp's dependency rows, indexed for
+// hydration in wispDetails (gt-7dctf).
 func (b *Beads) PreloadLabeledWisps(labels ...string) error {
-	wisps, err := b.listAllWisps()
+	rows, err := b.queryIssueRows(beadsql.PreloadedWisps())
 	if err != nil {
 		return err
 	}
+	wispRows, depRows := splitPreloadRows(rows)
+	wisps := wispRowsToIssues(wispRows)
+
 	cache := make(map[string][]*Issue, len(labels))
 	for _, label := range labels {
 		cache[label] = nil
@@ -2445,6 +2500,7 @@ func (b *Beads) PreloadLabeledWisps(labels ...string) error {
 	}
 	b.wispCache = cache
 	b.wispSnapshot = wisps
+	b.wispDetails = newPreloadDetails(wisps, depRows)
 	return nil
 }
 
@@ -2463,9 +2519,19 @@ func filterMergeRequestsByRig(issues []*Issue, rigName string) []*Issue {
 	return filtered
 }
 
+// hydrateMergeRequestDetails takes the listed merge requests to the detailed
+// form carrying their dependencies and blocker counts. A *Beads answers from
+// its preloaded snapshots when they cover every issue — the dependency rows
+// came down with the rows themselves (preloadDetails, gt-7dctf) — and falls
+// back to one `bd show --json <ids>` for the whole set otherwise.
 func hydrateMergeRequestDetails(c Client, issues []*Issue) ([]*Issue, error) {
 	if len(issues) == 0 {
 		return issues, nil
+	}
+	if b, ok := c.(*Beads); ok {
+		if hydrated, ok := b.hydrateFromPreload(issues); ok {
+			return hydrated, nil
+		}
 	}
 
 	ids := make([]string, 0, len(issues))

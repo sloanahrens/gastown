@@ -12,6 +12,18 @@ type issueSnapshot struct {
 	labels   map[string]bool
 	statuses map[IssueStatus]bool
 	issues   []*Issue
+	details  *preloadDetails
+}
+
+// detail returns the issue row the read returned for id, with the dependency
+// rows the same read carried, for hydration (see preloadDetails). ok is false
+// for an id this read did not return — including on a nil snapshot, which
+// means "not warmed".
+func (s *issueSnapshot) detail(id string) (*Issue, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return s.details.detail(id)
 }
 
 // PreloadIssues warms this *Beads' issues-table snapshot with one bd sql round
@@ -19,7 +31,9 @@ type issueSnapshot struct {
 // (gt-0hmt2) calls it once per rig so three reads that each spawned their own
 // bd subprocess answer from memory: ListAgentBeads' issues half (label
 // gt:agent), ListMergeRequests' issues half (label gt:merge-request), and
-// ListIssueStatuses (the active-work statuses).
+// ListIssueStatuses (the active-work statuses). The same round trip also
+// carries those issues' dependency rows, which is what ListMergeRequests'
+// hydration reads (gt-7dctf): see preloadDetails.
 //
 // The cache never refreshes — same caveat as PreloadLabeledWisps: don't hold
 // this instance across writes that could create or change those issues
@@ -33,15 +47,16 @@ func (b *Beads) PreloadIssues(labels []string, statuses []IssueStatus) error {
 	for i, st := range statuses {
 		statusNames[i] = string(st)
 	}
-	rows, err := b.queryIssueRows(beadsql.IssuesWithLabelsOrStatuses(labels, statusNames))
+	rows, err := b.queryIssueRows(beadsql.PreloadedIssues(labels, statusNames))
 	if err != nil {
 		return err
 	}
+	issueRows, depRows := splitPreloadRows(rows)
 
 	snap := &issueSnapshot{
 		labels:   make(map[string]bool, len(labels)),
 		statuses: make(map[IssueStatus]bool, len(statuses)),
-		issues:   make([]*Issue, 0, len(rows)),
+		issues:   make([]*Issue, 0, len(issueRows)),
 	}
 	for _, l := range labels {
 		snap.labels[l] = true
@@ -49,9 +64,10 @@ func (b *Beads) PreloadIssues(labels []string, statuses []IssueStatus) error {
 	for _, s := range statuses {
 		snap.statuses[s] = true
 	}
-	for _, row := range rows {
+	for _, row := range issueRows {
 		snap.issues = append(snap.issues, row.toIssue(false))
 	}
+	snap.details = newPreloadDetails(snap.issues, depRows)
 	b.issueSnapshot = snap
 	return nil
 }

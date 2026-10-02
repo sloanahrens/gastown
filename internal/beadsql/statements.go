@@ -178,57 +178,204 @@ func LabelPresent(id, label string) Query {
 	return declared("SELECT 1 AS present FROM labels WHERE issue_id = " + quote(id) + " AND label = " + quote(label) + " LIMIT 1")
 }
 
-// wispSelectColumns is the SELECT list the wisps reads share, so their
-// column order stays in one place; internal/beads' bdSQLIssueRow decodes it.
-// The LEFT JOIN on wisp_labels populates labels_csv; a read that filters on
-// a label adds its own INNER JOIN.
-const wispSelectColumns = "SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, " +
-	"w.created_at, w.updated_at, w.created_by, " +
-	"GROUP_CONCAT(al.label) as labels_csv " +
-	"FROM wisps w " +
-	"LEFT JOIN wisp_labels al ON w.id = al.issue_id "
+// wispRowSelect is the SELECT list the row-only wisps reads share, derived
+// from the preload column list so the two stay in step; internal/beads'
+// bdSQLIssueRow decodes it. The LEFT JOIN on wisp_labels populates
+// labels_csv; a read that filters on a label adds its own INNER JOIN, before
+// wispRowGroupBy.
+func wispRowSelect() string {
+	return preloadRowSelect("w", "''", false) + preloadRowTableJoin("w", "wisps", "wisp_labels")
+}
 
-// wispSelectGroupBy collapses the one-row-per-label join into one row per
-// wisp, with labels_csv carrying the labels.
-const wispSelectGroupBy = " GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, " +
-	"w.created_at, w.updated_at, w.created_by"
+func wispRowGroupBy() string { return preloadRowGroupBy("w") }
 
 // AllWisps reads every wisp with its labels.
-func AllWisps() Query { return declared(wispSelectColumns + wispSelectGroupBy) }
+func AllWisps() Query { return declared(wispRowSelect() + wispRowGroupBy()) }
 
 // WispsWithLabels reads every wisp carrying any of labels, with all its
 // labels. The INNER JOIN hides a wisp without a label row.
 func WispsWithLabels(labels []string) Query {
-	return declared(wispSelectColumns +
-		"JOIN wisp_labels l ON w.id = l.issue_id " +
-		"WHERE l.label IN (" + quoteList(labels, ", ") + ")" +
-		wispSelectGroupBy)
+	return declared(wispRowSelect() +
+		" JOIN wisp_labels l ON w.id = l.issue_id" +
+		" WHERE l.label IN (" + quoteList(labels, ", ") + ")" +
+		wispRowGroupBy())
 }
 
-// IssuesWithLabelsOrStatuses reads every issue carrying any of labels or in
-// any of statuses, with its labels, ordered as `bd list` orders (priority,
-// then age). The columns are wispSelectColumns' plus issue_type and
-// ephemeral. Both lists empty is a caller error.
-func IssuesWithLabelsOrStatuses(labels, statuses []string) Query {
+// The two preload reads — PreloadedWisps behind PreloadLabeledWisps, and
+// PreloadedIssues behind PreloadIssues — return their rows and, in the same
+// round trip, the dependency rows of every row they return (gt-7dctf). That
+// is what lets ListMergeRequests hydrate its merge requests without the
+// separate `bd show --json <ids>` it used to pay per rig: the dependency and
+// blocker data a hydration needs is already read.
+//
+// Each read is one UNION ALL. Its row half is the read's own rows, tagged
+// dep_row = 0; its dependency half is one row per dependency of those rows,
+// tagged dep_row = 1 and keyed to the row it belongs to by dep_issue_id. Both
+// halves are rendered from preloadColumns, so they line up column for column
+// by construction rather than by two hand-kept lists staying in step.
+
+// depTargetExpr is bd's own resolution of a dependency row's target: the
+// first non-null of the three typed target columns (issueops.DepTargetExpr).
+const depTargetExpr = "COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)"
+
+// preloadColumn is one column shared by the reads in this file: the row
+// expression ({t} is the row table's alias, {issue_type} the one column the
+// tables source differently) and what a dependency row puts in the same
+// position. A row-only read — one with no dependency half to line up with —
+// drops the dependency columns (depOnly).
+type preloadColumn struct {
+	row     string
+	dep     string
+	depOnly bool
+}
+
+// preloadColumns is that shared list: every column the issues and wisps reads
+// select, plus close_reason (`bd list` reports it; the wisps reads did not
+// select it) and the dep_* columns. One list serves every read, so a column
+// added here reaches all of them; a read with no use for one still decodes it
+// and ignores it.
+var preloadColumns = []preloadColumn{
+	{row: "{t}.id", dep: "d.issue_id"},
+	{row: "{t}.title", dep: "''"},
+	{row: "{t}.description", dep: "''"},
+	{row: "{t}.status", dep: "''"},
+	{row: "{t}.priority", dep: "0"},
+	{row: "{issue_type}", dep: "''"},
+	{row: "{t}.assignee", dep: "''"},
+	// The two datetime columns are NULL, not '', on a dependency row: a UNION
+	// takes its column types from its first half, and the reads' ORDER BY then
+	// sorts these as datetimes, which Dolt refuses to read '' as.
+	{row: "{t}.created_at", dep: "NULL"},
+	{row: "{t}.updated_at", dep: "NULL"},
+	{row: "{t}.created_by", dep: "''"},
+	{row: "{t}.ephemeral", dep: "0"},
+	{row: "{t}.close_reason", dep: "''"},
+	{row: "GROUP_CONCAT(al.label) as labels_csv", dep: "''"},
+	{row: "0 AS dep_row", dep: "1 AS dep_row", depOnly: true},
+	{row: "'' AS dep_issue_id", dep: "d.issue_id", depOnly: true},
+	{row: "'' AS dep_type", dep: "d.type", depOnly: true},
+	{row: "'' AS dep_id", dep: "COALESCE(tw.id, ti.id)", depOnly: true},
+	{row: "'' AS dep_status", dep: "COALESCE(tw.status, ti.status)", depOnly: true},
+	{row: "'' AS dep_close_reason", dep: "COALESCE(tw.close_reason, ti.close_reason)", depOnly: true},
+	{row: "'' AS dep_title", dep: "COALESCE(tw.title, ti.title)", depOnly: true},
+	{row: "0 AS dep_priority", dep: "COALESCE(tw.priority, ti.priority)", depOnly: true},
+	{row: "'' AS dep_issue_type", dep: "COALESCE(tw.issue_type, ti.issue_type)", depOnly: true},
+}
+
+// preloadRowSelect renders the row half for alias, with the dependency columns
+// included when the read has a dependency half for them to line up with.
+// issueType stands in for {issue_type}: a wisp's Type stays "" because
+// ListAgentBeadsFromWisps reads that field to classify agent beads, and the
+// wisps table's own issue_type column ('task', 'molecule', …) is not the same
+// thing, so the wisps reads pass a constant there.
+func preloadRowSelect(alias, issueType string, withDeps bool) string {
+	var exprs []string
+	for _, c := range preloadColumns {
+		if c.depOnly && !withDeps {
+			continue
+		}
+		exprs = append(exprs, preloadSubstitute(c.row, alias, issueType))
+	}
+	return "SELECT " + strings.Join(exprs, ", ")
+}
+
+// preloadRowGroupBy collapses the one-row-per-label join into one row per row
+// of the row table, with labels_csv carrying the labels. Grouping by that
+// table's id is enough: every other column selected from it is functionally
+// dependent on its primary key, and labels_csv is the only aggregate. A
+// constant cannot be listed here at all — Dolt reads one as a column ordinal —
+// which is what the wisps read's {issue_type} renders to.
+func preloadRowGroupBy(alias string) string { return " GROUP BY " + alias + ".id" }
+
+// preloadRowTableJoin is the row half's FROM clause for a read over table,
+// whose labels live in labelsTable.
+func preloadRowTableJoin(alias, table, labelsTable string) string {
+	return " FROM " + table + " " + alias + " LEFT JOIN " + labelsTable + " al ON " + alias + ".id = al.issue_id"
+}
+
+// preloadDependencyRows is the dependency half: one row per dependency of a
+// row in scope, carrying the relation type and the target's own status, close
+// reason, title, priority and type, under the dep_* names. scope is the
+// subquery naming the depending ids, which are the rows the read returned.
+//
+// The target is resolved the way bd resolves it — depTargetExpr, then looked
+// up in the issues and wisps tables — so a dependency whose target this
+// database does not hold (an external id from another rig) drops out here
+// exactly as bd drops it from `bd show`, and a target that is itself a wisp
+// resolves. Dependencies of wisps carry their targets in wisps, so both
+// tables have to be joined for either read.
+func preloadDependencyRows(depTable, scope string) string {
+	exprs := make([]string, len(preloadColumns))
+	for i, c := range preloadColumns {
+		exprs[i] = c.dep
+	}
+	return "SELECT " + strings.Join(exprs, ", ") +
+		" FROM " + depTable + " d" +
+		" LEFT JOIN issues ti ON ti.id = " + depTargetExpr +
+		" LEFT JOIN wisps tw ON tw.id = " + depTargetExpr +
+		" WHERE (ti.id IS NOT NULL OR tw.id IS NOT NULL)" +
+		" AND d.issue_id IN (" + scope + ")"
+}
+
+func preloadSubstitute(expr, alias, issueType string) string {
+	expr = strings.ReplaceAll(expr, "{t}", alias)
+	return strings.ReplaceAll(expr, "{issue_type}", issueType)
+}
+
+// PreloadedWisps is the wisps read behind PreloadLabeledWisps: every wisp in
+// the rig with its labels — unfiltered by label, because the agent side of the
+// preload runs type and ID fallbacks over wisps the label join cannot see
+// (gt-92zx) — plus the dependency rows of every wisp it returns.
+func PreloadedWisps() Query {
+	return declared(preloadRowSelect("w", "''", true) +
+		preloadRowTableJoin("w", "wisps", "wisp_labels") +
+		wispRowGroupBy() +
+		" UNION ALL " +
+		preloadDependencyRows("wisp_dependencies", "SELECT id FROM wisps"))
+}
+
+// PreloadedIssues is the issues read behind PreloadIssues: every issue
+// carrying any of labels or in any of statuses, with its labels and, in the
+// same round trip, the dependency rows of every issue it returns. The row
+// half is ordered as `bd list` orders (priority, then age); dep_row first
+// keeps the dependency rows after it, so the order of the issue rows — which
+// the snapshot preserves — is unchanged by the union. Both lists empty is a
+// caller error.
+func PreloadedIssues(labels, statuses []string) Query {
+	clauses := issueScopeClauses("i", labels, statuses)
+	if len(clauses) == 0 {
+		return Query{err: fmt.Errorf("beadsql: PreloadedIssues needs a label or a status")}
+	}
+	scope := strings.Join(issueScopeClauses("i2", labels, statuses), " OR ")
+	return declared(preloadRowSelect("i", "i.issue_type", true) +
+		preloadRowTableJoin("i", "issues", "labels") +
+		" WHERE " + strings.Join(clauses, " OR ") +
+		preloadRowGroupBy("i") +
+		" UNION ALL " +
+		preloadDependencyRows("dependencies", "SELECT i2.id FROM issues i2 WHERE "+scope) +
+		" ORDER BY " + preloadOrderBy)
+}
+
+// preloadOrderBy is PreloadedIssues' ORDER BY, at the end of the whole UNION
+// because a UNION takes only one and it has to come last. dep_row first keeps
+// the dependency rows after the issue rows, so the issue rows keep the order
+// `bd list` gives them — priority, then age — which the snapshot preserves and
+// the readers rely on. These are the output column names of the union's first
+// half, which is what an ORDER BY over a UNION sees.
+const preloadOrderBy = "dep_row, priority, created_at, id"
+
+// issueScopeClauses are the WHERE terms PreloadedIssues selects rows on,
+// written against alias so that the dependency half's scope subquery asks the
+// same question of the same rows.
+func issueScopeClauses(alias string, labels, statuses []string) []string {
 	var clauses []string
 	if len(labels) > 0 {
-		clauses = append(clauses, "i.id IN (SELECT issue_id FROM labels WHERE label IN ("+quoteList(labels, ", ")+"))")
+		clauses = append(clauses, alias+".id IN (SELECT issue_id FROM labels WHERE label IN ("+quoteList(labels, ", ")+"))")
 	}
 	if len(statuses) > 0 {
-		clauses = append(clauses, "i.status IN ("+quoteList(statuses, ", ")+")")
+		clauses = append(clauses, alias+".status IN ("+quoteList(statuses, ", ")+")")
 	}
-	if len(clauses) == 0 {
-		return Query{err: fmt.Errorf("beadsql: IssuesWithLabelsOrStatuses needs a label or a status")}
-	}
-	return declared("SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, " +
-		"i.created_at, i.updated_at, i.created_by, i.ephemeral, " +
-		"GROUP_CONCAT(al.label) as labels_csv " +
-		"FROM issues i " +
-		"LEFT JOIN labels al ON i.id = al.issue_id " +
-		"WHERE " + strings.Join(clauses, " OR ") +
-		" GROUP BY i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, " +
-		"i.created_at, i.updated_at, i.created_by, i.ephemeral " +
-		"ORDER BY i.priority, i.created_at, i.id")
+	return clauses
 }
 
 // MailWisps reads the open or hooked gt:message wisps assigned to, or
