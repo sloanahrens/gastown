@@ -16,6 +16,11 @@ import (
 // landing that turned main red (gt-v4ssj.4.1).
 const LabelRevert = "gt:revert"
 
+// LabelInstallNow marks a work bead whose landing an operator wants followed
+// by an install of gt at once, rather than at the next quiet point
+// (gt-3qmv4.2).
+const LabelInstallNow = "gt:install-now"
+
 // RevertNoteMarker opens the notes block that names what a revert bead
 // reverts. The landing worker reads it after the revert lands to reopen the
 // culprit.

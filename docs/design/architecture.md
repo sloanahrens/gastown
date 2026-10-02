@@ -215,6 +215,13 @@ to a person at `land.MaxReworkAttempts` rejections, where the loop is the
 failure rather than the refusal (gt-28ibg). Polecats never push main. Polecats manage their own lifecycle up to `gt done`;
 the daemon restarts a session only when it is dead while holding work.
 
+A work bead carrying `gt:install-now` asks for the installed `gt` binary to be
+brought up to date as soon as its landing is on main: the landing worker requests
+the daemon's `rebuild_gt` install in the pass that lands it, rather than at the
+next quiet point. An operator labels a bead that way to put an urgent daemon,
+landing or dispatch fix in force without waiting for the queue to drain or an
+hourly tick.
+
 ## Data Plane Lifecycle
 
 All beads data flows through a six-stage lifecycle managed by the daemon:
