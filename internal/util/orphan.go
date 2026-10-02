@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // minOrphanAge is the minimum age (in seconds) a process must be before
@@ -259,8 +260,8 @@ func getProcessCwd(pid int) string {
 	return ""
 }
 
-// resolveTownRoot returns the Gas Town workspace root for a process, identified
-// by walking up from its CWD looking for the mayor/town.json marker.
+// resolveTownRoot returns the Gas Town workspace root for a process, from its
+// CWD (see resolveTownRootFromDir).
 // Returns the workspace root path, or "" if the process is not in any workspace
 // or its CWD cannot be determined.
 func resolveTownRoot(pid int) string {
@@ -271,24 +272,20 @@ func resolveTownRoot(pid int) string {
 	return resolveTownRootFromDir(cwd)
 }
 
-// resolveTownRootFromDir walks up from dir looking for mayor/town.json.
-// Returns the workspace root path, or "" if not found.
+// resolveTownRootFromDir returns the Gas Town workspace root dir belongs to,
+// or "" when dir is outside every workspace. The walk belongs to
+// internal/workspace (gt-y3pgh.2), which returns the outermost workspace
+// above dir.
 func resolveTownRootFromDir(dir string) string {
-	current := dir
-	for {
-		if _, err := os.Stat(filepath.Join(current, "mayor", "town.json")); err == nil {
-			return current
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return ""
-		}
-		current = parent
+	root, err := workspace.Find(dir)
+	if err != nil {
+		return ""
 	}
+	return root
 }
 
 // isInGasTownWorkspace checks whether a process's working directory is inside
-// a Gas Town workspace (identified by the mayor/town.json marker).
+// a Gas Town workspace.
 func isInGasTownWorkspace(pid int) bool {
 	return resolveTownRoot(pid) != ""
 }

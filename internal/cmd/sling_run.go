@@ -210,7 +210,7 @@ func realSlingDeps() *slingDeps {
 		steps:         slingSteps,
 		autoCommitOff: setBDAutoCommitOff,
 		releaseSeat:   func(s *SpawnedPolecatInfo) { s.releaseSeatClaim() },
-		findTown:      findTownRoot,
+		findTown:      workspace.FindFromCwd,
 		townOrEnv:     workspace.FindFromCwdOrError,
 
 		resolvePRBranch:        resolvePRBranch,

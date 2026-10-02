@@ -2252,7 +2252,7 @@ func findAssignedBeadsForAgent(workDir, agentID string) []string {
 		return assigned
 	}
 
-	townRoot, err := findTownRoot()
+	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
 		return nil
 	}

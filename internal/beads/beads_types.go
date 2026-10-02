@@ -35,33 +35,39 @@ var (
 	ensuredMu   sync.Mutex
 )
 
-// FindTownRoot walks up from startDir to find the Gas Town root directory.
-// The town root is identified by the presence of mayor/town.json.
-// Returns the outermost town root found, so that rig repos which were
-// originally standalone towns (and still contain mayor/town.json) don't
-// shadow the real town root above them.
-// Returns empty string if not found (reached filesystem root), and refuses the
-// live town root while the hermetic test harness is active (gt-dr664).
+// FindTownRoot returns the Gas Town town root containing startDir: the
+// outermost directory holding a mayor/town.json. The walk itself belongs to
+// internal/workspace (gt-y3pgh.2) — this is beads' name for workspace.Find,
+// so rig repos that were originally standalone towns (and still carry their
+// own mayor/town.json) don't shadow the real town root above them.
+//
+// workspace.Find also accepts a bare mayor/ directory (its SecondaryMarker),
+// which is not a town root here: FindTownRoot is defined by mayor/town.json
+// (PrimaryMarker) and returns "" for such a tree.
+//
+// Returns "" when no town root exists above startDir. While the hermetic test
+// harness forbids the live town, workspace.Find reports "no workspace" rather
+// than naming it; FindTownRoot routes that refusal through
+// workspace.RefuseForbiddenRoot so an in-process caller reaching production
+// fails loudly under test, and a gt/bd subprocess falls back to its own beads
+// dir instead of production (gt-dr664).
 func FindTownRoot(startDir string) string {
-	dir := startDir
-	candidate := ""
-	for {
-		townFile := filepath.Join(dir, "mayor", "town.json")
-		if _, err := os.Stat(townFile); err == nil {
-			candidate = dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break // Reached filesystem root — candidate is the outermost found
-		}
-		dir = parent
-	}
-	if workspace.RefuseForbiddenRoot("beads.FindTownRoot", candidate) != nil {
-		// Subprocess (gt/bd): the live town is refused, so routing falls back
-		// to the caller's own beads dir instead of production.
+	root, err := workspace.Find(startDir)
+	if err != nil {
 		return ""
 	}
-	return candidate
+	if root == "" {
+		// "" is either "no town above startDir" or the harness-forbidden live
+		// town. Only the second is a refusal, and RefuseForbiddenRoot ignores
+		// a dir outside the forbidden tree.
+		_ = workspace.RefuseForbiddenRoot("beads.FindTownRoot", startDir)
+		return ""
+	}
+	// A bare mayor/ (SecondaryMarker) is not a town root: require town.json.
+	if _, err := os.Stat(filepath.Join(root, workspace.PrimaryMarker)); err != nil {
+		return ""
+	}
+	return root
 }
 
 // ResolveRoutingTarget determines which beads directory a bead ID will route to.

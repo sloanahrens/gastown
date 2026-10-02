@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -52,7 +53,7 @@ row, so its fields must never be merged in by severity or recency (gt-1361).`,
 		if len(args) == 1 {
 			arg = args[0]
 		}
-		townRoot, err := findTownRoot()
+		townRoot, err := workspace.FindFromCwd()
 		if err != nil {
 			return err
 		}

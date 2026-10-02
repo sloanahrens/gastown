@@ -239,9 +239,9 @@ func detectTownRoot(startDir string, getenv func(string) string) string {
 		return townRoot
 	}
 
-	// Fallback: the GT_TOWN_ROOT the session was spawned with, when workspace
+	// Fallback: the town root the session was spawned with, when workspace
 	// detection fails (e.g., running from outside any workspace directory).
-	if envRoot := getenv("GT_TOWN_ROOT"); envRoot != "" {
+	if envRoot := workspace.TownRootFromEnv(getenv); envRoot != "" {
 		if ok, _ := workspace.IsWorkspace(envRoot); ok {
 			return envRoot
 		}
