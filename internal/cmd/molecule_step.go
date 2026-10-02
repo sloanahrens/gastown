@@ -114,10 +114,13 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 
 	// Step 3: Close the step
 	if moleculeStepDryRun {
+		if isPinnedStep(step) {
+			fmt.Printf("[dry-run] Would release pinned step: %s\n", stepID)
+		}
 		fmt.Printf("[dry-run] Would close step: %s\n", stepID)
 		result.StepClosed = true
 	} else {
-		if err := b.Close(stepID); err != nil {
+		if err := closeStep(b, step); err != nil {
 			return fmt.Errorf("closing step: %w", err)
 		}
 		result.StepClosed = true
@@ -175,6 +178,30 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// isPinnedStep reports whether a step still carries the pin a hand-off left on it.
+func isPinnedStep(step *beads.Issue) bool {
+	return beads.IssueStatus(step.Status) == beads.IssueStatusPinned
+}
+
+// stepWriter is the beads write surface completing a step needs.
+type stepWriter interface {
+	Update(id string, opts beads.UpdateOptions) error
+	Close(ids ...string) error
+}
+
+// closeStep closes a completed step, releasing a hand-off pin first: bd refuses
+// to close a pinned issue, so the session the step was handed to could not
+// complete it without claiming the step by hand (gt-tiv2x).
+func closeStep(w stepWriter, step *beads.Issue) error {
+	if isPinnedStep(step) {
+		inProgress := string(beads.StatusInProgress)
+		if err := w.Update(step.ID, beads.UpdateOptions{Status: &inProgress}); err != nil {
+			return fmt.Errorf("releasing pinned step: %w", err)
+		}
+	}
+	return w.Close(step.ID)
 }
 
 // extractMoleculeIDFromStep extracts the molecule ID from a step ID.
@@ -288,18 +315,22 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 	}
 
 	if dryRun {
-		fmt.Printf("\n[dry-run] Would pin next step: %s\n", nextStep.ID)
+		fmt.Printf("\n[dry-run] Would assign next step: %s\n", nextStep.ID)
 		fmt.Printf("[dry-run] Would respawn pane\n")
 		return nil
 	}
 
-	// Pin the next step bead
-	pinned := beads.StatusPinned
-	if err := beads.NewPlain(gitRoot, nil).Update(nextStep.ID, beads.UpdateOptions{Status: &pinned, Assignee: &agentID}); err != nil {
-		return fmt.Errorf("pinning next step: %w", err)
+	// Hand the next step to the session that will run it as an assignment
+	// (in_progress, assigned to this agent), the status a claim leaves. Pinned
+	// is the status for beads that never get closed, and bd refuses to close a
+	// pinned issue, so pinning here stranded the successor on the step it was
+	// handed (gt-tiv2x).
+	assigned := string(beads.StatusInProgress)
+	if err := beads.NewPlain(gitRoot, nil).Update(nextStep.ID, beads.UpdateOptions{Status: &assigned, Assignee: &agentID}); err != nil {
+		return fmt.Errorf("assigning next step: %w", err)
 	}
 
-	fmt.Printf("%s Next step pinned: %s\n", style.Bold.Render("📌"), nextStep.ID)
+	fmt.Printf("%s Next step assigned: %s\n", style.Bold.Render("→"), nextStep.ID)
 
 	// Respawn the pane
 	if !tmux.IsInsideTmux() {
