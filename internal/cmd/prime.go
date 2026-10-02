@@ -215,9 +215,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	if hookErr != nil {
 		// Cross-rig / unresolvable hook bead (gt-el4): the agent bead names a
 		// hook bead that bd show cannot find. Don't sit idle "pontificating" —
-		// emit a clear message, fire a HIGH escalation so the witness sees the
-		// dead-with-active-work state, and exit non-zero so the dog can clear
-		// the hook on its next sweep.
+		// emit a clear message, fire a HIGH escalation so the mayor sees the
+		// dead-with-active-work state, and exit non-zero instead of falling
+		// through as if no work were assigned.
 		if errors.Is(hookErr, ErrHookUnresolvable) {
 			agentID := getAgentIdentity(ctx)
 			fmt.Fprintf(os.Stderr,
@@ -233,7 +233,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "Hook query failed: %v\n", hookErr)
 		fmt.Fprintf(os.Stderr, "This is a database connectivity error, NOT an empty hook.\n")
 		fmt.Fprintf(os.Stderr, "Your work may still be assigned. Do NOT close any beads.\n")
-		fmt.Fprintf(os.Stderr, "Escalate to witness/mayor and wait for resolution.\n\n")
+		fmt.Fprintf(os.Stderr, "Escalate to mayor and wait for resolution.\n\n")
 	}
 
 	// Static role text (template + CONTEXT.md) goes into the role's
@@ -254,8 +254,8 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	hasSlungWork := hookedBead != nil
 	explain(hasSlungWork, "Autonomous mode: hooked/in-progress work detected")
 	// Render the hooked work first and on its own: a checkSlungWork error
-	// (refinery safety-stop lookup, formula rendering) must abort before the
-	// side-effecting sections (mail inject, checkpoint cleanup) run.
+	// (molecule checklist rendering) must abort before the side-effecting
+	// sections (mail inject, checkpoint cleanup) run.
 	var slungErr error
 	var hookedWork strings.Builder
 	_, slungErr = checkSlungWork(&hookedWork, ctx, hookedBead)
@@ -956,7 +956,7 @@ func isBeadNotFound(err error) bool {
 		strings.Contains(msg, "issue not found")
 }
 
-// firePolecatHookUnresolvableEscalation fires a HIGH escalation so the witness
+// firePolecatHookUnresolvableEscalation fires a HIGH escalation so the mayor
 // sees the dead-with-active-work state immediately. Best effort — logged on
 // failure but does not gate the prime exit.
 var firePolecatHookUnresolvableEscalation = func(agentID, detail string) {
@@ -999,8 +999,8 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 			// The agent bead names a hook bead but `bd show` cannot find it.
 			// This is the cross-rig dispatch failure mode (gt-el4): an `hq-`
 			// bead was handed to a polecat whose DB only resolves `gt-`. Fail
-			// fast — never pontificate, the witness will clear the hook on
-			// its next sweep and the dispatcher will (or won't) re-issue.
+			// fast — never pontificate. The escalation above puts the bead in
+			// front of the mayor, who decides whether to re-issue.
 			if hookBead == nil || isBeadNotFound(showErr) {
 				staleHookErr = fmt.Errorf("%w: agent=%s hook_bead=%s cwd=%s: %v",
 					ErrHookUnresolvable, agentID, agentBead.HookBead, ctx.WorkDir, showErr)
@@ -1035,7 +1035,7 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 }
 
 // rigBeadsRoot returns the route-owned directory to use for beads queries.
-// For rig-level agents (polecats, crew, witness, refinery), prefer the rig DB
+// For rig-level agents (polecats, crew), prefer the rig DB
 // from town routes rather than rig-root metadata, which can be a stale redirect
 // shim during recovery. For town-level agents, returns ctx.WorkDir unchanged.
 func rigBeadsRoot(ctx RoleContext) string {
@@ -1424,8 +1424,8 @@ func getAgentIdentity(ctx RoleContext) string {
 // Returns an error if another agent already owns this identity.
 func acquireIdentityLock(ctx RoleContext) error {
 	// Only lock worker roles (polecat, crew)
-	// Infrastructure roles (mayor, witness, refinery, deacon) are singletons
-	// managed by tmux session names, so they don't need file-based locks
+	// The mayor is a singleton managed by its tmux session name,
+	// so it doesn't need a file-based lock
 	if ctx.Role != RolePolecat && ctx.Role != RoleCrew {
 		return nil
 	}
@@ -1471,7 +1471,7 @@ func acquireIdentityLock(ctx RoleContext) error {
 }
 
 // getAgentBeadID returns the agent bead ID for the current role.
-// Town-level agents (mayor, deacon) use hq- prefix; rig-scoped agents use the rig's prefix.
+// The mayor uses the hq- prefix; rig-scoped agents use the rig's prefix.
 // Returns empty string for unknown roles.
 func getAgentBeadID(ctx RoleContext) string {
 	switch ctx.Role {
