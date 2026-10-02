@@ -35,6 +35,26 @@ func TestCheckSessionHealth_LivenessErrorIsUnknown(t *testing.T) {
 	}
 }
 
+// TestCheckSessionHealth_UnanswerableExistenceIsUnknown is gt-i3okp, the
+// inverse of gt-fcxe9.1. Level 1 used to collapse a HasSession error and a
+// false into SessionDead, so a has-session tmux could not answer (runner
+// timeout, server hung) read as a confirmed-dead session to every kill/restart
+// path. The unanswerable case must read AgentUnknown, never SessionDead.
+func TestCheckSessionHealth_UnanswerableExistenceIsUnknown(t *testing.T) {
+	t.Parallel()
+	s := newScripted(bySub(map[string]reply{"has-session": fail("timed out waiting for server")}))
+	got := unitTmux(s, nil).CheckSessionHealth("gt-x", 0)
+	if got != AgentUnknown {
+		t.Fatalf("CheckSessionHealth = %v, want %v", got, AgentUnknown)
+	}
+	if got.IsZombie() {
+		t.Fatal("AgentUnknown must not count as a zombie")
+	}
+	if !got.CountsAsRunning() {
+		t.Fatal("AgentUnknown must count as running: no caller may kill or restart on it")
+	}
+}
+
 // TestCleanupOrphanedSessions_LivenessErrorKillsNothing: the sweep kills only
 // sessions confirmed dead; an unanswerable liveness query leaves them alone.
 func TestCleanupOrphanedSessions_LivenessErrorKillsNothing(t *testing.T) {
