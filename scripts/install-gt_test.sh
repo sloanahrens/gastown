@@ -453,16 +453,77 @@ rc=$(CALLER_ACTOR=daemon run_install "$T" --sha "$(cat "$T/c2")" --source rebuil
 # identifier the Developer Tools grant is keyed on; missing material or a failing
 # codesign is one WARN and an ad-hoc install, never a failure or a rollback. ---
 
-# KEYCHAINS_ORIG / restore_keychains: codesign only finds an identity in a
-# keychain the user's search list carries, so the throwaway one below goes on
-# that list for the case and comes back off whatever the case does. SIGN_KC is
-# deleted before the list is restored, so it never dangles.
-KEYCHAINS_ORIG=$(security list-keychains -d user 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
-KEYCHAINS_ORIG="${KEYCHAINS_ORIG% }"
+# codesign only finds an identity in a keychain the user's search list carries
+# (probed on macOS: --keychain alone, by name or by hash, answers "no identity
+# found"), so the throwaway keychain below goes on that list for the case and
+# comes back off whatever the case does. The list is one global per user, shared
+# with every other run of this script (a post-land, a tier sweep, a presubmit)
+# and with the town's real signing keychain, so the case never snapshots it and
+# puts the snapshot back: a stale snapshot re-adds another run's already-deleted
+# keychain and drops a real one. It takes a machine-wide lock for as long as its
+# keychain is on the list, reads the list at the moment it changes it, and
+# removes only its own entry (gt-52lxg). A lock it cannot get makes the signing
+# cases SKIP, never fail.
+KC_LOCK="${GT_TEST_KEYCHAIN_LOCK:-/tmp/gt-install-test-keychain.lock}"
+KC_LOCK_HELD=0
 SIGN_KC=""
+
+# kc_lock — take the lock, waiting up to 4 minutes. A lock whose owner is gone
+# (or that never got an owner file and is minutes old) is stale and reaped.
+kc_lock() {
+  [ "$KC_LOCK_HELD" = "1" ] && return 0
+  local waited=0 owner
+  while ! mkdir "$KC_LOCK" 2>/dev/null; do
+    owner=$(cat "$KC_LOCK/pid" 2>/dev/null || true)
+    if { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; } \
+       || { [ -z "$owner" ] && [ -n "$(find "$KC_LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; }; then
+      rm -rf "$KC_LOCK"
+      continue
+    fi
+    waited=$((waited + 1))
+    [ "$waited" -gt 240 ] && return 1
+    sleep 1
+  done
+  echo $$ > "$KC_LOCK/pid"
+  KC_LOCK_HELD=1
+}
+
+kc_unlock() {
+  [ "$KC_LOCK_HELD" = "1" ] || return 0
+  rm -rf "$KC_LOCK"
+  KC_LOCK_HELD=0
+}
+
+# kc_list prints the user's search list, one path per line.
+kc_list() {
+  security list-keychains -d user 2>/dev/null | tr -d '"' | sed 's/^[[:space:]]*//'
+}
+
+# kc_add KC — append KC to the list as it is right now.
+kc_add() {
+  local kc="$1" line
+  local -a cur=()
+  while IFS= read -r line; do [ -n "$line" ] && cur+=("$line"); done < <(kc_list)
+  security list-keychains -d user -s ${cur[@]+"${cur[@]}"} "$kc"
+}
+
+# kc_remove KC — drop KC from the list as it is right now and nothing else. The
+# list spells /var as /private/var, so the two compare equal.
+kc_remove() {
+  local kc="${1#/private}" line
+  local -a keep=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && [ "${line#/private}" != "$kc" ] && keep+=("$line")
+  done < <(kc_list)
+  security list-keychains -d user -s ${keep[@]+"${keep[@]}"}
+}
+
 restore_keychains() {
-  [ -n "$SIGN_KC" ] && security delete-keychain "$SIGN_KC" 2>/dev/null || true
-  [ -n "$KEYCHAINS_ORIG" ] && security list-keychains -d user -s $KEYCHAINS_ORIG 2>/dev/null || true
+  if [ -n "$SIGN_KC" ]; then
+    kc_remove "$SIGN_KC" 2>/dev/null || true
+    security delete-keychain "$SIGN_KC" 2>/dev/null || true
+  fi
+  kc_unlock
 }
 trap restore_keychains EXIT
 
@@ -475,7 +536,11 @@ make_signing_material() {
   local t="$1" pw="$2" kc="$1/signing/gastown-signing.keychain-db"
   command -v security >/dev/null 2>&1 && command -v codesign >/dev/null 2>&1 \
     && command -v openssl >/dev/null 2>&1 || return 1
-  [ -n "$SIGN_KC" ] && security delete-keychain "$SIGN_KC" 2>/dev/null || true
+  kc_lock || return 1
+  if [ -n "$SIGN_KC" ]; then
+    kc_remove "$SIGN_KC" 2>/dev/null || true
+    security delete-keychain "$SIGN_KC" 2>/dev/null || true
+  fi
   SIGN_KC=""
   mkdir -p "$t/signing"
   security create-keychain -p "$pw" "$kc" || return 1
@@ -502,7 +567,7 @@ make_signing_material() {
   chmod 600 "$t/signing/keychain.pass"
   # Appended, so the case never changes which keychain answers a lookup first
   # for anything else on the machine while it runs.
-  security list-keychains -d user -s $KEYCHAINS_ORIG "$kc" || return 1
+  kc_add "$kc" || return 1
   return 0
 }
 
@@ -592,6 +657,24 @@ grep -q "WARNING: installing ad-hoc: cannot unlock $T/signing/gastown-signing.ke
   && pass "unlock fails: WARN names the keychain" || fail "unlock fails: $(grep WARNING "$T/run.out")"
 [ -z "$(escalations "$T")" ] && pass "unlock fails: no escalation, no rollback" \
   || fail "unlock fails: escalated: $(escalations "$T")"
+
+# --- Case 21: the signing cases leave no trace on the user's keychain search
+# list (gt-52lxg). Their keychain comes off the list when the cases end, the
+# lock goes with it, and a second run may take the list straight away; a
+# snapshot-and-restore here once dropped other runs' entries and re-added deleted
+# ones, which is what made "no identity found" intermittent. ---
+if [ -n "$SIGN_KC" ]; then
+  restore_keychains
+  if kc_list | grep -q -F "${SIGN_KC#/private}"; then
+    fail "keychain list: the signing cases left $SIGN_KC on the search list"
+  elif [ -e "$KC_LOCK" ] && [ "$(cat "$KC_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+    fail "keychain list: the signing cases left the lock held"
+  else
+    pass "keychain list: own keychain off the search list, lock released"
+  fi
+else
+  echo "  SKIP: no signing material was made on this host — keychain search-list cleanup check not run"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
