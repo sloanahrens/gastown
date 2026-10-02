@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -123,10 +124,11 @@ func (r *RedMain) recordVerdict(pl PostLand, green bool) {
 }
 
 // maybeRevert files a revert of pl's landing when it is the only landing
-// between the last green commit and the red one: then it is the culprit. It
-// returns what it did, for the status line, or "" when a revert is not
-// this owner's call (a direct push, revert tracking off).
-func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand) string {
+// between the last green commit and the red one, and its diff can have moved
+// what failed: then it is the culprit. It returns what it did, for the status
+// line, or "" when a revert is not this owner's call (a direct push, revert
+// tracking off).
+func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand, b blame) string {
 	if pl.Direct || pl.BeadID == "" || r.State == nil || r.Landings == nil || r.Revert == nil {
 		return ""
 	}
@@ -157,8 +159,14 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand) string {
 	if id := r.openRevert(pl.BeadID); id != "" {
 		return fmt.Sprintf("revert of %s already open as %s", pl.BeadID, id)
 	}
+	// The cancellation guard comes before the diff read: a run the stop cut
+	// short spends no git read on an attribution it will not act on
+	// (gt-40so9).
 	if ctx.Err() != nil {
 		return ""
+	}
+	if why := r.unattributableFromDiff(ctx, rec, b); why != "" {
+		return "no revert: " + why
 	}
 	branch := RevertBranch(pl.BeadID, rec.LandedCommit)
 	head, err := r.Revert(ctx, rec, branch)
@@ -172,6 +180,95 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand) string {
 		return fmt.Sprintf("no revert: filing it failed (%v)", land.NoteField(err.Error()))
 	}
 	return fmt.Sprintf("reverting %s as %s", pl.BeadID, id)
+}
+
+// blame is what one red post-landing run held responsible: the Go packages
+// still red after their rerun, and the scripts the run itself named. An empty
+// kind is one the run named none of; a run that named neither (a build the
+// merged tree failed) has no unit a diff can be checked against.
+type blame struct {
+	packages []string
+	scripts  []string
+}
+
+// redBlame reads a run's failing units: stillRed holds redMainNoPackage when
+// the run named no Go package, and the scripts the run named then stand for
+// the whole-command failure that key describes.
+func redBlame(stillRed, scripts []string) blame {
+	b := blame{scripts: scripts}
+	for _, p := range stillRed {
+		if p != redMainNoPackage {
+			b.packages = append(b.packages, p)
+		}
+	}
+	return b
+}
+
+var (
+	// goVerdictInputsRE is the paths whose change can move a Go test's
+	// verdict: the sources, the module files, the Makefile whose targets run
+	// the tier, and the test policy that decides which packages pass.
+	goVerdictInputsRE = regexp.MustCompile(`(\.go$|go\.mod$|go\.sum$|Makefile$|^internal/testpolicy/)`)
+	// shellVerdictInputsRE is the same rule for the shell tier, the tier's
+	// own (land.ShellTierInputs).
+	shellVerdictInputsRE = regexp.MustCompile(land.ShellTierInputs)
+)
+
+// unattributable names a unit a red run blamed that a landing with those
+// changed paths cannot have moved, or "" when it can have moved every blamed
+// unit: a failing script only by a shell-tier input, a failing Go package only
+// by a Go input. Every Go input counts for every package (a package's
+// dependencies span the module), so the check over-approximates "downstream"
+// instead of guessing an import graph: only a landing that changed no Go code
+// at all is ruled out of a Go failure (gt-40so9).
+func unattributable(changed []string, b blame) string {
+	if len(b.packages) > 0 && !anyMatch(changed, goVerdictInputsRE) {
+		return fmt.Sprintf("%s: the landing changed no Go input (%s)", strings.Join(b.packages, ", "), pathsBrief(changed))
+	}
+	if len(b.scripts) > 0 && !anyMatch(changed, shellVerdictInputsRE) {
+		return fmt.Sprintf("%s: the landing changed no shell-tier input (%s)", strings.Join(b.scripts, ", "), pathsBrief(changed))
+	}
+	return ""
+}
+
+// unattributableFromDiff is unattributable over the landing of rec. A red run
+// that blamed no unit keeps the revert it always had (nothing names what the
+// landing would have to have moved), and a diff this cannot read is no
+// attribution.
+func (r *RedMain) unattributableFromDiff(ctx context.Context, rec land.LandingRecord, b blame) string {
+	if len(b.packages) == 0 && len(b.scripts) == 0 {
+		return ""
+	}
+	if r.Diff == nil {
+		return "the landing's changed paths are unreadable"
+	}
+	changed, err := r.Diff(ctx, rec)
+	if err != nil {
+		r.logf("reading what %s changed (%s..%s): %v", rec.BeadID, short(rec.Base), short(rec.LandedCommit), err)
+		return "the landing's changed paths are unreadable"
+	}
+	return unattributable(changed, b)
+}
+
+func anyMatch(paths []string, re *regexp.Regexp) bool {
+	for _, p := range paths {
+		if re.MatchString(strings.TrimSpace(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsBrief is up to namesBrief changed paths, for a log line.
+func pathsBrief(paths []string) string {
+	if len(paths) == 0 {
+		return "nothing"
+	}
+	const namesBrief = 5
+	if len(paths) > namesBrief {
+		return fmt.Sprintf("%s, ... (%d more)", strings.Join(paths[:namesBrief], ", "), len(paths)-namesBrief)
+	}
+	return strings.Join(paths, ", ")
 }
 
 // openRevert is the open revert bead for culprit on this rig, or "".

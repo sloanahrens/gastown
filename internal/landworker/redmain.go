@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // LabelRedMain marks a bead the red-main owner filed for one package that
@@ -34,11 +35,12 @@ type RedMainBeads interface {
 // closes the open beads for every package that passed. Each verdict ends in
 // one status line, which is the signal: never an expiring nudge.
 //
-// With State, Landings and Revert set it also reverts a culprit
+// With State, Landings, Revert and Diff set it also reverts a culprit
 // (gt-v4ssj.4.1): when the red commit's landing was built on the last green
-// commit, that landing is the only change between green and red, so a revert
-// of it is filed as a work bead and landed through Land by the worker. With
-// more than one change in between, the red-main beads stand alone.
+// commit, that landing is the only change between green and red, and the
+// diff can have moved what failed, a revert of it is filed as a work bead and
+// landed through Land by the worker. With more than one change in between, or
+// a failure the diff cannot have moved, the red-main beads stand alone.
 type RedMain struct {
 	Rig   string
 	Beads RedMainBeads
@@ -53,6 +55,11 @@ type RedMain struct {
 	Landings Landings
 	// Revert builds and pushes a revert branch.
 	Revert RevertBuilder
+	// Diff lists the paths a landing changed, so a revert is only filed when
+	// that landing's diff can have moved what failed (gt-40so9). A nil Diff,
+	// or an error, skips the revert: an unattributable red main is a human's
+	// call, never a landing spent on a guess.
+	Diff func(ctx context.Context, rec land.LandingRecord) ([]string, error)
 }
 
 func (r *RedMain) logf(format string, args ...any) {
@@ -138,7 +145,7 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 		line += "; flaky (passed on rerun): " + strings.Join(flaky, ", ")
 	}
 	if len(filed) > 0 {
-		if did := r.maybeRevert(ctx, pl); did != "" {
+		if did := r.maybeRevert(ctx, pl, redBlame(stillRed, res.ShellFailures)); did != "" {
 			line += "; " + did
 		}
 	}

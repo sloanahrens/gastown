@@ -610,7 +610,7 @@ func TestLandGateRunsTheShellTierForItsInputs(t *testing.T) {
 	dir := writeShellTierTree(t, gateStagesMakefile)
 	s := &scriptedRun{answers: map[string]scriptedAnswer{
 		shellTierDiffCommand: {output: "plugins/rebuild-gt\ninternal/cmd/x.go\n"},
-		ShellStepCommand:     {code: 1, output: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh\n"},
+		ShellStepCommand:     {code: 1, output: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)\n"},
 	}}
 	g := WithTimeouts(LandGate(dir, nil), time.Minute, 5*time.Minute, 3*time.Minute)
 	g.run = s.run
@@ -632,6 +632,60 @@ func TestLandGateRunsTheShellTierForItsInputs(t *testing.T) {
 	}
 	if got := strings.Join(s.calls[0].argv, " "); got != "sh -c "+shellTierDiffCommand {
 		t.Errorf("the change check ran %q, want %q", got, shellTierDiffCommand)
+	}
+}
+
+// postLandShellRedLine is a post-land run's own red summary, verbatim from
+// the gt-40so9 incident's post-land log: the run that blamed a Go-only
+// landing for a scripts/test-makefile.sh failure and opened the revert. The
+// "(logs DIR)" suffix is part of what scripts/tier-sweep.sh prints, so a
+// parser that reads past it names the log directory as a failing script
+// (gt-40so9).
+const postLandShellRedLine = "tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/test-makefile.sh (logs /var/folders/dx/ccj87p8d14l8cs64cnp691pm0000gn/T//tier-sweep.PpcO4T)"
+
+// TestCommandGateReadsShellFailuresFromAnyStep: the post-land command runs
+// the tier sweep inside its "test" step (the name that holds the container
+// slot), so the scripts its summary named are that step's shell failures too
+// (gt-40so9).
+func TestCommandGateReadsShellFailuresFromAnyStep(t *testing.T) {
+	t.Parallel()
+	const postLand = "bash scripts/post-land-shell.sh"
+	s := &scriptedRun{answers: map[string]scriptedAnswer{
+		postLand: {code: 1, output: postLandShellRedLine + "\n"},
+	}}
+	g := CommandGate{Steps: []Step{{Name: "test", Command: postLand}}}
+	g.run = s.run
+	res := g.Run(context.Background(), t.TempDir())
+	if res.Passed || res.Err != nil || len(res.Steps) != 1 {
+		t.Fatalf("gate = %+v, want the test step's failure", res)
+	}
+	if got := res.Steps[0].ShellFailures; !reflect.DeepEqual(got, []string{"scripts/test-makefile.sh"}) {
+		t.Fatalf("shell failures = %v, want just the script the summary named, not the log directory", got)
+	}
+}
+
+// TestParseShellTierFailuresReadsTheRealSummaryLine: the formats the parse
+// accepts, pinned to the one scripts/tier-sweep.sh actually prints — with the
+// "(logs DIR)" suffix, with several names, and with none.
+func TestParseShellTierFailuresReadsTheRealSummaryLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		out  string
+		want []string
+	}{
+		{name: "the post-land run's line", out: postLandShellRedLine, want: []string{"scripts/test-makefile.sh"}},
+		{name: "several scripts", out: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)",
+			want: []string{"scripts/a_test.sh", "plugins/b_test.sh"}},
+		{name: "a green run names none", out: "tier-sweep: shell GREEN passed=6 failed=0 skipped=0 (logs /tmp/tier-sweep.aB12)", want: nil},
+		{name: "a red run that named no script", out: "tier-sweep: shell RED passed=6 failed=1 skipped=0 (logs /tmp/tier-sweep.aB12)", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseShellTierFailures(tc.out + "\n"); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseShellTierFailures(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
 	}
 }
 

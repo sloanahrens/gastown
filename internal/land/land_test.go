@@ -955,7 +955,7 @@ func redShellGate(string) GateResult {
 		{Name: "gate", Command: "make gate-test"},
 		{Name: ShellStepName, Command: ShellStepCommand, ExitCode: 1,
 			ShellFailures: []string{"scripts/a_test.sh", "plugins/b_test.sh"},
-			Tail:          "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh\n"},
+			Tail:          "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)\n"},
 	}}
 }
 
