@@ -577,7 +577,7 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	}
 
 	d.landingPasses.Add(1)
-	d.landingBeads.Store("gastown", "gt-x")
+	d.landingStates.setBead("gastown", "gt-x", time.Now())
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 	now := time.Now()
 	if d.checkUpgradeRestart(now) {
@@ -597,7 +597,7 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	}
 
 	// The pass ends: restart at once.
-	d.landingBeads.Delete("gastown")
+	d.landingStates.endPass("gastown", time.Now(), false)
 	d.landingPasses.Add(-1)
 	if !d.checkUpgradeRestart(now.Add(4 * time.Minute)) {
 		t.Fatal("must restart once no pass is in flight")

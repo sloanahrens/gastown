@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -48,6 +52,117 @@ const (
 // mayorAddress is the mailbox the polecat template sends BLOCKED reports to
 // (internal/templates/roles/polecat.md.tmpl).
 const mayorAddress = "mayor/"
+
+// The landing-pipeline thresholds (gt-vsct7.3), compiled in like the queue's
+// others.
+const (
+	// attentionLandingStuck is how long one bead may be the in-flight landing
+	// before it is an item. A gate takes minutes; eight on the same bead is a
+	// wedged pass, not a slow one.
+	attentionLandingStuck = 8 * time.Minute
+	// attentionQueueSilent is how long a rig with ready-to-land beads may show
+	// no landing activity before it is an item.
+	attentionQueueSilent = 10 * time.Minute
+	// attentionPolecatStall is how long a running seat's progress evidence may
+	// be unchanged before it is an item. It is deliberately shorter than
+	// liveness.DefaultStallAfter (30m), which gates restarts: this item asks a
+	// human to look, it does not kill anything (gt-vsct7.3).
+	attentionPolecatStall = 10 * time.Minute
+	// attentionDirectPushHold is how long a direct-push item holds after the
+	// tip was first observed. An unacked push is forgotten after a day rather
+	// than holding for good.
+	attentionDirectPushHold = 24 * time.Hour
+	// attentionLandingRecords is how many of a rig's most recent landing
+	// records the direct-push collector searches for the tip it saw. The tip
+	// moved recently by definition, so its record is at the end of the file.
+	attentionLandingRecords = 50
+)
+
+// landingState is one rig's landing state as the collectors read it
+// (gt-vsct7.3): the bead a landing is on and when it started, and when the
+// rig's queue last showed landing activity. The zero value is "no bead, no
+// activity seen".
+type landingState struct {
+	// bead is the bead the rig's landing pass is landing; "" between beads and
+	// when no pass is running.
+	bead string
+	// since is when bead became the in-flight landing.
+	since time.Time
+	// active is the last time the rig showed landing activity: a bead entering
+	// or leaving flight, or the end of a pass that landed, repaired or
+	// rejected something. queue-stuck counts silence from here, and a pass
+	// that finds nothing to do does not move it.
+	active time.Time
+}
+
+// landingStates is the daemon's per-rig landing state. The landing worker
+// writes its own rig's entry on its own goroutine and the attention tick reads
+// every entry on the heartbeat goroutine, so this map is the one
+// synchronization point between them. The zero value is ready to use.
+type landingStates struct {
+	m sync.Map
+}
+
+// get returns rig's state, or the zero value when nothing has been recorded.
+func (l *landingStates) get(rig string) landingState {
+	v, ok := l.m.Load(rig)
+	if !ok {
+		return landingState{}
+	}
+	p, _ := v.(landingState)
+	return p
+}
+
+func (l *landingStates) put(rig string, p landingState) { l.m.Store(rig, p) }
+
+// beginPass marks a landing pass as running with no bead in flight yet. The
+// process's first pass also sets the activity baseline: a daemon that just
+// started has observed no silence, and a zero clock would raise an item for
+// every waiting bead at once. Later passes move nothing — an idle pass is not
+// activity, or a queue polled every minute and never landed could never be
+// stuck.
+func (l *landingStates) beginPass(rig string, now time.Time) {
+	p := l.get(rig)
+	p.bead, p.since = "", time.Time{}
+	if p.active.IsZero() {
+		p.active = now
+	}
+	l.put(rig, p)
+}
+
+// setBead records a bead entering (id != "") or leaving (id == "") the
+// in-flight landing. Both are landing activity.
+func (l *landingStates) setBead(rig, id string, now time.Time) {
+	p := l.get(rig)
+	p.bead, p.active, p.since = id, now, time.Time{}
+	if id != "" {
+		p.since = now
+	}
+	l.put(rig, p)
+}
+
+// endPass records the end of a landing pass. Only a pass that did work is
+// activity: a pass that found nothing to land says the worker is alive, not
+// that the queue is moving.
+func (l *landingStates) endPass(rig string, now time.Time, didWork bool) {
+	p := l.get(rig)
+	p.bead, p.since = "", time.Time{}
+	if didWork {
+		p.active = now
+	}
+	l.put(rig, p)
+}
+
+// each calls fn with every rig in flight, in no order.
+func (l *landingStates) each(fn func(rig, bead string)) {
+	l.m.Range(func(k, v any) bool {
+		p, _ := v.(landingState)
+		if p.bead != "" {
+			fn(k.(string), p.bead)
+		}
+		return true
+	})
+}
 
 // attentionCache is what the daemon carries between attention ticks: the
 // state it wrote last, so an item keeps its first_seen and a failed collector
@@ -102,6 +217,29 @@ type attentionSources struct {
 	refusals    func() ([]attention.Refusal, error)
 	refusalBead func(ctx context.Context, rig, id string) (*beads.Issue, error)
 	blockedMail func(ctx context.Context) ([]*mail.Message, error)
+	// landingState reads the rig's in-flight landing, the landing-stuck and
+	// queue-stuck collectors' subject.
+	landingState func(rig string) landingState
+	// readyToLand counts the rig's actionable gt:ready-to-land beads.
+	readyToLand func(ctx context.Context, rig string) (int, error)
+	// seats lists the town's seats: the same walk townhealth judges, which has
+	// already dropped every seat whose sample is missing or stale.
+	seats func() ([]townhealth.Seat, error)
+	// seatWork reports whether the seat holds assigned open work.
+	seatWork func(rig, name string) (bool, error)
+	// remoteTip reads the rig's landing target from origin with git ls-remote.
+	// It never fetches: the rig repo is the landing worker's and
+	// <town>/gastown/mayor/rig is install-gt's, so a fetch here would race them.
+	remoteTip func(rig string) (string, error)
+	// landedCommit reports whether the rig's landings file records sha.
+	landedCommit func(rig, sha string) (bool, error)
+	// commitInfo describes a commit in the rig repo: its author and subject.
+	// An unreadable commit is empty strings, not an error — a direct push's tip
+	// is often not in the local repo yet.
+	commitInfo func(rig, sha string) (author, subject string)
+	// tips is the direct-push collector's persisted tip state for this tick.
+	// Already loaded and written back by writeAttention.
+	tips *directPushTips
 
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
@@ -141,8 +279,22 @@ func (d *Daemon) writeAttention() {
 	if cache.reworkNotes != nil {
 		src.reworkNotes = cache.reworkNotes
 	}
+	tips, err := readDirectPushTips(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
+	}
+	src.tips = &tips
 	state := d.attentionTick(ctx, src, prev, acks, now)
 	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes}
+	if len(src.tips.Rigs) == 0 {
+		return
+	}
+	// The observed tips and the raised pushes are written after the tick that
+	// read them, so a daemon restart judges the next tip against the one the
+	// last tick saw and keeps an unacked push (gt-vsct7.3).
+	if err := writeDirectPushTips(d.config.TownRoot, *src.tips, now); err != nil {
+		d.logger.Printf("attention: writing %s: %v", tipsFileName, err)
+	}
 }
 
 // attentionTick runs the collectors, reconciles what they found against prev
@@ -205,7 +357,7 @@ func prevOfKind(prev attention.State, kind attention.Kind) []attention.Item {
 }
 
 // collectors is the queue's collector set, in the order they run. Each later
-// bead (gt-vsct7.3, .4, .5, .6) adds its checks by appending entries here.
+// bead (gt-vsct7.4, .5, .6) adds its checks by appending entries here.
 func (s *attentionSources) collectors() []attentionCollector {
 	return []attentionCollector{
 		{kind: attention.KindRedMain, collect: s.collectRedMain},
@@ -216,6 +368,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindBDSlow, collect: s.collectBDSlow},
 		{kind: attention.KindRevertRefused, collect: s.collectRevertRefused},
 		{kind: attention.KindBlockedMail, collect: s.collectBlockedMail},
+		{kind: attention.KindLandingStuck, collect: s.collectLandingStuck},
+		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
+		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
+		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
 	}
 }
 
@@ -283,7 +439,107 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		}
 		return mail.NewMailboxFromAddress(mayorAddress, d.config.TownRoot).ListUnread()
 	}
+	s.landingState = d.landingStates.get
+	s.readyToLand = d.attentionReadyToLand
+	s.seats = func() ([]townhealth.Seat, error) { return d.attentionSeats(now) }
+	s.seatWork = d.attentionSeatWork
+	s.remoteTip = func(rig string) (string, error) {
+		rigPath := filepath.Join(d.config.TownRoot, rig)
+		return git.NewGit(filepath.Join(rigPath, ".repo.git")).
+			RemoteBranchTip("origin", rigDefaultBranch(rigPath))
+	}
+	s.landedCommit = d.attentionLandedCommit
+	s.commitInfo = d.attentionCommitInfo
 	return s
+}
+
+// attentionReadyToLand counts the rig's actionable gt:ready-to-land beads: the
+// same list the landing worker's pass works, filtered the same way
+// (landworker.Worker.pass), so the queue-stuck item and the worker never
+// disagree about whether there is anything waiting.
+func (d *Daemon) attentionReadyToLand(ctx context.Context, rig string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	issues, err := d.rigWorkBeads(rig).List(beads.ListOptions{
+		Label: land.LabelReadyToLand, Priority: -1, Limit: 0,
+	})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, is := range issues {
+		if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
+			continue
+		}
+		n++
+	}
+	return n, nil
+}
+
+// attentionSeats walks the town's seat records the way townhealth does, with
+// the same evidence window, so the stall item and the health report judge the
+// same samples. It samples nothing itself (gt-vsct7.3): the walk reads the
+// intent records the liveness sampler already writes.
+func (d *Daemon) attentionSeats(now time.Time) ([]townhealth.Seat, error) {
+	th, _, err := d.loadOperationalConfig().GetHealthSettings().Resolve()
+	if err != nil {
+		th = townhealth.DefaultThresholds()
+	}
+	return (&healthSources{d: d, evidence: th.SeatEvidence, now: now}).Seats()
+}
+
+// attentionSeatWork reports whether the polecat holds assigned open work: a
+// bead assigned to its seat with one of the statuses a sling sets
+// (Daemon.hasAssignedOpenWork's set). Work already submitted for landing is
+// not open work — that seat's record has no samples to be stalled on anyway.
+// The read's error is kept, so an unanswered query is UNKNOWN rather than "no
+// work", which would quietly clear a real stall (townhealth's UNKNOWN rule).
+func (d *Daemon) attentionSeatWork(rig, name string) (bool, error) {
+	assignee := rig + "/polecats/" + name
+	for _, status := range []string{"hooked", "in_progress", "open"} {
+		issues, err := d.assignedWork(rig, assignee, status)
+		if err != nil {
+			return false, fmt.Errorf("%s: bd list --status=%s: %w", assignee, status, err)
+		}
+		if len(issues) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// attentionLandedCommit reports whether the rig's landings file records sha as
+// a landed commit: the landing worker's own record that the tip was its doing
+// (gt-vsct7.3).
+func (d *Daemon) attentionLandedCommit(rig, sha string) (bool, error) {
+	f, err := land.RigLandingsFile(d.config.TownRoot, rig)
+	if err != nil {
+		return false, err
+	}
+	recs, err := f.Recent(attentionLandingRecords)
+	if err != nil {
+		return false, err
+	}
+	for _, rec := range recs {
+		if rec.LandedCommit == sha {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// attentionCommitInfo describes a commit in the rig repo. An unreadable commit
+// is empty, not an error: the tip of a direct push is usually a commit the
+// local repo has never seen, and the item is still worth raising without the
+// author and subject.
+func (d *Daemon) attentionCommitInfo(rig, sha string) (string, string) {
+	rigPath := filepath.Join(d.config.TownRoot, rig)
+	author, subject, err := git.NewGit(filepath.Join(rigPath, ".repo.git")).CommitAuthorSubject(sha)
+	if err != nil {
+		return "", ""
+	}
+	return author, subject
 }
 
 // attentionLandingRigs are the rigs whose landing beads the collectors read;
@@ -633,4 +889,121 @@ func attentionPIDAlive(pid int) bool {
 		return false
 	}
 	return isProcessAlive(p)
+}
+
+// collectLandingStuck raises one item per rig whose landing pass has been on
+// the same bead longer than attentionLandingStuck (gt-vsct7.3). It is the
+// daemon's copy of the queue-watch STUCK-INFLIGHT check, read from the Active
+// callback the worker already makes rather than by tailing the log. The item
+// clears on its own: the next tick returns no item once the pass moves to
+// another bead or ends.
+func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.landingRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		p := s.landingState(rig)
+		if p.bead == "" || p.since.IsZero() {
+			continue
+		}
+		inFlight := s.now.Sub(p.since)
+		if inFlight <= attentionLandingStuck {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "landing-stuck:" + rig + ":" + p.bead,
+			Kind:     attention.KindLandingStuck,
+			Severity: attention.SeverityHigh,
+			Rig:      rig,
+			Bead:     p.bead,
+			Summary:  fmt.Sprintf("%s in flight %s", p.bead, townhealth.Short(inFlight)),
+		})
+	}
+	return out, nil
+}
+
+// collectQueueStuck raises one item per rig that has ready-to-land beads and
+// has shown no landing activity for longer than attentionQueueSilent
+// (gt-vsct7.3): the daemon's copy of queue-watch STUCK-QUEUE. The clock is the
+// same landingState.active the in-flight item reads, so a queue that keeps
+// landing never raises it however long each landing takes.
+func (s *attentionSources) collectQueueStuck(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.landingRigs() {
+		ready, err := s.readyToLand(ctx, rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		if ready == 0 {
+			continue
+		}
+		p := s.landingState(rig)
+		if p.active.IsZero() {
+			// No pass has ever run for this rig, so there is no silence to
+			// measure. A daemon that has not started the worker reports the
+			// worker's absence elsewhere rather than guessing here.
+			continue
+		}
+		silent := s.now.Sub(p.active)
+		if silent <= attentionQueueSilent {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "queue-stuck:" + rig,
+			Kind:     attention.KindQueueStuck,
+			Severity: attention.SeverityHigh,
+			Rig:      rig,
+			Summary:  fmt.Sprintf("landing queue silent %s with %d ready-to-land", townhealth.Short(silent), ready),
+		})
+	}
+	return out, nil
+}
+
+// collectPolecatStall raises one item per running polecat whose progress
+// evidence has not changed for attentionPolecatStall and which holds assigned
+// open work (gt-vsct7.3): the daemon's copy of the polecat-stall monitor,
+// read from the intent record the liveness sampler already writes rather than
+// from a fresh pane capture. It is the queue's one low-severity item: a
+// stalled seat costs a session, not a town.
+//
+// The walk has already dropped every seat whose sample is missing or older
+// than the evidence window, so this reads evidence and holds back nothing.
+func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention.Item, error) {
+	seats, err := s.seats()
+	if err != nil {
+		return nil, err
+	}
+	var out []attention.Item
+	for _, seat := range seats {
+		if !seat.Run || seat.Frozen {
+			continue
+		}
+		role, name, named := strings.Cut(seat.Name, "/")
+		if !named || role != constants.RolePolecat || seat.Rig == "" {
+			continue
+		}
+		if seat.Changed.IsZero() {
+			continue
+		}
+		quiet := s.now.Sub(seat.Changed)
+		if quiet <= attentionPolecatStall {
+			continue
+		}
+		holds, err := s.seatWork(seat.Rig, name)
+		if err != nil {
+			return nil, err
+		}
+		if !holds {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "stall:" + seat.Rig + "/" + name,
+			Kind:     attention.KindPolecatStall,
+			Severity: attention.SeverityLow,
+			Rig:      seat.Rig,
+			Summary:  fmt.Sprintf("%s silent %s with work in hand", name, townhealth.Short(quiet)),
+		})
+	}
+	return out, nil
 }

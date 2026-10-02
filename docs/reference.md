@@ -790,8 +790,10 @@ gt attention -f              # stream new transitions as they append
 gt attention ack <key>       # hide an item until its condition clears
 ```
 
-The queue is three files under `<town>/.runtime/attention/`. `gt attention`
-only ever writes `acks.json`:
+The queue is three files under `<town>/.runtime/attention/`. The daemon keeps a
+fourth there, `tips.json`: the origin tips the direct-push check has seen, so a
+daemon restart does not drop a push nobody has acked. `gt attention` only ever
+writes `acks.json`:
 
 - `state.json` — the current set, rewritten atomically each daemon heartbeat.
   An item is `{key, kind, severity, rig, bead, sha, summary, first_seen,

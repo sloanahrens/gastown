@@ -311,3 +311,37 @@ func TestCheckBranchContamination(t *testing.T) {
 		t.Fatalf("CheckBranchContamination = %+v, %v; want behind 5 ahead 1", c, err)
 	}
 }
+
+// CommitAuthorSubject reads one commit's author and subject in a single call;
+// the NUL keeps a subject containing spaces from bleeding into the author.
+func TestCommitAuthorSubject(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%s cccc": ok("Alice\x00push straight to main\n"),
+	})
+	g := newTestGit(t, s)
+
+	author, subject, err := g.CommitAuthorSubject("cccc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if author != "Alice" || subject != "push straight to main" {
+		t.Errorf("author, subject = %q, %q, want the two fields split on the NUL", author, subject)
+	}
+	s.noUnscripted(t)
+}
+
+// A commit the repo does not have is an error: the caller decides what to say
+// about a tip it cannot describe.
+func TestCommitAuthorSubjectUnknownCommit(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%s dead": fail(128, "fatal: bad revision 'dead'"),
+	})
+	g := newTestGit(t, s)
+
+	if _, _, err := g.CommitAuthorSubject("dead"); err == nil {
+		t.Fatal("want an error for a commit the repo does not have")
+	}
+	s.noUnscripted(t)
+}

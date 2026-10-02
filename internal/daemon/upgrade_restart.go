@@ -369,12 +369,10 @@ func (d *Daemon) logUpgradeWait(now time.Time) {
 // name when several), or "" when none is working on one.
 func (d *Daemon) landingPassBead() string {
 	best, bestRig := "", ""
-	d.landingBeads.Range(func(k, v any) bool {
-		id, _ := v.(string)
-		if id != "" && (bestRig == "" || k.(string) < bestRig) {
-			best, bestRig = id, k.(string)
+	d.landingStates.each(func(rig, bead string) {
+		if bestRig == "" || rig < bestRig {
+			best, bestRig = bead, rig
 		}
-		return true
 	})
 	return best
 }
