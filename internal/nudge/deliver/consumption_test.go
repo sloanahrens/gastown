@@ -34,7 +34,7 @@ func TestConsumptionWarningForEachVerdict(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{name: "wedged", verdict: tmux.InputConsumptionNotConsumed, want: []string{target, "started no turn", "gt-eigw", "40ms", "gt session health " + target}},
+		{name: "wedged", verdict: tmux.InputConsumptionNotConsumed, want: []string{target, "started no turn", "gt-eigw", "40ms", "gt status"}},
 		{name: "pane unreadable", err: errors.New("tmux: no such pane"), want: []string{target, "UNKNOWN", "no such pane"}, notWant: []string{"started no turn"}},
 		{name: "undated freeze", verdict: tmux.InputConsumptionUndated, want: []string{"UNKNOWN (UNDATED)", "40ms"}, notWant: []string{"started no turn"}},
 		{name: "started a turn", verdict: tmux.InputConsumptionStartedTurn},

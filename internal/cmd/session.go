@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,17 +29,15 @@ import (
 
 // Session command flags
 var (
-	sessionIssue               string
-	sessionForce               bool
-	sessionRequestedBy         string
-	sessionLines               int
-	sessionMessage             string
-	sessionFile                string
-	sessionRigFilter           string
-	sessionListJSON            bool
-	sessionStatusJSON          bool
-	sessionHealthJSON          bool
-	sessionHealthMaxInactivity time.Duration
+	sessionIssue       string
+	sessionForce       bool
+	sessionRequestedBy string
+	sessionLines       int
+	sessionMessage     string
+	sessionFile        string
+	sessionRigFilter   string
+	sessionListJSON    bool
+	sessionStatusJSON  bool
 )
 
 var sessionCmd = &cobra.Command{
@@ -173,48 +170,6 @@ Displays running state, uptime, session info, and activity.`,
 	RunE: runSessionStatus,
 }
 
-var sessionCheckCmd = &cobra.Command{
-	Use:   "check [rig]",
-	Short: "Check session health for polecats",
-	Long: `Check if polecat tmux sessions are alive and healthy.
-
-This command validates that:
-1. Polecats with work-on-hook have running tmux sessions
-2. Sessions are responsive
-
-Use this for manual health checks or debugging session issues.
-
-Examples:
-  gt session check              # Check all rigs
-  gt session check greenplace      # Check specific rig`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runSessionCheck,
-}
-
-var sessionHealthCmd = &cobra.Command{
-	Use:   "health <tmux-session>",
-	Short: "Check a tmux agent session with central runtime liveness",
-	Long: `Check a tmux agent session using the central runtime-aware liveness path.
-
-This wraps tmux.CheckSessionHealth, which reads GT_PROCESS_NAMES/GT_AGENT from
-the session environment before falling back to built-in agent process names.
-
-Unlike its sibling subcommands, this one takes a TMUX SESSION NAME, not a
-rig/name address: "gt-witness", not "gastown/witness" (for that, see
-"gt session status gastown/witness"). A rig/name address is rejected with a
-non-zero exit rather than reported as session-dead (gt-3uyr).
-
-The command exits successfully for all valid health states; inspect the status
-field when using --json. Operational failures, argument errors, or invalid flags
-return non-zero.
-
-Examples:
-  gt session health gt-vault --json
-  gt session health gt-vault --json --max-inactivity 30m`,
-	Args: cobra.ExactArgs(1),
-	RunE: runSessionHealth,
-}
-
 func init() {
 	// Start flags
 	sessionStartCmd.Flags().StringVar(&sessionIssue, "issue", "", "Issue ID to work on")
@@ -241,10 +196,6 @@ func init() {
 	// Status flags
 	sessionStatusCmd.Flags().BoolVar(&sessionStatusJSON, "json", false, "Output as JSON")
 
-	// Health flags
-	sessionHealthCmd.Flags().BoolVar(&sessionHealthJSON, "json", false, "Output as JSON")
-	sessionHealthCmd.Flags().DurationVar(&sessionHealthMaxInactivity, "max-inactivity", 0, "Maximum tmux inactivity before reporting agent-hung (0 disables activity check)")
-
 	// Add subcommands
 	sessionCmd.AddCommand(sessionStartCmd)
 	sessionCmd.AddCommand(sessionStopCmd)
@@ -254,28 +205,8 @@ func init() {
 	sessionCmd.AddCommand(sessionInjectCmd)
 	sessionCmd.AddCommand(sessionRestartCmd)
 	sessionCmd.AddCommand(sessionStatusCmd)
-	sessionCmd.AddCommand(sessionCheckCmd)
-	sessionCmd.AddCommand(sessionHealthCmd)
 
 	rootCmd.AddCommand(sessionCmd)
-}
-
-type sessionHealthReport struct {
-	Session              string `json:"session"`
-	Status               string `json:"status"`
-	Healthy              bool   `json:"healthy"`
-	Zombie               bool   `json:"zombie"`
-	MaxInactivitySeconds int64  `json:"max_inactivity_seconds"`
-}
-
-func newSessionHealthReport(session string, status tmux.ZombieStatus, maxInactivity time.Duration) sessionHealthReport {
-	return sessionHealthReport{
-		Session:              session,
-		Status:               status.String(),
-		Healthy:              status == tmux.SessionHealthy,
-		Zombie:               status.IsZombie(),
-		MaxInactivitySeconds: int64(maxInactivity.Seconds()),
-	}
 }
 
 // parseAddress parses "rig/polecat" format.
@@ -862,91 +793,6 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runSessionHealth(cmd *cobra.Command, args []string) error {
-	return sessionHealth(os.Stdout, townRegistry(), tmux.NewTmux().CheckSessionHealth,
-		args[0], sessionHealthJSON, sessionHealthMaxInactivity)
-}
-
-// sessionHealth reports sessionName's health, probed through check, to out:
-// as JSON when asJSON, else one line. An argument that cannot name a session
-// is an error before check runs.
-func sessionHealth(out io.Writer, reg *session.PrefixRegistry, check func(string, time.Duration) tmux.ZombieStatus,
-	sessionName string, asJSON bool, maxInactivity time.Duration) error {
-	if err := sessionHealthArgError(reg, sessionName); err != nil {
-		return err
-	}
-	status := check(sessionName, maxInactivity)
-	report := newSessionHealthReport(sessionName, status, maxInactivity)
-
-	if asJSON {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(report)
-	}
-
-	if report.Healthy {
-		fmt.Fprintf(out, "%s: %s\n", sessionName, style.Bold.Render(report.Status))
-	} else {
-		fmt.Fprintf(out, "%s: %s\n", sessionName, style.Dim.Render(report.Status))
-	}
-	return nil
-}
-
-// sessionHealthArgError rejects arguments that cannot name a tmux session.
-//
-// `gt session health` is the odd one out among the session subcommands: its
-// siblings take a rig/name address (parseAddress, "gastown/witness") while it
-// takes a tmux session name ("gt-witness"). Feeding it the sibling form used to
-// fall through to tmux's has-session miss and return exit 0 with
-// status=session-dead, healthy=false — a payload indistinguishable from a
-// genuine dead-session verdict, so a caller could not tell "this session is
-// dead" from "you gave me the wrong kind of name" (gt-3uyr). That is a
-// plausible cause of the false MASS DEATH critical hq-wisp-6g109.
-//
-// The rejection is deliberately narrow — only arguments that can never name a
-// session. A well-formed session name that happens not to exist still reports
-// session-dead with exit 0, because "is this session running?" is a question
-// callers ask on purpose: plugins/stuck-agent-dog/run.sh turns health's
-// session-dead verdict into a polecat restart, and a non-zero exit there reads
-// as "health unavailable" and skips the restart instead.
-//
-// reg supplies the rig prefixes the "Did you mean" hint resolves with.
-func sessionHealthArgError(reg *session.PrefixRegistry, arg string) error {
-	if strings.TrimSpace(arg) == "" {
-		return fmt.Errorf("missing session name (usage: gt session health <tmux-session>)")
-	}
-	if !strings.Contains(arg, "/") {
-		return nil
-	}
-
-	lines := []string{fmt.Sprintf(
-		"invalid session name %q: gt session health takes a tmux session name, not a rig/name address",
-		arg)}
-	if resolved := tmuxSessionForAddress(reg, arg); resolved != "" {
-		lines = append(lines, fmt.Sprintf("Did you mean: gt session health %s", resolved))
-	}
-	lines = append(lines, fmt.Sprintf("For session details by rig/name, use: gt session status %s", arg))
-	return errors.New(strings.Join(lines, "\n"))
-}
-
-// tmuxSessionForAddress maps a rig/name address ("gastown/witness") to the tmux
-// session name it runs as ("gt-witness"), for use in an error hint.
-//
-// Returns "" unless the address's rig is registered with reg:
-// PrefixFor falls back to the default prefix for unknown rigs, so an
-// unregistered rig would yield a plausible but wrong session name.
-func tmuxSessionForAddress(reg *session.PrefixRegistry, addr string) string {
-	parts := strings.Split(addr, "/")
-	if len(parts) < 2 || parts[0] == "" {
-		return ""
-	}
-	if _, known := reg.AllRigs()[parts[0]]; !known {
-		return ""
-	}
-	resolved, _ := reg.AssigneeSessionName(addr)
-	return resolved
-}
-
 // formatDuration formats a duration for human display.
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
@@ -963,97 +809,4 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
 	}
 	return fmt.Sprintf("%dh %dm", hours, mins)
-}
-
-func runSessionCheck(cmd *cobra.Command, args []string) error {
-	// Find town root
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	// Load rigs config
-	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
-
-	// Get rigs to check
-	g := git.NewGit(townRoot)
-	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	rigs, err := rigMgr.DiscoverRigs()
-	if err != nil {
-		return fmt.Errorf("discovering rigs: %w", err)
-	}
-
-	// Filter if specific rig requested
-	if len(args) > 0 {
-		rigFilter := args[0]
-		var filtered []*rig.Rig
-		for _, r := range rigs {
-			if r.Name == rigFilter {
-				filtered = append(filtered, r)
-			}
-		}
-		if len(filtered) == 0 {
-			return fmt.Errorf("rig not found: %s", rigFilter)
-		}
-		rigs = filtered
-	}
-
-	fmt.Printf("%s Session Health Check\n\n", style.Bold.Render("🔍"))
-
-	t := tmux.NewTmux()
-	reg := townRegistry()
-	totalChecked := 0
-	totalHealthy := 0
-	totalCrashed := 0
-
-	for _, r := range rigs {
-		polecatsDir := filepath.Join(r.Path, "polecats")
-		entries, err := os.ReadDir(polecatsDir)
-		if err != nil {
-			continue // Rig might not have polecats
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			if strings.HasPrefix(entry.Name(), ".") {
-				continue
-			}
-			polecatName := entry.Name()
-			sessionName := session.PolecatSessionName(reg.PrefixForRig(r.Name), polecatName)
-			totalChecked++
-
-			// Check if session exists
-			running, err := t.HasSession(sessionName)
-			if err != nil {
-				fmt.Printf("  %s %s/%s: %s\n", style.Bold.Render("⚠"), r.Name, polecatName, style.Dim.Render("error checking session"))
-				continue
-			}
-
-			if running {
-				fmt.Printf("  %s %s/%s: %s\n", style.Bold.Render("✓"), r.Name, polecatName, style.Dim.Render("session alive"))
-				totalHealthy++
-			} else {
-				// Check if polecat has work on hook (would need restart)
-				fmt.Printf("  %s %s/%s: %s\n", style.Bold.Render("✗"), r.Name, polecatName, style.Dim.Render("session not running"))
-				totalCrashed++
-			}
-		}
-	}
-
-	// Summary
-	fmt.Printf("\n%s Summary: %d checked, %d healthy, %d not running\n",
-		style.Bold.Render("📊"), totalChecked, totalHealthy, totalCrashed)
-
-	if totalCrashed > 0 {
-		fmt.Printf("\n%s To restart crashed polecats: gt session restart <rig>/<polecat>\n",
-			style.Dim.Render("Tip:"))
-	}
-
-	return nil
 }
