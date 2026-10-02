@@ -291,7 +291,8 @@ func TestFileMainStateCarriesTheRevertTheDispatcherReads(t *testing.T) {
 	}
 	town := t.TempDir()
 	f := fileMainState{path: RedMainStatePath(town, "gastown")}
-	if err := f.Save(landworker.MainState{LastGreen: "g1", Revert: &landworker.PendingRevert{Culprit: "gt-cul", Bead: "gt-rv"}}); err != nil {
+	started := time.Date(2026, 9, 30, 11, 55, 0, 0, time.UTC)
+	if err := f.Save(landworker.MainState{LastGreen: "g1", Revert: &landworker.PendingRevert{Culprit: "gt-cul", Bead: "gt-rv", StartedAt: started}}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(f.path)
@@ -301,6 +302,11 @@ func TestFileMainStateCarriesTheRevertTheDispatcherReads(t *testing.T) {
 	rv := specdispatch.ParseRevert(raw)
 	if rv == nil || rv.Culprit != "gt-cul" || rv.Bead != "gt-rv" {
 		t.Fatalf("dispatcher read %+v from %s; want the revert of gt-cul as gt-rv", rv, raw)
+	}
+	// The build's start time crosses the wire too: it is what lets the
+	// dispatcher expire a record a crash left with no bead (gt-wgyca).
+	if !rv.StartedAt.Equal(started) {
+		t.Fatalf("dispatcher read started_at %v, want %v", rv.StartedAt, started)
 	}
 	// And the beads this hold is about are the ones the owner labels.
 	if specdispatch.RedMainHold(specdispatch.Spec{Labels: []string{landworker.LabelRedMain}}, rv) == "" {

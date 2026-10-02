@@ -276,7 +276,10 @@ type specDispatchReport struct {
 	Planning   []specDispatchEntry `json:"planning"`
 	Skipped    []specDispatchEntry `json:"skipped"`
 	Failed     []specDispatchEntry `json:"failed"`
-	Errors     []string            `json:"errors,omitempty"`
+	// Notices are lines the tick decided on but no single candidate owns,
+	// logged once each (gt-wgyca).
+	Notices []string `json:"notices,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 type specDispatchEntry struct {
@@ -363,6 +366,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	if perTick <= 0 {
 		perTick = defaultSpecMaxPerTick
 	}
+	// One notice per rig per tick: the revert record is the rig's, not a
+	// candidate's, so a rig with several red-main beads still logs it once
+	// (gt-wgyca).
+	staleNoted := map[string]bool{}
 
 	for _, c := range candidates {
 		id := c.Spec.ID
@@ -380,7 +387,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// already undoing; a seat spent on it races the revert over the same
 		// package (gt-zkdwt). The hold lifts as soon as the revert lands, is
 		// rejected, or turns out never to have been filed.
-		if why := specdispatch.RedMainHold(full, env.RevertInFlight(c.Rig)); why != "" {
+		rv, staleWhy := specdispatch.ResolveRevert(env.RevertInFlight(c.Rig), env.Now())
+		if staleWhy != "" && !staleNoted[c.Rig] {
+			// The record is ignored, so say so once: a silent ignore hides a
+			// crashed revert behind a held bead (gt-wgyca).
+			staleNoted[c.Rig] = true
+			report.Notices = append(report.Notices, fmt.Sprintf("%s: ignoring stale revert: %s", c.Rig, staleWhy))
+		}
+		if why := specdispatch.RedMainHold(full, rv); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
 			continue
 		}
@@ -665,7 +679,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
-			return rigRevertInFlight(townRoot, rig)
+			return rigRevertInFlightPinned(townRoot, rig)
 		},
 		Roster: func() (specRoster, error) {
 			sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
@@ -722,6 +736,9 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 			fmt.Fprintf(w, "  %-10s %s\n", group.name, e.Line)
 		}
 	}
+	for _, n := range r.Notices {
+		fmt.Fprintf(w, "  %-10s %s\n", "note", n)
+	}
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  error      %s\n", e)
 	}
@@ -733,7 +750,12 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 // owner writes the state only while a revert is in flight, so a read error
 // must not hold a rig's red-main beads out of the candidate set forever
 // (gt-zkdwt). A malformed state is the same silence, by specdispatch.ParseRevert.
-func rigRevertInFlight(townRoot, rig string) *specdispatch.Revert {
+//
+// A record whose bead is filed only holds while that bead is open: a closed
+// or missing bead means the revert already finished — or never started — and
+// holding on it would strand the rig (gt-wgyca). beadOpen is that question,
+// passed in so a test can answer it without a rig's beads database.
+func rigRevertInFlight(townRoot, rig string, beadOpen func(beadID string) bool) *specdispatch.Revert {
 	if rig == "" {
 		return nil
 	}
@@ -741,7 +763,40 @@ func rigRevertInFlight(townRoot, rig string) *specdispatch.Revert {
 	if err != nil {
 		return nil
 	}
-	return specdispatch.ParseRevert(raw)
+	rv := specdispatch.ParseRevert(raw)
+	if rv == nil || rv.Bead == "" {
+		return rv
+	}
+	if !beadOpen(rv.Bead) {
+		return nil
+	}
+	return rv
+}
+
+// rigRevertInFlightPinned is rigRevertInFlight against the rig's own beads,
+// the shape both dispatchers call it in.
+func rigRevertInFlightPinned(townRoot, rig string) *specdispatch.Revert {
+	return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
+		return revertBeadOpen(townRoot, rig, beadID)
+	})
+}
+
+// revertBeadOpen reports whether the revert bead the state records is still
+// open in the rig's beads. Its complement — closed, missing, or unreadable,
+// the last fail-open like the state read above — is not an open revert.
+func revertBeadOpen(townRoot, rig, beadID string) bool {
+	b := beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
+	is, err := b.Show(beadID)
+	if err != nil || is == nil {
+		return false
+	}
+	return revertStatusOpen(is.Status)
+}
+
+// revertStatusOpen reports whether a revert bead's status still counts as an
+// open revert. Only a closed or tombstoned bead does not.
+func revertStatusOpen(status string) bool {
+	return !beads.IssueStatus(strings.TrimSpace(status)).IsTerminal()
 }
 
 // specBoard reads one rig's ready board. It is a parameter of specCandidates

@@ -293,6 +293,8 @@ func TestRedMainRecordsTheRevertItHasInFlight(t *testing.T) {
 	}
 	if st, _ := h.state.Load(); st.Revert == nil || st.Revert.Culprit != "gt-cul" || st.Revert.Bead != rv[0].ID {
 		t.Fatalf("state %+v; want the revert of gt-cul in flight as %s", st, rv[0].ID)
+	} else if st.Revert.StartedAt.IsZero() {
+		t.Fatalf("state %+v; want the build's start time recorded so the dispatcher can expire it (gt-wgyca)", st.Revert)
 	}
 }
 
@@ -310,6 +312,14 @@ func TestRedMainRecordsARevertItIsStillBuilding(t *testing.T) {
 	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
 	if seen == nil || seen.Culprit != "gt-cul" || seen.Bead != "" {
 		t.Fatalf("state during the build %+v; want the culprit with no bead yet", seen)
+	}
+	if seen.StartedAt.IsZero() {
+		t.Fatalf("state during the build %+v; want the build's start time recorded", seen)
+	}
+	// Filing the bead continues that build, so the start time it was recorded
+	// with is the one the dispatcher still counts from (gt-wgyca).
+	if st, _ := h.state.Load(); st.Revert == nil || !st.Revert.StartedAt.Equal(seen.StartedAt) {
+		t.Fatalf("state after filing %+v; want the build's start time %v kept", st.Revert, seen.StartedAt)
 	}
 }
 

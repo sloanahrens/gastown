@@ -2,7 +2,9 @@ package specdispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 )
 
 // LabelRedMain marks a bead the red-main owner filed for a package that stayed
@@ -10,13 +12,23 @@ import (
 // bead back while the owner's revert of the same breakage is in flight.
 const LabelRedMain = "red-main"
 
+// RevertStaleAge is how long a revert record may sit with no bead filed before
+// the dispatcher reads it as abandoned: the build either finished — filing the
+// bead would have updated the record — or died with its process, and a
+// dispatcher holding on it would strand the rig's red-main beads (gt-wgyca).
+const RevertStaleAge = 30 * time.Minute
+
 // Revert is the revert a rig's red-main owner has in flight: the culprit
-// landing being reverted, and the revert work bead once it is filed (empty
-// while the branch is still being built). The landing worker writes it in the
-// rig's red-main state file under "revert" (landworker.MainState, gt-zkdwt).
+// landing being reverted, the revert work bead once it is filed (empty while
+// the branch is still being built), and when the build began. The landing
+// worker writes it in the rig's red-main state file under "revert"
+// (landworker.MainState, gt-zkdwt).
 type Revert struct {
 	Culprit string `json:"culprit"`
 	Bead    string `json:"bead,omitempty"`
+	// StartedAt is when the build began. Zero is a record written before the
+	// field existed, which is as stale as one past RevertStaleAge (gt-wgyca).
+	StartedAt time.Time `json:"started_at,omitzero"`
 }
 
 // ParseRevert reads the revert a rig's red-main state file records. raw is the
@@ -34,10 +46,40 @@ func ParseRevert(raw []byte) *Revert {
 	return st.Revert
 }
 
+// StaleRevert reports a revert record a dispatcher must ignore, with a reason
+// naming the culprit and its age, and false for a record it must honor. Only a
+// record still carrying no bead can be stale: a filed bead is judged by the
+// bead's own status, not by how long the record has sat (gt-wgyca).
+func StaleRevert(rv *Revert, now time.Time) (string, bool) {
+	if rv == nil || rv.Bead != "" || strings.TrimSpace(rv.Culprit) == "" {
+		return "", false
+	}
+	culprit := strings.TrimSpace(rv.Culprit)
+	if rv.StartedAt.IsZero() {
+		return "revert of " + culprit + " has no start time recorded", true
+	}
+	if age := now.Sub(rv.StartedAt); age > RevertStaleAge {
+		return fmt.Sprintf("revert of %s has been building for %d minutes", culprit, int(age.Minutes())), true
+	}
+	return "", false
+}
+
+// ResolveRevert is what a dispatcher honors of a revert record read from a
+// rig's state file: rv itself while it is live, nil once it is stale, and the
+// reason to log when it dropped one. A caller that reads a record resolves it
+// here before RedMainHold, so the staleness rule has one home (gt-wgyca).
+func ResolveRevert(rv *Revert, now time.Time) (*Revert, string) {
+	if why, stale := StaleRevert(rv, now); stale {
+		return nil, why
+	}
+	return rv, ""
+}
+
 // RedMainHold reports why the dispatcher must leave spec to the red-main
 // owner: spec is a red-main bead on a rig whose revert rv is in flight, so
 // spending a seat on it starts a fix forward the revert supersedes (gt-zkdwt).
-// A nil or culprit-less rv, or any bead without the label, is no hold.
+// rv must already be resolved by ResolveRevert — a nil or culprit-less rv, or
+// any bead without the label, is no hold.
 func RedMainHold(spec Spec, rv *Revert) string {
 	if rv == nil || strings.TrimSpace(rv.Culprit) == "" || !spec.HasLabel(LabelRedMain) {
 		return ""

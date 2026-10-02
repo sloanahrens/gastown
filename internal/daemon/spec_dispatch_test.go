@@ -61,6 +61,9 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, joined)
 		}
 	}
+	if got := formatSpecDispatchReport([]byte(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
+		t.Errorf("notices = %v", got)
+	}
 	if got := formatSpecDispatchReport([]byte(`{"hold":"town ESTOP active"}`)); len(got) != 1 || got[0] != "held: town ESTOP active" {
 		t.Errorf("hold = %v", got)
 	}

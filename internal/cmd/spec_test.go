@@ -44,6 +44,9 @@ type fakeSpecTown struct {
 	sleeps     int
 }
 
+// specTestNow is the tick clock every dispatch test runs at.
+var specTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, notes: map[string][]string{}, labels: map[string][]string{}}
@@ -111,7 +114,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return "p", nil
 		},
 		Sleep:    func(time.Duration) { f.sleeps++ },
-		Now:      func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) },
+		Now:      func() time.Time { return specTestNow },
 		Template: specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 		Budget: specdispatch.Budget{Seats: []specdispatch.Seat{
 			{Agent: "deepseek-flash", Cap: 2},
@@ -312,7 +315,7 @@ func TestSpecDispatchHoldsRedMainBeadsWhileARevertIsInFlight(t *testing.T) {
 	// The revert is building or queued: the fix-forward bead is not a
 	// candidate, and nothing is written on it.
 	f := newFakeSpecTown(redMain)
-	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul"}
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul", StartedAt: specTestNow.Add(-5 * time.Minute)}
 	r := runSpecDispatchCycle(f.env())
 	if len(f.slung) != 0 {
 		t.Fatalf("slung the red-main bead while a revert was in flight: %v", f.slung)
@@ -337,9 +340,41 @@ func TestSpecDispatchHoldsRedMainBeadsWhileARevertIsInFlight(t *testing.T) {
 func TestSpecDispatchHoldsOnlyRedMainBeads(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-plain", 1, "2026-09-29T10:00:00Z"))
-	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul"}
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul", StartedAt: specTestNow.Add(-5 * time.Minute)}
 	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 1 {
 		t.Fatalf("slung %v, want the plain bead dispatched beside a revert in flight (report %+v)", f.slung, r)
+	}
+}
+
+// gt-wgyca: a revert record left behind with no bead — a crash mid-build, or
+// one closed by hand — held the rig's red-main beads with nothing to expire
+// it. A bead-less record past the age is ignored, and the tick says so once,
+// naming the culprit and how long it has sat.
+func TestSpecDispatchIgnoresAStaleRevertRecord(t *testing.T) {
+	t.Parallel()
+	redMain := cleanSpec("gt-red", 1, "2026-09-29T10:00:00Z")
+	redMain.Labels = []string{specdispatch.LabelRedMain}
+
+	f := newFakeSpecTown(redMain)
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul", StartedAt: specTestNow.Add(-31 * time.Minute)}
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 {
+		t.Fatalf("slung %v, want the red-main bead once the record is stale (report %+v)", f.slung, r)
+	}
+	if len(r.Skipped) != 0 {
+		t.Fatalf("stale record still held a bead: %+v", r.Skipped)
+	}
+	if len(r.Notices) != 1 || !strings.Contains(r.Notices[0], "gt-cul") || !strings.Contains(r.Notices[0], "31 minutes") {
+		t.Fatalf("notices = %v, want one naming the culprit and its age", r.Notices)
+	}
+
+	// A record with no start time at all is the same stale: it cannot prove
+	// the build it describes is still running.
+	f = newFakeSpecTown(redMain)
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul"}
+	r = runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || len(r.Notices) != 1 || !strings.Contains(r.Notices[0], "gt-cul") {
+		t.Fatalf("slung %v notices %v; want the bead dispatched with one notice", f.slung, r.Notices)
 	}
 }
 
@@ -353,21 +388,57 @@ func TestRigRevertInFlightReadsTheStateFile(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if rv := rigRevertInFlight(town, "gastown"); rv != nil {
+	open := func(string) bool { return true }
+	silent := func(string) bool { return false }
+	if rv := rigRevertInFlight(town, "gastown", open); rv != nil {
 		t.Fatalf("absent state = %+v, want nil", rv)
 	}
 	state := filepath.Join(dir, "gastown.json")
 	if err := os.WriteFile(state, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if rv := rigRevertInFlight(town, "gastown"); rv != nil {
+	if rv := rigRevertInFlight(town, "gastown", open); rv != nil {
 		t.Fatalf("malformed state = %+v, want nil", rv)
 	}
 	if err := os.WriteFile(state, []byte(`{"last_green":"aaa","revert":{"culprit":"gt-cul","bead":"gt-rv"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if rv := rigRevertInFlight(town, "gastown"); rv == nil || rv.Culprit != "gt-cul" || rv.Bead != "gt-rv" {
+	if rv := rigRevertInFlight(town, "gastown", open); rv == nil || rv.Culprit != "gt-cul" || rv.Bead != "gt-rv" {
 		t.Fatalf("state = %+v, want the revert of gt-cul as gt-rv", rv)
+	}
+	// A closed or missing revert bead is a revert that already finished, or
+	// one a crash never filed: the record is dead and holds nothing (gt-wgyca).
+	if rv := rigRevertInFlight(town, "gastown", silent); rv != nil {
+		t.Fatalf("closed or missing bead = %+v, want nil", rv)
+	}
+	// A building revert carries no bead, so no bead status can rule it out.
+	if err := os.WriteFile(state, []byte(`{"revert":{"culprit":"gt-cul","started_at":"2026-09-30T11:59:00Z"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rv := rigRevertInFlight(town, "gastown", silent); rv == nil || rv.Culprit != "gt-cul" {
+		t.Fatalf("building revert = %+v, want the revert of gt-cul", rv)
+	}
+}
+
+// A revert bead holds only while it is open: a closed one is a revert that
+// already landed or was rejected, and a dispatcher that kept holding on it
+// would strand the rig's red-main beads (gt-wgyca).
+func TestRevertStatusOpen(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		status string
+		open   bool
+	}{
+		{status: "open", open: true},
+		{status: "in_progress", open: true},
+		{status: "hooked", open: true},
+		{status: "closed"},
+		{status: "tombstone"},
+		{status: " closed "},
+	} {
+		if got := revertStatusOpen(tc.status); got != tc.open {
+			t.Errorf("revertStatusOpen(%q) = %v, want %v", tc.status, got, tc.open)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -402,8 +403,11 @@ func dispatchRigPictures(townRoot string, maxPriority int) ([]dispatchRig, error
 		}
 
 		// Pass the rig's revert in flight, so a red-main bead the owner is
-		// already undoing is not counted as work to sling (gt-1fiv4).
-		ready, urgent, err := countActionableReady(rigPath, maxPriority, rigRevertInFlight(townRoot, name))
+		// already undoing is not counted as work to sling (gt-1fiv4). A stale
+		// record is resolved away first, or a crashed revert would hold the
+		// rig's beads out of the count forever (gt-wgyca).
+		live, _ := specdispatch.ResolveRevert(rigRevertInFlightPinned(townRoot, name), time.Now())
+		ready, urgent, err := countActionableReady(rigPath, maxPriority, live)
 		if err != nil {
 			return nil, fmt.Errorf("counting ready work for %s: %w", name, err)
 		}
