@@ -44,6 +44,9 @@ func CheckBeads() (BeadsStatus, string) {
 	// Use a clean environment that strips BEADS target env vars
 	// to prevent stale shell state from leaking into version checks.
 	baseEnv := beads.StripBDTargetEnv(os.Environ())
+	// Keep-raw (gt-7iwy0.4.1): a presence probe, not a store read - it runs
+	// before any database is chosen, on an environment stripped of bd target
+	// vars, and only its version text is read. The handshake owns compatibility.
 	cmd := beads.CommandContextWithEnv(ctx, "", baseEnv, "version")
 	util.SetDetachedProcessGroup(cmd.Cmd)
 	output, err := cmd.Output()

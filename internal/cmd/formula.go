@@ -283,6 +283,9 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 // caller gets the --json payload (the envelope's data); without it bd's own
 // prose, which machine mode replaces with the envelope, so that run opts out.
 func passBdFormulaOutput(bdArgs []string, asJSON bool) error {
+	// Keep-raw (gt-7iwy0.4.1): bd formula list/show prints for the operator,
+	// prose and --json payload alike, and the caller opts out of machine mode
+	// itself; no typed Client method expresses that passthrough.
 	bdCmd := beads.CommandWithEnv("", nil, bdArgs...)
 	bdCmd.Stderr = os.Stderr
 	if !asJSON {

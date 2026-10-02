@@ -270,6 +270,41 @@ func TestPlainRunsExactlyWhatItIsGiven(t *testing.T) {
 	}
 }
 
+// TestPlainListSendsAssigneeStatusAndDefaultPage pins the argv and
+// environment a plain List hands bd, the shape the CV counters' assigned-issue
+// query uses (polecat_identity.go, gt-7iwy0.4.1): the list filters, bd's
+// default page made explicit as --limit, --flat for JSON, and the caller's
+// environment plus machine mode, with no BEADS_DIR pin and no routing.
+func TestPlainListSendsAssigneeStatusAndDefaultPage(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func([]string) reply { return reply{stdout: "[]"} })
+	dir := t.TempDir()
+	b := NewPlain(dir, nil)
+	b.exec = r.exec
+	if _, err := b.List(ListOptions{
+		Assignee: "gastown/polecats/agate",
+		Status:   "closed",
+		Priority: -1, // no priority filter
+		Limit:    50, // bd list's default page
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := r.calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v", r.argvs())
+	}
+	want := "list --json --status=closed --assignee=gastown/polecats/agate --limit=50 --flat"
+	if got := strings.Join(calls[0].args, " "); got != want {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+	if !calls[0].plain || calls[0].dir != dir {
+		t.Errorf("call = %+v, want a plain call in %s", calls[0], dir)
+	}
+	if wantEnv := WithMachineEnvIn(dir, nil); !reflect.DeepEqual(calls[0].env, wantEnv) {
+		t.Errorf("env = %q, want %q", calls[0].env, wantEnv)
+	}
+}
+
 func TestPlainErrorKeepsOutput(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(func([]string) reply {

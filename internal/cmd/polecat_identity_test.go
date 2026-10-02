@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -213,5 +215,63 @@ func TestFormatCountStyled(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("formatCountStyled(42) = %q, does not contain '42'", got)
+	}
+}
+
+// TestQueryAssignedIssuesFiltersAndMaps pins the store query the CV counters
+// make: only the assignee's issues in the asked-for status come back, newest
+// first, and each field the CV reads carries over. The caller supplies the
+// store (buildCVSummary passes beads.NewPlain), so the fake drives it here
+// without bd.
+func TestQueryAssignedIssuesFiltersAndMaps(t *testing.T) {
+	t.Parallel()
+	const assignee = "gastown/polecats/agate"
+	// The fake acts as the polecat, the way bd does when the holder closes
+	// its own bead; a foreign assignee's bead can only be closed with force.
+	db := beadsfake.New(beadsfake.WithActor(assignee))
+	create := func(owner, title string) *beads.Issue {
+		t.Helper()
+		is, err := db.Create(beads.CreateOptions{Title: title, Assignee: owner, Priority: -1})
+		if err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+		return is
+	}
+	older := create(assignee, "older")
+	open := create(assignee, "still open")
+	newer := create(assignee, "newer")
+	other := create("gastown/polecats/emerald", "someone else's")
+	// Close in creation order so the newer one carries the later timestamp.
+	for _, is := range []*beads.Issue{older, newer} {
+		if err := db.Close(is.ID); err != nil {
+			t.Fatalf("close %s: %v", is.ID, err)
+		}
+	}
+	if err := db.ForceCloseWithReason("", other.ID); err != nil {
+		t.Fatalf("close %s: %v", other.ID, err)
+	}
+	closedNewer, err := db.Show(newer.ID)
+	if err != nil {
+		t.Fatalf("show %s: %v", newer.ID, err)
+	}
+
+	got, err := queryAssignedIssues(db, assignee, "closed")
+	if err != nil {
+		t.Fatalf("queryAssignedIssues: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d issues, want 2 (agate's closed only): %+v", len(got), got)
+	}
+	if got[0].ID != newer.ID || got[1].ID != older.ID {
+		t.Errorf("order = %s, %s; want %s (newest) first", got[0].ID, got[1].ID, newer.ID)
+	}
+	if got[0].Title != "newer" || got[0].Type != "task" || got[0].Status != "closed" {
+		t.Errorf("got[0] = %+v, want newer/task/closed", got[0])
+	}
+	if got[0].Updated != closedNewer.UpdatedAt {
+		t.Errorf("got[0].Updated = %q, want %q", got[0].Updated, closedNewer.UpdatedAt)
+	}
+	if open.Status != string(beads.StatusOpen) {
+		t.Fatalf("open issue closed by the fixture: %+v", open)
 	}
 }
