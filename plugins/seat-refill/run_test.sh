@@ -93,10 +93,6 @@ SH
 #   ready --rig <rig> --json    $TEST_STATE/ready/<rig>.json
 #   nudge <target> <message>    appends to $TEST_STATE/nudge.log
 #   escalate <desc> ...         appends to $TEST_STATE/escalate.log
-#   spec lint <id> --json       $TEST_STATE/lint/<id>.json + .exit, else clean
-#   show <id> --json --include-comments  $TEST_STATE/comments/<id>.json, else []
-#   bead comment <id> <text>    appends to $TEST_STATE/comment.log
-#   bead update <id> --add-label  appends to $TEST_STATE/label.log
 write_fake_gt() {
   local bin_dir="$1"
 
@@ -190,60 +186,6 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  spec)
-    if [ "${2:-}" = "lint" ]; then
-      id="${3:-}"
-      if [ -f "$TEST_STATE/lint_fails" ]; then
-        echo "gt: spec lint: database not found" >&2
-        exit 1
-      fi
-      if [ -f "$TEST_STATE/lint/$id.json" ]; then
-        cat "$TEST_STATE/lint/$id.json"
-        code=0
-        if [ -f "$TEST_STATE/lint/$id.exit" ]; then code=$(cat "$TEST_STATE/lint/$id.exit"); fi
-        exit "$code"
-      fi
-      printf '{"id":"%s","ok":true,"needs_planning":false,"refusals":[]}\n' "$id"
-      exit 0
-    fi
-    exit 1
-    ;;
-  show)
-    id="${2:-}"
-    if [ -f "$TEST_STATE/show_fails" ]; then
-      echo "gt: show: database not found" >&2
-      exit 1
-    fi
-    printf '[{"id":"%s","comments":' "$id"
-    if [ -f "$TEST_STATE/comments/$id.json" ]; then
-      cat "$TEST_STATE/comments/$id.json"
-    else
-      echo '[]'
-    fi
-    printf '}]\n'
-    exit 0
-    ;;
-  bead)
-    case "${2:-}" in
-      comment)
-        printf 'COMMENT|%s|%s\n' "${3:-}" "${4:-}" >> "$TEST_STATE/comment.log"
-        if [ -f "$TEST_STATE/comment_fails" ]; then
-          echo "bd: comment write failed" >&2
-          exit 1
-        fi
-        exit 0
-        ;;
-      update)
-        printf 'LABEL|%s|%s\n' "${3:-}" "$*" >> "$TEST_STATE/label.log"
-        if [ -f "$TEST_STATE/label_fails" ]; then
-          echo "bd: label write failed" >&2
-          exit 1
-        fi
-        exit 0
-        ;;
-    esac
-    exit 1
-    ;;
   *)
     printf 'UNEXPECTED gt call: %s\n' "$*" >> "$TEST_STATE/unexpected.log"
     exit 1
@@ -261,13 +203,12 @@ setup_case() {
   CASE_DIR=$(mktemp -d)
   CLEANUP_DIRS+=("$CASE_DIR")
   TEST_STATE="$CASE_DIR/state"
-  mkdir -p "$TEST_STATE/ready" "$TEST_STATE/bin" "$TEST_STATE/lint" "$TEST_STATE/comments"
+  mkdir -p "$TEST_STATE/ready" "$TEST_STATE/bin"
 
   unset GT_SEAT_REFILL_PRO_MAX GT_SEAT_REFILL_PRO_AGENT GT_SEAT_REFILL_PRO_LABEL
   unset GT_SEAT_REFILL_EMPTY_SECONDS GT_SEAT_REFILL_NUDGE_SECONDS GT_SEAT_REFILL_MAYOR
   unset GT_SEAT_REFILL_DRY_RUN GT_SEAT_REFILL_DISPATCH_EMPTY_SECONDS
   unset GT_SEAT_REFILL_CLAIM_TTL GT_SEAT_REFILL_TOP_CANDIDATES GT_SEAT_REFILL_MAX_PRIORITY
-  unset GT_SEAT_REFILL_SHAPE_GATE GT_SEAT_REFILL_LINT_BOUND GT_SEAT_REFILL_BEAD_BOUND
 
   # The pool every case starts from: one local seat, one capped overflow seat.
   cat > "$CASE_DIR/settings.json" <<'JSON'
@@ -292,8 +233,6 @@ JSON
   : > "$TEST_STATE/sling.log"
   : > "$TEST_STATE/escalate.log"
   : > "$TEST_STATE/unexpected.log"
-  : > "$TEST_STATE/comment.log"
-  : > "$TEST_STATE/label.log"
 
   write_fake_gt "$TEST_STATE/bin"
   write_fake_timeout "$TEST_STATE/bin"
@@ -318,27 +257,6 @@ slings() { grep -c 'SLING' "$TEST_STATE/sling.log" || true; }
 escalations() { grep -c 'ESCALATE' "$TEST_STATE/escalate.log" || true; }
 nudges() { grep -c 'NUDGE' "$TEST_STATE/nudge.log" || true; }
 nudges_of() { grep -c "$1" "$TEST_STATE/nudge.log" || true; }
-comments() { grep -c 'COMMENT' "$TEST_STATE/comment.log" || true; }
-labels() { grep -c 'LABEL' "$TEST_STATE/label.log" || true; }
-
-# lint_verdict <id> <exit> <report json>: what gt spec lint --json answers for
-# that bead. lint_refuses and lint_planning are the two verdicts the plugin
-# routes on (a bead with no fixture answers clean, the third shape), and the
-# exit code is the lint's own, read only when the report is unreadable.
-lint_verdict() {
-  printf '%s\n' "$3" > "$TEST_STATE/lint/$1.json"
-  printf '%s\n' "$2" > "$TEST_STATE/lint/$1.exit"
-}
-lint_refuses() { lint_verdict "$1" 1 "{\"id\":\"$1\",\"ok\":false,\"needs_planning\":false,\"refusals\":$2}"; }
-lint_planning() { lint_verdict "$1" 2 "{\"id\":\"$1\",\"ok\":false,\"needs_planning\":true,\"refusals\":[]}"; }
-
-# bead_comment <id> <text>: what gt show reports as the bead's comment history,
-# which is where the shape note's dedupe key is read from.
-bead_comment() {
-  jq -cn --arg id "$1" --arg t "$2" \
-    '[{id:"c1",issue_id:$id,author:"overseer",text:$t,created_at:"2026-10-02T00:00:00Z"}]' \
-    > "$TEST_STATE/comments/$1.json"
-}
 
 # ready_bug <rig>: one P1 bug, ready and unassigned, in that rig.
 ready_bug() {
@@ -939,169 +857,6 @@ assert_eq "$(slings)" "0" "config mode: nudge in the file slings nothing"
 write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1,"mode":"sling"}'
 run_plugin 41000600
 assert_eq "$(slings)" "1" "config mode: sling in the file dispatches the bead"
-
-# === Shape gate (gt-cq5gb) =================================================
-# Every candidate is shape-linted (`gt spec lint <id> --json`) just before the
-# sling, because a vague bead is the main cause of om rejections. shape_gate
-# picks the response: off runs no lint, warn slings the bead anyway and leaves
-# the verdict on it, refuse skips it and labels it. warn is the default, so a
-# town collects a day of data before the overseer flips it to refuse.
-
-# gate_case <gate>: a direct-dispatch town whose shape_gate is <gate>.
-gate_case() {
-  direct_case
-  write_pool "{\"local_agent\":\"local-coder-polecat\",\"max_local\":1,\"overflow_agent\":\"deepseek-flash\",\"max_overflow\":1,\"shape_gate\":\"$1\"}"
-  write_polecats "$LIVE_NONE"
-}
-
-# two_beads: a P1 vague bead and a P2 shaped one, so a skip can be told from a
-# sling in the same run.
-two_beads() {
-  cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
-{"sources":[{"name":"gastown","issues":[
-  {"id":"gt-vague","title":"Fix the thing","status":"open","priority":1,"issue_type":"task"},
-  {"id":"gt-shaped","title":"Fix the other thing","status":"open","priority":2,"issue_type":"task"}
-]}],"summary":{},"town_root":"/town"}
-JSON
-}
-
-# --- Case 42: off runs no lint and writes nothing --------------------------
-gate_case off
-ready_bug gastown
-lint_refuses gt-bug1 '[{"field":"## Gate","reason":"missing"}]'
-run_plugin 42000000
-assert_eq "$(slings)" "1" "gate off: the bead is slung"
-assert_eq "$(comments)" "0" "gate off: no note is written"
-assert_eq "$(labels)" "0" "gate off: no label is written"
-assert_not_contains "$TEST_STATE/stdout.log" "SHAPE" "gate off: no verdict is read"
-
-# --- Case 43: warn (the default) slings the bead and notes the verdict -----
-direct_case
-write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1}'
-ready_bug gastown
-lint_refuses gt-bug1 '[{"field":"## Gate","reason":"not found"},{"field":"acceptance","reason":"0 items"}]'
-run_plugin 43000000
-assert_eq "$(slings)" "1" "warn: an unshaped bead is still slung"
-assert_contains "$TEST_STATE/comment.log" "SHAPE: ## Gate: not found; acceptance: 0 items" \
-  "warn: the comment names every refusal"
-assert_eq "$(labels)" "0" "warn: the bead is not labeled"
-assert_contains "$TEST_STATE/stdout.log" "slinging anyway (shape_gate warn)" \
-  "warn: says why it slung anyway"
-
-# --- Case 44: the note lands once per distinct verdict ---------------------
-direct_case
-write_pool '{"local_agent":"local-coder-polecat","max_local":1,"overflow_agent":"deepseek-flash","max_overflow":1}'
-ready_bug gastown
-lint_refuses gt-bug1 '[{"field":"## Gate","reason":"not found"}]'
-bead_comment gt-bug1 "SHAPE: ## Gate: not found"
-run_plugin 44000000
-assert_eq "$(slings)" "1" "dedupe: the bead is slung regardless"
-assert_eq "$(comments)" "0" "dedupe: the same verdict is not commented again"
-
-lint_refuses gt-bug1 '[{"field":"## Gate","reason":"not found"},{"field":"size","reason":"two workers"}]'
-run_plugin 44000001
-assert_eq "$(comments)" "1" "dedupe: a changed verdict is a new note"
-assert_contains "$TEST_STATE/comment.log" "size: two workers" "dedupe: the new note carries the new refusal"
-
-# A history that cannot be read is not an empty one: the note is skipped
-# rather than written on a guess, which is the write the dedupe exists to stop.
-rm -f "$TEST_STATE/comments/gt-bug1.json"
-touch "$TEST_STATE/show_fails"
-: > "$TEST_STATE/sling.log"
-run_plugin 44000002
-assert_eq "$(slings)" "1" "dedupe: an unreadable history does not block the sling"
-assert_eq "$(comments)" "1" "dedupe: an unreadable history writes no note"
-assert_contains "$TEST_STATE/stdout.log" "could not read comments on gt-bug1" \
-  "dedupe: the unreadable history is named"
-
-# --- Case 45: refuse skips the vague bead and takes the next one -----------
-gate_case refuse
-two_beads
-lint_refuses gt-vague '[{"field":"## Gate","reason":"missing"},{"field":"size","reason":"unstated"}]'
-run_plugin 45000000
-assert_eq "$(slings)" "1" "refuse: the seat is still filled"
-assert_contains "$TEST_STATE/sling.log" "SLING|gt-shaped gastown --agent local-coder-polecat" \
-  "refuse: the next candidate in the same run takes it"
-assert_not_contains "$TEST_STATE/sling.log" "gt-vague" "refuse: the vague bead is not slung"
-assert_contains "$TEST_STATE/label.log" "LABEL|gt-vague|" "refuse: the vague bead is labeled"
-assert_contains "$TEST_STATE/label.log" "--add-label=needs-shape" "refuse: with needs-shape"
-assert_contains "$TEST_STATE/comment.log" "SHAPE: ## Gate: missing; size: unstated" \
-  "refuse: the verdict is commented"
-assert_contains "$TEST_STATE/stdout.log" "skipped gt-vague" "refuse: the skip is logged"
-
-# --- Case 46: a bead that needs planning is labeled as such ----------------
-gate_case refuse
-ready_bug gastown
-lint_planning gt-bug1
-run_plugin 46000000
-assert_eq "$(slings)" "0" "planning: nothing is slung"
-assert_contains "$TEST_STATE/label.log" "--add-label=needs-planning" "planning: labeled needs-planning"
-assert_not_contains "$TEST_STATE/label.log" "needs-shape" "planning: not labeled needs-shape"
-assert_contains "$TEST_STATE/comment.log" "SHAPE: needs planning" "planning: commented once"
-assert_contains "$TEST_STATE/stdout.log" "1 skipped by shape_gate" \
-  "planning: the receipt counts the skip"
-
-# --- Case 47: a lint that cannot be read is not a clean verdict ------------
-# The gate must never guess "shaped": in refuse mode an unreadable lint leaves
-# the seat unfilled and the run non-zero, which is what escalates.
-gate_case refuse
-ready_bug gastown
-printf 'spec lint' > "$TEST_STATE/timeout_expires"
-run_plugin 47000000
-assert_eq "$EXIT" "1" "unreadable lint: the run fails"
-assert_eq "$(slings)" "0" "unreadable lint: nothing is slung on an unknown verdict"
-assert_contains "$TEST_STATE/stderr.log" "shape unreadable" "unreadable lint: named at the bead"
-assert_contains "$TEST_STATE/stderr.log" "every dispatch failed" "unreadable lint: the run says it could not fill the seat"
-
-# A lint that fails without a report at all reads the same way as a wedged one.
-rm -f "$TEST_STATE/timeout_expires"
-touch "$TEST_STATE/lint_fails"
-run_plugin 47000001
-assert_eq "$EXIT" "1" "failed lint: the run fails"
-assert_contains "$TEST_STATE/stderr.log" "gt spec lint exit 1" "failed lint: the exit is named"
-
-# --- Case 48: warn never blocks a dispatch ---------------------------------
-gate_case warn
-ready_bug gastown
-printf 'spec lint' > "$TEST_STATE/timeout_expires"
-run_plugin 48000000
-assert_eq "$EXIT" "0" "warn + unreadable lint: exits 0"
-assert_eq "$(slings)" "1" "warn + unreadable lint: the bead is still slung"
-assert_contains "$TEST_STATE/stdout.log" "shape unreadable" "warn + unreadable lint: named as a warning"
-
-# --- Case 49: a dry run decides but writes nothing -------------------------
-gate_case refuse
-two_beads
-lint_refuses gt-vague '[{"field":"## Gate","reason":"missing"}]'
-GT_SEAT_REFILL_DRY_RUN=1 run_plugin 49000000
-assert_eq "$(slings)" "0" "gate dry run: no sling"
-assert_eq "$(comments)" "0" "gate dry run: no note"
-assert_eq "$(labels)" "0" "gate dry run: no label"
-assert_contains "$TEST_STATE/stdout.log" "DRY-RUN: would skip gt-vague: SHAPE: ## Gate: missing" \
-  "gate dry run: says what it would skip"
-
-# --- Case 50: the gate adds no per-candidate clock -------------------------
-# One bounded read per candidate, no sleep: a long board must not spend the
-# plugin's 3m budget, so three skipped candidates stay well under the 1s each
-# the bead asks for.
-gate_case refuse
-cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
-{"sources":[{"name":"gastown","issues":[
-  {"id":"gt-v1","title":"V1","status":"open","priority":1,"issue_type":"task"},
-  {"id":"gt-v2","title":"V2","status":"open","priority":2,"issue_type":"task"},
-  {"id":"gt-v3","title":"V3","status":"open","priority":2,"issue_type":"task"}
-]}],"summary":{},"town_root":"/town"}
-JSON
-for bead in gt-v1 gt-v2 gt-v3; do
-  lint_refuses "$bead" '[{"field":"## Gate","reason":"missing"}]'
-done
-start="$SECONDS"
-run_plugin 50000000
-elapsed=$((SECONDS - start))
-assert_eq "$EXIT" "0" "gate timing: exits 0 when every candidate is skipped"
-assert_eq "$(slings)" "0" "gate timing: none of the three is slung"
-assert_eq "$((elapsed < 3 ? 1 : 0))" "1" "gate timing: three candidates take under 1s each"
-assert_contains "$TEST_STATE/stdout.log" "3 skipped by shape_gate" "gate timing: all three are named"
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

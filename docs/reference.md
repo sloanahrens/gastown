@@ -207,10 +207,8 @@ The seat-refill plugin's dispatch policy lives in the town's
 `max_priority` is the ceiling on a candidate bead's number, `empty_seconds` and
 `nudge_seconds` are the nudge cadence, `top_candidates` and
 `dispatch_empty_seconds` tune what a nudge says and when a direct sling waits,
-and `pro_max`, `pro_agent` and `pro_label` configure the pro seat, `mode`
-chooses between filling an empty seat directly and nudging the mayor about it,
-and `shape_gate` is what a direct sling does with a candidate's shape lint
-(`gt spec lint`): off, warn or refuse.
+and `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and `mode`
+chooses between filling an empty seat directly and nudging the mayor about it.
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.

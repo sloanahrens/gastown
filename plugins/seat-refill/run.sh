@@ -19,12 +19,6 @@
 # (a log line plus one low-severity escalation naming the bead, gt-hpu8h).
 # gt sling keeps its own refusals (backpressure, hold, rig estop).
 #
-# Each candidate is shape-linted (`gt spec lint`, gt-mmsr2) just before the
-# sling, because a vague bead is the main cause of om rejections. What the
-# verdict does is polecat_pool.shape_gate: off runs no lint, warn slings the
-# bead anyway and leaves the verdict on it, refuse skips it and labels it
-# (gt-cq5gb).
-#
 # The daemon runs this in-process (execution type script) and records the run
 # itself, so this script must not call `gt plugin record-run` — that would
 # write a second receipt for one run. Exit 0 prints the skip marker when the
@@ -89,11 +83,6 @@ SLING_BOUND=$(int_or_default "${GT_SEAT_REFILL_SLING_BOUND:-}" 120)
 # The record a pro dispatch writes is small and local, so it gets a short cap
 # of its own: a wedged `gt escalate` must not eat the sling budget beside it.
 ESCALATE_BOUND=$(int_or_default "${GT_SEAT_REFILL_ESCALATE_BOUND:-}" 20)
-# The shape gate's two reads and two writes (one lint, one comment list, one
-# comment, one label) are per-candidate work on the sling path, so each gets a
-# cap short enough that a wedged one cannot eat the seat's dispatch window.
-LINT_BOUND=$(int_or_default "${GT_SEAT_REFILL_LINT_BOUND:-}" 10)
-BEAD_BOUND=$(int_or_default "${GT_SEAT_REFILL_BEAD_BOUND:-}" 15)
 
 # --- Run budget ----------------------------------------------------------
 # The plugin's [execution] timeout is 3m. Every gt call is bounded by the
@@ -186,11 +175,6 @@ PRO_AGENT=$(str_or_default "${GT_SEAT_REFILL_PRO_AGENT:-}" "$(read_config pro_ag
 PRO_LABEL=$(str_or_default "${GT_SEAT_REFILL_PRO_LABEL:-}" "$(read_config pro_label '"needs-pro"')")
 MODE=$(str_or_default "${GT_SEAT_REFILL_MODE:-}" "$(read_config mode '"sling"')")
 case "$MODE" in sling|nudge) ;; *) fail "mode must be sling or nudge (polecat_pool.mode, or GT_SEAT_REFILL_MODE for a test), got $MODE" ;; esac
-# shape_gate is the sling path's response to the shape lint: off runs no lint,
-# warn slings the bead anyway, refuse skips it. Read in both modes so the file
-# is one policy, but only a sling consults it (gt-cq5gb).
-SHAPE_GATE=$(str_or_default "${GT_SEAT_REFILL_SHAPE_GATE:-}" "$(read_config shape_gate '"warn"')")
-case "$SHAPE_GATE" in off|warn|refuse) ;; *) fail "shape_gate must be off, warn or refuse (polecat_pool.shape_gate, or GT_SEAT_REFILL_SHAPE_GATE for a test), got $SHAPE_GATE" ;; esac
 
 [ "$LOCAL_AGENT" != "null" ] || LOCAL_AGENT=""
 [ "$OVERFLOW_AGENT" != "null" ] || OVERFLOW_AGENT=""
@@ -419,148 +403,6 @@ state_field() {
   jq -r --arg s "$seat" --arg f "$field" '.episodes[$s][$f] // 0' "$STATE_FILE" 2>/dev/null || printf '0'
 }
 
-# --- Shape gate ----------------------------------------------------------
-# `gt spec lint <id> --json` (gt-mmsr2) is the shape check the Go spec
-# dispatcher runs before it spends a seat, and a vague bead is the main cause
-# of om rejections. The lint is run here, on the candidate about to take the
-# seat, rather than on the whole board up front: the board can be long and the
-# seat has room for one.
-#
-# The note is its own dedupe key: a bead the lint keeps refusing carries one
-# comment per distinct verdict, not one per run. Labels are the overseer's
-# queue of beads to fix, and a bead carrying one is left a candidate on
-# purpose: reshaping it is what puts it back in the seat's reach (gt-cq5gb).
-SHAPE_LABEL_SHAPE="needs-shape"
-SHAPE_LABEL_PLANNING="needs-planning"
-
-# shape_lint <bead>: runs the lint and sets SHAPE_ROUTE (clean|refuse|planning,
-# else unknown) and SHAPE_VERDICT. The route comes from the report, not the
-# exit code, so a lint whose JSON and exit code disagree is unknown rather
-# than guessed at.
-shape_lint() {
-  local bead="$1" limit rc=0 out route
-  limit=$(bound "$LINT_BOUND" "$RUN_BUDGET")
-  out=$(timeout "$limit" gt spec lint "$bead" --json 2>&1) || rc=$?
-  SHAPE_VERDICT="$out"
-  route=$(printf '%s' "$out" | jq -r '
-    if (.ok | type) == "boolean" then
-      if .ok then "clean" elif (.needs_planning == true) then "planning" else "refuse" end
-    else empty end' 2>/dev/null) || route=""
-  if [ -n "$route" ]; then
-    SHAPE_ROUTE="$route"
-    return 0
-  fi
-  SHAPE_ROUTE=unknown
-  if [ "$rc" -eq 124 ]; then
-    SHAPE_WHY="gt spec lint timed out after ${limit}s"
-  else
-    SHAPE_WHY="gt spec lint exit $rc: $(printf '%s' "$out" | tail -n 1)"
-  fi
-  return 0
-}
-
-# shape_comment prints the note for one verdict: every refusal, or the route
-# for a bead that needs planning (its report carries no refusal, and the
-# --json shape does not name the reason).
-shape_comment() {
-  local route="$1" verdict="$2" text
-  if [ "$route" = planning ]; then
-    printf 'SHAPE: needs planning'
-    return 0
-  fi
-  text=$(printf '%s' "$verdict" |
-    jq -r '[.refusals[]? | "\(.field): \(.reason)"] | join("; ")' 2>/dev/null)
-  # A refused report the lint rendered without refusals is the lint's problem,
-  # not a reason to leave the note half-written.
-  [ -n "$text" ] || text="refused"
-  printf 'SHAPE: %s' "$text"
-}
-
-# shape_note <bead> <text>: comment unless the bead already carries this exact
-# note. A history that cannot be read writes nothing, because the write is the
-# thing that must not repeat (the same rule as the spec dispatcher's
-# annotate-once, internal/cmd/spec.go).
-shape_note() {
-  local bead="$1" text="$2" limit rc=0 json out state
-  limit=$(bound "$BEAD_BOUND" "$RUN_BUDGET")
-  json=$(timeout "$limit" gt show "$bead" --json --include-comments 2>/dev/null) || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    log "WARN: could not read comments on $bead (gt show exit $rc); leaving the shape note off"
-    return 0
-  fi
-  state=$(printf '%s' "$json" | jq -r --arg t "$text" '
-    if (type != "array") or (length == 0) then "unreadable"
-    elif any(.[0].comments[]?; ((.text // "") | gsub("^\\s+|\\s+$"; "")) == $t) then "present"
-    else "absent" end' 2>/dev/null) || state=""
-  case "$state" in
-    present) return 0 ;;
-    absent) ;;
-    *)
-      log "WARN: could not read comments on $bead; leaving the shape note off"
-      return 0
-      ;;
-  esac
-  limit=$(bound "$BEAD_BOUND" "$RUN_BUDGET")
-  rc=0
-  out=$(timeout "$limit" gt bead comment "$bead" "$text" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || log "WARN: could not comment $text on $bead: $(printf '%s' "$out" | tail -n 1)"
-}
-
-# shape_label <bead> <label> <labels>: add the label unless the ready board
-# already showed it, so a bead re-refused every run is labeled once. A failed
-# label is a warning, not a failure: the bead is skipped either way, and the
-# run's job is the seat.
-shape_label() {
-  local bead="$1" label="$2" labels="$3" limit rc=0 out
-  case ",$(lower "$labels")," in
-    *",$(lower "$label"),"*) return 0 ;;
-  esac
-  limit=$(bound "$BEAD_BOUND" "$RUN_BUDGET")
-  out=$(timeout "$limit" gt bead update "$bead" "--add-label=$label" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || log "WARN: could not label $bead $label: $(printf '%s' "$out" | tail -n 1)"
-}
-
-# shape_check <bead> <labels> <dry-run>: 0 to sling the bead, 1 to skip it.
-# warn slings anything the lint flags — it is the observe-first half of the
-# rollout, so it never blocks a dispatch, and a lint it cannot read is a
-# warning beside the sling. refuse takes an unreadable lint as an unknown
-# verdict: it is recorded as an error and the bead is skipped, because a lint
-# that cannot say "shaped" is not a clean one.
-shape_check() {
-  local bead="$1" labels="$2" dry="$3" note
-  shape_lint "$bead"
-  case "$SHAPE_ROUTE" in
-    clean) return 0 ;;
-    unknown)
-      if [ "$SHAPE_GATE" = warn ]; then
-        log "WARN $bead: shape unreadable ($SHAPE_WHY); slinging anyway (shape_gate warn)"
-        return 0
-      fi
-      ERRORS+="$bead: shape unreadable, not slinging: $SHAPE_WHY"$'\n'
-      log "ERROR $bead: shape unreadable, not slinging: $SHAPE_WHY"
-      return 1
-      ;;
-  esac
-  note=$(shape_comment "$SHAPE_ROUTE" "$SHAPE_VERDICT")
-  if [ "$SHAPE_GATE" = warn ]; then
-    [ -n "$dry" ] || shape_note "$bead" "$note"
-    log "WARN $bead: $note; slinging anyway (shape_gate warn)"
-    return 0
-  fi
-  if [ -n "$dry" ]; then
-    log "DRY-RUN: would skip $bead: $note"
-    return 1
-  fi
-  if [ "$SHAPE_ROUTE" = planning ]; then
-    shape_label "$bead" "$SHAPE_LABEL_PLANNING" "$labels"
-  else
-    shape_label "$bead" "$SHAPE_LABEL_SHAPE" "$labels"
-  fi
-  shape_note "$bead" "$note"
-  log "skipped $bead: $note"
-  return 1
-}
-
 # Every bead the pro seat dispatches is recorded, not just logged (gt-hpu8h):
 # pro is the expensive class, and the overseer wants each invocation to reach
 # them as it happens. The escalation is low severity, so it routes as a bead
@@ -589,7 +431,6 @@ NUDGE_LINES=""
 SLUNG=","
 DISPATCHED=0
 REFUSALS=0
-SHAPE_SKIPPED=0
 ERRORS=""
 BUDGET_SPENT=0
 
@@ -629,16 +470,6 @@ while IFS='|' read -r seat agent cap selector; do
         case ",$SLUNG," in *",$c_id,"*) continue ;; esac
         if [ "$selector" = any ]; then
           case ",$(lower "$c_labels")," in *",$(lower "$PRO_LABEL"),"*) continue ;; esac
-        fi
-        # Skipped here rather than broken out of: the seat still wants a bead,
-        # and the next candidate may be a shaped one (gt-cq5gb). Once the budget
-        # is spent no lint runs, so a long board of vague beads costs one such
-        # pass and not a read per bead.
-        if [ "$SHAPE_GATE" != off ] && [ "$BUDGET_SPENT" != 1 ] &&
-          ! shape_check "$c_id" "$c_labels" "$DRY_RUN"; then
-          SLUNG+="$c_id,"
-          SHAPE_SKIPPED=$((SHAPE_SKIPPED + 1))
-          continue
         fi
         if [ -n "$DRY_RUN" ]; then
           log "DRY-RUN: would sling $c_id (P$c_prio) to $c_rig on seat $seat (agent $agent)"
@@ -723,28 +554,23 @@ write_state() {
 if [ "$MODE" = sling ]; then
   [ -n "$DRY_RUN" ] || write_state
   if [ -n "$ERRORS" ] && [ "$DISPATCHED" -eq 0 ]; then
-    # Every dispatch attempted this run failed: an empty seat with work ready
-    # that the dispatcher could not fill is not "nothing to do" (escalate).
-    fail "every dispatch failed; seat(s) still empty with work ready:
+    # Every sling attempted this run failed: an empty seat with work ready that
+    # the dispatcher could not fill is not "nothing to do" (escalate).
+    fail "every sling failed; seat(s) still empty with work ready:
 $ERRORS"
   fi
   if [ -n "$ERRORS" ]; then
     log "some slings failed:"$'\n'"$ERRORS"
   fi
-  # A skip the gate ordered is a decision, not silence: the receipt names it
-  # beside the dispatches so an empty seat full of needs-shape beads reads as
-  # that, rather than as a quiet run (gt-cq5gb).
-  shape_note_line=""
-  [ "$SHAPE_SKIPPED" -gt 0 ] && shape_note_line=" (${SHAPE_SKIPPED} candidate(s) skipped by shape_gate ${SHAPE_GATE})"
   if [ "$DISPATCHED" -gt 0 ]; then
     if [ -n "$DRY_RUN" ]; then
-      log "dry run: would dispatch $DISPATCHED bead(s) to empty seat(s); nothing slung${shape_note_line}"
+      log "dry run: would dispatch $DISPATCHED bead(s) to empty seat(s); nothing slung"
     else
-      log "dispatched $DISPATCHED bead(s) to empty seat(s)${shape_note_line}"
+      log "dispatched $DISPATCHED bead(s) to empty seat(s)"
     fi
     exit 0
   fi
-  skip "no empty seat with a slingable bead, or every candidate was refused (${REFUSALS} refusal(s), ${SHAPE_SKIPPED} skipped by shape_gate)"
+  skip "no empty seat with a slingable bead, or every candidate was refused (${REFUSALS} refusal(s))"
 fi
 
 if [ -z "$NUDGE_LINES" ]; then
