@@ -106,11 +106,15 @@ func applyOverride(result, override *HooksConfig) *HooksConfig {
 // a same-matcher override entry instead UNIONS its Hooks into the base
 // entry's Hooks list (gt-5ihs). Bare tool-name matchers are how every
 // PreToolUse guard must route post-fix — Claude Code's matcher only ever
-// matches the tool name, so pr-workflow, dangerous-command, and each role's
-// patrol-formula-guard all legitimately share matcher "Bash", discriminated
-// by each Hook's If field (or by self-inspecting the command) rather than by
-// matcher. Whole-entry replace would silently drop one layer's guards
-// whenever another layer also targets "Bash". Union is keyed by (Command,
+// matches the tool name, so the built-in guards (pr-workflow,
+// dangerous-command, container-suite, bd-close-invariant) all share
+// shellExecutingToolMatcher ("Bash|Monitor"), and none carries an If field
+// (gt-3mp1) — each self-inspects tool_input.command instead. A role
+// override (e.g. polecat-paths) and operator-supplied overrides may still
+// target the same bare tool-name matcher, with or without an If field of
+// their own, so a same-matcher override must UNION rather than replace:
+// whole-entry replace would silently drop the town-wide guards whenever
+// another layer also targets "Bash". Union is keyed by (Command,
 // If) so re-merging is idempotent: a hook already present is replaced in
 // place, a genuinely new one is appended.
 func mergeEntries(base, override []HookEntry) []HookEntry {

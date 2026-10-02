@@ -220,11 +220,11 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 			continue
 		}
 
-		// Both exist - compare. If matters: post-gt-5ihs, several hooks on
-		// the same bare-tool matcher can share an identical Command and
-		// differ only by If (e.g. three pr-workflow entries on "Bash"), so
-		// an If-only drift (a typo'd pattern in an on-disk override) must
-		// still show up here.
+		// Both exist - compare. If matters: the built-in guards stopped
+		// setting If (gt-3mp1), but an operator-supplied override may carry
+		// one, and two hooks on the same bare-tool matcher can then share an
+		// identical Command and differ only by If — so an If-only drift (a
+		// typo'd pattern in an on-disk override) must still show up here.
 		if current.Hooks[i].Command != expected.Hooks[i].Command || current.Hooks[i].If != expected.Hooks[i].If {
 			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d]:\n", hookType, matcherSuffix, i))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+hookDisplayText(current.Hooks[i]))))

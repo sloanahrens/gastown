@@ -177,9 +177,11 @@ func TestDiffCommandsDetectsIfOnlyDrift(t *testing.T) {
 }
 
 // TestHooksFingerprintDistinguishesByIf pins that two hooks sharing
-// Type+Command but differing only in If (e.g. three pr-workflow entries on
-// matcher "Bash") produce different fingerprints — otherwise gt hooks init
-// would deduplicate them into one (finding 6, gt-wisp-db27).
+// Type+Command but differing only in If produce different fingerprints —
+// otherwise gt hooks init would deduplicate them into one (finding 6,
+// gt-wisp-db27). The built-in guards no longer set If (gt-3mp1), but an
+// operator-supplied override may, and two such overrides on one bare
+// tool-name matcher then share a Command and differ only by If.
 func TestHooksFingerprintDistinguishesByIf(t *testing.T) {
 	t.Parallel()
 	a := []hooks.Hook{{Type: "command", Command: "gt tap guard pr-workflow", If: "Bash(gh pr create*)"}}
