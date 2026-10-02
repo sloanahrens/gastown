@@ -34,6 +34,7 @@ type fakeEnv struct {
 	heartbeats  map[string]*Heartbeat
 	restartErr  map[string]error
 	idleErr     map[string]error
+	submitErr   map[string]error
 	// idleStopped names seats whose record already says stop, so MarkIdle
 	// reports no change.
 	idleStopped map[string]bool
@@ -51,11 +52,13 @@ type fakeEnv struct {
 	branchErr  map[string]error
 	commentErr error
 
-	restarts []string
-	idles    []string // polecats whose seat was retired to stop
-	closed   []string
-	comments map[string][]string
-	reads    []string // AgentState reads, to prove they are refusal-only
+	restarts  []string
+	idles     []string // polecats whose seat was retired to stop
+	submitted []string // "polecat=bead" the tick recorded as submitted
+	closed    []string
+	comments  map[string][]string
+	reads     []string // AgentState reads, to prove they are refusal-only
+	workReads []string // AssignedWork reads, to prove a skipped seat reads no Dolt
 
 	// workBeads answers WorkBead by ID; a missing ID is a gone bead (nil).
 	workBeads   map[string]*Work
@@ -69,8 +72,9 @@ func newFake() *fakeEnv {
 		intents: map[string]intent.Record{}, intentErr: map[string]error{},
 		verdicts: map[string]liveness.Result{}, work: map[string]*Work{}, workErr: map[string]error{},
 		states: map[string]string{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
-		restartErr: map[string]error{}, idleErr: map[string]error{}, idleStopped: map[string]bool{},
-		dirs: map[string]bool{}, dirErr: map[string]error{},
+		restartErr: map[string]error{}, idleErr: map[string]error{}, submitErr: map[string]error{},
+		idleStopped: map[string]bool{},
+		dirs:        map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
 		molErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
 		comments:  map[string][]string{},
@@ -89,7 +93,10 @@ func (f *fakeEnv) Assess(_, p string) liveness.Result {
 	}
 	return liveness.Result{Verdict: liveness.Alive}
 }
-func (f *fakeEnv) AssignedWork(_, p string) (*Work, error) { return f.work[p], f.workErr[p] }
+func (f *fakeEnv) AssignedWork(_, p string) (*Work, error) {
+	f.workReads = append(f.workReads, p)
+	return f.work[p], f.workErr[p]
+}
 func (f *fakeEnv) WorkBead(_, id string) (*Work, error) {
 	if err := f.workBeadErr[id]; err != nil {
 		return nil, err
@@ -126,6 +133,15 @@ func (f *fakeEnv) MarkIdle(_, p string) (bool, error) {
 	f.idleStopped[p] = true
 	return true, nil
 }
+
+func (f *fakeEnv) MarkSubmitted(_, p, bead string) error {
+	if err := f.submitErr[p]; err != nil {
+		return err
+	}
+	f.submitted = append(f.submitted, p+"="+bead)
+	return nil
+}
+
 func (f *fakeEnv) ActiveWork(string) ([]Work, error) { return f.active, f.activeErr }
 func (f *fakeEnv) PolecatDirExists(_, p string) (bool, error) {
 	return f.dirs[p], f.dirErr[p]
@@ -233,6 +249,59 @@ func TestIdleSeatIsRetiredToStop(t *testing.T) {
 	r = scanner(env, nil).Tick("gastown")
 	if f := seatFinding(t, r, "ruby"); f.Outcome != "" {
 		t.Fatalf("second tick = %v %q, want no finding", f.Outcome, f.Detail)
+	}
+}
+
+// A seat whose gt done wrote gt:ready-to-land but lost its intent-record write
+// is mid-landing, not dead. The tick brings the record up to the label, or the
+// record says run for the whole of the landing and townhealth reports the seat
+// dead (gt-2z8k1).
+func TestMidLandingSeatRecordIsBroughtUpToTheLabel(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.work["ruby"].Labels = []string{"gt:ready-to-land"}
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.submitted, ","); got != "ruby=gt-ruby" {
+		t.Fatalf("submitted = %q, want ruby=gt-ruby; report %v", got, r.Lines())
+	}
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeSkipped {
+		t.Fatalf("outcome = %v, want skipped", f)
+	}
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none", env.restarts)
+	}
+}
+
+// The tick reports the failure instead of claiming the repair: the seat is
+// still mid-landing, and the next tick tries again.
+func TestMidLandingSeatRecordWriteFailureIsReported(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.work["ruby"].Labels = []string{"gt:ready-to-land"}
+	env.submitErr["ruby"] = errors.New("intent lock: timed out")
+	r := scanner(env, nil).Tick("gastown")
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeFailed {
+		t.Fatalf("outcome = %v %q, want failed", f.Outcome, f.Detail)
+	}
+}
+
+// A seat whose record already says submitted is left alone from the record
+// check: no work read, no Dolt.
+func TestSubmittedSeatIsNotReadFromDolt(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"ruby"}
+	env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+	env.work["ruby"] = &Work{ID: "gt-ruby", Status: "hooked"}
+	r := scanner(env, nil).Tick("gastown")
+	if f := seatFinding(t, r, "ruby"); f.Outcome != "" {
+		t.Fatalf("outcome = %v %q, want no finding", f.Outcome, f.Detail)
+	}
+	if len(env.submitted) != 0 || len(env.reads) != 0 || len(env.workReads) != 0 {
+		t.Fatalf("submitted = %v, agent-state reads = %v, work reads = %v; want none",
+			env.submitted, env.reads, env.workReads)
 	}
 }
 
