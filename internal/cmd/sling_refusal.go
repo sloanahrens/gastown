@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -9,18 +10,42 @@ import (
 	"github.com/steveyegge/gastown/internal/sling"
 )
 
-// silenceUsageOnRefusal keeps cobra from printing gt sling's whole usage block
-// after a refusal. Usage answers a mistyped invocation; a refusal is the
-// command working — the bead is fine and simply not this sling's to take — and
-// its own text already carries the reason and the remediation. Cobra's usage
-// block otherwise follows the reason and buries it: seat-refill keeps only the
-// last line of a failed sling (plugins/seat-refill/run.sh), which was the usage
-// line, so the dispatcher log showed no cause at all (gt-fudap).
-func silenceUsageOnRefusal(cmd *cobra.Command, err error) {
-	if cmd == nil || !isSlingRefusal(err) {
+// silenceUsageOnFailure keeps cobra from printing gt sling's whole usage block
+// after a failure that is not a mistyped invocation. A refusal is the command
+// working — the bead is fine and simply not this sling's to take — and its own
+// text already carries the reason and the remediation; a runtime failure has
+// its reason in the error. Cobra's usage block otherwise follows the reason and
+// buries it: seat-refill keeps only the last line of a failed sling
+// (plugins/seat-refill/run.sh), which was the usage line, so the dispatcher log
+// showed no cause at all (gt-fudap, gt-thnbp).
+func silenceUsageOnFailure(cmd *cobra.Command, err error) {
+	if cmd == nil || err == nil {
 		return
 	}
-	cmd.SilenceUsage = true
+	if isSlingRefusal(err) || !isSlingUsageError(err) {
+		cmd.SilenceUsage = true
+	}
+}
+
+// slingUsageError marks a failure that is the command being mistyped — a
+// conflicting flag pair, a missing argument, an unknown rig name — so cobra's
+// usage block stays under it. Every other failure from a sling that got as far
+// as running (the store unreachable, the daemon restarting, a refusal) prints
+// its one error line and nothing else, so a caller that keeps only the last
+// line of the output reads the reason and not the end of a usage block
+// (gt-thnbp).
+type slingUsageError struct{ err error }
+
+func (e *slingUsageError) Error() string { return e.err.Error() }
+func (e *slingUsageError) Unwrap() error { return e.err }
+
+func slingUsageErrorf(format string, a ...any) error {
+	return &slingUsageError{err: fmt.Errorf(format, a...)}
+}
+
+func isSlingUsageError(err error) bool {
+	var u *slingUsageError
+	return errors.As(err, &u)
 }
 
 // isSlingRefusal reports whether err is one of sling's refusals rather than a
