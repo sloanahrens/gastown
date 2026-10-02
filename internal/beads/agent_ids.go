@@ -115,6 +115,29 @@ func PolecatBeadID(rig, name string) string {
 	return PolecatBeadIDWithPrefix("gt", rig, name)
 }
 
+// AgentBeadIDFor returns the agent bead that role/rig/name owns in the town at
+// townRoot: the town-level hq- bead for the mayor, and the rig's prefixed bead
+// for a named rig role. It returns "" for an identity that owns no bead, which
+// is what every caller's `agentBeadID != ""` guard is there to catch.
+func AgentBeadIDFor(role, rig, name, townRoot string) string {
+	switch role {
+	case constants.RoleMayor:
+		return MayorBeadIDTown()
+	case constants.RolePolecat:
+		if rig == "" || name == "" {
+			return ""
+		}
+		return PolecatBeadIDWithPrefix(GetPrefixForRig(townRoot, rig), rig, name)
+	case constants.RoleCrew:
+		if rig == "" || name == "" {
+			return ""
+		}
+		return CrewBeadIDWithPrefix(GetPrefixForRig(townRoot, rig), rig, name)
+	default:
+		return ""
+	}
+}
+
 // ParseAgentBeadID parses an agent bead ID into its components.
 // Returns rig, role, name, and whether parsing succeeded.
 // For town-level agents, rig will be empty.

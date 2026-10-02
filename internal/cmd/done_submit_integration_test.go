@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -183,7 +184,7 @@ func TestIntegrationRunDoneReplacesAnOlderBranchTipUnderLease(t *testing.T) {
 func TestIntegrationRunDoneRedLocalGateExits15(t *testing.T) {
 	gate := &recordingGate{result: land.GateResult{Steps: []land.StepResult{{Name: "test", ExitCode: 2, Tail: "FAIL\tpkg/x\n"}}}}
 	r := runDoneSubmit(t, gate, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
-	assertDoneExitCode(t, r.err, doneExitGateFailed, "FAIL\tpkg/x")
+	assertDoneExitCode(t, r.err, done.DoneExitGateFailed, "FAIL\tpkg/x")
 	if got := gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch); got != "" {
 		t.Errorf("a red gate pushed the branch: %s", got)
 	}
@@ -199,7 +200,7 @@ func TestIntegrationRunDoneRebaseConflictExits14(t *testing.T) {
 		setupRoutedSubmitGitRepo(t, workDir, false)
 		advanceOriginMain(t, workDir, "file.txt", "main moved\n")
 	})
-	assertDoneExitCode(t, r.err, doneExitRebaseConflict, "file.txt")
+	assertDoneExitCode(t, r.err, done.DoneExitRebaseConflict, "file.txt")
 	if _, err := os.Stat(filepath.Join(r.workDir, ".git", "rebase-merge")); err == nil {
 		t.Error("worktree left mid-rebase")
 	}
@@ -210,7 +211,7 @@ func TestIntegrationRunDoneRebaseConflictExits14(t *testing.T) {
 func TestIntegrationRunDoneExitsReadyRecordFailed(t *testing.T) {
 	t.Setenv("GT_TEST_BD_UPDATE_FAILS", "1")
 	r := runDoneSubmit(t, passingDoneGate(), func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
-	assertDoneExitCode(t, r.err, doneExitReadyFailed, "ready to land")
+	assertDoneExitCode(t, r.err, done.DoneExitReadyFailed, "ready to land")
 	if rec := submittedIntentFor(t, r); rec.Submitted() {
 		t.Errorf("a bead that never got gt:ready-to-land was recorded as submitted: %+v", rec)
 	}
@@ -238,7 +239,7 @@ func TestIntegrationRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 		runGitForMQSubmitTest(t, workDir, "add", "mine.txt")
 		runGitForMQSubmitTest(t, workDir, "commit", "-m", "mine")
 	})
-	assertDoneExitCode(t, r.err, doneExitPushFailed, "real divergence")
+	assertDoneExitCode(t, r.err, done.DoneExitPushFailed, "real divergence")
 	if got := strings.Fields(gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch)); len(got) == 0 || got[0] != theirs {
 		t.Fatalf("origin branch = %v, want their commit %s kept", got, theirs)
 	}
@@ -250,7 +251,7 @@ func TestIntegrationRunDoneRefusesToPushOverSomeoneElsesWork(t *testing.T) {
 func TestIntegrationRunDoneGateThatCouldNotRunExits16(t *testing.T) {
 	broken := &recordingGate{result: land.GateResult{Err: errors.New("sh: not found")}}
 	r := runDoneSubmit(t, broken, func(t *testing.T, workDir string) { setupRoutedSubmitGitRepo(t, workDir, false) })
-	assertDoneExitCode(t, r.err, doneExitGateUnavailable, "not a verdict on your change")
+	assertDoneExitCode(t, r.err, done.DoneExitGateUnavailable, "not a verdict on your change")
 	if got := gitOut(t, r.workDir, "ls-remote", "origin", "refs/heads/"+doneTestBranch); got != "" {
 		t.Errorf("a gate that did not run pushed the branch: %s", got)
 	}

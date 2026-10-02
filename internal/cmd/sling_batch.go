@@ -2,19 +2,19 @@ package cmd
 
 import (
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 // batchSlingOptions are the gt sling flags a batch sling reads.
@@ -502,5 +502,5 @@ func deletePolecatBranch(branchName string, repoGit *git.Git, hasPendingMR bool)
 	}
 
 	fmt.Printf("  %s keeping local branch %s: no remote ref contains %s — delete it manually once the work is safe\n",
-		style.Warning.Render("⚠"), branchName, shortSHA(tip))
+		style.Warning.Render("⚠"), branchName, done.ShortSHA(tip))
 }
