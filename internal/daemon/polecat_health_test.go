@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -628,13 +629,20 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 // holds the bead until the landing worker lands it. Dead session + open hook is
 // the crash signature, but here it is a polecat that finished: the witness
 // raised a second session on it twice on 2026-09-30. Both halves are pinned —
-// the intent record gt done writes (read before Dolt), and the bead's
-// gt:ready-to-land label for a seat whose record was never written.
+// the intent record gt done writes, and the bead's gt:ready-to-land label for
+// a seat whose record was never written.
+//
+// gt-xs1ni: the intent record is a wait, and the wait is only real while the
+// bead it names still reads as submitted. gt done writes the label before the
+// record, so a bead that lost the label was pulled after the submission — for
+// rework, or by a human — and the record outlived it. That seat is a crashed
+// rework and has to be reported, not skipped forever.
 func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
 	t.Parallel()
-	t.Run("intent record", func(t *testing.T) {
+	t.Run("intent record, bead still waiting", func(t *testing.T) {
+		t.Parallel()
 		bd := newWorkBD(t)
-		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour))
+		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour), "gt:ready-to-land")
 		d, logBuf := reaperDaemon(t, bd)
 		d.tmux = newFakeTmux(newFixedClock())
 		seat := intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}
@@ -648,12 +656,52 @@ func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
 		if strings.Contains(got, "CRASH DETECTED") || !strings.Contains(got, "submitted for landing") {
 			t.Fatalf("a submitted polecat was called crashed: %s", got)
 		}
-		if calls := bd.calls(t); strings.Contains(calls, "show") || strings.Contains(calls, "list") {
-			t.Fatalf("the intent record decides before any bd read, got calls:\n%s", calls)
+		if calls := bd.calls(t); !strings.Contains(calls, "show gt-work1") {
+			t.Fatalf("the record was trusted without reading the bead it names, got calls:\n%s", calls)
+		}
+	})
+
+	t.Run("intent record, landing pulled for rework", func(t *testing.T) {
+		t.Parallel()
+		bd := newWorkBD(t)
+		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour), "rework")
+		d, logBuf := reaperDaemon(t, bd)
+		d.tmux = newFakeTmux(newFixedClock())
+		seat := intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}
+		if err := intent.MarkSubmitted(d.config.TownRoot, seat, "gt-work1", "gt done", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+
+		d.checkPolecatHealth("myr", "mycat")
+
+		got := logBuf.String()
+		if !strings.Contains(got, "CRASH DETECTED") {
+			t.Fatalf("a seated rework whose landing was pulled was read as healthy: %s", got)
+		}
+	})
+
+	t.Run("intent record, bead unreadable", func(t *testing.T) {
+		t.Parallel()
+		bd := newWorkBD(t)
+		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour), "rework")
+		bd.showErr = errors.New("bd show: connection refused")
+		d, logBuf := reaperDaemon(t, bd)
+		d.tmux = newFakeTmux(newFixedClock())
+		seat := intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}
+		if err := intent.MarkSubmitted(d.config.TownRoot, seat, "gt-work1", "gt done", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+
+		d.checkPolecatHealth("myr", "mycat")
+
+		got := logBuf.String()
+		if strings.Contains(got, "CRASH DETECTED") || !strings.Contains(got, "submitted for landing") {
+			t.Fatalf("a failed bead read was taken as proof the landing ended: %s", got)
 		}
 	})
 
 	t.Run("bead label", func(t *testing.T) {
+		t.Parallel()
 		bd := newWorkBD(t)
 		bd.seed("gt-work1", "hooked", time.Now().Add(-time.Hour), "gt:ready-to-land")
 		d, logBuf := reaperDaemon(t, bd)

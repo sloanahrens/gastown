@@ -371,6 +371,31 @@ func (h *patrolScanHost) AssignedWork(rig, name string) (*patrolscan.Work, error
 	return nil, nil
 }
 
+// WorkBead reads one work bead by ID. A bead bd says is not found is gone,
+// not an unknown: the seat's record outlived it, and nothing is waiting to
+// land (gt-xs1ni).
+func (h *patrolScanHost) WorkBead(rig, id string) (*patrolscan.Work, error) {
+	issue, err := h.readBeads(rig).Show(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil {
+		return nil, nil
+	}
+	w := issueWork(issue)
+	return &w, nil
+}
+
+// ClearSubmission ends the seat's submitted wait once its work bead is no
+// longer submitted (the landing was pulled for rework, or a human took it):
+// the record goes to stop and the ordinary path decides what the seat needs.
+func (h *patrolScanHost) ClearSubmission(rig, name, workBead string) (bool, error) {
+	return intent.ClearLanded(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
+}
+
 func (h *patrolScanHost) AgentState(rig, name string) (string, error) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
 	issue, err := h.readBeads(rig).Show(id)

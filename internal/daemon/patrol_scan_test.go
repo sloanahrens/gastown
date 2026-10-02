@@ -9,8 +9,10 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
@@ -49,6 +51,25 @@ func TestPatrolScanReadyToLandLabelMatchesLand(t *testing.T) {
 	t.Parallel()
 	if patrolscan.ReadyToLandLabel != land.LabelReadyToLand {
 		t.Fatalf("patrolscan.ReadyToLandLabel = %q, land.LabelReadyToLand = %q", patrolscan.ReadyToLandLabel, land.LabelReadyToLand)
+	}
+}
+
+// The tick and the daemon's crash detector each ask "is this bead submitted
+// for landing?" from their own copy of the rule. gt-xs1ni was two detectors
+// answering it differently, so this pins them to the same answer on every
+// status a work bead can be in.
+func TestPatrolScanIsSubmittedMatchesPolecat(t *testing.T) {
+	t.Parallel()
+	statuses := []string{"open", "hooked", "in_progress", "blocked", "deferred", "closed", "tombstone", "", "weird"}
+	for _, status := range statuses {
+		for _, labels := range [][]string{nil, {land.LabelReadyToLand}, {"rework"}, {land.LabelReadyToLand, "rework"}} {
+			w := patrolscan.Work{Status: status, Labels: labels}
+			got := w.IsSubmitted()
+			want := polecat.IsSubmittedWork(&beads.Issue{Status: status, Labels: labels})
+			if got != want {
+				t.Errorf("status %q labels %v: patrolscan says %v, polecat says %v", status, labels, got, want)
+			}
+		}
 	}
 }
 
@@ -132,4 +153,61 @@ func TestPatrolScanGHGatesHonorsTheRecordedRun(t *testing.T) {
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
 
 	d.patrolScanGHGates(&patrolScanHost{d: d}, nil)
+}
+
+// A bead bd says does not exist is gone, not unknown: the seat's submitted
+// record outlived it and nothing is waiting to land. Any other read failure
+// is unknown, and the tick leaves the seat alone on it (gt-xs1ni).
+func TestPatrolScanWorkBeadTellsGoneFromUnreadable(t *testing.T) {
+	t.Parallel()
+	bd := newWorkBD(t)
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
+	h := &patrolScanHost{d: d}
+
+	bd.seed("gt-live", "hooked", time.Now(), "gt:ready-to-land")
+	if w, err := h.WorkBead("myr", "gt-live"); err != nil || w == nil || w.ID != "gt-live" {
+		t.Fatalf("WorkBead(gt-live) = %+v, %v", w, err)
+	}
+	if w, err := h.WorkBead("myr", "gt-gone"); err != nil || w != nil {
+		t.Fatalf("WorkBead(gt-gone) = %+v, %v; want nil, nil", w, err)
+	}
+	bd.showErr = errors.New("bd show: connection refused")
+	if w, err := h.WorkBead("myr", "gt-live"); err == nil || w != nil {
+		t.Fatalf("a failed read answered %+v, %v; want an error", w, err)
+	}
+}
+
+// ClearSubmission ends the seat's wait for the landing worker. It is the
+// action half of the stale-record fix: without it the supervisor's own
+// submitted guard refuses every restart (gt-xs1ni).
+func TestPatrolScanClearSubmissionEndsTheWait(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	h := &patrolScanHost{d: d}
+	seat := supervisor.IntentSeat(supervisor.SeatFor("myr", constants.RolePolecat, "mycat"))
+	if err := intent.MarkSubmitted(townRoot, seat, "gt-work1", "gt done", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := h.ClearSubmission("myr", "mycat", "gt-work1")
+	if err != nil || !changed {
+		t.Fatalf("ClearSubmission = %v, %v; want true, nil", changed, err)
+	}
+	rec, err := intent.Read(townRoot, seat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Submitted() {
+		t.Fatalf("record still says submitted: %+v", rec)
+	}
+
+	// A record for another bead is left alone: the seat is waiting for
+	// something else's landing.
+	if err := intent.MarkSubmitted(townRoot, seat, "gt-work2", "gt done", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := h.ClearSubmission("myr", "mycat", "gt-work1"); err != nil || changed {
+		t.Fatalf("ClearSubmission for another bead = %v, %v; want false, nil", changed, err)
+	}
 }

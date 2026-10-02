@@ -2481,11 +2481,22 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// gt done recorded desired=submitted: the branch is on origin for the
 	// landing worker and the session ended on purpose. The hook still holds
 	// the bead until it lands, which would read as a crash (gt-obbx2).
+	//
+	// The record is a wait, and the wait is real only while the bead it names
+	// still reads as submitted. gt done writes the label before the record,
+	// so a bead that no longer carries it was pulled after the submission —
+	// for rework, or by a human — and only the record outlived it. That seat
+	// has to fall through to the ordinary path, or nothing ever restarts it
+	// (gt-xs1ni). An unreadable bead keeps the skip: a failed read proves
+	// nothing, and falling through on it would call a landing still in flight
+	// a crash.
 	if rec.Submitted() {
-		skipped = true
-		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s is submitted for landing",
-			rigName, polecatName, rec.WorkBead)
-		return
+		if still, known := d.workBeadStillSubmitted(rigName, rec.WorkBead); !known || still {
+			skipped = true
+			d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s is submitted for landing",
+				rigName, polecatName, rec.WorkBead)
+			return
+		}
 	}
 
 	// Build the expected tmux session name
@@ -2680,6 +2691,26 @@ func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 		return true, false
 	}
 	return false, slices.Contains(issue.Labels, land.LabelReadyToLand)
+}
+
+// workBeadStillSubmitted reports whether the work bead a submitted record names is
+// still submitted for landing (gt:ready-to-land, not terminal), and whether
+// that could be answered at all. A bead bd says does not exist is an answer —
+// it cannot be waiting to land — but an empty ID or a failed read is not:
+// known=false, which every caller must read as "leave the seat alone". The
+// record is the wait, and a read that failed is no evidence it ended.
+func (d *Daemon) workBeadStillSubmitted(rigName, beadID string) (still, known bool) {
+	if beadID == "" {
+		return false, false
+	}
+	issue, err := d.workBeads(d.workBeadsEnv(rigName), 0).Show(beadID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, true
+	}
+	if err != nil {
+		return false, false
+	}
+	return polecat.IsSubmittedWork(issue), true
 }
 
 // assignedWork lists assignee's work beads in status from rigName's database.

@@ -5,7 +5,9 @@
 //   - restart: a polecat whose session is confirmed dead while it holds
 //     unfinished, unheld work is restarted through the supervisor, which
 //     enforces the park/freeze, e-stop, submitted and 3-per-hour budget
-//     guards in one place;
+//     guards in one place. A submitted seat is restarted once its work bead
+//     stops reading as submitted, which is how a landing pulled for rework
+//     comes back to a session it no longer has (gt-xs1ni);
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
@@ -74,6 +76,23 @@ type Work struct {
 	AttachedMolecule string
 }
 
+// IsSubmitted reports whether the bead is submitted for landing: it carries
+// gt:ready-to-land and is not finished. It is the rule the daemon's crash
+// detector and the polecat state readers each apply, named once here so the
+// tick cannot answer it differently — gt-xs1ni was the daemon and gt polecat
+// list disagreeing about the same seat.
+//
+// The terminal statuses repeat beads.IssueStatus.IsTerminal to keep this
+// package out of the beads dependency tree;
+// TestPatrolScanIsSubmittedMatchesPolecat pins the two to one answer.
+func (w Work) IsSubmitted() bool {
+	switch strings.TrimSpace(w.Status) {
+	case "closed", "tombstone":
+		return false
+	}
+	return w.HasLabel(ReadyToLandLabel)
+}
+
 // HasLabel reports whether the bead carries label (case-insensitive).
 func (w Work) HasLabel(label string) bool {
 	for _, l := range w.Labels {
@@ -104,6 +123,14 @@ type Env interface {
 	// AssignedWork returns the polecat's hooked or in_progress work bead, or
 	// nil when it has none.
 	AssignedWork(rig, polecat string) (*Work, error)
+	// WorkBead returns the work bead with the given ID, or nil when the bead
+	// is gone. It reads one bead a submitted seat's record names, to tell a
+	// real landing wait from a record its landing outlived (gt-xs1ni).
+	WorkBead(rig, id string) (*Work, error)
+	// ClearSubmission ends a submitted seat's wait whose work bead is no
+	// longer submitted for landing, so the ordinary path can decide what the
+	// seat needs. It reports whether the record changed.
+	ClearSubmission(rig, polecat, workBead string) (bool, error)
 	// AgentState returns the agent_state the polecat's agent bead records
 	// (stuck, awaiting-gate, paused, done, ...). It is read only to refuse a
 	// restart, never to cause one.
@@ -289,8 +316,8 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return f, true
 	}
 
-	// The intent record first: it never depends on Dolt, and a held or
-	// submitted seat needs no liveness sample to be left alone.
+	// The intent record first: it never depends on Dolt, and a held seat
+	// needs no liveness sample to be left alone.
 	rec, err := s.env.Intent(rig, name)
 	if err != nil {
 		return unknown("intent record unreadable", err)
@@ -299,7 +326,25 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return Finding{}, false // parked or frozen: the operator's, silently
 	}
 	if rec.Submitted() {
-		return Finding{}, false // gt done handed it to the landing worker
+		// The record is a wait for the landing worker, and the wait is real
+		// only while the bead it names is still submitted. gt done writes the
+		// label before the record, so a bead that no longer reads as
+		// submitted was pulled after the submission — for rework, or by a
+		// human — and only the record outlived it. End the wait and fall
+		// through to the ordinary dead-session path below: nothing else ever
+		// restarts the seat (gt-xs1ni). An unreadable bead is Unknown, never
+		// a fall-through — restarting on a failed read is the double-spawn
+		// gt-obbx2 closed.
+		waiting, err := s.submittedWait(rig, rec)
+		if err != nil {
+			return unknown("submitted work unreadable", err)
+		}
+		if waiting {
+			return Finding{}, false // gt done handed it to the landing worker
+		}
+		if _, err := s.env.ClearSubmission(rig, name, rec.WorkBead); err != nil {
+			return unknown("ending the stale submission", err)
+		}
 	}
 
 	res := s.env.Assess(rig, name)
@@ -350,7 +395,7 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	if strings.EqualFold(work.Status, "closed") {
 		return Finding{}, false
 	}
-	if work.HasLabel(ReadyToLandLabel) {
+	if work.IsSubmitted() {
 		return skip(work.ID + " is submitted for landing (" + ReadyToLandLabel + "); the landing worker owns it")
 	}
 	if s.o.HoldReason != nil {
@@ -406,6 +451,24 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	return f, true
 }
 
+// submittedWait reports whether a submitted seat's record still describes a
+// landing that is waiting: the bead the record names carries
+// gt:ready-to-land and has not closed. A record with no work_bead keeps the
+// wait — it was written before the field existed and names nothing to check.
+func (s *Scanner) submittedWait(rig string, rec intent.Record) (bool, error) {
+	if rec.WorkBead == "" {
+		return true, nil
+	}
+	work, err := s.env.WorkBead(rig, rec.WorkBead)
+	if err != nil {
+		return false, err
+	}
+	if work == nil {
+		return false, nil // the bead is gone: nothing is waiting to land
+	}
+	return work.IsSubmitted(), nil
+}
+
 // orphans scans from the beads side: work held by a polecat that no longer
 // exists. That polecat is invisible to the seat pass, which walks directories.
 func (s *Scanner) orphans(rig string, r *Report) {
@@ -432,7 +495,7 @@ func (s *Scanner) orphans(rig string, r *Report) {
 		if !gone {
 			continue
 		}
-		if w.HasLabel(ReadyToLandLabel) {
+		if w.IsSubmitted() {
 			continue // the landing worker owns it; a dead holder is expected
 		}
 		if f, ok := s.molecule(w, name); ok {
