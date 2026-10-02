@@ -437,8 +437,8 @@ func TestComputeExpected(t *testing.T) {
 	if len(expected.SessionStart) != 1 || expected.SessionStart[0].Hooks[0].Command != "gastown-crew-session" {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
-	// On-disk base has no PreToolUse, so DefaultBase's bare-Bash guard entry
-	// is backfilled. The crew override adds its own Bash(git*) entry.
+	// On-disk base has no PreToolUse, so DefaultBase's shellExecutingToolMatcher
+	// guard entry is backfilled. The crew override adds its own Bash(git*) entry.
 	defaultPTU := len(DefaultBase().PreToolUse)
 	if len(expected.PreToolUse) != defaultPTU+1 {
 		t.Errorf("expected %d PreToolUse (default %d + crew 1), got %d", defaultPTU+1, defaultPTU, len(expected.PreToolUse))
@@ -579,8 +579,8 @@ func TestComputeExpectedNoBase(t *testing.T) {
 
 	// The mayor has no PreToolUse override of its own: it must still carry
 	// the ungated base guards from DefaultBase. dangerous-command comes from
-	// DefaultBase, so an override that replaced rather than unioned its Bash
-	// entry would silently drop it (gt-8ki9).
+	// DefaultBase, so an override that replaced rather than unioned its
+	// shellExecutingToolMatcher entry would silently drop it (gt-8ki9).
 	mayor, err := home.computeExpected("mayor")
 	if err != nil {
 		t.Fatalf("home.computeExpected(mayor) failed: %v", err)
@@ -649,11 +649,12 @@ func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, co
 }
 
 // TestComputeExpectedPolecatsGetPolecatPathsGuard pins the gt-hmaf wiring: the
-// polecats role must receive the polecat-paths guard on both the Bash matcher
-// and the file-writing tool matcher, alongside — not instead of — the guards it
-// inherits from the base. A hooks-sync regression that dropped it, or a merge
-// change that let a same-matcher override replace the base entry, would remove
-// the only protection against one polecat editing another's worktree.
+// polecats role must receive the polecat-paths guard on both the
+// shellExecutingToolMatcher and the file-writing tool matcher, alongside — not
+// instead of — the guards it inherits from the base. A hooks-sync regression
+// that dropped it, or a merge change that let a same-matcher override replace
+// the base entry, would remove the only protection against one polecat editing
+// another's worktree.
 func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -665,12 +666,12 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 
 	const guardCommand = "tap guard polecat-paths"
-	bashEntry, ok := findPreToolUse(polecats, shellExecutingToolMatcher)
+	shellEntry, ok := findPreToolUse(polecats, shellExecutingToolMatcher)
 	if !ok {
-		t.Fatal("polecats missing the base bare \"Bash\" PreToolUse entry")
+		t.Fatalf("polecats missing the base %q PreToolUse entry", shellExecutingToolMatcher)
 	}
 	hasPolecatPaths := false
-	for _, h := range bashEntry.Hooks {
+	for _, h := range shellEntry.Hooks {
 		if strings.Contains(h.Command, guardCommand) {
 			hasPolecatPaths = true
 			if h.If != "" {
@@ -679,7 +680,7 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 		}
 	}
 	if !hasPolecatPaths {
-		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
+		t.Errorf("polecats shell entry missing %q, got: %+v", guardCommand, shellEntry.Hooks)
 	}
 	// The base's own guards share the bare shellExecutingToolMatcher matcher
 	// and must survive the union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command,
@@ -688,13 +689,13 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	requireUngatedGuardCommand(t, "gastown/polecats", polecats, "tap guard pr-workflow")
 	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite", "tap guard bd-close-invariant"} {
 		found := false
-		for _, h := range bashEntry.Hooks {
+		for _, h := range shellEntry.Hooks {
 			if strings.Contains(h.Command, want) {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("polecats Bash entry lost the inherited %q guard, got: %+v", want, bashEntry.Hooks)
+			t.Errorf("polecats shell entry lost the inherited %q guard, got: %+v", want, shellEntry.Hooks)
 		}
 	}
 
