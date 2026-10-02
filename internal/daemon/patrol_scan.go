@@ -399,6 +399,14 @@ func (h *patrolScanHost) MarkIdle(rig, name string) (bool, error) {
 	return intent.MarkIdle(h.town(), supervisor.IntentSeat(h.seat(rig, name)), patrolscan.Actor, h.d.clk().Now())
 }
 
+// MarkSubmitted brings a seat's record up to the gt:ready-to-land label its
+// work bead carries, for a gt done whose record write was lost: the seat is
+// mid-landing, and a record that still says run reports it dead for the whole
+// of the landing (gt-2z8k1).
+func (h *patrolScanHost) MarkSubmitted(rig, name, workBead string) error {
+	return intent.MarkSubmitted(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
+}
+
 func (h *patrolScanHost) ActiveWork(rig string) ([]patrolscan.Work, error) {
 	issues, err := h.listByStatus(rig, "", "hooked", "in_progress")
 	if err != nil {

@@ -116,6 +116,10 @@ type Env interface {
 	// and it holds no work, so nothing needs it running. It reports whether
 	// the record changed.
 	MarkIdle(rig, polecat string) (bool, error)
+	// MarkSubmitted records the seat's work bead as submitted for landing, so
+	// a seat the tick found mid-landing is read from its record on later
+	// ticks rather than from liveness.
+	MarkSubmitted(rig, polecat, workBead string) error
 
 	// ActiveWork lists hooked and in_progress beads assigned to polecats of
 	// the rig (assignee "<rig>/polecats/<name>").
@@ -351,6 +355,17 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return Finding{}, false
 	}
 	if work.HasLabel(ReadyToLandLabel) {
+		// gt done writes this label before the record, and that record write is
+		// best-effort: a seat whose write was lost still holds the label while
+		// the record says run. The label is the authoritative half, so the
+		// record is brought up to it. MarkSubmitted also drops the dead sample
+		// Assess has just taken, which is what townhealth reads to report a
+		// mid-landing seat dead (gt-2z8k1), and later ticks take the record
+		// check above before Dolt is read at all.
+		if err := s.env.MarkSubmitted(rig, name, work.ID); err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, "recording "+work.ID+" as submitted: "+err.Error()
+			return f, true
+		}
 		return skip(work.ID + " is submitted for landing (" + ReadyToLandLabel + "); the landing worker owns it")
 	}
 	if s.o.HoldReason != nil {

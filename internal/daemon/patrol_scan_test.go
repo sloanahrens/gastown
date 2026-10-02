@@ -4,11 +4,14 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -99,6 +102,55 @@ func TestRestartPolecatDeclinedOutsidePatrolScan(t *testing.T) {
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"beads"}}}}
 	if d.patrolScanActiveForRig("gastown") || !d.patrolScanActiveForRig("beads") {
 		t.Fatal("rigs list not honoured")
+	}
+}
+
+// gt done writes gt:ready-to-land before the intent record, and the record
+// write is best-effort: a seat whose write was lost reads as run for the whole
+// of the landing, and townhealth reports it dead on the samples the scan
+// records while it is mid-landing (gt-2z8k1). Bringing the record up to the
+// label ends both.
+func TestMarkSubmittedBringsTheRecordUpToTheLabel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	const name = "ruby"
+	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	iseat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: name}
+	writeJSONFile(t, iseat.Path(town), intent.Record{
+		Progress: &intent.Progress{SampledAt: time.Now().Add(-time.Minute), DeadSamples: 3},
+	})
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: town}}
+	src := &healthSources{d: d, evidence: time.Hour, now: time.Now()}
+	before, err := src.Seats()
+	if err != nil {
+		t.Fatalf("Seats: %v", err)
+	}
+	if len(before) != 1 || before[0].DeadSamples != 3 {
+		t.Fatalf("before = %+v, want the mid-landing seat reported dead", before)
+	}
+
+	if err := (&patrolScanHost{d: d}).MarkSubmitted("gastown", name, "gt-ruby"); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+	rec, err := intent.Read(town, iseat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Submitted() || rec.WorkBead != "gt-ruby" {
+		t.Fatalf("record = %+v, want submitted for gt-ruby", rec)
+	}
+	if rec.Progress != nil {
+		t.Fatalf("progress = %+v, want dropped with the submission", rec.Progress)
+	}
+	after, err := src.Seats()
+	if err != nil {
+		t.Fatalf("Seats: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("after = %+v, want the submitted seat dropped", after)
 	}
 }
 
