@@ -240,7 +240,11 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if w.draining() {
 			return rep
 		}
-		if issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() || !beads.HasLabel(issue, land.LabelReadyToLand) {
+		// IsActionable, not IsTerminal: deferring a submitted bead is the
+		// operator's only hold on it (gt bead reset refuses a ready bead), so
+		// the worker must read the same park the health count reports, or a
+		// "0 pending" field sits over a queue that still lands (gt-y7n1u).
+		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
 			continue
 		}
 		if _, pending := w.pendingRepair[issue.ID]; pending {

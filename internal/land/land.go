@@ -269,7 +269,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	} else if repaired != nil {
 		return *repaired, nil
 	}
-	if beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+	// IsActionable, not IsTerminal: a defer applied while the gate ran parks
+	// the bead under a worker that has already read it (gt-y7n1u).
+	if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
 		return Result{}, fmt.Errorf("%w: %s is %s", ErrNotReady, w.BeadID, issue.Status)
 	}
 	if !beads.HasLabel(issue, LabelReadyToLand) {

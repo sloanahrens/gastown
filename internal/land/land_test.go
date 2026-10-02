@@ -565,6 +565,21 @@ func TestLandNotReadyWritesNothing(t *testing.T) {
 	}
 }
 
+// TestLandRefusesAParkedBead is the defer that arrives while the gate ran: the
+// worker read the bead before the park and lands nothing it can no longer see
+// (gt-y7n1u).
+func TestLandRefusesAParkedBead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "deferred", Type: "task", Assignee: "gastown/polecats/opal",
+		Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
+	_, err := f.lander().Land(context.Background(), f.work)
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Land error = %v, want ErrNotReady", err)
+	}
+	f.assertUntouched(t)
+}
+
 func TestLandGateInfraErrorIsNotARejection(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)

@@ -573,6 +573,29 @@ func TestPassSkipsClosedAndUnlabeled(t *testing.T) {
 	}
 }
 
+// TestPassLeavesAParkedReadyBead covers the operator's hold on a submission:
+// deferring a ready bead parks it, and the worker must not land work the
+// health count already reports as 0 pending (gt-y7n1u).
+func TestPassLeavesAParkedReadyBead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	deferred := string(beads.StatusDeferred)
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{Status: &deferred}); err != nil {
+		t.Fatal(err)
+	}
+	rep := h.w.Pass(context.Background())
+	if len(h.lander.calls) != 0 {
+		t.Fatalf("landed a parked bead: %+v", h.lander.calls)
+	}
+	if len(h.comments(t, "gt-abc")) != 0 {
+		t.Errorf("comments %q; a parked bead is left alone, not annotated", h.comments(t, "gt-abc"))
+	}
+	if rep.Skipped != 0 {
+		t.Errorf("report %v; a parked bead is out of the queue, not skipped", rep)
+	}
+}
+
 func TestPassStopsWhenContextIsDone(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
