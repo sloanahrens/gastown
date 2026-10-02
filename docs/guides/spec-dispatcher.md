@@ -67,6 +67,22 @@ decides and reports without slinging, labeling or commenting.
 4. A clean spec takes the first free seat and is slung through the shared
    rig-dispatch path in-process, with no auto-convoy.
 
+## A red main defers to its revert
+
+A bead the red-main owner filed (label `red-main`) is held while that owner is
+undoing the breakage it was filed for. Otherwise the dispatcher spends a seat
+on the fix forward and the two race over the same package (gt-zkdwt).
+
+The owner records the revert it is building or has queued in the rig's red-main
+state file, `.runtime/red-main/<rig>.json`, under `revert` (`culprit`, and the
+revert bead once it is filed). While that is set, that rig's `red-main` beads
+are skipped and stay ready; every other bead in the rig still dispatches. The
+hold is per rig and per label, and it lifts — so the very next tick takes the
+bead again — when the revert lands, when it is rejected, or when the owner
+never filed one. A state that is missing, malformed or has no `revert` key is
+no revert at all: reading silence as a hold would keep a rig's red-main beads
+from a seat for good.
+
 ## Seats and budget
 
 A seat is one agent with its own cap. Every agent runs the claude CLI with the

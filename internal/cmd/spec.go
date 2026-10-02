@@ -41,6 +41,10 @@ import (
 // (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
 // town dispatches the same beads it did before the move.
 //
+// A rig whose red-main owner has a revert in flight holds that rig's red-main
+// beads out of the candidate set: a seat spent on the fix forward would race
+// the revert over the same package (gt-zkdwt).
+//
 // Seat accounting counts every live polecat session plus the in-flight seat
 // claims other slings hold, whoever slung them. The mayor's slings land in that
 // same count, so the ticker never pushes past a cap another path already filled
@@ -134,6 +138,13 @@ polecat_pool.shape_gate says what the verdict does:
   - refuse: refused beads get one line, one comment and the needs-shape label,
     and are never dispatched; a bead that needs planning gets the
     needs-planning label and is left for the planner (gt-4k3fj.7)
+
+Beads labeled red-main are held while the red-main owner is reverting the
+breakage they were filed for: the landing worker records a revert in flight in
+the rig's red-main state file (<town>/.runtime/red-main/<rig>.json), and that
+rig's red-main beads stay ready instead of racing the revert with a fix
+forward. The hold lifts when the revert lands or is rejected, so the next tick
+takes them again (gt-zkdwt).
 
 A clean candidate is slung onto the first free seat within the budget: the
 pool's overflow_agent (capped by max_overflow), then the pro seat (pro_agent,
@@ -296,7 +307,11 @@ type specDispatchEnv struct {
 	Candidates func() ([]specCandidate, []string)
 	Show       func(beadID string) (specdispatch.Spec, error)
 	RigHold    func(rig string) string
-	Roster     func() (specRoster, error)
+	// RevertInFlight is the revert the rig's red-main owner has building or
+	// queued, from the state the landing worker writes; nil is none. It holds
+	// that rig's red-main beads, never any other bead (gt-zkdwt).
+	RevertInFlight func(rig string) *specdispatch.Revert
+	Roster         func() (specRoster, error)
 	// Annotate adds text as a comment unless the bead already carries a
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
@@ -359,6 +374,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// The ready board is a snapshot; re-check the fresh bead.
 		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
+			continue
+		}
+		// A red-main bead is the fix forward for a breakage the owner is
+		// already undoing; a seat spent on it races the revert over the same
+		// package (gt-zkdwt). The hold lifts as soon as the revert lands, is
+		// rejected, or turns out never to have been filed.
+		if why := specdispatch.RedMainHold(full, env.RevertInFlight(c.Rig)); why != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
 			continue
 		}
 		shapeNote := ""
@@ -641,6 +664,9 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		Candidates: func() ([]specCandidate, []string) { return specCandidates(townRoot, maxPriority, specReadyBoard) },
 		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		RevertInFlight: func(rig string) *specdispatch.Revert {
+			return rigRevertInFlight(townRoot, rig)
+		},
 		Roster: func() (specRoster, error) {
 			sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
 			if err != nil {
@@ -699,6 +725,23 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  error      %s\n", e)
 	}
+}
+
+// rigRevertInFlight reads the revert a rig's red-main owner has building or
+// queued from the state file the landing worker keeps for that rig
+// (daemon.RedMainStatePath). A missing or unreadable file is no revert: the
+// owner writes the state only while a revert is in flight, so a read error
+// must not hold a rig's red-main beads out of the candidate set forever
+// (gt-zkdwt). A malformed state is the same silence, by specdispatch.ParseRevert.
+func rigRevertInFlight(townRoot, rig string) *specdispatch.Revert {
+	if rig == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(daemon.RedMainStatePath(townRoot, rig))
+	if err != nil {
+		return nil
+	}
+	return specdispatch.ParseRevert(raw)
 }
 
 // specBoard reads one rig's ready board. It is a parameter of specCandidates
