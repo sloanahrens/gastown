@@ -247,3 +247,126 @@ func TestDetectRevertedMergesStillCatchesARealRevertBesideBlankLines(t *testing.
 		t.Errorf("a stale branch: reverted %+v, relocated %+v; want the commit reverted", report.Reverted, report.Relocated)
 	}
 }
+
+// The gt-59p7e shape in miniature: two preload reads folded into one combined
+// call. preloadTwoReads is the file before main's first commit, preloadCollapsed
+// after it merged the wisps reads, preloadWithIssues after the purely additive
+// commit that added the issues read, and preloadCombined is a branch that
+// supersedes both reads with one call.
+const (
+	supersededPath = "internal/cmd/polecat.go"
+
+	preloadTwoReads = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	if err := b.ListLabeledWisps("gt:agent"); err != nil {
+		warnf(err)
+	}
+	if err := b.ListLabeledWisps("gt:merge-request"); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadCollapsed = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadWithIssues = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+
+	// The issues read, one more round trip.
+	if err := b.PreloadIssues([]string{"gt:agent", "gt:merge-request"}, workStatuses); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadCombined = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE read for both tables.
+	if err := b.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, workStatuses); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	// preloadEdited is the read dropped with no call written over it: the
+	// branch's own work sits beside the hole it left.
+	preloadEdited = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+	audit("seats")
+}
+`
+)
+
+// supersededPreloadTree builds those four blobs into an observation: main's tip
+// is the additive issues-read commit, and the candidate writes candidateBlob.
+func supersededPreloadTree(candidateBlob string) fakeRevertTree {
+	return fakeRevertTree{
+		blobs: map[string]string{
+			"twoReads": preloadTwoReads, "collapsed": preloadCollapsed,
+			"withIssues": preloadWithIssues, "combined": preloadCombined,
+			"edited": preloadEdited,
+		},
+		trees: map[string]map[string]string{
+			"base": {supersededPath: "withIssues"},
+			"main": {supersededPath: "withIssues"},
+			"tree": {supersededPath: candidateBlob},
+		},
+		changes: []CommitFileChange{
+			{Commit: "collapse the wisps reads", Path: supersededPath, OldBlob: "twoReads", NewBlob: "collapsed"},
+			{Commit: "add the issues read", Path: supersededPath, OldBlob: "collapsed", NewBlob: "withIssues"},
+		},
+	}
+}
+
+// A branch that SUPERSEDES a merged change is not undoing it. The read this
+// branch deletes was added on its own, so the change has nothing to restore and
+// nothing in the second containment weighed against the deletion — it was
+// refused for doing what its bead asked, merging the two reads into one call
+// (gt-gas9g).
+func TestDetectRevertedMergesReadsASupersedingEditAsNoRevert(t *testing.T) {
+	t.Parallel()
+	report, err := DetectRevertedMerges(supersededPreloadTree("combined"), "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("a branch that supersedes the added read with one combined call: reverted %+v, relocated %+v; want neither",
+			report.Reverted, report.Relocated)
+	}
+}
+
+// The other edge of that reading: the same tree dropping the added read and
+// writing an edit of its own is still undoing the change. Nothing covers the
+// deleted lines, so the removal is the whole of the addition and the
+// observation stands (gt-gas9g).
+func TestDetectRevertedMergesStillRefusesADeletedAdditionBesideAnEdit(t *testing.T) {
+	t.Parallel()
+	report, err := DetectRevertedMerges(supersededPreloadTree("edited"), "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 1 || len(report.Relocated) != 0 {
+		t.Errorf("a tree that drops the added read beside an edit of its own: reverted %+v, relocated %+v; want the commit reverted",
+			report.Reverted, report.Relocated)
+	}
+}
