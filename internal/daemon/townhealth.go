@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/exectax"
@@ -86,6 +87,7 @@ type healthSources struct {
 	execTax    func(ctx context.Context) (time.Duration, error)
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
+	dispatch   func() (townhealth.DispatchRecord, error)
 }
 
 // execTaxState is what a report said about the exec tax, for the transition
@@ -100,10 +102,40 @@ func execTaxState(r *townhealth.Report, th townhealth.Thresholds) exectax.State 
 func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *townhealth.Report) townhealth.Inputs {
 	s.now = now
 	return townhealth.Inputs{
-		Now: now, Thresholds: th, Prev: prev,
+		Now: now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
 		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
-		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s, Steward: s,
+		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s, Steward: s,
 	}
+}
+
+// daemonStarted is when this daemon process began, from the state file it
+// writes at startup. The dispatch field compares it to the health window to
+// tell a daemon too young to have ticked from one that has gone silent
+// (gt-xiw7o). A missing or unreadable state is an unknown start.
+func (s *healthSources) daemonStarted() time.Time {
+	if s.d == nil || s.d.config == nil {
+		return time.Time{}
+	}
+	st, err := LoadState(s.d.config.TownRoot)
+	if err != nil {
+		return time.Time{}
+	}
+	return st.StartedAt
+}
+
+// Dispatch answers townhealth's dispatcher field: the spec_dispatch patrol
+// switch, the operator hold that parks every automatic dispatcher, and the
+// ticks the ticker recorded (gt-xiw7o).
+func (s *healthSources) Dispatch() (townhealth.DispatchRecord, error) {
+	if s.dispatch != nil {
+		return s.dispatch()
+	}
+	rec := townhealth.DispatchRecord{Active: s.d.isPatrolActive("spec_dispatch")}
+	if s.d.config != nil {
+		rec.Hold = dispatch.OperatorHold(s.d.config.TownRoot)
+	}
+	rec.Ticks = s.d.dispatchTickRecords()
+	return rec, nil
 }
 
 func (s *healthSources) townRoot() string { return s.d.config.TownRoot }

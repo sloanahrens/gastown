@@ -16,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -97,7 +98,7 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 	t.Helper()
 	town := t.TempDir()
 	writeJSONFile(t, filepath.Join(town, "mayor", "rigs.json"), map[string]any{"version": 1, "rigs": map[string]any{"gastown": map[string]any{}}})
-	writeJSONFile(t, StateFile(town), State{LastHeartbeat: now.Add(-3 * time.Minute), HeartbeatCount: 12})
+	writeJSONFile(t, StateFile(town), State{StartedAt: now.Add(-3 * time.Hour), LastHeartbeat: now.Add(-3 * time.Minute), HeartbeatCount: 12})
 	for _, p := range []string{"mayor_dispatch", "git_hygiene", "events_prune"} {
 		if err := savePatrolLastRun(town, p, now.Add(-50*time.Minute)); err != nil {
 			t.Fatal(err)
@@ -316,6 +317,128 @@ func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
 	if got := logs.String(); !strings.Contains(got, "clear") {
 		t.Errorf("the transition back to clear logged %q, want the clear line", got)
 	}
+}
+
+// The dispatch field reads the daemon's own records — the spec_dispatch
+// patrol switch, the operator hold file, and the tick decisions the ticker
+// recorded — so an operator learns from gt status --line that nothing is
+// filling the free seats (gt-xiw7o).
+func TestWriteTownHealth_DispatchField(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, d *Daemon)
+		tag     townhealth.Tag
+		verdict townhealth.Verdict
+		value   string
+		line    string
+	}{
+		{
+			"spec_dispatch turned off",
+			func(t *testing.T, d *Daemon) {
+				d.patrolConfig.Patrols.SpecDispatch = &SpecDispatchConfig{Enabled: false}
+			},
+			townhealth.Recorded, townhealth.Red, "off", "dispatch=off[R]",
+		},
+		{
+			"operator hold",
+			func(t *testing.T, d *Daemon) {
+				if err := os.WriteFile(dispatch.HoldFilePath(d.config.TownRoot), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			townhealth.Recorded, townhealth.Green, "held", "",
+		},
+		{
+			"stalled with work waiting and a free seat",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 1/2", "candidates": 3, "dispatched": null}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Recorded, townhealth.Red, "stalled", "dispatch=stalled[R]",
+		},
+		{
+			"no candidates",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 0/2", "candidates": 0, "dispatched": null}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Recorded, townhealth.Green, "idle", "",
+		},
+		{
+			"every seat at its cap",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 2/2", "candidates": 3, "dispatched": null}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Recorded, townhealth.Green, "full", "",
+		},
+		{
+			"a dispatch in the window",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 1/2", "candidates": 3, "dispatched": [{"line": "gt-a"}]}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Recorded, townhealth.Green, "ok", "",
+		},
+		{
+			"a tick that refused its candidates is not a stall",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 1/2", "candidates": 3, "dispatched": null, "refused": [{"line": "gt-a"}]}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Recorded, townhealth.Green, "ok", "",
+		},
+		{
+			"a daemon that has not ticked since it started is silent",
+			nil,
+			townhealth.Recorded, townhealth.Red, "silent", "dispatch=silent[R]",
+		},
+		{
+			"a roster the daemon cannot read is unknown, never a full town",
+			func(t *testing.T, d *Daemon) {
+				d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet x/2", "candidates": 3, "dispatched": null}`), now.Add(-2*time.Minute))
+			},
+			townhealth.Unknown, townhealth.VerdictUnknown, "?", "dispatch[?]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := healthTown(t, now)
+			if tc.setup != nil {
+				tc.setup(t, d)
+			}
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTag := tc.tag
+			if wantTag == "" {
+				wantTag = townhealth.Recorded
+			}
+			got := healthField(t, r, "dispatch")
+			if got.Verdict != tc.verdict || got.Value != tc.value || got.Tag != wantTag {
+				t.Errorf("dispatch = %+v, want %s %q %s", got, tc.verdict, tc.value, wantTag)
+			}
+			line := townhealth.Line(r, now, townhealth.DefaultStaleAfter)
+			if tc.line == "" {
+				if strings.Contains(line, "dispatch") {
+					t.Errorf("line = %q, want no dispatch token for a working dispatcher", line)
+				}
+				return
+			}
+			if !strings.Contains(line, tc.line) {
+				t.Errorf("line = %q, want it to carry %q", line, tc.line)
+			}
+		})
+	}
+}
+
+// tickReport parses one tick's JSON the way the ticker's output is read.
+func tickReport(t *testing.T, json string) specDispatchTickReport {
+	t.Helper()
+	r, err := parseSpecDispatchReport([]byte(json))
+	if err != nil {
+		t.Fatalf("parse %s: %v", json, err)
+	}
+	return r
 }
 
 // The second report checks the heartbeat count against the first: the

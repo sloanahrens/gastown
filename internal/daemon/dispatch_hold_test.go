@@ -178,6 +178,61 @@ func TestDispatchQueuedWork_OperatorHold_SkipsDispatchAndLogsOnce(t *testing.T) 
 	}
 }
 
+// The hold-lifted line names the dispatchers that came back and whether each
+// is on, so the operator reading daemon.log learns what resumed without a
+// second lookup (gt-xiw7o).
+func TestDispatchQueuedWork_HoldLiftedLineNamesTheDispatchers(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		spec    bool
+		feeding bool
+		want    string
+	}{
+		{"both on", true, true, "(spec_dispatch on, convoy feed on)"},
+		{"spec_dispatch on, feeder stopped", true, false, "(spec_dispatch on, convoy feed off)"},
+		{"both off", false, false, "(spec_dispatch off, convoy feed off)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			writeOperatorHold(t, townRoot)
+			logger, lines := lineLogger()
+			feed := NewConvoyManager(townRoot, logger.Printf, nil, 0, nil, nil, nil)
+			// A running feeder without its goroutines: FeedActive reads the
+			// state Start sets, not the work the goroutines do.
+			feed.started.Store(tc.feeding)
+			d := &Daemon{
+				config: &Config{TownRoot: townRoot},
+				logger: logger,
+				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+					SpecDispatch: &SpecDispatchConfig{Enabled: tc.spec},
+				}},
+				schedulerDeps: schedulerDepsForTest(),
+				convoyManager: feed,
+			}
+
+			d.dispatchQueuedWork() // logs the hold once
+			if err := os.Remove(filepath.Join(townRoot, "seat-refill.hold")); err != nil {
+				t.Fatal(err)
+			}
+			// A malformed scheduler state file stops the pass inside planning,
+			// before it reads any store: this is the unit tier.
+			if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, ".runtime", "scheduler-state.json"), []byte("{not json"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			d.dispatchQueuedWork()
+
+			want := "Resuming scheduler dispatch: operator dispatch hold lifted " + tc.want
+			if n := countContaining(lines(), want); n != 1 {
+				t.Errorf("hold lift logged %q %d times, want once; log: %v", want, n, lines())
+			}
+		})
+	}
+}
+
 // schedulerDepsForTest is a scheduler deps set that dispatches nothing: the
 // tests that drive the heartbeat tick care about the gate, not the sling.
 func schedulerDepsForTest() schedulerrun.Deps {

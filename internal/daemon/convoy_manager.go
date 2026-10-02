@@ -396,6 +396,12 @@ func (m *ConvoyManager) Start() error {
 	return nil
 }
 
+// FeedActive reports whether the stranded-convoy feeder is running, which is
+// what the daemon's hold-lifted line calls "convoy feed on" (gt-xiw7o).
+func (m *ConvoyManager) FeedActive() bool {
+	return m != nil && m.started.Load()
+}
+
 // Stop gracefully stops the convoy manager and closes any beads stores it owns.
 func (m *ConvoyManager) Stop() {
 	m.cancel()
