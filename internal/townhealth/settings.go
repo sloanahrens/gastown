@@ -48,6 +48,44 @@ type Settings struct {
 	StewardMinJobs      int     `json:"steward_min_jobs,omitempty"`
 }
 
+// DefaultSettings is the operator config block gt config migrate writes
+// (gt-s3rec.8): the compiled defaults as explicit values, so every threshold
+// lives in settings/config.json and an operator can tune it without editing
+// code. Resolving it returns DefaultThresholds and DefaultStaleAfter, so it
+// is the canonical serialization of the defaults, not a second copy of them.
+// NotifyCommand is deliberately empty: no default may page a command nobody
+// chose.
+func DefaultSettings() *Settings {
+	th, stale := DefaultThresholds(), DefaultStaleAfter
+	return &Settings{
+		StaleAfter:          stale.String(),
+		DoltSamples:         th.DoltSamples,
+		DoltLatencyDegraded: th.DoltLatency.Degraded.String(),
+		DoltLatencyRed:      th.DoltLatency.Red.String(),
+		ExecTaxDegraded:     th.ExecTax.Degraded.String(),
+		ExecTaxRed:          th.ExecTax.Red.String(),
+		HeartbeatDegraded:   th.Heartbeat.Degraded.String(),
+		HeartbeatRed:        th.Heartbeat.Red.String(),
+		TickDegradedFactor:  th.TickDegradedFactor,
+		TickRedFactor:       th.TickRedFactor,
+		LandingDegraded:     th.Landing.Degraded.String(),
+		LandingRed:          th.Landing.Red.String(),
+		EscalationDegraded:  th.Escalation.Degraded.String(),
+		EscalationRed:       th.Escalation.Red.String(),
+		SlotHolderDegraded:  th.SlotHolder.Degraded.String(),
+		SlotHolderRed:       th.SlotHolder.Red.String(),
+		BackupDegraded:      th.Backup.Degraded.String(),
+		BackupRed:           th.Backup.Red.String(),
+		NeedsHumanDegraded:  th.NeedsHuman.Degraded.String(),
+		NeedsHumanRed:       th.NeedsHuman.Red.String(),
+		SeatStallDegraded:   th.SeatStall.Degraded.String(),
+		SeatStallRed:        th.SeatStall.Red.String(),
+		SeatEvidence:        th.SeatEvidence.String(),
+		StewardErrorRate:    th.StewardErrorRate,
+		StewardMinJobs:      th.StewardMinJobs,
+	}
+}
+
 // Resolve returns the thresholds and stale age s sets over the compiled
 // defaults. A nil Settings is all defaults. A value that does not parse, or
 // is negative, is an error naming its key: a broken threshold never
