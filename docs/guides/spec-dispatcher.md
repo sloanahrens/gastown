@@ -1,26 +1,42 @@
 # Spec dispatcher
 
 The spec dispatcher (gt-4k3fj.5) turns a spec bead into a running polecat
-without an operator or mayor in the loop. A spec is a bead written against the
-D10 template (`~/.claude/docs/agents/spec-template.md`), usually by
+without an operator or mayor in the loop. A spec is a work bead written against
+the D10 template (`~/.claude/docs/agents/spec-template.md`), usually by
 `/workorder`.
+
+## Shape is a property of every work bead
+
+The lint checks shape, not bookkeeping (gt-mmsr2). It reads the five `## `
+sections and the acceptance list of a task, bug or feature the same way; a
+bead's type and labels do not decide whether it is checked.
+
+The label `spec` is **retired: accepted and ignored** (gt-mmsr2). Leave it off
+new beads; a filer who adds it by habit changes nothing. The spec-template doc
+(`~/.claude/docs/agents/spec-template.md`) and `gt spec lint --help` say the
+same.
 
 ## `gt spec lint <id>`
 
-Checks one bead the way the dispatcher does before it allocates a seat, and
-prints one line.
+Checks one work bead the way the dispatcher does before it allocates a seat,
+and prints one line naming the first failure. `--json` prints
+`{id, ok, needs_planning, refusals[]}` instead, listing **every** shape failure
+in check order, so a shell caller can act on all of them at once.
 
 | Check | Refusal names |
 |---|---|
-| type `feature` | `type` |
-| label `spec` | `label spec` |
+| the bead is work, not an epic, an agent bead, a wisp or another runtime family | `not a work bead` |
 | every `## ` section in the template, present and non-empty (Goal, Constraints, Out of scope, Gate, Size) | `## <section>` |
-| at least one acceptance item (3-6 preferred) | `acceptance` |
+| 1-6 acceptance items (3-6 preferred) | `acceptance` |
 | Size says one worker, one MR | `size` |
+
+A non-work bead is refused before any shape is read: no sections are required
+of an epic, and the reason names what the bead is (`type epic`, `label
+gt:agent`, `type wisp`).
 
 Exit 0 means clean. Exit 1 means refused. Exit 2 means the spec needs planning:
 label `needs-planning`, a Size that says planning, or more than six
-acceptance items.
+acceptance items. `--json` does not change the exit codes.
 
 The template path is daemon.json `patrols.spec_dispatch.template`, else the
 file above, else the five sections built in. `/workorder` runs `gt spec lint <id>` after filing when
@@ -32,8 +48,10 @@ One tick. The daemon runs it with `--json` when the ticker is on; `--dry-run`
 decides and reports without slinging, labeling or commenting.
 
 1. The operator hold file (`<town>/seat-refill.hold`) or ESTOP stops the tick.
-2. Candidates are ready, open, unassigned beads with label `spec` and type
-   `feature` in every rig that is not parked or docked. Beads labeled
+2. Candidates are ready, open, unassigned work beads in every rig that is not
+   parked or docked. Epics, agent beads, wisps and the other runtime families
+   are never candidates, and the retired label `spec` and type `feature` are
+   not required — the candidate filter does not read them (gt-mmsr2). Beads labeled
    `gt:ready-to-land`, `needs-human`, `needs-mayor-review` or
    `spec-dispatch-failed`, or deferred, are skipped. Order is priority, then
    created_at, then id.

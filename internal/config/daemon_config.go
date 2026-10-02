@@ -347,8 +347,9 @@ type PatrolScanConfig struct {
 }
 
 // SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
-// ready, unassigned, spec-labeled feature bead that passes the spec lint is
-// slung onto a polecat seat within the seat budget. Off unless enabled.
+// ready, unassigned work bead that passes the spec lint is slung onto a
+// polecat seat within the seat budget. The retired label spec and type feature
+// are accepted and ignored (gt-mmsr2). Off unless enabled.
 type SpecDispatchConfig struct {
 	// Enabled turns the ticker on. Default off.
 	Enabled bool `json:"enabled"`

@@ -23,8 +23,10 @@ func ExcludedLabels() []string { return append([]string(nil), excludedLabels...)
 
 // Eligible reports whether a ready bead is the dispatcher's to consider, and
 // why not when it is not. It is the candidate filter: status open, unassigned,
-// label spec, type feature, and none of the excluded labels or a deferred
-// status. The lint itself runs later, on the full bead.
+// a work bead (not an epic, not a runtime family), and none of the excluded
+// labels or a deferred status. The label spec and type feature are retired and
+// accepted-but-ignored (gt-mmsr2), so neither gates a candidate. The shape
+// lint runs later, on the full bead.
 func Eligible(s Spec) (bool, string) {
 	status := strings.ToLower(strings.TrimSpace(s.Status))
 	switch {
@@ -34,10 +36,9 @@ func Eligible(s Spec) (bool, string) {
 		return false, "status " + status
 	case strings.TrimSpace(s.Assignee) != "":
 		return false, "assigned to " + s.Assignee
-	case !s.HasLabel(SpecLabel):
-		return false, "no spec label"
-	case !strings.EqualFold(strings.TrimSpace(s.Type), SpecType):
-		return false, "type " + s.Type
+	}
+	if why := NotWorkBead(s); why != "" {
+		return false, "not a work bead: " + why
 	}
 	for _, l := range excludedLabels {
 		if s.HasLabel(l) {
