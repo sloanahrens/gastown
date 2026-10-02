@@ -1050,7 +1050,8 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	removed := 0
 	var removedNames []string
-	for _, o := range orphans {
+	var failedNames []string
+	for i, o := range orphans {
 		if err := doltserver.RemoveDatabase(townRoot, o.Name, doltCleanupForce); err != nil {
 			// If DROP caused read-only, stop immediately and recover (gt-r1cyd)
 			if doltserver.IsReadOnlyError(err.Error()) {
@@ -1061,9 +1062,16 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 				} else {
 					fmt.Printf("  %s Server recovered from read-only state\n", style.Bold.Render("✓"))
 				}
+				// Stopping here leaves this orphan and every orphan after it in
+				// place; they are failures, not omissions (gt-tfsp6).
+				failedNames = append(failedNames, o.Name)
+				for _, rest := range orphans[i+1:] {
+					failedNames = append(failedNames, rest.Name)
+				}
 				break
 			}
 			fmt.Printf("  %s Failed to remove %s: %v\n", style.Bold.Render("✗"), o.Name, err)
+			failedNames = append(failedNames, o.Name)
 			continue
 		}
 		fmt.Printf("  %s Removed %s\n", style.Bold.Render("✓"), o.Name)
@@ -1080,14 +1088,24 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 			if recoverErr := doltserver.RecoverReadOnly(townRoot); recoverErr != nil {
 				fmt.Printf("  %s Recovery failed: %v\n", style.Bold.Render("✗"), recoverErr)
 				fmt.Printf("  Run: gt dolt stop && gt dolt start\n")
+				for _, rest := range orphans[i+1:] {
+					failedNames = append(failedNames, rest.Name)
+				}
 				break
 			}
 			fmt.Printf("  %s Server recovered — continuing cleanup\n", style.Bold.Render("✓"))
 		}
 	}
 
-	fmt.Printf("\n%s Removed %d/%d orphaned database(s)\n",
-		style.Bold.Render("✓"), removed, len(orphans))
+	// A pass that leaves orphans behind must not exit 0: scripts and agents
+	// gate on the exit code, so "Removed 0/1" reading as success hides the
+	// failure (gt-tfsp6).
+	cleanupErr := cleanupExitError(failedNames, len(orphans))
+	glyph := style.Bold.Render("✓")
+	if cleanupErr != nil {
+		glyph = style.Bold.Render("✗")
+	}
+	fmt.Printf("\n%s Removed %d/%d orphaned database(s)\n", glyph, removed, len(orphans))
 
 	// Record the forced removal on the authorizing bead (audit trail, gt-61x).
 	// Runs even when removed == 0 (a failed attempt is audit-worthy) and fails
@@ -1102,7 +1120,18 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return nil
+	return cleanupErr
+}
+
+// cleanupExitError is the cleanup pass's exit status: non-nil when any targeted
+// orphan was left in place, naming them. Callers gate on the exit code, so a
+// run that removed 0 of 1 orphans exiting 0 reads as success (gt-tfsp6).
+func cleanupExitError(failed []string, targeted int) error {
+	if len(failed) == 0 {
+		return nil
+	}
+	return fmt.Errorf("failed to remove %d of %d orphaned database(s): %s",
+		len(failed), targeted, strings.Join(failed, ", "))
 }
 
 // resolveDestructiveActor decides who is running a destructive cleanup.
