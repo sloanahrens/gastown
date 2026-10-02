@@ -46,6 +46,7 @@ type Settings struct {
 	SeatEvidence        string  `json:"seat_evidence,omitempty"`
 	StewardErrorRate    float64 `json:"steward_error_rate,omitempty"`
 	StewardMinJobs      int     `json:"steward_min_jobs,omitempty"`
+	DispatchWindow      string  `json:"dispatch_window,omitempty"`
 }
 
 // DefaultSettings is the operator config block gt config migrate writes
@@ -83,6 +84,7 @@ func DefaultSettings() *Settings {
 		SeatEvidence:        th.SeatEvidence.String(),
 		StewardErrorRate:    th.StewardErrorRate,
 		StewardMinJobs:      th.StewardMinJobs,
+		DispatchWindow:      th.DispatchWindow.String(),
 	}
 }
 
@@ -120,6 +122,7 @@ func (s *Settings) Resolve() (Thresholds, time.Duration, error) {
 		{"seat_stall_degraded", s.SeatStallDegraded, &th.SeatStall.Degraded},
 		{"seat_stall_red", s.SeatStallRed, &th.SeatStall.Red},
 		{"seat_evidence", s.SeatEvidence, &th.SeatEvidence},
+		{"dispatch_window", s.DispatchWindow, &th.DispatchWindow},
 	}
 	for _, d := range durations {
 		if d.val == "" {

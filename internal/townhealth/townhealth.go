@@ -91,6 +91,9 @@ const (
 	FieldConfig     = "config"
 	FieldNeedsHuman = "needs-human"
 	FieldSeat       = "seat"
+	// FieldDispatch is the automatic dispatcher: whether it is filling the
+	// town's free seats (gt-xiw7o).
+	FieldDispatch = "dispatch"
 )
 
 // Field is one health fact.
@@ -200,7 +203,17 @@ type Thresholds struct {
 	// before the share means anything.
 	StewardErrorRate float64
 	StewardMinJobs   int
+	// DispatchWindow is how far back the dispatcher's ticks are judged. It is
+	// longer than the dispatcher's own min_spawn_gap stagger, which legitimately
+	// skips a tick, so a dispatcher that is filling seats dispatches within it.
+	DispatchWindow time.Duration
 }
+
+// DefaultDispatchWindow is how far back the dispatcher's ticks are judged.
+// The dispatcher's min_spawn_gap (4m) legitimately skips a tick after a
+// spawn, and this is longer than that stagger, so a dispatcher that is
+// filling seats dispatches within the window (gt-xiw7o).
+const DefaultDispatchWindow = 10 * time.Minute
 
 // DefaultThresholds are the compiled defaults.
 func DefaultThresholds() Thresholds {
@@ -220,6 +233,7 @@ func DefaultThresholds() Thresholds {
 		SeatEvidence:       30 * time.Minute,
 		StewardErrorRate:   0.5,
 		StewardMinJobs:     3,
+		DispatchWindow:     DefaultDispatchWindow,
 	}
 }
 
@@ -344,6 +358,38 @@ type Seats interface {
 	Seats() ([]Seat, error)
 }
 
+// DispatchSeat is one seat of a dispatcher tick's roster: how many agents
+// were live on it and the cap it allows.
+type DispatchSeat struct {
+	Live int
+	Cap  int
+}
+
+// DispatchTick is one dispatcher tick's decision: what it saw and what it did.
+type DispatchTick struct {
+	At time.Time
+	// Candidates counts the ready beads the tick considered.
+	Candidates int
+	// Seats is the roster the tick decided against.
+	Seats []DispatchSeat
+	// Dispatched counts the beads the tick slung.
+	Dispatched int
+}
+
+// DispatchRecord is the automatic dispatcher as it stands: the patrol switch,
+// the operator's hold reason, and the ticks it has run recently, oldest
+// first.
+type DispatchRecord struct {
+	Active bool
+	Hold   string
+	Ticks  []DispatchTick
+}
+
+// Dispatcher reads the automatic dispatcher's state.
+type Dispatcher interface {
+	Dispatch() (DispatchRecord, error)
+}
+
 // Inputs are one computation's sources, clock, thresholds and previous
 // report.
 type Inputs struct {
@@ -365,6 +411,7 @@ type Inputs struct {
 	Config      Config
 	NeedsHuman  NeedsHuman
 	Seats       Seats
+	Dispatch    Dispatcher
 	// Steward is optional: nil is a town with no steward, and adds no field.
 	Steward Steward
 }
@@ -391,6 +438,7 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, mains(in)...)
 	r.Fields = append(r.Fields, config(in), needsHuman(ctx, in))
 	r.Fields = append(r.Fields, seats(in)...)
+	r.Fields = append(r.Fields, dispatch(in))
 	if f, c := steward(ctx, in); f != nil {
 		r.Fields = append(r.Fields, *f)
 		r.Steward = c
@@ -734,6 +782,76 @@ func seats(in Inputs) []Field {
 		}
 	}
 	return fs
+}
+
+// dispatch judges the automatic dispatcher. An operator hold is the pause the
+// operator asked for and reads green; a dispatcher the town runs with no hold
+// is red when the patrol is off, and red when it is stalled — every tick in
+// the window saw candidates waiting and a free seat and dispatched none. A
+// tick with no candidates, or a roster with every seat at its cap, is a town
+// with nothing to fill and reports nothing.
+//
+// No tick in the window is green: a daemon younger than the window has not
+// had the chance to dispatch yet, and reporting it red would fire on every
+// restart.
+func dispatch(in Inputs) Field {
+	if in.Dispatch == nil {
+		return unknown(FieldDispatch, "", "", errNotWired)
+	}
+	rec, err := in.Dispatch.Dispatch()
+	if err != nil {
+		return unknown(FieldDispatch, "", "", err)
+	}
+	if rec.Hold != "" {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "held", Detail: rec.Hold}
+	}
+	if !rec.Active {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off", Detail: "spec_dispatch is off"}
+	}
+	win := in.Thresholds.DispatchWindow
+	if win <= 0 {
+		win = DefaultDispatchWindow
+	}
+	since := in.Now.Add(-win)
+	var ticks []DispatchTick
+	for _, t := range rec.Ticks {
+		if !t.At.Before(since) {
+			ticks = append(ticks, t)
+		}
+	}
+	if len(ticks) == 0 {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "no ticks", Detail: "no tick in the last " + Short(win)}
+	}
+	stalled := true
+	for _, t := range ticks {
+		if t.Candidates == 0 || t.Dispatched > 0 || !freeDispatchSeat(t.Seats) {
+			stalled = false
+		}
+	}
+	if stalled {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "stalled",
+			Detail: fmt.Sprintf("%d tick(s) in %s with candidates waiting and a free seat, none dispatched", len(ticks), Short(win))}
+	}
+	last := ticks[len(ticks)-1]
+	switch {
+	case last.Candidates == 0:
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "idle", Detail: "no candidates"}
+	case !freeDispatchSeat(last.Seats):
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "full", Detail: "every seat at its cap"}
+	default:
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "ok"}
+	}
+}
+
+// freeDispatchSeat reports whether any seat of a roster has room under its
+// cap. A roster the tick could not report has none.
+func freeDispatchSeat(seats []DispatchSeat) bool {
+	for _, s := range seats {
+		if s.Live < s.Cap {
+			return true
+		}
+	}
+	return false
 }
 
 // Short renders a duration in its largest whole unit: 850ms, 42s, 7m, 3h,

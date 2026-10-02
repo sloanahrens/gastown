@@ -53,6 +53,9 @@ type fake struct {
 
 	seats    []Seat
 	seatsErr error
+
+	dispatch    DispatchRecord
+	dispatchErr error
 }
 
 func (f *fake) Ping(context.Context) (time.Duration, error) {
@@ -85,6 +88,7 @@ func (f *fake) NewestBackup() (time.Time, bool, error) { return f.backupAt, f.ba
 func (f *fake) Mains() ([]RigMain, error)              { return f.mains, f.mainsErr }
 func (f *fake) Validate() error                        { return f.configErr }
 func (f *fake) Seats() ([]Seat, error)                 { return f.seats, f.seatsErr }
+func (f *fake) Dispatch() (DispatchRecord, error)      { return f.dispatch, f.dispatchErr }
 func (f *fake) NeedsHuman(context.Context) (int, time.Time, error) {
 	return f.waiting, f.waitOldest, f.waitErr
 }
@@ -99,6 +103,9 @@ func healthy() *fake {
 		backupAt: ago(12 * time.Hour), backupOK: true,
 		mains: []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc"}},
 		seats: []Seat{{Rig: "gastown", Name: "polecat/opal", Run: true, Sampled: ago(time.Minute), Changed: ago(5 * time.Minute)}},
+		dispatch: DispatchRecord{Active: true, Ticks: []DispatchTick{
+			{At: ago(2 * time.Minute), Candidates: 2, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1},
+		}},
 	}
 }
 
@@ -106,7 +113,7 @@ func inputs(f *fake) Inputs {
 	return Inputs{
 		Now: now, Thresholds: DefaultThresholds(),
 		Dolt: f, ExecTax: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
-		Backups: f, Mains: f, Config: f, NeedsHuman: f, Seats: f,
+		Backups: f, Mains: f, Config: f, NeedsHuman: f, Seats: f, Dispatch: f,
 	}
 }
 
@@ -162,8 +169,8 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
-	if len(r.Fields) != 12 {
-		t.Errorf("got %d fields, want one per source (12)", len(r.Fields))
+	if len(r.Fields) != 13 {
+		t.Errorf("got %d fields, want one per source (13)", len(r.Fields))
 	}
 }
 
@@ -173,9 +180,9 @@ func TestFailedQueriesAreUnknown(t *testing.T) {
 	f := healthy()
 	f.hbErr, f.ticksErr, f.landingsErr, f.escErr, f.holdersErr = boom, boom, boom, boom, boom
 	f.backupErr, f.mainsErr, f.waitErr, f.seatsErr = boom, boom, boom, boom
-	f.execTaxErr = boom
+	f.execTaxErr, f.dispatchErr = boom, boom
 	r := Compute(context.Background(), inputs(f))
-	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "needs-human", "seat", "exec-tax"} {
+	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "needs-human", "seat", "exec-tax", "dispatch"} {
 		got := field(t, r, key)
 		if got.Tag != Unknown || got.Detail != boom.Error() {
 			t.Errorf("%s = %+v, want UNKNOWN carrying the error", key, got)
@@ -452,6 +459,71 @@ func TestSeats(t *testing.T) {
 		if fl.Subject == "polecat/parked" {
 			t.Errorf("parked seat listed: %+v", fl)
 		}
+	}
+}
+
+// seeded is a dispatcher tick that saw ready work, a free seat, and slung it.
+func seeded(at time.Time, dispatched int) DispatchTick {
+	return DispatchTick{At: at, Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: dispatched}
+}
+
+// The dispatch field is the operator's answer to "is anything filling the free
+// seats": a dispatcher the town runs with no hold is red when it is off and
+// red when every tick in the window had work and a seat and dispatched none,
+// and quiet when the hold is deliberate or the town has nothing to fill
+// (gt-xiw7o).
+func TestDispatch(t *testing.T) {
+	t.Parallel()
+	idle := DispatchTick{At: ago(2 * time.Minute), Candidates: 0, Seats: []DispatchSeat{{Live: 0, Cap: 2}}}
+	full := DispatchTick{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 2, Cap: 2}}}
+	for _, tc := range []struct {
+		name     string
+		rec      DispatchRecord
+		verdict  Verdict
+		value    string
+		detail   string
+		linePart string
+	}{
+		{"off", DispatchRecord{}, Red, "off", "spec_dispatch is off", "dispatch=off[R]"},
+		{
+			"stalled",
+			DispatchRecord{Active: true, Ticks: []DispatchTick{seeded(ago(6*time.Minute), 0), seeded(ago(2*time.Minute), 0)}},
+			Red, "stalled", "none dispatched", "dispatch=stalled[R]",
+		},
+		{
+			"held",
+			DispatchRecord{Hold: "operator dispatch hold present (/town/seat-refill.hold); remove it to resume"},
+			Green, "held", "operator dispatch hold present", "",
+		},
+		{"idle for want of candidates", DispatchRecord{Active: true, Ticks: []DispatchTick{idle}}, Green, "idle", "no candidates", ""},
+		{"full roster", DispatchRecord{Active: true, Ticks: []DispatchTick{full}}, Green, "full", "every seat at its cap", ""},
+		{"a dispatch in the window is not a stall", DispatchRecord{Active: true, Ticks: []DispatchTick{seeded(ago(6*time.Minute), 0), seeded(ago(2*time.Minute), 1)}}, Green, "ok", "", ""},
+		{"a tick with nothing to do is not a stall", DispatchRecord{Active: true, Ticks: []DispatchTick{seeded(ago(6*time.Minute), 0), idle}}, Green, "idle", "no candidates", ""},
+		{"a full roster is not a stall", DispatchRecord{Active: true, Ticks: []DispatchTick{seeded(ago(6*time.Minute), 0), full}}, Green, "full", "every seat at its cap", ""},
+		{"ticks older than the window are not judged", DispatchRecord{Active: true, Ticks: []DispatchTick{seeded(ago(11*time.Minute), 0)}}, Green, "no ticks", "no tick in the last 10m", ""},
+		{"a hold outranks a stalled dispatcher", DispatchRecord{Active: true, Hold: "town ESTOP active", Ticks: []DispatchTick{seeded(ago(2*time.Minute), 0)}}, Green, "held", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := healthy()
+			f.dispatch = tc.rec
+			r := Compute(context.Background(), inputs(f))
+			got := field(t, r, "dispatch")
+			if got.Verdict != tc.verdict || got.Value != tc.value || got.Tag != Recorded {
+				t.Errorf("dispatch = %+v, want %s %q RECORDED", got, tc.verdict, tc.value)
+			}
+			if !strings.Contains(got.Detail, tc.detail) {
+				t.Errorf("dispatch detail = %q, want it to carry %q", got.Detail, tc.detail)
+			}
+			if tc.linePart == "" {
+				if line := Line(r, now, DefaultStaleAfter); strings.Contains(line, "dispatch=") {
+					t.Errorf("the line reports an unremarkable dispatcher: %q", line)
+				}
+				return
+			}
+			if line := Line(r, now, DefaultStaleAfter); !strings.Contains(line, tc.linePart) {
+				t.Errorf("line = %q, want it to carry %q", line, tc.linePart)
+			}
+		})
 	}
 }
 

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // Spec dispatcher ticker (gt-4k3fj.5).
@@ -29,6 +32,11 @@ const (
 	// session, and a tick slings at most max_per_tick beads (default 1), so
 	// five minutes covers a slow Dolt without stranding the ticker.
 	specDispatchTimeout = 5 * time.Minute
+
+	// dispatchTickHistory bounds the tick records the daemon keeps for
+	// townhealth's dispatch field: two hours at the default 60s interval,
+	// far past the health window (gt-xiw7o).
+	dispatchTickHistory = 120
 )
 
 // specDispatchInterval returns the configured interval, or 60s.
@@ -92,9 +100,65 @@ func (d *Daemon) runSpecDispatch() {
 		d.logger.Printf("spec_dispatch: tick failed: %v", err)
 		return
 	}
+	// A held tick decided nothing, so it carries no roster to record.
+	if r, perr := parseSpecDispatchReport(out); perr == nil && r.Hold == "" {
+		d.recordDispatchTick(r, d.clk().Now())
+	}
 	for _, line := range formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)
 	}
+}
+
+// recordDispatchTick appends one tick's decision to the history townhealth's
+// dispatch field judges, keeping the newest dispatchTickHistory records
+// (gt-xiw7o). The history is in memory: a restart drops it, and the field
+// reports nothing until the ticker has run again.
+func (d *Daemon) recordDispatchTick(r specDispatchTickReport, at time.Time) {
+	t := townhealth.DispatchTick{
+		At:         at,
+		Candidates: r.Candidates,
+		Seats:      dispatchRosterSeats(r.Roster),
+		Dispatched: len(r.Dispatched),
+	}
+	d.dispatchTicksMu.Lock()
+	defer d.dispatchTicksMu.Unlock()
+	d.dispatchTicks = append(d.dispatchTicks, t)
+	if n := len(d.dispatchTicks); n > dispatchTickHistory {
+		d.dispatchTicks = append([]townhealth.DispatchTick(nil), d.dispatchTicks[n-dispatchTickHistory:]...)
+	}
+}
+
+// dispatchTickRecords copies the recorded ticks, oldest first.
+func (d *Daemon) dispatchTickRecords() []townhealth.DispatchTick {
+	d.dispatchTicksMu.Lock()
+	defer d.dispatchTicksMu.Unlock()
+	return append([]townhealth.DispatchTick(nil), d.dispatchTicks...)
+}
+
+// dispatchRosterSeats reads the seats out of a tick's roster, which
+// Budget.Picture renders as "agent live/cap, agent live/cap" and "no seats"
+// for none. A seat it cannot read is dropped: a roster nobody can parse
+// reports no free seat, which is the answer that does not cry stall.
+func dispatchRosterSeats(roster string) []townhealth.DispatchSeat {
+	var out []townhealth.DispatchSeat
+	for _, part := range strings.Split(roster, ",") {
+		part = strings.TrimSpace(part)
+		i := strings.LastIndexByte(part, ' ')
+		if i < 0 {
+			continue
+		}
+		live, cap, ok := strings.Cut(part[i+1:], "/")
+		if !ok {
+			continue
+		}
+		l, lerr := strconv.Atoi(live)
+		c, cerr := strconv.Atoi(cap)
+		if lerr != nil || cerr != nil {
+			continue
+		}
+		out = append(out, townhealth.DispatchSeat{Live: l, Cap: c})
+	}
+	return out
 }
 
 func (d *Daemon) runSpecDispatchCommand() ([]byte, error) {
@@ -113,16 +177,23 @@ func (d *Daemon) runSpecDispatchCommand() ([]byte, error) {
 	return stdout, nil
 }
 
-// formatSpecDispatchReport renders a tick's JSON as log lines. The sling path
-// prints progress to stdout before the JSON, so the report is read from the
-// last JSON object in the output.
-func formatSpecDispatchReport(out []byte) []string {
+// parseSpecDispatchReport reads a tick's report out of its output. The sling
+// path prints progress to stdout before the JSON, so the report is the last
+// JSON object in the output.
+func parseSpecDispatchReport(out []byte) (specDispatchTickReport, error) {
+	var r specDispatchTickReport
 	text := strings.TrimSpace(string(out))
 	if i := strings.LastIndex(text, "\n{"); i >= 0 {
 		text = text[i+1:]
 	}
-	var r specDispatchTickReport
-	if err := json.Unmarshal([]byte(text), &r); err != nil {
+	err := json.Unmarshal([]byte(text), &r)
+	return r, err
+}
+
+// formatSpecDispatchReport renders a tick's JSON as log lines.
+func formatSpecDispatchReport(out []byte) []string {
+	r, err := parseSpecDispatchReport(out)
+	if err != nil {
 		return []string{fmt.Sprintf("unparseable tick output (%v)", err)}
 	}
 	if r.Hold != "" {
