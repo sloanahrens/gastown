@@ -13,13 +13,8 @@ internal/beads/beads.go GT_BD_TIMEOUT_SEC 1
 internal/beads/beads.go GT_TEST_BD_TIMEOUT_SEC 1
 internal/beads/test_container.go GT_TEST_DOLT_INIT_CONCURRENCY 1
 internal/cmd/install.go GT_TEST_EXTERNAL_DOLT 1
-internal/cmd/sling_formula.go GT_TEST_NO_NUDGE 1
-internal/cmd/sling_helpers.go GT_TEST_ATTACHED_MOLECULE_LOG 1
-internal/cmd/sling_helpers.go GT_TEST_NO_NUDGE 1
-internal/cmd/sling_helpers.go GT_TEST_SKIP_HOOK_VERIFY 1
 internal/cmd/tap_guard_container_suite.go GT_TEST_DOCKER 1
 internal/cmd/tap_guard_dangerous.go GT_POLECAT_PATH 1
-internal/cmd/tap_guard_mol_patrol.go GT_MAYOR 1
 internal/cmd/tap_guard_polecat_paths.go GT_POLECAT_PATH 1
 internal/cmd/telemetry.go GT_TEST_HERMETIC 1
 internal/events/events.go GT_TEST_HERMETIC 1

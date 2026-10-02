@@ -188,6 +188,8 @@ exit /b 0
 	prevReviewOnly := slingReviewOnly
 	prevNoMerge := slingNoMerge
 	prevResolveTargetAgent := resolveTargetAgentFn
+	prevNudgePane := nudgePaneFn
+	prevHookVerify := hookVerifyFn
 	t.Cleanup(func() {
 		slingOnTarget = prevOn
 		slingVars = prevVars
@@ -197,6 +199,8 @@ exit /b 0
 		slingReviewOnly = prevReviewOnly
 		slingNoMerge = prevNoMerge
 		resolveTargetAgentFn = prevResolveTargetAgent
+		nudgePaneFn = prevNudgePane
+		hookVerifyFn = prevHookVerify
 	})
 
 	slingDryRun = false
@@ -213,9 +217,11 @@ exit /b 0
 		return "gastown/polecats/toast", "", filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"), nil
 	}
 
-	// Prevent real tmux nudge from firing during tests (causes agent self-interruption)
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1") // Stub bd doesn't track state
+	// Neither the real tmux nudge nor the post-hook read-back may run here:
+	// nudging would interrupt a live agent pane, and the stub bd below does
+	// not track hook state.
+	nudgePaneFn = func(_, _ string) error { return nil }
+	hookVerifyFn = func(string) func(beadID string) (*beadInfo, error) { return nil }
 	// Poison the ambient beads target: all mutating commands must override this
 	// with the route-resolved target rig database.
 	t.Setenv("BEADS_DIR", filepath.Join(townRoot, ".beads"))

@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 var tapGuardMolPatrolCmd = &cobra.Command{
@@ -33,27 +37,35 @@ func init() {
 }
 
 func runTapGuardMolPatrol(cmd *cobra.Command, args []string) error {
-	if !isGasTownAgentContext() {
+	return tapGuardMolPatrolIn(os.Getenv, os.Getwd, os.Stderr)
+}
+
+// tapGuardMolPatrolIn is runTapGuardMolPatrol reading the environment through
+// getenv, the working directory through getwd and the block notice written to
+// stderr. Mayor may patrol — it coordinates agents — and every other Gas Town
+// agent context is blocked.
+func tapGuardMolPatrolIn(getenv func(string) string, getwd func() (string, error), stderr io.Writer) error {
+	if !isGasTownAgentContextIn(getenv, getwd) {
 		return nil
 	}
 
-	// Allow Mayor to run patrol (it coordinates agents)
-	if os.Getenv("GT_MAYOR") != "" {
+	// Allow Mayor to run patrol (it coordinates agents).
+	if config.ExtractSimpleRole(getenv(EnvGTRole)) == constants.RoleMayor {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(os.Stderr, "║  ❌ MOL PATROL BLOCKED                                           ║")
-	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintln(os.Stderr, "║  Running 'gt mol patrol' from an agent can kill sibling agents  ║")
-	fmt.Fprintln(os.Stderr, "║  or even your own molecule.                                     ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  Only the Mayor or human operators should run mol patrol.       ║")
-	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  If you need to check molecule status, use:                     ║")
-	fmt.Fprintln(os.Stderr, "║    gt mol status    (safe, read-only)                           ║")
-	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(stderr, "")
+	fmt.Fprintln(stderr, "╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Fprintln(stderr, "║  ❌ MOL PATROL BLOCKED                                           ║")
+	fmt.Fprintln(stderr, "╠══════════════════════════════════════════════════════════════════╣")
+	fmt.Fprintln(stderr, "║  Running 'gt mol patrol' from an agent can kill sibling agents  ║")
+	fmt.Fprintln(stderr, "║  or even your own molecule.                                     ║")
+	fmt.Fprintln(stderr, "║                                                                  ║")
+	fmt.Fprintln(stderr, "║  Only the Mayor or human operators should run mol patrol.       ║")
+	fmt.Fprintln(stderr, "║                                                                  ║")
+	fmt.Fprintln(stderr, "║  If you need to check molecule status, use:                     ║")
+	fmt.Fprintln(stderr, "║    gt mol status    (safe, read-only)                           ║")
+	fmt.Fprintln(stderr, "╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Fprintln(stderr, "")
 	return NewSilentExit(2)
 }

@@ -444,11 +444,6 @@ func (r *slingRun) runFormula(ctx context.Context, args []string) (err error) {
 		return nil
 	}
 
-	// Skip nudge during tests to prevent agent self-interruption
-	if r.getenv("GT_TEST_NO_NUDGE") != "" {
-		return nil
-	}
-
 	prompt := formulaSlingPrompt(formulaName, r.opts.argsText)
 
 	if targetPane == "" {

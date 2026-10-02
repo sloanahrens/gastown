@@ -481,23 +481,13 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 }
 
 func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpdates) error {
-	logPath := os.Getenv("GT_TEST_ATTACHED_MOLECULE_LOG")
-
-	issue := &beads.Issue{}
-	if logPath == "" {
-		// Read the bead once
-		shown, err := showBead(townRoot, beadID)
-		if err != nil {
-			return fmt.Errorf("fetching bead: %w", err)
-		}
-		issue = shown
+	// Read the bead once, so the update is a single read-modify-write.
+	issue, err := showBead(townRoot, beadID)
+	if err != nil {
+		return fmt.Errorf("fetching bead: %w", err)
 	}
 
 	newDesc := applyBeadFieldUpdates(issue, updates)
-	if logPath != "" {
-		_ = os.WriteFile(logPath, []byte(newDesc), 0644)
-		return nil
-	}
 
 	updateDir := resolveBeadDir(beadID)
 	if townRoot != "" {
@@ -574,16 +564,18 @@ func applyBeadFieldUpdates(issue *beads.Issue, updates beadFieldUpdates) string 
 	return beads.SetAttachmentFields(issue, fields)
 }
 
+// nudgePaneFn delivers a "start now" nudge to a target pane. It is a seam:
+// tests replace it so a sling run inside the test process never types into a
+// live tmux pane.
+var nudgePaneFn = func(pane, message string) error {
+	return tmux.NewTmux().NudgePane(pane, message)
+}
+
 // injectStartPrompt sends a prompt to the target pane to start working.
 // Uses the reliable nudge pattern: literal mode + 500ms debounce + separate Enter.
 func injectStartPrompt(pane, beadID, subject, args string) error {
 	if pane == "" {
 		return fmt.Errorf("no target pane")
-	}
-
-	// Skip nudge during tests to prevent agent self-interruption
-	if os.Getenv("GT_TEST_NO_NUDGE") != "" {
-		return nil
 	}
 
 	// Build the prompt to inject
@@ -602,8 +594,7 @@ func injectStartPrompt(pane, beadID, subject, args string) error {
 	}
 
 	// Use the reliable nudge pattern (same as gt nudge / tmux.NudgeSession)
-	t := tmux.NewTmux()
-	return t.NudgePane(pane, prompt)
+	return nudgePaneFn(pane, prompt)
 }
 
 // getSessionFromPane extracts session name from a pane target.
@@ -1295,12 +1286,16 @@ func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
 	return hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, "")
 }
 
+// hookVerifyFn builds the read-back verifier hookBeadWithRetryWithTownRoot
+// confirms each landed hook write with. It is a seam: a test driving a stub bd,
+// which does not track hook state, replaces it with one returning nil so the
+// write is not read back.
+var hookVerifyFn = func(townRoot string) func(beadID string) (*beadInfo, error) {
+	return func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(townRoot, id) }
+}
+
 func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string) error {
-	verify := func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(townRoot, id) }
-	if os.Getenv("GT_TEST_SKIP_HOOK_VERIFY") != "" {
-		verify = nil
-	}
-	return slingStores{}.hookWithRetry(verify, beadID, targetAgent, hookDir)
+	return slingStores{}.hookWithRetry(hookVerifyFn(townRoot), beadID, targetAgent, hookDir)
 }
 
 // hookWithRetry is hookBeadWithRetryWithTownRoot with the hook written to
