@@ -946,3 +946,82 @@ func TestLandRejectionRecordFailuresAreObservable(t *testing.T) {
 		})
 	}
 }
+
+// redShellGate is a merged tree whose gate stages passed and whose shell step
+// failed, naming the scripts tier-sweep reported (gt-vsct7.8).
+func redShellGate(string) GateResult {
+	return GateResult{Steps: []StepResult{
+		{Name: "lint", Command: "make gate-lint"},
+		{Name: "gate", Command: "make gate-test"},
+		{Name: ShellStepName, Command: ShellStepCommand, ExitCode: 1,
+			ShellFailures: []string{"scripts/a_test.sh", "plugins/b_test.sh"},
+			Tail:          "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh\n"},
+	}}
+}
+
+// TestLandShellTierFailureRejectsAndNamesTheScripts: a red shell step rejects
+// the landing with the scripts the tier named, the flake policy reruns nothing
+// (the step named no Go package), and om never runs (gt-vsct7.8).
+func TestLandShellTierFailureRejectsAndNamesTheScripts(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = redShellGate
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran after a red shell step")
+		return Verdict{Verdict: VerdictApprove}, nil
+	}
+	reran := false
+	l := f.lander()
+	l.Rerun = func(context.Context, string, []string) GateResult {
+		reran = true
+		return GateResult{Passed: true}
+	}
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectGate, LabelRework)
+	if reran {
+		t.Error("the flake policy reran a step that named no Go package")
+	}
+	for _, want := range []string{"the shell tier failed:", "scripts/a_test.sh", "plugins/b_test.sh"} {
+		if !strings.Contains(rej.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", rej.Reason, want)
+		}
+	}
+}
+
+// TestLandShellTierTimeoutRejects: the shell step killed by its own timeout
+// takes the existing timeout path - a rejection naming the step, to a human,
+// with om never running (gt-vsct7.8).
+func TestLandShellTierTimeoutRejects(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{
+			{Name: "lint", Command: "make gate-lint"},
+			{Name: "gate", Command: "make gate-test"},
+			{Name: ShellStepName, Command: ShellStepCommand, ExitCode: -1, TimedOut: true, Timeout: 3 * time.Minute},
+		}}
+	}
+	f.review.fn = func(string) (Verdict, error) {
+		t.Error("om ran after a timed-out shell step")
+		return Verdict{Verdict: VerdictApprove}, nil
+	}
+	_, err := f.lander().Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectTimeout, LabelNeedsHuman)
+	if !strings.Contains(rej.Reason, ShellStepCommand) || !strings.Contains(rej.Reason, "3m0s") {
+		t.Errorf("reason = %q, want the shell step and its timeout named", rej.Reason)
+	}
+}
+
+// TestStageTimesReportsTheShellStep: a landing that ran the shell tier says
+// how long it took, beside the other stages (gt-vsct7.8).
+func TestStageTimesReportsTheShellStep(t *testing.T) {
+	t.Parallel()
+	got := stageTimes(GateResult{Steps: []StepResult{
+		{Name: "lint", Elapsed: 18 * time.Second},
+		{Name: "gate", Elapsed: 92 * time.Second},
+		{Name: ShellStepName, Elapsed: 12 * time.Second},
+	}}, 0)
+	if !strings.Contains(got, "shell 12s") {
+		t.Errorf("stageTimes = %q, want the shell step's wall time", got)
+	}
+}

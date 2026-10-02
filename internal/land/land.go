@@ -385,6 +385,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
 				tail = fv.rerun.FailureTail()
 			}
+			if names := gateRes.ShellTierFailures(); len(names) > 0 {
+				reason += "; the shell tier failed: " + strings.Join(names, " ")
+			}
 			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
 			return Result{}, l.reject(issue, w, rej, nil)
