@@ -22,17 +22,26 @@ type revertHarness struct {
 	files    *fakeLandings
 	reverts  []string
 	buildErr error
+	// changed is what the culprit's landing is reported to have changed;
+	// diffErr makes reading it fail.
+	changed []string
+	diffErr error
 }
 
 // newRevertHarness is a red-main owner that last saw main green at greenSHA,
-// with gt-cul's landing recorded at redSHA on top of baseOfCulprit.
+// with gt-cul's landing recorded at redSHA on top of baseOfCulprit. The
+// landing changed a Go file, so a Go package that stayed red is its doing.
 func newRevertHarness(t *testing.T, baseOfCulprit string) *revertHarness {
 	t.Helper()
-	h := &revertHarness{redMainHarness: newRedMainHarness(t), state: &MemoryMainState{}, files: &fakeLandings{}}
+	h := &revertHarness{redMainHarness: newRedMainHarness(t), state: &MemoryMainState{}, files: &fakeLandings{},
+		changed: []string{"internal/a/a.go"}}
 	h.r.State, h.r.Landings = h.state, h.files
 	h.r.Revert = func(_ context.Context, rec land.LandingRecord, branch string) (string, error) {
 		h.reverts = append(h.reverts, rec.LandedCommit+" on "+branch)
 		return revertSHA, h.buildErr
+	}
+	h.r.Diff = func(_ context.Context, _ land.LandingRecord) ([]string, error) {
+		return h.changed, h.diffErr
 	}
 	h.r.Green(context.Background(), "make test-slow", PostLand{BeadID: "gt-prev", Commit: greenSHA}, PostLandResult{})
 	h.bd.Seed(beads.Issue{ID: "gt-cul", Title: "culprit work", Status: "closed", Type: "task", Assignee: "gastown/polecats/opal"})
@@ -43,6 +52,12 @@ func newRevertHarness(t *testing.T, baseOfCulprit string) *revertHarness {
 
 func (h *revertHarness) red(ctx context.Context, pl PostLand) {
 	h.r.Red(ctx, "make test-slow", pl, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+}
+
+// redShell is a red run the post-land shell tier caused: it names no Go
+// package, only the script that failed, so nothing is rerun.
+func (h *revertHarness) redShell(ctx context.Context, pl PostLand, script string) {
+	h.r.Red(ctx, "bash scripts/post-land-shell.sh", pl, PostLandResult{ExitCode: 1, ShellFailures: []string{script}})
 }
 
 func (h *revertHarness) revertBeads(t *testing.T) []*beads.Issue {
@@ -89,6 +104,86 @@ func TestRedMainFilesARevertOfTheOnlyLandingSinceGreen(t *testing.T) {
 	}
 }
 
+// gt-40so9: at 4576c678 a Go-only landing (gt-vsct7.1) was reverted for a
+// scripts/test-makefile.sh failure it cannot have caused.
+func TestRedMainSkipsTheRevertWhenTheLandingCannotHaveFailedTheScript(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"internal/attention/attention.go", "internal/cmd/attention.go", "docs/reference.md"}
+	h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/test-makefile.sh")
+
+	if len(h.reverts) != 0 || len(h.revertBeads(t)) != 0 {
+		t.Fatalf("reverted a landing that cannot have failed the script: %v %+v", h.reverts, h.revertBeads(t))
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "no revert: scripts/test-makefile.sh: the landing changed no shell-tier input (internal/attention/attention.go, internal/cmd/attention.go, docs/reference.md)") {
+		t.Fatalf("status %q; want the skipped revert and why", s)
+	}
+	// The red-main bead stands: the failure is a human's call.
+	if open := h.open(t); len(open) != 1 || open[RedMainTitle("gastown", redMainNoPackage)] == nil {
+		t.Fatalf("red-main beads %+v; want the whole-command bead", open)
+	}
+}
+
+func TestRedMainRevertsWhenTheLandingTouchedTheFailingScript(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"scripts/test-makefile.sh", "scripts/lib/install-gt-lib.sh"}
+	h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/test-makefile.sh")
+
+	rv := h.revertBeads(t)
+	if len(h.reverts) != 1 || len(rv) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want the failing script's landing reverted", h.reverts, rv)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
+		t.Fatalf("status %q", s)
+	}
+}
+
+func TestRedMainSkipsTheRevertWhenTheDiffChangedNoGoInput(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"scripts/lint-lock-wait.sh"}
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	if len(h.reverts) != 0 || len(h.revertBeads(t)) != 0 {
+		t.Fatalf("reverted a script-only landing for a Go failure: %v %+v", h.reverts, h.revertBeads(t))
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "no revert: "+pkgA+": the landing changed no Go input (scripts/lint-lock-wait.sh)") {
+		t.Fatalf("status %q; want the skipped revert and why", s)
+	}
+}
+
+// A red run that named no unit (a build the merged tree failed) keeps the
+// revert: nothing names what the landing would have to have moved.
+func TestRedMainRevertsARedRunThatNamedNoUnit(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.r.Diff = nil
+	h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"},
+		PostLandResult{ExitCode: 2, Tail: "build failed\n"})
+
+	if len(h.reverts) != 1 || len(h.revertBeads(t)) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want the unnamed failure reverted", h.reverts, h.revertBeads(t))
+	}
+}
+
+// A red run that failed in two units is only the landing's doing when its
+// diff can have moved both.
+func TestRedMainSkipsTheRevertWhenOneFailingUnitIsUnattributable(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"internal/a/a.go"}
+	h.r.Red(context.Background(), "bash scripts/post-land-shell.sh", PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"},
+		PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false}), ShellFailures: []string{"scripts/test-makefile.sh"}})
+
+	if len(h.reverts) != 0 || len(h.revertBeads(t)) != 0 {
+		t.Fatalf("reverted for a unit the diff cannot have moved: %v %+v", h.reverts, h.revertBeads(t))
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "scripts/test-makefile.sh: the landing changed no shell-tier input") {
+		t.Fatalf("status %q; want the script it stopped at", s)
+	}
+}
+
 func TestRedMainDoesNotRevert(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -113,6 +208,12 @@ func TestRedMainDoesNotRevert(t *testing.T) {
 		{name: "build fails", base: greenSHA, pl: PostLand{BeadID: "gt-cul", Commit: redSHA},
 			setup:      func(h *revertHarness) { h.buildErr = errors.New("revert conflicts") },
 			wantStatus: "no revert: building it failed (revert conflicts)"},
+		{name: "the landing's diff is unreadable", base: greenSHA, pl: PostLand{BeadID: "gt-cul", Commit: redSHA},
+			setup:      func(h *revertHarness) { h.diffErr = errors.New("fatal: bad revision") },
+			wantStatus: "no revert: the landing's changed paths are unreadable"},
+		{name: "no way to read the landing's diff", base: greenSHA, pl: PostLand{BeadID: "gt-cul", Commit: redSHA},
+			setup:      func(h *revertHarness) { h.r.Diff = nil },
+			wantStatus: "no revert: the landing's changed paths are unreadable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -30,6 +30,11 @@ type PostLandResult struct {
 	Tail     string
 	// Packages are the Go packages the run reported as ok or FAIL.
 	Packages []land.PackageResult
+	// ShellFailures are the scripts the run's tier sweep reported red, in the
+	// order its summary line named them. A red run that named no Go package
+	// still names these, and red-main attributes the landing against them
+	// (gt-40so9).
+	ShellFailures []string
 	// LogPath is the run's full output on disk, "" when none was kept.
 	LogPath string
 	Err     error

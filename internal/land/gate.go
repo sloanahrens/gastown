@@ -64,9 +64,11 @@ type StepResult struct {
 	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
 	// landing says why where it is recorded.
 	Warnings []string
-	// ShellFailures are the scripts the shell tier reported red, in the order
-	// its summary line named them (scripts/tier-sweep.sh). Empty for every
-	// other step, and for a shell failure that named no script.
+	// ShellFailures are the scripts this step's own tier sweep reported red,
+	// in the order its summary line named them (scripts/tier-sweep.sh). A
+	// sweep names them whatever the step is called, so the post-land run's
+	// "test" step reads like the gate's "shell" step (gt-40so9). Empty when
+	// the step ran no sweep, or the sweep named no script.
 	ShellFailures []string
 	// TimedOut is true when the step's own Timeout killed it.
 	TimedOut bool
@@ -616,10 +618,7 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 	}
 	out := buf.String()
 	pkgs, tests := parseGoTestOutput(out)
-	var shells []string
-	if s.Name == ShellStepName {
-		shells = parseShellTierFailures(out)
-	}
+	shells := parseShellTierFailures(out)
 	res.Steps = append(res.Steps, StepResult{
 		Name:           s.Name,
 		Command:        s.Command,
@@ -704,7 +703,7 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 	return pkgs, tests
 }
 
-// parseShellTierFailures is the scripts the shell tier's summary line named,
+// parseShellTierFailures is the scripts the tier sweep's summary line named,
 // from the last line that carried one.
 func parseShellTierFailures(out string) []string {
 	var names []string

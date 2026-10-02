@@ -635,6 +635,27 @@ func TestLandGateRunsTheShellTierForItsInputs(t *testing.T) {
 	}
 }
 
+// TestCommandGateReadsShellFailuresFromAnyStep: the post-land command runs
+// the tier sweep inside its "test" step (the name that holds the container
+// slot), so the scripts its summary named are that step's shell failures too
+// (gt-40so9).
+func TestCommandGateReadsShellFailuresFromAnyStep(t *testing.T) {
+	t.Parallel()
+	const postLand = "bash scripts/post-land-shell.sh"
+	s := &scriptedRun{answers: map[string]scriptedAnswer{
+		postLand: {code: 1, output: "tier-sweep: shell RED passed=8 failed=1 skipped=0 failed: scripts/test-makefile.sh\n"},
+	}}
+	g := CommandGate{Steps: []Step{{Name: "test", Command: postLand}}}
+	g.run = s.run
+	res := g.Run(context.Background(), t.TempDir())
+	if res.Passed || res.Err != nil || len(res.Steps) != 1 {
+		t.Fatalf("gate = %+v, want the test step's failure", res)
+	}
+	if got := res.Steps[0].ShellFailures; !reflect.DeepEqual(got, []string{"scripts/test-makefile.sh"}) {
+		t.Fatalf("shell failures = %v, want the script the summary named", got)
+	}
+}
+
 // TestLandGateSkipsTheShellTierWithoutItsInputs: a tree that changed none of
 // the tier's inputs runs no shell step and pays no time for it, and a tree
 // that does not ship the tier never gets one, whatever it changed
