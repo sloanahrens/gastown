@@ -113,21 +113,20 @@ func writePolecatHeartbeat(t *testing.T, townRoot string, state polecat.Heartbea
 }
 
 // reaperDaemon returns a daemon over a stale bash polecat session whose bd
-// calls bd answers. A nil bd leaves the daemon without a bd at all.
+// calls bd answers. The bd is required: the reaper reads the work bead on the
+// way to every reap, so a daemon without one shells out to the real bd.
 func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 	t.Helper()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config:   &Config{TownRoot: t.TempDir()},
-		logger:   log.New(&logBuf, "", 0),
-		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
-		notifier: notifyfake.New(),
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
 		// The reaper names the seat's session from the registry.
 		prefixRegistryFn: myrPrefixes,
-	}
-	if bd != nil {
-		d.openWorkBeads = bd.open
-		d.execCmd = bd.run
 	}
 	return d, &logBuf
 }
@@ -136,7 +135,7 @@ func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 // was the one scanner that did not.
 func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 	t.Parallel()
-	d, logBuf := reaperDaemon(t, nil)
+	d, logBuf := reaperDaemon(t, newWorkBD(t))
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := agentpause.Pause(d.config.TownRoot, "myr", "polecat", "mycat", "inspecting the pane", "human", ""); err != nil {
 		t.Fatal(err)
@@ -155,7 +154,7 @@ func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 // G1-07: a per-rig e-stop stops the reaper too.
 func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 	t.Parallel()
-	d, logBuf := reaperDaemon(t, nil)
+	d, logBuf := reaperDaemon(t, newWorkBD(t))
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := estop.ActivateRig(d.config.TownRoot, "myr", estop.TriggerManual, "drill"); err != nil {
 		t.Fatal(err)
