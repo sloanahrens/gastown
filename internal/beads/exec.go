@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -247,6 +248,54 @@ func SubprocessModeForArgs(args []string) SubprocessEnvMode {
 		return ReadOnlyRouting
 	}
 	return MutationRouting
+}
+
+// SubprocessModeForCall returns the subprocess policy for a bd argv run from
+// workDir, the workspace directory that policy is built from, and an error for
+// a workspace that cannot name the database bd must open.
+func SubprocessModeForCall(workDir string, args []string) (SubprocessEnvMode, string, error) {
+	beadsDir := ResolveBeadsDir(workDir)
+	if routableBeadIDInArgs(workDir, args) != "" {
+		// The ID selects the database; naming one here would override routing.
+		return SubprocessModeForArgs(args), beadsDir, nil
+	}
+	if _, err := os.Stat(beadsDir); err != nil {
+		// No workspace here to name. bd resolves the nearest .beads above its
+		// cwd, which is how a directory inside a worktree, or a town-level
+		// agent's own directory, reaches the database that owns it.
+		return SubprocessModeForArgs(args), beadsDir, nil
+	}
+	// Routing reads its target from an ID in argv, so an ID-less call has
+	// nothing to route and bd falls back to its built-in default "beads" when
+	// the workspace it resolves names no dolt_database — a silent read of a
+	// database no rig owns (gt-170zk). Naming the workspace gt already
+	// resolved keeps the read where the call was placed.
+	if DatabaseNameFromMetadata(beadsDir) == "" {
+		return 0, "", fmt.Errorf("%w: bd %s in %s",
+			ErrNoConfiguredDatabase, strings.Join(args, " "), beadsDir)
+	}
+	if ArgsAreReadOnly(args) {
+		return ReadOnlyPinned, beadsDir, nil
+	}
+	return MutationPinned, beadsDir, nil
+}
+
+// routableBeadIDInArgs returns the first argument bd's prefix routing can
+// resolve from workDir's town, or "" when nothing in argv selects a database.
+func routableBeadIDInArgs(workDir string, args []string) string {
+	townRoot := FindTownRoot(workDir)
+	if townRoot == "" {
+		return ""
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") || !IsBeadIDToken(arg) {
+			continue
+		}
+		if GetRigPathForPrefix(townRoot, ExtractPrefix(arg)) != "" {
+			return arg
+		}
+	}
+	return ""
 }
 
 var bdBoolGlobalFlags = map[string]bool{

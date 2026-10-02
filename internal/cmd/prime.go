@@ -760,7 +760,14 @@ func execPrimeExternalCommand(ctx context.Context, workDir, name string, args ..
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	if name == "bd" {
-		beads.ConfigureCommand(cmd, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args))
+		mode, beadsDir, err := beads.SubprocessModeForCall(workDir, args)
+		if err != nil {
+			// A workspace that names no database: bd would read its built-in
+			// default "beads" instead of the one this call was placed in.
+			fmt.Fprintf(os.Stderr, "gt prime: %v\n", err)
+			return stdout, stderr, err
+		}
+		beads.ConfigureCommand(cmd, workDir, beadsDir, mode)
 	} else {
 		cmd.Dir = workDir
 		cmd.Env = os.Environ()
