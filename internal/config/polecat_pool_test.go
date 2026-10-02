@@ -24,7 +24,8 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			p.GetProMax() != DefaultSeatRefillProMax ||
 			p.GetProAgent() != DefaultSeatRefillProAgent ||
 			p.GetProLabel() != DefaultSeatRefillProLabel ||
-			p.GetMode() != DefaultSeatRefillMode {
+			p.GetMode() != DefaultSeatRefillMode ||
+			p.GetShapeGate() != DefaultSeatRefillShapeGate {
 			t.Fatal("a nil pool must read as every default")
 		}
 		if err := p.Validate(); err != nil {
@@ -47,7 +48,8 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 				"dispatch_empty_seconds": 30,
 				"pro_max": 0,
 				"pro_agent": "deepseek-reasoner",
-				"pro_label": "hard"
+				"pro_label": "hard",
+				"shape_gate": "refuse"
 			}
 		}`
 		if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
@@ -68,6 +70,9 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 		if pool.GetProMax() != 0 || pool.GetProAgent() != "deepseek-reasoner" || pool.GetProLabel() != "hard" {
 			t.Errorf("pro seat knobs not loaded: %+v", pool)
 		}
+		if pool.GetShapeGate() != "refuse" {
+			t.Errorf("shape_gate not loaded: %q", pool.GetShapeGate())
+		}
 		// pro_max 0 drops the seat, so the agent and label go unread: an
 		// unset pair is not a config error there.
 		if err := pool.Validate(); err != nil {
@@ -83,7 +88,7 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 		}
 		for _, want := range []string{`"max_priority": 3`, `"top_candidates": 5`, `"empty_seconds": 60`,
 			`"nudge_seconds": 0`, `"dispatch_empty_seconds": 30`, `"pro_max": 0`,
-			`"pro_agent": "deepseek-reasoner"`, `"pro_label": "hard"`} {
+			`"pro_agent": "deepseek-reasoner"`, `"pro_label": "hard"`, `"shape_gate": "refuse"`} {
 			if !strings.Contains(string(saved), want) {
 				t.Errorf("rewrite dropped %s:\n%s", want, saved)
 			}
@@ -108,7 +113,10 @@ func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 		{"pro_max below zero", &PolecatPool{ProMax: &neg}, "polecat_pool.pro_max"},
 		{"top_candidates zero", &PolecatPool{TopCandidates: &zero}, "polecat_pool.top_candidates"},
 		{"an unknown mode", &PolecatPool{Mode: "ask-the-mayor"}, "polecat_pool.mode"},
+		{"an unknown shape gate", &PolecatPool{ShapeGate: "block"}, "polecat_pool.shape_gate"},
 		{"nudge mode validates", &PolecatPool{Mode: "nudge"}, ""},
+		{"each shape gate validates", &PolecatPool{ShapeGate: "off"}, ""},
+		{"refuse validates", &PolecatPool{ShapeGate: "refuse"}, ""},
 		{"zero priority is the P0 ceiling", &PolecatPool{MaxPriority: &zero}, ""},
 		{"nudge_seconds 0 drops the repeat cap", &PolecatPool{NudgeSeconds: &zero}, ""},
 		{"an empty pro agent reads as the default", &PolecatPool{ProMax: &one}, ""},
@@ -150,6 +158,7 @@ func TestPolecatPool_SeatRefillDefaultsMatchPlugin(t *testing.T) {
 		{"pro_agent", "deepseek-pro"},
 		{"pro_label", "needs-pro"},
 		{"mode", "sling"},
+		{"shape_gate", "warn"},
 	} {
 		line := lineWithReadConfig(string(data), k.key)
 		if line == "" {
