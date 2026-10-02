@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -56,8 +57,10 @@ func TestRegistryChecksReadTheTwoFileLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := &CheckContext{TownRoot: town}
-	if r := NewRigsRegistryExistsCheck().Run(ctx); r.Status != StatusOK {
-		t.Errorf("rigs-registry-exists = %+v", r)
+	// The message must name the file the registry was read from
+	// (mayor/town.json), not the retired mayor/rigs.json.
+	if r := NewRigsRegistryExistsCheck().Run(ctx); r.Status != StatusOK || !strings.Contains(r.Message, "mayor/town.json") {
+		t.Errorf("rigs-registry-exists = %+v, want OK naming mayor/town.json", r)
 	}
 	rj := NewRigsJSONCheck()
 	if r := rj.Run(ctx); r.Status != StatusOK || rj.CanFix() {

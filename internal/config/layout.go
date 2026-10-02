@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // The two-file layout (gt-y3pgh.7, D5 Q2). A town's config used to be
@@ -156,6 +157,26 @@ func SourcePath(path string) string {
 		return path
 	}
 	return sectionLabel(host, key)
+}
+
+// SourcePathRel is SourcePath phrased for a message that names files
+// relative to the town root: "mayor/rigs.json" while the registry is read
+// from its own file, `mayor/town.json (section "registry")` once it lives in
+// the host's section. The doctor reports the file it found the registry in,
+// so a two-file town must not be told the retired file exists (gt-cfdqw).
+func SourcePathRel(townRoot, path string) string {
+	rel := func(p string) string {
+		r, err := filepath.Rel(townRoot, p)
+		if err != nil || strings.HasPrefix(r, "..") {
+			return p
+		}
+		return filepath.ToSlash(r)
+	}
+	host, key, ok, _, err := sectionFor(path)
+	if err != nil || !ok {
+		return rel(path)
+	}
+	return fmt.Sprintf("%s (section %q)", rel(host), key)
 }
 
 // readConfigFile returns the content of a config file, following a retired
