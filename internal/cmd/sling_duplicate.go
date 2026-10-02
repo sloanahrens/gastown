@@ -196,11 +196,14 @@ func testNamesOverlap(a, b string) bool {
 }
 
 // findDuplicateMatches compares one candidate against the pool, returning every
-// overlap, blocking ones first.
+// overlap, blocking ones first. Epics are not candidates: an epic's prose
+// enumerates its children's tests, so a shared name says nothing about
+// duplication, and every task filed under it would otherwise refuse against it
+// (gt-fudap, the gt-idv8s/gt-ik4a1 seat-refill failure).
 func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidate) []duplicateMatch {
 	var matches []duplicateMatch
 	for _, other := range pool {
-		if other.ID == candidate.ID || other.Refs.Empty() {
+		if other.ID == candidate.ID || other.Refs.Empty() || other.IsEpic() {
 			continue
 		}
 		sharedTests := intersectTests(candidate.Refs.Tests, other.Refs.Tests)
@@ -247,10 +250,11 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	}
 
 	candidate := &duplicateCandidate{
-		ID:     beadID,
-		Title:  info.Title,
-		Status: info.Status,
-		Refs:   refs,
+		ID:        beadID,
+		Title:     info.Title,
+		Status:    info.Status,
+		IssueType: info.IssueType,
+		Refs:      refs,
 	}
 
 	beadsDir := duplicateBeadsDir(townRoot, beadID)
@@ -431,10 +435,11 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 		}
 		text := fullText[row.ID]
 		candidates = append(candidates, duplicateCandidate{
-			ID:       row.ID,
-			Title:    row.Title,
-			Status:   row.Status,
-			ClosedAt: row.ClosedAt,
+			ID:        row.ID,
+			Title:     row.Title,
+			Status:    row.Status,
+			ClosedAt:  row.ClosedAt,
+			IssueType: row.Type,
 			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
 				text.Design, text.Notes),
 		})

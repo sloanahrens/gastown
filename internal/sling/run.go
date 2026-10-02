@@ -206,7 +206,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		if decision := DecideDuplicates(opts.BeadID, matches); decision.Message != "" {
 			if decision.Blocked {
 				result.ErrMsg = ErrDuplicateContent.Error()
-				return result, errors.New(decision.Message)
+				return result, decision.Err()
 			}
 			_, _ = fmt.Fprint(d.out(), decision.Message)
 		}
@@ -554,6 +554,20 @@ func IsDeferredBead(info *Bead) bool {
 	return false
 }
 
+// ErrRigUnavailable is the sentinel for a rig an e-stop, park or dock refuses a
+// dispatch to (errors.Is). These refusals carry no dispatch refusal marker —
+// the rig, not the bead, is the reason — so this is how a caller tells them
+// apart from a failed sling when deciding whether to print help (gt-fudap).
+var ErrRigUnavailable = errors.New("rig unavailable for dispatch")
+
+// rigUnavailableError is Blocked's refusal. It wraps the operator-facing line
+// so errors.Is finds ErrRigUnavailable without adding text to that line.
+type rigUnavailableError struct{ msg string }
+
+func (e *rigUnavailableError) Error() string { return e.msg }
+
+func (e *rigUnavailableError) Is(target error) bool { return target == ErrRigUnavailable }
+
 // Blocked refuses a dispatch to a rig that is e-stopped, parked or docked.
 // It returns a short label naming the state, and the refusal to hand back.
 func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
@@ -562,14 +576,14 @@ func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (b
 		if err != nil {
 			why = err.Error()
 		}
-		return "e-stop", fmt.Errorf("cannot sling to rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)
+		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf("cannot sling to rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)}
 	}
 	if blocked, reason := parked(townRoot, rigName); blocked {
 		undoCmd := "gt rig unpark"
 		if reason == "docked" {
 			undoCmd = "gt rig undock"
 		}
-		return "rig " + reason, fmt.Errorf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)
+		return "rig " + reason, &rigUnavailableError{msg: fmt.Sprintf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)}
 	}
 	return "", nil
 }

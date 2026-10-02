@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -858,5 +859,55 @@ func TestSlingBatchGetsTheResolvedRequest(t *testing.T) {
 		if h.batchOpts.argsText != "do the thing" || h.batchOpts.resumeBranch != "feature/pr-42" {
 			t.Errorf("deferred=%v: batch got args %q, resume branch %q", deferred, h.batchOpts.argsText, h.batchOpts.resumeBranch)
 		}
+	}
+}
+
+// TestSlingRefusalSilencesUsage (gt-fudap): a refusal prints its own reason and
+// remediation, not cobra's usage block. seat-refill keeps only the last line of
+// a failed sling (plugins/seat-refill/run.sh), and the usage block was the whole
+// of what its log showed; the last line must instead carry the remediation.
+func TestSlingRefusalSilencesUsage(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{Description: "TestIntegration fails in internal/cmd."})
+	h.run.checkDuplicates = func(_, _ string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+		candidate := duplicateCandidate{ID: slingBead, Title: info.Title, Status: info.Status,
+			Refs: extractContentRefs(info.Title, info.Description)}
+		other := duplicateCandidate{ID: "gt-ik4a1", Status: "open",
+			Refs: extractContentRefs("TestIntegration fails in internal/cmd.")}
+		return &candidate, findDuplicateMatches(candidate, []duplicateCandidate{other}), nil
+	}
+
+	cmd := &cobra.Command{Use: "sling"}
+	err := h.run.run(context.Background(), cmd, []string{slingBead, "gastown"})
+	if err == nil {
+		t.Fatal("an overlap with live work must refuse the sling")
+	}
+	if !cmd.SilenceUsage {
+		t.Error("a refusal must suppress cobra's usage block so the reason is the whole message")
+	}
+	if !errors.Is(err, errSlingDuplicateContent) {
+		t.Errorf("refusal must report the duplicate sentinel so a caller need not parse it: %v", err)
+	}
+	for _, want := range []string{"Refusing to sling", "gt-ik4a1", "TestIntegration", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should name %q for the operator:\n%s", want, err)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
+	last := lines[len(lines)-1]
+	for _, want := range []string{"live bead(s)", "--force"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("last line %q must carry the reason and the remediation seat-refill logs (missing %q)", last, want)
+		}
+	}
+
+	// Contrast: a failure that is not a refusal still prints usage.
+	failCmd := &cobra.Command{Use: "sling"}
+	if err := h.run.run(context.Background(), failCmd, []string{"gt-missing", "gastown"}); err == nil {
+		t.Fatal("an unknown bead must fail")
+	}
+	if failCmd.SilenceUsage {
+		t.Error("a non-refusal failure should keep cobra's usage block")
 	}
 }

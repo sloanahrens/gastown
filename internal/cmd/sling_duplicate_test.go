@@ -774,3 +774,60 @@ func TestDuplicateOverlapBlocksOnlyLiveWork(t *testing.T) {
 		t.Fatalf("gt-bivxl must not be refused over two closed beads:\n%s", d.Message)
 	}
 }
+
+// TestDuplicateOverlapSkipsEpics (gt-fudap): an epic's prose enumerates its
+// children's tests and files rather than naming one defect, so a shared test
+// name against an epic says nothing about duplication. The seat-refill failure
+// behind this bead slung task gt-idv8s, which shares TestIntegration with open
+// epic gt-ik4a1, and was refused — losing the reason to cobra's usage block.
+func TestDuplicateOverlapSkipsEpics(t *testing.T) {
+	t.Parallel()
+	candidate := newDuplicateCandidate("gt-idv8s",
+		"seat-refill: fill an empty polecat seat", "open",
+		"TestIntegration fails when the seat is refilled in internal/cmd.")
+
+	epicText := []string{"gt-ik4a1", "Epic: internal/cmd test cleanup", "open",
+		"TestIntegration fails when the seat is refilled in internal/cmd."}
+
+	epic := newDuplicateCandidate(epicText[0], epicText[1], epicText[2], epicText[3:]...)
+	epic.IssueType = "epic"
+
+	matches := findDuplicateMatches(candidate, []duplicateCandidate{epic})
+	if len(matches) != 0 {
+		t.Fatalf("an epic must not be an overlap candidate, got %+v", matches)
+	}
+	if d := decideSlingDuplicates(candidate.ID, matches); d.Blocked {
+		t.Fatalf("an epic overlap must not refuse the sling:\n%s", d.Message)
+	}
+
+	// Control: the same text on a plain task still refuses, so the exclusion is
+	// the epic type and not the shared test itself.
+	task := epic
+	task.IssueType = "task"
+	taskMatches := findDuplicateMatches(candidate, []duplicateCandidate{task})
+	if len(taskMatches) != 1 || !decideSlingDuplicates(candidate.ID, taskMatches).Blocked {
+		t.Fatalf("the same overlap with a non-epic task must still refuse; matches=%+v", taskMatches)
+	}
+}
+
+// TestListDuplicateCandidatesCarriesIssueType (gt-fudap): the pool must keep
+// each bead's issue type, or the epic exclusion above cannot fire on real data
+// — bd list carries the type and the candidate reduction dropped it.
+func TestListDuplicateCandidatesCarriesIssueType(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-ik4a1", Title: "Epic: internal/cmd test cleanup", Status: "open",
+		Type:        "epic",
+		Description: "TestIntegration fails when the seat is refilled in internal/cmd."})
+
+	got, err := listDuplicateCandidates(listLikeBD{Client: db}, func(string, error) {}, t.TempDir(), []string{"open"}, time.Time{})
+	if err != nil {
+		t.Fatalf("listDuplicateCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("pool = %+v, want the epic gt-ik4a1", got)
+	}
+	if !got[0].IsEpic() {
+		t.Errorf("candidate %s IssueType = %q, want epic", got[0].ID, got[0].IssueType)
+	}
+}
