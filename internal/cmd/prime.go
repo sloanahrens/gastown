@@ -86,6 +86,7 @@ Role detection:
   - Town root → Neutral (no role inferred; use GT_ROLE)
   - mayor/ or <rig>/mayor/ → Mayor context
   - <rig>/polecats/<name>/ → Polecat context
+  - <rig>/crew/<name>/ → Crew context
 
 This command is typically used in shell prompts or agent initialization.
 

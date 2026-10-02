@@ -280,3 +280,23 @@ func TestOutputMayorContextDropsRetiredRoles(t *testing.T) {
 		t.Errorf("mayor context should name the surviving lifecycle signal:\n%s", out)
 	}
 }
+
+// TestOutputUnknownContextListsCrew pins the navigate list to every role
+// detectRole resolves from a directory. Crew is live (<rig>/crew/<name>/ maps
+// to RoleCrew at role.go), so omitting it sent a lost agent looking for a
+// directory the brief never named (gt-uflmc).
+func TestOutputUnknownContextListsCrew(t *testing.T) {
+	t.Parallel()
+
+	ctx := RoleContext{Role: RoleUnknown, TownRoot: t.TempDir(), Rig: "myrig"}
+
+	var buf bytes.Buffer
+	outputUnknownContext(&buf, ctx)
+	out := buf.String()
+
+	for _, want := range []string{"<rig>/polecats/<name>/", "<rig>/crew/<name>/", "<rig>/mayor/"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unknown-role context omits navigable dir %q:\n%s", want, out)
+		}
+	}
+}
