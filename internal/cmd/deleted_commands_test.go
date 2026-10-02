@@ -71,7 +71,9 @@ var deletedCommands = [][]string{
 	{"costs"},
 	{"seance"},
 	{"mountain"},
-	{"feed"}, // gt-3vdcx: replaced by gt tail
+	{"feed"},              // gt-3vdcx: replaced by gt tail
+	{"session", "health"}, // gt-dj3xv: always exit 0; townhealth and gt status carry the seat evidence
+	{"session", "check"},  // gt-dj3xv: always exit 0; gt status prints the same polecat rows
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

@@ -170,7 +170,7 @@ func TestIntegrationImmediateConsumptionWarningReportsUnknownWhenPaneUnreadable(
 	if warning == "" {
 		t.Fatal("unreadable pane produced no output — the probe is fail-open (gt-7xnv)")
 	}
-	for _, want := range []string{"UNKNOWN", "gt session health gt-beads-refinery"} {
+	for _, want := range []string{"UNKNOWN", "gt status"} {
 		if !strings.Contains(warning, want) {
 			t.Errorf("warning %q does not mention %q", warning, want)
 		}

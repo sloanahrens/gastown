@@ -226,8 +226,8 @@ func ConsumptionWarning(probe func(sessionName string, window time.Duration) (tm
 		// turn". Re-probe before acting on it.
 		return fmt.Sprintf(
 			"%s: %s took the nudge but consumption is UNKNOWN — the probe could not read the pane (%v). "+
-				"Re-check with 'gt session health %s' before acting.\n",
-			mode, sessionName, err, sessionName)
+				"Re-check with 'gt status' before acting.\n",
+			mode, sessionName, err)
 	}
 	if verdict == tmux.InputConsumptionUndated {
 		// The pane was frozen and holding input but has no content above the
@@ -236,8 +236,8 @@ func ConsumptionWarning(probe func(sessionName string, window time.Duration) (tm
 		return fmt.Sprintf(
 			"%s: %s still holds input and the pane was frozen for %s, but it has nothing above "+
 				"the input box to date it by — consumption is UNKNOWN (UNDATED), not a strand. "+
-				"Re-check with 'gt session health %s' before acting.\n",
-			mode, sessionName, window, sessionName)
+				"Re-check with 'gt status' before acting.\n",
+			mode, sessionName, window)
 	}
 	if verdict != tmux.InputConsumptionNotConsumed {
 		return ""
@@ -245,9 +245,9 @@ func ConsumptionWarning(probe func(sessionName string, window time.Duration) (tm
 	return fmt.Sprintf(
 		"%s: %s accepted the nudge but started no turn within %s — its input is "+
 			"still stranded in the composer/queue, which is how a wedged session presents "+
-			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
+			"(gt-eigw). Inspect it with 'gt status'; if it stays stuck, restart "+
 			"that session.\n",
-		mode, sessionName, window, sessionName)
+		mode, sessionName, window)
 }
 
 // waitIdle waits for the target to become idle (prompt visible), then
