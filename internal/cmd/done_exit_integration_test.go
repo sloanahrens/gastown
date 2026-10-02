@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/done"
 )
 
 // End-to-end gt done runs in a routed test town: real git with a bare
@@ -135,7 +137,7 @@ func TestIntegrationRunDoneExitsPushFailedWhenOriginRejects(t *testing.T) {
 		setupRoutedSubmitGitRepo(t, workDir, false)
 		installRemoteHook(t, workDir, "pre-receive", "echo 'rejected by test hook' >&2\nexit 1\n")
 	})
-	assertDoneExitCode(t, err, doneExitPushFailed, "feature/routed-submit")
+	assertDoneExitCode(t, err, done.DoneExitPushFailed, "feature/routed-submit")
 }
 
 // TestRunDoneExitsPushUnverifiedWhenOriginDropsTheBranch: every push command
@@ -145,7 +147,7 @@ func TestIntegrationRunDoneExitsPushUnverifiedWhenOriginDropsTheBranch(t *testin
 		setupRoutedSubmitGitRepo(t, workDir, false)
 		installRemoteHook(t, workDir, "post-receive", "git update-ref -d refs/heads/feature/routed-submit\nexit 0\n")
 	})
-	assertDoneExitCode(t, err, doneExitPushUnverified, "feature/routed-submit")
+	assertDoneExitCode(t, err, done.DoneExitPushUnverified, "feature/routed-submit")
 }
 
 // TestRunDoneExitsCloseFailedOnNoMRClose: a branch with nothing ahead of main
@@ -158,7 +160,7 @@ func TestIntegrationRunDoneExitsCloseFailedOnNoMRClose(t *testing.T) {
 		setupRoutedSubmitGitRepo(t, workDir, false)
 		runGitForMQSubmitTest(t, workDir, "reset", "--hard", "main")
 	})
-	assertDoneExitCode(t, err, doneExitCloseFailed, "could not close issue bd-source")
+	assertDoneExitCode(t, err, done.DoneExitCloseFailed, "could not close issue bd-source")
 }
 
 // TestRunDoneClassifiesOnTheLastPushAttempt: the first push fails, the retry
@@ -171,7 +173,7 @@ func TestIntegrationRunDoneClassifiesOnTheLastPushAttempt(t *testing.T) {
 		installRemoteHook(t, workDir, "pre-receive", "if [ ! -e '"+marker+"' ]; then touch '"+marker+"'; echo 'transient rejection' >&2; exit 1; fi\nexit 0\n")
 		installRemoteHook(t, workDir, "post-receive", "git update-ref -d refs/heads/feature/routed-submit\nexit 0\n")
 	})
-	assertDoneExitCode(t, err, doneExitPushUnverified, "feature/routed-submit")
+	assertDoneExitCode(t, err, done.DoneExitPushUnverified, "feature/routed-submit")
 }
 
 func resetDoneFlagsForTest(t *testing.T) {
