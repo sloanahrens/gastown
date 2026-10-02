@@ -76,9 +76,6 @@ const (
 	// BdCommandTimeout is the default timeout for bd (beads CLI) command execution.
 	BdCommandTimeout = 30 * time.Second
 
-	// BdSubprocessTimeout is the timeout for bd subprocess calls in TUI panels.
-	BdSubprocessTimeout = 5 * time.Second
-
 	// DialogPollInterval is the interval between pane content checks when
 	// polling for startup dialogs (workspace trust, bypass permissions).
 	DialogPollInterval = 500 * time.Millisecond
@@ -107,13 +104,6 @@ const (
 	// witness) completes quickly on idle rigs and immediately hands off.
 	// (gt-058d)
 	MinHandoffCooldown = 2 * time.Minute
-
-	// GUPPViolationTimeout is how long an agent can have work on hook without
-	// progressing before it's considered a GUPP (Gas Town Universal Propulsion
-	// Principle) violation. GUPP states: if you have work on your hook, you run it.
-	//
-	// Single source of truth — referenced by the daemon's lifecycle patrol.
-	GUPPViolationTimeout = 30 * time.Minute
 
 	// HungSessionThreshold is how long a tmux session can be inactive before
 	// it's considered hung. Overridable per-role via RoleHealthConfig.

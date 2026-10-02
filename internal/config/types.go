@@ -265,9 +265,8 @@ type SessionThresholds struct {
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
 
-	// The keys below have no reader (gt-e2kxa): the code uses the
-	// internal/constants values. They are declared so a settings file that
-	// still carries them decodes.
+	// The keys below have no reader (gt-e2kxa). They are declared so a
+	// settings file that still carries them decodes.
 	ClaudeStartTimeout      string `json:"claude_start_timeout,omitempty"`
 	ShellReadyTimeout       string `json:"shell_ready_timeout,omitempty"`
 	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
