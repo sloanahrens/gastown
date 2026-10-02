@@ -775,40 +775,6 @@ parked seat does not refuse), logging actor and reason in
 `.runtime/supervisor/actions.jsonl`. Crew sessions are skipped unless
 `--crew` is given; the overseer session is never killed.
 
-### Attention Queue
-
-`gt attention` reads the queue of conditions the daemon maintains for human or
-overseer judgment, and acknowledges an item.
-
-```bash
-gt attention                 # the queue, oldest first
-gt attention --all           # include acked items
-gt attention --json          # state.json
-gt attention -f              # stream new transitions as they append
-gt attention ack <key>       # hide an item until its condition clears
-```
-
-The queue is three files under `<town>/.runtime/attention/`. `gt attention`
-only ever writes `acks.json`:
-
-- `state.json` — the current set, rewritten atomically each daemon heartbeat.
-  An item is `{key, kind, severity, rig, bead, sha, summary, first_seen,
-  last_seen, acked_at}`; `key` is the condition's stable identity, so the same
-  condition re-observed keeps its key and its `first_seen`.
-- `events.jsonl` — the transitions, append-only, rotated to `events.jsonl.1` at
-  1 MB. Each line is `{ts, class, severity, text, key, state}`, `state` being
-  `new` or `cleared`. The first four fields are the `alerts.jsonl` schema
-  (`gt-z2pdg`) that `gt tail`'s watch source reads, so transitions show in the
-  feed.
-- `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
-  attention ack` under a flock. The daemon reads it and never writes it, so
-  neither process races the other's file.
-
-An ack hides its item until the item's condition clears; the ack is then
-dropped, so a recurrence raises a new item rather than hiding behind the old
-ack. A state older than 15 minutes is stale — the daemon has stopped writing
-it — and `gt attention` prints a `STALE` header and exits 3.
-
 ## Beads Commands (bd)
 
 ```bash
