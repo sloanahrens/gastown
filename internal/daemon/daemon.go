@@ -992,7 +992,8 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
-	// Start the spec dispatcher ticker if enabled (default off, gt-4k3fj.5).
+	// Start the spec dispatcher ticker unless mayor/daemon.json sets
+	// enabled:false (default on, gt-1gnq9).
 	var specDispatchTicker *time.Ticker
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {

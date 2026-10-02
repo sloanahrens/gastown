@@ -349,9 +349,10 @@ type PatrolScanConfig struct {
 // SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
 // ready, unassigned work bead that passes the spec lint is slung onto a
 // polecat seat within the seat budget. The retired label spec and type feature
-// are accepted and ignored (gt-mmsr2). Off unless enabled.
+// are accepted and ignored (gt-mmsr2). On unless disabled (gt-1gnq9).
 type SpecDispatchConfig struct {
-	// Enabled turns the ticker on. Default off.
+	// Enabled runs the ticker. Default on (gt-1gnq9): the seat-refill plugin
+	// is deleted, so nothing else fills a free seat. Set false to turn it off.
 	Enabled bool `json:"enabled"`
 
 	// IntervalStr is the tick cadence (default "60s").

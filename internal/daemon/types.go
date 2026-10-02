@@ -264,11 +264,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.MayorDispatch.Enabled
 	}
-	// spec_dispatch defaults OFF: it slings on its own, so the operator opts
-	// in (gt-4k3fj.5).
+	// spec_dispatch defaults ON because the seat-refill plugin it replaced is
+	// deleted (gt-4k3fj.8.8), leaving it the only filler of a free seat: a
+	// dispatcher that must be switched on cannot prevent the idle town it was
+	// written for (gt-1gnq9). The operator hold file (<town>/seat-refill.hold)
+	// and ESTOP still park it, and patrols.spec_dispatch.enabled:false turns
+	// it off.
 	if patrol == "spec_dispatch" {
 		if config == nil || config.Patrols == nil || config.Patrols.SpecDispatch == nil {
-			return false
+			return true
 		}
 		return config.Patrols.SpecDispatch.Enabled
 	}
