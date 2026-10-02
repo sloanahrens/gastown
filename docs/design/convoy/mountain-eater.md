@@ -1,4 +1,4 @@
-> Status: historical (2026-07). Abandoned: unknown. Not maintained.
+> Status: historical (2026-07). Abandoned: gt-638go.2, gt-4k3fj.6.1. Not maintained.
 >
 > Layers 1-2 of this design depend on the Witness, the Deacon and its Dog
 > pool, all since retired. `mol-mountain-dog` was never built; nothing
