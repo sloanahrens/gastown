@@ -607,6 +607,68 @@ func TestHandoffProcessNames(t *testing.T) {
 	})
 }
 
+// newHandoffTown writes a minimal town — mayor/town.json plus the crew worktree
+// gt-crew-holden runs from — and returns its root.
+func newHandoffTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "crew", "holden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// TestBuildRestartCommand_DoesNotPropagateTownRoot: the successor resolves its
+// town root by walking up from its workdir, so the respawn command no longer
+// exports GT_TOWN_ROOT. The tmux global environment's copy was handoff's
+// fallback and went stale across a town move (gt-y3pgh.2.12).
+func TestBuildRestartCommand_DoesNotPropagateTownRoot(t *testing.T) {
+	t.Parallel()
+	cmd, err := buildTestRestartCommand(newHandoffTown(t), map[string]string{}, "gt-crew-holden")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+	if strings.Contains(cmd, "GT_TOWN_ROOT") {
+		t.Errorf("respawn command exports GT_TOWN_ROOT; the workspace walker is the one source\ncmd: %s", cmd)
+	}
+}
+
+// TestDetectTownRootFromCwdUsesTheWalker: gt handoff's town root is whatever
+// the workspace walker returns, and nothing else. A walk that errors or finds
+// no town resolves to "": with the tmux global-env fallback deleted, GT_TOWN_ROOT
+// read from that environment is no longer consulted, and no other source
+// exists (gt-y3pgh.2.12).
+func TestDetectTownRootFromCwdUsesTheWalker(t *testing.T) {
+	t.Parallel()
+	t.Run("returns the walker's town root", func(t *testing.T) {
+		t.Parallel()
+		walk := func() (string, error) { return "/towns/gastown", nil }
+		if got := townRootFrom(walk); got != "/towns/gastown" {
+			t.Errorf("townRootFrom() = %q, want the walker's %q", got, "/towns/gastown")
+		}
+	})
+	t.Run("a failed walk resolves to nothing", func(t *testing.T) {
+		t.Parallel()
+		walk := func() (string, error) { return "", errors.New("not in a workspace") }
+		if got := townRootFrom(walk); got != "" {
+			t.Errorf("townRootFrom() = %q, want \"\" when the walk fails", got)
+		}
+	})
+	t.Run("a walk with no town resolves to nothing", func(t *testing.T) {
+		t.Parallel()
+		walk := func() (string, error) { return "", nil }
+		if got := townRootFrom(walk); got != "" {
+			t.Errorf("townRootFrom() = %q, want \"\" when the walk finds no town", got)
+		}
+	})
+}
+
 // TestCollectGitState verifies that collectGitState renders deterministic
 // workspace state from git without shelling out to gt/bd (GH#1996), over
 // canned git state; TestIntegrationHandoffGitState reads a real repository.

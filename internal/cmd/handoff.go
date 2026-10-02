@@ -994,10 +994,6 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		}
 	}
 
-	// Propagate GT_TOWN_ROOT so subsequent handoffs can use it as fallback
-	// when cwd-based detection fails (broken state recovery)
-	envMap["GT_TOWN_ROOT"] = townRoot
-
 	// Record the agent the successor runs, so agent selection survives the
 	// handoff. After a role_agents re-resolution that is the newly resolved
 	// agent, not the preset this session was spawned with (gt-di8p).
@@ -1242,31 +1238,25 @@ func sessionToGTRole(reg *session.PrefixRegistry, sessionName string) string {
 	return identity.GTRole()
 }
 
+// townRootFrom is handoff's one town-root resolver: whatever walk returns, and
+// nothing else. A walk that fails or finds no town resolves to "" — there is no
+// second source to fall back to (gt-y3pgh.2.12).
+func townRootFrom(walk func() (string, error)) string {
+	townRoot, err := walk()
+	if err != nil {
+		return ""
+	}
+	return townRoot
+}
+
 // detectTownRootFromCwd walks up from the current directory to find the town
 // root, falling back to the town root the session was spawned with
 // (workspace.FindFromCwdOrError) when cwd detection fails: detached HEAD,
-// wrong branch, deleted worktree.
+// wrong branch, deleted worktree. The walker is the one source: handoff no
+// longer rescues a missing town root from the tmux global environment, which
+// went stale across a town move (gt-y3pgh.2.12).
 func detectTownRootFromCwd() string {
-	if townRoot, err := workspace.FindFromCwdOrError(); err == nil && townRoot != "" {
-		return townRoot
-	}
-
-	// Final fallback: read GT_TOWN_ROOT from tmux global environment.
-	// This handles the run-shell case where CWD is $HOME and process env
-	// vars aren't set — the daemon sets GT_TOWN_ROOT in tmux global env.
-	if socket := tmux.SocketFromEnv(); socket != "" {
-		t := tmux.NewTmuxWithSocket(socket)
-		if envRoot, err := t.GetGlobalEnvironment("GT_TOWN_ROOT"); err == nil && envRoot != "" {
-			if _, statErr := os.Stat(filepath.Join(envRoot, workspace.PrimaryMarker)); statErr == nil {
-				return envRoot
-			}
-			if info, statErr := os.Stat(filepath.Join(envRoot, workspace.SecondaryMarker)); statErr == nil && info.IsDir() {
-				return envRoot
-			}
-		}
-	}
-
-	return ""
+	return townRootFrom(workspace.FindFromCwdOrError)
 }
 
 // handoffRemoteSession respawns a different session and optionally switches to it.
