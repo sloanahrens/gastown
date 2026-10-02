@@ -100,7 +100,7 @@ func BlockingDependencies(issue *Issue) []IssueDep {
 	}
 	var deps []IssueDep
 	for _, dep := range issue.Dependencies {
-		if !isBlockingDependencyType(dep.DependencyType) {
+		if !IsBlockingDependencyType(dep.DependencyType) {
 			continue
 		}
 		deps = append(deps, dep)

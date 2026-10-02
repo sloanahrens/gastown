@@ -578,7 +578,7 @@ func unresolvedBlockingDependencyIDs(issue *Issue) ([]string, int) {
 	ids := make([]string, 0, len(issue.Dependencies))
 	count := 0
 	for _, dep := range issue.Dependencies {
-		if !isBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
+		if !IsBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
 			continue
 		}
 		count++
@@ -606,7 +606,11 @@ func normalizedIssueIDs(ids []string) []string {
 	return result
 }
 
-func isBlockingDependencyType(depType string) bool {
+// IsBlockingDependencyType reports whether a dependency relation type is one
+// bd treats as blocking: blocks, conditional-blocks, waits-for, or
+// merge-blocks. A relation bd does not recognize, including the empty string
+// its older output leaves behind, does not block.
+func IsBlockingDependencyType(depType string) bool {
 	return blockingDependencyTypes[strings.ToLower(strings.TrimSpace(depType))]
 }
 

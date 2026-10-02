@@ -57,6 +57,12 @@ const (
 // owns the limit.
 const duplicateMatchLimit = sling.MatchLimit
 
+// duplicateDependencyHops bounds the dependency walk the guard makes before
+// each sling. Chains in this town are shallow — a plan's steps depend on the
+// plan, siblings on the base they share — so a small bound covers them and
+// keeps the guard a fixed cost.
+const duplicateDependencyHops = 4
+
 var (
 	// testNameRe matches a Go test identifier as it appears in bead prose.
 	// The trailing character class includes "_" so the wildcard spelling used
@@ -87,6 +93,10 @@ type contentRefs = sling.ContentRefs
 
 // duplicateCandidate is one bead reduced to the fields the dedupe compares.
 type duplicateCandidate = sling.Duplicate
+
+// depEdge is one blocking dependency edge; internal/sling owns the shape and
+// the walk over it.
+type depEdge = sling.DepEdge
 
 // duplicateMatch records one existing bead whose content overlaps the
 // candidate's, and on what. Which overlaps refuse a sling is sling.Blocking's
@@ -254,6 +264,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 		Title:     info.Title,
 		Status:    info.Status,
 		IssueType: info.IssueType,
+		Blockers:  blockingDepIDs(info.Dependencies),
 		Refs:      refs,
 	}
 
@@ -265,7 +276,53 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	if err != nil {
 		return candidate, nil, fmt.Errorf("duplicate check skipped: %w", err)
 	}
-	return candidate, findDuplicateMatches(*candidate, pool), nil
+	matches := findDuplicateMatches(*candidate, pool)
+	return candidate, dropRelatedMatches(*candidate, pool, matches), nil
+}
+
+// dropRelatedMatches removes the overlaps the candidate's dependency chain
+// already links to it. The chain is read from the edges this check has in hand
+// — the candidate's own blocking dependencies and each pool bead's — because a
+// refusal arrives from the dependents side too (gt-xydyc).
+func dropRelatedMatches(candidate duplicateCandidate, pool []duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
+	if len(matches) == 0 {
+		return matches
+	}
+	related := sling.RelatedBeads(candidate.ID, dependencyEdges(candidate, pool), duplicateDependencyHops)
+	return sling.DropRelatedMatches(matches, related)
+}
+
+// dependencyEdges is every blocking dependency edge this check knows.
+func dependencyEdges(candidate duplicateCandidate, pool []duplicateCandidate) []depEdge {
+	edges := make([]depEdge, 0, len(candidate.Blockers))
+	for _, blocker := range candidate.Blockers {
+		edges = append(edges, depEdge{From: candidate.ID, To: blocker})
+	}
+	for _, other := range pool {
+		for _, blocker := range other.Blockers {
+			edges = append(edges, depEdge{From: other.ID, To: blocker})
+		}
+	}
+	return edges
+}
+
+// blockingDepIDs reduces a bead's dependency list to the IDs it blocks on,
+// dropping relations that are not blocking and bd's external: refs.
+func blockingDepIDs(deps []beads.IssueDep) []string {
+	var ids []string
+	seen := make(map[string]bool, len(deps))
+	for _, dep := range deps {
+		if !beads.IsBlockingDependencyType(dep.DependencyType) {
+			continue
+		}
+		id := beads.ExtractIssueID(dep.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // noteSlingCandidateDispatched adds a bead to the cached pool once its sling
@@ -422,10 +479,10 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 	// The degrade is reported, though: a pool without design/notes text is
 	// blind to exactly the overlap this check was extended to catch, and the
 	// operator must be able to tell that apart from "no duplicates found".
-	fullText, ftErr := fetchDuplicateFullText(store, ids)
-	if ftErr != nil {
-		fullText = nil
-		warn(beadsDir, ftErr)
+	details, detailErr := fetchDuplicateDetails(store, ids)
+	if detailErr != nil {
+		details = nil
+		warn(beadsDir, detailErr)
 	}
 
 	candidates := make([]duplicateCandidate, 0, len(rows))
@@ -433,15 +490,16 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 		if row.ID == "" {
 			continue
 		}
-		text := fullText[row.ID]
+		detail := details[row.ID]
 		candidates = append(candidates, duplicateCandidate{
 			ID:        row.ID,
 			Title:     row.Title,
 			Status:    row.Status,
 			ClosedAt:  row.ClosedAt,
 			IssueType: row.Type,
+			Blockers:  detail.Blockers,
 			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
-				text.Design, text.Notes),
+				detail.Design, detail.Notes),
 		})
 	}
 	return candidates, nil
@@ -455,19 +513,22 @@ func warnDuplicateEnrichmentFailed(beadsDir string, err error) {
 		style.Dim.Render("Warning:"), beadsDir, err)
 }
 
-// duplicateFullText holds the design and notes text bd show returns for one
-// bead — the two fields bd list never carries.
-type duplicateFullText struct {
-	Design string
-	Notes  string
+// duplicateDetail is what one batched show recovers for a pool bead beyond its
+// bd list row: the design and notes text, which bd list's JSON never carries,
+// and the blocking dependency edges, which the guard walks to tell a bead in
+// the candidate's chain from a duplicate (gt-xydyc).
+type duplicateDetail struct {
+	Design   string
+	Notes    string
+	Blockers []string
 }
 
-// fetchDuplicateFullText recovers design and notes text for a pool of beads
-// with a single batched show, so the pool comparison sees the same fields
-// the sling-time candidate already does (checkSlingDuplicates reads its
-// candidate via bd show, which carries design and notes; bd list does not).
+// fetchDuplicateDetails recovers that detail for a pool of beads with a single
+// batched show, so the pool comparison sees the same fields the sling-time
+// candidate already does (checkSlingDuplicates reads its candidate via bd
+// show, which carries design, notes and dependencies; bd list does not).
 // Returns nil, nil for an empty pool — nothing to enrich.
-func fetchDuplicateFullText(store beads.Client, ids []string) (map[string]duplicateFullText, error) {
+func fetchDuplicateDetails(store beads.Client, ids []string) (map[string]duplicateDetail, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -475,11 +536,15 @@ func fetchDuplicateFullText(store beads.Client, ids []string) (map[string]duplic
 	if err != nil {
 		return nil, fmt.Errorf("fetching design/notes for %d bead(s): %w", len(ids), err)
 	}
-	text := make(map[string]duplicateFullText, len(issues))
+	details := make(map[string]duplicateDetail, len(issues))
 	for id, is := range issues {
-		text[id] = duplicateFullText{Design: is.Design, Notes: is.Notes}
+		details[id] = duplicateDetail{
+			Design:   is.Design,
+			Notes:    is.Notes,
+			Blockers: blockingDepIDs(is.Dependencies),
+		}
 	}
-	return text, nil
+	return details, nil
 }
 
 // intersectTests returns the entries of a that name the same test as some entry

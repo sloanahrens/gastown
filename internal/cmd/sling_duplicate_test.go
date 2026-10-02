@@ -519,7 +519,7 @@ func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
 // the wired-up pipeline still misses that exact case. This test drives the
 // check through the production pool fetch over a bd shaped like production:
 // the pool bead's list row is silent on the shared test, and the overlap is
-// recoverable only from the batched show fetchDuplicateFullText makes.
+// recoverable only from the batched show fetchDuplicateDetails makes.
 func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 	t.Parallel()
 	townRoot := duplicateTown(t)
@@ -546,6 +546,70 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 		if !strings.Contains(decision.Message, want) {
 			t.Errorf("refusal should mention %q:\n%s", want, decision.Message)
 		}
+	}
+}
+
+// TestCheckSlingDuplicatesIgnoresDependencyChain is the gt-xydyc production
+// path: the pool bead that refused the base of a planned chain is the bead
+// that depends on it, so the edges have to come out of the batched show fetch
+// the pool already makes.
+func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-plan.1", Title: "plan: base step", Status: "open",
+			Description: "TestSharedStep fails at the base of the plan."},
+		beads.Issue{ID: "gt-plan.3", Title: "plan: prerequisite step", Status: "open",
+			Description: "TestSharedStep fails in the step the base needs."},
+		beads.Issue{ID: "gt-plan.7", Title: "plan: a tracked step", Status: "open",
+			Description: "TestSharedStep fails in the step that tracks the base."},
+		beads.Issue{ID: "gt-plan.9", Title: "plan: a step that depends on the base", Status: "hooked",
+			Description: "TestSharedStep fails from this vantage point."},
+		beads.Issue{ID: "gt-rival", Title: "unrelated bead", Status: "open",
+			Description: "TestSharedStep fails."},
+	)
+	if err := db.AddDependency("gt-plan.9", "gt-plan.1"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if err := db.AddTypedDependency("gt-plan.7", "gt-plan.1", "tracks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+
+	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+		return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+			t.Errorf("enrichment of %s failed: %v", dir, err)
+		}, beadsDir)
+	})
+
+	info := &beadInfo{
+		Title:        "plan: base step",
+		Status:       "open",
+		Description:  "TestSharedStep fails at the base of the plan.",
+		Dependencies: []beads.IssueDep{{ID: "gt-plan.3", DependencyType: "blocks"}},
+	}
+	_, matches, err := pools.check(townRoot, "gt-plan.1", info)
+	if err != nil {
+		t.Fatalf("checkSlingDuplicates: %v", err)
+	}
+
+	var got []string
+	for _, m := range matches {
+		got = append(got, m.Bead.ID)
+	}
+	// The dependent and the prerequisite drop out of the overlap; the bead
+	// outside the chain stays, and so does the one only linked by a
+	// non-blocking relation (gt-plan.7 tracks the candidate).
+	if strings.Join(got, ",") != "gt-plan.7,gt-rival" {
+		t.Fatalf("matches = %v, want [gt-plan.7 gt-rival]", got)
+	}
+	decision := decideSlingDuplicates("gt-plan.1", matches)
+	if !decision.Blocked {
+		t.Fatalf("the unrelated bead must still refuse the sling:\n%s", decision.Message)
+	}
+	if strings.Contains(decision.Message, "gt-plan.9") || strings.Contains(decision.Message, "gt-plan.3") {
+		t.Errorf("the report must not count the chain as overlap:\n%s", decision.Message)
 	}
 }
 

@@ -35,6 +35,11 @@ type Duplicate struct {
 	ClosedAt  string
 	IssueType string
 	Refs      ContentRefs
+	// Blockers lists the IDs this bead has a blocking dependency on, as far as
+	// the caller could read them from bd. The overlap guard walks these edges
+	// to tell a bead of the candidate's own chain from a duplicate: a chain's
+	// beads share tests because they are one piece of work (gt-xydyc).
+	Blockers []string
 }
 
 // IsEpic reports whether the bead is an epic. An epic is a container for other
@@ -60,6 +65,74 @@ func (m DuplicateMatch) Blocking() bool {
 
 // blockingStatuses are the statuses whose overlap refuses a sling.
 var blockingStatuses = map[string]bool{"open": true, "in_progress": true, "hooked": true}
+
+// DepEdge is one blocking dependency edge as bd records it: From depends on
+// To.
+type DepEdge struct {
+	From string
+	To   string
+}
+
+// RelatedBeads returns every bead the edges link to root within maxHops hops,
+// walked in both directions because the candidate and the overlapping bead can
+// be on either side of a blocking edge (gt-xydyc).
+func RelatedBeads(root string, edges []DepEdge, maxHops int) map[string]bool {
+	if root == "" || maxHops <= 0 {
+		return nil
+	}
+
+	neighbors := make(map[string][]string, len(edges)*2)
+	for _, e := range edges {
+		if e.From == "" || e.To == "" || e.From == e.To {
+			continue
+		}
+		neighbors[e.From] = append(neighbors[e.From], e.To)
+		neighbors[e.To] = append(neighbors[e.To], e.From)
+	}
+
+	related := make(map[string]bool)
+	seen := map[string]bool{root: true}
+	frontier := []string{root}
+	for hop := 0; hop < maxHops && len(frontier) > 0; hop++ {
+		var next []string
+		for _, id := range frontier {
+			for _, neighbor := range neighbors[id] {
+				if seen[neighbor] {
+					continue
+				}
+				seen[neighbor] = true
+				related[neighbor] = true
+				next = append(next, neighbor)
+			}
+		}
+		frontier = next
+	}
+	if len(related) == 0 {
+		return nil
+	}
+	return related
+}
+
+// DropRelatedMatches removes the matches the candidate's dependency chain
+// already links to it: counting them as overlaps refuses the base of a planned
+// chain and leaves an automatic dispatcher nothing it can sling without
+// --force (gt-xydyc).
+func DropRelatedMatches(matches []DuplicateMatch, related map[string]bool) []DuplicateMatch {
+	if len(related) == 0 {
+		return matches
+	}
+	kept := make([]DuplicateMatch, 0, len(matches))
+	for _, m := range matches {
+		if related[m.Bead.ID] {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
 
 // packageFixtureTests are test identifiers that name a package's own
 // scaffolding rather than a defect. TestMain is Go's package entrypoint: every
