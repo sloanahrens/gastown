@@ -562,14 +562,15 @@ func TestLandGateSplitsMakeGateIntoStages(t *testing.T) {
 }
 
 // writeShellTierTree is a tree with make gate's two stages and the shell
-// tier's entry point, so LandGate's shell step has a script to run.
+// tier's entry point. The script only has to exist for the gate's own check;
+// the fake runner answers the step.
 func writeShellTierTree(t *testing.T, makefile string) string {
 	t.Helper()
 	dir := writeMakefile(t, makefile)
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, shellTierScript), []byte("#!/usr/bin/env bash\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, shellTierScript), []byte("true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
