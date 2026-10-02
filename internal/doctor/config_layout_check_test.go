@@ -62,8 +62,10 @@ func TestRegistryChecksReadTheTwoFileLayout(t *testing.T) {
 	if r := NewRigsRegistryExistsCheck().Run(ctx); r.Status != StatusOK || !strings.Contains(r.Message, "mayor/town.json") {
 		t.Errorf("rigs-registry-exists = %+v, want OK naming mayor/town.json", r)
 	}
+	// The fixture's only rig carries no beads prefix, so the registry reads
+	// from mayor/town.json but registers nothing: Warning, not Error.
 	rj := NewRigsJSONCheck()
-	if r := rj.Run(ctx); r.Status != StatusOK || rj.CanFix() {
+	if r := rj.Run(ctx); r.Status != StatusWarning || rj.CanFix() {
 		t.Errorf("rigs-json = %+v, CanFix %v", r, rj.CanFix())
 	}
 	if r := NewPatrolHooksWiredCheck().Run(ctx); r.Status != StatusOK {

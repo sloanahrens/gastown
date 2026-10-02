@@ -13,7 +13,9 @@ const testRigsJSON = `{
   }
 }`
 
-func TestBuildPrefixRegistryFromTown_CanonicalExists_FallbackCreated(t *testing.T) {
+// TestBuildPrefixRegistryFromTown_CanonicalExists: mayor/rigs.json is the
+// registry, and nothing is copied to the town root (gt-y3pgh.2.8).
+func TestBuildPrefixRegistryFromTown_CanonicalExists(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
@@ -29,25 +31,21 @@ func TestBuildPrefixRegistryFromTown_CanonicalExists_FallbackCreated(t *testing.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// Registry should be populated.
 	if rig := r.RigForPrefix("-"); rig != "gastown" {
 		t.Errorf("expected gastown for prefix -, got %q", rig)
 	}
-
-	// Fallback copy should have been created at town root.
-	fallback := filepath.Join(townRoot, "rigs.json")
-	if _, err := os.Stat(fallback); os.IsNotExist(err) {
-		t.Error("fallback rigs.json was not created at town root")
+	if _, err := os.Stat(filepath.Join(townRoot, "rigs.json")); !os.IsNotExist(err) {
+		t.Errorf("town-root rigs.json exists (%v); the fallback copy is deleted (gt-y3pgh.2.8)", err)
 	}
 }
 
-func TestBuildPrefixRegistryFromTown_CanonicalMissing_FallbackUsed(t *testing.T) {
+// TestBuildPrefixRegistryFromTown_TownRootCopyIgnored: a leftover town-root
+// rigs.json registers nothing — only the config loaders read the registry
+// (gt-y3pgh.2.8).
+func TestBuildPrefixRegistryFromTown_TownRootCopyIgnored(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	// No mayor/rigs.json — only fallback at town root.
-	fallback := filepath.Join(townRoot, "rigs.json")
-	if err := os.WriteFile(fallback, []byte(testRigsJSON), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, "rigs.json"), []byte(testRigsJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,10 +53,8 @@ func TestBuildPrefixRegistryFromTown_CanonicalMissing_FallbackUsed(t *testing.T)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// Registry should be populated from fallback.
-	if rig := r.RigForPrefix("bd-"); rig != "beads" {
-		t.Errorf("expected beads for prefix bd-, got %q", rig)
+	if rig := r.RigForPrefix("bd-"); rig != "bd-" {
+		t.Errorf("RigForPrefix(bd-) = %q, want the unknown-prefix fallthrough", rig)
 	}
 }
 
@@ -79,32 +75,6 @@ func TestBuildPrefixRegistryFromTown_BothMissing_EmptyRegistry(t *testing.T) {
 	// Verify no rigs were registered by checking a known rig name returns default.
 	if prefix := r.PrefixForRig("gastown"); prefix != DefaultPrefix {
 		t.Errorf("expected default prefix for unknown rig, got %q", prefix)
-	}
-}
-
-func TestCopyFileIfNewer_AtomicWrite(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.json")
-	dst := filepath.Join(dir, "dst.json")
-
-	if err := os.WriteFile(src, []byte(testRigsJSON), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	copyFileIfNewer(src, dst)
-
-	data, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("failed to read dst: %v", err)
-	}
-	if string(data) != testRigsJSON {
-		t.Error("dst content does not match src")
-	}
-
-	// Temp file should not be left behind.
-	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
-		t.Error("temp file was not cleaned up")
 	}
 }
 

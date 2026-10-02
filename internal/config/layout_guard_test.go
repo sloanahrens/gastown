@@ -37,10 +37,7 @@ var (
 // The scan follows a path through local assignments, not through range
 // loops or struct fields set in another function; it catches the common
 // filepath.Join-then-os.ReadFile shape, not every one.
-var retiredFileRawAccess = map[string]string{
-	"internal/session/registry.go:BuildPrefixRegistryFromTown": "keeps the town-root fallback copy only while mayor/rigs.json is a file",
-	"internal/doctor/rigs_json_check.go:Run":                   "five-file layout only, after DetectLayout",
-}
+var retiredFileRawAccess = map[string]string{}
 
 // TestRetiredConfigFilesAreReadThroughTheLoaders fails when production code
 // opens or stats mayor/rigs.json, mayor/daemon.json, mayor/overseer.json or

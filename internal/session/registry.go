@@ -4,7 +4,6 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -218,83 +217,30 @@ func sanitizeTownName(name string) string {
 }
 
 // BuildPrefixRegistryFromTown reads the rig registry and returns a populated
-// PrefixRegistry. It reads mayor/rigs.json (canonical; config.LoadRigsConfig
-// follows it into mayor/town.json on the two-file layout), then falls back to
-// town-root rigs.json. Warns to stderr if the registry is missing entirely —
-// an empty registry causes silent failures in session name parsing (crew
-// cycling, nudge routing, etc.).
+// PrefixRegistry. mayor/rigs.json goes through config.LoadRigsConfig, which
+// follows it into the registry section of mayor/town.json on the two-file
+// layout. Warns to stderr if the registry is missing entirely — an empty
+// registry causes silent failures in session name parsing (crew cycling,
+// nudge routing, etc.).
 func BuildPrefixRegistryFromTown(townRoot string) (*PrefixRegistry, error) {
-	// Canonical location: inside mayor worktree.
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	fallbackPath := filepath.Join(townRoot, "rigs.json")
 	rc, err := config.LoadRigsConfig(rigsPath)
-	if err == nil {
-		// Maintain fallback copy at town root (resilient to git ops in
-		// mayor/). The two-file layout has no rigs.json file to copy.
-		if _, statErr := os.Stat(rigsPath); statErr == nil {
-			copyFileIfNewer(rigsPath, fallbackPath)
-		}
-		r := NewPrefixRegistry()
-		for rigName, entry := range rc.Rigs {
-			if entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
-				r.Register(entry.BeadsConfig.Prefix, rigName)
-			}
-		}
-		return r, nil
-	}
-	if !errors.Is(err, config.ErrNotFound) {
-		return nil, err
-	}
-
-	// Fallback: town root (safe from git operations in mayor worktree).
-	if _, err := os.Stat(fallbackPath); err == nil {
-		style.PrintWarning("mayor/rigs.json missing, using fallback %s", fallbackPath)
-		return BuildPrefixRegistryFromFile(fallbackPath)
-	}
-
-	// No rigs.json found anywhere — warn loudly.
-	style.PrintWarning("rigs.json not found (checked mayor/rigs.json and town root). " +
-		"PrefixRegistry is empty — session parsing will fail. " +
-		"Run 'gt doctor' or restore rigs.json.")
-	return NewPrefixRegistry(), nil
-}
-
-// rigsJSON is the minimal structure for reading rigs.json prefix data.
-type rigsJSON struct {
-	Rigs map[string]rigEntry `json:"rigs"`
-}
-
-type rigEntry struct {
-	Beads *beadsEntry `json:"beads,omitempty"`
-}
-
-type beadsEntry struct {
-	Prefix string `json:"prefix"`
-}
-
-// BuildPrefixRegistryFromFile reads a rigs.json file and returns a PrefixRegistry.
-func BuildPrefixRegistryFromFile(path string) (*PrefixRegistry, error) {
-	r := NewPrefixRegistry()
-
-	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return r, nil
+		if !errors.Is(err, config.ErrNotFound) {
+			return nil, err
 		}
-		return nil, err
+		style.PrintWarning("rig registry not found (no mayor/rigs.json and no registry " +
+			"section in mayor/town.json). PrefixRegistry is empty — session parsing " +
+			"will fail. Run 'gt doctor' or restore the registry.")
+		return NewPrefixRegistry(), nil
 	}
 
-	var rigs rigsJSON
-	if err := json.Unmarshal(data, &rigs); err != nil {
-		return nil, err
-	}
-
-	for rigName, entry := range rigs.Rigs {
-		if entry.Beads != nil && entry.Beads.Prefix != "" {
-			r.Register(entry.Beads.Prefix, rigName)
+	r := NewPrefixRegistry()
+	for rigName, entry := range rc.Rigs {
+		if entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
+			r.Register(entry.BeadsConfig.Prefix, rigName)
 		}
 	}
-
 	return r, nil
 }
 
@@ -366,27 +312,4 @@ func (r *PrefixRegistry) sortedPrefixes() []string {
 		return len(prefixes[i]) > len(prefixes[j])
 	})
 	return prefixes
-}
-
-// copyFileIfNewer copies src to dst if src is newer or dst doesn't exist.
-// Errors are silently ignored — this is a best-effort resilience mechanism.
-func copyFileIfNewer(src, dst string) {
-	srcInfo, err := os.Stat(src)
-	if err != nil {
-		return
-	}
-	if dstInfo, err := os.Stat(dst); err == nil {
-		if !srcInfo.ModTime().After(dstInfo.ModTime()) {
-			return // dst is up to date
-		}
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return
-	}
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, dst)
 }

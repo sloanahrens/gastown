@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.repo.git`. `gt doctor` is now read-only; `--no-start` and
   `--restart-sessions` moved to the named repair.
 
+- **The town-root `rigs.json` fallback copy** (gt-y3pgh.2.8) — the session
+  prefix registry copied `mayor/rigs.json` to `<town>/rigs.json` and parsed
+  that copy raw when the canonical file was missing. On the two-file layout
+  the registry is the `registry` section of `mayor/town.json` and no
+  `rigs.json` exists to copy, so the fallback was a second, non-strict reader
+  of a retired file. `gt doctor`'s `rigs-json` check no longer offers to
+  restore the canonical file from it: it reports whether the registry loads
+  and carries rig prefixes.
+
 ### Added
 
 - **Test-pollution sweep** (gt-4k3fj.6.2) — the retired deacon's
