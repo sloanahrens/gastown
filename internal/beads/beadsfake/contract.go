@@ -455,6 +455,24 @@ func contractCloseFence(t *testing.T, s *scope) {
 	if st := s.mustShow(t, also.ID).Status; st != "closed" {
 		t.Errorf("Update(status=closed) left status %q", st)
 	}
+
+	// The pin is a close fence too, and like the assignee fence it is
+	// close's alone: an update to status closed passes it, a release or a
+	// forced close clears it.
+	pinned := s.mustCreate(t, beads.CreateOptions{Title: "pinned", Priority: -1})
+	mustDo(t, "pin", s.Update(pinned.ID, beads.UpdateOptions{Status: ptr("pinned")}))
+	refused(t, "closing a pinned issue", s.Close(pinned.ID))
+	if st := s.mustShow(t, pinned.ID).Status; st != "pinned" {
+		t.Errorf("refused close left status %q", st)
+	}
+	mustDo(t, "Release", s.Release(pinned.ID))
+	mustDo(t, "close released", s.Close(pinned.ID))
+	still := s.mustCreate(t, beads.CreateOptions{Title: "pinned again", Priority: -1})
+	mustDo(t, "pin again", s.Update(still.ID, beads.UpdateOptions{Status: ptr("pinned")}))
+	mustDo(t, "Update(status=closed) of a pinned issue", s.Update(still.ID, beads.UpdateOptions{Status: ptr("closed")}))
+	last := s.mustCreate(t, beads.CreateOptions{Title: "pinned last", Priority: -1})
+	mustDo(t, "pin last", s.Update(last.ID, beads.UpdateOptions{Status: ptr("pinned")}))
+	mustDo(t, "ForceCloseWithReason of a pinned issue", s.ForceCloseWithReason("forced", last.ID))
 }
 
 func contractListFilters(t *testing.T, s *scope) {
