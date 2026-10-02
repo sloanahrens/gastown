@@ -473,12 +473,15 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
+	bd := newWorkBD(t)
 	d := &Daemon{
 		prefixRegistryFn: myrPrefixes,
 		config:           &Config{TownRoot: townRoot},
 		logger:           log.New(&logBuf, "", 0),
 		tmux:             polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier:         notifyfake.New(),
+		openWorkBeads:    bd.open,
+		execCmd:          bd.run,
 	}
 
 	sessionName := session.PolecatSessionName(myrPrefixes().PrefixForRig("myr"), "mycat")
@@ -526,6 +529,55 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), string(polecat.HeartbeatExiting)) {
 		t.Fatalf("expected reap reason %q, got: %q", polecat.HeartbeatExiting, logBuf.String())
+	}
+}
+
+// gt-7lwft: the reaper read a polecat deliberately waiting on a red main gate
+// as idle and killed it, stranding committed work until a restart. gt done
+// writes "exiting" at the top of its flow, so the run that exits 15 on the red
+// gate leaves the same heartbeat as one that submitted — but not the same work
+// bead. A stale idle or exiting heartbeat that still holds assigned work is not
+// idle, and killing it is what strands the work.
+func TestReapIdlePolecat_SkipsPolecatHoldingWork(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []polecat.HeartbeatState{polecat.HeartbeatExiting, polecat.HeartbeatIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+
+			bd := hookedWorkBD(t, "gt-work1", time.Hour)
+			d, logBuf := reaperDaemon(t, bd)
+			writePolecatHeartbeat(t, d.config.TownRoot, state, time.Hour)
+
+			d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+			if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
+				t.Fatalf("reaped a %s polecat that still holds work; log: %s", state, logBuf)
+			}
+			if !strings.Contains(logBuf.String(), "still holds assigned work") {
+				t.Fatalf("the hold was not logged for %s: %s", state, logBuf)
+			}
+		})
+	}
+}
+
+// The control for the test above: the same stale exiting heartbeat with no
+// work assigned is still reclaimed, so the hold cannot be satisfied by "never
+// reap a polecat in state=exiting" (gt-azmw).
+func TestReapIdlePolecat_ReapsPolecatWithoutWork(t *testing.T) {
+	t.Parallel()
+
+	bd := newWorkBD(t)
+	d, logBuf := reaperDaemon(t, bd)
+	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatExiting, time.Hour)
+
+	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+	if !strings.Contains(logBuf.String(), "Reaping idle polecat") {
+		t.Fatalf("a stale, workless, agentless polecat was not reaped: %s", logBuf)
+	}
+	if alive, _ := d.tmux.HasSession("myr-mycat"); alive {
+		t.Fatal("the reaped polecat's session is still alive")
 	}
 }
 

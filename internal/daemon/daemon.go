@@ -2764,6 +2764,10 @@ func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) {
 //     hooked work (agent_state=idle in beads). This catches polecats that completed
 //     gt done — persistentPreRun resets heartbeat to "working" on every gt sub-command,
 //     so after gt done finishes the heartbeat shows "working" with a stale timestamp.
+//
+// Unfinished assigned work suspends the reap in every state. A heartbeat cannot
+// separate a finished polecat from one that is deliberately waiting, so the reap
+// reads the work bead (gt-7lwft).
 func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Duration) {
 	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 
@@ -2799,8 +2803,23 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 
 	state := hb.EffectiveState()
 
-	// Explicitly idle or exiting — safe to reap
+	// Explicitly idle or exiting — reapable only with no work left to strand.
+	// gt done writes state="exiting" at the top of its flow and a run that
+	// exits 15 on a red local gate (or 10/11/14 on a failed push or rebase)
+	// never writes anything else on the way out, so "exiting" covers both the
+	// polecat that submitted and the one sitting on committed, unpushed work
+	// waiting for the gate to go green (gt-7lwft). The work bead is the
+	// discriminator the rest of the town already applies to this question:
+	// patrol scan will not retire a seat that holds work, and the "working"
+	// branch below has always stopped here. The trade is that a session wedged
+	// inside gt done with work on its hook waits for the crash path instead.
 	if state == polecat.HeartbeatIdle || state == polecat.HeartbeatExiting {
+		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+		if d.hasAssignedOpenWork(rigName, assignee) {
+			d.logger.Printf("Not reaping %s/%s: %s heartbeat but still holds assigned work (idle %v)",
+				rigName, polecatName, state, staleDuration.Truncate(time.Second))
+			return
+		}
 		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, string(state))
 		return
 	}
