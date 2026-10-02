@@ -110,6 +110,11 @@ type Daemon struct {
 	// heartbeat advance check. Heartbeat goroutine only.
 	lastTownHealth *townhealth.Report
 
+	// lastAttention is the previous attention tick: the queue state it wrote
+	// and the rejection-note cache (see attentionCache). Heartbeat goroutine
+	// only.
+	lastAttention *attentionCache
+
 	// townHealthSources replaces the health report's outside probes (Dolt
 	// ping, backup root, slot status) in tests; nil probes for real.
 	townHealthSources func(s *healthSources)
@@ -1319,6 +1324,11 @@ var heartbeatSteps = []heartbeatStep{
 	// status --line reads (gt-s3rec.2). Last, so it sees this tick's Dolt
 	// check and the steps' records.
 	{name: "townhealth", run: (*Daemon).writeTownHealth},
+
+	// Write the attention queue from the collectors (gt-vsct7.2). After
+	// townhealth, so the bd-slow collector can read this tick's Dolt verdict;
+	// non-lifecycle, so an E-stopped town still gets its queue.
+	{name: "attention", run: (*Daemon).writeAttention},
 }
 
 // heartbeatWork is the recovery work of one heartbeat, run after the
