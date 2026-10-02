@@ -1,0 +1,28 @@
+{"Time":"2026-10-02T11:00:00.000000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/daemon"}
+{"Time":"2026-10-02T11:00:00.100000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandingRecords"}
+{"Time":"2026-10-02T11:00:00.100200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandingRecords","Output":"=== RUN   TestLandingRecords\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:00.100400-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandingRecords","Output":"    landing_test.go:31: a passing test's own line\n"}
+{"Time":"2026-10-02T11:00:01.000000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandingRecords","Output":"--- PASS: TestLandingRecords (0.90s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.000100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandingRecords","Elapsed":0.9}
+{"Time":"2026-10-02T11:00:01.100000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails"}
+{"Time":"2026-10-02T11:00:01.100200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails","Output":"=== RUN   TestLandFails\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.100400-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails","Output":"    land_test.go:44: the landing record has no gate result\n"}
+{"Time":"2026-10-02T11:00:01.100600-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails","Output":"    land_test.go:45: want ok, got red\n","OutputType":"error"}
+{"Time":"2026-10-02T11:00:01.100700-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails","Output":"--- FAIL: TestLandFails (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.100800-05:00","Action":"fail","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLandFails","Elapsed":0}
+{"Time":"2026-10-02T11:00:01.200000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Output":"FAIL\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.200100-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Output":"FAIL\tgithub.com/steveyegge/gastown/internal/daemon\t40.000s\n"}
+{"Time":"2026-10-02T11:00:01.200200-05:00","Action":"fail","Package":"github.com/steveyegge/gastown/internal/daemon","Elapsed":40}
+{"ImportPath":"github.com/steveyegge/gastown/internal/broken [github.com/steveyegge/gastown/internal/broken.test]","Action":"build-output","Output":"# github.com/steveyegge/gastown/internal/broken [github.com/steveyegge/gastown/internal/broken.test]\n"}
+{"ImportPath":"github.com/steveyegge/gastown/internal/broken [github.com/steveyegge/gastown/internal/broken.test]","Action":"build-output","Output":"internal/broken/broken_test.go:8:2: undefined: landRecord\n"}
+{"ImportPath":"github.com/steveyegge/gastown/internal/broken [github.com/steveyegge/gastown/internal/broken.test]","Action":"build-fail"}
+{"Time":"2026-10-02T11:00:01.300000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/broken"}
+{"Time":"2026-10-02T11:00:01.300100-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/broken","Output":"FAIL\tgithub.com/steveyegge/gastown/internal/broken [build failed]\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.300200-05:00","Action":"fail","Package":"github.com/steveyegge/gastown/internal/broken","Elapsed":0,"FailedBuild":"github.com/steveyegge/gastown/internal/broken [github.com/steveyegge/gastown/internal/broken.test]"}
+{"Time":"2026-10-02T11:00:01.400000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/notify"}
+{"Time":"2026-10-02T11:00:01.500000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/notify","Test":"TestNudge"}
+{"Time":"2026-10-02T11:00:40.600000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/notify","Test":"TestNudge","Output":"--- PASS: TestNudge (39.10s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:40.600100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/notify","Test":"TestNudge","Elapsed":39.1}
+{"Time":"2026-10-02T11:00:40.600200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/notify","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:40.600300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/notify","Output":"ok  \tgithub.com/steveyegge/gastown/internal/notify\t39.200s\n"}
+{"Time":"2026-10-02T11:00:40.600400-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/notify","Elapsed":39.2}
