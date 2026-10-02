@@ -363,6 +363,13 @@ func (h *patrolScanHost) Restart(rig, name, reason string) error {
 	return h.d.sup().Restart(h.seat(rig, name), reason, patrolscan.Actor)
 }
 
+// MarkIdle retires a polecat seat's record to stop once its session is gone
+// and it holds no work, so the record stops asking for a session that nothing
+// will start (gt-613vw).
+func (h *patrolScanHost) MarkIdle(rig, name string) (bool, error) {
+	return intent.MarkIdle(h.town(), supervisor.IntentSeat(h.seat(rig, name)), patrolscan.Actor, h.d.clk().Now())
+}
+
 func (h *patrolScanHost) ActiveWork(rig string) ([]patrolscan.Work, error) {
 	issues, err := h.listByStatus(rig, "", "hooked", "in_progress")
 	if err != nil {

@@ -12,7 +12,7 @@ job already did. Both sessions spent tokens while idle, and their judgement call
 of the restart loops, re-slings and mail storms the backlog audit catalogued.
 
 We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, host in
-`internal/daemon/patrol_scan.go`). Per rig, every two minutes, it does three things:
+`internal/daemon/patrol_scan.go`). Per rig, every two minutes, it does four things:
 
 - **Restart.** A polecat whose session the liveness function has found Dead on two consecutive
   samples, while it holds hooked or in_progress work, is restarted through the supervisor
@@ -21,6 +21,11 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   work was hooked within the spawn grace; the agent bead says `stuck`, `awaiting-gate`, `paused`,
   `done` or `nuked`; or the heartbeat says `stuck` or a fresh `exiting`. The supervisor still
   enforces e-stop, shutdown and the 3-per-hour budget.
+- **Idle seats.** A polecat Dead on two consecutive samples which holds no hooked or in_progress
+  work has its intent record retired to `stop` (gt-613vw): the town needs no session for a seat
+  with nothing to run, and a record left at `desired=run` was what made townhealth report the
+  seat dead forever. A hold and a `submitted` record are left alone, and the seat's next dispatch
+  goes through the supervisor's Respawn, which sets the record back to `run`.
 - **Orphaned molecules.** For hooked work whose polecat has neither a session nor a directory,
   the bonded `mol-polecat-work` root and its step wisps are force-closed, read with
   `bd show --children` so ephemeral steps are seen (gt-22hdp.36).

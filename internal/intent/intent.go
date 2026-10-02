@@ -229,6 +229,31 @@ func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error 
 	return err
 }
 
+// MarkIdle retires a seat whose session ended without submitting and which
+// holds no work: nothing needs it, so the record goes to stop and its stall
+// evidence is dropped. A hold, a landing wait and an already-stopped seat are
+// left as they are. Dispatching work to the seat clears it (Respawn sets
+// run). It reports whether it changed the record.
+func MarkIdle(townRoot string, s Seat, actor string, now time.Time) (bool, error) {
+	rec, err := Read(townRoot, s)
+	if err != nil || rec.Held() || rec.Submitted() || rec.EffectiveDesired() == DesiredStop {
+		return false, err
+	}
+	changed := false
+	_, err = Update(townRoot, s, func(r *Record) error {
+		if r.Held() || r.Submitted() || r.EffectiveDesired() == DesiredStop {
+			return nil
+		}
+		r.Desired = DesiredStop
+		r.WorkBead = ""
+		r.Progress = nil
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		changed = true
+		return nil
+	})
+	return changed, err
+}
+
 // ClearLanded ends a submitted seat's wait once the landing worker has
 // finished workBead (landed it, or handed it back as rework): the seat goes
 // to stop, so nothing reads "submitted" for a bead that is no longer waiting

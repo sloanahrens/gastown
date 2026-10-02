@@ -33,6 +33,10 @@ type fakeEnv struct {
 	stateErr    map[string]error
 	heartbeats  map[string]*Heartbeat
 	restartErr  map[string]error
+	idleErr     map[string]error
+	// idleStopped names seats whose record already says stop, so MarkIdle
+	// reports no change.
+	idleStopped map[string]bool
 
 	active     []Work
 	activeErr  error
@@ -48,6 +52,7 @@ type fakeEnv struct {
 	commentErr error
 
 	restarts []string
+	idles    []string // polecats whose seat was retired to stop
 	closed   []string
 	comments map[string][]string
 	reads    []string // AgentState reads, to prove they are refusal-only
@@ -58,7 +63,8 @@ func newFake() *fakeEnv {
 		intents: map[string]intent.Record{}, intentErr: map[string]error{},
 		verdicts: map[string]liveness.Result{}, work: map[string]*Work{}, workErr: map[string]error{},
 		states: map[string]string{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
-		restartErr: map[string]error{}, dirs: map[string]bool{}, dirErr: map[string]error{},
+		restartErr: map[string]error{}, idleErr: map[string]error{}, idleStopped: map[string]bool{},
+		dirs: map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
 		molErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
 		comments: map[string][]string{},
@@ -87,6 +93,17 @@ func (f *fakeEnv) Restart(_, p, _ string) error {
 	}
 	f.restarts = append(f.restarts, p)
 	return nil
+}
+func (f *fakeEnv) MarkIdle(_, p string) (bool, error) {
+	if err := f.idleErr[p]; err != nil {
+		return false, err
+	}
+	f.idles = append(f.idles, p)
+	if f.idleStopped[p] {
+		return false, nil
+	}
+	f.idleStopped[p] = true
+	return true, nil
 }
 func (f *fakeEnv) ActiveWork(string) ([]Work, error) { return f.active, f.activeErr }
 func (f *fakeEnv) PolecatDirExists(_, p string) (bool, error) {
@@ -176,6 +193,28 @@ func TestDeadSeatWithHookedWorkIsRestarted(t *testing.T) {
 	}
 }
 
+// An idle polecat — session gone, no work — is not a crash, and its record
+// must stop asking for a session or townhealth reports the seat dead forever
+// (gt-613vw). The retirement is reported once, then the record reads as
+// stopped and the next tick says nothing.
+func TestIdleSeatIsRetiredToStop(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"ruby"}
+	env.verdicts["ruby"] = dead(2)
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.idles, ","); got != "ruby" {
+		t.Fatalf("idles = %q, want ruby; report %v", got, r.Lines())
+	}
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeIdled {
+		t.Fatalf("outcome = %v, want idled", f)
+	}
+	r = scanner(env, nil).Tick("gastown")
+	if f := seatFinding(t, r, "ruby"); f.Outcome != "" {
+		t.Fatalf("second tick = %v %q, want no finding", f.Outcome, f.Detail)
+	}
+}
+
 func TestNoRestartCases(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -215,7 +254,19 @@ func TestNoRestartCases(t *testing.T) {
 			env.work["ruby"].Labels = []string{"needs-human"}
 		}, OutcomeSkipped},
 		{"closed work", func(env *fakeEnv) { env.work["ruby"].Status = "closed" }, ""},
-		{"no work: idle polecat", func(env *fakeEnv) { env.work["ruby"] = nil }, ""},
+		{"no work: idle polecat retired to stop", func(env *fakeEnv) { env.work["ruby"] = nil }, OutcomeIdled},
+		{"no work, death unconfirmed", func(env *fakeEnv) {
+			env.work["ruby"] = nil
+			env.verdicts["ruby"] = dead(1)
+		}, ""},
+		{"no work, record already stopped", func(env *fakeEnv) {
+			env.work["ruby"] = nil
+			env.idleStopped["ruby"] = true
+		}, ""},
+		{"no work, retire fails", func(env *fakeEnv) {
+			env.work["ruby"] = nil
+			env.idleErr["ruby"] = errors.New("intent lock: timed out")
+		}, OutcomeFailed},
 		{"work read failure (hazard 3)", func(env *fakeEnv) {
 			env.work["ruby"] = nil
 			env.workErr["ruby"] = errors.New("bd list: connection refused")
