@@ -337,6 +337,12 @@ type Daemon struct {
 	specDispatchRunning atomic.Bool
 	specDispatchCycles  sync.WaitGroup
 
+	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
+	// oldest first, which townhealth's dispatch field judges to tell a
+	// dispatcher that is off from one that is stalled (gt-xiw7o).
+	dispatchTicksMu sync.Mutex
+	dispatchTicks   []townhealth.DispatchTick
+
 	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
@@ -3036,7 +3042,7 @@ func (d *Daemon) dispatchQueuedWork() {
 		if reason != "" {
 			d.logger.Printf("Deferring scheduler dispatch: %s", reason)
 		} else {
-			d.logger.Printf("Resuming scheduler dispatch: operator dispatch hold lifted")
+			d.logger.Printf("Resuming scheduler dispatch: operator dispatch hold lifted (%s)", d.autoDispatchers())
 		}
 	}
 	if reason != "" {
@@ -3045,4 +3051,19 @@ func (d *Daemon) dispatchQueuedWork() {
 	ctx, cancel := context.WithTimeout(context.Background(), schedulerDispatchTimeout)
 	defer cancel()
 	d.dispatchScheduledWork(ctx)
+}
+
+// autoDispatchers names the automatic dispatchers the operator hold parks and
+// whether each is on, for the hold-lifted line: an operator reading it learns
+// what came back without a second lookup (gt-xiw7o).
+func (d *Daemon) autoDispatchers() string {
+	return fmt.Sprintf("spec_dispatch %s, convoy feed %s",
+		onOff(d.isPatrolActive("spec_dispatch")), onOff(d.convoyManager.FeedActive()))
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }

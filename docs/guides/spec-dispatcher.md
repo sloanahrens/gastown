@@ -137,6 +137,16 @@ already stop the tick without a restart. The seat budget comes from
 `polecat_pool`, not from this block; `max_hooked` is the only seat key here, and
 it is opt-in.
 
+`gt status --line` and the health tick report `dispatch=off[R]` while the
+ticker is off, `dispatch=stalled[R]` when every tick in its ten-minute window
+saw candidates waiting and a free seat, slung none and turned none away on
+purpose, and `dispatch=silent[R]` when the daemon has been up longer than the
+window with the ticker on and no tick landed in it, so a town with no working
+dispatcher says so from the one signal an operator reads. A tick that
+refused, replanned or skipped its candidates was working, not stalled. A tick
+whose roster the daemon cannot read is `dispatch[?]`: an unreadable roster is
+not a full town (gt-xiw7o).
+
 ## seat-refill
 
 The plugin this ticker replaced is deleted (gt-4k3fj.8.8): the ticker is the
