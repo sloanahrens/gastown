@@ -811,6 +811,25 @@ dropped, so a recurrence raises a new item rather than hiding behind the old
 ack. A state older than 15 minutes is stale — the daemon has stopped writing
 it — and `gt attention` prints a `STALE` header and exits 3.
 
+### Hourly Report
+
+`gt report --hour` prints the hourly summary the overseer used to assemble by
+hand, from the town's own ledgers. `gt report --hour --help` is the section
+list and each section's source. It only reads: no Dolt write, no mail, no
+nudge. A source that cannot be read prints `<section>: unavailable
+(<reason>)` in that section's place and the command still exits 0.
+
+Two sections read writers that land later in the epic. `sweep` prints `no
+sweep record` until the daemon's tier sweep has run (gt-vsct7.5). `attention`
+prints unavailable until the daemon writes `.runtime/attention/state.json`
+(gt-vsct7.2): a queue that was never written and an empty queue must not read
+the same.
+
+`spend` is the one section left out whole rather than reported empty — a
+`.runtime/watch/spend.json` older than 15 minutes is not a live reading.
+daemon.log is local time and bd JSON is UTC; the window is tz-aware, so a line
+stamped just inside it counts in either zone.
+
 ## Beads Commands (bd)
 
 ```bash
