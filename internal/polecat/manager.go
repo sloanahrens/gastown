@@ -1035,6 +1035,8 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		worktreeCreated = true
 	}
 
+	pinBranchUpstream(repoGit, branchName, m.branchBaseRef(opts.BaseBranch))
+
 	// Provision CLAUDE.md with gt done instructions (same as AddWithOptions path).
 	lockedRigName := filepath.Base(m.rig.Path)
 	if _, err := templates.CreatePolecatCLAUDEmd(clonePath, lockedRigName, name); err != nil {
@@ -1243,6 +1245,8 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		}
 		worktreeCreated = true
 	}
+
+	pinBranchUpstream(repoGit, branchName, m.branchBaseRef(opts.BaseBranch))
 
 	// Provision CLAUDE.md with gt done instructions and lifecycle context.
 	// This is the primary mechanism for polecats to learn about completion —
@@ -1902,6 +1906,8 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		}
 	}
 
+	pinBranchUpstream(repoGit, branchName, m.branchBaseRef(opts.BaseBranch))
+
 	// New worktree created successfully — now safe to remove old worktree and reset bead.
 	// Kill the existing session first: its cwd is about to disappear, and leaving
 	// a live idle session around makes SessionManager.Start return ErrSessionRunning
@@ -2180,6 +2186,10 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 			}
 		}
 	}
+
+	// The sandbox is re-pointed at branchName; its upstream is re-pinned rather
+	// than left as whatever a previous life of this branch inherited.
+	pinBranchUpstream(polecatGit, branchName, m.branchBaseRef(opts.BaseBranch))
 
 	// Verify the worktree is actually on the expected branch
 	if actual, err := polecatGit.CurrentBranch(); err == nil && actual != branchName {
