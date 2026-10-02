@@ -1267,7 +1267,7 @@ func submitForLanding(r *doneRun) error {
 func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error {
 	if r.opts.allowReverts {
 		style.PrintWarning("skipping merged-work revert check (--allow-reverts): the branch may undo work merged to %s", baseRef)
-	} else if err := reportRevertedMerges(r.g, baseRef); err != nil {
+	} else if err := reportRevertedMergesRecording(r, baseRef); err != nil {
 		return err
 	}
 	if r.opts.allowThrowawayPaths {
