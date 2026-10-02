@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/sling"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -285,7 +284,7 @@ func realSlingDeps() *slingDeps {
 		createWisp:        createFormulaWisp,
 		hookWisp:          hookBeadWithRetryFn,
 		burnWisp:          burnSlingWispFn,
-		nudgePane:         func(pane, msg string) error { return tmux.NewTmux().NudgePane(pane, msg) },
+		nudgePane:         func(pane, msg string) error { return nudgePaneFn(pane, msg) },
 
 		slingContexts: func(rigBeadsDir string) slingContextStore {
 			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
