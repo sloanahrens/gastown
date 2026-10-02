@@ -264,6 +264,13 @@ func addPath(bucket []RevertedMerge, at map[string]int, commit, path string) []R
 // Containment is required in both directions: a candidate that merely deletes
 // a file the commit touched, or that happens to add a line the commit
 // removed, is not reverting it.
+//
+// Blank lines take no part in either direction. BlobDiffLines keys a blank line
+// as "" like any other, so a commit that only strips blank lines reads as
+// changeRemoved = {"": n} — which any branch whose diff adds n blank lines
+// contains, while changeAdded empty makes the other containment vacuous. That
+// pair refused a branch for undoing a commit that changed no content
+// (gt-cqzm3). Filtering every side keeps both containments about content.
 func changeIsInvertedBy(g RevertReader, preImage, postImage, base, head string) (bool, error) {
 	branchAdded, branchRemoved, err := g.BlobDiffLines(base, head)
 	if err != nil {
@@ -280,10 +287,28 @@ func changeIsInvertedBy(g RevertReader, preImage, postImage, base, head string) 
 	// of the added lines read as a revert (gt-tlw9u).
 	branchAdded, branchRemoved = netLines(branchAdded, branchRemoved)
 	changeAdded, changeRemoved = netLines(changeAdded, changeRemoved)
-	if len(changeAdded)+len(changeRemoved) == 0 {
+	branchAdded, branchRemoved = nonBlankLines(branchAdded), nonBlankLines(branchRemoved)
+	changeAdded, changeRemoved = nonBlankLines(changeAdded), nonBlankLines(changeRemoved)
+	// An empty side is contained by everything and contains everything, so it
+	// would satisfy half of the conjunction for free: only a comparison with
+	// content on both sides is a reading at all.
+	if len(changeAdded)+len(changeRemoved) == 0 || len(branchAdded)+len(branchRemoved) == 0 {
 		return false, nil
 	}
 	return multisetContains(branchRemoved, changeAdded) && multisetContains(branchAdded, changeRemoved), nil
+}
+
+// nonBlankLines drops whitespace-only lines from one side of a diff. squashLine
+// reduces a line to its fields, so a line of spaces leaves with the "" a blank
+// line arrives as.
+func nonBlankLines(lines map[string]int) map[string]int {
+	kept := make(map[string]int, len(lines))
+	for line, count := range lines {
+		if squashLine(line) != "" {
+			kept[line] = count
+		}
+	}
+	return kept
 }
 
 // netLines cancels lines a diff both adds and removes, returning what each side
