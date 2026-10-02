@@ -514,6 +514,29 @@ func forceCloseDescendants(b beads.Client, parentID string) (int, error) {
 	return closeDescendantsImpl(b, parentID, true)
 }
 
+// releasePinnedSteps clears the pin and the claim on each pinned issue of
+// steps, and reports how many it cleared. Unpinning leaves the step open and
+// unassigned, as a bd release does; the caller closes it immediately after.
+// A pinned descendant of a molecule whose owner is closing it is a hand-off
+// marker, not unfinished work, and bd refuses to close it — a pin is a close
+// fence, as an assignee other than the actor is — so the sweep clears both
+// rather than strand the molecule and its remaining steps (gt-z5m6j).
+func releasePinnedSteps(b beads.Client, steps []*beads.Issue) int {
+	open, unassigned := string(beads.StatusOpen), ""
+	released := 0
+	for _, step := range steps {
+		if beads.IssueStatus(step.Status) != beads.IssueStatusPinned {
+			continue
+		}
+		if err := b.Update(step.ID, beads.UpdateOptions{Status: &open, Assignee: &unassigned}); err != nil {
+			style.PrintWarning("releasing pinned step %s: %v", step.ID, err)
+			continue
+		}
+		released++
+	}
+	return released
+}
+
 func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, error) {
 	// Uses Children (bd show --children), not List(ListOptions{Parent:
 	// parentID}) (bd list --parent): the latter only checks the persistent
@@ -554,6 +577,12 @@ func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, err
 		if force {
 			closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
 		} else {
+			// A pinned child is a hand-off marker, not unfinished work, and
+			// bd refuses to close it: clear the mark before the sweep
+			// (gt-z5m6j). Forced closes skip bd's fences, the pin among them.
+			if n := releasePinnedSteps(b, children); n > 0 {
+				fmt.Fprintf(os.Stderr, "Released %d pinned step(s) under %s\n", n, parentID)
+			}
 			closeErr = closeUntilNoProgress(b, idsToClose)
 		}
 		// A batch close can close some children and have bd refuse others

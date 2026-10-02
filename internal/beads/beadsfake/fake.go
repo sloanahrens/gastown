@@ -515,6 +515,13 @@ func errBlocked(id string, by []string) error {
 	return fmt.Errorf("cannot close blocked issue: %s is blocked by %v (use --force to override)", id, by)
 }
 
+// errPinned is bd's refusal to close a pinned issue, whoever holds it. The
+// pin is a close fence, as an assignee other than the actor is: an update to
+// status closed passes it.
+func errPinned(id string) error {
+	return fmt.Errorf("cannot modify pinned issue %s (use --force to override)", id)
+}
+
 // openBlockers lists the issues r depends on ("blocks") that are not
 // closed. Callers hold f.mu.
 func (f *Fake) openBlockers(r *record) []string {
@@ -542,11 +549,14 @@ func (f *Fake) updateCloseRefusal(r *record) error {
 }
 
 // closeRefusal is why bd would refuse to close r without --force: an update's
-// refusals, or an assignee other than the actor. Callers hold f.mu.
+// refusals, a pin, or an assignee other than the actor. Callers hold f.mu.
 func (f *Fake) closeRefusal(r *record) error {
 	id := r.issue.ID
 	if err := f.updateCloseRefusal(r); err != nil {
 		return err
+	}
+	if r.issue.Status == string(beads.StatusPinned) {
+		return errPinned(id)
 	}
 	if a := r.issue.Assignee; a != "" && a != f.actor {
 		return errNotActors(id, a, f.actor)
@@ -686,8 +696,8 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 }
 
 // Close closes ids with bd's default reason, "Closed". An issue with open
-// children or an open blocker, or assigned to someone other than the actor,
-// is refused: skipped, the rest closing, and reported in a
+// children or an open blocker, pinned, or assigned to someone other than the
+// actor, is refused: skipped, the rest closing, and reported in a
 // *beads.PartialCloseError (the first refusal when every issue is refused).
 func (f *Fake) Close(ids ...string) error { return f.close("", false, ids) }
 
