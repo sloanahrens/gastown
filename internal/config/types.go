@@ -1430,25 +1430,31 @@ type PolecatPool struct {
 	// OverflowAgent. Zero leaves the seat uncapped.
 	MaxOverflow int `json:"max_overflow,omitempty"`
 
-	// The keys below are the seat-refill plugin's dispatch policy
-	// (plugins/seat-refill/run.sh), which the plugin reads from here so a
-	// policy change is one edit in the file its neighbors live in
-	// (gt-y3pgh.12). A GT_SEAT_REFILL_* variable still overrides for the
-	// plugin's own tests. Absent means the DefaultSeatRefill* value.
+	// The keys below are the spec dispatcher's dispatch policy
+	// (internal/cmd/spec.go), read from here so a policy change is one edit in
+	// the file its neighbors live in (gt-y3pgh.12). They were the seat-refill
+	// plugin's keys before the plugin was deleted (gt-4k3fj.8.8), which is why
+	// the defaults and the DefaultSeatRefill* names keep the old spelling: a
+	// settings file written then still reads the same now. Absent means the
+	// DefaultSeatRefill* value.
 	//
-	// MaxPriority is the lowest priority number the plugin dispatches; a bead
-	// numbered higher is left for the operator. Default 2 (P0-P2).
+	// MaxPriority is the ceiling on a candidate's priority number, for the
+	// dispatcher's intake and for the daemon's idle-seat check: a bead numbered
+	// higher is left for the operator. Default 2 (P0-P2).
 	MaxPriority *int `json:"max_priority,omitempty"`
-	// TopCandidates is how many candidate beads a nudge names. Default 3.
+	// TopCandidates is how many candidate beads a nudge names. Retired with
+	// the seat-refill plugin's nudge mode: nothing reads it, and it is kept,
+	// validated, so a settings file that still carries it decodes.
 	TopCandidates *int `json:"top_candidates,omitempty"`
 	// EmptySeconds is how long a seat must sit empty with work ready before a
-	// nudge fires. Default 300 (5m).
+	// nudge fires. Retired with the plugin's nudge mode.
 	EmptySeconds *int `json:"empty_seconds,omitempty"`
 	// NudgeSeconds is the shortest gap between two nudges about one empty
-	// episode. Default 900 (15m).
+	// episode. Retired with the plugin's nudge mode.
 	NudgeSeconds *int `json:"nudge_seconds,omitempty"`
-	// DispatchEmptySeconds delays a direct sling until the seat has been empty
-	// this long. Default 0: fill at once.
+	// DispatchEmptySeconds delayed a direct sling until the seat had been
+	// empty this long. Retired with the plugin: the dispatcher fills a free
+	// seat at once.
 	DispatchEmptySeconds *int `json:"dispatch_empty_seconds,omitempty"`
 	// ProMax caps the pro seat, a class of work that reaches a seat only by
 	// carrying ProLabel. Default 1; 0 drops the seat.
@@ -1458,10 +1464,12 @@ type PolecatPool struct {
 	// ProLabel is the label a bead carries to reach the pro seat, and the one
 	// the other seats leave alone. Default "needs-pro".
 	ProLabel string `json:"pro_label,omitempty"`
-	// Mode is how an empty seat is filled: "sling" dispatches the bead
-	// directly, "nudge" asks the mayor instead. Default "sling".
+	// Mode is how an empty seat was filled: "sling" dispatched the bead
+	// directly, "nudge" asked the mayor instead. Retired with the plugin: the
+	// dispatcher always slings, and the mayor it could have asked is gone
+	// (gt-4k3fj.7). Kept, validated, so an old settings file decodes.
 	Mode string `json:"mode,omitempty"`
-	// ShapeGate is what the plugin does with a candidate's shape lint
+	// ShapeGate is what the dispatcher does with a candidate's shape lint
 	// (`gt spec lint`, gt-mmsr2) before it slings it: "off" runs no lint,
 	// "warn" slings the bead anyway and leaves the verdict on it as a
 	// comment, "refuse" skips the bead and labels it (gt-cq5gb). Default
@@ -1469,9 +1477,10 @@ type PolecatPool struct {
 	ShapeGate string `json:"shape_gate,omitempty"`
 }
 
-// Defaults for PolecatPool's seat-refill policy keys. Each equals the value
-// plugins/seat-refill/run.sh dispatched on before the keys existed, except
-// ShapeGate, which is the warn-only first step of the shape gate (gt-cq5gb).
+// Defaults for PolecatPool's dispatch policy keys. Each equals the value the
+// seat-refill plugin dispatched on before the keys existed — the plugin's
+// deletion did not move a default (gt-4k3fj.8.8) — except ShapeGate, which is
+// the warn-only first step of the shape gate (gt-cq5gb).
 const (
 	DefaultSeatRefillMaxPriority          = 2
 	DefaultSeatRefillTopCandidates        = 3
@@ -1575,11 +1584,12 @@ func (p *PolecatPool) GetShapeGate() string {
 	return p.ShapeGate
 }
 
-// Validate reports the seat-refill policy values the plugin cannot act on: a
-// count below zero, or a nudge naming no candidates. gt config set refuses a
-// value it rejects, and the config kernel checks the same method at load, so a
-// hand-edited settings/config.json stops the daemon instead of dispatching on
-// a value the plugin would silently ignore.
+// Validate reports the dispatch policy values the dispatcher cannot act on: a
+// count below zero, a nudge naming no candidates, a mode outside sling|nudge,
+// or a shape gate outside off|warn|refuse. gt config set refuses a value it
+// rejects, and the config kernel checks the same method at load, so a
+// hand-edited settings/config.json stops the daemon instead of dispatching on a
+// value the dispatcher would silently ignore.
 func (p *PolecatPool) Validate() error {
 	if p == nil {
 		return nil

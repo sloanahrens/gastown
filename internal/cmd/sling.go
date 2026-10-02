@@ -657,7 +657,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// Guard against a dispatcher taking a rework bead from the steward
 	// (gt-28ibg). Mirrors the engine's guard (internal/sling), so a bead one
 	// path refuses the other refuses too: while the steward runs live its
-	// rejection job settles every rejected bead, and seat-refill slinging one
+	// rejection job settles every rejected bead, and a dispatcher slinging one
 	// spends a second polecat on work that job is already settling. The check
 	// reads the target as given -- a rig target only, since the steward covers
 	// rigs -- and the explicit --force, matching the engine's, so the CLI's

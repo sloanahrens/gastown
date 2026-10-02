@@ -16,28 +16,61 @@ func TestEligible(t *testing.T) {
 		why  string
 	}{
 		{func(s *Spec) {}, true, ""},
-		// The label spec and type feature are retired: neither keeps a
-		// candidate out (gt-mmsr2).
+		// The label spec and type feature are retired: neither admits or keeps
+		// out a candidate (gt-mmsr2). The type whitelist is what admits the
+		// feature bead, not the retired label.
 		{func(s *Spec) { s.Labels = nil }, true, ""},
 		{func(s *Spec) { s.Type = "feature" }, true, ""},
 		{func(s *Spec) { s.Type = "bug" }, true, ""},
+		{func(s *Spec) { s.Type = "Feature" }, true, ""},
 		{func(s *Spec) { s.Status = "in_progress" }, false, "status in_progress"},
 		{func(s *Spec) { s.Status = "deferred" }, false, "deferred"},
 		{func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, false, "assigned"},
 		{func(s *Spec) { s.Type = "epic" }, false, "not a work bead: type epic"},
 		{func(s *Spec) { s.Type = "wisp" }, false, "not a work bead: type wisp"},
 		{func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, false, "not a work bead: wisp"},
+		{func(s *Spec) { s.Type = "chore" }, false, "type chore"},
+		{func(s *Spec) { s.Type = "docs" }, false, "type docs"},
 		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, false, "not a work bead: label gt:agent"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, false, "label gt:ready-to-land"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, false, "label needs-human"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, false, "label needs-mayor-review"},
+		{func(s *Spec) { s.Priority = 2 }, true, ""},
+		{func(s *Spec) { s.Priority = 3 }, false, "priority P3 outside the ceiling P2"},
+		{func(s *Spec) { s.Priority = -1 }, false, "priority P-1 outside the ceiling P2"},
 	}
 	for i, tc := range cases {
 		s := goodSpec()
 		tc.edit(&s)
-		ok, why := Eligible(s)
+		ok, why := Eligible(s, 2)
 		if ok != tc.ok || !strings.Contains(why, tc.why) {
 			t.Errorf("case %d: Eligible = %v %q, want %v %q", i, ok, why, tc.ok, tc.why)
+		}
+	}
+}
+
+// The ceiling is the operator's (polecat_pool.max_priority), not a constant:
+// the same bead is refused at P2 and taken at P4 (gt-h2kyc).
+func TestEligibleHonorsTheConfiguredCeiling(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Priority = 4
+	if ok, why := Eligible(s, 2); ok {
+		t.Errorf("P4 bead eligible at the default ceiling: %q", why)
+	}
+	if ok, why := Eligible(s, 4); !ok {
+		t.Errorf("P4 bead refused at a P4 ceiling: %q", why)
+	}
+}
+
+func TestIsDispatchType(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		typ  string
+		want bool
+	}{{"task", true}, {"bug", true}, {"feature", true}, {"Bug", true}, {" task ", true}, {"epic", false}, {"chore", false}, {"", false}} {
+		if got := IsDispatchType(tt.typ); got != tt.want {
+			t.Errorf("IsDispatchType(%q) = %v, want %v", tt.typ, got, tt.want)
 		}
 	}
 }
@@ -97,11 +130,52 @@ func TestChooseSeat(t *testing.T) {
 			if tc.edit != nil {
 				tc.edit(&b)
 			}
-			got := ChooseSeat(b)
+			got := ChooseSeat(b, goodSpec())
 			if got.Skip != tc.skip || got.Agent != tc.agent || !strings.Contains(got.Reason, tc.reason) {
 				t.Fatalf("ChooseSeat = %+v, want agent %q skip %v reason ~%q", got, tc.agent, tc.skip, tc.reason)
 			}
 		})
+	}
+}
+
+// The pro seat: a bead carrying pro_label goes only to the seat that reserved
+// it, and a plain bead never goes to that seat (gt-tq6l, carried over from
+// seat-refill).
+func TestChooseSeatReservedLabel(t *testing.T) {
+	t.Parallel()
+	b := Budget{
+		Seats: []Seat{
+			{Agent: "deepseek-flash", Cap: 2},
+			{Agent: "deepseek-pro", Cap: 1, Label: "needs-pro"},
+		},
+		Now: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
+	}
+	plain := goodSpec()
+	if got := ChooseSeat(b, plain); got.Agent != "deepseek-flash" {
+		t.Errorf("plain bead took %+v, want the pool seat", got)
+	}
+
+	pro := goodSpec()
+	pro.Labels = []string{"needs-pro"}
+	if got := ChooseSeat(b, pro); got.Agent != "deepseek-pro" {
+		t.Errorf("needs-pro bead took %+v, want the pro seat", got)
+	}
+
+	// With the pool seat full, a plain bead still does not reach the pro seat:
+	// it is a no-seat skip, not a dispatch to the reserved seat.
+	b.Seats[0].Live = 2
+	got := ChooseSeat(b, plain)
+	if !got.Skip || !strings.Contains(got.Reason, "no free seat takes this bead") {
+		t.Errorf("plain bead with the pool full = %+v, want a skip", got)
+	}
+	if got := ChooseSeat(b, pro); got.Agent != "deepseek-pro" {
+		t.Errorf("needs-pro bead took %+v, want the pro seat", got)
+	}
+
+	// The label matcher ignores case and padding, like every other label read.
+	pro.Labels = []string{" Needs-Pro "}
+	if got := ChooseSeat(b, pro); got.Agent != "deepseek-pro" {
+		t.Errorf("padded needs-pro bead took %+v", got)
 	}
 }
 

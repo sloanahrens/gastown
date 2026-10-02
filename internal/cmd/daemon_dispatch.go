@@ -42,12 +42,23 @@ const (
 	// the rig's own answer and wins. The key keeps its merge_queue name so
 	// existing settings files still load.
 	defaultDispatchLandingCeiling = 12
-
-	// maxDispatchPriority is the lowest priority treated as actionable: P0-P2.
-	// Everything below is backlog, and a nudge that leads with backlog is a
-	// nudge the mayor learns to ignore.
-	maxDispatchPriority = 2
 )
+
+// dispatchPriorityCeiling is the operator's ceiling on a dispatchable bead's
+// priority number: polecat_pool.max_priority, default 2 (P0-P2). Everything
+// numbered higher is backlog, and a nudge that leads with backlog is a nudge
+// the mayor learns to ignore.
+//
+// It is policy, not a constant (gt-h2kyc): the same key bounds the spec
+// dispatcher's candidate intake (internal/cmd/spec.go), so raising it moves
+// both the work the dispatcher takes and the work this check names.
+func dispatchPriorityCeiling(townRoot string) (int, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return 0, fmt.Errorf("loading town settings for the dispatch ceiling: %w", err)
+	}
+	return settings.PolecatPool.GetMaxPriority(), nil
+}
 
 // dispatchSeats is the town's polecat-seat picture: how many polecats could be
 // spawned right now.
@@ -75,7 +86,7 @@ type dispatchSeats struct {
 type dispatchRig struct {
 	Rig string `json:"rig"`
 
-	// Ready counts actionable P0-P2 ready beads.
+	// Ready counts actionable ready beads at or above the priority ceiling.
 	Ready int `json:"ready"`
 
 	// Urgent is the P0/P1 subset of Ready. The split matters: a rig with 200
@@ -108,6 +119,10 @@ type dispatchCheck struct {
 	Seats dispatchSeats `json:"seats"`
 	Rigs  []dispatchRig `json:"rigs"`
 
+	// MaxPriority is the ceiling the ready counts were taken at
+	// (polecat_pool.max_priority), so a reader can tell P0-P2 from P0-P4.
+	MaxPriority int `json:"max_priority"`
+
 	// Actionable is the total ready work in rigs that can absorb it.
 	Actionable int `json:"actionable"`
 
@@ -133,9 +148,10 @@ town can idle indefinitely with ready work on the board.
 
 Seats come from polecat_pool (the admission point every spawn path reads), or
 from scheduler.max_polecats when no pool is configured. Work counts actionable
-P0-P2 ready beads per rig, excluding bead families that are bookkeeping rather
-than dispatchable work (agent beads, escalations, merge slots, messages, epics)
-and rigs whose landing queue is already deeper than the rule allows.
+ready beads per rig up to polecat_pool.max_priority (default P2), excluding bead
+families that are bookkeeping rather than dispatchable work (agent beads,
+escalations, merge slots, messages, epics) and rigs whose landing queue is
+already deeper than the rule allows.
 
 Examples:
   gt daemon dispatch-check            # human-readable
@@ -179,26 +195,31 @@ func buildDispatchCheck(townRoot string) (*dispatchCheck, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	rigs, err := dispatchRigPictures(townRoot)
+	ceiling, err := dispatchPriorityCeiling(townRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	check := &dispatchCheck{Seats: seats, Rigs: rigs}
+	rigs, err := dispatchRigPictures(townRoot, ceiling)
+	if err != nil {
+		return nil, err
+	}
+
+	check := &dispatchCheck{Seats: seats, Rigs: rigs, MaxPriority: ceiling}
 	for _, rig := range rigs {
 		if rig.Parked || rig.Backpressure {
 			continue
 		}
 		check.Actionable += rig.Ready
 	}
-	check.Nudge, check.Message = dispatchDecision(seats, rigs)
+	check.Nudge, check.Message = dispatchDecision(seats, rigs, ceiling)
 	return check, nil
 }
 
 // dispatchDecision is the patrol's whole policy, in one pure function: nudge,
 // or stay silent. It returns the nudge text when it fires and "" when it does
-// not.
+// not. maxPriority is the ceiling the rigs' ready counts were taken at, named
+// in the nudge so the mayor reads the same number the check counted.
 //
 // It stays silent for exactly three reasons, and each one is a nudge that
 // would have been wrong: no seat model is configured (the town has no answer
@@ -206,7 +227,7 @@ func buildDispatchCheck(townRoot string) (*dispatchCheck, error) {
 // every rig with ready work is over its landing-queue ceiling (the work could
 // not land any sooner). Silence is the default, because a cadence that fires
 // without news is a cadence the mayor learns to ignore.
-func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
+func dispatchDecision(seats dispatchSeats, rigs []dispatchRig, maxPriority int) (bool, string) {
 	if seats.Free < 1 {
 		return false, ""
 	}
@@ -236,7 +257,7 @@ func dispatchDecision(seats dispatchSeats, rigs []dispatchRig) (bool, string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Idle-seat check: %d of %d polecat seats are free (%d working).",
 		seats.Free, seats.Capacity, seats.Occupied)
-	fmt.Fprintf(&b, " Actionable P0-P2 ready beads: %s.", strings.Join(named, ", "))
+	fmt.Fprintf(&b, " Actionable P0-P%d ready beads: %s.", maxPriority, strings.Join(named, ", "))
 	if len(held) > 0 {
 		fmt.Fprintf(&b, " Held by landing-queue depth: %s.", strings.Join(held, ", "))
 	}
@@ -350,8 +371,9 @@ func schedulerSeatPicture(townRoot string) (dispatchSeats, error) {
 	}, nil
 }
 
-// dispatchRigPictures reports every known rig's dispatchable work.
-func dispatchRigPictures(townRoot string) ([]dispatchRig, error) {
+// dispatchRigPictures reports every known rig's dispatchable work, counted at
+// the operator's priority ceiling.
+func dispatchRigPictures(townRoot string, maxPriority int) ([]dispatchRig, error) {
 	names, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
@@ -378,7 +400,7 @@ func dispatchRigPictures(townRoot string) ([]dispatchRig, error) {
 			continue
 		}
 
-		ready, urgent, err := countActionableReady(rigPath)
+		ready, urgent, err := countActionableReady(rigPath, maxPriority)
 		if err != nil {
 			return nil, fmt.Errorf("counting ready work for %s: %w", name, err)
 		}
@@ -412,20 +434,20 @@ func knownRigNames(townRoot string) ([]string, error) {
 	return names, nil
 }
 
-// countActionableReady counts the rig's actionable P0-P2 ready beads, and the
-// P0/P1 subset of them.
+// countActionableReady counts the rig's actionable ready beads up to the
+// operator's priority ceiling, and the P0/P1 subset of them.
 //
 // A read failure is returned, not swallowed. Under-reporting ready work is the
 // one error this check cannot absorb: it produces exactly the silence the
 // patrol exists to break, and produces it invisibly. A rig with no beads
 // database at all is not a failure — it has no ready work to report.
-func countActionableReady(rigPath string) (ready, urgent int, err error) {
+func countActionableReady(rigPath string, maxPriority int) (ready, urgent int, err error) {
 	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, issue := range filterIdentityBeads(issues) {
-		if !isActionableReadyBead(issue) {
+		if !isActionableReadyBead(issue, maxPriority) {
 			continue
 		}
 		ready++
@@ -530,16 +552,17 @@ var patrolSuppressedTitlePrefixes = []string{
 }
 
 // isActionableReadyBead reports whether a ready bead is work the mayor could
-// sling: P0-P2, and not one of the town's bookkeeping families.
+// sling: at or above maxPriority's floor, and not one of the town's
+// bookkeeping families.
 //
 // Epics are excluded as containers. `gt sling` accepts one, but a container's
 // children are what a polecat takes, and they appear in ready on their own — a
 // nudge naming the epic would point the mayor at the wrong row.
-func isActionableReadyBead(issue *beads.Issue) bool {
+func isActionableReadyBead(issue *beads.Issue, maxPriority int) bool {
 	if issue == nil {
 		return false
 	}
-	if issue.Priority < 0 || issue.Priority > maxDispatchPriority {
+	if issue.Priority < 0 || issue.Priority > maxPriority {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(issue.Type), "epic") {
@@ -550,8 +573,8 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 	}
 	// Work the operator reserved is not the mayor's to sling: naming one here
 	// is what sends the mayor into a sling that refuses (gt-21pl0). The rule is
-	// the convoy feeders' own, so this check and seat-refill's draw the same
-	// line the sling guard does.
+	// the convoy feeders' own, so this check and the spec dispatcher's draw the
+	// same line the sling guard does.
 	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
 		return false
 	}
@@ -594,7 +617,7 @@ func printDispatchCheck(check *dispatchCheck) {
 		fmt.Printf("Seats: %d of %d free (%d occupied) via %s\n",
 			check.Seats.Free, check.Seats.Capacity, check.Seats.Occupied, check.Seats.Source)
 	}
-	fmt.Printf("Actionable P0-P2 ready: %d\n", check.Actionable)
+	fmt.Printf("Actionable P0-P%d ready: %d\n", check.MaxPriority, check.Actionable)
 
 	for _, rig := range check.Rigs {
 		switch {

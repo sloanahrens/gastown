@@ -21,13 +21,50 @@ var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-mayor-re
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
 
+// DispatchTypes are the bead types the dispatcher fills a seat with: the work
+// bead kinds. They are narrower than the ready board — a docs or chore bead is
+// real work, but it is the mayor's patrol that surfaces those, not the seat
+// filler (seat-refill's type whitelist, carried over with the plugin).
+var dispatchTypes = []string{"task", "bug", "feature"}
+
+// IsDispatchType reports whether t names a bead type the dispatcher takes,
+// ignoring case and surrounding space.
+func IsDispatchType(t string) bool {
+	t = strings.ToLower(strings.TrimSpace(t))
+	for _, d := range dispatchTypes {
+		if t == d {
+			return true
+		}
+	}
+	return false
+}
+
+// ShapeGate values (polecat_pool.shape_gate, gt-cq5gb): what the dispatcher
+// does with a candidate's shape lint before it spends a seat.
+const (
+	// ShapeGateOff runs no lint: shape is not a gate.
+	ShapeGateOff = "off"
+	// ShapeGateWarn slings the bead anyway and leaves the verdict on it as one
+	// comment.
+	ShapeGateWarn = "warn"
+	// ShapeGateRefuse skips the bead and labels it.
+	ShapeGateRefuse = "refuse"
+)
+
 // Eligible reports whether a ready bead is the dispatcher's to consider, and
 // why not when it is not. It is the candidate filter: status open, unassigned,
-// a work bead (not an epic, not a runtime family), and none of the excluded
-// labels or a deferred status. The label spec and type feature are retired and
-// accepted-but-ignored (gt-mmsr2), so neither gates a candidate. The shape
-// lint runs later, on the full bead.
-func Eligible(s Spec) (bool, string) {
+// a work bead (not an epic, not a runtime family) of a dispatchable type
+// (task/bug/feature), at or above maxPriority's floor, and none of the
+// excluded labels or a deferred status. The label spec and type feature are
+// retired and accepted-but-ignored (gt-mmsr2), so neither gates a candidate:
+// the retired type name is not what admits a feature bead, the type whitelist
+// is. The shape lint runs later, on the full bead.
+//
+// maxPriority is the operator's ceiling on a candidate's priority number
+// (polecat_pool.max_priority, default 2): a bead numbered higher is backlog the
+// operator keeps. A negative priority is an unscored bead, which is never
+// dispatched.
+func Eligible(s Spec, maxPriority int) (bool, string) {
 	status := strings.ToLower(strings.TrimSpace(s.Status))
 	switch {
 	case status == "deferred":
@@ -40,10 +77,16 @@ func Eligible(s Spec) (bool, string) {
 	if why := NotWorkBead(s); why != "" {
 		return false, "not a work bead: " + why
 	}
+	if !IsDispatchType(s.Type) {
+		return false, "type " + strings.ToLower(strings.TrimSpace(s.Type))
+	}
 	for _, l := range excludedLabels {
 		if s.HasLabel(l) {
 			return false, "label " + l
 		}
+	}
+	if s.Priority < 0 || s.Priority > maxPriority {
+		return false, fmt.Sprintf("priority P%d outside the ceiling P%d", s.Priority, maxPriority)
 	}
 	return true, ""
 }
@@ -86,10 +129,34 @@ type Seat struct {
 	Agent string
 	Cap   int // live polecats allowed on this agent
 	Live  int // live polecats (and in-flight claims) on this agent
+	// Label, when set, reserves the seat for beads carrying it: a bead with
+	// that label is this seat's alone, and a seat without one leaves it alone
+	// (the pro seat's selector, polecat_pool.pro_label).
+	Label string
 }
 
 // Free reports whether the seat has room.
 func (s Seat) Free() bool { return s.Agent != "" && s.Live < s.Cap }
+
+// takes reports whether the seat may take spec: a reserving seat takes only
+// its own beads, and a plain seat leaves every reserved bead to the seat that
+// reserved it.
+func (s Seat) takes(spec Spec, b Budget) bool {
+	if s.Label != "" {
+		return spec.HasLabel(s.Label)
+	}
+	for _, other := range b.Seats {
+		if other.Label != "" && spec.HasLabel(other.Label) {
+			return false
+		}
+	}
+	return true
+}
+
+// reason renders the seat for a report: "seat <agent> <live+1>/<cap>".
+func (s Seat) reason() string {
+	return fmt.Sprintf("seat %s %d/%d", s.Agent, s.Live+1, s.Cap)
+}
 
 // Budget is the seat picture the seat choice runs on.
 type Budget struct {
@@ -141,19 +208,30 @@ type SeatChoice struct {
 	Reason string
 }
 
-// ChooseSeat picks the first free seat for a clean spec within the budget. It
-// never exceeds a cap: a seat at its cap is not a seat. ChooseSeat assumes
-// Lint already passed, which bounds size.
-func ChooseSeat(b Budget) SeatChoice {
+// ChooseSeat picks the first free seat that may take spec within the budget.
+// It never exceeds a cap: a seat at its cap is not a seat. A seat reserved for
+// a label (the pro seat) takes only beads carrying it, and a bead carrying a
+// reserved label is left for that seat — a needs-pro bead is not slung onto the
+// pool's plain seat. A seat existing without room for this bead is a skip, not
+// a refusal: the bead stays ready and the next tick asks again.
+func ChooseSeat(b Budget, spec Spec) SeatChoice {
 	if b.MinSpawnGap > 0 && !b.NewestSpawn.IsZero() {
 		if age := b.Now.Sub(b.NewestSpawn); age < b.MinSpawnGap {
 			return SeatChoice{Skip: true, Reason: fmt.Sprintf("min_spawn_gap: newest polecat %s old (< %s)", age.Round(time.Second), b.MinSpawnGap)}
 		}
 	}
+	free := false
 	for _, seat := range b.Seats {
-		if seat.Free() {
-			return SeatChoice{Agent: seat.Agent, Reason: fmt.Sprintf("seat %s %d/%d", seat.Agent, seat.Live+1, seat.Cap)}
+		if !seat.Free() {
+			continue
 		}
+		free = true
+		if seat.takes(spec, b) {
+			return SeatChoice{Agent: seat.Agent, Reason: seat.reason()}
+		}
+	}
+	if free {
+		return SeatChoice{Skip: true, Reason: "no free seat takes this bead: " + b.Picture()}
 	}
 	return SeatChoice{Skip: true, Reason: "seats full: " + b.Picture()}
 }

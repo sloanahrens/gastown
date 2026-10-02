@@ -13,9 +13,9 @@ import (
 // after a refusal. Usage answers a mistyped invocation; a refusal is the
 // command working — the bead is fine and simply not this sling's to take — and
 // its own text already carries the reason and the remediation. Cobra's usage
-// block otherwise follows the reason and buries it: seat-refill keeps only the
-// last line of a failed sling (plugins/seat-refill/run.sh), which was the usage
-// line, so the dispatcher log showed no cause at all (gt-fudap).
+// block otherwise follows the reason and buries it, and an automatic
+// dispatcher that logs only the last line of a failed sling then shows no
+// cause at all (gt-fudap).
 func silenceUsageOnRefusal(cmd *cobra.Command, err error) {
 	if cmd == nil || !isSlingRefusal(err) {
 		return

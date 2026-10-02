@@ -14,10 +14,11 @@ import (
 )
 
 // HoldFileName is the operator's town-wide dispatch hold: a file at the town
-// root whose existence parks automatic dispatch. It is the file the
-// seat-refill plugin already honors (plugins/seat-refill/run.sh), so one
-// `touch` stops both the nudges that ask for a sling and the code paths that
-// sling on their own.
+// root whose existence parks automatic dispatch. The name is the deleted
+// seat-refill plugin's (gt-4k3fj.8.8, plugins/seat-refill/run.sh); it is kept
+// so a hold file an operator wrote then still parks the dispatcher that
+// replaced the plugin (the spec dispatcher and gt sling), and every other
+// automatic sling path with it.
 const HoldFileName = "seat-refill.hold"
 
 // HoldFilePath returns the operator hold file for a town.
@@ -27,9 +28,9 @@ func HoldFilePath(townRoot string) string {
 
 // OperatorHold reports why automatic dispatch must not run in this town right
 // now, or "" when it may. It answers for the operator's hold file and for a
-// town-wide ESTOP, the same two hand brakes seat-refill checks. It is the one
-// dispatch choke point for e-stop (gt-4k3fj.4); restarts and kills have
-// theirs in internal/supervisor.
+// town-wide ESTOP, the two hand brakes the seat-refill plugin checked and the
+// spec dispatcher checks now. It is the one dispatch choke point for e-stop
+// (gt-4k3fj.4); restarts and kills have theirs in internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
 // operator or the mayor is the decision the hold file defers to; an e-stop
@@ -69,8 +70,8 @@ func estopHold(townRoot, rig string) string {
 }
 
 // RigHold is OperatorHold plus the per-rig ESTOP (<town>/ESTOP.<rig>), for a
-// dispatcher that knows which rig it is about to sling into. seat-refill
-// honors the same per-rig file (run.sh). An empty rig answers for the town.
+// dispatcher that knows which rig it is about to sling into. An empty rig
+// answers for the town.
 func RigHold(townRoot, rig string) string {
 	if reason := OperatorHold(townRoot); reason != "" {
 		return reason
