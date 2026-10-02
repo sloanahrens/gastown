@@ -243,7 +243,7 @@ func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 		Labels: []string{specdispatch.LabelRedMain},
 	}
 
-	rv := rigRevertInFlight(t.TempDir(), "gastown")
+	rv := rigRevertInFlight(t.TempDir(), "gastown", func(string) bool { return false })
 	if rv != nil {
 		t.Fatalf("absent red-main state = %+v, want no revert", rv)
 	}

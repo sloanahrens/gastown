@@ -71,7 +71,8 @@ type specDispatchTickReport struct {
 	Failed []struct {
 		Line string `json:"line"`
 	} `json:"failed"`
-	Errors []string `json:"errors"`
+	Notices []string `json:"notices"`
+	Errors  []string `json:"errors"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -226,6 +227,9 @@ func formatSpecDispatchReport(out []byte) []string {
 		for _, e := range group.entries {
 			lines = append(lines, group.name+": "+e.Line)
 		}
+	}
+	for _, n := range r.Notices {
+		lines = append(lines, "note: "+n)
 	}
 	for _, e := range r.Errors {
 		lines = append(lines, "error: "+e)

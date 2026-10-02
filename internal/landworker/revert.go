@@ -41,11 +41,17 @@ type MainState struct {
 }
 
 // PendingRevert is a revert the red-main owner has started but not finished
-// with: the culprit whose landing is being reverted, and the revert work bead
-// once it is filed (empty while the branch is still being built).
+// with: the culprit whose landing is being reverted, the revert work bead
+// once it is filed (empty while the branch is still being built), and when
+// the build began.
 type PendingRevert struct {
 	Culprit string `json:"culprit"`
 	Bead    string `json:"bead,omitempty"`
+	// StartedAt is when the build was first recorded. A dispatcher reads a
+	// record still carrying no bead long past it as abandoned, so a crash
+	// mid-build cannot hold a rig's red-main beads forever (gt-wgyca). State
+	// written before the field reads as zero, which is equally stale.
+	StartedAt time.Time `json:"started_at,omitzero"`
 }
 
 // MainStateStore persists a rig's MainState. The daemon keeps it beside the
@@ -153,10 +159,18 @@ func (r *RedMain) setRevertInFlight(culprit, bead string) {
 		r.logf("reading the main state to record the revert of %s: %v", culprit, err)
 		return
 	}
-	if st.Revert != nil && st.Revert.Culprit == culprit && st.Revert.Bead == bead {
-		return
+	if st.Revert != nil && st.Revert.Culprit == culprit {
+		if st.Revert.Bead == bead {
+			return
+		}
+		// Filing the bead continues the build the owner already recorded, so
+		// the start time — the dispatcher's staleness clock — is kept.
+		rv := *st.Revert
+		rv.Bead = bead
+		st.Revert = &rv
+	} else {
+		st.Revert = &PendingRevert{Culprit: culprit, Bead: bead, StartedAt: time.Now().UTC()}
 	}
-	st.Revert = &PendingRevert{Culprit: culprit, Bead: bead}
 	if err := r.State.Save(st); err != nil {
 		r.logf("saving the main state with the revert of %s: %v", culprit, err)
 	}
