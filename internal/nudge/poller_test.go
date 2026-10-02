@@ -260,3 +260,45 @@ func TestStartPoller_RefusesTestBinary(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneDeadPollerPIDFiles covers the cadence sweep: pollerAlive reclaims a
+// stale record only for a session something still asks about, so the record of
+// a session that is itself gone needs this to ever be reclaimed.
+func TestPruneDeadPollerPIDFiles(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dead := writePollerRecord(t, townRoot, "gt-old", "999999999|100.5")
+
+	rep, err := PruneDeadPollerPIDFiles(townRoot)
+	if err != nil {
+		t.Fatalf("PruneDeadPollerPIDFiles: %v", err)
+	}
+	if rep.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", rep.Removed)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Error("the dead session's poller record survived the sweep")
+	}
+}
+
+// TestPruneDeadPollerPIDFilesKeepsTheRest is the safety half: the sweep reads
+// the poller directory and nothing else.
+func TestPruneDeadPollerPIDFilesKeepsTheRest(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dead := writePollerRecord(t, townRoot, "gt-old", "999999999|100.5")
+	other := filepath.Join(townRoot, ".runtime", "nudge_poller", "notes.txt")
+	if err := os.WriteFile(other, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := PruneDeadPollerPIDFiles(townRoot); err != nil {
+		t.Fatalf("PruneDeadPollerPIDFiles: %v", err)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Error("the dead session's poller record survived the sweep")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("the sweep removed a file that is not a pid record: %v", err)
+	}
+}

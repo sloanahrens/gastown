@@ -33,8 +33,15 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   that carries unlanded work or saying none does. The tick never re-slings, resets, unassigns or
   passes `--force`.
 
-Town-wide it also resolves elapsed timer gates in the town and scanned rigs' databases, and once
-an hour walks agent worktrees for a rogue executable `bd`, which it neutralizes and escalates.
+Town-wide it also resolves elapsed timer gates in the town and scanned rigs' databases, once an
+hour evaluates the GitHub gates (`bd gate check --type=gh`), and once an hour walks agent
+worktrees for a rogue executable `bd`, which it neutralizes and escalates.
+
+The GitHub gate check runs on its own slow cadence because an open `gh` gate makes `bd` shell out
+to the `gh` CLI over the network; with none open it is one query per database. It resolves a gate
+whose run succeeded and leaves a failed one open: the tick sends no mail, so escalation stays the
+operator's. The deacon's gate-evaluation step deferred these to a "separate step" that never
+existed, so until now no step in any patrol evaluated one (gt-4k3fj.6.2).
 
 Every read that fails is Unknown and nothing acts on Unknown. A failed `bd list` is not "no
 work", a failed `bd show` is not "bead gone", and an unreadable intent record is a hold. The
@@ -71,9 +78,9 @@ started, so the bead is reported, not released. HELP triage belongs to the opera
 | 2 | ack-probes | Dropped (self). The doctor dog's deacon self-probe now runs only while the deacon patrol is enabled. |
 | 3 | inbox-check | Wisp gc: existing `wisp_reaper`. RECOVERED_BEAD re-dispatch: the landing worker re-dispatches rejections itself (ADR 0004). HELP: operator inbox, dropped as judgement. |
 | 4 | orphan-process-cleanup | Existing daemon job (`cleanupOrphanedProcesses`, every heartbeat). |
-| 5 | test-pollution-cleanup | Dolt orphans and test dirs: existing `doctor_dog`. The residual (imposter kill, test tmux sockets, PID files, dog worktrees) is follow-up gt-4k3fj.6.2. |
-| 6 | gate-evaluation | **Ported** (timer gates). GitHub gates were evaluated by no step before and none now; follow-up gt-4k3fj.6.2. |
-| 7 | dispatch-gated-molecules | Dropped to follow-up gt-4k3fj.6.2: slinging is the spec dispatcher's, and usage was never measured. |
+| 5 | test-pollution-cleanup | **Ported**: the daemon's test-pollution sweep (gt-4k3fj.6.2). |
+| 6 | gate-evaluation | **Ported** (timer gates on the tick, GitHub gates hourly). |
+| 7 | dispatch-gated-molecules | Dropped. Measured 2026-10-01: no gate bead exists in any town database, so no molecule has a gate to resume (gt-4k3fj.6.2). |
 | 8 | check-convoy-completion | Existing ConvoyManager. |
 | 9 | resolve-external-deps | Dropped: beads unblocks dependents itself. |
 | 10 | fire-notifications | Dropped: `gt convoy check` already notifies. |
@@ -93,6 +100,27 @@ started, so the bead is reported, not released. HELP triage belongs to the opera
 | 24 | patrol-digest | Dropped: no patrol molecules remain to digest. |
 | 25 | log-maintenance | Existing (`rotateOversizedLogs`). |
 | 26-28 | patrol-cleanup, context-check, loop-or-exit | Dropped (self). |
+
+## The test-pollution sweep
+
+The deacon's test-pollution-cleanup step is one daemon job on the doctor dog's cadence
+(`internal/daemon/pollution.go`), not a new patrol key. It reaps what a test run killed at its
+timeout leaves behind: orphaned embedded `dolt sql-server` processes and the temp directories of a
+killed beads suite (gt-twil, moved here from `doctor_dog.go`), a foreign Dolt holding the town's
+port (`gt dolt kill-imposters`' decision), the PID file of a session or poller whose process is
+gone, and the tmux servers bound to `gt-test-*` sockets. Every part is a fact about a process, and
+none reads a failed measurement as absence.
+
+The step's fourth residual, an unpushed-aware prune of orphaned dog worktrees, is not in the job.
+The kennel was retired (gt-ckunw) and nothing in the tree creates a worktree under it, so there is
+nothing to reap; `git_hygiene` already deletes the orphaned `dog/` branches a kennel would leave.
+Its PID-file sweep is the half that had accumulated: `.runtime/pids` held one record per polecat
+that had ever run, since `KillTrackedPIDs` only ran during `gt down`.
+
+`dispatch-gated-molecules` is dropped rather than ported. `bd gate list` is empty in every town
+database, and no code in the tree creates a gate bead, so `bd ready --gated` returns nothing to
+resume. The spec dispatcher dispatches from `bd ready` without `--gated`. Revisit it when a formula
+or an operator starts creating gates.
 
 ## How to enable it, and how to turn the LLM patrols off
 

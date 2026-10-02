@@ -88,6 +88,17 @@ func UntrackPID(townRoot, sessionID string) {
 	_ = os.Remove(pidFile(townRoot, sessionID))
 }
 
+// PruneDeadTrackedPIDs removes the PID files under <townRoot>/.runtime/pids
+// whose process is gone, and leaves every file naming a live one. A session
+// that dies without UntrackPID leaves its file behind, and only KillTrackedPIDs
+// ever reclaimed one — that runs during `gt down`, so on a live town they
+// accumulate. Nothing here signals a process: a sweep may not kill a session
+// it merely failed to recognize (unlike KillTrackedPIDs, which is the
+// shutdown path and owns the kill).
+func PruneDeadTrackedPIDs(townRoot string) (procid.PruneReport, error) {
+	return procid.PruneDeadRecords(pidsDir(townRoot))
+}
+
 // KillTrackedPIDs reads all PID files and kills any processes that are
 // still running. Returns the number of processes killed and any session
 // names that had errors.

@@ -1062,9 +1062,10 @@ func (d *Daemon) Run() (err error) {
 			// Doctor dog — comprehensive Dolt health monitor: connectivity, latency,
 			// gc, zombie detection, backup staleness, and disk usage checks.
 			if !d.isShutdownInProgress() {
-				// Reap orphaned test 'dolt sql-server' processes on the same
-				// cadence, before the molecule-based health checks run (gt-twil).
-				d.cleanupOrphanedDoltServers()
+				// The test-pollution sweep runs first, on the same cadence
+				// (gt-4k3fj.6.2): it is the deacon's test-pollution-cleanup
+				// step, now one daemon job.
+				d.runTestPollutionSweep()
 				d.runDoctorDog()
 			}
 

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/tmuxsweep"
 )
 
 // testLeakEventWindow is how far back the check reads the event log. A rig
@@ -87,7 +88,7 @@ func (c *TestLeakCheck) Run(ctx *CheckContext) *CheckResult {
 	sessions, sessErr := c.townSessions()
 	var testSessions []string
 	for _, s := range sessions {
-		if hasAnyPrefix(s, testSessionFamilies) {
+		if tmuxsweep.IsTestSessionName(s) {
 			testSessions = append(testSessions, s)
 		}
 	}
