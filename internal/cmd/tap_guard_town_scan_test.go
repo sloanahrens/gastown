@@ -77,6 +77,14 @@ func TestTownScanHazard(t *testing.T) {
 		{"rig crew", filepath.Join(rig, "crew"), "a rig's worktree dir"},
 		{"rig mayor", filepath.Join(rig, "mayor"), "a rig's worktree dir"},
 
+		// Blocked — a trailing '*' expands to every child of the directory
+		// before it, so it names the same hazard as that directory spelled
+		// without the glob (gt-kvwlc).
+		{"glob over the town root", town + string(filepath.Separator) + "*", "the town root"},
+		{"glob over a rig root", rig + string(filepath.Separator) + "*", "a rig root"},
+		{"glob over a rig's polecats", filepath.Join(rig, "polecats") + string(filepath.Separator) + "*", "a rig's worktree dir"},
+		{"double-star glob over a rig root", rig + string(filepath.Separator) + "**", "a rig root"},
+
 		// Blocked — bare repos, at any depth.
 		{"rig bare repo", filepath.Join(rig, ".repo.git"), "a .repo.git bare repo"},
 		{"bare repo nested under a worktree", filepath.Join(rig, "polecats", "lapis", ".repo.git"), "a .repo.git bare repo"},
@@ -86,6 +94,11 @@ func TestTownScanHazard(t *testing.T) {
 		{"worktree subdir", filepath.Join(rig, "polecats", "lapis", "gastown", "internal"), ""},
 		{"rig directory with no checkouts", filepath.Join(rig, "settings"), ""},
 		{"rig mayor clone", filepath.Join(rig, "mayor", "rig"), ""},
+
+		// Allowed — a glob over one bounded subtree, and a selective glob that
+		// matches a subset of a level rather than every child (gt-kvwlc).
+		{"glob over one worktree", filepath.Join(rig, "polecats", "lapis", "gastown") + string(filepath.Separator) + "*", ""},
+		{"selective glob is not every child", filepath.Join(rig, "settings") + string(filepath.Separator) + "s*", ""},
 
 		// Allowed — outside the town, and the degenerate inputs.
 		{"outside the town", other, ""},
@@ -448,6 +461,60 @@ func TestMatchesUnboundedScanPatternNotRootFromTownRoot(t *testing.T) {
 			}
 			if tt.blocked && alternative == "" {
 				t.Errorf("matchesUnboundedScan(%q, town) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
+// TestMatchesUnboundedScanGlobRoot pins the gt-kvwlc gap end-to-end: a
+// recursive scan whose root is spelled as a glob expands to every child of the
+// level the rule blocks when the path is spelled without the glob. The
+// cwd-relative spellings (* and ./polecats/*) are the same gap one level
+// further down — from a rig root they resolve to the rig root and its
+// aggregate directories, which are blocked as explicit roots but were allowed
+// as globs.
+func TestMatchesUnboundedScanGlobRoot(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
+
+	rigRootSess := townScanSession(home, rig, town)
+	worktreeSess := townScanSession(home, worktree, town)
+
+	tests := []struct {
+		name    string
+		sess    guardSession
+		command string
+		blocked bool
+	}{
+		// Blocked — a trailing '*' names the whole level it stands in for.
+		{"grep over a rig root glob", rigRootSess, `grep -rn TODO ` + rig + `/*`, true},
+		{"ls -R over a rig root glob", rigRootSess, `ls -R ` + rig + `/*`, true},
+		{"grep over a rig's polecats glob", rigRootSess, `grep -rn TODO ` + filepath.Join(rig, "polecats") + `/*`, true},
+		{"grep over the town root glob", rigRootSess, `grep -rn TODO ` + town + `/*`, true},
+		{"cwd-relative glob over a rig root", rigRootSess, `grep -rn TODO *`, true},
+		{"cwd-relative glob under ls -R", rigRootSess, `ls -R *`, true},
+		{"cwd-relative glob under find", rigRootSess, `find * -name x`, true},
+		{"cwd-relative glob over polecats", rigRootSess, `grep -rn TODO ./polecats/*`, true},
+
+		// Allowed — the same globs inside one bounded worktree, and a selective
+		// glob that matches a subset of a level rather than every child.
+		{"glob over one worktree", worktreeSess, `grep -rn TODO ` + worktree + `/*`, false},
+		{"glob over a worktree subdir", worktreeSess, `grep -rn TODO ./internal/*`, false},
+		{"cwd-relative glob in a worktree", worktreeSess, `grep -rn TODO *`, false},
+		{"selective glob over a bounded directory", rigRootSess, `grep -rn TODO ` + filepath.Join(rig, "settings") + `/s*`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), tt.sess)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q) blocked but returned no alternative text", tt.command)
 			}
 		})
 	}

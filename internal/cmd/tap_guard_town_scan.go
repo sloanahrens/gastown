@@ -96,6 +96,32 @@ func currentTownRoot(proc guardProcess) string {
 	return ""
 }
 
+// starGlobComponent reports whether a single path component is a pure '*'
+// glob ("*", "**", ...) — the one glob shape that matches every name. A
+// component carrying any other character ("s*", "*.go", "l?pis") matches a
+// subset of names, which is the ordinary, bounded case this guard must leave
+// alone.
+func starGlobComponent(component string) bool {
+	return component != "" && strings.Trim(component, "*") == ""
+}
+
+// trimTrailingStarGlob drops trailing pure-'*' components from an absolute,
+// cleaned path. A trailing '*' expands to every child of the directory before
+// it, so <rig>/* names the same hazard as <rig> — the rig root — and
+// <rig>/polecats/* the same as <rig>/polecats. The returned path is the
+// directory the glob stood in for, which townScanHazard then classifies by
+// its usual shape rules. A glob that is not a pure '*' is left in place.
+func trimTrailingStarGlob(p string) string {
+	for starGlobComponent(filepath.Base(p)) {
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		p = parent
+	}
+	return p
+}
+
 // townScanHazard reports whether a recursive scan rooted at scanRoot would
 // walk a town-aggregate tree (see this file's header for the two levels),
 // returning a short label for the block banner — "the town root", "a rig
@@ -118,7 +144,7 @@ func townScanHazard(scanRoot, townRoot string) string {
 	// err — and matches how scanRootDenylist already folds case for the
 	// host roots.
 	town := strings.ToLower(filepath.Clean(townRoot))
-	root := strings.ToLower(filepath.Clean(scanRoot))
+	root := trimTrailingStarGlob(strings.ToLower(filepath.Clean(scanRoot)))
 
 	if root == town {
 		return "the town root"
