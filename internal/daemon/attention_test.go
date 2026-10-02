@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -58,6 +59,9 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		slots:       func() (slot.Report, error) { return slot.Report{}, nil },
 		pidAlive:    func(int) bool { return true },
 		bdLatency:   func(context.Context) (time.Duration, error) { return 0, nil },
+		refusals:    func() ([]attention.Refusal, error) { return nil, nil },
+		refusalBead: func(context.Context, string, string) (*beads.Issue, error) { return nil, nil },
+		blockedMail: func(context.Context) ([]*mail.Message, error) { return nil, nil },
 
 		landingState: func(string) landingState { return landingState{} },
 		readyToLand:  func(context.Context, string) (int, error) { return 0, nil },
@@ -308,6 +312,193 @@ func TestAttentionCollector_BDSlow(t *testing.T) {
 			t.Fatalf("items = %+v, want none", items)
 		}
 	})
+}
+
+// refusal is one recorded gt done refusal at head, for a refusal collector
+// test.
+func refusal(bead, rig, head string) attention.Refusal {
+	return attention.Refusal{
+		Bead: bead, Rig: rig, Worker: "emerald", Branch: "polecat/emerald/" + bead,
+		Head: head, Kind: attention.KindRevertGuard,
+		Summary: "branch reverts 2 merged commit(s): aaaa1234 do the thing",
+	}
+}
+
+// TestAttentionCollector_RevertRefused (gt-vsct7.6): a record from the last
+// 48 h whose bead is open and not since resubmitted at another head is an
+// item; the bead closing or a different READY TO LAND head clears it.
+func TestAttentionCollector_RevertRefused(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	const head = "abcdef1234567890"
+	readyAt := func(h string) string {
+		return land.FormatReadyNote(land.Work{Branch: "b", Head: h, Target: "main", Worker: "emerald"})
+	}
+
+	t.Run("an open refused bead is one item", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		ref := refusal("gt-x", attentionRig, head)
+		ref.TS = now.Add(-time.Hour)
+		f.src.refusals = func() ([]attention.Refusal, error) { return []attention.Refusal{ref}, nil }
+		f.src.refusalBead = func(context.Context, string, string) (*beads.Issue, error) {
+			return &beads.Issue{ID: "gt-x", Status: "open"}, nil
+		}
+		items := f.collect(t, f.src.collectRevertRefused)
+		if len(items) != 1 {
+			t.Fatalf("items = %+v, want the refused bead", items)
+		}
+		got := items[0]
+		if got.Key != "refused:gt-x:abcdef123456" || got.Kind != attention.KindRevertRefused ||
+			got.Bead != "gt-x" || got.Rig != attentionRig || got.SHA != head {
+			t.Errorf("item = %+v, want refused:gt-x:abcdef123456", got)
+		}
+	})
+
+	t.Run("a closed bead clears it", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		ref := refusal("gt-x", attentionRig, head)
+		ref.TS = now.Add(-time.Hour)
+		f.src.refusals = func() ([]attention.Refusal, error) { return []attention.Refusal{ref}, nil }
+		f.src.refusalBead = func(context.Context, string, string) (*beads.Issue, error) {
+			return &beads.Issue{ID: "gt-x", Status: "closed"}, nil
+		}
+		if items := f.collect(t, f.src.collectRevertRefused); len(items) != 0 {
+			t.Errorf("items = %+v, want none for a closed bead", items)
+		}
+	})
+
+	t.Run("a later submission at another head clears it", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		ref := refusal("gt-x", attentionRig, head)
+		ref.TS = now.Add(-time.Hour)
+		f.src.refusals = func() ([]attention.Refusal, error) { return []attention.Refusal{ref}, nil }
+		f.src.refusalBead = func(context.Context, string, string) (*beads.Issue, error) {
+			return &beads.Issue{ID: "gt-x", Status: "open", Notes: readyAt("9999999999999999")}, nil
+		}
+		if items := f.collect(t, f.src.collectRevertRefused); len(items) != 0 {
+			t.Errorf("items = %+v, want none once resubmitted at another head", items)
+		}
+	})
+
+	t.Run("a READY note at the refused head keeps it", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		ref := refusal("gt-x", attentionRig, head)
+		ref.TS = now.Add(-time.Hour)
+		f.src.refusals = func() ([]attention.Refusal, error) { return []attention.Refusal{ref}, nil }
+		f.src.refusalBead = func(context.Context, string, string) (*beads.Issue, error) {
+			return &beads.Issue{ID: "gt-x", Status: "open", Notes: readyAt(head)}, nil
+		}
+		if items := f.collect(t, f.src.collectRevertRefused); len(items) != 1 {
+			t.Errorf("items = %+v, want the item while the head still matches", items)
+		}
+	})
+
+	t.Run("a refusal older than the window is not an item", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		ref := refusal("gt-x", attentionRig, head)
+		ref.TS = now.Add(-49 * time.Hour)
+		f.src.refusals = func() ([]attention.Refusal, error) { return []attention.Refusal{ref}, nil }
+		f.src.refusalBead = func(context.Context, string, string) (*beads.Issue, error) {
+			return &beads.Issue{ID: "gt-x", Status: "open"}, nil
+		}
+		if items := f.collect(t, f.src.collectRevertRefused); len(items) != 0 {
+			t.Errorf("items = %+v, want none past the 48 h window", items)
+		}
+	})
+
+	t.Run("a failed ledger read is an error", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.refusals = func() ([]attention.Refusal, error) { return nil, os.ErrDeadlineExceeded }
+		if _, err := f.src.collectRevertRefused(context.Background()); err == nil {
+			t.Error("a failed ledger read returned items, want an error")
+		}
+	})
+}
+
+// TestAttentionCollector_BlockedMail (gt-vsct7.6): an unread message to the
+// mayor whose subject starts with BLOCKED: is one item; the read never marks
+// one read, and a read message or another subject is nothing.
+func TestAttentionCollector_BlockedMail(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	t.Run("an unread BLOCKED message is one item", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
+			return []*mail.Message{{
+				ID: "hq-msg", From: "gastown/polecats/emerald",
+				Subject: "BLOCKED: dolt is wedged", Timestamp: now,
+			}}, nil
+		}
+		items := f.collect(t, f.src.collectBlockedMail)
+		if len(items) != 1 || items[0].Key != "blocked:hq-msg" || items[0].Kind != attention.KindBlockedMail {
+			t.Fatalf("items = %+v, want blocked:hq-msg", items)
+		}
+		if !strings.Contains(items[0].Summary, "BLOCKED: dolt is wedged") {
+			t.Errorf("summary = %q, want the subject", items[0].Summary)
+		}
+	})
+
+	t.Run("a non-BLOCKED subject is not an item", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
+			return []*mail.Message{{ID: "hq-msg", Subject: "status report"}}, nil
+		}
+		if items := f.collect(t, f.src.collectBlockedMail); len(items) != 0 {
+			t.Errorf("items = %+v, want none for another subject", items)
+		}
+	})
+
+	t.Run("a read message is not in the unread list", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		// ListUnread drops read messages, so an empty read is the read state.
+		if items := f.collect(t, f.src.collectBlockedMail); len(items) != 0 {
+			t.Errorf("items = %+v, want none", items)
+		}
+	})
+
+	t.Run("a failed list is an error", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) { return nil, os.ErrDeadlineExceeded }
+		if _, err := f.src.collectBlockedMail(context.Background()); err == nil {
+			t.Error("a failed mail read returned items, want an error")
+		}
+	})
+}
+
+// A failed mail read keeps the previous tick's blocked-mail items: an
+// unanswered read must not clear a real alarm (townhealth's UNKNOWN rule).
+func TestAttentionTick_BlockedMailFailureKeepsItsItems(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
+		return []*mail.Message{{ID: "hq-msg", From: "gastown/polecats/emerald", Subject: "BLOCKED: dolt is wedged"}}, nil
+	}
+	first := f.tick(t, now)
+	if _, ok := attention.Find(first, "blocked:hq-msg"); !ok {
+		t.Fatalf("first tick = %+v, want the blocked-mail item", first.Items)
+	}
+
+	f.src.blockedMail = func(context.Context) ([]*mail.Message, error) { return nil, os.ErrDeadlineExceeded }
+	second := f.tick(t, now.Add(time.Minute))
+	kept, ok := attention.Find(second, "blocked:hq-msg")
+	if !ok {
+		t.Fatalf("second tick = %+v, want the item kept across a failed read", second.Items)
+	}
+	if !kept.FirstSeen.Equal(now) {
+		t.Errorf("FirstSeen = %v, want the first tick's time kept", kept.FirstSeen)
+	}
 }
 
 // A collector whose source fails keeps the previous tick's items of its kind:

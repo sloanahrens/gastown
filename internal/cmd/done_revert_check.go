@@ -2,8 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -58,10 +62,18 @@ func reportRevertedMerges(g *git.Git, target string) error {
 type revertReportGit interface {
 	DiffStatThreeDot(base, head string) (string, error)
 	CommitSubject(rev string) (string, error)
+	Rev(ref string) (string, error)
 }
 
 // reportRevertedMergesWith is reportRevertedMerges with the detection given.
 func reportRevertedMergesWith(g revertReportGit, detect func() (git.RevertReport, error), target string) error {
+	_, err := revertedMergesReport(g, detect, target)
+	return err
+}
+
+// revertedMergesReport is reportRevertedMergesWith returning the report it
+// acted on, so the submit path can record what it refused.
+func revertedMergesReport(g revertReportGit, detect func() (git.RevertReport, error), target string) (git.RevertReport, error) {
 	if stat, err := g.DiffStatThreeDot(target, "HEAD"); err != nil {
 		style.PrintWarning("could not compute branch diff against %s: %v", target, err)
 	} else if strings.TrimSpace(stat) != "" {
@@ -77,7 +89,7 @@ func reportRevertedMergesWith(g revertReportGit, detect func() (git.RevertReport
 		// Refuse rather than submit: this check exists because a branch that
 		// reverts merged work is silently accepted by everything downstream,
 		// and a check that cannot run must not read as a check that passed.
-		return fmt.Errorf("cannot verify branch against %s: %w\n"+
+		return report, fmt.Errorf("cannot verify branch against %s: %w\n"+
 			"Refusing to submit rather than risk reverting merged work. "+
 			"Run `git fetch origin && git rebase %s`, then re-run gt done.", target, err, target)
 	}
@@ -85,9 +97,65 @@ func reportRevertedMergesWith(g revertReportGit, detect func() (git.RevertReport
 		fmt.Print(note)
 	}
 	if len(report.Reverted) == 0 {
-		return nil
+		return report, nil
 	}
-	return revertedMergeRefusal(g, target, report.Reverted)
+	return report, revertedMergeRefusal(g, target, report.Reverted)
+}
+
+// reportRevertedMergesRecording is reportRevertedMerges for the submit path: a
+// refusal that names reverted commits is recorded in the town's attention
+// ledger before the same refusal is returned. A refusal is the strongest
+// evidence a polecat is destroying other people's merged work (gt-63sz), and
+// without the record it lives only in the refused pane.
+//
+// The record is best-effort and never touches the refusal: the refusal is what
+// stops the submission, so a ledger write that fails warns and is forgotten.
+func reportRevertedMergesRecording(r *doneRun, target string) error {
+	return reportRevertedMergesRecordingTo(os.Stderr, r, r.g, func() (git.RevertReport, error) {
+		return git.DetectRevertedMerges(r.g, target, "HEAD")
+	}, target)
+}
+
+// reportRevertedMergesRecordingTo is reportRevertedMergesRecording with the
+// detection given and the warning writer taken, so a test reads both.
+func reportRevertedMergesRecordingTo(warn io.Writer, r *doneRun, g revertReportGit, detect func() (git.RevertReport, error), target string) error {
+	report, err := revertedMergesReport(g, detect, target)
+	if err != nil && len(report.Reverted) > 0 {
+		recordRevertRefusal(warn, r, g, report.Reverted)
+	}
+	return err
+}
+
+// recordRevertRefusal appends one line to the attention ledger naming the
+// refusal. Every failure here is a warning: gt done has already decided to
+// refuse, and whether the record lands must not change that.
+func recordRevertRefusal(warn io.Writer, r *doneRun, g revertReportGit, reverted []git.RevertedMerge) {
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		style.FprintWarning(warn, "could not resolve HEAD to record the refusal: %v", err)
+		return
+	}
+	ref := attention.Refusal{
+		TS:      time.Now().UTC(),
+		Bead:    r.issueID,
+		Rig:     r.rigName,
+		Worker:  r.polecatName,
+		Branch:  r.branch,
+		Head:    head,
+		Kind:    attention.KindRevertGuard,
+		Summary: revertRefusalSummary(g, reverted),
+	}
+	if err := attention.AppendRefusal(r.townRoot, ref); err != nil {
+		style.FprintWarning(warn, "could not record the refusal for the attention queue: %v", err)
+	}
+}
+
+// revertRefusalSummary is the ledger line's one-line description: the first
+// reverted commit and how many there are.
+func revertRefusalSummary(g revertReportGit, reverted []git.RevertedMerge) string {
+	first := reverted[0]
+	return fmt.Sprintf("branch reverts %d merged commit(s): %s %s",
+		len(reverted), shortSHA(first.Commit), commitSubjectOrUnavailable(g, first.Commit))
 }
 
 // relocatedMergesNote names the merged changes the branch moves rather than
