@@ -213,6 +213,74 @@ func TestProvisionRefreshesStaleCommand(t *testing.T) {
 	}
 }
 
+// A copy written from an older template is drift, not coverage: Missing counts
+// it as provisioned and nothing refreshes it (gt-w9afa).
+func TestStale(t *testing.T) {
+	t.Parallel()
+	ws := t.TempDir()
+
+	// Absent commands are Missing's report; Stale must not duplicate them.
+	if got := Stale(ws); len(got) != 0 {
+		t.Errorf("Stale(empty) = %v, want none (Missing owns the absent case)", got)
+	}
+
+	dir := filepath.Join(ws, ".claude", "commands")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	stalePath := filepath.Join(dir, "done.md")
+	if err := os.WriteFile(stalePath, []byte("---\ndescription: old\n---\n\nold body\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	current, err := BuildCommand(*FindByName("review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte(current), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A file the registry does not name is not drift either.
+	if err := os.WriteFile(filepath.Join(dir, "reaper.md"), []byte("mine"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := Stale(ws); !slices.Equal(got, []string{"done"}) {
+		t.Fatalf("Stale = %v, want [done]", got)
+	}
+
+	// Provision is the refresh the doctor's Fix calls; afterwards the drift is
+	// gone and a second pass over the now-current copies finds nothing.
+	if err := Provision(ws); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := Stale(ws); len(got) != 0 {
+		t.Errorf("Stale after Provision = %v, want none", got)
+	}
+}
+
+// Stale and Missing partition the drift: a workspace with one of each reports
+// each name exactly once.
+func TestStaleAndMissingPartition(t *testing.T) {
+	t.Parallel()
+	ws := t.TempDir()
+	dir := filepath.Join(ws, ".claude", "commands")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "handoff.md"), []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := Stale(ws); !slices.Equal(got, []string{"handoff"}) {
+		t.Errorf("Stale = %v, want [handoff]", got)
+	}
+	want := slices.DeleteFunc(slices.Clone(Names()), func(n string) bool { return n == "handoff" })
+	if got := Missing(ws); !slices.Equal(got, want) {
+		t.Errorf("Missing = %v, want %v", got, want)
+	}
+}
+
 func TestUnknownCommand(t *testing.T) {
 	t.Parallel()
 	if FindByName("no-such-command") != nil {

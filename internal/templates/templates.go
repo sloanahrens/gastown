@@ -209,6 +209,12 @@ func MissingCommands(workspacePath string) []string {
 	return commands.Missing(workspacePath)
 }
 
+// StaleCommands returns the list of commands present in the workspace whose
+// body no longer matches the embedded template (gt-w9afa).
+func StaleCommands(workspacePath string) []string {
+	return commands.Stale(workspacePath)
+}
+
 // ProvisionSupervisor creates and configures supervisor files for the daemon.
 // On macOS: creates and loads a launchd plist.
 // On Linux: creates and enables a systemd user unit.
