@@ -54,6 +54,24 @@ func (m DuplicateMatch) Blocking() bool {
 // blockingStatuses are the statuses whose overlap refuses a sling.
 var blockingStatuses = map[string]bool{"open": true, "in_progress": true, "hooked": true}
 
+// packageFixtureTests are test identifiers that name a package's own
+// scaffolding rather than a defect. TestMain is Go's package entrypoint: every
+// test binary defines it, so two beads that cite it share no work at all, yet
+// the guard — which sees no package context — read it as a shared failing test
+// and refused unrelated slings (gt-a0gk). A name joins this set when it proves
+// per-package rather than defect-naming.
+var packageFixtureTests = map[string]bool{
+	"TestMain": true,
+}
+
+// IsPackageFixtureTest reports whether an extracted test identifier names
+// per-package scaffolding rather than one test; callers drop these from a
+// bead's refs. The trailing "_" of a wildcard citation ("TestMain_*") is
+// ignored, so the same fixture is not readable two ways.
+func IsPackageFixtureTest(name string) bool {
+	return packageFixtureTests[strings.TrimRight(name, "_")]
+}
+
 // DuplicateDecision is the outcome of a pre-dispatch dedupe check: whether to
 // refuse, and the report to print either way. Message is empty when nothing
 // overlapped.
