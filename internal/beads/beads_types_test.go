@@ -231,6 +231,40 @@ func TestFindTownRoot(t *testing.T) {
 	}
 }
 
+// TestFindTownRootRequiresPrimaryMarker pins the narrowing FindTownRoot adds
+// over workspace.Find (gt-y3pgh.2): workspace.Find falls back to a bare mayor/
+// directory, but a town root is defined by mayor/town.json, so such a tree has
+// no town root at all. Nested towns still resolve to the outermost one.
+func TestFindTownRootRequiresPrimaryMarker(t *testing.T) {
+	bare := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bare, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(bare, "rig", "crew", "worker")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{bare, deep} {
+		if got := FindTownRoot(dir); got != "" {
+			t.Errorf("FindTownRoot(%q) = %q, want \"\" (a bare mayor/ is not a town root)", dir, got)
+		}
+	}
+
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "imported", "gastown")
+	for _, town := range []string{outer, inner} {
+		if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := FindTownRoot(filepath.Join(inner, "crew", "worker")); got != outer {
+		t.Errorf("FindTownRoot from a nested town = %q, want the outermost %q", got, outer)
+	}
+}
+
 func TestResolveRoutingTarget(t *testing.T) {
 	// Create a temporary town with routes
 	tmpDir := t.TempDir()

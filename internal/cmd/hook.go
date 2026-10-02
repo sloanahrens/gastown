@@ -509,7 +509,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 	// Convoys (hq-cv-*) are stored in town beads (~/gt/.beads) and any agent
 	// can hook them for convoy-driver mode.
 	if len(hookedBeads) == 0 {
-		townRoot, err := findTownRoot()
+		townRoot, err := workspace.FindFromCwd()
 		if err == nil && townRoot != "" {
 			// Check town beads for hooked items
 			townBeadsDir := filepath.Join(townRoot, ".beads")
@@ -670,11 +670,6 @@ func sessionNameToCanonicalAddress(reg *session.PrefixRegistry, sessionName, tar
 		return "", false
 	}
 	return canonicalAssigneeAddress(identity), true
-}
-
-// findTownRoot finds the Gas Town root directory.
-func findTownRoot() (string, error) {
-	return workspace.FindFromCwd()
 }
 
 // isBeadID checks if a string looks like a bead ID.

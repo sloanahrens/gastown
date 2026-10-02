@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -49,7 +50,7 @@ func parseReaperAge(flag, value string) (time.Duration, error) {
 // well as in the daemon so a hand-run sweep cannot auto-close either: the
 // disarm has to hold on every path that reaches the write.
 func reaperAutoCloseDisarmed() (bool, string) {
-	townRoot, err := findTownRoot()
+	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return false, ""
 	}
@@ -65,7 +66,7 @@ func reaperWriter(dbName string) (reaper.Writer, error) {
 	if reaperDryRun {
 		return nil, nil
 	}
-	townRoot, err := findTownRoot()
+	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return nil, fmt.Errorf("live reaper run needs the town root to reach bd: %w", err)
 	}
@@ -151,7 +152,7 @@ func parseReaperDatabaseList(list string) []string {
 }
 
 func defaultReaperEndpoint() (string, int) {
-	townRoot, _ := findTownRoot()
+	townRoot, _ := workspace.FindFromCwd()
 	return reaperEndpoint(townRoot)
 }
 
@@ -436,7 +437,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 					prefix, len(results), totalReaped, extra, totalOpen)
 			}
 		}
-		townRoot, _ := findTownRoot()
+		townRoot, _ := workspace.FindFromCwd()
 		reportReaperRunOpenWisps(os.Stderr, townRoot, reaperRunAlert{
 			Sample:          reaper.OpenWispSample{OpenWisps: totalOpen, Databases: len(results), DryRun: reaperDryRun},
 			WholeTown:       reaperDB == "" && !reaperJSON,
@@ -920,7 +921,7 @@ it by hand.`,
 		fmt.Printf("  Closed:    %d stale issues\n", totalClosed)
 		fmt.Printf("  Open:      %d wisps remain\n", totalOpen)
 
-		townRoot, _ := findTownRoot()
+		townRoot, _ := workspace.FindFromCwd()
 		reportReaperRunOpenWisps(os.Stderr, townRoot, reaperRunAlert{
 			Sample:          reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: reaperDryRun},
 			WholeTown:       reaperDB == "" && !reaperJSON,
