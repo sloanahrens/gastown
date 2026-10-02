@@ -189,26 +189,42 @@ func (d *Daemon) triggerRebuildGT() {
 	}
 	now := d.clk().Now()
 	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_gt", time.Time{}, now, rebuildGTInterval(d.patrolConfig))
-	if !dec.due {
+	// A request armed by a landing pass makes the job due on its own: an
+	// install is the point of the drain signal, and the interval it would
+	// otherwise wait out is what leaves the merge inert (gt-3qmv4.1).
+	if !dec.due && !d.rebuildGTRequested.Load() {
 		return
 	}
 	if !d.rebuildGTRunning.CompareAndSwap(false, true) {
 		return
 	}
-	if dec.warn != "" {
+	if dec.due && dec.warn != "" {
 		d.logger.Printf("rebuild_gt: WARNING: %s — %s", dec.warn, dec.note)
 	}
 	go func() {
 		defer d.rebuildGTRunning.Store(false)
 		if !d.runRebuildGT() {
 			// Nothing accomplished: leave the gate open so the next
-			// heartbeat retries (the script's exit 3).
+			// heartbeat retries (the script's exit 3), and leave a request
+			// armed so a not-quiet deferral does not lose it.
 			return
 		}
+		d.rebuildGTRequested.Store(false)
 		if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
 			d.logger.Printf("rebuild_gt: WARNING: cannot persist last-run time (%v)", err)
 		}
 	}()
+}
+
+// requestRebuildGTInstall arms the sticky request that makes the next
+// rebuild_gt heartbeat due regardless of the patrol's interval. A cycle clears
+// it only on a verdict, so a deferral keeps the install pending; arming an
+// already-armed request is a no-op, which is what keeps the log one line per
+// drain rather than one per landing pass (gt-3qmv4.1).
+func (d *Daemon) requestRebuildGTInstall() {
+	if d.rebuildGTRequested.CompareAndSwap(false, true) {
+		d.logger.Printf("rebuild_gt: install requested: queue drained after landing")
+	}
 }
 
 // runRebuildGT is one cycle. It reports whether the cycle reached a verdict
