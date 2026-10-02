@@ -169,9 +169,17 @@ var (
 	quotedHeredoc  = regexp.MustCompile(`<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'`)
 )
 
-// Allowed beyond systemGeneratedVar: review_id is a slug the agent picks
-// (lowercase letters, digits, hyphens; mol-idea-to-plan says so).
-var shellLineAllowedVar = regexp.MustCompile(systemGeneratedVar.String() + `|\{\{review_id\}\}`)
+// Allowed beyond systemGeneratedVar, all machine-shaped: review_id is a slug
+// the agent picks (lowercase letters, digits, hyphens; mol-idea-to-plan says
+// so), convoy and resolved_issue are bead ids, and the rest are slugs and
+// counts the operator configures. None can carry human prose.
+var machineShapedShellVar = regexp.MustCompile(`\{\{(review_id|convoy|resolved_issue|repo|patrol_label|slice_docs|slice_go|max_open_beads|scan_interval_seconds)\}\}`)
+
+// The *_command vars are the operator's own command lines: rendering one into a
+// shell block is the formula's purpose, so they are exempt rather than bound.
+var shellCommandVar = regexp.MustCompile(`\{\{(setup|build|typecheck|lint|test)_command\}\}`)
+
+var shellLineAllowedVar = regexp.MustCompile(systemGeneratedVar.String() + `|` + machineShapedShellVar.String() + `|` + shellCommandVar.String())
 
 // shellLineViolations returns "line: text" for each line inside a shell fence
 // that carries a template var outside the allowlist and outside a quoted
@@ -206,25 +214,31 @@ func shellLineViolations(content string) []string {
 	return out
 }
 
-// Formulas already swept for this rule. The rest of the shipped formulas still
-// carry unquoted vars on shell lines (convoy, dog, patrol and digest formulas);
-// add each one here as it is fixed.
-var sweptShellLineFormulas = []string{
-	"mol-idea-to-plan",
-	"mol-polecat-code-review",
-	"mol-polecat-review-pr",
-}
-
-func TestSweptFormulasBindFreeTextVarsOnlyInQuotedHeredocs(t *testing.T) {
+// Every shipped formula obeys the rule, so a new one is covered the moment it
+// lands and no list has to be kept in step with the directory (gt-totbn).
+func TestShippedFormulasBindFreeTextVarsOnlyInQuotedHeredocs(t *testing.T) {
 	t.Parallel()
-	for _, f := range sweptShellLineFormulas {
-		data, err := formulasFS.ReadFile("formulas/" + f + ".formula.toml")
+	entries, err := fs.ReadDir(formulasFS, "formulas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".formula.toml") {
+			continue
+		}
+		checked++
+		name := "formulas/" + e.Name()
+		data, err := formulasFS.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, l := range shellLineViolations(string(data)) {
-			t.Errorf("%s: template var on a shell line outside a quoted heredoc: %s", f, l)
+			t.Errorf("%s: template var on a shell line outside a quoted heredoc: %s", e.Name(), l)
 		}
+	}
+	if checked == 0 {
+		t.Error("no formula checked; the sweep is looking at nothing")
 	}
 }
 
@@ -238,6 +252,9 @@ func TestShellLineViolationsCatchesUnquotedVars(t *testing.T) {
 		`bd update {{issue}} --notes "{{focus}}"`,
 		"cat <<EOF\n{{problem}}\nEOF",
 		"X=$(cat <<'EOF'\nok\nEOF\n)\necho {{problem}}",
+		// The allowlist matches the whole placeholder: a field on an allowed
+		// id is free text and must still bind through a quoted heredoc.
+		`echo "convoy: {{convoy.title}}"`,
 	}
 	for _, b := range bad {
 		if len(shellLineViolations(fence(b))) == 0 {
@@ -248,6 +265,10 @@ func TestShellLineViolationsCatchesUnquotedVars(t *testing.T) {
 		`bd show {{issue}}`,
 		`cat .prd-reviews/{{review_id}}/prd-draft.md`,
 		"P=$(cat <<'EOF'\n{{problem}}\nEOF\n)\ngh pr view \"$P\"",
+		`bd show {{convoy}}`,
+		`gh pr list --repo {{repo}}`,
+		`{{build_command}}`,
+		`sleep {{scan_interval_seconds}}`,
 	}
 	for _, g := range good {
 		if v := shellLineViolations(fence(g)); len(v) != 0 {
