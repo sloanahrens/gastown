@@ -121,7 +121,7 @@ func TestDaemonNotifiersRunGtAsTheDaemon(t *testing.T) {
 func TestPluginScriptRunsAsTheDaemonPlugin(t *testing.T) {
 	t.Parallel()
 	bash := newFakeCLI(nil)
-	p := &plugin.Plugin{Name: "rebuild-gt", Path: "/town/plugins/rebuild-gt"}
+	p := &plugin.Plugin{Name: "tool-updater", Path: "/town/plugins/tool-updater"}
 	runPluginScript(context.Background(), bash.run, scriptEnv{environ: pollutedEnv()}, p, "/town", time.Second)
 	calls := bash.recorded()
 	if len(calls) != 1 {

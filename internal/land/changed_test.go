@@ -127,7 +127,6 @@ var guardTriggers = []struct {
 	{"internal/testdb", "M\tinternal/daemon/patrol.go\n"},
 	{"internal/testutil", "M\tinternal/daemon/patrol.go\n"},
 	{"internal/dispatch", "M\tplugins/seat-refill/run.sh\n"},
-	{"internal/plugin", "M\tplugins/rebuild-gt/plugin.md\n"},
 }
 
 // unguarded is a changed path no guard reads: a doc outside every guard's

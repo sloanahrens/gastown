@@ -399,8 +399,9 @@ then syncs formulas and plugins; plugin sync leaves runtime-only plugin edits
 untouched. Finally it writes `daemon/restart-pending.json`, and the daemon
 restarts itself once idle. It never kills the daemon. Exit codes: 0 installed
 or already current, 1 failed and rolled back, 2 refused (mayor/rig dirty,
-diverged or not forward), 3 busy (retry). The `rebuild-gt` plugin calls the same
-script hourly as a backstop. Do not copy binaries by hand, run `go install`, or
+diverged or not forward), 3 busy (retry). The daemon's `rebuild_gt` job calls
+the same script as a backstop, whenever the installed binary falls behind main
+and the town is quiet. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 
