@@ -30,38 +30,6 @@ func TestExtractCommand(t *testing.T) {
 	}
 }
 
-// TestMatchesAllFragments pins the containment helper itself. The guard's own
-// git/SQL rules no longer use it — they are positional matchers now (gt-24lz6)
-// — but matchesPackageInstall still matches its packageManagerPatterns through
-// it, so the helper's semantics (token-exact fragments, the bundled short-flag
-// form) stay under test here.
-func TestMatchesAllFragments(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		command   string
-		fragments []string
-		want      bool
-	}{
-		{"git reset hard", "git reset --hard", []string{"git", "reset", "--hard"}, true},
-		{"git reset soft", "git reset --soft", []string{"git", "reset", "--hard"}, false},
-		{"drop table", "drop table users", []string{"drop", "table"}, true},
-		{"drop database", "drop database mydb", []string{"drop", "database"}, true},
-		{"truncate table", "truncate table logs", []string{"truncate", "table"}, true},
-		{"git clean -f", "git clean -f", []string{"git", "clean", "-f"}, true},
-		{"git clean -n", "git clean -n", []string{"git", "clean", "-f"}, false},
-		{"no match", "echo hello", []string{"rm", "-rf"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := matchesAllFragments(lowerTokens(tt.command), tt.fragments)
-			if got != tt.want {
-				t.Errorf("matchesAllFragments(%q, %v) = %v, want %v", tt.command, tt.fragments, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestMatchesDangerousRmRf(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -439,6 +407,11 @@ func TestMatchesPackageInstall(t *testing.T) {
 		{"pip3 install --system", "pip3 install --system flask", true},
 		{"npm install -g", "npm install -g typescript", true},
 		{"npm install --global", "npm install --global eslint", true},
+		// The command word may sit behind a launcher, an env assignment, or a
+		// path prefix — segmentCommandWord resolves it (gt-qis3f).
+		{"env apt install", "env apt install -y curl", true},
+		{"env assignment before apt", "FOO=bar apt install -y curl", true},
+		{"full path apt", "/usr/bin/apt install -y curl", true},
 
 		// Should allow
 		{"pip install (venv ok)", "pip install requests", false},
@@ -450,6 +423,11 @@ func TestMatchesPackageInstall(t *testing.T) {
 		// gt-mkrj: "apt" must not fire as a substring of an ordinary word.
 		{"capture substring", "tmux capture-pane -p", false},
 		{"adapt substring", "echo adapt this script", false},
+		// gt-qis3f: the manager and "install" are one invocation, not two words
+		// that merely both appear somewhere in the token list.
+		{"apt and install in separate segments", "grep -n apt README.md; grep -n install Makefile", false},
+		{"echo apt install", "echo apt install foo", false},
+		{"apt without install", "apt update", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
