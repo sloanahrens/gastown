@@ -538,7 +538,9 @@ func tailSeatPicture(townRoot string) (used, cap int, pairs []string, err error)
 		if err != nil || len(names) == 0 {
 			continue
 		}
-		agents, err := beads.New(rigPath).ListAgentBeads()
+		// Agent beads are rig-local and their IDs reroot: the wrapper has to
+		// be the agent-scoped one, never a bare beads.New chain (gt-a6g).
+		agents, err := beads.New(rigPath).ForAgentBead().ListAgentBeads()
 		if err != nil {
 			continue
 		}
