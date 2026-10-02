@@ -509,7 +509,10 @@ func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("mkdir rig path: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"trunk"}`), 0o644); err != nil {
+	// Identity keys too: one strict loader owns rig config.json (gt-y3pgh.2.5),
+	// and a file without them does not decode, so the branch read would
+	// silently fall back to "main".
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"type":"rig","version":1,"name":"rig","default_branch":"trunk"}`), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
 	}
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
@@ -533,7 +536,7 @@ func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("mkdir rig path: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"main"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"type":"rig","version":1,"name":"rig","default_branch":"main"}`), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
 	}
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}

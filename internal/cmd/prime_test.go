@@ -684,7 +684,7 @@ func TestOutputAutonomousDirectiveForkRigAvoidsMergeQueueGuidance(t *testing.T) 
 	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"upstream_url":"https://token@example.com/upstream/repo.git"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"type":"rig","version":1,"name":"myrig","upstream_url":"https://token@example.com/upstream/repo.git"}`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -707,7 +707,7 @@ func TestOutputMoleculeWorkflowForkRigOverridesFormulaMergeQueueReminder(t *test
 	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"upstream_url":"https://github.com/upstream/repo"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "config.json"), []byte(`{"type":"rig","version":1,"name":"myrig","upstream_url":"https://github.com/upstream/repo"}`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
