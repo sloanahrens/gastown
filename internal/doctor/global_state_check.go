@@ -104,7 +104,8 @@ func (c *GlobalStateCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 func hasShellIntegration(rcPath string) bool {
-	// Look for official marker (from gt shell install) or manual sourcing of the hook script.
+	// Look for the official marker written by `gt install --shell`, or a manual
+	// source of the hook script.
 	markers := []string{"Gas Town Integration", "shell-hook.sh"}
 	return checkSourceChain(rcPath, markers, make(map[string]bool), 0)
 }
