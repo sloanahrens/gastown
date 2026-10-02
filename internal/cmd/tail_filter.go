@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -132,6 +133,286 @@ func (l *tailTownHealthLatch) visible(text string) bool {
 	}
 	l.last = key
 	return true
+}
+
+// tailDuplicateWindow is how close two identical events lines have to be for
+// the second to be the same event written twice.
+const tailDuplicateWindow = 2 * time.Second
+
+// tailJournalOps are the operations a bd events record carries
+// (internal/beads/events.go). A line whose first field is not one of them is
+// not a record — a source's own error line, say — and is never a duplicate.
+var tailJournalOps = map[string]bool{
+	"create": true, "update": true, "close": true, "delete": true,
+	"dep_add": true, "dep_remove": true, "comment": true,
+}
+
+// tailEventKey reads the identity of an events line: the operation, the bead,
+// and the status the write left it in. Two journal rows with the same key
+// close together are one write the store recorded twice, or a retry that
+// landed on the same row; seq, actor and time are what the retry changes, so
+// they are not part of the key. "" for a line that is not an "<op> <id> ..."
+// record — a source's own error line, say — which is never a duplicate.
+func tailEventKey(text string) string {
+	f := strings.Fields(text)
+	if len(f) < 2 || !tailJournalOps[f[0]] || f[1] == "" {
+		return ""
+	}
+	key := f[0] + "\x00" + f[1] + "\x00"
+	for _, field := range f[2:] {
+		if status, ok := strings.CutPrefix(field, "status="); ok {
+			return key + status
+		}
+	}
+	return key
+}
+
+// tailEventDuplicateLatch hides an events line that repeats the one before it
+// for the same bead, operation and status within tailDuplicateWindow. A bd
+// write arrives as several journal rows when it is retried (two commits, one
+// logical event), and the same row is rewritten as a store races a retry, so
+// the stream otherwise carries the same sentence two or three times.
+//
+// The window slides: a run of identical rows stays hidden while it keeps
+// coming, and the next write after a pause prints again.
+type tailEventDuplicateLatch struct {
+	mu  sync.Mutex
+	key string
+	at  time.Time
+}
+
+func (l *tailEventDuplicateLatch) visible(ln tailLine) bool {
+	if ln.Kind != tailKindEvents || ln.At.IsZero() {
+		return true
+	}
+	key := tailEventKey(ln.Text)
+	if key == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	same := key == l.key && ln.At.Sub(l.at) < tailDuplicateWindow && !ln.At.Before(l.at)
+	l.key, l.at = key, ln.At
+	return !same
+}
+
+// tailSeatWaitIcon leads the one line a convoy's seat-retry loop prints.
+const tailSeatWaitIcon = "⏳"
+
+// The daemon lines a convoy's seat-retry loop writes: the attempt that fed the
+// bead, the attempt that could not, and the reason that names a missing seat
+// as opposed to any other complaint.
+var (
+	tailConvoyFeedRe   = regexp.MustCompile(`^Convoy \S+: feeding (\S+) to `)
+	tailConvoyDeferRe  = regexp.MustCompile(`^Convoy \S+: deferring (\S+): (.*)$`)
+	tailConvoyNoSeatRe = regexp.MustCompile(`(?i:\bpool: full\b|\bno seat\b)`)
+)
+
+// tailSeatWaitLatch collapses a convoy's seat-retry loop into one line. A
+// convoy retries a bead every few seconds while the pool has no seat, so the
+// stream carries "deferring gt-x: pool: full ..." once per attempt, all of it
+// saying the same thing. The first prints as one waiting line; the rest are
+// suppressed until the bead, the reason or the outcome changes. A later
+// success — the convoy's "feeding gt-x" line — clears the latch, so the bead
+// printing a fresh waiting line means it lost its seat again.
+type tailSeatWaitLatch struct {
+	mu     sync.Mutex
+	bead   string
+	reason string
+}
+
+// tailSeatWaitText is the one line a seat-waiting bead prints as.
+func tailSeatWaitText(bead string) string {
+	return tailSeatWaitIcon + " waiting for a seat: " + bead
+}
+
+// adjust returns the line to print and whether to print it.
+func (l *tailSeatWaitLatch) adjust(ln tailLine) (tailLine, bool) {
+	if ln.Kind != tailKindDaemon {
+		return ln, true
+	}
+	if m := tailConvoyFeedRe.FindStringSubmatch(ln.Text); m != nil {
+		l.mu.Lock()
+		if l.bead == m[1] {
+			l.bead, l.reason = "", ""
+		}
+		l.mu.Unlock()
+		return ln, true
+	}
+	m := tailConvoyDeferRe.FindStringSubmatch(ln.Text)
+	if m == nil || !tailConvoyNoSeatRe.MatchString(m[2]) {
+		return ln, true
+	}
+	bead, reason := m[1], strings.TrimSpace(m[2])
+	l.mu.Lock()
+	repeat := l.bead == bead && l.reason == reason
+	if !repeat {
+		l.bead, l.reason = bead, reason
+	}
+	l.mu.Unlock()
+	if repeat {
+		return ln, false
+	}
+	ln.Text = tailSeatWaitText(bead)
+	return ln, true
+}
+
+// tailDefaultFilter is the default view's filter. It hides the routine lines,
+// collapses a convoy's seat-retry loop, drops an events line that repeats the
+// one before it, and latches a townhealth line that repeats the last one
+// shown. --all and --verbose keep every raw line.
+type tailDefaultFilter struct {
+	townHealth tailTownHealthLatch
+	duplicates tailEventDuplicateLatch
+	seats      tailSeatWaitLatch
+}
+
+func (f *tailDefaultFilter) visible(ln tailLine) (tailLine, bool) {
+	if !tailVisible(ln) {
+		return ln, false
+	}
+	adjusted, ok := f.seats.adjust(ln)
+	if !ok {
+		return ln, false
+	}
+	ln = adjusted
+	if !f.duplicates.visible(ln) {
+		return ln, false
+	}
+	return ln, f.townHealth.visible(ln.Text)
+}
+
+// The fields the default view strikes from an events line. The seq numbers the
+// journal's cursor, and the actor is the writer: both are the form to grep by,
+// which is what --verbose is for. An actor that is not the operator's own git
+// identity is kept — that one names somebody else's write.
+var tailSeqFieldRe = regexp.MustCompile(` seq=[0-9]+`)
+
+// tailDropActorField drops " actor=<name>" when name is gitUser. The name is
+// whatever the writer recorded, and bd records a person's name with its space
+// ("Sloan Ahrens"), so the field runs to the next field or to the end — not to
+// the next space, which would match only the given name.
+func tailDropActorField(text, gitUser string) string {
+	const field = " actor="
+	i := strings.Index(text, field)
+	if i < 0 {
+		return text
+	}
+	rest := text[i+len(field):]
+	end := len(rest)
+	for _, next := range []string{" seq=", " ts="} {
+		if j := strings.Index(rest, next); j >= 0 && j < end {
+			end = j
+		}
+	}
+	if rest[:end] != gitUser {
+		return text
+	}
+	return text[:i] + rest[end:]
+}
+
+// tailTrimEventFields drops the cursor and the operator's own identity from an
+// events line. A line that is not an events record, and a view that keeps the
+// raw columns, are returned unchanged.
+func tailTrimEventFields(ln tailLine, gitUser string) tailLine {
+	if ln.Kind != tailKindEvents {
+		return ln
+	}
+	ln.Text = tailSeqFieldRe.ReplaceAllString(ln.Text, "")
+	if gitUser != "" {
+		ln.Text = tailDropActorField(ln.Text, gitUser)
+	}
+	return ln
+}
+
+// The verdict prefixes the review loop writes. A comment or a note that opens
+// with one of these is a verdict, not chatter, and the stream shows it.
+var tailVerdictMarkers = []string{
+	"OVERSEER REVIEW",
+	"OVERSEER RULING",
+	"STEWARD",
+	"MERGE REJECTION",
+}
+
+// tailVerdictWidth bounds the verdict text the stream prints.
+const tailVerdictWidth = 100
+
+// tailVerdictText reads the verdict a comment or a note event carries, "" when
+// the event says nothing the operator needs. For a comment it is the newest
+// comment — the one the event is about; for a note it is the last MERGE
+// REJECTION block in the notes. Either has to open with a marker.
+func tailVerdictText(issue *beads.Issue, op string) string {
+	if issue == nil {
+		return ""
+	}
+	switch op {
+	case "comment":
+		if n := len(issue.Comments); n > 0 {
+			return tailMarkerText(issue.Comments[n-1].Text)
+		}
+	case "update":
+		return tailMarkerText(lastMergeRejectionLine(issue.Notes))
+	}
+	return ""
+}
+
+// lastMergeRejectionLine returns the opening line of the last MERGE REJECTION
+// block in notes, "" when the notes hold none. The block's first line is the
+// one that names the attempt, the kind and the reason.
+func lastMergeRejectionLine(notes string) string {
+	var last string
+	for _, line := range strings.Split(notes, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "MERGE REJECTION") {
+			last = strings.TrimSpace(line)
+		}
+	}
+	return last
+}
+
+// tailMarkerText returns text when it opens with a verdict marker, trimmed to
+// tailVerdictWidth runes, "" otherwise.
+func tailMarkerText(text string) string {
+	text = strings.TrimSpace(text)
+	found := false
+	for _, marker := range tailVerdictMarkers {
+		if strings.HasPrefix(text, marker) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ""
+	}
+	return tailTruncateRunes(text, tailVerdictWidth)
+}
+
+// tailTruncateRunes cuts text to at most n runes, marking the cut.
+func tailTruncateRunes(text string, n int) string {
+	r := []rune(text)
+	if len(r) <= n {
+		return text
+	}
+	return string(r[:n]) + "…"
+}
+
+// The verdict's own colors: a pass is green, a refusal red, and an advisory
+// "(shadow)" verdict yellow whatever it decided.
+var (
+	tailVerdictPassRe = regexp.MustCompile(`\bPASS\b`)
+	tailVerdictFailRe = regexp.MustCompile(`\bFAIL\b|(?i:\brefused\b|\brejection\b)`)
+)
+
+// tailVerdictClass is the class a verdict line is drawn in.
+func tailVerdictClass(text string) tailClass {
+	switch {
+	case strings.Contains(text, "(shadow)"):
+		return tailClassWarning
+	case tailVerdictPassRe.MatchString(text):
+		return tailClassSuccess
+	case tailVerdictFailRe.MatchString(text):
+		return tailClassFailure
+	}
+	return tailClassPlain
 }
 
 // tailClass is what a line's text says it is: the color and the emoji the
