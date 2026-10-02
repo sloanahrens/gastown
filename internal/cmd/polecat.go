@@ -642,21 +642,16 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 
 	bd := beads.New(r.Path)
 
-	// One combined bd sql round trip for both label sets this rig's listing
-	// needs (agent beads, merge requests), so the MR query below and
-	// ListAgentBeads() share it instead of each paying their own wisps-table
-	// subprocess (gt-92zx). A failed preload just means both fall back to
-	// their own per-call query — never fatal to the list.
-	if err := bd.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to preload wisp labels in %s: %v\n", r.Name, err)
-	}
-
-	// The issues-table counterpart, one more bd sql round trip: it answers the
-	// issues half of ListAgentBeads() and of the MR query below, and the
-	// active-work listing, which would otherwise each spawn their own bd
-	// subprocess (gt-0hmt2). Same fallback on failure.
-	if err := bd.PreloadIssues([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to preload issues in %s: %v\n", r.Name, err)
+	// ONE bd sql round trip per rig, the whole of this listing's reads: the
+	// wisps table for the agent-bead join (gt-92zx) and the MR index, and the
+	// issues table for the agent-bead and MR rows and the active-work listing
+	// (gt-0hmt2), each carrying the dependency rows ListMergeRequests hydrates
+	// from (gt-7dctf). They share a statement because one caller wants all of
+	// it at once and each read is a subprocess (gt-59p7e). A failed preload
+	// just means every reader falls back to its own per-call query — never
+	// fatal to the list.
+	if err := bd.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload beads in %s: %v\n", r.Name, err)
 	}
 
 	// ONE merge-request query per rig, joined per polecat below — never a

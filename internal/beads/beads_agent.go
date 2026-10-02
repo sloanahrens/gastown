@@ -750,7 +750,7 @@ func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// Agent beads are type=agent (infrastructure), hidden by bd list default filter.
 	// Use --include-infra so they appear in results.
 	//
-	// A PreloadIssues snapshot covering gt:agent answers from memory instead
+	// A PreloadBeads snapshot covering gt:agent answers from memory instead
 	// (gt-0hmt2).
 	issues, cached := b.issueSnapshot.agentBeads()
 	if !cached {
@@ -794,8 +794,8 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
 //
-// A PreloadLabeledWisps(...) snapshot is checked first: it answers from the
-// one bd sql round trip that call already paid for (gt-92zx), instead of this
+// A PreloadBeads(...) snapshot is checked first: it answers from the one bd
+// sql round trip that call already paid for (gt-92zx), instead of this
 // spawning its own "bd mol wisp list" over every wisp in the rig.
 //
 // That snapshot is the *unfiltered* wisps read, not the gt:agent-labeled

@@ -6,25 +6,42 @@ import (
 	"testing"
 )
 
-// The fixtures below are what the two preload reads answer with once they
-// carry their dependency half (gt-7dctf): the issue and wisp rows, then a
-// dep_row = 1 row per dependency, keyed to its dependent by dep_issue_id.
-// Three merge requests between them pin the two ways a dependency decides
-// readiness — an open `blocks` dependency holds its MR back, a `merge-blocks`
-// dependency whose target is closed rides on the target's close_reason, and
-// one closed for any other reason still blocks.
+// The fixtures below are what the one preload read answers with once it
+// carries its dependency arms (gt-7dctf, gt-59p7e): the wisp and issue rows
+// tagged with the table they came from, then a dep_row = 1 row per dependency,
+// keyed to its dependent by dep_issue_id. Three merge requests between them pin
+// the two ways a dependency decides readiness — an open `blocks` dependency
+// holds its MR back, a `merge-blocks` dependency whose target is closed rides
+// on the target's close_reason, and one closed for any other reason still
+// blocks.
 
-const preloadIssuesJSON = `[
-{"id":"gt-mr-issue","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"close_reason":"","labels_csv":"gt:merge-request","dep_row":0},
-{"id":"gt-mr-issue","dep_row":1,"dep_issue_id":"gt-mr-issue","dep_type":"blocks","dep_id":"gt-blocker","dep_status":"open","dep_close_reason":"","dep_title":"the blocker","dep_priority":1,"dep_issue_type":"bug"}
+const preloadBeadsJSON = `[
+{"id":"gt-wisp-mr","src":"wisp","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-wisp-mr","src":"wisp","dep_row":1,"dep_issue_id":"gt-wisp-mr","dep_type":"merge-blocks","dep_id":"gt-merged","dep_status":"closed","dep_close_reason":"Merged in gt-wisp-x","dep_title":"already landed","dep_priority":1,"dep_issue_type":"task"},
+{"id":"gt-wisp-mr-rejected","src":"wisp","title":"Merge: gt-other","description":"branch: polecat/test/gt-other@abc\nsource_issue: gt-other\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-wisp-mr-rejected","src":"wisp","dep_row":1,"dep_issue_id":"gt-wisp-mr-rejected","dep_type":"merge-blocks","dep_id":"gt-rejected","dep_status":"closed","dep_close_reason":"rejected: superseded","dep_title":"went nowhere","dep_priority":1,"dep_issue_type":"task"},
+{"id":"gt-om-witness","src":"wisp","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:agent","dep_row":0},
+{"id":"gt-mr-issue","src":"issue","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"close_reason":"","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-mr-issue","src":"issue","dep_row":1,"dep_issue_id":"gt-mr-issue","dep_type":"blocks","dep_id":"gt-blocker","dep_status":"open","dep_close_reason":"","dep_title":"the blocker","dep_priority":1,"dep_issue_type":"bug"}
 ]`
 
-const preloadWispsJSON = `[
-{"id":"gt-wisp-mr","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
-{"id":"gt-wisp-mr","dep_row":1,"dep_issue_id":"gt-wisp-mr","dep_type":"merge-blocks","dep_id":"gt-merged","dep_status":"closed","dep_close_reason":"Merged in gt-wisp-x","dep_title":"already landed","dep_priority":1,"dep_issue_type":"task"},
-{"id":"gt-wisp-mr-rejected","title":"Merge: gt-other","description":"branch: polecat/test/gt-other@abc\nsource_issue: gt-other\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
-{"id":"gt-wisp-mr-rejected","dep_row":1,"dep_issue_id":"gt-wisp-mr-rejected","dep_type":"merge-blocks","dep_id":"gt-rejected","dep_status":"closed","dep_close_reason":"rejected: superseded","dep_title":"went nowhere","dep_priority":1,"dep_issue_type":"task"},
-{"id":"gt-om-witness","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:agent","dep_row":0}
+// preloadWispsOnlyJSON is one PreloadBeads read that returned the wisps and no
+// issues — what a read scoped to labels the merge requests do not carry looks
+// like here. The merge request's own issues-table row is then one no snapshot
+// covered, which is the case the hydration fallback exists for.
+const preloadWispsOnlyJSON = `[
+{"id":"gt-wisp-mr","src":"wisp","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-wisp-mr-rejected","src":"wisp","title":"Merge: gt-other","description":"branch: polecat/test/gt-other@abc\nsource_issue: gt-other\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-om-witness","src":"wisp","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:agent","dep_row":0}
+]`
+
+// preloadMRWispsJSON is what the label-filtered wisps read answers — the same
+// rows without the witness, which carries no gt:merge-request label.
+// ListMergeRequests reaches for it only when the preload cache does not cover
+// its label.
+const preloadMRWispsJSON = `[
+{"id":"gt-wisp-mr","src":"wisp","title":"Merge: gt-src","description":"branch: polecat/test/gt-src@abc\nsource_issue: gt-src\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0},
+{"id":"gt-wisp-mr-rejected","src":"wisp","title":"Merge: gt-other","description":"branch: polecat/test/gt-other@abc\nsource_issue: gt-other\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","labels_csv":"gt:merge-request","dep_row":0}
 ]`
 
 // What `bd list` and `bd show` still answer on the paths the preloads do not
@@ -40,26 +57,34 @@ const showMergeRequestsJSON = `[
 {"id":"gt-wisp-mr-rejected","title":"Merge: gt-other","description":"branch: polecat/test/gt-other@abc\nsource_issue: gt-other\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","close_reason":"","ephemeral":true,"labels":["gt:merge-request"],"dependencies":[{"id":"gt-rejected","status":"closed","close_reason":"rejected: superseded","issue_type":"task","title":"went nowhere","dependency_type":"merge-blocks"}]}
 ]`
 
-// preloadAnswer is the bd the preload tests run against: the two preload reads
-// answer with the fixtures above, `bd list` and `bd show` answer what the
+// preloadAnswer is the bd the preload tests run against: the one preload read
+// answers with the fixture above, `bd list` and `bd show` answer what the
 // uncovered paths would see, and anything else fails the test rather than
 // quietly returning nothing.
 func preloadAnswer(args []string) reply {
-	joined := strings.Join(args, " ")
-	switch {
-	case strings.HasPrefix(joined, "sql --json "):
+	return preloadAnswerWith(preloadBeadsJSON)(args)
+}
+
+// preloadAnswerWith is preloadAnswer with a caller-chosen answer to the preload
+// read, for the cases where which rows that read covered is the thing under
+// test. The preload is the one union; a later label-filtered wisps read is what
+// ListMergeRequests falls back to for a label the cache does not cover, and
+// answers the rows that label selects.
+func preloadAnswerWith(beads string) func([]string) reply {
+	return func(args []string) reply {
+		joined := strings.Join(args, " ")
 		switch {
-		case strings.Contains(joined, "FROM wisps w"):
-			return reply{stdout: preloadWispsJSON}
-		case strings.Contains(joined, "FROM issues i"):
-			return reply{stdout: preloadIssuesJSON}
+		case strings.HasPrefix(joined, "sql --json ") && strings.Contains(joined, "UNION ALL"):
+			return reply{stdout: beads}
+		case strings.HasPrefix(joined, "sql --json "):
+			return reply{stdout: preloadMRWispsJSON}
+		case strings.HasPrefix(joined, "list --json"):
+			return reply{stdout: listMergeIssueJSON}
+		case strings.HasPrefix(joined, "show --json"):
+			return reply{stdout: showMergeRequestsJSON}
 		}
-	case strings.HasPrefix(joined, "list --json"):
-		return reply{stdout: listMergeIssueJSON}
-	case strings.HasPrefix(joined, "show --json"):
-		return reply{stdout: showMergeRequestsJSON}
+		return reply{stdout: "unexpected bd read: " + joined, err: exitError{code: 7}}
 	}
-	return reply{stdout: "unexpected bd read: " + joined, err: exitError{code: 7}}
 }
 
 func newPreloadBeads(t *testing.T) (*Beads, *recorder) {
@@ -70,11 +95,8 @@ func newPreloadBeads(t *testing.T) (*Beads, *recorder) {
 
 func warmPreloads(t *testing.T, b *Beads) {
 	t.Helper()
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
-	}
-	if err := b.PreloadIssues([]string{"gt:agent", "gt:merge-request"}, []IssueStatus{StatusOpen}); err != nil {
-		t.Fatalf("PreloadIssues() error = %v", err)
+	if err := b.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, []IssueStatus{StatusOpen}); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 }
 
@@ -147,16 +169,18 @@ func TestMergeRequestHydrationReadsPreloadedDependencies(t *testing.T) {
 	}
 }
 
-// TestMergeRequestHydrationFallsBackWhenNotCovered: a *Beads whose snapshots
-// do not cover every merge request pays the one `bd show` for the whole set,
+// TestMergeRequestHydrationFallsBackWhenNotCovered: a *Beads whose snapshot
+// does not cover every merge request pays the one `bd show` for the whole set,
 // wisp merge requests included, rather than mixing a preloaded answer with a
 // remembered one.
 func TestMergeRequestHydrationFallsBackWhenNotCovered(t *testing.T) {
-	b, r := newPreloadBeads(t)
-	// Only the wisps preload runs: the issues half of the listing comes from
-	// bd list, so neither snapshot covers gt-mr-issue.
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	// The read was scoped to gt:agent, so the listing's issues half comes from
+	// `bd list` — gt-mr-issue among them — and that is a row no snapshot
+	// covered. One uncovered id is enough to send the whole set to bd show.
+	r := newRecorder(preloadAnswerWith(preloadWispsOnlyJSON))
+	b := newRecordedBeads(t.TempDir(), r)
+	if err := b.PreloadBeads([]string{"gt:agent"}, []IssueStatus{StatusOpen}); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 
 	byID := mergeRequestsByID(t, b)

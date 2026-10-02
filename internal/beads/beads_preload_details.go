@@ -69,10 +69,10 @@ func (b *Beads) preloadedDetail(id string) (*Issue, bool) {
 }
 
 // hydrateFromPreload answers hydrateMergeRequestDetails from the preloaded
-// snapshots when they cover every issue — the case whenever PreloadIssues and
-// PreloadLabeledWisps ran, which is `gt polecat list` (gt-7dctf). Each preload
-// read already carries the dependency rows of every row it returned, so the
-// `bd show --json <ids>` this replaces would be re-reading data in memory.
+// snapshots when they cover every issue — the case whenever PreloadBeads ran,
+// which is `gt polecat list` (gt-7dctf). That one read already carries the
+// dependency rows of every row it returned, so the `bd show --json <ids>` this
+// replaces would be re-reading data in memory.
 //
 // ok is false when even one id is not covered. Then the caller runs that one
 // round trip for the whole set, as before: a partial answer would still need
