@@ -215,6 +215,10 @@ type Daemon struct {
 	// maintenanceGCRunning is set while a scheduled_maintenance gc cycle runs
 	// on its own goroutine; it blocks a second cycle and an upgrade-restart.
 	maintenanceGCRunning atomic.Bool
+	// catchUpAttemptAt is the UnixNano time of the last out-of-window
+	// catch-up backup attempt (or unreadable-backup-root report); it bounds
+	// retries to one per maintenanceCatchUpRetry (gt-wne04).
+	catchUpAttemptAt atomic.Int64
 	// maintenanceGCFinishedAt is the UnixNano time a gc cycle completed or
 	// failed (0 = none pending). The loop goroutine folds it into
 	// lastMaintenanceRun; a deferred cycle never sets it.

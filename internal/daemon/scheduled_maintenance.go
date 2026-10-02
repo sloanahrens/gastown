@@ -155,7 +155,11 @@ func (d *Daemon) runScheduledMaintenance() {
 	if !isInMaintenanceWindow(now, window) {
 		// Outside the window the only work is a missed backup (gt-wne04);
 		// otherwise a silent skip (this fires every 5 minutes).
-		d.maybeCatchUpBackup(now)
+		// A malformed window also reads as "outside"; it must not enable
+		// catch-ups and hide that the window (and its gc) never runs.
+		if _, _, err := maintenanceWindowBounds(now, window); err == nil {
+			d.maybeCatchUpBackup(now)
+		}
 		return
 	}
 

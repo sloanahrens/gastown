@@ -15,6 +15,12 @@ import (
 // certainly missed (gt-wne04).
 const maintenanceCatchUpAge = 24*time.Hour + maintenanceWindowLength
 
+// maintenanceCatchUpRetry is the shortest gap between two catch-up attempts.
+// The in-window path escalates a failed backup once and stops until the next
+// window; outside it the check fires every 5 minutes, so without this a
+// failing backup would rerun and re-escalate on every tick.
+const maintenanceCatchUpRetry = 6 * time.Hour
+
 // maybeCatchUpBackup takes a missed nightly backup outside the window: the
 // backup only, never the gc, which stays in the window behind the full quiet
 // guard. It waits for a moment when the daemon has no work in flight and no
@@ -25,15 +31,18 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	if d.maintenanceGCRunning.Load() {
 		return
 	}
+	if last := d.catchUpAttemptAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < maintenanceCatchUpRetry {
+		return
+	}
 	s := d.maintenance()
 	root, err := s.backupRoot()
 	if err != nil {
-		d.logger.Printf("scheduled_maintenance: catch-up: backup root: %v", err)
+		d.catchUpUnknown(now, fmt.Sprintf("backup root: %v", err))
 		return
 	}
 	newest, ok, err := doltbackup.Newest(root)
 	if err != nil {
-		d.logger.Printf("scheduled_maintenance: catch-up: reading backups: %v", err)
+		d.catchUpUnknown(now, fmt.Sprintf("reading backups: %v", err))
 		return
 	}
 	if ok && newest.Age(now) < maintenanceCatchUpAge {
@@ -56,6 +65,7 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return
 	}
+	d.catchUpAttemptAt.Store(now.UnixNano())
 	age := "none on disk"
 	if ok {
 		age = newest.Age(now).Round(time.Minute).String() + " old"
@@ -67,6 +77,16 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 		res := d.maintenanceBackup(databases)
 		d.logger.Printf("scheduled_maintenance: catch-up backup %s", res.outcome)
 	})
+}
+
+// catchUpUnknown reports a backup age the check could not read. That is not
+// "a recent backup exists": the gap this change closes could be open, so it
+// escalates (once per retry gap) instead of returning quietly.
+func (d *Daemon) catchUpUnknown(now time.Time, what string) {
+	d.catchUpAttemptAt.Store(now.UnixNano())
+	d.logger.Printf("scheduled_maintenance: catch-up: cannot tell the newest backup's age: %s", what)
+	d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
+		"scheduled_maintenance: cannot read the Dolt backups, so a missed nightly backup cannot be caught up: %s", what))
 }
 
 // catchUpQuiet is the catch-up's guard: no daemon work in flight (a landing

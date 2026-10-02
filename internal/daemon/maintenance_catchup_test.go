@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -87,5 +88,62 @@ func TestBackupCatchUpWaitsForAQuietTown(t *testing.T) {
 	d.runScheduledMaintenance()
 	if len(f.backupCalls) != 2 {
 		t.Errorf("catch-up not taken once the town went quiet: %v", f.backupCalls)
+	}
+}
+
+// A failing catch-up escalates once and is not retried on the next 5-minute
+// ticks; the retry gap passing allows exactly one more attempt.
+func TestBackupCatchUpFailureIsThrottled(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	f.backupErr["gt"] = errors.New("disk full")
+
+	d.runScheduledMaintenance()
+	first := len(f.backupCalls)
+	if first == 0 || len(f.escalations) != 1 {
+		t.Fatalf("calls=%v escalations=%v, want an attempt and one escalation", f.backupCalls, f.escalations)
+	}
+
+	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+	d.runScheduledMaintenance()
+	if len(f.backupCalls) != first || len(f.escalations) != 1 {
+		t.Errorf("retried within the gap: calls=%v escalations=%v", f.backupCalls, f.escalations)
+	}
+
+	d.maint.now = func() time.Time { return catchUpNow.Add(maintenanceCatchUpRetry + time.Minute) }
+	d.runScheduledMaintenance()
+	if len(f.backupCalls) <= first || len(f.escalations) != 2 {
+		t.Errorf("no retry after the gap: calls=%v escalations=%v", f.backupCalls, f.escalations)
+	}
+}
+
+// An unreadable backup root is not "a recent backup exists": it escalates, once
+// per retry gap, and takes no backup.
+func TestBackupCatchUpUnreadableRootEscalates(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	d.maint.backupRoot = func() (string, error) { return "", errors.New("no home") }
+
+	d.runScheduledMaintenance()
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Errorf("took a backup with an unreadable root: %v", f.backupCalls)
+	}
+	if len(f.escalations) != 1 {
+		t.Errorf("escalations = %v, want exactly 1", f.escalations)
+	}
+}
+
+// A malformed window reads as "outside"; it must not enable catch-ups.
+func TestBackupCatchUpIgnoredWithMalformedWindow(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	d.patrolConfig.Patrols.ScheduledMaintenance.Window = "not-a-window"
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Errorf("catch-up ran with a malformed window: %v", f.backupCalls)
 	}
 }

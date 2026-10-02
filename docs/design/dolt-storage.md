@@ -353,7 +353,11 @@ nights. A Dolt backup is the server's consistent snapshot of every branch and
 the working set, dolt_ignored tables included, so the server never stops. The
 backup comes first because the gc is the step that has correlated with a Dolt
 panic: a failed backup escalates and skips that night's gc. A night already on
-disk is not taken again when a deferred gc retries. Restore:
+disk is not taken again when a deferred gc retries. If the daemon was down
+across the window, the 5-minute check outside it takes a catch-up backup (the
+backup only, never the gc) once the newest backup is older than 24h plus the
+window length and the town is quiet (no daemon work, no gate slot held); a
+failed catch-up escalates and is not retried for 6 hours (gt-wne04). Restore:
 `docs/dolt-restore.md`.
 
 Due databases run smallest first, one at a time, each bounded by 10 minutes.
