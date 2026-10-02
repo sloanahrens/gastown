@@ -118,7 +118,7 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d stale port file(s), %d stale metadata.json(s), %d stale config dir(s)", len(c.stalePorts), len(c.staleMetadata), len(staleConfigs)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to fix port inconsistencies",
+		FixHint: "Run 'gt doctor fix stale-dolt-port' to fix port inconsistencies",
 	}
 }
 

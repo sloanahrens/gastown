@@ -11,24 +11,23 @@ import (
 )
 
 var (
-	doctorFix             bool
-	doctorVerbose         bool
-	doctorRig             string
-	doctorRestartSessions bool
-	doctorNoStart         bool
-	doctorSlow            string
-	doctorLiveFire        bool
-	doctorCheck           []string
+	doctorVerbose  bool
+	doctorRig      string
+	doctorSlow     string
+	doctorLiveFire bool
+	doctorCheck    []string
 )
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor",
 	GroupID: GroupDiag,
-	Short:   "Run health checks on the workspace",
-	Long: `Run diagnostic checks on the Gas Town workspace.
+	Short:   "Run read-only health checks on the workspace",
+	Long: `Run read-only diagnostic checks on the Gas Town workspace.
 
 Doctor checks for common configuration issues, missing files,
-and other problems that could affect workspace operation.
+and other problems that could affect workspace operation. It never
+changes anything: a repair is a separate, named invocation,
+'gt doctor fix <check>' (see 'gt doctor fix --help').
 
 Workspace checks:
   - town-config-exists       Check mayor/town.json exists
@@ -121,8 +120,10 @@ Patrol checks:
   - patrol-not-stuck         Detect stale wisps (>1h)
   - patrol-plugins-accessible Verify plugin directories
 
-Use --fix to attempt automatic fixes for issues that support it.
-Use --no-start with --fix to suppress starting the daemon and agents.
+The checks marked (fixable) above are repairable one at a time:
+  gt doctor fix <check>          repair exactly that check
+  gt doctor fix --help           the fixer's flags
+
 Use --rig to check a specific rig instead of the entire workspace.
 Use --check <name> to run only the named check (repeatable).
 Use --slow to highlight slow checks (default threshold: 1s, e.g. --slow=500ms).
@@ -133,16 +134,14 @@ blocks end-to-end — slow, token-cost-bearing, not run by default).`,
 }
 
 func init() {
-	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Attempt to automatically fix issues")
 	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show detailed output")
 	doctorCmd.Flags().StringVar(&doctorRig, "rig", "", "Check specific rig only")
-	doctorCmd.Flags().BoolVar(&doctorRestartSessions, "restart-sessions", false, "Restart patrol sessions when fixing stale settings (use with --fix)")
-	doctorCmd.Flags().BoolVar(&doctorNoStart, "no-start", false, "Suppress starting daemon/agents during --fix")
 	doctorCmd.Flags().StringVar(&doctorSlow, "slow", "", "Highlight slow checks (optional threshold, default 1s)")
 	// Allow --slow without a value (uses default 1s)
 	doctorCmd.Flags().Lookup("slow").NoOptDefVal = "1s"
 	doctorCmd.Flags().BoolVar(&doctorLiveFire, "live-fire", false, "Include hooks-live-fire (spawns a real claude -p session; slow, token-cost-bearing)")
 	doctorCmd.Flags().StringArrayVar(&doctorCheck, "check", nil, "Run only the named check (repeatable)")
+	doctorCmd.AddCommand(doctorFixCmd)
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -153,13 +152,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Create check context
+	// Read-only: gt doctor never mutates. Repairs are a separate, named
+	// invocation, 'gt doctor fix <check>' (gt-638go.3).
 	ctx := &doctor.CheckContext{
-		TownRoot:        townRoot,
-		RigName:         doctorRig,
-		Verbose:         doctorVerbose,
-		RestartSessions: doctorRestartSessions,
-		NoStart:         doctorNoStart,
+		TownRoot: townRoot,
+		RigName:  doctorRig,
+		Verbose:  doctorVerbose,
 	}
 
 	d := newDoctorForCommand(doctorRig)
@@ -187,12 +185,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// Run checks with streaming output
 	fmt.Println() // Initial blank line
-	var report *doctor.Report
-	if doctorFix {
-		report = d.FixStreaming(ctx, os.Stdout, slowThreshold)
-	} else {
-		report = d.RunStreaming(ctx, os.Stdout, slowThreshold)
-	}
+	report := d.RunStreaming(ctx, os.Stdout, slowThreshold)
 
 	// Print summary (checks were already printed during streaming)
 	report.PrintSummaryOnly(os.Stdout, doctorVerbose, slowThreshold)

@@ -10,7 +10,7 @@ import (
 // longer than the threshold (see beads.WispGCCandidates). It is report-only
 // on purpose. `bd mol wisp gc` in age mode deletes without --force, and an
 // open merge-request wisp queued past the threshold is one of its
-// candidates, so --fix must never run it: deciding to delete open wisps is
+// candidates, so gt doctor fix must never run it: deciding to delete open wisps is
 // an operator's call (gt-22hdp.13 review C1; the gt-4okk failure class).
 type WispGCCheck struct {
 	BaseCheck

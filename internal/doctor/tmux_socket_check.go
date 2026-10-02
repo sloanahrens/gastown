@@ -131,9 +131,12 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("Found %d Gas Town session(s) on wrong socket — nudge/discovery will fail", len(c.staleSessions)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to kill stale sessions on wrong socket",
+		FixHint: "Run 'gt doctor fix socket-split-brain' to kill stale sessions on wrong socket",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it kills sessions on the wrong socket.
+func (c *SocketSplitBrainCheck) DestructiveFix() bool { return true }
 
 // Fix kills Gas Town sessions on the "default" socket that shouldn't be there.
 func (c *SocketSplitBrainCheck) Fix(ctx *CheckContext) error {

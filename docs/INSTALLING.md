@@ -186,7 +186,8 @@ cd ~/gt
 
 gt up                  # Start all services. Use gt down or gt shutdown for stopping. 
 
-gt doctor --fix        # Run health checks and fix post-install warnings
+gt doctor              # Read-only health checks
+gt doctor fix <check>  # Repair one check doctor reported
 gt status              # Show workspace status
 ```
 
@@ -331,10 +332,10 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 
 ### `gt doctor` shows errors
 
-Run with `--fix` to auto-repair common issues:
+`gt doctor` is read-only. Repair the checks it names one at a time:
 
 ```bash
-gt doctor --fix
+gt doctor fix <check>
 ```
 
 For persistent issues, check specific errors:
@@ -384,7 +385,7 @@ brew update
 brew upgrade gastown
 command -v gt              # Should be Homebrew's gt, e.g. /opt/homebrew/bin/gt
 gt version
-gt doctor --fix            # Fix any post-update issues
+gt doctor                  # Post-update health checks (read-only)
 ```
 
 If you installed from source and a town is running, `make install` is the one
@@ -406,7 +407,7 @@ back.
 ```bash
 make install               # from any gastown clone in the town
 gt version                 # the installed commit
-gt doctor --fix
+gt doctor                  # read-only checks after the update
 ```
 
 If you maintain Beads separately from Homebrew, update `bd` from its own source:
@@ -415,8 +416,8 @@ If you maintain Beads separately from Homebrew, update `bd` from its own source:
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-Run the `command -v gt` and `gt version` checks before `gt doctor --fix` so a
-stale shadow binary does not run the repair step first.
+Run the `command -v gt` and `gt version` checks before `gt doctor` so a
+stale shadow binary does not run the checks first.
 
 If `command -v gt` points at a different install channel than the one you just
 updated, fix your PATH before continuing.

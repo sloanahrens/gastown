@@ -305,7 +305,7 @@ func warnIfTownRootOffMain() {
 	fmt.Fprintf(os.Stderr, "\n%s Town root is on branch '%s' (should be 'main')\n",
 		style.Bold.Render("⚠️  WARNING:"), branch)
 	fmt.Fprintf(os.Stderr, "   This can cause gt commands to fail. Run: %s\n\n",
-		style.Dim.Render("gt doctor --fix"))
+		style.Dim.Render("gt doctor fix town-root-branch"))
 }
 
 // staleBinaryWarned tracks if we've already warned about stale binary in this session.

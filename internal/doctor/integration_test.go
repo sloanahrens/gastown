@@ -230,7 +230,7 @@ func TestIntegrationRigBeadsExist(t *testing.T) {
 	}
 }
 
-// TestIntegrationDoctorFixReliability verifies that doctor --fix actually fixes issues.
+// TestIntegrationDoctorFixReliability verifies that a doctor repair actually fixes issues.
 func TestIntegrationDoctorFixReliability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -261,18 +261,18 @@ func TestIntegrationDoctorFixReliability(t *testing.T) {
 	}
 
 	// Run fix
-	d.Fix(ctx)
+	fixRegisteredForTest(t, d, ctx)
 
 	// Second run should show the issue is fixed
 	report2 := d.Run(ctx)
 	for _, r := range report2.Checks {
 		if r.Name == "runtime-gitignore" && r.Status == StatusError {
-			t.Errorf("doctor --fix did not fix runtime-gitignore issue")
+			t.Errorf("the doctor repair did not fix runtime-gitignore issue")
 		}
 	}
 }
 
-// TestIntegrationFixMultipleIssues verifies that doctor --fix can fix multiple issues.
+// TestIntegrationFixMultipleIssues verifies that doctor repairs can fix multiple issues.
 func TestIntegrationFixMultipleIssues(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -290,7 +290,7 @@ func TestIntegrationFixMultipleIssues(t *testing.T) {
 	d.RegisterAll(NewRuntimeGitignoreCheck())
 
 	// Run fix
-	report := d.Fix(ctx)
+	report := fixRegisteredForTest(t, d, ctx)
 
 	// Count how many were fixed
 	fixedCount := 0
@@ -320,7 +320,7 @@ func TestIntegrationFixIdempotent(t *testing.T) {
 	d.RegisterAll(NewRuntimeGitignoreCheck())
 
 	// Fix it once
-	d.Fix(ctx)
+	fixRegisteredForTest(t, d, ctx)
 
 	// Verify it's fixed
 	report1 := d.Run(ctx)
@@ -329,7 +329,7 @@ func TestIntegrationFixIdempotent(t *testing.T) {
 	}
 
 	// Fix it again - should not break anything
-	d.Fix(ctx)
+	fixRegisteredForTest(t, d, ctx)
 
 	// Verify it's still fixed
 	report2 := d.Run(ctx)
@@ -365,7 +365,7 @@ func TestIntegrationFixDoesntBreakWorking(t *testing.T) {
 	initialOK := report1.Summary.OK
 
 	// Run fix (even though nothing is broken)
-	d.Fix(ctx)
+	fixRegisteredForTest(t, d, ctx)
 
 	// Run check again - should still be OK
 	report2 := d.Run(ctx)

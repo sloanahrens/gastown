@@ -12,7 +12,7 @@ import (
 // (gt-y3pgh.5). Tokens belong in settings/daemon.env, referenced by name.
 // The town refuses to load them once secrets.refuse_literals is set; then
 // TownConfigParseCheck reports the refusal and this check has nothing to say.
-// It has no --fix: moving tokens is gt config secrets migrate, run by the
+// It has no gt doctor fix: moving tokens is gt config secrets migrate, run by the
 // operator.
 type TownConfigSecretsCheck struct {
 	BaseCheck

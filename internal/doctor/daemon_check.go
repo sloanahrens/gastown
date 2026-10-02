@@ -98,7 +98,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusError,
 			Message: msg,
 			Details: []string{"Supervised: " + c.sup().StatusLine(ctx.TownRoot, pidIfRunning(running, pid))},
-			FixHint: "Run 'gt doctor --fix' (loads the job through gt daemon start/restart)",
+			FixHint: "Run 'gt doctor fix daemon' (loads the job through gt daemon start/restart)",
 		}
 	}
 
@@ -128,9 +128,12 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: "Daemon is not running",
 		Details: []string{"Supervised: " + c.sup().StatusLine(ctx.TownRoot, 0)},
-		FixHint: "Run 'gt daemon start' or 'gt doctor --fix'",
+		FixHint: "Run 'gt daemon start' or 'gt doctor fix daemon'",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it restarts (terminates) the running daemon.
+func (c *DaemonCheck) DestructiveFix() bool { return true }
 
 // Fix starts the daemon.
 func (c *DaemonCheck) Fix(ctx *CheckContext) error {

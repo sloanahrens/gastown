@@ -95,7 +95,7 @@ func (c *StaleTaskDispatchCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d target(s) have stale task-dispatch guard", len(c.staleTargets)),
 		Details:  details,
-		FixHint:  "Run 'gt doctor --fix' or 'gt hooks sync' to regenerate settings.json files",
+		FixHint:  "Run 'gt doctor fix stale-task-dispatch' or 'gt hooks sync' to regenerate settings.json files",
 		Category: c.Category(),
 	}
 }

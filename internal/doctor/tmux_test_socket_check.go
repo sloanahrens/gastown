@@ -96,7 +96,7 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d socket file(s) left by test runs whose server has exited", len(report.StaleFiles)),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to remove them",
+			FixHint: "Run 'gt doctor fix tmux-test-socket' to remove them",
 		}
 	}
 
@@ -113,7 +113,7 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 		Message: fmt.Sprintf("%d abandoned test tmux server(s) — their sessions read as phantom polecats (gt-2bj)",
 			len(report.Leftovers)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to kill them",
+		FixHint: "Run 'gt doctor fix tmux-test-socket' to kill them",
 	}
 }
 
@@ -133,7 +133,16 @@ func unprobedDetail(unprobed []string) string {
 		len(unprobed), strings.Join(firstFew(unprobed, 5), ", "))
 }
 
-// Fix kills each abandoned server and unlinks the socket files.
+// DestructiveFix marks this repair as destructive (gt-638go.3): it kills leftover tmux servers.
+func (c *TmuxTestSocketCheck) DestructiveFix() bool { return true }
+
+// Fix kills each abandoned server and unlinks the socket files. A server
+// unlinks its own socket on the way out, so the explicit Remove covers the one
+// that died between Run and Fix, and the files whose server had already exited.
+//
+// Nothing unprobed is touched: those are the sockets Run could not make a
+// finding about, and a fix has no more evidence than the scan it follows
+// (gt-ri37).
 func (c *TmuxTestSocketCheck) Fix(ctx *CheckContext) error {
 	err := tmuxsweep.Reap(c.options(), c.report)
 	c.report = tmuxsweep.Report{}

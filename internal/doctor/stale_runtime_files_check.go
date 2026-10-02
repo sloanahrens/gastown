@@ -142,7 +142,7 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: msg,
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to remove stale runtime files",
+		FixHint: "Run 'gt doctor fix stale-runtime-files' to remove stale runtime files",
 	}
 }
 

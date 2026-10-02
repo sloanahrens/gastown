@@ -190,10 +190,12 @@ Start the long-lived services. `gt up` boots Dolt, the daemon and the Mayor.
 gt up
 ```
 
-Verify the install. The `--fix` flag clears the warnings that `gt install` does not preempt.
+Verify the install. `gt doctor` is read-only; repair the checks it names one at a
+time with `gt doctor fix <check>`.
 
 ```bash
-gt doctor --fix
+gt doctor
+gt doctor fix <check>   # for each check doctor reported
 ```
 
 #### Add a project
@@ -267,7 +269,7 @@ git config --global user.email "you@example.com" &&
 gt install ~/gt --shell --git &&
 cd ~/gt &&
 gt up &&
-gt doctor --fix &&
+gt doctor &&
 gt config agent list &&
 gt mayor attach
 ```

@@ -85,7 +85,7 @@ func (c *SparseCheckoutCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d repo(s) have legacy sparse checkout that should be removed", len(c.affectedRepos)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to remove sparse checkout and restore .claude/ files",
+		FixHint: "Run 'gt doctor fix sparse-checkout' to remove sparse checkout and restore .claude/ files",
 	}
 }
 

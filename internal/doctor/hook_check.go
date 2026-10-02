@@ -37,6 +37,9 @@ func NewHookAttachmentValidCheck() *HookAttachmentValidCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it mutates tracker rows.
+func (c *HookAttachmentValidCheck) DestructiveFix() bool { return true }
+
 // Run checks all pinned beads for invalid molecule attachments.
 func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 	c.invalidAttachments = nil
@@ -75,7 +78,7 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("Found %d invalid hook attachment(s)", len(c.invalidAttachments)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to detach invalid molecules, or 'gt mol detach <pinned-bead-id>' manually",
+		FixHint: "Run 'gt doctor fix hook-attachment-valid' to detach invalid molecules, or 'gt mol detach <pinned-bead-id>' manually",
 	}
 }
 
@@ -210,6 +213,9 @@ func NewHookSingletonCheck() *HookSingletonCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it closes beads.
+func (c *HookSingletonCheck) DestructiveFix() bool { return true }
+
 // Run checks all pinned beads for duplicate handoff titles.
 func (c *HookSingletonCheck) Run(ctx *CheckContext) *CheckResult {
 	c.duplicates = nil
@@ -253,7 +259,7 @@ func (c *HookSingletonCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("Found %d duplicate handoff bead(s)", totalDups),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to close duplicates, or 'bd close <id>' manually",
+		FixHint: "Run 'gt doctor fix hook-singleton' to close duplicates, or 'bd close <id>' manually",
 	}
 }
 

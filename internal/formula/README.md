@@ -7,7 +7,7 @@ gastown renders what `bd cook` returns. Nothing in gastown parses a formula.
 ## What lives here
 
 - `formulas/*.formula.toml`: the formulas embedded in the gt binary. The
-  binary is canonical: `gt formula sync` (and `gt doctor --fix`) writes them
+  binary is canonical: `gt formula sync` (and `gt doctor fix formulas`) writes them
   to `<town>/.beads/formulas`, checked by content hash (`embed.go`).
 - `overlay.go`: the one overlay dir, `<town>/formula-overlays/<formula>.toml`,
   whose step overrides bd applies when it cooks.

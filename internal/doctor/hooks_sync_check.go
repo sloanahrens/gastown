@@ -95,7 +95,7 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:   StatusWarning,
 			Message:  fmt.Sprintf("%d target(s) out of sync", outOfSyncCount),
 			Details:  details,
-			FixHint:  "Run 'gt doctor --fix hooks-sync' to regenerate settings files",
+			FixHint:  "Run 'gt doctor fix hooks-sync' to regenerate settings files",
 			Category: c.Category(),
 		}
 	}

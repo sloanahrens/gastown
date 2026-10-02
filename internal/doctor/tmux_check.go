@@ -107,9 +107,12 @@ func (c *LinkedPaneCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("Found %d linked pane(s) causing crosstalk!", len(conflicts)),
 		Details: conflicts,
-		FixHint: "Run 'gt doctor --fix' to kill linked sessions (daemon will recreate)",
+		FixHint: "Run 'gt doctor fix linked-panes' to kill linked sessions (daemon will recreate)",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it kills tmux sessions with linked panes.
+func (c *LinkedPaneCheck) DestructiveFix() bool { return true }
 
 // Fix kills sessions with linked panes (except mayor session).
 // The daemon will recreate them with independent panes.

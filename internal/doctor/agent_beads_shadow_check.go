@@ -71,7 +71,7 @@ func (c *AgentBeadsShadowCheck) Run(ctx *CheckContext) *CheckResult {
 					line += "(none)"
 				}
 			} else {
-				line += "; NO rig row (run gt doctor --fix agent-beads-exist first)"
+				line += "; NO rig row (run gt doctor fix agent-beads-exist first)"
 			}
 			res.Details = append(res.Details, line)
 		}

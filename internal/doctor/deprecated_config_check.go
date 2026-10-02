@@ -70,7 +70,7 @@ func (c *DeprecatedMergeQueueKeysCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found deprecated merge_queue keys in %d rig(s)", len(c.affectedFiles)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to remove deprecated keys from settings",
+		FixHint: "Run 'gt doctor fix deprecated-merge-queue-keys' to remove deprecated keys from settings",
 	}
 }
 

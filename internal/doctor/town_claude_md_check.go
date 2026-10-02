@@ -52,7 +52,7 @@ func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 				Name:    c.Name(),
 				Status:  StatusError,
 				Message: "Town-root CLAUDE.md is missing",
-				FixHint: "Run 'gt doctor --fix' to create it from embedded template",
+				FixHint: "Run 'gt doctor fix town-claude-md' to create it from embedded template",
 			}
 		}
 		return &CheckResult{
@@ -91,7 +91,7 @@ func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Town-root CLAUDE.md missing %d section(s)", len(missing)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to add missing sections from embedded template",
+		FixHint: "Run 'gt doctor fix town-claude-md' to add missing sections from embedded template",
 	}
 }
 

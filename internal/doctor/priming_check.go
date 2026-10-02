@@ -130,7 +130,7 @@ func (c *PrimingCheck) Run(ctx *CheckContext) *CheckResult {
 
 	fixHint := ""
 	if fixableCount > 0 {
-		fixHint = fmt.Sprintf("Run 'gt doctor --fix' to fix %d issue(s)", fixableCount)
+		fixHint = fmt.Sprintf("Run 'gt doctor fix priming' to fix %d issue(s)", fixableCount)
 	}
 
 	return &CheckResult{
@@ -364,6 +364,9 @@ func (c *PrimingCheck) countLines(path string) int {
 	}
 	return count
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes settings and .beads directories.
+func (c *PrimingCheck) DestructiveFix() bool { return true }
 
 // Fix attempts to fix priming issues.
 func (c *PrimingCheck) Fix(ctx *CheckContext) error {

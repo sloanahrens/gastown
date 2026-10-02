@@ -198,7 +198,7 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d Gas Town directories not excluded", len(c.missingEntries)),
 		Details: []string{fmt.Sprintf("Missing: %s", strings.Join(c.missingEntries, ", "))},
-		FixHint: "Run 'gt doctor --fix' to add missing entries",
+		FixHint: "Run 'gt doctor fix git-exclude-configured' to add missing entries",
 	}
 }
 
@@ -347,7 +347,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d clone(s) missing hooks configuration", len(c.unconfiguredClones)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to configure hooks",
+		FixHint: "Run 'gt doctor fix hooks-path-configured' to configure hooks",
 	}
 }
 
@@ -426,7 +426,7 @@ func (c *MayorCloneExistsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: "Mayor structure incomplete",
 		Details: issues,
-		FixHint: "Run 'gt doctor --fix' to create structure (clone requires repo URL)",
+		FixHint: "Run 'gt doctor fix mayor-clone-exists' to create structure (clone requires repo URL)",
 	}
 }
 
@@ -668,6 +668,9 @@ func NewBeadsRedirectCheck() *BeadsRedirectCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes a local rig .beads directory.
+func (c *BeadsRedirectCheck) DestructiveFix() bool { return true }
+
 // Run checks if the rig-level beads redirect exists when needed.
 func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 	// Only applies when checking a specific rig
@@ -696,7 +699,7 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 					"Beads database not initialized for this rig",
 					"This prevents issue tracking for this rig",
 				},
-				FixHint: "Run 'gt doctor --fix --rig " + ctx.RigName + "' to initialize beads",
+				FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to initialize beads",
 			}
 		}
 		return &CheckResult{
@@ -724,7 +727,7 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 				"Local beads with data exist at: .beads/",
 				"Fix will remove local beads and create redirect to tracked beads",
 			},
-			FixHint: "Run 'gt doctor --fix --rig " + ctx.RigName + "' to fix",
+			FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to fix",
 		}
 	}
 
@@ -739,7 +742,7 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 				"Missing redirect at: .beads/redirect",
 				"Without this redirect, bd commands from rig root won't find beads",
 			},
-			FixHint: "Run 'gt doctor --fix' to create the redirect",
+			FixHint: "Run 'gt doctor fix beads-redirect' to create the redirect",
 		}
 	}
 
@@ -759,7 +762,7 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("Redirect points to %q, expected mayor/rig/.beads", target),
-			FixHint: "Run 'gt doctor --fix --rig " + ctx.RigName + "' to correct the redirect",
+			FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to correct the redirect",
 		}
 	}
 
@@ -977,7 +980,7 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 				healthErr.Error(),
 				"Configuring a refspec on a corrupt repo would silently mask the corruption.",
 			},
-			FixHint: "Run 'gt doctor --fix --rig " + ctx.RigName + "' (bare-repo-exists check will re-clone)",
+			FixHint: "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to re-clone",
 		}
 	}
 
@@ -993,7 +996,7 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 				"Worktrees cannot fetch or see origin/* refs without this config",
 				"This breaks merge operations and causes stale origin/main",
 			},
-			FixHint: "Run 'gt doctor --fix' to configure the refspec",
+			FixHint: "Run 'gt doctor fix bare-repo-refspec' to configure the refspec",
 		}
 	}
 
@@ -1007,7 +1010,7 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 				fmt.Sprintf("Current: %s", refspec),
 				fmt.Sprintf("Expected: %s", expectedRefspec),
 			},
-			FixHint: "Run 'gt doctor --fix' to update the refspec",
+			FixHint: "Run 'gt doctor fix bare-repo-refspec' to update the refspec",
 		}
 	}
 
@@ -1262,6 +1265,9 @@ func NewBareRepoExistsCheck() *BareRepoExistsCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it quarantines the shared .repo.git.
+func (c *BareRepoExistsCheck) DestructiveFix() bool { return true }
+
 // Run checks if .repo.git exists when worktrees reference it.
 func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	if ctx.RigName == "" {
@@ -1328,7 +1334,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	// If .repo.git exists, first verify it is structurally usable. A bare repo
 	// reduced to objects/ + worktrees/ (no HEAD/refs/config) blocks `gt sling --create`
 	// with "fatal: not a git repository" and is the recurring corruption mode this
-	// check exists to catch. Detect it here as a hard error so --fix triggers re-clone.
+	// check exists to catch. Detect it here as a hard error so gt doctor fix bare-repo-exists triggers re-clone.
 	if _, err := os.Stat(bareRepoPath); err == nil {
 		state, healthErr := classifyBareRepo(ctx, bareRepoPath)
 		if state == bareRepoUnverified {
@@ -1341,7 +1347,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 					fmt.Sprintf("git could not confirm %s is a usable bare repo", bareRepoPath),
 					healthErr.Error(),
 					"This is not treated as corruption: git itself may be failing (toolchain update, load, codesign).",
-					"gt doctor --fix will not touch .repo.git in this state.",
+					"gt doctor fix bare-repo-exists will not touch .repo.git in this state.",
 				},
 				FixHint:  "Check that `git -C " + bareRepoPath + " rev-parse --git-dir` works, then re-run gt doctor",
 				Category: c.Category(),
@@ -1363,7 +1369,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 				Status:   StatusError,
 				Message:  "Shared bare repo exists but is unusable (corrupt)",
 				Details:  details,
-				FixHint:  "Run 'gt doctor --fix --rig " + ctx.RigName + "' to re-clone .repo.git",
+				FixHint:  "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to re-clone .repo.git",
 				Category: c.Category(),
 			}
 		}
@@ -1471,7 +1477,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 				Status:   StatusWarning,
 				Message:  "Shared bare repo push URL does not match config.json",
 				Details:  []string{"Note: manual config.json edits require 'gt rig add <name> --adopt' to propagate to town.json"},
-				FixHint:  "Run 'gt doctor --fix --rig " + ctx.RigName + "' to update push URL",
+				FixHint:  "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to update push URL",
 				Category: c.Category(),
 			}
 		}
@@ -1487,7 +1493,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Push URL mismatch and %d broken worktree(s)", len(c.brokenWorktrees)),
 				Details:  details,
-				FixHint:  "Run 'gt doctor --fix --rig " + ctx.RigName + "' to repair",
+				FixHint:  "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to repair",
 				Category: c.Category(),
 			}
 		}
@@ -1502,7 +1508,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:   StatusError,
 			Message:  fmt.Sprintf("%d worktree(s) have broken references in .repo.git", len(c.brokenWorktrees)),
 			Details:  details,
-			FixHint:  "Run 'gt doctor --fix --rig " + ctx.RigName + "' to recreate worktree entries",
+			FixHint:  "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to recreate worktree entries",
 			Category: c.Category(),
 		}
 	}
@@ -1525,7 +1531,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 			[]string{"Missing: " + bareRepoPath},
 			c.brokenWorktrees...,
 		),
-		FixHint:  "Run 'gt doctor --fix --rig " + ctx.RigName + "' to recreate .repo.git from remote",
+		FixHint:  "Run 'gt doctor fix bare-repo-exists --rig " + ctx.RigName + "' to recreate .repo.git from remote",
 		Category: c.Category(),
 	}
 }

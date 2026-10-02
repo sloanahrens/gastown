@@ -695,9 +695,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// the correct server-side database (rigName, not beads_<prefix>).
 	if err := doltserver.EnsureMetadata(m.townRoot, opts.Name); err != nil {
 		// Non-fatal: daemon's EnsureAllMetadata self-heals on next startup,
-		// or user can run gt doctor --fix to repair manually.
+		// or the operator can repair the named check by hand.
 		fmt.Printf("  Warning: Could not set Dolt server metadata: %v\n", err)
-		fmt.Printf("  Run 'gt doctor --fix' to repair, or it will self-heal on next daemon start.\n")
+		fmt.Printf("  Run 'gt doctor fix rig-config-sync' to repair, or it will self-heal on next daemon start.\n")
 	}
 
 	// Safety-net: drop orphan databases that may have been created by bd init.
@@ -854,9 +854,9 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// writing the wrong database name, before the rig is considered ready.
 	if err := m.VerifyRigIdentity(rigPath, opts.Name, opts.BeadsPrefix); err != nil {
 		// Non-fatal but loud: the rig was created, but identity may be wrong.
-		// gt doctor --fix can repair this.
+		// gt doctor fix rig-database can repair this.
 		fmt.Fprintf(os.Stderr, "  ⚠ Identity verification warning: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  Run 'gt doctor --fix' to repair if needed.\n")
+		fmt.Fprintf(os.Stderr, "  Run 'gt doctor fix rig-database' to repair if needed.\n")
 	}
 
 	// The registry records the database metadata.json now names: gastown

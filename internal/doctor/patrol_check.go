@@ -42,7 +42,7 @@ func (c *PatrolHooksWiredCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%s not found", relPath),
-			FixHint: "Run 'gt doctor --fix' to create default config, or 'gt daemon start' to start the daemon",
+			FixHint: "Run 'gt doctor fix patrol-hooks-wired' to create default config, or 'gt daemon start' to start the daemon",
 		}
 	}
 	if err != nil {
@@ -74,7 +74,7 @@ func (c *PatrolHooksWiredCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Configure patrols in %s or run 'gt daemon start'", relPath),
-		FixHint: "Run 'gt doctor --fix' to create default config",
+		FixHint: "Run 'gt doctor fix patrol-hooks-wired' to create default config",
 	}
 }
 
@@ -247,7 +247,7 @@ func (c *PatrolPluginsAccessibleCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d plugin directory(ies) missing", len(c.missingDirs)),
 			Details: c.missingDirs,
-			FixHint: "Run 'gt doctor --fix' to create missing directories",
+			FixHint: "Run 'gt doctor fix patrol-plugins-accessible' to create missing directories",
 		}
 	}
 

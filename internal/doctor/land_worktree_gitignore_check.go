@@ -66,7 +66,7 @@ func (c *LandWorktreeGitignoreCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d rig(s) missing .land-worktree/ in .gitignore", len(c.affectedRigs)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to add .land-worktree/ to .gitignore",
+		FixHint: "Run 'gt doctor fix land-worktree-gitignore' to add .land-worktree/ to .gitignore",
 	}
 }
 

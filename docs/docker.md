@@ -250,7 +250,7 @@ A few rough edges are worth knowing about.
 ```bash
 git -C /gt rm --cached .claude/settings.json
 git -C /gt commit -m "Untrack Claude settings"
-gt doctor --fix
+gt doctor fix claude-settings
 ```
 
 **The first `docker compose up` on a busy host can race.** On rare occasions, the entrypoint's `bd init` step has been observed to fail with a dynamic-linker error before Dolt's startup completes. Retrying with `docker compose down -v && docker compose up -d` resolves the failure. The race has not been reproduced under controlled conditions.

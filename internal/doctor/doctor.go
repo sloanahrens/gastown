@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -94,17 +93,6 @@ func (d *Doctor) RunStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 
 		// Stream: overwrite line with result
 		if w != nil {
-			var statusIcon string
-			switch result.Status {
-			case StatusOK:
-				statusIcon = ui.RenderPassIcon()
-			case StatusWarning:
-				statusIcon = ui.RenderWarnIcon()
-			case StatusError:
-				statusIcon = ui.RenderFailIcon()
-			case StatusSkipped:
-				statusIcon = ui.RenderSkipIcon()
-			}
 			// Check if slow (hourglass replaces spaces to maintain alignment)
 			isSlow := slowThreshold > 0 && result.Elapsed >= slowThreshold
 			slowIndicator := "  "
@@ -112,7 +100,7 @@ func (d *Doctor) RunStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 				report.Summary.Slow++
 				slowIndicator = "⏳"
 			}
-			fmt.Fprintf(w, "\r  %s%s%s", statusIcon, slowIndicator, result.Name)
+			fmt.Fprintf(w, "\r  %s%s%s", statusIcon(result.Status), slowIndicator, result.Name)
 			if result.Message != "" {
 				fmt.Fprintf(w, "%s", ui.RenderMuted(" "+result.Message))
 			}
@@ -126,12 +114,6 @@ func (d *Doctor) RunStreaming(ctx *CheckContext, w io.Writer, slowThreshold time
 	}
 
 	return report
-}
-
-// Fix runs all checks with auto-fix enabled where possible.
-// It first runs the check, then if it fails and can be fixed, attempts the fix.
-func (d *Doctor) Fix(ctx *CheckContext) *Report {
-	return d.FixStreaming(ctx, nil, 0)
 }
 
 // safeFixCheck calls check.Fix() with panic recovery. If the Fix method panics
@@ -144,120 +126,6 @@ func safeFixCheck(check Check, ctx *CheckContext) (retErr error) {
 		}
 	}()
 	return check.Fix(ctx)
-}
-
-// FixStreaming runs all checks with auto-fix and optional real-time output.
-// If w is non-nil, prints each check name as it starts and result when done.
-// If slowThreshold > 0, shows hourglass icon for slow checks.
-func (d *Doctor) FixStreaming(ctx *CheckContext, w io.Writer, slowThreshold time.Duration) *Report {
-	report := NewReport()
-
-	for _, check := range d.checks {
-		// Stream: print check name before running
-		if w != nil {
-			fmt.Fprintf(w, "  %s  %s...", ui.RenderMuted("○"), check.Name())
-		}
-
-		start := time.Now()
-		result := check.Run(ctx)
-		if result.Name == "" {
-			result.Name = check.Name()
-		}
-		// Set category from check if available
-		if cg, ok := check.(categoryGetter); ok && result.Category == "" {
-			result.Category = cg.Category()
-		}
-
-		// Attempt fix if check failed and is fixable. A skipped check ran but
-		// couldn't determine an answer, so there is nothing to fix — attempting
-		// one anyway runs the fixer against an unverified assumption (gt-whvu).
-		if result.Status != StatusOK && result.Status != StatusSkipped && check.CanFix() {
-			// Stream: show the problem with fixing indicator (all on same line)
-			if w != nil {
-				var problemIcon string
-				if result.Status == StatusError {
-					problemIcon = ui.RenderFailIcon()
-				} else {
-					problemIcon = ui.RenderWarnIcon()
-				}
-				// Overwrite the "checking" line with problem status + fixing indicator
-				fmt.Fprintf(w, "\r  %s  %s", problemIcon, check.Name())
-				if result.Message != "" {
-					fmt.Fprintf(w, "%s", ui.RenderMuted(" "+result.Message))
-				}
-				fmt.Fprintf(w, "%s", ui.RenderMuted(" (fixing)..."))
-			}
-
-			err := safeFixCheck(check, ctx)
-			if err == nil {
-				// Re-run check to verify fix worked
-				result = check.Run(ctx)
-				if result.Name == "" {
-					result.Name = check.Name()
-				}
-				// Set category again after re-run
-				if cg, ok := check.(categoryGetter); ok && result.Category == "" {
-					result.Category = cg.Category()
-				}
-				// Update message to indicate fix was applied
-				if result.Status == StatusOK {
-					result.Message = result.Message + " (fixed)"
-					result.Fixed = true
-				}
-			} else if errors.Is(err, ErrSkippedNoStart) {
-				// Fix skipped due to --no-start flag
-				result.Details = append(result.Details, "Skipped: --no-start suppresses startup")
-			} else {
-				// Fix failed, add error to details
-				result.Details = append(result.Details, "Fix failed: "+err.Error())
-			}
-		}
-
-		// Record total elapsed time including any fix attempts
-		result.Elapsed = time.Since(start)
-
-		// Stream: overwrite line with final result
-		if w != nil {
-			var statusIcon string
-			if result.Fixed {
-				statusIcon = ui.RenderFixIcon()
-			} else {
-				switch result.Status {
-				case StatusOK:
-					statusIcon = ui.RenderPassIcon()
-				case StatusWarning:
-					statusIcon = ui.RenderWarnIcon()
-				case StatusError:
-					statusIcon = ui.RenderFailIcon()
-				case StatusSkipped:
-					statusIcon = ui.RenderSkipIcon()
-				}
-			}
-			// Check if slow (hourglass replaces spaces to maintain alignment)
-			// Fix icon (🔧) is double-width, so use one less padding space
-			isSlow := slowThreshold > 0 && result.Elapsed >= slowThreshold
-			slowIndicator := "  "
-			if result.Fixed {
-				slowIndicator = " "
-			}
-			if isSlow {
-				report.Summary.Slow++
-				slowIndicator = "⏳"
-			}
-			fmt.Fprintf(w, "\r  %s%s%s", statusIcon, slowIndicator, result.Name)
-			if result.Message != "" {
-				fmt.Fprintf(w, "%s", ui.RenderMuted(" "+result.Message))
-			}
-			if isSlow {
-				fmt.Fprintf(w, "%s", ui.RenderMuted(" ("+formatDuration(result.Elapsed)+")"))
-			}
-			fmt.Fprintln(w)
-		}
-
-		report.Add(result)
-	}
-
-	return report
 }
 
 // BaseCheck provides a base implementation for checks that don't support auto-fix.

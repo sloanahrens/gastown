@@ -1155,7 +1155,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	// from it, before identity/agent beads are created against a broken database.
 	if err := mgr.VerifyRigIdentity(rigPath, name, result.BeadsPrefix); err != nil {
 		fmt.Printf("  %s Identity verification warning: %v\n", style.Warning.Render("!"), err)
-		fmt.Printf("  Run 'gt doctor --fix' to repair if needed.\n")
+		fmt.Printf("  Run 'gt doctor fix rig-database' to repair if needed.\n")
 	}
 
 	// Create rig identity bead if prefix is set

@@ -146,9 +146,12 @@ func (c *StaleBeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d beads redirect issue(s) found", totalIssues),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to repair redirects and remove stale files",
+		FixHint: "Run 'gt doctor fix stale-beads-redirect' to repair redirects and remove stale files",
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes stale .beads files.
+func (c *StaleBeadsRedirectCheck) DestructiveFix() bool { return true }
 
 // Fix removes stale files from .beads directories that have redirects,
 // and creates/repairs missing or incorrect redirects.

@@ -77,6 +77,9 @@ func NewRigConfigSyncCheck() *RigConfigSyncCheck {
 	}
 }
 
+// DestructiveFix marks this repair as destructive (gt-638go.3): it restarts the Dolt server and renames its database dir.
+func (c *RigConfigSyncCheck) DestructiveFix() bool { return true }
+
 // Run checks if all registered rigs have proper configuration.
 func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsConfigPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
@@ -216,7 +219,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			// prefix-fallback already used by migration_check.go (gt-85w7): default to
 			// rigName, but fall back to the prefix-named DB when .dolt-data/<rigName>
 			// is absent and .dolt-data/<prefix> exists. Without this, the check reports
-			// a false mismatch and --fix reverts metadata to the non-existent rig-name
+			// a false mismatch and gt doctor fix rig-config-sync reverts metadata to the non-existent rig-name
 			// DB. (gt-5hd2)
 			//
 			// The registry's dolt_database, when recorded, outranks both
@@ -320,7 +323,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: strings.Join(parts, ", "),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to create missing config files and databases",
+		FixHint: "Run 'gt doctor fix rig-config-sync' to create missing config files and databases",
 	}
 }
 
@@ -514,7 +517,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 	// Guard: skip restart if the server has been running less than 60s — restarting
 	// during startup churn is a known crash trigger (gt-9bxzs: Dolt NomsBlockStore
 	// panic when SIGTERM arrives mid-write). The server will pick up renamed databases
-	// on its next natural restart or on the next doctor --fix run once stable.
+	// on its next natural restart or on the next gt doctor fix rig-config-sync run once stable.
 	if renamedDBs {
 		if running, pid, _ := doltserver.IsRunning(ctx.TownRoot); running && pid > 0 {
 			const minStableAge = 60 * time.Second

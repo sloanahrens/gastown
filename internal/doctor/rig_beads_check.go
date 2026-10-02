@@ -103,7 +103,7 @@ func (c *RigBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusError,
 		Message: fmt.Sprintf("%d rig identity bead(s) missing", len(missing)),
 		Details: missing,
-		FixHint: "Run 'gt doctor --fix' to create missing rig identity beads",
+		FixHint: "Run 'gt doctor fix rig-beads-exist' to create missing rig identity beads",
 	}
 }
 

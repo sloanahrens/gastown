@@ -16,8 +16,8 @@ import (
 // OverlayHealthCheck verifies that formula overlay files reference valid step IDs.
 // It scans the one overlay dir, <townRoot>/formula-overlays, and checks that every
 // step_id in an overlay names a step of the formula as bd cooks it (extends,
-// expansions and aspects applied), for a formula this binary ships. Fix mode
-// removes stale step-override entries.
+// expansions and aspects applied), for a formula this binary ships.
+// 'gt doctor fix overlay-health' removes stale step-override entries.
 // A rig-level <rig>/formula-overlays dir is not read (gt-fd2cu.3), so one that
 // still holds overlays is reported for an operator to move or delete.
 type OverlayHealthCheck struct {
@@ -156,7 +156,7 @@ func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d overlay(s) with stale step IDs", stale),
 			Details: details,
-			FixHint: "Run 'gt doctor --fix' to remove stale step overrides",
+			FixHint: "Run 'gt doctor fix overlay-health' to remove stale step overrides",
 		}
 	}
 
@@ -178,6 +178,9 @@ func (c *OverlayHealthCheck) runOverlayDir(townRoot string) *CheckResult {
 		Message: fmt.Sprintf("%d overlay(s) healthy", ok),
 	}
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it removes operator-authored overlay overrides.
+func (c *OverlayHealthCheck) DestructiveFix() bool { return true }
 
 // Fix removes stale step-override entries from overlay files.
 // Malformed TOML files are left untouched (require manual intervention).

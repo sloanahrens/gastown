@@ -248,7 +248,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d stale agent bead(s) for removed workers", len(stale)),
 		Details: stale,
-		FixHint: "Run 'gt doctor --fix' to close stale agent beads",
+		FixHint: "Run 'gt doctor fix stale-agent-beads' to close stale agent beads",
 	}
 }
 
@@ -283,6 +283,9 @@ func dedup(s []string) []string {
 	}
 	return result
 }
+
+// DestructiveFix marks this repair as destructive (gt-638go.3): it closes tracker beads.
+func (c *StaleAgentBeadsCheck) DestructiveFix() bool { return true }
 
 // Fix closes stale agent beads for crew members that no longer exist on disk.
 // For beads with known prefixes, closes via the rig's beads client.
