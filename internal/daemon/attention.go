@@ -222,6 +222,11 @@ type attentionSources struct {
 	landingState func(rig string) landingState
 	// readyToLand counts the rig's actionable gt:ready-to-land beads.
 	readyToLand func(ctx context.Context, rig string) (int, error)
+	// tierSweep reads one rig's tier-sweep record (tier_sweep.go), and
+	// tierSweepRigs is the rig set the sweep covers — none when the patrol is
+	// off.
+	tierSweep     func(rig string) (tierSweepState, error)
+	tierSweepRigs func() []string
 	// seats lists the town's seats: the same walk townhealth judges, which has
 	// already dropped every seat whose sample is missing or stale.
 	seats func() ([]townhealth.Seat, error)
@@ -372,6 +377,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
 		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
+		{kind: attention.KindTierSweepRed, collect: s.collectTierSweepRed},
 	}
 }
 
@@ -441,6 +447,15 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.landingState = d.landingStates.get
 	s.readyToLand = d.attentionReadyToLand
+	s.tierSweep = func(rig string) (tierSweepState, error) {
+		return readTierSweepState(d.config.TownRoot, rig)
+	}
+	s.tierSweepRigs = func() []string {
+		if !d.isPatrolActive("tier_sweep") {
+			return nil
+		}
+		return tierSweepRigs(d.patrolConfig, d.getKnownRigs())
+	}
 	s.seats = func() ([]townhealth.Seat, error) { return d.attentionSeats(now) }
 	s.seatWork = d.attentionSeatWork
 	s.remoteTip = func(rig string) (string, error) {
@@ -1006,4 +1021,49 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		})
 	}
 	return out, nil
+}
+
+// collectTierSweepRed raises one item per rig and tier whose last sweep
+// verdict is RED (gt-vsct7.5), read from the sweep job's own record. The item
+// clears on the next GREEN of that tier, because that is what rewrites the
+// record's verdict; nothing clears it by hand.
+func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.tierSweepRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		st, err := s.tierSweep(rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		for tier, res := range st.Tiers {
+			if res.Verdict != tierSweepRed {
+				continue
+			}
+			out = append(out, attention.Item{
+				Key:      "sweep:" + rig + ":" + tier,
+				Kind:     attention.KindTierSweepRed,
+				Severity: attention.SeverityHigh,
+				Rig:      rig,
+				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames)),
+			})
+		}
+	}
+	return out, nil
+}
+
+// tierSweepFailureNames renders a RED tier's failing units for an item
+// summary: the first few by name, with a count for the rest.
+func tierSweepFailureNames(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	const shown = 3
+	head := names
+	rest := ""
+	if len(head) > shown {
+		head, rest = head[:shown], fmt.Sprintf(" and %d more", len(names)-shown)
+	}
+	return ": " + strings.Join(head, ", ") + rest
 }

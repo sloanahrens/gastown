@@ -63,14 +63,16 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		refusalBead: func(context.Context, string, string) (*beads.Issue, error) { return nil, nil },
 		blockedMail: func(context.Context) ([]*mail.Message, error) { return nil, nil },
 
-		landingState: func(string) landingState { return landingState{} },
-		readyToLand:  func(context.Context, string) (int, error) { return 0, nil },
-		seats:        func() ([]townhealth.Seat, error) { return nil, nil },
-		seatWork:     func(string, string) (bool, error) { return false, nil },
-		remoteTip:    func(string) (string, error) { return "", nil },
-		landedCommit: func(string, string) (bool, error) { return false, nil },
-		commitInfo:   func(string, string) (string, string) { return "", "" },
-		tips:         &directPushTips{},
+		landingState:  func(string) landingState { return landingState{} },
+		readyToLand:   func(context.Context, string) (int, error) { return 0, nil },
+		tierSweep:     func(string) (tierSweepState, error) { return tierSweepState{}, nil },
+		tierSweepRigs: func() []string { return nil },
+		seats:         func() ([]townhealth.Seat, error) { return nil, nil },
+		seatWork:      func(string, string) (bool, error) { return false, nil },
+		remoteTip:     func(string) (string, error) { return "", nil },
+		landedCommit:  func(string, string) (bool, error) { return false, nil },
+		commitInfo:    func(string, string) (string, string) { return "", "" },
+		tips:          &directPushTips{},
 
 		reworkNotes: map[string]reworkNote{},
 	}
@@ -1018,5 +1020,61 @@ func TestDirectPushTipsSurviveARestart(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Key != "direct-push:gastown:cccc00000000" {
 		t.Fatalf("items = %+v, want the persisted push raised again", items)
+	}
+}
+
+// TestCollectTierSweepRed_RaisesTheRedTiersAndClearsOnGreen walks one rig's
+// sweep record from RED to GREEN through a full tick, so the item's clear is
+// the reconcile's, not a collector-local special case (gt-vsct7.5).
+func TestCollectTierSweepRed_RaisesTheRedTiersAndClearsOnGreen(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 15, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{Tiers: map[string]tierSweepTierResult{
+			"shell":       {Verdict: tierSweepRed, Passed: 5, Failed: 1, FailedNames: []string{"scripts/x.sh"}},
+			"integration": {Verdict: tierSweepGreen, Passed: 29},
+		}}, nil
+	}
+
+	st := f.tick(t, now)
+	it, ok := attention.Find(st, "sweep:gastown:shell")
+	if !ok {
+		t.Fatalf("items = %+v, want sweep:gastown:shell", st.Items)
+	}
+	if it.Kind != attention.KindTierSweepRed || it.Severity != attention.SeverityHigh || it.Rig != attentionRig {
+		t.Errorf("item = %+v", it)
+	}
+	if _, ok := attention.Find(st, "sweep:gastown:integration"); ok {
+		t.Error("a GREEN tier raised an item")
+	}
+
+	// The tier goes green: the next tick clears the item.
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{Tiers: map[string]tierSweepTierResult{
+			"shell":       {Verdict: tierSweepGreen, Passed: 6},
+			"integration": {Verdict: tierSweepGreen, Passed: 29},
+		}}, nil
+	}
+	st = f.tick(t, now.Add(time.Minute))
+	if _, ok := attention.Find(st, "sweep:gastown:shell"); ok {
+		t.Errorf("items = %+v, want the shell item cleared", st.Items)
+	}
+}
+
+// TestCollectTierSweepRed_NoRigsWhenThePatrolIsOff pins that turning the patrol
+// off clears its items rather than holding a stale red forever.
+func TestCollectTierSweepRed_NoRigsWhenThePatrolIsOff(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 15, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1},
+		}}, nil
+	}
+	if items := f.collect(t, f.src.collectTierSweepRed); len(items) != 0 {
+		t.Errorf("items = %+v, want none: the fixture's sweep patrol is off", items)
 	}
 }

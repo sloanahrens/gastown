@@ -139,6 +139,7 @@ type (
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
 	StewardConfig              = agentconfig.StewardConfig
+	TierSweepConfig            = agentconfig.TierSweepConfig
 )
 
 // PatrolConfigFile returns the path to the patrol config file.
@@ -250,6 +251,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.LandingWorker.Enabled
+	}
+	// tier_sweep is opt-in: it runs the town's expensive suites, so only an
+	// explicit enabled:true turns it on (gt-vsct7.5).
+	if patrol == "tier_sweep" {
+		if config == nil || config.Patrols == nil || config.Patrols.TierSweep == nil {
+			return false
+		}
+		return config.Patrols.TierSweep.Enabled
 	}
 	// mayor_dispatch defaults ON because the failure it exists for is
 	// silence. The mayor is event-driven, so a "no
