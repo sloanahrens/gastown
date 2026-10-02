@@ -34,6 +34,15 @@
 # developed and installed on macOS) without failing installs where the
 # platform can't grant it.
 #
+# gt-ykots: the installed binary is also signed with the town's stable identity
+# (com.gastown.gt) when the town's signing keychain exists, so a Developer Tools
+# grant keyed on that identity survives EVERY install path, not just install-gt.sh
+# (which signs again after this, harmlessly). The temp copy is signed before the
+# rename, so the live path only ever holds a complete, finished binary. Best
+# effort, like install-gt.sh's: no keychain, no password file, a keychain that
+# will not unlock or a failing codesign is one line on stderr and an ad-hoc
+# install, never a failed one. INSTALL_BINARY_SIGN=0 skips the step.
+#
 # Usage: install-binary.sh <built-binary> <install-dir> [name]
 
 set -euo pipefail
@@ -81,6 +90,45 @@ cp "$src" "$tmp"
 # to a fresh path would too) rather than imposing one; --reference is GNU-only,
 # so fall back to go build's 0755 on macOS.
 chmod --reference="$src" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
+
+# sign_tmp — sign $tmp with the town's identity. The same material and knobs as
+# install-gt.sh (INSTALL_GT_SIGN_*), so one setting steers both. codesign gets
+# </dev/null and an already-unlocked keychain, so it has nothing to prompt for;
+# the password reaches one `security unlock-keychain` call and nowhere else.
+sign_tmp() {
+  [ "${INSTALL_BINARY_SIGN:-1}" = "0" ] && return 0
+  local sign_dir kc pwfile identity identifier limit pw msg rc=0
+  sign_dir="${INSTALL_GT_SIGN_DIR:-${GT_TOWN_ROOT:-$HOME/gt}/.runtime/signing}"
+  kc="$sign_dir/gastown-signing.keychain-db"
+  pwfile="$sign_dir/keychain.pass"
+  identity="${INSTALL_GT_SIGN_IDENTITY:-gastown-dev-unattended}"
+  identifier="com.gastown.gt"
+  limit="${INSTALL_GT_SIGN_TIMEOUT:-30}"
+  [ -f "$kc" ] || { echo "install-binary.sh: installing ad-hoc: no signing keychain at $kc" >&2; return 0; }
+  [ -f "$pwfile" ] || { echo "install-binary.sh: installing ad-hoc: no password file at $pwfile" >&2; return 0; }
+  pw=$(cat "$pwfile") || { echo "install-binary.sh: installing ad-hoc: cannot read $pwfile" >&2; return 0; }
+  if ! security unlock-keychain -p "$pw" "$kc" >/dev/null 2>&1; then
+    echo "install-binary.sh: installing ad-hoc: cannot unlock $kc" >&2
+    return 0
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    msg=$(timeout "$limit" codesign --force --keychain "$kc" -s "$identity" -i "$identifier" "$tmp" </dev/null 2>&1) || rc=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    msg=$(gtimeout "$limit" codesign --force --keychain "$kc" -s "$identity" -i "$identifier" "$tmp" </dev/null 2>&1) || rc=$?
+  else
+    msg=$(codesign --force --keychain "$kc" -s "$identity" -i "$identifier" "$tmp" </dev/null 2>&1) || rc=$?
+  fi
+  if [ "$rc" != "0" ]; then
+    # A codesign that died mid-write can leave the temp half-signed: start over
+    # from the built binary and install it as it was.
+    cp "$src" "$tmp"
+    chmod --reference="$src" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
+    echo "install-binary.sh: installing ad-hoc: codesign failed: $(printf '%s' "${msg:-no output}" | head -1)" >&2
+    return 0
+  fi
+  echo "install-binary.sh: signed $name as $identifier" >&2
+}
+sign_tmp
 
 # Atomic: replaces the directory entry, so readers never observe a partial file.
 mv -f "$tmp" "$dest"
