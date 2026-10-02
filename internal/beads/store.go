@@ -170,7 +170,7 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 			case dep.Type == beadsdk.DepParentChild:
 				// If this issue depends on the parent, the parent is the DependsOnID
 				issue.Parent = dep.DependsOnID
-			case isBlockingDependencyType(string(dep.Type)):
+			case IsBlockingDependencyType(string(dep.Type)):
 				deps = append(deps, dep.DependsOnID)
 			}
 		}
