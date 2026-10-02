@@ -96,10 +96,12 @@ assert_live_block() {
 }
 
 assert_live_pass() {
-  # assert_live_pass <name> <envs> <refspec>
-  local test_name=$1 envs=$2 refspec=$3 out="" status=0
+  # assert_live_pass <name> <envs> <refspec> [extra push args...]
+  local test_name=$1 envs=$2 refspec=$3
+  shift 3
+  local out="" status=0
   # shellcheck disable=SC2086
-  out=$(env $envs git push origin "$refspec" 2>&1) || status=$?
+  out=$(env $envs git push origin "$refspec" "$@" 2>&1) || status=$?
   if [[ $status -eq 0 ]]; then
     echo "  PASS: $test_name"
     PASS=$((PASS + 1))
@@ -570,6 +572,44 @@ echo "live spoofed merge" >> file.txt
 git add file.txt && git commit -m "live spoofed merge" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
 assert_live_block "LIVE HEAD:default refused for polecat despite GT_REFINERY_MERGE=1" "GT_REFINERY_MERGE=1" "HEAD:$DEFAULT_BRANCH"
+cleanup
+
+# Test 35: LIVE push of the red-main owner's revert branch, in the form the
+# daemon uses (HEAD:refs/heads/revert/<bead>-<sha> from the throwaway revert
+# worktree). The worktree is a checkout of the landed commit, so its relative
+# core.hooksPath resolves to this hook as checked out there — refusing the
+# family left main red with no revert (gt-pihe2).
+echo "Test 35: LIVE push of a revert/<bead>-<sha> branch — allowed"
+setup_repos
+cd "$TMPDIR/local"
+echo "revert work" >> file.txt
+git add file.txt && git commit -m "revert work" >/dev/null 2>&1
+assert_live_pass "LIVE revert branch push allowed" "" "HEAD:refs/heads/revert/gt-4k3fj.8.6-69e3bc54"
+cleanup
+
+# Test 36: LIVE push of a crew branch in the exact form gt done requires a
+# crew member to have pushed — refspec plus the lease on the branch git
+# reports before the push is made.
+echo "Test 36: LIVE push of a crew/<user>/<slug> branch under gt done's lease"
+setup_repos
+cd "$TMPDIR/local"
+git checkout -b crew/sloan/gt-5tuoe >/dev/null 2>&1
+echo "crew work" >> file.txt
+git add file.txt && git commit -m "crew work" >/dev/null 2>&1
+assert_live_pass "LIVE crew branch push allowed under the lease" "" \
+  "refs/heads/crew/sloan/gt-5tuoe:refs/heads/crew/sloan/gt-5tuoe" \
+  "--force-with-lease=refs/heads/crew/sloan/gt-5tuoe:"
+cleanup
+
+# Test 37: the control for both above — an unrelated branch family is still
+# refused live, so the two allowances above opened nothing else.
+echo "Test 37: LIVE push of an unrelated branch family — still refused"
+setup_repos
+cd "$TMPDIR/local"
+git checkout -b docs/gt-ecqx0-self-probe >/dev/null 2>&1
+echo "docs work" >> file.txt
+git add file.txt && git commit -m "docs work" >/dev/null 2>&1
+assert_live_block "LIVE unrelated branch refused" "" "HEAD:refs/heads/docs/gt-ecqx0-self-probe"
 cleanup
 
 echo ""

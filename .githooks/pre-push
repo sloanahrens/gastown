@@ -41,6 +41,21 @@ fi
 #   <default_branch>, beads-sync  - Direct work branches
 #   polecat/*                     - Polecat working branches (Refinery merges these)
 #   integration/*                 - Integration branches (created by gt mq integration)
+#   crew/*                        - Crew working branches (gt done requires one)
+#   revert/*                      - The red-main owner's revert branch
+#
+# crew/* and revert/* are families this town's own tooling creates and pushes,
+# so refusing them broke the flows that make them rather than any outside
+# contributor (gt-pihe2):
+#   crew/<user>/<slug>   gt done refuses to submit a crew branch that origin
+#                        does not have, and refuses the default branch, so
+#                        the branch must be pushable (internal/cmd/done_crew.go).
+#   revert/<bead>-<sha>  the daemon's red-main owner builds it in a throwaway
+#                        worktree of the rig's bare repo, whose relative
+#                        core.hooksPath resolves to this file as checked out in
+#                        that worktree (internal/daemon/landing_worker.go).
+# Both still land through the same gates as any other branch: neither is the
+# default branch, so nothing here reaches it.
 
 # is_polecat_caller reports whether the process running this hook belongs to a
 # polecat, as opposed to crew / refinery / mayor / witness / any non-agent
@@ -205,7 +220,7 @@ while read local_ref local_sha remote_ref remote_sha; do
   fi
 
   case "$branch" in
-    "${default_branch}"|beads-sync|polecat/*|integration/*)
+    "${default_branch}"|beads-sync|polecat/*|integration/*|crew/*|revert/*)
       # Allowed branches
       ;;
     *)
@@ -222,6 +237,8 @@ while read local_ref local_sha remote_ref remote_sha; do
         echo "  polecat/*   - Polecat working branches"
         echo "  integration/* - Integration branches"
         echo "  beads-sync  - Beads synchronization"
+        echo "  crew/*      - Crew working branches"
+        echo "  revert/*    - The red-main owner's revert branch"
         echo ""
         echo "Do NOT create PRs. Push to main or let Refinery merge polecat work."
         exit 1
