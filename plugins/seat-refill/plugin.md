@@ -51,22 +51,11 @@ or assigned beads (crew included), epics, molecules and agent beads (type
 whitelist), the `operator` label, and any bead named by a live polecat session
 or an in-flight pool claim (gt-inu1y).
 
-Each candidate is shape-linted just before its sling
-(`gt spec lint <id> --json`, gt-mmsr2), because a vague bead is the main cause
-of om rejections. `polecat_pool.shape_gate` picks the response. `off` runs no
-lint. `warn` (the default, the observe-first half of the rollout) slings the
-bead anyway and leaves the verdict on it as one comment naming the refusals
-(`SHAPE: <refusals>`, never repeated for the same verdict). `refuse` skips the
-bead, labels it `needs-shape` — or `needs-planning` when that is the verdict —
-and moves on to the next candidate in the same run. A lint that cannot be read
-is not a clean verdict: `warn` slings and logs it, `refuse` skips the bead and
-fails the run. A labeled bead stays a candidate, so reshaping it is what puts
-it back within reach. Nudge mode runs no lint; the mayor decides there.
-
 `GT_SEAT_REFILL_DRY_RUN=1` logs `DRY-RUN: would sling ...` and neither slings
-nor writes state. The hold file, ESTOP, parked rigs and seat caps apply in both
-modes; `polecat_pool.mode` `nudge` restores the mayor nudge described below,
-and skips the run when `gt mayor status --running` reports no mayor.
+nor writes state. `polecat_pool.mode` `nudge` restores the mayor nudge below;
+in that mode a mayor that `gt mayor status --running` reports down skips the run rather than failing it.
+The hold file, ESTOP, parked rigs and seat caps apply in both modes. The prose
+below describes nudge mode.
 
 ## Why
 
@@ -80,9 +69,9 @@ seat number for the whole pool, every 30m (gt-59o9). This plugin is the
 per-seat half. It watches each seat separately, so a seat that empties between
 patrols is named within one, with the beads that could fill it attached.
 
-Refilling is a noticing problem: the nudge names an empty seat and work that
-exists, and the mayor decides whether to sling it, which bead, and on which
-model.
+Refilling is a noticing problem, not a judgment problem. The nudge carries no
+judgment: it names a seat that is empty and work that exists, and the mayor
+decides whether to sling it, which bead, and on which model.
 
 ## What counts as a seat
 
@@ -94,8 +83,10 @@ settings:
   unset or zero `max_overflow` leaves the overflow seat **uncapped**, so it is
   never empty and never watched.
 - `pro` — `pro_agent`, capped at `pro_max`, taking only beads carrying
-  `pro_label`. The pool has no tier for this class: only an explicit
-  `gt sling --agent <pro>` reaches it (gt-xmsqb). `pro_max` 0 drops the seat.
+  `pro_label`. The pool's own accounting has no tier for this class, so a pro
+  session reaches a seat only through an explicit `gt sling --agent <pro>`
+  and nothing else counts it (gt-xmsqb); the seat is modeled here, and
+  `pro_max` 0 drops it.
 
 A `max_local` of zero means the local tier is **closed**, which is a decision
 rather than an empty seat, so it is not watched either.
@@ -113,10 +104,11 @@ rig that is operational. Epics, agent and infra beads, and the town's
 bookkeeping families are gone before this point — `gt ready` excludes them, and
 the type whitelist excludes the rest.
 
-Two further exclusions, both shared with the daemon's dispatch check (gt-59o9):
-notification envelopes (`STATE_COLLAPSE`, an escalation, a `main_branch_test:`
-diagnosis) are titles *about* work; and a parked rig is not a dispatch target,
-so its backlog is not a reason to nudge.
+Two further exclusions, both shared with the daemon's dispatch check
+(gt-59o9): notification envelopes (`STATE_COLLAPSE`, an escalation, a
+`main_branch_test:` diagnosis) are titles *about* work rather than work; and a
+parked or docked rig is not a dispatch target at all, so its backlog is not a
+reason to nudge.
 
 The priority ceiling is `max_priority` (default P2): a nudge that leads with a
 P3 backlog is a nudge the mayor learns to ignore. The types are narrower than
@@ -144,10 +136,11 @@ time it was last nudged about.
 Episode state lives in `.runtime/seat-refill.json` under the town root. Deleting
 it loses only the current episodes; the next run starts new ones.
 
-Every firing goes to the mayor as one `gt nudge` in its default wait-idle mode —
-the same path the daemon's patrol uses, honoring the mayor's DND — naming each
-empty seat, how long it has been empty, its live/cap count, and the top three
-candidates by priority.
+Every firing goes to the mayor as one nudge naming each empty seat, how long it
+has been empty, its live/cap count, and the top three candidate bead ids by
+priority. Delivery is `gt nudge` in its default wait-idle mode — the same path
+the daemon's own patrol uses: it reaches an idle mayor directly, queues behind a
+busy one, and honors the mayor's DND.
 
 ## Stopping it
 
@@ -156,14 +149,22 @@ plugin stops firing; delete it to resume. The gate stays untouched, so the hold
 is visible in `gt plugin history` as skipped runs rather than as a plugin that
 went quiet. A town-wide or per-rig `ESTOP` is respected the same way.
 
-The file is also the town's automatic-dispatch hold: the convoy feeders,
-`gt scheduler run` and the `scheduled_slings` patrol refuse to sling while it
-exists (`internal/dispatch`), so an operator hold parks more than this plugin.
-A rig's `ESTOP.<rig>` holds only that rig's dispatch.
+The same file is the town's automatic-dispatch hold. The following all refuse
+to sling while it exists and log why (`internal/dispatch`):
 
-**Disabling the gate.** A cooldown gate runs whenever the cooldown has elapsed;
-to stop the plugin for longer than a hold, change this file's gate type to
-`manual` and run `gt plugin sync`.
+- the daemon's convoy feeders
+- `gt scheduler run`, and the daemon's scheduled-dispatch pass, which runs the
+  same code in process
+- the `scheduled_slings` patrol
+
+The file is always `<town-root>/seat-refill.hold`. A rig's `ESTOP.<rig>`
+holds only that rig's dispatch. An explicit `gt sling` typed by
+the operator or the mayor still works through the hold file, but not through
+an E-stop: `gt sling` refuses a rig the town or its own ESTOP covers.
+
+**Disabling the gate.** gt plugin has no pause command; a plugin whose gate is a
+cooldown runs whenever that cooldown has elapsed. To stop it for longer than a
+hold, change this file's gate type to `manual` and run `gt plugin sync`.
 
 Before changing what fires, read "Seat Refill" in `docs/reference.md`: the seats
 and thresholds are `polecat_pool` keys there, and a `GT_SEAT_REFILL_*` variable
@@ -171,9 +172,10 @@ overrides the file for `run_test.sh` alone.
 
 ## Boundaries
 
-In nudge mode it never slings, assigns or reorders work. It does not read the
+In nudge mode it never slings, never assigns, and never reorders work. It does not read the
 merge queue, so it can name a rig whose queue is deeper than the dispatch rule
-allows; `gt sling`'s backpressure guard refuses that dispatch.
+allows; `gt sling`'s own backpressure guard refuses that dispatch, and the
+nudge asks the mayor to decide, not to comply.
 
 A seat count it cannot read is never reported as zero. If `gt polecat list`
 fails, the run fails loudly rather than nudging about a seat that may be
