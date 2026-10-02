@@ -122,7 +122,7 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 
 	// A misnamed file is dead for every role, so this runs before the
 	// content check below rather than inside it: the roles most likely to act
-	// on the warning (mayor, witness) are exactly the ones that have a
+	// on the warning (mayor, polecat) are exactly the ones that have a
 	// directive of their own and would never reach the early return.
 	outputUnusedDirectiveWarning(w, townRoot, rigName)
 
@@ -325,7 +325,6 @@ func outputUnknownContext(w io.Writer, ctx RoleContext) {
 	}
 	fmt.Fprintln(w, "Navigate to a specific agent directory:")
 	fmt.Fprintln(w, "- `<rig>/polecats/<name>/` - Polecat role")
-	fmt.Fprintln(w, "- `<rig>/refinery/rig/` - Refinery role")
 	fmt.Fprintln(w, "- `mayor/` or `<rig>/mayor/` - Mayor role")
 	fmt.Fprintln(w, "- Town root is neutral (set GT_ROLE or cd into a role directory)")
 	fmt.Fprintln(w)
