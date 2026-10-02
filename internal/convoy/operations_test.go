@@ -3,19 +3,17 @@ package convoy
 import (
 	"context"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/beads"
+	beadsRouting "github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	beadsdk "github.com/steveyegge/beads"
-	"github.com/steveyegge/gastown/internal/beads"
-	beadsRouting "github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beads/beadsfake"
-	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/sling"
 )
 
 func TestExtractIssueID(t *testing.T) {
@@ -220,14 +218,14 @@ func TestIsIssueBlocked_NoDeps(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	issue := &beadsdk.Issue{
+	issue := &beads.Issue{
 		ID:        "test-noblk1",
 		Title:     "No Deps Issue",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -246,23 +244,23 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:        "test-blkr1",
 		Title:     "Blocker",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	blocked := &beadsdk.Issue{
+	blocked := &beads.Issue{
 		ID:        "test-blkd1",
 		Title:     "Blocked",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, blocker, "test"); err != nil {
@@ -272,11 +270,11 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 		t.Fatalf("CreateIssue blocked: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     blocked.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DepBlocks,
-		CreatedAt:   now,
+		Type:        "blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -298,23 +296,23 @@ func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:        "test-clblkr",
 		Title:     "Closed Blocker",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	blocked := &beadsdk.Issue{
+	blocked := &beads.Issue{
 		ID:        "test-clblkd",
 		Title:     "Blocked By Closed",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, blocker, "test"); err != nil {
@@ -324,11 +322,11 @@ func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 		t.Fatalf("CreateIssue blocked: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     blocked.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DepBlocks,
-		CreatedAt:   now,
+		Type:        "blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -350,23 +348,23 @@ func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	parent := &beadsdk.Issue{
+	parent := &beads.Issue{
 		ID:        "test-pcpar",
 		Title:     "Parent",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	child := &beadsdk.Issue{
+	child := &beads.Issue{
 		ID:        "test-pcchld",
 		Title:     "Child",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
@@ -376,11 +374,11 @@ func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 		t.Fatalf("CreateIssue child: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     child.ID,
 		DependsOnID: parent.ID,
-		Type:        beadsdk.DepParentChild,
-		CreatedAt:   now,
+		Type:        "parent-child",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -419,23 +417,23 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 	now := time.Now().UTC()
 
 	// Blocker is closed but has no CloseReason (gt done without merge)
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:        "test-mblkr1",
 		Title:     "Closed No Merge",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	blocked := &beadsdk.Issue{
+	blocked := &beads.Issue{
 		ID:        "test-mblkd1",
 		Title:     "Merge-Blocked",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, blocker, "test"); err != nil {
@@ -445,11 +443,11 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 		t.Fatalf("CreateIssue blocked: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     blocked.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DependencyType("merge-blocks"),
-		CreatedAt:   now,
+		Type:        "merge-blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -472,24 +470,24 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Blocker is closed WITH merge confirmation
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:          "test-mblkr2",
 		Title:       "Merged Blocker",
-		Status:      beadsdk.StatusClosed,
+		Status:      "closed",
 		CloseReason: "Merged in mr-xyz",
 		Priority:    2,
-		IssueType:   beadsdk.TypeTask,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Type:        "task",
+		CreatedAt:   now.Format(time.RFC3339),
+		UpdatedAt:   now.Format(time.RFC3339),
 	}
-	blocked := &beadsdk.Issue{
+	blocked := &beads.Issue{
 		ID:        "test-mblkd2",
 		Title:     "Merge-Blocked By Merged",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, blocker, "test"); err != nil {
@@ -499,11 +497,11 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 		t.Fatalf("CreateIssue blocked: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     blocked.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DependencyType("merge-blocks"),
-		CreatedAt:   now,
+		Type:        "merge-blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -525,23 +523,23 @@ func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create blocker as open first, then transition to tombstone
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:        "test-mblkr3",
 		Title:     "Tombstone Blocker",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	blocked := &beadsdk.Issue{
+	blocked := &beads.Issue{
 		ID:        "test-mblkd3",
 		Title:     "Merge-Blocked By Tombstone",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := store.CreateIssue(ctx, blocker, "test"); err != nil {
@@ -551,11 +549,11 @@ func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 		t.Fatalf("CreateIssue blocked: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     blocked.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DependencyType("merge-blocks"),
-		CreatedAt:   now,
+		Type:        "merge-blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -775,48 +773,48 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create convoy issue
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy1",
 		Title:     "Test Convoy",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// 1: closed issue (should be skipped)
-	closed := &beadsdk.Issue{
+	closed := &beads.Issue{
 		ID:        "test-closed1",
 		Title:     "Closed Task",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// 2: assigned issue (should be skipped)
-	assigned := &beadsdk.Issue{
+	assigned := &beads.Issue{
 		ID:        "test-assigned1",
 		Title:     "Assigned Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Assignee:  "gastown/polecats/alpha",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// 3: open, unassigned task (should be dispatched)
-	ready := &beadsdk.Issue{
+	ready := &beads.Issue{
 		ID:        "test-ready1",
 		Title:     "Ready Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, closed, assigned, ready} {
+	for _, iss := range []*beads.Issue{convoy, closed, assigned, ready} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -824,11 +822,11 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 
 	// Add tracks deps: convoy -> each tracked issue
 	for _, trackedID := range []string{closed.ID, assigned.ID, ready.ID} {
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID:     convoy.ID,
 			DependsOnID: trackedID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
+			Type:        "tracks",
+			CreatedAt:   now.Format(time.RFC3339),
 			CreatedBy:   "test",
 		}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -862,35 +860,35 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy2",
 		Title:     "Convoy For Epic Test",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	epic := &beadsdk.Issue{
+	epic := &beads.Issue{
 		ID:        "test-epic1",
 		Title:     "An Epic",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  1,
-		IssueType: beadsdk.TypeEpic,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "epic",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	task := &beadsdk.Issue{
+	task := &beads.Issue{
 		ID:        "test-task2",
 		Title:     "A Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, epic, task} {
+	for _, iss := range []*beads.Issue{convoy, epic, task} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -898,11 +896,11 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 
 	// Add tracks deps: convoy -> epic, convoy -> task
 	for _, trackedID := range []string{epic.ID, task.ID} {
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID:     convoy.ID,
 			DependsOnID: trackedID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
+			Type:        "tracks",
+			CreatedAt:   now.Format(time.RFC3339),
 			CreatedBy:   "test",
 		}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -938,47 +936,47 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy3",
 		Title:     "Convoy For Blocked Test",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// Blocker issue (open)
-	blocker := &beadsdk.Issue{
+	blocker := &beads.Issue{
 		ID:        "test-blocker3",
 		Title:     "Blocker",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  1,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// Blocked task
-	blockedTask := &beadsdk.Issue{
+	blockedTask := &beads.Issue{
 		ID:        "test-blocked3",
 		Title:     "Blocked Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// Unblocked task
-	unblockedTask := &beadsdk.Issue{
+	unblockedTask := &beads.Issue{
 		ID:        "test-unblk3",
 		Title:     "Unblocked Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  3,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, blocker, blockedTask, unblockedTask} {
+	for _, iss := range []*beads.Issue{convoy, blocker, blockedTask, unblockedTask} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -986,11 +984,11 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 
 	// Add tracks deps from convoy
 	for _, trackedID := range []string{blockedTask.ID, unblockedTask.ID} {
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID:     convoy.ID,
 			DependsOnID: trackedID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
+			Type:        "tracks",
+			CreatedAt:   now.Format(time.RFC3339),
 			CreatedBy:   "test",
 		}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -999,11 +997,11 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 	}
 
 	// Add blocks dep: blockedTask is blocked by blocker
-	blocksDep := &beadsdk.Dependency{
+	blocksDep := &depSpec{
 		IssueID:     blockedTask.ID,
 		DependsOnID: blocker.ID,
-		Type:        beadsdk.DepBlocks,
-		CreatedAt:   now,
+		Type:        "blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, blocksDep, "test"); err != nil {
@@ -1039,46 +1037,46 @@ func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy4",
 		Title:     "Convoy No Ready",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	closed1 := &beadsdk.Issue{
+	closed1 := &beads.Issue{
 		ID:        "test-cl4a",
 		Title:     "Closed A",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	closed2 := &beadsdk.Issue{
+	closed2 := &beads.Issue{
 		ID:        "test-cl4b",
 		Title:     "Closed B",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, closed1, closed2} {
+	for _, iss := range []*beads.Issue{convoy, closed1, closed2} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
 	}
 
 	for _, trackedID := range []string{closed1.ID, closed2.ID} {
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID:     convoy.ID,
 			DependsOnID: trackedID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
+			Type:        "tracks",
+			CreatedAt:   now.Format(time.RFC3339),
 			CreatedBy:   "test",
 		}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1113,36 +1111,36 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy5",
 		Title:     "Convoy Parked Test",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	task := &beadsdk.Issue{
+	task := &beads.Issue{
 		ID:        "test-task5",
 		Title:     "Task For Parked Rig",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, task} {
+	for _, iss := range []*beads.Issue{convoy, task} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: task.ID,
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1379,27 +1377,27 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 
 	// Create a convoy as open first (SDK validates status on create),
 	// then transition to "staged_ready" via UpdateIssue.
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-cv-staged1",
 		Title:     "Staged Ready Convoy",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// Create a tracked issue (closed, to trigger the event path)
-	tracked := &beadsdk.Issue{
+	tracked := &beads.Issue{
 		ID:        "test-trk-stg1",
 		Title:     "Tracked Issue",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, tracked} {
+	for _, iss := range []*beads.Issue{convoy, tracked} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -1414,11 +1412,11 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 	}
 
 	// Add tracks dependency: convoy tracks the closed issue
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: tracked.ID,
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1470,26 +1468,26 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create a convoy as open first, then transition to "staged_warnings".
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-cv-staged2",
 		Title:     "Staged Warnings Convoy",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	tracked := &beadsdk.Issue{
+	tracked := &beads.Issue{
 		ID:        "test-trk-stg2",
 		Title:     "Tracked Issue",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, tracked} {
+	for _, iss := range []*beads.Issue{convoy, tracked} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -1502,11 +1500,11 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 		t.Fatalf("UpdateIssue to staged_warnings: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: tracked.ID,
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1556,27 +1554,27 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create a convoy as open first, then transition to "staged_ready"
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-cv-launch",
 		Title:     "Launched Convoy",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	// Create a tracked issue that is closed (triggers event path)
-	tracked := &beadsdk.Issue{
+	tracked := &beads.Issue{
 		ID:        "test-trk-lnch",
 		Title:     "Tracked Closed",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
-	for _, iss := range []*beadsdk.Issue{convoy, tracked} {
+	for _, iss := range []*beads.Issue{convoy, tracked} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
@@ -1589,11 +1587,11 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 		t.Fatalf("UpdateIssue to staged_ready: %v", err)
 	}
 
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: tracked.ID,
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1623,13 +1621,13 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 
 	// Phase 2: Transition convoy to "open" (launch it)
 	if err := store.UpdateIssue(ctx, convoy.ID, map[string]interface{}{
-		"status": string(beadsdk.StatusOpen),
+		"status": string("open"),
 	}, "test"); err != nil {
 		t.Fatalf("UpdateIssue staged->open: %v", err)
 	}
 
 	// Verify it's no longer staged
-	if isConvoyStaged(ctx, store, convoy.ID) {
+	if isConvoyStaged(store, convoy.ID) {
 		t.Fatal("convoy should not be staged after transition to open")
 	}
 
@@ -1704,14 +1702,14 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create convoy in the store (local)
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoy-xrig",
 		Title:     "Cross-Rig Convoy",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := store.CreateIssue(ctx, convoy, "test"); err != nil {
 		t.Fatalf("CreateIssue convoy: %v", err)
@@ -1719,11 +1717,11 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 
 	// The cross-rig bead (oag-19dd9) is NOT in the local store.
 	// Add tracks dependency using external reference format expected by beads.
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: "external:oag:oag-19dd9",
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1731,9 +1729,9 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 	}
 
 	// The bead's own rig store has it closed.
-	rigStore := newFakeRigStore(&beadsdk.Issue{ID: "oag-19dd9", Status: beadsdk.StatusClosed, Assignee: "gastown/polecats/alpha", Priority: 2, IssueType: beadsdk.TypeTask})
+	rigStore := newFakeRigStore(&beads.Issue{ID: "oag-19dd9", Status: "closed", Assignee: "gastown/polecats/alpha", Priority: 2, Type: "task"})
 	townRoot := setupTownRootWithCrossRig(t)
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"osr_ai_gm": rigStore})
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{"osr_ai_gm": rigStore})
 
 	tracked := getConvoyTrackedIssues(ctx, store, convoy.ID, townRoot, resolver, func(string, ...interface{}) {})
 
@@ -1833,7 +1831,7 @@ func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
 	// Should not panic with empty closed issue ID.
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
-	FireCrossRigDepNotifications(context.Background(), "", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
+	FireCrossRigDepNotifications(context.Background(), "", "/tmp", map[string]IssueSource{"test": store}, nil)
 }
 
 func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
@@ -1841,7 +1839,7 @@ func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
 	// Issue ID without a recognizable prefix should not panic.
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
-	FireCrossRigDepNotifications(context.Background(), "noprefixid", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
+	FireCrossRigDepNotifications(context.Background(), "noprefixid", "/tmp", map[string]IssueSource{"test": store}, nil)
 }
 
 // A close that unblocks an issue in another rig is logged, naming the issue and
@@ -1859,25 +1857,25 @@ func TestFireCrossRigDepNotifications_LogsCrossRigUnblock(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	dependent := &beadsdk.Issue{
+	dependent := &beads.Issue{
 		ID:        "gt-dep1",
 		Title:     "Waiting on beads fix",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := store.CreateIssue(ctx, dependent, "test"); err != nil {
 		t.Fatalf("CreateIssue dependent: %v", err)
 	}
 
 	// Add a blocking dep: gt-dep1 is blocked by external:bd:bd-closed
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     "gt-dep1",
 		DependsOnID: "external:bd:bd-closed",
-		Type:        beadsdk.DepBlocks,
-		CreatedAt:   now,
+		Type:        "blocks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -1898,7 +1896,7 @@ func TestFireCrossRigDepNotifications_LogsCrossRigUnblock(t *testing.T) {
 
 	// stores: "gastown" → store (has gt-dep1 blocked by external:bd:bd-closed)
 	//         "beads"   → (closed issue's home store, skipped by FireCrossRigDepNotifications)
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]IssueSource{
 		"gastown": store,
 	}
 
@@ -1935,38 +1933,38 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoyhold",
 		Title:     "Convoy With A Held Bead",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	held := &beadsdk.Issue{
+	held := &beads.Issue{
 		ID:        "test-held1",
 		Title:     "Held For The Mayor",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	ready := &beadsdk.Issue{
+	ready := &beads.Issue{
 		ID:        "test-ready2",
 		Title:     "Next Ready Task",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 
 	if err := convoyStore.CreateIssue(ctx, convoy, "test"); err != nil {
 		t.Fatalf("CreateIssue convoy: %v", err)
 	}
-	for _, iss := range []*beadsdk.Issue{held, ready} {
+	for _, iss := range []*beads.Issue{held, ready} {
 		if err := convoyStore.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s in convoy store: %v", iss.ID, err)
 		}
@@ -1980,11 +1978,11 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 		t.Fatalf("AddLabel: %v", err)
 	}
 	for _, trackedID := range []string{held.ID, ready.ID} {
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID:     convoy.ID,
 			DependsOnID: trackedID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
+			Type:        "tracks",
+			CreatedAt:   now.Format(time.RFC3339),
 			CreatedBy:   "test",
 		}
 		if err := convoyStore.AddDependency(ctx, dep, "test"); err != nil {
@@ -2001,7 +1999,7 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 		{Prefix: "test-", Path: "testrig"},
 	})
 
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{
 		"hq":      convoyStore,
 		"testrig": rigStore,
 	})
@@ -2048,14 +2046,14 @@ func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	townCopy := &beadsdk.Issue{
+	townCopy := &beads.Issue{
 		ID:        "test-held1",
 		Title:     "Held",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	rigCopy := *townCopy
 	if err := townStore.CreateIssue(ctx, townCopy, "test"); err != nil {
@@ -2077,7 +2075,7 @@ func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
 		{Prefix: "test-", Path: "testrig"},
 	})
 
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{
 		"hq":      townStore,
 		"testrig": rigStore,
 	})
@@ -2089,14 +2087,14 @@ func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
 	// A bead the town store has no row for is the gt close shape: the caller
 	// holds only the town store, and the old nil resolver left the hold
 	// unread. The check has to report the record unknown, not the bead free.
-	rigOnly := &beadsdk.Issue{
+	rigOnly := &beads.Issue{
 		ID:        "test-rigonly1",
 		Title:     "Rig Only",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := rigStore.CreateIssue(ctx, rigOnly, "test"); err != nil {
 		t.Fatalf("CreateIssue rig-only: %v", err)
@@ -2117,34 +2115,34 @@ func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	convoy := &beadsdk.Issue{
+	convoy := &beads.Issue{
 		ID:        "test-convoyunreadable",
 		Title:     "Convoy With An Unreadable Bead",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	tracked := &beadsdk.Issue{
+	tracked := &beads.Issue{
 		ID:        "test-unreadable1",
 		Title:     "Tracked",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
-	for _, iss := range []*beadsdk.Issue{convoy, tracked} {
+	for _, iss := range []*beads.Issue{convoy, tracked} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
 	}
-	dep := &beadsdk.Dependency{
+	dep := &depSpec{
 		IssueID:     convoy.ID,
 		DependsOnID: tracked.ID,
-		Type:        beadsdk.DependencyType("tracks"),
-		CreatedAt:   now,
+		Type:        "tracks",
+		CreatedAt:   now.Format(time.RFC3339),
 		CreatedBy:   "test",
 	}
 	if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -2162,9 +2160,9 @@ func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
 	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
 		{Prefix: "test-", Path: "testrig"},
 	})
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{
 		"hq":      store,
-		"testrig": &unreadableStorage{Storage: store},
+		"testrig": unreadableSource{store},
 	})
 
 	gt := &slingLog{}
@@ -2187,26 +2185,18 @@ func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
 	}
 }
 
-// unreadableStorage wraps a store whose issue reads fail, standing in for a
-// Dolt that has gone away while its other calls still work.
-type unreadableStorage struct {
-	beadsdk.Storage
+// unreadableSource wraps a source whose issue reads fail, standing in for a
+// Dolt that has gone away while its dependency reads still work.
+type unreadableSource struct {
+	IssueSource
 }
 
-func (s *unreadableStorage) GetIssue(context.Context, string) (*beadsdk.Issue, error) {
+func (s unreadableSource) Show(string) (*beads.Issue, error) {
 	return nil, fmt.Errorf("dolt unreachable")
 }
 
-func (s *unreadableStorage) GetIssueComments(context.Context, string) ([]*beadsdk.Comment, error) {
+func (s unreadableSource) Comments(string) ([]beads.Comment, error) {
 	return nil, fmt.Errorf("dolt unreachable")
-}
-
-// GetDependencyRecords still answers: beadsdk.Storage does not declare it, so
-// the embedded interface would hide the real store's method, and the feed
-// would hold the bead for want of raw records instead of for its unreadable
-// record.
-func (s *unreadableStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadsdk.Dependency, error) {
-	return s.Storage.(dependencyRecordReader).GetDependencyRecords(ctx, issueID)
 }
 
 // TestDispatchIssue_PassesFormula is the gt-o9sbq regression test: a bead slung
@@ -2286,35 +2276,35 @@ func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
 			ctx := context.Background()
 			now := time.Now().UTC()
 
-			convoy := &beadsdk.Issue{
+			convoy := &beads.Issue{
 				ID:          "test-convoy1",
 				Title:       "Test Convoy",
 				Description: tc.description,
-				Status:      beadsdk.StatusOpen,
+				Status:      "open",
 				Priority:    2,
-				IssueType:   beadsdk.TypeTask,
-				CreatedAt:   now,
-				UpdatedAt:   now,
+				Type:        "task",
+				CreatedAt:   now.Format(time.RFC3339),
+				UpdatedAt:   now.Format(time.RFC3339),
 			}
-			ready := &beadsdk.Issue{
+			ready := &beads.Issue{
 				ID:        "test-ready1",
 				Title:     "Ready Task",
-				Status:    beadsdk.StatusOpen,
+				Status:    "open",
 				Priority:  2,
-				IssueType: beadsdk.TypeTask,
-				CreatedAt: now,
-				UpdatedAt: now,
+				Type:      "task",
+				CreatedAt: now.Format(time.RFC3339),
+				UpdatedAt: now.Format(time.RFC3339),
 			}
-			for _, iss := range []*beadsdk.Issue{convoy, ready} {
+			for _, iss := range []*beads.Issue{convoy, ready} {
 				if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 					t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 				}
 			}
-			dep := &beadsdk.Dependency{
+			dep := &depSpec{
 				IssueID:     convoy.ID,
 				DependsOnID: ready.ID,
-				Type:        beadsdk.DependencyType("tracks"),
-				CreatedAt:   now,
+				Type:        "tracks",
+				CreatedAt:   now.Format(time.RFC3339),
 				CreatedBy:   "test",
 			}
 			if err := store.AddDependency(ctx, dep, "test"); err != nil {
@@ -2349,15 +2339,15 @@ func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
 
 	ctx := context.Background()
 	now := time.Now().UTC()
-	convoy := &beadsdk.Issue{
-		ID: "test-convoy1", Title: "Test Convoy", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	convoy := &beads.Issue{
+		ID: "test-convoy1", Title: "Test Convoy", Status: "open",
+		Priority: 2, Type: "task", CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339),
 	}
-	issues := []*beadsdk.Issue{convoy}
+	issues := []*beads.Issue{convoy}
 	for _, id := range []string{"test-ready1", "test-ready2"} {
-		issues = append(issues, &beadsdk.Issue{
-			ID: id, Title: id, Status: beadsdk.StatusOpen,
-			Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+		issues = append(issues, &beads.Issue{
+			ID: id, Title: id, Status: "open",
+			Priority: 2, Type: "task", CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339),
 		})
 	}
 	for _, iss := range issues {
@@ -2367,9 +2357,9 @@ func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
 		if iss.ID == convoy.ID {
 			continue
 		}
-		dep := &beadsdk.Dependency{
+		dep := &depSpec{
 			IssueID: convoy.ID, DependsOnID: iss.ID,
-			Type: beadsdk.DependencyType("tracks"), CreatedAt: now, CreatedBy: "test",
+			Type: "tracks", CreatedAt: now.Format(time.RFC3339), CreatedBy: "test",
 		}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
 			t.Fatalf("AddDependency: %v", err)

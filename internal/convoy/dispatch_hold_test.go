@@ -7,29 +7,8 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
-
-// fakeHoldStorage answers the two reads the hold rule makes, and nothing else.
-type fakeHoldStorage struct {
-	beadsdk.Storage
-	issues  map[string]*beadsdk.Issue
-	readErr error
-}
-
-func (s *fakeHoldStorage) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
-	if s.readErr != nil {
-		return nil, s.readErr
-	}
-	return s.issues[id], nil
-}
-
-func (s *fakeHoldStorage) GetIssueComments(_ context.Context, _ string) ([]*beadsdk.Comment, error) {
-	if s.readErr != nil {
-		return nil, s.readErr
-	}
-	return nil, nil
-}
 
 const rejectedNotes = "MERGE REJECTION (attempt 1): tests fail - see review\nBranch: polecat/x/gt-r+abc"
 
@@ -39,10 +18,10 @@ const rejectedNotes = "MERGE REJECTION (attempt 1): tests fail - see review\nBra
 func TestFeedHold_MergeRejectionIsFlaggedNotHeld(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-r":   {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
-		"gt-rpr": {ID: "gt-rpr", Status: beadsdk.StatusOpen, Labels: []string{"needs-pro"}, Notes: rejectedNotes},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-r", Status: "open", Notes: rejectedNotes},
+		&beads.Issue{ID: "gt-rpr", Status: "open", Labels: []string{"needs-pro"}, Notes: rejectedNotes},
+	)
 	if hold := FeedHold(ctx, store, "gt-r", nil); hold != (Hold{MergeRejection: true}) {
 		t.Errorf("rejected record: want the rejection flagged with no hold, got %+v", hold)
 	}
@@ -55,9 +34,9 @@ func TestFeedHold_MergeRejectionIsFlaggedNotHeld(t *testing.T) {
 // rule leaves a rejected bead free to dispatch.
 func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 	t.Parallel()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-r", Status: "open", Notes: rejectedNotes},
+	)
 	if reason := DispatchHoldReason(context.Background(), store, "gt-r", nil); reason != "" {
 		t.Errorf("a rejected bead must not be held, got %q", reason)
 	}
@@ -69,11 +48,11 @@ func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 func TestFeedHold_NeedsHumanRejectionIsHeld(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-h":  {ID: "gt-h", Status: beadsdk.StatusOpen, Labels: []string{"gt:needs-human"}, Notes: rejectedNotes},
-		"gt-hl": {ID: "gt-hl", Status: beadsdk.StatusOpen, Labels: []string{"Needs-Human"}},
-		"gt-rw": {ID: "gt-rw", Status: beadsdk.StatusOpen, Labels: []string{"rework"}, Notes: rejectedNotes},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-h", Status: "open", Labels: []string{"gt:needs-human"}, Notes: rejectedNotes},
+		&beads.Issue{ID: "gt-hl", Status: "open", Labels: []string{"Needs-Human"}},
+		&beads.Issue{ID: "gt-rw", Status: "open", Labels: []string{"rework"}, Notes: rejectedNotes},
+	)
 	if hold := FeedHold(ctx, store, "gt-h", nil); hold.Reason != "label gt:needs-human" || !hold.MergeRejection {
 		t.Errorf("needs-human rejection: want the label hold and the flag, got %+v", hold)
 	}
@@ -88,10 +67,10 @@ func TestFeedHold_NeedsHumanRejectionIsHeld(t *testing.T) {
 func TestFeedHold_Verdicts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-clean":    {ID: "gt-clean", Status: beadsdk.StatusOpen, Notes: "ordinary notes"},
-		"gt-deferred": {ID: "gt-deferred", Status: beadsdk.StatusDeferred},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-clean", Status: "open", Notes: "ordinary notes"},
+		&beads.Issue{ID: "gt-deferred", Status: "deferred"},
+	)
 
 	if hold := FeedHold(ctx, store, "gt-clean", nil); hold != (Hold{}) {
 		t.Errorf("clean record: want no hold, got %+v", hold)
@@ -103,7 +82,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 
 	// A record that cannot be read holds the bead: it is the one case where a
 	// rejection cannot be ruled out (fail closed).
-	broken := &fakeHoldStorage{readErr: errors.New("dolt: connection refused")}
+	broken := &fakeStore{readErr: errors.New("dolt: connection refused")}
 	if hold := FeedHold(ctx, broken, "gt-x", nil); !hold.Unreadable || !strings.Contains(hold.Reason, "record unreadable") {
 		t.Errorf("unreadable record: want an unreadable hold, got %+v", hold)
 	}
@@ -127,18 +106,18 @@ func TestFeedNextReadyIssue_FeedsRejectedAsRework(t *testing.T) {
 
 	ctx := context.Background()
 	now := time.Now().UTC()
-	convoy := &beadsdk.Issue{ID: "test-convoyr", Title: "Convoy", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}
+	convoy := &beads.Issue{ID: "test-convoyr", Title: "Convoy", Status: "open", Priority: 2, Type: "task", CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
 	// Priority 1 sorts the rejected bead first, so the feed reaches it before
 	// the sibling.
-	rejected := &beadsdk.Issue{ID: "test-rejected1", Title: "Rejected", Status: beadsdk.StatusOpen, Priority: 1, IssueType: beadsdk.TypeTask, Notes: rejectedNotes, CreatedAt: now, UpdatedAt: now}
-	fresh := &beadsdk.Issue{ID: "test-fresh1", Title: "Fresh", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}
-	for _, iss := range []*beadsdk.Issue{convoy, rejected, fresh} {
+	rejected := &beads.Issue{ID: "test-rejected1", Title: "Rejected", Status: "open", Priority: 1, Type: "task", Notes: rejectedNotes, CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
+	fresh := &beads.Issue{ID: "test-fresh1", Title: "Fresh", Status: "open", Priority: 2, Type: "task", CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
+	for _, iss := range []*beads.Issue{convoy, rejected, fresh} {
 		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
 		}
 	}
 	for _, id := range []string{rejected.ID, fresh.ID} {
-		dep := &beadsdk.Dependency{IssueID: convoy.ID, DependsOnID: id, Type: beadsdk.DependencyType("tracks"), CreatedAt: now, CreatedBy: "test"}
+		dep := &depSpec{IssueID: convoy.ID, DependsOnID: id, Type: "tracks", CreatedAt: now.Format(time.RFC3339), CreatedBy: "test"}
 		if err := store.AddDependency(ctx, dep, "test"); err != nil {
 			t.Fatalf("AddDependency %s: %v", id, err)
 		}
@@ -171,61 +150,61 @@ func TestFeedNextReadyIssue_FeedsRejectedAsRework(t *testing.T) {
 // TestDispatchHoldFields_MatchesTheIssueRule pins the exported field rule
 // against the one readHold applies, so the two cannot drift: the witness
 // reaches the rule through DispatchHoldFields (it reads a hook bead as JSON
-// and holds no beadsdk.Storage), and a divergence would mean a polecat
+// and holds no IssueSource), and a divergence would mean a polecat
 // restarted against work a convoy feeder would have held (gt-n38c6).
 func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
-		issue beadsdk.Issue
+		issue beads.Issue
 	}{
 		{
 			name:  "clean",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "ordinary notes"},
+			issue: beads.Issue{Status: "open", Notes: "ordinary notes"},
 		},
 		{
 			name:  "label",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-mayor-review"}},
+			issue: beads.Issue{Status: "open", Labels: []string{"needs-mayor-review"}},
 		},
 		{
 			name:  "label, however typed",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-PRO"}},
+			issue: beads.Issue{Status: "open", Labels: []string{"NEEDS-PRO"}},
 		},
 		{
 			name:  "deferred status",
-			issue: beadsdk.Issue{Status: beadsdk.StatusDeferred},
+			issue: beads.Issue{Status: "deferred"},
 		},
 		{
 			name:  "pinned status",
-			issue: beadsdk.Issue{Status: "pinned"},
+			issue: beads.Issue{Status: "pinned"},
 		},
 		{
 			name:  "decision in design",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Design: "## MAYOR DESIGN DECISION\npark it"},
+			issue: beads.Issue{Status: "open", Design: "## MAYOR DESIGN DECISION\npark it"},
 		},
 		{
 			name:  "decision in notes",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "context\n\n- do not redispatch"},
+			issue: beads.Issue{Status: "open", Notes: "context\n\n- do not redispatch"},
 		},
 		{
 			name:  "wording only mentioned",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "a review note quoting 'do not redispatch'"},
+			issue: beads.Issue{Status: "open", Notes: "a review note quoting 'do not redispatch'"},
 		},
 		{
 			name:  "operator label",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"operator"}},
+			issue: beads.Issue{Status: "open", Labels: []string{"operator"}},
 		},
 		{
 			name:  "operator label, however typed",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"Operator"}},
+			issue: beads.Issue{Status: "open", Labels: []string{"Operator"}},
 		},
 		{
 			name:  "human assignee",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Assignee: "sloan"},
+			issue: beads.Issue{Status: "open", Assignee: "sloan"},
 		},
 		{
 			name:  "agent assignee",
-			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Assignee: "gastown/polecats/onyx"},
+			issue: beads.Issue{Status: "open", Assignee: "gastown/polecats/onyx"},
 		},
 	}
 
@@ -246,15 +225,15 @@ func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
 func TestFeedHold_OperatorReservation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-op":         {ID: "gt-op", Status: beadsdk.StatusOpen, Labels: []string{"operator"}, Assignee: "sloan"},
-		"gt-labelled":   {ID: "gt-labelled", Status: beadsdk.StatusOpen, Labels: []string{"operator"}},
-		"gt-human":      {ID: "gt-human", Status: beadsdk.StatusOpen, Assignee: "Sloan Ahrens"},
-		"gt-overseer":   {ID: "gt-overseer", Status: beadsdk.StatusOpen, Assignee: "overseer"},
-		"gt-agent":      {ID: "gt-agent", Status: beadsdk.StatusOpen, Assignee: "gastown/polecats/onyx"},
-		"gt-crew":       {ID: "gt-crew", Status: beadsdk.StatusOpen, Assignee: "gastown/crew/sloan"},
-		"gt-unassigned": {ID: "gt-unassigned", Status: beadsdk.StatusOpen},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-op", Status: "open", Labels: []string{"operator"}, Assignee: "sloan"},
+		&beads.Issue{ID: "gt-labelled", Status: "open", Labels: []string{"operator"}},
+		&beads.Issue{ID: "gt-human", Status: "open", Assignee: "Sloan Ahrens"},
+		&beads.Issue{ID: "gt-overseer", Status: "open", Assignee: "overseer"},
+		&beads.Issue{ID: "gt-agent", Status: "open", Assignee: "gastown/polecats/onyx"},
+		&beads.Issue{ID: "gt-crew", Status: "open", Assignee: "gastown/crew/sloan"},
+		&beads.Issue{ID: "gt-unassigned", Status: "open"},
+	)
 
 	held := []struct{ id, want string }{
 		{"gt-op", "label operator"},
@@ -286,9 +265,9 @@ func TestFeedHold_OperatorReservation(t *testing.T) {
 // not the deacon's to redispatch either.
 func TestDispatchHoldReason_OperatorReservation(t *testing.T) {
 	t.Parallel()
-	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
-		"gt-op": {ID: "gt-op", Status: beadsdk.StatusOpen, Assignee: "sloan"},
-	}}
+	store := holdStore(
+		&beads.Issue{ID: "gt-op", Status: "open", Assignee: "sloan"},
+	)
 	if reason := DispatchHoldReason(context.Background(), store, "gt-op", nil); reason == "" {
 		t.Error("deacon path must hold operator work, got no hold")
 	}
@@ -304,11 +283,11 @@ func TestHold_RigStoreNotOpen_ReportsNoHold(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	townRoot := setupTownRoot(t)
-	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}
+	townStore := holdStore()
 
 	// The daemon's store map has hq but not the "testrig" the bead routes to:
 	// a rig that never opened.
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"hq": townStore})
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{"hq": townStore})
 
 	// Both feeders' rules, and the deacon's, answer the gap the same way.
 	if hold := FeedHold(ctx, townStore, "test-rigbead", resolver); hold != (Hold{}) {
@@ -333,10 +312,10 @@ func TestHold_RigStoreReadable_StillHoldsUnreadableRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	townRoot := setupTownRoot(t)
-	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}
-	broken := &fakeHoldStorage{readErr: errors.New("dolt: connection refused")}
+	townStore := holdStore()
+	broken := &fakeStore{readErr: errors.New("dolt: connection refused")}
 
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"hq": townStore, "testrig": broken})
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{"hq": townStore, "testrig": broken})
 
 	if hold := FeedHold(ctx, townStore, "test-rigbead", resolver); !hold.Unreadable || !strings.Contains(hold.Reason, "record unreadable") {
 		t.Errorf("a rig store that cannot read the record must hold it, got %+v", hold)

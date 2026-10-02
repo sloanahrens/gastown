@@ -9,107 +9,36 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
-	beadsRouting "github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
-
-// fakeRigStore is one rig's beads store: its own issues and the dependency
-// edges recorded on them. Its joined dependency view behaves as beads v1.0.5's
-// Dolt store does: an edge whose target is not one of this store's issues
-// (every "external:<prefix>:<id>" edge) is dropped (gt-j02xy).
-type fakeRigStore struct {
-	beadsdk.Storage
-	issues map[string]*beadsdk.Issue
-	deps   []*beadsdk.Dependency
-	// readErr, when set, fails GetIssuesByIDs: a rig whose Dolt went away.
-	readErr error
-}
-
-func newFakeRigStore(issues ...*beadsdk.Issue) *fakeRigStore {
-	s := &fakeRigStore{issues: make(map[string]*beadsdk.Issue)}
-	for _, iss := range issues {
-		s.issues[iss.ID] = iss
-	}
-	return s
-}
-
-func (s *fakeRigStore) edge(from, to, depType string) {
-	s.deps = append(s.deps, &beadsdk.Dependency{IssueID: from, DependsOnID: to, Type: beadsdk.DependencyType(depType)})
-}
-
-func (s *fakeRigStore) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
-	return s.issues[id], nil
-}
-
-func (s *fakeRigStore) GetIssueComments(context.Context, string) ([]*beadsdk.Comment, error) {
-	return nil, nil
-}
-
-func (s *fakeRigStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*beadsdk.Issue, error) {
-	if s.readErr != nil {
-		return nil, s.readErr
-	}
-	var out []*beadsdk.Issue
-	for _, id := range ids {
-		if iss, ok := s.issues[id]; ok {
-			out = append(out, iss)
-		}
-	}
-	return out, nil
-}
-
-func (s *fakeRigStore) GetDependencyRecords(_ context.Context, issueID string) ([]*beadsdk.Dependency, error) {
-	var out []*beadsdk.Dependency
-	for _, d := range s.deps {
-		if d.IssueID == issueID {
-			out = append(out, d)
-		}
-	}
-	return out, nil
-}
-
-func (s *fakeRigStore) GetDependenciesWithMetadata(_ context.Context, issueID string) ([]*beadsdk.IssueWithDependencyMetadata, error) {
-	var out []*beadsdk.IssueWithDependencyMetadata
-	for _, d := range s.deps {
-		if d.IssueID != issueID {
-			continue
-		}
-		iss, ok := s.issues[d.DependsOnID]
-		if !ok {
-			continue // the v1.0.5 join drops a target this store does not hold
-		}
-		out = append(out, &beadsdk.IssueWithDependencyMetadata{Issue: *iss, DependencyType: d.Type})
-	}
-	return out, nil
-}
 
 // xrigTown is a town convoy tracking two gastown beads. gt-work (priority 1,
 // fed first) is blocked by oag-x, which lives in a third rig, oag.
 type xrigTown struct {
 	townRoot string
-	hq       *fakeRigStore
-	gastown  *fakeRigStore
-	oag      *fakeRigStore
+	hq       *fakeStore
+	gastown  *fakeStore
+	oag      *fakeStore
 }
 
-func newXrigTown(t *testing.T, blockerStatus beadsdk.Status) *xrigTown {
+func newXrigTown(t *testing.T, blockerStatus string) *xrigTown {
 	t.Helper()
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	task := func(id string, priority int, status beadsdk.Status) *beadsdk.Issue {
-		return &beadsdk.Issue{ID: id, Title: id, Status: status, Priority: priority, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}
+	task := func(id string, priority int, status string) *beads.Issue {
+		return &beads.Issue{ID: id, Title: id, Status: status, Priority: priority, Type: "task", CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
 	}
 
 	x := &xrigTown{
 		townRoot: t.TempDir(),
-		hq:       newFakeRigStore(task("hq-cv1", 2, beadsdk.StatusOpen)),
-		gastown:  newFakeRigStore(task("gt-work", 1, beadsdk.StatusOpen), task("gt-sib", 2, beadsdk.StatusOpen)),
+		hq:       newFakeRigStore(task("hq-cv1", 2, "open")),
+		gastown:  newFakeRigStore(task("gt-work", 1, "open"), task("gt-sib", 2, "open")),
 		oag:      newFakeRigStore(task("oag-x", 2, blockerStatus)),
 	}
 	x.hq.edge("hq-cv1", "external:gt:gt-work", "tracks")
 	x.hq.edge("hq-cv1", "external:gt:gt-sib", "tracks")
 	x.gastown.edge("gt-work", "external:oag:oag-x", "blocks")
 
-	if err := beadsRouting.WriteRoutes(filepath.Join(x.townRoot, ".beads"), []beadsRouting.Route{
+	if err := beads.WriteRoutes(filepath.Join(x.townRoot, ".beads"), []beads.Route{
 		{Prefix: "hq-", Path: "."},
 		{Prefix: "gt-", Path: "gastown/mayor/rig"},
 		{Prefix: "oag-", Path: "oag/mayor/rig"},
@@ -121,9 +50,9 @@ func newXrigTown(t *testing.T, blockerStatus beadsdk.Status) *xrigTown {
 
 // withHQBlocker re-points gt-work's blocker at hq-blk, a town-level bead.
 // Production stores such an edge as the bare ID.
-func (x *xrigTown) withHQBlocker(status beadsdk.Status) *xrigTown {
-	x.hq.issues["hq-blk"] = &beadsdk.Issue{ID: "hq-blk", Title: "hq-blk", Status: status, IssueType: beadsdk.TypeTask}
-	x.gastown.deps = nil
+func (x *xrigTown) withHQBlocker(status string) *xrigTown {
+	x.hq.seed(beads.Issue{ID: "hq-blk", Title: "hq-blk", Status: status, Type: "task"})
+	x.gastown.clearEdges()
 	x.gastown.edge("gt-work", "hq-blk", "blocks")
 	return x
 }
@@ -132,8 +61,8 @@ func (x *xrigTown) withHQBlocker(status beadsdk.Status) *xrigTown {
 // never holds hq, and opens a rig's store on first use (close.go). opens
 // counts open calls per rig; failOpen names rigs whose open fails.
 func (x *xrigTown) closeResolver(opens map[string]int, failOpen ...string) *StoreResolver {
-	rigs := map[string]beadsdk.Storage{"gastown": x.gastown, "oag": x.oag}
-	return NewOpeningStoreResolver(x.townRoot, func(name string) (beadsdk.Storage, error) {
+	rigs := map[string]IssueSource{"gastown": x.gastown, "oag": x.oag}
+	return NewOpeningStoreResolver(x.townRoot, func(name string) (IssueSource, error) {
 		if opens != nil {
 			opens[name]++
 		}
@@ -147,7 +76,7 @@ func (x *xrigTown) closeResolver(opens map[string]int, failOpen ...string) *Stor
 }
 
 func (x *xrigTown) resolver(withOag bool) *StoreResolver {
-	stores := map[string]beadsdk.Storage{"hq": x.hq, "gastown": x.gastown}
+	stores := map[string]IssueSource{"hq": x.hq, "gastown": x.gastown}
 	if withOag {
 		stores["oag"] = x.oag
 	}
@@ -189,7 +118,7 @@ func loggedLine(msgs []string, parts ...string) bool {
 // dependency view drops the external blocker, so the feed saw no blocker.
 func TestFeedNextReadyIssue_ThirdRigOpenBlockerHolds(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusOpen)
+	x := newXrigTown(t, "open")
 
 	slung, logged := x.feed(t, x.resolver(true))
 
@@ -208,7 +137,7 @@ func TestFeedNextReadyIssue_ThirdRigOpenBlockerHolds(t *testing.T) {
 // blocker is closed in its own rig, the bead feeds.
 func TestFeedNextReadyIssue_ThirdRigClosedBlockerFeeds(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
 	slung, logged := x.feed(t, x.resolver(true))
 
@@ -222,7 +151,7 @@ func TestFeedNextReadyIssue_ThirdRigClosedBlockerFeeds(t *testing.T) {
 // as unreadable, not as missing.
 func TestFeedNextReadyIssue_UnresolvableBlockerHolds(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
 	slung, logged := x.feed(t, x.resolver(false)) // no oag store reachable
 
@@ -242,8 +171,8 @@ func TestFeedNextReadyIssue_UnresolvableBlockerHolds(t *testing.T) {
 // bead is held and the log says the blocker is unresolved.
 func TestFeedNextReadyIssue_DanglingBlockerHolds(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
-	delete(x.oag.issues, "oag-x")
+	x := newXrigTown(t, "closed")
+	x.oag.forget("oag-x")
 
 	slung, logged := x.feed(t, x.resolver(true))
 
@@ -262,13 +191,13 @@ func TestBlockReason_OwningStoreFailureIsUnreadable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 	reason := BlockReason(ctx, x.hq, "gt-work", x.closeResolver(nil, "oag"))
 	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "connection refused") {
 		t.Errorf("open failure: reason = %q, want oag-x unreadable with the open error", reason)
 	}
 
-	y := newXrigTown(t, beadsdk.StatusClosed)
+	y := newXrigTown(t, "closed")
 	y.oag.readErr = errors.New("dolt: query timeout")
 	reason = BlockReason(ctx, y.hq, "gt-work", y.resolver(true))
 	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "query timeout") {
@@ -282,9 +211,9 @@ func TestBlockReason_OwningStoreFailureIsUnreadable(t *testing.T) {
 func TestBlockReason_HomeRigStoreUnavailableBlocks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
-	daemonNoGastown := NewStoreResolver(x.townRoot, map[string]beadsdk.Storage{"hq": x.hq, "oag": x.oag})
+	daemonNoGastown := NewStoreResolver(x.townRoot, map[string]IssueSource{"hq": x.hq, "oag": x.oag})
 	if reason := BlockReason(ctx, x.hq, "gt-sib", daemonNoGastown); !strings.Contains(reason, "gastown") {
 		t.Errorf("daemon resolver without the gastown store: reason = %q, want a block naming rig gastown", reason)
 	}
@@ -300,31 +229,31 @@ func TestBlockOf_NamesTheFailSafeHold(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	open := newXrigTown(t, beadsdk.StatusOpen)
+	open := newXrigTown(t, "open")
 	if b := BlockOf(ctx, open.hq, "gt-work", open.resolver(true)); b.Reason == "" || b.Held() || b.Cause != BlockOpen {
 		t.Errorf("open blocker: got %+v, want a reason that is not a fail-safe hold", b)
 	}
 
-	closed := newXrigTown(t, beadsdk.StatusClosed)
+	closed := newXrigTown(t, "closed")
 	if b := BlockOf(ctx, closed.hq, "gt-work", closed.resolver(true)); b != (Block{}) {
 		t.Errorf("closed blocker: got %+v, want no block", b)
 	}
 
-	dangling := newXrigTown(t, beadsdk.StatusClosed)
-	delete(dangling.oag.issues, "oag-x")
+	dangling := newXrigTown(t, "closed")
+	dangling.oag.forget("oag-x")
 	if b := BlockOf(ctx, dangling.hq, "gt-work", dangling.resolver(true)); b.Cause != BlockUnresolved || b.BlockerID != "oag-x" || !b.Held() {
 		t.Errorf("dangling edge: got %+v, want unresolved oag-x", b)
 	}
 
-	down := newXrigTown(t, beadsdk.StatusClosed)
+	down := newXrigTown(t, "closed")
 	down.oag.readErr = errors.New("dolt: query timeout")
 	if b := BlockOf(ctx, down.hq, "gt-work", down.resolver(true)); b.Cause != BlockUnreadable || b.BlockerID != "oag-x" || !b.Held() {
 		t.Errorf("rig store down: got %+v, want unreadable oag-x", b)
 	}
 
 	// The bead's own store failing names no blocker: there is none to name yet.
-	noHome := newXrigTown(t, beadsdk.StatusClosed)
-	gone := NewStoreResolver(noHome.townRoot, map[string]beadsdk.Storage{"hq": noHome.hq, "oag": noHome.oag})
+	noHome := newXrigTown(t, "closed")
+	gone := NewStoreResolver(noHome.townRoot, map[string]IssueSource{"hq": noHome.hq, "oag": noHome.oag})
 	if b := BlockOf(ctx, noHome.hq, "gt-sib", gone); b.Cause != BlockUnreadable || b.BlockerID != "" {
 		t.Errorf("home store unavailable: got %+v, want unreadable with no blocker id", b)
 	}
@@ -335,7 +264,7 @@ func TestBlockOf_NamesTheFailSafeHold(t *testing.T) {
 func TestStoreResolver_CachesFailedOpen(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 	opens := map[string]int{}
 	r := x.closeResolver(opens, "oag")
 
@@ -356,11 +285,11 @@ func TestStoreResolver_CachesFailedOpen(t *testing.T) {
 func TestFeedNextReadyIssue_HQBlocker(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"daemon", "close"} {
-		for _, status := range []beadsdk.Status{beadsdk.StatusOpen, beadsdk.StatusClosed} {
+		for _, status := range []string{"open", "closed"} {
 			kind, status := kind, status
-			t.Run(kind+"/"+string(status), func(t *testing.T) {
+			t.Run(kind+"/"+status, func(t *testing.T) {
 				t.Parallel()
-				x := newXrigTown(t, beadsdk.StatusClosed).withHQBlocker(status)
+				x := newXrigTown(t, "closed").withHQBlocker(status)
 				r := x.resolver(true)
 				if kind == "close" {
 					r = x.closeResolver(nil)
@@ -368,7 +297,7 @@ func TestFeedNextReadyIssue_HQBlocker(t *testing.T) {
 
 				slung, logged := x.feed(t, r)
 
-				if status == beadsdk.StatusOpen {
+				if status == "open" {
 					if strings.Contains(slung, "gt-work") {
 						t.Errorf("gt-work is blocked by open hq-blk; must not be slung, got %q", slung)
 					}
@@ -391,7 +320,7 @@ func TestFeedNextReadyIssue_HQBlocker(t *testing.T) {
 // the bead is held forever even after its blocker closes.
 func TestFeedNextReadyIssue_OpeningResolverReachesBlockerRig(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
 	slung, logged := x.feed(t, x.closeResolver(nil))
 
@@ -405,7 +334,7 @@ func TestFeedNextReadyIssue_OpeningResolverReachesBlockerRig(t *testing.T) {
 // so the bead is blocked.
 func TestIsIssueBlocked_CrossRigBlockerWithoutResolver(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
 	if !isIssueBlocked(context.Background(), x.gastown, "gt-work", nil) {
 		t.Error("without a resolver, gt-work's cross-rig blocker cannot be resolved and must block")
@@ -420,8 +349,8 @@ func TestIsIssueBlocked_CrossRigBlockerWithoutResolver(t *testing.T) {
 // rather than fed on a view that may have dropped one.
 func TestIsIssueBlocked_StoreWithoutRawRecordsBlocks(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
-	joinedOnly := &joinedOnlyStore{x.gastown}
+	x := newXrigTown(t, "closed")
+	joinedOnly := joinedOnlySource{x.gastown}
 
 	if !isIssueBlocked(context.Background(), joinedOnly, "gt-sib", nil) {
 		t.Error("a store without raw dependency records must fail safe (blocked)")
@@ -433,19 +362,13 @@ func TestIsIssueBlocked_StoreWithoutRawRecordsBlocks(t *testing.T) {
 // tracked bead, so it is an error instead.
 func TestTrackedIDs_StoreWithoutRawRecordsErrors(t *testing.T) {
 	t.Parallel()
-	x := newXrigTown(t, beadsdk.StatusClosed)
+	x := newXrigTown(t, "closed")
 
-	if _, err := trackedIDs(context.Background(), &joinedOnlyStore{x.hq}, "hq-cv1"); err == nil {
+	if _, err := trackedIDs(joinedOnlySource{x.hq}, "hq-cv1"); err == nil {
 		t.Error("trackedIDs on a store without raw dependency records must return an error")
 	}
-	ids, err := trackedIDs(context.Background(), x.hq, "hq-cv1")
+	ids, err := trackedIDs(x.hq, "hq-cv1")
 	if err != nil || len(ids) != 2 {
 		t.Errorf("trackedIDs = %v, %v; want gt-work and gt-sib", ids, err)
 	}
-}
-
-// joinedOnlyStore hides GetDependencyRecords, which beadsdk.Storage does not
-// declare, leaving only the joined view.
-type joinedOnlyStore struct {
-	beadsdk.Storage
 }

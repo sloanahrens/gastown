@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
@@ -77,24 +76,24 @@ type blockCheck func(issueID string) Block
 // blocked (gt-j02xy). A town store that will not open is an error: the scan
 // fails rather than hold every bead in silence.
 func openStrandedBlockCheck(ctx context.Context, townRoot string) (blockCheck, func(), error) {
-	return openStrandedBlockCheckWith(ctx, townRoot, func(beadsDir string) (beadsdk.Storage, error) {
-		return beads.OpenStoreFromConfig(ctx, beadsDir)
+	return openStrandedBlockCheckWith(ctx, townRoot, func(beadsDir string) (IssueSource, error) {
+		return ClientSource(beads.NewPinned(beadsDir)), nil
 	})
 }
 
 // openStrandedBlockCheckWith is openStrandedBlockCheck with the store opener
-// supplied: openStore opens the beads store in a .beads directory.
-func openStrandedBlockCheckWith(ctx context.Context, townRoot string, openStore func(beadsDir string) (beadsdk.Storage, error)) (blockCheck, func(), error) {
-	townStore, err := openStore(filepath.Join(townRoot, ".beads"))
+// supplied: openSource opens the issue source in a .beads directory.
+func openStrandedBlockCheckWith(ctx context.Context, townRoot string, openSource func(beadsDir string) (IssueSource, error)) (blockCheck, func(), error) {
+	townStore, err := openSource(filepath.Join(townRoot, ".beads"))
 	if err != nil {
 		return nil, nil, fmt.Errorf("town beads store unavailable: %w", err)
 	}
-	resolver := NewOpeningStoreResolver(townRoot, func(name string) (beadsdk.Storage, error) {
+	resolver := NewOpeningStoreResolver(townRoot, func(name string) (IssueSource, error) {
 		beadsDir := doltserver.FindRigBeadsDir(townRoot, name)
 		if beadsDir == "" {
 			return nil, fmt.Errorf("no beads directory for rig %s", name)
 		}
-		return openStore(beadsDir)
+		return openSource(beadsDir)
 	})
 	check := func(issueID string) Block {
 		return BlockOf(ctx, townStore, issueID, resolver)

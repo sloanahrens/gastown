@@ -2,10 +2,11 @@ package convoy
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"unicode"
 
-	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -36,7 +37,7 @@ var dispatchHoldLabels = []string{"needs-pro", "needs-mayor-review", "gt:needs-h
 // from bd ready": a convoy that fed one would dispatch work the tracker says is
 // not ready. The category test itself is not exported by the SDK, and neither
 // is a pinned constant, hence the literal.
-var dispatchHoldStatuses = []beadsdk.Status{beadsdk.StatusDeferred, "pinned"}
+var dispatchHoldStatuses = []string{"deferred", "pinned"}
 
 // dispatchHoldProse are the keep-off decisions recorded in a bead's prose,
 // listed as they are written so the reason can quote them back.
@@ -54,8 +55,8 @@ var dispatchHoldRelease = "HOLD RELEASED"
 //
 // This is the rule every automatic dispatcher shares. The convoy feeders apply
 // FeedHold, which also reports a merge rejection on record.
-func DispatchHoldReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
-	return readHold(ctx, store, issueID, resolver).Reason
+func DispatchHoldReason(ctx context.Context, source IssueSource, issueID string, resolver *StoreResolver) string {
+	return readHold(source, issueID, resolver).Reason
 }
 
 // Hold is a convoy feeder's verdict on one bead's record. The zero value is
@@ -82,16 +83,16 @@ type Hold struct {
 // no store to read from at all — a record whose rig has no store open
 // included, which the town store would otherwise answer "no record" for
 // (gt-2ppfg).
-func FeedHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Hold {
-	return readHold(ctx, store, issueID, resolver)
+func FeedHold(ctx context.Context, source IssueSource, issueID string, resolver *StoreResolver) Hold {
+	return readHold(source, issueID, resolver)
 }
 
 // readHold applies the hold rule to issueID's record and notes whether it
 // carries a merge rejection.
-func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Hold {
-	// store is the town store the caller already holds; the resolver redirects
+func readHold(source IssueSource, issueID string, resolver *StoreResolver) Hold {
+	// source is the town store the caller already holds; the resolver redirects
 	// a rig bead to its own store, which is where its record lives.
-	owner := store
+	owner := source
 	if resolver != nil {
 		resolved, gap := resolver.owningStoreOrGap(issueID)
 		if gap {
@@ -113,8 +114,8 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 		return Hold{}
 	}
 
-	issue, err := owner.GetIssue(ctx, issueID)
-	if err != nil {
+	issue, err := owner.Show(issueID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return Hold{Reason: "record unreadable (" + util.FirstLine(err.Error()) + ")", Unreadable: true}
 	}
 	if issue == nil {
@@ -129,16 +130,16 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 		return Hold{Reason: reason, MergeRejection: rejected}
 	}
 
-	comments, err := owner.GetIssueComments(ctx, issueID)
+	comments, err := owner.Comments(issueID)
 	if err != nil {
 		return Hold{Reason: "comments unreadable (" + util.FirstLine(err.Error()) + ")", Unreadable: true}
 	}
 	return Hold{Reason: dispatchHoldInComments(comments), MergeRejection: rejected}
 }
 
-// dispatchHoldInFields applies the hold rule to the fields GetIssue returns.
-func dispatchHoldInFields(issue *beadsdk.Issue) string {
-	return DispatchHoldFields(string(issue.Status), issue.Labels, issue.Assignee, issue.Design, issue.Notes)
+// dispatchHoldInFields applies the hold rule to the fields Show returns.
+func dispatchHoldInFields(issue *beads.Issue) string {
+	return DispatchHoldFields(issue.Status, issue.Labels, issue.Assignee, issue.Design, issue.Notes)
 }
 
 // DispatchHoldFields reports the hold a bead's own fields assert, or "" when
@@ -153,7 +154,7 @@ func dispatchHoldInFields(issue *beadsdk.Issue) string {
 // caller needs no SDK type; dispatchHoldInFields does the one conversion.
 func DispatchHoldFields(status string, labels []string, assignee, design, notes string) string {
 	for _, held := range dispatchHoldStatuses {
-		if status == string(held) {
+		if status == held {
 			return "status " + status
 		}
 	}
@@ -183,12 +184,9 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 // oldest first, and the newest decision is the live one: a later release lifts
 // an earlier hold, which is what makes a comment-recorded hold releasable
 // (gt-tq6l).
-func dispatchHoldInComments(comments []*beadsdk.Comment) string {
+func dispatchHoldInComments(comments []beads.Comment) string {
 	held := ""
 	for _, comment := range comments {
-		if comment == nil {
-			continue
-		}
 		if decisionOnLine(comment.Text, []string{dispatchHoldRelease}) != "" {
 			held = ""
 			continue

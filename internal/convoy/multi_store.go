@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -18,7 +17,7 @@ import (
 // cross-database dependencies. See GH #2624.
 type StoreResolver struct {
 	// stores maps store names ("hq", "dashboard", etc.) to beads stores.
-	stores map[string]beadsdk.Storage
+	stores map[string]IssueSource
 
 	// townRoot is the path to the town root, used for prefix → rig name lookup.
 	townRoot string
@@ -28,10 +27,10 @@ type StoreResolver struct {
 	// which opens the town store and then resolves tracked issues across rigs —
 	// reaches a rig's beads this way without paying for every rig's connection
 	// on each invocation (gt-tq6l).
-	open func(name string) (beadsdk.Storage, error)
+	open func(name string) (IssueSource, error)
 
 	// opened names the stores open produced, so Close can release them.
-	opened map[string]beadsdk.Storage
+	opened map[string]IssueSource
 
 	// failed remembers a store open could not produce, with its error, for
 	// the life of this resolver: a rig that is down is tried once per gt
@@ -43,7 +42,7 @@ type StoreResolver struct {
 
 // NewStoreResolver creates a resolver from the daemon's store map.
 // If stores is nil or empty, all resolution methods fall through gracefully.
-func NewStoreResolver(townRoot string, stores map[string]beadsdk.Storage) *StoreResolver {
+func NewStoreResolver(townRoot string, stores map[string]IssueSource) *StoreResolver {
 	return &StoreResolver{
 		stores:   stores,
 		townRoot: townRoot,
@@ -53,10 +52,10 @@ func NewStoreResolver(townRoot string, stores map[string]beadsdk.Storage) *Store
 // NewOpeningStoreResolver creates a resolver that opens a name's store the
 // first time an issue routing to it is resolved; open receives a store name
 // ("hq" or a rig name) and its stores are released by Close (gt-tq6l).
-func NewOpeningStoreResolver(townRoot string, open func(name string) (beadsdk.Storage, error)) *StoreResolver {
+func NewOpeningStoreResolver(townRoot string, open func(name string) (IssueSource, error)) *StoreResolver {
 	return &StoreResolver{
-		stores:   make(map[string]beadsdk.Storage),
-		opened:   make(map[string]beadsdk.Storage),
+		stores:   make(map[string]IssueSource),
+		opened:   make(map[string]IssueSource),
 		failed:   make(map[string]error),
 		townRoot: townRoot,
 		open:     open,
@@ -78,13 +77,13 @@ func (r *StoreResolver) Close() error {
 		}
 		delete(r.stores, name)
 	}
-	r.opened = make(map[string]beadsdk.Storage)
+	r.opened = make(map[string]IssueSource)
 	r.failed = make(map[string]error)
 	return first
 }
 
 // storeNamed returns the store named name, or nil.
-func (r *StoreResolver) storeNamed(name string) beadsdk.Storage {
+func (r *StoreResolver) storeNamed(name string) IssueSource {
 	if r == nil || name == "" {
 		return nil
 	}
@@ -95,7 +94,7 @@ func (r *StoreResolver) storeNamed(name string) beadsdk.Storage {
 
 // owningStore returns the store holding id, opening it on demand when this
 // resolver was built to, or nil when no store for id is reachable.
-func (r *StoreResolver) owningStore(id string) beadsdk.Storage {
+func (r *StoreResolver) owningStore(id string) IssueSource {
 	store, _ := r.owningStoreOrGap(id)
 	return store
 }
@@ -107,7 +106,7 @@ func (r *StoreResolver) owningStore(id string) beadsdk.Storage {
 // bead whose record is in the rig; the gap is the fact that caller acts on
 // instead (gt-2ppfg). hq is never a gap — the caller's own store holds its
 // record — and neither is an id whose prefix routes nowhere.
-func (r *StoreResolver) owningStoreOrGap(id string) (beadsdk.Storage, bool) {
+func (r *StoreResolver) owningStoreOrGap(id string) (IssueSource, bool) {
 	if r == nil {
 		return nil, false
 	}
@@ -123,7 +122,7 @@ func (r *StoreResolver) owningStoreOrGap(id string) (beadsdk.Storage, bool) {
 // on demand when this resolver was built to, or the reason it has none. hq is
 // never opened here: a caller holding a resolver without hq holds the town
 // store itself.
-func (r *StoreResolver) storeByName(name string) (beadsdk.Storage, error) {
+func (r *StoreResolver) storeByName(name string) (IssueSource, error) {
 	if r == nil {
 		return nil, fmt.Errorf("no store resolver")
 	}
@@ -164,8 +163,8 @@ func (r *StoreResolver) storeByName(name string) (beadsdk.Storage, error) {
 // issue in the appropriate store based on its prefix, opening that store when
 // the resolver was built to. Issues found in any store are returned in the
 // result map. Issues not found in any store are omitted.
-func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[string]*beadsdk.Issue {
-	result := make(map[string]*beadsdk.Issue, len(ids))
+func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[string]*beads.Issue {
+	result := make(map[string]*beads.Issue, len(ids))
 	if len(ids) == 0 {
 		return result
 	}
@@ -186,13 +185,13 @@ func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[str
 			continue
 		}
 
-		issues, err := store.GetIssuesByIDs(ctx, storeIDs)
+		issues, err := store.ShowMultiple(storeIDs)
 		if err != nil {
 			continue
 		}
-		for _, iss := range issues {
+		for id, iss := range issues {
 			if iss != nil {
-				result[iss.ID] = iss
+				result[id] = iss
 			}
 		}
 	}
