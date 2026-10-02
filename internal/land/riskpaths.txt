@@ -1,0 +1,37 @@
+# Paths whose landings get gt:overseer-review-wanted (label only; never holds).
+# Read from the target's base commit. One glob per line; dir/** = subtree.
+internal/daemon/**
+internal/land/**
+internal/landworker/**
+internal/landings/**
+internal/git/**
+internal/doltserver/**
+internal/doltbackup/**
+internal/doltpause/**
+internal/beads/beads.go
+internal/config/**
+internal/townconfig/**
+internal/guard/**
+internal/cmd/tap_guard*.go
+scripts/guards/**
+.githooks/**
+internal/slot/**
+internal/cmd/slot*.go
+internal/sling/**
+internal/cmd/sling*.go
+internal/cmd/done*.go
+internal/supervisor/**
+internal/liveness/**
+internal/intent/**
+internal/reaper/**
+internal/estop/**
+scripts/install-gt.sh
+scripts/lib/install-gt-lib.sh
+scripts/install-binary.sh
+scripts/uninstall-gt.sh
+scripts/post-land-shell.sh
+scripts/tier-sweep.sh
+Makefile
+.om.json
+.golangci.yml
+go.mod

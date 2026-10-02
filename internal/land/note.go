@@ -352,6 +352,12 @@ type LandingRecord struct {
 	OMScore      float64   `json:"om_score"`
 	Route        string    `json:"route"`
 	LandedAt     time.Time `json:"landed_at"`
+	// RiskPaths are the changed paths this landing touched that matched
+	// internal/land/riskpaths.txt at the base commit. They are the record the
+	// attention queue's risk-path item reads, and the reason the work bead
+	// carries gt:overseer-review-wanted (gt-vsct7.4). Empty on a landing that
+	// touched nothing on the list.
+	RiskPaths []string `json:"risk_paths,omitempty"`
 }
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.

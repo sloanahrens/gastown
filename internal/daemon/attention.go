@@ -76,6 +76,11 @@ const (
 	// records the direct-push collector searches for the tip it saw. The tip
 	// moved recently by definition, so its record is at the end of the file.
 	attentionLandingRecords = 50
+	// attentionRiskPathWindow is how long a landing that touched a risk path
+	// stays an item. A human is asked to look; a week is long enough to act
+	// and short enough that the queue does not become a history file
+	// (gt-vsct7.4).
+	attentionRiskPathWindow = 7 * 24 * time.Hour
 )
 
 // landingState is one rig's landing state as the collectors read it
@@ -241,6 +246,12 @@ type attentionSources struct {
 	// Already loaded and written back by writeAttention.
 	tips *directPushTips
 
+	// riskLandings reads a rig's landing records in a window; riskNotes reads
+	// one work bead's notes. Together they are the risk-path collector's two
+	// outside reads (gt-vsct7.4).
+	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
+	riskNotes    func(ctx context.Context, rig, id string) (string, error)
+
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
 	reworkNotes map[string]reworkNote
@@ -372,6 +383,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
 		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
+		{kind: attention.KindRiskPath, collect: s.collectRiskPaths},
 	}
 }
 
@@ -450,7 +462,29 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.landedCommit = d.attentionLandedCommit
 	s.commitInfo = d.attentionCommitInfo
+	s.riskLandings = d.attentionRiskLandings
+	s.riskNotes = func(ctx context.Context, rig, id string) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		is, err := d.rigWorkBeads(rig).Show(id)
+		if err != nil {
+			return "", err
+		}
+		return is.Notes, nil
+	}
 	return s
+}
+
+// attentionRiskLandings reads the rig's landing records landed at or after
+// since: the risk-path collector's window over the landings file the landing
+// worker writes.
+func (d *Daemon) attentionRiskLandings(rig string, since time.Time) ([]land.LandingRecord, error) {
+	f, err := land.RigLandingsFile(d.config.TownRoot, rig)
+	if err != nil {
+		return nil, err
+	}
+	return f.Since(since)
 }
 
 // attentionReadyToLand counts the rig's actionable gt:ready-to-land beads: the
@@ -1006,4 +1040,75 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		})
 	}
 	return out, nil
+}
+
+// collectRiskPaths raises risk:<bead>:<head12> for each landing in the last
+// attentionRiskPathWindow whose record names a risk path, unless the work
+// bead's notes carry an "OVERSEER REVIEW <that head> PASS|FAIL" line
+// (land.HasOverseerReviewNote). It is the label land.Land writes as
+// gt:overseer-review-wanted made visible as something to do: a landed bead is
+// closed, and the review it asks for comes after, so this item outlives the
+// close.
+//
+// Both verdicts clear the item: a FAIL says a human looked and is filing the
+// follow-up, which is not the queue's to hold (gt-vsct7.4).
+//
+// The notes read is cached per rig and bead for the tick, so a bead landed
+// twice in the window costs one bd show. The cache lives for the one collector
+// call: a review note written between ticks must be seen on the next, so
+// nothing carries over.
+//
+// Like the other landing collectors it reads only the rigs whose landing
+// worker is on (attentionLandingRigs): a town with landings disabled has no
+// landing picture to report, and this item is part of that picture.
+func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	notesFor := map[string]string{}
+	since := s.now.Add(-attentionRiskPathWindow)
+	for _, rig := range s.landingRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		recs, err := s.riskLandings(rig, since)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		for _, rec := range recs {
+			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
+				continue
+			}
+			cacheKey := rig + "\x00" + rec.BeadID
+			notes, ok := notesFor[cacheKey]
+			if !ok {
+				notes, err = s.riskNotes(ctx, rig, rec.BeadID)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", rec.BeadID, err)
+				}
+				notesFor[cacheKey] = notes
+			}
+			if land.HasOverseerReviewNote(notes, rec.Head) {
+				continue
+			}
+			out = append(out, attention.Item{
+				Key:      "risk:" + rec.BeadID + ":" + sha12(rec.Head),
+				Kind:     attention.KindRiskPath,
+				Severity: attention.SeverityHigh,
+				Rig:      rig,
+				Bead:     rec.BeadID,
+				SHA:      rec.Head,
+				Summary:  fmt.Sprintf("%s landed %s touching %s; overseer review wanted", rec.BeadID, sha12(rec.Head), riskPathList(rec.RiskPaths)),
+			})
+		}
+	}
+	return out, nil
+}
+
+// riskPathList is a landing's risk paths as one line, capped so a landing that
+// swept a whole directory does not fill the queue row.
+func riskPathList(paths []string) string {
+	const shown = 3
+	if len(paths) <= shown {
+		return strings.Join(paths, " ")
+	}
+	return fmt.Sprintf("%s +%d more", strings.Join(paths[:shown], " "), len(paths)-shown)
 }

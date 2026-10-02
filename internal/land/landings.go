@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -88,6 +89,19 @@ func (f *LandingsFile) Recent(n int) ([]LandingRecord, error) {
 		recs = append(recs, rec)
 		if len(recs) > n {
 			recs = recs[1:]
+		}
+		return false
+	})
+	return recs, err
+}
+
+// Since returns the records landed at or after t, oldest first. The
+// attention queue's risk-path collector reads a window this way (gt-vsct7.4).
+func (f *LandingsFile) Since(t time.Time) ([]LandingRecord, error) {
+	var recs []LandingRecord
+	_, _, err := f.latest(func(rec LandingRecord) bool {
+		if !rec.LandedAt.Before(t) {
+			recs = append(recs, rec)
 		}
 		return false
 	})

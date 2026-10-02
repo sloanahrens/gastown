@@ -19,7 +19,8 @@ type Kind string
 // The item kinds. A slice may produce only some of them; the set is fixed
 // here so a reader can name any of them.
 const (
-	// KindRiskPath: a landing touched a risk path (scripts/, plugins/, hooks).
+	// KindRiskPath: a landing touched a path on the risk list
+	// (internal/land/riskpaths.txt) and wants a post-landing review.
 	KindRiskPath Kind = "risk-path"
 	// KindRedMain: the tier sweep found main red.
 	KindRedMain Kind = "red-main"
@@ -74,7 +75,7 @@ const (
 // the same condition re-observed keeps its key, and an ack is found by it.
 type Item struct {
 	// Key identifies the condition, for example red-main:gastown:internal/cmd,
-	// risk:gt-abc:6cf8b456, esc:hq-123 or stall:gastown/opal.
+	// risk:gt-abc:6cf8b456abcd, esc:hq-123 or stall:gastown/opal.
 	Key string `json:"key"`
 	// Kind is what the item is about.
 	Kind Kind `json:"kind"`

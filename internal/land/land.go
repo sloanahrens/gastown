@@ -37,6 +37,11 @@ type Repo interface {
 	TreesIdentical(a, b string) (bool, error)
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)
+	// DiffNameOnly is the paths a change touches, and ShowFileAtRev reads one
+	// file at a revision. RiskPaths uses both to label a landing that touched
+	// a risk path without holding it (gt-vsct7.4).
+	DiffNameOnly(base, head string) ([]string, error)
+	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
@@ -116,6 +121,10 @@ type Result struct {
 	Base    string
 	Gate    GateResult
 	Verdict Verdict
+	// RiskPaths are the changed paths the landing touched that matched
+	// RiskPathsFile at Base. They label the work bead and are written to the
+	// landing record; they never reject or delay the landing (gt-vsct7.4).
+	RiskPaths []string
 	// Rerun and Flaky are set when the gate was red and the flake policy's
 	// rerun of the failed packages passed.
 	Rerun *GateResult
@@ -311,6 +320,14 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			return Result{}, l.reject(issue, w, rej, nil)
 		}
 	}
+	// Risk paths are the label this landing carries, never a hold: a read
+	// that fails leaves the landing unlabelled rather than stopping it, so a
+	// broken globs file can never wedge the queue (gt-vsct7.4).
+	riskPaths, err := RiskPaths(g, base, w.Head)
+	if err != nil {
+		l.logf("%s: reading risk paths: %v; landing unlabelled", w.BeadID, err)
+		riskPaths = nil
+	}
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
 	} else if same {
@@ -355,7 +372,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, "gate")
 	gateRes := l.Gate.Run(gateCtx, dir)
 	gateDone()
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes}
+	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
 		if step.Name == "lint" {
@@ -489,7 +506,8 @@ func (l *Lander) repairRecord(g Repo, w Work) (*Result, error) {
 		return nil, nil
 	}
 	l.logf("%s: already landed as %s; finishing its record", w.BeadID, shortSHA(rec.LandedCommit))
-	res := &Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID, Base: rec.Base, Verdict: Verdict{Verdict: rec.OMVerdict, Score: rec.OMScore}}
+	res := &Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID, Base: rec.Base,
+		Verdict: Verdict{Verdict: rec.OMVerdict, Score: rec.OMScore}, RiskPaths: rec.RiskPaths}
 	if err := l.recordBead(w, rec); err != nil {
 		return res, &RecordError{Result: *res, Err: err}
 	}
@@ -802,7 +820,7 @@ func (l *Lander) record(w Work, res Result) error {
 		BeadID: w.BeadID, Rig: w.Rig, Branch: w.Branch, Head: w.Head, Target: w.Target, Base: res.Base,
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
-		Route: route, LandedAt: l.now().UTC(),
+		Route: route, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
 	}
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)
@@ -811,7 +829,8 @@ func (l *Lander) record(w Work, res Result) error {
 }
 
 // recordBead writes the landing onto the work bead: the LANDING RECORD block,
-// the ready label off, and the close carrying landed_commit and patch_id. It
+// the ready label off, the overseer-review-wanted label on when the landing
+// touched a risk path, and the close carrying landed_commit and patch_id. It
 // is idempotent, so a repair after a partial write finishes the same record.
 func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 	issue, err := l.Beads.Show(w.BeadID)
@@ -823,9 +842,18 @@ func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 			return fmt.Errorf("landing record note on %s: %w", w.BeadID, err)
 		}
 	}
+	// The label goes on in the same update that takes the ready label off: a
+	// risky landing is one state change, not two a crash can split.
+	update := beads.UpdateOptions{}
 	if beads.HasLabel(issue, LabelReadyToLand) {
-		if err := l.Beads.Update(w.BeadID, beads.UpdateOptions{RemoveLabels: []string{LabelReadyToLand}}); err != nil {
-			return fmt.Errorf("removing %s from %s: %w", LabelReadyToLand, w.BeadID, err)
+		update.RemoveLabels = []string{LabelReadyToLand}
+	}
+	if len(rec.RiskPaths) > 0 && !beads.HasLabel(issue, LabelOverseerReviewWanted) {
+		update.AddLabels = []string{LabelOverseerReviewWanted}
+	}
+	if len(update.RemoveLabels) > 0 || len(update.AddLabels) > 0 {
+		if err := l.Beads.Update(w.BeadID, update); err != nil {
+			return fmt.Errorf("updating %s after landing: %w", w.BeadID, err)
 		}
 	}
 	if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {

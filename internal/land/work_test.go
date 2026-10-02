@@ -127,3 +127,32 @@ func TestOverseerReviewedNeedsTheLabelAndTheHead(t *testing.T) {
 		}
 	}
 }
+
+// HasOverseerReviewNote answers only for a review line naming exactly head:
+// the om-bypass marker (OVERSEER REVIEWED), a short sha, another head, and a
+// verdict the line does not carry are all not it (gt-vsct7.4).
+func TestHasOverseerReviewNote(t *testing.T) {
+	t.Parallel()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	other := "0123456789abcdef0123456789abcdef01234568"
+	for _, tc := range []struct {
+		name  string
+		notes string
+		want  bool
+	}{
+		{"PASS of this head", "x\n" + OverseerReviewMarker + " " + head + " PASS\n", true},
+		{"FAIL of this head", OverseerReviewMarker + " " + head + " FAIL", true},
+		{"the om-bypass marker is not a review", OverseerReviewedMarker + " " + head, false},
+		{"review of another head", OverseerReviewMarker + " " + other + " PASS", false},
+		{"short sha", OverseerReviewMarker + " " + head[:8] + " PASS", false},
+		{"verdict extended by a word", OverseerReviewMarker + " " + head + " PASSED", false},
+		{"no note", "LANDING RECORD\nlanded_commit: abc", false},
+	} {
+		if got := HasOverseerReviewNote(tc.notes, head); got != tc.want {
+			t.Errorf("%s: HasOverseerReviewNote = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if HasOverseerReviewNote(OverseerReviewMarker+" "+head+" PASS", "") {
+		t.Error("an empty head must not be answered")
+	}
+}

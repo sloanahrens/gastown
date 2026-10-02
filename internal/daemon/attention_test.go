@@ -71,6 +71,8 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		landedCommit: func(string, string) (bool, error) { return false, nil },
 		commitInfo:   func(string, string) (string, string) { return "", "" },
 		tips:         &directPushTips{},
+		riskLandings: func(string, time.Time) ([]land.LandingRecord, error) { return nil, nil },
+		riskNotes:    func(context.Context, string, string) (string, error) { return "", nil },
 
 		reworkNotes: map[string]reworkNote{},
 	}
@@ -963,6 +965,110 @@ func TestAttentionDirectPush(t *testing.T) {
 	f.src.now = now.Add(3*time.Minute + attentionDirectPushHold)
 	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
 		t.Fatalf("items = %+v, want the item expired after the hold", items)
+	}
+}
+
+// gt-vsct7.4: a landing that touched a risk path raises risk:<bead>:<head12>
+// until a review note names that head. Only an "OVERSEER REVIEW <head>
+// PASS|FAIL" line clears it: the om-bypass marker "OVERSEER REVIEWED" and a
+// review of another head both leave it holding.
+func TestAttentionRiskPath(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	head := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-abc", Head: head, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			// A landing that touched nothing on the list is not an item.
+			{BeadID: "gt-doc", Head: other, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	notes := ""
+	f.src.riskNotes = func(context.Context, string, string) (string, error) { return notes, nil }
+
+	items := f.collect(t, f.src.collectRiskPaths)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one risk-path item", items)
+	}
+	got := items[0]
+	if got.Key != "risk:gt-abc:"+head[:12] || got.Kind != attention.KindRiskPath ||
+		got.Rig != attentionRig || got.Bead != "gt-abc" || got.SHA != head || got.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want risk:gt-abc:<head12> with the full head in SHA", got)
+	}
+	if !strings.Contains(got.Summary, "internal/daemon/attention.go") {
+		t.Errorf("summary = %q, want the touched path", got.Summary)
+	}
+
+	// The om-bypass marker is not a review of this head.
+	notes = land.OverseerReviewedMarker + " " + head
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
+		t.Errorf("items = %+v, want the item held for %q", items, land.OverseerReviewedMarker)
+	}
+	// A review of another head does not clear this one.
+	notes = land.OverseerReviewMarker + " " + other + " PASS"
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
+		t.Errorf("items = %+v, want the item held for a review of another head", items)
+	}
+	// A FAIL review of this head clears it: the overseer files the follow-up.
+	notes = land.OverseerReviewMarker + " " + head + " FAIL"
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
+		t.Errorf("items = %+v, want a FAIL review of this head to clear it", items)
+	}
+	// So does a PASS.
+	notes = land.OverseerReviewMarker + " " + head + " PASS"
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
+		t.Errorf("items = %+v, want a PASS review of this head to clear it", items)
+	}
+}
+
+// The collector is wired into the tick, and two records naming one bead cost
+// one bd show.
+func TestAttentionRiskPathTickAndOneReadPerBead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-abc", Head: strings.Repeat("a", 40), RiskPaths: []string{"a"}, LandedAt: now},
+			{BeadID: "gt-abc", Head: strings.Repeat("c", 40), RiskPaths: []string{"b"}, LandedAt: now},
+		}, nil
+	}
+	reads := 0
+	f.src.riskNotes = func(context.Context, string, string) (string, error) { reads++; return "", nil }
+
+	st := f.tick(t, now)
+	var risk []attention.Item
+	for _, it := range st.Items {
+		if it.Kind == attention.KindRiskPath {
+			risk = append(risk, it)
+		}
+	}
+	if len(risk) != 2 {
+		t.Fatalf("risk items = %+v, want one per landing head", risk)
+	}
+	if reads != 1 {
+		t.Errorf("bd shows = %d, want one per bead per tick", reads)
+	}
+}
+
+// A failed landings read emits no items and keeps the previous tick's.
+func TestAttentionRiskPathKeepsItemsWhenTheReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return nil, errors.New("landings unreadable")
+	}
+	prev := attention.State{Updated: now, Items: []attention.Item{{
+		Key: "risk:gt-abc:aaaaaaaaaaaa", Kind: attention.KindRiskPath,
+		Severity: attention.SeverityHigh, Rig: attentionRig, Summary: "risky landing",
+	}}}
+	collectors := []attentionCollector{{kind: attention.KindRiskPath, collect: f.src.collectRiskPaths}}
+	observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+	if len(observed) != 1 || observed[0].Key != "risk:gt-abc:aaaaaaaaaaaa" {
+		t.Fatalf("observed = %+v, want the previous item kept", observed)
 	}
 }
 
