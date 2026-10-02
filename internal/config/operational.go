@@ -220,6 +220,17 @@ func (d *DoltThresholds) LogLevelSetting() (string, bool) {
 	return *d.LogLevel, true
 }
 
+// PasswordSetting returns the configured Dolt SQL password value and whether
+// it is set. The value is a ${VAR} reference into settings/daemon.env, or a
+// literal; ResolveDoltPassword turns it into the password. An empty setting is
+// unset: the server takes no password.
+func (d *DoltThresholds) PasswordSetting() (string, bool) {
+	if d == nil || d.Password == nil || *d.Password == "" {
+		return "", false
+	}
+	return *d.Password, true
+}
+
 // GetSessionConfig returns the session thresholds, never nil.
 func (c *OperationalConfig) GetSessionConfig() *SessionThresholds {
 	if c != nil && c.Session != nil {

@@ -13,6 +13,11 @@ import (
 //
 //	"env": {"ANTHROPIC_AUTH_TOKEN": "${DEEPSEEK_API_KEY}"}
 //
+// operational.dolt.password follows the same rule (gt-y3pgh.2.4): it holds
+// the Dolt SQL password as a reference ("${GT_DOLT_PASSWORD}"), resolved by
+// ResolveDoltPassword from daemon.env with the process environment as the
+// fallback.
+//
 // The braced reference is the one form the strict decoder already reads (a
 // plain string), so no schema change is needed to use it. At spawn a
 // reference to a daemon.env name is not expanded into the startup command:
@@ -42,19 +47,33 @@ func (s *TownSettings) RefusesLiteralSecrets() bool {
 	return s != nil && s.Secrets != nil && s.Secrets.RefuseLiterals
 }
 
-// LiteralSecret names one agent env value in settings/config.json that holds
-// a token in plain text. It carries the location only, never the value, so
-// it can be printed, logged and put in an error.
+// LiteralSecret names one settings/config.json value that holds a token in
+// plain text. It carries the location only, never the value, so it can be
+// printed, logged and put in an error.
 type LiteralSecret struct {
+	// Agent and Key locate an agents.<agent>.env.<key> value.
 	Agent string
 	Key   string
+	// KeyPath is the value's dotted key path when it is not in an agent env
+	// block, empty otherwise. Only the Dolt password uses it today:
+	// operational.dolt.password (gt-y3pgh.2.4).
+	KeyPath string
 }
 
-// Path is the value's dotted key path in settings/config.json.
-func (s LiteralSecret) Path() string { return "agents." + s.Agent + ".env." + s.Key }
+// doltPasswordPath is the settings/config.json key path of
+// operational.dolt.password.
+const doltPasswordPath = "operational.dolt.password"
 
-// FindLiteralSecrets lists the agent env values in s that look like tokens,
-// sorted by path. A nil s has none.
+// Path is the value's dotted key path in settings/config.json.
+func (s LiteralSecret) Path() string {
+	if s.KeyPath != "" {
+		return s.KeyPath
+	}
+	return "agents." + s.Agent + ".env." + s.Key
+}
+
+// FindLiteralSecrets lists the values in s that look like tokens, sorted by
+// path: every agent env value, and the Dolt password. A nil s has none.
 func FindLiteralSecrets(s *TownSettings) []LiteralSecret {
 	if s == nil {
 		return nil
@@ -68,6 +87,11 @@ func FindLiteralSecrets(s *TownSettings) []LiteralSecret {
 			if LooksLikeSecret(k, v) {
 				out = append(out, LiteralSecret{Agent: agent, Key: k})
 			}
+		}
+	}
+	if s.Operational != nil && s.Operational.Dolt != nil && s.Operational.Dolt.Password != nil {
+		if LooksLikeSecret("password", *s.Operational.Dolt.Password) {
+			out = append(out, LiteralSecret{KeyPath: doltPasswordPath})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path() < out[j].Path() })

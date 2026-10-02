@@ -1012,9 +1012,7 @@ func (m *DoltServerManager) startLocked() error {
 	// use --config instead. This prevents CLOSE_WAIT accumulation that occurs
 	// when Dolt uses its 8-hour default read/write timeouts. (gt-ch5)
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
-	env := m.environ()
-	lookupEnv := func(key string) (string, bool) { return lookupEnvIn(env, key) }
-	if err := writeDaemonDoltConfig(m.config, configPath, doltserver.DefaultConfigWithEnv(m.townRoot, lookupEnv)); err != nil {
+	if err := writeDaemonDoltConfig(m.config, configPath, doltserver.DefaultConfig(m.townRoot)); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 

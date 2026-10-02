@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-// patrolCheck is a DoltServerPatrolCheck with an empty environment whose
-// dial reaches the Dolt server only when up is true.
+// patrolCheck is a DoltServerPatrolCheck whose dial reaches the Dolt server
+// only when up is true.
 func patrolCheck(t *testing.T, up bool) *DoltServerPatrolCheck {
 	t.Helper()
 	c := NewDoltServerPatrolCheck()
-	c.lookupEnv = func(string) (string, bool) { return "", false }
 	c.dial = func(addr string) error {
 		if !strings.HasSuffix(addr, ":3307") {
 			t.Errorf("dialed %q, want the town's port 3307", addr)

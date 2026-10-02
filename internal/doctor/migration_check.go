@@ -260,9 +260,6 @@ func loadRigNames(rigsPath string) map[string]struct{} {
 type DoltServerReachableCheck struct {
 	BaseCheck
 
-	// lookupEnv reads GT_DOLT_PASSWORD, the one variable the server config
-	// still honors; nil is the process environment (gt-y3pgh.2.3).
-	lookupEnv func(key string) (string, bool)
 	// dial reports whether a TCP connection to addr succeeds; nil dials.
 	dial func(addr string) error
 	// verify reports which expected databases the server at cfg serves;
@@ -329,7 +326,7 @@ func (c *DoltServerReachableCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			details = append(details, fmt.Sprintf("Server %s unreachable (rigs: %s)", addr, strings.Join(rigNames, ", ")))
 		} else {
-			cfg := doltserver.DefaultConfigWithEnv(ctx.TownRoot, c.lookupEnv)
+			cfg := doltserver.DefaultConfig(ctx.TownRoot)
 			cfg.Host = hostForAddr(addr)
 			cfg.Port = portForAddr(addr)
 			var expected []string
@@ -497,7 +494,7 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 	if port == 0 {
 		// The town's endpoint, the port Start/Stop/Status use (gt-y3pgh.3).
 		// A town without one has nothing to probe.
-		port = doltserver.DefaultConfigWithEnv(townRoot, c.lookupEnv).Port
+		port = doltserver.DefaultConfig(townRoot).Port
 	}
 	if port == 0 {
 		return "", false

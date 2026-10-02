@@ -97,14 +97,10 @@ func setupRigsJSON(t *testing.T, townRoot string, rigNames []string) {
 	}
 }
 
-// noEnv is an environment with no variables set.
-func noEnv(string) (string, bool) { return "", false }
-
-// reachableCheck is a DoltServerReachableCheck with an empty environment,
-// every address reachable, and verify answering the database probe.
+// reachableCheck is a DoltServerReachableCheck with every address reachable
+// and verify answering the database probe.
 func reachableCheck(verify func(*doltserver.Config, []string) ([]string, []string, error)) *DoltServerReachableCheck {
 	c := NewDoltServerReachableCheck()
-	c.lookupEnv = noEnv
 	c.dial = func(string) error { return nil }
 	c.verify = verify
 	return c
@@ -113,7 +109,6 @@ func reachableCheck(verify func(*doltserver.Config, []string) ([]string, []strin
 func TestGetServerAddr(t *testing.T) {
 	t.Parallel()
 	check := NewDoltServerReachableCheck()
-	check.lookupEnv = noEnv
 
 	tests := []struct {
 		name     string
@@ -206,7 +201,6 @@ func TestGetServerAddr_NoMetadata(t *testing.T) {
 func TestGetServerAddr_UsesConfigYAMLPort(t *testing.T) {
 	t.Parallel()
 	check := NewDoltServerReachableCheck()
-	check.lookupEnv = noEnv
 	townRoot := t.TempDir()
 
 	// Create config.yaml with custom port
@@ -473,7 +467,6 @@ func TestDoltOrphanedDatabaseCheck_Name(t *testing.T) {
 func TestGetServerAddr_NoPortWithoutEndpoint(t *testing.T) {
 	t.Parallel()
 	check := NewDoltServerReachableCheck()
-	check.lookupEnv = noEnv
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	setupServerMetadata(t, beadsDir, "", 0)
