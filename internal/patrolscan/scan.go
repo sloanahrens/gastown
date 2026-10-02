@@ -11,7 +11,10 @@
 //     wisps open; they are closed so the base bead is not blocked by them;
 //   - stranded work: a hooked bead whose polecat is gone gets ONE comment per
 //     report window naming the surviving branch (or saying none survives). The
-//     tick never re-slings, resets or reassigns the bead.
+//     tick never re-slings, resets or reassigns the bead;
+//   - idle seats: a polecat whose session is confirmed gone and which holds
+//     no work has its record retired to stop, so nothing keeps reporting the
+//     seat dead (gt-613vw). Dispatching work to it sets the record back to run.
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -109,6 +112,10 @@ type Env interface {
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
 	Restart(rig, polecat, reason string) error
+	// MarkIdle retires the seat's intent record to stop: its session is gone
+	// and it holds no work, so nothing needs it running. It reports whether
+	// the record changed.
+	MarkIdle(rig, polecat string) (bool, error)
 
 	// ActiveWork lists hooked and in_progress beads assigned to polecats of
 	// the rig (assignee "<rig>/polecats/<name>").
@@ -196,6 +203,7 @@ const (
 	OutcomeClosed     Outcome = "closed"     // orphaned molecule closed
 	OutcomeReported   Outcome = "reported"   // stranded comment written
 	OutcomeSuppressed Outcome = "suppressed" // already reported this window
+	OutcomeIdled      Outcome = "idled"      // idle seat's record retired to stop
 )
 
 // Finding is one line of a tick's report.
@@ -321,7 +329,23 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return unknown("assigned work unreadable", err)
 	}
 	if work == nil {
-		return Finding{}, false // idle or finished: a dead session is not a crash
+		// Idle or finished: a dead session is not a crash. The record still
+		// saying run would keep townhealth reporting the seat dead forever
+		// (gt-613vw), so the seat is retired to stop once the death is
+		// confirmed across ticks, exactly as a restart is.
+		if samples < s.o.DeadSamples {
+			return Finding{}, false
+		}
+		changed, err := s.env.MarkIdle(rig, name)
+		if err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, "retiring idle seat: "+err.Error()
+			return f, true
+		}
+		if !changed {
+			return Finding{}, false // already stopped on an earlier tick
+		}
+		f.Outcome, f.Detail = OutcomeIdled, "no session and no work; record retired to stop"
+		return f, true
 	}
 	if strings.EqualFold(work.Status, "closed") {
 		return Finding{}, false

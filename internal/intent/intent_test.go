@@ -367,6 +367,71 @@ func TestClearLandedLeavesAParkedSeat(t *testing.T) {
 	}
 }
 
+// A seat whose session ended without submitting and which holds no work is
+// retired to stop, so no reader keeps looking for a session nothing will
+// start (gt-613vw).
+func TestMarkIdleStopsTheSeatAndDropsItsEvidence(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Desired = DesiredRun
+		r.WorkBead = "gt-abc"
+		r.Progress = &Progress{SampledAt: now, DeadSamples: 796}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := MarkIdle(town, polecat, "daemon/patrol-scan", now)
+	if err != nil || !changed {
+		t.Fatalf("MarkIdle = %v, %v; want a change", changed, err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.EffectiveDesired() != DesiredStop || rec.WorkBead != "" || rec.Progress != nil || rec.Actor != "daemon/patrol-scan" {
+		t.Fatalf("record after MarkIdle: %+v", rec)
+	}
+	if changed, err := MarkIdle(town, polecat, "daemon/patrol-scan", now); err != nil || changed {
+		t.Fatalf("second MarkIdle = %v, %v; want no change", changed, err)
+	}
+}
+
+// A hold outranks idleness: the operator's park is not overwritten by a
+// supervisor retiring an idle seat.
+func TestMarkIdleLeavesHeldAndSubmittedSeatsAlone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	held := []struct {
+		name string
+		set  Desired
+	}{
+		{"parked", DesiredPark},
+		{"submitted", DesiredSubmitted},
+	}
+	for _, h := range held {
+		t.Run(h.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if _, err := Update(town, polecat, func(r *Record) error {
+				r.Desired = h.set
+				r.WorkBead = "gt-abc"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := MarkIdle(town, polecat, "daemon/patrol-scan", now); err != nil || changed {
+				t.Fatalf("MarkIdle on a %s seat = %v, %v; want no change", h.name, changed, err)
+			}
+			if rec, _ := Read(town, polecat); rec.EffectiveDesired() != h.set || rec.WorkBead != "gt-abc" {
+				t.Fatalf("seat became %s with work %q", rec.EffectiveDesired(), rec.WorkBead)
+			}
+		})
+	}
+}
+
 // Remove deletes the record, so the readers that walk the agents directory
 // stop seeing a seat that is gone (gt-u7voe). It tolerates a record that was
 // never written.

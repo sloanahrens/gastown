@@ -454,6 +454,37 @@ func TestHealthSourcesSeatsIgnoreRecordsWhosePolecatIsGone(t *testing.T) {
 	}
 }
 
+// A seat the patrol tick retired to stop is where the town wants it, so its
+// last sample is not stall evidence and it is not listed — a record stuck at
+// desired=run is what made townhealth report an idle polecat dead forever
+// (gt-613vw).
+func TestHealthSourcesSeatsSkipStoppedSeats(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	progress := &intent.Progress{SampledAt: now.Add(-time.Minute), DeadSamples: 796}
+	stop := intent.Record{Desired: intent.DesiredStop, Progress: progress}
+	run := intent.Record{Progress: progress}
+	for _, s := range []struct {
+		name string
+		rec  intent.Record
+	}{{"opal", stop}, {"jasper", run}} {
+		writeJSONFile(t, intent.Seat{Rig: "gastown", Role: "polecat", Name: s.name}.Path(town), s.rec)
+		if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", s.name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src := &healthSources{d: &Daemon{config: &Config{TownRoot: town}}, evidence: time.Hour, now: now}
+	got, err := src.Seats()
+	if err != nil {
+		t.Fatalf("Seats: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "polecat/jasper" {
+		t.Fatalf("Seats = %+v, want only gastown/polecat/jasper", got)
+	}
+}
+
 func TestSeatHomeMapsPolecatDirectoriesOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
