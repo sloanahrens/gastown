@@ -26,9 +26,6 @@ import (
 type DoltServerPatrolCheck struct {
 	BaseCheck
 
-	// lookupEnv reads GT_DOLT_PASSWORD, the one variable the server config
-	// still honors; nil is the process environment (gt-y3pgh.2.3).
-	lookupEnv func(key string) (string, bool)
 	// dial reports whether a TCP connection to addr succeeds; nil dials.
 	dial func(addr string) error
 }
@@ -106,7 +103,7 @@ func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
 // isDoltReachable reports whether the local Dolt SQL server is accepting
 // connections on its configured port.
 func (c *DoltServerPatrolCheck) isDoltReachable(townRoot string) bool {
-	cfg := doltserver.DefaultConfigWithEnv(townRoot, c.lookupEnv)
+	cfg := doltserver.DefaultConfig(townRoot)
 	addr := doltServerAddr(cfg.Host, cfg.Port)
 	if c.dial != nil {
 		return c.dial(addr) == nil

@@ -122,6 +122,19 @@ func writeTownDoltSettings(t *testing.T, townRoot, doltJSON string) {
 	}
 }
 
+// writeTownDaemonEnv writes townRoot's settings/daemon.env (gt-y3pgh.2.4):
+// one KEY=VALUE line per entry passed in body.
+func writeTownDaemonEnv(t *testing.T, townRoot, body string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // setenv sets an environment variable of the fake machine.
 func (f *fakeHost) setenv(key, value string) *fakeHost {
 	f.mu.Lock()

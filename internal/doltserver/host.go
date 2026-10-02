@@ -81,11 +81,6 @@ func (h *host) resolveDoltEndpoint(townRoot string) (configpkg.DoltEndpoint, boo
 	return configpkg.ResolveDoltEndpoint(townRoot)
 }
 
-func (h *host) getenv(key string) string {
-	v, _ := h.lookupEnvVar(key)
-	return v
-}
-
 func (h *host) lookupEnvVar(key string) (string, bool) {
 	if h.lookupEnv != nil {
 		return h.lookupEnv(key)

@@ -254,6 +254,13 @@ type DoltThresholds struct {
 	// LogLevel is the Dolt server log level: trace, debug, info, warning,
 	// error, fatal (default "warning").
 	LogLevel *string `json:"log_level,omitempty"`
+	// Password is the Dolt SQL password, held as a ${VAR} reference to a
+	// settings/daemon.env entry (for example "${GT_DOLT_PASSWORD}") rather
+	// than as a token in this file (gt-y3pgh.2.4). Unset or empty means the
+	// server takes no password. A literal value is treated as the password
+	// but FindLiteralSecrets reports it, and secrets.refuse_literals rejects
+	// it, exactly as for an agent env value.
+	Password *string `json:"password,omitempty"`
 
 	// The keys below have no reader (gt-e2kxa). They are declared so a
 	// settings file that still carries them decodes.

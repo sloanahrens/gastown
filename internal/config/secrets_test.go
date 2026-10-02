@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,6 +187,72 @@ func TestBuildStartupCommand_ReadsDaemonEnvSecretAtRunTime(t *testing.T) {
 	execPart := cmd[strings.Index(cmd, "exec env "):]
 	if strings.Contains(execPart, "ANTHROPIC_AUTH_TOKEN=") {
 		t.Errorf("exec env assigns ANTHROPIC_AUTH_TOKEN after the run-time read: %s", execPart)
+	}
+}
+
+// The Dolt password follows the same rule as an agent env value: a literal is
+// reported by FindLiteralSecrets and moved by MigrateSecrets, a reference is
+// not (gt-y3pgh.2.4).
+func TestLiteralSecretsCoverDoltPassword(t *testing.T) {
+	t.Parallel()
+	ref := "${GT_DOLT_PASSWORD}"
+	// A value no agent holds, so the plan mints a fresh DOLT_PASSWORD entry
+	// rather than reusing the agent's.
+	literal := "sk-fake2222222222222222222222222222"
+
+	s := secretsTownSettings()
+	s.Operational = &OperationalConfig{Dolt: &DoltThresholds{Password: &ref}}
+	if got := LiteralSecretPaths(FindLiteralSecrets(s)); strings.Contains(strings.Join(got, ","), doltPasswordPath) {
+		t.Errorf("a reference was reported as a literal: %v", got)
+	}
+
+	s.Operational.Dolt.Password = &literal
+	got := LiteralSecretPaths(FindLiteralSecrets(s))
+	if !slices.Contains(got, doltPasswordPath) {
+		t.Fatalf("paths = %v, want %s among them", got, doltPasswordPath)
+	}
+
+	moves := PlanSecretMoves(s, nil)
+	i := slices.IndexFunc(moves, func(m SecretMove) bool { return m.KeyPath == doltPasswordPath })
+	if i < 0 {
+		t.Fatalf("no move for the Dolt password: %v", moves)
+	}
+	if moves[i].Var != "DOLT_PASSWORD" || !moves[i].Added {
+		t.Errorf("move = %+v, want a new DOLT_PASSWORD entry", moves[i])
+	}
+}
+
+func TestMigrateSecretsMovesDoltPassword(t *testing.T) {
+	t.Parallel()
+	literal := fakeTokenA
+	town := t.TempDir()
+	s := NewTownSettings()
+	s.Operational = &OperationalConfig{Dolt: &DoltThresholds{Password: &literal}}
+	if err := SaveTownSettings(TownSettingsPath(town), s); err != nil {
+		t.Fatal(err)
+	}
+
+	moves, err := MigrateSecrets(town)
+	if err != nil || len(moves) != 1 {
+		t.Fatalf("MigrateSecrets = %v, %v; want one move", moves, err)
+	}
+	env, err := LoadDaemonEnv(town)
+	if err != nil || env["DOLT_PASSWORD"] != fakeTokenA {
+		t.Errorf("daemon.env = %v, %v; want DOLT_PASSWORD in it", env, err)
+	}
+	back, err := LoadOrCreateTownSettings(TownSettingsPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *back.Operational.Dolt.Password; got != "${DOLT_PASSWORD}" {
+		t.Errorf("password = %q, want the reference", got)
+	}
+	data, err := os.ReadFile(TownSettingsPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "sk-fake") {
+		t.Error("settings/config.json still holds the token")
 	}
 }
 

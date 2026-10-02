@@ -154,9 +154,9 @@ func writeAndReadDaemonAutoGC(t *testing.T, doltSettings string) struct {
 	}
 	configPath := filepath.Join(dir, "config.yaml")
 	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
-	// The manager hands the daemon's env only for GT_DOLT_PASSWORD now
-	// (gt-y3pgh.2.3); the auto-GC knob comes from town settings.
-	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfigWithEnv(dir, nil)); err != nil {
+	// The password comes from the town's settings reference, not the
+	// daemon's env (gt-y3pgh.2.4); the auto-GC knob comes from town settings.
+	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfig(dir)); err != nil {
 		t.Fatalf("writeDaemonDoltConfig: %v", err)
 	}
 	data, err := os.ReadFile(configPath)

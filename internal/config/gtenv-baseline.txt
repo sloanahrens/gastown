@@ -6,7 +6,7 @@
 # TestNoNewGTEnvReads fails when a count grows (a new env read of a config
 # fact) and when one shrinks (lower it here), so this file only goes down.
 # Read a new fact from config instead of adding a line. The remaining
-# entries are config knobs (GT_DOLT_PASSWORD, GT_BD_TIMEOUT_SEC), session-manager
+# entries are config knobs (GT_BD_TIMEOUT_SEC), session-manager
 # signals (GT_POLECAT_PATH, GT_MAYOR), and test seams (GT_TEST_*).
 internal/beads/bdcmd.go GT_BD_TIMEOUT_SEC 1
 internal/beads/beads.go GT_BD_TIMEOUT_SEC 1
@@ -22,6 +22,5 @@ internal/cmd/tap_guard_dangerous.go GT_POLECAT_PATH 1
 internal/cmd/tap_guard_mol_patrol.go GT_MAYOR 1
 internal/cmd/tap_guard_polecat_paths.go GT_POLECAT_PATH 1
 internal/cmd/telemetry.go GT_TEST_HERMETIC 1
-internal/doltserver/doltserver.go GT_DOLT_PASSWORD 1
 internal/events/events.go GT_TEST_HERMETIC 1
 internal/workspace/find.go GT_TEST_FORBIDDEN_TOWN_ROOT 1

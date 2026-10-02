@@ -39,7 +39,7 @@ func PlanSecretMoves(s *TownSettings, fileEnv map[string]string) []SecretMove {
 	}
 	var moves []SecretMove
 	for _, lit := range FindLiteralSecrets(s) {
-		value := s.Agents[lit.Agent].Env[lit.Key]
+		value := literalValue(s, lit)
 		if name, ok := byValue[value]; ok {
 			moves = append(moves, SecretMove{LiteralSecret: lit, Var: name})
 			continue
@@ -52,8 +52,29 @@ func PlanSecretMoves(s *TownSettings, fileEnv map[string]string) []SecretMove {
 	return moves
 }
 
-// secretVarName is AGENT_KEY in env-name form, suffixed until it is not taken.
-func secretVarName(lit LiteralSecret, taken map[string]bool) string {
+// literalValue reads lit's current value from s.
+func literalValue(s *TownSettings, lit LiteralSecret) string {
+	if lit.KeyPath == doltPasswordPath {
+		return *s.Operational.Dolt.Password
+	}
+	return s.Agents[lit.Agent].Env[lit.Key]
+}
+
+// setLiteralValue rewrites lit's value in s.
+func setLiteralValue(s *TownSettings, lit LiteralSecret, value string) {
+	if lit.KeyPath == doltPasswordPath {
+		s.Operational.Dolt.Password = &value
+		return
+	}
+	s.Agents[lit.Agent].Env[lit.Key] = value
+}
+
+// secretVarBase is the daemon.env name a literal moves to: AGENT_KEY in
+// env-name form for an agent env value, DOLT_PASSWORD for the Dolt password.
+func secretVarBase(lit LiteralSecret) string {
+	if lit.KeyPath == doltPasswordPath {
+		return "DOLT_PASSWORD"
+	}
 	var b strings.Builder
 	for _, c := range strings.ToUpper(lit.Agent + "_" + lit.Key) {
 		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
@@ -66,6 +87,12 @@ func secretVarName(lit LiteralSecret, taken map[string]bool) string {
 	if base[0] >= '0' && base[0] <= '9' {
 		base = "_" + base
 	}
+	return base
+}
+
+// secretVarName is secretVarBase, suffixed until it is not taken.
+func secretVarName(lit LiteralSecret, taken map[string]bool) string {
+	base := secretVarBase(lit)
 	name := base
 	for i := 2; taken[name]; i++ {
 		name = fmt.Sprintf("%s_%d", base, i)
@@ -125,7 +152,7 @@ func MigrateSecrets(townRoot string) ([]SecretMove, error) {
 			return err
 		}
 		for _, m := range moves {
-			s.Agents[m.Agent].Env[m.Key] = "${" + m.Var + "}"
+			setLiteralValue(s, m.LiteralSecret, "${"+m.Var+"}")
 		}
 		return nil
 	})
@@ -167,7 +194,7 @@ func appendDaemonEnv(townRoot string, s *TownSettings, moves []SecretMove) error
 			b.WriteString("# Tokens moved from settings/config.json by gt config secrets migrate.\n")
 			added = true
 		}
-		fmt.Fprintf(&b, "%s=%s\n", m.Var, s.Agents[m.Agent].Env[m.Key])
+		fmt.Fprintf(&b, "%s=%s\n", m.Var, literalValue(s, m.LiteralSecret))
 	}
 	return replaceFile(path, []byte(b.String()), 0o600)
 }

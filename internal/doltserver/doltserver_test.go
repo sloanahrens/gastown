@@ -2587,7 +2587,8 @@ func TestGetConnectionString_MasksPassword(t *testing.T) {
 	f := newFakeHost()
 	h := f.host()
 	townRoot := t.TempDir()
-	f.setenv("GT_DOLT_PASSWORD", "supersecret")
+	writeTownDoltSettings(t, townRoot, `{"password":"${GT_DOLT_PASSWORD}"}`)
+	writeTownDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=supersecret")
 	s := h.GetConnectionString(townRoot)
 	if strings.Contains(s, "supersecret") {
 		t.Errorf("connection string should not contain raw password, got %q", s)
@@ -4141,10 +4142,10 @@ func TestHostPort(t *testing.T) {
 	}
 }
 
-// The endpoint is the town's config, never GT_DOLT_HOST/GT_DOLT_PORT; the
-// server tunables come from town settings, and only the password from an
-// environment variable (gt-y3pgh.2.3).
-func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
+// The endpoint is the town's config, never GT_DOLT_HOST/GT_DOLT_PORT, and the
+// server tunables and the password come from town settings
+// (gt-y3pgh.2.3, .2.4).
+func TestDefaultConfig_EndpointAndTunablesNeverFromEnv(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
 	h := f.host()
@@ -4156,13 +4157,14 @@ func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 4407\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	writeTownDoltSettings(t, townRoot, `{"user":"myuser"}`)
+	writeTownDoltSettings(t, townRoot, `{"user":"myuser","password":"${GT_DOLT_PASSWORD}"}`)
+	writeTownDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=mypass")
 
 	f.setenv("GT_DOLT_HOST", "10.0.0.5")
 	f.setenv("GT_DOLT_PORT", "13306")
 	f.setenv("GT_DOLT_IGNORE_CONFIG", "1")
 	f.setenv("GT_DOLT_USER", "envuser")
-	f.setenv("GT_DOLT_PASSWORD", "mypass")
+	f.setenv("GT_DOLT_PASSWORD", "envpass")
 
 	config := h.DefaultConfig(townRoot)
 
@@ -4173,28 +4175,38 @@ func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 		t.Errorf("User = %q, want the settings' myuser (the environment no longer carries it)", config.User)
 	}
 	if config.Password != "mypass" {
-		t.Errorf("Password = %q, want %q", config.Password, "mypass")
+		t.Errorf("Password = %q, want the daemon.env's mypass (the environment no longer carries it)", config.Password)
 	}
 }
 
-// DefaultConfigWithEnv reads the variable it is given, not the process's, and
-// a town without an endpoint gets port 0, never DefaultPort.
-func TestDefaultConfigWithEnv(t *testing.T) {
+// operational.dolt.password holds a ${VAR} reference; the Dolt server config
+// resolves it from settings/daemon.env, so the token never lives in
+// settings/config.json (gt-y3pgh.2.4).
+func TestDefaultConfig_PasswordFromDaemonEnvReference(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"password":"${GT_DOLT_PASSWORD}"}`)
+	writeTownDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=x")
+	if got := DefaultConfig(townRoot).Password; got != "x" {
+		t.Errorf("Password = %q, want x", got)
+	}
+}
+
+// A town that names no password has none.
+func TestDefaultConfig_PasswordUnset(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeTownDoltSettings(t, townRoot, `{"user":"myuser"}`)
-	env := map[string]string{"GT_DOLT_PORT": "13306", "GT_DOLT_PASSWORD": "mypass"}
-	config := DefaultConfigWithEnv(townRoot, func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if config.Port != 0 || config.User != "myuser" || config.Password != "mypass" {
-		t.Errorf("Port, User, Password = %d, %q, %q; want 0, myuser, mypass", config.Port, config.User, config.Password)
+	if config := DefaultConfig(townRoot); config.Password != "" {
+		t.Errorf("Password = %q, want empty when operational.dolt names none", config.Password)
 	}
 }
 
 // A host withEnv reads the given variables over its own environment for the
 // sql-server it starts, so a caller can hand Start daemon.json's env without
-// writing the process environment. Only the password still resolves through
-// the environment; the tunables come from town settings (gt-y3pgh.2.3).
-func TestHostWithEnvOverlaysConfigAndServerEnv(t *testing.T) {
+// writing the process environment. The config itself reads town settings
+// (gt-y3pgh.2.4).
+func TestHostWithEnvOverlaysServerEnv(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost().setenv("GT_DOLT_PASSWORD", "base-pass").townPort(4551)
 	h := f.host().withEnv(map[string]string{"GT_DOLT_PASSWORD": "overlay-pass"})
@@ -4202,12 +4214,14 @@ func TestHostWithEnvOverlaysConfigAndServerEnv(t *testing.T) {
 	townRoot := t.TempDir()
 	writeTownDoltSettings(t, townRoot, `{"user":"myuser","log_level":"error"}`)
 	config := h.DefaultConfig(townRoot)
-	if config.Password != "overlay-pass" || config.User != "myuser" || config.LogLevel != "error" {
-		t.Errorf("Password, User, LogLevel = %q, %q, %q; want overlay-pass (overlay), myuser and error (settings)",
-			config.Password, config.User, config.LogLevel)
+	if config.User != "myuser" || config.LogLevel != "error" {
+		t.Errorf("User, LogLevel = %q, %q; want myuser and error (settings)", config.User, config.LogLevel)
 	}
-	if got := f.host().DefaultConfig(townRoot).Password; got != "base-pass" {
-		t.Errorf("the overlay leaked into the host it was made from: Password = %q", got)
+	if v, _ := h.lookupEnvVar("GT_DOLT_PASSWORD"); v != "overlay-pass" {
+		t.Errorf("overlay lookup = %q, want overlay-pass", v)
+	}
+	if v, _ := f.host().lookupEnvVar("GT_DOLT_PASSWORD"); v != "base-pass" {
+		t.Errorf("the overlay leaked into the host it was made from: lookup = %q", v)
 	}
 
 	_ = h.Start(townRoot)
@@ -4808,9 +4822,10 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	}
 }
 
-// TestWriteServerConfig_AutoGCDisabled verifies the GT_DOLT_AUTO_GC kill-switch:
-// AutoGC="off" emits auto_gc_behavior {enable:false, archive_level:0} so auto_gc can
-// be disabled at runtime without a source revert+rebuild (hq-excy9g escape hatch).
+// TestWriteServerConfig_AutoGCDisabled verifies the operational.dolt.auto_gc
+// kill-switch: AutoGC="off" emits auto_gc_behavior {enable:false,
+// archive_level:0} so auto_gc can be disabled at runtime without a source
+// revert+rebuild (hq-excy9g escape hatch).
 func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

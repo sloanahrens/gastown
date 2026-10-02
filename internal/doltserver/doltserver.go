@@ -218,7 +218,8 @@ type Config struct {
 	// User is the MySQL user name.
 	User string
 
-	// Password is the MySQL password.
+	// Password is the MySQL password, resolved from the town's
+	// operational.dolt.password reference (gt-y3pgh.2.4).
 	// Empty means no password (backward-compatible default for local access).
 	Password string
 
@@ -299,9 +300,10 @@ var ErrNoEndpoint = errors.New("town has no Dolt endpoint: mayor/town.json has n
 // is 0 when the town has none.
 //
 // The server tunables (user, log level, idle-session timeout, time zone,
-// event scheduler, stats, auto-GC) are settings facts read from the town's
-// operational.dolt config (gt-y3pgh.2.3). Only the password still comes from
-// the environment (GT_DOLT_PASSWORD), until the secrets slice (gt-y3pgh.2.4).
+// event scheduler, stats, auto-GC) and the password are settings facts read
+// from the town's operational.dolt config (gt-y3pgh.2.3, .2.4). The password
+// is a ${VAR} reference into settings/daemon.env, never an environment
+// variable of this process (config.ResolveDoltPassword).
 func (h *host) DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
@@ -352,11 +354,10 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 	if u, ok := doltCfg.UserSetting(); ok {
 		config.User = u
 	}
-	// GT_DOLT_PASSWORD is the last env read here; it moves to a secret
-	// reference in the next slice (gt-y3pgh.2.4).
-	if pw := h.getenv("GT_DOLT_PASSWORD"); pw != "" {
-		config.Password = pw
-	}
+	// The password is the same kind of settings fact: operational.dolt.password
+	// holds a ${VAR} reference resolved from settings/daemon.env (the process
+	// environment is the fallback). A town that sets nothing has none.
+	config.Password = configpkg.ResolveDoltPassword(townRoot, doltCfg)
 	if ll, ok := doltCfg.LogLevelSetting(); ok {
 		config.LogLevel = ll
 	}
@@ -367,14 +368,6 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 // DefaultConfig is (*host).DefaultConfig on the real machine.
 func DefaultConfig(townRoot string) *Config {
 	return std.DefaultConfig(townRoot)
-}
-
-// DefaultConfigWithEnv is DefaultConfig reading GT_DOLT_PASSWORD through
-// lookupEnv instead of the process environment. A nil lookupEnv is the process
-// environment, exactly DefaultConfig; the server tunables no longer come from
-// the environment at all (gt-y3pgh.2.3).
-func DefaultConfigWithEnv(townRoot string, lookupEnv func(key string) (string, bool)) *Config {
-	return (&host{lookupEnv: lookupEnv}).DefaultConfig(townRoot)
 }
 
 // IsRemote returns true when the config points to a non-local Dolt server.
@@ -1951,8 +1944,8 @@ func writeServerConfig(config *Config, configPath string) error {
 # To customize the rest, set operational.dolt in settings/config.json: the
 # Dolt user, log level, idle-session timeout, time zone, event scheduler
 # (OFF, ON, omit), stats (0, 1, omit) and auto GC (on, off).
-# GT_DOLT_PASSWORD is still an environment variable until the secrets slice
-# (gt-y3pgh.2.4).
+# The Dolt password is operational.dolt.password, a ${VAR} reference into
+# settings/daemon.env; it is never written to this file.
 
 log_level: %s
 
@@ -2305,9 +2298,9 @@ func Start(townRoot string) error {
 	return std.Start(townRoot)
 }
 
-// StartWithEnv is Start reading env over the process environment, for its
-// config and for the sql-server it starts, without writing the process
-// environment.
+// StartWithEnv is Start with env added to the environment of the sql-server it
+// starts, without writing the process environment. The server's config comes
+// from town settings, not from env (gt-y3pgh.2.4).
 func StartWithEnv(townRoot string, env map[string]string) error {
 	return std.withEnv(env).Start(townRoot)
 }
