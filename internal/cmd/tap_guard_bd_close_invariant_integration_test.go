@@ -110,33 +110,52 @@ func TestIntegrationRunTapGuardBdCloseInvariant(t *testing.T) {
 		// /polecats/, /crew/ or /deacon/dogs/ component.
 		//
 		// The fixture's worktree path does contain /polecats/, which
-		// isGasTownAgentContext treats as an agent context by path alone, so this
-		// case is driven from a plain directory inside the same town instead.
-		plain := filepath.Join(f.town, "notes")
-		if err := os.MkdirAll(plain, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		// isGasTownAgentContext treats as an agent context by path alone, so
+		// the case is driven from the town's plain checkout instead.
 		for _, env := range []string{"GT_POLECAT", "GT_CREW", "GT_WITNESS", "GT_REFINERY", "GT_MAYOR", "GT_DEACON", "GT_DOG_NAME"} {
 			delete(f.env, env)
 		}
 
-		payload := fmt.Sprintf(`{"tool_name":"Bash","cwd":%q,"tool_input":{"command":"bd close gt-arno"}}`, plain)
-		err := tapGuardBdCloseInvariant(strings.NewReader(payload), f.process(plain))
-		if err != nil {
+		payload := fmt.Sprintf(`{"tool_name":"Bash","cwd":%q,"tool_input":{"command":"bd close gt-arno"}}`, f.plain)
+		if err := tapGuardBdCloseInvariant(strings.NewReader(payload), f.process(f.plain)); err != nil {
 			t.Errorf("expected the guard to be a no-op outside an agent context, got error: %v", err)
+		}
+
+		// The same close, from the same directory, with only the agent-context
+		// signal added: it must be refused. The pair is what makes the allow
+		// above evidence — the plain checkout resolves to the same branch and
+		// the same unmerged commits either way, so the agent-context check is
+		// the whole difference between the two runs. A guard that ignored the
+		// check and judged this directory an agent context would refuse the
+		// first close too, failing the case rather than passing it for the
+		// wrong reason (gt-22hdp.59).
+		agentEnv := make(map[string]string, len(f.env)+1)
+		for k, v := range f.env {
+			agentEnv[k] = v
+		}
+		agentEnv["GT_POLECAT"] = "malachite"
+		agent := f.process(f.plain)
+		agent.getenv = envMap(agentEnv)
+		if err := tapGuardBdCloseInvariant(strings.NewReader(payload), agent); err == nil {
+			t.Error("expected the same close to be refused once the same directory is read as an agent context")
 		}
 	})
 }
 
 // bdCloseInvariantFixture is a hermetic town: a real "mayor/town.json" marker
-// so workspace.Find resolves it, a rig directory, and a real git checkout at
-// the polecat worktree path. Nothing here touches the operator's town, so a
-// guard run against it neither reads nor mutates production state; the guard
-// itself runs no bd subprocess.
+// so workspace.Find resolves it, a rig directory, a real git checkout at the
+// polecat worktree path, and a second checkout of the same branch at a path
+// with no agent component (plain). Nothing here touches the operator's town,
+// so a guard run against it neither reads nor mutates production state; the
+// guard itself runs no bd subprocess.
 type bdCloseInvariantFixture struct {
 	town string
 	work string
-	env  map[string]string
+	// plain is the same branch and history as work, checked out where
+	// /polecats/, /crew/ and /deacon/dogs/ do not appear in the path: the cwd
+	// the NonAgentContextAllowed case needs a non-agent session to sit in.
+	plain string
+	env   map[string]string
 }
 
 func (f bdCloseInvariantFixture) payload(command string) string {
@@ -178,11 +197,11 @@ func newBdCloseInvariantFixture(t *testing.T, branch string, commitsAhead int) b
 	// guard's getwd fallback.
 	env := map[string]string{"GT_TOWN_ROOT": town, "GT_ROOT": town, "GT_RIG": rig, "GT_POLECAT": "malachite"}
 
-	return bdCloseInvariantFixture{town: town, work: work, env: env}
+	return bdCloseInvariantFixture{town: town, work: work, plain: filepath.Join(town, "notes"), env: env}
 }
 
-// buildBdCloseInvariantTown lays out newBdCloseInvariantFixture's town and
-// polecat checkout under town.
+// buildBdCloseInvariantTown lays out newBdCloseInvariantFixture's town, its
+// polecat checkout, and the plain checkout of the same branch.
 func buildBdCloseInvariantTown(t *testing.T, town, rig, branch string, commitsAhead int) {
 	t.Helper()
 
@@ -224,4 +243,13 @@ func buildBdCloseInvariantTown(t *testing.T, town, rig, branch string, commitsAh
 		testRunGit(t, work, "add", ".")
 		testRunGit(t, work, "commit", "-m", "polecat work")
 	}
+
+	// The plain checkout: the branch work is on, with the same commits ahead of
+	// origin/main, at a path with none of the agent components
+	// isGasTownAgentContext matches. Cloning work keeps the two from drifting;
+	// what NonAgentContextAllowed needs from it is that the guard resolve a
+	// branch and unmerged commits from it, so the only thing standing between
+	// `bd close gt-arno` and a refusal there is the agent-context check
+	// (gt-22hdp.59).
+	testRunGit(t, town, "clone", work, filepath.Join(town, "notes"))
 }
