@@ -3,6 +3,7 @@
 package land
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,14 @@ func writeT(t *testing.T, dir, name, body string) {
 	}
 }
 
+// The union test's seed files: list.txt is covered by merge=union in the
+// seed's .gitattributes, plain.txt is not, so the same two appends must land
+// clean on one and conflict on the other.
+const (
+	unionListSeed = "# A grow-only list for the union merge test.\n"
+	plainListSeed = "# The same list with no union rule.\n"
+)
+
 // newRealLandFixture builds newLandFixture's shape with real git: a bare
 // origin, an author's clone that pushes main and the branch, and the
 // lander's clone.
@@ -46,7 +55,10 @@ func newRealLandFixture(t *testing.T) *landFixture {
 	gitT(t, seed, "config", "core.hooksPath", "/dev/null")
 	gitT(t, seed, "checkout", "-q", "-b", "main")
 	writeT(t, seed, "a.txt", "one\ntwo\nthree\n")
-	gitT(t, seed, "add", "a.txt")
+	writeT(t, seed, ".gitattributes", "list.txt merge=union\n")
+	writeT(t, seed, "list.txt", unionListSeed)
+	writeT(t, seed, "plain.txt", plainListSeed)
+	gitT(t, seed, "add", "a.txt", ".gitattributes", "list.txt", "plain.txt")
 	gitT(t, seed, "commit", "-q", "-m", "main: seed")
 	gitT(t, seed, "push", "-q", "origin", "main")
 	gitT(t, seed, "checkout", "-q", "-b", fixtureBranch)
@@ -73,6 +85,72 @@ func newRealLandFixture(t *testing.T) *landFixture {
 		return strings.Fields(gitT(t, f.origin, "rev-list", "--parents", "-n", "1", commit))[1:]
 	}
 	return f
+}
+
+// appendT appends line to name in dir: one side of a landing's two appends.
+func appendT(t *testing.T, dir, name, line string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(line); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// realAppendOnBranch commits line appended to name on the fixture's work
+// branch and pushes it, moving the landing's head: the branch's half of the
+// two appends a union merge has to reconcile.
+func realAppendOnBranch(t *testing.T, f *landFixture, name, line string) {
+	t.Helper()
+	seed := filepath.Join(filepath.Dir(f.origin), "seed")
+	gitT(t, seed, "checkout", "-q", fixtureBranch)
+	gitT(t, seed, "pull", "-q", "--ff-only", "origin", fixtureBranch)
+	appendT(t, seed, name, line)
+	gitT(t, seed, "add", name)
+	gitT(t, seed, "commit", "-q", "-m", "branch: append to "+name)
+	gitT(t, seed, "push", "-q", "origin", fixtureBranch)
+	f.work.Head = gitT(t, seed, "rev-parse", "HEAD")
+}
+
+// TestIntegrationLandUnionMergesTwoAppends: .gitattributes' merge=union rule
+// lets main and the work branch each append to the same grow-only list, so
+// the landing succeeds with both lines once. The control runs the same two
+// appends on a file with no rule and expects RejectConflict naming it, which
+// is what shows the rule, not luck, made the first landing clean.
+func TestIntegrationLandUnionMergesTwoAppends(t *testing.T) {
+	t.Parallel()
+
+	f := newRealLandFixture(t)
+	f.base = f.realPushMain("list.txt", unionListSeed+"main's line\n")
+	realAppendOnBranch(t, f, "list.txt", "branch's line\n")
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land with a union rule: %v", err)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want landed %s", got, res.LandedCommit)
+	}
+	landed := gitT(t, f.origin, "show", res.LandedCommit+":list.txt")
+	for _, want := range []string{"grow-only list", "main's line", "branch's line"} {
+		if n := strings.Count(landed, want); n != 1 {
+			t.Errorf("%q appears %d times in the landed list.txt, want once:\n%s", want, n, landed)
+		}
+	}
+
+	g := newRealLandFixture(t)
+	g.base = g.realPushMain("plain.txt", plainListSeed+"main's line\n")
+	realAppendOnBranch(t, g, "plain.txt", "branch's line\n")
+	_, err = g.lander().Land(context.Background(), g.work)
+	rej := g.assertRejected(t, err, RejectConflict, LabelRework)
+	if len(rej.Conflicting) != 1 || rej.Conflicting[0] != "plain.txt" {
+		t.Errorf("control conflicting = %v, want [plain.txt]", rej.Conflicting)
+	}
 }
 
 func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {

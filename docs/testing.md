@@ -364,7 +364,7 @@ func TestMain(m *testing.M) {
 }
 ```
 
-and the same without the option in a `//go:build integration` file. The list only grows: adding a package raises `minGitFree` in `internal/testpolicy/gitfree_test.go` in the same change. An unlisted package is not checked by `TestGitFree`.
+and the same without the option in a `//go:build integration` file. The list only grows: adding a package raises `minGitFree` in `internal/testpolicy/gitfree_test.go` in the same change. Because it only grows, the repo-root `.gitattributes` marks it `merge=union`, so two branches that each add a package line merge clean instead of landing as a conflict; `TestUnionMergeOnlyOnGrowOnlyLists` fails any `merge=union` path whose file does not carry the `This list only grows` header. An unlisted package is not checked by `TestGitFree`.
 
 Every other package is held to a baseline instead. `TestRealGit` applies the same detection to the unit tier of each package not in `gitfree.txt`, and every test file it flags must be listed in `internal/testpolicy/realgit.txt`. A new file that runs real git fails the test, and so does a listed file that no longer does: delete its line and lower `maxRealGit` in `internal/testpolicy/realgit_test.go` in the same change. A listed file's package must also be in `unconverted.txt`, and `TestPolicy` keeps a package on `unconverted.txt` while `realgit.txt` lists any of its files, so a package whose unit tier runs git never counts as converted. `go test -run 'TestRealGit$' -v ./internal/testpolicy/` logs the real-git files per package and the converted share of test lines; `-seed-realgit` prints the list the tree needs.
 
