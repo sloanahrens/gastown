@@ -28,6 +28,11 @@
 #
 # It never restarts the daemon: it writes daemon/restart-pending.json and the
 # daemon exits for a launchd restart once nothing is in flight.
+#
+# After install-local has installed the new binary, and before the smoke check
+# runs it, that binary is signed with the town's stable identity (gt-426fo.1)
+# so a Developer Tools grant survives every install. SIGN_DIR below holds the
+# material it signs with and the ad-hoc fallback when it cannot.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -81,6 +86,18 @@ DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: no town found (set
 RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/gastown/mayor/rig}"
 LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-300}"
 GT="$BIN_DIR/gt"
+# The town's signing material: a keychain and, beside it, the 0600 file holding
+# its password. A Developer Tools grant is keyed on the *designated requirement*
+# — the identifier below, not the binary's hash — which is why signing with one
+# stable identity is what makes the operator's grant survive an install
+# (gt-426fo.1). None of it is required: with no material, or if signing fails,
+# the install proceeds ad-hoc with one WARN line.
+SIGN_DIR="${INSTALL_GT_SIGN_DIR:-$TOWN_ROOT/.runtime/signing}"
+SIGN_KEYCHAIN="$SIGN_DIR/gastown-signing.keychain-db"
+SIGN_PASSWORD_FILE="$SIGN_DIR/keychain.pass"
+SIGN_IDENTITY="${INSTALL_GT_SIGN_IDENTITY:-gastown-dev-unattended}"
+SIGN_IDENTIFIER="com.gastown.gt"
+SIGN_TIMEOUT="${INSTALL_GT_SIGN_TIMEOUT:-30}"
 # Every gt this script runs is the installer's unless the caller already named
 # an actor (rebuild-gt runs as the daemon), so the usage log and escalations
 # never read "unknown" (gt-kyik6).
@@ -264,6 +281,71 @@ fail_install() {
   exit 1
 }
 
+# --- Signing (best-effort) ----------------------------------------------------------
+# Implements the contract described at SIGN_DIR above. Every failure path leaves
+# the install exactly as it would have been without any of this: unsigned,
+# ad-hoc, exit 0.
+#
+# The target is the installed binary, never the build output: `make build`
+# stamps a fresh $(BUILD_TIME) into every invocation, so install-local's own
+# build prerequisite re-links and any signature on $(BUILD_DIR)/$(BINARY) is
+# gone before install-binary.sh ever copies it.
+
+# code_timeout CMD... — GNU timeout(1) when it is on PATH (coreutils, or brew's
+# gtimeout when the unprefixed name is not linked). Where neither exists,
+# codesign runs unguarded: it gets </dev/null and an already-unlocked keychain,
+# so it has nothing left to prompt for.
+code_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$SIGN_TIMEOUT" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$SIGN_TIMEOUT" "$@"
+  else "$@"
+  fi
+}
+
+# sign_binary BIN — sign the installed BIN with the town's identity. codesign
+# runs against a temp copy in BIN's own directory, renamed over BIN only once it
+# has succeeded: signing the live path in place would rewrite the bytes of a
+# binary the town may be exec'ing, and a codesign that dies mid-write would leave
+# a half-signed file there (the temp+rename install-binary.sh uses, for the same
+# reason). The OS-immutable flag install-binary.sh left on BIN comes off for the
+# rename and goes back after, exactly as rollback() does it. Best-effort: any
+# failure leaves BIN as install-local left it and logs one WARN — never a failed
+# install, never a rollback.
+sign_binary() {
+  local bin="$1" pw tmp msg rc=0
+  [ -f "$bin" ] || { log "WARNING: not signing: nothing installed at $bin"; return 0; }
+  [ -f "$SIGN_KEYCHAIN" ] || { log "WARNING: installing ad-hoc: no keychain at $SIGN_KEYCHAIN"; return 0; }
+  [ -f "$SIGN_PASSWORD_FILE" ] || { log "WARNING: installing ad-hoc: no password file at $SIGN_PASSWORD_FILE"; return 0; }
+  pw=$(cat "$SIGN_PASSWORD_FILE") || { log "WARNING: installing ad-hoc: cannot read $SIGN_PASSWORD_FILE"; return 0; }
+  # The password reaches this one call (in its argv, for as long as the unlock
+  # takes). It is never logged, never echoed, and never handed to codesign.
+  if ! security unlock-keychain -p "$pw" "$SIGN_KEYCHAIN" >/dev/null 2>&1; then
+    log "WARNING: installing ad-hoc: cannot unlock $SIGN_KEYCHAIN"
+    return 0
+  fi
+  tmp=$(mktemp "$(dirname "$bin")/.$(basename "$bin").signed.XXXXXX") \
+    || { log "WARNING: installing ad-hoc: cannot create a temp file beside $bin"; return 0; }
+  cp "$bin" "$tmp" || { rm -f "$tmp"; log "WARNING: installing ad-hoc: cannot copy $bin"; return 0; }
+  chmod --reference="$bin" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
+  clear_immutable "$tmp"
+  msg=$(code_timeout codesign --force --keychain "$SIGN_KEYCHAIN" -s "$SIGN_IDENTITY" \
+          -i "$SIGN_IDENTIFIER" "$tmp" </dev/null 2>&1) || rc=$?
+  if [ "$rc" != "0" ]; then
+    rm -f "$tmp"
+    log "WARNING: installing ad-hoc: codesign failed: $(printf '%s' "${msg:-no output}" | head -1)"
+    return 0
+  fi
+  clear_immutable "$bin"
+  if ! mv -f "$tmp" "$bin"; then
+    rm -f "$tmp"
+    set_immutable "$bin"
+    log "WARNING: installing ad-hoc: cannot rename the signed copy over $bin"
+    return 0
+  fi
+  set_immutable "$bin"
+  log "Signed $bin as $SIGN_IDENTIFIER"
+}
+
 # --- Build and install -------------------------------------------------------------
 log "Building $EXPECTED in $RIG_DIR (source: $SOURCE)"
 if [ -n "$SLOT_ROLE" ]; then
@@ -302,6 +384,11 @@ if [ "$INSTALL_RC" != "0" ]; then
   fi
   fail_install build-failed "make install-local failed for $EXPECTED" medium install-gt:build-failed failed
 fi
+
+# Sign what install-local just put in place, before the smoke check runs it: the
+# smoke check then exercises exactly the artifact the town will execute, and
+# nothing is signed that has not already installed successfully.
+sign_binary "$GT"
 
 # --- Smoke: the gt the town will execute is the commit built --------------------------
 if ! (cd "$RIG_DIR" && "$GT" stale --json 2>/dev/null) | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
