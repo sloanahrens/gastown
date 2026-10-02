@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +64,10 @@ type StepResult struct {
 	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
 	// landing says why where it is recorded.
 	Warnings []string
+	// ShellFailures are the scripts the shell tier reported red, in the order
+	// its summary line named them (scripts/tier-sweep.sh). Empty for every
+	// other step, and for a shell failure that named no script.
+	ShellFailures []string
 	// TimedOut is true when the step's own Timeout killed it.
 	TimedOut bool
 	// Timeout is the step's own bound, for the rejection that names it.
@@ -138,6 +143,18 @@ func (r GateResult) FailureTail() string {
 	return r.Steps[len(r.Steps)-1].Tail
 }
 
+// ShellTierFailures is the scripts the shell step reported red, so a rejection
+// names what failed rather than quoting the tier's output. Empty when the
+// shell step did not run or did not fail.
+func (r GateResult) ShellTierFailures() []string {
+	for _, s := range r.Steps {
+		if s.Name == ShellStepName {
+			return s.ShellFailures
+		}
+	}
+	return nil
+}
+
 // Step is one gate command, run as `sh -c Command` in the gated tree.
 type Step struct {
 	Name    string
@@ -177,6 +194,14 @@ type CommandGate struct {
 	// holds. It is read only for such a step, and a step with a SlotRole and
 	// no TownRoot is an error rather than a silent unguarded run.
 	TownRoot string
+	// ShellTier appends the shell tier (ShellStepName, ShellStepCommand) after
+	// every other step, and only when the gated tree changes one of the tier's
+	// inputs against its base (shellTierNeeded). LandGate sets it; RigGate,
+	// gt done's pre-submit, never does.
+	ShellTier bool
+
+	// shellTimeout bounds the appended shell step; see WithTimeouts.
+	shellTimeout time.Duration
 
 	run        runFunc         // nil means realRun
 	lockDelays []time.Duration // nil means lintlock.RetryDelay
@@ -270,12 +295,50 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 	return CommandGate{Steps: steps}, nil
 }
 
+// ShellStepName names the gate's shell-tier step. It must not be "test":
+// WithSlot holds the container-gate slot around that name, and the shell tier
+// starts no container.
+const ShellStepName = "shell"
+
+// ShellStepCommand is the shell tier alone, what scripts/post-land-shell.sh
+// execs after a landing; the landing gate runs it before the push instead when
+// the submission can move its verdict (gt-vsct7.8).
+const ShellStepCommand = "bash scripts/tier-sweep.sh shell"
+
+// ShellTierInputs is the ERE of the paths whose change can move the shell
+// tier's verdict. It is the INPUTS line of scripts/post-land-shell.sh
+// (gt-er6jn), the post-land run's own rule for the same decision;
+// TestShellTierInputsMatchPostLandScript fails when the two drift.
+const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$)`
+
+// shellTierScript is the tier's entry point in the gated tree. A tree that
+// does not ship it has no shell tier, whatever it changed: another rig's
+// Makefile change must not run a script its tree does not have.
+const shellTierScript = "scripts/tier-sweep.sh"
+
+// shellTierDiffCommand asks git what the merged tree changed against its base.
+// The landing worktree holds exactly one commit on top of the base - mergeWork
+// makes a --no-ff merge or a squash - so its first parent is that base.
+const shellTierDiffCommand = "git diff --name-only HEAD^ HEAD"
+
+var (
+	shellTierInputsRE = regexp.MustCompile(ShellTierInputs)
+	// shellTierSummaryRE matches the shell tier's one summary line, e.g.
+	// "tier-sweep: shell RED passed=8 failed=1 skipped=0 failed: scripts/x.sh",
+	// and captures the scripts it names.
+	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:(.*)$`)
+)
+
 // LandGate is the gate Land runs on the merged tree, one command from the
 // rig's settings: merge_queue.gate when set, else `make gate` when the
 // Makefile has that target, else `make test`. Only the `make test` fallback
 // needs the container slot; its step is named "test", so WithSlot puts that
 // step under the slot and nothing else. A configured gate that needs a slot
 // holds it itself.
+//
+// Every shape may append the shell tier (ShellTier): the tree's own
+// scripts/tier-sweep.sh, run for the submissions that can move its verdict,
+// before the push the post-land run comes after (gt-vsct7.8).
 func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
 	cmd := ""
 	if mq != nil {
@@ -288,15 +351,15 @@ func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
 		// make gate's two stages, run one at a time so each has its own
 		// timeout and a lint failure stops the landing before the tests
 		// (gt-b5ugw).
-		return CommandGate{Steps: []Step{
+		return CommandGate{ShellTier: true, Steps: []Step{
 			{Name: "lint", Command: "make gate-lint", LockRetry: true},
 			{Name: "gate", Command: "make gate-test"},
 		}}
 	}
 	if cmd != "" {
-		return CommandGate{Steps: []Step{{Name: "gate", Command: cmd, LockRetry: true}}}
+		return CommandGate{ShellTier: true, Steps: []Step{{Name: "gate", Command: cmd, LockRetry: true}}}
 	}
-	return CommandGate{Steps: []Step{{Name: "test", Command: "make test", LockRetry: true}}}
+	return CommandGate{ShellTier: true, Steps: []Step{{Name: "test", Command: "make test", LockRetry: true}}}
 }
 
 // UnitTier reports whether g is make gate's unit tier (containers off), in
@@ -310,8 +373,9 @@ func (g CommandGate) UnitTier() bool {
 }
 
 // WithTimeouts returns g with the step named "lint" bounded by lint and every
-// other step by test. A zero leaves that step bounded only by its context.
-func WithTimeouts(g CommandGate, lint, test time.Duration) CommandGate {
+// other step by test, and with the shell step Run may append bounded by shell.
+// A zero leaves that step bounded only by its context.
+func WithTimeouts(g CommandGate, lint, test, shell time.Duration) CommandGate {
 	steps := make([]Step, len(g.Steps))
 	copy(steps, g.Steps)
 	for i := range steps {
@@ -322,6 +386,7 @@ func WithTimeouts(g CommandGate, lint, test time.Duration) CommandGate {
 		}
 	}
 	g.Steps = steps
+	g.shellTimeout = shell
 	return g
 }
 
@@ -443,6 +508,16 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 	if len(g.Steps) == 0 {
 		return GateResult{Err: errors.New("gate has no steps")}
 	}
+	steps := g.Steps
+	if g.ShellTier {
+		needed, err := shellTierNeeded(ctx, dir, run)
+		if err != nil {
+			return GateResult{Err: fmt.Errorf("the shell tier's change check: %w", err)}
+		}
+		if needed {
+			steps = append(slices.Clone(g.Steps), Step{Name: ShellStepName, Command: ShellStepCommand, Timeout: g.shellTimeout})
+		}
+	}
 	if g.LogDir != "" {
 		if err := os.MkdirAll(g.LogDir, 0o700); err != nil {
 			return GateResult{Err: fmt.Errorf("creating gate log dir: %w", err)}
@@ -452,13 +527,39 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 		}
 	}
 	var res GateResult
-	for _, s := range g.Steps {
+	for _, s := range steps {
 		if !g.runStep(ctx, dir, run, s, &res) {
 			return res
 		}
 	}
 	res.Passed = true
 	return res
+}
+
+// shellTierNeeded reports whether dir's merged tree changes one of the shell
+// tier's inputs against its base, and whether it ships the tier at all.
+func shellTierNeeded(ctx context.Context, dir string, run runFunc) (bool, error) {
+	if _, err := os.Stat(filepath.Join(dir, shellTierScript)); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		// A tree the check cannot read is not a tree without the tier: an
+		// unreadable path is infrastructure, not a skip.
+		return false, fmt.Errorf("looking for %s in %s: %w", shellTierScript, dir, err)
+	}
+	var buf bytes.Buffer
+	code, err := run(ctx, dir, nil, []string{"sh", "-c", shellTierDiffCommand}, &buf)
+	if err != nil {
+		return false, fmt.Errorf("asking git what %s changed: %w", dir, err)
+	}
+	if code != 0 {
+		return false, fmt.Errorf("%s in %s exited %d: %s", shellTierDiffCommand, dir, code, strings.TrimSpace(buf.String()))
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if shellTierInputsRE.MatchString(strings.TrimSpace(line)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // runStep runs one step under its own timeout, appends its result to res, and
@@ -515,6 +616,10 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 	}
 	out := buf.String()
 	pkgs, tests := parseGoTestOutput(out)
+	var shells []string
+	if s.Name == ShellStepName {
+		shells = parseShellTierFailures(out)
+	}
 	res.Steps = append(res.Steps, StepResult{
 		Name:           s.Name,
 		Command:        s.Command,
@@ -525,6 +630,7 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 		FailedTests:    tests,
 		BudgetOverruns: parseBudgetOverruns(out),
 		Warnings:       parseWarnings(out),
+		ShellFailures:  shells,
 	})
 	if s.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
 		// Its own timeout, not the landing's: the step was killed, and that
@@ -596,6 +702,18 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 		pending = nil
 	}
 	return pkgs, tests
+}
+
+// parseShellTierFailures is the scripts the shell tier's summary line named,
+// from the last line that carried one.
+func parseShellTierFailures(out string) []string {
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if m := shellTierSummaryRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			names = strings.Fields(m[1])
+		}
+	}
+	return names
 }
 
 // budgetLineRE matches the budget runner's failing lines, "BUDGET: <pkg>

@@ -458,11 +458,16 @@ type rigLandGate struct {
 const (
 	defaultLandLintTimeout = 2 * time.Minute
 	defaultLandTestTimeout = 6 * time.Minute
+	// defaultLandShellTimeout bounds the gate's shell tier. It is compiled in
+	// rather than resolved from a rig setting: the tier is a fixed extra stage
+	// for the submissions that move its inputs, and a landing's wall should
+	// not depend on how an operator tuned the other two (gt-vsct7.8).
+	defaultLandShellTimeout = 3 * time.Minute
 )
 
 func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	mq := rig.ResolveMergeQueueConfig(g.townRoot, g.rig)
-	cg := land.WithTimeouts(land.LandGate(dir, mq), g.lintTimeout, g.testTimeout)
+	cg := land.WithTimeouts(land.LandGate(dir, mq), g.lintTimeout, g.testTimeout, defaultLandShellTimeout)
 	cg = land.WithSlot(cg, g.townRoot, g.rig+"/landing")
 	cg.LogDir = landingLogDir(ctx, g.logRoot, dir)
 	return cg.Run(ctx, dir)
