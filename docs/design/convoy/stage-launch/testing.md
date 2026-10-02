@@ -162,7 +162,6 @@ These test the full command flow with stubbed `bd` and `gt` binaries.
 | IT-28 | Stage with capacity warning: informational, creates staged_warnings | US-003 | -- | -- | P2 |
 | IT-29 | Launch output: convoy ID + `gt convoy status` command printed | US-009 | -- | -- | P1 |
 | IT-30 | Launch output: each dispatched task shows polecat name | US-009 | -- | -- | P1 |
-| IT-31 | Launch output: TUI hint (`gt convoy -i`) printed | US-009 | -- | -- | P2 |
 | IT-32 | Launch output: daemon feed explanation printed | US-009 | -- | -- | P2 |
 | IT-33 | Launch staged_ready convoy: skips re-analysis, dispatches directly | US-010 | -- | -- | P0 |
 | IT-34 | --json with errors: non-zero exit code | US-011 | -- | I-3, I-10 | P1 |
@@ -202,7 +201,7 @@ Capture and verify console output format stability.
 |----|------|-----------|----------|
 | SN-01 | Tree display: epic with 2 sub-epics, 5 tasks | US-005 | P2 |
 | SN-02 | Wave table: 3 waves with blockers column | US-006 | P2 |
-| SN-03 | Launch output: convoy ID, wave summary, polecat list, hints | US-009 | P2 |
+| SN-03 | Launch output: convoy ID, wave summary, polecat list, daemon feed explanation | US-009 | P2 |
 | SN-04 | Error output: cycle path formatting | US-002 | P2 |
 | SN-05 | Warning output: parked rig + orphan list | US-003 | P2 |
 | SN-06 | JSON output: full structure | US-011 | P2 |
@@ -335,16 +334,16 @@ Combined with property assertions: "every task in exactly one wave", "no task be
 | Integration (Dolt) | 3 | DS-02, DS-06, DS-10 |
 | Property | 5 | PT-01, PT-02, PT-03, PT-04, PT-06 |
 
-### P2 — Nice to have (25 tests)
+### P2 — Nice to have (24 tests)
 
 | Tier | Count | Tests |
 |------|-------|-------|
 | Unit | 6 | U-19, U-24, U-28, U-29, U-30, U-35 |
-| Integration (bd stub) | 12 | IT-12, IT-24, IT-25, IT-28, IT-31, IT-32, IT-36, IT-37, IT-38, IT-39, IT-40, IT-44 |
+| Integration (bd stub) | 11 | IT-12, IT-24, IT-25, IT-28, IT-32, IT-36, IT-37, IT-38, IT-39, IT-40, IT-44 |
 | Snapshot | 6 | SN-01 through SN-06 |
 | Property | 1 | PT-05 |
 
-**Total: 105 tests (38 P0 + 42 P1 + 25 P2)**
+**Total: 104 tests (38 P0 + 42 P1 + 24 P2)**
 
 ---
 
@@ -481,8 +480,7 @@ Every acceptance criterion in the PRD mapped to its covering test(s).
 | 1 | Convoy ID + status command | IT-29, SN-03 |
 | 2 | Wave summary | SN-03 |
 | 3 | Each Wave 1 task with polecat | IT-30, SN-03 |
-| 4 | TUI hint (gt convoy -i) | IT-31, SN-03 |
-| 5 | Daemon feeds explanation | IT-32, SN-03 |
+| 4 | Daemon feeds explanation | IT-32, SN-03 |
 
 ### US-010: gt convoy launch as alias
 
