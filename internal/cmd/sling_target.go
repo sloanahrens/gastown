@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -250,7 +251,28 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 				// (gt-hw2gj). The rig branch above guards the same way. The
 				// name is fixed here, so no pool peek is needed to print the
 				// route.
-				fmt.Fprintf(d.out, "Would reuse/create named polecat %s/%s\n", rigName, polecatName)
+				//
+				// The route is not always reuse: a parked, hooked, busy or
+				// dirty named polecat is refused by the reuse gate, and a
+				// missing one without --create by the lookup. The peek reads
+				// those blockers without taking any, so the preview stops
+				// where the sling would (gt-yxc7m). A refusal is terminal, so
+				// it is reported as one rather than as a route with a caveat.
+				townRoot := opts.TownRoot
+				if townRoot == "" {
+					townRoot = d.cwdTown()
+				}
+				refusal := d.peekNamed(townRoot, rigName, SlingSpawnOptions{
+					Name:     polecatName,
+					HookBead: opts.HookBead,
+					Create:   opts.Create,
+				})
+				if refusal != nil {
+					fmt.Fprintf(d.out, "%s Dry run: this sling would be refused.\n", style.Dim.Render("○"))
+					fmt.Fprintf(d.out, "%s\n", refusal)
+				} else {
+					fmt.Fprintf(d.out, "Would reuse/create named polecat %s/%s\n", rigName, polecatName)
+				}
 				result.Agent = fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 				result.Pane = "<named-pane>"
 				return result, nil

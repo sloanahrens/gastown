@@ -196,7 +196,10 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			return h.crew[rig+"/"+name]
 		},
 		peekPool: func(string, string) (string, string, error) { return "", "", nil },
-		wakeRig:  func(rig string) { h.record("wake rig %s", rig) },
+		// A harness rig has no polecats on disk; the eligible route is the
+		// default. Tests that care about a refusal replace this (gt-yxc7m).
+		peekNamed: func(string, string, SlingSpawnOptions) error { return nil },
+		wakeRig:   func(rig string) { h.record("wake rig %s", rig) },
 
 		requester:       func() string { return "tester" },
 		clearReassigned: func(_, assignee string) { h.record("clear reassigned %s", assignee) },

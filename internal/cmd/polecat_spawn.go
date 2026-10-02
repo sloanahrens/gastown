@@ -415,13 +415,53 @@ func namedPolecatExistsForSling(polecatMgr idlePolecatReuse, rigName string, opt
 		if opts.Create {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("polecat %s/%s does not exist; not substituting another polecat\n"+
-			"Create it by that name: add --create\n"+
-			"Let the pool choose:    gt sling %s %s",
-			rigName, opts.Name, beadOrPlaceholder(opts.HookBead), rigName)
+		return nil, namedPolecatMissingRefusal(rigName, opts.Name, opts.HookBead)
 	default:
 		return nil, fmt.Errorf("reading named polecat %s/%s: %w", rigName, opts.Name, err)
 	}
+}
+
+// namedPolecatMissingRefusal is the refusal for a named polecat that does not
+// exist without --create. The live lookup and the dry-run peek both build it
+// here, so a preview prints the refusal the sling would raise (gt-yxc7m).
+func namedPolecatMissingRefusal(rigName, name, hookBead string) error {
+	return fmt.Errorf("polecat %s/%s does not exist; not substituting another polecat\n"+
+		"Create it by that name: add --create\n"+
+		"Let the pool choose:    gt sling %s %s",
+		rigName, name, beadOrPlaceholder(hookBead), rigName)
+}
+
+// peekNamedPolecatSling is the named-polecat reuse decision without its side
+// effects — the named counterpart of peekPolecatPoolAgent: a preview must
+// print the route a live sling would take, a refusal included, without reusing
+// anything (detach, reset --hard, clean -f, a new branch, hook_bead) and
+// without creating anything (gt-yxc7m). Nothing is admitted, so no seat is
+// claimed. The refusal text is the one the live path builds, hint included.
+func peekNamedPolecatSling(townRoot, rigName string, opts SlingSpawnOptions) error {
+	_, _, polecatMgr, err := openSlingRig(townRoot, rigName)
+	if err != nil {
+		// The rig is unreadable. A live sling reports that itself; a preview
+		// says nothing rather than inventing a refusal it cannot know.
+		return nil
+	}
+	heldIssue, peekErr := polecatMgr.PeekNamedReuse(opts.Name)
+	return namedSlingRefusal(rigName, opts, heldIssue, peekErr)
+}
+
+// namedSlingRefusal is the refusal a live named sling would raise, given the
+// read-only reuse verdict: nil when the route stands. Separated from the rig
+// lookup so the mapping is testable without a rig.
+func namedSlingRefusal(rigName string, opts SlingSpawnOptions, heldIssue string, err error) error {
+	switch {
+	case errors.Is(err, polecat.ErrPolecatNotFound):
+		if opts.Create {
+			return nil // --create would make it under this name
+		}
+		return namedPolecatMissingRefusal(rigName, opts.Name, opts.HookBead)
+	case err != nil:
+		return namedPolecatRefusal(rigName, opts.Name, opts.HookBead, heldIssue, err)
+	}
+	return nil
 }
 
 // namedPolecatRefusal explains why a named polecat cannot take this sling.
@@ -601,8 +641,10 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 // the seat: load the rig, reuse or allocate the polecat, and build its
 // worktree. Every error return leaves no session behind, so its caller drops
 // the seat claim on any error.
-func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-	// Load rig config
+// openSlingRig opens a rig and the polecat manager a sling reads it through.
+// The spawn path and the --dry-run peek share it, so a preview inspects
+// exactly the polecats a live spawn would.
+func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Manager, error) {
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
 	if err != nil {
@@ -613,13 +655,20 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 	r, err := rigMgr.GetRig(rigName)
 	if err != nil {
-		return nil, fmt.Errorf("rig '%s' not found", rigName)
+		return nil, nil, nil, fmt.Errorf("rig '%s' not found", rigName)
 	}
 
-	// Get polecat manager (with tmux for session-aware allocation)
+	// The polecat manager carries tmux for session-aware allocation.
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
-	polecatMgr := supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling"))
+	return r, t, supervisedPolecatManager(r, polecatGit, t, operatorActor("gt sling")), nil
+}
+
+func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+	r, t, polecatMgr, err := openSlingRig(townRoot, rigName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Pre-spawn Dolt health check (gt-94llt7): verify Dolt is reachable before
 	// allocating a polecat. Prevents orphaned polecats when Dolt is down.
