@@ -768,7 +768,12 @@ const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for 
                               the one the other seats leave alone (default:
                               needs-pro)
   polecat_pool.mode            How an empty seat is filled: "sling" dispatches
-                              the bead, "nudge" asks the mayor (default: sling)`
+                              the bead, "nudge" asks the mayor (default: sling)
+  polecat_pool.shape_gate      What a sling does with a candidate's shape lint
+                              (gt spec lint): "off" runs no lint, "warn" slings
+                              it anyway and comments the verdict, "refuse"
+                              skips it and labels it needs-shape or
+                              needs-planning (default: warn)`
 
 // polecatPoolIntKeys and polecatPoolStringKeys are gt config's view of
 // PolecatPool's seat-refill policy: one row per key, with the accessor that
@@ -794,6 +799,7 @@ var (
 		{"pro_agent", (*config.PolecatPool).GetProAgent, func(p *config.PolecatPool, v string) { p.ProAgent = v }},
 		{"pro_label", (*config.PolecatPool).GetProLabel, func(p *config.PolecatPool, v string) { p.ProLabel = v }},
 		{"mode", (*config.PolecatPool).GetMode, func(p *config.PolecatPool, v string) { p.Mode = v }},
+		{"shape_gate", (*config.PolecatPool).GetShapeGate, func(p *config.PolecatPool, v string) { p.ShapeGate = v }},
 	}
 )
 

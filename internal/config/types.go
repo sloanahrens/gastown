@@ -1461,10 +1461,17 @@ type PolecatPool struct {
 	// Mode is how an empty seat is filled: "sling" dispatches the bead
 	// directly, "nudge" asks the mayor instead. Default "sling".
 	Mode string `json:"mode,omitempty"`
+	// ShapeGate is what the plugin does with a candidate's shape lint
+	// (`gt spec lint`, gt-mmsr2) before it slings it: "off" runs no lint,
+	// "warn" slings the bead anyway and leaves the verdict on it as a
+	// comment, "refuse" skips the bead and labels it (gt-cq5gb). Default
+	// "warn": a day of data before the overseer flips it to refuse.
+	ShapeGate string `json:"shape_gate,omitempty"`
 }
 
 // Defaults for PolecatPool's seat-refill policy keys. Each equals the value
-// plugins/seat-refill/run.sh dispatched on before the keys existed.
+// plugins/seat-refill/run.sh dispatched on before the keys existed, except
+// ShapeGate, which is the warn-only first step of the shape gate (gt-cq5gb).
 const (
 	DefaultSeatRefillMaxPriority          = 2
 	DefaultSeatRefillTopCandidates        = 3
@@ -1475,6 +1482,7 @@ const (
 	DefaultSeatRefillProAgent             = "deepseek-pro"
 	DefaultSeatRefillProLabel             = "needs-pro"
 	DefaultSeatRefillMode                 = "sling"
+	DefaultSeatRefillShapeGate            = "warn"
 )
 
 // intOr returns *v, or def when v is nil.
@@ -1558,6 +1566,15 @@ func (p *PolecatPool) GetMode() string {
 	return p.Mode
 }
 
+// GetShapeGate returns what the plugin does with a candidate's shape lint, or
+// its default.
+func (p *PolecatPool) GetShapeGate() string {
+	if p == nil || p.ShapeGate == "" {
+		return DefaultSeatRefillShapeGate
+	}
+	return p.ShapeGate
+}
+
 // Validate reports the seat-refill policy values the plugin cannot act on: a
 // count below zero, or a nudge naming no candidates. gt config set refuses a
 // value it rejects, and the config kernel checks the same method at load, so a
@@ -1589,6 +1606,11 @@ func (p *PolecatPool) Validate() error {
 	case "sling", "nudge":
 	default:
 		errs = append(errs, fmt.Errorf("polecat_pool.mode = %q: must be sling or nudge", p.Mode))
+	}
+	switch p.GetShapeGate() {
+	case "off", "warn", "refuse":
+	default:
+		errs = append(errs, fmt.Errorf("polecat_pool.shape_gate = %q: must be off, warn or refuse", p.ShapeGate))
 	}
 	return errors.Join(errs...)
 }
