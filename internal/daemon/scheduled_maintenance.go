@@ -153,7 +153,10 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	if !isInMaintenanceWindow(now, window) {
-		return // Not in window — silent skip (this fires every 5 minutes)
+		// Outside the window the only work is a missed backup (gt-wne04);
+		// otherwise a silent skip (this fires every 5 minutes).
+		d.maybeCatchUpBackup(now)
+		return
 	}
 
 	// A gc cycle runs on its own goroutine; fold its completion time into
