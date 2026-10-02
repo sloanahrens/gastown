@@ -67,9 +67,9 @@ type SessionManager struct {
 	// hooks route the kills and replacements through the supervisor
 	// (gt-4k3fj.4.1); a nil hook goes straight to tmux.
 	hooks SessionHooks
-	// beadsAt opens the beads database at a resolved bd work dir; nil
-	// runs bd there as a plain call bounded by BdCommandTimeout.
-	beadsAt func(dir string) beads.Client
+	// beadsAt opens the beads database in a resolved beads dir; nil is
+	// beads.NewPinned.
+	beadsAt func(beadsDir string) beads.Client
 }
 
 // SessionHooks route a SessionManager's kills through the supervisor
@@ -974,10 +974,11 @@ func (m *SessionManager) StopAll(force bool) error {
 	return errors.Join(errs...)
 }
 
-// resolveBeadsDir determines the correct working directory for bd commands
-// on a given issue. This enables cross-rig beads resolution via routes.jsonl.
-// This is the core fix for GitHub issue #1056.
-func (m *SessionManager) resolveBeadsDir(issueID, fallbackDir string) string {
+// resolveHookWorkDir is the workspace directory bd commands on a given issue
+// run from: the rig that issue's prefix routes to, or fallbackDir when the
+// prefix names no rig. This enables cross-rig beads resolution via
+// routes.jsonl. This is the core fix for GitHub issue #1056.
+func (m *SessionManager) resolveHookWorkDir(issueID, fallbackDir string) string {
 	townRoot := filepath.Dir(m.rig.Path)
 	return beads.ResolveHookDir(townRoot, issueID, fallbackDir)
 }
@@ -996,13 +997,16 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 	return nil
 }
 
-// beadsFor opens the database issueID resolves to from fallbackDir.
+// beadsFor opens the database issueID resolves to from fallbackDir. The
+// database is named by path, so a BEADS_DIR the session manager's own process
+// inherited cannot retarget the validateIssue read or the hookIssue write
+// (gt-9hou3).
 func (m *SessionManager) beadsFor(issueID, fallbackDir string) beads.Client {
-	dir := m.resolveBeadsDir(issueID, fallbackDir)
+	beadsDir := beads.ResolveBeadsDir(m.resolveHookWorkDir(issueID, fallbackDir))
 	if m.beadsAt != nil {
-		return m.beadsAt(dir)
+		return m.beadsAt(beadsDir)
 	}
-	return beads.NewPlain(dir, nil).WithTimeout(constants.BdCommandTimeout)
+	return beads.NewPinned(beadsDir)
 }
 
 // verifyStartupNudgeDelivery checks if the polecat started working after the

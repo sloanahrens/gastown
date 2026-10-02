@@ -2,6 +2,8 @@ package polecat
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -32,6 +34,77 @@ func TestValidateIssueRefusesMissingAndTerminal(t *testing.T) {
 		if err := m.validateIssue(id, "/work"); !errors.Is(err, ErrIssueInvalid) {
 			t.Errorf("validateIssue(%s) = %v, want ErrIssueInvalid", id, err)
 		}
+	}
+}
+
+// TestBeadsForNamesTheDatabaseEachIDRoutesTo: validateIssue and hookIssue open
+// the database each issue ID routes to, addressed by path rather than left to
+// whatever workspace bd would resolve from the directory and the environment it
+// inherits. That is what stops a BEADS_DIR in the session manager's own process
+// from retargeting the validateIssue read and the hookIssue write at once
+// (gt-9hou3); the stripping itself is pinned in internal/beads by
+// BuildPinnedBDEnv's tests.
+func TestBeadsForNamesTheDatabaseEachIDRoutesTo(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	townBeads := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"hq-","path":"."}` + "\n" + `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigBeads := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
+	worktree := filepath.Join(townRoot, "gastown", "polecats", "Toast", "gastown")
+	if err := os.MkdirAll(filepath.Join(worktree, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".beads", "redirect"),
+		[]byte("../../../mayor/rig/.beads\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// gt- routes to the gastown rig, hq- to the town, and a prefix no route
+	// claims falls back to the worktree, whose redirect names the rig's
+	// database.
+	ids := []struct{ id, want string }{
+		{"gt-f1", rigBeads},
+		{"hq-town1", townBeads},
+		{"xx-unknown1", rigBeads},
+	}
+	db := beadsfake.New()
+	for _, tc := range ids {
+		db.Seed(beads.Issue{ID: tc.id, Title: "work", Status: "open"})
+	}
+	m := newTestSessionManager(&rig.Rig{Name: "gastown", Path: filepath.Join(townRoot, "gastown")})
+	var opened []string
+	m.beadsAt = func(beadsDir string) beads.Client {
+		opened = append(opened, beadsDir)
+		return db
+	}
+
+	for _, tc := range ids {
+		if err := m.validateIssue(tc.id, worktree); err != nil {
+			t.Fatalf("validateIssue(%s): %v", tc.id, err)
+		}
+	}
+	if len(opened) != len(ids) {
+		t.Fatalf("validateIssue opened %d databases, want %d: %v", len(opened), len(ids), opened)
+	}
+	for i, tc := range ids {
+		if opened[i] != tc.want {
+			t.Errorf("validateIssue(%s) opened %q, want %q", tc.id, opened[i], tc.want)
+		}
+	}
+
+	opened = nil
+	if err := m.hookIssue("gt-f1", "gastown/polecats/Toast", worktree); err != nil {
+		t.Fatalf("hookIssue: %v", err)
+	}
+	if len(opened) != 1 || opened[0] != rigBeads {
+		t.Errorf("hookIssue opened %v, want [%s]", opened, rigBeads)
 	}
 }
 

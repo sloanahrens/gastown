@@ -526,13 +526,14 @@ func TestEnsureCanonicalSessionBranch_RecordsRepairFailure(t *testing.T) {
 	}
 }
 
-// TestSessionManager_resolveBeadsDir verifies that SessionManager correctly
-// resolves the beads directory for cross-rig issues via routes.jsonl.
+// TestSessionManager_resolveHookWorkDir verifies that SessionManager correctly
+// resolves the workspace directory for cross-rig issues via routes.jsonl.
 // This is a regression test for GitHub issue #1056.
 //
 // The bug was that hookIssue/validateIssue used workDir directly instead of
-// resolving via routes.jsonl. Now they call resolveBeadsDir which we test here.
-func TestSessionManager_resolveBeadsDir(t *testing.T) {
+// resolving via routes.jsonl. Now they call resolveHookWorkDir which we test
+// here.
+func TestSessionManager_resolveHookWorkDir(t *testing.T) {
 	t.Parallel()
 	// Set up a mock town with routes.jsonl
 	townRoot := t.TempDir()
@@ -594,10 +595,10 @@ func TestSessionManager_resolveBeadsDir(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Test the SessionManager's resolveBeadsDir method directly
-			resolved := m.resolveBeadsDir(tc.issueID, polecatWorkDir)
+			// Test the SessionManager's resolveHookWorkDir method directly
+			resolved := m.resolveHookWorkDir(tc.issueID, polecatWorkDir)
 			if resolved != tc.expectedDir {
-				t.Errorf("resolveBeadsDir(%q, %q) = %q, want %q",
+				t.Errorf("resolveHookWorkDir(%q, %q) = %q, want %q",
 					tc.issueID, polecatWorkDir, resolved, tc.expectedDir)
 			}
 		})
