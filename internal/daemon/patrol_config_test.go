@@ -217,6 +217,53 @@ func TestLoadPatrolConfig_IgnoresLegacyDoltRemotesKey(t *testing.T) {
 	}
 }
 
+// TestPatrolConfigSource_FollowsTheDaemonSectionToItsHost: on the two-file
+// layout the daemon's patrols live in settings/config.json under "daemon", and
+// the startup line must name that file, not the retired mayor/daemon.json
+// (gt-y3pgh.12).
+func TestPatrolConfigSource_FollowsTheDaemonSectionToItsHost(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The two-file marker: mayor/town.json carries the registry section.
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":{"rigs":{}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(townJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"mayor":{"enabled":false}}}}`
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := PatrolConfigSource(town)
+	want := filepath.Join(town, "settings", "config.json")
+	if !strings.HasPrefix(got, want) || !strings.Contains(got, `section "daemon"`) {
+		t.Errorf("PatrolConfigSource = %q, want %s and its daemon section", got, want)
+	}
+	// The config still loads through the retired path, so the log and the load
+	// name one file.
+	if cfg := LoadPatrolConfig(town); cfg == nil || cfg.Patrols == nil {
+		t.Fatalf("patrol config did not load through the section: %+v", cfg)
+	}
+
+	// A town that still has mayor/daemon.json keeps that name.
+	fiveFile := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fiveFile, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(PatrolConfigFile(fiveFile), []byte(`{"type":"daemon-patrol-config","version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := PatrolConfigSource(fiveFile); got != PatrolConfigFile(fiveFile) {
+		t.Errorf("PatrolConfigSource on a five-file town = %q, want %q", got, PatrolConfigFile(fiveFile))
+	}
+}
+
 // Shutdown no longer pushes Dolt remotes or flushes OTel, so its budget is the
 // Dolt server's graceful stop and nothing else.
 func TestShutdownBudget_HasNoRemotePushStep(t *testing.T) {

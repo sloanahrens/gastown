@@ -557,14 +557,17 @@ func New(config *Config) (*Daemon, error) {
 	}
 	patrolConfig := LoadPatrolConfig(config.TownRoot)
 	if patrolConfig != nil {
-		logger.Printf("Loaded patrol config from %s", PatrolConfigFile(config.TownRoot))
-		// Propagate env vars from daemon.json to this process and all spawned sessions.
+		// Name the file the config was read from: on the two-file layout it is
+		// settings/config.json, not mayor/daemon.json (gt-y3pgh.12).
+		source := PatrolConfigSource(config.TownRoot)
+		logger.Printf("Loaded patrol config from %s", source)
+		// Propagate the daemon config's env to this process and all spawned sessions.
 		for k, v := range patrolConfig.Env {
 			processEnv{}.Setenv(k, v)
 			if agentconfig.LooksLikeSecret(k, v) {
-				logger.Printf("Set env %s=<redacted> from daemon.json", k)
+				logger.Printf("Set env %s=<redacted> from %s", k, source)
 			} else {
-				logger.Printf("Set env %s=%s from daemon.json", k, v)
+				logger.Printf("Set env %s=%s from %s", k, v, source)
 			}
 		}
 	}

@@ -1,0 +1,174 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// The seat-refill policy keys on polecat_pool (gt-y3pgh.12): absent means the
+// value the plugin dispatched on before the keys existed, a value in the file
+// wins, and Validate refuses what the plugin cannot act on.
+func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent keys take the defaults", func(t *testing.T) {
+		t.Parallel()
+		var p *PolecatPool
+		if p.GetMaxPriority() != DefaultSeatRefillMaxPriority ||
+			p.GetTopCandidates() != DefaultSeatRefillTopCandidates ||
+			p.GetEmptySeconds() != DefaultSeatRefillEmptySeconds ||
+			p.GetNudgeSeconds() != DefaultSeatRefillNudgeSeconds ||
+			p.GetDispatchEmptySeconds() != DefaultSeatRefillDispatchEmptySeconds ||
+			p.GetProMax() != DefaultSeatRefillProMax ||
+			p.GetProAgent() != DefaultSeatRefillProAgent ||
+			p.GetProLabel() != DefaultSeatRefillProLabel ||
+			p.GetMode() != DefaultSeatRefillMode {
+			t.Fatal("a nil pool must read as every default")
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("defaults must validate: %v", err)
+		}
+	})
+
+	t.Run("the file wins and survives a rewrite", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "config.json")
+		settingsJSON := `{
+			"type": "town-settings",
+			"version": 1,
+			"polecat_pool": {
+				"overflow_agent": "deepseek-flash",
+				"max_priority": 3,
+				"top_candidates": 5,
+				"empty_seconds": 60,
+				"nudge_seconds": 0,
+				"dispatch_empty_seconds": 30,
+				"pro_max": 0,
+				"pro_agent": "deepseek-reasoner",
+				"pro_label": "hard"
+			}
+		}`
+		if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		ts, err := LoadOrCreateTownSettings(path)
+		if err != nil {
+			t.Fatalf("LoadOrCreateTownSettings: %v", err)
+		}
+		pool := ts.PolecatPool
+		if pool == nil {
+			t.Fatal("polecat_pool did not load")
+		}
+		if pool.GetMaxPriority() != 3 || pool.GetTopCandidates() != 5 || pool.GetEmptySeconds() != 60 ||
+			pool.GetNudgeSeconds() != 0 || pool.GetDispatchEmptySeconds() != 30 {
+			t.Errorf("int knobs not loaded: %+v", pool)
+		}
+		if pool.GetProMax() != 0 || pool.GetProAgent() != "deepseek-reasoner" || pool.GetProLabel() != "hard" {
+			t.Errorf("pro seat knobs not loaded: %+v", pool)
+		}
+		// pro_max 0 drops the seat, so the agent and label go unread: an
+		// unset pair is not a config error there.
+		if err := pool.Validate(); err != nil {
+			t.Fatalf("a dropped pro seat must validate: %v", err)
+		}
+
+		if err := SaveTownSettings(path, ts); err != nil {
+			t.Fatalf("SaveTownSettings: %v", err)
+		}
+		saved, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{`"max_priority": 3`, `"top_candidates": 5`, `"empty_seconds": 60`,
+			`"nudge_seconds": 0`, `"dispatch_empty_seconds": 30`, `"pro_max": 0`,
+			`"pro_agent": "deepseek-reasoner"`, `"pro_label": "hard"`} {
+			if !strings.Contains(string(saved), want) {
+				t.Errorf("rewrite dropped %s:\n%s", want, saved)
+			}
+		}
+	})
+}
+
+func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
+	t.Parallel()
+	neg := -1
+	zero := 0
+	one := 1
+	for _, tc := range []struct {
+		name    string
+		pool    *PolecatPool
+		wantSub string // empty: the pool must validate
+	}{
+		{"max_priority below zero", &PolecatPool{MaxPriority: &neg}, "polecat_pool.max_priority"},
+		{"empty_seconds below zero", &PolecatPool{EmptySeconds: &neg}, "polecat_pool.empty_seconds"},
+		{"nudge_seconds below zero", &PolecatPool{NudgeSeconds: &neg}, "polecat_pool.nudge_seconds"},
+		{"dispatch_empty_seconds below zero", &PolecatPool{DispatchEmptySeconds: &neg}, "polecat_pool.dispatch_empty_seconds"},
+		{"pro_max below zero", &PolecatPool{ProMax: &neg}, "polecat_pool.pro_max"},
+		{"top_candidates zero", &PolecatPool{TopCandidates: &zero}, "polecat_pool.top_candidates"},
+		{"an unknown mode", &PolecatPool{Mode: "ask-the-mayor"}, "polecat_pool.mode"},
+		{"nudge mode validates", &PolecatPool{Mode: "nudge"}, ""},
+		{"zero priority is the P0 ceiling", &PolecatPool{MaxPriority: &zero}, ""},
+		{"nudge_seconds 0 drops the repeat cap", &PolecatPool{NudgeSeconds: &zero}, ""},
+		{"an empty pro agent reads as the default", &PolecatPool{ProMax: &one}, ""},
+		{"a dropped pro seat is still valid", &PolecatPool{ProMax: &zero}, ""},
+		{"everything at its floor validates", &PolecatPool{MaxPriority: &zero, TopCandidates: &one, EmptySeconds: &zero, NudgeSeconds: &zero, DispatchEmptySeconds: &zero, ProMax: &zero}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.pool.Validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("Validate() = %v, want an error naming %s", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// The plugin reads the same keys from the same file, and a default that only
+// one side knows is the drift this pins: the plugin's read must carry the Go
+// default, so a missing key dispatches on the value the type documents.
+func TestPolecatPool_SeatRefillDefaultsMatchPlugin(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "seat-refill", "run.sh"))
+	if err != nil {
+		t.Fatalf("read seat-refill run.sh: %v", err)
+	}
+	for _, k := range []struct{ key, def string }{
+		{"max_priority", "2"},
+		{"top_candidates", "3"},
+		{"empty_seconds", "300"},
+		{"nudge_seconds", "900"},
+		{"dispatch_empty_seconds", "0"},
+		{"pro_max", "1"},
+		{"pro_agent", "deepseek-pro"},
+		{"pro_label", "needs-pro"},
+		{"mode", "sling"},
+	} {
+		line := lineWithReadConfig(string(data), k.key)
+		if line == "" {
+			t.Errorf("plugins/seat-refill/run.sh does not read polecat_pool.%s", k.key)
+			continue
+		}
+		if !strings.Contains(line, k.def) {
+			t.Errorf("run.sh reads polecat_pool.%s with a default other than the type's %s:\n\t%s", k.key, k.def, line)
+		}
+	}
+}
+
+// lineWithReadConfig returns the run.sh line that reads the key through the
+// plugin's read_config, or "" when there is none.
+func lineWithReadConfig(script, key string) string {
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "read_config "+key+" ") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
