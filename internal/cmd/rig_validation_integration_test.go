@@ -3,22 +3,23 @@
 package cmd
 
 import (
-	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
 
 func TestIntegrationRigAddURLValidation(t *testing.T) {
-	_ = mockBdCommand(t)
-	townRoot := setupTestTown(t)
-
-	// We need to be in the workspace for FindFromCwdOrError
-	oldCwd, _ := os.Getwd()
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir to townRoot: %v", err)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
 	}
-	defer os.Chdir(oldCwd)
 
+	// The flags reach runRigAdd through cobra, so this drives the CLI: the
+	// push/upstream URL globals it would otherwise have to be handed by
+	// assignment are package-level state, which t.Parallel forbids touching.
+	// The rig name and git URL are valid, so the command stops at the URL
+	// check before AddRig and needs no Dolt server.
+	townRoot := setupTestTown(t)
 	gitURL := "https://github.com/org/repo.git"
 
 	tests := []struct {
@@ -43,18 +44,22 @@ func TestIntegrationRigAddURLValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Reset flags (they are global vars in rig.go)
-			rigAddPushURL = tt.pushURL
-			rigAddUpstreamURL = tt.upstreamURL
-			rigAddAdopt = false
+			args := []string{"rig", "add", "myrig", gitURL}
+			if tt.pushURL != "" {
+				args = append(args, "--push-url", tt.pushURL)
+			}
+			if tt.upstreamURL != "" {
+				args = append(args, "--upstream-url", tt.upstreamURL)
+			}
 
-			// Call runRigAdd
-			err := runRigAdd(nil, []string{"myrig", gitURL})
+			// cmd.Dir is the town root: workspace discovery walks up from it
+			// instead of this process chdir-ing into it.
+			out, err := runGTCmdMayFail(t, buildGT(t), townRoot, nil, args...)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			if !strings.Contains(out, tt.wantErr) {
+				t.Errorf("output %q does not contain %q", out, tt.wantErr)
 			}
 		})
 	}

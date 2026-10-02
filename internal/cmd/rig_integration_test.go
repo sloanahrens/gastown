@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // =============================================================================
@@ -191,171 +191,16 @@ func setupTestTown(t *testing.T) string {
 	return townRoot
 }
 
-// mockBdCommand creates a fake bd binary that simulates bd behavior.
-// This avoids needing bd installed for tests.
-func mockBdCommand(t *testing.T) string {
-	t.Helper()
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	logPath := filepath.Join(binDir, "bd.log")
-
-	if runtime.GOOS == "windows" {
-		bdPath = filepath.Join(binDir, "bd.cmd")
-		psPath := filepath.Join(binDir, "bd.ps1")
-
-		psScript := `# Mock bd for testing (PowerShell)
-$logFile = '` + logPath + `'
-$cmd = ''
-foreach ($arg in $args) {
-  if ($arg -like '--*') { continue }
-  $cmd = $arg
-  break
-}
-
-switch ($cmd) {
-  'init' {
-    $prefix = 'gt'
-    for ($i = 0; $i -lt $args.Length; $i++) {
-      $arg = $args[$i]
-      if ($arg -like '--prefix=*') {
-        $prefix = $arg.Substring(9)
-      } elseif ($arg -eq '--prefix' -and $i + 1 -lt $args.Length) {
-        $prefix = $args[$i + 1]
-      }
-    }
-    New-Item -ItemType Directory -Force -Path .beads | Out-Null
-    Set-Content -Path (Join-Path .beads 'config.yaml') -Value ("prefix: " + $prefix)
-    exit 0
-  }
-  'version' {
-    # deps.EnsureBeads reads a version from this; without one the mock is
-    # "on PATH but its version could not be determined".
-    Write-Output 'bd version 1.0.5 (mock)'
-    exit 0
-  }
-  'migrate' { exit 0 }
-  'show' {
-    [Console]::Error.WriteLine('{"error":"not found"}')
-    exit 1
-  }
-  'create' {
-    Add-Content -Path $logFile -Value ($args -join ' ')
-    $beadId = ''
-    foreach ($arg in $args) {
-      if ($arg -like '--id=*') {
-        $beadId = $arg.Substring(5)
-      }
-    }
-    Write-Output ("{""id"":""" + $beadId + """,""status"":""open"",""created_at"":""2025-01-01T00:00:00Z""}")
-    exit 0
-  }
-  'mol' { exit 0 }
-  'list' { exit 0 }
-  default { exit 0 }
-}
-`
-		cmdScript := `@echo off
-pwsh -NoProfile -NoLogo -File "` + psPath + `" %*
-`
-		if err := os.WriteFile(psPath, []byte(psScript), 0644); err != nil {
-			t.Fatalf("write mock bd ps1: %v", err)
-		}
-		if err := os.WriteFile(bdPath, []byte(cmdScript), 0644); err != nil {
-			t.Fatalf("write mock bd cmd: %v", err)
-		}
-	} else {
-		// Create a script that simulates bd init and other commands
-		// Also logs all create commands for verification.
-		// Note: beads.run() prepends --allow-stale to all commands,
-		// so we need to find the actual command in the argument list.
-		script := `#!/bin/sh
-# Mock bd for testing
-LOG_FILE="` + logPath + `"
-
-# Find the actual command (skip global flags like --allow-stale)
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;; # skip flags
-    *) cmd="$arg"; break ;;
-  esac
-done
-
-case "$cmd" in
-  init)
-    # Create .beads directory and config.yaml
-    mkdir -p .beads
-    prefix="gt"
-    # Handle both --prefix=value and --prefix value forms
-    next_is_prefix=false
-    for arg in "$@"; do
-      if [ "$next_is_prefix" = true ]; then
-        prefix="$arg"
-        next_is_prefix=false
-      else
-        case "$arg" in
-          --prefix=*) prefix="${arg#--prefix=}" ;;
-          --prefix) next_is_prefix=true ;;
-        esac
-      fi
-    done
-    echo "prefix: $prefix" > .beads/config.yaml
-    exit 0
-    ;;
-  version)
-    # deps.EnsureBeads reads a version from this; without one the mock is
-    # "on PATH but its version could not be determined".
-    echo "bd version 1.0.5 (mock)"
-    exit 0
-    ;;
-  migrate)
-    exit 0
-    ;;
-  show)
-    echo '{"error":"not found"}' >&2
-    exit 1
-    ;;
-  create)
-    # Log all create commands for verification
-    echo "$@" >> "$LOG_FILE"
-    # Extract the ID from --id=xxx argument
-    bead_id=""
-    for arg in "$@"; do
-      case "$arg" in
-        --id=*) bead_id="${arg#--id=}" ;;
-      esac
-    done
-    # Return valid JSON for bead creation
-    echo "{\"id\":\"$bead_id\",\"status\":\"open\",\"created_at\":\"2025-01-01T00:00:00Z\"}"
-    exit 0
-    ;;
-  mol|list)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-		if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
-			t.Fatalf("write mock bd: %v", err)
-		}
-	}
-
-	// Prepend to PATH
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	return logPath
-}
-
 // TestIntegrationRigAddCreatesCorrectStructure verifies that gt rig add creates
 // the expected directory structure.
 func TestIntegrationRigAddCreatesCorrectStructure(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "testproject")
 
 	// Load rigs config
@@ -476,10 +321,13 @@ func TestIntegrationRigAddCreatesCorrectStructure(t *testing.T) {
 // TestIntegrationRigAddInitializesBeads verifies that beads is initialized with
 // the correct prefix.
 func TestIntegrationRigAddInitializesBeads(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "beadstest")
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -545,10 +393,13 @@ func TestIntegrationRigAddInitializesBeads(t *testing.T) {
 // TestIntegrationRigAddUpdatesRoutes verifies that routes.jsonl is updated
 // with the new rig's route.
 func TestIntegrationRigAddUpdatesRoutes(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "routetest")
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -616,10 +467,13 @@ func TestIntegrationRigAddUpdatesRoutes(t *testing.T) {
 // TestIntegrationRigAddUpdatesRigsJson verifies that rigs.json is updated
 // with the new rig entry.
 func TestIntegrationRigAddUpdatesRigsJson(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "jsontest")
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -667,10 +521,13 @@ func TestIntegrationRigAddUpdatesRigsJson(t *testing.T) {
 // TestIntegrationRigAddDerivesPrefix verifies that when no prefix is specified,
 // one is derived from the rig name.
 func TestIntegrationRigAddDerivesPrefix(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "myproject")
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -700,10 +557,13 @@ func TestIntegrationRigAddDerivesPrefix(t *testing.T) {
 // TestIntegrationRigAddCreatesRigConfig verifies that config.json contains
 // the correct rig configuration.
 func TestIntegrationRigAddCreatesRigConfig(t *testing.T) {
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 	gitURL := createTestGitRepo(t, "configtest")
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -759,11 +619,13 @@ func TestIntegrationRigAddCreatesRigConfig(t *testing.T) {
 // configures the upstream remote on both the bare repo and mayor clone,
 // and persists the URL to config.json and rigs.json.
 func TestIntegrationRigAddWithUpstreamURL(t *testing.T) {
-	// bd is mocked, but AddRig still creates the rig's database over SQL.
-	requireScratchDoltServer(t)
-	_ = mockBdCommand(t)
+	t.Parallel()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	port, _ := testutil.LeaseScratchDoltContainerEnv(t)
 	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
 
 	// Create two repos: one acts as the fork (origin), one as the upstream.
 	forkURL := createTestGitRepo(t, "myfork")
@@ -847,7 +709,9 @@ func TestIntegrationRigAddWithUpstreamURL(t *testing.T) {
 // TestIntegrationRigAddRejectsInvalidNames verifies that rig names with invalid
 // characters are rejected.
 func TestIntegrationRigAddRejectsInvalidNames(t *testing.T) {
-	_ = mockBdCommand(t)
+	t.Parallel()
+	// AddRig validates the name before its Dolt check, so this needs no Dolt
+	// server and no bd: it stops at the name.
 	townRoot := setupTestTown(t)
 	gitURL := createTestGitRepo(t, "validname")
 
@@ -929,11 +793,14 @@ func TestIntegrationAgentBeadIDs(t *testing.T) {
 // - Repo WITHOUT tracked .beads/ (clean repo)
 // - Repo WITH tracked .beads/ (simulates beads project)
 func TestIntegrationAgentWorktreesStayClean(t *testing.T) {
+	t.Parallel()
 	// Skip if bd is not available (required for beads initialization)
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
 	}
-	requireScratchDoltServer(t)
+	// One lease for both cases: the container is exclusive and its catalog is
+	// reset between lessees, so two cases in one test share it.
+	port, baseEnv := testutil.LeaseScratchDoltContainerEnv(t)
 
 	testCases := []struct {
 		name            string
@@ -945,7 +812,7 @@ func TestIntegrationAgentWorktreesStayClean(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			runAgentCleanTest(t, tc.hasTrackedBeads)
+			runAgentCleanTest(t, tc.hasTrackedBeads, port, baseEnv)
 		})
 	}
 }
@@ -960,7 +827,11 @@ type agentWorktree struct {
 
 // runAgentCleanTest runs the agent worktree cleanliness test for all agent types.
 // If hasTrackedBeads is true, the source repo will have a tracked .beads/ directory.
-func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
+// port and baseEnv are the parent's leased scratch Dolt container: the in-process
+// AddRig reaches it through the town's bridged endpoint, and the gt subprocesses
+// below are given baseEnv because a child that inherited this process's
+// environment instead would reach the package's shared container.
+func runAgentCleanTest(t *testing.T, hasTrackedBeads bool, port string, baseEnv []string) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -1026,9 +897,14 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 		}
 	}
 
+	// Every gt below runs with the scratch container's routing variables plus
+	// this case's isolated HOME: the child, not this process, is the one
+	// pointed at the leased container.
+	townEnv := append(append([]string{}, baseEnv...), "HOME="+tmpDir, "GT_TOWN_ROOT="+hqPath)
+
 	// Step 2: Run gt install
-	cmd := exec.Command(gtBinary, "install", hqPath, "--name", "test-town", "--dolt-port", os.Getenv("GT_DOLT_PORT"))
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+	cmd := exec.Command(gtBinary, "install", hqPath, "--name", "test-town", "--dolt-port", port)
+	cmd.Env = append(append([]string{}, baseEnv...), "HOME="+tmpDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gt install failed: %v\nOutput: %s", err, output)
@@ -1036,7 +912,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	t.Logf("gt install output:\n%s", output)
 
 	// Bridge the test Dolt server PID so AddRig's IsRunning check passes.
-	bridgeDoltPidToTown(t, hqPath)
+	bridgeDoltPidToTownOnPort(t, hqPath, port)
 
 	// Step 3: Add rig using Manager API (CLI rejects local paths since URL validation was added)
 	// Use different prefix based on whether source has tracked beads
@@ -1075,7 +951,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	// Step 4: Create a crew member
 	cmd = exec.Command(gtBinary, "crew", "add", "testcrew", "--rig", "testrig")
 	cmd.Dir = hqPath
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_TOWN_ROOT="+hqPath)
+	cmd.Env = townEnv
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gt crew add failed: %v\nOutput: %s", err, output)
@@ -1091,7 +967,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool) {
 	defer cancel()
 	cmd = exec.CommandContext(ctx, gtBinary, "polecat", "add", "testrig", "TestCat")
 	cmd.Dir = hqPath
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "GT_TOWN_ROOT="+hqPath)
+	cmd.Env = townEnv
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("gt polecat identity add failed (non-fatal, beads may not be available): %v", err)

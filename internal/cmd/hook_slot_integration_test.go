@@ -457,6 +457,7 @@ func TestIntegrationHookSlot_HookPersistence(t *testing.T) {
 
 // TestIntegrationHookSlot_StatusTransitions tests valid status transitions for hooked beads.
 func TestIntegrationHookSlot_StatusTransitions(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping test")
 	}
@@ -516,9 +517,10 @@ func TestIntegrationHookSlot_StatusTransitions(t *testing.T) {
 
 	// Finally close the bead, as the agent it is hooked to: bd refuses a close
 	// of a bead assigned to someone else unless it is forced, and the hooked
-	// polecat closing its own work is the transition under test.
-	t.Setenv("BD_ACTOR", agentID)
-	if err := b.Close(issue.ID); err != nil {
+	// polecat closing its own work is the transition under test. ActingAs
+	// carries the actor to this one call's environment instead of the
+	// process's, which is what t.Parallel forbids touching.
+	if err := b.ActingAs(agentID).Close(issue.ID); err != nil {
 		t.Errorf("close hooked bead: %v", err)
 	}
 
