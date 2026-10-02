@@ -753,6 +753,13 @@ func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
 	if got := strings.TrimSpace(stdout.String()); got != "needs-pro" {
 		t.Errorf("polecat_pool.pro_label = %q, want the default needs-pro", got)
 	}
+	stdout.Reset()
+	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.shape_gate"}); err != nil {
+		t.Fatalf("configGet polecat_pool.shape_gate: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "warn" {
+		t.Errorf("polecat_pool.shape_gate = %q, want the default warn", got)
+	}
 
 	// Set the ceiling the 2026-10-01 incident had to reach through an env var.
 	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_priority", "3"}); err != nil {
@@ -785,6 +792,20 @@ func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
 	err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_priority", "high"})
 	if err == nil || !strings.Contains(err.Error(), "expected integer") {
 		t.Errorf("configSet max_priority high = %v, want an integer refusal", err)
+	}
+	err = configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.shape_gate", "block"})
+	if err == nil || !strings.Contains(err.Error(), "polecat_pool.shape_gate") {
+		t.Errorf("configSet shape_gate block = %v, want a refusal naming the key", err)
+	}
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.shape_gate", "refuse"}); err != nil {
+		t.Fatalf("configSet shape_gate refuse: %v", err)
+	}
+	loaded, err = config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if got := loaded.PolecatPool.GetShapeGate(); got != "refuse" {
+		t.Errorf("saved shape_gate = %q, want refuse", got)
 	}
 
 	// A knob that is not one of the pool's keys is still an unknown key.
