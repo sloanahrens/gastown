@@ -3,6 +3,9 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +16,8 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/slot"
@@ -53,6 +58,16 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		slots:       func() (slot.Report, error) { return slot.Report{}, nil },
 		pidAlive:    func(int) bool { return true },
 		bdLatency:   func(context.Context) (time.Duration, error) { return 0, nil },
+
+		landingState: func(string) landingState { return landingState{} },
+		readyToLand:  func(context.Context, string) (int, error) { return 0, nil },
+		seats:        func() ([]townhealth.Seat, error) { return nil, nil },
+		seatWork:     func(string, string) (bool, error) { return false, nil },
+		remoteTip:    func(string) (string, error) { return "", nil },
+		landedCommit: func(string, string) (bool, error) { return false, nil },
+		commitInfo:   func(string, string) (string, string) { return "", "" },
+		tips:         &directPushTips{},
+
 		reworkNotes: map[string]reworkNote{},
 	}
 	return &attentionFixture{d: d, logs: logs, now: now, src: src}
@@ -438,5 +453,379 @@ func TestWriteAttention_WritesTheQueueFromTheDaemonsOwnReads(t *testing.T) {
 	}
 	if strings.Count(logs.String(), "attention: +esc:hq-9") != 1 {
 		t.Errorf("log = %q, want one new-item line, not one per beat", logs.String())
+	}
+}
+
+// gt-vsct7.3: a rig whose landing pass has been on the same bead longer than
+// the threshold raises landing-stuck, and the item clears when the pass moves
+// on. The clock is the fixture's fake one.
+func TestAttentionLandingStuck(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+
+	// Exactly at the threshold is not yet past it.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck)}
+	}
+	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none at exactly the threshold", items)
+	}
+
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck - time.Minute)}
+	}
+	items := f.collect(t, f.src.collectLandingStuck)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one stuck landing", items)
+	}
+	got := items[0]
+	if got.Key != "landing-stuck:gastown:gt-a" || got.Kind != attention.KindLandingStuck ||
+		got.Rig != attentionRig || got.Bead != "gt-a" || got.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want the rig and bead in the key, high severity", got)
+	}
+
+	// The pass moves on to the next bead: the condition no longer holds.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-b", since: now}
+	}
+	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none once the pass moved on", items)
+	}
+}
+
+// The item clears in the queue, not just in one collector: the next tick stops
+// returning it and Reconcile drops it.
+func TestAttentionLandingStuckClearsWhenThePassMoves(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck - time.Minute)}
+	}
+	st := f.tick(t, now)
+	itemByKey(t, st, "landing-stuck:gastown:gt-a")
+
+	f.src.landingState = func(string) landingState { return landingState{} }
+	st = f.tick(t, now.Add(time.Minute))
+	if _, ok := attention.Find(st, "landing-stuck:gastown:gt-a"); ok {
+		t.Fatalf("state = %+v, want the landed item cleared", st.Items)
+	}
+}
+
+// gt-vsct7.3: a rig with ready-to-land beads and no landing activity past the
+// threshold raises queue-stuck; a rig with nothing waiting never does.
+func TestAttentionQueueStuck(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
+
+	f.src.landingState = func(string) landingState {
+		return landingState{active: now.Add(-attentionQueueSilent)}
+	}
+	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none at exactly the threshold", items)
+	}
+
+	f.src.landingState = func(string) landingState {
+		return landingState{active: now.Add(-attentionQueueSilent - time.Minute)}
+	}
+	items := f.collect(t, f.src.collectQueueStuck)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one silent queue", items)
+	}
+	if got := items[0]; got.Key != "queue-stuck:gastown" || got.Kind != attention.KindQueueStuck ||
+		got.Rig != attentionRig || got.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want queue-stuck:gastown", got)
+	}
+
+	// Nothing waiting: no item however quiet the rig has been.
+	f.src.readyToLand = func(context.Context, string) (int, error) { return 0, nil }
+	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none with an empty queue", items)
+	}
+
+	// A rig whose worker has never run a pass has no silence to measure.
+	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
+	f.src.landingState = func(string) landingState { return landingState{} }
+	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none before the first pass", items)
+	}
+}
+
+// The busy-queue case from the bead: five beads each landing in 2.5m is a
+// moving queue and never raises queue-stuck, however long it stays busy.
+func TestAttentionQueueStuckStaysQuietWhileLandingsContinue(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, start)
+	f.src.readyToLand = func(context.Context, string) (int, error) { return 5, nil }
+	states := &landingStates{}
+	f.src.landingState = states.get
+
+	at := start
+	states.beginPass(attentionRig, at)
+	for i := 0; i < 5; i++ {
+		states.setBead(attentionRig, fmt.Sprintf("gt-%d", i), at)
+		at = at.Add(2*time.Minute + 30*time.Second)
+		states.setBead(attentionRig, "", at)
+		states.endPass(attentionRig, at, true)
+		f.src.now = at
+		if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+			t.Fatalf("landing %d: items = %+v, want none while the queue is landing", i, items)
+		}
+	}
+
+	// The queue stops moving: the item appears once the silence passes.
+	at = at.Add(attentionQueueSilent + time.Minute)
+	f.src.now = at
+	items := f.collect(t, f.src.collectQueueStuck)
+	if len(items) != 1 || items[0].Key != "queue-stuck:gastown" {
+		t.Fatalf("items = %+v, want queue-stuck:gastown once the queue went quiet", items)
+	}
+}
+
+// An idle pass is not activity: a worker that keeps polling an unmoved queue
+// must still raise the item.
+func TestAttentionQueueStuckIgnoresIdlePasses(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, start)
+	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
+	states := &landingStates{}
+	f.src.landingState = states.get
+
+	at := start
+	states.beginPass(attentionRig, at)
+	for i := 0; i < 20; i++ {
+		at = at.Add(time.Minute)
+		states.beginPass(attentionRig, at)
+		states.endPass(attentionRig, at, false)
+	}
+	f.src.now = at
+	items := f.collect(t, f.src.collectQueueStuck)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want the item after 20 idle passes over a waiting queue", items)
+	}
+}
+
+// gt-vsct7.3: a running polecat whose intent record shows no progress for the
+// threshold, and which holds assigned open work, raises stall:<rig>/<name>.
+// The walk is the same one townhealth judges (healthSources.Seats), so the
+// item reads the samples the liveness sampler already wrote.
+func TestAttentionPolecatStall(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+
+	writeSeat := func(name string, rec intent.Record) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(town, attentionRig, "polecats", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeJSONFile(t, intent.Seat{Rig: attentionRig, Role: constants.RolePolecat, Name: name}.Path(town), rec)
+	}
+	quiet := now.Add(-attentionPolecatStall - time.Minute)
+	writeSeat("opal", intent.Record{
+		Desired:  intent.DesiredRun,
+		Progress: &intent.Progress{SampledAt: now.Add(-time.Minute), ChangedAt: quiet},
+	})
+
+	src := &attentionSources{
+		d:           d,
+		now:         now,
+		landingRigs: func() []string { return []string{attentionRig} },
+		seats: func() ([]townhealth.Seat, error) {
+			return (&healthSources{d: d, evidence: time.Hour, now: now}).Seats()
+		},
+		seatWork:     func(string, string) (bool, error) { return true, nil },
+		landingState: func(string) landingState { return landingState{} },
+	}
+	items, err := src.collectPolecatStall(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one stalled polecat", items)
+	}
+	got := items[0]
+	if got.Key != "stall:gastown/opal" || got.Kind != attention.KindPolecatStall ||
+		got.Rig != attentionRig || got.Severity != attention.SeverityLow {
+		t.Errorf("item = %+v, want stall:gastown/opal at low severity", got)
+	}
+
+	// A seat with no assigned work is idle, not stalled.
+	src.seatWork = func(string, string) (bool, error) { return false, nil }
+	if items, err := src.collectPolecatStall(context.Background()); err != nil || len(items) != 0 {
+		t.Fatalf("items = %+v (err %v), want none for a seat holding no work", items, err)
+	}
+	src.seatWork = func(string, string) (bool, error) { return true, nil }
+
+	// An unanswered work read is UNKNOWN, not "no work": the collector fails
+	// and the tick keeps the kind's previous items.
+	src.seatWork = func(string, string) (bool, error) { return false, errors.New("bd is down") }
+	if _, err := src.collectPolecatStall(context.Background()); err == nil {
+		t.Fatal("want the collector to fail when the seat's work cannot be read")
+	}
+	src.seatWork = func(string, string) (bool, error) { return true, nil }
+
+	// Progress moving again clears it.
+	writeSeat("opal", intent.Record{
+		Desired:  intent.DesiredRun,
+		Progress: &intent.Progress{SampledAt: now.Add(-time.Minute), ChangedAt: now.Add(-time.Minute)},
+	})
+	if items, err := src.collectPolecatStall(context.Background()); err != nil || len(items) != 0 {
+		t.Fatalf("items = %+v (err %v), want none once the seat moved", items, err)
+	}
+}
+
+// A frozen seat and a seat that is not a polecat are never stall items.
+func TestAttentionPolecatStallSkipsFrozenAndOtherRoles(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	quiet := now.Add(-attentionPolecatStall - time.Minute)
+	f := newAttentionFixture(t, now)
+	f.src.seats = func() ([]townhealth.Seat, error) {
+		return []townhealth.Seat{
+			{Rig: attentionRig, Name: "polecat/frozen", Run: true, Frozen: true, Sampled: now.Add(-time.Minute), Changed: quiet},
+			{Rig: attentionRig, Name: "witness", Run: true, Sampled: now.Add(-time.Minute), Changed: quiet},
+			{Rig: attentionRig, Name: "polecat/stopped", Sampled: now.Add(-time.Minute), Changed: quiet},
+		}, nil
+	}
+	f.src.seatWork = func(string, string) (bool, error) {
+		t.Fatal("no seat here may be asked for work")
+		return false, nil
+	}
+	if items := f.collect(t, f.src.collectPolecatStall); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for frozen, non-polecat or stopped seats", items)
+	}
+}
+
+// gt-vsct7.3: a tip that reached origin with no landing record naming it
+// raises direct-push:<rig>:<sha12> with the commit's author and subject. A
+// worker landing raises nothing, the tip is judged one tick after it moves so
+// the record has time to appear, and the item clears a day after the tip was
+// first seen.
+func TestAttentionDirectPush(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tips = &directPushTips{}
+
+	tip := "aaaa000000000000000000000000000000000000"
+	landed := map[string]bool{}
+	f.src.remoteTip = func(string) (string, error) { return tip, nil }
+	f.src.landedCommit = func(string, string) (bool, error) { return landed[tip], nil }
+	f.src.commitInfo = func(string, string) (string, string) { return "Alice", "push straight to main" }
+
+	// The first read is a baseline: the tip already on origin is not a move.
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for the first reading", items)
+	}
+
+	// The landing worker lands: the tip moves, and its record is there by the
+	// time the next tick judges it.
+	tip = "bbbb000000000000000000000000000000000000"
+	f.src.now = now.Add(time.Minute)
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
+		t.Fatalf("items = %+v, want nothing on the tick the tip moved", items)
+	}
+	landed[tip] = true
+	f.src.now = now.Add(2 * time.Minute)
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
+		t.Fatalf("items = %+v, want nothing for a recorded landing", items)
+	}
+
+	// A tip nothing recorded: one item, with the commit's author and subject.
+	tip = "cccc000000000000000000000000000000000000"
+	f.src.now = now.Add(3 * time.Minute)
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
+		t.Fatalf("items = %+v, want nothing on the grace tick", items)
+	}
+	f.src.now = now.Add(4 * time.Minute)
+	items := f.collect(t, f.src.collectDirectPush)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one direct push", items)
+	}
+	got := items[0]
+	if got.Key != "direct-push:gastown:cccc00000000" || got.Kind != attention.KindDirectPush ||
+		got.Rig != attentionRig || got.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want the twelve-character sha in the key", got)
+	}
+	if got.SHA != tip {
+		t.Errorf("SHA = %q, want the full %q", got.SHA, tip)
+	}
+	if !strings.Contains(got.Summary, "Alice") || !strings.Contains(got.Summary, "push straight to main") {
+		t.Errorf("summary = %q, want the commit's author and subject", got.Summary)
+	}
+
+	// It holds while the tip stays.
+	f.src.now = now.Add(5 * time.Minute)
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 1 {
+		t.Fatalf("items = %+v, want the item to hold", items)
+	}
+
+	// A day after the tip was first seen it is dropped, so an unacked push
+	// does not hold forever.
+	f.src.now = now.Add(3*time.Minute + attentionDirectPushHold)
+	if items := f.collect(t, f.src.collectDirectPush); len(items) != 0 {
+		t.Fatalf("items = %+v, want the item expired after the hold", items)
+	}
+}
+
+// A failed ls-remote emits no items and keeps the previous tick's.
+func TestAttentionDirectPushKeepsItemsWhenTheReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tips = &directPushTips{}
+	f.src.remoteTip = func(string) (string, error) { return "", errors.New("origin unreachable") }
+
+	prev := attention.State{Updated: now, Items: []attention.Item{{
+		Key: "direct-push:gastown:cccc00000000", Kind: attention.KindDirectPush,
+		Severity: attention.SeverityHigh, Rig: attentionRig, Summary: "main -> cccc00000000 with no landing record",
+	}}}
+	collectors := []attentionCollector{{kind: attention.KindDirectPush, collect: f.src.collectDirectPush}}
+	observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+	if len(observed) != 1 || observed[0].Key != "direct-push:gastown:cccc00000000" {
+		t.Fatalf("observed = %+v, want the previous item kept", observed)
+	}
+}
+
+// The observed tip and the raised push survive a daemon restart: a fresh
+// collector reading tips.json off disk raises the same item without judging
+// the tip again.
+func TestDirectPushTipsSurviveARestart(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	const sha = "cccc000000000000000000000000000000000000"
+	if err := writeDirectPushTips(town, directPushTips{Rigs: []directPushTip{{
+		Rig: attentionRig, Tip: sha, Pushes: []directPush{{SHA: sha, FirstSeen: now, Author: "Alice", Subject: "straight to main"}},
+	}}}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	tips, err := readDirectPushTips(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &attentionSources{
+		d:            &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)},
+		now:          now.Add(time.Minute),
+		landingRigs:  func() []string { return []string{attentionRig} },
+		tips:         &tips,
+		remoteTip:    func(string) (string, error) { return sha, nil },
+		landedCommit: func(string, string) (bool, error) { return false, nil },
+		commitInfo:   func(string, string) (string, string) { return "", "" },
+	}
+	items, err := src.collectDirectPush(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "direct-push:gastown:cccc00000000" {
+		t.Fatalf("items = %+v, want the persisted push raised again", items)
 	}
 }

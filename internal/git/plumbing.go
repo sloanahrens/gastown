@@ -199,6 +199,18 @@ func (g *Git) CommitSubject(rev string) (string, error) {
 	return g.run("log", "-1", "--format=%s", rev)
 }
 
+// CommitAuthorSubject returns one commit's author name and subject line
+// (git log -1 --format=%an%x00%s), read in one call. A commit whose objects
+// are not in this repo is an error; the caller decides whether that matters.
+func (g *Git) CommitAuthorSubject(rev string) (author, subject string, err error) {
+	out, err := g.runOutput("log", "-1", "--format=%an%x00%s", rev)
+	if err != nil {
+		return "", "", err
+	}
+	author, subject, _ = strings.Cut(out, "\x00")
+	return strings.TrimSpace(author), strings.TrimSpace(subject), nil
+}
+
 // DiffStatThreeDot returns git diff --stat for base...head, the diff restricted
 // to what head introduces on top of the merge base (as opposed to the pair-wise
 // base..head range, which also reports base's own progress as a deletion).

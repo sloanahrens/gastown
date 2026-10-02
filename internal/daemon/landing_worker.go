@@ -250,9 +250,12 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			skipLogged = ""
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
 			d.landingPasses.Add(1)
-			d.landingBeads.Store(rigName, "")
+			d.landingStates.beginPass(rigName, d.clk().Now())
 			rep := pass(d.ctx)
-			d.landingBeads.Delete(rigName)
+			// The pass's end is landing activity only when it did work: an
+			// idle pass every interval says the worker is alive, not that the
+			// queue is moving (gt-vsct7.3).
+			d.landingStates.endPass(rigName, d.clk().Now(), rep.Landed+rep.Rejected+rep.Repaired > 0)
 			d.landingPasses.Add(-1)
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
@@ -424,7 +427,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
 		},
 		Draining: d.upgradeRestartPending.Load,
-		Active:   func(id string) { d.landingBeads.Store(rigName, id) },
+		Active: func(id string) {
+			// The Active callback is the landing-stuck item's clock: a bead
+			// entering flight is when its in-flight time starts, and leaving
+			// it is activity (gt-vsct7.3).
+			d.landingStates.setBead(rigName, id, d.clk().Now())
+		},
 		ClearIntent: func(w land.Work) error {
 			seat := supervisor.IntentSeat(supervisor.SeatFor(rigName, constants.RolePolecat, w.Worker))
 			_, err := intent.ClearLanded(townRoot, seat, w.BeadID, "landing worker", time.Now())
