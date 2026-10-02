@@ -451,7 +451,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	}
 
 	// Step 5: Report
-	d.reportOpenWispAlert(reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: dryRun})
+	d.recordCycleOpenWisps(reapErrors, reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: dryRun})
 	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", totalReaped)
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
@@ -462,22 +462,36 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	cycle.closeStep("report")
 }
 
+// recordCycleOpenWisps reports one patrol cycle's open-wisp reading, unless the
+// cycle lost databases to reap errors: that count covers fewer databases than
+// the series is measured over, so recording it would anchor the series on an
+// undercount and hide the growth the alert exists to catch (gt-11kyy). The
+// failed step is already reported by the cycle itself.
+func (d *Daemon) recordCycleOpenWisps(reapErrors int, sample reaper.OpenWispSample) {
+	if reapErrors > 0 {
+		d.logger.Printf("wisp_reaper: open-wisp alert skipped: %d database(s) failed to reap, so this cycle's count is incomplete", reapErrors)
+		return
+	}
+	d.reportOpenWispAlert(sample)
+}
+
 // reportOpenWispAlert warns when this cycle's open-wisp count grew enough over
-// the last recorded cycle to mean accumulation rather than a working set, then
+// the recorded baseline to mean accumulation rather than a working set, then
 // records the cycle as the reading the next one is judged against. The record
-// outlives the process — the baseline is on disk — so a daemon restart loses no
+// outlives the process — it is on disk — so a daemon restart loses no
 // comparison (gt-11kyy).
 func (d *Daemon) reportOpenWispAlert(sample reaper.OpenWispSample) {
-	townRoot := d.config.TownRoot
-	previous, err := LoadWispAlertBaseline(townRoot)
+	path := WispAlertBaselinePath(d.config.TownRoot)
+	previous, err := LoadWispAlertState(path)
 	if err != nil {
 		d.logger.Printf("wisp_reaper: WARNING: cannot read the open-wisp baseline (%v) — "+
 			"this cycle cannot be judged against the last one", err)
 	}
-	if alert, detail := reaper.OpenWispAlert(sample, previous); alert {
+	next, alert, detail := reaper.NextOpenWispAlertState(previous, sample)
+	if alert {
 		d.logger.Printf("wisp_reaper: WARNING: %s — investigate wisp lifecycle", detail)
 	}
-	if err := SaveWispAlertBaseline(townRoot, sample); err != nil {
+	if err := SaveWispAlertState(path, next); err != nil {
 		d.logger.Printf("wisp_reaper: WARNING: cannot record the open-wisp baseline (%v) — "+
 			"the next cycle will have nothing to compare against", err)
 	}

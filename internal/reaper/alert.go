@@ -2,13 +2,14 @@ package reaper
 
 import "fmt"
 
+// The open-wisp alert measures growth, never size (gt-11kyy). The fixed count
+// it replaced is gone rather than kept: the open-wisp count is dominated by
+// healthy, recent wisps, so no absolute value separates "busy town" from
+// "runaway", and a threshold set from one town's steady state false-alarms in
+// the next.
 const (
-	// AlertGrowthFactor is how many times its previous value the open-wisp count
-	// must reach in one cycle before callers warn. The alert is about
-	// accumulation, never about size (gt-11kyy): the open-wisp count is
-	// dominated by healthy, recent wisps, so its absolute value cannot separate
-	// "busy town" from "runaway", and a threshold set from one town's steady
-	// state false-alarms or falls silent in the next.
+	// AlertGrowthFactor is how many times the baseline the open-wisp count must
+	// reach before callers warn.
 	AlertGrowthFactor = 2
 
 	// AlertGrowthFloor is the smallest absolute increase that can alert, so a
@@ -29,26 +30,48 @@ type OpenWispSample struct {
 	DryRun    bool `json:"dry_run,omitempty"`
 }
 
-// OpenWispAlert reports whether this cycle's open-wisp count has grown enough
-// over the previous sample to warn about, and describes the growth for the
-// warning line. A missing baseline, a sample that is not comparable to the
-// previous one (another mode, or a different number of databases), and growth
-// under either threshold all report no alert.
+// OpenWispAlertState is the alert's memory between cycles: the sample a rising
+// count is measured from, and how many cycles have passed since it was
+// recorded.
+type OpenWispAlertState struct {
+	Baseline OpenWispSample `json:"baseline"`
+	Held     int            `json:"held"`
+}
+
+// NextOpenWispAlertState returns the memory to record after one cycle and
+// whether that cycle's count has grown enough over the baseline to warn about.
 //
-// Callers record every cycle's sample, including the ones that do not alert:
-// the baseline is always the previous cycle's reading, so a reaper that only
-// writes on an alert has no baseline on the cycles worth comparing (gt-11kyy).
-func OpenWispAlert(current OpenWispSample, previous *OpenWispSample) (bool, string) {
-	if previous == nil {
-		return false, ""
+// The baseline is held while the count rises and moves only when an alert
+// fires, when the count falls back to or below it, or when the cycle is not
+// comparable to the one recorded (another mode, or a different number of
+// databases). A baseline that tracked every cycle could only ever see growth
+// that doubled the count between two of them; accumulation spread over many
+// cycles — the case that matters — would pass unremarked (gt-11kyy).
+func NextOpenWispAlertState(previous *OpenWispAlertState, current OpenWispSample) (OpenWispAlertState, bool, string) {
+	if previous == nil || !comparable(previous.Baseline, current) {
+		return OpenWispAlertState{Baseline: current}, false, ""
 	}
-	if previous.DryRun != current.DryRun || previous.Databases != current.Databases {
-		return false, ""
+
+	growth := current.OpenWisps - previous.Baseline.OpenWisps
+	if current.OpenWisps >= previous.Baseline.OpenWisps*AlertGrowthFactor && growth >= AlertGrowthFloor {
+		// This cycle becomes the baseline, so a town that settles at the high
+		// count reports the rise once rather than every cycle after it.
+		return OpenWispAlertState{Baseline: current}, true, fmt.Sprintf(
+			"open wisps grew from %d to %d (+%d) over %d cycle(s) on the same %d database(s)",
+			previous.Baseline.OpenWisps, current.OpenWisps, growth, previous.Held+1, current.Databases)
 	}
-	growth := current.OpenWisps - previous.OpenWisps
-	if current.OpenWisps < previous.OpenWisps*AlertGrowthFactor || growth < AlertGrowthFloor {
-		return false, ""
+
+	if current.OpenWisps <= previous.Baseline.OpenWisps {
+		// The town reaped back down, so the floor it settled on is what the next
+		// rise is measured from.
+		return OpenWispAlertState{Baseline: current}, false, ""
 	}
-	return true, fmt.Sprintf("open wisps grew from %d to %d (+%d) over the same %d database(s)",
-		previous.OpenWisps, current.OpenWisps, growth, current.Databases)
+
+	return OpenWispAlertState{Baseline: previous.Baseline, Held: previous.Held + 1}, false, ""
+}
+
+// comparable reports whether two samples were taken over the same set in the
+// same mode, and so may be subtracted.
+func comparable(a, b OpenWispSample) bool {
+	return a.DryRun == b.DryRun && a.Databases == b.Databases
 }
