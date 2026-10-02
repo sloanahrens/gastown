@@ -27,11 +27,11 @@ func (f fakeActiveMRReader) Show(issueID string) (*beads.Issue, error) {
 func TestAssessActiveMR(t *testing.T) {
 	t.Parallel()
 	reader := fakeActiveMRReader{issues: map[string]*beads.Issue{
-		"mr-open":        &beads.Issue{ID: "mr-open", Status: "open"},
-		"mr-closed":      &beads.Issue{ID: "mr-closed", Status: "closed"},
-		"mr-with-source": &beads.Issue{ID: "mr-with-source", Status: "closed", Description: "source_issue: gt-closed\n"},
-		"gt-closed":      &beads.Issue{ID: "gt-closed", Status: "closed"},
-		"gt-open":        &beads.Issue{ID: "gt-open", Status: "open"},
+		"mr-open":        {ID: "mr-open", Status: "open"},
+		"mr-closed":      {ID: "mr-closed", Status: "closed"},
+		"mr-with-source": {ID: "mr-with-source", Status: "closed", Description: "source_issue: gt-closed\n"},
+		"gt-closed":      {ID: "gt-closed", Status: "closed"},
+		"gt-open":        {ID: "gt-open", Status: "open"},
 	}}
 
 	tests := []struct {
@@ -241,7 +241,7 @@ func TestAssessActiveMRWithLandedEvidenceLookupErrorDoesNotProbe(t *testing.T) {
 func TestAssessActiveMRLookupErrorsFailClosed(t *testing.T) {
 	t.Parallel()
 	reader := fakeActiveMRReader{
-		issues: map[string]*beads.Issue{"gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}},
+		issues: map[string]*beads.Issue{"gt-closed": {ID: "gt-closed", Status: "closed"}},
 		errs:   map[string]error{"mr-error": errors.New("bd exploded"), "gt-error": errors.New("bd exploded")},
 	}
 

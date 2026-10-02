@@ -270,20 +270,20 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			mrID:       "mr-1",
 			sourceHint: "gt-closed",
 			gitSafe:    true,
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
+			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": {ID: "mr-1", Status: "closed"}, "gt-closed": {ID: "gt-closed", Status: "closed"}}},
 			want:       false,
 		},
 		{
 			name:       "closed MR with terminal source blocks when git unsafe",
 			mrID:       "mr-1",
 			sourceHint: "gt-closed",
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
+			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": {ID: "mr-1", Status: "closed"}, "gt-closed": {ID: "gt-closed", Status: "closed"}}},
 			want:       true,
 		},
 		{
 			name: "closed MR without source blocks conservatively",
 			mrID: "mr-1",
-			bd:   fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}}},
+			bd:   fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": {ID: "mr-1", Status: "closed"}}},
 			want: true,
 		},
 		{
@@ -303,7 +303,7 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			mrID:       "mr-1",
 			sourceHint: "gt-closed",
 			gitSafe:    true,
-			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
+			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"gt-closed": {ID: "gt-closed", Status: "closed"}}},
 			want:       false,
 		},
 	}
