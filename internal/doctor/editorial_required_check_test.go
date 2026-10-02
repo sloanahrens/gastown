@@ -56,7 +56,11 @@ func TestEditorialRequiredCheck_RubricPresentRequiredTrue(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
-	setupRigWithRubric(t, tmpDir, rigName, `{"merge_queue":{"editorial":{"required":true}}}`)
+	// A rig config.json carries identity as well as merge_queue: with one
+	// loader for the file (gt-y3pgh.2.5) an identity-less file no longer
+	// decodes, so the fixture is shaped like a real one.
+	setupRigWithRubric(t, tmpDir, rigName,
+		`{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":true}}}`)
 
 	check := NewEditorialRequiredCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}

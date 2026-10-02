@@ -577,9 +577,10 @@ type RigConfig struct {
 	CreatedAt   time.Time    `json:"created_at"` // when the rig was created
 	Beads       *BeadsConfig `json:"beads,omitempty"`
 
-	// The fields below are written by internal/rig (rig.RigConfig) into the
-	// same file. They are declared here so strict decoding accepts the file
-	// the rig manager writes (gt-y3pgh.1); the two types merge in gt-y3pgh.2.
+	// The fields below were written by internal/rig's own RigConfig before the
+	// two types merged (gt-y3pgh.2.5): rig.RigConfig is an alias of this type,
+	// so this declaration is the only one and strict decoding accepts the file
+	// the rig manager writes.
 	DefaultBranch string            `json:"default_branch,omitempty"`
 	MergeQueue    *MergeQueueConfig `json:"merge_queue,omitempty"`
 	// Witness is retired with the witness role (gt-4k3fj.6.1): nothing reads

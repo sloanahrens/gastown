@@ -94,43 +94,17 @@ func convertToSSH(httpsURL string) string {
 	return ""
 }
 
-// RigConfig represents the rig-level configuration (config.json at rig root).
-type RigConfig struct {
-	Type          string       `json:"type"`                     // "rig"
-	Version       int          `json:"version"`                  // schema version
-	Name          string       `json:"name"`                     // rig name
-	GitURL        string       `json:"git_url"`                  // repository URL (fetch/pull)
-	PushURL       string       `json:"push_url,omitempty"`       // optional push URL (fork for read-only upstreams)
-	UpstreamURL   string       `json:"upstream_url,omitempty"`   // optional upstream URL (for fork workflows)
-	LocalRepo     string       `json:"local_repo,omitempty"`     // optional local reference repo
-	DefaultBranch string       `json:"default_branch,omitempty"` // main, master, etc.
-	CreatedAt     time.Time    `json:"created_at"`               // when rig was created
-	Beads         *BeadsConfig `json:"beads,omitempty"`
+// RigConfig is the rig-level configuration (config.json at rig root). It is
+// an alias of config.RigConfig so <rig>/config.json has one type and one
+// loader (gt-y3pgh.2.5); callers may keep using rig.RigConfig.
+type RigConfig = config.RigConfig
 
-	// MergeQueue holds gate commands and merge behavior set at rig onboarding
-	// time (see the onboard-repo skill). Without this field json.Unmarshal
-	// silently drops the whole section, so operators following onboarding
-	// end up with commands that are never read back (gt-me9t).
-	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
-
-	// Witness is retired with the witness role (gt-4k3fj.6.1): nothing reads
-	// it; it is kept verbatim so a rewrite does not drop operator data.
-	Witness json.RawMessage `json:"witness,omitempty"`
-
-	// Persistent polecat pool configuration.
-	// PolecatPoolSize is the number of persistent polecats to create with pool init.
-	// PolecatNames optionally specifies fixed names (overrides theme-based naming).
-	PolecatPoolSize int      `json:"polecat_pool_size,omitempty"`
-	PolecatNames    []string `json:"polecat_names,omitempty"`
-}
-
-// BeadsConfig represents beads configuration for the rig.
-type BeadsConfig struct {
-	Prefix string `json:"prefix"` // issue prefix (e.g., "gt")
-}
+// BeadsConfig is the rig's beads configuration. It is an alias of
+// config.BeadsConfig, which carries Repo as well as Prefix.
+type BeadsConfig = config.BeadsConfig
 
 // CurrentRigConfigVersion is the current schema version.
-const CurrentRigConfigVersion = 1
+const CurrentRigConfigVersion = config.CurrentRigConfigVersion
 
 // Manager handles rig discovery, loading, and creation.
 type Manager struct {
@@ -1015,29 +989,28 @@ func (m *Manager) verifyBeadsRoundTrip(rigPath, resolvedBeadsDir, rigName, prefi
 	return nil
 }
 
-// saveRigConfig writes the rig configuration to config.json.
+// saveRigConfig writes the rig configuration to config.json through the one
+// writer for town config files, so a rig config.json that does not decode
+// strictly is never replaced by what gt built from defaults (gt-y3pgh.2.5).
 func (m *Manager) saveRigConfig(rigPath string, cfg *RigConfig) error {
-	configPath := filepath.Join(rigPath, "config.json")
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configPath, data, 0644)
+	return config.SaveRigConfig(filepath.Join(rigPath, "config.json"), cfg)
 }
 
-// LoadRigConfig reads the rig configuration from config.json.
+// LoadRigConfig reads the rig configuration from config.json. It delegates to
+// config.LoadRigConfig so there is one loader for <rig>/config.json: decoding
+// is strict and validation runs (gt-y3pgh.2.5). A file that does not exist
+// keeps returning the read error rather than config.ErrNotFound, which is how
+// callers have always told "no config" apart from "bad config".
 func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	configPath := filepath.Join(rigPath, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, err
 	}
-	var cfg RigConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
+	// Warn before decoding: strict decoding rejects a deprecated key, and the
+	// warning names the replacement the parse error cannot.
 	warnDeprecatedRigConfigKeys(data, configPath)
-	return &cfg, nil
+	return config.LoadRigConfig(configPath)
 }
 
 // ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
@@ -1119,10 +1092,10 @@ func LoadNamedGateCommands(townRoot, rigName string) map[string]string {
 }
 
 // warnDeprecatedRigConfigKeys detects merge_queue.target_branch in rig root
-// config.json, a key RigConfig.MergeQueue does parse (gt-me9t) but that gt mq
-// submit / gt done have never read — they resolve targets from default_branch
-// instead. Without this warning, operators can set target_branch believing it
-// controls MR targets and be silently ignored.
+// config.json, a key gt mq submit / gt done have never read — they resolve
+// targets from default_branch instead. Strict decoding rejects it too
+// (gt-y3pgh.2.5); the warning runs first so the operator learns the
+// replacement alongside the parse error, not just that the file is unreadable.
 func warnDeprecatedRigConfigKeys(data []byte, path string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

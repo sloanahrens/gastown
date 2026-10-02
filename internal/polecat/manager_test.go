@@ -316,8 +316,10 @@ func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write rig config.json with polecat_names (no settings/config.json)
-	rigConfig := `{"polecat_names": ["alpha", "beta", "gamma"]}`
+	// Write rig config.json with polecat_names (no settings/config.json).
+	// The identity keys are required now that one strict loader owns the file
+	// (gt-y3pgh.2.5); a names-only file does not decode.
+	rigConfig := `{"type":"rig","version":1,"name":"myrig","polecat_names": ["alpha", "beta", "gamma"]}`
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0644); err != nil {
 		t.Fatal(err)
 	}
