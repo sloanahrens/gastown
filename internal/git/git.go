@@ -42,6 +42,39 @@ func (e *GitError) Unwrap() error {
 	return e.Err
 }
 
+// pushError is a failed push carrying both streams' text. A push is the one
+// git command whose reason can be on stdout: a local pre-push hook writes its
+// refusal with echo, while git writes only its own summary ("error: failed to
+// push some refs to ...") to stderr. GitError renders stderr alone, so a
+// refused push reached every log as that one line and the hook's explanation
+// was lost (gt-pihe2).
+type pushError struct {
+	gitErr *GitError
+}
+
+func (e *pushError) Error() string {
+	if out := strings.TrimSpace(e.gitErr.Stdout); out != "" {
+		return e.gitErr.Error() + "\n" + out
+	}
+	return e.gitErr.Error()
+}
+
+func (e *pushError) Unwrap() error { return e.gitErr }
+
+// asPushError attaches a push's stdout to the error that reports it. Errors
+// without captured stdout (a timeout, a missing working directory, a refused
+// fork-backed default push) pass through unchanged.
+func asPushError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ge *GitError
+	if !errors.As(err, &ge) || strings.TrimSpace(ge.Stdout) == "" {
+		return err
+	}
+	return &pushError{gitErr: ge}
+}
+
 // moveDir moves a directory from src to dest. It first tries os.Rename for
 // efficiency, but falls back to copy+delete if src and dest are on different
 // filesystems (which causes EXDEV error on rename).
@@ -1236,7 +1269,7 @@ func (g *Git) PushWithTimeout(remote, branch string, force bool, timeout time.Du
 		args = append(args, "--force")
 	}
 	_, err := g.runWithTimeout(timeout, args...)
-	return err
+	return asPushError(err)
 }
 
 // EnvRefineryMerge is the one allow signal the pre-push hook accepts for a
@@ -1268,7 +1301,7 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 		args = append(args, "--force")
 	}
 	_, err := g.runWithEnvAndTimeout(args, env, pushTimeout)
-	return err
+	return asPushError(err)
 }
 
 // PushForceWithLease pushes refspec to remote, but only if remote's current
@@ -1283,7 +1316,7 @@ func (g *Git) PushForceWithLease(remote, refspec, branchRef, expectedSHA string)
 	}
 	args := []string{"push", remote, refspec, fmt.Sprintf("--force-with-lease=%s:%s", branchRef, expectedSHA)}
 	_, err := g.runWithTimeout(pushTimeout, args...)
-	return err
+	return asPushError(err)
 }
 
 // ErrNoNote is returned by NotesShow when commit has no note under ref.
@@ -1564,7 +1597,7 @@ var ErrNotesPushConflict = errors.New("notes push rejected and remote notes conf
 func (g *Git) PushNotes(remote, ref string) error {
 	_, err := g.runWithTimeout(pushTimeout, "push", remote, "refs/notes/"+ref)
 	if err == nil || !isNonFastForwardPush(err) {
-		return err
+		return asPushError(err)
 	}
 	if mergeErr := g.mergeRemoteNotes(remote, ref); mergeErr != nil {
 		return fmt.Errorf("%w: %s refs/notes/%s: %v", ErrNotesPushConflict, remote, ref, mergeErr)
