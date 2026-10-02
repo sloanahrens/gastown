@@ -153,11 +153,18 @@ type beadState struct {
 	// lintTimeouts counts consecutive lint-stage timeouts; any other outcome
 	// resets it.
 	lintTimeouts int
+	// installNow is whether the bead carried LabelInstallNow when this pass
+	// loaded it; only a landing of it turns the flag into a report field.
+	installNow bool
 }
 
 // Report counts one pass's outcomes.
 type Report struct {
 	Landed, Repaired, Rejected, Skipped, Failed int
+	// InstallRequested is set when a bead landed in this pass carries
+	// LabelInstallNow: the operator wants gt installed as soon as that
+	// landing is on main, not at the next quiet point (gt-3qmv4.2).
+	InstallRequested bool
 }
 
 func (r Report) String() string {
@@ -312,6 +319,11 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 		w.Active(issue.ID)
 		defer w.Active("")
 	}
+	// Read from the bead this pass loaded: a landed bead carrying the label
+	// arms the install request, and a rejected or skipped one never reaches
+	// the outcome that reads it (gt-3qmv4.2).
+	w.bead(issue.ID).installNow = beads.HasLabel(issue, LabelInstallNow)
+
 	work, ok := w.resolveWork(issue)
 	if !ok {
 		w.waitForHuman(issue.ID, "no-request", fmt.Sprintf("Landing worker: %s carries %s but neither a READY TO LAND block nor a \"Submitted for landing: <branch> @ <sha>\" comment says what to land. Leaving the label for a human.", issue.ID, land.LabelReadyToLand))
@@ -465,6 +477,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 
 	st := w.bead(work.BeadID)
 	_, wasRepair := w.pendingRepair[work.BeadID]
+	// Only a new landing carries the label's request: a repair finishes a
+	// landing an earlier pass already accounted for (gt-3qmv4.2).
+	installNow := st.installNow && !wasRepair
 	oc := classify(ctx, err)
 	if oc != outInfra {
 		st.lintTimeouts = 0
@@ -478,6 +493,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		} else {
 			rep.Landed++
 		}
+		if installNow {
+			rep.InstallRequested = true
+		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
 		w.clearIntent(work)
 		if !wasRepair {
@@ -487,6 +505,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		// Landed: the push was read back. Only the record is unfinished.
 		w.pendingRepair[work.BeadID] = work
 		rep.Landed++
+		if installNow {
+			rep.InstallRequested = true
+		}
 		w.logf("%s: %v; the next pass finishes the record", work.BeadID, err)
 		w.clearIntent(work)
 		if !wasRepair {

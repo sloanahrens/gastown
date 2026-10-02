@@ -265,6 +265,13 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
 			}
+			// A gt:install-now bead asks for the install in the pass that
+			// landed it, while beads are still queued behind it: the drain
+			// below is the ordinary quiet point, and this label is the
+			// operator saying not to wait for one (gt-3qmv4.2).
+			if rep.InstallRequested {
+				d.noteLandingInstallNow(rigName)
+			}
 			if rep == (landworker.Report{}) && lastPassLanded {
 				d.noteLandingDrained(rigName)
 			}
@@ -309,6 +316,16 @@ func (d *Daemon) signalLandingDrained() {
 	case d.landingDrained() <- struct{}{}:
 	default:
 	}
+}
+
+// noteLandingInstallNow asks rebuild_gt to install at the next heartbeat when
+// the pass that landed a gt:install-now bead belongs to the rig whose checkout
+// the binary is built from (gt-3qmv4.2).
+func (d *Daemon) noteLandingInstallNow(rigName string) {
+	if !d.landingOwnsGTSource(rigName) {
+		return
+	}
+	d.requestRebuildGTInstallNow()
 }
 
 // noteLandingDrained asks rebuild_gt to install at the next heartbeat when the

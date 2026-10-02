@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -224,6 +225,15 @@ func (d *Daemon) triggerRebuildGT() {
 func (d *Daemon) requestRebuildGTInstall() {
 	if d.rebuildGTRequested.CompareAndSwap(false, true) {
 		d.logger.Printf("rebuild_gt: install requested: queue drained after landing")
+	}
+}
+
+// requestRebuildGTInstallNow arms the same request for a bead the operator
+// labeled gt:install-now: its landing asks for the install at once, so the
+// request is not held back for the queue to drain (gt-3qmv4.2).
+func (d *Daemon) requestRebuildGTInstallNow() {
+	if d.rebuildGTRequested.CompareAndSwap(false, true) {
+		d.logger.Printf("rebuild_gt: install requested: a %s bead landed", landworker.LabelInstallNow)
 	}
 }
 
