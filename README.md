@@ -71,7 +71,7 @@ Git worktree-based persistent storage for agent work. Survives crashes and resta
 
 ### Convoys 🚚
 
-Work tracking units. Bundle multiple beads that get assigned to agents. Convoys labeled `mountain` get autonomous stall detection and smart skip logic for epic-scale execution.
+Work tracking units. Bundle multiple beads that get assigned to agents.
 
 ### Beads Integration 📿
 
