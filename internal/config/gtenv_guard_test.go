@@ -64,17 +64,22 @@ var gtEnvReaders = map[string]bool{
 // gtEnvAllowed does not name and gtenv-baseline.txt does not already count
 // (gt-y3pgh.2). The baseline holds the sites still waiting to move to config;
 // it may only shrink. Fix a failure by reading the fact from config, never by
-// raising a count. internal/testutil is the test harness and is not scanned.
+// raising a count. Its floor counts every GT_ read, allowlisted ones included,
+// so shrinking the baseline cannot trip it. internal/testutil is the test
+// harness and is not scanned.
 func TestNoNewGTEnvReads(t *testing.T) {
 	t.Parallel()
 	reads, err := scanGTEnvReads(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Just under the 24 reads gtenv-baseline.txt listed on 2026-10-01: a
-	// scanner gone blind passes everything.
-	if len(reads) < 20 {
-		t.Fatalf("scanGTEnvReads found %d non-allowlisted GT_ reads (floor 20); the scanner has stopped seeing them", len(reads))
+	// Just under the 106 GT_ reads gtEnvAllowed names that the scanner found on
+	// 2026-10-02 (130 GT_ reads in all, counting the 24 gtenv-baseline.txt
+	// lists). Basing the floor on the count that survives the baseline
+	// shrinking to zero keeps it valid while every slice deletes its reads; a
+	// scanner gone blind still passes everything.
+	if len(reads) < 102 {
+		t.Fatalf("scanGTEnvReads found %d GT_ reads (floor 102); the scanner has stopped seeing them", len(reads))
 	}
 	src, err := os.ReadFile("gtenv-baseline.txt")
 	if err != nil {
@@ -84,7 +89,7 @@ func TestNoNewGTEnvReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, stale := compareGTEnvBaseline(reads, baseline)
+	fresh, stale := compareGTEnvBaseline(baselinedGTEnvReads(reads), baseline)
 	for _, r := range fresh {
 		t.Errorf("%s:%d reads %s from the environment; read it from config (gt-y3pgh.2)", r.file, r.line, r.name)
 	}
@@ -118,8 +123,49 @@ func f(getenv func(string) string) {
 	for _, r := range got {
 		names = append(names, r.name)
 	}
-	if want := "GT_A GT_KNOB GT_B"; strings.Join(names, " ") != want {
+	if want := "GT_A GT_KNOB GT_B GT_ROLE"; strings.Join(names, " ") != want {
 		t.Fatalf("reads = %v, want %s", names, want)
+	}
+	if !got[len(got)-1].allowed {
+		t.Errorf("GT_ROLE read not marked allowlisted: %+v", got[len(got)-1])
+	}
+	for _, r := range got[:len(got)-1] {
+		if r.allowed {
+			t.Errorf("%s read marked allowlisted, want not: %+v", r.name, r)
+		}
+	}
+}
+
+// TestGTEnvAllowlistedReadsCountTowardTotal feeds the scanner a file whose only
+// GT_ read is allowlisted: it must count toward the total, so the floor holds
+// while the baseline shrinks, and it must never reach the fresh/stale
+// comparison.
+func TestGTEnvAllowlistedReadsCountTowardTotal(t *testing.T) {
+	t.Parallel()
+	src := `package p
+
+import "os"
+
+func f() {
+	_ = os.Getenv("GT_ROLE")
+}
+`
+	got, err := gtEnvReadsInFile("p/p.go", []byte(src), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].name != "GT_ROLE" {
+		t.Fatalf("reads = %+v, want one GT_ROLE read", got)
+	}
+	if !got[0].allowed {
+		t.Fatalf("GT_ROLE read not marked allowlisted: %+v", got[0])
+	}
+	baselined := baselinedGTEnvReads(got)
+	if len(baselined) != 0 {
+		t.Fatalf("baselined = %+v, want the allowlisted read dropped", baselined)
+	}
+	if fresh, stale := compareGTEnvBaseline(baselined, map[gtEnvKey]int{}); len(fresh) != 0 || len(stale) != 0 {
+		t.Fatalf("fresh = %v, stale = %v, want none", fresh, stale)
 	}
 }
 
@@ -146,14 +192,31 @@ type gtEnvRead struct {
 	file string
 	line int
 	name string
+	// allowed records whether gtEnvAllowed names the variable. The scanner
+	// returns allowlisted reads too, so the total stays stable while the
+	// baseline shrinks; only baselinedGTEnvReads reaches the baseline.
+	allowed bool
 }
 
 type gtEnvKey struct{ file, name string }
 
 func (k gtEnvKey) String() string { return k.file + " " + k.name }
 
+// baselinedGTEnvReads returns the reads the baseline tracks: those gtEnvAllowed
+// does not name. Allowlisted reads travel in the scanner's result so the floor
+// can count them, but they never produce a fresh or stale entry.
+func baselinedGTEnvReads(reads []gtEnvRead) []gtEnvRead {
+	var out []gtEnvRead
+	for _, r := range reads {
+		if !r.allowed {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // scanGTEnvReads parses every non-test Go file under root's cmd and internal
-// trees and returns its non-identity GT_ reads.
+// trees and returns its GT_ reads, allowlisted ones included.
 func scanGTEnvReads(root string) ([]gtEnvRead, error) {
 	type file struct {
 		rel string
@@ -238,9 +301,10 @@ func gtStringConsts(f *ast.File) map[string]string {
 	return out
 }
 
-// gtEnvReadsInFile returns the non-identity GT_ reads in one file: a call to
-// a gtEnvReaders name whose first argument is a GT_ string literal, a GT_
-// constant of the file's own package, or pkg.Const from consts.
+// gtEnvReadsInFile returns the GT_ reads in one file: a call to a gtEnvReaders
+// name whose first argument is a GT_ string literal, a GT_ constant of the
+// file's own package, or pkg.Const from consts. Each read records whether
+// gtEnvAllowed names it.
 func gtEnvReadsInFile(rel string, src []byte, consts map[string]string) ([]gtEnvRead, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, rel, src, parser.SkipObjectResolution)
@@ -285,8 +349,13 @@ func gtEnvReadsInFile(rel string, src []byte, consts map[string]string) ([]gtEnv
 				name = consts[pkg.Name+"."+a.Sel.Name]
 			}
 		}
-		if strings.HasPrefix(name, "GT_") && !gtEnvAllowed(name) {
-			reads = append(reads, gtEnvRead{file: rel, line: fset.Position(call.Pos()).Line, name: name})
+		if strings.HasPrefix(name, "GT_") {
+			reads = append(reads, gtEnvRead{
+				file:    rel,
+				line:    fset.Position(call.Pos()).Line,
+				name:    name,
+				allowed: gtEnvAllowed(name),
+			})
 		}
 		return true
 	})
