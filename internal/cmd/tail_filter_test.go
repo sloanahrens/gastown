@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
@@ -202,8 +206,11 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	at := time.Date(2026, 10, 1, 16, 34, 5, 0, tailTestLoc)
 	line := tailLine{At: at, Rig: "r", Kind: "k", Text: "t"}
 
-	def := newTailView(tailTestLoc, tailViewOptions{})
-	if def.Show == nil || def.Show(wisp) {
+	def := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(nil), gitUser: "Sloan Ahrens"})
+	if def.Show == nil {
+		t.Fatal("the default view must filter")
+	}
+	if _, ok := def.Show(wisp); ok {
 		t.Error("the default view must hide wisp churn")
 	}
 	if got := def.renderLine(line); got != "16:34:05 r t" {
@@ -212,8 +219,18 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	if def.Decor != nil {
 		t.Error("a view the flags did not decorate must render plain")
 	}
-	if v := newTailView(tailTestLoc, tailViewOptions{all: true}); v.Show != nil {
+	if !def.Trim || def.Beads == nil {
+		t.Error("the default view trims the raw fields and names the bead")
+	}
+	all := newTailView(tailTestLoc, tailViewOptions{all: true, beads: newTailBeads(nil), gitUser: "Sloan Ahrens"})
+	if all.Show != nil {
 		t.Error("--all must show every line")
+	}
+	if all.Trim {
+		t.Error("--all must keep the raw fields")
+	}
+	if all.Beads != nil {
+		t.Error("--all must print the raw line, with no title looked up for it")
 	}
 	if got := newTailView(tailTestLoc, tailViewOptions{iso: true}).renderLine(line); got != "2026-10-01T16:34:05-05:00 r t" {
 		t.Errorf("--iso line: %q", got)
@@ -329,7 +346,7 @@ func TestRunTailStream_FollowPrintsTheBacklogInTimeOrder(t *testing.T) {
 	var out syncBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runTailStream(ctx, &out, []tailSource{slow, fast}, nil, true, make(chan time.Time), tailView{Loc: tailTestLoc, FullSource: true})
+		done <- runTailStream(ctx, &out, []tailSource{slow, fast}, nil, true, make(chan time.Time), tailView{Loc: tailTestLoc, FullSource: true}, nil)
 	}()
 
 	// The backlog waits for every source: the daemon line is read, and still
@@ -359,7 +376,7 @@ func TestRunTailStream_ViewHidesFilteredLines(t *testing.T) {
 	}}}
 	var out syncBuffer
 	view := newTailView(tailTestLoc, tailViewOptions{})
-	if err := runTailStream(context.Background(), &out, []tailSource{src}, nil, false, nil, view); err != nil {
+	if err := runTailStream(context.Background(), &out, []tailSource{src}, nil, false, nil, view, nil); err != nil {
 		t.Fatal(err)
 	}
 	if want := "09:00:01 gastown create gt-a status=open\n"; out.String() != want {
@@ -379,12 +396,278 @@ func TestRunTailStream_ViewHidesARepeatedTownHealthLine(t *testing.T) {
 	}}}
 	var out syncBuffer
 	view := newTailView(tailTestLoc, tailViewOptions{})
-	if err := runTailStream(context.Background(), &out, []tailSource{src}, nil, false, nil, view); err != nil {
+	if err := runTailStream(context.Background(), &out, []tailSource{src}, nil, false, nil, view, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := "09:00:00 town townhealth: RED tick 4ms ago: exec-tax=133ms/exec needs-human=1\n" +
 		"09:06:00 town townhealth: GREEN tick 4ms ago: exec-tax=130ms/exec needs-human=0\n"
 	if out.String() != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
+
+// TestTailEventDuplicateLatch: one bd write recorded twice, or retried onto
+// the same row, prints once; the same bead's next write prints again.
+func TestTailEventDuplicateLatch(t *testing.T) {
+	t.Parallel()
+	ev := func(ts, text string) tailLine {
+		return tailLine{At: at(ts), Rig: "gastown", Kind: tailKindEvents, Text: text}
+	}
+	latch := &tailEventDuplicateLatch{}
+	if !latch.visible(ev("2026-09-30T14:00:00Z", "close gt-1 status=closed actor=daemon seq=11")) {
+		t.Fatal("the first close must print")
+	}
+	if latch.visible(ev("2026-09-30T14:00:01Z", "close gt-1 status=closed actor=daemon seq=12")) {
+		t.Error("the same close one second later is the same write; it must be hidden")
+	}
+	if latch.visible(ev("2026-09-30T14:00:02Z", "close gt-1 status=closed actor=daemon seq=13")) {
+		t.Error("the retry loop must stay hidden while it keeps landing on the same row")
+	}
+	if !latch.visible(ev("2026-09-30T14:00:05Z", "close gt-1 status=closed actor=daemon seq=14")) {
+		t.Error("a close after the two-second window is a new write; it must print")
+	}
+	if !latch.visible(ev("2026-09-30T14:00:05Z", "close gt-2 status=closed actor=daemon seq=15")) {
+		t.Error("a different bead must print")
+	}
+	if !latch.visible(ev("2026-09-30T14:00:05Z", "update gt-2 status=in_progress actor=daemon seq=16")) {
+		t.Error("a different operation on the same bead must print")
+	}
+	if !latch.visible(ev("2026-09-30T14:00:05Z", "update gt-2 status=open actor=daemon seq=17")) {
+		t.Error("a different status on the same bead must print")
+	}
+	if !latch.visible(ev("2026-09-30T14:00:05Z", "read failed: bd events tail: exit status 25")) {
+		t.Error("a source's own line has no bead and is never a duplicate")
+	}
+	if !latch.visible(tailLine{At: at("2026-09-30T14:00:06Z"), Rig: "town", Kind: tailKindDaemon, Text: "Convoy: close detected: gt-1 (from gastown)"}) {
+		t.Error("a daemon line is not a journal record")
+	}
+}
+
+// TestTailSeatWaitLatch: a convoy retrying a bead with no seat prints one
+// waiting line, and prints again only when the bead, the reason or the
+// outcome changes.
+func TestTailSeatWaitLatch(t *testing.T) {
+	t.Parallel()
+	dm := func(text string) tailLine {
+		return tailLine{At: at("2026-09-30T14:00:00Z"), Rig: "town", Kind: tailKindDaemon, Text: text}
+	}
+	latch := &tailSeatWaitLatch{}
+	got, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash"))
+	if !ok || got.Text != "⏳ waiting for a seat: gt-abc" {
+		t.Fatalf("first deferral = %q, %v", got.Text, ok)
+	}
+	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); ok {
+		t.Error("the same bead for the same reason must not print again")
+	}
+	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); ok {
+		t.Error("the retry loop must stay collapsed while bead and reason hold still")
+	}
+	if _, ok := latch.adjust(dm("Convoy hq-cv-2: deferring gt-other: pool: full (0/1) -> no seat for deepseek-flash")); !ok {
+		t.Error("another bead waiting for a seat is its own line")
+	}
+	// The outcome changed: the bead got its seat.
+	if _, ok := latch.adjust(dm(`Convoy hq-cv-1: feeding gt-abc to gastown (agent "deepseek-flash" recorded on convoy at sling time)`)); !ok {
+		t.Error("the feeding line is the outcome and must print")
+	}
+	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); !ok {
+		t.Error("the bead losing its seat again must print a fresh waiting line")
+	}
+	// A deferral that is not about seating keeps the convoy's own words.
+	plain := "Convoy hq-cv-1: deferring gt-abc: bead is held by another convoy"
+	if got, ok := latch.adjust(dm(plain)); !ok || got.Text != plain {
+		t.Fatalf("a non-seat deferral = %q, %v", got.Text, ok)
+	}
+	if got, ok := latch.adjust(dm("hm witness restarted")); !ok || got.Text != "hm witness restarted" {
+		t.Fatalf("an unrelated daemon line = %q, %v", got.Text, ok)
+	}
+}
+
+// TestTailTrimEventFields: the cursor and the operator's own identity are the
+// default view's to drop, and nobody else's actor is.
+func TestTailTrimEventFields(t *testing.T) {
+	t.Parallel()
+	ev := func(text string) tailLine {
+		return tailLine{Rig: "gastown", Kind: tailKindEvents, Text: text}
+	}
+	if got := tailTrimEventFields(ev("update gt-1 status=open actor=Sloan Ahrens seq=7"), "Sloan Ahrens"); got.Text != "update gt-1 status=open" {
+		t.Errorf("own actor: %q", got.Text)
+	}
+	if got := tailTrimEventFields(ev("update gt-1 status=open actor=daemon seq=7"), "Sloan Ahrens"); got.Text != "update gt-1 status=open actor=daemon" {
+		t.Errorf("another actor: %q", got.Text)
+	}
+	if got := tailTrimEventFields(ev("update gt-1 actor=gastown/polecats/opal seq=7"), ""); got.Text != "update gt-1 actor=gastown/polecats/opal" {
+		t.Errorf("no git identity keeps every actor: %q", got.Text)
+	}
+	if got := tailTrimEventFields(ev("read failed: bd events tail: exit status 25"), "Sloan Ahrens"); got.Text != "read failed: bd events tail: exit status 25" {
+		t.Errorf("a line with neither field: %q", got.Text)
+	}
+	dm := tailLine{Rig: "town", Kind: tailKindDaemon, Text: "Handler: script plugin x actor=Sloan Ahrens seq=1"}
+	if got := tailTrimEventFields(dm, "Sloan Ahrens"); got.Text != dm.Text {
+		t.Errorf("a daemon line is not an events record: %q", got.Text)
+	}
+	// The title is not part of the text the trim reads.
+	titled := ev("close gt-1 status=closed actor=Sloan Ahrens seq=9")
+	titled.Title = "a title with actor=in it seq=4"
+	if got := tailTrimEventFields(titled, "Sloan Ahrens"); got.Text != "close gt-1 status=closed" || got.Title != titled.Title {
+		t.Errorf("a titled line: %q / %q", got.Text, got.Title)
+	}
+}
+
+// TestTailVerdictText: only the review loop's own words come out of a comment
+// or a note, and the note's is the last MERGE REJECTION block.
+func TestTailVerdictText(t *testing.T) {
+	t.Parallel()
+	commented := &beads.Issue{Comments: []beads.Comment{
+		{Text: "pushed: crew/x at 9f4171a4"},
+		{Text: "OVERSEER REVIEW aaaa PASS: reads well, one nit"},
+	}}
+	if got := tailVerdictText(commented, "comment"); got != "OVERSEER REVIEW aaaa PASS: reads well, one nit" {
+		t.Errorf("verdict comment = %q", got)
+	}
+	chat := &beads.Issue{Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}}}
+	if got := tailVerdictText(chat, "comment"); got != "" {
+		t.Errorf("ordinary comment text must stay hidden, got %q", got)
+	}
+	noted := &beads.Issue{Notes: "some earlier note\n" +
+		"MERGE REJECTION (attempt 1): branch-conflict - main moved under it\n  findings:\n  - a\n" +
+		"another note\n" +
+		"MERGE REJECTION (attempt 2): gate-failed - make gate is red\n  findings:\n"}
+	want := "MERGE REJECTION (attempt 2): gate-failed - make gate is red"
+	if got := tailVerdictText(noted, "update"); got != want {
+		t.Errorf("note verdict = %q, want %q", got, want)
+	}
+	if got := tailVerdictText(&beads.Issue{Notes: "nothing to see"}, "update"); got != "" {
+		t.Errorf("a note without the marker = %q", got)
+	}
+	if got := tailVerdictText(nil, "update"); got != "" {
+		t.Errorf("no issue = %q", got)
+	}
+	if got := tailVerdictText(noted, "close"); got != "" {
+		t.Errorf("a close record carries no note text = %q", got)
+	}
+	// The marker has to open the text, and a long one is cut to the width.
+	long := "STEWARD " + strings.Repeat("x", 200)
+	issue := &beads.Issue{Comments: []beads.Comment{{Text: long}}}
+	got := tailVerdictText(issue, "comment")
+	if !strings.HasSuffix(got, "…") || len([]rune(got)) != tailVerdictWidth+1 {
+		t.Errorf("a long verdict = %q (%d runes)", got, len([]rune(got)))
+	}
+	quoted := &beads.Issue{Comments: []beads.Comment{{Text: "note: STEWARD said no"}}}
+	if got := tailVerdictText(quoted, "comment"); got != "" {
+		t.Errorf("a marker that does not open the text = %q", got)
+	}
+}
+
+// TestTailVerdictClass: a pass is green, a refusal red, a shadow verdict
+// yellow whatever it decided.
+func TestTailVerdictClass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		text string
+		want tailClass
+	}{
+		{"OVERSEER REVIEW aaaa PASS: reads well", tailClassSuccess},
+		{"STEWARD REVIEW PASS", tailClassSuccess},
+		{"STEWARD (shadow) REVIEW PASS", tailClassWarning},
+		{"STEWARD (shadow) ESCALATE", tailClassWarning},
+		{"OVERSEER RULING bbbb FAIL: the gate is red", tailClassFailure},
+		{"STEWARD FIX: rebased and repushed", tailClassPlain},
+		{"MERGE REJECTION (attempt 2): gate-failed - make gate is red", tailClassFailure},
+		{"OVERSEER REVIEW cccc REFUSED: no test", tailClassFailure},
+	}
+	for _, c := range cases {
+		if got := tailVerdictClass(c.text); got != c.want {
+			t.Errorf("tailVerdictClass(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}
+
+// TestTailDefaultFilter: the latches compose, and the routine lines are still
+// gone before any of them sees a line.
+func TestTailDefaultFilter(t *testing.T) {
+	t.Parallel()
+	dm := func(ts, text string) tailLine {
+		return tailLine{At: at(ts), Rig: "town", Kind: tailKindDaemon, Text: text}
+	}
+	ev := func(ts, text string) tailLine {
+		return tailLine{At: at(ts), Rig: "gastown", Kind: tailKindEvents, Text: text}
+	}
+	f := &tailDefaultFilter{}
+	shown := func(l tailLine) bool { _, ok := f.visible(l); return ok }
+
+	if shown(dm("2026-09-30T14:00:00Z", "Heartbeat complete (#53)")) {
+		t.Error("a routine line must not reach the latches")
+	}
+	if !shown(ev("2026-09-30T14:00:00Z", "close gt-1 status=closed actor=daemon seq=3")) {
+		t.Error("a bead close must show")
+	}
+	if shown(ev("2026-09-30T14:00:01Z", "close gt-1 status=closed actor=daemon seq=4")) {
+		t.Error("the duplicate must be hidden")
+	}
+	got, ok := f.visible(dm("2026-09-30T14:00:02Z", "Convoy hq-cv-1: deferring gt-9: pool: full (0/1) -> no seat for x"))
+	if !ok || got.Text != "⏳ waiting for a seat: gt-9" {
+		t.Fatalf("a seat wait = %q, %v", got.Text, ok)
+	}
+	if _, ok := f.visible(dm("2026-09-30T14:00:05Z", "Convoy hq-cv-1: deferring gt-9: pool: full (0/1) -> no seat for x")); ok {
+		t.Error("the seat-retry repeat must be hidden")
+	}
+}
+
+// TestTailDefaultView_RemovesAboutAThirdOfABusyQuarterHour is the bead's own
+// measure, over a recorded busy quarter hour: the lines this bead adds latches
+// for — a repeated events row, a convoy's seat-retry loop — are about a third
+// of what the default view used to print, so the default view shrinks rather
+// than grows, and no line that reports a landing, a rejection or an escalation
+// is lost to it.
+func TestTailDefaultView_RemovesAboutAThirdOfABusyQuarterHour(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("testdata", "tail_busy_sample.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []tailLine
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 4 {
+			t.Fatalf("sample line %q: want <ts>\t<rig>\t<kind>\t<text>", line)
+		}
+		lines = append(lines, tailLine{At: at(f[0]), Rig: f[1], Kind: f[2], Text: f[3]})
+	}
+	if len(lines) < 100 {
+		t.Fatalf("the sample is %d lines; it is meant to be a busy quarter hour", len(lines))
+	}
+	count := func(show func(tailLine) (tailLine, bool)) int {
+		n := 0
+		for _, l := range lines {
+			if show != nil {
+				if _, ok := show(l); !ok {
+					continue
+				}
+			}
+			n++
+		}
+		return n
+	}
+	// The view as it was before the latches: the routine lines hidden and a
+	// townhealth repeat latched, which is all it did.
+	before := &tailTownHealthLatch{}
+	beforeCount := count(func(l tailLine) (tailLine, bool) { return l, tailVisible(l) && before.visible(l.Text) })
+	afterCount := count(newTailView(tailTestLoc, tailViewOptions{}).Show)
+	drop := 1 - float64(afterCount)/float64(beforeCount)
+	if drop < 1.0/3.0 {
+		t.Fatalf("the default view prints %d lines where it printed %d (%.0f%% dropped); want about a third gone",
+			afterCount, beforeCount, drop*100)
+	}
+	if afterCount >= len(lines) {
+		t.Fatalf("the default view prints %d of the sample's %d raw lines", afterCount, len(lines))
+	}
+	// The lines that report something must survive: nothing here is routine.
+	for _, l := range lines {
+		if !strings.Contains(l.Text, "landed ") && !strings.Contains(l.Text, "escalat") && !strings.Contains(l.Text, "rejection") {
+			continue
+		}
+		if _, ok := newTailView(tailTestLoc, tailViewOptions{}).Show(l); !ok {
+			t.Fatalf("a reporting line was hidden: %q", l.Text)
+		}
 	}
 }
