@@ -67,6 +67,7 @@ var beadsExemptCommands = map[string]bool{
 	"metrics":     true, // Metrics reads local JSONL, no beads needed
 	"heartbeat":   true, // Heartbeat state update — must be fast and dependency-free
 	"tail":        true, // Read-only stream; reports an unreachable bd per rig and continues
+	"report":      true, // Read-only summary; reports an unreachable bd per section and exits 0
 }
 
 // Commands exempt from the town root branch warning.

@@ -1,0 +1,34 @@
+hour ending 2026-10-02 13:52:05 -0500 (1h0m0s)
+
+mains
+  origin/main 138368fd  installed gt 1.2.1-dev (5e6f7a8b)  3 commits behind
+
+landings
+  gt-abc  merged 12:52:05  landed 12:58:40  om pass/0.92  stages: lint 18s, gate 92s, om 2m31s
+  gt-def  merged 13:05:00  landed -  rejected (lint)
+  gt-ghi  merged 13:10:00  landed -  rejected (tests)
+  gt-jkl  merged -  landed 13:30:00  om pass/0.75
+
+rejections by kind
+  lint  1
+  tests  1
+
+queue depth
+  gastown  2 ready-to-land
+
+seats
+  intent records 2 (1 run)
+  refill episode gastown/opal  empty 41m0s
+
+sweep
+  gastown  no sweep record
+
+escalations
+  opened 1  closed 1
+
+steward
+  2 jobs  fail 1  pass 1
+
+attention
+  1 open (1 high)  state 5s old
+  high  queue-stuck  gastown  12m5s  landing queue silent 12m
