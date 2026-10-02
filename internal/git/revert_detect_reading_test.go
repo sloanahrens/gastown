@@ -187,3 +187,63 @@ func run(path string) {
 		t.Errorf("a two-line block: reverted %+v, relocated %+v; want a revert", report.Reverted, report.Relocated)
 	}
 }
+
+// blankLines writes the blank lines a fixture holds, so the counts these tests
+// turn on are read off the construction rather than eyed in a raw string.
+func blankLines(n int) string { return strings.Repeat("\n", n) }
+
+// A commit that only strips blank lines is not merged content a branch can
+// undo. With a blank line keyed as "" the strip reads as changeRemoved = {"": 5},
+// and a branch whose diff adds ten blank lines to the same test file contains
+// it — so the branch was refused for reverting a commit that removed no
+// content (gt-cqzm3).
+func TestDetectRevertedMergesIgnoresBlankLinesAsContent(t *testing.T) {
+	t.Parallel()
+	const configTest = "internal/cmd/config_test.go"
+	stripped := "package cmd\n" + blankLines(6) + "func TestFoo(t *testing.T) {\n}\n"
+	strippedOut := "package cmd\n\nfunc TestFoo(t *testing.T) {\n}\n"
+	branch := "package cmd\n" + blankLines(9) + "func TestFoo(t *testing.T) {\n}\n\n\nfunc TestBar(t *testing.T) {\n}\n"
+	g := fakeRevertTree{
+		blobs: map[string]string{"stripped": stripped, "strippedOut": strippedOut, "branch": branch},
+		trees: map[string]map[string]string{
+			"base": {configTest: "strippedOut"},
+			"main": {configTest: "strippedOut"},
+			"tree": {configTest: "branch"},
+		},
+		changes: []CommitFileChange{{Commit: "strip", Path: configTest, OldBlob: "stripped", NewBlob: "strippedOut"}},
+	}
+	report, err := DetectRevertedMerges(g, "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("a branch that adds blank lines: reverted %+v, relocated %+v; want neither", report.Reverted, report.Relocated)
+	}
+}
+
+// Dropping blank lines must not cost a real revert: the branch here is a stale
+// tree that never saw the line the commit added, and the blank lines it carries
+// are not what detects it.
+func TestDetectRevertedMergesStillCatchesARealRevertBesideBlankLines(t *testing.T) {
+	t.Parallel()
+	const configTest = "internal/cmd/config_test.go"
+	const before = "package cmd\n\nfunc TestFoo(t *testing.T) {\n}\n"
+	const after = "package cmd\n\nfunc TestFoo(t *testing.T) {\n\tcheckGot(t, want, got)\n}\n"
+	branch := "package cmd\n" + blankLines(4) + "func TestFoo(t *testing.T) {\n}\n"
+	g := fakeRevertTree{
+		blobs: map[string]string{"before": before, "after": after, "branch": branch},
+		trees: map[string]map[string]string{
+			"base": {configTest: "after"},
+			"main": {configTest: "after"},
+			"tree": {configTest: "branch"},
+		},
+		changes: []CommitFileChange{{Commit: "fix", Path: configTest, OldBlob: "before", NewBlob: "after"}},
+	}
+	report, err := DetectRevertedMerges(g, "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 1 || len(report.Relocated) != 0 {
+		t.Errorf("a stale branch: reverted %+v, relocated %+v; want the commit reverted", report.Reverted, report.Relocated)
+	}
+}
