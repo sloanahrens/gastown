@@ -8,13 +8,17 @@ import (
 	"time"
 )
 
-func TestSpecDispatchDefaultsOff(t *testing.T) {
+func TestSpecDispatchDefaultsOn(t *testing.T) {
 	t.Parallel()
-	if IsPatrolEnabled(nil, "spec_dispatch") {
-		t.Error("spec_dispatch must be off with no config")
+	if !IsPatrolEnabled(nil, "spec_dispatch") {
+		t.Error("spec_dispatch must be on with no config")
 	}
-	if IsPatrolEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, "spec_dispatch") {
-		t.Error("spec_dispatch must be off with no spec_dispatch entry")
+	if !IsPatrolEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, "spec_dispatch") {
+		t.Error("spec_dispatch must be on with no spec_dispatch entry")
+	}
+	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: false}}}
+	if IsPatrolEnabled(off, "spec_dispatch") {
+		t.Error("spec_dispatch enabled:false must be off")
 	}
 	on := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}}
 	if !IsPatrolEnabled(on, "spec_dispatch") {

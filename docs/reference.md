@@ -231,7 +231,7 @@ to the dispatcher that reads it — which is how raising the ceiling to P3 took
 two tries (gt-y3pgh.12).
 
 `docs/guides/spec-dispatcher.md` is the behavioral guide: candidates, the shape
-gate, the seat table and how to enable the ticker.
+gate, the seat table and how to turn the ticker off.
 
 ### Daemon Environment (`settings/daemon.env`)
 

@@ -124,24 +124,18 @@ retries on its own. Pool and merge-queue refusals are skips. Any other failure
 leaves the bead unassigned, adds `spec-dispatch-failed` and one comment. Remove
 the label to retry.
 
-## Enabling the ticker
+## Turning the ticker off
 
-In `mayor/daemon.json`:
+The ticker is on by default (gt-1gnq9): the seat-refill plugin is gone, so it
+is the only thing that fills a free seat from ready work, and a town that
+dispatches nothing until an operator switches it on is the failure it exists to
+prevent.
 
-```json
-{
-  "patrols": {
-    "spec_dispatch": {
-      "enabled": true,
-      "interval": "60s",
-      "max_per_tick": 1
-    }
-  }
-}
-```
-
-Then restart the daemon. The seat budget comes from `polecat_pool`, not from
-this block; `max_hooked` is the only seat key here, and it is opt-in.
+To park it, set `patrols.spec_dispatch.enabled` false in `mayor/daemon.json` and
+restart the daemon. The operator hold file (`<town>/seat-refill.hold`) and ESTOP
+already stop the tick without a restart. The seat budget comes from
+`polecat_pool`, not from this block; `max_hooked` is the only seat key here, and
+it is opt-in.
 
 ## seat-refill
 
