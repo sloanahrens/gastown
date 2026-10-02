@@ -38,13 +38,14 @@ func TestValidateIssueRefusesMissingAndTerminal(t *testing.T) {
 }
 
 // TestBeadsForNamesTheDatabaseEachIDRoutesTo: validateIssue and hookIssue open
-// the database each issue ID routes to, named by path, so the BEADS_DIR this
-// test plants in the manager's own environment reaches neither the read nor
-// the hook write (gt-9hou3).
-//
-// Not parallel: it sets BEADS_DIR.
+// the database each issue ID routes to, addressed by path rather than left to
+// whatever workspace bd would resolve from the directory and the environment it
+// inherits. That is what stops a BEADS_DIR in the session manager's own process
+// from retargeting the validateIssue read and the hookIssue write at once
+// (gt-9hou3); the stripping itself is pinned in internal/beads by
+// BuildPinnedBDEnv's tests.
 func TestBeadsForNamesTheDatabaseEachIDRoutesTo(t *testing.T) {
-	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), ".beads"))
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")
