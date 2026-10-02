@@ -258,21 +258,12 @@ func (s *healthSources) countOpen(rig, label string, seen func(created time.Time
 // The read is pinned to the town database, where notify.Raise files every
 // escalation.
 func (s *healthSources) OldestEscalation(ctx context.Context) (time.Time, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return time.Time{}, false, err
-	}
-	env := bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(s.townRoot()))
-	issues, err := s.d.workBeads(env, townHealthBDTimeout).List(beads.ListOptions{
-		Label: "gt:escalation", Status: "open", IncludeInfra: true, Priority: -1,
-	})
+	issues, err := listOpenEscalations(ctx, s.d.escalationBeads())
 	if err != nil {
 		return time.Time{}, false, err
 	}
 	var oldest time.Time
 	for _, is := range issues {
-		if !beads.IsEscalationRecord(is) {
-			continue
-		}
 		t, err := time.Parse(time.RFC3339, is.CreatedAt)
 		if err != nil {
 			return time.Time{}, false, fmt.Errorf("escalation %s: created_at %q: %w", is.ID, is.CreatedAt, err)
@@ -282,6 +273,41 @@ func (s *healthSources) OldestEscalation(ctx context.Context) (time.Time, bool, 
 		}
 	}
 	return oldest, !oldest.IsZero(), nil
+}
+
+// escalationBeads is the client the town's escalation records are read
+// through: the town database, read-only and pinned, where notify.Raise files
+// every escalation.
+func (d *Daemon) escalationBeads() workBeadReader {
+	env := bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(d.config.TownRoot))
+	return d.workBeads(env, townHealthBDTimeout)
+}
+
+// listOpenEscalations lists the town's open escalation records from bd: both
+// bead planes, minus the mail carriers routed for each escalation. A carrier
+// carries gt:escalation and outlives the escalation it delivered, so counting
+// one ages the field past every row the display path shows (gt-9k2bx).
+//
+// OldestEscalation (the town-health field) and the attention queue's
+// escalation collector both read through this, so `gt status --line`, `gt
+// attention` and `gt escalate list` agree on which beads are escalations.
+func listOpenEscalations(ctx context.Context, bd workBeadReader) ([]*beads.Issue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	issues, err := bd.List(beads.ListOptions{
+		Label: "gt:escalation", Status: "open", IncludeInfra: true, Priority: -1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []*beads.Issue
+	for _, is := range issues {
+		if beads.IsEscalationRecord(is) {
+			out = append(out, is)
+		}
+	}
+	return out, nil
 }
 
 func (s *healthSources) SlotHolders() ([]townhealth.SlotHolder, error) {
