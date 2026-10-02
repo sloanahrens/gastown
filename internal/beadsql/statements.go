@@ -342,12 +342,13 @@ func preloadSubstitute(expr, alias, issueType, src string) string {
 // its labels, and the dependency rows of both, in one bd sql round trip
 // (gt-59p7e).
 //
-// The issue rows come back as `bd list` orders them (priority, then age);
-// dep_row first sorts every dependency row after every row, so neither table's
-// rows are reordered by the union. The ORDER BY closes the whole statement
-// because a UNION takes only one and it has to be last. Labels and statuses
-// are what scope the issue arms: with both empty the read is the wisps alone,
-// which is still a read worth making, so that is not a caller error.
+// The issue rows come back as `bd list` orders them — priority, then age —
+// because the snapshot preserves that order and its readers rely on it;
+// dep_row first keeps the dependency rows after the rows they belong to. The
+// ORDER BY closes the whole statement because a UNION takes only one and it has
+// to be last. Labels and statuses are what scope the issue arms: with both
+// empty the read is the wisps alone, which is still a read worth making, so
+// that is not a caller error.
 func PreloadedBeads(labels, statuses []string) Query {
 	arms := []string{
 		preloadRowSelect("w", "''", WispSrc, true) +

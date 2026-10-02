@@ -445,7 +445,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// installLabeledWispsBDStub returns three wisps from "bd sql": one agent wisp,
+// installPreloadBDStub returns three wisps from "bd sql": one agent wisp,
 // one merge-request wisp, and one carrying no labels at all, so a single
 // PreloadBeads([]string{"gt:agent", "gt:merge-request"}, ...) call can warm
 // both caches at once. It also logs every invocation, so a test can assert
@@ -456,7 +456,7 @@ esac
 // The unlabeled wisp is the regression case for the editorial rejection on
 // gt-92zx: it is an agent bead by ID pattern only, so it is invisible to any
 // label-filtered query and must still surface through the preloaded snapshot.
-func installLabeledWispsBDStub(t *testing.T) string {
+func installPreloadBDStub(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
@@ -518,7 +518,7 @@ var (
 // table, costs one bd sql round trip — not one per label, and not one per
 // table.
 func TestPreloadBeadsSingleQuery(t *testing.T) {
-	logPath := installLabeledWispsBDStub(t)
+	logPath := installPreloadBDStub(t)
 
 	b := New(t.TempDir())
 	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
@@ -549,7 +549,7 @@ func TestPreloadBeadsSingleQuery(t *testing.T) {
 // the issues arm, so the assertion slices the wisps arm out rather than
 // looking at the statement as a whole.
 func TestPreloadBeadsWispsArmIsUnfiltered(t *testing.T) {
-	logPath := installLabeledWispsBDStub(t)
+	logPath := installPreloadBDStub(t)
 
 	b := New(t.TempDir())
 	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
@@ -588,7 +588,7 @@ func preloadWispsArm(t *testing.T, log string) string {
 // PreloadBeads has warmed the cache, ListMergeRequests reads it
 // instead of running its own "bd sql" query.
 func TestListMergeRequestsUsesPreloadedWispCache(t *testing.T) {
-	logPath := installLabeledWispsBDStub(t)
+	logPath := installPreloadBDStub(t)
 
 	b := New(t.TempDir())
 	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
@@ -619,7 +619,7 @@ func TestListMergeRequestsUsesPreloadedWispCache(t *testing.T) {
 // cached run has to classify the same wisps an uncached one would (gt-92zx,
 // editorial rejection attempt 1).
 func TestListAgentBeadsFromWispsUsesPreloadedCache(t *testing.T) {
-	installLabeledWispsBDStub(t)
+	installPreloadBDStub(t)
 
 	b := New(t.TempDir())
 	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {

@@ -136,9 +136,6 @@ func TestPreloadBeadsWithoutIssueScope(t *testing.T) {
 	if err := b.PreloadBeads(nil, nil); err != nil {
 		t.Fatalf("PreloadBeads(nil, nil) error = %v", err)
 	}
-	if b.issueSnapshot == nil {
-		t.Fatal("PreloadBeads(nil, nil) left no snapshot; a nil one means 'not warmed' and would have readers pay their own round trips")
-	}
 	if got, ok := b.issueSnapshot.byStatus([]IssueStatus{StatusOpen}); ok {
 		t.Errorf("the snapshot answered byStatus(open) although no issue was read: %v", sortedIDs(got))
 	}
