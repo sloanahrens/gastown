@@ -1097,7 +1097,7 @@ func TestFindRigsUsingTheme(t *testing.T) {
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	rigsJSON := `{"version":1,"rigs":{"rig-alpha":{},"rig-beta":{}}}`
+	rigsJSON := `{"version":1,"rigs":{"rig-alpha":{},"rig-beta":{},"rig-gamma":{}}}`
 	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1120,7 +1120,17 @@ func TestFindRigsUsingTheme(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Should find rig-alpha using tolkien
+	// rig-gamma carries a key the rig settings type does not declare, so the
+	// strict loader rejects the file and its style never counts (gt-y3pgh.2.7).
+	gammaSettings := filepath.Join(tmpDir, "rig-gamma", "settings")
+	if err := os.MkdirAll(gammaSettings, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gammaSettings, "config.json"), []byte(`{"namepool":{"style":"tolkien"},"undeclared_key":true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should find rig-alpha using tolkien, and not rig-gamma
 	using := FindRigsUsingTheme(tmpDir, "tolkien")
 	if len(using) != 1 || using[0] != "rig-alpha" {
 		t.Errorf("expected [rig-alpha], got %v", using)
