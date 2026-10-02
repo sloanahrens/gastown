@@ -202,13 +202,11 @@ func WispsWithLabels(labels []string) Query {
 }
 
 // The preload read — PreloadedBeads behind *Beads.PreloadBeads — returns the
-// rig's wisps, the issues its caller asked for, and, in the same round trip,
-// the dependency rows of both (gt-7dctf). That is what lets ListMergeRequests
-// hydrate its merge requests without the separate `bd show --json <ids>` it
-// used to pay per rig: the dependency and blocker data a hydration needs is
-// already read. Wisps and issues share one statement because `gt polecat list`
-// reads both for the same three consumers, and two subprocesses where one
-// answers is a cost it was paying for nothing (gt-59p7e).
+// rig's wisps, the issues its caller asked for, and the dependency rows of
+// both, in one round trip: ListMergeRequests hydrates its merge requests out of
+// those rows rather than paying a `bd show --json <ids>` per rig (gt-7dctf),
+// and the two tables share the statement because one caller wants both and each
+// read is a subprocess (gt-59p7e).
 //
 // The read is one UNION ALL of four arms: the wisps, their dependency rows,
 // the issues, their dependency rows. A row arm is a table's own rows, tagged

@@ -2,27 +2,21 @@ package beads
 
 import "github.com/steveyegge/gastown/internal/beadsql"
 
-// PreloadBeads warms this *Beads' wisps and issues snapshots from one bd sql
-// round trip, the read behind `gt polecat list`. Its callers are the reads that
-// would otherwise each spawn their own bd subprocess per rig (gt-92zx,
-// gt-0hmt2, gt-59p7e): ListAgentBeads and ListMergeRequests answer from the
-// wisps read and the issues read, ListIssueStatuses from the issues read, and
-// ListMergeRequests' hydration from the dependency rows both halves carry
-// (gt-7dctf).
+// PreloadBeads warms this *Beads' wisps and issues snapshots, and the
+// dependency rows of both, from one bd sql round trip — the read behind `gt
+// polecat list`, whose readers would otherwise each spawn a bd subprocess per
+// rig (gt-92zx, gt-0hmt2, gt-59p7e).
 //
-// Wisps and issues travel in one statement because the same caller wants both
-// at once and each is a subprocess: two round trips per rig where one answers
-// is a cost paid for nothing. The read is unfiltered on the wisp side (the
-// whole wisps table, not a label-filtered subset) and the per-label split
-// happens in Go, because the two wisp consumers need different subsets of one
-// read: ListMergeRequests wants its label's wisps, while ListAgentBeadsFromWisps
-// needs every wisp to run its type/ID fallbacks against, and the agent bead it
-// classifies that way may carry no label row at all (gt-92zx). Labels and
-// statuses are what scope the issues half.
+// Wisps and issues travel together because one caller wants both at once and
+// each read is a subprocess. The wisp side is unfiltered — the whole wisps
+// table, split into per-label buckets in Go — because ListAgentBeadsFromWisps
+// runs type/ID fallbacks over wisps whose label metadata is missing, and a
+// label-filtered query cannot see them (gt-92zx). Labels and statuses scope the
+// issues side.
 //
-// The caches never refresh — same caveat as PreloadAgentBeads/PreloadMergeRequests:
-// don't hold this instance across writes that could create or change those rows
-// mid-run.
+// The caches never refresh — the same caveat as PreloadAgentBeads and
+// PreloadMergeRequests: don't hold this instance across writes that could
+// create or change those rows mid-run.
 func (b *Beads) PreloadBeads(labels []string, statuses []IssueStatus) error {
 	statuses = uniqueStatuses(statuses)
 	statusNames := make([]string, len(statuses))
