@@ -11,6 +11,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLER="$SCRIPT_DIR/install-binary.sh"
 
+# The installer signs with the town's keychain when one exists (gt-ykots); no
+# case below may reach the real one. Cases that test signing point this at stub
+# material of their own.
+export INSTALL_GT_SIGN_DIR="/nonexistent/install-binary-test-signing"
+
 WORK_DIR=""
 DEST=""
 PASS=0
@@ -238,6 +243,81 @@ if immutable_supported; then
 else
   echo "  SKIP: OS immutable-flag enforcement unavailable on this host (needs BSD chflags, or chattr with CAP_LINUX_IMMUTABLE) — gt-vya0s checks not run"
 fi
+
+# --- Signing (gt-ykots): best effort, never a failed install ------------------
+#
+# `security` and `codesign` are stubs on PATH, so no case touches a real
+# keychain. The stub codesign records its arguments and exits with the code the
+# case picks.
+make_sign_world() {
+  local codesign_rc="$1"
+  setup
+  printf '#!/bin/sh\necho hi\n' > "$WORK_DIR/built-gt"
+  chmod 755 "$WORK_DIR/built-gt"
+  STUBS="$WORK_DIR/stubs"
+  SIGN_DIR="$WORK_DIR/sign"
+  mkdir -p "$STUBS" "$SIGN_DIR"
+  printf '#!/bin/sh\nexit 0\n' > "$STUBS/security"
+  printf '#!/bin/sh\necho "$@" >> "%s/codesign.args"\nexit %s\n' "$WORK_DIR" "$codesign_rc" > "$STUBS/codesign"
+  chmod 755 "$STUBS/security" "$STUBS/codesign"
+  : > "$SIGN_DIR/gastown-signing.keychain-db"
+  printf 'secret-pw-7c1e' > "$SIGN_DIR/keychain.pass"
+}
+
+run_sign_install() {
+  rc=0
+  PATH="$STUBS:$PATH" INSTALL_GT_SIGN_DIR="$SIGN_DIR" bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt 2> "$WORK_DIR/err" || rc=$?
+}
+
+make_sign_world 0
+run_sign_install
+assert_ok "signing: install succeeds" "$rc"
+args="$(cat "$WORK_DIR/codesign.args" 2>/dev/null || true)"
+case "$args" in
+  *"-i com.gastown.gt"*"--keychain"*|*"--keychain"*"-i com.gastown.gt"*) echo "  PASS: signing: codesign asked for the com.gastown.gt identifier"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL: signing: codesign args were: $args"; FAIL=$((FAIL + 1)) ;;
+esac
+case "$args" in
+  *"--keychain $SIGN_DIR/gastown-signing.keychain-db"*"-s gastown-dev-unattended"*) echo "  PASS: signing: town keychain and identity used"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL: signing: keychain/identity args: $args"; FAIL=$((FAIL + 1)) ;;
+esac
+case "$args" in
+  *"$DEST/.gt.tmp."*) echo "  PASS: signing: signs the temp copy, not the live path"; PASS=$((PASS + 1)) ;;
+  *) echo "  FAIL: signing: signed something other than the temp copy: $args"; FAIL=$((FAIL + 1)) ;;
+esac
+assert_eq "signing: says it signed" "1" "$(grep -c 'signed gt as com.gastown.gt' "$WORK_DIR/err")"
+assert_eq "signing: password never printed" "0" "$(grep -c 'secret-pw-7c1e' "$WORK_DIR/err")"
+cleanup
+
+make_sign_world 1
+run_sign_install
+assert_ok "signing: a failing codesign still installs (exit 0)" "$rc"
+assert_eq "signing: failing codesign installs the built binary unchanged" "#!/bin/sh echo hi" "$(tr '\n' ' ' < "$DEST/gt" | sed 's/ $//')"
+assert_eq "signing: failing codesign is one WARN" "1" "$(grep -c 'installing ad-hoc: codesign failed' "$WORK_DIR/err")"
+assert_eq "signing: failing codesign leaves no temp file" "" "$(find "$DEST" -name '.gt.tmp.*' -print)"
+cleanup
+
+make_sign_world 0
+rm -f "$SIGN_DIR/gastown-signing.keychain-db"
+run_sign_install
+assert_ok "signing: no keychain installs ad-hoc (exit 0)" "$rc"
+assert_eq "signing: no keychain says so" "1" "$(grep -c 'installing ad-hoc: no signing keychain' "$WORK_DIR/err")"
+assert_eq "signing: no keychain never calls codesign" "no" "$([ -e "$WORK_DIR/codesign.args" ] && echo yes || echo no)"
+cleanup
+
+make_sign_world 0
+rm -f "$SIGN_DIR/keychain.pass"
+run_sign_install
+assert_ok "signing: no password file installs ad-hoc (exit 0)" "$rc"
+assert_eq "signing: no password file says so" "1" "$(grep -c 'installing ad-hoc: no password file' "$WORK_DIR/err")"
+cleanup
+
+make_sign_world 0
+rc=0
+INSTALL_BINARY_SIGN=0 PATH="$STUBS:$PATH" INSTALL_GT_SIGN_DIR="$SIGN_DIR" bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt 2> "$WORK_DIR/err" || rc=$?
+assert_ok "signing: INSTALL_BINARY_SIGN=0 installs (exit 0)" "$rc"
+assert_eq "signing: INSTALL_BINARY_SIGN=0 never calls codesign" "no" "$([ -e "$WORK_DIR/codesign.args" ] && echo yes || echo no)"
+cleanup
 
 # --- Static guard: the non-atomic recipe must not come back -------------------
 if grep -qE 'cp[[:space:]]+\$\(BUILD_DIR\)/\$\(BINARY\)[[:space:]]+\$\(INSTALL_DIR\)' "$REPO_ROOT/Makefile"; then
