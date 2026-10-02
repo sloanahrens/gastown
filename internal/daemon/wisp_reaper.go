@@ -20,9 +20,6 @@ const (
 	defaultWispMaxAge = 24 * time.Hour
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
 	defaultWispDeleteAge = 7 * 24 * time.Hour
-	// Alert threshold: if open wisp count exceeds this, the reaper warns.
-	// Shared with `gt reaper run` warning. See reaper.DefaultAlertThreshold.
-	wispAlertThreshold = reaper.DefaultAlertThreshold
 	// Closed mail older than this is permanently deleted.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
 	// Issues stale longer than this are auto-closed.
@@ -236,6 +233,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	port := d.doltServerPort()
 	dryRun := config.DryRun
 	var totalReaped, totalMoleculeSteps, totalOpen, totalPurged, totalMailPurged, totalAutoClosed int
+	// openDBs counts the databases totalOpen covers, so the alert can compare
+	// this cycle's total to a baseline taken over the same set (gt-11kyy).
+	var openDBs int
 
 	// Step 2: Reap
 	reapErrors := 0
@@ -274,6 +274,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalReaped += result.Reaped
 		totalMoleculeSteps += result.MoleculeStepsClosed
 		totalOpen += result.OpenRemain
+		openDBs++
 		if result.Reaped > 0 || result.MoleculeStepsClosed > 0 {
 			reapSummary := fmt.Sprintf("wisp_reaper: %s: reaped %d stale wisps", dbName, result.Reaped)
 			if result.MoleculeStepsClosed > 0 {
@@ -450,10 +451,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	}
 
 	// Step 5: Report
-	if totalOpen > wispAlertThreshold {
-		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
-			totalOpen, wispAlertThreshold)
-	}
+	d.recordCycleOpenWisps(reapErrors, reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: dryRun})
 	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", totalReaped)
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
@@ -462,6 +460,41 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
 	d.logger.Printf("%s", summary)
 	cycle.closeStep("report")
+}
+
+// recordCycleOpenWisps reports one patrol cycle's open-wisp reading, unless the
+// cycle lost databases to reap errors: that count covers fewer databases than
+// the series is measured over, so recording it would anchor the series on an
+// undercount and hide the growth the alert exists to catch (gt-11kyy). The
+// failed step is already reported by the cycle itself.
+func (d *Daemon) recordCycleOpenWisps(reapErrors int, sample reaper.OpenWispSample) {
+	if reapErrors > 0 {
+		d.logger.Printf("wisp_reaper: open-wisp alert skipped: %d database(s) failed to reap, so this cycle's count is incomplete", reapErrors)
+		return
+	}
+	d.reportOpenWispAlert(sample)
+}
+
+// reportOpenWispAlert warns when this cycle's open-wisp count grew enough over
+// the recorded baseline to mean accumulation rather than a working set, then
+// records the cycle as the reading the next one is judged against. The record
+// outlives the process — it is on disk — so a daemon restart loses no
+// comparison (gt-11kyy).
+func (d *Daemon) reportOpenWispAlert(sample reaper.OpenWispSample) {
+	path := WispAlertBaselinePath(d.config.TownRoot)
+	previous, err := LoadWispAlertState(path)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: WARNING: cannot read the open-wisp baseline (%v) — "+
+			"this cycle cannot be judged against the last one", err)
+	}
+	next, alert, detail := reaper.NextOpenWispAlertState(previous, sample)
+	if alert {
+		d.logger.Printf("wisp_reaper: WARNING: %s — investigate wisp lifecycle", detail)
+	}
+	if err := SaveWispAlertState(path, next); err != nil {
+		d.logger.Printf("wisp_reaper: WARNING: cannot record the open-wisp baseline (%v) — "+
+			"the next cycle will have nothing to compare against", err)
+	}
 }
 
 // autoCloseDB runs the auto-close sweep against one open database and returns

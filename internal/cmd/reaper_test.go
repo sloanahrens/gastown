@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -190,5 +191,144 @@ func TestWriteAutoCloseReportCountsWhatAClosedSweepClosed(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "auto-closed 3 stale issues") {
 		t.Errorf("stdout = %q, want the close count", stdout.String())
+	}
+}
+
+// TestReportReaperRunOpenWisps drives the hand-run alert's whole decision: what
+// counts as a reading of the town, what it is compared against, and what it
+// leaves behind for the next run (gt-11kyy).
+func TestReportReaperRunOpenWisps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		seed     *reaper.OpenWispSample
+		run      reaperRunAlert
+		wantWarn bool
+		wantSkip bool
+		// wantRecorded is the baseline the hand-run series holds afterwards;
+		// nil means the run left no series at all.
+		wantRecorded *reaper.OpenWispSample
+	}{
+		{
+			name:         "the first whole-town run only records",
+			run:          reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 900, Databases: 2}, WholeTown: true},
+			wantRecorded: &reaper.OpenWispSample{OpenWisps: 900, Databases: 2},
+		},
+		{
+			name:         "steady state is silent",
+			seed:         &reaper.OpenWispSample{OpenWisps: 138, Databases: 2},
+			run:          reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 138, Databases: 2}, WholeTown: true},
+			wantRecorded: &reaper.OpenWispSample{OpenWisps: 138, Databases: 2},
+		},
+		{
+			name:         "accumulation warns",
+			seed:         &reaper.OpenWispSample{OpenWisps: 138, Databases: 2},
+			run:          reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 900, Databases: 2}, WholeTown: true},
+			wantWarn:     true,
+			wantRecorded: &reaper.OpenWispSample{OpenWisps: 900, Databases: 2},
+		},
+		{
+			name: "a --db run is not a reading of the town",
+			run:  reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 900, Databases: 1}},
+		},
+		{
+			name: "a --json run is not a reading of the town",
+			run:  reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 900, Databases: 2}},
+		},
+		{
+			name:         "a run that lost a database keeps the series it found",
+			seed:         &reaper.OpenWispSample{OpenWisps: 138, Databases: 2},
+			run:          reaperRunAlert{Sample: reaper.OpenWispSample{OpenWisps: 900, Databases: 1}, WholeTown: true, FailedDatabases: 1},
+			wantSkip:     true,
+			wantRecorded: &reaper.OpenWispSample{OpenWisps: 138, Databases: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			path := daemon.WispAlertCLIBaselinePath(townRoot)
+			if tt.seed != nil {
+				held := reaper.OpenWispAlertState{Baseline: *tt.seed, Held: 2}
+				if err := daemon.SaveWispAlertState(path, held); err != nil {
+					t.Fatalf("seed baseline: %v", err)
+				}
+			}
+
+			var out bytes.Buffer
+			reportReaperRunOpenWisps(&out, townRoot, tt.run)
+
+			if got := strings.Contains(out.String(), "investigate wisp lifecycle"); got != tt.wantWarn {
+				t.Fatalf("warned = %v, want %v; output: %q", got, tt.wantWarn, out.String())
+			}
+			if got := strings.Contains(out.String(), "open-wisp alert skipped"); got != tt.wantSkip {
+				t.Fatalf("skip notice = %v, want %v; output: %q", got, tt.wantSkip, out.String())
+			}
+
+			state, err := daemon.LoadWispAlertState(path)
+			if err != nil {
+				t.Fatalf("load baseline: %v", err)
+			}
+			switch {
+			case tt.wantRecorded == nil && state != nil:
+				t.Fatalf("the run recorded %+v, want no series", state)
+			case tt.wantRecorded != nil && state == nil:
+				t.Fatalf("the run recorded nothing, want %+v", *tt.wantRecorded)
+			case tt.wantRecorded != nil && state.Baseline != *tt.wantRecorded:
+				t.Fatalf("recorded baseline is %+v, want %+v", state.Baseline, *tt.wantRecorded)
+			}
+		})
+	}
+}
+
+// The patrol samples once a cycle and a hand run samples whenever an operator
+// asks, so a hand run must not move the patrol's series: the gap between the
+// two would read as growth (gt-11kyy).
+func TestReportReaperRunOpenWispsKeepsItsOwnSeries(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	patrolPath := daemon.WispAlertBaselinePath(townRoot)
+	patrol := reaper.OpenWispAlertState{
+		Baseline: reaper.OpenWispSample{OpenWisps: 1966, Databases: 6},
+		Held:     9,
+	}
+	if err := daemon.SaveWispAlertState(patrolPath, patrol); err != nil {
+		t.Fatalf("seed patrol baseline: %v", err)
+	}
+
+	// A count this far above the patrol's baseline would alert against it, so a
+	// shared series would show up here as a warning.
+	var out bytes.Buffer
+	reportReaperRunOpenWisps(&out, townRoot, reaperRunAlert{
+		Sample:    reaper.OpenWispSample{OpenWisps: 5900, Databases: 6},
+		WholeTown: true,
+	})
+	if strings.Contains(out.String(), "investigate wisp lifecycle") {
+		t.Fatalf("the first hand run warned against the patrol's series: %q", out.String())
+	}
+
+	got, err := daemon.LoadWispAlertState(patrolPath)
+	if err != nil {
+		t.Fatalf("load patrol baseline: %v", err)
+	}
+	if got == nil || *got != patrol {
+		t.Fatalf("the hand run moved the patrol's series to %+v, want %+v", got, patrol)
+	}
+}
+
+// A town with no root to keep a series in reports nothing rather than guessing
+// at one.
+func TestReportReaperRunOpenWispsWithoutATownRoot(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	reportReaperRunOpenWisps(&out, "", reaperRunAlert{
+		Sample:    reaper.OpenWispSample{OpenWisps: 900, Databases: 2},
+		WholeTown: true,
+	})
+	if out.Len() != 0 {
+		t.Fatalf("output = %q, want nothing", out.String())
 	}
 }

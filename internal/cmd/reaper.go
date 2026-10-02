@@ -350,12 +350,17 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 		databases := reaperDatabaseNames()
 
 		var results []*reaper.ReapResult
+		// reapFailures counts the databases that contributed no reading, so the
+		// open-wisp alert can tell a reading of the town from a reading of part
+		// of it (gt-11kyy).
+		var reapFailures int
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				reapFailures++
 				continue
 			}
 
@@ -365,12 +370,14 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				reapFailures++
 				continue
 			}
 
 			if ok, err := reaper.HasReaperSchema(db); err != nil {
 				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
 				db.Close()
+				reapFailures++
 				continue
 			} else if !ok {
 				db.Close()
@@ -381,21 +388,29 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
 				db.Close()
+				reapFailures++
 				continue
 			}
 			result, err := reaper.Reap(db, w, dbName, maxAge, reaperDryRun)
 			db.Close()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: reap error: %v\n", dbName, err)
+				reapFailures++
 				continue
 			}
 			results = append(results, result)
 		}
 
+		var totalReaped, totalMoleculeSteps, totalOpen int
+		for _, r := range results {
+			totalReaped += r.Reaped
+			totalMoleculeSteps += r.MoleculeStepsClosed
+			totalOpen += r.OpenRemain
+		}
+
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
-			var totalReaped, totalMoleculeSteps, totalOpen int
 			for _, r := range results {
 				prefix := ""
 				if r.DryRun {
@@ -407,9 +422,6 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				}
 				fmt.Printf("%s: %sreaped %d wisps%s, %d open remain\n",
 					r.Database, prefix, r.Reaped, extra, r.OpenRemain)
-				totalReaped += r.Reaped
-				totalMoleculeSteps += r.MoleculeStepsClosed
-				totalOpen += r.OpenRemain
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -422,14 +434,65 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				}
 				fmt.Printf("\n%sReap summary (%d databases): reaped %d wisps%s, %d open remain\n",
 					prefix, len(results), totalReaped, extra, totalOpen)
-				if totalOpen > reaper.DefaultAlertThreshold {
-					fmt.Fprintf(os.Stderr, "WARNING: %d open wisps exceed alert threshold (%d)\n",
-						totalOpen, reaper.DefaultAlertThreshold)
-				}
 			}
 		}
+		townRoot, _ := findTownRoot()
+		reportReaperRunOpenWisps(os.Stderr, townRoot, reaperRunAlert{
+			Sample:          reaper.OpenWispSample{OpenWisps: totalOpen, Databases: len(results), DryRun: reaperDryRun},
+			WholeTown:       reaperDB == "" && !reaperJSON,
+			FailedDatabases: reapFailures,
+		})
 		return nil
 	},
+}
+
+// reaperRunAlert is one hand-run cycle's open-wisp reading together with what
+// the run covered, which is what decides whether the reading belongs in the
+// alert's series at all.
+type reaperRunAlert struct {
+	Sample          reaper.OpenWispSample
+	WholeTown       bool // false for a --db subset or a --json run
+	FailedDatabases int  // databases that contributed no reading
+}
+
+// reportReaperRunOpenWisps records a hand-run cycle's reading in the series
+// that belongs to hand runs, and warns on w when it has grown enough to mean
+// accumulation.
+//
+// Only a whole-town, non-JSON run that lost no database is a reading of the
+// town (gt-11kyy): a --db run measures a subset, a --json run usually feeds a
+// monitor sampling at its own rate, and a run missing a database counts low —
+// each would post a reading the next real cycle reads as growth or as a fall.
+func reportReaperRunOpenWisps(w io.Writer, townRoot string, run reaperRunAlert) {
+	switch {
+	case townRoot == "":
+		return
+	case !run.WholeTown:
+		return
+	case run.FailedDatabases > 0:
+		fmt.Fprintf(w, "WARNING: open-wisp alert skipped: %d database(s) failed, so this run's count is incomplete\n", run.FailedDatabases)
+		return
+	}
+	reportReaperOpenWispAlert(w, townRoot, run.Sample)
+}
+
+// reportReaperOpenWispAlert warns on w when this reading has grown enough over
+// the last one recorded for hand runs to mean accumulation rather than a
+// working set, then records it as the reading the next run is judged against
+// (gt-11kyy).
+func reportReaperOpenWispAlert(w io.Writer, townRoot string, sample reaper.OpenWispSample) {
+	path := daemon.WispAlertCLIBaselinePath(townRoot)
+	previous, err := daemon.LoadWispAlertState(path)
+	if err != nil {
+		fmt.Fprintf(w, "WARNING: cannot read the open-wisp baseline (%v) — this run cannot be judged against the last one\n", err)
+	}
+	next, alert, detail := reaper.NextOpenWispAlertState(previous, sample)
+	if alert {
+		fmt.Fprintf(w, "WARNING: %s — investigate wisp lifecycle\n", detail)
+	}
+	if err := daemon.SaveWispAlertState(path, next); err != nil {
+		fmt.Fprintf(w, "WARNING: cannot record the open-wisp baseline (%v) — the next run will have nothing to compare against\n", err)
+	}
 }
 
 var reaperPurgeCmd = &cobra.Command{
@@ -708,6 +771,10 @@ it by hand.`,
 		autoCloseDisarmed, autoCloseConfigPath := reaperAutoCloseDisarmed()
 
 		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
+		// openDBs counts the databases totalOpen covers and openFailures the ones
+		// that contributed no reading, so the open-wisp alert can tell a reading
+		// of the town from a reading of part of it (gt-11kyy).
+		var openDBs, openFailures int
 
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
@@ -715,6 +782,7 @@ it by hand.`,
 			}
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				fmt.Printf("skip invalid db: %s\n", dbName)
+				openFailures++
 				continue
 			}
 
@@ -724,12 +792,14 @@ it by hand.`,
 					continue
 				}
 				fmt.Printf("%s: connect error: %v\n", dbName, err)
+				openFailures++
 				continue
 			}
 
 			if ok, err := reaper.HasReaperSchema(db); err != nil {
 				fmt.Printf("%s: schema check error: %v\n", dbName, err)
 				db.Close()
+				openFailures++
 				continue
 			} else if !ok {
 				fmt.Printf("%s: skipped (no reaper schema)\n", dbName)
@@ -742,6 +812,7 @@ it by hand.`,
 			if err != nil {
 				fmt.Printf("%s: scan error: %v\n", dbName, err)
 				db.Close()
+				openFailures++
 				continue
 			}
 			for _, a := range scanResult.Anomalies {
@@ -752,6 +823,7 @@ it by hand.`,
 			if err != nil {
 				fmt.Printf("%s: %v\n", dbName, err)
 				db.Close()
+				openFailures++
 				continue
 			}
 
@@ -759,10 +831,12 @@ it by hand.`,
 			reapResult, err := reaper.Reap(db, w, dbName, maxAge, reaperDryRun)
 			if err != nil {
 				fmt.Printf("%s: reap error: %v\n", dbName, err)
+				openFailures++
 			} else {
 				totalReaped += reapResult.Reaped
 				totalMoleculeSteps += reapResult.MoleculeStepsClosed
 				totalOpen += reapResult.OpenRemain
+				openDBs++
 			}
 
 			// Purge
@@ -845,6 +919,13 @@ it by hand.`,
 		fmt.Printf("  Purged:    %d wisps, %d mail\n", totalPurged, totalMailPurged)
 		fmt.Printf("  Closed:    %d stale issues\n", totalClosed)
 		fmt.Printf("  Open:      %d wisps remain\n", totalOpen)
+
+		townRoot, _ := findTownRoot()
+		reportReaperRunOpenWisps(os.Stderr, townRoot, reaperRunAlert{
+			Sample:          reaper.OpenWispSample{OpenWisps: totalOpen, Databases: openDBs, DryRun: reaperDryRun},
+			WholeTown:       reaperDB == "" && !reaperJSON,
+			FailedDatabases: openFailures,
+		})
 
 		return nil
 	},
