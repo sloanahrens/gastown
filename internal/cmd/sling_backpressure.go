@@ -134,6 +134,10 @@ func (g slingBackpressure) check(townRoot, rigName string, opts SlingSpawnOption
 // worker: open beads labeled gt:ready-to-land. It replaced the ready-MR count
 // when the merge queue was deleted (gt-v4ssj.6); the landing worker drains
 // this queue the way the refinery drained MRs.
+//
+// IsActionable, not IsTerminal: the count must match what the worker will
+// drain, or a parked bead fills the ceiling with work no landing will ever
+// clear (gt-y7n1u).
 func countReadyToLand(lister dispatchMRLister, _ string) (int, error) {
 	issues, err := lister.List(beads.ListOptions{
 		Label:    land.LabelReadyToLand,
@@ -144,7 +148,7 @@ func countReadyToLand(lister dispatchMRLister, _ string) (int, error) {
 	}
 	ready := 0
 	for _, issue := range issues {
-		if !beads.IssueStatus(issue.Status).IsTerminal() {
+		if beads.IssueStatus(issue.Status).IsActionable() {
 			ready++
 		}
 	}

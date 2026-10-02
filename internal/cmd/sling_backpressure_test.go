@@ -223,7 +223,8 @@ func TestCheckSlingBackpressureNoSettingsIsOff(t *testing.T) {
 
 // TestCountReadyToLand pins the count itself: open and in-flight beads carry
 // the ready-to-land label until the landing worker lands them; a closed bead
-// has already landed and is not queue depth.
+// has already landed and a parked bead (deferred or pinned) is what the worker
+// will not drain, so neither is queue depth (gt-y7n1u).
 func TestCountReadyToLand(t *testing.T) {
 	t.Parallel()
 	lister := &fakeDispatchMRLister{mrs: []*beads.Issue{
@@ -231,6 +232,8 @@ func TestCountReadyToLand(t *testing.T) {
 		{ID: "gt-b", Status: "in_progress"},
 		{ID: "gt-c", Status: "closed"},
 		{ID: "gt-d", Status: "hooked"},
+		{ID: "gt-e", Status: "deferred"},
+		{ID: "gt-f", Status: "pinned"},
 	}}
 
 	got, err := countReadyToLand(lister, "gastown")
