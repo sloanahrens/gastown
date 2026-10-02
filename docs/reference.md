@@ -200,34 +200,38 @@ migration's commit does not fsync through to the host disk. Set `GT_TEST_DOLT_TM
 instead, for a Docker runtime that cannot mount tmpfs there. Measurements:
 `docs/plans/2026-09-24-test-suite-concurrency-design.md`.
 
-### Seat Refill (`polecat_pool`)
+### Spec Dispatch (`polecat_pool`)
 
-The seat-refill plugin's dispatch policy lives in the town's
-`settings/config.json`, under `polecat_pool`, beside the seats it fills:
-`max_priority` is the ceiling on a candidate bead's number, `empty_seconds` and
-`nudge_seconds` are the nudge cadence, `top_candidates` and
-`dispatch_empty_seconds` tune what a nudge says and when a direct sling waits,
-and `pro_max`, `pro_agent` and `pro_label` configure the pro seat, `mode`
-chooses between filling an empty seat directly and nudging the mayor about it,
-and `shape_gate` is what a direct sling does with a candidate's shape lint
-(`gt spec lint`): off, warn or refuse.
+The spec dispatcher's policy lives in the town's `settings/config.json`, under
+`polecat_pool`, beside the seats it fills: `max_priority` is the ceiling on a
+candidate bead's number (the daemon's idle-seat check counts to the same
+number), `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and
+`shape_gate` is what a dispatch does with a candidate's shape lint
+(`gt spec lint`): off, warn or refuse. `overflow_agent` and `max_overflow` are
+the pool's own seat, and `min_spawn_gap` staggers its spawns.
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.
 
-A value the plugin cannot act on is refused rather than ignored: `gt config set`
-rejects it at the write, and the daemon refuses to start from a file carrying
-one, naming the file and the key.
+The keys were the seat-refill plugin's before it was deleted (gt-4k3fj.8.8),
+which is why a few names say what they no longer do: `mode`, `top_candidates`,
+`empty_seconds`, `nudge_seconds` and `dispatch_empty_seconds` tuned the plugin's
+nudge and its delayed fill. Nothing reads them now; they are accepted and
+ignored, and kept so an older settings file still loads.
 
-A `GT_SEAT_REFILL_*` variable overrides the file. That is a test seam
-(`plugins/seat-refill/run_test.sh` drives the plugin through it), the same way
-the plugin's timeouts and paths are overridable; it is not the operator's
-switch. `settings/daemon.env` is for secrets and process environment (below),
-and the `daemon.env` map in `settings/config.json` is the ambient environment
-the daemon exports to every session it spawns. A dispatch policy put in either
-place is invisible to `gt config`, unvalidated, and applied to every session
-rather than to the plugin that reads it — which is how raising the ceiling to P3
-took two tries (gt-y3pgh.12).
+A value the dispatcher cannot act on is refused rather than ignored: `gt config
+set` rejects it at the write, and the daemon refuses to start from a file
+carrying one, naming the file and the key.
+
+`settings/daemon.env` is for secrets and process environment (below), and the
+`daemon.env` map in `settings/config.json` is the ambient environment the daemon
+exports to every session it spawns. A dispatch policy put in either place is
+invisible to `gt config`, unvalidated, and applied to every session rather than
+to the dispatcher that reads it — which is how raising the ceiling to P3 took
+two tries (gt-y3pgh.12).
+
+`docs/guides/spec-dispatcher.md` is the behavioral guide: candidates, the shape
+gate, the seat table and how to enable the ticker.
 
 ### Daemon Environment (`settings/daemon.env`)
 

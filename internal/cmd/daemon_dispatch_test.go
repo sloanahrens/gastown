@@ -18,7 +18,7 @@ func TestDispatchDecision_NudgesWhenSeatsAreFreeAndWorkExists(t *testing.T) {
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 1}}
 
-	nudge, msg := dispatchDecision(seats, rigs)
+	nudge, msg := dispatchDecision(seats, rigs, 2)
 
 	if !nudge {
 		t.Fatalf("expected a nudge with free seats and 1 ready bead, got silence")
@@ -36,7 +36,7 @@ func TestDispatchDecision_SilentWhenNoSeatIsFree(t *testing.T) {
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 4, Free: 0}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 5}}
 
-	if nudge, msg := dispatchDecision(seats, rigs); nudge {
+	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
 		t.Errorf("expected silence with every seat taken, got nudge: %s", msg)
 	}
 }
@@ -46,7 +46,7 @@ func TestDispatchDecision_SilentWhenNoWorkIsReady(t *testing.T) {
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 3, Free: 1}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 0}, {Rig: "beads", Ready: 0}}
 
-	if nudge, msg := dispatchDecision(seats, rigs); nudge {
+	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
 		t.Errorf("expected silence with no ready work, got nudge: %s", msg)
 	}
 }
@@ -58,7 +58,7 @@ func TestDispatchDecision_SilentWhenNoSeatModelIsConfigured(t *testing.T) {
 	seats := dispatchSeats{Source: "none"}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 5}}
 
-	if nudge, msg := dispatchDecision(seats, rigs); nudge {
+	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
 		t.Errorf("expected silence with no seat model, got nudge: %s", msg)
 	}
 }
@@ -71,14 +71,14 @@ func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
 	}
 
 	// Only the held rig has work: silence, because the work could not land.
-	if nudge, msg := dispatchDecision(seats, rigs); nudge {
+	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
 		t.Errorf("expected silence when every rig with work is over its ceiling, got: %s", msg)
 	}
 
 	// A second rig with work keeps the nudge, and the held rig is named with
 	// its MR depth so the mayor can tell "empty board" from "board held".
 	rigs = append(rigs, dispatchRig{Rig: "gastown", Ready: 4})
-	nudge, msg := dispatchDecision(seats, rigs)
+	nudge, msg := dispatchDecision(seats, rigs, 2)
 	if !nudge {
 		t.Fatal("expected a nudge when a rig outside its ceiling has work")
 	}
@@ -94,12 +94,12 @@ func TestDispatchDecision_NamesUrgentSubsetOnlyWhenNonZero(t *testing.T) {
 	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 
-	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 0}})
+	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 0}}, 2)
 	if strings.Contains(msg, "P0/P1") {
 		t.Errorf("a rig with no P0/P1 should not carry an empty urgent clause: %s", msg)
 	}
 
-	_, msg = dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 2}})
+	_, msg = dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 2}}, 2)
 	if !strings.Contains(msg, "gastown=200 (P0/P1 2)") {
 		t.Errorf("nudge should name the urgent subset when there is one: %s", msg)
 	}
@@ -110,7 +110,7 @@ func TestDispatchDecision_SkipsParkedRigs(t *testing.T) {
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 	rigs := []dispatchRig{{Rig: "mango", Ready: 7, Parked: true}}
 
-	if nudge, msg := dispatchDecision(seats, rigs); nudge {
+	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
 		t.Errorf("expected silence: the only rig with work is parked, got: %s", msg)
 	}
 }
@@ -178,10 +178,67 @@ func TestIsActionableReadyBead(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isActionableReadyBead(tc.issue); got != tc.want {
+			if got := isActionableReadyBead(tc.issue, 2); got != tc.want {
 				t.Errorf("isActionableReadyBead = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// The ceiling is the operator's, not a constant (gt-h2kyc): the same bead is
+// backlog at the default and dispatchable work at a raised one, and an
+// unscored bead is never dispatchable.
+func TestIsActionableReadyBeadHonorsTheCeiling(t *testing.T) {
+	t.Parallel()
+	p3 := &beads.Issue{ID: "gt-3", Title: "someday", Priority: 3}
+	if isActionableReadyBead(p3, 2) {
+		t.Error("a P3 bead is dispatchable at the default P2 ceiling")
+	}
+	if !isActionableReadyBead(p3, 4) {
+		t.Error("a P3 bead is backlog at a P4 ceiling")
+	}
+	if isActionableReadyBead(&beads.Issue{ID: "gt-u", Title: "unscored", Priority: -1}, 4) {
+		t.Error("an unscored bead is dispatchable")
+	}
+}
+
+// The nudge names the ceiling the counts were taken at, so the mayor reads the
+// same number the check counted.
+func TestDispatchDecisionNamesTheCeiling(t *testing.T) {
+	t.Parallel()
+	seats := dispatchSeats{Source: "polecat_pool", Capacity: 1, Occupied: 0, Free: 1}
+	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 2}}, 4)
+	if !strings.Contains(msg, "Actionable P0-P4 ready beads: gastown=2") {
+		t.Errorf("nudge does not name the ceiling: %s", msg)
+	}
+}
+
+// The ceiling comes from polecat_pool.max_priority in the town settings, and
+// defaults to P2 when the town sets nothing.
+func TestDispatchPriorityCeilingFromSettings(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"polecat_pool":{"overflow_agent":"deepseek-flash","max_priority":4}}`
+	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ceiling, err := dispatchPriorityCeiling(townRoot)
+	if err != nil || ceiling != 4 {
+		t.Fatalf("ceiling = %d, %v; want 4", ceiling, err)
+	}
+
+	townRoot = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(`{"type":"town-settings","version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ceiling, err = dispatchPriorityCeiling(townRoot); err != nil || ceiling != config.DefaultSeatRefillMaxPriority {
+		t.Fatalf("default ceiling = %d, %v; want %d", ceiling, err, config.DefaultSeatRefillMaxPriority)
 	}
 }
 

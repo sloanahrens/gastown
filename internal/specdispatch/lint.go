@@ -232,6 +232,30 @@ func refusal(failures ...Refusal) Verdict {
 // Clean reports whether the spec may be dispatched to a polecat.
 func (v Verdict) Clean() bool { return v.Route == RouteDispatch }
 
+// ShapeNote renders the verdict as the note a warn-mode shape gate leaves on a
+// bead: "SHAPE: <field>: <reason>; ..." for a refusal, "SHAPE: needs planning"
+// for a spec that must be decomposed first. It is the seat-refill plugin's own
+// comment text (gt-cq5gb), kept so the bead's history reads the same across the
+// move to the Go dispatcher. Empty when the verdict is clean.
+func (v Verdict) ShapeNote() string {
+	switch v.Route {
+	case RouteDispatch:
+		return ""
+	case RoutePlanning:
+		return "SHAPE: needs planning"
+	}
+	parts := make([]string, 0, len(v.Refusals))
+	for _, r := range v.Refusals {
+		parts = append(parts, r.Field+": "+r.Reason)
+	}
+	if len(parts) == 0 {
+		// A refused verdict the lint rendered without refusals is the lint's
+		// problem, not a reason to leave the note half-written.
+		return "SHAPE: refused"
+	}
+	return "SHAPE: " + strings.Join(parts, "; ")
+}
+
 // Line renders the one-line report for a bead: "<id>: spec lint ok",
 // "<id>: spec lint refused: <field>: <reason>", or
 // "<id>: spec needs planning: <reason>".
