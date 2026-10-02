@@ -1330,53 +1330,6 @@ func extractCommand(input []byte) string {
 	return hookInput.ToolInput.Command
 }
 
-// matchesAllFragments returns true if every fragment is present somewhere in
-// tokens (order- and position-independent). tokens must already be
-// lowercased; fragments are lowercased here for callers that pass
-// mixed-case literals. Word fragments (e.g. "apt", "table") must match an
-// exact token — not a substring — so "apt" doesn't fire on "capture" or
-// "adapt" (gt-mkrj), and shell-aware tokens (see shellTokenize) keep quoted
-// text — a sed/jq script, a mail body — from being mistaken for standalone
-// command words. A two-character short-flag fragment (e.g. "-f") also
-// matches when bundled into a larger short-option cluster (e.g. "-fd",
-// "git clean -fd"), since that's a real single-token flag combination, not
-// quoted or embedded text.
-func matchesAllFragments(tokens []string, fragments []string) bool {
-	for _, f := range fragments {
-		if !tokensContainFragment(tokens, strings.ToLower(f)) {
-			return false
-		}
-	}
-	return true
-}
-
-// tokensContainFragment deliberately does NOT look inside a quoted,
-// multi-word token for word matches: mayor scope for gt-5ihs attempt 2 is
-// explicit that quoted text stays opaque outside the shell-invoker
-// recursion in evaluateDangerousCommand (nestedCommands) — "SQL DDL inside
-// quotes is not a shell hazard; do not flag it." Every false positive this
-// guard has hit (bead ids, mail bodies, a package-manager name inside an
-// ordinary word) came from scanning inside quoted prose; the earlier
-// word-boundary DDL fix reintroduced exactly that class of risk for SQL
-// strings. Recursing into sh -c/bash -c/eval/command-substitution payloads
-// is the correct, narrower fix — those really are shell commands.
-func tokensContainFragment(tokens []string, want string) bool {
-	for _, tok := range tokens {
-		if tok == want {
-			return true
-		}
-	}
-	if len(want) == 2 && want[0] == '-' && want[1] != '-' {
-		letter := rune(want[1])
-		for _, tok := range tokens {
-			if len(tok) > 2 && tok[0] == '-' && tok[1] != '-' && strings.ContainsRune(tok[1:], letter) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // matchesDangerousRmRf blocks "rm -rf /" targeting the root filesystem.
 // Only blocks when the target is literally "/" or "/*". Normal cleanup
 // commands like "rm -rf ./build/" are allowed. tokens must be lowercased,
@@ -1410,8 +1363,10 @@ func matchesSudo(tokens []string) string {
 	return ""
 }
 
-// packageManagerPatterns lists system package manager install commands.
-// Each entry has the command prefix tokens and a reason.
+// packageManagerPatterns lists system package manager install commands. Each
+// entry's tokens are [command word, install subcommand]: the command word is
+// the package manager and "install" is an argument of that invocation (see
+// matchesPackageInstall).
 var packageManagerPatterns = []struct {
 	tokens []string
 	reason string
@@ -1420,11 +1375,11 @@ var packageManagerPatterns = []struct {
 	{[]string{"apt-get", "install"}, "System package install (apt-get) — use workspace tools instead"},
 	{[]string{"dnf", "install"}, "System package install (dnf) — use workspace tools instead"},
 	{[]string{"yum", "install"}, "System package install (yum) — use workspace tools instead"},
-	// pacman is deliberately absent here — see matchesPacmanInstall. Its -S
-	// (sync/install) and -s (search modifier, e.g. -Ss/-Qs) flags only
-	// differ by case, which a lowercased fragment match can't distinguish;
-	// the generic rule made "pacman -Ss foo" (a read-only search) block as
-	// an install (finding 7, gt-wisp-db27).
+	// pacman is deliberately absent here — see matchesPacmanInstall. Its
+	// install is a -S flag, not an "install" word, and its -S (sync/install)
+	// vs -s (search modifier, e.g. -Ss/-Qs) flags differ only by case, which
+	// this table's lowercased match can't tell apart (finding 7,
+	// gt-wisp-db27).
 	{[]string{"brew", "install"}, "Package install (brew) — use workspace tools instead"},
 	{[]string{"gem", "install"}, "System gem install — use workspace tools instead"},
 }
@@ -1458,37 +1413,39 @@ func matchesPacmanInstall(tokens, lowerTokens []string) bool {
 	return false
 }
 
-// matchesPackageInstall blocks system package manager install commands.
-// Also blocks "pip install" with --system flag and "npm install -g" (global
-// installs). tokens must be lowercased, shell-aware tokens (see
-// shellTokenize) — token-exact matching keeps a fragment like "apt" from
-// firing on "capture"/"adapt" and keeps quoted text out of consideration
-// (gt-mkrj).
+// matchesPackageInstall blocks system package manager install commands and,
+// more narrowly, "pip install --system" and global npm installs. Each shell
+// segment is read as one invocation (gt-24lz6): the segment's command word —
+// basename, skipping env assignments and launchers (segmentCommandWord) — is
+// the package manager, and "install" is one of that invocation's arguments,
+// in any position so an option before the subcommand ("apt-get -y install
+// curl") is still blocked (gt-qis3f). tokens must be lowercased, shell-aware
+// tokens (see shellTokenize).
 func matchesPackageInstall(tokens []string) string {
-	// Check simple token-based patterns (apt install, dnf install, etc.)
-	for _, p := range packageManagerPatterns {
-		if matchesAllFragments(tokens, p.tokens) {
-			return p.reason
+	for _, segment := range splitShellSegments(tokens) {
+		word, args := segmentCommandWord(segment)
+		if word == "" {
+			continue
 		}
-	}
+		base := filepath.Base(word)
 
-	hasToken := func(want string) bool {
-		for _, t := range tokens {
-			if t == want {
-				return true
+		// Simple package-manager pairs (apt install, dnf install, etc.): the
+		// command word is the manager and "install" is an argument.
+		for _, p := range packageManagerPatterns {
+			if base == p.tokens[0] && hasExactArg(args, p.tokens[1]) {
+				return p.reason
 			}
 		}
-		return false
-	}
 
-	// pip install --system (but not regular pip install into a venv)
-	if (hasToken("pip") || hasToken("pip3")) && hasToken("install") && hasToken("--system") {
-		return "System-level pip install — use a virtualenv or workspace tools instead"
-	}
+		// pip install --system (but not regular pip install into a venv)
+		if (base == "pip" || base == "pip3") && hasExactArg(args, "install") && hasExactArg(args, "--system") {
+			return "System-level pip install — use a virtualenv or workspace tools instead"
+		}
 
-	// npm install -g / npm install --global
-	if hasToken("npm") && hasToken("install") && (hasToken("-g") || hasToken("--global")) {
-		return "Global npm install — use workspace tools instead"
+		// npm install -g / npm install --global
+		if base == "npm" && hasExactArg(args, "install") && (hasExactArg(args, "-g") || hasExactArg(args, "--global")) {
+			return "Global npm install — use workspace tools instead"
+		}
 	}
 
 	return ""
