@@ -75,8 +75,12 @@ type stewardStatusView struct {
 	// the configured value was read as shadow.
 	Mode      steward.Mode `json:"mode"`
 	ModeError string       `json:"mode_error,omitempty"`
-	Timeout   string       `json:"job_timeout"`
-	HardAgent string       `json:"hard_agent"`
+	// Kinds are the event kinds new jobs run on; KindsError says why the
+	// configured list was read as the default (rejections only).
+	Kinds      []string `json:"kinds"`
+	KindsError string   `json:"kinds_error,omitempty"`
+	Timeout    string   `json:"job_timeout"`
+	HardAgent  string   `json:"hard_agent"`
 	steward.Stats
 	// Alerts counts the escalations the daemon raised about the steward in
 	// the window, by kind (pro, stuck, error-rate).
@@ -100,9 +104,11 @@ func buildStewardStatus(townRoot string, since, now time.Time, last int) (stewar
 		last = -1
 	}
 	mode, modeErr := daemon.StewardMode(cfg)
+	kinds, kindsErr := daemon.StewardKinds(cfg)
 	view := stewardStatusView{
 		Enabled:   daemon.IsPatrolEnabled(cfg, "steward"),
 		Mode:      mode,
+		Kinds:     kindNames(kinds),
 		Timeout:   timeout.String(),
 		HardAgent: hard,
 		Stats:     steward.Summarize(rows, steward.StatsOptions{Since: since, Now: now, Timeout: timeout, HardAgent: hard, Last: last}),
@@ -111,7 +117,19 @@ func buildStewardStatus(townRoot string, since, now time.Time, last int) (stewar
 	if modeErr != nil {
 		view.ModeError = modeErr.Error()
 	}
+	if kindsErr != nil {
+		view.KindsError = kindsErr.Error()
+	}
 	return view, nil
+}
+
+// kindNames renders kinds for the status view and its --json shape.
+func kindNames(kinds []steward.Kind) []string {
+	out := make([]string, len(kinds))
+	for i, k := range kinds {
+		out[i] = string(k)
+	}
+	return out
 }
 
 func runStewardStatus(cmd *cobra.Command, _ []string) error {
@@ -150,6 +168,10 @@ func renderStewardStatus(w io.Writer, v stewardStatusView, loc *time.Location) {
 	fmt.Fprintf(w, "  mode        %s\n", v.Mode)
 	if v.ModeError != "" {
 		fmt.Fprintf(w, "              %s\n", v.ModeError)
+	}
+	fmt.Fprintf(w, "  kinds       %s\n", strings.Join(v.Kinds, ", "))
+	if v.KindsError != "" {
+		fmt.Fprintf(w, "              %s\n", v.KindsError)
 	}
 	shadow := ""
 	if v.Shadow > 0 {

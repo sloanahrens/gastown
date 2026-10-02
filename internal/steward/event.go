@@ -1,6 +1,7 @@
 package steward
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -18,6 +19,25 @@ const (
 	// the rework label and a MERGE REJECTION block naming the rejected head.
 	KindRejection Kind = "rejection"
 )
+
+// ParseKind reads one entry of patrols.steward.kinds. The set is closed: an
+// empty string and anything that is not a kind are errors naming the key
+// (gt-9bioi.7).
+func ParseKind(s string) (Kind, error) {
+	switch Kind(s) {
+	case KindReview:
+		return KindReview, nil
+	case KindRejection:
+		return KindRejection, nil
+	}
+	return "", fmt.Errorf("patrols.steward.kinds %q is neither %q nor %q", s, KindReview, KindRejection)
+}
+
+// DefaultKinds is what a scan covers when patrols.steward.kinds is absent:
+// rejections only. A review job repeats what om (which gates every landing)
+// and the overseer's risk review already decide, so it spends LLM calls for
+// no decision and the operator opts into it (gt-9bioi.7).
+func DefaultKinds() []Kind { return []Kind{KindRejection} }
 
 // Event is one landing-queue event, carrying everything a job's prompt needs
 // so the job reads the bead for judgement, not for facts (gt-9bioi.2).
