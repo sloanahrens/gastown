@@ -169,11 +169,19 @@ func (e SpawnEnv) Values() map[string]string {
 	return out
 }
 
+// ResolveSpawnEnvMissing is ResolveSpawnEnv with the names neither
+// settings/daemon.env nor this process defines, for a caller that execs the
+// command itself and so has no shell to expand a late reference: it refuses
+// the run rather than pass an empty credential (gt-yih1).
+func ResolveSpawnEnvMissing(townRoot string, env map[string]string) (SpawnEnv, []string, error) {
+	return resolveSpawnEnv(townRoot, env, processHost.getenv)
+}
+
 // ResolveSpawnEnv resolves env for a startup command run in the town at
 // townRoot, reading ${VAR} references daemon.env does not define from this
 // process's environment (unset ones expand to "", as ExpandEnvRefs does).
 func ResolveSpawnEnv(townRoot string, env map[string]string) (SpawnEnv, error) {
-	se, _, err := resolveSpawnEnv(townRoot, env, processHost.getenv)
+	se, _, err := ResolveSpawnEnvMissing(townRoot, env)
 	return se, err
 }
 

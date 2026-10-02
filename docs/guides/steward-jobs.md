@@ -96,6 +96,15 @@ whose daemon died — the next daemon closes it at startup. The daemon logs one
 `steward: start …` line and one `steward: end …` line per job, visible in
 `gt tail`.
 
+The ledger does not grow without bound: when the runner starts it drops every
+job that ended more than seven days ago, whole. A job still running is kept
+whatever its age, because a scan reads its row as the bead being busy.
+
+A job whose preset's env names a `${VAR}` neither `settings/daemon.env` nor
+the daemon's own environment defines fails before it starts, with the variable
+named in the ledger's summary: an unresolved reference is an empty credential,
+and the provider's auth error would look like a broken job.
+
 ## Monitoring
 
 `gt steward status [--since 1h] [--last N] [--json]` summarizes the ledger: jobs

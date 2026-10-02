@@ -257,6 +257,88 @@ func TestLedgerCloseOrphansSparesOwnJobs(t *testing.T) {
 	}
 }
 
+// TestLedgerCompactDropsAFinishedJobWhole: every row of a job that ended
+// before the retention goes, so none is left as its latest row for Active to
+// read as running; a job with no end time is kept however old it is
+// (gt-9bioi.6).
+func TestLedgerCompactDropsAFinishedJobWhole(t *testing.T) {
+	t.Parallel()
+	l := NewLedger(filepath.Join(t.TempDir(), "jobs.jsonl"))
+
+	old := testJob("steward-old", "review", "gt-old", "aaaa")
+	old.Started = testEpoch.Add(-30 * 24 * time.Hour)
+	oldRows := []Job{old, old} // the start row and the process-group row
+	done := old
+	done.Ended, done.Outcome = old.Started.Add(time.Minute), OutcomePass
+
+	young := testJob("steward-young", "review", "gt-young", "bbbb")
+	young.Ended, young.Outcome = testEpoch, OutcomeFixed
+
+	// A job's age is its end: one that started long ago but ended within the
+	// retention is not a row a reader has stopped needing.
+	long := testJob("steward-long", "review", "gt-long", "dddd")
+	long.Started = testEpoch.Add(-30 * 24 * time.Hour)
+	long.Ended, long.Outcome = testEpoch, OutcomeFixed
+
+	stuck := testJob("steward-stuck", "review", "gt-stuck", "cccc")
+	stuck.Started = testEpoch.Add(-30 * 24 * time.Hour)
+
+	for _, j := range append(append(append(append([]Job{}, oldRows...), done), young), long, stuck) {
+		if err := l.Append(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := l.Compact(7*24*time.Hour, testEpoch)
+	if err != nil || n != 1 {
+		t.Fatalf("Compact = %d, %v; want 1, nil", n, err)
+	}
+	rows, err := l.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, j := range rows {
+		ids = append(ids, j.ID)
+		if j.ID == "steward-old" {
+			t.Errorf("a row of the dropped job survives: %+v", j)
+		}
+	}
+	if len(rows) != 3 || ids[0] != "steward-young" || ids[1] != "steward-long" || ids[2] != "steward-stuck" {
+		t.Fatalf("kept %v, want the young, the long-running and the still-running job", ids)
+	}
+	active, err := l.Active()
+	if err != nil || len(active) != 1 || active[0].ID != "steward-stuck" {
+		t.Fatalf("active = %+v, %v; want only the running job", active, err)
+	}
+}
+
+// TestLedgerCompactLeavesAYoungLedgerAlone: nothing old is no rewrite, so the
+// bytes a reader has are the bytes it had (gt-9bioi.6).
+func TestLedgerCompactLeavesAYoungLedgerAlone(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	l := NewLedger(path)
+	j := testJob("steward-1", "review", "gt-x", "aaaa")
+	j.Ended, j.Outcome = testEpoch, OutcomePass
+	if err := l.Append(j); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.Compact(7*24*time.Hour, testEpoch); err != nil || n != 0 {
+		t.Fatalf("Compact = %d, %v; want 0, nil", n, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("the ledger was rewritten:\n%s\n%s", before, after)
+	}
+}
+
 func TestOutcomeValid(t *testing.T) {
 	t.Parallel()
 	for _, o := range Outcomes {

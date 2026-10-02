@@ -169,6 +169,119 @@ func TestAgentSpawnerRefusals(t *testing.T) {
 	}
 }
 
+// TestAgentSpawnerRecordsTheRunnersDeadlineAsTimeout: the runner holds the
+// job's deadline and the spawner's own is a backstop behind it, so the job
+// dies to the parent context; that kill is a timeout, not an error, or the
+// ledger says the job broke when it merely ran out of time (gt-9bioi.6).
+func TestAgentSpawnerRecordsTheRunnersDeadlineAsTimeout(t *testing.T) {
+	t.Parallel()
+	g := &fakeGit{refs: map[string]bool{"c0ffee^{commit}": true}}
+	sp, _ := testSpawner(t, g)
+	sp.Run = func(ctx context.Context, _ *exec.Cmd) error {
+		<-ctx.Done() // the deadline kills the job, as a real command's would
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	res := sp.Spawn(ctx, SpawnRequest{
+		ID: "steward-1", Dir: filepath.Join(t.TempDir(), "steward-1"), Prompt: "p", Model: "deepseek-flash",
+		// Longer than the runner's deadline: the parent is what expired.
+		Timeout: time.Minute, Event: Event{Bead: "gt-x", Branch: "b", Head: "c0ffee"},
+	})
+	if !res.TimedOut || res.Err != nil {
+		t.Fatalf("res = %+v, want a timeout", res)
+	}
+}
+
+// TestRunnerRecordsASpawnerTimeout: the ledger is where the distinction pays
+// off — a job the deadline killed is a timeout and so earns the hard-preset
+// retry, where an error would stop it (gt-9bioi.6).
+func TestRunnerRecordsASpawnerTimeout(t *testing.T) {
+	t.Parallel()
+	g := &fakeGit{refs: map[string]bool{"c0ffee^{commit}": true}}
+	sp, _ := testSpawner(t, g)
+	sp.Run = func(ctx context.Context, _ *exec.Cmd) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	r := &Runner{
+		Ledger:  NewLedger(filepath.Join(t.TempDir(), "steward", "jobs.jsonl")),
+		Spawn:   sp,
+		WorkDir: filepath.Join(t.TempDir(), "jobs"),
+		MaxJobs: 1,
+		Timeout: 50 * time.Millisecond,
+		Now:     func() time.Time { return testEpoch },
+		NewID:   func() string { return "1" },
+	}
+	if !r.Start(context.Background(), reviewEvent("gt-x", "c0ffee"), DefaultRoutineAgent, "p") {
+		t.Fatal("job did not start")
+	}
+	r.Wait()
+	jobs, err := r.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) == 0 {
+		t.Fatal("no ledger rows")
+	}
+	if last := jobs[len(jobs)-1]; last.Outcome != OutcomeTimeout {
+		t.Fatalf("outcome = %q, want %q (summary %q)", last.Outcome, OutcomeTimeout, last.Summary)
+	}
+}
+
+// TestAgentSpawnerRefusesAnUnresolvablePresetEnv: an undefined ${VAR} in the
+// preset's env would reach the provider as an empty credential, so the job
+// does not run at all and the error names the variable (gt-yih1).
+func TestAgentSpawnerRefusesAnUnresolvablePresetEnv(t *testing.T) {
+	t.Parallel()
+	g := &fakeGit{refs: map[string]bool{"c0ffee^{commit}": true}}
+	sp, last := testSpawner(t, g)
+	sp.ResolveAgent = func(string) (*agentconfig.RuntimeConfig, error) {
+		return &agentconfig.RuntimeConfig{Command: "claude", Env: map[string]string{"DEEPSEEK_API_KEY": "${GT_9BIOI6_UNDEFINED}"}}, nil
+	}
+	res := sp.Spawn(context.Background(), SpawnRequest{
+		ID: "steward-1", Dir: filepath.Join(t.TempDir(), "steward-1"), Prompt: "p", Model: "deepseek-flash",
+		Timeout: time.Minute, Event: Event{Bead: "gt-x", Branch: "b", Head: "c0ffee"},
+	})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "GT_9BIOI6_UNDEFINED") {
+		t.Fatalf("err = %v, want it to name the undefined variable", res.Err)
+	}
+	if last.Path != "" {
+		t.Error("the job ran with an unresolved variable")
+	}
+}
+
+// TestAgentSpawnerRefusesAMalformedDaemonEnv: daemon.env that does not parse
+// stops the job, and the error names the file and line without quoting the
+// malformed line, which may be a credential written without its '=' (the
+// parse error itself quotes it) (gt-9bioi.6).
+func TestAgentSpawnerRefusesAMalformedDaemonEnv(t *testing.T) {
+	t.Parallel()
+	g := &fakeGit{refs: map[string]bool{"c0ffee^{commit}": true}}
+	sp, _ := testSpawner(t, g)
+	sp.ResolveAgent = func(string) (*agentconfig.RuntimeConfig, error) {
+		return &agentconfig.RuntimeConfig{Command: "claude", Env: map[string]string{"DEEPSEEK_API_KEY": "${TOWN_KEY}"}}, nil
+	}
+	const secret = "sk-live-9bioi6-secret"
+	envFile := agentconfig.DaemonEnvPath(sp.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(envFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, []byte("PROVIDER_KEY "+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := sp.Spawn(context.Background(), SpawnRequest{
+		ID: "steward-1", Dir: filepath.Join(t.TempDir(), "steward-1"), Prompt: "p", Model: "deepseek-flash",
+		Timeout: time.Minute, Event: Event{Bead: "gt-x", Branch: "b", Head: "c0ffee"},
+	})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "does not parse") {
+		t.Fatalf("err = %v, want a parse refusal", res.Err)
+	}
+	if strings.Contains(res.Err.Error(), secret) {
+		t.Errorf("the error quotes the daemon.env line: %v", res.Err)
+	}
+}
+
 func TestAgentSpawnerUnknownPresetIsAnError(t *testing.T) {
 	t.Parallel()
 	g := &fakeGit{refs: map[string]bool{"c0ffee^{commit}": true}}
