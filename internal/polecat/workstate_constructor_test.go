@@ -100,18 +100,13 @@ func isWorkstateInputType(expr ast.Expr) bool {
 	}
 }
 
-// TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat keeps the nuke preflight
-// (gt-ef9) and any later caller on WorkstateFacts: production code outside
-// internal/polecat may not hand-compute the predicates for
-// polecat.CanIgnoreStaleCleanupStatus.
-func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
-	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-
+// directFuncCallViolations walks production (non-test) Go files under internal/,
+// skipping the internal/polecat package (home of the fail-closed policy it
+// protects), and reports every direct call to the named function through a
+// selector (polecat.<name>(...)) as "path:line" entries. Test files are exempt
+// so the decision layer can still be exercised directly.
+func directFuncCallViolations(t *testing.T, repoRoot, funcName string) []string {
+	t.Helper()
 	var violations []string
 	err := filepath.WalkDir(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -133,7 +128,7 @@ func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
-			if ok && sel.Sel != nil && sel.Sel.Name == "CanIgnoreStaleCleanupStatus" {
+			if ok && sel.Sel != nil && sel.Sel.Name == funcName {
 				rel, _ := filepath.Rel(repoRoot, path)
 				violations = append(violations, "  "+rel+":"+itoa(fset.Position(sel.Pos()).Line))
 			}
@@ -144,7 +139,39 @@ func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk internal: %v", err)
 	}
-	if len(violations) > 0 {
+	return violations
+}
+
+// TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat keeps the nuke preflight
+// (gt-ef9) and any later caller on WorkstateFacts: production code outside
+// internal/polecat may not hand-compute the predicates for
+// polecat.CanIgnoreStaleCleanupStatus.
+func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
+	t.Parallel()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	if violations := directFuncCallViolations(t, repoRoot, "CanIgnoreStaleCleanupStatus"); len(violations) > 0 {
 		t.Fatalf("do not call CanIgnoreStaleCleanupStatus outside internal/polecat; gather a polecat.WorkstateFacts and use its CanIgnoreStaleCleanupStatusForNuke or polecat.NewWorkstateInput:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// TestNoResolveIgnoreCleanupStatusCallsOutsidePolecat keeps the check-recovery
+// diagnostic (gt-ivvgu) and any later caller on the facts path: production code
+// outside internal/polecat may not hand-compute the predicates for
+// polecat.ResolveIgnoreCleanupStatus. The single fail-closed gate is reached
+// through polecat.NewWorkstateInput(facts), whose IgnoreCleanupStatus verdict is
+// derived from the same facts the classifier reads.
+func TestNoResolveIgnoreCleanupStatusCallsOutsidePolecat(t *testing.T) {
+	t.Parallel()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	if violations := directFuncCallViolations(t, repoRoot, "ResolveIgnoreCleanupStatus"); len(violations) > 0 {
+		t.Fatalf("do not call ResolveIgnoreCleanupStatus outside internal/polecat; gather a polecat.WorkstateFacts and let polecat.NewWorkstateInput resolve IgnoreCleanupStatus from the facts:\n%s", strings.Join(violations, "\n"))
 	}
 }

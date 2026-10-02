@@ -1592,6 +1592,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName 
 	var targetRefLookupFailed bool
 	var mrForBranch *beads.Issue
 	var mrForBranchErr error
+	var input polecat.WorkstateInput
 	// gt-2h6: a worktree directory that is structurally gone (not merely a
 	// git command that failed) can never self-report a fresh CleanupStatus,
 	// so a missing/unknown status here must not permanently veto recovery.
@@ -1645,6 +1646,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName 
 		facts.AssignedBeadTerminal = beadTerminal
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
+		input = polecat.NewWorkstateInput(facts)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
 		// gt-ui2x: the bead was actually read here (fields != nil), unlike the
@@ -1717,8 +1719,14 @@ func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName 
 		// instead of duplicating (and drifting from) that policy here.
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
-		directGitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
-		liveGitProbeRan := facts.GitStateSource == polecat.GitStateSourceLive
+		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
+		// directly with hand-computed predicates (partialSpawn,
+		// worktreeStructurallyMissing, hookDisposition.Safe,
+		// !activeMRAssessment.Pending, directGitSafe) — a second, drifting copy
+		// of the fail-closed policy NewWorkstateInput already resolves from the
+		// same facts. Build the input first and read its verdict instead, so the
+		// diagnostic and the classifier can never disagree.
+		input = polecat.NewWorkstateInput(facts)
 		if !facts.CleanupStatus.IsSafe() {
 			// claude-41j.1 D9 splits this diagnostic in two, because the record
 			// can now be ignored for either of two reasons: a live git probe
@@ -1728,12 +1736,11 @@ func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName 
 			switch {
 			case !polecat.RecordedCleanupBlocks(facts.CleanupStatus, facts.GitStateSource):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s cleanup_status_source=%s git_state_source=%s live_git_supersedes=recorded", facts.CleanupStatus, polecat.CleanupStatusSourceRecorded, facts.GitStateSource))
-			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, facts.WorkTerminal(), hookDisposition.Safe, !activeMRAssessment.Pending, directGitSafe):
-				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v agent_bead_read=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead))
+			case input.IgnoreCleanupStatus:
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v agent_bead_read=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, facts.PartialSpawnWithoutDurableHook, facts.WorktreeStructurallyMissing, facts.AgentBeadRead))
 			}
 		}
 	}
-	input := polecat.NewWorkstateInput(facts)
 
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr, mrForBranch, mrForBranchErr)
