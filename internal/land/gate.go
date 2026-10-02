@@ -338,8 +338,7 @@ var (
 //
 // Every shape may append the shell tier (ShellTier): the tree's own
 // scripts/tier-sweep.sh, run for the submissions that can move its verdict,
-// in place of the post-land run that reaches that verdict too late
-// (gt-vsct7.8).
+// before the push the post-land run comes after (gt-vsct7.8).
 func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
 	cmd := ""
 	if mq != nil {
